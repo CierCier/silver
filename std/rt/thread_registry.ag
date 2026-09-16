@@ -38,6 +38,7 @@ struct TaskRecord {
     u8* stack;   // child stack base (parent-owned mmap; see thread.ag)
     i64 done;    // atomic: 1 once the child fn returned (thread then exits)
     i64 pack;    // launch pack ptr (compiler-owned); 0 for spawn(): freed by the waiter
+    i32 ctid;    // kernel-managed tid via CLONE_CHILD_CLEARTID (cleared to 0 upon thread exit)
 }
 
 // Thread table and its guard. .bss, zero-initialized by the OS loader.
@@ -80,6 +81,20 @@ void thread_wait_done_futex(TaskRecord* rec) {
 void thread_wake_done_futex(TaskRecord* rec) {
     sys_futex((i64)&rec.done, FUTEX_OP_WAKE, 1, 0, 0, 0);
 }
+/// Wait until the kernel clears rec.ctid to 0 upon thread exit via CLONE_CHILD_CLEARTID.
+void thread_wait_ctid(TaskRecord* rec) {
+    while (true) {
+        i32 c = __atomic_load_i32(&rec.ctid, ATOMIC_ACQUIRE);
+        if (c == 0) {
+            return;
+        }
+        i64 r = sys_futex((i64)&rec.ctid, FUTEX_OP_WAIT, (i64)c, 0, 0, 0);
+        if (r == FUTEX_EAGAIN || r == FUTEX_EINTR) {
+            continue;
+        }
+    }
+}
+
 
 /// Join one task: wait until the child fn returned, then reclaim the slot.
 /// Returns the child's tid. Silently returns -1 for a null record.
@@ -87,18 +102,29 @@ i64 thread_join(TaskRecord* rec) {
     if (rec == (TaskRecord*)0) {
         return -1;
     }
-    // Adaptive wait: spin briefly (cheap for near-instant joins), then block
-    // in the kernel on the done flag. The child never exits without setting
-    // done and waking one waiter.
-    i64 spins = 0;
-    while (true) {
-        if (__atomic_load_i64(&rec.done, ATOMIC_ACQUIRE) == 1) {
-            break;
+    if (@cfg(os.linux)) {
+        i64 spins = 0;
+        while (true) {
+            if (__atomic_load_i32(&rec.ctid, ATOMIC_ACQUIRE) == 0) {
+                break;
+            }
+            spins = spins + 1;
+            if (spins > THREAD_JOIN_MAX_SPINS) {
+                thread_wait_ctid(rec);
+                break;
+            }
         }
-        spins = spins + 1;
-        if (spins > THREAD_JOIN_MAX_SPINS) {
-            thread_wait_done_futex(rec);
-            break;
+    } else {
+        i64 spins = 0;
+        while (true) {
+            if (__atomic_load_i64(&rec.done, ATOMIC_ACQUIRE) == 1) {
+                break;
+            }
+            spins = spins + 1;
+            if (spins > THREAD_JOIN_MAX_SPINS) {
+                thread_wait_done_futex(rec);
+                break;
+            }
         }
     }
     thread_lock_acquire();
@@ -123,15 +149,29 @@ u8* __silver_wait_done(i64 rec) {
     if (r == (TaskRecord*)0) {
         return (u8*)0;
     }
-    i64 spins = 0;
-    while (true) {
-        if (__atomic_load_i64(&r.done, ATOMIC_ACQUIRE) == 1) {
-            break;
+    if (@cfg(os.linux)) {
+        i64 spins = 0;
+        while (true) {
+            if (__atomic_load_i32(&r.ctid, ATOMIC_ACQUIRE) == 0) {
+                break;
+            }
+            spins = spins + 1;
+            if (spins > THREAD_JOIN_MAX_SPINS) {
+                thread_wait_ctid(r);
+                break;
+            }
         }
-        spins = spins + 1;
-        if (spins > THREAD_JOIN_MAX_SPINS) {
-            thread_wait_done_futex(r);
-            break;
+    } else {
+        i64 spins = 0;
+        while (true) {
+            if (__atomic_load_i64(&r.done, ATOMIC_ACQUIRE) == 1) {
+                break;
+            }
+            spins = spins + 1;
+            if (spins > THREAD_JOIN_MAX_SPINS) {
+                thread_wait_done_futex(r);
+                break;
+            }
         }
     }
     thread_lock_acquire();

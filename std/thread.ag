@@ -17,8 +17,8 @@ import std.rt.thread_registry;
 import std.mem.alloc;
 
 // Raw clone flags for a thread that shares the process address space:
-// CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM.
-const i64 THREAD_CLONE_FLAGS = 331520;
+// CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID.
+const i64 THREAD_CLONE_FLAGS = 19205888;
 
 // Dedicated stack size per thread (16-byte aligned top, 2MB).
 const i64 THREAD_STACK_SIZE = 2097152;
@@ -140,7 +140,8 @@ i64 thread_spawn_claimed(TaskRecord* rec, i64 fn) {
         }
         top = (u8*)((i64)stack + THREAD_STACK_SIZE);
     }
-    i64 tid = thread_spawn_raw(THREAD_CLONE_FLAGS, top, fn, (i64)rec);
+    rec.ctid = 1;
+    i64 tid = thread_spawn_raw(THREAD_CLONE_FLAGS, top, fn, (i64)rec, &rec.ctid);
     if (tid <= 0 && stack != (u8*)0) {
         mem_sys_free(stack, THREAD_STACK_SIZE);
         rec.stack = (u8*)0;

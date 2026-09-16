@@ -1,0 +1,23 @@
+// compile_flags: --static-runtime
+import std.thread;
+import std.sys.entry;
+
+i64 counter = 0;
+
+void worker(i64 val) {
+    counter = counter + val;
+}
+
+i32 main() {
+    for (i64 i = 0; i < 200; i = i + 1) {
+        TaskRecord* t = thread_spawn((void(i64))worker, 1);
+        if (t == (TaskRecord*)0) {
+            return 1;
+        }
+        thread_join(t);
+    }
+    if (counter != 200) {
+        return 2;
+    }
+    return 0;
+}
