@@ -15,190 +15,210 @@ struct Scanner {
     i64 cap;
     i64 pos;
     bool ok;
-    bool has_saved;
-    i64 saved_end;
-    u8 saved_byte;
+    i32 fd;
+    bool eof;
+    u8* token_buf;
+    i64 token_cap;
 }
 
 impl Scanner {
     /// Read all of fd 0 into an internal heap buffer.
     /// Skips a UTF-8 BOM (0xEF 0xBB 0xBF) if present.
     /// On read error, ok = false but already-read bytes are kept.
+    /// Initialize Scanner reading from fd 0 with a streaming buffer window.
+    /// Skips a UTF-8 BOM (0xEF 0xBB 0xBF) if present.
     Scanner stdin() {
         Scanner s;
-        s.cap = 4096;
+        s.cap = 65536;
         s.buf = alloc<u8>(s.cap);
         s.len = 0;
         s.pos = 0;
         s.ok = true;
-        s.has_saved = false;
-        s.saved_end = 0;
-        s.saved_byte = (u8)0;
-
-        while (true) {
-            i64 space = s.cap - s.len;
-            // Need at least 2 bytes: 1 for reading, 1 for NUL.
-            if (space < 2) {
-                i64 new_cap = s.cap * 2;
-                s.buf = realloc<u8>(s.buf, new_cap);
-                s.cap = new_cap;
-                space = s.cap - s.len;
-            }
-            Result<i64, Error> r = try_read(STDIN_FD, &s.buf[s.len], space - 1);
-            if (r.is_ok()) {
-                i64 n = r.value();
-                if (n == 0) {
-                    break;  // EOF
-                }
-                s.len = s.len + n;
-            } else {
-                s.ok = false;
-                break;
-            }
-        }
-        // NUL-terminate.
-        s.buf[s.len] = (u8)0;
-
-        // Skip UTF-8 BOM.
+        s.fd = STDIN_FD;
+        s.eof = false;
+        s.token_buf = (u8*)0;
+        s.token_cap = 0;
+        s.refill();
         if (s.len >= 3 && s.buf[0] == (u8)0xEF && s.buf[1] == (u8)0xBB && s.buf[2] == (u8)0xBF) {
             s.pos = 3;
         }
         return s;
     }
 
-    /// Return true if more non-whitespace tokens are available.
-    /// Restores any saved delimiter and skips whitespace.
-    bool has_next(&mut self) {
-        if (self.has_saved) {
-            self.buf[self.saved_end] = self.saved_byte;
-            self.has_saved = false;
+    /// Create an in-memory Scanner reading from a C string.
+    Scanner from_str(str text) {
+        Scanner s;
+        i64 slen = strlen(text);
+        s.cap = slen + 1;
+        s.buf = alloc<u8>(s.cap);
+        if (slen > 0) {
+            memcpy((void*)s.buf, (const void*)text, slen);
         }
-        while (self.pos + 16 <= self.len) {
-            i64 non_ws = asm("
-                movdqu (%rax), %xmm0
-                movl $$0x20202020, %edx
-                movd %edx, %xmm1
-                pshufd $$0, %xmm1, %xmm1
-                pcmpeqb %xmm0, %xmm1
+        s.buf[slen] = (u8)0;
+        s.len = slen;
+        s.pos = 0;
+        s.ok = true;
+        s.fd = -1;
+        s.eof = true;
+        s.token_buf = (u8*)0;
+        s.token_cap = 0;
+        if (s.len >= 3 && s.buf[0] == (u8)0xEF && s.buf[1] == (u8)0xBB && s.buf[2] == (u8)0xBF) {
+            s.pos = 3;
+        }
+        return s;
+    }
 
-                movl $$0x09090909, %edx
-                movd %edx, %xmm2
-                pshufd $$0, %xmm2, %xmm2
-                pcmpeqb %xmm0, %xmm2
-                por %xmm2, %xmm1
-
-                movl $$0x0a0a0a0a, %edx
-                movd %edx, %xmm2
-                pshufd $$0, %xmm2, %xmm2
-                pcmpeqb %xmm0, %xmm2
-                por %xmm2, %xmm1
-
-                movl $$0x0d0d0d0d, %edx
-                movd %edx, %xmm2
-                pshufd $$0, %xmm2, %xmm2
-                pcmpeqb %xmm0, %xmm2
-                por %xmm2, %xmm1
-
-                pmovmskb %xmm1, %ecx
-                cmpl $$65535, %ecx
-                je 1f
-                notl %ecx
-                bsfl %ecx, %eax
-                jmp 2f
-                1:
-                movq $$-1, %rax
-                2:
-            ", [&self.buf[self.pos]], ["rdx", "rcx", "xmm0", "xmm1", "xmm2"]);
-            if (non_ws >= 0) {
-                self.pos = self.pos + non_ws;
-                return true;
+    /// Refill the buffer from the underlying file descriptor, sliding unread
+    /// bytes to the front of the window.
+    void refill(&mut self) {
+        if (self.fd < 0 || self.eof) {
+            return;
+        }
+        if (self.pos > 0) {
+            i64 remaining = self.len - self.pos;
+            if (remaining > 0) {
+                memmove((void*)self.buf, (const void*)&self.buf[self.pos], remaining);
             }
-            self.pos = self.pos + 16;
+            self.len = remaining;
+            self.pos = 0;
         }
-        while (self.pos < self.len) {
-            u8 ch = self.buf[self.pos];
-            if (ch == (u8)0x20 || ch == (u8)0x09 || ch == (u8)0x0A || ch == (u8)0x0D || ch == (u8)0x0B || ch == (u8)0x0C) {
-                self.pos = self.pos + 1;
+        i64 space = self.cap - self.len;
+        if (space < 1024) {
+            i64 new_cap = self.cap * 2;
+            self.buf = realloc<u8>(self.buf, new_cap);
+            self.cap = new_cap;
+            space = self.cap - self.len;
+        }
+        Result<i64, Error> r = try_read(self.fd, &self.buf[self.len], space);
+        if (r.is_ok()) {
+            i64 n = r.value();
+            if (n == 0) {
+                self.eof = true;
             } else {
-                break;
+                self.len = self.len + n;
+            }
+        } else {
+            self.eof = true;
+        }
+    }
+
+    /// Return true if more non-whitespace tokens are available.
+    bool has_next(&mut self) {
+        while (true) {
+            while (self.pos < self.len) {
+                u8 ch = self.buf[self.pos];
+                if (ch == (u8)0x20 || ch == (u8)0x09 || ch == (u8)0x0A || ch == (u8)0x0D || ch == (u8)0x0B || ch == (u8)0x0C) {
+                    self.pos = self.pos + 1;
+                } else {
+                    return true;
+                }
+            }
+            if (self.fd < 0 || self.eof) {
+                return false;
+            }
+            self.refill();
+            if (self.pos >= self.len && self.eof) {
+                return false;
             }
         }
-        return self.pos < self.len;
+        return false;
+    }
+
+    /// Return the next whitespace-delimited token as an immutable zero-copy Slice<u8>.
+    Slice<u8> next_slice(&mut self) {
+        if (!self.has_next()) {
+            self.ok = false;
+            Slice<u8> empty;
+            empty.data = (u8*)0;
+            empty.len = 0;
+            return empty;
+        }
+        i64 start = self.pos;
+        while (true) {
+            while (self.pos < self.len) {
+                u8 ch = self.buf[self.pos];
+                if (ch == (u8)0x20 || ch == (u8)0x09 || ch == (u8)0x0A || ch == (u8)0x0D || ch == (u8)0x0B || ch == (u8)0x0C) {
+                    Slice<u8> s;
+                    s.data = &self.buf[start];
+                    s.len = self.pos - start;
+                    return s;
+                }
+                self.pos = self.pos + 1;
+            }
+            if (self.fd < 0 || self.eof) {
+                Slice<u8> s;
+                s.data = &self.buf[start];
+                s.len = self.pos - start;
+                return s;
+            }
+            i64 token_len = self.pos - start;
+            if (start > 0) {
+                memmove((void*)self.buf, (const void*)&self.buf[start], token_len);
+                self.len = token_len;
+                self.pos = token_len;
+                start = 0;
+            }
+            i64 space = self.cap - self.len;
+            if (space < 1024) {
+                i64 new_cap = self.cap * 2;
+                self.buf = realloc<u8>(self.buf, new_cap);
+                self.cap = new_cap;
+                space = self.cap - self.len;
+            }
+            Result<i64, Error> r = try_read(self.fd, &self.buf[self.len], space);
+            if (r.is_ok()) {
+                i64 n = r.value();
+                if (n == 0) {
+                    self.eof = true;
+                    Slice<u8> s;
+                    s.data = &self.buf[start];
+                    s.len = self.pos - start;
+                    return s;
+                }
+                self.len = self.len + n;
+            } else {
+                self.eof = true;
+                Slice<u8> s;
+                s.data = &self.buf[start];
+                s.len = self.pos - start;
+                return s;
+            }
+        }
+        Slice<u8> empty;
+        empty.data = (u8*)0;
+        empty.len = 0;
+        return empty;
     }
 
     /// Return the next whitespace-delimited token as a borrowed NUL-terminated str.
-    /// The returned pointer is valid until the next mutating scanner call.
-    /// Sets ok = false and returns (str)0 when no token remains.
+    /// The returned pointer is valid until the next scanner call.
+    /// Does NOT mutate the source buffer in place.
     str next(&mut self) {
-        if (!self.has_next()) {
-            self.ok = false;
+        Slice<u8> tok = self.next_slice();
+        if (!self.ok || tok.data == (u8*)0) {
             return (str)0;
         }
-        i64 start = self.pos;
-        while (self.pos + 16 <= self.len) {
-            i64 ws = asm("
-                movdqu (%rax), %xmm0
-                movl $$0x20202020, %edx
-                movd %edx, %xmm1
-                pshufd $$0, %xmm1, %xmm1
-                pcmpeqb %xmm0, %xmm1
-
-                movl $$0x09090909, %edx
-                movd %edx, %xmm2
-                pshufd $$0, %xmm2, %xmm2
-                pcmpeqb %xmm0, %xmm2
-                por %xmm2, %xmm1
-
-                movl $$0x0a0a0a0a, %edx
-                movd %edx, %xmm2
-                pshufd $$0, %xmm2, %xmm2
-                pcmpeqb %xmm0, %xmm2
-                por %xmm2, %xmm1
-
-                movl $$0x0d0d0d0d, %edx
-                movd %edx, %xmm2
-                pshufd $$0, %xmm2, %xmm2
-                pcmpeqb %xmm0, %xmm2
-                por %xmm2, %xmm1
-
-                pmovmskb %xmm1, %eax
-                bsfl %eax, %eax
-                jnz 1f
-                movq $$-1, %rax
-                1:
-            ", [&self.buf[self.pos]], ["rdx", "rcx", "xmm0", "xmm1", "xmm2"]);
-            if (ws >= 0) {
-                self.pos = self.pos + ws;
-                break;
+        if (self.token_buf == (u8*)0 || self.token_cap <= tok.len) {
+            if (self.token_buf != (u8*)0) {
+                free(self.token_buf);
             }
-            self.pos = self.pos + 16;
+            self.token_cap = tok.len + 64;
+            self.token_buf = alloc<u8>(self.token_cap);
         }
-        while (self.pos < self.len) {
-            u8 ch = self.buf[self.pos];
-            if (ch == (u8)0x20 || ch == (u8)0x09 || ch == (u8)0x0A || ch == (u8)0x0D || ch == (u8)0x0B || ch == (u8)0x0C) {
-                break;
-            }
-            self.pos = self.pos + 1;
+        if (tok.len > 0) {
+            memcpy((void*)self.token_buf, (const void*)tok.data, tok.len);
         }
-        if (self.pos < self.len) {
-            self.saved_end = self.pos;
-            self.saved_byte = self.buf[self.pos];
-            self.buf[self.pos] = (u8)0;
-            self.has_saved = true;
-        } else {
-            self.has_saved = false;
-        }
-        return (str)&self.buf[start];
+        self.token_buf[tok.len] = (u8)0;
+        return (str)self.token_buf;
     }
 
     /// Return the next token as an owned String.
-    /// Sets ok = false on failure.
     String next_string(&mut self) {
-        str tok = self.next();
-        if (!self.ok) {
+        Slice<u8> tok = self.next_slice();
+        if (!self.ok || tok.data == (u8*)0) {
             return String.new();
         }
-        return String.from_str(tok);
+        return tok.to_string();
     }
 
     /// Parse the next token as a signed integer, saturating to [lo, hi] on
@@ -586,21 +606,25 @@ impl Scanner {
         return false;
     }
 
-    /// Return the next line (bytes up to but not including LF or CRLF).
-    /// The returned str is a borrowed NUL-terminated view into the buffer.
-    /// Sets ok = false at EOF.
-    str next_line(&mut self) {
-        // Restore previous saved delimiter.
-        if (self.has_saved) {
-            self.buf[self.saved_end] = self.saved_byte;
-            self.has_saved = false;
-        }
+    /// Return the next line as an immutable zero-copy Slice<u8>.
+    Slice<u8> next_line_slice(&mut self) {
         if (self.pos >= self.len) {
-            self.ok = false;
-            return (str)0;
+            if (self.fd < 0 || self.eof) {
+                self.ok = false;
+                Slice<u8> empty;
+                empty.data = (u8*)0;
+                empty.len = 0;
+                return empty;
+            }
+            self.refill();
+            if (self.pos >= self.len && self.eof) {
+                self.ok = false;
+                Slice<u8> empty;
+                empty.data = (u8*)0;
+                empty.len = 0;
+                return empty;
+            }
         }
-        // If the previous token ended exactly at a line break, consume that
-        // break and return the following line rather than an empty view.
         if (self.buf[self.pos] == (u8)0x0D) {
             self.pos = self.pos + 1;
             if (self.pos < self.len && self.buf[self.pos] == (u8)0x0A) {
@@ -613,26 +637,103 @@ impl Scanner {
         }
         if (self.pos >= self.len) {
             self.ok = false;
-            return (str)0;
+            Slice<u8> empty;
+            empty.data = (u8*)0;
+            empty.len = 0;
+            return empty;
         }
         i64 start = self.pos;
-        // Scan forward until LF or end.
-        while (self.pos < self.len && self.buf[self.pos] != (u8)0x0A) {
-            self.pos = self.pos + 1;
+        while (true) {
+            while (self.pos < self.len) {
+                if (self.buf[self.pos] == (u8)0x0A) {
+                    i64 end = self.pos;
+                    if (end > start && self.buf[end - 1] == (u8)0x0D) {
+                        end = end - 1;
+                    }
+                    self.pos = self.pos + 1;
+                    Slice<u8> s;
+                    s.data = &self.buf[start];
+                    s.len = end - start;
+                    return s;
+                }
+                self.pos = self.pos + 1;
+            }
+            if (self.fd < 0 || self.eof) {
+                i64 end = self.pos;
+                if (end > start && self.buf[end - 1] == (u8)0x0D) {
+                    end = end - 1;
+                }
+                Slice<u8> s;
+                s.data = &self.buf[start];
+                s.len = end - start;
+                return s;
+            }
+            i64 line_len = self.pos - start;
+            if (start > 0) {
+                memmove((void*)self.buf, (const void*)&self.buf[start], line_len);
+                self.len = line_len;
+                self.pos = line_len;
+                start = 0;
+            }
+            i64 space = self.cap - self.len;
+            if (space < 1024) {
+                i64 new_cap = self.cap * 2;
+                self.buf = realloc<u8>(self.buf, new_cap);
+                self.cap = new_cap;
+                space = self.cap - self.len;
+            }
+            Result<i64, Error> r = try_read(self.fd, &self.buf[self.len], space);
+            if (r.is_ok()) {
+                i64 n = r.value();
+                if (n == 0) {
+                    self.eof = true;
+                    i64 end = self.pos;
+                    if (end > start && self.buf[end - 1] == (u8)0x0D) {
+                        end = end - 1;
+                    }
+                    Slice<u8> s;
+                    s.data = &self.buf[start];
+                    s.len = end - start;
+                    return s;
+                }
+                self.len = self.len + n;
+            } else {
+                self.eof = true;
+                i64 end = self.pos;
+                if (end > start && self.buf[end - 1] == (u8)0x0D) {
+                    end = end - 1;
+                }
+                Slice<u8> s;
+                s.data = &self.buf[start];
+                s.len = end - start;
+                return s;
+            }
         }
-        // If the delimiter is preceded by CR, treat CRLF as a single terminator.
-        if (self.pos > start && self.buf[self.pos - 1] == (u8)0x0D) {
-            self.pos = self.pos - 1;
+        Slice<u8> empty;
+        empty.data = (u8*)0;
+        empty.len = 0;
+        return empty;
+    }
+
+    /// Return the next line as a borrowed NUL-terminated str.
+    /// Does NOT mutate the source buffer in place.
+    str next_line(&mut self) {
+        Slice<u8> line = self.next_line_slice();
+        if (!self.ok || line.data == (u8*)0) {
+            return (str)0;
         }
-        if (self.pos < self.len) {
-            self.saved_end = self.pos;
-            self.saved_byte = self.buf[self.pos];
-            self.buf[self.pos] = (u8)0;
-            self.has_saved = true;
-        } else {
-            self.has_saved = false;
+        if (self.token_buf == (u8*)0 || self.token_cap <= line.len) {
+            if (self.token_buf != (u8*)0) {
+                free(self.token_buf);
+            }
+            self.token_cap = line.len + 64;
+            self.token_buf = alloc<u8>(self.token_cap);
         }
-        return (str)&self.buf[start];
+        if (line.len > 0) {
+            memcpy((void*)self.token_buf, (const void*)line.data, line.len);
+        }
+        self.token_buf[line.len] = (u8)0;
+        return (str)self.token_buf;
     }
 
     /// Return true if no errors have been encountered.
@@ -647,6 +748,11 @@ impl Drop for Scanner {
         if (self.buf != (u8*)0) {
             free(self.buf);
             self.buf = (u8*)0;
+        }
+        if (self.token_buf != (u8*)0) {
+            free(self.token_buf);
+            self.token_buf = (u8*)0;
+            self.token_cap = 0;
         }
     }
 }

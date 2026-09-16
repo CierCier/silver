@@ -1,0 +1,48 @@
+import std.test;
+import std.io.scanner;
+import std.string;
+import std.slice;
+
+i32 main() {
+    test_start("scanner and split streaming non-mutating");
+
+    // 1. Non-mutating SplitIter: tokens remain valid and uncorrupted
+    String text = String.from_str("apple,banana,cherry");
+    SplitIter it = text.split(",");
+    Optional<str> t1 = it.next();
+    Optional<str> t2 = it.next();
+    Optional<str> t3 = it.next();
+    assert_true(t1.is_some(), "t1 is some");
+    assert_true(t2.is_some(), "t2 is some");
+    assert_true(t3.is_some(), "t3 is some");
+    // Verify underlying String was NOT mutated (still has commas!)
+    assert_eq_str("apple,banana,cherry", text.to_str(), "original string untouched");
+
+    // 2. SplitSliceIter
+    SplitSliceIter sit = text.split_slices(",");
+    Optional<Slice<u8>> s1 = sit.next();
+    Optional<Slice<u8>> s2 = sit.next();
+    Optional<Slice<u8>> s3 = sit.next();
+    assert_true(s1.is_some(), "s1 is some");
+    assert_true(s2.is_some(), "s2 is some");
+    assert_true(s3.is_some(), "s3 is some");
+    Slice<u8> u1 = s1.unwrap();
+    Slice<u8> u2 = s2.unwrap();
+    Slice<u8> u3 = s3.unwrap();
+    assert_true(u1.equals_str("apple"), "s1 equals apple");
+    assert_true(u2.equals_str("banana"), "s2 equals banana");
+    assert_true(u3.equals_str("cherry"), "s3 equals cherry");
+
+    // 3. Scanner from_str: next_slice zero-copy non-mutating
+    Scanner sc = Scanner.from_str("123 456 hello\nworld");
+    Slice<u8> tok1 = sc.next_slice();
+    assert_true(tok1.equals_str("123"), "tok1 is 123");
+    i64 num = sc.next_i64();
+    assert_eq_i64(456, num, "num is 456");
+    String tok3 = sc.next_string();
+    assert_eq_str("hello", tok3.to_str(), "tok3 is hello");
+    sc.drop();
+
+    it.drop();
+    return done();
+}

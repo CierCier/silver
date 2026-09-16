@@ -379,9 +379,19 @@ impl String {
         it.delim = delimiter;
         it.delim_len = strlen(delimiter);
         it.done = false;
-        it.has_saved = false;
-        it.saved_byte = (u8)0;
-        it.saved_end = 0;
+        it.token_buf = (u8*)0;
+        it.token_cap = 0;
+        return it;
+    }
+
+    SplitSliceIter split_slices(&self, str delimiter) {
+        SplitSliceIter it;
+        it.data = self.data;
+        it.len = self.len;
+        it.pos = 0;
+        it.delim = delimiter;
+        it.delim_len = strlen(delimiter);
+        it.done = false;
         return it;
     }
 
@@ -870,9 +880,8 @@ struct SplitIter {
     str delim;
     i64 delim_len;
     bool done;
-    i64 saved_end;
-    u8 saved_byte;
-    bool has_saved;
+    u8* token_buf;
+    i64 token_cap;
 }
 
 impl Iterator for SplitIter {
@@ -885,22 +894,14 @@ impl Iterator for SplitIter {
             }
             return None;
         }
-        if (self.has_saved) {
-            self.data[self.saved_end] = self.saved_byte;
-            self.has_saved = false;
-            self.pos = self.saved_end + self.delim_len;
-        }
         if (self.done && self.pos >= self.len) {
             return None;
         }
         if (self.delim_len == 0 || self.delim == (str)0) {
             if (self.pos == 0 && !self.done) {
                 self.done = true;
-                self.saved_end = self.len;
-                self.saved_byte = self.data[self.len];
-                self.data[self.len] = (u8)0;
-                self.has_saved = true;
-                return Some((str)&self.data[0]);
+                self.pos = self.len;
+                return Some((str)self.data);
             }
             return None;
         }
@@ -916,21 +917,93 @@ impl Iterator for SplitIter {
         }
         if (!found) {
             self.done = true;
+            self.pos = self.len;
             end = self.len;
+        } else {
+            self.pos = end + self.delim_len;
         }
-        self.saved_end = end;
-        self.saved_byte = self.data[end];
-        self.data[end] = (u8)0;
-        self.has_saved = true;
-        return Some((str)&self.data[start]);
+        i64 tok_len = end - start;
+        if (self.token_buf == (u8*)0 || self.token_cap <= tok_len) {
+            if (self.token_buf != (u8*)0) {
+                free(self.token_buf);
+            }
+            self.token_cap = tok_len + 64;
+            self.token_buf = alloc<u8>(self.token_cap);
+        }
+        if (tok_len > 0) {
+            memcpy((void*)self.token_buf, (const void*)&self.data[start], tok_len);
+        }
+        self.token_buf[tok_len] = (u8)0;
+        return Some((str)self.token_buf);
     }
 }
 impl Drop for SplitIter {
     void drop(*self) {
-        if (self.has_saved && self.data != (u8*)0) {
-            self.data[self.saved_end] = self.saved_byte;
-            self.has_saved = false;
+        if (self.token_buf != (u8*)0) {
+            free(self.token_buf);
+            self.token_buf = (u8*)0;
+            self.token_cap = 0;
         }
+    }
+}
+
+struct SplitSliceIter {
+    u8* data;
+    i64 len;
+    i64 pos;
+    str delim;
+    i64 delim_len;
+    bool done;
+}
+
+impl Iterator for SplitSliceIter {
+    type Item = Slice<u8>;
+    Optional<Slice<u8>> next(*self) {
+        if (self.data == (u8*)0) {
+            if (!self.done && self.pos == 0) {
+                self.done = true;
+                Slice<u8> empty;
+                empty.data = (u8*)0;
+                empty.len = 0;
+                return Some(empty);
+            }
+            return None;
+        }
+        if (self.done && self.pos >= self.len) {
+            return None;
+        }
+        if (self.delim_len == 0 || self.delim == (str)0) {
+            if (self.pos == 0 && !self.done) {
+                self.done = true;
+                self.pos = self.len;
+                Slice<u8> all;
+                all.data = self.data;
+                all.len = self.len;
+                return Some(all);
+            }
+            return None;
+        }
+        i64 start = self.pos;
+        i64 end = self.len;
+        bool found = false;
+        for (i64 i = start; i <= self.len - self.delim_len; i = i + 1) {
+            if (memcmp((const void*)&self.data[i], (const void*)self.delim, self.delim_len) == 0) {
+                end = i;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            self.done = true;
+            self.pos = self.len;
+            end = self.len;
+        } else {
+            self.pos = end + self.delim_len;
+        }
+        Slice<u8> s;
+        s.data = &self.data[start];
+        s.len = end - start;
+        return Some(s);
     }
 }
 
