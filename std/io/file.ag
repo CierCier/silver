@@ -7,6 +7,8 @@
 // try_close/try_lseek) — no FILE*, no libc stdio buffering.
 
 
+import std.atomic;
+import std.cpu;
 import std.error;
 import std.fmt;
 import std.mem.alloc;
@@ -76,9 +78,16 @@ impl BufWriter {
                 self.cap = -1;   // sentinel: "initialized, no buffer"
                 return;
             }
-            self.data = (i64)malloc(4096);
-            self.len = 0;
-            self.cap = 4096;
+            i64 buf = (i64)malloc(4096);
+            if (__atomic_cmpxchg_i64(&self.data, 0, buf, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST)) {
+                self.len = 0;
+                __atomic_store_i64(&self.cap, 4096, ATOMIC_RELEASE);
+            } else {
+                free((void*)buf);
+                while (__atomic_load_i64(&self.cap, ATOMIC_ACQUIRE) == 0) {
+                    cpu_relax();
+                }
+            }
         }
     }
 

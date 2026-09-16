@@ -22,6 +22,7 @@
 // http/1.1 over ALPN (the negotiated protocol is exposed for the future
 // HTTP/2 work).
 
+import std.atomic;
 import std.error;
 import std.mem.memory;
 import std.net.transport;
@@ -142,7 +143,10 @@ i64 ssl_make_client_ctx(bool verify, str ca_file) {
 i64 ssl_client_ctx(bool verify, str ca_file) {
     if (verify && (ca_file == (str)0 || strlen(ca_file) == 0)) {
         if (g_client_ctx == 0) {
-            g_client_ctx = ssl_make_client_ctx(true, (str)0);
+            i64 ctx = ssl_make_client_ctx(true, (str)0);
+            if (!__atomic_cmpxchg_i64(&g_client_ctx, 0, ctx, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST)) {
+                ssl_ctx_free(ctx);
+            }
         }
         return g_client_ctx;
     }
@@ -174,7 +178,10 @@ i64 ssl_make_server_ctx(str cert_file, str key_file) {
 
 i64 ssl_server_ctx(str cert_file, str key_file) {
     if (g_server_ctx == 0) {
-        g_server_ctx = ssl_make_server_ctx(cert_file, key_file);
+        i64 ctx = ssl_make_server_ctx(cert_file, key_file);
+        if (!__atomic_cmpxchg_i64(&g_server_ctx, 0, ctx, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST)) {
+            ssl_ctx_free(ctx);
+        }
     }
     return g_server_ctx;
 }
