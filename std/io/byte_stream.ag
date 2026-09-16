@@ -126,7 +126,6 @@ impl ByteStream {
             i32 b = self.read_byte();
             if (b < 0) {
                 if (s.len() == 0) {
-                    s.drop();
                     return Optional<String>.none();
                 }
                 break;
@@ -198,7 +197,6 @@ impl File {
             i32 ch = self.read_char();
             if (ch == -1) { // EOF
                 if (s.len() == 0) {
-                    s.drop();
                     return Optional<String>.none();
                 }
                 break;
