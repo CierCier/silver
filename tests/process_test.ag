@@ -2,7 +2,53 @@ import std.test;
 import std.process;
 
 i32 main() {
-    exit(0);
-    assert_true(false, "should not reach here");
+    test_start("native process management");
+
+    // 1. Process identity
+    i64 pid = getpid();
+    assert_true(pid > 0, "getpid returns positive pid");
+    i64 ppid = getppid();
+    assert_true(ppid > 0, "getppid returns positive ppid");
+
+    // 2. Command spawn and wait: success case
+    Command cmd_true = Command.new("/bin/sh");
+    cmd_true.arg("-c");
+    cmd_true.arg("exit 0");
+    Result<Child, i64> r1 = cmd_true.spawn();
+    assert_true(r1.is_ok(), "spawn /bin/sh exit 0 succeeds");
+    Child c1 = r1.unwrap();
+    assert_true(c1.id() > 0, "child pid is positive");
+    ExitStatus st1 = c1.wait_status();
+    assert_true(st1.exited, "c1 exited normally");
+    assert_true(st1.success(), "c1 status success");
+    assert_eq_i32(0, st1.exit_code(), "c1 exit code is 0");
+
+    // 3. Command spawn and wait: exit code 42
+    Command cmd_42 = Command.new("/bin/sh");
+    cmd_42.arg("-c");
+    cmd_42.arg("exit 42");
+    Result<Child, i64> r2 = cmd_42.spawn();
+    assert_true(r2.is_ok(), "spawn /bin/sh exit 42 succeeds");
+    Child c2 = r2.unwrap();
+    ExitStatus st2 = c2.wait_status();
+    assert_true(st2.exited, "c2 exited normally");
+    assert_true(!st2.success(), "c2 status not success");
+    assert_eq_i32(42, st2.exit_code(), "c2 exit code is 42");
+
+    // 4. Command status shorthand
+    Command cmd_shorthand = Command.new("/bin/sh");
+    cmd_shorthand.arg("-c");
+    cmd_shorthand.arg("exit 7");
+    Result<ExitStatus, i64> r3 = cmd_shorthand.status();
+    assert_true(r3.is_ok(), "cmd.status() succeeds");
+    ExitStatus st3 = r3.unwrap();
+    assert_eq_i32(7, st3.exit_code(), "cmd.status() exit code is 7");
+
+    // 5. Non-existent binary fails with exit code 127
+    Command cmd_none = Command.new("/bin/nonexistent_command_xyz_12345");
+    Result<ExitStatus, i64> r4 = cmd_none.status();
+    assert_true(r4.is_ok(), "exec of nonexistent binary spawns and exits 127");
+    assert_eq_i32(127, r4.unwrap().exit_code(), "nonexistent binary exits 127");
+
     return done();
 }

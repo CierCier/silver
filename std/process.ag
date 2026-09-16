@@ -1,12 +1,176 @@
-// std/process.ag — process management.
+// std/process.ag — process management: spawning, waiting, and exit status.
 
+import std.error;
+import std.mem.alloc;
+import std.mem.vec;
+import std.result;
+import std.string;
+import std.sys.entry;
 import std.sys.os;
+import std.sys.raw.process;
 
-#[cfg(os.linux)]
+/// Exit status of a terminated child process.
+struct ExitStatus {
+    i32 code;
+    bool exited;
+    i32 signal;
+}
+
+impl ExitStatus {
+    /// True if the process exited cleanly with status 0.
+    bool success(&self) {
+        return self.exited && self.code == 0;
+    }
+
+    /// Exit code (0-255) if the process exited normally, or -1 otherwise.
+    i32 exit_code(&self) {
+        if (self.exited) {
+            return self.code;
+        }
+        return -1;
+    }
+
+    /// Terminating signal number if killed by a signal, or 0 otherwise.
+    i32 termsig(&self) {
+        return self.signal;
+    }
+}
+
+/// A running child process.
 struct Child {
     i64 pid;
 }
 
+impl Child {
+    /// The process ID of the child.
+    i64 id(&self) {
+        return self.pid;
+    }
+
+    /// Wait for the child to exit and return its ExitStatus.
+    ExitStatus wait_status(&mut self) {
+        ExitStatus st;
+        st.code = -1;
+        st.exited = false;
+        st.signal = 0;
+        if (self.pid <= 0) {
+            return st;
+        }
+        i32 status = 0;
+        i64 r = sys_wait4(self.pid, (i64)&status, 0, 0);
+        if (r > 0) {
+            self.pid = 0;
+            i32 term_sig = status & 0x7F;
+            if (term_sig == 0) {
+                st.exited = true;
+                st.code = (status >> 8) & 0xFF;
+            } else {
+                st.exited = false;
+                st.signal = term_sig;
+            }
+        }
+        return st;
+    }
+
+    /// Send SIGKILL to the child process.
+    void kill(&self) {
+        if (self.pid > 0) {
+            sys_kill(self.pid, 9); // SIGKILL
+        }
+    }
+}
+
+/// A process builder for launching external commands.
+struct Command {
+    String program;
+    Vec<String> args;
+    Vec<String> env_vars;
+    bool clear_env;
+}
+
+impl Command {
+    Command new(str prog) {
+        Command cmd;
+        cmd.program = String.from_str(prog);
+        cmd.args = Vec<String>.new();
+        cmd.env_vars = Vec<String>.new();
+        cmd.clear_env = false;
+        return cmd;
+    }
+
+    void arg(&mut self, str a) {
+        self.args.push(String.from_str(a));
+    }
+
+    void env(&mut self, str key, str val) {
+        String entry = String.from_str(key);
+        entry.push((u8)'=');
+        entry.push_str(val);
+        self.env_vars.push(move entry);
+    }
+
+    /// Spawn the command as a child process.
+    Result<Child, i64> spawn(&self) {
+        i64 pid = sys_fork();
+        if (pid < 0) {
+            return Result<Child, i64>.Err(pid);
+        }
+        if (pid == 0) {
+            // Child process: construct argv
+            i64 argc = self.args.len() + 2;
+            str* argv = (str*)alloc<str>(argc);
+            argv[0] = self.program.to_str();
+            for (i64 i = 0; i < self.args.len(); i = i + 1) {
+                String* s = self.args.get_ptr(i);
+                argv[i + 1] = s.to_str();
+            }
+            argv[argc - 1] = (str)0;
+
+            // Construct envp
+            str* envp = (str*)0;
+            if (self.env_vars.len() > 0) {
+                i64 envc = self.env_vars.len() + 1;
+                envp = (str*)alloc<str>(envc);
+                for (i64 i = 0; i < self.env_vars.len(); i = i + 1) {
+                    String* e = self.env_vars.get_ptr(i);
+                    envp[i] = e.to_str();
+                }
+                envp[envc - 1] = (str)0;
+            } else if (!self.clear_env) {
+                envp = (str*)silver_envp();
+            }
+
+            sys_execve((i64)self.program.to_str(), (i64)&argv[0], (i64)envp);
+            sys_exit(127);
+        }
+        Child c;
+        c.pid = pid;
+        return Result<Child, i64>.Ok(c);
+    }
+
+    /// Spawn the command and wait for it to complete.
+    Result<ExitStatus, i64> status(&self) {
+        Result<Child, i64> res = self.spawn();
+        if (res.is_err()) {
+            return Result<ExitStatus, i64>.Err(res.unwrap_err());
+        }
+        Child c = res.unwrap();
+        ExitStatus st = c.wait_status();
+        return Result<ExitStatus, i64>.Ok(st);
+    }
+}
+
+/// Terminate the current process immediately with an exit code.
 void exit(i32 code) {
     sys_exit_group((i64)code);
+}
+
+/// Return the process ID of the calling process.
+i64 getpid() {
+    return sys_getpid();
+}
+
+/// Return the process ID of the parent process.
+i64 getppid() {
+    return sys_getppid();
 }
