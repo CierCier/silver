@@ -14,7 +14,6 @@ import std.fmt;
 import std.mem.alloc;
 import std.mem.drop;
 import std.sys.result;
-import std.string;
 
 const i32 EOF = -1;
 
@@ -513,28 +512,6 @@ impl File {
             written = written  + r.value();
         }
         return 0;
-    }
-
-    Optional<String> read_line(*self) {
-        if (self.invalid() || self.at_eof) {
-            return Optional<String>.none();
-        }
-        String s = String.new();
-        while (true) {
-            i32 ch = self.read_char();
-            if (ch == EOF) {
-                if (s.len() == 0) {
-                    s.drop();
-                    return Optional<String>.none();
-                }
-                break;
-            }
-            s.push((u8)ch);
-            if (ch == 10) {
-                break;
-            }
-        }
-        return Optional<String>.some(move s);
     }
 
     i32 write_line(*self, str text) {

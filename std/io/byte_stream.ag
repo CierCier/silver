@@ -187,3 +187,27 @@ impl BufReader {
         return self.inner.eof();
     }
 }
+
+impl File {
+    Optional<String> read_line(*self) {
+        if (self.invalid() || self.at_eof) {
+            return Optional<String>.none();
+        }
+        String s = String.new();
+        while (true) {
+            i32 ch = self.read_char();
+            if (ch == -1) { // EOF
+                if (s.len() == 0) {
+                    s.drop();
+                    return Optional<String>.none();
+                }
+                break;
+            }
+            s.push((u8)ch);
+            if (ch == 10) {
+                break;
+            }
+        }
+        return Optional<String>.some(move s);
+    }
+}

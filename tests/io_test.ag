@@ -1,5 +1,6 @@
 import std.test;
 import std.io.file;
+import std.io.byte_stream;
 import std.string;
 import std.optional;
 i32 main() {
