@@ -36,6 +36,8 @@ void handle_query(ResponseWriter* w, HttpRequest* r) {
 void server_worker(i32 fd) {
     TcpListener listener = TcpListener.from_fd(fd);
     HttpServer s = HttpServer.new("127.0.0.1:0");
+    s.set_workers(2);
+    assert_eq_i64(s.workers, 2, "s.workers == 2");
     s.get("/hello", handle_hello);
     s.post("/echo", handle_echo);
     s.get("/search", handle_query);

@@ -22,6 +22,7 @@ import std.slice;
 import std.string;
 import std.sync;
 import std.sys.result;
+import std.thread;
 
 const i64 HTTP_ERR_IO = -1;
 const i64 HTTP_ERR_MALFORMED = -2;
@@ -2778,6 +2779,7 @@ struct HttpServer {
     i64 max_header_bytes;
     i64 max_body_bytes;
     bool enable_h2;
+    i64 workers;
 }
 
 // --- HTTP/2 Connection Reactor --------------------------------------------
@@ -2949,6 +2951,37 @@ void h2_serve_conn(StreamIo* io, ServeMux* mux, i64 max_body) {
     h2_serve_conn(io, mux, max_body, false, "");
 }
 
+struct HttpWorkerContext {
+    HttpServer* server;
+    i32 lfd;
+}
+
+void http_acceptor_worker(i64 arg) {
+    HttpWorkerContext* ctx = (HttpWorkerContext*)arg;
+    HttpServer* s = (*ctx).server;
+    i32 lfd = (*ctx).lfd;
+    while (true) {
+        Result<i64, Error> a = try_accept4(lfd, (void*)0, (u32*)0, SOCK_CLOEXEC);
+        if (a.err_is(EINTR)) {
+            a = try_accept4(lfd, (void*)0, (u32*)0, SOCK_CLOEXEC);
+        }
+        match a {
+            Ok(fd) : {
+                TcpStream stream = TcpStream.from_fd((i32)fd);
+                stream.set_nodelay(true);
+                if ((*s).read_timeout_secs > 0) {
+                    stream.sock.set_recv_timeout((*s).read_timeout_secs);
+                }
+                if ((*s).write_timeout_secs > 0) {
+                    stream.sock.set_send_timeout((*s).write_timeout_secs);
+                }
+                (*s).serve_conn(move stream);
+            },
+            Err(e) : { continue; },
+        };
+    }
+}
+
 impl HttpServer {
     HttpServer new(str addr) {
         HttpServer s;
@@ -2961,7 +2994,12 @@ impl HttpServer {
         s.max_header_bytes = HTTP_DEFAULT_MAX_HEADER;
         s.max_body_bytes = HTTP_DEFAULT_MAX_BODY;
         s.enable_h2 = true;
+        s.workers = 1;
         return move s;
+    }
+
+    void set_workers(&mut self, i64 n) {
+        self.workers = n;
     }
 
     void set_keep_alive_timeout_ms(&mut self, i64 ms) {
@@ -3098,6 +3136,18 @@ impl HttpServer {
         TcpListener listener = TcpListener.bind(&sa, 128);
         if (!listener.valid()) {
             return Err(HTTP_ERR_CONNECT, "failed to bind socket");
+        }
+
+        HttpWorkerContext ctx;
+        if (self.workers > 1) {
+            ctx.server = self;
+            ctx.lfd = listener.raw_fd();
+            i64 spawned = 0;
+            while (spawned < self.workers - 1) {
+                TaskRecord* h = thread_spawn(http_acceptor_worker, (i64)&ctx);
+                if (h == (TaskRecord*)0) { break; }
+                spawned = spawned + 1;
+            }
         }
 
         while (true) {
