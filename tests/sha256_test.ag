@@ -1,0 +1,45 @@
+import std.crypto.sha256;
+import std.test;
+import std.string;
+
+i32 main() {
+    test_start("std.crypto.sha256: SHA-256 and HMAC-SHA256");
+
+    // Test 1: SHA-256 of empty string
+    String hex_empty = sha256_hex((u8*)"", 0);
+    assert_true(hex_empty.equals("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"), "SHA-256 empty string");
+    hex_empty.drop();
+
+    // Test 2: SHA-256 of "abc"
+    String hex_abc = sha256_hex((u8*)"abc", 3);
+    assert_true(hex_abc.equals("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"), "SHA-256 'abc'");
+    hex_abc.drop();
+
+    // Test 3: SHA-256 of 56-byte message spanning across block padding boundary
+    str msg56 = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+    String hex_56 = sha256_hex((u8*)msg56, strlen(msg56));
+    assert_true(hex_56.equals("248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"), "SHA-256 56-byte message");
+    hex_56.drop();
+
+    // Test 4: HMAC-SHA256 (RFC 4231 Test Case 1)
+    u8 key[20];
+    for (i64 i = 0; i < 20; i = i + 1) {
+        key[i] = (u8)0x0b;
+    }
+    str data = "Hi There";
+    u8 hmac_out[32];
+    bool ok = hmac_sha256(&key[0], 20, (u8*)data, strlen(data), &hmac_out[0]);
+    assert_true(ok, "hmac_sha256 succeeds");
+
+    str hex_chars = "0123456789abcdef";
+    String hmac_hex = String.with_capacity(64);
+    for (i64 j = 0; j < 32; j = j + 1) {
+        u8 byte = hmac_out[j];
+        hmac_hex.push((u8)hex_chars[(i64)(byte >> 4)]);
+        hmac_hex.push((u8)hex_chars[(i64)(byte & (u8)0x0f)]);
+    }
+    assert_true(hmac_hex.equals("b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"), "HMAC-SHA256 RFC 4231 Test Case 1");
+    hmac_hex.drop();
+
+    return done();
+}
