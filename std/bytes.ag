@@ -86,6 +86,7 @@ impl Bytes {
         bool is_internal = false;
         i64 src_offset = 0;
         if (self.data != (u8*)0 && (i64)src >= (i64)self.data && (i64)src < (i64)self.data + self.cap) {
+            is_internal = true;
             src_offset = (i64)src - (i64)self.data;
         }
         if (self.len + src_len > self.cap) {
@@ -102,7 +103,11 @@ impl Bytes {
                 src = (u8*)((i64)self.data + src_offset);
             }
         }
-        silver_rt_memcpy(&self.data[self.len], src, src_len);
+        if (is_internal) {
+            silver_rt_memmove(&self.data[self.len], src, src_len);
+        } else {
+            silver_rt_memcpy(&self.data[self.len], src, src_len);
+        }
         self.len = self.len + src_len;
     }
 

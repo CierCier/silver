@@ -191,5 +191,19 @@ i32 main() {
         b.drop();
     }
 
+    test_start("extend self-overlap without reallocation");
+    {
+        Bytes b = Bytes.with_capacity(16);
+        b.push((u8)'A');
+        b.push((u8)'B');
+        b.push((u8)'C');
+        b.extend(b.as_ptr(), 3);
+        assert_eq_i64(b.len(), 6, "len is 6");
+        assert_eq_i32((i32)b.get(3), (i32)'A', "b[3] = 'A'");
+        assert_eq_i32((i32)b.get(4), (i32)'B', "b[4] = 'B'");
+        assert_eq_i32((i32)b.get(5), (i32)'C', "b[5] = 'C'");
+        b.drop();
+    }
+
     return done();
 }
