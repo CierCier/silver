@@ -1,0 +1,29 @@
+import std.log;
+import std.test;
+
+i32 main() {
+    test_start("std.log: structured logger");
+
+    // Default level is Info
+    LogLevel lvl = get_log_level();
+    assert_true(match lvl { Info : true, _ : false }, "default log level is Info");
+
+    set_log_level(LogLevel.Debug);
+    LogLevel lvl_dbg = get_log_level();
+    assert_true(match lvl_dbg { Debug : true, _ : false }, "log level set to Debug");
+
+    // Log messages at various levels
+    log_debug("debug test message");
+    log_info("info test message");
+    log_warn("warn test message");
+    log_error("error test message");
+
+    // Setting level to Error should filter out lower levels
+    set_log_level(LogLevel.Error);
+    LogLevel lvl_err = get_log_level();
+    assert_true(match lvl_err { Error : true, _ : false }, "log level set to Error");
+    log_info("this should not be printed");
+    log_error("this error should be printed");
+
+    return done();
+}

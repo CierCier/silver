@@ -1,0 +1,71 @@
+// std/log.ag — structured logging with severity levels and thread safety.
+
+import std.io.file;
+import std.sync;
+import std.atomic;
+
+enum LogLevel {
+    Debug;
+    Info;
+    Warn;
+    Error;
+}
+
+i32 g_log_level = 1; // Default to Info (0 = Debug, 1 = Info, 2 = Warn, 3 = Error)
+RawMutex g_log_lock;
+
+void set_log_level(LogLevel level) {
+    i32 lvl = match level {
+        Debug : 0,
+        Info : 1,
+        Warn : 2,
+        Error : 3
+    };
+    __atomic_store_i32(&g_log_level, lvl, ATOMIC_RELEASE);
+}
+
+LogLevel get_log_level() {
+    i32 lvl = __atomic_load_i32(&g_log_level, ATOMIC_ACQUIRE);
+    if (lvl == 0) { return LogLevel.Debug; }
+    if (lvl == 1) { return LogLevel.Info; }
+    if (lvl == 2) { return LogLevel.Warn; }
+    return LogLevel.Error;
+}
+
+void log(LogLevel level, str msg) {
+    i32 lvl = match level {
+        Debug : 0,
+        Info : 1,
+        Warn : 2,
+        Error : 3
+    };
+    if (lvl < __atomic_load_i32(&g_log_level, ATOMIC_ACQUIRE)) {
+        return;
+    }
+
+    str tag = match level {
+        Debug : "[DEBUG] ",
+        Info  : "[INFO]  ",
+        Warn  : "[WARN]  ",
+        Error : "[ERROR] "
+    };
+
+    g_log_lock.lock();
+    if (lvl >= 2) {
+        STDERR.write_str(tag);
+        STDERR.write_str(msg);
+        STDERR.write_str("\n");
+        STDERR.flush();
+    } else {
+        STDOUT.write_str(tag);
+        STDOUT.write_str(msg);
+        STDOUT.write_str("\n");
+        STDOUT.flush();
+    }
+    g_log_lock.unlock();
+}
+
+void log_debug(str msg) { log(LogLevel.Debug, msg); }
+void log_info(str msg) { log(LogLevel.Info, msg); }
+void log_warn(str msg) { log(LogLevel.Warn, msg); }
+void log_error(str msg) { log(LogLevel.Error, msg); }
