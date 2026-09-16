@@ -345,20 +345,23 @@ struct File {
     bool at_eof;
     bool had_error;
     bool owns_fd;
+    u8* read_buf;
+    i64 read_pos;
+    i64 read_len;
 }
 
 impl File {
     File from_fd(i32 fd) {
-        File file = { .fd = fd, .is_open = fd >= 0, .at_eof = false, .had_error = false, .owns_fd = true };
+        File file = { .fd = fd, .is_open = fd >= 0, .at_eof = false, .had_error = false, .owns_fd = true, .read_buf = (u8*)0, .read_pos = 0, .read_len = 0 };
         return file;
     }
 
     File closed() {
-        File file = { .fd = -1, .is_open = false, .at_eof = false, .had_error = false, .owns_fd = false };
+        File file = { .fd = -1, .is_open = false, .at_eof = false, .had_error = false, .owns_fd = false, .read_buf = (u8*)0, .read_pos = 0, .read_len = 0 };
         return file;
     }
     File borrow_fd(i32 fd) {
-        File file = { .fd = fd, .is_open = fd >= 0, .at_eof = false, .had_error = false, .owns_fd = false };
+        File file = { .fd = fd, .is_open = fd >= 0, .at_eof = false, .had_error = false, .owns_fd = false, .read_buf = (u8*)0, .read_pos = 0, .read_len = 0 };
         return file;
     }
 
@@ -430,6 +433,12 @@ impl File {
     }
 
     i32 close(*self) {
+        if (self.read_buf != (u8*)0) {
+            free(self.read_buf);
+            self.read_buf = (u8*)0;
+            self.read_pos = 0;
+            self.read_len = 0;
+        }
         if (self.invalid()) {
             self.is_open = false;
             return 0;
@@ -459,20 +468,32 @@ impl File {
     }
 
     i32 read_char(*self) {
-        if (self.invalid()) {
+        if (self.invalid() || self.at_eof) {
             return EOF;
         }
-        u8 ch = (u8)0;
-        Result<i64, Error> r = try_read(self.fd, &ch, 1);
+        if (self.read_pos < self.read_len) {
+            u8 ch = self.read_buf[self.read_pos];
+            self.read_pos = self.read_pos + 1;
+            return (i32)ch;
+        }
+        if (self.read_buf == (u8*)0) {
+            self.read_buf = alloc<u8>(4096);
+        }
+        self.read_pos = 0;
+        self.read_len = 0;
+        Result<i64, Error> r = try_read(self.fd, self.read_buf, 4096);
         if (r.is_err()) {
             self.had_error = true;
             return EOF;
         }
-        if (r.value() == 0) {
+        i64 n = r.value();
+        if (n <= 0) {
             self.at_eof = true;
             return EOF;
         }
-        return (i32)ch;
+        self.read_len = n;
+        self.read_pos = 1;
+        return (i32)self.read_buf[0];
     }
 
     i32 write_char(*self, i32 ch) {
@@ -536,6 +557,16 @@ impl File {
         }
         i64 total = elem_size * elem_count;
         i64 done = 0;
+        if (self.read_pos < self.read_len) {
+            i64 avail = self.read_len - self.read_pos;
+            i64 to_copy = avail;
+            if (to_copy > total) {
+                to_copy = total;
+            }
+            memcpy(buffer, (const void*)&self.read_buf[self.read_pos], to_copy);
+            self.read_pos = self.read_pos + to_copy;
+            done = to_copy;
+        }
         while (done < total) {
             Result<i64, Error> r = try_read(self.fd, (u8*)((i64)buffer + done), total - done);
             if (r.is_err()) {
@@ -593,6 +624,8 @@ impl File {
         if (self.invalid()) {
             return false;
         }
+        self.read_pos = 0;
+        self.read_len = 0;
         Result<i64, Error> r = try_lseek(self.fd, offset, (i64)((i32)origin));
         if (r.is_err()) {
             self.had_error = true;
@@ -615,6 +648,8 @@ impl File {
 
     void rewind(*self) {
         if (self.valid()) {
+            self.read_pos = 0;
+            self.read_len = 0;
             self.seek_from(0, IO_SEEK.SET);
             self.at_eof = false;
             self.had_error = false;

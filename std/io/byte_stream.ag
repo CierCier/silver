@@ -194,16 +194,51 @@ impl File {
         }
         String s = String.new();
         while (true) {
-            i32 ch = self.read_char();
-            if (ch == -1) { // EOF
-                if (s.len() == 0) {
-                    return Optional<String>.none();
+            if (self.read_pos >= self.read_len) {
+                if (self.read_buf == (u8*)0) {
+                    self.read_buf = alloc<u8>(4096);
                 }
-                break;
+                self.read_pos = 0;
+                self.read_len = 0;
+                Result<i64, Error> r = try_read(self.fd, self.read_buf, 4096);
+                if (r.is_err()) {
+                    self.had_error = true;
+                    if (s.len() == 0) {
+                        return Optional<String>.none();
+                    }
+                    break;
+                }
+                i64 n = r.value();
+                if (n <= 0) {
+                    self.at_eof = true;
+                    if (s.len() == 0) {
+                        return Optional<String>.none();
+                    }
+                    break;
+                }
+                self.read_len = n;
             }
-            s.push((u8)ch);
-            if (ch == 10) {
+            i64 start = self.read_pos;
+            i64 found = -1;
+            for (i64 i = start; i < self.read_len; i = i + 1) {
+                if (self.read_buf[i] == (u8)10) {
+                    found = i;
+                    break;
+                }
+            }
+            if (found >= 0) {
+                i64 count = found - start + 1;
+                for (i64 i = 0; i < count; i = i + 1) {
+                    s.push(self.read_buf[start + i]);
+                }
+                self.read_pos = found + 1;
                 break;
+            } else {
+                i64 count = self.read_len - start;
+                for (i64 i = 0; i < count; i = i + 1) {
+                    s.push(self.read_buf[start + i]);
+                }
+                self.read_pos = self.read_len;
             }
         }
         return Optional<String>.some(move s);

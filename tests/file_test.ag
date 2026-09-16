@@ -2,6 +2,7 @@
 import std.test;
 import std.string;
 import std.mem.vec;
+import std.io.byte_stream;
 
 str test_file = "silver_file_test.txt";
 str test_file2 = "silver_file_test2.txt";
@@ -266,6 +267,25 @@ i32 main() {
     Result<FileStat, Error> missing = stat_path("silver_file_test_missing.xyz");
     assert_true(missing.is_err(), "stat of missing file errors");
 
+
+    // Test: Buffered File.read_line()
+    File rlf = File.open_write(test_file);
+    rlf.write_str("line 1\nline 2\nlast line without newline");
+    rlf.close();
+
+    File rlf_in = File.open_read(test_file);
+    Optional<String> l1 = rlf_in.read_line();
+    assert_true(l1.is_some(), "read_line 1 is some");
+    assert_eq_str("line 1\n", l1.unwrap().to_str(), "l1 matches line 1");
+    Optional<String> l2 = rlf_in.read_line();
+    assert_true(l2.is_some(), "read_line 2 is some");
+    assert_eq_str("line 2\n", l2.unwrap().to_str(), "l2 matches line 2");
+    Optional<String> l3 = rlf_in.read_line();
+    assert_true(l3.is_some(), "read_line 3 is some");
+    assert_eq_str("last line without newline", l3.unwrap().to_str(), "l3 matches trailing line");
+    Optional<String> l4 = rlf_in.read_line();
+    assert_true(l4.is_none(), "read_line at EOF is none");
+    rlf_in.close();
     // Final cleanup
     file_delete(test_file);
     file_delete(test_file2);
