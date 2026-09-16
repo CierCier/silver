@@ -10,6 +10,7 @@
   zlib,
   libxml2,
   git,
+  openssl,
 }:
 let
   fs = lib.fileset;
@@ -58,16 +59,20 @@ rustPlatform.buildRustPackage {
     ncurses
     zlib
     libxml2
+    openssl
   ];
 
   nativeCheckInputs = [
     git
     llvmPackages_22.lld
+    openssl
   ];
 
   # LLVM & Clang environment flags for build scripts and bindgen
   LLVM_SYS_221_PREFIX = "${llvmPackages_22.llvm.dev}";
   LIBCLANG_PATH = "${llvmPackages_22.libclang.lib}/lib";
+  OPENSSL_LIB_DIR = "${lib.getLib openssl}/lib";
+  OPENSSL_DIR = "${openssl.dev}";
 
   # Ensure reproducible build without git repository in sandbox
   GIT_DESCRIBE = "0.2.6";

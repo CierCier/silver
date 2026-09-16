@@ -147,6 +147,11 @@ class BackgroundServices:
         self.modlib_dir = workdir / "modlib"
 
     def _find_openssl(self) -> str:
+        env_dir = os.environ.get("OPENSSL_LIB_DIR") or os.environ.get("SILVER_OPENSSL_LIB_DIR")
+        if env_dir:
+            p = Path(env_dir)
+            if (p / "libssl.so").is_file() or (p / "libssl.so.3").is_file():
+                return str(p)
         if not shutil.which("openssl"):
             return ""
         for pattern in ["/nix/store/*openssl-*/lib", "/usr/lib", "/usr/local/lib"]:

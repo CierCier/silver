@@ -20,6 +20,9 @@ let
         clippy
         rust-analyzer
         gdb
+        openssl
+        nodejs
+        go
       ;
       inherit (pkgs.llvmPackages_22)
         lld
@@ -28,6 +31,8 @@ let
 
     LLVM_SYS_221_PREFIX = "${pkgs.llvmPackages_22.llvm.dev}";
     LIBCLANG_PATH = "${pkgs.llvmPackages_22.libclang.lib}/lib";
+    OPENSSL_LIB_DIR = "${pkgs.lib.getLib pkgs.openssl}/lib";
+    OPENSSL_DIR = "${pkgs.openssl.dev}";
     SILVER_SYSROOT = builtins.toString ./.;
   };
 
