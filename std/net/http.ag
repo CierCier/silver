@@ -2977,7 +2977,12 @@ void http_acceptor_worker(i64 arg) {
                 }
                 (*s).serve_conn(move stream);
             },
-            Err(e) : { continue; },
+            Err(e) : {
+                if (a.err_is(EBADF) || a.err_is(EINVAL)) {
+                    break;
+                }
+                continue;
+            },
         };
     }
 }
@@ -3138,13 +3143,13 @@ impl HttpServer {
             return Err(HTTP_ERR_CONNECT, "failed to bind socket");
         }
 
-        HttpWorkerContext ctx;
         if (self.workers > 1) {
-            ctx.server = self;
-            ctx.lfd = listener.raw_fd();
+            HttpWorkerContext* ctx = alloc<HttpWorkerContext>();
+            (*ctx).server = self;
+            (*ctx).lfd = listener.raw_fd();
             i64 spawned = 0;
             while (spawned < self.workers - 1) {
-                TaskRecord* h = thread_spawn(http_acceptor_worker, (i64)&ctx);
+                TaskRecord* h = thread_spawn(http_acceptor_worker, (i64)ctx);
                 if (h == (TaskRecord*)0) { break; }
                 spawned = spawned + 1;
             }
@@ -3165,7 +3170,12 @@ impl HttpServer {
 
                     self.serve_conn(move stream);
                 },
-                Err(e) : { continue; },
+                Err(e) : {
+                    if (a.err_is(EBADF) || a.err_is(EINVAL)) {
+                        break;
+                    }
+                    continue;
+                },
             };
         }
         return Ok(0);
