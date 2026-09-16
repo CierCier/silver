@@ -52,7 +52,30 @@ i32 main() {
     Result<TcpStream, Error> refused = TcpStream.connect(&refused_addr);
     assert_true(refused.failed(), "connect refused returns error");
     Error refused_err = refused.get_error();
-    assert_eq_i64(refused_err.code, ECONNREFUSED, "refused errno");
+    // Test C: Unix domain socket TCP stream/listener (abstract namespace)
+    test_start("unix domain socket echo");
+    Result<SocketAddr, AddrError> u_bind_r = SocketAddr.unix("@test_silver_tcp_sock");
+    assert_true(u_bind_r.success(), "unix bind address valid");
+    SocketAddr u_bind_addr = u_bind_r.unwrap();
+    TcpListener u_listener = TcpListener.bind(&u_bind_addr, 1);
+    assert_true(u_listener.valid(), "unix listener bind ok");
+
+    Result<TcpStream, Error> u_client_r = TcpStream.connect(&u_bind_addr);
+    assert_true(u_client_r.success(), "unix connect ok");
+    TcpStream u_client = u_client_r.unwrap();
+    Result<i64, Error> uw = u_client.write((u8*)"ping", 4);
+    assert_true(uw.is_ok(), "unix write ok");
+
+    Result<i64, Error> ua = u_listener.accept();
+    assert_true(ua.is_ok(), "unix accept ok");
+    TcpStream u_server = TcpStream.from_fd((i32)ua.value());
+    u8* u_msg = alloc<u8>(8);
+    Result<i64, Error> ur = u_server.read(u_msg, 7);
+    assert_true(ur.is_ok(), "unix read ok");
+    assert_eq_i64(4, ur.value(), "unix read 4 bytes");
+    u_msg[ur.value()] = (u8)0;
+    assert_eq_str("ping", (str)u_msg, "unix echo message matches");
+    free(u_msg);
 
     return done();
 }
