@@ -1,0 +1,101 @@
+// std/random.ag — cryptographically-secure and pseudo-random number generators.
+
+import std.sys.os;
+
+/// Fill buffer with cryptographically-secure random bytes from the OS (getrandom syscall).
+bool random_bytes(u8* out, i64 len) {
+    i64 done = 0;
+    while (done < len) {
+        i64 r = sys_getrandom((i64)((i64)out + done), len - done, 0);
+        if (r < 0) {
+            i64 err = -r;
+            if (err == 4) { continue; } // EINTR
+            return false;
+        }
+        if (r == 0) { return false; }
+        done = done + r;
+    }
+    return true;
+}
+
+/// Generate a cryptographically-secure random 64-bit integer.
+u64 random_u64() {
+    u64 val = (u64)0;
+    random_bytes((u8*)&val, 8);
+    return val;
+}
+
+/// Generate a cryptographically-secure random non-negative integer in [min, max).
+i64 random_range(i64 min, i64 max) {
+    if (max <= min) { return min; }
+    u64 r = random_u64();
+    u64 range = (u64)(max - min);
+    return min + (i64)(r % range);
+}
+
+u64 rotl_u64(u64 x, i64 k) {
+    return (x << (u64)k) | (x >> (u64)(64 - k));
+}
+
+/// Fast pseudo-random number generator (Xoroshiro128+ algorithm).
+struct Rng {
+    u64 s0;
+    u64 s1;
+}
+
+impl Rng {
+    /// Create an RNG seeded with random numbers from OS CSPRNG.
+    Rng new() {
+        Rng r;
+        r.s0 = random_u64();
+        r.s1 = random_u64();
+        if (r.s0 == (u64)0 && r.s1 == (u64)0) {
+            r.s0 = (u64)0x8a5cd789635d2dff;
+            r.s1 = (u64)0x123456789abcdef0;
+        }
+        return r;
+    }
+
+    /// Create an RNG seeded with a specific 64-bit seed.
+    Rng from_seed(u64 seed) {
+        // SplitMix64 to generate two state words from single seed
+        u64 z = seed + (u64)0x9e3779b97f4a7c15;
+        z = (z ^ (z >> (u64)30)) * (u64)0xbf58476d1ce4e5b9;
+        z = (z ^ (z >> (u64)27)) * (u64)0x94d049bb133111eb;
+        u64 s0 = z ^ (z >> (u64)31);
+
+        z = z + (u64)0x9e3779b97f4a7c15;
+        z = (z ^ (z >> (u64)30)) * (u64)0xbf58476d1ce4e5b9;
+        z = (z ^ (z >> (u64)27)) * (u64)0x94d049bb133111eb;
+        u64 s1 = z ^ (z >> (u64)31);
+
+        Rng r;
+        r.s0 = s0;
+        r.s1 = s1;
+        if (r.s0 == (u64)0 && r.s1 == (u64)0) {
+            r.s0 = (u64)1;
+        }
+        return r;
+    }
+
+    /// Generate next pseudo-random u64 using Xoroshiro128+.
+    u64 next_u64(&mut self) {
+        u64 s0 = self.s0;
+        u64 s1 = self.s1;
+        u64 result = s0 + s1;
+
+        s1 = s1 ^ s0;
+        self.s0 = rotl_u64(s0, 55) ^ s1 ^ (s1 << (u64)14);
+        self.s1 = rotl_u64(s1, 36);
+
+        return result;
+    }
+
+    /// Generate next integer in [min, max).
+    i64 next_range(&mut self, i64 min, i64 max) {
+        if (max <= min) { return min; }
+        u64 val = self.next_u64();
+        u64 range = (u64)(max - min);
+        return min + (i64)(val % range);
+    }
+}

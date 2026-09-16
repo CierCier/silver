@@ -1,0 +1,47 @@
+import std.random;
+import std.test;
+
+i32 main() {
+    test_start("std.random: CSPRNG and PRNG");
+
+    u8 buf[32];
+    bool ok = random_bytes(&buf[0], 32);
+    assert_true(ok, "random_bytes succeeds");
+
+    bool non_zero = false;
+    for (i64 i = 0; i < 32; i = i + 1) {
+        if (buf[i] != (u8)0) {
+            non_zero = true;
+            break;
+        }
+    }
+    assert_true(non_zero, "random_bytes produces non-zero entropy");
+
+    u64 r1 = random_u64();
+    u64 r2 = random_u64();
+    assert_true(r1 != r2, "two successive random_u64 calls differ");
+
+    for (i64 k = 0; k < 20; k = k + 1) {
+        i64 val = random_range(50, 60);
+        assert_true(val >= 50 && val < 60, "random_range in bounds [50, 60)");
+    }
+
+    // Deterministic PRNG test
+    Rng prng1 = Rng.from_seed((u64)12345);
+    Rng prng2 = Rng.from_seed((u64)12345);
+
+    u64 s1_a = prng1.next_u64();
+    u64 s2_a = prng2.next_u64();
+    assert_eq_i64((i64)s1_a, (i64)s2_a, "identical seed produces identical 1st output");
+
+    u64 s1_b = prng1.next_u64();
+    u64 s2_b = prng2.next_u64();
+    assert_eq_i64((i64)s1_b, (i64)s2_b, "identical seed produces identical 2nd output");
+
+    for (i64 m = 0; m < 50; m = m + 1) {
+        i64 bounded = prng1.next_range(1000, 2000);
+        assert_true(bounded >= 1000 && bounded < 2000, "next_range in bounds [1000, 2000)");
+    }
+
+    return done();
+}

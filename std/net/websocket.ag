@@ -19,6 +19,7 @@ import std.mem.drop;
 import std.mem.memory;
 import std.net.http;
 import std.net.transport;
+import std.random;
 import std.string;
 import std.sys.raw.misc;
 import std.sys.result;
@@ -131,20 +132,9 @@ String ws_base64(u8* data, i64 len) {
     return out;
 }
 
-/// Fill `len` bytes from the kernel CSPRNG (getrandom(2), retried on EINTR).
+/// Fill `len` bytes from the kernel CSPRNG (delegated to std.random).
 bool ws_random_bytes(u8* out, i64 len) {
-    i64 done = 0;
-    while (done < len) {
-        i64 r = sys_getrandom((i64)((i64)out + done), len - done, 0);
-        if (r < 0) {
-            i64 err = -r;
-            if (err == 4) { continue; } // EINTR
-            return false;
-        }
-        if (r == 0) { return false; }
-        done = done + r;
-    }
-    return true;
+    return random_bytes(out, len);
 }
 
 // --- Case-insensitive helpers ----------------------------------------------
