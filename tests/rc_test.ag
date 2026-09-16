@@ -3,6 +3,8 @@
 // RcBox<T> { count, value } layout.
 import std.test;  // assert_true, assert_eq_i32, done, STDOUT
 import std.mem;
+import std.mem.box;
+import std.string;
 
 i32 main() {
     STDOUT.write_str("=== Rc Test Suite ===\n\n");
@@ -76,6 +78,20 @@ i32 main() {
         Rc<i32> r = Rc<i32>.from_ptr(p);
         i32* rp = r.get(&r);
         assert_eq_i32(*rp, 777, "from_ptr: Rc reads adopted value");
+        r.drop();
+    }
+
+    // Test 6: Box and Rc with owned String
+    STDOUT.write_str("--- Test 6: Box and Rc with String ---\n");
+    {
+        Box<String> b = Box<String>.new(String.from_str("boxed string"));
+        String* bp = b.get(&b);
+        assert_eq_i64((*bp).len(), 12, "Box<String> len is 12");
+        b.drop();
+
+        Rc<String> r = Rc<String>.new(String.from_str("rc string"));
+        String* rp = r.get(&r);
+        assert_eq_i64((*rp).len(), 9, "Rc<String> len is 9");
         r.drop();
     }
 

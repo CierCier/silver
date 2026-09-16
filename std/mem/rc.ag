@@ -39,7 +39,7 @@ impl<T> Rc<T> {
     Rc<T> new(T val) {
         RcBox<T>* b = alloc<RcBox<T>>();
         (*b).count = 1;
-        (*b).value = val;
+        (*b).value = move val;
         Rc<T> rc;
         rc.ptr = &((*b).value);
         rc.count = &((*b).count);
