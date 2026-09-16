@@ -145,13 +145,12 @@ i64 inet_addr(str s) {
 // ---------------------------------------------------------------------------
 
 // struct sockaddr_in6 — 28 bytes, matches Linux x86_64 layout.
-// Address stored as two u64 halves (network byte order).
+// sin6_addr is 16 bytes (network byte order).
 struct SockAddrIn6 {
     u16 sin6_family;
     u16 sin6_port;
     u32 sin6_flowinfo;
-    u64 sin6_addr_lo;   // bytes 0-7 of IPv6 address
-    u64 sin6_addr_hi;   // bytes 8-15 of IPv6 address
+    u8 sin6_addr[16];   // 16 bytes of IPv6 address
     u32 sin6_scope_id;
 }
 
@@ -162,34 +161,27 @@ impl SockAddrIn6 {
         sa.sin6_family = (u16)AddressFamily.INET6;
         sa.sin6_port = hton16(port);
         sa.sin6_flowinfo = (u32)0;
+        i64 i = 0;
+        while (i < 16) {
+            sa.sin6_addr[i] = (u8)0;
+            i += 1;
+        }
         sa.sin6_scope_id = (u32)0;
-
-        u64 hi = 0;
-        u64 lo = 0;
-        inet_pton6(addr_str, &hi, &lo);
-        sa.sin6_addr_hi = hi;
-        sa.sin6_addr_lo = lo;
+        inet_pton6(addr_str, &sa.sin6_addr[0]);
         return sa;
     }
 
     /// Set address from colon-hex string. Returns true on success.
     bool set_addr(*self, str addr_str) {
-        u64 hi = 0;
-        u64 lo = 0;
-        bool ok = inet_pton6(addr_str, &hi, &lo);
-        if (ok) {
-            self.sin6_addr_hi = hi;
-            self.sin6_addr_lo = lo;
-        }
-        return ok;
+        return inet_pton6(addr_str, &self.sin6_addr[0]);
     }
 }
 
-/// Parse an IPv6 colon-hex string into two u64 halves (network byte order).
+/// Parse an IPv6 colon-hex string into 16 bytes (network byte order).
 /// Handles :: compression, but NOT embedded IPv4 (::ffff:1.2.3.4).
 /// Returns true on success.
-bool inet_pton6(str s, u64* hi_out, u64* lo_out) {
-    if (s == (str)0) { return false; }
+bool inet_pton6(str s, u8* out_bytes) {
+    if (s == (str)0 || out_bytes == (u8*)0) { return false; }
     u8* p = (u8*)s;
 
     // 8 × 16-bit hextets stored in host order during parse.
@@ -257,22 +249,15 @@ bool inet_pton6(str s, u64* hi_out, u64* lo_out) {
         while (j < 8) { out[j] = hextets[j]; j += 1; }
     }
 
-    // Pack into two u64 in network byte order.
-    // hextet[0..3] -> hi (bytes: h[0],h[1],h[2],h[3] in big-endian)
-    // hextet[4..7] -> lo
-    u64 hi = 0;
-    u64 lo = 0;
-    hi = hi | ((u64)out[0] << (u64)48);
-    hi = hi | ((u64)out[1] << (u64)32);
-    hi = hi | ((u64)out[2] << (u64)16);
-    hi = hi | ((u64)out[3]);
-    lo = lo | ((u64)out[4] << (u64)48);
-    lo = lo | ((u64)out[5] << (u64)32);
-    lo = lo | ((u64)out[6] << (u64)16);
-    lo = lo | ((u64)out[7]);
+    // Write 16 bytes in network byte order (big-endian).
+    i64 j = 0;
+    while (j < 8) {
+        i64 h = (i64)out[j];
+        out_bytes[j * 2] = (u8)((h >> 8) & 255);
+        out_bytes[j * 2 + 1] = (u8)(h & 255);
+        j += 1;
+    }
 
-    *hi_out = hi;
-    *lo_out = lo;
     return true;
 }
 // ---------------------------------------------------------------------------
@@ -324,18 +309,19 @@ impl SocketAddr {
     }
 
     Result<SocketAddr, AddrError> v6(str ip, u16 port) {
-        u64 hi = 0;
-        u64 lo = 0;
-        if (!inet_pton6(ip, &hi, &lo)) {
-            return Err(AddrError.InvalidAddress);
-        }
         SockAddrIn6 sa;
         sa.sin6_family = (u16)AddressFamily.INET6;
         sa.sin6_port = hton16(port);
         sa.sin6_flowinfo = (u32)0;
-        sa.sin6_addr_hi = hi;
-        sa.sin6_addr_lo = lo;
+        i64 i = 0;
+        while (i < 16) {
+            sa.sin6_addr[i] = (u8)0;
+            i += 1;
+        }
         sa.sin6_scope_id = (u32)0;
+        if (!inet_pton6(ip, &sa.sin6_addr[0])) {
+            return Err(AddrError.InvalidAddress);
+        }
         return Ok(SocketAddr.V6(sa));
     }
 

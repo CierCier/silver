@@ -50,5 +50,18 @@ i32 main() {
     i64 got = a.recv_from(buf, 5, &src);
     assert_eq_i64(5, got, "recv 5 bytes");
 
+    test_start("udp unix and v6 constructors");
+    UdpSocket unix_sock = UdpSocket.new_unix();
+    assert_true(unix_sock.valid(), "create unix datagram socket");
+    unix_sock.close();
+
+    Result<SocketAddr, AddrError> v6_res = SocketAddr.v6("::1", (u16)0);
+    if (v6_res.success()) {
+        SocketAddr v6_addr = v6_res.unwrap();
+        UdpSocket v6_sock = UdpSocket.bind_addr(&v6_addr);
+        assert_true(v6_sock.valid(), "bind_addr on v6 succeeds");
+        v6_sock.close();
+    }
+
     return done();
 }

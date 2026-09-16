@@ -121,6 +121,30 @@ impl UdpSocket {
         return u;
     }
 
+    /// Create an unbound Unix datagram socket. Returns a closed socket on failure.
+    UdpSocket new_unix() {
+        UdpSocket u;
+        u.sock = Socket.new(AddressFamily.UNIX, SocketType.DGRAM, SOCK_CLOEXEC, 0);
+        return u;
+    }
+
+    /// Create and bind a UDP socket matching the family of `addr` (IPv4, IPv6, or Unix).
+    UdpSocket bind_addr(SocketAddr* addr) {
+        AddressFamily fam = match *addr {
+            V4(sa) : AddressFamily.INET,
+            V6(sa) : AddressFamily.INET6,
+            Unix(sa) : AddressFamily.UNIX
+        };
+        UdpSocket u;
+        u.sock = Socket.new(fam, SocketType.DGRAM, SOCK_CLOEXEC, 0);
+        if (u.valid()) {
+            if (!u.bind(addr)) {
+                u.sock.close();
+            }
+        }
+        return u;
+    }
+
     /// Bind to a borrowed socket address (supports IPv4, IPv6, and Unix datagrams).
     bool bind(*self, SocketAddr* addr) {
         if (self.sock.invalid()) { return false; }
