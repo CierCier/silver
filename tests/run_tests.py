@@ -56,10 +56,6 @@ LEAK_CHECK_TESTS = {
 }
 
 EXPECTED_COMPILE_FAILURES = {
-    "enum_arity_error_test",
-    "inherent_drop_error_test",
-    "static_volatile_negative_test",
-    "target_feature_error_test",
     "borrow_origin_escape_error_test",
     "enum_move_in_error_test",
     "launch_wait_error_test",

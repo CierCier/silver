@@ -189,10 +189,11 @@ impl Vec<T> {
 
 
     /// Remove all elements without freeing the backing buffer.
-    /// NOTE: Does NOT drop elements — for owned T, `drain`/`take`/`pop` first
-    /// to move out values (see smoke comment below); otherwise backing memory
-    /// is freed but inner allocations (e.g., String buffers) leak.
+    /// Drops active elements in place before resetting length.
     void clear(&mut self) {
+        if (self.data != (T*)0 && self.len > 0) {
+            @drop_in_place(self.data, self.len);
+        }
         self.len = 0;
     }
 

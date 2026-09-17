@@ -184,7 +184,11 @@ impl BinaryHeap<T> {
     }
 
     /// Remove all elements without freeing the backing buffer.
+    /// Drops active elements in place before resetting length.
     void clear(&mut self) {
+        if (self.data != (T*)0 && self.len > 0) {
+            @drop_in_place(self.data, self.len);
+        }
         self.len = 0;
     }
 }

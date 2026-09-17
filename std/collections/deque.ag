@@ -200,9 +200,18 @@ impl Deque<T> {
     }
 
     /// Remove all elements without freeing the backing buffer.
-    /// NOTE: Does NOT drop elements — for owned T drain via `pop_front`/`pop_back`
-    /// (each `move`s) before `clear`/`drop`; otherwise inner allocations leak.
+    /// Drops active elements in place across the ring buffer segments.
     void clear(&mut self) {
+        if (self.data != (T*)0 && self.len > 0) {
+            i64 first = self.cap - self.head;
+            if (first > self.len) {
+                first = self.len;
+            }
+            @drop_in_place(&self.data[self.head], first);
+            if (first < self.len) {
+                @drop_in_place(self.data, self.len - first);
+            }
+        }
         self.len = 0;
         self.head = 0;
     }

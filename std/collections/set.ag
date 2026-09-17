@@ -302,10 +302,16 @@ impl HashSet<K> {
         }
     }
 
-    /// Remove all entries and release backing memory.
-    /// Leaks owned K — drain first for Drop types.
+    /// Remove all entries and release backing memory after dropping active keys.
     void clear(&mut self) {
         if (self.ctrl != (u8*)0) {
+            i64 i = 0;
+            while (i < self.capacity) {
+                if (self.ctrl[i] < (u8)0x80) {
+                    @drop_in_place(&self.keys[i], 1);
+                }
+                i = i + 1;
+            }
             free(self.keys);
             free(self.ctrl);
             self.keys = (K*)0;

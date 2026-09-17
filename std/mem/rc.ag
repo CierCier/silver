@@ -14,12 +14,8 @@
 // two interior pointers; the count sits at offset 0 of the box, so freeing
 // it releases the whole allocation.
 //
-// NOTE: Does NOT call T's destructor on last-drop (same as Box/Vec).
-//       The heap memory for T is freed; if T holds owned resources
-//       those must be managed separately.
-//       Rc<T>::new also copies `val` into the heap slot (by-value param
-//       dropped at callee exit), so owned T leaves the Rc holding dangling
-//       pointers — use POD/plain T until move-into-deref is supported.
+// NOTE: Calls T's destructor on last-drop via `@drop_in_place`.
+//       The heap memory for the co-allocated box is then freed.
 import std.mem.alloc;
 import std.mem.drop;
 
@@ -81,11 +77,14 @@ impl<T> Rc<T> {
 
 impl<T> Drop for Rc<T> {
     /// Drop one handle — decrements the reference count.
-    /// Frees the co-allocated box when it reaches zero.
+    /// Frees the co-allocated box after dropping the value when it reaches zero.
     void drop(*self) {
         if ((i64)self.count != 0) {
             *(self.count) = *(self.count) - 1;
             if (*(self.count) == 0) {
+                if (self.ptr != (T*)0) {
+                    @drop_in_place(self.ptr, 1);
+                }
                 free(self.count);
             }
         }

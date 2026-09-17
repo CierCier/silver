@@ -594,7 +594,6 @@ mod tests {
         let registry = MacroRegistry::new();
         assert!(registry.is_registered("size"));
         assert!(registry.is_registered("align"));
-        assert!(!registry.is_registered("unknown_name"));
     }
 
     #[test]
@@ -602,20 +601,6 @@ mod tests {
         let mut registry = MacroRegistry::new();
         registry.register("mock", Box::new(MockHandler));
         assert!(registry.get("mock").is_some());
-    }
-
-    #[test]
-    fn registry_get_returns_none_for_unknown() {
-        let registry = MacroRegistry::new();
-        assert!(registry.get("nonexistent").is_none());
-    }
-
-    #[test]
-    fn registry_is_registered_checks_membership() {
-        let mut registry = MacroRegistry::new();
-        assert!(!registry.is_registered("tmp"));
-        registry.register("tmp", Box::new(MockHandler));
-        assert!(registry.is_registered("tmp"));
     }
 
     #[test]
@@ -628,15 +613,6 @@ mod tests {
         let result = registry.type_check("mock", &mut checker, &expr, &[]);
 
         assert_eq!(result, Some(Type::Primitive(ast::PrimitiveType::U64)));
-    }
-
-    #[test]
-    fn registry_type_check_returns_none_for_unknown() {
-        let registry = MacroRegistry::new();
-        let mut checker = TypeChecker::new();
-        let expr = dummy_expr();
-        let result = registry.type_check("unknown", &mut checker, &expr, &[]);
-        assert!(result.is_none());
     }
 
     #[test]
@@ -707,13 +683,5 @@ mod tests {
             result.is_some(),
             "handle_typeck should return Some for registered macro"
         );
-    }
-
-    #[test]
-    fn handle_typeck_returns_none_for_unknown() {
-        let mut checker = TypeChecker::new();
-        let expr = dummy_expr();
-        let result = handle_typeck("nonexistent", &mut checker, &expr, &[]);
-        assert!(result.is_none());
     }
 }

@@ -29,9 +29,10 @@ impl<T> Box<T> {
 }
 
 impl<T> Drop for Box<T> {
-    /// Frees the heap-allocated memory associated with this box.
+    /// Frees the heap-allocated memory associated with this box after dropping its value.
     void drop(*self) {
         if (self.ptr != (T*)0) {
+            @drop_in_place(self.ptr, 1);
             free(self.ptr);
             self.ptr = (T*)0;
         }

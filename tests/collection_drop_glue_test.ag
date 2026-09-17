@@ -7,6 +7,8 @@ import std.collections.deque;
 import std.collections.heap;
 import std.map;
 import std.collections.set;
+import std.mem.box;
+import std.mem.rc;
 
 i64 g_drops = 0;
 
@@ -141,6 +143,150 @@ i32 main() {
             m.insert(1, 2);
         }
         assert_eq_i64(0, g_drops, "No drops for primitive collections");
+    }
+
+    // 7. Box<DropSpy> drops contained element
+    test_start("Box drops contained element");
+    {
+        g_drops = 0;
+        {
+            DropSpy d;
+            d.val = 42;
+            Box<DropSpy> _b = Box<DropSpy>.new(move d);
+        }
+        assert_eq_i64(1, g_drops, "Box dropped contained element on exit");
+    }
+
+    // 8. Rc<DropSpy> drops contained element on last handle drop
+    test_start("Rc drops contained element on last handle drop");
+    {
+        g_drops = 0;
+        {
+            DropSpy d;
+            d.val = 99;
+            Rc<DropSpy> r1 = Rc<DropSpy>.new(move d);
+            {
+                Rc<DropSpy> _r2 = r1.clone(&r1);
+                assert_eq_i64(0, g_drops, "No drop while 2 handles exist");
+            }
+            assert_eq_i64(0, g_drops, "No drop while 1 handle exists");
+        }
+        assert_eq_i64(1, g_drops, "Rc dropped contained element when refcount hits 0");
+    }
+
+    // 9. Vec<DropSpy>.clear() drops elements and allows reuse
+    test_start("Vec.clear() drops elements and allows reuse");
+    {
+        g_drops = 0;
+        {
+            Vec<DropSpy> v = Vec<DropSpy>.new();
+            for (i64 i = 0; i < 3; i = i + 1) {
+                DropSpy d;
+                d.val = i;
+                v.push(move d);
+            }
+            assert_eq_i64(0, g_drops, "No drops before clear");
+            v.clear();
+            assert_eq_i64(3, g_drops, "Vec.clear dropped 3 elements");
+            assert_eq_i64(0, v.len(), "Vec is empty after clear");
+
+            DropSpy d2;
+            d2.val = 100;
+            v.push(move d2);
+        }
+        assert_eq_i64(4, g_drops, "Vec dropped reused element on scope exit");
+    }
+
+    // 10. Deque<DropSpy>.clear() drops elements and allows reuse
+    test_start("Deque.clear() drops elements and allows reuse");
+    {
+        g_drops = 0;
+        {
+            Deque<DropSpy> dq = Deque<DropSpy>.new();
+            for (i64 i = 0; i < 4; i = i + 1) {
+                DropSpy d;
+                d.val = i;
+                dq.push_back(move d);
+            }
+            assert_eq_i64(0, g_drops, "No drops before clear");
+            dq.clear();
+            assert_eq_i64(4, g_drops, "Deque.clear dropped 4 elements");
+            assert_eq_i64(0, dq.len(), "Deque is empty after clear");
+
+            DropSpy d2;
+            d2.val = 200;
+            dq.push_back(move d2);
+        }
+        assert_eq_i64(5, g_drops, "Deque dropped reused element on scope exit");
+    }
+
+    // 11. HashMap<i64, DropSpy>.clear() drops entries and allows reuse
+    test_start("HashMap.clear() drops entries and allows reuse");
+    {
+        g_drops = 0;
+        {
+            HashMap<i64, DropSpy> m = HashMap<i64, DropSpy>.new();
+            for (i64 i = 0; i < 5; i = i + 1) {
+                DropSpy d;
+                d.val = i;
+                m.insert(i, move d);
+            }
+            assert_eq_i64(0, g_drops, "No drops before clear");
+            m.clear();
+            assert_eq_i64(5, g_drops, "HashMap.clear dropped 5 values");
+            assert_eq_i64(0, m.len(), "HashMap is empty after clear");
+
+            DropSpy d2;
+            d2.val = 300;
+            m.insert(99, move d2);
+        }
+        assert_eq_i64(6, g_drops, "HashMap dropped reused element on scope exit");
+    }
+
+    // 12. HashSet<DropSpy>.clear() drops entries and allows reuse
+    test_start("HashSet.clear() drops entries and allows reuse");
+    {
+        g_drops = 0;
+        {
+            HashSet<DropSpy> s = HashSet<DropSpy>.new();
+            for (i64 i = 0; i < 3; i = i + 1) {
+                DropSpy d;
+                d.val = i;
+                s.insert(move d);
+            }
+            assert_eq_i64(0, g_drops, "No drops before clear");
+            s.clear();
+            assert_eq_i64(3, g_drops, "HashSet.clear dropped 3 keys");
+            assert_eq_i64(0, s.len(), "HashSet is empty after clear");
+
+            DropSpy d2;
+            d2.val = 400;
+            s.insert(move d2);
+        }
+        assert_eq_i64(4, g_drops, "HashSet dropped reused element on scope exit");
+    }
+
+    // 13. BinaryHeap<DropSpy>.clear() drops entries and allows reuse
+    test_start("BinaryHeap.clear() drops entries and allows reuse");
+    {
+        g_drops = 0;
+        {
+            BinaryHeap<DropSpy> h = BinaryHeap<DropSpy>.new();
+            for (i64 i = 0; i < 4; i = i + 1) {
+                DropSpy d;
+                d.val = i;
+                h.push(move d);
+            }
+            assert_eq_i64(0, g_drops, "No drops before clear");
+            h.clear();
+            assert_eq_i64(4, g_drops, "BinaryHeap.clear dropped 4 elements");
+            assert_eq_i64(0, h.len(), "BinaryHeap is empty after clear");
+
+            DropSpy d2;
+            d2.val = 500;
+            h.push(move d2);
+        }
+        assert_eq_i64(5, g_drops, "BinaryHeap dropped reused element on scope exit");
     }
 
     done();
