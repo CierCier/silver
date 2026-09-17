@@ -239,16 +239,16 @@ impl Condvar {
     /// the mutex before returning.
     /// Named `wait_on` because `wait` is the task-join keyword.
     void wait_on(*self, RawMutex* mu) {
-        i32 expected = __atomic_load_i32(&(*self).seq, ATOMIC_SEQ_CST);
-        (*mu).unlock();
-        futex_wait(&(*self).seq, expected);
-        (*mu).lock();
+        i32 expected = __atomic_load_i32(&self.seq, ATOMIC_SEQ_CST);
+        mu.unlock();
+        futex_wait(&self.seq, expected);
+        mu.lock();
     }
 
     /// Wake one thread waiting on this condition variable.
     void notify_one(*self) {
-        __atomic_fetch_add_i32(&(*self).seq, 1, ATOMIC_SEQ_CST);
-        futex_wake(&(*self).seq, 1);
+        __atomic_fetch_add_i32(&self.seq, 1, ATOMIC_SEQ_CST);
+        futex_wake(&self.seq, 1);
     }
 
     /// Alias for `notify_one` (short form).
@@ -258,8 +258,8 @@ impl Condvar {
 
     /// Wake all threads waiting on this condition variable.
     void notify_all(*self) {
-        __atomic_fetch_add_i32(&(*self).seq, 1, ATOMIC_SEQ_CST);
-        futex_wake(&(*self).seq, 2147483647);
+        __atomic_fetch_add_i32(&self.seq, 1, ATOMIC_SEQ_CST);
+        futex_wake(&self.seq, 2147483647);
     }
 }
 
@@ -295,71 +295,71 @@ impl RawRwLock {
     /// Acquire a shared read lock, blocking if a writer is active or waiting.
     void read_lock(*self) {
         while (true) {
-            i32 ww = __atomic_load_i32(&(*self).writers_waiting, ATOMIC_SEQ_CST);
-            i32 s = __atomic_load_i32(&(*self).state, ATOMIC_SEQ_CST);
+            i32 ww = __atomic_load_i32(&self.writers_waiting, ATOMIC_SEQ_CST);
+            i32 s = __atomic_load_i32(&self.state, ATOMIC_SEQ_CST);
             if (ww == 0 && s >= 0) {
-                if (__atomic_cmpxchg_i32(&(*self).state, s, s + 1, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST)) {
+                if (__atomic_cmpxchg_i32(&self.state, s, s + 1, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST)) {
                     return;
                 }
             } else {
-                i32 expected = __atomic_load_i32(&(*self).read_futex, ATOMIC_SEQ_CST);
-                futex_wait(&(*self).read_futex, expected);
+                i32 expected = __atomic_load_i32(&self.read_futex, ATOMIC_SEQ_CST);
+                futex_wait(&self.read_futex, expected);
             }
         }
     }
 
     /// Try to acquire a shared read lock without blocking.
     bool try_read_lock(*self) {
-        i32 ww = __atomic_load_i32(&(*self).writers_waiting, ATOMIC_SEQ_CST);
+        i32 ww = __atomic_load_i32(&self.writers_waiting, ATOMIC_SEQ_CST);
         if (ww > 0) {
             return false;
         }
-        i32 s = __atomic_load_i32(&(*self).state, ATOMIC_SEQ_CST);
+        i32 s = __atomic_load_i32(&self.state, ATOMIC_SEQ_CST);
         if (s < 0) {
             return false;
         }
-        return __atomic_cmpxchg_i32(&(*self).state, s, s + 1, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST);
+        return __atomic_cmpxchg_i32(&self.state, s, s + 1, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST);
     }
 
     /// Release a shared read lock.
     void read_unlock(*self) {
-        i32 prev = __atomic_fetch_sub_i32(&(*self).state, 1, ATOMIC_SEQ_CST);
+        i32 prev = __atomic_fetch_sub_i32(&self.state, 1, ATOMIC_SEQ_CST);
         if (prev == 1) {
             // Last reader exited: wake one waiting writer if any
-            if (__atomic_load_i32(&(*self).writers_waiting, ATOMIC_SEQ_CST) > 0) {
-                __atomic_fetch_add_i32(&(*self).write_futex, 1, ATOMIC_SEQ_CST);
-                futex_wake(&(*self).write_futex, 1);
+            if (__atomic_load_i32(&self.writers_waiting, ATOMIC_SEQ_CST) > 0) {
+                __atomic_fetch_add_i32(&self.write_futex, 1, ATOMIC_SEQ_CST);
+                futex_wake(&self.write_futex, 1);
             }
         }
     }
 
     /// Acquire an exclusive write lock, blocking until all readers and writers exit.
     void write_lock(*self) {
-        __atomic_fetch_add_i32(&(*self).writers_waiting, 1, ATOMIC_SEQ_CST);
+        __atomic_fetch_add_i32(&self.writers_waiting, 1, ATOMIC_SEQ_CST);
         while (true) {
-            if (__atomic_cmpxchg_i32(&(*self).state, 0, -1, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST)) {
-                __atomic_fetch_sub_i32(&(*self).writers_waiting, 1, ATOMIC_SEQ_CST);
+            if (__atomic_cmpxchg_i32(&self.state, 0, -1, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST)) {
+                __atomic_fetch_sub_i32(&self.writers_waiting, 1, ATOMIC_SEQ_CST);
                 return;
             }
-            i32 expected = __atomic_load_i32(&(*self).write_futex, ATOMIC_SEQ_CST);
-            futex_wait(&(*self).write_futex, expected);
+            i32 expected = __atomic_load_i32(&self.write_futex, ATOMIC_SEQ_CST);
+            futex_wait(&self.write_futex, expected);
         }
     }
 
     /// Try to acquire an exclusive write lock without blocking.
     bool try_write_lock(*self) {
-        return __atomic_cmpxchg_i32(&(*self).state, 0, -1, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST);
+        return __atomic_cmpxchg_i32(&self.state, 0, -1, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST);
     }
 
     /// Release an exclusive write lock.
     void write_unlock(*self) {
-        __atomic_exchange_i32(&(*self).state, 0, ATOMIC_SEQ_CST);
-        if (__atomic_load_i32(&(*self).writers_waiting, ATOMIC_SEQ_CST) > 0) {
-            __atomic_fetch_add_i32(&(*self).write_futex, 1, ATOMIC_SEQ_CST);
-            futex_wake(&(*self).write_futex, 1);
+        __atomic_exchange_i32(&self.state, 0, ATOMIC_SEQ_CST);
+        if (__atomic_load_i32(&self.writers_waiting, ATOMIC_SEQ_CST) > 0) {
+            __atomic_fetch_add_i32(&self.write_futex, 1, ATOMIC_SEQ_CST);
+            futex_wake(&self.write_futex, 1);
         } else {
-            __atomic_fetch_add_i32(&(*self).read_futex, 1, ATOMIC_SEQ_CST);
-            futex_wake(&(*self).read_futex, 2147483647);
+            __atomic_fetch_add_i32(&self.read_futex, 1, ATOMIC_SEQ_CST);
+            futex_wake(&self.read_futex, 2147483647);
         }
     }
 }

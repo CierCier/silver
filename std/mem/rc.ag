@@ -6,7 +6,7 @@
 // USAGE:
 //   Rc<GraphNode> n = Rc.new(GraphNode.new(id));
 //   Rc<GraphNode> m = n.clone();  // shared ownership
-//   (*n.get()).payload[0] = 42;
+//   n.get().payload[0] = 42;
 //
 // The count and the value live in one co-allocated RcBox<T>, so creating a
 // handle is a single heap allocation instead of two (16 bytes of metadata
@@ -38,11 +38,11 @@ impl<T> Rc<T> {
     /// Create a new reference-counted handle (single co-allocated box).
     Rc<T> new(T val) {
         RcBox<T>* b = alloc<RcBox<T>>();
-        (*b).count = 1;
-        (*b).value = move val;
+        b.count = 1;
+        b.value = move val;
         Rc<T> rc;
-        rc.ptr = &((*b).value);
-        rc.count = &((*b).count);
+        rc.ptr = &b.value;
+        rc.count = &b.count;
         return rc;
     }
 
@@ -53,12 +53,12 @@ impl<T> Rc<T> {
     /// payload, not the original pointer. The count starts at 1.
     Rc<T> from_ptr(T* ptr) {
         RcBox<T>* b = alloc<RcBox<T>>();
-        (*b).count = 1;
-        (*b).value = *ptr;
+        b.count = 1;
+        b.value = *ptr;
         free(ptr);
         Rc<T> rc;
-        rc.ptr = &((*b).value);
-        rc.count = &((*b).count);
+        rc.ptr = &b.value;
+        rc.count = &b.count;
         return rc;
     }
 

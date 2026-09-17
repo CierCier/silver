@@ -144,7 +144,7 @@ const i32* p_const; // raw pointer to const i32 (read-only target)
 i32** pp_mut;       // double raw pointer
 ```
 
-Pointer field access auto-derefs: `p.x` is equivalent to `(*p).x`.
+Pointer and reference field access auto-derefs: `p.x` is equivalent to `*(p).x`.
 
 Prefer `&T`/`&mut T` whenever the callee borrows caller-owned data; reserve
 raw pointers for FFI, manual address arithmetic, and state owned by the
@@ -253,6 +253,9 @@ struct Buffer {
     i32 capacity;
 }
 ```
+
+> **Note**: Fields on struct pointers and struct references can be directly accessed
+> without dereferencing (`s.f` is the same as `*(s).f`).
 
 ### Enum Definitions
 
@@ -570,6 +573,9 @@ f64 y = p_ptr.y;          // auto-deref: equivalent to (*p_ptr).y
 i32 item = arr[0];        // array/container index (may invoke __index_get)
 arr[1] = 100;             // index write (may invoke __index_set)
 ```
+
+> **Note**: Fields on struct pointers and struct references can be directly accessed
+> without dereferencing (`s.f` is the same as `*(s).f`).
 
 ### Control Flow Expressions
 

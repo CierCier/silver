@@ -2958,8 +2958,8 @@ struct HttpWorkerContext {
 
 void http_acceptor_worker(i64 arg) {
     HttpWorkerContext* ctx = (HttpWorkerContext*)arg;
-    HttpServer* s = (*ctx).server;
-    i32 lfd = (*ctx).lfd;
+    HttpServer* s = ctx.server;
+    i32 lfd = ctx.lfd;
     while (true) {
         Result<i64, Error> a = try_accept4(lfd, (void*)0, (u32*)0, SOCK_CLOEXEC);
         if (a.err_is(EINTR)) {
@@ -2969,13 +2969,13 @@ void http_acceptor_worker(i64 arg) {
             Ok(fd) : {
                 TcpStream stream = TcpStream.from_fd((i32)fd);
                 stream.set_nodelay(true);
-                if ((*s).read_timeout_secs > 0) {
-                    stream.sock.set_recv_timeout((*s).read_timeout_secs);
+                if (s.read_timeout_secs > 0) {
+                    stream.sock.set_recv_timeout(s.read_timeout_secs);
                 }
-                if ((*s).write_timeout_secs > 0) {
-                    stream.sock.set_send_timeout((*s).write_timeout_secs);
+                if (s.write_timeout_secs > 0) {
+                    stream.sock.set_send_timeout(s.write_timeout_secs);
                 }
-                (*s).serve_conn(move stream);
+                s.serve_conn(move stream);
             },
             Err(e) : {
                 if (a.err_is(EBADF) || a.err_is(EINVAL)) {
@@ -2996,10 +2996,10 @@ struct HttpTlsWorkerContext {
 
 void http_tls_acceptor_worker(i64 arg) {
     HttpTlsWorkerContext* ctx = (HttpTlsWorkerContext*)arg;
-    HttpServer* s = (*ctx).server;
-    i32 lfd = (*ctx).lfd;
-    str cert = (*ctx).cert_file;
-    str key = (*ctx).key_file;
+    HttpServer* s = ctx.server;
+    i32 lfd = ctx.lfd;
+    str cert = ctx.cert_file;
+    str key = ctx.key_file;
     while (true) {
         Result<i64, Error> a = try_accept4(lfd, (void*)0, (u32*)0, SOCK_CLOEXEC);
         if (a.err_is(EINTR)) {
@@ -3009,13 +3009,13 @@ void http_tls_acceptor_worker(i64 arg) {
             Ok(fd) : {
                 TcpStream stream = TcpStream.from_fd((i32)fd);
                 stream.set_nodelay(true);
-                if ((*s).read_timeout_secs > 0) {
-                    stream.sock.set_recv_timeout((*s).read_timeout_secs);
+                if (s.read_timeout_secs > 0) {
+                    stream.sock.set_recv_timeout(s.read_timeout_secs);
                 }
-                if ((*s).write_timeout_secs > 0) {
-                    stream.sock.set_send_timeout((*s).write_timeout_secs);
+                if (s.write_timeout_secs > 0) {
+                    stream.sock.set_send_timeout(s.write_timeout_secs);
                 }
-                (*s).serve_tls_conn(move stream, cert, key);
+                s.serve_tls_conn(move stream, cert, key);
             },
             Err(e) : {
                 if (a.err_is(EBADF) || a.err_is(EINVAL)) {
@@ -3185,8 +3185,8 @@ impl HttpServer {
 
         if (self.workers > 1) {
             HttpWorkerContext* ctx = alloc<HttpWorkerContext>();
-            (*ctx).server = self;
-            (*ctx).lfd = listener.raw_fd();
+            ctx.server = self;
+            ctx.lfd = listener.raw_fd();
             i64 spawned = 0;
             while (spawned < self.workers - 1) {
                 TaskRecord* h = thread_spawn(http_acceptor_worker, (i64)ctx);
@@ -3337,10 +3337,10 @@ impl HttpServer {
 
         if (self.workers > 1) {
             HttpTlsWorkerContext* ctx = alloc<HttpTlsWorkerContext>();
-            (*ctx).server = self;
-            (*ctx).lfd = listener.raw_fd();
-            (*ctx).cert_file = cert_file;
-            (*ctx).key_file = key_file;
+            ctx.server = self;
+            ctx.lfd = listener.raw_fd();
+            ctx.cert_file = cert_file;
+            ctx.key_file = key_file;
             i64 spawned = 0;
             while (spawned < self.workers - 1) {
                 TaskRecord* h = thread_spawn(http_tls_acceptor_worker, (i64)ctx);
