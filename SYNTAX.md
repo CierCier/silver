@@ -286,7 +286,7 @@ bodies.  Methods use **C-style syntax**: return type before name.
 
 ```silver
 trait Display {
-    str to_string(Self* self);
+    void fmt(*self, BufWriter* out);
 }
 
 trait Iterator<Self> {
@@ -323,7 +323,7 @@ impl Vector2 {
 
 // Trait implementation
 impl Display for Vector2 {
-    str to_string(Vector2* self) { return "Vector2"; }
+    void fmt(*self, BufWriter* out) { out.write_str("Vector2"); }
 }
 ```
 

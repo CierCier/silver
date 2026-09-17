@@ -7,6 +7,8 @@
 // a view that outlives the error (the same lifetime rule as `str` fields
 // elsewhere in the stdlib).
 
+import std.display;
+
 struct Error {
     i64 code;
     str message;
@@ -19,5 +21,12 @@ impl Error {
         e.code = code;
         e.message = message;
         return e;
+    }
+}
+
+/// Display: `Error 22: invalid uuid: ...`.
+impl Display for Error {
+    void fmt(*self, BufWriter* out) {
+        @fprint(out, "Error {}: {}", self.code, self.message);
     }
 }

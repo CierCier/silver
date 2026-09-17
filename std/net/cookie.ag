@@ -13,6 +13,7 @@
 // compare, decimal parsing, whitespace tests) used by the client, so the
 // low-level helpers live in one place below the net/http client.
 
+import std.display;
 import std.fmt;
 import std.mem.vec;
 import std.net.inet;
@@ -116,6 +117,16 @@ struct Cookie {
     SameSite same_site;
     bool quoted; // value was quoted in the Set-Cookie header (Go's Cookie.Quoted)
     i64 creation_seq; // per-jar monotonic sequence; jar ordering tiebreak
+}
+
+/// `name=value[; attributes]`, reusing the `Set-Cookie` serializer.
+impl Display for Cookie {
+    void fmt(*self, BufWriter* out) {
+        String s = String.new();
+        (*self).to_string(&mut s);
+        out.write(s.data, s.len);
+        s.drop();
+    }
 }
 
 impl Cookie {

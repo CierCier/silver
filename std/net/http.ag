@@ -5,6 +5,7 @@
 // GET, 307/308 preserve), and a Response with status, reason, get_header,
 // and status_text. The lower layer (HttpConnection, request/response framing)
 // stays exposed for callers that need explicit connection reuse.
+import std.display;
 import std.error;
 import std.fmt;
 import std.mem.alloc;
@@ -243,6 +244,18 @@ struct HttpUrl {
     u16 port;
     str path;
     bool https;
+}
+
+/// Full URL (`https://example.com:443/a/b`). `host` is NUL-terminated by
+/// `http_parse_url`, so the fixed array reads as a C string.
+impl Display for HttpUrl {
+    void fmt(*self, BufWriter* out) {
+        str scheme = "http";
+        if (self.https) {
+            scheme = "https";
+        }
+        @fprint(out, "{}://{}:{}{}", scheme, (str)&(*self).host[0], self.port, self.path);
+    }
 }
 
 // --- Byte helpers ---------------------------------------------------------

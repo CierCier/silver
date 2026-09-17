@@ -7,7 +7,10 @@
 // Primitive types (i64, u64, f64, bool, str) have built-in implementations
 // that forward to BufWriter's write_T methods.
 
-import std.io;  // BufWriter
+import std.io.file;  // BufWriter only — never the full std.io (that would
+                      // drag scanner/byte_stream (and thus std.optional /
+                      // std.iter) into every module that imports Display,
+// colliding with user types that shadow those names.
 
 /// Trait for types that can be formatted for display.
 trait Display {
@@ -51,6 +54,13 @@ impl Display for bool {
 impl Display for str {
     void fmt(*self, BufWriter* out) { out.write_str(*self); }
 }
-impl Display for String {
-    void fmt(*self, BufWriter* out) { out.write_str(self.to_str()); }
+// NOTE: `impl Display for String` lives in std/string.ag next to `String`
+// and `to_str`: display.ag must not reference `String`, or units that
+// inline display.ag without string.ag (e.g. cached leaf modules) fail to
+// resolve the body.
+impl Display for i128 {
+    void fmt(*self, BufWriter* out) { out.write_i128(*self); }
+}
+impl Display for u128 {
+    void fmt(*self, BufWriter* out) { out.write_u128(*self); }
 }

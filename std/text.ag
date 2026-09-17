@@ -3,6 +3,7 @@
 // LSP positions are (line, UTF-16 code unit) pairs over UTF-8 sources while
 // compiler spans are byte offsets. These helpers convert between the two.
 // Line breaks are `\n` only, matching the bootstrap LSP's position math.
+import std.display;
 import std.string;
 
 struct TextPosition {
@@ -16,6 +17,13 @@ impl TextPosition {
         pos.line = line;
         pos.character = character;
         return move pos;
+    }
+}
+
+/// `line:character` (`12:34`), matching editor status-bar convention.
+impl Display for TextPosition {
+    void fmt(*self, BufWriter* out) {
+        @fprint(out, "{}:{}", self.line, self.character);
     }
 }
 

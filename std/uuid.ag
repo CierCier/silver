@@ -1,0 +1,455 @@
+// std/uuid.ag — RFC 9562 Universally Unique Identifier (UUID).
+//
+// Provides generation, parsing, formatting, and inspection for UUIDs.
+// Compliant with RFC 9562 (which obsoletes RFC 4122), focusing on:
+//   - Version 4 (cryptographically secure random UUIDs)
+//   - Version 7 (Unix epoch time-ordered UUIDs for database indexing)
+//   - Nil and Max UUIDs
+//
+// Binary representation is a 16-byte array in standard network byte order.
+// Supports direct comparison (__eq, __lt) and hashing via @hash for use
+// in HashMap<Uuid, V> and HashSet<Uuid>.
+
+import std.display;
+import std.error;
+import std.mem.memory;
+import std.random;
+import std.result;
+import std.slice;
+import std.string;
+import std.time;
+
+const str UUID_HEX_CHARS = "0123456789abcdef";
+
+/// Decodes a single hexadecimal ASCII character to its 0..15 integer value,
+/// or returns -1 if `c` is not a valid hex character.
+i32 uuid_hex_val(u8 c) {
+    if (c >= (u8)'0' && c <= (u8)'9') {
+        return (i32)(c - (u8)'0');
+    }
+    if (c >= (u8)'a' && c <= (u8)'f') {
+        return (i32)(c - (u8)'a') + 10;
+    }
+    if (c >= (u8)'A' && c <= (u8)'F') {
+        return (i32)(c - (u8)'A') + 10;
+    }
+    return -1;
+}
+
+/// A 128-bit Universally Unique Identifier (RFC 9562).
+/// Stored as a 16-byte fixed array in big-endian network byte order.
+struct Uuid {
+    u8 bytes[16];
+}
+
+impl Uuid {
+    // -- Constructors --------------------------------------------------------
+
+    /// Generates a Version 4 (pure random) UUID using the OS CSPRNG.
+    Uuid v4() {
+        Uuid u;
+        random_bytes(&u.bytes[0], 16);
+        // RFC 9562 §5.4: set 4-bit version to 4 (0b0100 in bits 12..15 of time_hi_and_version)
+        u.bytes[6] = (u.bytes[6] & (u8)0x0f) | (u8)0x40;
+        // Set variant to RFC 4122 / RFC 9562 (0b10 in bits 6..7 of clock_seq_hi_and_reserved)
+        u.bytes[8] = (u.bytes[8] & (u8)0x3f) | (u8)0x80;
+        return u;
+    }
+
+    /// Convenience constructor — aliases `v4()`.
+    Uuid new() {
+        return Uuid.v4();
+    }
+
+    /// Generates a Version 7 (Unix Epoch time-ordered) UUID using current system time
+    /// and the OS CSPRNG. Millisecond timestamp occupies the most significant 48 bits,
+    /// making UUIDv7 naturally sortable in chronological order.
+    Uuid v7() {
+        SystemTime st = system_time_now();
+        i64 ms = st.unix_timestamp_millis();
+        return Uuid.v7_at(ms);
+    }
+
+    /// Generates a Version 7 UUID with an explicit millisecond Unix timestamp.
+    /// Useful for deterministic generation and testing.
+    Uuid v7_at(i64 timestamp_ms) {
+        Uuid u;
+        // 48-bit timestamp in big-endian order
+        u.bytes[0] = (u8)((timestamp_ms >> 40) & (i64)0xff);
+        u.bytes[1] = (u8)((timestamp_ms >> 32) & (i64)0xff);
+        u.bytes[2] = (u8)((timestamp_ms >> 24) & (i64)0xff);
+        u.bytes[3] = (u8)((timestamp_ms >> 16) & (i64)0xff);
+        u.bytes[4] = (u8)((timestamp_ms >> 8) & (i64)0xff);
+        u.bytes[5] = (u8)(timestamp_ms & (i64)0xff);
+
+        // Fill remaining 10 bytes with cryptographic random data
+        random_bytes(&u.bytes[6], 10);
+
+        // RFC 9562 §5.7: set 4-bit version to 7 (0b0111 in bits 12..15)
+        u.bytes[6] = (u.bytes[6] & (u8)0x0f) | (u8)0x70;
+        // Set variant to RFC 4122 / RFC 9562 (0b10 in bits 6..7)
+        u.bytes[8] = (u.bytes[8] & (u8)0x3f) | (u8)0x80;
+        return u;
+    }
+
+    /// Returns the Nil UUID (all 128 bits zero: 00000000-0000-0000-0000-000000000000).
+    Uuid nil() {
+        Uuid u;
+        for (i64 i = 0; i < 16; i = i + 1) {
+            u.bytes[i] = (u8)0;
+        }
+        return u;
+    }
+
+    /// Alias for `nil()`.
+    Uuid zero() {
+        return Uuid.nil();
+    }
+
+    /// Returns the Max UUID (all 128 bits set: ffffffff-ffff-ffff-ffff-ffffffffffff).
+    Uuid max() {
+        Uuid u;
+        for (i64 i = 0; i < 16; i = i + 1) {
+            u.bytes[i] = (u8)0xff;
+        }
+        return u;
+    }
+
+    /// Constructs a UUID by copying 16 raw bytes from `src`.
+    Uuid from_bytes(u8* src) {
+        Uuid u;
+        if (src != (u8*)0) {
+            memcpy((void*)&u.bytes[0], (const void*)src, 16);
+        } else {
+            for (i64 i = 0; i < 16; i = i + 1) {
+                u.bytes[i] = (u8)0;
+            }
+        }
+        return u;
+    }
+
+    /// Constructs a UUID from a 128-bit unsigned integer in big-endian byte order.
+    Uuid from_u128(u128 val) {
+        Uuid u;
+        for (i64 i = 0; i < 16; i = i + 1) {
+            i64 shift = (15 - i) * 8;
+            u.bytes[i] = (u8)((val >> (u128)shift) & (u128)0xff);
+        }
+        return u;
+    }
+
+    // -- Parsing -------------------------------------------------------------
+
+    /// Parses a UUID from a string representation.
+    /// Accepts:
+    ///   - Canonical 36-char hyphenated: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`
+    ///   - Simple 32-char unhyphenated hex: `xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`
+    ///   - Braced 38-char: `{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}`
+    ///   - URN 45-char: `urn:uuid:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`
+    /// Hex characters are case-insensitive.
+    Result<Uuid, Error> parse(str text) {
+        if (text == (str)0) {
+            Error err = Error.new(22, "invalid uuid: null pointer");
+            return Result<Uuid, Error>.Err(move err);
+        }
+        u8* p = (u8*)text;
+        i64 len = strlen(text);
+
+        i64 start = 0;
+        bool hyphenated = false;
+
+        if (len == 36) {
+            hyphenated = true;
+            start = 0;
+        } else if (len == 32) {
+            hyphenated = false;
+            start = 0;
+        } else if (len == 38 && p[0] == (u8)'{' && p[37] == (u8)'}') {
+            hyphenated = true;
+            start = 1;
+        } else if (len == 45) {
+            bool is_urn = (p[0] == (u8)'u' || p[0] == (u8)'U')
+                       && (p[1] == (u8)'r' || p[1] == (u8)'R')
+                       && (p[2] == (u8)'n' || p[2] == (u8)'N')
+                       && p[3] == (u8)':'
+                       && (p[4] == (u8)'u' || p[4] == (u8)'U')
+                       && (p[5] == (u8)'u' || p[5] == (u8)'U')
+                       && (p[6] == (u8)'i' || p[6] == (u8)'I')
+                       && (p[7] == (u8)'d' || p[7] == (u8)'D')
+                       && p[8] == (u8)':';
+            if (is_urn) {
+                hyphenated = true;
+                start = 9;
+            } else {
+                Error err = Error.new(22, "invalid uuid: unrecognized prefix");
+                return Result<Uuid, Error>.Err(move err);
+            }
+        } else {
+            Error err = Error.new(22, "invalid uuid: invalid length");
+            return Result<Uuid, Error>.Err(move err);
+        }
+
+        Uuid u;
+        if (hyphenated) {
+            // Verify hyphen positions at 8, 13, 18, 23
+            if (p[start + 8] != (u8)'-' || p[start + 13] != (u8)'-'
+                || p[start + 18] != (u8)'-' || p[start + 23] != (u8)'-') {
+                Error err = Error.new(22, "invalid uuid: missing or misplaced hyphen");
+                return Result<Uuid, Error>.Err(move err);
+            }
+
+            // Map each byte index to its character offset in the string
+            i64 offsets[16];
+            offsets[0] = start + 0;
+            offsets[1] = start + 2;
+            offsets[2] = start + 4;
+            offsets[3] = start + 6;
+            // hyphen at 8
+            offsets[4] = start + 9;
+            offsets[5] = start + 11;
+            // hyphen at 13
+            offsets[6] = start + 14;
+            offsets[7] = start + 16;
+            // hyphen at 18
+            offsets[8] = start + 19;
+            offsets[9] = start + 21;
+            // hyphen at 23
+            offsets[10] = start + 24;
+            offsets[11] = start + 26;
+            offsets[12] = start + 28;
+            offsets[13] = start + 30;
+            offsets[14] = start + 32;
+            offsets[15] = start + 34;
+
+            for (i64 i = 0; i < 16; i = i + 1) {
+                i64 off = offsets[i];
+                i32 hi = uuid_hex_val(p[off]);
+                i32 lo = uuid_hex_val(p[off + 1]);
+                if (hi < 0 || lo < 0) {
+                    Error err = Error.new(22, "invalid uuid: invalid hex character");
+                    return Result<Uuid, Error>.Err(move err);
+                }
+                u.bytes[i] = (u8)((hi << 4) | lo);
+            }
+        } else {
+            // 32-char unhyphenated
+            for (i64 i = 0; i < 16; i = i + 1) {
+                i32 hi = uuid_hex_val(p[start + i * 2]);
+                i32 lo = uuid_hex_val(p[start + i * 2 + 1]);
+                if (hi < 0 || lo < 0) {
+                    Error err = Error.new(22, "invalid uuid: invalid hex character");
+                    return Result<Uuid, Error>.Err(move err);
+                }
+                u.bytes[i] = (u8)((hi << 4) | lo);
+            }
+        }
+
+        return Result<Uuid, Error>.Ok(move u);
+    }
+
+    /// Parses a UUID from a string, aborting if invalid.
+    Uuid must_parse(str text) {
+        Result<Uuid, Error> r = Uuid.parse(text);
+        if (r.is_err()) {
+            abort();
+        }
+        return r.unwrap();
+    }
+
+    // -- Inspection ----------------------------------------------------------
+
+    /// Returns true if all 16 bytes are 0.
+    bool is_nil(&self) {
+        for (i64 i = 0; i < 16; i = i + 1) {
+            if (self.bytes[i] != (u8)0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// Returns true if all 16 bytes are 0xff.
+    bool is_max(&self) {
+        for (i64 i = 0; i < 16; i = i + 1) {
+            if (self.bytes[i] != (u8)0xff) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// Returns the 4-bit UUID version (e.g. 4 or 7).
+    i32 version(&self) {
+        return (i32)(self.bytes[6] >> (u8)4);
+    }
+
+    /// Returns the UUID variant number:
+    ///   0: NCS backward compatibility (0b0xxx)
+    ///   1: RFC 4122 / RFC 9562 (0b10xx)
+    ///   2: Microsoft GUID (0b110x)
+    ///   3: Reserved for future definition (0b111x)
+    i32 variant(&self) {
+        u8 b = self.bytes[8];
+        if ((b & (u8)0x80) == (u8)0) {
+            return 0;
+        }
+        if ((b & (u8)0xc0) == (u8)0x80) {
+            return 1;
+        }
+        if ((b & (u8)0xe0) == (u8)0xc0) {
+            return 2;
+        }
+        return 3;
+    }
+
+    /// For UUIDv7 instances, extracts the embedded 48-bit millisecond Unix timestamp.
+    /// Returns 0 for non-v7 UUIDs or if the timestamp field is zero.
+    i64 timestamp_millis(&self) {
+        i64 ms = ((i64)self.bytes[0] << 40)
+               | ((i64)self.bytes[1] << 32)
+               | ((i64)self.bytes[2] << 24)
+               | ((i64)self.bytes[3] << 16)
+               | ((i64)self.bytes[4] << 8)
+               | (i64)self.bytes[5];
+        return ms;
+    }
+
+    /// Converts the 16 big-endian bytes to a 128-bit unsigned integer.
+    u128 to_u128(&self) {
+        u128 res = (u128)0;
+        for (i64 i = 0; i < 16; i = i + 1) {
+            res = (res << (u128)8) | (u128)self.bytes[i];
+        }
+        return res;
+    }
+
+    /// Returns a raw pointer to the underlying 16-byte array.
+    u8* as_ptr(&self) {
+        return (u8*)&self.bytes[0];
+    }
+
+    /// Returns a non-owning 16-byte slice over the UUID bytes.
+    Slice<u8> as_slice(&self) {
+        Slice<u8> s;
+        s.data = (u8*)&self.bytes[0];
+        s.len = 16;
+        return s;
+    }
+
+    // -- Formatting ----------------------------------------------------------
+
+    /// Formats this UUID into the provided buffer in canonical 36-character
+    /// hyphenated lowercase hex (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`).
+    /// `out` must have capacity for at least 36 bytes. Does NOT append a null terminator.
+    void write_buf(&self, u8* out) {
+        u8* hex = (u8*)UUID_HEX_CHARS;
+        i64 byte_idx = 0;
+        i64 out_idx = 0;
+
+        // Group 1: 4 bytes (8 hex chars)
+        while (byte_idx < 4) {
+            u8 b = self.bytes[byte_idx];
+            out[out_idx] = hex[(b >> (u8)4) & (u8)0x0f];
+            out[out_idx + 1] = hex[b & (u8)0x0f];
+            out_idx = out_idx + 2;
+            byte_idx = byte_idx + 1;
+        }
+        out[out_idx] = (u8)'-';
+        out_idx = out_idx + 1;
+
+        // Group 2: 2 bytes (4 hex chars)
+        while (byte_idx < 6) {
+            u8 b = self.bytes[byte_idx];
+            out[out_idx] = hex[(b >> (u8)4) & (u8)0x0f];
+            out[out_idx + 1] = hex[b & (u8)0x0f];
+            out_idx = out_idx + 2;
+            byte_idx = byte_idx + 1;
+        }
+        out[out_idx] = (u8)'-';
+        out_idx = out_idx + 1;
+
+        // Group 3: 2 bytes (4 hex chars)
+        while (byte_idx < 8) {
+            u8 b = self.bytes[byte_idx];
+            out[out_idx] = hex[(b >> (u8)4) & (u8)0x0f];
+            out[out_idx + 1] = hex[b & (u8)0x0f];
+            out_idx = out_idx + 2;
+            byte_idx = byte_idx + 1;
+        }
+        out[out_idx] = (u8)'-';
+        out_idx = out_idx + 1;
+
+        // Group 4: 2 bytes (4 hex chars)
+        while (byte_idx < 10) {
+            u8 b = self.bytes[byte_idx];
+            out[out_idx] = hex[(b >> (u8)4) & (u8)0x0f];
+            out[out_idx + 1] = hex[b & (u8)0x0f];
+            out_idx = out_idx + 2;
+            byte_idx = byte_idx + 1;
+        }
+        out[out_idx] = (u8)'-';
+        out_idx = out_idx + 1;
+
+        // Group 5: 6 bytes (12 hex chars)
+        while (byte_idx < 16) {
+            u8 b = self.bytes[byte_idx];
+            out[out_idx] = hex[(b >> (u8)4) & (u8)0x0f];
+            out[out_idx + 1] = hex[b & (u8)0x0f];
+            out_idx = out_idx + 2;
+            byte_idx = byte_idx + 1;
+        }
+    }
+
+    /// Formats this UUID into the provided buffer in simple 32-character
+    /// unhyphenated lowercase hex (`xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`).
+    /// `out` must have capacity for at least 32 bytes. Does NOT append a null terminator.
+    void write_simple_buf(&self, u8* out) {
+        u8* hex = (u8*)UUID_HEX_CHARS;
+        for (i64 i = 0; i < 16; i = i + 1) {
+            u8 b = self.bytes[i];
+            out[i * 2] = hex[(b >> (u8)4) & (u8)0x0f];
+            out[i * 2 + 1] = hex[b & (u8)0x0f];
+        }
+    }
+
+    /// Returns the canonical 36-character hyphenated lowercase hex string.
+    String to_string(&self) {
+        u8 buf[36];
+        self.write_buf(&buf[0]);
+        String s = String.with_capacity(36);
+        s.push_bytes(&buf[0], 36);
+        return s;
+    }
+
+    /// Returns the simple 32-character unhyphenated lowercase hex string.
+    String to_simple_string(&self) {
+        u8 buf[32];
+        self.write_simple_buf(&buf[0]);
+        String s = String.with_capacity(32);
+        s.push_bytes(&buf[0], 32);
+        return s;
+    }
+
+    // -- Operators -----------------------------------------------------------
+
+    /// 16-byte equality comparison.
+    bool __eq(&self, &Uuid other) {
+        return memcmp((const void*)&self.bytes[0], (const void*)&other.bytes[0], 16) == 0;
+    }
+
+    /// Lexicographical byte-by-byte comparison in big-endian network byte order.
+    /// Aligns with chronological order for UUIDv7 instances.
+    bool __lt(&self, &Uuid other) {
+        return memcmp((const void*)&self.bytes[0], (const void*)&other.bytes[0], 16) < 0;
+    }
+}
+
+/// Display formatting: canonical 36-char hyphenated lowercase hex, written
+/// straight into the buffer with no heap allocation (cf. `to_string()`).
+impl Display for Uuid {
+    void fmt(*self, BufWriter* out) {
+        u8 buf[36];
+        (*self).write_buf(&buf[0]);
+        out.write(&buf[0], 36);
+    }
+}

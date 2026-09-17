@@ -1,0 +1,36 @@
+// tests/display_net_test.ag — Display impls for network stdlib types.
+
+import std.net.cookie;
+import std.net.http;
+import std.net.inet;
+import std.string;
+import std.test;
+
+i32 main() {
+    test_start("Display for net types");
+
+    // SockAddrIn prints as dotted-quad with port.
+    {
+        SockAddrIn sa = SockAddrIn.v4(8080, "127.0.0.1");
+        String s = @format("{}", sa);
+        assert_true(s.equals("127.0.0.1:8080"), "SockAddrIn Display");
+    }
+
+    // HttpUrl prints the full URL.
+    {
+        HttpUrl u;
+        bool ok = http_parse_url("https://example.com:8443/a/b", &u);
+        assert_true(ok, "http_parse_url succeeds");
+        String s = @format("{}", u);
+        assert_true(s.equals("https://example.com:8443/a/b"), "HttpUrl Display");
+    }
+
+    // Cookie prints as name=value with attributes.
+    {
+        Cookie c = Cookie.new("session", "abc123");
+        String s = @format("{}", c);
+        assert_true(s.equals("session=abc123"), "Cookie Display");
+    }
+
+    return done();
+}

@@ -1215,6 +1215,13 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                     {
                         self.drop_trait_impl_owners.insert(owner);
                     }
+                    if Self::is_display_trait_impl(impl_item)
+                        && impl_item.generics.is_none()
+                        && !self.has_generic_placeholder_type(&impl_item.self_type)
+                        && let Some(owner) = Self::owner_name_from_type(&impl_item.self_type)
+                    {
+                        self.display_trait_impl_owners.insert(owner);
+                    }
                 }
                 _ => {}
             }

@@ -4,6 +4,7 @@
 // natural alignment) and pure-Silver helpers for network byte-order
 // conversion and dotted-quad IPv4 string parsing.
 
+import std.display;
 import std.sys.socket;
 
 // Timeval — POSIX struct timeval (seconds/microseconds), shared by
@@ -36,6 +37,21 @@ impl SockAddrIn {
         sa.sin_zero_1 = (u32)0;
         sa.sin_zero_2 = (u32)0;
         return sa;
+    }
+}
+
+/// Dotted-quad with port (`127.0.0.1:8080`). `sin_addr` is stored in host
+/// byte order and `sin_port` in network byte order; `ntoh32`/`ntoh16` are
+/// symmetric, so the same helpers convert back for printing.
+impl Display for SockAddrIn {
+    void fmt(*self, BufWriter* out) {
+        i64 addr = (i64)ntoh32(self.sin_addr);
+        i64 a = (addr >> (i64)24) & (i64)0xFF;
+        i64 b = (addr >> (i64)16) & (i64)0xFF;
+        i64 c = (addr >> (i64)8) & (i64)0xFF;
+        i64 d = addr & (i64)0xFF;
+        i64 port = (i64)ntoh16(self.sin_port);
+        @fprint(out, "{}.{}.{}.{}:{}", a, b, c, d, port);
     }
 }
 

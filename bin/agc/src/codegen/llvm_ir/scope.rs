@@ -615,6 +615,82 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(None)
     }
 
+    /// True when `ty` has an `impl Display for ...` (concrete owners recorded
+    /// in the pass-1 impl scan, or a generic `impl Display` template with a
+    /// matching base name). This is the `@print`-family dispatch guard: a
+    /// bare inherent method named `fmt` does NOT count.
+    pub(crate) fn type_implements_display(&self, ty: &ast::Type) -> bool {
+        for owner in Self::owner_name_candidates_from_type(ty) {
+            if self.display_trait_impl_owners.contains(owner.as_str()) {
+                return true;
+            }
+        }
+        // Generic `impl Display for Base<T...>` templates.
+        let base = match ty.kind.as_ref() {
+            ast::TypeKind::Named(named) => Self::named_type_name(named),
+            ast::TypeKind::Reference(reference) => match reference.inner.kind.as_ref() {
+                ast::TypeKind::Named(named) => Self::named_type_name(named),
+                _ => return false,
+            },
+            ast::TypeKind::Pointer(pointer) => match pointer.inner.kind.as_ref() {
+                ast::TypeKind::Named(named) => Self::named_type_name(named),
+                _ => return false,
+            },
+            _ => return false,
+        };
+        self.generic_impl_templates.iter().any(|template| {
+            let Some(trait_ref) = &template.trait_ref else {
+                return false;
+            };
+            if trait_ref.path.last().map(|id| id.name.as_str()) != Some("Display") {
+                return false;
+            }
+            let Some(template_named) = Self::extract_named_type_owned(&template.self_type)
+            else {
+                return false;
+            };
+            if Self::named_type_name(&template_named) != base {
+                return false;
+            }
+            template.items.iter().any(|item| {
+                matches!(item, ast::ImplItemKind::Function(func) if func.name.name == "fmt")
+            })
+        })
+    }
+
+    /// `(display_name, fields)` for the comptime struct-debug fallback, or
+    /// `None` when `ty` is not a plain struct. Enums keep their tag-aware
+    /// runtime behavior and are never field-dumped; primitives, pointers,
+    /// and unknown types are excluded.
+    pub(crate) fn struct_debug_fields(
+        &self,
+        ty: &ast::Type,
+    ) -> Option<(String, Vec<(String, ast::Type)>)> {
+        let named = Self::extract_named_type(ty)?.clone();
+        let base = named.path.last().map(|s| s.name.clone()).unwrap_or_default();
+        if self.enum_backing_types.contains_key(&base)
+            || self.enum_variants.contains_key(&base)
+            || self.enum_payload_layouts.contains_key(&base)
+        {
+            return None;
+        }
+        let monomorph = Self::monomorph_owner_name_from_named(&named);
+        if self.enum_payload_layouts.contains_key(&monomorph) {
+            return None;
+        }
+        let named_key = Self::named_type_key(&named);
+        if let Some(fields) = self.struct_fields.get(&named_key) {
+            return Some((base, fields.clone()));
+        }
+        if let Some(fields) = self.struct_fields.get(&monomorph) {
+            return Some((base, fields.clone()));
+        }
+        if let Some(fields) = self.struct_fields.get(&base) {
+            return Some((base, fields.clone()));
+        }
+        None
+    }
+
     /// Emit a tag-switched drop of an enum's payload: load the i16 tag and
     /// drop the active variant's Drop-typed payload values (enums without a
     /// Drop impl of their own). Zero-initialized enums carry tag 0; their

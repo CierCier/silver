@@ -1,0 +1,199 @@
+// tests/uuid_test.ag — test suite for RFC 9562 UUID module (std.uuid)
+
+import std.test;
+import std.uuid;
+import std.map;
+import std.collections.set;
+import std.string;
+import std.time;
+
+i32 main() {
+    test_start("std.uuid: RFC 9562 Universally Unique Identifier");
+
+    // Test 1: Nil and Max UUIDs
+    {
+        Uuid nil_id = Uuid.nil();
+        assert_true(nil_id.is_nil(), "nil_id.is_nil() is true");
+        assert_true(!nil_id.is_max(), "nil_id.is_max() is false");
+        assert_eq_i32(0, nil_id.version(), "nil_id version is 0");
+        String nil_str = nil_id.to_string();
+        assert_true(nil_str.equals("00000000-0000-0000-0000-000000000000"), "nil string representation");
+        assert_eq_i64(0, (i64)nil_id.to_u128(), "nil_id to_u128 is 0");
+
+        Uuid max_id = Uuid.max();
+        assert_true(max_id.is_max(), "max_id.is_max() is true");
+        assert_true(!max_id.is_nil(), "max_id.is_nil() is false");
+        String max_str = max_id.to_string();
+        assert_true(max_str.equals("ffffffff-ffff-ffff-ffff-ffffffffffff"), "max string representation");
+
+        assert_true(nil_id < max_id, "nil_id < max_id");
+        assert_true(!(max_id < nil_id), "!(max_id < nil_id)");
+        assert_true(nil_id == Uuid.zero(), "nil_id == Uuid.zero()");
+    }
+
+    // Test 2: UUIDv4 generation
+    {
+        Uuid u1 = Uuid.v4();
+        Uuid u2 = Uuid.v4();
+        Uuid u3 = Uuid.new();
+
+        assert_true(!u1.is_nil(), "v4 u1 is not nil");
+        assert_true(!u2.is_nil(), "v4 u2 is not nil");
+        assert_true(!(u1 == u2), "consecutive v4 UUIDs are distinct");
+        assert_true(!(u1 == u3), "v4 u1 and u3 are distinct");
+
+        assert_eq_i32(4, u1.version(), "u1 version is 4");
+        assert_eq_i32(4, u2.version(), "u2 version is 4");
+        assert_eq_i32(1, u1.variant(), "u1 variant is 1 (RFC 9562)");
+        assert_eq_i32(1, u2.variant(), "u2 variant is 1 (RFC 9562)");
+
+        String s1 = u1.to_string();
+        assert_eq_i64(36, s1.len(), "v4 string length is 36");
+        assert_true(s1[8] == (u8)'-', "hyphen at 8");
+        assert_true(s1[13] == (u8)'-', "hyphen at 13");
+        assert_true(s1[18] == (u8)'-', "hyphen at 18");
+        assert_true(s1[23] == (u8)'-', "hyphen at 23");
+        assert_true(s1[14] == (u8)'4', "version character in string is '4'");
+    }
+
+    // Test 3: UUIDv7 generation & timestamp ordering
+    {
+        i64 fixed_ts = 1710000000123;
+        Uuid u_fixed = Uuid.v7_at(fixed_ts);
+        assert_eq_i32(7, u_fixed.version(), "v7_at version is 7");
+        assert_eq_i32(1, u_fixed.variant(), "v7_at variant is 1");
+        assert_eq_i64(fixed_ts, u_fixed.timestamp_millis(), "extracted timestamp matches input");
+
+        // Chronological ordering: earlier timestamp must compare less than later timestamp
+        Uuid early = Uuid.v7_at(1000000);
+        Uuid late = Uuid.v7_at(2000000);
+        assert_true(early < late, "earlier v7 < later v7");
+        assert_true(!(late < early), "!(late < early)");
+
+        // Current time v7
+        SystemTime st = system_time_now();
+        i64 now_ms = st.unix_timestamp_millis();
+        Uuid now_v7 = Uuid.v7();
+        assert_eq_i32(7, now_v7.version(), "now_v7 version is 7");
+        assert_eq_i32(1, now_v7.variant(), "now_v7 variant is 1");
+        i64 diff = now_v7.timestamp_millis() - now_ms;
+        if (diff < 0) { diff = -diff; }
+        assert_true(diff <= 5000, "now_v7 timestamp within 5s of now");
+    }
+
+    // Test 4: Parsing canonical, simple, braced, and URN formats
+    {
+        str canon_str = "550e8400-e29b-41d4-a716-446655440000";
+        Result<Uuid, Error> r1 = Uuid.parse(canon_str);
+        assert_true(r1.is_ok(), "parsed canonical string");
+        Uuid u1 = r1.unwrap();
+        assert_eq_i32(4, u1.version(), "parsed version is 4");
+        assert_eq_i32(1, u1.variant(), "parsed variant is 1");
+        String s1 = u1.to_string();
+        assert_true(s1.equals(canon_str), "roundtrip canonical to_string matches");
+
+        // Case insensitivity
+        Result<Uuid, Error> r_upper = Uuid.parse("550E8400-E29B-41D4-A716-446655440000");
+        assert_true(r_upper.is_ok(), "parsed uppercase canonical string");
+        assert_true(r_upper.unwrap() == u1, "uppercase parse equals lowercase parse");
+
+        // Simple unhyphenated 32-char hex
+        str simple_str = "550e8400e29b41d4a716446655440000";
+        Result<Uuid, Error> r_simple = Uuid.parse(simple_str);
+        assert_true(r_simple.is_ok(), "parsed simple 32-char hex");
+        assert_true(r_simple.unwrap() == u1, "simple parse equals canonical parse");
+
+        // Braced format
+        str braced_str = "{550e8400-e29b-41d4-a716-446655440000}";
+        Result<Uuid, Error> r_braced = Uuid.parse(braced_str);
+        assert_true(r_braced.is_ok(), "parsed braced format");
+        assert_true(r_braced.unwrap() == u1, "braced parse equals canonical parse");
+
+        // URN format
+        str urn_str = "urn:uuid:550e8400-e29b-41d4-a716-446655440000";
+        Result<Uuid, Error> r_urn = Uuid.parse(urn_str);
+        assert_true(r_urn.is_ok(), "parsed URN format");
+        assert_true(r_urn.unwrap() == u1, "urn parse equals canonical parse");
+
+        // must_parse
+        Uuid must = Uuid.must_parse(canon_str);
+        assert_true(must == u1, "must_parse matches u1");
+    }
+
+    // Test 5: Parsing failure cases
+    {
+        // Invalid lengths
+        assert_true(Uuid.parse("").is_err(), "empty string fails");
+        assert_true(Uuid.parse("short").is_err(), "short string fails");
+        assert_true(Uuid.parse("550e8400-e29b-41d4-a716-4466554400000").is_err(), "37 chars fails");
+
+        // Misplaced hyphens
+        assert_true(Uuid.parse("550e840-0e29b-41d4-a716-446655440000").is_err(), "misplaced hyphen fails");
+
+        // Invalid hex characters
+        assert_true(Uuid.parse("550e8400-e29b-41d4-a716-44665544000g").is_err(), "invalid hex 'g' fails");
+        assert_true(Uuid.parse("550e8400-e29b-41d4-a716-44665544000z").is_err(), "invalid hex 'z' fails");
+    }
+
+    // Test 6: Zero-allocation buffer writing and simple string formatting
+    {
+        str canon_str = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
+        Uuid u = Uuid.must_parse(canon_str);
+
+        // write_buf into stack buffer
+        u8 stack_buf[37];
+        u.write_buf(&stack_buf[0]);
+        stack_buf[36] = (u8)0;
+        str stack_str = (str)&stack_buf[0];
+        assert_eq_i64(0, (i64)strcmp(canon_str, stack_str), "write_buf matches canon_str");
+
+        // write_simple_buf
+        u8 simple_buf[33];
+        u.write_simple_buf(&simple_buf[0]);
+        simple_buf[32] = (u8)0;
+        assert_true(u.to_simple_string().equals((str)&simple_buf[0]), "write_simple_buf matches to_simple_string");
+        assert_true(u.to_simple_string().equals("6ba7b8109dad11d180b400c04fd430c8"), "to_simple_string expected value");
+    }
+
+    // Test 7: Conversion to/from u128 and raw bytes
+    {
+        Uuid u = Uuid.v4();
+        u128 val = u.to_u128();
+        Uuid reconstructed = Uuid.from_u128(val);
+        assert_true(u == reconstructed, "to_u128 -> from_u128 roundtrip matches");
+
+        u8 raw[16];
+        memcpy((void*)&raw[0], (const void*)u.as_ptr(), 16);
+        Uuid from_raw = Uuid.from_bytes(&raw[0]);
+        assert_true(u == from_raw, "as_ptr -> from_bytes roundtrip matches");
+        assert_eq_i64(16, u.as_slice().len(), "as_slice len is 16");
+    }
+
+    // Test 8: Map and Set integration (@hash compatibility)
+    {
+        HashMap<Uuid, i64> map = HashMap<Uuid, i64>.new();
+        Uuid id1 = Uuid.must_parse("00000000-0000-0000-0000-000000000001");
+        Uuid id2 = Uuid.must_parse("00000000-0000-0000-0000-000000000002");
+        Uuid id3 = Uuid.must_parse("00000000-0000-0000-0000-000000000003");
+
+        map.insert(id1, 100);
+        map.insert(id2, 200);
+        map.insert(id3, 300);
+
+        assert_eq_i64(3, map.len(), "map has 3 items");
+        assert_eq_i64(100, map.get(id1), "map.get(id1) is 100");
+        assert_eq_i64(200, map.get(id2), "map.get(id2) is 200");
+        assert_eq_i64(300, map.get(id3), "map.get(id3) is 300");
+
+        // HashSet
+        HashSet<Uuid> set = HashSet<Uuid>.new();
+        set.insert(id1);
+        set.insert(id2);
+        assert_eq_i64(2, set.len(), "set has 2 items");
+        assert_true(set.contains(id1), "set contains id1");
+        assert_true(set.contains(id2), "set contains id2");
+        assert_true(!set.contains(id3), "set does not contain id3");
+    }
+
+    return done();
+}

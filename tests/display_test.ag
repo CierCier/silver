@@ -1,0 +1,186 @@
+// tests/display_test.ag — Display-trait dispatch + comptime struct fallback
+// for the @print family (@format/@println/@print/@eprintln/@fprint).
+
+import std.atomic;
+import std.display;
+import std.error;
+import std.process;
+import std.string;
+import std.test;
+import std.text;
+import std.time;
+import std.uuid;
+
+struct Point { i64 x; i64 y; }
+
+struct Line { Point a; Point b; str tag; }
+
+struct Label { str text; }
+
+impl Display for Label {
+    void fmt(*self, BufWriter* out) {
+        out.write_str("Label!");
+    }
+}
+
+i32 make_calls = 0;
+
+Point make_point() {
+    make_calls = make_calls + 1;
+    Point q = { .x = 7, .y = 8 };
+    return q;
+}
+
+i32 main() {
+    test_start("Display trait dispatch + struct fallback");
+
+    // 1. Uuid formats through its Display impl (no heap in fmt itself).
+    {
+        Uuid u = Uuid.must_parse("550e8400-e29b-41d4-a716-446655440000");
+        String s = @format("{}", u);
+        assert_true(s.equals("550e8400-e29b-41d4-a716-446655440000"), "@format uuid via Display");
+        // Bind the comparison temporary: unbound owning temporaries are not
+        // dropped (pre-existing Silver semantics), which leak-check flags.
+        String canon = u.to_string();
+        assert_true(s.equals((str)canon), "Display matches to_string");
+        @println("uuid: {}", u);
+    }
+
+    // 2. Plain struct without Display gets the comptime field fallback.
+    {
+        Point p = { .x = 1, .y = 2 };
+        String s = @format("{}", p);
+        assert_true(s.equals("Point { x: 1, y: 2 }"), "struct fallback exact text");
+    }
+
+    // 3. Nested structs recurse through the same dispatch.
+    {
+        Line l = { .a = { .x = 1, .y = 2 }, .b = { .x = 3, .y = 4 }, .tag = "seg" };
+        String s = @format("{}", l);
+        assert_true(
+            s.equals("Line { a: Point { x: 1, y: 2 }, b: Point { x: 3, y: 4 }, tag: seg }"),
+            "nested struct fallback"
+        );
+    }
+
+    // 4. An explicit Display impl wins over the fallback.
+    {
+        Label l = { .text = "ignored" };
+        String s = @format("{}", l);
+        assert_true(s.equals("Label!"), "Display impl takes precedence");
+    }
+
+    // 5. Call-expression args are evaluated once (spilled to a hidden temp).
+    {
+        make_calls = 0;
+        String s = @format("{}", make_point());
+        assert_true(s.equals("Point { x: 7, y: 8 }"), "call arg fallback text");
+        assert_eq_i64(1, (i64)make_calls, "call arg evaluated once");
+    }
+
+    // 6. Optional / Result (generic enum impls; Debug-style Some/Ok).
+    {
+        Optional<i32> some = Optional<i32>.some(42);
+        String s1 = @format("{}", some);
+        assert_true(s1.equals("Some(42)"), "Optional Some(i32)");
+
+        Optional<i32> none = Optional<i32>.none();
+        String s2 = @format("{}", none);
+        assert_true(s2.equals("None"), "Optional None");
+
+        // Drop-typed payload: printing borrows, the value stays intact.
+        Optional<String> os = Optional<String>.some(String.from_str("hi"));
+        String s3 = @format("{}", os);
+        assert_true(s3.equals("Some(hi)"), "Optional Some(String)");
+        String back = os.unwrap();
+        assert_true(back.equals("hi"), "payload intact after print");
+
+        Result<i64, Error> ok = Result<i64, Error>.ok(7);
+        String s4 = @format("{}", ok);
+        assert_true(s4.equals("Ok(7)"), "Result Ok");
+
+        Result<i64, Error> err = Result<i64, Error>.err(Error.new(5, "boom"));
+        String s5 = @format("{}", err);
+        assert_true(s5.equals("Err(Error 5: boom)"), "Result Err nests Error Display");
+    }
+
+    // 7. Error, Duration, SystemTime, Instant, ExitStatus, TextPosition.
+    {
+        Error e = Error.new(22, "nope");
+        String s = @format("{}", e);
+        assert_true(s.equals("Error 22: nope"), "Error Display");
+
+        Duration d2 = Duration.from_secs(2);
+        String m2 = @format("{}", d2);
+        assert_true(m2.equals("2s"), "Duration secs");
+
+        Duration dms = Duration.from_millis(1500);
+        String mms = @format("{}", dms);
+        assert_true(mms.equals("1500ms"), "Duration millis");
+
+        Duration dus = Duration.from_micros(1500);
+        String mus = @format("{}", dus);
+        assert_true(mus.equals("1500us"), "Duration micros");
+
+        Duration dns = Duration.from_nanos(42);
+        String mns = @format("{}", dns);
+        assert_true(mns.equals("42ns"), "Duration nanos");
+
+        Duration dz = Duration.zero();
+        String mz = @format("{}", dz);
+        assert_true(mz.equals("0s"), "Duration zero");
+
+        SystemTime st = system_time_now();
+        String mst = @format("{}", st);
+        assert_true(mst.ends_with("ms"), "SystemTime millis suffix");
+
+        Instant t0 = now();
+        String mt = @format("{}", t0);
+        assert_true(mt.len() > 0, "Instant prints elapsed");
+
+        ExitStatus ok_st;
+        ok_st.code = 0;
+        ok_st.exited = true;
+        ok_st.signal = 0;
+        String mok = @format("{}", ok_st);
+        assert_true(mok.equals("exit status: 0"), "ExitStatus exited");
+
+        ExitStatus sig;
+        sig.code = -1;
+        sig.exited = false;
+        sig.signal = 9;
+        String msig = @format("{}", sig);
+        assert_true(msig.equals("signal: 9"), "ExitStatus signal");
+
+        TextPosition pos = TextPosition.new(12, 34);
+        String mp = @format("{}", pos);
+        assert_true(mp.equals("12:34"), "TextPosition line:col");
+    }
+
+    // 8. Atomics print as their loaded value; i128/u128 primitives.
+    {
+        AtomicI8 a8 = AtomicI8.new(8);
+        String m8 = @format("{}", a8);
+        assert_true(m8.equals("8"), "AtomicI8");
+
+        AtomicI32 a32 = AtomicI32.new(-32);
+        String m32 = @format("{}", a32);
+        assert_true(m32.equals("-32"), "AtomicI32");
+
+        AtomicI64 a64 = AtomicI64.new(64);
+        String m64 = @format("{}", a64);
+        assert_true(m64.equals("64"), "AtomicI64");
+
+        AtomicBool ab = AtomicBool.new(true);
+        String mab = @format("{}", ab);
+        assert_true(mab.equals("true"), "AtomicBool");
+
+        String mi = @format("{}", (i128)-123);
+        assert_true(mi.equals("-123"), "i128 Display");
+
+        String mu = @format("{}", (u128)456);
+        assert_true(mu.equals("456"), "u128 Display");
+    }
+
+    return done();
+}

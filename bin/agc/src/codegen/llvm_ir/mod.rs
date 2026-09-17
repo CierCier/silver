@@ -154,6 +154,12 @@ pub struct LlvmIrGenerator<'ctx> {
     /// monomorph pass never requested.
     pub(crate) generic_function_templates: HashMap<String, Vec<ast::FunctionItem>>,
     pub(crate) drop_trait_impl_owners: HashSet<String>,
+    /// Concrete owners with an `impl Display for Owner` (populated in the
+    /// pass-1 impl scan, mirroring `drop_trait_impl_owners`). The `@print`
+    /// family dispatches `{}` placeholders through this set — never through
+    /// bare method-name sniffing — with a comptime struct-field fallback for
+    /// types that lack a Display impl.
+    pub(crate) display_trait_impl_owners: HashSet<String>,
     pub(crate) loop_stack: Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>,
     pub(crate) loop_defers_base: Vec<usize>,
     pub(crate) symbol_table: CompilerSymbolTable,

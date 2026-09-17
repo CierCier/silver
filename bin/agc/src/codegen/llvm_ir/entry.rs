@@ -182,6 +182,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             free_function_sigs: HashMap::default(),
             source_function_symbols: HashMap::default(),
             drop_trait_impl_owners: HashSet::default(),
+            display_trait_impl_owners: HashSet::default(),
             generic_impl_templates: Vec::new(),
             generic_function_templates: HashMap::default(),
             loop_stack: Vec::new(),
@@ -337,6 +338,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             generic_impl_templates: Vec::new(),
             generic_function_templates: HashMap::default(),
             drop_trait_impl_owners: HashSet::default(),
+            display_trait_impl_owners: HashSet::default(),
             loop_stack: Vec::new(),
             doc_comments: Vec::new(),
             loop_defers_base: Vec::new(),
@@ -754,6 +756,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             generic_impl_templates: Vec::new(),
             generic_function_templates: HashMap::default(),
             drop_trait_impl_owners: HashSet::default(),
+            display_trait_impl_owners: HashSet::default(),
             loop_stack: Vec::new(),
             doc_comments: Vec::new(),
             loop_defers_base: Vec::new(),
@@ -1026,6 +1029,27 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             None,
                             SymbolKind::ExternFunction,
                         );
+                        // Trait-visibility bridge: `impl Display for Owner`
+                        // items from cached modules never enter
+                        // `program.items`, so the pass-1
+                        // `display_trait_impl_owners` scan cannot see them.
+                        // An imported `fmt` with the exact Display shape
+                        // (`fmt(*self, BufWriter*) -> void`) carries the same
+                        // fact. (Generic impls are not exported; only
+                        // concrete owners resolve here.)
+                        if let Some(owner) = export.name.strip_suffix("::fmt")
+                            && !export.is_variadic
+                            && return_ast.is_none()
+                            && param_ast.len() == 2
+                            && let Some(owner_named) = Self::extract_named_type(&param_ast[0])
+                            && (Self::named_type_key(owner_named) == owner
+                                || Self::named_type_name(owner_named) == owner)
+                            && let Some(writer_named) =
+                                Self::extract_named_type(&param_ast[1])
+                            && Self::named_type_name(writer_named) == "BufWriter"
+                        {
+                            self.display_trait_impl_owners.insert(owner.to_string());
+                        }
                         if self.module.get_function(&llvm_name).is_none() {
                             let fn_ty = self.lower_function_type(
                                 &param_ast,
@@ -1812,6 +1836,297 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(self.context.i64_type().const_zero().into())
     }
 
+    /// Maximum recursion depth for the comptime struct-debug fallback in
+    /// `emit_format_value`. Direct self-containment is impossible (infinite
+    /// size) and pointer fields terminate at `write_ptr`; this is a safety
+    /// net for pathological nesting.
+    const MAX_FMT_DEBUG_DEPTH: u32 = 8;
+
+    /// Write a literal string chunk to `writer_expr`.
+    fn emit_write_str_lit(
+        &mut self,
+        writer_expr: &ast::Expression,
+        text: &str,
+        span: &crate::lexer::Span,
+    ) -> CodegenResult<()> {
+        let method = ast::Identifier {
+            name: "write_str".to_string(),
+            span: *span,
+        };
+        let lit_expr = ast::Expression {
+            kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::String(
+                text.to_string(),
+            ))),
+            span: *span,
+        };
+        self.emit_method_call_expression(writer_expr, &method, &[lit_expr], true, span)?;
+        Ok(())
+    }
+
+    /// Dispatch one `{}` value through the `Display` trait guard.
+    fn emit_display_fmt_call(
+        &mut self,
+        writer_expr: &ast::Expression,
+        val_expr: &ast::Expression,
+        span: &crate::lexer::Span,
+    ) -> CodegenResult<()> {
+        let fmt_method = ast::Identifier {
+            name: "fmt".to_string(),
+            span: *span,
+        };
+        let writer_arg = if let Some(ty) = self.resolve_receiver_type(writer_expr) {
+            if matches!(ty.kind.as_ref(), ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)) {
+                writer_expr.clone()
+            } else {
+                ast::Expression {
+                    kind: Box::new(ast::ExpressionKind::Reference {
+                        is_mutable: true,
+                        expression: Box::new(writer_expr.clone()),
+                    }),
+                    span: *span,
+                }
+            }
+        } else {
+            ast::Expression {
+                kind: Box::new(ast::ExpressionKind::Reference {
+                    is_mutable: true,
+                    expression: Box::new(writer_expr.clone()),
+                }),
+                span: *span,
+            }
+        };
+        self.emit_method_call_expression(val_expr, &fmt_method, &[writer_arg], true, span)?;
+        Ok(())
+    }
+
+    /// Clone `val_expr` for repeated field reads, spilling side-effecting
+    /// expressions into a hidden temp so every field reads the same value.
+    /// The temp is borrow-only (no drop flag), mirroring the fprint/sprint
+    /// writer spills — the original keeps sole ownership.
+    fn format_base_expr(
+        &mut self,
+        val_expr: &ast::Expression,
+        span: &crate::lexer::Span,
+    ) -> CodegenResult<ast::Expression> {
+        if matches!(
+            val_expr.kind.as_ref(),
+            ast::ExpressionKind::Identifier(_)
+                | ast::ExpressionKind::FieldAccess { .. }
+                | ast::ExpressionKind::Index { .. }
+                | ast::ExpressionKind::Unary {
+                    operator: ast::UnaryOperator::Dereference,
+                    ..
+                }
+        ) {
+            return Ok(val_expr.clone());
+        }
+        let value = self.emit_expression_value(val_expr)?;
+        let function = self.current_fn.ok_or_else(|| {
+            CodegenError::with_span("format fallback requires an active function", *span)
+        })?;
+        let name = format!("fmt.tmp.{}", self.temp_counter);
+        self.temp_counter += 1;
+        let tmp = self.create_entry_alloca(function, &name, value.get_type())?;
+        self.builder
+            .build_store(tmp, value)
+            .map_err(|e| {
+                CodegenError::with_span(format!("failed to spill format value: {e}"), *span)
+            })?;
+        let ast_ty = self
+            .resolve_receiver_type(val_expr)
+            .unwrap_or_else(|| self.infer_ast_type_from_value(&value, span));
+        if let Some(scope) = self.variables.last_mut() {
+            scope.insert(
+                name.clone(),
+                VarInfo {
+                    ptr: tmp,
+                    ty: ast_ty,
+                    is_mutable: false,
+                    is_volatile: false,
+                    drop_flag: None,
+                    field_flags: Vec::new(),
+                },
+            );
+        }
+        Ok(ast::Expression {
+            kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
+                name,
+                span: *span,
+            })),
+            span: *span,
+        })
+    }
+
+    /// Comptime struct-debug fallback: `Name { field: value, ... }`.
+    /// Returns `Ok(false)` when `val_expr` is not a plain struct, so the
+    /// caller can fall through to the "does not implement Display" error.
+    fn emit_struct_debug_fallback(
+        &mut self,
+        writer_expr: &ast::Expression,
+        val_expr: &ast::Expression,
+        span: &crate::lexer::Span,
+        depth: u32,
+    ) -> CodegenResult<bool> {
+        if depth >= Self::MAX_FMT_DEBUG_DEPTH {
+            self.emit_write_str_lit(writer_expr, "...", span)?;
+            return Ok(true);
+        }
+        let Some(ty) = self.resolve_receiver_type(val_expr) else {
+            return Ok(false);
+        };
+        let Some((display_name, fields)) = self.struct_debug_fields(&ty) else {
+            return Ok(false);
+        };
+        let base = self.format_base_expr(val_expr, span)?;
+        if fields.is_empty() {
+            self.emit_write_str_lit(writer_expr, &format!("{display_name} {{}}"), span)?;
+            return Ok(true);
+        }
+        self.emit_write_str_lit(writer_expr, &format!("{display_name} {{ "), span)?;
+        for (idx, (field_name, _)) in fields.iter().enumerate() {
+            if idx > 0 {
+                self.emit_write_str_lit(writer_expr, ", ", span)?;
+            }
+            self.emit_write_str_lit(writer_expr, &format!("{field_name}: "), span)?;
+            let field_expr = ast::Expression {
+                kind: Box::new(ast::ExpressionKind::FieldAccess {
+                    object: Box::new(base.clone()),
+                    field: ast::Identifier {
+                        name: field_name.clone(),
+                        span: val_expr.span,
+                    },
+                }),
+                span: val_expr.span,
+            };
+            self.emit_format_value(writer_expr, &field_expr, span, depth + 1)?;
+        }
+        self.emit_write_str_lit(writer_expr, " }", span)?;
+        Ok(true)
+    }
+
+    /// Emit one `{}` placeholder value: `Display::fmt` via the trait guard,
+    /// then the legacy `to_str` / `to_string` conversions (kept until the
+    /// rest of the stdlib gains Display impls), then primitive writers, then
+    /// the comptime struct-debug fallback.
+    pub(crate) fn emit_format_value(
+        &mut self,
+        writer_expr: &ast::Expression,
+        val_expr: &ast::Expression,
+        span: &crate::lexer::Span,
+        depth: u32,
+    ) -> CodegenResult<()> {
+        if self.is_string_type_expr(val_expr) {
+            let string_expr = match val_expr.kind.as_ref() {
+                ast::ExpressionKind::Reference { expression, .. } => expression.as_ref(),
+                _ => val_expr,
+            };
+            let data_expr = ast::Expression {
+                kind: Box::new(ast::ExpressionKind::FieldAccess {
+                    object: Box::new(string_expr.clone()),
+                    field: ast::Identifier {
+                        name: "data".to_string(),
+                        span: val_expr.span,
+                    },
+                }),
+                span: val_expr.span,
+            };
+            let cast_expr = ast::Expression {
+                kind: Box::new(ast::ExpressionKind::Cast {
+                    expression: Box::new(data_expr),
+                    target_type: Box::new(ast::Type {
+                        kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::Str)),
+                        span: val_expr.span,
+                    }),
+                }),
+                span: val_expr.span,
+            };
+            let method = ast::Identifier {
+                name: "write_str".to_string(),
+                span: *span,
+            };
+            self.emit_method_call_expression(writer_expr, &method, &[cast_expr], true, span)?;
+            return Ok(());
+        }
+        if let Some(ty) = self.resolve_receiver_type(val_expr)
+            && self.type_implements_display(&ty)
+        {
+            self.emit_display_fmt_call(writer_expr, val_expr, span)?;
+            return Ok(());
+        }
+        let owners = self.receiver_owner_candidates(val_expr);
+        if owners.iter().any(|o| self.type_has_method(o, "to_str")) {
+            let to_str_expr = ast::Expression {
+                kind: Box::new(ast::ExpressionKind::MethodCall {
+                    receiver: Box::new(val_expr.clone()),
+                    method: ast::Identifier {
+                        name: "to_str".to_string(),
+                        span: val_expr.span,
+                    },
+                    arguments: Vec::new(),
+                }),
+                span: val_expr.span,
+            };
+            let method = ast::Identifier {
+                name: "write_str".to_string(),
+                span: *span,
+            };
+            self.emit_method_call_expression(writer_expr, &method, &[to_str_expr], true, span)?;
+            return Ok(());
+        }
+        if owners.iter().any(|o| self.type_has_method(o, "to_string")) {
+            let to_string_expr = ast::Expression {
+                kind: Box::new(ast::ExpressionKind::MethodCall {
+                    receiver: Box::new(val_expr.clone()),
+                    method: ast::Identifier {
+                        name: "to_string".to_string(),
+                        span: val_expr.span,
+                    },
+                    arguments: Vec::new(),
+                }),
+                span: val_expr.span,
+            };
+            let to_str_expr = ast::Expression {
+                kind: Box::new(ast::ExpressionKind::MethodCall {
+                    receiver: Box::new(to_string_expr),
+                    method: ast::Identifier {
+                        name: "to_str".to_string(),
+                        span: val_expr.span,
+                    },
+                    arguments: Vec::new(),
+                }),
+                span: val_expr.span,
+            };
+            let method = ast::Identifier {
+                name: "write_str".to_string(),
+                span: *span,
+            };
+            self.emit_method_call_expression(writer_expr, &method, &[to_str_expr], true, span)?;
+            return Ok(());
+        }
+        match self.value_write_method_name(val_expr) {
+            Ok(method_name) => {
+                let method = ast::Identifier {
+                    name: method_name,
+                    span: *span,
+                };
+                self.emit_method_call_expression(
+                    writer_expr,
+                    &method,
+                    std::slice::from_ref(val_expr),
+                    true,
+                    span,
+                )?;
+                Ok(())
+            }
+            Err(write_err) => {
+                if self.emit_struct_debug_fallback(writer_expr, val_expr, span, depth)? {
+                    return Ok(());
+                }
+                Err(CodegenError::with_span(write_err, val_expr.span))
+            }
+        }
+    }
+
     pub(crate) fn print_codegen(
         &mut self,
         name: &str,
@@ -2088,23 +2403,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 crate::builtin_macros::FormatSegment::Placeholder => {
                     let val_expr = value_args[placeholder_idx];
                     placeholder_idx += 1;
-
-                    // Determine the write method based on the value's type
-                    let method_name = self
-                        .value_write_method_name(val_expr)
-                        .map_err(|e| CodegenError::with_span(e, val_expr.span))?;
-
-                    let method = ast::Identifier {
-                        name: method_name,
-                        span: expr.span,
-                    };
-                    self.emit_method_call_expression(
-                        &writer_expr,
-                        &method,
-                        std::slice::from_ref(val_expr),
-                        true,
-                        &expr.span,
-                    )?;
+                    self.emit_format_value(&writer_expr, val_expr, &expr.span, 0)?;
                 }
             }
         }

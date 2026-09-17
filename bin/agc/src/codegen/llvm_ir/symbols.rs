@@ -1932,6 +1932,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         })
     }
 
+    pub(crate) fn is_display_trait_impl(item: &ast::ImplItem) -> bool {
+        item.trait_ref.as_ref().is_some_and(|trait_ref| {
+            trait_ref.path.last().map(|id| id.name.as_str()) == Some("Display")
+        })
+    }
+
     /// method calls can resolve before bodies are emitted.
     pub(crate) fn collect_impl_method_signatures(
         &mut self,

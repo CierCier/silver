@@ -24,6 +24,8 @@
 // Atomic types are plain value types (no drop, no allocation); they may live
 // in globals, structs, or heap objects shared between threads.
 
+import std.display;
+
 const i32 ATOMIC_RELAXED = 0;
 const i32 ATOMIC_ACQUIRE = 1;
 const i32 ATOMIC_RELEASE = 2;
@@ -307,4 +309,29 @@ i8 bool_to_i8(bool b) {
         return 1;
     }
     return 0;
+}
+
+/// Atomics print as their loaded value (`42`, `true`).
+impl Display for AtomicI8 {
+    void fmt(*self, BufWriter* out) {
+        out.write_i64((i64)self.get());
+    }
+}
+
+impl Display for AtomicI32 {
+    void fmt(*self, BufWriter* out) {
+        out.write_i64((i64)self.get());
+    }
+}
+
+impl Display for AtomicI64 {
+    void fmt(*self, BufWriter* out) {
+        out.write_i64(self.get());
+    }
+}
+
+impl Display for AtomicBool {
+    void fmt(*self, BufWriter* out) {
+        out.write_bool(self.get());
+    }
 }

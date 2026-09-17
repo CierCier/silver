@@ -5,6 +5,7 @@
 // wrong variant: `unwrap()` on an err value and `get_error()` on an ok
 // value.  Use `success`/`failed` to test first, or `unwrap_or` for a
 // non-aborting fallback.
+import std.display;
 import std.io.file;
 
 /// Terminates the process with SIGABRT, like C `abort()`.
@@ -76,5 +77,16 @@ impl Result<T, E> {
 
     E get_error(self) {
         return self.unwrap_err();
+    }
+}
+
+/// Debug-style formatting: `Ok(v)` / `Err(e)`. Payload bindings are borrows
+/// (see the Optional impl): Drop-typed payloads stay owned by the original.
+impl<T, E> Display for Result<T, E> {
+    void fmt(*self, BufWriter* out) {
+        match *self {
+            Ok(v) : @fprint(out, "Ok({})", v),
+            Err(e) : @fprint(out, "Err({})", e),
+        };
     }
 }

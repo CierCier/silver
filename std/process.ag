@@ -1,5 +1,6 @@
 // std/process.ag — process management: spawning, waiting, and exit status.
 
+import std.display;
 import std.error;
 import std.mem.alloc;
 import std.mem.vec;
@@ -33,6 +34,17 @@ impl ExitStatus {
     /// Terminating signal number if killed by a signal, or 0 otherwise.
     i32 termsig(&self) {
         return self.signal;
+    }
+}
+
+/// `exit status: 0` for clean exits, `signal: 9` for signal kills.
+impl Display for ExitStatus {
+    void fmt(*self, BufWriter* out) {
+        if (self.exited) {
+            @fprint(out, "exit status: {}", self.code);
+        } else {
+            @fprint(out, "signal: {}", self.signal);
+        }
     }
 }
 

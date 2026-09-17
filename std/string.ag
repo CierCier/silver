@@ -1,3 +1,5 @@
+import std.display;
+import std.io.file;
 import std.mem.alloc;
 import std.mem.memory;
 import std.ops;
@@ -740,6 +742,13 @@ impl String {
         try_close(fd);
         return Ok(move out);
     }
+}
+
+/// Display forwards to the borrowed NUL-terminated view. Lives here (not
+/// in std/display.ag) so the body always resolves `to_str` in every unit
+/// this module is inlined into.
+impl Display for String {
+    void fmt(*self, BufWriter* out) { out.write_str(self.to_str()); }
 }
 
 impl Drop for String {

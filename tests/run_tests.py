@@ -53,6 +53,9 @@ LEAK_CHECK_TESTS = {
     "temp_operator_test",
     "enum_move_test",
     "enum_cascade_test",
+    "uuid_test",
+    "display_test",
+    "display_net_test",
 }
 
 EXPECTED_COMPILE_FAILURES = {

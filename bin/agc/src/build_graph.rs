@@ -111,14 +111,20 @@ pub fn is_inlined_source_module(source_path: &Path) -> bool {
     if !p_str.contains("std/") {
         return false;
     }
-    let is_cacheable_std = p_str.ends_with("std/atomic.ag")
-        || p_str.ends_with("std/ops.ag")
+    // NOTE: this list must stay free of modules that carry `impl Trait`
+    // blocks consumed by compile-time dispatch (notably `impl Display`,
+    // used by the @print family's comptime expansion). Cached modules reach
+    // importing units as .agm metadata only, and trait-impl membership does
+    // not cross that boundary — an impl here would work under --no-cache
+    // and silently fall back (or fail) in cached builds. Keep such modules
+    // source-inlined (e.g. std/time.ag and std/atomic.ag were removed from
+    // this list when they gained Display impls).
+    let is_cacheable_std = p_str.ends_with("std/ops.ag")
         || p_str.ends_with("std/math.ag")
         || p_str.ends_with("std/math_int.ag")
         || p_str.ends_with("std/cpu.ag")
         || p_str.ends_with("std/hash.ag")
         || p_str.ends_with("std/bytes.ag")
-        || p_str.ends_with("std/time.ag")
         || p_str.ends_with("std/cffi.ag");
     !is_cacheable_std
 }

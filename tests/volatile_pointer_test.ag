@@ -38,7 +38,8 @@ i64 verify_pattern(volatile u8* fb, i64 len) {
 }
 
 // Struct field holding a volatile pointer (e.g. a driver context).
-struct Display {
+// (Named VgaDisplay: `Display` is the std formatting trait.)
+struct VgaDisplay {
     volatile u8* base;
     i64 width;
     i64 height;
@@ -82,7 +83,7 @@ i32 main() {
     @println("  [PASS] volatile pointer deref read/write");
 
     // Struct field holding a volatile pointer.
-    Display disp;
+    VgaDisplay disp;
     disp.base = (volatile u8*)&backing[0];
     disp.width = 100;
     disp.height = 1000;

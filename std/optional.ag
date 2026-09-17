@@ -4,6 +4,7 @@
 // from the wrong variant: `unwrap()` on a none value.  Use
 // `is_some`/`is_none` to test first, or `unwrap_or` for a non-aborting
 // fallback.
+import std.display;
 import std.io.file;
 
 /// Terminates the process with SIGABRT, like C `abort()`.
@@ -57,5 +58,17 @@ impl Optional<T> {
 
     T unwrap_or(self, T fallback) {
         return match self { Some(move v) : v, None : fallback };
+    }
+}
+
+/// Debug-style formatting: `Some(v)` / `None`. The payload binding is a
+/// borrow (never moved or dropped), so Drop-typed payloads stay owned by
+/// the original while printing.
+impl<T> Display for Optional<T> {
+    void fmt(*self, BufWriter* out) {
+        match *self {
+            Some(v) : @fprint(out, "Some({})", v),
+            None : out.write_str("None"),
+        };
     }
 }

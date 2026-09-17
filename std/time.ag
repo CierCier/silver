@@ -1,5 +1,6 @@
 // std/time.ag — clock and time operations.
 
+import std.display;
 import std.sys.os;
 
 const i64 CLOCK_REALTIME = 0;
@@ -98,6 +99,37 @@ impl SystemTime {
 
     i64 unix_timestamp_millis(*self) {
         return self.ts.sec * 1000 + self.ts.nsec / 1000000;
+    }
+}
+
+/// Compact exact durations: whole seconds as `2s`, whole millis as
+/// `1500ms`, whole micros as `1500us`, anything else as raw `42ns`.
+impl Display for Duration {
+    void fmt(*self, BufWriter* out) {
+        i64 total = self.as_nanos();
+        if (total % (i64)1000000000 == 0) {
+            @fprint(out, "{}s", total / (i64)1000000000);
+        } else if (total % (i64)1000000 == 0) {
+            @fprint(out, "{}ms", total / (i64)1000000);
+        } else if (total % (i64)1000 == 0) {
+            @fprint(out, "{}us", total / (i64)1000);
+        } else {
+            @fprint(out, "{}ns", total);
+        }
+    }
+}
+
+/// Wall-clock time as Unix millis (`1710000000123ms`).
+impl Display for SystemTime {
+    void fmt(*self, BufWriter* out) {
+        @fprint(out, "{}ms", self.unix_timestamp_millis());
+    }
+}
+
+/// Monotonic instants print as the elapsed Duration (which has Display).
+impl Display for Instant {
+    void fmt(*self, BufWriter* out) {
+        @fprint(out, "{}", self.elapsed());
     }
 }
 
