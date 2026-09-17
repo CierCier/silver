@@ -14,6 +14,7 @@ use inkwell::values::{
 use crate::codegen::SilverGenerator;
 use crate::codegen::llvm_ir::LlvmIrGenerator;
 use crate::codegen::llvm_ir::VarInfo;
+use crate::codegen::llvm_ir::{DeferAction, DeferredEntry};
 use crate::codegen::{CodegenError, CodegenResult};
 use crate::lexer::Span;
 use crate::parser::ast;
@@ -3418,7 +3419,59 @@ pub(crate) fn emit_asm_expression(
                 ))
             }
             ast::ExpressionKind::FieldAccess { object, field } => {
-                let (object_ptr, object_ty) = self.resolve_lvalue_ptr(object)?;
+                let (object_ptr, object_ty) = match self.resolve_lvalue_ptr(object) {
+                    Ok(res) => res,
+                    Err(_) => {
+                        let value = self.emit_expression_value(object)?;
+                        let ty = self
+                            .resolve_receiver_type(object)
+                            .or_else(|| self.resolve_argument_type(object))
+                            .ok_or_else(|| {
+                                CodegenError::with_span(
+                                    "cannot determine type of rvalue for field access",
+                                    object.span,
+                                )
+                            })?;
+                        let function_ctx = self.current_fn.ok_or_else(|| {
+                            CodegenError::new("no active function for rvalue field access")
+                        })?;
+                        let temp = self.create_entry_alloca(
+                            function_ctx,
+                            "field.rvalue.tmp",
+                            value.get_type(),
+                        )?;
+                        self.builder.build_store(temp, value).map_err(|e| {
+                            CodegenError::with_span(
+                                format!("failed to spill rvalue for field access: {e}"),
+                                object.span,
+                            )
+                        })?;
+                        if let Some(drop_fn_name) = self.get_drop_function_name(&ty)? {
+                            let flag_name = format!("field.rvalue.tmp.{}.drop", self.temp_counter);
+                            self.temp_counter += 1;
+                            let flag_alloca = self.create_entry_alloca(
+                                function_ctx,
+                                &flag_name,
+                                self.context.bool_type().as_basic_type_enum(),
+                            )?;
+                            self.builder
+                                .build_store(
+                                    flag_alloca,
+                                    self.context.bool_type().const_int(1, false),
+                                )
+                                .map_err(|e| {
+                                    CodegenError::new(format!("failed to init temp drop flag: {e}"))
+                                })?;
+                            if let Some(scope) = self.defers.last_mut() {
+                                scope.push(DeferredEntry {
+                                    action: DeferAction::DropCall(drop_fn_name, temp),
+                                    flag: Some(flag_alloca),
+                                });
+                            }
+                        }
+                        (temp, ty)
+                    }
+                };
                 // Fast path for builtin Slice<T> pseudo-fields `data` and `len`.
                 // Handles Slice value, &Slice, and Slice* uniformly.
                 let slice_field = match object_ty.kind.as_ref() {

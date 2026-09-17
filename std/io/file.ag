@@ -92,6 +92,9 @@ impl BufWriter {
 
     /// Buffer a write.  Flush behavior depends on self.mode.
     void write(*self, u8* src, i64 n) {
+        if (n <= 0 || src == (u8*)0) {
+            return;
+        }
         self.ensure_init();
 
         // UNBUFFERED: direct syscall, no buffering.
@@ -173,6 +176,9 @@ impl BufWriter {
 
     /// Write a null-terminated string.
     void write_str(*self, str s) {
+        if (s == (str)0) {
+            return;
+        }
         self.write((u8*)s, cstr_len((u8*)s));
     }
 

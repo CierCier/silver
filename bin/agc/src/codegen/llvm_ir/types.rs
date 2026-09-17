@@ -29,6 +29,61 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
+    pub(crate) fn is_string_type_expr(&mut self, expr: &ast::Expression) -> bool {
+        if let Some(ty) = self.resolve_receiver_type(expr) {
+            match ty.kind.as_ref() {
+                ast::TypeKind::Named(named) => {
+                    if named.path.last().map(|id| id.name.as_str()) == Some("String") {
+                        return true;
+                    }
+                }
+                ast::TypeKind::Reference(r) => {
+                    if let ast::TypeKind::Named(named) = r.inner.kind.as_ref() {
+                        if named.path.last().map(|id| id.name.as_str()) == Some("String") {
+                            return true;
+                        }
+                    }
+                }
+                ast::TypeKind::Pointer(p) => {
+                    if let ast::TypeKind::Named(named) = p.inner.kind.as_ref() {
+                        if named.path.last().map(|id| id.name.as_str()) == Some("String") {
+                            return true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let owners = self.receiver_owner_candidates(expr);
+        owners.iter().any(|o| o == "String")
+    }
+
+    pub(crate) fn type_has_method(&self, owner: &str, method: &str) -> bool {
+        let candidates = self.overloaded_method_candidates(owner, method);
+        for name in &candidates {
+            if self.module.get_function(name).is_some()
+                || self.signature_for_name(name).is_some()
+                || self.free_function_sigs.contains_key(name)
+            {
+                return true;
+            }
+        }
+        let method_key = format!("{owner}::{method}");
+        if self.imported_function_links.contains_key(&method_key) {
+            return true;
+        }
+        if self
+            .method_overload_signatures
+            .contains_key(&(owner.to_string(), method.to_string()))
+            || self
+                .method_receivers
+                .contains_key(&(owner.to_string(), method.to_string()))
+        {
+            return true;
+        }
+        false
+    }
+
     /// Map a type kind to the corresponding BufWriter write method name.
     pub(crate) fn type_to_write_method(kind: &ast::TypeKind) -> Result<String, String> {
         use crate::parser::ast::TypeKind;
@@ -56,7 +111,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 )),
             },
             TypeKind::Pointer(_) | TypeKind::Reference(_) => Ok("write_ptr".to_string()),
-            _ => Err(format!("no BufWriter write method for type {:?}", kind,)),
+            TypeKind::Named(named) => Err(format!(
+                "type '{}' cannot be formatted with {{}} (it does not implement Display or to_string)",
+                Self::named_type_name(named)
+            )),
+            _ => Err(format!("no BufWriter write method for type {:?}", kind)),
         }
     }
 

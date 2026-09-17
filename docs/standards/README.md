@@ -18,3 +18,4 @@ This directory contains dedicated compliance tables for every networking standar
 | **Cookies** | HTTP State Management Mechanism | RFC 6265 | [cookie.md](file:///home/cier/Projects/silver/docs/standards/cookie.md) | **Full** |
 | **WebSocket** | Full-Duplex Bidirectional Framing | RFC 6455 | [websocket.md](file:///home/cier/Projects/silver/docs/standards/websocket.md) | **Full** |
 | **Server-Sent Events** | Unidirectional Server Streaming | W3C / WHATWG HTML Living Standard | [sse.md](file:///home/cier/Projects/silver/docs/standards/sse.md) | **Full** |
+| **UUID** | Universally Unique Identifier (v4, v7, Nil, Max) | RFC 9562, RFC 4122 | [uuid.md](file:///home/cier/Projects/silver/docs/standards/uuid.md) | **Full** |

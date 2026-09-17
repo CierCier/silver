@@ -742,8 +742,10 @@ bool is_valid_utf8(u8* p, i64 len) {
     return true;
 }
 
-// Length of a NUL-terminated C string (pure Silver, no libc).
 i64 cstr_len(u8* p) {
+    if (p == (u8*)0) {
+        return 0;
+    }
     i64 n = 0;
     while (((i64)p[n] & (i64)255) != 0) {
         n += 1;
