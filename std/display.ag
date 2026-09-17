@@ -52,5 +52,5 @@ impl Display for str {
     void fmt(*self, BufWriter* out) { out.write_str(*self); }
 }
 impl Display for String {
-    void fmt(*self, BufWriter* out) { out.write_str((str)self.data); }
+    void fmt(*self, BufWriter* out) { out.write_str(self.to_str()); }
 }

@@ -151,7 +151,7 @@ String path_normalize(str path) {
         if (k > 0) {
             result.push((u8)47);
         }
-        result.push_str((str)parts.data[k].data);
+        result.push_str(parts.data[k].to_str());
         k = k + 1;
     }
     if (result.len == 0) {

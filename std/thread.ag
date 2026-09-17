@@ -37,6 +37,7 @@ void thread_entry(i64 arg) {
     TaskRecord* rec = (TaskRecord*)arg;
     void(i64) fn = (void(i64))rec.fn;
     fn(rec.arg);
+    mem_tcache_exit();
     __atomic_store_i64(&rec.done, 1, ATOMIC_RELEASE);
     thread_wake_done_futex(rec);
     thread_exit(0);

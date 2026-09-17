@@ -870,7 +870,7 @@ impl ToJson for f64 { void to_json(*self, JsonWriter* out) { out.write_f64(*self
 impl ToJson for f32 { void to_json(*self, JsonWriter* out) { out.write_f64((f64)*self); } }
 impl ToJson for bool { void to_json(*self, JsonWriter* out) { out.write_bool(*self); } }
 impl ToJson for str { void to_json(*self, JsonWriter* out) { out.write_string(*self); } }
-impl ToJson for String { void to_json(*self, JsonWriter* out) { out.write_string((str)self.data); } }
+impl ToJson for String { void to_json(*self, JsonWriter* out) { out.write_string(self.to_str()); } }
 impl<T> ToJson for Optional<T> {
     void to_json(*self, JsonWriter* out) {
         if (self.is_none()) {

@@ -480,13 +480,17 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         None => break,
                     }
                 }
-                let owner = Self::owner_name_from_type(&obj_ty)?;
-                self.struct_fields.get(&owner).and_then(|fields| {
-                    fields
-                        .iter()
-                        .find(|(name, _)| *name == field.name)
-                        .map(|(_, field_ty)| field_ty.clone())
-                })
+                if let ast::TypeKind::Named(named) = obj_ty.kind.as_ref() {
+                    let _ = self.ensure_named_struct_type(named);
+                }
+                for candidate in Self::owner_name_candidates_from_type(&obj_ty) {
+                    if let Some(fields) = self.struct_fields.get(&candidate) {
+                        if let Some((_, field_ty)) = fields.iter().find(|(name, _)| *name == field.name) {
+                            return Some(field_ty.clone());
+                        }
+                    }
+                }
+                None
             }
             ast::ExpressionKind::Index { object, .. } => {
                 let obj_ty = self.resolve_argument_type(object)?;

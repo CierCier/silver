@@ -522,7 +522,7 @@ impl<'a> ItemParser<'a> {
                 Some(Tok::RParen)
                 | Some(Tok::RBracket)
                 | Some(Tok::RBrace) => depth = depth.saturating_sub(1),
-                Some(Tok::Semi) if depth == 0 => return false,
+                Some(Tok::Semi) | Some(Tok::Assign) if depth == 0 => return false,
                 Some(Tok::Ident) | Some(Tok::SelfType) => prev_ident = true,
                 _ => {}
             }

@@ -113,7 +113,7 @@ impl HashSet<K> {
             i64 mask = new_cap - 1;
             for (i64 i = 0; i < self.capacity; i = i + 1) {
                 if (self.ctrl[i] < (u8)0x80) {
-                    K key = self.keys[i];
+                    K key = move self.keys[i];
                     i64 h = @hash(key);
                     if (h < 0) { h = -h; }
                     u8 h2 = set_h2(h);
@@ -124,7 +124,7 @@ impl HashSet<K> {
                         if (free_slots != 0) {
                             i64 bit = set_trailing_zeros(free_slots);
                             i64 slot = (idx + bit) & mask;
-                            new_keys[slot] = key;
+                            new_keys[slot] = move key;
                             new_ctrl[slot] = h2;
                             if (slot < 16) {
                                 new_ctrl[new_cap + slot] = h2;
@@ -203,7 +203,7 @@ impl HashSet<K> {
             }
             i64 empties = set_probe_empty(&self.ctrl[idx]);
             if (empties != 0) {
-                self.keys[first_available] = key;
+                self.keys[first_available] = move key;
                 self.set_ctrl(first_available, h2);
                 self.len = self.len + 1;
                 return first_available;
@@ -231,7 +231,7 @@ impl HashSet<K> {
         if (h < 0) { h = -h; }
         u8 h2 = set_h2(h);
         i64 before = self.len;
-        self._insert_at(h, h2, key);
+        self._insert_at(h, h2, move key);
         return self.len != before;
     }
 
@@ -459,9 +459,16 @@ impl HashSet<K> {
     }
 }
 impl<K> Drop for HashSet<K> {
-    /// Frees backing memory. Does NOT iterate per-element drops.
+    /// Frees backing memory after dropping contained keys.
     void drop(*self) {
         if (self.ctrl != (u8*)0) {
+            i64 i = 0;
+            while (i < self.capacity) {
+                if (self.ctrl[i] < (u8)0x80) {
+                    @drop_in_place(&self.keys[i], 1);
+                }
+                i = i + 1;
+            }
             free(self.keys);
             free(self.ctrl);
             self.keys = (K*)0;
@@ -549,10 +556,13 @@ impl<K> IntoIterator for HashSet<K> {
 impl<K> Drop for HashSetIntoIter<K> {
     void drop(*self) {
         if (self.ctrl != (u8*)0) {
-            // Frees the buffer only. Keys not yet moved out by next() are
-            // the caller's responsibility to drop before abandoning the
-            // iterator (same convention as VecIter and HashMapIntoIter:
-            // containers own their backing buffer, never element contents).
+            i64 i = self.idx;
+            while (i < self.capacity) {
+                if (self.ctrl[i] < (u8)0x80) {
+                    @drop_in_place(&self.keys[i], 1);
+                }
+                i = i + 1;
+            }
             free(self.keys);
             free(self.ctrl);
             self.keys = (K*)0;

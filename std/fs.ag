@@ -146,6 +146,44 @@ bool remove_dir(str path) {
     return r == 0;
 }
 
+/// Recursively remove directory at `path` and all its contents. Returns true on success.
+bool remove_dir_all(str path) {
+    if (path == (str)0) {
+        return false;
+    }
+    Result<Vec<String>, Error> r = read_dir(path);
+    if (r.is_err()) {
+        return false;
+    }
+    Vec<String> entries = r.unwrap();
+    bool ok = true;
+    for (i64 i = 0; i < entries.len(); i = i + 1) {
+        String* name = entries.get_ptr(i);
+        String child = String.from_str(path);
+        if (!child.ends_with("/")) {
+            child.push_str("/");
+        }
+        child.push_str(name.to_str());
+        str child_str = child.to_str();
+        if (is_dir(child_str)) {
+            if (!remove_dir_all(child_str)) {
+                ok = false;
+            }
+        } else {
+            if (!remove_file(child_str)) {
+                ok = false;
+            }
+        }
+        child.drop();
+        name.drop();
+    }
+    entries.drop();
+    if (!ok) {
+        return false;
+    }
+    return remove_dir(path);
+}
+
 /// Rename file or directory from `from` to `to`. Returns true on success.
 bool rename(str from, str to) {
     if (from == (str)0 || to == (str)0) {

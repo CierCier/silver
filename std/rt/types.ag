@@ -562,9 +562,7 @@ impl TypeRegistry {
             i += 1;
         }
 
-        // Build the Type, transferring each payload Vec by shallow copy.
-        // The defs buffer is freed by the parameter's automatic drop; Vec
-        // never drops elements, so each payload buffer has exactly one owner.
+        // Build the Type, transferring each payload Vec.
         Type ty = Type.new(rt_type_str_owned(name), (i32)TYPE_KIND.ENUM);
         i = 0;
         while (i < count) {
@@ -572,7 +570,8 @@ impl TypeRegistry {
             EnumVariant variant;
             variant.name = rt_type_str_owned(vd.name);
             variant.discriminant = vd.discriminant;
-            variant.payload = vd.payload;
+            variant.payload = move vd.payload;
+            vd.payload = Vec<TypeId>.new();
             ty.enum_data.variants.push(move variant);
             i += 1;
         }

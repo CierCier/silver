@@ -55,6 +55,7 @@ impl MacroRegistry {
         registry.register("memcpy", Box::new(MemcpyHandler));
         registry.register("memset", Box::new(MemsetHandler));
         registry.register("memmove", Box::new(MemmoveHandler));
+        registry.register("drop_in_place", Box::new(DropInPlaceHandler));
         registry.register("file", Box::new(FileHandler));
         registry.register("line", Box::new(LineHandler));
         registry.register("column", Box::new(ColumnHandler));
@@ -282,6 +283,30 @@ impl MacroHandler for MemmoveHandler {
         args: &[ast::MacroArg],
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
         generator.memmove_codegen(expr, args)
+    }
+}
+
+pub struct DropInPlaceHandler;
+
+impl MacroHandler for DropInPlaceHandler {
+    fn type_check(
+        &self,
+        checker: &mut TypeChecker,
+        _name: &str,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> Type {
+        checker.drop_in_place_typeck(expr, args)
+    }
+
+    fn codegen<'ctx>(
+        &self,
+        generator: &mut LlvmIrGenerator<'ctx>,
+        _name: &str,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        generator.drop_in_place_codegen(expr, args)
     }
 }
 

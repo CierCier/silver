@@ -235,10 +235,10 @@ impl Vec<T> {
 }
 
 impl<T> Drop for Vec<T> {
-    /// Frees the backing buffer.  Does NOT call per-element destructors
-    /// (the type system currently does not iterate elements on drop).
+    /// Frees the backing buffer after dropping contained elements.
     void drop(*self) {
         if (self.data != (T*)0) {
+            @drop_in_place(self.data, self.len);
             free(self.data);
             self.data = (T*)0;
         }
@@ -342,6 +342,9 @@ impl<T> Vec<T> {
 impl<T> Drop for VecIter<T> {
     void drop(*self) {
         if (self.data != (T*)0) {
+            if (self.idx < self.len) {
+                @drop_in_place(&self.data[self.idx], self.len - self.idx);
+            }
             free(self.data);
             self.data = (T*)0;
         }

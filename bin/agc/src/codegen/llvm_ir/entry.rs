@@ -11,7 +11,7 @@ use inkwell::targets::{
 };
 use inkwell::types::BasicType;
 use inkwell::values::AsValueRef;
-use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue};
+use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, PointerValue};
 
 use crate::codegen::SilverGenerator;
 use crate::codegen::abi;
@@ -1622,6 +1622,194 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 CodegenError::with_span(format!("@memmove call failed: {e}"), expr.span)
             })?;
         Ok(dst_val)
+    }
+
+    pub(crate) fn emit_value_drop_at_ptr(
+        &mut self,
+        ty: &ast::Type,
+        val_ptr: PointerValue<'ctx>,
+    ) -> CodegenResult<()> {
+        if let Some(drop_fn_name) = self.get_drop_function_name(ty)? {
+            if let Some(func) = self.module.get_function(&drop_fn_name) {
+                self.builder
+                    .build_call(func, &[val_ptr.into()], "")
+                    .map_err(|e| CodegenError::new(format!("failed to call drop: {e}")))?;
+            }
+            return Ok(());
+        }
+        if let Some(named) = Self::extract_named_type(ty).cloned() {
+            let base_name = named.path.last().map(|s| &s.name[..]).unwrap_or_default().to_string();
+            if let Some(struct_ty) = self.struct_types.get(&base_name).copied() {
+                let fields = self.struct_fields.get(&base_name).cloned().unwrap_or_default();
+                for (idx, (_fname, fty)) in fields.iter().enumerate() {
+                    if self.param_type_drops_on_exit(fty)? {
+                        let field_ptr = self
+                            .builder
+                            .build_struct_gep(struct_ty, val_ptr, idx as u32, "dip.fld")
+                            .map_err(|e| CodegenError::new(format!("{e}")))?;
+                        self.emit_value_drop_at_ptr(fty, field_ptr)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn drop_in_place_codegen(
+        &mut self,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let (elem_ty, ptr_expr, count_expr) = if args.len() == 3 {
+            let Some(ast::MacroArg::Expression(arg0)) = args.first() else {
+                return Err(CodegenError::with_span(
+                    "@drop_in_place requires expression arguments".to_string(),
+                    expr.span,
+                ));
+            };
+            let Some(ast::MacroArg::Expression(arg1)) = args.get(1) else {
+                return Err(CodegenError::with_span(
+                    "@drop_in_place requires ptr argument".to_string(),
+                    expr.span,
+                ));
+            };
+            let Some(ast::MacroArg::Expression(arg2)) = args.get(2) else {
+                return Err(CodegenError::with_span(
+                    "@drop_in_place requires count argument".to_string(),
+                    expr.span,
+                ));
+            };
+            let ty = match arg0.kind.as_ref() {
+                ast::ExpressionKind::TypeName(t) => t.clone(),
+                ast::ExpressionKind::Identifier(ident) => {
+                    if let Some(prim) = self.type_name_to_ast_type(&ident.name) {
+                        prim
+                    } else {
+                        ast::Type {
+                            kind: Box::new(ast::TypeKind::Named(ast::NamedType {
+                                path: vec![ident.clone()],
+                                generics: None,
+                            })),
+                            span: expr.span,
+                        }
+                    }
+                }
+                _ => self
+                    .resolve_argument_type(arg0)
+                    .ok_or_else(|| CodegenError::with_span("cannot resolve type for @drop_in_place".to_string(), expr.span))?,
+            };
+            (ty, arg1, arg2)
+        } else if args.len() == 2 {
+            let Some(ast::MacroArg::Expression(ptr_arg)) = args.first() else {
+                return Err(CodegenError::with_span(
+                    "@drop_in_place requires ptr argument".to_string(),
+                    expr.span,
+                ));
+            };
+            let Some(ast::MacroArg::Expression(count_arg)) = args.get(1) else {
+                return Err(CodegenError::with_span(
+                    "@drop_in_place requires count argument".to_string(),
+                    expr.span,
+                ));
+            };
+            let ptr_ty = self
+                .resolve_argument_type(ptr_arg)
+                .ok_or_else(|| CodegenError::with_span("cannot resolve pointer type for @drop_in_place".to_string(), expr.span))?;
+            let elem_ty = match ptr_ty.kind.as_ref() {
+                ast::TypeKind::Pointer(pt) => (*pt.inner).clone(),
+                ast::TypeKind::Reference(rt) => (*rt.inner).clone(),
+                _ => return Err(CodegenError::with_span(
+                    format!("@drop_in_place expects a pointer, got {:?}", ptr_ty.kind),
+                    expr.span,
+                )),
+            };
+            (elem_ty, ptr_arg, count_arg)
+        } else {
+            return Err(CodegenError::with_span(
+                "@drop_in_place expects 2 or 3 arguments".to_string(),
+                expr.span,
+            ));
+        };
+
+        if !self.param_type_drops_on_exit(&elem_ty)? {
+            return Ok(self.context.i64_type().const_zero().into());
+        }
+
+        let ptr_val = self.emit_expression_value(ptr_expr)?.into_pointer_value();
+        let count_val = self.emit_expression_value(count_expr)?.into_int_value();
+        let i64_type = self.context.i64_type();
+        let function = self
+            .current_fn
+            .ok_or_else(|| CodegenError::new("no active function for @drop_in_place"))?;
+
+        let entry_bb = self.builder.get_insert_block().unwrap();
+        let loop_bb = self.context.append_basic_block(function, "dip.body");
+        let merge_bb = self.context.append_basic_block(function, "dip.end");
+
+        // Guard: ptr != null && count > 0
+        let is_non_null = self
+            .builder
+            .build_is_not_null(ptr_val, "dip.is_non_null")
+            .map_err(|e| CodegenError::new(format!("{e}")))?;
+        let has_elems = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SGT,
+                count_val,
+                i64_type.const_zero(),
+                "dip.has_elems",
+            )
+            .map_err(|e| CodegenError::new(format!("{e}")))?;
+        let should_enter = self
+            .builder
+            .build_and(is_non_null, has_elems, "dip.should_enter")
+            .map_err(|e| CodegenError::new(format!("{e}")))?;
+
+        self.builder
+            .build_conditional_branch(should_enter, loop_bb, merge_bb)
+            .map_err(|e| CodegenError::new(format!("{e}")))?;
+
+        self.builder.position_at_end(loop_bb);
+        let i_phi = self
+            .builder
+            .build_phi(i64_type, "dip.i")
+            .map_err(|e| CodegenError::new(format!("{e}")))?;
+        let zero = i64_type.const_zero();
+        i_phi.add_incoming(&[(&zero, entry_bb)]);
+
+        let i_val = i_phi.as_basic_value().into_int_value();
+        let elem_llvm_ty = self.lower_basic_type(&elem_ty)?.as_basic_type_enum();
+        let elem_ptr = unsafe {
+            self.builder
+                .build_gep(elem_llvm_ty, ptr_val, &[i_val], "dip.elem_ptr")
+                .map_err(|e| CodegenError::new(format!("{e}")))?
+        };
+
+        self.emit_value_drop_at_ptr(&elem_ty, elem_ptr)?;
+
+        let i_next = self
+            .builder
+            .build_int_add(i_val, i64_type.const_int(1, false), "dip.i_next")
+            .map_err(|e| CodegenError::new(format!("{e}")))?;
+        let loop_end_bb = self.builder.get_insert_block().unwrap();
+        i_phi.add_incoming(&[(&i_next, loop_end_bb)]);
+
+        let has_more = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SLT,
+                i_next,
+                count_val,
+                "dip.has_more",
+            )
+            .map_err(|e| CodegenError::new(format!("{e}")))?;
+
+        self.builder
+            .build_conditional_branch(has_more, loop_bb, merge_bb)
+            .map_err(|e| CodegenError::new(format!("{e}")))?;
+
+        self.builder.position_at_end(merge_bb);
+        Ok(self.context.i64_type().const_zero().into())
     }
 
     pub(crate) fn print_codegen(

@@ -33,6 +33,7 @@ import std.mem.memory;
 import std.rt.backtrace;
 import std.atomic;
 import std.cpu;
+import std.sys.syscall;
 // Static free-list head table in .bss — eliminates lazy-init branch on every
 // alloc/free. Zero-initialized by the OS loader at program startup.
 i64 g_mem_heads[9];
@@ -173,6 +174,110 @@ void mem_lock_release() {
     __atomic_store_i32(&g_mem_lock, 0, ATOMIC_RELEASE);
 }
 
+// -- Thread-local allocation cache (tcache) --------------------------------
+
+struct ThreadCache {
+    i64 tid;
+    i64 heads[9];
+    i32 counts[9];
+}
+
+const i64 MEM_MAX_TCACHES = 64;
+ThreadCache g_mem_tcaches[64];
+
+#[cfg(os.linux)]
+i64 mem_get_tid() {
+    return syscall0(186); // SYS_gettid
+}
+
+#[cfg(os.windows)]
+extern "C" {
+    #[link_name("GetCurrentThreadId")]
+    u32 win_GetCurrentThreadId();
+}
+
+#[cfg(os.windows)]
+i64 mem_get_tid() {
+    return (i64)win_GetCurrentThreadId();
+}
+
+#[cfg(os.linux)]
+bool mem_thread_alive(i64 tid) {
+    if (tid <= 0) { return false; }
+    i64 r = syscall2(200, tid, 0); // SYS_tkill
+    return r == 0;
+}
+
+#[cfg(os.windows)]
+bool mem_thread_alive(i64 tid) {
+    return true;
+}
+
+void mem_tcache_flush_slot(i64 slot) {
+    if (slot < 0 || slot >= MEM_MAX_TCACHES) { return; }
+    mem_lock_acquire();
+    i64* heads = mem_heads();
+    for (i64 idx = 0; idx < MEM_NUM_CLASSES; idx = idx + 1) {
+        while (g_mem_tcaches[slot].heads[idx] != 0) {
+            i64 h = g_mem_tcaches[slot].heads[idx];
+            i64* link = (i64*)(h + MEM_HEADER_SIZE);
+            g_mem_tcaches[slot].heads[idx] = link[0];
+            link[0] = heads[idx];
+            heads[idx] = h;
+        }
+        g_mem_tcaches[slot].counts[idx] = 0;
+    }
+    mem_lock_release();
+}
+
+i64 mem_current_tcache_slot() {
+    i64 tid = mem_get_tid();
+    if (tid <= 0) {
+        return -1;
+    }
+    i64 h = (tid ^ (tid >> 4)) & (MEM_MAX_TCACHES - 1);
+    if (g_mem_tcaches[h].tid == tid) {
+        return h;
+    }
+    for (i64 i = 0; i < MEM_MAX_TCACHES; i = i + 1) {
+        if (g_mem_tcaches[i].tid == tid) {
+            return i;
+        }
+    }
+    for (i64 i = 0; i < MEM_MAX_TCACHES; i = i + 1) {
+        i64 slot_idx = (h + i) & (MEM_MAX_TCACHES - 1);
+        if (g_mem_tcaches[slot_idx].tid == 0) {
+            bool claimed = __atomic_cmpxchg_i64(&g_mem_tcaches[slot_idx].tid, 0, tid, ATOMIC_SEQ_CST, ATOMIC_ACQUIRE);
+            if (claimed) {
+                return slot_idx;
+            }
+        }
+    }
+    for (i64 i = 0; i < MEM_MAX_TCACHES; i = i + 1) {
+        i64 old_tid = g_mem_tcaches[i].tid;
+        if (old_tid > 0 && !mem_thread_alive(old_tid)) {
+            bool claimed = __atomic_cmpxchg_i64(&g_mem_tcaches[i].tid, old_tid, tid, ATOMIC_SEQ_CST, ATOMIC_ACQUIRE);
+            if (claimed) {
+                mem_tcache_flush_slot(i);
+                return i;
+            }
+        }
+    }
+    return -1;
+}
+
+void mem_tcache_exit() {
+    i64 tid = mem_get_tid();
+    if (tid <= 0) { return; }
+    for (i64 i = 0; i < MEM_MAX_TCACHES; i = i + 1) {
+        if (g_mem_tcaches[i].tid == tid) {
+            mem_tcache_flush_slot(i);
+            __atomic_store_i64(&g_mem_tcaches[i].tid, 0, ATOMIC_RELEASE);
+            return;
+        }
+    }
+}
+
 // -- Raw allocator core -----------------------------------------------------
 
 /// Core allocation: `size` bytes with at least `align` alignment.
@@ -182,9 +287,17 @@ u8* mem_alloc_raw_impl(i64 size, i64 align) {
         return mem_dangling(align);
     }
     if (align <= MEM_HEADER_SIZE && size <= MEM_MAX_CLASS_SIZE) {
+        i64 idx = mem_class_index(size);
+        i64 slot = mem_current_tcache_slot();
+        if (slot >= 0 && g_mem_tcaches[slot].heads[idx] != 0) {
+            i64 h = g_mem_tcaches[slot].heads[idx];
+            i64* link = (i64*)(h + MEM_HEADER_SIZE);
+            g_mem_tcaches[slot].heads[idx] = link[0];
+            g_mem_tcaches[slot].counts[idx] = g_mem_tcaches[slot].counts[idx] - 1;
+            return (u8*)(h + MEM_HEADER_SIZE);
+        }
         mem_lock_acquire();
         i64* heads = mem_heads();
-        i64 idx = mem_class_index(size);
         if (heads[idx] == 0) {
             mem_refill(heads, idx);
         }
@@ -227,10 +340,18 @@ void mem_free_raw_impl(u8* ptr) {
         // Null or dangling (zero-page) pointer: no-op.
         return;
     }
-    mem_lock_acquire();
     i64* header = (i64*)(a - MEM_HEADER_SIZE);
     i64 tag = header[1];
     if (tag >= 0 && tag < MEM_NUM_CLASSES) {
+        i64 slot = mem_current_tcache_slot();
+        if (slot >= 0 && g_mem_tcaches[slot].counts[tag] < 32) {
+            i64* link = (i64*)a;
+            link[0] = g_mem_tcaches[slot].heads[tag];
+            g_mem_tcaches[slot].heads[tag] = a - MEM_HEADER_SIZE;
+            g_mem_tcaches[slot].counts[tag] = g_mem_tcaches[slot].counts[tag] + 1;
+            return;
+        }
+        mem_lock_acquire();
         i64* heads = mem_heads();
         i64* link = (i64*)a;
         link[0] = heads[tag];
@@ -238,7 +359,6 @@ void mem_free_raw_impl(u8* ptr) {
         mem_lock_release();
         return;
     }
-    mem_lock_release();
     if (tag < 0) {
         i64 offset = 0 - 1 - tag;
         i64 total = offset + MEM_HEADER_SIZE + header[0];

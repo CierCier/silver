@@ -426,9 +426,17 @@ impl HashMap<K, V> {
 }
 
 impl<K, V> Drop for HashMap<K, V> {
-    /// Free all memory. Does NOT call per-element destructors.
+    /// Free all memory after dropping active key-value entries.
     void drop(*self) {
         if (self.ctrl != (u8*)0) {
+            i64 i = 0;
+            while (i < self.capacity) {
+                if (self.ctrl[i] < (u8)0x80) {
+                    @drop_in_place(&self.keys[i], 1);
+                    @drop_in_place(&self.values[i], 1);
+                }
+                i = i + 1;
+            }
             free(self.keys);
             free(self.values);
             free(self.ctrl);
@@ -479,6 +487,14 @@ impl<K, V> IntoIterator for HashMap<K, V> {
 impl<K, V> Drop for HashMapIntoIter<K, V> {
     void drop(*self) {
         if (self.ctrl != (u8*)0) {
+            i64 i = self.idx;
+            while (i < self.capacity) {
+                if (self.ctrl[i] < (u8)0x80) {
+                    @drop_in_place(&self.keys[i], 1);
+                    @drop_in_place(&self.values[i], 1);
+                }
+                i = i + 1;
+            }
             free(self.keys);
             free(self.values);
             free(self.ctrl);
@@ -688,6 +704,14 @@ struct HashMapDrain<K, V> {
 impl<K, V> Drop for HashMapDrain<K, V> {
     void drop(*self) {
         if (self.ctrl != (u8*)0) {
+            i64 i = self.idx;
+            while (i < self.capacity) {
+                if (self.ctrl[i] < (u8)0x80) {
+                    @drop_in_place(&self.keys[i], 1);
+                    @drop_in_place(&self.values[i], 1);
+                }
+                i = i + 1;
+            }
             free(self.keys);
             free(self.values);
             free(self.ctrl);

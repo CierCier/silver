@@ -1,149 +1,89 @@
-// Queue<T> — ring-buffer FIFO queue.
+// Queue<T> — FIFO queue adapter wrapping Deque<T>.
 //
-// Memory (malloc/realloc/free) is provided through std.mem.
-// pop and front abort on an empty queue.
+// @deprecated Prefer `Deque<T>` from `std.collections.deque`.
+//
+// Memory and ring buffer logic are provided by Deque<T>.
 
 import std.mem;
+import std.collections.deque;
+import std.optional;
 
-/// A FIFO queue backed by a ring buffer.
+/// @deprecated Prefer `Deque<T>` from `std.collections.deque`.
+/// A FIFO queue backed by `Deque<T>`.
 struct Queue<T> {
-    T* data;
-    i64 len;
-    i64 cap;
-    i64 head;
+    Deque<T> inner;
 }
 
-impl Queue<T> {
+impl<T> Queue<T> {
     /// Empty queue — no allocation.
     Queue<T> new() {
         Queue<T> q;
-        q.data = (T*)0;
-        q.len = 0;
-        q.cap = 0;
-        q.head = 0;
-        return q;
+        q.inner = Deque<T>.new();
+        return move q;
     }
 
     /// Reserve space for `capacity` elements up front.
     Queue<T> with_capacity(i64 capacity) {
         Queue<T> q;
-        if (capacity > 0) {
-            i64 cap = 1;
-            while (cap < capacity) {
-                cap = cap * 2;
-            }
-            q.data = (T*)(malloc(@size(T) * cap));
-            q.cap = cap;
-        } else {
-            q.data = (T*)0;
-            q.cap = 0;
-        }
-        q.len = 0;
-        q.head = 0;
-        return q;
+        q.inner = Deque<T>.with_capacity(capacity);
+        return move q;
     }
 
     // -- Size ------------------------------------------------------------
 
     /// Number of elements in the queue.
     i64 len(&self) {
-        return self.len;
+        return self.inner.len();
     }
 
     /// Total allocated capacity.
     i64 capacity(&self) {
-        return self.cap;
+        return self.inner.capacity();
     }
 
     /// True when `len` is zero.
     bool is_empty(&self) {
-        return self.len == 0;
+        return self.inner.is_empty();
     }
 
     // -- Mutation --------------------------------------------------------
 
     /// Push `value` to the back of the queue (O(1) amortized).
     void push(&mut self, T value) {
-        if (self.len >= self.cap) {
-            i64 new_cap = 1;
-            if (self.cap != 0) {
-                new_cap = self.cap * 2;
-            }
-            i64 old_cap = self.cap;
-            T* new_data = (T*)(malloc(@size(T) * new_cap));
-            // Copy existing elements linearly into new buffer
-            if (old_cap > 0) {
-                i64 i = 0;
-                while (i < self.len) {
-                    new_data[i] = self.data[(self.head + i) & (old_cap - 1)];
-                    i = i + 1;
-                }
-            }
-            if (self.data != (T*)0) {
-                free(self.data);
-            }
-            self.data = new_data;
-            self.head = 0;
-            self.cap = new_cap;
-        }
-        i64 tail = (self.head + self.len) & (self.cap - 1);
-        self.data[tail] = move value;
-        self.len = self.len + 1;
+        self.inner.push_back(move value);
     }
 
-    /// Remove and return the front element.  Aborts if empty.
+    /// Remove and return the front element. Aborts if empty.
     T pop(&mut self) {
-        if (self.len == 0) {
-            abort();
-        }
-        T result = self.data[self.head];
-        self.head = (self.head + 1) & (self.cap - 1);
-        self.len = self.len - 1;
-        return result;
+        return self.inner.pop_front();
     }
 
-    /// Return a copy of the front element without removing it.  Aborts if empty.
+    /// Return a copy of the front element without removing it. Aborts if empty.
     T front(&self) {
-        if (self.len == 0) {
-            abort();
-        }
-        return self.data[self.head];
+        return self.inner.front();
     }
 
     // -- Fallible accessors (None instead of abort) -----------------------
 
     /// Remove and return the front element, or None when empty.
     Optional<T> try_pop(&mut self) {
-        if (self.len == 0) {
-            return None;
-        }
-        return Some(self.pop());
+        return self.inner.try_pop_front();
     }
 
     /// Copy of the front element, or None when empty.
     Optional<T> try_front(&self) {
-        if (self.len == 0) {
-            return None;
-        }
-        return Some(self.front());
+        return self.inner.try_front();
     }
 
     /// Remove all elements without freeing the backing buffer.
     void clear(&mut self) {
-        self.len = 0;
-        self.head = 0;
+        self.inner.clear();
     }
 }
 
 impl<T> Drop for Queue<T> {
     /// Frees the backing buffer.
     void drop(*self) {
-        if (self.data != (T*)0) {
-            free(self.data);
-            self.data = (T*)0;
-        }
-        self.len = 0;
-        self.cap = 0;
-        self.head = 0;
+        self.inner.drop();
     }
 }

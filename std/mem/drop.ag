@@ -7,3 +7,9 @@
 trait Drop {
     void drop(*self);
 }
+
+/// Runs destructors in place for `count` contiguous elements starting at `ptr`.
+/// If `T` does not implement `Drop` or require destruction, this is a compile-time no-op.
+void drop_in_place<T>(T* ptr, i64 count) {
+    @drop_in_place(ptr, count);
+}

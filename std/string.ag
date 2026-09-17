@@ -20,7 +20,7 @@ struct String {
 
 impl String {
     String new() {
-        return String.with_capacity(16);
+        return String.with_capacity(0);
     }
 
     String with_capacity(i64 capacity) {
@@ -163,6 +163,9 @@ impl String {
     /// compiler does not run the by-value `self` copy's destructor, so the
     /// String keeps ownership and no explicit hand-off is needed.
     cast str(String self) {
+        if (self.data == (u8*)0) {
+            return "";
+        }
         return (str)self.data;
     }
 

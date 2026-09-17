@@ -200,14 +200,14 @@ impl Object {
         o.text = String.with_capacity(0);
         o.values = Vec<RtValue>.new();
         o.variant = 0;
-        return o;
+        return move o;
     }
 
     /// Placeholder object used for the error arm of FreeResult.
     /// Owns no allocations, so overwriting or dropping it is free.
     Object empty() {
         Object o = Object.blank();
-        return o;
+        return move o;
     }
 
     /// Object::String — takes ownership of `text`.
@@ -218,7 +218,7 @@ impl Object {
         o.kind = OBJ_KIND_STRING;
         o.ty = RT_TYPE_STRING;
         o.text = move text;
-        return o;
+        return move o;
     }
 
     /// Object::Vec { ty, items } — takes ownership of `items`.
@@ -227,7 +227,7 @@ impl Object {
         o.kind = OBJ_KIND_VEC;
         o.ty = ty;
         o.values = move items;
-        return o;
+        return move o;
     }
 
     /// Object::Struct { ty, fields } — takes ownership of `fields`.
@@ -236,7 +236,7 @@ impl Object {
         o.kind = OBJ_KIND_STRUCT;
         o.ty = ty;
         o.values = move fields;
-        return o;
+        return move o;
     }
 
     /// Object::Enum { ty, variant, fields } — takes ownership of `fields`.
@@ -246,7 +246,7 @@ impl Object {
         o.ty = ty;
         o.variant = variant;
         o.values = move fields;
-        return o;
+        return move o;
     }
 
     /// Append every object handle reachable from this object to `out`
@@ -379,21 +379,21 @@ impl Heap {
         r.ok = false;
         r.object = Object.empty();
         if (!self.handle_is_valid(handle)) {
-            return r;
+            return move r;
         }
 
         i64 idx = (i64)handle.index;
-        Object object = self.objects.get(idx);
+        Object* slot_ptr = self.objects.get_ptr(idx);
+        Object object = move (*slot_ptr);
+        *slot_ptr = Object.blank();
         self.occupied.set(idx, false);
         // Invalidate all outstanding handles for this index (wrapping add).
         self.generations.set(idx, self.generations.get(idx) + (u32)1);
         self.free_list.push(handle.index);
 
-        // r.object currently holds Object.empty() which owns no
-        // allocations, so overwriting it leaks nothing.
         r.object = move object;
         r.ok = true;
-        return r;
+        return move r;
     }
 
     /// Mark-sweep collection. `roots` points at `roots_len` values that are
@@ -464,6 +464,7 @@ impl Heap {
                 i64 slot = i + bit;
                 Object* object = self.objects.get_ptr(slot);
                 object.drop();
+                *object = Object.blank();
                 self.occupied.set(slot, false);
                 self.generations.set(slot, self.generations.get(slot) + (u32)1);
                 self.free_list.push((u32)slot);
@@ -477,6 +478,7 @@ impl Heap {
             if (self.occupied.get(i) && !self.marked.get(i)) {
                 Object* object = self.objects.get_ptr(i);
                 object.drop();
+                *object = Object.blank();
                 self.occupied.set(i, false);
                 self.generations.set(i, self.generations.get(i) + (u32)1);
                 self.free_list.push((u32)i);
@@ -512,6 +514,7 @@ impl Drop for Heap {
             if (self.occupied.get(i)) {
                 Object* object = self.objects.get_ptr(i);
                 object.drop();
+                *object = Object.blank();
             }
             i += 1;
         }

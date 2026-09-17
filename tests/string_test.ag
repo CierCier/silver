@@ -4,16 +4,7 @@ import std.string;
 import std.mem.vec;
 import std.hash;
 
-/// Free the String elements of a Vec before dropping the Vec itself (Vec
-/// owns the backing buffer only, never its elements).
 void drop_vec_strings(Vec<String>* v) {
-    i64 i = 0;
-    while (i < v.len()) {
-        String* p = v.get_ptr(i);
-        String elem = *p;
-        elem.drop();
-        i = i + 1;
-    }
     v.drop();
 }
 
@@ -21,8 +12,8 @@ i32 main(){
     // -- Existing tests ---------------------------------------------------
     String s = String.new();
     assert_eq_i64(s.len, 0, "New string has length 0");
-    assert_eq_i64(s.capacity, 16, "New string has initial capacity 16");
-    assert_true(s.data != (u8*)0, "New string has non-null data pointer");
+    assert_eq_i64(s.capacity, 0, "New string has initial capacity 0");
+    assert_true(s.data == (u8*)0, "New string has null data pointer");
     s.drop();
 
     String s1 = String.with_capacity(32);
@@ -534,6 +525,7 @@ i32 main(){
             assert_true(line1.equals("beta"), "line 1 is beta");
             assert_true(line2.equals("gamma"), "line 2 is gamma");
             drop_vec_strings(&mut lns);
+            raw_sys_unlink((i64)tmp_path);
         }
     }
 

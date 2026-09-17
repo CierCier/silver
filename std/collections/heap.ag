@@ -190,9 +190,10 @@ impl BinaryHeap<T> {
 }
 
 impl<T> Drop for BinaryHeap<T> {
-    /// Frees the backing buffer.
+    /// Frees the backing buffer after dropping contained elements.
     void drop(*self) {
         if (self.data != (T*)0) {
+            @drop_in_place(self.data, self.len);
             free(self.data);
             self.data = (T*)0;
         }

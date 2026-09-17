@@ -5331,6 +5331,29 @@ impl TypeChecker {
         }
     }
 
+    pub(crate) fn drop_in_place_typeck(
+        &mut self,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> Type {
+        if args.len() != 2 && args.len() != 3 {
+            self.error(format!("@drop_in_place expects 2 or 3 arguments, got {}", args.len()), expr.span);
+            return Type::Unknown;
+        }
+        let (ptr_arg, count_arg) = if args.len() == 3 {
+            (&args[1], &args[2])
+        } else {
+            (&args[0], &args[1])
+        };
+        if let ast::MacroArg::Expression(e) = ptr_arg {
+            self.check_expr(e, None);
+        }
+        if let ast::MacroArg::Expression(e) = count_arg {
+            self.check_expr(e, None);
+        }
+        Type::Primitive(ast::PrimitiveType::Void)
+    }
+
     pub(crate) fn json_typeck(&mut self, expr: &ast::Expression, args: &[ast::MacroArg]) -> Type {
         if !(1..=2).contains(&args.len()) {
             self.error(msg::json_arg_count(), expr.span);

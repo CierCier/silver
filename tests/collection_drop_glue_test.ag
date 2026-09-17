@@ -1,0 +1,148 @@
+// Test suite for generic container element drop glue (§4.2)
+// Verifies that Vec<T>, Deque<T>, HashMap<K, V>, HashSet<K>, and BinaryHeap<T>
+// run per-element destructors on drop.
+import std.test;
+import std.mem.vec;
+import std.collections.deque;
+import std.collections.heap;
+import std.map;
+import std.collections.set;
+
+i64 g_drops = 0;
+
+struct DropSpy {
+    i64 val;
+}
+
+impl Drop for DropSpy {
+    void drop(*self) {
+        g_drops = g_drops + 1;
+    }
+}
+
+impl DropSpy {
+    bool __lt(&self, &DropSpy other) {
+        return self.val < other.val;
+    }
+    bool __eq(&self, &DropSpy other) {
+        return self.val == other.val;
+    }
+}
+
+i32 main() {
+    STDOUT.write_str("=== Collection Drop Glue Tests ===\n\n");
+
+    // 1. Vec<DropSpy>
+    test_start("Vec drops contained elements");
+    {
+        g_drops = 0;
+        {
+            Vec<DropSpy> v = Vec<DropSpy>.new();
+            i64 i = 0;
+            while (i < 5) {
+                DropSpy d;
+                d.val = i;
+                v.push(move d);
+                i = i + 1;
+            }
+        }
+        assert_eq_i64(5, g_drops, "Vec dropped 5 elements");
+    }
+
+    // 2. Deque<DropSpy>
+    test_start("Deque drops contained elements across ring buffer");
+    {
+        g_drops = 0;
+        {
+            Deque<DropSpy> dq = Deque<DropSpy>.new();
+            i64 i = 0;
+            while (i < 8) {
+                DropSpy d;
+                d.val = i;
+                dq.push_back(move d);
+                i = i + 1;
+            }
+            // Pop 2 from front to shift head, then push 4 more to wrap
+            dq.pop_front();
+            dq.pop_front();
+            while (i < 12) {
+                DropSpy d;
+                d.val = i;
+                dq.push_back(move d);
+                i = i + 1;
+            }
+        }
+        // 10 elements remaining in dq are dropped at scope exit
+        assert_eq_i64(10, g_drops, "Deque dropped all 10 elements including wrapped slots");
+    }
+
+    // 3. HashMap<i64, DropSpy>
+    test_start("HashMap drops values and keys");
+    {
+        g_drops = 0;
+        {
+            HashMap<i64, DropSpy> m = HashMap<i64, DropSpy>.new();
+            i64 i = 0;
+            while (i < 7) {
+                DropSpy d;
+                d.val = i;
+                m.insert(i, move d);
+                i = i + 1;
+            }
+        }
+        assert_eq_i64(7, g_drops, "HashMap dropped 7 values");
+    }
+
+    // 4. HashSet<DropSpy>
+    test_start("HashSet drops keys");
+    {
+        g_drops = 0;
+        {
+            HashSet<DropSpy> s = HashSet<DropSpy>.new();
+            i64 i = 0;
+            while (i < 6) {
+                DropSpy d;
+                d.val = i;
+                s.insert(move d);
+                i = i + 1;
+            }
+        }
+        assert_eq_i64(6, g_drops, "HashSet dropped 6 keys");
+    }
+
+    // 5. BinaryHeap<DropSpy>
+    test_start("BinaryHeap drops elements");
+    {
+        g_drops = 0;
+        {
+            BinaryHeap<DropSpy> h = BinaryHeap<DropSpy>.new();
+            i64 i = 0;
+            while (i < 4) {
+                DropSpy d;
+                d.val = i;
+                h.push(move d);
+                i = i + 1;
+            }
+        }
+        assert_eq_i64(4, g_drops, "BinaryHeap dropped 4 elements");
+    }
+
+    // 6. Primitive collections do not invoke drop
+    test_start("Primitive collections have zero drop overhead");
+    {
+        g_drops = 0;
+        {
+            Vec<i64> v = Vec<i64>.new();
+            v.push(10);
+            v.push(20);
+            Deque<i32> dq = Deque<i32>.new();
+            dq.push_back(1);
+            HashMap<i64, i64> m = HashMap<i64, i64>.new();
+            m.insert(1, 2);
+        }
+        assert_eq_i64(0, g_drops, "No drops for primitive collections");
+    }
+
+    done();
+    return 0;
+}

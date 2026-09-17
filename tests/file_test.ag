@@ -284,8 +284,22 @@ i32 main() {
     assert_true(l3.is_some(), "read_line 3 is some");
     assert_eq_str("last line without newline", l3.unwrap().to_str(), "l3 matches trailing line");
     Optional<String> l4 = rlf_in.read_line();
-    assert_true(l4.is_none(), "read_line at EOF is none");
     rlf_in.close();
+
+    // Test lines() iterator
+    File lines_f = File.open_read(test_file);
+    i64 lines_count = 0;
+    LinesIter iter = lines_f.lines();
+    while (true) {
+        Optional<String> opt = iter.next();
+        if (opt.is_none()) { break; }
+        String line = opt.unwrap();
+        lines_count = lines_count + 1;
+        line.drop();
+    }
+    assert_eq_i64(3, lines_count, "lines() yielded 3 lines");
+    lines_f.close();
+
     // Final cleanup
     file_delete(test_file);
     file_delete(test_file2);

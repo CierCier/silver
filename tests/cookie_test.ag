@@ -263,14 +263,12 @@ i32 main() {
             Vec<Cookie> cookies = response.cookies();
             assert_eq_i64(cookies.len, 2, "two cookies parsed");
             if (cookies.len == 2) {
-                Cookie first = cookies.get(0);
-                Cookie second = cookies.get(1);
+                Cookie* first = cookies.get_ptr(0);
+                Cookie* second = cookies.get_ptr(1);
                 assert_true(first.name.equals("one") && first.value.equals("1"), "first cookie");
                 assert_true(first.path.equals("/p") && first.http_only, "first cookie attrs");
                 assert_true(second.name.equals("two") && second.value.equals("quoted value"),
                     "quoted value unquoted");
-                first.drop();
-                second.drop();
             }
             cookies.drop();
             assert_true(thread_join(server_handle) >= 0, "join");
@@ -316,10 +314,8 @@ i32 main() {
     {
         CookieJar jar = CookieJar.new();
         Cookie a = Cookie.new("a", "1");
-        a.path.drop();
         a.path = String.from_str("/a/b/c");
         Cookie b = Cookie.new("b", "2");
-        b.path.drop();
         b.path = String.from_str("/a");
         Cookie c = Cookie.new("c", "3");
         jar.set_cookie("127.0.0.1", "/", move a);

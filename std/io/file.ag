@@ -348,20 +348,22 @@ struct File {
     u8* read_buf;
     i64 read_pos;
     i64 read_len;
+    u8* write_buf;
+    i64 write_len;
 }
 
 impl File {
     File from_fd(i32 fd) {
-        File file = { .fd = fd, .is_open = fd >= 0, .at_eof = false, .had_error = false, .owns_fd = true, .read_buf = (u8*)0, .read_pos = 0, .read_len = 0 };
+        File file = { .fd = fd, .is_open = fd >= 0, .at_eof = false, .had_error = false, .owns_fd = true, .read_buf = (u8*)0, .read_pos = 0, .read_len = 0, .write_buf = (u8*)0, .write_len = 0 };
         return file;
     }
 
     File closed() {
-        File file = { .fd = -1, .is_open = false, .at_eof = false, .had_error = false, .owns_fd = false, .read_buf = (u8*)0, .read_pos = 0, .read_len = 0 };
+        File file = { .fd = -1, .is_open = false, .at_eof = false, .had_error = false, .owns_fd = false, .read_buf = (u8*)0, .read_pos = 0, .read_len = 0, .write_buf = (u8*)0, .write_len = 0 };
         return file;
     }
     File borrow_fd(i32 fd) {
-        File file = { .fd = fd, .is_open = fd >= 0, .at_eof = false, .had_error = false, .owns_fd = false, .read_buf = (u8*)0, .read_pos = 0, .read_len = 0 };
+        File file = { .fd = fd, .is_open = fd >= 0, .at_eof = false, .had_error = false, .owns_fd = false, .read_buf = (u8*)0, .read_pos = 0, .read_len = 0, .write_buf = (u8*)0, .write_len = 0 };
         return file;
     }
 
@@ -433,6 +435,12 @@ impl File {
     }
 
     i32 close(*self) {
+        self.flush();
+        if (self.write_buf != (u8*)0) {
+            free(self.write_buf);
+            self.write_buf = (u8*)0;
+            self.write_len = 0;
+        }
         if (self.read_buf != (u8*)0) {
             free(self.read_buf);
             self.read_buf = (u8*)0;
@@ -459,10 +467,26 @@ impl File {
         return (i32)r.errno();
     }
 
-    /// No userspace buffer to flush: a valid fd is already flushed.
+    /// Flushes user-space write buffer to fd.
     i32 flush(*self) {
         if (self.invalid()) {
             return EOF;
+        }
+        if (self.write_buf != (u8*)0 && self.write_len > 0) {
+            i64 written = 0;
+            while (written < self.write_len) {
+                Result<i64, Error> r = try_write(self.fd, (u8*)((i64)self.write_buf + written), self.write_len - written);
+                if (r.is_err()) {
+                    self.had_error = true;
+                    return EOF;
+                }
+                if (r.value() == 0) {
+                    self.had_error = true;
+                    return EOF;
+                }
+                written = written + r.value();
+            }
+            self.write_len = 0;
         }
         return 0;
     }
@@ -470,6 +494,11 @@ impl File {
     i32 read_char(*self) {
         if (self.invalid() || self.at_eof) {
             return EOF;
+        }
+        if (self.write_buf != (u8*)0 && self.write_len > 0) {
+            if (self.flush() < 0) {
+                return EOF;
+            }
         }
         if (self.read_pos < self.read_len) {
             u8 ch = self.read_buf[self.read_pos];
@@ -500,18 +529,28 @@ impl File {
         if (self.invalid()) {
             return EOF;
         }
-        u8 b = (u8)ch;
-        Result<i64, Error> r = try_write(self.fd, &b, 1);
-        if (r.is_err() || r.value() != 1) {
-            self.had_error = true;
-            return EOF;
+        if (self.write_buf == (u8*)0) {
+            self.write_buf = alloc<u8>(4096);
+            self.write_len = 0;
         }
+        if (self.write_len >= 4096) {
+            if (self.flush() < 0) {
+                return EOF;
+            }
+        }
+        self.write_buf[self.write_len] = (u8)ch;
+        self.write_len = self.write_len + 1;
         return ch;
     }
 
     i32 write_str(*self, str text) {
         if (self.invalid()) {
             return EOF;
+        }
+        if (self.write_buf != (u8*)0 && self.write_len > 0) {
+            if (self.flush() < 0) {
+                return EOF;
+            }
         }
         if (text == (str)0) {
             self.had_error = true;
@@ -552,6 +591,11 @@ impl File {
         if (self.invalid()) {
             return 0;
         }
+        if (self.write_buf != (u8*)0 && self.write_len > 0) {
+            if (self.flush() < 0) {
+                return 0;
+            }
+        }
         if (elem_size <= 0 || elem_count <= 0) {
             return 0;
         }
@@ -587,6 +631,11 @@ impl File {
     i64 write(*self, const void* buffer, i64 elem_size, i64 elem_count) {
         if (self.invalid()) {
             return 0;
+        }
+        if (self.write_buf != (u8*)0 && self.write_len > 0) {
+            if (self.flush() < 0) {
+                return 0;
+            }
         }
         if (elem_size <= 0 || elem_count <= 0) {
             return 0;
@@ -624,6 +673,11 @@ impl File {
         if (self.invalid()) {
             return false;
         }
+        if (self.write_buf != (u8*)0 && self.write_len > 0) {
+            if (self.flush() < 0) {
+                return false;
+            }
+        }
         self.read_pos = 0;
         self.read_len = 0;
         Result<i64, Error> r = try_lseek(self.fd, offset, (i64)((i32)origin));
@@ -637,6 +691,11 @@ impl File {
     i64 tell(*self) {
         if (self.invalid()) {
             return -1;
+        }
+        if (self.write_buf != (u8*)0 && self.write_len > 0) {
+            if (self.flush() < 0) {
+                return -1;
+            }
         }
         Result<i64, Error> r = try_lseek(self.fd, 0, SEEK_CUR);
         if (r.is_err()) {

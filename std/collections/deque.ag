@@ -209,9 +209,19 @@ impl Deque<T> {
 }
 
 impl<T> Drop for Deque<T> {
-    /// Frees the backing buffer. Does NOT call per-element destructors; see `clear`.
+    /// Frees the backing buffer after dropping contained elements.
     void drop(*self) {
         if (self.data != (T*)0) {
+            if (self.len > 0) {
+                i64 first = self.cap - self.head;
+                if (first > self.len) {
+                    first = self.len;
+                }
+                @drop_in_place(&self.data[self.head], first);
+                if (first < self.len) {
+                    @drop_in_place(self.data, self.len - first);
+                }
+            }
             free(self.data);
             self.data = (T*)0;
         }
@@ -294,10 +304,21 @@ impl<T> Deque<T> {
 }
 
 impl<T> Drop for DequeIter<T> {
-    /// Frees the backing buffer. Does NOT drop un-drained elements — iterate to
-    /// completion or `pop_*` to move out owned values before drop.
+    /// Frees the backing buffer after dropping un-drained elements.
     void drop(*self) {
         if (self.data != (T*)0) {
+            i64 rem = self.len - self.idx;
+            if (rem > 0) {
+                i64 curr_head = (self.head + self.idx) & (self.cap - 1);
+                i64 first = self.cap - curr_head;
+                if (first > rem) {
+                    first = rem;
+                }
+                @drop_in_place(&self.data[curr_head], first);
+                if (first < rem) {
+                    @drop_in_place(self.data, rem - first);
+                }
+            }
             free(self.data);
             self.data = (T*)0;
         }

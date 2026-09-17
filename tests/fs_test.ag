@@ -110,5 +110,21 @@ i32 main() {
     remove_file(inner_file);
     remove_dir(test_dir);
 
+    // Test 10: remove_dir_all
+    str recur_dir = "/tmp/__silver_fs_test_recur";
+    str recur_sub = "/tmp/__silver_fs_test_recur/subdir";
+    str recur_f1 = "/tmp/__silver_fs_test_recur/file1.txt";
+    str recur_f2 = "/tmp/__silver_fs_test_recur/subdir/file2.txt";
+    if (exists(recur_dir)) { remove_dir_all(recur_dir); }
+    create_dir(recur_dir);
+    create_dir(recur_sub);
+    write_file(recur_f1, "f1");
+    write_file(recur_f2, "f2");
+    assert_true(exists(recur_f1), "recur_f1 exists");
+    assert_true(exists(recur_f2), "recur_f2 exists");
+    bool r_all = remove_dir_all(recur_dir);
+    assert_true(r_all, "remove_dir_all succeeded");
+    assert_true(!exists(recur_dir), "recur_dir no longer exists");
+
     return done();
 }

@@ -8,6 +8,7 @@ import std.mem.alloc;
 import std.sys.result;
 import std.optional;
 import std.string;
+import std.iter;
 
 struct ByteStream {
     File file;
@@ -243,4 +244,30 @@ impl File {
         }
         return Optional<String>.some(move s);
     }
+
+    LinesIter lines(*self) {
+        LinesIter it;
+        it.file = self;
+        return it;
+    }
 }
+
+struct LinesIter {
+    File* file;
+}
+
+impl IntoIterator for LinesIter {
+    type Item = String;
+    type IntoIter = LinesIter;
+    LinesIter into_iter(LinesIter self) {
+        return self;
+    }
+}
+
+impl Iterator for LinesIter {
+    type Item = String;
+    Optional<String> next(*self) {
+        return self.file.read_line();
+    }
+}
+
