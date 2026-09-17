@@ -1957,6 +1957,126 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         })
     }
 
+    /// Comptime unit-enum fallback: the variant name (`Red`), `<unknown>`
+    /// for a discriminant with no entry. Payload-carrying enums keep their
+    /// tag-aware runtime behavior and are never dumped. Returns `Ok(false)`
+    /// when `val_expr` is not a unit enum.
+    fn emit_unit_enum_fallback(
+        &mut self,
+        writer_expr: &ast::Expression,
+        val_expr: &ast::Expression,
+        span: &crate::lexer::Span,
+        depth: u32,
+    ) -> CodegenResult<bool> {
+        if depth >= Self::MAX_FMT_DEBUG_DEPTH {
+            self.emit_write_str_lit(writer_expr, "...", span)?;
+            return Ok(true);
+        }
+        let Some(ty) = self.resolve_receiver_type(val_expr) else {
+            return Ok(false);
+        };
+        let Some(named) = Self::extract_named_type(&ty).cloned() else {
+            return Ok(false);
+        };
+        let base = named.path.last().map(|s| s.name.clone()).unwrap_or_default();
+        let monomorph = Self::monomorph_owner_name_from_named(&named);
+        // Payload enums manage their variants at runtime; only unit enums
+        // (every variant payload-free, no payload layout) dump names.
+        if self.enum_payload_layouts.contains_key(&base)
+            || self.enum_payload_layouts.contains_key(&monomorph)
+        {
+            return Ok(false);
+        }
+        if let Some(payloads) = self.enum_variant_payload_types.get(&base)
+            && payloads.values().any(|v| !v.is_empty())
+        {
+            return Ok(false);
+        }
+        let Some(backing) = self
+            .enum_backing_types
+            .get(&base)
+            .or_else(|| self.enum_backing_types.get(&monomorph))
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        let Some(variants) = self
+            .enum_variants
+            .get(&base)
+            .or_else(|| self.enum_variants.get(&monomorph))
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        if variants.is_empty() {
+            return Ok(false);
+        }
+        let base_expr = self.format_base_expr(val_expr, span)?;
+        let value = self.emit_expression_value(&base_expr)?;
+        let inkwell::values::BasicValueEnum::IntValue(disc) = value else {
+            return Ok(false);
+        };
+        let int_ty = disc.get_type();
+        let backing_llvm_ty = self.lower_basic_type(&ast::Type {
+            kind: Box::new(ast::TypeKind::Primitive(backing)),
+            span: *span,
+        })?;
+        if backing_llvm_ty != int_ty.as_basic_type_enum() {
+            return Ok(false);
+        }
+        let function = self.current_fn.ok_or_else(|| {
+            CodegenError::with_span("@print requires an active function", *span)
+        })?;
+        let end_bb = self.context.append_basic_block(function, "fmt.enum.end");
+        let default_bb = self
+            .context
+            .append_basic_block(function, "fmt.enum.unknown");
+        // Sorted for deterministic IR.
+        let mut cases: Vec<(i128, String)> =
+            variants.into_iter().map(|(name, v)| (v, name)).collect();
+        cases.sort();
+        let mut case_bbs = Vec::with_capacity(cases.len());
+        for _ in &cases {
+            case_bbs.push(self.context.append_basic_block(function, "fmt.enum.case"));
+        }
+        let width = int_ty.get_bit_width();
+        let switch_cases: Vec<(inkwell::values::IntValue<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
+            cases
+                .iter()
+                .zip(case_bbs.iter())
+                .map(|((disc_val, _), bb)| {
+                    let const_val = if width > 64 {
+                        let words = [*disc_val as u64, ((*disc_val >> 64) as i64) as u64];
+                        int_ty.const_int_arbitrary_precision(&words)
+                    } else {
+                        int_ty.const_int(*disc_val as u64, false)
+                    };
+                    (const_val, *bb)
+                })
+                .collect();
+        self.builder
+            .build_switch(disc, default_bb, &switch_cases)
+            .map_err(|e| CodegenError::with_span(format!("format enum switch failed: {e}"), *span))?;
+        for ((_, name), bb) in cases.iter().zip(case_bbs.iter()) {
+            self.builder.position_at_end(*bb);
+            self.emit_write_str_lit(writer_expr, name, span)?;
+            self.builder
+                .build_unconditional_branch(end_bb)
+                .map_err(|e| {
+                    CodegenError::with_span(format!("format enum branch failed: {e}"), *span)
+                })?;
+        }
+        self.builder.position_at_end(default_bb);
+        self.emit_write_str_lit(writer_expr, "<unknown>", span)?;
+        self.builder
+            .build_unconditional_branch(end_bb)
+            .map_err(|e| {
+                CodegenError::with_span(format!("format enum branch failed: {e}"), *span)
+            })?;
+        self.builder.position_at_end(end_bb);
+        Ok(true)
+    }
+
     /// Comptime struct-debug fallback: `Name { field: value, ... }`.
     /// Returns `Ok(false)` when `val_expr` is not a plain struct, so the
     /// caller can fall through to the "does not implement Display" error.
@@ -2004,10 +2124,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(true)
     }
 
-    /// Emit one `{}` placeholder value: `Display::fmt` via the trait guard,
-    /// then the legacy `to_str` / `to_string` conversions (kept until the
-    /// rest of the stdlib gains Display impls), then primitive writers, then
-    /// the comptime struct-debug fallback.
+    /// Emit one `{}` placeholder value: `Display::fmt` via the trait guard
+    /// (including the `String` fast path above), then primitive writers,
+    /// then the comptime struct-debug fallback.
     pub(crate) fn emit_format_value(
         &mut self,
         writer_expr: &ast::Expression,
@@ -2053,56 +2172,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             self.emit_display_fmt_call(writer_expr, val_expr, span)?;
             return Ok(());
         }
-        let owners = self.receiver_owner_candidates(val_expr);
-        if owners.iter().any(|o| self.type_has_method(o, "to_str")) {
-            let to_str_expr = ast::Expression {
-                kind: Box::new(ast::ExpressionKind::MethodCall {
-                    receiver: Box::new(val_expr.clone()),
-                    method: ast::Identifier {
-                        name: "to_str".to_string(),
-                        span: val_expr.span,
-                    },
-                    arguments: Vec::new(),
-                }),
-                span: val_expr.span,
-            };
-            let method = ast::Identifier {
-                name: "write_str".to_string(),
-                span: *span,
-            };
-            self.emit_method_call_expression(writer_expr, &method, &[to_str_expr], true, span)?;
-            return Ok(());
-        }
-        if owners.iter().any(|o| self.type_has_method(o, "to_string")) {
-            let to_string_expr = ast::Expression {
-                kind: Box::new(ast::ExpressionKind::MethodCall {
-                    receiver: Box::new(val_expr.clone()),
-                    method: ast::Identifier {
-                        name: "to_string".to_string(),
-                        span: val_expr.span,
-                    },
-                    arguments: Vec::new(),
-                }),
-                span: val_expr.span,
-            };
-            let to_str_expr = ast::Expression {
-                kind: Box::new(ast::ExpressionKind::MethodCall {
-                    receiver: Box::new(to_string_expr),
-                    method: ast::Identifier {
-                        name: "to_str".to_string(),
-                        span: val_expr.span,
-                    },
-                    arguments: Vec::new(),
-                }),
-                span: val_expr.span,
-            };
-            let method = ast::Identifier {
-                name: "write_str".to_string(),
-                span: *span,
-            };
-            self.emit_method_call_expression(writer_expr, &method, &[to_str_expr], true, span)?;
-            return Ok(());
-        }
         match self.value_write_method_name(val_expr) {
             Ok(method_name) => {
                 let method = ast::Identifier {
@@ -2120,6 +2189,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             Err(write_err) => {
                 if self.emit_struct_debug_fallback(writer_expr, val_expr, span, depth)? {
+                    return Ok(());
+                }
+                if self.emit_unit_enum_fallback(writer_expr, val_expr, span, depth)? {
                     return Ok(());
                 }
                 Err(CodegenError::with_span(write_err, val_expr.span))

@@ -1,5 +1,6 @@
 // Growable contiguous array. Move transfers owned elements; Copy is bitwise.
 // Drop frees the buffer only, so drain owned elements before discarding Vec.
+import std.display;
 import std.slice;
 import std.mem.alloc;
 import std.mem.drop;
@@ -336,6 +337,25 @@ impl<T> Vec<T> {
         r.len = self.len;
         r.idx = 0;
         return r;
+    }
+}
+
+
+/// Debug-style list: `[1, 2, 3]`, `[]` when empty. Elements are read in
+/// place through the backing buffer (`self.data[i]`, as in `ToJson`), so
+/// Drop-typed elements stay owned by the Vec while printing.
+impl<T> Display for Vec<T> {
+    void fmt(*self, BufWriter* out) {
+        out.write_str("[");
+        i64 i = 0;
+        while (i < self.len) {
+            if (i > 0) {
+                out.write_str(", ");
+            }
+            @fprint(out, "{}", self.data[i]);
+            i = i + 1;
+        }
+        out.write_str("]");
     }
 }
 

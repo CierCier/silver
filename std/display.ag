@@ -51,6 +51,11 @@ impl Display for f32 {
 impl Display for bool {
     void fmt(*self, BufWriter* out) { out.write_bool(*self); }
 }
+// NOTE: `char` truncates to a single byte, matching the primitive writer
+// path (`write_u8`) this replaces.
+impl Display for char {
+    void fmt(*self, BufWriter* out) { out.write_u8((u8)*self); }
+}
 impl Display for str {
     void fmt(*self, BufWriter* out) { out.write_str(*self); }
 }

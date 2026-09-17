@@ -4,6 +4,8 @@
 import std.atomic;
 import std.display;
 import std.error;
+import std.mem.vec;
+import std.net.http_status;
 import std.process;
 import std.string;
 import std.test;
@@ -14,6 +16,12 @@ import std.uuid;
 struct Point { i64 x; i64 y; }
 
 struct Line { Point a; Point b; str tag; }
+
+enum Color { Red; Green; Blue; }
+
+enum Signed { Neg = -1; Zero = 0; }
+
+struct Pixel { Color color; i64 brightness; }
 
 struct Label { str text; }
 
@@ -180,6 +188,47 @@ i32 main() {
 
         String mu = @format("{}", (u128)456);
         assert_true(mu.equals("456"), "u128 Display");
+    }
+
+    // 9. Unit enums print variant names; payload enums still need Display.
+    {
+        Color c = Color.Green;
+        String s = @format("{}", c);
+        assert_true(s.equals("Green"), "local unit enum");
+
+        Signed n = Signed.Neg;
+        String sn = @format("{}", n);
+        assert_true(sn.equals("Neg"), "negative discriminant enum");
+
+        HttpStatus st = HttpStatus.Ok;
+        String mst = @format("{}", st);
+        assert_true(mst.equals("Ok"), "HttpStatus enum");
+
+        Pixel p = { .color = Color.Blue, .brightness = 9 };
+        String mp = @format("{}", p);
+        assert_true(mp.equals("Pixel { color: Blue, brightness: 9 }"), "enum nested in struct");
+    }
+
+    // 10. Vec prints Debug-style; elements stay owned by the Vec.
+    {
+        Vec<i64> v = Vec<i64>.new();
+        v.push(1);
+        v.push(2);
+        v.push(3);
+        String s = @format("{}", v);
+        assert_true(s.equals("[1, 2, 3]"), "Vec<i64>");
+
+        Vec<i64> e = Vec<i64>.new();
+        String se = @format("{}", e);
+        assert_true(se.equals("[]"), "empty Vec");
+
+        Vec<String> ws = Vec<String>.new();
+        ws.push(String.from_str("a"));
+        ws.push(String.from_str("bb"));
+        String sw = @format("{}", ws);
+        assert_true(sw.equals("[a, bb]"), "Vec<String>");
+        assert_eq_i64(2, ws.len(), "Vec intact after print");
+        assert_true(ws.data[0].equals("a"), "element intact after print");
     }
 
     return done();

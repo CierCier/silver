@@ -652,6 +652,11 @@ u64 obj_hash = @hash(my_object);
 > **Note**: Only `@name(...)` syntax works.  `name!(...)` syntax is **not**
 > parsed — the `!` token is only used as logical NOT.
 
+`{}` placeholders dispatch through the `Display` trait (`void fmt(*self,
+BufWriter* out)`). Types without a `Display` impl fall back to a comptime
+debug expansion: structs print as `Name { field: value, ... }` and unit
+enums print their variant name.
+
 ---
 
 ## 6. Operator Precedence & Associativity

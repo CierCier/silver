@@ -32,5 +32,12 @@ i32 main() {
         assert_true(s.equals("session=abc123"), "Cookie Display");
     }
 
+    // Unit enums from std print variant names.
+    {
+        SameSite ss = SameSite.Strict;
+        String s = @format("{}", ss);
+        assert_true(s.equals("Strict"), "SameSite enum");
+    }
+
     return done();
 }
