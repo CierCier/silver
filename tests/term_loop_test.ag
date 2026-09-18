@@ -1,0 +1,71 @@
+// Tests for std.term.loop — pump transfers over pipe pairs and a live
+// epoll session around /bin/echo.
+import std.test;
+import std.term.loop;
+import std.sys.result;
+import std.sys.syscall;
+import std.mem.vec;
+import std.string;
+import std.time;
+
+const i64 SYS_PIPE2 = 293;
+const i64 PIPE_FLAGS = 526336; // O_NONBLOCK | O_CLOEXEC
+
+// pipe2(fds, O_NONBLOCK|O_CLOEXEC). Returns 0 or a negative errno.
+i64 make_pipe(i32* fds) {
+    return syscall2(SYS_PIPE2, (i64)fds, PIPE_FLAGS);
+}
+
+i32 main() {
+    test_start("pump moves bytes between pipes");
+    {
+        i32 a[2];
+        i32 b[2];
+        assert_eq_i64(0, make_pipe(&a[0]), "pipe A");
+        assert_eq_i64(0, make_pipe(&b[0]), "pipe B");
+        // Empty source pumps nothing.
+        assert_eq_i64(0, pty_pump_once(a[0], b[1]), "empty pump is 0");
+        u8* msg = (u8*)"hello pump";
+        Result<i64, Error> w = try_write(a[1], msg, 10);
+        assert_true(w.is_ok() && w.value() == 10, "pipe write");
+        assert_eq_i64(10, pty_pump_once(a[0], b[1]), "pump moves 10");
+        u8 buf[16];
+        Result<i64, Error> r = try_read(b[0], &buf[0], 16);
+        assert_true(r.is_ok() && r.value() == 10, "pipe read back");
+        for (i64 i = 0; i < 10; i = i + 1) {
+            assert_eq_i32((i32)msg[i], (i32)buf[i], "byte round-trips");
+        }
+        try_close(a[0]);
+        try_close(a[1]);
+        try_close(b[0]);
+        try_close(b[1]);
+    }
+
+    test_start("session relays echo to exit");
+    {
+        Vec<String> args = Vec<String>.new();
+        args.push(String.from_str("hi"));
+        Result<PtySession, Error> r = PtySession.open("/bin/echo", &args, 24, 80);
+        assert_true(r.is_ok(), "session open");
+        PtySession s = r.unwrap();
+        // Spaced pumps: child-exit visibility trails slave-close EOF, and
+        // each pump already waits up to 100ms in epoll.
+        bool alive = true;
+        for (i64 i = 0; i < 30 && alive; i = i + 1) {
+            alive = s.pump(100);
+            if (alive) {
+                sleep_ms(5);
+            }
+        }
+        assert_true(!alive, "echo session ends");
+        PtyStatus st = s.pty.status();
+        assert_true(st.success(), "echo exits 0");
+        while (args.len() > 0) {
+            String a = args.pop();
+            a.drop();
+        }
+        args.drop();
+    }
+
+    return done();
+}

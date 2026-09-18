@@ -5,6 +5,7 @@ import std.term.size;
 import std.term.pty;
 import std.string;
 import std.mem.vec;
+import std.time;
 
 // Read until EOF/EIO with a bounded spin. Returns everything received.
 String pty_read_all(Pty* p) {
@@ -21,12 +22,15 @@ String pty_read_all(Pty* p) {
     return out;
 }
 
-// Spin poll_exit with a bound. True when the child reaped in time.
+// Spin poll_exit with sleeps: the slave-close EOF that ends a read loop
+// precedes zombie visibility by a scheduling window, so back-to-back
+// WNOHANG polls can all miss it. Spaced retries observe the exit.
 bool wait_child(Pty* p) {
-    for (i64 i = 0; i < 200000; i = i + 1) {
+    for (i64 i = 0; i < 500; i = i + 1) {
         if (p.poll_exit()) {
             return true;
         }
+        sleep_ms(2);
     }
     return false;
 }

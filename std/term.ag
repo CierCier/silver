@@ -1,8 +1,10 @@
 // std/term.ag — terminal support: ANSI emitters, key-input parsing,
-// and the raw-mode guard.
+// window size, raw mode, and pseudoterminal spawning.
 //
-// Higher layers (PTY spawn, resize handling, screen renderer) build on
-// these primitives.
+// Higher layers (screen renderer, line editor) build on these primitives.
 import std.term.ansi;
 import std.term.keys;
+import std.term.size;
 import std.term.raw;
+import std.term.pty;
+import std.term.loop;

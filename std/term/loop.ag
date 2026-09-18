@@ -1,0 +1,198 @@
+// std/term/loop.ag — epoll-driven pty session relay.
+//
+// PtySession wires a spawned pty into the calling terminal: stdin flows to
+// the child, child output flows to stdout, the pty follows our window size,
+// and everything is nonblocking under one epoll instance. pty_pump_once is
+// the testable single-transfer primitive underneath.
+
+import std.sys.epoll;
+import std.sys.result;
+import std.error;
+import std.result;
+import std.term.pty;
+import std.term.size;
+import std.term.raw;
+
+// EAGAIN / EINTR come from std.sys.errno (transitively imported).
+
+/// Move available bytes from src to dst (both nonblocking): up to one 4 KiB
+/// transfer. Returns bytes moved, 0 when src has nothing (or EOF — the
+/// caller decides what EOF means), or a negative errno on hard error.
+/// EINTR retries inside; EAGAIN surfaces as 0 (src) or a partial count.
+i64 pty_pump_once(i32 src, i32 dst) {
+    u8 buf[4096];
+    i64 n = 0;
+    while (true) {
+        Result<i64, Error> r = try_read(src, &buf[0], 4096);
+        if (r.is_err()) {
+            if (r.errno() == EINTR) {
+                continue;
+            }
+            if (r.errno() == EAGAIN) {
+                return 0;
+            }
+            return -r.errno();
+        }
+        n = r.value();
+        break;
+    }
+    if (n <= 0) {
+        return 0;
+    }
+    i64 off = 0;
+    while (off < n) {
+        Result<i64, Error> w = try_write(dst, &buf[off], n - off);
+        if (w.is_err()) {
+            if (w.errno() == EINTR) {
+                continue;
+            }
+            if (w.errno() == EAGAIN && off > 0) {
+                break;
+            }
+            return -w.errno();
+        }
+        if (w.value() <= 0) {
+            break;
+        }
+        off = off + w.value();
+    }
+    return off;
+}
+
+#[cfg(os.linux)]
+struct PtySession {
+    Pty pty;
+    Epoll ep;
+    i64 stdin_flags; // saved O_NONBLOCK state of fd 0, restored on drop
+    TermSize last_size;
+    bool size_known;
+    bool stdin_eof;
+    // False when the kernel refuses to watch stdin (EPERM for /dev/null
+    // and regular files): the session still relays output and reaps.
+    bool watch_stdin;
+}
+
+#[cfg(os.linux)]
+impl PtySession {
+    /// Spawn `prog` and watch the master plus our stdin. Stdin goes
+    /// nonblocking (restored on drop); attach fails only when fds do.
+    Result<PtySession, Error> open(str prog, Vec<String>* args, i64 rows, i64 cols) {
+        Result<Pty, Error> pr = Pty.spawn(prog, args, rows, cols);
+        if (pr.is_err()) {
+            return Err(pr.unwrap_err());
+        }
+        PtySession s;
+        s.pty = pr.unwrap();
+        // -1 until stdin is actually reflagged: Drop must not restore
+        // flags on paths that never changed them (0 is a valid flag set).
+        s.stdin_flags = -1;
+        s.size_known = false;
+        s.stdin_eof = false;
+        s.last_size = TermSize_new(0, 0);
+        s.watch_stdin = false;
+        if (!s.pty.set_nonblock()) {
+            return Err(5, "pty nonblock failed");
+        }
+        Result<i64, Error> f = try_fcntl(0, F_GETFL, 0);
+        if (f.is_err()) {
+            return Err(f.errno(), "stdin flags failed");
+        }
+        s.stdin_flags = f.value();
+        if (try_fcntl(0, F_SETFL, s.stdin_flags | O_NONBLOCK).is_err()) {
+            return Err(5, "stdin nonblock failed");
+        }
+        Result<Epoll, Error> er = Epoll.new();
+        if (er.is_err()) {
+            return Err(er.unwrap_err());
+        }
+        s.ep = er.unwrap();
+        if (!s.ep.add(s.pty.master, EPOLLIN | EPOLLRDHUP | EPOLLHUP, 1)) {
+            return Err(5, "epoll add master failed");
+        }
+        // Best effort: /dev/null and regular files cannot be epolled.
+        s.watch_stdin = s.ep.add(0, EPOLLIN | EPOLLRDHUP | EPOLLHUP, 0);
+        Result<TermSize, Error> sz = term_get_size(0);
+        if (sz.is_ok()) {
+            s.last_size = sz.unwrap();
+            s.size_known = true;
+        }
+        return Ok(move s);
+    }
+
+    /// One relay step: move ready bytes both ways, propagate resizes,
+    /// and report whether the child is still alive.
+    bool pump(*self, i64 timeout_ms) {
+        EpollEvent evs[8];
+        i64 n = self.ep.poll(&evs[0], 8, timeout_ms);
+        if (n < 0) {
+            n = 0; // EINTR and friends: treat as no events this step
+        }
+        i64 i = 0;
+        while (i < n) {
+            u64 tag = evs[i].data;
+            u32 evts = evs[i].events;
+            if (tag == (u64)1) {
+                if ((evts & EPOLLIN) != (u32)0) {
+                    pty_pump_once(self.pty.master, 1);
+                }
+            } else if (self.watch_stdin) {
+                if (!self.stdin_eof && (evts & EPOLLIN) != (u32)0) {
+                    i64 moved = pty_pump_once(0, self.pty.master);
+                    if (moved == 0) {
+                        self.stdin_eof = true;
+                    }
+                }
+                if ((evts & (EPOLLHUP | EPOLLERR)) != (u32)0) {
+                    self.stdin_eof = true;
+                }
+            }
+            i = i + 1;
+        }
+        self.poll_resize();
+        return !self.pty.poll_exit();
+    }
+
+    /// Re-query our window size; push changes to the child.
+    void poll_resize(*self) {
+        if (!self.size_known) {
+            return;
+        }
+        Result<TermSize, Error> cur = term_get_size(0);
+        if (cur.is_err()) {
+            return;
+        }
+        TermSize t = cur.unwrap();
+        if (t.rows != self.last_size.rows || t.cols != self.last_size.cols) {
+            self.last_size = t;
+            self.pty.set_size(t.rows, t.cols);
+        }
+    }
+
+    /// Run until the child exits: raw-mode stdin, relay, restore on return.
+    /// Returns the final child status (unreaped when stdin wasn't a tty).
+    PtyStatus run(*self) {
+        Result<RawMode, Error> g = RawMode.enable(0);
+        if (g.is_err()) {
+            return self.pty.status();
+        }
+        RawMode _guard = g.unwrap();
+        while (self.pump(100)) {
+        }
+        // Final drain: goodbye output written just before exit.
+        i64 i = 0;
+        while (i < 32) {
+            pty_pump_once(self.pty.master, 1);
+            i = i + 1;
+        }
+        return self.pty.status();
+    }
+}
+
+#[cfg(os.linux)]
+impl Drop for PtySession {
+    void drop(*self) {
+        if (self.stdin_flags >= 0) {
+            try_fcntl(0, F_SETFL, self.stdin_flags);
+        }
+    }
+}
