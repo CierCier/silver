@@ -245,10 +245,24 @@ impl String {
             u8 first = n[0];
             return mem_find_byte(&self.data[0], first, self.len) >= 0;
         }
-        for (i64 i = 0; i <= self.len - needle_len; i = i + 1) {
+        // Multi-byte: jump between occurrences of the first byte with the
+        // SIMD scan and memcmp only at those candidates.
+        u8* nbytes = (u8*)needle;
+        u8 first = nbytes[0];
+        i64 i = 0;
+        while (i <= self.len - needle_len) {
+            i64 rel = mem_find_byte(&self.data[i], first, self.len - i);
+            if (rel < 0) {
+                break;
+            }
+            i = i + rel;
+            if (i > self.len - needle_len) {
+                break;
+            }
             if (memcmp((const void*)&self.data[i], (const void*)needle, needle_len) == 0) {
                 return true;
             }
+            i = i + 1;
         }
         return false;
     }
@@ -270,10 +284,23 @@ impl String {
             u8 first = n[0];
             return mem_find_byte(&self.data[0], first, self.len);
         }
-        for (i64 i = 0; i <= self.len - needle_len; i = i + 1) {
+        // Multi-byte: SIMD-scan for the first byte, memcmp at candidates only.
+        u8* nbytes = (u8*)needle;
+        u8 first = nbytes[0];
+        i64 i = 0;
+        while (i <= self.len - needle_len) {
+            i64 rel = mem_find_byte(&self.data[i], first, self.len - i);
+            if (rel < 0) {
+                break;
+            }
+            i = i + rel;
+            if (i > self.len - needle_len) {
+                break;
+            }
             if (memcmp((const void*)&self.data[i], (const void*)needle, needle_len) == 0) {
                 return i;
             }
+            i = i + 1;
         }
         return -1;
     }
@@ -294,12 +321,20 @@ impl String {
             u8* n = (u8*)needle;
             return mem_find_byte_back(&self.data[0], n[0], self.len);
         }
+        // Multi-byte: walk match-start candidates backwards via the SIMD
+        // reverse scan over [0, i], memcmping only at first-byte hits.
+        u8* nbytes = (u8*)needle;
+        u8 first = nbytes[0];
         i64 i = self.len - needle_len;
         while (i >= 0) {
-            if (memcmp((const void*)&self.data[i], (const void*)needle, needle_len) == 0) {
-                return i;
+            i64 rel = mem_find_byte_back(&self.data[0], first, i + 1);
+            if (rel < 0) {
+                break;
             }
-            i = i - 1;
+            if (memcmp((const void*)&self.data[rel], (const void*)needle, needle_len) == 0) {
+                return rel;
+            }
+            i = rel - 1;
         }
         return -1;
     }
@@ -317,9 +352,19 @@ impl String {
             u8* n = (u8*)needle;
             return mem_count_byte(&self.data[0], n[0], self.len);
         }
+        u8* nbytes = (u8*)needle;
+        u8 first = nbytes[0];
         i64 c = 0;
         i64 i = 0;
         while (i <= self.len - needle_len) {
+            i64 rel = mem_find_byte(&self.data[i], first, self.len - i);
+            if (rel < 0) {
+                break;
+            }
+            i = i + rel;
+            if (i > self.len - needle_len) {
+                break;
+            }
             if (memcmp((const void*)&self.data[i], (const void*)needle, needle_len) == 0) {
                 c = c + 1;
                 i = i + needle_len;
@@ -442,10 +487,21 @@ impl String {
         if (replacement != (str)0) {
             repl_len = strlen(replacement);
         }
-        // First pass: count non-overlapping occurrences.
+        // First pass: count non-overlapping occurrences, skipping via the
+        // SIMD first-byte scan instead of memcmping at every position.
+        u8* nbytes = (u8*)needle;
+        u8 first = nbytes[0];
         i64 count = 0;
         i64 i = 0;
         while (i <= self.len - needle_len) {
+            i64 rel = mem_find_byte(&self.data[i], first, self.len - i);
+            if (rel < 0) {
+                break;
+            }
+            i = i + rel;
+            if (i > self.len - needle_len) {
+                break;
+            }
             if (memcmp((const void*)&self.data[i], (const void*)needle, needle_len) == 0) {
                 count = count + 1;
                 i = i + needle_len;
@@ -463,6 +519,23 @@ impl String {
         i64 src = 0;
         i64 dst = 0;
         while (src < self.len) {
+            // No match can start where needle[0] is absent: bulk-copy the
+            // match-free run to the next first-byte candidate (or the end).
+            if (src <= self.len - needle_len) {
+                i64 rel = mem_find_byte(&self.data[src], first, self.len - src);
+                if (rel < 0) {
+                    memcpy((void*)&result.data[dst], (const void*)&self.data[src], self.len - src);
+                    dst = dst + (self.len - src);
+                    src = self.len;
+                    break;
+                }
+                if (rel > 0) {
+                    memcpy((void*)&result.data[dst], (const void*)&self.data[src], rel);
+                    dst = dst + rel;
+                    src = src + rel;
+                    continue;
+                }
+            }
             if (src <= self.len - needle_len
                 && memcmp((const void*)&self.data[src], (const void*)needle, needle_len) == 0) {
                 if (repl_len > 0) {
