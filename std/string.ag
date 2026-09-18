@@ -111,10 +111,11 @@ impl String {
             return;
         }
         if (self.len + text_len + 1 > self.capacity) {
+            // Geometric growth (same as push_bytes): doubling keeps repeated
+            // appends amortized instead of reallocating per call.
             i64 new_cap = self.capacity * 2;
-            if (new_cap < self.len + text_len + 16) {
-                new_cap = self.len + text_len + 16;
-            }
+            if (new_cap < 16) { new_cap = 16; }
+            while (new_cap < self.len + text_len + 1) { new_cap = new_cap * 2; }
             self.data = realloc<u8>(self.data, new_cap);
             self.capacity = new_cap;
         }
@@ -125,13 +126,15 @@ impl String {
 
     // Clone borrows self by shared reference, creates a deep copy, and returns it.
     // The caller retains ownership of the original string.
+    // Sizes the copy to the content (len + NUL), not the source capacity.
     String clone(&self) {
-        String s = String.with_capacity(self.capacity);
-        s.len = self.len;
-        if (self.len > 0) {
-            memcpy((void*)s.data, (const void*)self.data, self.len);
-            s.data[s.len] = (u8)0;
+        if (self.len == 0) {
+            return String.new();
         }
+        String s = String.with_capacity(self.len + 1);
+        s.len = self.len;
+        memcpy((void*)s.data, (const void*)self.data, self.len);
+        s.data[s.len] = (u8)0;
         return s;
     }
 
@@ -1008,12 +1011,17 @@ impl Iterator for SplitIter {
             self.pos = end + self.delim_len;
         }
         i64 tok_len = end - start;
-        if (self.token_buf == (u8*)0 || self.token_cap <= tok_len) {
-            if (self.token_buf != (u8*)0) {
-                free(self.token_buf);
-            }
+        // Geometric growth: the old path freed and reallocated per token
+        // once tokens outgrew the buffer.
+        if (self.token_buf == (u8*)0) {
             self.token_cap = tok_len + 64;
+            if (self.token_cap < 64) { self.token_cap = 64; }
             self.token_buf = alloc<u8>(self.token_cap);
+        } else if (self.token_cap <= tok_len) {
+            i64 new_cap = self.token_cap * 2;
+            while (new_cap <= tok_len) { new_cap = new_cap * 2; }
+            self.token_buf = realloc<u8>(self.token_buf, new_cap);
+            self.token_cap = new_cap;
         }
         if (tok_len > 0) {
             memcpy((void*)self.token_buf, (const void*)&self.data[start], tok_len);
