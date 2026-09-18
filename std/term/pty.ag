@@ -1,0 +1,292 @@
+// std/term/pty.ag — pseudoterminal spawning and I/O.
+//
+// Pty.spawn runs a child process on a fresh pty: the parent keeps the master
+// fd for read/write/resize/poll, the child gets the slave as its controlling
+// terminal with stdio attached. Linux-only for now.
+//
+// Child setup mirrors std/process.ag (argv/env construction), plus the pty
+// handshake: unlock (TIOCSPTLCK), number (TIOCGPTN), setsid, attach
+// (TIOCSCTTY), dup2 onto 0/1/2. The parent closes the slave; the child
+// closes the master — otherwise EOF never arrives.
+
+import std.sys.raw.fs;
+import std.sys.raw.misc;
+import std.sys.raw.process;
+import std.sys.result;
+import std.sys.entry;
+import std.sys.os;
+import std.error;
+import std.result;
+import std.fmt;
+import std.mem.alloc;
+import std.mem.vec;
+import std.string;
+import std.term.size;
+
+const i64 TIOCGPTN = 0x80045430;
+const i64 TIOCSPTLCK = 0x40045431;
+const i64 TIOCSCTTY = 0x540E;
+const i64 O_NOCTTY = 256; // 0400: never take a controlling terminal here
+const i64 WNOHANG = 1;
+
+/// Exit state of a pty child, decoded from waitpid status like ExitStatus.
+struct PtyStatus {
+    bool exited;
+    i32 code;
+    i32 signal;
+}
+
+impl PtyStatus {
+    /// True when the child exited normally (vs signaled or still running).
+    bool success(*self) {
+        return self.exited && self.code == 0;
+    }
+
+    bool reaped(*self) {
+        return self.exited;
+    }
+
+    i32 exit_code(*self) {
+        return self.code;
+    }
+
+    i32 termsig(*self) {
+        return self.signal;
+    }
+}
+
+#[cfg(os.linux)]
+struct Pty {
+    i32 master;
+    i64 child_pid; // <= 0 when no live child
+    bool exited;
+    i32 exit_code;
+    i32 exit_sig;
+}
+
+#[cfg(os.linux)]
+impl Pty {
+    /// Open a bare master fd: unlock the pty, no slave, no child.
+    /// Useful for winsize tests and manual slave setup.
+    Result<Pty, Error> open() {
+        Result<i64, Error> r = try_open("/dev/ptmx", O_RDWR | O_NOCTTY, 0);
+        if (r.is_err()) {
+            return Err(r.errno(), "open ptmx failed");
+        }
+        i32 master = (i32)r.value();
+        i32 lck = 0;
+        i64 u = sys_ioctl((i64)master, TIOCSPTLCK, (i64)&lck);
+        if (u != 0) {
+            try_close(master);
+            return Err(-u, "unlock ptmx failed");
+        }
+        Pty p;
+        p.master = master;
+        p.child_pid = 0;
+        p.exited = false;
+        p.exit_code = 0;
+        p.exit_sig = 0;
+        return Ok(move p);
+    }
+
+    /// Spawn `prog` with `args` on a fresh pty sized rows x cols.
+    /// Rows/cols of 0 skip the initial size ioctl.
+    Result<Pty, Error> spawn(str prog, Vec<String>* args, i64 rows, i64 cols) {
+        Result<Pty, Error> q = Pty.open();
+        if (q.is_err()) {
+            return move q;
+        }
+        Pty p = q.unwrap();
+        i32 master = p.master;
+
+        // Slave path: /dev/pts/N from the pty number.
+        i32 num = 0;
+        i64 g = sys_ioctl((i64)master, TIOCGPTN, (i64)&num);
+        if (g != 0) {
+            p.drop();
+            return Err(-g, "pty number failed");
+        }
+        u8 nbuf[20];
+        i64 nlen = itoa((i64)num, &nbuf[0]);
+        String path = String.from_str("/dev/pts/");
+        path.push_bytes(&nbuf[0], nlen);
+        Result<i64, Error> s = try_open(path.to_str(), O_RDWR | O_NOCTTY, 0);
+        path.drop();
+        if (s.is_err()) {
+            p.drop();
+            return Err(s.errno(), "open pty slave failed");
+        }
+        i32 slave = (i32)s.value();
+
+        if (rows > 0 && cols > 0) {
+            Result<i64, Error> sz = term_set_size(master, rows, cols);
+            if (sz.is_err()) {
+                sys_close((i64)slave);
+                p.drop();
+                return Err(sz.errno(), "pty size failed");
+            }
+        }
+
+        i64 pid = sys_fork();
+        if (pid < 0) {
+            sys_close((i64)slave);
+            p.drop();
+            return Err(-pid, "fork failed");
+        }
+        if (pid == 0) {
+            // Child: new session, attach the slave, wire stdio, exec.
+            if (sys_setsid() < 0) {
+                sys_exit(127);
+            }
+            if (sys_ioctl((i64)slave, TIOCSCTTY, 0) != 0) {
+                sys_exit(127);
+            }
+            if (sys_dup2((i64)slave, 0) < 0) {
+                sys_exit(127);
+            }
+            if (sys_dup2((i64)slave, 1) < 0) {
+                sys_exit(127);
+            }
+            if (sys_dup2((i64)slave, 2) < 0) {
+                sys_exit(127);
+            }
+            if (slave > 2) {
+                sys_close((i64)slave);
+            }
+            if (master > 2) {
+                sys_close((i64)master);
+            }
+            i64 argc = args.len() + 2;
+            str* argv = (str*)alloc<str>(argc);
+            argv[0] = prog;
+            for (i64 i = 0; i < args.len(); i = i + 1) {
+                String* a = args.get_ptr(i);
+                argv[i + 1] = a.to_str();
+            }
+            argv[argc - 1] = (str)0;
+            str* envp = (str*)silver_envp();
+            sys_execve((i64)prog, (i64)&argv[0], (i64)envp);
+            sys_exit(127);
+        }
+        // Parent: the slave belongs to the child now.
+        sys_close((i64)slave);
+        p.child_pid = pid;
+        return Ok(move p);
+    }
+
+    /// Read up to n bytes from the master. Returns the count, 0 on EOF,
+    /// or a negative errno (EAGAIN when nonblocking and empty).
+    i64 read(*self, u8* buf, i64 n) {
+        if (self.master < 0) {
+            return -9; // EBADF
+        }
+        Result<i64, Error> r = try_read(self.master, buf, n);
+        if (r.is_err()) {
+            return -r.errno();
+        }
+        return r.value();
+    }
+
+    /// Single write to the master. May be short; returns bytes or -errno.
+    i64 write(*self, u8* buf, i64 n) {
+        if (self.master < 0) {
+            return -9; // EBADF
+        }
+        Result<i64, Error> r = try_write(self.master, buf, n);
+        if (r.is_err()) {
+            return -r.errno();
+        }
+        return r.value();
+    }
+
+    /// Resize the pty window.
+    bool set_size(*self, i64 rows, i64 cols) {
+        if (self.master < 0) {
+            return false;
+        }
+        return term_set_size(self.master, rows, cols).is_ok();
+    }
+
+    /// Current pty window size.
+    Result<TermSize, Error> get_size(*self) {
+        if (self.master < 0) {
+            return Err(9, "pty closed");
+        }
+        return term_get_size(self.master);
+    }
+
+    /// Nonblocking poll for child exit (waitpid WNOHANG). True when no live
+    /// child remains; exit details stay available through status().
+    bool poll_exit(*self) {
+        if (self.child_pid <= 0) {
+            return true;
+        }
+        i32 status = 0;
+        i64 r = sys_wait4(self.child_pid, (i64)&status, WNOHANG, 0);
+        if (r == 0) {
+            return false;
+        }
+        if (r < 0) {
+            // ECHILD or similar: nobody left to wait for.
+            self.child_pid = 0;
+            self.exited = true;
+            self.exit_code = -1;
+            self.exit_sig = 0;
+            return true;
+        }
+        i32 term_sig = status & 0x7F;
+        if (term_sig == 0) {
+            self.exit_code = (status >> 8) & 0xFF;
+        } else {
+            self.exit_code = -1;
+            self.exit_sig = term_sig;
+        }
+        self.exited = true;
+        self.child_pid = 0;
+        return true;
+    }
+
+    /// Last exit state. Valid after poll_exit reports true.
+    PtyStatus status(*self) {
+        PtyStatus st;
+        st.exited = self.exited;
+        st.code = self.exit_code;
+        st.signal = self.exit_sig;
+        return st;
+    }
+
+    /// Send SIGKILL to the child, if any.
+    void kill(*self) {
+        if (self.child_pid > 0) {
+            sys_kill(self.child_pid, 9);
+        }
+    }
+
+    /// Switch the master fd to nonblocking I/O.
+    bool set_nonblock(*self) {
+        if (self.master < 0) {
+            return false;
+        }
+        Result<i64, Error> f = try_fcntl(self.master, F_GETFL, 0);
+        if (f.is_err()) {
+            return false;
+        }
+        return try_fcntl(self.master, F_SETFL, f.value() | O_NONBLOCK).is_ok();
+    }
+
+    void close(*self) {
+        if (self.master >= 0) {
+            try_close(self.master);
+            self.master = -1;
+        }
+    }
+}
+
+#[cfg(os.linux)]
+impl Drop for Pty {
+    /// Drop closes the master (the kernel SIGHUPs the foreground child).
+    /// It does not kill or wait: call kill/poll_exit explicitly.
+    void drop(*self) {
+        self.close();
+    }
+}

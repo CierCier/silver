@@ -1,0 +1,59 @@
+// std/term/size.ag — terminal window-size query and control.
+//
+// Thin wrappers over TIOCGWINSZ / TIOCSWINSZ. Linux-only for now.
+
+import std.sys.raw.fs;
+import std.error;
+import std.result;
+
+const i64 TIOCGWINSZ = 0x5413;
+const i64 TIOCSWINSZ = 0x5414;
+
+/// Linux `struct winsize`: rows, cols, and pixel sizes, all u16 (8 bytes).
+struct Winsize {
+    u16 rows;
+    u16 cols;
+    u16 xp;
+    u16 yp;
+}
+
+/// Row/column terminal size in host integers.
+struct TermSize {
+    i64 rows;
+    i64 cols;
+}
+
+TermSize TermSize_new(i64 rows, i64 cols) {
+    TermSize s;
+    s.rows = rows;
+    s.cols = cols;
+    return s;
+}
+
+#[cfg(os.linux)]
+Result<TermSize, Error> term_get_size(i32 fd) {
+    Winsize w;
+    w.rows = (u16)0;
+    w.cols = (u16)0;
+    w.xp = (u16)0;
+    w.yp = (u16)0;
+    i64 r = sys_ioctl((i64)fd, TIOCGWINSZ, (i64)&w);
+    if (r != 0) {
+        return Err(-r, "TIOCGWINSZ failed");
+    }
+    return Ok(TermSize_new((i64)w.rows, (i64)w.cols));
+}
+
+#[cfg(os.linux)]
+Result<i64, Error> term_set_size(i32 fd, i64 rows, i64 cols) {
+    Winsize w;
+    w.rows = (u16)rows;
+    w.cols = (u16)cols;
+    w.xp = (u16)0;
+    w.yp = (u16)0;
+    i64 r = sys_ioctl((i64)fd, TIOCSWINSZ, (i64)&w);
+    if (r != 0) {
+        return Err(-r, "TIOCSWINSZ failed");
+    }
+    return Ok((i64)0);
+}

@@ -1,0 +1,128 @@
+// Tests for std.term.size + std.term.pty — winsize round-trip and child
+// sessions on a real pty (/bin/echo, /bin/cat).
+import std.test;
+import std.term.size;
+import std.term.pty;
+import std.string;
+import std.mem.vec;
+
+// Read until EOF/EIO with a bounded spin. Returns everything received.
+String pty_read_all(Pty* p) {
+    String out = String.new();
+    u8 buf[512];
+    for (i64 i = 0; i < 200000; i = i + 1) {
+        i64 n = p.read(&buf[0], 512);
+        if (n > 0) {
+            out.push_bytes(&buf[0], n);
+        } else {
+            break; // 0 = EOF, negative = EIO/EAGAIN: child is done talking
+        }
+    }
+    return out;
+}
+
+// Spin poll_exit with a bound. True when the child reaped in time.
+bool wait_child(Pty* p) {
+    for (i64 i = 0; i < 200000; i = i + 1) {
+        if (p.poll_exit()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+i32 main() {
+    test_start("winsize round-trip on a bare master");
+    {
+        Result<Pty, Error> r = Pty.open();
+        assert_true(r.is_ok(), "pty open");
+        Pty p = r.unwrap();
+        Result<TermSize, Error> s = p.get_size();
+        assert_true(s.is_ok(), "get size works");
+        assert_true(p.set_size(30, 100), "set size works");
+        Result<TermSize, Error> s2 = p.get_size();
+        assert_true(s2.is_ok(), "get size after set");
+        TermSize t = s2.unwrap();
+        assert_eq_i64(30, t.rows, "rows stick");
+        assert_eq_i64(100, t.cols, "cols stick");
+        p.close();
+    }
+
+    test_start("echo child session");
+    {
+        Vec<String> args = Vec<String>.new();
+        args.push(String.from_str("hello"));
+        Result<Pty, Error> r = Pty.spawn("/bin/echo", &args, 24, 80);
+        assert_true(r.is_ok(), "spawn echo");
+        Pty p = r.unwrap();
+        String out = pty_read_all(&p);
+        assert_true(out.contains("hello"), "echo output arrives");
+        assert_true(wait_child(&p), "echo reaps");
+        PtyStatus st = p.status();
+        assert_true(st.reaped(), "status reaped");
+        assert_eq_i64(0, (i64)st.exit_code(), "echo exits 0");
+        out.drop();
+        p.close();
+        // args owns its Strings; drop elements then the buffer.
+        while (args.len() > 0) {
+            String a = args.pop();
+            a.drop();
+        }
+        args.drop();
+    }
+
+    test_start("cat echo with nonblocking master");
+    {
+        Vec<String> args = Vec<String>.new();
+        Result<Pty, Error> r = Pty.spawn("/bin/cat", &args, 24, 80);
+        assert_true(r.is_ok(), "spawn cat");
+        Pty p = r.unwrap();
+        assert_true(p.set_nonblock(), "nonblock master");
+        u8* msg = (u8*)"ping\n";
+        i64 wn = 0;
+        for (i64 i = 0; i < 200000 && wn <= 0; i = i + 1) {
+            i64 w = p.write(msg, 5);
+            if (w > 0) {
+                wn = w;
+            }
+        }
+        assert_true(wn > 0, "wrote to cat");
+        String out = String.new();
+        u8 buf[512];
+        bool seen = false;
+        for (i64 i = 0; i < 200000 && !seen; i = i + 1) {
+            i64 n = p.read(&buf[0], 512);
+            if (n > 0) {
+                out.push_bytes(&buf[0], n);
+                if (out.contains("ping")) {
+                    seen = true;
+                }
+            }
+        }
+        assert_true(seen, "cat echoes back");
+        p.kill();
+        assert_true(wait_child(&p), "cat reaps after kill");
+        PtyStatus st = p.status();
+        assert_true(!st.success(), "killed cat did not exit 0");
+        out.drop();
+        p.close();
+        args.drop();
+    }
+
+    test_start("missing program exits 127");
+    {
+        Vec<String> args = Vec<String>.new();
+        Result<Pty, Error> r = Pty.spawn("/nonexistent-prog-xyz", &args, 24, 80);
+        assert_true(r.is_ok(), "spawn returns a child even for bad prog");
+        Pty p = r.unwrap();
+        String out = pty_read_all(&p);
+        out.drop();
+        assert_true(wait_child(&p), "bad prog reaps");
+        PtyStatus st = p.status();
+        assert_eq_i64(127, (i64)st.exit_code(), "exec failure exits 127");
+        p.close();
+        args.drop();
+    }
+
+    return done();
+}
