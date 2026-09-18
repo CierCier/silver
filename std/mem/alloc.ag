@@ -185,6 +185,12 @@ struct ThreadCache {
 const i64 MEM_MAX_TCACHES = 64;
 ThreadCache g_mem_tcaches[64];
 
+/// Zero while no second thread has ever been spawned: the allocator may use
+/// tcache slot 0 directly without a `gettid` syscall or slot search.
+/// Set to 1 by `mem_mark_multithreaded` on the first spawn (which runs on the
+/// sole live thread, so the 0 -> 1 transition is race-free); never reset.
+i64 g_mem_multithreaded;
+
 #[cfg(os.linux)]
 i64 mem_get_tid() {
     return syscall0(186); // SYS_gettid
@@ -278,6 +284,18 @@ void mem_tcache_exit() {
     }
 }
 
+/// Record that a second thread now exists: flush the anonymous single-threaded
+/// slot 0 back to the global free lists, then disable the fast path.
+/// Called from `thread_spawn_claimed` before the clone. The first call runs on
+/// the sole live thread, so flushing slot 0 cannot race a concurrent owner;
+/// later calls return early on the flag (slot 0 may then belong to a live
+/// thread via the slow path and must not be touched).
+void mem_mark_multithreaded() {
+    if (g_mem_multithreaded != 0) { return; }
+    mem_tcache_flush_slot(0);
+    g_mem_multithreaded = 1;
+}
+
 // -- Raw allocator core -----------------------------------------------------
 
 /// Core allocation: `size` bytes with at least `align` alignment.
@@ -288,7 +306,12 @@ u8* mem_alloc_raw_impl(i64 size, i64 align) {
     }
     if (align <= MEM_HEADER_SIZE && size <= MEM_MAX_CLASS_SIZE) {
         i64 idx = mem_class_index(size);
-        i64 slot = mem_current_tcache_slot();
+        // Single-threaded fast path: slot 0 needs no gettid syscall or
+        // table search. Once any second thread exists, resolve the slot.
+        i64 slot = 0;
+        if (g_mem_multithreaded != 0) {
+            slot = mem_current_tcache_slot();
+        }
         if (slot >= 0 && g_mem_tcaches[slot].heads[idx] != 0) {
             i64 h = g_mem_tcaches[slot].heads[idx];
             i64* link = (i64*)(h + MEM_HEADER_SIZE);
@@ -343,13 +366,25 @@ void mem_free_raw_impl(u8* ptr) {
     i64* header = (i64*)(a - MEM_HEADER_SIZE);
     i64 tag = header[1];
     if (tag >= 0 && tag < MEM_NUM_CLASSES) {
-        i64 slot = mem_current_tcache_slot();
-        if (slot >= 0 && g_mem_tcaches[slot].counts[tag] < 32) {
-            i64* link = (i64*)a;
-            link[0] = g_mem_tcaches[slot].heads[tag];
-            g_mem_tcaches[slot].heads[tag] = a - MEM_HEADER_SIZE;
-            g_mem_tcaches[slot].counts[tag] = g_mem_tcaches[slot].counts[tag] + 1;
-            return;
+        // Single-threaded fast path: slot 0 needs no gettid syscall.
+        // The tcache cap still bounds the cache; overflow goes global.
+        if (g_mem_multithreaded == 0) {
+            if (g_mem_tcaches[0].counts[tag] < 32) {
+                i64* link = (i64*)a;
+                link[0] = g_mem_tcaches[0].heads[tag];
+                g_mem_tcaches[0].heads[tag] = a - MEM_HEADER_SIZE;
+                g_mem_tcaches[0].counts[tag] = g_mem_tcaches[0].counts[tag] + 1;
+                return;
+            }
+        } else {
+            i64 slot = mem_current_tcache_slot();
+            if (slot >= 0 && g_mem_tcaches[slot].counts[tag] < 32) {
+                i64* link = (i64*)a;
+                link[0] = g_mem_tcaches[slot].heads[tag];
+                g_mem_tcaches[slot].heads[tag] = a - MEM_HEADER_SIZE;
+                g_mem_tcaches[slot].counts[tag] = g_mem_tcaches[slot].counts[tag] + 1;
+                return;
+            }
         }
         mem_lock_acquire();
         i64* heads = mem_heads();

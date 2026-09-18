@@ -142,6 +142,8 @@ i64 thread_spawn_claimed(TaskRecord* rec, i64 fn) {
         top = (u8*)((i64)stack + THREAD_STACK_SIZE);
     }
     rec.ctid = 1;
+    // Any spawn ends single-threaded allocator mode (see mem_mark_multithreaded).
+    mem_mark_multithreaded();
     i64 tid = thread_spawn_raw(THREAD_CLONE_FLAGS, top, fn, (i64)rec, &rec.ctid);
     if (tid <= 0 && stack != (u8*)0) {
         mem_sys_free(stack, THREAD_STACK_SIZE);
