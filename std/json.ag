@@ -11,6 +11,7 @@ import std.fmt;
 import std.mem.memory;
 import std.mem.vec;
 import std.optional;
+import std.atomic;
 
 enum JsonError {
     Invalid;
@@ -63,6 +64,27 @@ trait JsonDecode {
 // synthesis emits one per struct.
 trait JsonDispose {
     void dispose(*self);
+}
+
+// Powers of 10 for float parsing. Built at runtime by the identical
+// recurrence the old loops used (repeated *10.0 / /10.0 from 1.0), so a
+// table lookup reproduces the loop value bit-for-bit: parse results are
+// unchanged, only the per-digit division and the O(exponent) multiply chain
+// disappear. Filled once on first use; concurrent fills compute identical
+// IEEE-754 values, and the ready flag is release/acquire published.
+f64 JSON_POW10_POS[324];
+f64 JSON_POW10_NEG[324];
+i64 g_json_pow10_ready;
+
+void json_pow10_init() {
+    if (__atomic_load_i64(&g_json_pow10_ready, ATOMIC_ACQUIRE) != 0) { return; }
+    JSON_POW10_POS[0] = 1.0;
+    JSON_POW10_NEG[0] = 1.0;
+    for (i64 k = 1; k < 324; k = k + 1) {
+        JSON_POW10_POS[k] = JSON_POW10_POS[k - 1] * 10.0;
+        JSON_POW10_NEG[k] = JSON_POW10_NEG[k - 1] / 10.0;
+    }
+    __atomic_store_i64(&g_json_pow10_ready, 1, ATOMIC_RELEASE);
 }
 
 struct JsonWriter {
@@ -557,6 +579,7 @@ impl JsonReader {
     bool read_f64(*self, f64* out) {
         u8* bytes = (u8*)self.input;
         self.skip_whitespace();
+        json_pow10_init();
         bool negative = false;
         if (self.index < self.length && bytes[self.index] == (u8)45) {
             negative = true;
@@ -584,7 +607,10 @@ impl JsonReader {
             self.failed = true;
             return false;
         }
-        f64 fraction = 0.1;
+        // Fraction scale comes from the table (bit-identical to the old
+        // repeated /10.0 sequence); past the table end, keep dividing.
+        i64 frac_step = 1;
+        f64 fraction = JSON_POW10_NEG[1];
         if (self.index < self.length && bytes[self.index] == (u8)46) {
             self.index = self.index + 1;
             i64 fraction_digits = 0;
@@ -592,7 +618,9 @@ impl JsonReader {
                 u8 ch = bytes[self.index];
                 if (ch < (u8)48 || ch > (u8)57) { break; }
                 value = value + (f64)(ch - (u8)48) * fraction;
-                fraction = fraction / 10.0;
+                frac_step = frac_step + 1;
+                if (frac_step < 324) { fraction = JSON_POW10_NEG[frac_step]; }
+                else { fraction = fraction / 10.0; }
                 self.index = self.index + 1;
                 fraction_digits = fraction_digits + 1;
             }
@@ -624,11 +652,19 @@ impl JsonReader {
                 self.failed = true;
                 return false;
             }
+            // Exponent scale from the table (bit-identical to the old multiply
+            // chain); absurd magnitudes fall back to the loop, as before.
             f64 scale = 1.0;
-            i64 i = 0;
-            if (exponent_negative) {
+            if (exponent < 324) {
+                if (exponent_negative) { scale = JSON_POW10_NEG[exponent]; }
+                else { scale = JSON_POW10_POS[exponent]; }
+            } else if (exponent_negative) {
+                scale = JSON_POW10_NEG[323];
+                i64 i = 323;
                 while (i < exponent) { scale = scale / 10.0; i = i + 1; }
             } else {
+                scale = JSON_POW10_POS[323];
+                i64 i = 323;
                 while (i < exponent) { scale = scale * 10.0; i = i + 1; }
             }
             value = value * scale;
