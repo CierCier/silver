@@ -241,17 +241,21 @@ i64 mem_current_tcache_slot() {
     if (tid <= 0) {
         return -1;
     }
-    i64 h = (tid ^ (tid >> 4)) & (MEM_MAX_TCACHES - 1);
+    // Slot 0 is the anonymous single-threaded slot: never claimed here, so a
+    // thread that observed flag == 0 before the first spawn can never share
+    // its cache with a claimed owner (raw clone(2) threads bypass the spawn
+    // hook, so anonymous sharing must stay sound on its own).
+    i64 h = (tid ^ (tid >> 4)) % 63 + 1;
     if (g_mem_tcaches[h].tid == tid) {
         return h;
     }
-    for (i64 i = 0; i < MEM_MAX_TCACHES; i = i + 1) {
+    for (i64 i = 1; i < MEM_MAX_TCACHES; i = i + 1) {
         if (g_mem_tcaches[i].tid == tid) {
             return i;
         }
     }
     for (i64 i = 0; i < MEM_MAX_TCACHES; i = i + 1) {
-        i64 slot_idx = (h + i) & (MEM_MAX_TCACHES - 1);
+        i64 slot_idx = (h + i) % 63 + 1;
         if (g_mem_tcaches[slot_idx].tid == 0) {
             bool claimed = __atomic_cmpxchg_i64(&g_mem_tcaches[slot_idx].tid, 0, tid, ATOMIC_SEQ_CST, ATOMIC_ACQUIRE);
             if (claimed) {
@@ -259,7 +263,7 @@ i64 mem_current_tcache_slot() {
             }
         }
     }
-    for (i64 i = 0; i < MEM_MAX_TCACHES; i = i + 1) {
+    for (i64 i = 1; i < MEM_MAX_TCACHES; i = i + 1) {
         i64 old_tid = g_mem_tcaches[i].tid;
         if (old_tid > 0 && !mem_thread_alive(old_tid)) {
             bool claimed = __atomic_cmpxchg_i64(&g_mem_tcaches[i].tid, old_tid, tid, ATOMIC_SEQ_CST, ATOMIC_ACQUIRE);
@@ -286,10 +290,9 @@ void mem_tcache_exit() {
 
 /// Record that a second thread now exists: flush the anonymous single-threaded
 /// slot 0 back to the global free lists, then disable the fast path.
-/// Called from `thread_spawn_claimed` before the clone. The first call runs on
-/// the sole live thread, so flushing slot 0 cannot race a concurrent owner;
-/// later calls return early on the flag (slot 0 may then belong to a live
-/// thread via the slow path and must not be touched).
+/// Called from `thread_spawn_claimed` before the clone. Slot 0 is never
+/// claimed by the slow path, so it holds only anonymous blocks here; later
+/// calls return early on the flag.
 void mem_mark_multithreaded() {
     if (g_mem_multithreaded != 0) { return; }
     mem_tcache_flush_slot(0);
@@ -306,12 +309,34 @@ u8* mem_alloc_raw_impl(i64 size, i64 align) {
     }
     if (align <= MEM_HEADER_SIZE && size <= MEM_MAX_CLASS_SIZE) {
         i64 idx = mem_class_index(size);
-        // Single-threaded fast path: slot 0 needs no gettid syscall or
-        // table search. Once any second thread exists, resolve the slot.
-        i64 slot = 0;
-        if (g_mem_multithreaded != 0) {
-            slot = mem_current_tcache_slot();
+        // Single-threaded fast path: slot 0 needs no gettid syscall or table
+        // search. The global lock still serializes it: threads created by raw
+        // clone(2) bypass the spawn hook, so anonymous sharing stays sound.
+        if (g_mem_multithreaded == 0) {
+            mem_lock_acquire();
+            i64 h = g_mem_tcaches[0].heads[idx];
+            if (h != 0) {
+                i64* link = (i64*)(h + MEM_HEADER_SIZE);
+                g_mem_tcaches[0].heads[idx] = link[0];
+                g_mem_tcaches[0].counts[idx] = g_mem_tcaches[0].counts[idx] - 1;
+                mem_lock_release();
+                return (u8*)(h + MEM_HEADER_SIZE);
+            }
+            i64* heads = mem_heads();
+            if (heads[idx] == 0) {
+                mem_refill(heads, idx);
+            }
+            h = heads[idx];
+            if (h == 0) {
+                mem_lock_release();
+                return (u8*)0;
+            }
+            i64* link = (i64*)(h + MEM_HEADER_SIZE);
+            heads[idx] = link[0];
+            mem_lock_release();
+            return (u8*)(h + MEM_HEADER_SIZE);
         }
+        i64 slot = mem_current_tcache_slot();
         if (slot >= 0 && g_mem_tcaches[slot].heads[idx] != 0) {
             i64 h = g_mem_tcaches[slot].heads[idx];
             i64* link = (i64*)(h + MEM_HEADER_SIZE);
@@ -366,25 +391,32 @@ void mem_free_raw_impl(u8* ptr) {
     i64* header = (i64*)(a - MEM_HEADER_SIZE);
     i64 tag = header[1];
     if (tag >= 0 && tag < MEM_NUM_CLASSES) {
-        // Single-threaded fast path: slot 0 needs no gettid syscall.
-        // The tcache cap still bounds the cache; overflow goes global.
+        // Single-threaded fast path: slot 0 with no gettid syscall.
+        // Still serialized by the global lock for raw-clone threads.
         if (g_mem_multithreaded == 0) {
+            mem_lock_acquire();
             if (g_mem_tcaches[0].counts[tag] < 32) {
                 i64* link = (i64*)a;
                 link[0] = g_mem_tcaches[0].heads[tag];
                 g_mem_tcaches[0].heads[tag] = a - MEM_HEADER_SIZE;
                 g_mem_tcaches[0].counts[tag] = g_mem_tcaches[0].counts[tag] + 1;
+                mem_lock_release();
                 return;
             }
-        } else {
-            i64 slot = mem_current_tcache_slot();
-            if (slot >= 0 && g_mem_tcaches[slot].counts[tag] < 32) {
-                i64* link = (i64*)a;
-                link[0] = g_mem_tcaches[slot].heads[tag];
-                g_mem_tcaches[slot].heads[tag] = a - MEM_HEADER_SIZE;
-                g_mem_tcaches[slot].counts[tag] = g_mem_tcaches[slot].counts[tag] + 1;
-                return;
-            }
+            i64* heads = mem_heads();
+            i64* link = (i64*)a;
+            link[0] = heads[tag];
+            heads[tag] = a - MEM_HEADER_SIZE;
+            mem_lock_release();
+            return;
+        }
+        i64 slot = mem_current_tcache_slot();
+        if (slot >= 0 && g_mem_tcaches[slot].counts[tag] < 32) {
+            i64* tlink = (i64*)a;
+            tlink[0] = g_mem_tcaches[slot].heads[tag];
+            g_mem_tcaches[slot].heads[tag] = a - MEM_HEADER_SIZE;
+            g_mem_tcaches[slot].counts[tag] = g_mem_tcaches[slot].counts[tag] + 1;
+            return;
         }
         mem_lock_acquire();
         i64* heads = mem_heads();
