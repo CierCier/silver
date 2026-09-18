@@ -1,0 +1,116 @@
+// Tests for std.term.ansi — escape emitters captured via an in-memory writer.
+import std.test;
+import std.term.ansi;
+import std.io.file;
+
+struct Capture {
+    BufWriter w;
+    u8 scratch[512];
+}
+
+// Initialize in place (not via a returning constructor): w.data points
+// into scratch, so the value must never move after init.
+void Capture_init(Capture* c) {
+    c.w.data = (i64)&c.scratch[0];
+    c.w.len = 0;
+    c.w.cap = -512;
+    c.w.fd = -1;
+    c.w.list_next = (BufWriter*)0;
+    c.w.list_prev = (BufWriter*)0;
+    c.w.mode = IOMODE_MEMORY;
+}
+
+void check_bytes(Capture* c, str expected, str msg) {
+    u8* got = (u8*)c.w.data;
+    i64 want_len = cstr_len((u8*)expected);
+    u8* want = (u8*)expected;
+    assert_eq_i64(want_len, c.w.len, msg);
+    i64 i = 0;
+    while (i < want_len && i < c.w.len) {
+        assert_eq_i32((i32)want[i], (i32)got[i], msg);
+        i = i + 1;
+    }
+    c.w.len = 0;
+}
+
+i32 main() {
+    test_start("cursor visibility");
+    {
+        Capture c;
+        Capture_init(&c);
+        term_hide_cursor(&c.w);
+        check_bytes(&c, "\x1b[?25l", "hide cursor");
+        term_show_cursor(&c.w);
+        check_bytes(&c, "\x1b[?25h", "show cursor");
+    }
+
+    test_start("cursor motion");
+    {
+        Capture c;
+        Capture_init(&c);
+        term_cursor_home(&c.w);
+        check_bytes(&c, "\x1b[H", "home");
+        term_move_to(&c.w, 5, 10);
+        check_bytes(&c, "\x1b[5;10H", "move to 5,10");
+        term_cursor_up(&c.w, 3);
+        check_bytes(&c, "\x1b[3A", "up 3");
+        term_cursor_down(&c.w, 2);
+        check_bytes(&c, "\x1b[2B", "down 2");
+        term_cursor_forward(&c.w, 4);
+        check_bytes(&c, "\x1b[4C", "forward 4");
+        term_cursor_back(&c.w, 7);
+        check_bytes(&c, "\x1b[7D", "back 7");
+        term_cursor_save(&c.w);
+        check_bytes(&c, "\x1b[s", "save");
+        term_cursor_restore(&c.w);
+        check_bytes(&c, "\x1b[u", "restore");
+    }
+
+    test_start("erase and alt screen");
+    {
+        Capture c;
+        Capture_init(&c);
+        term_erase_line(&c.w);
+        check_bytes(&c, "\x1b[2K", "erase line");
+        term_erase_line_end(&c.w);
+        check_bytes(&c, "\x1b[K", "erase line end");
+        term_erase_screen(&c.w);
+        check_bytes(&c, "\x1b[2J", "erase screen");
+        term_erase_screen_end(&c.w);
+        check_bytes(&c, "\x1b[J", "erase screen end");
+        term_enter_alt(&c.w);
+        check_bytes(&c, "\x1b[?1049h", "enter alt");
+        term_exit_alt(&c.w);
+        check_bytes(&c, "\x1b[?1049l", "exit alt");
+    }
+
+    test_start("sgr attributes and color");
+    {
+        Capture c;
+        Capture_init(&c);
+        term_sgr_reset(&c.w);
+        check_bytes(&c, "\x1b[0m", "reset");
+        term_bold_on(&c.w);
+        check_bytes(&c, "\x1b[1m", "bold");
+        term_underline_on(&c.w);
+        check_bytes(&c, "\x1b[4m", "underline");
+        term_set_fg(&c.w, TERM_RED);
+        check_bytes(&c, "\x1b[31m", "fg red");
+        term_set_bg(&c.w, TERM_BLUE);
+        check_bytes(&c, "\x1b[44m", "bg blue");
+        term_set_fg(&c.w, TERM_GREEN + TERM_BRIGHT);
+        check_bytes(&c, "\x1b[92m", "fg bright green");
+        term_set_bg(&c.w, TERM_WHITE + TERM_BRIGHT);
+        check_bytes(&c, "\x1b[107m", "bg bright white");
+        term_set_fg256(&c.w, 9);
+        check_bytes(&c, "\x1b[38;5;9m", "fg 256");
+        term_set_bg256(&c.w, 200);
+        check_bytes(&c, "\x1b[48;5;200m", "bg 256");
+        term_set_fg_rgb(&c.w, 255, 128, 0);
+        check_bytes(&c, "\x1b[38;2;255;128;0m", "fg rgb");
+        term_set_bg_rgb(&c.w, 0, 0, 0);
+        check_bytes(&c, "\x1b[48;2;0;0;0m", "bg rgb");
+    }
+
+    return done();
+}

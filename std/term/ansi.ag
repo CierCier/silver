@@ -1,0 +1,198 @@
+// std/term/ansi.ag — terminal escape-sequence emitters.
+//
+// Every helper writes through a caller-provided BufWriter: no allocation,
+// no syscalls here. Bytes are emitted with write_u8 / itoa formatting so no
+// string-literal escape forms are required.
+
+import std.io.file;
+import std.fmt;
+
+// Standard 8 colors (SGR base codes 30-37 / 40-47).
+const i64 TERM_BLACK = 0;
+const i64 TERM_RED = 1;
+const i64 TERM_GREEN = 2;
+const i64 TERM_YELLOW = 3;
+const i64 TERM_BLUE = 4;
+const i64 TERM_MAGENTA = 5;
+const i64 TERM_CYAN = 6;
+const i64 TERM_WHITE = 7;
+// Added to a base color for the bright variant (90-97 / 100-107).
+const i64 TERM_BRIGHT = 8;
+
+void term_write_esc(BufWriter* out) {
+    out.write_u8((u8)27);
+}
+
+void term_write_csi(BufWriter* out) {
+    out.write_u8((u8)27);
+    out.write_u8((u8)91); // '['
+}
+
+void term_write_num(BufWriter* out, i64 v) {
+    u8 buf[20];
+    i64 n = itoa(v, &buf[0]);
+    out.write(&buf[0], n);
+}
+
+// -- Cursor ---------------------------------------------------------------
+
+void term_hide_cursor(BufWriter* out) {
+    out.write_str("\x1b[?25l");
+}
+
+void term_show_cursor(BufWriter* out) {
+    out.write_str("\x1b[?25h");
+}
+
+void term_cursor_home(BufWriter* out) {
+    out.write_str("\x1b[H");
+}
+
+/// Move to 1-based (row, col).
+void term_move_to(BufWriter* out, i64 row, i64 col) {
+    term_write_csi(out);
+    term_write_num(out, row);
+    out.write_u8((u8)59); // ';'
+    term_write_num(out, col);
+    out.write_u8((u8)72); // 'H'
+}
+
+void term_cursor_up(BufWriter* out, i64 n) {
+    term_write_csi(out);
+    term_write_num(out, n);
+    out.write_u8((u8)65); // 'A'
+}
+
+void term_cursor_down(BufWriter* out, i64 n) {
+    term_write_csi(out);
+    term_write_num(out, n);
+    out.write_u8((u8)66); // 'B'
+}
+
+void term_cursor_forward(BufWriter* out, i64 n) {
+    term_write_csi(out);
+    term_write_num(out, n);
+    out.write_u8((u8)67); // 'C'
+}
+
+void term_cursor_back(BufWriter* out, i64 n) {
+    term_write_csi(out);
+    term_write_num(out, n);
+    out.write_u8((u8)68); // 'D'
+}
+
+void term_cursor_save(BufWriter* out) {
+    out.write_str("\x1b[s");
+}
+
+void term_cursor_restore(BufWriter* out) {
+    out.write_str("\x1b[u");
+}
+
+// -- Erase ------------------------------------------------------------------
+
+/// Erase the whole line the cursor is on.
+void term_erase_line(BufWriter* out) {
+    out.write_str("\x1b[2K");
+}
+
+/// Erase from the cursor to the end of the line.
+void term_erase_line_end(BufWriter* out) {
+    out.write_str("\x1b[K");
+}
+
+/// Erase the whole screen.
+void term_erase_screen(BufWriter* out) {
+    out.write_str("\x1b[2J");
+}
+
+/// Erase from the cursor to the end of the screen.
+void term_erase_screen_end(BufWriter* out) {
+    out.write_str("\x1b[J");
+}
+
+// -- Alternate screen ---------------------------------------------------------
+
+void term_enter_alt(BufWriter* out) {
+    out.write_str("\x1b[?1049h");
+}
+
+void term_exit_alt(BufWriter* out) {
+    out.write_str("\x1b[?1049l");
+}
+
+// -- SGR attributes -------------------------------------------------------------
+
+void term_sgr_reset(BufWriter* out) {
+    out.write_str("\x1b[0m");
+}
+
+void term_bold_on(BufWriter* out) {
+    out.write_str("\x1b[1m");
+}
+
+void term_underline_on(BufWriter* out) {
+    out.write_str("\x1b[4m");
+}
+
+/// Set foreground to a base-or-bright color (TERM_RED, TERM_RED + TERM_BRIGHT).
+void term_set_fg(BufWriter* out, i64 color) {
+    term_write_csi(out);
+    if (color >= TERM_BRIGHT) {
+        term_write_num(out, 90 + (color - TERM_BRIGHT));
+    } else {
+        term_write_num(out, 30 + color);
+    }
+    out.write_u8((u8)109); // 'm'
+}
+
+/// Set background to a base-or-bright color.
+void term_set_bg(BufWriter* out, i64 color) {
+    term_write_csi(out);
+    if (color >= TERM_BRIGHT) {
+        term_write_num(out, 100 + (color - TERM_BRIGHT));
+    } else {
+        term_write_num(out, 40 + color);
+    }
+    out.write_u8((u8)109); // 'm'
+}
+
+/// Set foreground to 256-palette index n.
+void term_set_fg256(BufWriter* out, i64 n) {
+    term_write_csi(out);
+    out.write_str("38;5;");
+    term_write_num(out, n);
+    out.write_u8((u8)109); // 'm'
+}
+
+/// Set background to 256-palette index n.
+void term_set_bg256(BufWriter* out, i64 n) {
+    term_write_csi(out);
+    out.write_str("48;5;");
+    term_write_num(out, n);
+    out.write_u8((u8)109); // 'm'
+}
+
+/// Set foreground to an RGB triple.
+void term_set_fg_rgb(BufWriter* out, i64 r, i64 g, i64 b) {
+    term_write_csi(out);
+    out.write_str("38;2;");
+    term_write_num(out, r);
+    out.write_u8((u8)59); // ';'
+    term_write_num(out, g);
+    out.write_u8((u8)59); // ';'
+    term_write_num(out, b);
+    out.write_u8((u8)109); // 'm'
+}
+
+/// Set background to an RGB triple.
+void term_set_bg_rgb(BufWriter* out, i64 r, i64 g, i64 b) {
+    term_write_csi(out);
+    out.write_str("48;2;");
+    term_write_num(out, r);
+    out.write_u8((u8)59); // ';'
+    term_write_num(out, g);
+    out.write_u8((u8)59); // ';'
+    term_write_num(out, b);
+    out.write_u8((u8)109); // 'm'
+}
