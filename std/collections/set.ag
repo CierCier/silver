@@ -509,6 +509,25 @@ struct HashSetDrain<K> {
     i64 capacity;
     i64 idx;
 }
+impl<K> Drop for HashSetDrain<K> {
+    void drop(*self) {
+        if (self.ctrl != (u8*)0) {
+            i64 i = self.idx;
+            while (i < self.capacity) {
+                if (self.ctrl[i] < (u8)0x80) {
+                    @drop_in_place(&self.keys[i], 1);
+                }
+                i = i + 1;
+            }
+            free(self.keys);
+            free(self.ctrl);
+            self.keys = (K*)0;
+            self.ctrl = (u8*)0;
+        }
+        self.capacity = 0;
+        self.idx = 0;
+    }
+}
 impl<K> Iterator for HashSetDrain<K> {
     type Item = K;
     Optional<K> next(*self) {
@@ -518,9 +537,9 @@ impl<K> Iterator for HashSetDrain<K> {
         while (self.idx < self.capacity) {
             u8 ctrl = self.ctrl[self.idx];
             if (ctrl < (u8)0x80) {
-                K k = self.keys[self.idx];
+                K k = move self.keys[self.idx];
                 self.idx = self.idx + 1;
-                return Some(k);
+                return Some(move k);
             }
             self.idx = self.idx + 1;
         }
