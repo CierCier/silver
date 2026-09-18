@@ -22,9 +22,14 @@ struct HashMap<K, V> {
 }
 
 const i64 INITIAL_CAPACITY = 16;
-const f64 LOAD_FACTOR = 0.875;
 const u8 CTRL_EMPTY = (u8)0x80;
 const u8 CTRL_DELETED = (u8)0xFE;
+
+/// Max live entries for `cap` at 7/8 load, via integer math: `cap - cap/8`
+/// replaces the old f64 `len/cap > 0.875` division on the insert hot path.
+i64 map_max_load(i64 cap) {
+    return cap - cap / 8;
+}
 
 /// Extract 7-bit fingerprint (h2) in [0, 127].
 u8 h2_fingerprint(i64 hash) {
@@ -218,8 +223,7 @@ impl HashMap<K, V> {
         if (cap == 0) {
             self.grow(INITIAL_CAPACITY);
         } else {
-            f64 load = (f64)(self.len + 1) / (f64)cap;
-            if (load > LOAD_FACTOR) {
+            if (self.len + 1 > map_max_load(cap)) {
                 self.grow(cap * 2);
             }
         }
@@ -347,16 +351,12 @@ impl HashMap<K, V> {
         i64 required = self.len + additional;
         i64 cap = self.capacity;
         if (cap > 0) {
-            f64 max_f = (f64)cap * LOAD_FACTOR;
-            i64 max_supported = (i64)max_f;
-            if (required <= max_supported) { return; }
+            if (required <= map_max_load(cap)) { return; }
         }
         i64 target = cap;
         if (target < INITIAL_CAPACITY) { target = INITIAL_CAPACITY; }
         while (true) {
-            f64 max_f = (f64)target * LOAD_FACTOR;
-            i64 max_supported = (i64)max_f;
-            if (required <= max_supported) { break; }
+            if (required <= map_max_load(target)) { break; }
             target = target * 2;
         }
         self.grow(target);
@@ -368,9 +368,7 @@ impl HashMap<K, V> {
         if (cap == 0) { return; }
         i64 target = INITIAL_CAPACITY;
         while (target < cap) {
-            f64 max_f = (f64)target * LOAD_FACTOR;
-            i64 max_supported = (i64)max_f;
-            if (self.len <= max_supported) { break; }
+            if (self.len <= map_max_load(target)) { break; }
             target = target * 2;
         }
         if (target < cap) {
@@ -793,8 +791,7 @@ impl<K, V> HashMapEntryRef<K, V> {
         if (cap == 0) {
             self.map.grow(INITIAL_CAPACITY);
         } else {
-            f64 load = (f64)(self.map.len + 1) / (f64)cap;
-            if (load > LOAD_FACTOR) {
+            if (self.map.len + 1 > map_max_load(cap)) {
                 self.map.grow(cap * 2);
             }
         }

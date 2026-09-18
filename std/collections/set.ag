@@ -10,9 +10,13 @@ import std.io.file;
 import std.mem.drop;
 
 const i64 SET_INITIAL_CAPACITY = 16;
-const f64 SET_LOAD_FACTOR = 0.875;
 const u8 SET_CTRL_EMPTY = (u8)0x80;
 const u8 SET_CTRL_DELETED = (u8)0xFE;
+
+/// Max live entries for `cap` at 7/8 load, via integer math (see map_max_load).
+i64 set_max_load(i64 cap) {
+    return cap - cap / 8;
+}
 
 u8 set_h2(i64 hash) {
     i64 h = (hash >> 57) & (i64)0x7F;
@@ -106,9 +110,7 @@ impl HashSet<K> {
         }
         K* new_keys = alloc_uninit_n<K>(new_cap);
         u8* new_ctrl = alloc_uninit_n<u8>(new_cap + 16);
-        for (i64 j = 0; j < new_cap + 16; j = j + 1) {
-            new_ctrl[j] = SET_CTRL_EMPTY;
-        }
+        silver_rt_memset(new_ctrl, SET_CTRL_EMPTY, new_cap + 16);
         if (self.ctrl != (u8*)0) {
             i64 mask = new_cap - 1;
             for (i64 i = 0; i < self.capacity; i = i + 1) {
@@ -222,8 +224,7 @@ impl HashSet<K> {
         if (cap == 0) {
             self.grow(SET_INITIAL_CAPACITY);
         } else {
-            f64 load = (f64)(self.len + 1) / (f64)cap;
-            if (load > SET_LOAD_FACTOR) {
+            if (self.len + 1 > set_max_load(cap)) {
                 self.grow(cap * 2);
             }
         }
@@ -272,16 +273,12 @@ impl HashSet<K> {
         i64 required = self.len + additional;
         i64 cap = self.capacity;
         if (cap > 0) {
-            f64 max_f = (f64)cap * SET_LOAD_FACTOR;
-            i64 max_supported = (i64)max_f;
-            if (required <= max_supported) { return; }
+            if (required <= set_max_load(cap)) { return; }
         }
         i64 target = cap;
         if (target < SET_INITIAL_CAPACITY) { target = SET_INITIAL_CAPACITY; }
         while (true) {
-            f64 max_f = (f64)target * SET_LOAD_FACTOR;
-            i64 max_supported = (i64)max_f;
-            if (required <= max_supported) { break; }
+            if (required <= set_max_load(target)) { break; }
             target = target * 2;
         }
         self.grow(target);
@@ -292,9 +289,7 @@ impl HashSet<K> {
         if (cap == 0) { return; }
         i64 target = SET_INITIAL_CAPACITY;
         while (target < cap) {
-            f64 max_f = (f64)target * SET_LOAD_FACTOR;
-            i64 max_supported = (i64)max_f;
-            if (self.len <= max_supported) { break; }
+            if (self.len <= set_max_load(target)) { break; }
             target = target * 2;
         }
         if (target < cap) {
