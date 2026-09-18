@@ -42,6 +42,8 @@ LEAK_CHECK_TESTS = {
     "alloc_validity_test",
     "string_test",
     "vec_test",
+    "bytes_test",
+    "collections_set_test",
     "mem_test",
     "memmove_scalar_test",
     "channel_test",
