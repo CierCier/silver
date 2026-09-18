@@ -89,27 +89,18 @@ impl Vec<T> {
     // -- Mutation -------------------------------------------------------
 
     /// Append `value` to the end (O(1) amortized).
-    /// Growth moves existing elements via `move` (Place Index) — `new[i] = move old[i]`
-    /// — so owned T (String, Vec<u8>) transfers ownership without duplicating
-    /// the backing pointer; the old buffer is then `free`d (no per-element drop).
-    /// For Copy T (i32, POD structs) `move` is a bitwise copy.
+    /// Growth uses `realloc`, which extends in place when the allocator's
+    /// size-class headroom (or a `with_capacity` over-reserve) already covers
+    /// the new length — the old malloc+memcpy+free path copied unconditionally.
+    /// Owned T stays bitwise relocatable either way (see previous doc).
     void push(&mut self, T value) {
         if (self.len >= self.cap) {
             i64 new_cap = 8;
             if (self.cap != 0) {
                 new_cap = self.cap * 2;
             }
-            T* new_data = (T*)(malloc(@size(T) * new_cap));
-            if (self.data != (T*)0) {
-                // Every T is bitwise relocatable: transfer the live prefix
-                // with one SIMD memcpy, then free the old buffer wholesale.
-                // The pre-memcpy loop moved elements one by one; ownership
-                // travels with the bytes either way, and the old buffer is
-                // freed without per-element drops.
-                silver_rt_memcpy((u8*)new_data, (u8*)self.data, self.len * @size(T));
-                free(self.data);
-            }
-            self.data = new_data;
+            // realloc tolerates the null buffer of a fresh Vec.
+            self.data = (T*)(realloc_bytes(self.data, @size(T) * new_cap));
             self.cap = new_cap;
         }
         self.data[self.len] = move value;
@@ -199,24 +190,18 @@ impl Vec<T> {
     }
 
     /// Reserve at least `min_capacity` elements, growing if needed.
-    /// Moves existing elements (`new[i] = move old[i]`) rather than `realloc`
-    /// byte-copy; see `push` doc. POD-only `realloc` workaround removed.
+    /// Uses `realloc` so size-class headroom extends in place; null-safe.
     void reserve(&mut self, i64 min_capacity) {
         if (self.cap >= min_capacity) {
             return;
         }
-        T* new_data = (T*)(malloc(@size(T) * min_capacity));
-        if (self.data != (T*)0) {
-            silver_rt_memcpy((u8*)new_data, (u8*)self.data, self.len * @size(T));
-            free(self.data);
-        }
-        self.data = new_data;
+        self.data = (T*)(realloc_bytes(self.data, @size(T) * min_capacity));
         self.cap = min_capacity;
     }
 
     /// Shrink capacity to match length.
-    /// Moves elements via `move` into a right-sized buffer instead of
-    /// `realloc` byte-copy; POD-only path removed.
+    /// `realloc` extends or shrinks via the allocator; when the size class
+    /// already fits, the buffer stays in place and only `cap` is lowered.
     void shrink_to_fit(&mut self) {
         if (self.len == 0) {
             if (self.data != (T*)0) {
@@ -226,10 +211,7 @@ impl Vec<T> {
             self.cap = 0;
         } else {
             if (self.len < self.cap) {
-                T* new_data = (T*)(malloc(@size(T) * self.len));
-                silver_rt_memcpy((u8*)new_data, (u8*)self.data, self.len * @size(T));
-                free(self.data);
-                self.data = new_data;
+                self.data = (T*)(realloc_bytes(self.data, @size(T) * self.len));
                 self.cap = self.len;
             }
         }
