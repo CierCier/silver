@@ -918,6 +918,22 @@ T* alloc_n<T>(i64 count) {
     return ptr;
 }
 
+/// Allocate `count` elements WITHOUT zeroing. Use only when every byte is
+/// written before any read (container buffers guarded by len/ctrl bytes).
+/// Aborts on OOM or size overflow, matching `alloc_n`.
+T* alloc_uninit_n<T>(i64 count) {
+    if (count > 0) {
+        if (@size(T) > 9223372036854775807 / count) {
+            abort();
+        }
+    }
+    T* ptr = (T*)(malloc(@size(T) * count));
+    if (ptr == (T*)0) {
+        abort();
+    }
+    return ptr;
+}
+
 T* alloc_array<T>(i64 count) {
     return alloc_n<T>(count);
 }

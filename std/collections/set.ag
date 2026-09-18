@@ -104,8 +104,8 @@ impl HashSet<K> {
         while (new_cap < min_capacity) {
             new_cap = new_cap * 2;
         }
-        K* new_keys = alloc_n<K>(new_cap);
-        u8* new_ctrl = alloc_n<u8>(new_cap + 16);
+        K* new_keys = alloc_uninit_n<K>(new_cap);
+        u8* new_ctrl = alloc_uninit_n<u8>(new_cap + 16);
         for (i64 j = 0; j < new_cap + 16; j = j + 1) {
             new_ctrl[j] = SET_CTRL_EMPTY;
         }

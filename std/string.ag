@@ -30,7 +30,7 @@ impl String {
         s.len = 0;
         s.capacity = capacity;
         if (capacity > 0) {
-            s.data = alloc_n<u8>(capacity);
+            s.data = alloc_uninit_n<u8>(capacity);
             s.data[0] = (u8)0;
         } else {
             s.data = (u8*)0;

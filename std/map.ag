@@ -122,10 +122,10 @@ impl HashMap<K, V> {
             new_cap = new_cap * 2;
         }
 
-        K* new_keys = alloc_n<K>(new_cap);
-        V* new_vals = alloc_n<V>(new_cap);
+        K* new_keys = alloc_uninit_n<K>(new_cap);
+        V* new_vals = alloc_uninit_n<V>(new_cap);
         // +16 for SIMD control byte padding
-        u8* new_ctrl = alloc_n<u8>(new_cap + 16);
+        u8* new_ctrl = alloc_uninit_n<u8>(new_cap + 16);
         silver_rt_memset(new_ctrl, (u8)CTRL_EMPTY, new_cap + 16);
 
         // Rehash existing entries — move owned K/V via Place Index so non-Copy

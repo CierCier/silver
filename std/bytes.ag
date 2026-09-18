@@ -31,7 +31,7 @@ impl Bytes {
         b.len = 0;
         b.cap = capacity;
         if (capacity > 0) {
-            b.data = alloc_n<u8>(capacity);
+            b.data = alloc_uninit_n<u8>(capacity);
         } else {
             b.data = (u8*)0;
         }
