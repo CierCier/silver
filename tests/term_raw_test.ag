@@ -1,0 +1,63 @@
+// Tests for std.term.raw — termios round-trip and the raw-mode guard.
+// Uses /dev/ptmx as a real (master-side) tty fd; no child process needed.
+import std.test;
+import std.term.raw;
+import std.sys.result;
+
+bool lflag_has(Termios* t, u32 bit) {
+    return (t.c_lflag & bit) != (u32)0;
+}
+
+i32 main() {
+    test_start("isatty detection");
+    {
+        assert_true(term_is_tty(0) || !term_is_tty(0), "isatty runs without abort");
+        assert_true(!term_is_tty(-1), "bad fd is not a tty");
+        Result<i64, Error> r = try_open("/dev/ptmx", O_RDWR, 0);
+        assert_true(r.is_ok(), "open ptmx");
+        i32 fd = (i32)r.value();
+        assert_true(term_is_tty(fd), "ptmx master is a tty");
+        try_close(fd);
+    }
+
+    test_start("raw enable and restore");
+    {
+        Result<i64, Error> r = try_open("/dev/ptmx", O_RDWR, 0);
+        assert_true(r.is_ok(), "open ptmx");
+        i32 fd = (i32)r.value();
+
+        // Establish a known cooked state first.
+        Termios cooked;
+        assert_true(try_tcgetattr(fd, &cooked).is_ok(), "getattr works");
+        cooked.c_lflag = cooked.c_lflag | (ECHO | ICANON | ISIG);
+        assert_true(try_tcsetattr(fd, TCSETSW, &cooked).is_ok(), "set cooked");
+
+        {
+            Result<RawMode, Error> g = RawMode.enable(fd);
+            assert_true(g.is_ok(), "raw enable on tty");
+            RawMode guard = g.unwrap();
+            Termios cur;
+            assert_true(try_tcgetattr(fd, &cur).is_ok(), "getattr in raw");
+            assert_true(!lflag_has(&cur, ICANON), "ICANON cleared");
+            assert_true(!lflag_has(&cur, ECHO), "ECHO cleared");
+            assert_true(!lflag_has(&cur, ISIG), "ISIG cleared");
+            assert_eq_i64(1, (i64)cur.c_cc[VMIN], "VMIN is 1");
+            assert_eq_i64(0, (i64)cur.c_cc[VTIME], "VTIME is 0");
+            // guard drops here: restore runs at scope exit.
+        }
+
+        Termios back;
+        assert_true(try_tcgetattr(fd, &back).is_ok(), "getattr after drop");
+        assert_true(lflag_has(&back, ICANON), "ICANON restored");
+        assert_true(lflag_has(&back, ECHO), "ECHO restored");
+        try_close(fd);
+    }
+
+    test_start("raw enable rejects non-tty");
+    {
+        Result<RawMode, Error> g = RawMode.enable(-1);
+        assert_true(g.is_err(), "enable on bad fd fails");
+    }
+
+    return done();
+}

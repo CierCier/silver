@@ -1,0 +1,130 @@
+// std/term/raw.ag — termios definitions and the raw-mode guard.
+//
+// RawMode.enable puts a tty fd into raw (cfmakeraw-equivalent) state and
+// restores the saved termios on drop, so early returns cannot leave the
+// terminal unusable. All ioctl paths are Linux-only for now.
+
+import std.sys.raw.fs;
+import std.sys.result;
+import std.error;
+import std.result;
+
+// termios ioctl requests (Linux x86_64).
+const i64 TCGETS = 0x5401;
+const i64 TCSETS = 0x5402;
+const i64 TCSETSW = 0x5403;
+const i64 TCSETSF = 0x5404;
+
+// Input flags.
+const u32 BRKINT = 0x2;
+const u32 ICRNL = 0x100;
+const u32 INPCK = 0x10;
+const u32 ISTRIP = 0x20;
+const u32 IXON = 0x400;
+// Output flags.
+const u32 OPOST = 0x1;
+// Control flags.
+const u32 CS8 = 0x30;
+// Local flags.
+const u32 ISIG = 0x1;
+const u32 ICANON = 0x2;
+const u32 ECHO = 0x8;
+const u32 IEXTEN = 0x8000;
+// Control-character indices.
+const i64 VMIN = 6;
+const i64 VTIME = 5;
+
+/// Linux x86_64 `struct termios` (60 bytes with C padding, computed by the
+/// type checker): 4 flag words, line discipline, 32 control characters,
+/// and the input/output baud words.
+struct Termios {
+    u32 c_iflag;
+    u32 c_oflag;
+    u32 c_cflag;
+    u32 c_lflag;
+    u8 c_line;
+    u8 c_cc[32];
+    u32 c_ispeed;
+    u32 c_ospeed;
+}
+
+#[cfg(os.linux)]
+Result<i64, Error> try_tcgetattr(i32 fd, Termios* out) {
+    i64 r = sys_ioctl((i64)fd, TCGETS, (i64)out);
+    if (r != 0) {
+        return Err(-r, "tcgetattr failed");
+    }
+    return Ok((i64)0);
+}
+
+#[cfg(os.linux)]
+Result<i64, Error> try_tcsetattr(i32 fd, i64 action, Termios* t) {
+    i64 r = sys_ioctl((i64)fd, action, (i64)t);
+    if (r != 0) {
+        return Err(-r, "tcsetattr failed");
+    }
+    return Ok((i64)0);
+}
+
+/// True when `fd` is a terminal (TCGETS succeeds on it).
+#[cfg(os.linux)]
+bool term_is_tty(i32 fd) {
+    Termios t;
+    return sys_ioctl((i64)fd, TCGETS, (i64)&t) == 0;
+}
+
+/// Apply cfmakeraw-equivalent bits to a termios value in place.
+void termios_make_raw(Termios* t) {
+    t.c_iflag = t.c_iflag & ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+    t.c_oflag = t.c_oflag & ~OPOST;
+    t.c_cflag = t.c_cflag | CS8;
+    t.c_lflag = t.c_lflag & ~(ECHO | ICANON | IEXTEN | ISIG);
+    t.c_cc[VMIN] = (u8)1;
+    t.c_cc[VTIME] = (u8)0;
+}
+
+#[cfg(os.linux)]
+struct RawMode {
+    i32 fd;
+    Termios saved;
+    bool active;
+}
+
+#[cfg(os.linux)]
+impl RawMode {
+    /// Put `fd` into raw mode, saving its termios for restore on drop.
+    /// Fails (without touching the fd) when `fd` is not a tty.
+    Result<RawMode, Error> enable(i32 fd) {
+        Termios cur;
+        i64 r = sys_ioctl((i64)fd, TCGETS, (i64)&cur);
+        if (r != 0) {
+            return Err(-r, "tcgetattr failed");
+        }
+        Termios saved = cur;
+        termios_make_raw(&cur);
+        r = sys_ioctl((i64)fd, TCSETSF, (i64)&cur);
+        if (r != 0) {
+            return Err(-r, "tcsetattr failed");
+        }
+        RawMode g;
+        g.fd = fd;
+        g.saved = saved;
+        g.active = true;
+        return Ok(move g);
+    }
+
+    /// Restore the saved termios early; also runs from drop.
+    void restore(*self) {
+        if (self.active) {
+            sys_ioctl((i64)self.fd, TCSETSW, (i64)&self.saved);
+            self.active = false;
+        }
+    }
+}
+
+#[cfg(os.linux)]
+impl Drop for RawMode {
+    void drop(*self) {
+        self.restore();
+    }
+}
