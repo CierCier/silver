@@ -1,0 +1,319 @@
+// std/term/keys.ag — terminal key-input parser.
+//
+// A small state machine over raw input bytes: ground text (including UTF-8),
+// ESC-prefixed alt keys, CSI sequences with numeric params and xterm-style
+// modifiers, and SS3 function keys. Feed bytes one at a time; each feed
+// returns Some(event) when a byte completes a key, None while a sequence is
+// still open. Call flush() at end-of-input to resolve a trailing lone ESC.
+
+import std.optional;
+
+enum KeyKind {
+    Char;
+    Enter;
+    Tab;
+    Backspace;
+    Esc;
+    Up;
+    Down;
+    Left;
+    Right;
+    Home;
+    End;
+    PageUp;
+    PageDown;
+    Insert;
+    Delete;
+    FKey;
+    Unknown;
+}
+
+struct KeyEvent {
+    KeyKind kind;
+    u32 codepoint; // Char: the rune (ctrl+letter: the base letter).
+    i64 fnum;      // FKey: 1..12, else 0.
+    bool ctrl;
+    bool alt;
+    bool shift;
+}
+
+KeyEvent key_simple(KeyKind kind) {
+    KeyEvent e;
+    e.kind = kind;
+    e.codepoint = (u32)0;
+    e.fnum = 0;
+    e.ctrl = false;
+    e.alt = false;
+    e.shift = false;
+    return e;
+}
+
+KeyEvent key_char(u32 cp) {
+    KeyEvent e = key_simple(KeyKind.Char);
+    e.codepoint = cp;
+    return e;
+}
+
+// Parser states: 0 ground, 1 ESC seen, 2 CSI, 3 SS3.
+struct KeyParser {
+    i64 state;
+    i64 utf_need; // pending UTF-8 continuation bytes in ground state
+    u32 utf_cp;   // accumulated codepoint
+    i64 params[8];
+    i64 nparams;
+}
+
+KeyParser KeyParser_new() {
+    KeyParser p;
+    p.state = 0;
+    p.utf_need = 0;
+    p.utf_cp = (u32)0;
+    p.nparams = 0;
+    for (i64 i = 0; i < 8; i = i + 1) {
+        p.params[i] = 0;
+    }
+    return p;
+}
+
+impl KeyParser {
+    KeyParser new() {
+        return KeyParser_new();
+    }
+
+    /// Feed one input byte. Some(event) when the byte completes a key.
+    Optional<KeyEvent> feed(*self, u8 byte) {
+        if (self.state == 1) {
+            return self.feed_esc(byte);
+        }
+        if (self.state == 2) {
+            return self.feed_csi(byte);
+        }
+        if (self.state == 3) {
+            return self.feed_ss3(byte);
+        }
+        return self.feed_ground(byte);
+    }
+
+    /// Resolve a trailing open sequence at end-of-input: a lone ESC becomes
+    /// the Esc key; anything else yields None.
+    Optional<KeyEvent> flush(*self) {
+        if (self.state == 1) {
+            self.state = 0;
+            return Some(key_simple(KeyKind.Esc));
+        }
+        self.state = 0;
+        self.utf_need = 0;
+        self.nparams = 0;
+        return None;
+    }
+
+    Optional<KeyEvent> feed_ground(*self, u8 byte) {
+        // Mid-rune continuation.
+        if (self.utf_need > 0) {
+            if (byte >= (u8)128 && byte < (u8)192) {
+                self.utf_cp = (self.utf_cp << (u32)6) | ((u32)byte & (u32)63);
+                self.utf_need = self.utf_need - 1;
+                if (self.utf_need == 0) {
+                    u32 cp = self.utf_cp;
+                    self.utf_cp = (u32)0;
+                    return Some(key_char(cp));
+                }
+                return None;
+            }
+            self.utf_need = 0;
+            self.utf_cp = (u32)0;
+            KeyEvent e = key_simple(KeyKind.Unknown);
+            e.codepoint = (u32)byte;
+            return Some(e);
+        }
+        if (byte == (u8)27) {
+            self.state = 1;
+            return None;
+        }
+        if (byte == (u8)9) {
+            return Some(key_simple(KeyKind.Tab));
+        }
+        if (byte == (u8)13) {
+            return Some(key_simple(KeyKind.Enter));
+        }
+        if (byte == (u8)127 || byte == (u8)8) {
+            return Some(key_simple(KeyKind.Backspace));
+        }
+        if (byte >= (u8)1 && byte <= (u8)26) {
+            // Ctrl+letter: bytes 0x01..0x1A.
+            KeyEvent e = key_char((u32)96 + (u32)byte);
+            e.ctrl = true;
+            return Some(e);
+        }
+        if (byte == (u8)0) {
+            // Ctrl+space arrives as NUL.
+            KeyEvent e = key_char((u32)32);
+            e.ctrl = true;
+            return Some(e);
+        }
+        if (byte < (u8)32) {
+            KeyEvent e = key_simple(KeyKind.Unknown);
+            e.codepoint = (u32)byte;
+            return Some(e);
+        }
+        if (byte < (u8)128) {
+            return Some(key_char((u32)byte));
+        }
+        // UTF-8 lead byte: shape-checked here, completed above.
+        if (byte >= (u8)192 && byte < (u8)224) {
+            self.utf_need = 1;
+            self.utf_cp = (u32)byte & (u32)31;
+            return None;
+        }
+        if (byte >= (u8)224 && byte < (u8)240) {
+            self.utf_need = 2;
+            self.utf_cp = (u32)byte & (u32)15;
+            return None;
+        }
+        if (byte >= (u8)240 && byte < (u8)248) {
+            self.utf_need = 3;
+            self.utf_cp = (u32)byte & (u32)7;
+            return None;
+        }
+        KeyEvent e = key_simple(KeyKind.Unknown);
+        e.codepoint = (u32)byte;
+        return Some(e);
+    }
+
+    Optional<KeyEvent> feed_esc(*self, u8 byte) {
+        if (byte == (u8)91) {
+            // CSI: ESC [
+            self.state = 2;
+            self.nparams = 0;
+            for (i64 i = 0; i < 8; i = i + 1) {
+                self.params[i] = 0;
+            }
+            return None;
+        }
+        if (byte == (u8)79) {
+            // SS3: ESC O
+            self.state = 3;
+            return None;
+        }
+        if (byte == (u8)27) {
+            // ESC ESC: report one Esc, stay open for the next sequence.
+            return Some(key_simple(KeyKind.Esc));
+        }
+        // Alt+key: ESC followed by a plain byte.
+        self.state = 0;
+        if (byte == (u8)13) {
+            KeyEvent e = key_simple(KeyKind.Enter);
+            e.alt = true;
+            return Some(e);
+        }
+        if (byte == (u8)9) {
+            KeyEvent e = key_simple(KeyKind.Tab);
+            e.alt = true;
+            return Some(e);
+        }
+        if (byte >= (u8)32 && byte < (u8)127) {
+            KeyEvent e = key_char((u32)byte);
+            e.alt = true;
+            return Some(e);
+        }
+        KeyEvent e = key_simple(KeyKind.Unknown);
+        e.codepoint = (u32)byte;
+        e.alt = true;
+        return Some(e);
+    }
+
+    Optional<KeyEvent> feed_csi(*self, u8 byte) {
+        if (byte >= (u8)48 && byte <= (u8)57) {
+            if (self.nparams < 8) {
+                i64 v = self.params[self.nparams];
+                if (v < 1000) {
+                    self.params[self.nparams] = v * 10 + (i64)(byte - (u8)48);
+                }
+            }
+            return None;
+        }
+        if (byte == (u8)59) {
+            // ';': advance to the next param slot.
+            if (self.nparams < 7) {
+                self.nparams = self.nparams + 1;
+            }
+            return None;
+        }
+        if (byte >= (u8)32 && byte < (u8)48) {
+            // Intermediate bytes (e.g. "$", '"', " "): accepted, ignored.
+            return None;
+        }
+        if (byte >= (u8)64 && byte <= (u8)126) {
+            self.state = 0;
+            return Some(self.finish_csi(byte));
+        }
+        // Anything else aborts the sequence.
+        self.state = 0;
+        self.nparams = 0;
+        return None;
+    }
+
+    /// Decode a complete CSI sequence: params are parsed, `final` selects
+    /// the key, and a second param carries xterm modifiers (minus one).
+    KeyEvent finish_csi(*self, u8 final) {
+        i64 count = self.nparams + 1;
+        if (count > 8) { count = 8; }
+        self.nparams = 0;
+        bool shift = false;
+        bool alt = false;
+        bool ctrl = false;
+        if (count >= 2) {
+            i64 m = self.params[1] - 1;
+            if (m < 0) { m = 0; }
+            if (m > 8) { m = 8; }
+            shift = (m & 1) != 0;
+            alt = (m & 2) != 0;
+            ctrl = (m & 4) != 0;
+        }
+        KeyKind kind = KeyKind.Unknown;
+        i64 fnum = 0;
+        if (final == (u8)65) { kind = KeyKind.Up; }
+        else if (final == (u8)66) { kind = KeyKind.Down; }
+        else if (final == (u8)67) { kind = KeyKind.Right; }
+        else if (final == (u8)68) { kind = KeyKind.Left; }
+        else if (final == (u8)72) { kind = KeyKind.Home; }
+        else if (final == (u8)70) { kind = KeyKind.End; }
+        else if (final == (u8)90) {
+            kind = KeyKind.Tab;
+            shift = true;
+        }
+        else if (final == (u8)80) { kind = KeyKind.FKey; fnum = 1; }
+        else if (final == (u8)81) { kind = KeyKind.FKey; fnum = 2; }
+        else if (final == (u8)82) { kind = KeyKind.FKey; fnum = 3; }
+        else if (final == (u8)83) { kind = KeyKind.FKey; fnum = 4; }
+        else if (final == (u8)126 && count >= 1) {
+            i64 p = self.params[0];
+            if (p == 1 || p == 7) { kind = KeyKind.Home; }
+            else if (p == 2) { kind = KeyKind.Insert; }
+            else if (p == 3) { kind = KeyKind.Delete; }
+            else if (p == 4 || p == 8) { kind = KeyKind.End; }
+            else if (p == 5) { kind = KeyKind.PageUp; }
+            else if (p == 6) { kind = KeyKind.PageDown; }
+            else if (p >= 11 && p <= 15) { kind = KeyKind.FKey; fnum = p - 10; }
+            else if (p >= 17 && p <= 21) { kind = KeyKind.FKey; fnum = p - 11; }
+            else if (p == 23) { kind = KeyKind.FKey; fnum = 11; }
+            else if (p == 24) { kind = KeyKind.FKey; fnum = 12; }
+        }
+        KeyEvent e = key_simple(kind);
+        e.fnum = fnum;
+        e.shift = shift;
+        e.alt = alt;
+        e.ctrl = ctrl;
+        return e;
+    }
+
+    Optional<KeyEvent> feed_ss3(*self, u8 byte) {
+        self.state = 0;
+        KeyEvent e = key_simple(KeyKind.Unknown);
+        if (byte == (u8)80) { e = key_simple(KeyKind.FKey); e.fnum = 1; }
+        else if (byte == (u8)81) { e = key_simple(KeyKind.FKey); e.fnum = 2; }
+        else if (byte == (u8)82) { e = key_simple(KeyKind.FKey); e.fnum = 3; }
+        else if (byte == (u8)83) { e = key_simple(KeyKind.FKey); e.fnum = 4; }
+        return Some(e);
+    }
+}

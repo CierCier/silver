@@ -1,0 +1,143 @@
+// Tests for std.term.keys — key parser over raw byte feeds.
+import std.test;
+import std.term.keys;
+
+str kind_name(KeyKind k) {
+    return match k {
+        Char : "char",
+        Enter : "enter",
+        Tab : "tab",
+        Backspace : "backspace",
+        Esc : "esc",
+        Up : "up",
+        Down : "down",
+        Left : "left",
+        Right : "right",
+        Home : "home",
+        End : "end",
+        PageUp : "pageup",
+        PageDown : "pagedown",
+        Insert : "insert",
+        Delete : "delete",
+        FKey : "fkey",
+        Unknown : "unknown",
+    };
+}
+
+// Feed `text` byte by byte; exactly one event must emerge (the last byte's).
+KeyEvent feed_one(str text) {
+    KeyParser p = KeyParser.new();
+    u8* b = (u8*)text;
+    i64 len = cstr_len(b);
+    KeyEvent got = key_simple(KeyKind.Unknown);
+    bool seen = false;
+    for (i64 i = 0; i < len; i = i + 1) {
+        Optional<KeyEvent> o = p.feed(b[i]);
+        if (!o.is_none()) {
+            got = o.unwrap();
+            seen = true;
+        }
+    }
+    assert_true(seen, "feed produces exactly one event");
+    return got;
+}
+
+void check_key(str text, str want_kind, str msg) {
+    KeyEvent e = feed_one(text);
+    assert_eq_str(want_kind, kind_name(e.kind), msg);
+}
+
+i32 main() {
+    test_start("printable and control keys");
+    {
+        KeyEvent a = feed_one("a");
+        assert_eq_str("char", kind_name(a.kind), "a is char");
+        assert_eq_i64(97, (i64)a.codepoint, "codepoint of a");
+        check_key("\x09", "tab", "tab");
+        check_key("\x0d", "enter", "enter");
+        check_key("\x7f", "backspace", "DEL is backspace");
+        check_key("\x08", "backspace", "BS is backspace");
+        KeyEvent c = feed_one("\x03");
+        assert_eq_str("char", kind_name(c.kind), "ctrl-C is char");
+        assert_true(c.ctrl, "ctrl-C has ctrl");
+        assert_eq_i64(99, (i64)c.codepoint, "ctrl-C base letter");
+        KeyEvent z = feed_one("\x1a");
+        assert_true(z.ctrl, "ctrl-Z has ctrl");
+        assert_eq_i64(122, (i64)z.codepoint, "ctrl-Z base letter");
+    }
+
+    test_start("escape and alt keys");
+    {
+        KeyParser p = KeyParser.new();
+        Optional<KeyEvent> o = p.feed((u8)27);
+        assert_true(o.is_none(), "lone ESC waits");
+        Optional<KeyEvent> e = p.flush();
+        assert_true(!e.is_none(), "flush resolves lone ESC");
+        assert_eq_str("esc", kind_name(e.unwrap().kind), "lone ESC");
+        KeyEvent m = feed_one("\x1bx");
+        assert_eq_str("char", kind_name(m.kind), "alt-x is char");
+        assert_true(m.alt, "alt-x has alt");
+        assert_eq_i64(120, (i64)m.codepoint, "alt-x codepoint");
+        KeyEvent ae = feed_one("\x1b\x0d");
+        assert_eq_str("enter", kind_name(ae.kind), "alt-enter");
+        assert_true(ae.alt, "alt-enter has alt");
+    }
+
+    test_start("arrows and navigation");
+    {
+        check_key("\x1b[A", "up", "up");
+        check_key("\x1b[B", "down", "down");
+        check_key("\x1b[C", "right", "right");
+        check_key("\x1b[D", "left", "left");
+        check_key("\x1b[H", "home", "home");
+        check_key("\x1b[F", "end", "end");
+        check_key("\x1b[2~", "insert", "insert");
+        check_key("\x1b[3~", "delete", "delete");
+        check_key("\x1b[5~", "pageup", "pageup");
+        check_key("\x1b[6~", "pagedown", "pagedown");
+        check_key("\x1b[Z", "tab", "shift-tab is tab");
+        KeyEvent st = feed_one("\x1b[Z");
+        assert_true(st.shift, "shift-tab has shift");
+    }
+
+    test_start("modifiers");
+    {
+        KeyEvent cu = feed_one("\x1b[1;5A");
+        assert_eq_str("up", kind_name(cu.kind), "ctrl-up");
+        assert_true(cu.ctrl, "ctrl-up has ctrl");
+        KeyEvent sa = feed_one("\x1b[1;2D");
+        assert_true(sa.shift, "shift-left has shift");
+        KeyEvent al = feed_one("\x1b[1;3C");
+        assert_true(al.alt, "alt-right has alt");
+        KeyEvent csd = feed_one("\x1b[1;6B");
+        assert_true(csd.ctrl && csd.shift, "ctrl-shift-down");
+    }
+
+    test_start("function keys");
+    {
+        KeyEvent f1 = feed_one("\x1bOP");
+        assert_eq_str("fkey", kind_name(f1.kind), "SS3 F1");
+        assert_eq_i64(1, f1.fnum, "F1 number");
+        KeyEvent f4 = feed_one("\x1b[ S");
+        assert_eq_str("fkey", kind_name(f4.kind), "intermediates ignored, S is F4");
+        assert_eq_i64(4, f4.fnum, "F4 number via CSI");
+        KeyEvent f5 = feed_one("\x1b[15~");
+        assert_eq_i64(5, f5.fnum, "F5 number");
+        KeyEvent f12 = feed_one("\x1b[24~");
+        assert_eq_i64(12, f12.fnum, "F12 number");
+        check_key("\x1b[11~", "fkey", "CSI F1");
+    }
+
+    test_start("utf-8 passthrough");
+    {
+        // 'é' is U+00E9: 0xC3 0xA9.
+        KeyEvent e = feed_one("é");
+        assert_eq_str("char", kind_name(e.kind), "é is char");
+        assert_eq_i64(233, (i64)e.codepoint, "codepoint of é");
+        // '€' is U+20AC: 0xE2 0x82 0xAC.
+        KeyEvent euro = feed_one("€");
+        assert_eq_i64(8364, (i64)euro.codepoint, "codepoint of €");
+    }
+
+    return done();
+}
