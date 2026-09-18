@@ -131,28 +131,43 @@ impl JsonWriter {
         u8* bytes = (u8*)value;
         i64 i = 0;
         i64 len = cstr_len(bytes);
+        // Bulk-copy runs of plain bytes with one buffer write per run;
+        // only escape openers (quote, backslash, control) take the slow path.
+        i64 run = 0;
         while (i < len) {
             u8 ch = bytes[i];
-            if (ch == (u8)34) {
-                self.output.write_str("\\\"");
-            } else if (ch == (u8)92) {
-                self.output.write_str("\\\\");
-            } else if (ch == (u8)8) {
-                self.output.write_str("\\b");
-            } else if (ch == (u8)12) {
-                self.output.write_str("\\f");
-            } else if (ch == (u8)10) {
-                self.output.write_str("\\n");
-            } else if (ch == (u8)13) {
-                self.output.write_str("\\r");
-            } else if (ch == (u8)9) {
-                self.output.write_str("\\t");
-            } else if (ch < (u8)32) {
-                self.write_hex4((u32)ch);
+            if (ch == (u8)34 || ch == (u8)92 || ch < (u8)32) {
+                if (run > 0) {
+                    self.output.write(&bytes[i - run], run);
+                    run = 0;
+                }
+                if (ch == (u8)34) {
+                    self.output.write_str("\\\"");
+                } else if (ch == (u8)92) {
+                    self.output.write_str("\\\\");
+                } else if (ch == (u8)8) {
+                    self.output.write_str("\\b");
+                } else if (ch == (u8)12) {
+                    self.output.write_str("\\f");
+                } else if (ch == (u8)10) {
+                    self.output.write_str("\\n");
+                } else if (ch == (u8)13) {
+                    self.output.write_str("\\r");
+                } else if (ch == (u8)9) {
+                    self.output.write_str("\\t");
+                } else if (ch < (u8)32) {
+                    self.write_hex4((u32)ch);
+                } else {
+                    self.output.write_u8(ch);
+                }
+                i = i + 1;
             } else {
-                self.output.write_u8(ch);
+                run = run + 1;
+                i = i + 1;
             }
-            i = i + 1;
+        }
+        if (run > 0) {
+            self.output.write(&bytes[i - run], run);
         }
     }
 

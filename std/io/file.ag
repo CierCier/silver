@@ -549,14 +549,12 @@ impl File {
         return ch;
     }
 
+    /// Buffered string write: small writes accumulate in the 4096-byte
+    /// buffer (flushed by flush/close/read/seek, as with write_char);
+    /// only writes that cannot fit go straight to the fd.
     i32 write_str(*self, str text) {
         if (self.invalid()) {
             return EOF;
-        }
-        if (self.write_buf != (u8*)0 && self.write_len > 0) {
-            if (self.flush() < 0) {
-                return EOF;
-            }
         }
         if (text == (str)0) {
             self.had_error = true;
@@ -564,19 +562,37 @@ impl File {
         }
         u8* p = (u8*)text;
         i64 len = cstr_len(p);
-        i64 written = 0;
-        while (written < len) {
-            Result<i64, Error> r = try_write(self.fd, (u8*)((i64)p + written), len - written);
-            if (r.is_err()) {
-                self.had_error = true;
-                return EOF;
-            }
-            if (r.value() == 0) {
-                self.had_error = true;
-                return EOF;
-            }
-            written = written  + r.value();
+        if (self.write_buf == (u8*)0) {
+            self.write_buf = alloc<u8>(4096);
+            self.write_len = 0;
         }
+        // Oversized write: drain pending bytes, then write through directly.
+        if (len >= 4096) {
+            if (self.write_len > 0 && self.flush() < 0) {
+                return EOF;
+            }
+            i64 written = 0;
+            while (written < len) {
+                Result<i64, Error> r = try_write(self.fd, (u8*)((i64)p + written), len - written);
+                if (r.is_err()) {
+                    self.had_error = true;
+                    return EOF;
+                }
+                if (r.value() == 0) {
+                    self.had_error = true;
+                    return EOF;
+                }
+                written = written  + r.value();
+            }
+            return 0;
+        }
+        if (self.write_len + len > 4096) {
+            if (self.flush() < 0) {
+                return EOF;
+            }
+        }
+        memcpy((void*)&self.write_buf[self.write_len], (const void*)p, len);
+        self.write_len = self.write_len + len;
         return 0;
     }
 
