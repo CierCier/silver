@@ -119,18 +119,16 @@ impl Vec<T> {
     }
 
     /// Move value out of position `index`, removing it from the Vec: the
-    /// tail shifts left via `move` and `len` shrinks, so the slot is truly
-    /// vacated (drain with `take(0)` repeatedly, or `pop()` for LIFO).
-    /// Each shifted element is `move`d (`data[i] = move data[i+1]`) leaving the
-    /// source in a moved-from state; the trailing slot beyond `len` is ignored.
+    /// tail shifts left and `len` shrinks, so the slot is truly vacated.
+    /// Every T is bitwise relocatable, so the tail moves with one memmove
+    /// instead of a per-element move loop; the trailing slot beyond `len`
+    /// is ignored exactly as before.
     T take(&mut self, i64 index) {
         T tmp0 = self.data[index];
         T result = move tmp0;
-        i64 i = index;
-        while (i + 1 < self.len) {
-            T tmp = self.data[i + 1];
-            self.data[i] = move tmp;
-            i = i + 1;
+        i64 tail = self.len - index - 1;
+        if (tail > 0) {
+            silver_rt_memmove((u8*)&self.data[index], (u8*)&self.data[index + 1], tail * @size(T));
         }
         self.len = self.len - 1;
         return move result;
