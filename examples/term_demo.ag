@@ -1,0 +1,91 @@
+// Interactive terminal demo: raw-mode key readout. Run from a real
+// terminal (not a pipe): `agc run examples/term_demo.ag`
+// Press keys to see them decoded; Ctrl-Q quits.
+import std.term;
+import std.sys.result;
+
+str describe(KeyEvent* e) {
+    return match e.kind {
+        Char : "char",
+        Enter : "enter",
+        Tab : "tab",
+        Backspace : "backspace",
+        Esc : "esc",
+        Up : "up",
+        Down : "down",
+        Left : "left",
+        Right : "right",
+        Home : "home",
+        End : "end",
+        PageUp : "pageup",
+        PageDown : "pagedown",
+        Insert : "insert",
+        Delete : "delete",
+        FKey : "fkey",
+        Unknown : "unknown",
+    };
+}
+
+i32 main() {
+    if (!term_is_tty(0)) {
+        STDOUT.write_str("stdin is not a tty — run this from a real terminal\n");
+        STDOUT.flush();
+        return 1;
+    }
+    Result<RawMode, Error> g = RawMode.enable(0);
+    if (g.is_err()) {
+        STDOUT.write_str("raw mode failed\n");
+        STDOUT.flush();
+        return 1;
+    }
+    RawMode _guard = g.unwrap();
+    BufWriter* out = &STDOUT;
+    term_enter_alt(out);
+    term_hide_cursor(out);
+    term_erase_screen(out);
+    term_cursor_home(out);
+    out.write_str("term demo — press keys, Ctrl-Q quits\r\n");
+    out.flush();
+
+    KeyParser p = KeyParser.new();
+    u8 byte = 0;
+    while (true) {
+        Result<i64, Error> r = try_read(0, &byte, 1);
+        if (r.is_err() || r.value() == 0) {
+            break;
+        }
+        Optional<KeyEvent> o = p.feed(byte);
+        if (o.is_none()) {
+            continue;
+        }
+        KeyEvent e = o.unwrap();
+        out.write_str("key: ");
+        out.write_str(describe(&e));
+        if (e.kind == KeyKind.Char) {
+            u8 buf[16];
+            i64 n = utoa((u64)e.codepoint, &buf[0]);
+            out.write_str(" cp=");
+            out.write(&buf[0], n);
+        }
+        if (e.kind == KeyKind.FKey) {
+            u8 buf[16];
+            i64 n = itoa(e.fnum, &buf[0]);
+            out.write_str(" F");
+            out.write(&buf[0], n);
+        }
+        if (e.ctrl) { out.write_str(" ctrl"); }
+        if (e.alt) { out.write_str(" alt"); }
+        if (e.shift) { out.write_str(" shift"); }
+        out.write_str("\r\n");
+        out.flush();
+        if (e.kind == KeyKind.Char && e.ctrl && e.codepoint == (u32)113) {
+            break; // Ctrl-Q
+        }
+    }
+
+    term_exit_alt(out);
+    term_show_cursor(out);
+    out.write_str("bye\n");
+    out.flush();
+    return 0;
+}
