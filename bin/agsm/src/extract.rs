@@ -391,6 +391,7 @@ fn export_typedef(
                 trait_items: Vec::new(),
                 const_value: None,
                 is_mutable: false,
+                impl_trait: None,
             }))
         }
         Err(_) if export_opaque_types => Ok(Some(export_opaque_record(name))),
@@ -425,6 +426,7 @@ fn export_var(entity: &Entity<'_>, name: &str) -> Result<Option<ModuleExport>, E
         trait_items: Vec::new(),
         const_value: None,
         is_mutable: !is_const,
+        impl_trait: None,
     }))
 }
 
@@ -460,6 +462,7 @@ fn export_macro(entity: &Entity<'_>, name: &str) -> Result<Option<ModuleExport>,
         trait_items: Vec::new(),
         const_value: Some(const_val),
         is_mutable: false,
+        impl_trait: None,
     }))
 }
 
@@ -543,6 +546,7 @@ fn export_function(
         trait_items: Vec::new(),
         const_value: None,
         is_mutable: false,
+        impl_trait: None,
     })
 }
 
@@ -563,6 +567,7 @@ fn export_opaque_record(name: &str) -> ModuleExport {
         trait_items: Vec::new(),
         const_value: None,
         is_mutable: false,
+        impl_trait: None,
     }
 }
 
@@ -719,6 +724,7 @@ fn export_record(
         },
         const_value: None,
         is_mutable: false,
+        impl_trait: None,
     })
 }
 
@@ -758,6 +764,7 @@ fn export_enum(entity: &Entity<'_>, name: &str) -> Result<ModuleExport, ExtractE
         trait_items: Vec::new(),
         const_value: None,
         is_mutable: false,
+        impl_trait: None,
     })
 }
 
