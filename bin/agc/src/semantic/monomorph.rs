@@ -180,10 +180,18 @@ pub fn append_monomorphs(
     }
 
     let mut generic_fns = collect_generic_fns(program);
+    // Imported generic function templates (parsed from artifact sources):
+    // instantiating locally gives the instance a real body, so downstream
+    // concrete types link without requiring the library to pre-instantiate
+    // them (linkonce_odr deduplicates across units).
+    let mut imported_fn_templates: HashMap<String, ast::FunctionItem> = HashMap::default();
     for item in &imported_generic_items {
         if let ast::ItemKind::Function(func) = &item.kind {
             if func.generics.is_some() {
                 generic_fns.insert(func.name.name.clone());
+                imported_fn_templates
+                    .entry(func.name.name.clone())
+                    .or_insert_with(|| func.clone());
             }
         }
     }
@@ -219,7 +227,12 @@ pub fn append_monomorphs(
             report_nonconvergence("function instances", generation, current_requests[0].call_span());
             break;
         }
-        let new_items = instantiate_requests(program, &current_requests, &mut generated);
+        let new_items = instantiate_requests(
+            program,
+            &current_requests,
+            &mut generated,
+            &imported_fn_templates,
+        );
         for item in &new_items {
             all_new_items.push(item.clone());
             program.items.push(item.clone());
@@ -1450,6 +1463,7 @@ fn instantiate_requests(
     program: &mut ast::Program,
     requests: &[MonomorphRequest],
     generated: &mut HashSet<String>,
+    imported_fn_templates: &HashMap<String, ast::FunctionItem>,
 ) -> Vec<ast::Item> {
     let mut items = Vec::new();
     for request in requests {
@@ -1461,7 +1475,21 @@ fn instantiate_requests(
                 call_span,
                 is_imported,
             } => {
-                let source = source.as_ref();
+                // Prefer a real template body over the import stub: the
+                // defining unit cannot pre-instantiate downstream concrete
+                // types, so the consuming unit emits the instance itself.
+                let template;
+                let (source, is_imported) = if *is_imported {
+                    if let Some(tmpl) = imported_fn_templates.get(&source.name.name) {
+                        template = tmpl.clone();
+                        (&template, false)
+                    } else {
+                        (source.as_ref(), true)
+                    }
+                } else {
+                    (source.as_ref(), false)
+                };
+                let source = source;
                 let args = ordered_args(type_params, mapping);
 
                 let mangled = mangle_function_instance(source, &args, mapping);
@@ -1500,7 +1528,7 @@ fn instantiate_requests(
                 // an external declaration (marked with the synthetic
                 // `agm_import` attribute; codegen skips the body) so the
                 // mangled instance resolves against the library object.
-                let attributes = if *is_imported {
+                let attributes = if is_imported {
                     vec![ast::Attribute {
                         name: ast::Identifier {
                             name: "agm_import".to_string(),
@@ -1516,7 +1544,7 @@ fn instantiate_requests(
                 items.push(ast::Item {
                     kind: ast::ItemKind::Function(func),
                     span: source.name.span,
-                    visibility: if *is_imported {
+                    visibility: if is_imported {
                         ast::Visibility::Public
                     } else {
                         ast::Visibility::Private

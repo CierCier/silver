@@ -1786,26 +1786,6 @@ pub fn run(cli: Cli) {
                     }
                 }
 
-                if plan.tree_shake {
-                    profiler::begin_phase("tree-shake");
-                    let before_items = ast.items.len();
-                    let pruned = semantic::tree_shake::eliminate_dead_ast_items(
-                        &mut ast,
-                        Some(input_file),
-                        matches!(plan.emit, EmitKind::Module),
-                        &monomorphs,
-                    );
-                    if plan.verbose {
-                        eprintln!(
-                            "agc: tree-shaking eliminated {} unused items ({} -> {})",
-                            pruned,
-                            before_items,
-                            ast.items.len()
-                        );
-                    }
-                    profiler::end_phase("tree-shake");
-                }
-
                 profiler::begin_phase("monomorph");
                 profiler::begin_phase("append_monomorphs fixpoint");
                 let new_items = semantic::monomorph::append_monomorphs(&mut ast, &monomorphs, &imported_modules);
@@ -1863,6 +1843,30 @@ pub fn run(cli: Cli) {
                     CompilerPhase::Monomorphize,
                     format!("monomorph requests applied: {}", monomorphs.len()),
                 );
+
+                // Tree-shake AFTER monomorphization: instantiated generic
+                // bodies reference items no pre-expansion scan can see
+                // (imported templates arrive bodiless). Shaking first drops
+                // callees that only the instances use.
+                if plan.tree_shake {
+                    profiler::begin_phase("tree-shake");
+                    let before_items = ast.items.len();
+                    let pruned = semantic::tree_shake::eliminate_dead_ast_items(
+                        &mut ast,
+                        Some(input_file),
+                        matches!(plan.emit, EmitKind::Module),
+                        &monomorphs,
+                    );
+                    if plan.verbose {
+                        eprintln!(
+                            "agc: tree-shaking eliminated {} unused items ({} -> {})",
+                            pruned,
+                            before_items,
+                            ast.items.len()
+                        );
+                    }
+                    profiler::end_phase("tree-shake");
+                }
 
                 if matches!(plan.emit, EmitKind::Module) {
                     let target_triple = plan.target.clone().unwrap_or_else(|| {
