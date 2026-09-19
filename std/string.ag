@@ -148,11 +148,11 @@ impl String {
         return strcmp((const char*)self.data, other) == 0;
     }
 
-    const char* to_str(&self) {
+    str to_str(&self) {
         if (self.data == (u8*)0) {
             return "";
         }
-        return (const char*)self.data;
+        return (str)self.data;
     }
 
     String from_str(str s) {
