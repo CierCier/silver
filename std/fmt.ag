@@ -31,9 +31,13 @@ i64 __fmt_write_fd(i64 fd, u8* p, i64 len) {
             }
             written = written + r;
         } else {
-            if (r != -4) { // EINTR = 4
-                return r;
+            if (r == -4) { // EINTR = 4
+                continue;
             }
+            if (written > 0) {
+                return written;
+            }
+            return r;
         }
     }
     return written;

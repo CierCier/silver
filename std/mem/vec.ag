@@ -79,10 +79,23 @@ impl Vec<T> {
         return &(self.data[index]);
     }
 
+    /// Shared reference to an element at `index`.
+    &T get_ref(&self, i64 index) {
+        if (index < 0 || index >= self.len) { abort(); }
+        return &self.data[index];
+    }
+
+    /// Mutable reference to an element at `index`.
+    &mut T get_mut(&mut self, i64 index) {
+        if (index < 0 || index >= self.len) { abort(); }
+        return &mut self.data[index];
+    }
+
     /// Overwrite element at `index`.
     /// Out-of-bounds indices abort deterministically in every build profile.
     void set(&mut self, i64 index, T value) {
         if (index < 0 || index >= self.len) { abort(); }
+        @drop_in_place(&self.data[index], 1);
         self.data[index] = move value;
     }
 
@@ -238,6 +251,7 @@ impl<T> IndexedAccess for Vec<T> {
     }
     void __index_set(*self, i64 index, T value) {
         if (index < 0 || index >= self.len) { abort(); }
+        @drop_in_place(&self.data[index], 1);
         self.data[index] = move value;
     }
 }

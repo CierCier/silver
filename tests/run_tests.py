@@ -58,6 +58,7 @@ LEAK_CHECK_TESTS = {
     "uuid_test",
     "display_test",
     "display_net_test",
+    "leak_regression_test",
 }
 
 EXPECTED_COMPILE_FAILURES = {

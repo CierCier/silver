@@ -1243,6 +1243,7 @@ mod tests {
             trait_items: Vec::new(),
             const_value: None,
             is_mutable: false,
+            impl_trait: None,
         });
         let selection = vec![ast::ImportedName {
             name: ast::Identifier {

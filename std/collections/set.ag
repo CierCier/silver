@@ -241,10 +241,10 @@ impl HashSet<K> {
     }
 
     /// Remove key. Returns true if present (tombstones slot).
-    /// Leaks owned K — use take/drain for Drop types.
     bool erase(&mut self, K key) {
         i64 idx = self.find_slot(key);
         if (idx >= 0) {
+            @drop_in_place(&self.keys[idx], 1);
             self.set_ctrl(idx, SET_CTRL_DELETED);
             self.len = self.len - 1;
             return true;

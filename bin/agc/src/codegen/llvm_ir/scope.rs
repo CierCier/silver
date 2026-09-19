@@ -998,6 +998,107 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         struct_ptr: PointerValue<'ctx>,
         _parent_flag: PointerValue<'ctx>,
     ) -> CodegenResult<Vec<(String, PointerValue<'ctx>)>> {
+        if let ast::TypeKind::Tuple(types) = ty.kind.as_ref() {
+            let mut field_llvm_types = Vec::with_capacity(types.len());
+            for t in types {
+                field_llvm_types.push(self.lower_basic_type(t)?);
+            }
+            let tuple_struct_ty = self.context.struct_type(&field_llvm_types, false);
+
+            let mut collected: Vec<(String, PointerValue<'ctx>)> = Vec::new();
+            for (field_index, field_ty) in types.iter().enumerate().rev() {
+                let field_name = field_index.to_string();
+                let field_ptr = self
+                    .builder
+                    .build_struct_gep(tuple_struct_ty, struct_ptr, field_index as u32, &field_name)
+                    .map_err(|e| CodegenError::new(format!("cascade tuple GEP: {e}")))?;
+
+                if !Self::is_pointer_or_reference(field_ty) {
+                    let nested = self.register_field_drops(field_ty, field_ptr, _parent_flag)?;
+                    for (nested_path, nested_flag) in nested {
+                        let full_path = format!("{field_name}.{nested_path}");
+                        collected.push((full_path, nested_flag));
+                    }
+
+                    if let Some(drop_fn) = self.get_drop_function_name(field_ty)? {
+                        let function = self.current_fn.ok_or_else(|| {
+                            CodegenError::new("no active function for tuple field drop flag")
+                        })?;
+                        let field_flag = self.create_entry_alloca(
+                            function,
+                            &format!("field.{field_name}.drop"),
+                            self.context.bool_type().as_basic_type_enum(),
+                        )?;
+                        self.builder
+                            .build_store(field_flag, self.context.bool_type().const_int(0, false))
+                            .map_err(|e| {
+                                CodegenError::new(format!("failed to init field drop flag: {e}"))
+                            })?;
+                        if let Some(scope) = self.defers.last_mut() {
+                            scope.push(DeferredEntry {
+                                action: DeferAction::DropCall(drop_fn, field_ptr),
+                                flag: Some(field_flag),
+                            });
+                        }
+                        collected.push((field_name, field_flag));
+                    }
+                }
+            }
+            return Ok(collected);
+        }
+
+        if let ast::TypeKind::Array(array) = ty.kind.as_ref() {
+            let array_llvm_ty = self.lower_basic_type(ty)?;
+            let zero = self.context.i64_type().const_zero();
+            let mut collected: Vec<(String, PointerValue<'ctx>)> = Vec::new();
+            for i in (0..array.size).rev() {
+                let field_name = i.to_string();
+                let idx_val = self.context.i64_type().const_int(i as u64, false);
+                let field_ptr = unsafe {
+                    self.builder.build_in_bounds_gep(
+                        array_llvm_ty,
+                        struct_ptr,
+                        &[zero, idx_val],
+                        &field_name,
+                    )
+                }
+                .map_err(|e| CodegenError::new(format!("cascade array GEP: {e}")))?;
+
+                if !Self::is_pointer_or_reference(&array.element_type) {
+                    let nested =
+                        self.register_field_drops(&array.element_type, field_ptr, _parent_flag)?;
+                    for (nested_path, nested_flag) in nested {
+                        let full_path = format!("{field_name}.{nested_path}");
+                        collected.push((full_path, nested_flag));
+                    }
+
+                    if let Some(drop_fn) = self.get_drop_function_name(&array.element_type)? {
+                        let function = self.current_fn.ok_or_else(|| {
+                            CodegenError::new("no active function for array elem drop flag")
+                        })?;
+                        let field_flag = self.create_entry_alloca(
+                            function,
+                            &format!("field.{field_name}.drop"),
+                            self.context.bool_type().as_basic_type_enum(),
+                        )?;
+                        self.builder
+                            .build_store(field_flag, self.context.bool_type().const_int(0, false))
+                            .map_err(|e| {
+                                CodegenError::new(format!("failed to init field drop flag: {e}"))
+                            })?;
+                        if let Some(scope) = self.defers.last_mut() {
+                            scope.push(DeferredEntry {
+                                action: DeferAction::DropCall(drop_fn, field_ptr),
+                                flag: Some(field_flag),
+                            });
+                        }
+                        collected.push((field_name, field_flag));
+                    }
+                }
+            }
+            return Ok(collected);
+        }
+
         let Some(named) = Self::extract_named_type(ty).cloned() else {
             return Ok(Vec::new());
         };

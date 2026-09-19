@@ -184,12 +184,12 @@ impl HashMap<K, V> {
         }
         i64 h = @hash(key);
         if (h < 0) { h = -h; }
-        return self.find_slot_with_hash(key, h);
+        return self.find_slot_with_hash(&key, h);
     }
 
     /// Find slot for `key` given a pre-computed non-negative hash.
     /// Used by the entry API after the lookup key has been moved.
-    i64 find_slot_with_hash(&self, K key, i64 h) {
+    i64 find_slot_with_hash(&self, &K key, i64 h) {
         u8 h2 = h2_fingerprint(h);
         i64 mask = self.capacity - 1;
         i64 idx = h & mask;
@@ -200,7 +200,7 @@ impl HashMap<K, V> {
             while (matches != 0) {
                 i64 bit = trailing_zeros(matches);
                 i64 slot = (idx + bit) & mask;
-                if (self.keys[slot] == key) {
+                if (self.keys[slot] == *key) {
                     return slot;
                 }
                 matches = matches & (matches - 1);
@@ -247,6 +247,8 @@ impl HashMap<K, V> {
                 i64 bit = trailing_zeros(matches);
                 i64 slot = (idx + bit) & mask;
                 if (self.keys[slot] == key) {
+                    @drop_in_place(&self.keys[slot], 1);
+                    @drop_in_place(&self.values[slot], 1);
                     self.keys[slot] = move key;
                     self.values[slot] = move value;
                     return slot;
@@ -310,13 +312,11 @@ impl HashMap<K, V> {
     }
 
     /// Remove key. Returns true if key was present.
-    ///
-    /// NOTE: This does NOT call per-element destructors — owned `K` / `V`
-    /// values are leaked.  Use `remove` (which returns the owned pair) or
-    /// `drain` to release owned elements explicitly.
     bool erase(&mut self, K key) {
         i64 idx = self.find_slot(key);
         if (idx >= 0) {
+            @drop_in_place(&self.keys[idx], 1);
+            @drop_in_place(&self.values[idx], 1);
             self.set_ctrl(idx, CTRL_DELETED);
             self.len = self.len - 1;
             return true;
@@ -591,16 +591,16 @@ impl<K, V> HashMap<K, V> {
     HashMapEntryRef<K, V> entry(&mut self, K key) {
         HashMapEntryRef<K, V> e;
         e.map = self;
-        e.key = key;
+        e.key = move key;
         e.inserted = false;
         if (self.capacity > 0 && self.len > 0) {
             i64 h = @hash(e.key);
             if (h < 0) { h = -h; }
-            e.idx = self.find_slot_with_hash(e.key, h);
+            e.idx = self.find_slot_with_hash(&e.key, h);
         } else {
             e.idx = -1;
         }
-        return e;
+        return move e;
     }
 }
 
@@ -776,6 +776,7 @@ impl<K, V> HashMapEntryRef<K, V> {
         if (self.idx < 0) {
             return Optional<V>.none();
         }
+        @drop_in_place(&self.map.keys[self.idx], 1);
         V v = move self.map.values[self.idx];
         self.map.set_ctrl(self.idx, CTRL_DELETED);
         self.map.len = self.map.len - 1;

@@ -146,11 +146,27 @@ impl BufWriter {
 
         // If data still doesn't fit after flush (single chunk > cap), write directly.
         // LINE mode: also bypass for oversized chunks — can't reliably detect \n in them.
-        if (n > self.cap) {
+        if (n > self.cap && self.len == 0) {
             if (self.fd >= 0) {
                 __fmt_write_fd(self.fd, src, n);
             }
             return;
+        }
+
+        if (self.len + n > self.cap) {
+            i64 new_cap = self.cap * 2;
+            if (new_cap < self.len + n) {
+                new_cap = self.len + n;
+            }
+            u8* heap = (u8*)malloc(new_cap);
+            if (self.len > 0) {
+                silver_rt_memcpy(heap, (u8*)self.data, self.len);
+            }
+            if (self.cap > 0) {
+                free((u8*)self.data);
+            }
+            self.data = (i64)heap;
+            self.cap = new_cap;
         }
 
         // Copy bytes into buffer.

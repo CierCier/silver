@@ -1,0 +1,64 @@
+import std.mem.vec;
+import std.map;
+import std.collections.set;
+import std.string;
+import std.optional;
+
+i32 main() {
+    // 1. Vec::set overwrite
+    {
+        Vec<String> v = Vec<String>.new();
+        v.push(String.from_str("vec_set_old_111111111111111111111111"));
+        v.push(String.from_str("vec_set_keep_22222222222222222222222"));
+        v.set(0, String.from_str("vec_set_new_333333333333333333333333"));
+    }
+
+    // 2. Vec::__index_set overwrite
+    {
+        Vec<String> v = Vec<String>.new();
+        v.push(String.from_str("vec_idx_old_111111111111111111111111"));
+        v[0] = String.from_str("vec_idx_new_222222222222222222222222");
+    }
+
+    // 3. HashMap insert overwrite
+    {
+        HashMap<String, String> m = HashMap<String, String>.new();
+        m.insert(String.from_str("k"), String.from_str("v1-aaaaaaaaaaaaaaaaaaaaaaaa"));
+        m.insert(String.from_str("k"), String.from_str("v2-bbbbbbbbbbbbbbbbbbbbbbbb"));
+    }
+
+    // 4. HashMap erase, HashSet erase, and Entry take
+    {
+        HashMap<String, String> m = HashMap<String, String>.new();
+        m.insert(String.from_str("k1-aaaaaaaa"), String.from_str("v1-aaaaaaaa"));
+        m.insert(String.from_str("k2-bbbbbbbb"), String.from_str("v2-bbbbbbbb"));
+        m.erase(String.from_str("k1-aaaaaaaa"));
+
+        HashMapEntryRef<String, String> entry = m.entry(String.from_str("k2-bbbbbbbb"));
+        Optional<String> _val = entry.take();
+
+        HashSet<String> s = HashSet<String>.new();
+        s.insert(String.from_str("set-k1-aaaaaaaa"));
+        s.insert(String.from_str("set-k2-bbbbbbbb"));
+        s.erase(String.from_str("set-k1-aaaaaaaa"));
+    }
+
+    // 5. Fixed array of owned locals
+    {
+        String a = String.from_str("arr_elem_111111111111111111111111");
+        String b = String.from_str("arr_elem_222222222222222222222222");
+        String arr[2];
+        arr[0] = move a;
+        arr[1] = move b;
+        // Overwrite element 0 to verify assignment pre-drop on indexed array
+        arr[0] = String.from_str("arr_elem_overwrite_3333333333333");
+    }
+
+    // 6. Tuple with owned locals
+    {
+        String c = String.from_str("tuple_str_1111111111111111111111");
+        [String, i64] _tup = [move c, 42];
+    }
+
+    return 0;
+}

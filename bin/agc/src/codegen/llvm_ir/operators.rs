@@ -345,19 +345,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         )
                     }) {
                         self.check_assignment_mutability(left)?;
-                        let value = self.emit_expression_value(right)?;
                         let method_ident = ast::Identifier {
                             name: "__index_set".to_string(),
                             span: left.span,
                         };
-                        self.emit_method_call_expression(
+                        let call_result = self.emit_method_call_expression(
                             object,
                             &method_ident,
                             &[(**index).clone(), right.clone()],
                             true,
                             &whole_expr.span,
                         )?;
-                        return Ok(value);
+                        return Ok(call_result.unwrap_or_else(|| {
+                            self.context.i32_type().const_zero().as_basic_value_enum()
+                        }));
                     }
                 }
                 self.check_assignment_mutability(left)?;
@@ -393,7 +394,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 // overwritten field(s) as live so the scope-exit cascade
                 // drops them.
                 match left.kind.as_ref() {
-                    ast::ExpressionKind::FieldAccess { .. } => {
+                    ast::ExpressionKind::FieldAccess { .. } | ast::ExpressionKind::Index { .. } => {
                         self.set_assigned_field_flags(left)?;
                     }
                     ast::ExpressionKind::Identifier(_) => {
@@ -2013,6 +2014,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     path.push(field.name.clone());
                     expr = object;
                 }
+                ast::ExpressionKind::Index { object, index } => {
+                    if let ast::ExpressionKind::Literal(ast::Literal::Integer(i)) =
+                        index.kind.as_ref()
+                    {
+                        path.push(i.to_string());
+                        expr = object;
+                    } else {
+                        return None;
+                    }
+                }
                 _ => return None,
             }
         }
@@ -2030,6 +2041,53 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let mut ptr = base_ptr;
         let mut ty = base_ty.clone();
         for segment in path.split('.') {
+            if let ast::TypeKind::Tuple(types) = ty.kind.as_ref() {
+                let Ok(index) = segment.parse::<usize>() else {
+                    return Err(CodegenError::with_span(
+                        format!("invalid tuple index '{segment}' in field path"),
+                        *span,
+                    ));
+                };
+                if index >= types.len() {
+                    return Err(CodegenError::with_span(
+                        format!("tuple index '{segment}' out of bounds in field path"),
+                        *span,
+                    ));
+                }
+                let mut field_llvm_types = Vec::with_capacity(types.len());
+                for t in types {
+                    field_llvm_types.push(self.lower_basic_type(t)?);
+                }
+                let tuple_struct_ty = self.context.struct_type(&field_llvm_types, false);
+                ptr = self
+                    .builder
+                    .build_struct_gep(tuple_struct_ty, ptr, index as u32, segment)
+                    .map_err(|e| CodegenError::with_span(format!("tuple field path GEP: {e}"), *span))?;
+                ty = types[index].clone();
+                continue;
+            }
+            if let ast::TypeKind::Array(array) = ty.kind.as_ref() {
+                let Ok(index) = segment.parse::<usize>() else {
+                    return Err(CodegenError::with_span(
+                        format!("invalid array index '{segment}' in field path"),
+                        *span,
+                    ));
+                };
+                let array_llvm_ty = self.lower_basic_type(&ty)?;
+                let zero = self.context.i64_type().const_zero();
+                let idx_val = self.context.i64_type().const_int(index as u64, false);
+                ptr = unsafe {
+                    self.builder.build_in_bounds_gep(
+                        array_llvm_ty,
+                        ptr,
+                        &[zero, idx_val],
+                        segment,
+                    )
+                }
+                .map_err(|e| CodegenError::with_span(format!("array field path GEP: {e}"), *span))?;
+                ty = (*array.element_type).clone();
+                continue;
+            }
             let Some(named) = Self::extract_named_type(&ty).cloned() else {
                 return Err(CodegenError::with_span(
                     format!("field path {path} crosses a non-struct type"),
@@ -2084,13 +2142,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ast::ExpressionKind::Identifier(_) => {
                 // Wholesale variable overwrite: own drop plus the live
                 // field cascade, in scope-exit order.
-                let Some(drop_fn) = self.get_drop_function_name(target_ty)? else {
-                    return Ok(());
-                };
-                let Some(flag_ptr) = self.assignment_guard_flag(left) else {
-                    return Ok(());
-                };
-                self.emit_guarded_drop(flag_ptr, &drop_fn, target_ptr, &left.span)?;
+                if let Some(drop_fn) = self.get_drop_function_name(target_ty)? {
+                    if let Some(flag_ptr) = self.assignment_guard_flag(left) {
+                        self.emit_guarded_drop(flag_ptr, &drop_fn, target_ptr, &left.span)?;
+                    }
+                }
                 if let ast::ExpressionKind::Identifier(ident) = left.kind.as_ref()
                     && let Some(var) = self.lookup_variable(&ident.name)
                 {
@@ -2111,7 +2167,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 }
                 Ok(())
             }
-            ast::ExpressionKind::FieldAccess { .. } => {
+            ast::ExpressionKind::FieldAccess { .. } | ast::ExpressionKind::Index { .. } => {
                 let Some((root_name, path)) = self.lvalue_root_and_path(left) else {
                     return Ok(());
                 };
@@ -2165,6 +2221,29 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     fn field_type_at_path(&self, base_ty: &ast::Type, path: &str) -> CodegenResult<ast::Type> {
         let mut ty = base_ty.clone();
         for segment in path.split('.') {
+            if let ast::TypeKind::Tuple(types) = ty.kind.as_ref() {
+                let Ok(index) = segment.parse::<usize>() else {
+                    return Err(CodegenError::new(format!(
+                        "invalid tuple index '{segment}' in field path"
+                    )));
+                };
+                if index >= types.len() {
+                    return Err(CodegenError::new(format!(
+                        "tuple index '{segment}' out of bounds in field path"
+                    )));
+                }
+                ty = types[index].clone();
+                continue;
+            }
+            if let ast::TypeKind::Array(array) = ty.kind.as_ref() {
+                let Ok(_index) = segment.parse::<usize>() else {
+                    return Err(CodegenError::new(format!(
+                        "invalid array index '{segment}' in field path"
+                    )));
+                };
+                ty = (*array.element_type).clone();
+                continue;
+            }
             let Some(named) = Self::extract_named_type(&ty).cloned() else {
                 return Err(CodegenError::new(format!(
                     "field path {path} crosses a non-struct type"
