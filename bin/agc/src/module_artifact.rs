@@ -227,7 +227,7 @@ impl ModuleArtifact {
             module_path,
             source_path,
             source_hash_fnv1a64: fnv1a64(source_text.as_bytes()),
-            compiler_version: env!("CARGO_PKG_VERSION").to_string(),
+            compiler_version: crate::cache_store::compiler_cache_version(),
             target_triple,
             code_artifacts,
             module_deps,

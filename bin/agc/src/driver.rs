@@ -871,7 +871,7 @@ fn artifact_compatibility_error(module: &ModuleArtifact, plan: &CompilePlan) -> 
         ));
     }
 
-    let expected_version = env!("CARGO_PKG_VERSION");
+    let expected_version = crate::cache_store::compiler_cache_version();
     if module.compiler_version != "foreign" && module.compiler_version != expected_version {
         return Some(format!(
             "module `{}` was built by compiler version `{}` but current compiler is `{expected_version}`",
@@ -3023,7 +3023,7 @@ mod tests {
             module_path: "sample".to_string(),
             source_path: String::new(),
             source_hash_fnv1a64: hash_source_text("pub i32 answer() { return 42; }\n"),
-            compiler_version: env!("CARGO_PKG_VERSION").to_string(),
+            compiler_version: crate::cache_store::compiler_cache_version(),
             target_triple: "unknown".to_string(),
             code_artifacts: ModuleCodeArtifacts {
                 has_static_library: true,

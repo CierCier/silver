@@ -201,6 +201,17 @@ pub struct CacheKeyBuilder {
     hasher: Sha256,
 }
 
+/// Compiler identity for cache keys and artifact compatibility: the crate
+/// version plus the git SHA, so codegen fixes invalidate cached artifacts
+/// even when the version number has not changed.
+pub fn compiler_cache_version() -> String {
+    format!(
+        "{}+{}",
+        env!("CARGO_PKG_VERSION"),
+        option_env!("GIT_SHA").unwrap_or("unknown")
+    )
+}
+
 impl CacheKeyBuilder {
     pub fn new(module_name: impl Into<String>) -> Self {
         let mut builder = Self {

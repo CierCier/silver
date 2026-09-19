@@ -108,7 +108,7 @@ impl ModuleLoader {
         if builder.add_file(&canonical).is_err() {
             return None;
         }
-        builder.add_compiler_version(env!("CARGO_PKG_VERSION"));
+        builder.add_compiler_version(&crate::cache_store::compiler_cache_version());
         builder.add_target(self.target.as_deref().unwrap_or("default"));
         builder.add_opt_level(self.opt_level.as_deref());
         builder.add_flags(&self.cfg_flags);
