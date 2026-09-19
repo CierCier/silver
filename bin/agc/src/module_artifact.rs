@@ -12,7 +12,8 @@ const MODULE_MAGIC_V6: &[u8; 6] = b"AGM\x00\x00\x06";
 const MODULE_MAGIC_V7: &[u8; 6] = b"AGM\x00\x00\x07";
 const MODULE_MAGIC_V8: &[u8; 6] = b"AGM\x00\x00\x08";
 const MODULE_MAGIC_V9: &[u8; 6] = b"AGM\x00\x00\x09";
-const MODULE_MAGIC: &[u8; 6] = b"AGM\x00\x00\x0A"; // v10: struct packed bit in layout record
+const MODULE_MAGIC_V10: &[u8; 6] = b"AGM\x00\x00\x0A";
+const MODULE_MAGIC: &[u8; 6] = b"AGM\x00\x00\x0B"; // v11: trait provenance on method exports
 
 #[derive(Debug, Clone)]
 pub struct ModuleArtifact {
@@ -55,6 +56,9 @@ pub struct ModuleExport {
     pub trait_items: Vec<ModuleTraitItem>,
     pub const_value: Option<String>,
     pub is_mutable: bool,
+    /// Owning trait for `Owner::method` exports (`None` for inherent
+    /// methods and pre-v11 artifacts).
+    pub impl_trait: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,6 +306,7 @@ impl ModuleArtifact {
             }
             write_optional_string(&mut out, export.const_value.as_deref())?;
             out.push(export.is_mutable as u8);
+            write_optional_string(&mut out, export.impl_trait.as_deref())?;
         }
         write_len(&mut out, self.native_libs.len())?;
         for lib in &self.native_libs {
@@ -332,7 +337,8 @@ impl ModuleArtifact {
         } else {
             return Err("invalid module interface header".to_string());
         };
-        let has_packed = magic == MODULE_MAGIC;
+        let has_packed = magic == MODULE_MAGIC || magic == MODULE_MAGIC_V10;
+        let has_impl_trait = magic == MODULE_MAGIC;
         let has_lib_paths = magic == MODULE_MAGIC || magic == MODULE_MAGIC_V9 || magic == MODULE_MAGIC_V8 || magic == MODULE_MAGIC_V7;
         let has_constants_and_globals = magic == MODULE_MAGIC || magic == MODULE_MAGIC_V9 || magic == MODULE_MAGIC_V8;
         let has_generic_templates = magic == MODULE_MAGIC;
@@ -453,6 +459,11 @@ impl ModuleArtifact {
             } else {
                 (None, false)
             };
+            let impl_trait = if has_impl_trait {
+                read_optional_string(bytes, &mut cursor)?
+            } else {
+                None
+            };
             exports.push(ModuleExport {
                 kind,
                 name,
@@ -469,6 +480,7 @@ impl ModuleArtifact {
                 trait_items,
                 const_value,
                 is_mutable,
+                impl_trait,
             });
         }
         let libs_len = read_len(bytes, &mut cursor)? as usize;
@@ -807,6 +819,7 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                     trait_items: Vec::new(),
                     const_value: None,
                     is_mutable: false,
+                impl_trait: None,
                 });
             }
             ast::ItemKind::ExternFunction(func) => {
@@ -843,6 +856,7 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                     trait_items: Vec::new(),
                     const_value: None,
                     is_mutable: false,
+                impl_trait: None,
                 });
             }
             ast::ItemKind::Struct(s) => {
@@ -913,6 +927,7 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                     trait_items: Vec::new(),
                     const_value: None,
                     is_mutable: false,
+                impl_trait: None,
                 });
             }
             ast::ItemKind::Enum(e) => {
@@ -966,6 +981,7 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                     trait_items: Vec::new(),
                     const_value: None,
                     is_mutable: false,
+                impl_trait: None,
                 });
             }
             ast::ItemKind::Trait(t) => {
@@ -1027,6 +1043,7 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                     trait_items: items,
                     const_value: None,
                     is_mutable: false,
+                impl_trait: None,
                 });
             }
             ast::ItemKind::GlobalVariable(global) => {
@@ -1062,6 +1079,7 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                     trait_items: Vec::new(),
                     const_value,
                     is_mutable,
+                impl_trait: None,
                 });
             }
             ast::ItemKind::ExternBlock(block) => {
@@ -1098,6 +1116,7 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                         trait_items: Vec::new(),
                         const_value: None,
                         is_mutable: false,
+                    impl_trait: None,
                     });
                 }
                 for var in &block.variables {
@@ -1119,6 +1138,7 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                         trait_items: Vec::new(),
                         const_value: None,
                         is_mutable: true,
+                    impl_trait: None,
                     });
                 }
             }
@@ -1140,6 +1160,7 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                     trait_items: Vec::new(),
                     const_value: None,
                     is_mutable: false,
+                impl_trait: None,
                 });
             }
             ast::ItemKind::Impl(impl_item) => {
@@ -1188,6 +1209,14 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                     let link_name = function_link_name(&func.attributes)
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| crate::mangling::method_symbol(&self_type_name, method_name, &params, ret_opt, func.is_variadic));
+                    // Trait provenance for bound checks downstream: the
+                    // owning trait's final segment (mirrors typeck's
+                    // collect_trait_impls), or None for inherent methods.
+                    let impl_trait = impl_item
+                        .trait_ref
+                        .as_ref()
+                        .and_then(|t| t.path.last())
+                        .map(|id| id.name.clone());
                     exports.push(ModuleExport {
                         kind: ExportKind::Function,
                         name: format!("{self_type_name}::{method_name}"),
@@ -1204,6 +1233,7 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                         trait_items: Vec::new(),
                         const_value: None,
                         is_mutable: false,
+                        impl_trait,
                     });
                 }
             }
@@ -1568,6 +1598,7 @@ mod tests {
                     trait_items: Vec::new(),
                     const_value: None,
                     is_mutable: false,
+                    impl_trait: None,
                 },
                 ModuleExport {
                     kind: ExportKind::Struct,
@@ -1602,6 +1633,7 @@ mod tests {
                     trait_items: Vec::new(),
                     const_value: None,
                     is_mutable: false,
+                    impl_trait: None,
                 },
                 ModuleExport {
                     kind: ExportKind::Constant,
@@ -1619,6 +1651,7 @@ mod tests {
                     trait_items: Vec::new(),
                     const_value: Some("4096".to_string()),
                     is_mutable: false,
+                    impl_trait: None,
                 },
                 ModuleExport {
                     kind: ExportKind::Global,
@@ -1636,6 +1669,7 @@ mod tests {
                     trait_items: Vec::new(),
                     const_value: None,
                     is_mutable: true,
+                    impl_trait: None,
                 },
             ],
             native_libs: vec!["c".to_string()],
@@ -1720,6 +1754,7 @@ mod tests {
                 trait_items: Vec::new(),
                 const_value: None,
                 is_mutable: false,
+                impl_trait: None,
             }],
             native_libs: Vec::new(),
             native_lib_paths: Vec::new(),
@@ -1728,8 +1763,8 @@ mod tests {
         };
 
         let bytes = artifact.to_bytes().expect("artifact should encode");
-        // v10 magic survives the round trip.
-        assert_eq!(&bytes[..6], b"AGM\x00\x00\x0A");
+        // v11 magic survives the round trip.
+        assert_eq!(&bytes[..6], b"AGM\x00\x00\x0B");
         let decoded = ModuleArtifact::from_bytes(&bytes).expect("artifact should decode");
         let decoded_layout = decoded.exports[0].layout.expect("layout survives");
         assert_eq!(decoded_layout.size, Some(5));

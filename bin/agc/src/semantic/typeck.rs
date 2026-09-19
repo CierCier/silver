@@ -506,6 +506,15 @@ impl TypeChecker {
                                 .entry((owner_key, method_name.to_string()))
                                 .or_default()
                                 .push(symbol_id);
+                            // Trait provenance: bound checks (@json macros,
+                            // where clauses) consult trait_impls, which only
+                            // sees source impls — record artifact impls too.
+                            if let Some(trait_name) = &export.impl_trait {
+                                self.trait_impls
+                                    .entry(trait_name.clone())
+                                    .or_default()
+                                    .insert(owner_ty.canonical_key());
+                            }
                         }
                     }
                 }
@@ -8453,6 +8462,7 @@ mod tests {
                 trait_items: Vec::new(),
                 const_value: None,
                 is_mutable: false,
+                impl_trait: None,
             }],
             native_libs: Vec::new(),
             native_lib_paths: Vec::new(),
@@ -8502,6 +8512,7 @@ mod tests {
                     trait_items: Vec::new(),
                     const_value: None,
                     is_mutable: false,
+                    impl_trait: None,
                 },
                 crate::module_artifact::ModuleExport {
                     kind: crate::module_artifact::ExportKind::TypeAlias,
@@ -8519,6 +8530,7 @@ mod tests {
                     trait_items: Vec::new(),
                     const_value: None,
                     is_mutable: false,
+                    impl_trait: None,
                 },
                 crate::module_artifact::ModuleExport {
                     kind: crate::module_artifact::ExportKind::Function,
@@ -8536,6 +8548,7 @@ mod tests {
                     trait_items: Vec::new(),
                     const_value: None,
                     is_mutable: false,
+                    impl_trait: None,
                 },
                 crate::module_artifact::ModuleExport {
                     kind: crate::module_artifact::ExportKind::Function,
@@ -8553,6 +8566,7 @@ mod tests {
                     trait_items: Vec::new(),
                     const_value: None,
                     is_mutable: false,
+                    impl_trait: None,
                 },
             ],
             native_libs: Vec::new(),
