@@ -1,0 +1,21 @@
+// Packed structs must keep their layout across cached build units:
+// size, field offsets, and by-value calls all follow `#[packed]`.
+import std.test;
+import packed_layout.defs;
+
+i32 main() {
+    test_start("packed size across modules");
+    {
+        assert_eq_i64(5, (i64)@size(PackedPair), "packed pair is 5 bytes");
+        assert_eq_i64(8, (i64)@size(PaddedPair), "control stays padded");
+    }
+
+    test_start("packed round-trip by value");
+    {
+        PackedPair p = make_packed((u8)7, (u32)0xAABBCCDD);
+        assert_eq_i64(7, (i64)tag_packed(p), "tag survives");
+        assert_eq_i64((i64)0xAABBCCDD, (i64)read_packed(p), "value survives");
+    }
+
+    return done();
+}

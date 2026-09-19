@@ -11,7 +11,8 @@ const MODULE_MAGIC_V2: &[u8; 6] = b"AGM\x00\x00\x02";
 const MODULE_MAGIC_V6: &[u8; 6] = b"AGM\x00\x00\x06";
 const MODULE_MAGIC_V7: &[u8; 6] = b"AGM\x00\x00\x07";
 const MODULE_MAGIC_V8: &[u8; 6] = b"AGM\x00\x00\x08";
-const MODULE_MAGIC: &[u8; 6] = b"AGM\x00\x00\x09"; // v9: generic AST template serialization
+const MODULE_MAGIC_V9: &[u8; 6] = b"AGM\x00\x00\x09";
+const MODULE_MAGIC: &[u8; 6] = b"AGM\x00\x00\x0A"; // v10: struct packed bit in layout record
 
 #[derive(Debug, Clone)]
 pub struct ModuleArtifact {
@@ -89,6 +90,8 @@ pub struct ModuleField {
 pub struct ModuleTypeLayout {
     pub size: Option<u64>,
     pub align: Option<u64>,
+    /// Whether the struct was declared `#[packed]` (v10+; false for older).
+    pub packed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -318,6 +321,7 @@ impl ModuleArtifact {
         let mut cursor = 0;
         let magic = read_exact(bytes, &mut cursor, MODULE_MAGIC.len())?;
         let has_field_tags = if magic == MODULE_MAGIC
+            || magic == MODULE_MAGIC_V9
             || magic == MODULE_MAGIC_V8
             || magic == MODULE_MAGIC_V7
             || magic == MODULE_MAGIC_V6
@@ -328,8 +332,9 @@ impl ModuleArtifact {
         } else {
             return Err("invalid module interface header".to_string());
         };
-        let has_lib_paths = magic == MODULE_MAGIC || magic == MODULE_MAGIC_V8 || magic == MODULE_MAGIC_V7;
-        let has_constants_and_globals = magic == MODULE_MAGIC || magic == MODULE_MAGIC_V8;
+        let has_packed = magic == MODULE_MAGIC;
+        let has_lib_paths = magic == MODULE_MAGIC || magic == MODULE_MAGIC_V9 || magic == MODULE_MAGIC_V8 || magic == MODULE_MAGIC_V7;
+        let has_constants_and_globals = magic == MODULE_MAGIC || magic == MODULE_MAGIC_V9 || magic == MODULE_MAGIC_V8;
         let has_generic_templates = magic == MODULE_MAGIC;
         let module_name = read_string(bytes, &mut cursor)?;
         let module_path = read_string(bytes, &mut cursor)?;
@@ -399,7 +404,7 @@ impl ModuleArtifact {
                     tags: read_tags(bytes, &mut cursor, has_field_tags)?,
                 });
             }
-            let layout = read_layout(bytes, &mut cursor)?;
+            let layout = read_layout(bytes, &mut cursor, has_packed)?;
             let enum_backing_type = read_optional_string(bytes, &mut cursor)?;
             let variants_len = read_len(bytes, &mut cursor)? as usize;
             let mut enum_variants = Vec::with_capacity(variants_len);
@@ -902,7 +907,7 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                         .canonical_key(),
                     ),
                     fields,
-                    layout: to_module_layout(layout),
+                    layout: to_module_layout(layout, attrs.packed),
                     enum_backing_type: None,
                     enum_variants: Vec::new(),
                     trait_items: Vec::new(),
@@ -954,6 +959,7 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                     layout: Some(ModuleTypeLayout {
                         size: primitive_layout_size(&backing_type).map(|size| size as u64),
                         align: primitive_layout_align(&backing_type).map(|align| align as u64),
+                        packed: false,
                     }),
                     enum_backing_type: Some(Type::Primitive(backing_type.clone()).canonical_key()),
                     enum_variants: variants,
@@ -1290,10 +1296,11 @@ fn choose_enum_backing_type(min_value: i128, max_value: i128) -> ast::PrimitiveT
     }
 }
 
-fn to_module_layout(layout: TypeLayout) -> Option<ModuleTypeLayout> {
+fn to_module_layout(layout: TypeLayout, packed: bool) -> Option<ModuleTypeLayout> {
     Some(ModuleTypeLayout {
         size: layout.size.map(|size| size as u64),
         align: layout.align.map(|align| align as u64),
+        packed,
     })
 }
 
@@ -1389,6 +1396,7 @@ fn write_layout(out: &mut Vec<u8>, layout: Option<ModuleTypeLayout>) -> Result<(
             out.push(1);
             write_optional_u64(out, layout.size);
             write_optional_u64(out, layout.align);
+            out.push(layout.packed as u8);
         }
         None => out.push(0),
     }
@@ -1493,12 +1501,21 @@ fn read_optional_u64(bytes: &[u8], cursor: &mut usize) -> Result<Option<u64>, St
     }
 }
 
-fn read_layout(bytes: &[u8], cursor: &mut usize) -> Result<Option<ModuleTypeLayout>, String> {
+fn read_layout(
+    bytes: &[u8],
+    cursor: &mut usize,
+    has_packed: bool,
+) -> Result<Option<ModuleTypeLayout>, String> {
     match read_u8(bytes, cursor)? {
         0 => Ok(None),
         1 => Ok(Some(ModuleTypeLayout {
             size: read_optional_u64(bytes, cursor)?,
             align: read_optional_u64(bytes, cursor)?,
+            packed: if has_packed {
+                read_u8(bytes, cursor)? != 0
+            } else {
+                false
+            },
         })),
         other => Err(format!("invalid layout tag {other}")),
     }
@@ -1578,6 +1595,7 @@ mod tests {
                     layout: Some(ModuleTypeLayout {
                         size: Some(16),
                         align: Some(8),
+                        packed: false,
                     }),
                     enum_backing_type: None,
                     enum_variants: Vec::new(),
@@ -1653,6 +1671,69 @@ mod tests {
         assert_eq!(decoded.exports[3].kind, ExportKind::Global);
         assert!(decoded.exports[3].is_mutable);
         assert_eq!(decoded.generic_templates.len(), 1);
+    }
+
+    #[test]
+    fn round_trips_packed_layout_bit() {
+        let layout = ModuleTypeLayout {
+            size: Some(5),
+            align: Some(1),
+            packed: true,
+        };
+        let artifact = ModuleArtifact {
+            module_name: "defs".to_string(),
+            module_path: "packed.defs".to_string(),
+            source_path: "packed/defs.ag".to_string(),
+            source_hash_fnv1a64: 7,
+            compiler_version: "test".to_string(),
+            target_triple: "x86_64-unknown-linux-gnu".to_string(),
+            code_artifacts: ModuleCodeArtifacts {
+                has_static_library: true,
+                has_shared_library: false,
+            },
+            module_deps: Vec::new(),
+            transitive_deps: Vec::new(),
+            exports: vec![ModuleExport {
+                kind: ExportKind::Struct,
+                name: "PackedPair".to_string(),
+                signature: "struct{tag:u8,value:u32}".to_string(),
+                type_params: Vec::new(),
+                link_name: None,
+                abi: None,
+                is_variadic: false,
+                type_key: Some("PackedPair".to_string()),
+                fields: vec![
+                    ModuleField {
+                        name: "tag".to_string(),
+                        type_key: "u8".to_string(),
+                        tags: FxHashMap::default(),
+                    },
+                    ModuleField {
+                        name: "value".to_string(),
+                        type_key: "u32".to_string(),
+                        tags: FxHashMap::default(),
+                    },
+                ],
+                layout: Some(layout),
+                enum_backing_type: None,
+                enum_variants: Vec::new(),
+                trait_items: Vec::new(),
+                const_value: None,
+                is_mutable: false,
+            }],
+            native_libs: Vec::new(),
+            native_lib_paths: Vec::new(),
+            generic_templates: Vec::new(),
+            artifact_path: None,
+        };
+
+        let bytes = artifact.to_bytes().expect("artifact should encode");
+        // v10 magic survives the round trip.
+        assert_eq!(&bytes[..6], b"AGM\x00\x00\x0A");
+        let decoded = ModuleArtifact::from_bytes(&bytes).expect("artifact should decode");
+        let decoded_layout = decoded.exports[0].layout.expect("layout survives");
+        assert_eq!(decoded_layout.size, Some(5));
+        assert!(decoded_layout.packed);
     }
 }
 

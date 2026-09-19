@@ -1,0 +1,27 @@
+// Shared definitions for packed_layout_test: a packed struct plus an
+// unpacked control. Both cross the .agm boundary by value.
+#[packed]
+struct PackedPair {
+    u8 tag;
+    u32 value;
+}
+
+struct PaddedPair {
+    u8 tag;
+    u32 value;
+}
+
+PackedPair make_packed(u8 tag, u32 value) {
+    PackedPair p;
+    p.tag = tag;
+    p.value = value;
+    return move p;
+}
+
+u32 read_packed(PackedPair p) {
+    return p.value;
+}
+
+u8 tag_packed(PackedPair p) {
+    return p.tag;
+}

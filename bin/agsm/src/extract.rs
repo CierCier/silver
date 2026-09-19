@@ -681,6 +681,9 @@ fn export_record(
         align: Some(record_type.get_alignof().map_err(|error| {
             ExtractError::Unsupported(format!("record `{name}` alignment: {error}"))
         })? as u64),
+        // C records carry no Silver packed attribute; size/align above
+        // already reflect the true ABI.
+        packed: false,
     };
     let mut tags = String::new();
     if is_union {

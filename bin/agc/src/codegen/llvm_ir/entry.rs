@@ -1115,7 +1115,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 .map(|field| self.lower_basic_type(field))
                                 .collect::<CodegenResult<Vec<_>>>()?;
                             if struct_ty.count_fields() == 0 {
-                                struct_ty.set_body(&llvm_fields, false);
+                                struct_ty.set_body(
+                                    &llvm_fields,
+                                    export.layout.map(|l| l.packed).unwrap_or(false),
+                                );
                             }
                         }
                     }
@@ -1305,7 +1308,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 self.struct_types.get(&export.name).copied()
                             {
                                 if struct_ty.count_fields() == 0 {
-                                    struct_ty.set_body(&llvm_fields, false);
+                                    struct_ty.set_body(
+                                    &llvm_fields,
+                                    export.layout.map(|l| l.packed).unwrap_or(false),
+                                );
                                     progress = true;
                                 }
                             }
