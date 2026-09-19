@@ -246,6 +246,7 @@ impl<'a> FileImportResolverHook<'a> {
                 program.items.splice(0..0, extra_prog.items);
             }
         }
+        self.close_transitive_deps(program, base_dir)?;
         apply_all_pending_selections(
             std::mem::take(&mut self.pending_selections),
             self.module_imports.as_mut_slice(),
@@ -274,12 +275,81 @@ impl<'a> FileImportResolverHook<'a> {
             module_artifacts: self.module_imports.into_iter().map(|(_, m)| m).collect(),
         })
     }
-    fn lower_program_recursive(
+    /// Close the dependency cone: every transitive dependency named by a
+    /// collected artifact must itself be present, either as source (inlined
+    /// items) or as an artifact (signatures). Without this, a unit that
+    /// names a transitive struct (e.g. a field type from a dependency's
+    /// dependency) misses its layout at codegen ("missing field metadata").
+    /// Missing deps are fed back through normal import lowering as
+    /// synthesized items, so inline-vs-artifact rules and dedup apply
+    /// unchanged. Unresolvable names are skipped, preserving old behavior.
+    fn close_transitive_deps(
         &mut self,
         program: &mut ast::Program,
         base_dir: Option<&Path>,
     ) -> Result<(), String> {
-        let mut original_items = Vec::new();
+        let mut attempted: HashSet<String> = HashSet::default();
+        loop {
+            let mut missing: Vec<(Option<PathBuf>, String)> = Vec::new();
+            for (_, artifact) in &self.module_imports {
+                let base = Path::new(&artifact.source_path)
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .or_else(|| base_dir.map(|p| p.to_path_buf()));
+                for dep in artifact
+                    .transitive_deps
+                    .iter()
+                    .chain(artifact.module_deps.iter())
+                {
+                    if self.seen_modules.contains(dep) || attempted.contains(dep) {
+                        continue;
+                    }
+                    if self.module_imports.iter().any(|(p, _)| p == dep) {
+                        continue;
+                    }
+                    attempted.insert(dep.clone());
+                    missing.push((base.clone(), dep.clone()));
+                }
+            }
+            if missing.is_empty() {
+                break;
+            }
+            for (base, dep_path) in missing {
+                let mut extra_prog = ast::Program {
+                    items: vec![ast::Item {
+                        kind: ast::ItemKind::Import(ast::ImportItem {
+                            path: dep_path
+                                .split('.')
+                                .map(|seg| ast::Identifier {
+                                    name: seg.to_string(),
+                                    span: lexer::Span::default(),
+                                })
+                                .collect(),
+                            selection: None,
+                        }),
+                        span: lexer::Span::default(),
+                        visibility: ast::Visibility::Private,
+                        attributes: Vec::new(),
+                    }],
+                    attributes: Vec::new(),
+                    comments: Vec::new(),
+                    span: lexer::Span::default(),
+                };
+                self.lower_program_recursive(&mut extra_prog, base.as_deref())?;
+                program.items.extend(extra_prog.items);
+                program
+                    .comments
+                    .extend(extra_prog.comments);
+            }
+        }
+        Ok(())
+    }
+
+    fn lower_program_recursive(
+        &mut self,
+        program: &mut ast::Program,
+        base_dir: Option<&Path>,
+    ) -> Result<(), String> {        let mut original_items = Vec::new();
         let mut lowered_program_attributes = std::mem::take(&mut program.attributes);
         // (alias_plan removed)
 

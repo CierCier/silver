@@ -957,6 +957,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             }
                         }
                     }
+                    // Discriminants cross the boundary so imported enums
+                    // match on the same values; payload layouts are set in
+                    // the body phase below, once all struct bodies exist.
+                    let mut variants = HashMap::default();
+                    for variant in &export.enum_variants {
+                        variants.insert(variant.name.clone(), variant.value);
+                    }
+                    self.enum_variants.insert(export.name.clone(), variants);
                 }
             }
         }
@@ -973,6 +981,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 _ => {}
             }
         }
+
+        // Lay out imported struct/enum bodies BEFORE function signatures
+        // lower parameter types: a body set after its first use leaves the
+        // declaration with opaque members, silently mistyping cross-unit
+        // calls. Fixpoint over dependency order; leftovers keep today's
+        // behavior in the loop below.
+        self.lay_out_imported_types(imported_modules)?;
 
         for module in imported_modules {
             for export in &module.exports {
@@ -1208,6 +1223,231 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
 
         Ok(())
+    }
+
+    fn lay_out_imported_types(
+        &mut self,
+        imported_modules: &[ModuleArtifact],
+    ) -> CodegenResult<()> {
+        // Enums whose variants carry payloads (payload layouts required).
+        let mut payload_enums: HashSet<String> = HashSet::default();
+        for module in imported_modules {
+            for export in &module.exports {
+                if export.kind == crate::module_artifact::ExportKind::Enum
+                    && export.type_params.is_empty()
+                    && export
+                        .enum_variants
+                        .iter()
+                        .any(|v| !v.payload_types.is_empty())
+                {
+                    payload_enums.insert(export.name.clone());
+                }
+            }
+        }
+
+        let mut bodied: HashSet<String> = HashSet::default();
+        // Bounded fixpoint: each round sets every body whose members are
+        // ready; dependency chains resolve round by round.
+        let rounds = imported_modules.len() + 1;
+        for _ in 0..rounds {
+            let mut progress = false;
+            for module in imported_modules {
+                for export in &module.exports {
+                    match export.kind {
+                        crate::module_artifact::ExportKind::Struct => {
+                            if bodied.contains(&export.name)
+                                || !export.type_params.is_empty()
+                            {
+                                continue;
+                            }
+                            let is_union = export.trait_items.iter().any(|item| {
+                                item.name == "__foreign_record_kind"
+                                    && item.signature == "union"
+                            });
+                            if is_union {
+                                let size =
+                                    export.layout.and_then(|l| l.size).unwrap_or(0);
+                                if let Some(struct_ty) =
+                                    self.struct_types.get(&export.name).copied()
+                                {
+                                    if struct_ty.count_fields() == 0 {
+                                        let i8_arr = self
+                                            .context
+                                            .i8_type()
+                                            .array_type(size as u32);
+                                        struct_ty.set_body(&[i8_arr.into()], false);
+                                        bodied.insert(export.name.clone());
+                                        progress = true;
+                                    } else {
+                                        bodied.insert(export.name.clone());
+                                    }
+                                }
+                                continue;
+                            }
+                            let field_types = export
+                                .fields
+                                .iter()
+                                .map(|field| {
+                                    ast_type_from_canonical_key(&field.type_key)
+                                        .map_err(CodegenError::new)
+                                })
+                                .collect::<CodegenResult<Vec<_>>>()?;
+                            if !field_types.iter().all(|t| {
+                                self.imported_layout_ready(t, &bodied, &payload_enums)
+                            }) {
+                                continue;
+                            }
+                            let llvm_fields = field_types
+                                .iter()
+                                .map(|field| self.lower_basic_type(field))
+                                .collect::<CodegenResult<Vec<_>>>()?;
+                            if let Some(struct_ty) =
+                                self.struct_types.get(&export.name).copied()
+                            {
+                                if struct_ty.count_fields() == 0 {
+                                    struct_ty.set_body(&llvm_fields, false);
+                                    progress = true;
+                                }
+                            }
+                            bodied.insert(export.name.clone());
+                        }
+                        crate::module_artifact::ExportKind::Enum => {
+                            if bodied.contains(&export.name)
+                                || !export.type_params.is_empty()
+                                || !payload_enums.contains(&export.name)
+                            {
+                                continue;
+                            }
+                            let mut max_payload_size: u64 = 0;
+                            let mut variant_payload_types: HashMap<String, Vec<ast::Type>> =
+                                HashMap::default();
+                            let mut ready = true;
+                            for variant in &export.enum_variants {
+                                if variant.payload_types.is_empty() {
+                                    continue;
+                                }
+                                let payload_types: Vec<ast::Type> = variant
+                                    .payload_types
+                                    .iter()
+                                    .map(|key| ast_type_from_canonical_key(key))
+                                    .collect::<Result<Vec<_>, _>>()
+                                    .map_err(CodegenError::new)?;
+                                for pt in &payload_types {
+                                    if !self.imported_layout_ready(pt, &bodied, &payload_enums)
+                                    {
+                                        ready = false;
+                                        break;
+                                    }
+                                }
+                                if !ready {
+                                    break;
+                                }
+                                variant_payload_types
+                                    .insert(variant.name.clone(), payload_types);
+                            }
+                            if !ready {
+                                continue;
+                            }
+                            let target_data = inkwell::targets::TargetData::create(
+                                self.module.get_data_layout().as_str().to_str().unwrap(),
+                            );
+                            for payload_types in variant_payload_types.values() {
+                                let mut variant_size: u64 = 0;
+                                for pt in payload_types {
+                                    if let Ok(llvm_ty) = self.lower_basic_type(pt) {
+                                        variant_size +=
+                                            target_data.get_abi_size(&llvm_ty);
+                                    }
+                                }
+                                max_payload_size =
+                                    max_payload_size.max(variant_size);
+                            }
+                            if max_payload_size > 0 {
+                                let i16_ty = self.context.i16_type();
+                                let array_ty = self
+                                    .context
+                                    .i8_type()
+                                    .array_type(max_payload_size as u32);
+                                let struct_ty = self.context.struct_type(
+                                    &[i16_ty.into(), array_ty.into()],
+                                    false,
+                                );
+                                struct_ty.set_body(
+                                    &[i16_ty.into(), array_ty.into()],
+                                    false,
+                                );
+                                self.enum_payload_layouts
+                                    .insert(export.name.clone(), struct_ty);
+                                self.struct_types.insert(export.name.clone(), struct_ty);
+                            }
+                            self.enum_variant_payload_types
+                                .insert(export.name.clone(), variant_payload_types);
+                            bodied.insert(export.name.clone());
+                            progress = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if !progress {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// True when `ty` has a complete LLVM layout in this unit already:
+    /// primitives and pointers never need member bodies; named types need a
+    /// bodied struct (or a complete enum: backing plus payload layout when
+    /// variants carry payloads). Anything else defers to a later fixpoint
+    /// round.
+    fn imported_layout_ready(
+        &self,
+        ty: &ast::Type,
+        bodied: &HashSet<String>,
+        payload_enums: &HashSet<String>,
+    ) -> bool {
+        match ty.kind.as_ref() {
+            ast::TypeKind::Primitive(_)
+            | ast::TypeKind::Function(_)
+            | ast::TypeKind::Generic(_) => true,
+            ast::TypeKind::Pointer(_)
+            | ast::TypeKind::Reference(_)
+            | ast::TypeKind::Slice(_) => true,
+            ast::TypeKind::Array(a) => {
+                self.imported_layout_ready(&a.element_type, bodied, payload_enums)
+            }
+            ast::TypeKind::Tuple(ts) => ts
+                .iter()
+                .all(|t| self.imported_layout_ready(t, bodied, payload_enums)),
+            ast::TypeKind::Optional(inner) => {
+                self.imported_layout_ready(inner, bodied, payload_enums)
+            }
+            ast::TypeKind::Named(named) => {
+                if let Some(args) = &named.generics
+                    && !args
+                        .iter()
+                        .all(|g| self.imported_layout_ready(g, bodied, payload_enums))
+                {
+                    return false;
+                }
+                if named.path.is_empty() {
+                    return false;
+                }
+                let base = &named.path[0].name;
+                if bodied.contains(base) {
+                    return true;
+                }
+                if self.union_types.contains(base) {
+                    return false;
+                }
+                if self.enum_backing_types.contains_key(base) {
+                    return !payload_enums.contains(base)
+                        || self.enum_payload_layouts.contains_key(base);
+                }
+                false
+            }
+        }
     }
 
     fn type_name_to_ast_type(&self, name: &str) -> Option<ast::Type> {

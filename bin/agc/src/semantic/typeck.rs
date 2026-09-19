@@ -450,21 +450,37 @@ impl TypeChecker {
                                         })
                                         .collect(),
                                     method_kind: if let Some(first) = params.first() {
-                                        match first {
-                                            Type::Pointer { .. } => {
+                                        // A receiver is a first parameter naming the owner
+                                        // itself (by value, pointer, or reference) — any
+                                        // other first parameter makes this a static
+                                        // method, even when it is a pointer (e.g.
+                                        // `Terminal.new(BufWriter*, ...)`).
+                                        let receiver_inner = match first {
+                                            Type::Pointer { inner, .. }
+                                            | Type::Reference { inner, .. } => {
+                                                Some(inner.as_ref())
+                                            }
+                                            _ => None,
+                                        };
+                                        if let Some(inner) = receiver_inner {
+                                            if inner == &owner_ty {
+                                                let is_mutable = match first {
+                                                    Type::Pointer { is_mutable, .. }
+                                                    | Type::Reference { is_mutable, .. } => {
+                                                        *is_mutable
+                                                    }
+                                                    _ => false,
+                                                };
                                                 ast::MethodKind::InstancePointer {
-                                                    is_mutable: true,
+                                                    is_mutable,
                                                 }
+                                            } else {
+                                                ast::MethodKind::Static
                                             }
-                                            Type::Reference { is_mutable, .. } => {
-                                                ast::MethodKind::InstancePointer {
-                                                    is_mutable: *is_mutable,
-                                                }
-                                            }
-                                            _ if *first == owner_ty => {
-                                                ast::MethodKind::InstanceValue
-                                            }
-                                            _ => ast::MethodKind::Static,
+                                        } else if *first == owner_ty {
+                                            ast::MethodKind::InstanceValue
+                                        } else {
+                                            ast::MethodKind::Static
                                         }
                                     } else {
                                         ast::MethodKind::Static
