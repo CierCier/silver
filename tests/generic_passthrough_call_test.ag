@@ -1,0 +1,38 @@
+// Integration test: bare-Identifier calls to generic functions inside generic
+// bodies (no explicit type arguments) must resolve, instantiate, and link.
+// Previously failed codegen with "unknown function" while `agc check` passed.
+import std.test;
+
+i64 hits;
+
+void inner<A>(&mut A a) {
+    hits = hits + 1;
+}
+
+void outer<A>(&mut A app) {
+    inner(&mut app);
+}
+
+struct Box {
+    i64 x;
+}
+
+struct Tag {
+    i64 y;
+}
+
+i32 main() {
+    test_start("nested bare generic call instantiates");
+    Box b;
+    b.x = 1;
+    outer(&mut b);
+    assert_eq_i64(1, hits, "inner runs exactly once through outer");
+
+    test_start("second concrete type gets its own instance");
+    hits = 0;
+    Tag t;
+    t.y = 2;
+    outer(&mut t);
+    assert_eq_i64(1, hits, "inner<Tag> instantiates independently");
+    return done();
+}

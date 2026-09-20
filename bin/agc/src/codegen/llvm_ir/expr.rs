@@ -1418,7 +1418,30 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 result.ok_or_else(|| CodegenError::with_span("__slice_get returned void", expr.span))
             }
             ast::ExpressionKind::Reference { expression, .. } => {
-                let (ptr, _) = self.resolve_lvalue_ptr(expression)?;
+                let (ptr, operand_ty) = self.resolve_lvalue_ptr(expression)?;
+                // Reborrow: `&` of an already-reference-typed place passes the
+                // stored pointer through. Taking the slot address would hand
+                // the callee a pointer-to-pointer it reads as the referent.
+                if matches!(
+                    operand_ty.kind.as_ref(),
+                    ast::TypeKind::Reference(_)
+                ) {
+                    let ptr_ty = self.context.ptr_type(AddressSpace::default());
+                    if self.lvalue_is_volatile(expression) {
+                        return self.emit_volatile_load(
+                            ptr_ty.as_basic_type_enum(),
+                            ptr,
+                            "reborrow",
+                        );
+                    }
+                    let loaded = self.builder.build_load(ptr_ty, ptr, "reborrow").map_err(|e| {
+                        CodegenError::with_span(
+                            format!("failed to reborrow reference: {e}"),
+                            expr.span,
+                        )
+                    })?;
+                    return Ok(loaded.as_basic_value_enum());
+                }
                 Ok(ptr.as_basic_value_enum())
             }
             ast::ExpressionKind::MacroCall { name, args } => {

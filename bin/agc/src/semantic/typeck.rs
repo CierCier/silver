@@ -4829,7 +4829,15 @@ impl TypeChecker {
                     is_volatile,
                     ..
                 },
-            ) => !is_volatile && e_inner == f_inner,
+            ) => {
+                // Transparent reborrow (mirrors inference above): a pointer
+                // to a reference used as a reference dereferences through.
+                !is_volatile
+                    && match f_inner.as_ref() {
+                        Type::Reference { inner: deref, .. } => e_inner.as_ref() == deref.as_ref(),
+                        _ => e_inner == f_inner,
+                    }
+            }
             (
                 Type::Pointer {
                     inner: e_inner,
@@ -5039,7 +5047,18 @@ impl TypeChecker {
                 Type::Pointer {
                     inner: found_inner, ..
                 },
-            ) => self.infer_type_params(inner, found_inner, type_params, mapping),
+            ) => {
+                // Address-of always adds a Pointer layer, so a Pointer-typed
+                // argument whose pointee is itself a reference (e.g. `&mut r`
+                // where r: &mut T) must dereference through before binding:
+                // the variable denotes the referent T, not the pointer slot.
+                match found_inner.as_ref() {
+                    Type::Reference { inner: deref, .. } => {
+                        self.infer_type_params(inner, deref, type_params, mapping)
+                    }
+                    _ => self.infer_type_params(inner, found_inner, type_params, mapping),
+                }
+            }
             (
                 Type::Pointer { inner, .. },
                 Type::Reference {

@@ -227,11 +227,21 @@ pub fn append_monomorphs(
             report_nonconvergence("function instances", generation, current_requests[0].call_span());
             break;
         }
-        let new_items = instantiate_requests(
+        let mut new_items = instantiate_requests(
             program,
             &current_requests,
             &mut generated,
             &imported_fn_templates,
+        );
+        // Bare-Identifier calls to generic functions carry no explicit type
+        // arguments, so the span-based passes below cannot see them. Resolve
+        // them against the substituted instance bodies here, rewriting each
+        // matched site to its mangled instance inline.
+        let mut bare_requests = discover_bare_generic_calls(
+            &mut new_items,
+            program,
+            &imported_fn_templates,
+            &generated,
         );
         for item in &new_items {
             all_new_items.push(item.clone());
@@ -247,6 +257,7 @@ pub fn append_monomorphs(
             &generic_fns,
             &generated,
         );
+        current_requests.append(&mut bare_requests);
     }
     all_new_items
 }
@@ -3036,6 +3047,580 @@ fn collect_remaining_function_requests(
     }
     requests
 }
+
+/// Scope of known local bindings for bare-call inference. `None` means bound
+// but type-unknown (e.g. destructured): calls using it are skipped, never
+// guessed, so shadowing a generic function name can only suppress a request.
+type BareCallScope = HashMap<String, Option<Type>>;
+
+/// Best-effort type of an argument expression inside a substituted instance
+// body. Only shapes with locally knowable types are covered; anything else
+// yields None and the enclosing call is left for existing handling.
+fn infer_bare_arg_type(expr: &ast::Expression, scope: &BareCallScope) -> Option<Type> {
+    match expr.kind.as_ref() {
+        ast::ExpressionKind::Identifier(ident) => scope.get(&ident.name).cloned().flatten(),
+        ast::ExpressionKind::Reference {
+            is_mutable,
+            expression,
+        } => {
+            // Address-of always yields a Pointer (mirroring typeck); any
+            // dereference-through happens in unify_call_arg, never here.
+            infer_bare_arg_type(expression, scope).map(|inner| Type::Pointer {
+                is_mutable: *is_mutable,
+                is_volatile: false,
+                inner: Box::new(inner),
+            })
+        }
+        ast::ExpressionKind::Move(inner) | ast::ExpressionKind::Comptime(inner) => {
+            infer_bare_arg_type(inner, scope)
+        }
+        _ => None,
+    }
+}
+
+/// Whether a callee parameter type mentions any of the callee's own type
+// parameters. Pairs without variables need no inference: typeck already
+// proved them in the generic body and substitution preserves typing.
+fn type_mentions_vars(ty: &Type, vars: &HashSet<String>) -> bool {
+    match ty {
+        Type::Named { path, generics } => {
+            (path.len() == 1 && vars.contains(&path[0]))
+                || generics.iter().any(|g| type_mentions_vars(g, vars))
+        }
+        Type::Reference { inner, .. } | Type::Pointer { inner, .. } => {
+            type_mentions_vars(inner, vars)
+        }
+        Type::Slice { element }
+        | Type::Optional { inner: element }
+        | Type::Task(element) => type_mentions_vars(element, vars),
+        Type::Array { element, .. } => type_mentions_vars(element, vars),
+        Type::Tuple(items) => items.iter().any(|t| type_mentions_vars(t, vars)),
+        Type::Function {
+            params,
+            return_type,
+        } => {
+            params.iter().any(|t| type_mentions_vars(t, vars))
+                || type_mentions_vars(return_type, vars)
+        }
+        Type::Primitive(_) | Type::Unit | Type::Never | Type::Unknown => false,
+    }
+}
+
+/// First-order unification of one callee parameter type against an argument
+// type. Names in `vars` (the callee's own type params) bind; everything else
+// must match structurally. Returns false on any doubt.
+fn unify_call_arg(
+    pattern: &Type,
+    concrete: &Type,
+    vars: &HashSet<String>,
+    mapping: &mut HashMap<String, Type>,
+) -> bool {
+    if let Type::Named { path, generics } = pattern {
+        if path.len() == 1 && generics.is_empty() && vars.contains(&path[0]) {
+            if let Some(bound) = mapping.get(&path[0]) {
+                return bound == concrete;
+            }
+            mapping.insert(path[0].clone(), concrete.clone());
+            return true;
+        }
+    }
+    match (pattern, concrete) {
+        (
+            Type::Reference {
+                is_mutable: pm,
+                inner: pi,
+            },
+            Type::Reference {
+                is_mutable: cm,
+                inner: ci,
+            },
+        ) => (!*pm || *cm) && unify_call_arg(pi, ci, vars, mapping),
+        (
+            Type::Reference { inner, .. },
+            Type::Pointer {
+                inner: found_inner, ..
+            },
+        ) => {
+            // Mirrors typeck inference: a pointer to a reference
+            // dereferences through before binding.
+            match found_inner.as_ref() {
+                Type::Reference { inner: deref, .. } => {
+                    unify_call_arg(inner, deref, vars, mapping)
+                }
+                _ => unify_call_arg(inner, found_inner, vars, mapping),
+            }
+        }
+        (
+            Type::Pointer { inner, .. },
+            Type::Reference {
+                inner: found_inner, ..
+            },
+        ) => unify_call_arg(inner, found_inner, vars, mapping),
+        (
+            Type::Pointer {
+                is_mutable: pm,
+                is_volatile: pv,
+                inner: pi,
+            },
+            Type::Pointer {
+                is_mutable: cm,
+                is_volatile: cv,
+                inner: ci,
+            },
+        ) => pm == cm && pv == cv && unify_call_arg(pi, ci, vars, mapping),
+        (
+            Type::Named {
+                path: pp,
+                generics: pg,
+            },
+            Type::Named {
+                path: cp,
+                generics: cg,
+            },
+        ) => {
+            pp == cp
+                && pg.len() == cg.len()
+                && pg
+                    .iter()
+                    .zip(cg.iter())
+                    .all(|(a, b)| unify_call_arg(a, b, vars, mapping))
+        }
+        (Type::Primitive(a), Type::Primitive(b)) => a == b,
+        (Type::Unit, Type::Unit) => true,
+        (Type::Never, _) | (_, Type::Never) => true,
+        (
+            Type::Slice { element: a },
+            Type::Slice { element: b },
+        )
+        | (
+            Type::Optional { inner: a },
+            Type::Optional { inner: b },
+        )
+        | (Type::Task(a), Type::Task(b)) => unify_call_arg(a, b, vars, mapping),
+        (
+            Type::Array {
+                element: a,
+                size: sa,
+            },
+            Type::Array {
+                element: b,
+                size: sb,
+            },
+        ) => sa == sb && unify_call_arg(a, b, vars, mapping),
+        (Type::Tuple(a), Type::Tuple(b)) => {
+            a.len() == b.len()
+                && a
+                    .iter()
+                    .zip(b.iter())
+                    .all(|(x, y)| unify_call_arg(x, y, vars, mapping))
+        }
+        (
+            Type::Function {
+                params: ap,
+                return_type: ar,
+            },
+            Type::Function {
+                params: bp,
+                return_type: br,
+            },
+        ) => {
+            ap.len() == bp.len()
+                && ap
+                    .iter()
+                    .zip(bp.iter())
+                    .all(|(x, y)| unify_call_arg(x, y, vars, mapping))
+                && unify_call_arg(ar, br, vars, mapping)
+        }
+        _ => false,
+    }
+}
+
+/// Source-ordered type parameter names of a generic function template.
+fn template_type_params(source: &ast::FunctionItem) -> Vec<String> {
+    source
+        .generics
+        .as_ref()
+        .map(|g| {
+            g.params
+                .iter()
+                .filter_map(|p| {
+                    if let ast::GenericParam::Type(tp) = p {
+                        Some(tp.name.name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Walker discovering bare-Identifier calls to generic functions inside
+// freshly substituted instance bodies, where no explicit type arguments
+// exist to collect. Inferred mappings unify the callee template's parameters
+// against locally knowable argument types; anything ambiguous is skipped.
+struct BareCallDiscoverer<'a> {
+    program: &'a ast::Program,
+    imported: &'a HashMap<String, ast::FunctionItem>,
+    generated: &'a HashSet<String>,
+    seen: HashSet<String>,
+    requests: Vec<MonomorphRequest>,
+}
+
+impl<'a> BareCallDiscoverer<'a> {
+    fn template(&self, name: &str, arity: usize) -> Option<(&ast::FunctionItem, bool)> {
+        for item in &self.program.items {
+            if let ast::ItemKind::Function(func) = &item.kind
+                && func.name.name == name
+                && func.generics.is_some()
+                && func.parameters.len() == arity
+            {
+                return Some((func, false));
+            }
+        }
+        if let Some(func) = self.imported.get(name)
+            && func.generics.is_some()
+            && func.parameters.len() == arity
+        {
+            return Some((func, true));
+        }
+        None
+    }
+
+    fn bind_pattern(pattern: &ast::Pattern, ty: Option<Type>, scope: &mut BareCallScope) {
+        match &pattern.kind {
+            ast::PatternKind::Identifier(id) | ast::PatternKind::Move(id) => {
+                scope.insert(id.name.clone(), ty);
+            }
+            ast::PatternKind::Tuple(items) => {
+                for item in items {
+                    Self::bind_pattern(item, None, scope);
+                }
+            }
+            ast::PatternKind::Struct { fields, .. } => {
+                for field in fields {
+                    if let Some(pattern) = &field.pattern {
+                        Self::bind_pattern(pattern, None, scope);
+                    } else {
+                        scope.insert(field.name.name.clone(), None);
+                    }
+                }
+            }
+            ast::PatternKind::Enum { data, .. } => {
+                if let Some(pattern) = data {
+                    Self::bind_pattern(pattern, None, scope);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn bind_let(&self, stmt: &ast::LetStatement, scope: &mut BareCallScope) {
+        let mut ty = stmt
+            .type_annotation
+            .as_ref()
+            .map(Type::from_ast);
+        if ty.is_none()
+            && let Some(init) = stmt.initializer.as_ref()
+        {
+            ty = infer_bare_arg_type(init, scope);
+        }
+        Self::bind_pattern(&stmt.pattern, ty, scope);
+    }
+
+    fn walk_block(&mut self, block: &mut ast::Block, scope: &mut BareCallScope) {
+        let saved = scope.clone();
+        for i in 0..block.statements.len() {
+            self.walk_stmt(&mut block.statements[i], scope);
+        }
+        *scope = saved;
+    }
+
+    fn walk_stmt(&mut self, stmt: &mut ast::Statement, scope: &mut BareCallScope) {
+        match &mut stmt.kind {
+            ast::StatementKind::Block(block) => self.walk_block(block, scope),
+            ast::StatementKind::Let(let_stmt) => self.bind_let(&*let_stmt, scope),
+            ast::StatementKind::Expression(expr)
+            | ast::StatementKind::Return(Some(expr))
+            | ast::StatementKind::Break(Some(expr)) => self.walk_expr(expr, scope),
+            ast::StatementKind::Return(None) | ast::StatementKind::Break(None) => {}
+            ast::StatementKind::Continue => {}
+            ast::StatementKind::Defer(inner) => self.walk_stmt(inner, scope),
+        }
+    }
+
+    fn walk_expr(&mut self, expr: &mut ast::Expression, scope: &mut BareCallScope) {
+        match expr.kind.as_mut() {
+            ast::ExpressionKind::Call {
+                function,
+                arguments,
+            } => {
+                let span = expr.span;
+                if let ast::ExpressionKind::Identifier(ident) = function.kind.as_ref() {
+                    let name = ident.name.clone();
+                    self.visit_bare_call(function, &name, arguments, span, scope);
+                } else {
+                    self.walk_expr(function, scope);
+                }
+                for arg in arguments.iter_mut() {
+                    self.walk_expr(arg, scope);
+                }
+            }
+            ast::ExpressionKind::MethodCall {
+                receiver,
+                arguments,
+                ..
+            } => {
+                self.walk_expr(receiver, scope);
+                for arg in arguments.iter_mut() {
+                    self.walk_expr(arg, scope);
+                }
+            }
+            ast::ExpressionKind::FieldAccess { object, .. }
+            | ast::ExpressionKind::Index { object, .. }
+            | ast::ExpressionKind::Slice { object, .. } => self.walk_expr(object, scope),
+            ast::ExpressionKind::Cast { expression, .. } => self.walk_expr(expression, scope),
+            ast::ExpressionKind::Binary { left, right, .. } => {
+                self.walk_expr(left, scope);
+                self.walk_expr(right, scope);
+            }
+            ast::ExpressionKind::Unary { operand, .. }
+            | ast::ExpressionKind::Postfix { operand, .. } => self.walk_expr(operand, scope),
+            ast::ExpressionKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                self.walk_expr(condition, scope);
+                let mut inner = scope.clone();
+                self.walk_block(then_branch, &mut inner);
+                if let Some(branch) = else_branch {
+                    let mut inner = scope.clone();
+                    self.walk_block(branch, &mut inner);
+                }
+            }
+            ast::ExpressionKind::While { condition, body } => {
+                self.walk_expr(condition, scope);
+                let mut inner = scope.clone();
+                self.walk_block(body, &mut inner);
+            }
+            ast::ExpressionKind::For {
+                init,
+                condition,
+                increment,
+                body,
+            } => {
+                let mut inner = scope.clone();
+                self.bind_let(init, &mut inner);
+                if let Some(init_expr) = &mut init.initializer {
+                    self.walk_expr(init_expr, &mut inner);
+                }
+                self.walk_expr(condition, &mut inner);
+                self.walk_expr(increment, &mut inner);
+                self.walk_block(body, &mut inner);
+            }
+            ast::ExpressionKind::Match { expression, arms } => {
+                self.walk_expr(expression, scope);
+                for arm in arms.iter_mut() {
+                    if let Some(guard) = &mut arm.guard {
+                        self.walk_expr(guard, scope);
+                    }
+                    self.walk_expr(&mut arm.body, scope);
+                }
+            }
+            ast::ExpressionKind::Block(block) => {
+                let mut inner = scope.clone();
+                self.walk_block(block, &mut inner);
+            }
+            ast::ExpressionKind::Initializer { items } => {
+                for item in items.iter_mut() {
+                    match item {
+                        ast::InitializerItem::Positional(expr)
+                        | ast::InitializerItem::Field { value: expr, .. } => {
+                            self.walk_expr(expr, scope)
+                        }
+                        ast::InitializerItem::Index { index, value } => {
+                            self.walk_expr(index, scope);
+                            self.walk_expr(value, scope);
+                        }
+                    }
+                }
+            }
+            ast::ExpressionKind::Array(items) | ast::ExpressionKind::Tuple(items) => {
+                for item in items.iter_mut() {
+                    self.walk_expr(item, scope);
+                }
+            }
+            ast::ExpressionKind::StructLiteral { fields, .. } => {
+                for field in fields.iter_mut() {
+                    self.walk_expr(&mut field.value, scope);
+                }
+            }
+            ast::ExpressionKind::Move(inner)
+            | ast::ExpressionKind::Comptime(inner)
+            | ast::ExpressionKind::Launch(inner)
+            | ast::ExpressionKind::Wait(inner)
+            | ast::ExpressionKind::Reference {
+                expression: inner,
+                ..
+            } => self.walk_expr(inner, scope),
+            ast::ExpressionKind::MacroCall { args, .. } => {
+                for arg in args.iter_mut() {
+                    if let ast::MacroArg::Expression(expr) = arg {
+                        self.walk_expr(expr, scope);
+                    }
+                }
+            }
+            ast::ExpressionKind::ForIn { iterable, body, .. } => {
+                self.walk_expr(iterable, scope);
+                let mut inner = scope.clone();
+                self.walk_block(body, &mut inner);
+            }
+            ast::ExpressionKind::Asm { inputs, .. } => {
+                for input in inputs.iter_mut() {
+                    self.walk_expr(input, scope);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn visit_bare_call(
+        &mut self,
+        function_expr: &mut ast::Expression,
+        name: &str,
+        arguments: &mut [ast::Expression],
+        span: Span,
+        scope: &mut BareCallScope,
+    ) {
+        // A shadowing local binding means typeck did not resolve this to the
+        // global function; infer nothing.
+        if scope.contains_key(name) {
+            return;
+        }
+        // Copy template data out first: the rewrite below needs &mut self.
+        let resolved: Option<(
+            ast::FunctionItem,
+            bool,
+            Vec<Type>,
+            HashSet<String>,
+            Vec<String>,
+        )> = (|| {
+            let (template, is_imported) = self.template(name, arguments.len())?;
+            if template.is_variadic {
+                return None;
+            }
+            let params = template
+                .parameters
+                .iter()
+                .map(|p| Type::from_ast(&p.param_type))
+                .collect();
+            let type_params = template_type_params(template);
+            let vars: HashSet<String> = type_params.iter().cloned().collect();
+            Some((
+                template.clone(),
+                is_imported,
+                params,
+                vars,
+                type_params,
+            ))
+        })();
+        let Some((source, is_imported, param_types, vars, type_params)) = resolved else {
+            return;
+        };
+        let mut mapping = HashMap::default();
+        for (param, arg_expr) in param_types.iter().zip(arguments.iter()) {
+            // Concrete parameters were already proved by typeck; only
+            // variable-carrying ones need inference.
+            if !type_mentions_vars(param, &vars) {
+                continue;
+            }
+            let Some(arg) = infer_bare_arg_type(arg_expr, scope) else {
+                return;
+            };
+            if !unify_call_arg(param, &arg, &vars, &mut mapping) {
+                return;
+            }
+        }
+        if type_params.is_empty()
+            || type_params.iter().any(|p| !mapping.contains_key(p))
+            || mapping.values().any(|t| !is_concrete(t))
+        {
+            return;
+        }
+        let args = ordered_args(&type_params, &mapping);
+        let mangled = mangle_function_instance(&source, &args, &mapping);
+        // Rewrite this call site now: the instance body is already
+        // substituted, so no later span-based pass can match it.
+        *function_expr = ast::Expression {
+            kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
+                name: mangled.clone(),
+                span: function_expr.span,
+            })),
+            span: function_expr.span,
+        };
+        let key = format!("fn::{mangled}");
+        if self.generated.contains(&key) || !self.seen.insert(key) {
+            return;
+        }
+        self.requests.push(MonomorphRequest::Function {
+            source: Box::new(source),
+            type_params,
+            mapping,
+            call_span: span,
+            is_imported,
+        });
+    }
+}
+
+/// Discover bare-Identifier calls to generic functions inside freshly
+// substituted instance bodies and rewrite them to their mangled instances,
+// returning requests for instances not yet generated. Only unambiguous
+// local inference is attempted; everything else keeps existing behavior.
+fn discover_bare_generic_calls(
+    new_items: &mut [ast::Item],
+    program: &ast::Program,
+    imported_fn_templates: &HashMap<String, ast::FunctionItem>,
+    generated: &HashSet<String>,
+) -> Vec<MonomorphRequest> {
+    let mut discoverer = BareCallDiscoverer {
+        program,
+        imported: imported_fn_templates,
+        generated,
+        seen: HashSet::default(),
+        requests: Vec::new(),
+    };
+    for item in new_items.iter_mut() {
+        match &mut item.kind {
+            ast::ItemKind::Function(func) => {
+                let mut scope = BareCallScope::default();
+                for param in &func.parameters {
+                    scope.insert(
+                        param.name.name.clone(),
+                        Some(Type::from_ast(&param.param_type)),
+                    );
+                }
+                discoverer.walk_block(&mut func.body, &mut scope);
+            }
+            ast::ItemKind::Impl(impl_item) => {
+                for member in impl_item.items.iter_mut() {
+                    if let ast::ImplItemKind::Function(func) = member {
+                        let mut scope = BareCallScope::default();
+                        for param in &func.parameters {
+                            scope.insert(
+                                param.name.name.clone(),
+                                Some(Type::from_ast(&param.param_type)),
+                            );
+                        }
+                        discoverer.walk_block(&mut func.body, &mut scope);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    discoverer.requests
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3397,6 +3982,80 @@ mod tests {
             _ => false,
         });
         assert!(has_alloc, "expected nested alloc<i32> to be monomorphized");
+    }
+
+    /// Bare-Identifier calls to generic functions inside generic bodies carry
+    // no explicit type arguments, so span-based discovery cannot see them.
+    // The substituted instance body must resolve, instantiate, and rewrite
+    // them (the run_app -> run_app_view shape).
+    #[test]
+    fn monomorphizes_bare_nested_generic_function_call() {
+        let mut program = parse(
+            "void inner<A>(&mut A a) { } \
+             void outer<A>(&mut A app) { inner(&mut app); } \
+             struct Box { i64 x; } \
+             i32 main() { Box b; b.x = 1; outer(&mut b); return 0; }",
+        );
+
+        let source = find_function(&program, "outer");
+        let type_params = vec!["A".to_string()];
+        let mapping = HashMap::from_iter([(
+            "A".to_string(),
+            Type::Named {
+                path: vec!["Box".to_string()],
+                generics: vec![],
+            },
+        )]);
+        let request = MonomorphRequest::Function {
+            source: Box::new(source),
+            type_params,
+            mapping,
+            call_span: Span::default(),
+            is_imported: false,
+        };
+
+        let items = append_monomorphs(&mut program, &[request], &[]);
+
+        // The nested inner<Box> instance must exist.
+        let has_inner = items.iter().any(|item| match &item.kind {
+            ast::ItemKind::Function(f) => f.name.name.starts_with("inner__1_"),
+            _ => false,
+        });
+        assert!(has_inner, "expected nested inner<Box> to be monomorphized");
+
+        // The outer<Box> instance must call the mangled instance, not the
+        // bare template name.
+        let outer_instance = items
+            .iter()
+            .find_map(|item| match &item.kind {
+                ast::ItemKind::Function(f) if f.name.name.starts_with("outer__1_") => Some(f),
+                _ => None,
+            })
+            .expect("expected monomorphized outer<Box> instance");
+        let mut called: Vec<String> = Vec::new();
+        for stmt in &outer_instance.body.statements {
+            let exprs: Vec<&ast::Expression> = match &stmt.kind {
+                ast::StatementKind::Expression(e)
+                | ast::StatementKind::Return(Some(e))
+                | ast::StatementKind::Break(Some(e)) => vec![e],
+                _ => vec![],
+            };
+            for expr in exprs {
+                if let ast::ExpressionKind::Call { function, .. } = expr.kind.as_ref()
+                    && let ast::ExpressionKind::Identifier(ident) = function.kind.as_ref()
+                {
+                    called.push(ident.name.clone());
+                }
+            }
+        }
+        assert!(
+            !called.iter().any(|name| name == "inner"),
+            "bare template call must be rewritten, found: {called:?}"
+        );
+        assert!(
+            called.iter().any(|name| name.starts_with("inner__")),
+            "outer<Box> must call the mangled inner instance, found: {called:?}"
+        );
     }
 
     #[test]
