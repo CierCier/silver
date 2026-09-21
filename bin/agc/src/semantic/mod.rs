@@ -6,7 +6,6 @@ pub mod escape_check;
 pub mod linter;
 pub mod macro_expand;
 pub mod monomorph;
-pub mod drop_elaborate;
 pub mod init;
 pub mod move_check;
 pub mod move_path;
