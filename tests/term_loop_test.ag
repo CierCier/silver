@@ -1,5 +1,5 @@
 // Tests for std.term.loop — pump transfers over pipe pairs and a live
-// epoll session around /bin/echo.
+// epoll session (commands resolve through /usr/bin/env; see term_pty_test).
 import std.test;
 import std.term.loop;
 import std.sys.result;
@@ -44,8 +44,9 @@ i32 main() {
     test_start("session relays echo to exit");
     {
         Vec<String> args = Vec<String>.new();
+        args.push(String.from_str("echo"));
         args.push(String.from_str("hi"));
-        Result<PtySession, Error> r = PtySession.open("/bin/echo", &args, 24, 80);
+        Result<PtySession, Error> r = PtySession.open("/usr/bin/env", &args, 24, 80);
         assert_true(r.is_ok(), "session open");
         PtySession s = r.unwrap();
         // Spaced pumps: child-exit visibility trails slave-close EOF, and

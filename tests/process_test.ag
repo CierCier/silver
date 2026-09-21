@@ -11,11 +11,12 @@ i32 main() {
     assert_true(ppid > 0, "getppid returns positive ppid");
 
     // 2. Command spawn and wait: success case
-    Command cmd_true = Command.new("/bin/sh");
+    Command cmd_true = Command.new("/usr/bin/env");
+    cmd_true.arg("sh");
     cmd_true.arg("-c");
     cmd_true.arg("exit 0");
     Result<Child, i64> r1 = cmd_true.spawn();
-    assert_true(r1.is_ok(), "spawn /bin/sh exit 0 succeeds");
+    assert_true(r1.is_ok(), "spawn sh exit 0 succeeds");
     Child c1 = r1.unwrap();
     assert_true(c1.id() > 0, "child pid is positive");
     ExitStatus st1 = c1.wait_status();
@@ -24,11 +25,12 @@ i32 main() {
     assert_eq_i32(0, st1.exit_code(), "c1 exit code is 0");
 
     // 3. Command spawn and wait: exit code 42
-    Command cmd_42 = Command.new("/bin/sh");
+    Command cmd_42 = Command.new("/usr/bin/env");
+    cmd_42.arg("sh");
     cmd_42.arg("-c");
     cmd_42.arg("exit 42");
     Result<Child, i64> r2 = cmd_42.spawn();
-    assert_true(r2.is_ok(), "spawn /bin/sh exit 42 succeeds");
+    assert_true(r2.is_ok(), "spawn sh exit 42 succeeds");
     Child c2 = r2.unwrap();
     ExitStatus st2 = c2.wait_status();
     assert_true(st2.exited, "c2 exited normally");
@@ -36,7 +38,8 @@ i32 main() {
     assert_eq_i32(42, st2.exit_code(), "c2 exit code is 42");
 
     // 4. Command status shorthand
-    Command cmd_shorthand = Command.new("/bin/sh");
+    Command cmd_shorthand = Command.new("/usr/bin/env");
+    cmd_shorthand.arg("sh");
     cmd_shorthand.arg("-c");
     cmd_shorthand.arg("exit 7");
     Result<ExitStatus, i64> r3 = cmd_shorthand.status();

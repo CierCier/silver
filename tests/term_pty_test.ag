@@ -1,5 +1,7 @@
 // Tests for std.term.size + std.term.pty — winsize round-trip and child
-// sessions on a real pty (/bin/echo, /bin/cat).
+// sessions on a real pty. Commands resolve through /usr/bin/env (PATH
+// lookup) instead of hardcoded /bin paths, which do not exist everywhere
+// (e.g. NixOS has no FHS /bin).
 import std.test;
 import std.term.size;
 import std.term.pty;
@@ -55,8 +57,9 @@ i32 main() {
     test_start("echo child session");
     {
         Vec<String> args = Vec<String>.new();
+        args.push(String.from_str("echo"));
         args.push(String.from_str("hello"));
-        Result<Pty, Error> r = Pty.spawn("/bin/echo", &args, 24, 80);
+        Result<Pty, Error> r = Pty.spawn("/usr/bin/env", &args, 24, 80);
         assert_true(r.is_ok(), "spawn echo");
         Pty p = r.unwrap();
         String out = pty_read_all(&p);
@@ -78,7 +81,8 @@ i32 main() {
     test_start("cat echo with nonblocking master");
     {
         Vec<String> args = Vec<String>.new();
-        Result<Pty, Error> r = Pty.spawn("/bin/cat", &args, 24, 80);
+        args.push(String.from_str("cat"));
+        Result<Pty, Error> r = Pty.spawn("/usr/bin/env", &args, 24, 80);
         assert_true(r.is_ok(), "spawn cat");
         Pty p = r.unwrap();
         assert_true(p.set_nonblock(), "nonblock master");
