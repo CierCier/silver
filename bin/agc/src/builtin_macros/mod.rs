@@ -600,7 +600,16 @@ mod tests {
     fn registry_register_and_get() {
         let mut registry = MacroRegistry::new();
         registry.register("mock", Box::new(MockHandler));
-        assert!(registry.get("mock").is_some());
+        // A miss returns None so callers can fall back to plain calls.
+        assert!(registry.get("missing").is_none());
+        // A hit returns a handler that actually dispatches.
+        let handler = registry.get("mock").expect("registered mock resolves");
+        let mut checker = TypeChecker::new();
+        let expr = dummy_expr();
+        assert_eq!(
+            handler.type_check(&mut checker, "mock", &expr, &[]),
+            Type::Primitive(ast::PrimitiveType::U64)
+        );
     }
 
     #[test]

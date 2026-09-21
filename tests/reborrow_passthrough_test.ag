@@ -1,0 +1,50 @@
+// Regression test: transparent reborrow through generic forwarding.
+// `&mut x` where x is already a reference must pass the pointer through,
+// not take the slot's address (which corrupted non-zero-offset fields and
+// segfaulted in real programs).
+import std.test;
+
+struct Pair {
+    i64 first;
+    i64 second;
+}
+
+i64 read_second(&mut Pair p) {
+    return p.second;
+}
+
+i64 forward_read(&mut Pair p) {
+    return read_second(&mut p);
+}
+
+void set_first(Pair* p, i64 v) {
+    p.first = v;
+}
+
+struct Outer {
+    Pair pair;
+    i64 tag;
+}
+
+void set_via_pointer(Outer* o, i64 v) {
+    // Field address through a raw pointer: real address-of, not passthrough.
+    set_first(&o.pair, v);
+}
+
+i32 main() {
+    test_start("forwarded reference reads offset fields");
+    Pair p;
+    p.first = 10;
+    p.second = 20;
+    assert_eq_i64(20, forward_read(&mut p), "second field survives two generic layers");
+
+    test_start("field address through pointer stays exact");
+    Outer o;
+    o.pair.first = 0;
+    o.pair.second = 0;
+    o.tag = 0;
+    set_via_pointer(&o, 7);
+    assert_eq_i64(7, o.pair.first, "field write lands");
+    assert_eq_i64(0, o.pair.second, "sibling untouched");
+    return done();
+}

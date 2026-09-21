@@ -3115,14 +3115,16 @@ fn unify_call_arg(
     vars: &HashSet<String>,
     mapping: &mut HashMap<String, Type>,
 ) -> bool {
-    if let Type::Named { path, generics } = pattern {
-        if path.len() == 1 && generics.is_empty() && vars.contains(&path[0]) {
-            if let Some(bound) = mapping.get(&path[0]) {
-                return bound == concrete;
-            }
-            mapping.insert(path[0].clone(), concrete.clone());
-            return true;
+    if let Type::Named { path, generics } = pattern
+        && path.len() == 1
+        && generics.is_empty()
+        && vars.contains(&path[0])
+    {
+        if let Some(bound) = mapping.get(&path[0]) {
+            return bound == concrete;
         }
+        mapping.insert(path[0].clone(), concrete.clone());
+        return true;
     }
     match (pattern, concrete) {
         (
