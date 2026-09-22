@@ -1,0 +1,2 @@
+// tests/cfg_platform/linux.ag — Linux composition leaf.
+i32 cfg_platform_val() { return 11; }

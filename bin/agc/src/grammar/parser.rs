@@ -28,6 +28,7 @@ pub enum NodeKind {
     Function = 10,
     GlobalVariable = 11,
     Attribute = 12,
+    CfgBlock = 13,
 }
 
 impl NodeKind {
@@ -46,6 +47,7 @@ impl NodeKind {
             v if v == NodeKind::Function as u16 => NodeKind::Function,
             v if v == NodeKind::GlobalVariable as u16 => NodeKind::GlobalVariable,
             v if v == NodeKind::Attribute as u16 => NodeKind::Attribute,
+            v if v == NodeKind::CfgBlock as u16 => NodeKind::CfgBlock,
             _ => return None,
         })
     }
@@ -172,6 +174,11 @@ impl<'a> ItemParser<'a> {
             let start = first_idx;
 
             match tok {
+                Tok::If => {
+                    let end = self.thru_cfg_block(item_idx);
+                    self.emit_flat_span(NodeKind::CfgBlock, start, end);
+                    self.pos = end;
+                }
                 Tok::Import => {
                     let end = self.thru_terminator(item_idx + 1);
                     self.emit_flat_span(NodeKind::Import, start, end);
@@ -407,6 +414,60 @@ impl<'a> ItemParser<'a> {
             i += 1;
         }
         i
+    }
+
+    /// From a top-level `if` item, consume through the then-block plus any
+    /// `else` / `else if` chain as one flat span.
+    fn thru_cfg_block(&self, if_idx: usize) -> usize {
+        // `if (cond) { ... } [else { ... } | else if ...]`
+        let mut i = if_idx + 1;
+        // Condition parens.
+        if let Some((_, Tok::LParen)) = self.peek_sig(i) {
+            // Find matching RParen via depth scan.
+            let mut depth = 0i64;
+            let mut j = i;
+            while j < self.rows.len() {
+                let row = &self.rows[j];
+                if row.len == 0 {
+                    return j;
+                }
+                if !is_trivia(row.kind) {
+                    match num_to_tok(row.kind) {
+                        Some(Tok::LParen) => depth += 1,
+                        Some(Tok::RParen) => {
+                            depth -= 1;
+                            if depth == 0 {
+                                i = j + 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                j += 1;
+            }
+        }
+        // Then block.
+        i = self.thru_braces(i);
+        // Optional else chain.
+        loop {
+            match self.peek_sig(i) {
+                Some((else_idx, Tok::Else)) => {
+                    i = else_idx + 1;
+                    match self.peek_sig(i) {
+                        Some((nested_if, Tok::If)) => {
+                            // `else if ...`: recurse from the nested if.
+                            return self.thru_cfg_block(nested_if);
+                        }
+                        _ => {
+                            i = self.thru_braces(i);
+                            return i;
+                        }
+                    }
+                }
+                _ => return i,
+            }
+        }
     }
 
     /// Distinguish function (header + block) from global (semicolon).

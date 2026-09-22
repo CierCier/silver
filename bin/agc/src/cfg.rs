@@ -171,7 +171,7 @@ fn cfg_arg_span(arg: &ast::AttributeArg) -> Span {
 /// set. Returns `None` (keep) when there are no cfg attributes; otherwise the
 /// keep decision plus any malformed-attribute errors. All cfg arguments must
 /// match (AND); multiple `#[cfg]` attributes also AND-compose.
-fn eval_cfg_attrs(
+pub(crate) fn eval_cfg_attrs(
     attributes: &[ast::Attribute],
     cfg: &CfgSet,
     errors: &mut Vec<CfgError>,
@@ -237,6 +237,127 @@ pub fn gate_items(program: &mut ast::Program, cfg: &CfgSet) -> Vec<CfgError> {
         .items
         .retain(|item| eval_cfg_attrs(&item.attributes, cfg, &mut errors).unwrap_or(true));
     errors
+}
+
+/// Evaluate a top-level `if (@cfg(...))` condition to a compile-time bool.
+///
+/// Supports `@cfg(key)`, `!expr`, `a && b`, `a || b` (with short-circuit
+/// folding so `false && <runtime>` is still `false`). Returns `None` when
+/// the condition is not a compile-time cfg (e.g. `cpu.*` probes, which fold
+/// to a runtime global, or any non-cfg expression).
+pub fn eval_cfg_expr_to_bool(expr: &ast::Expression, cfg: &CfgSet) -> Option<bool> {
+    match expr.kind.as_ref() {
+        ast::ExpressionKind::Literal(ast::Literal::Bool(v)) => Some(*v),
+        ast::ExpressionKind::MacroCall { name, args } if name.name == "cfg" => {
+            eval_cfg_call_to_bool(cfg, args)
+        }
+        ast::ExpressionKind::Unary { operator, operand }
+            if *operator == ast::UnaryOperator::Not =>
+        {
+            eval_cfg_expr_to_bool(operand, cfg).map(|v| !v)
+        }
+        ast::ExpressionKind::Binary {
+            left,
+            right,
+            operator,
+        } => match operator {
+            ast::BinaryOperator::LogicalAnd => match eval_cfg_expr_to_bool(left, cfg) {
+                Some(false) => Some(false),
+                Some(true) => eval_cfg_expr_to_bool(right, cfg),
+                None => match eval_cfg_expr_to_bool(right, cfg) {
+                    Some(false) => Some(false),
+                    _ => None,
+                },
+            },
+            ast::BinaryOperator::LogicalOr => match eval_cfg_expr_to_bool(left, cfg) {
+                Some(true) => Some(true),
+                Some(false) => eval_cfg_expr_to_bool(right, cfg),
+                None => match eval_cfg_expr_to_bool(right, cfg) {
+                    Some(true) => Some(true),
+                    _ => None,
+                },
+            },
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Single `@cfg(key)` call to bool. `cpu.*` keys are runtime probes, so they
+/// return `None` (cannot gate items at compile time). Malformed calls also
+/// return `None`.
+fn eval_cfg_call_to_bool(cfg: &CfgSet, args: &[ast::MacroArg]) -> Option<bool> {
+    if args.len() != 1 {
+        return None;
+    }
+    let key = match &args[0] {
+        ast::MacroArg::Expression(expr) => cfg_call_key(expr)?,
+        ast::MacroArg::Identifier(id) => id.name.clone(),
+        _ => return None,
+    };
+    if key.strip_prefix("cpu.").is_some() {
+        return None;
+    }
+    Some(cfg.contains(&key))
+}
+
+fn cfg_call_key(expr: &ast::Expression) -> Option<String> {
+    match expr.kind.as_ref() {
+        ast::ExpressionKind::Identifier(id) => Some(id.name.clone()),
+        ast::ExpressionKind::Literal(ast::Literal::String(v)) => Some(v.clone()),
+        ast::ExpressionKind::FieldAccess { object, field } => {
+            Some(format!("{}.{}", cfg_call_key(object)?, field.name))
+        }
+        _ => None,
+    }
+}
+
+/// Expand top-level `if (@cfg(...)) { items } [else { items }]` blocks.
+///
+/// Must run BEFORE import lowering so dead-branch imports are never resolved,
+/// and before `gate_items` so inner `#[cfg]` attributes are still honored.
+/// `else if` chains appear as a single nested `CfgIf` inside `else_items`
+/// and are handled recursively. Non-compile-time conditions (e.g. `cpu.*` or
+/// non-`@cfg` expressions) are reported as errors and drop the whole block.
+pub fn expand_cfg_blocks(program: &mut ast::Program, cfg: &CfgSet) -> Vec<CfgError> {
+    let mut errors = Vec::new();
+    let items = std::mem::take(&mut program.items);
+    program.items = expand_item_list(items, cfg, &mut errors);
+    errors
+}
+
+fn expand_item_list(
+    items: Vec<ast::Item>,
+    cfg: &CfgSet,
+    errors: &mut Vec<CfgError>,
+) -> Vec<ast::Item> {
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        match item.kind {
+            ast::ItemKind::CfgIf(cfg_if) => {
+                // An outer #[cfg] on the `if` itself gates the whole block.
+                if !eval_cfg_attrs(&item.attributes, cfg, errors).unwrap_or(true) {
+                    continue;
+                }
+                match eval_cfg_expr_to_bool(&cfg_if.condition, cfg) {
+                    Some(true) => {
+                        out.extend(expand_item_list(cfg_if.then_items, cfg, errors));
+                    }
+                    Some(false) => {
+                        out.extend(expand_item_list(cfg_if.else_items, cfg, errors));
+                    }
+                    None => {
+                        errors.push(CfgError {
+                            message: "top-level if condition must be a compile-time @cfg(...) expression (cpu.* is runtime-only and cannot gate items)".to_string(),
+                            span: cfg_if.condition.span,
+                        });
+                    }
+                }
+            }
+            _ => out.push(item),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -401,5 +522,100 @@ mod tests {
         add_derived_cfgs(&mut set, None, Some("x86_64-unknown-linux-gnu"));
         assert!(!set.contains("cpu.avx2"));
         assert!(!set.contains("cpu.sse41"));
+    }
+
+    fn fn_names(program: &ast::Program) -> Vec<&str> {
+        program
+            .items
+            .iter()
+            .filter_map(|item| match &item.kind {
+                ast::ItemKind::Function(f) => Some(f.name.name.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn expand_picks_live_branch() {
+        let mut program = parse(
+            "if (@cfg(flag)) { i32 a() { return 1; } } else { i32 b() { return 2; } }",
+        );
+        let set = CfgSet::parse(&["flag".to_string()]);
+        let errors = expand_cfg_blocks(&mut program, &set);
+        assert!(errors.is_empty());
+        assert_eq!(fn_names(&program), vec!["a"]);
+    }
+
+    #[test]
+    fn expand_picks_else_when_missing() {
+        let mut program = parse(
+            "if (@cfg(flag)) { i32 a() { return 1; } } else { i32 b() { return 2; } }",
+        );
+        let set = CfgSet::default();
+        let errors = expand_cfg_blocks(&mut program, &set);
+        assert!(errors.is_empty());
+        assert_eq!(fn_names(&program), vec!["b"]);
+    }
+
+    #[test]
+    fn expand_else_if_chain() {
+        let mut program = parse(
+            "if (@cfg(a)) { i32 a() { return 1; } } else if (@cfg(b)) { i32 b() { return 2; } } else { i32 c() { return 3; } }",
+        );
+        let set = CfgSet::parse(&["b".to_string()]);
+        let errors = expand_cfg_blocks(&mut program, &set);
+        assert!(errors.is_empty());
+        assert_eq!(fn_names(&program), vec!["b"]);
+    }
+
+    #[test]
+    fn expand_and_or_not() {
+        let mut program = parse(
+            "if (@cfg(a) && @cfg(b)) { i32 a() { return 1; } } else { i32 b() { return 2; } }",
+        );
+        let set = CfgSet::parse(&["a,b".to_string()]);
+        let errors = expand_cfg_blocks(&mut program, &set);
+        assert!(errors.is_empty());
+        assert_eq!(fn_names(&program), vec!["a"]);
+
+        let mut program = parse(
+            "if (!@cfg(missing)) { i32 a() { return 1; } } else { i32 b() { return 2; } }",
+        );
+        let set = CfgSet::default();
+        let errors = expand_cfg_blocks(&mut program, &set);
+        assert!(errors.is_empty());
+        assert_eq!(fn_names(&program), vec!["a"]);
+
+        let mut program = parse(
+            "if (@cfg(a) || @cfg(b)) { i32 a() { return 1; } } else { i32 b() { return 2; } }",
+        );
+        let set = CfgSet::parse(&["b".to_string()]);
+        let errors = expand_cfg_blocks(&mut program, &set);
+        assert!(errors.is_empty());
+        assert_eq!(fn_names(&program), vec!["a"]);
+    }
+
+    #[test]
+    fn expand_rejects_cpu_probe() {
+        let mut program = parse("if (@cfg(cpu.avx2)) { i32 a() { return 1; } }");
+        let set = CfgSet::parse(&["cpu.avx2=1".to_string()]);
+        let errors = expand_cfg_blocks(&mut program, &set);
+        assert_eq!(errors.len(), 1);
+        assert!(program.items.is_empty());
+    }
+
+    #[test]
+    fn expand_keeps_import_in_live_branch() {
+        let mut program = parse(
+            "if (@cfg(flag)) { import foo.bar; } else { import baz.qux; }",
+        );
+        let set = CfgSet::parse(&["flag".to_string()]);
+        let errors = expand_cfg_blocks(&mut program, &set);
+        assert!(errors.is_empty());
+        assert_eq!(program.items.len(), 1);
+        let ast::ItemKind::Import(import) = &program.items[0].kind else {
+            panic!("expected import");
+        };
+        assert_eq!(import.path[1].name, "bar");
     }
 }

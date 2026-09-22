@@ -66,6 +66,7 @@ fn legacy_item_kinds(source: &str) -> Option<Vec<&'static str>> {
                 agc::parser::ast::ItemKind::GlobalVariable(_) => "GlobalVariable",
                 agc::parser::ast::ItemKind::Macro(_) => "Macro",
                 agc::parser::ast::ItemKind::TypeAlias(_) => "TypeAlias",
+                agc::parser::ast::ItemKind::CfgIf(_) => "CfgBlock",
             })
             .collect(),
     )
@@ -128,5 +129,6 @@ fn kind_name(kind: NodeKind) -> &'static str {
         NodeKind::Function => "Function",
         NodeKind::GlobalVariable => "GlobalVariable",
         NodeKind::Attribute => "Attribute",
+        NodeKind::CfgBlock => "CfgBlock",
     }
 }

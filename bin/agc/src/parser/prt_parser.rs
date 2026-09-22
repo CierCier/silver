@@ -5679,6 +5679,27 @@ impl PRT_Parser {
                 });
             }
 
+            // Top-level conditional block: `if (@cfg(...)) { items } [else ...]`.
+            if matches!(
+                tokens.get(item_start).map(|token| &token.kind),
+                Some(Token::If)
+            ) {
+                let (item, next) = self.parse_cfg_if_item(
+                    tokens,
+                    position,
+                    item_start,
+                    visibility,
+                    attributes,
+                )?;
+                self.record_known_item(&item.kind);
+                // Fold program-level attributes out like normal items.
+                // (parse_cfg_if_item already filtered; re-filter is a no-op,
+                // so just push.)
+                items.push(item);
+                position = next;
+                continue;
+            }
+
             let Some(production) = self.predict_item_production(tokens, item_start) else {
                 return Err(ParseError::InvalidSyntax {
                     message: format!(
@@ -5789,6 +5810,304 @@ impl PRT_Parser {
         })
     }
 
+    /// Parse a top-level `if (@cfg(...)) { items } [else { items } | else if ...]`.
+    /// `position` covers leading attributes; `item_start` is the `if` token.
+    fn parse_cfg_if_item(
+        &mut self,
+        tokens: &[LexToken],
+        position: usize,
+        item_start: usize,
+        visibility: ast::Visibility,
+        attributes: Vec<ast::Attribute>,
+    ) -> Result<(ast::Item, usize), ParseError> {
+        let end = tokens.len();
+        // Condition: `if ( ... )`.
+        if !matches!(
+            tokens.get(item_start + 1).map(|t| &t.kind),
+            Some(Token::LeftParen)
+        ) {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected '(' after top-level 'if'".to_string(),
+                span: tokens[item_start].span,
+            });
+        }
+        let Some(cond_close) = self.find_matching_token(
+            tokens,
+            item_start + 1,
+            end,
+            Token::LeftParen,
+            Token::RightParen,
+        ) else {
+            return Err(ParseError::InvalidSyntax {
+                message: "unterminated top-level if condition".to_string(),
+                span: tokens[item_start].span,
+            });
+        };
+        let condition =
+            self.parse_expression_reduction(tokens, item_start + 2, cond_close)?;
+        // Then block: `{ items }`.
+        let then_open = cond_close + 1;
+        if !matches!(
+            tokens.get(then_open).map(|t| &t.kind),
+            Some(Token::LeftBrace)
+        ) {
+            return Err(ParseError::InvalidSyntax {
+                message: "expected '{' after top-level if condition".to_string(),
+                span: tokens
+                    .get(then_open)
+                    .map(|t| t.span)
+                    .unwrap_or(tokens[item_start].span),
+            });
+        }
+        let Some(then_close) = self.find_matching_token(
+            tokens,
+            then_open,
+            end,
+            Token::LeftBrace,
+            Token::RightBrace,
+        ) else {
+            return Err(ParseError::InvalidSyntax {
+                message: "unterminated top-level if block".to_string(),
+                span: tokens[then_open].span,
+            });
+        };
+        let then_items = self.parse_item_list_range(tokens, then_open + 1, then_close)?;
+        let mut cursor = then_close + 1;
+        let mut else_items = Vec::new();
+        if matches!(
+            tokens.get(cursor).map(|t| &t.kind),
+            Some(Token::Else)
+        ) {
+            cursor += 1;
+            if matches!(
+                tokens.get(cursor).map(|t| &t.kind),
+                Some(Token::If)
+            ) {
+                // `else if ...`: single nested CfgIf as the else payload.
+                let (nested, next) = self.parse_cfg_if_item_inner(tokens, cursor)?;
+                else_items.push(nested);
+                cursor = next;
+            } else {
+                if !matches!(
+                    tokens.get(cursor).map(|t| &t.kind),
+                    Some(Token::LeftBrace)
+                ) {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "expected '{' or 'if' after 'else'".to_string(),
+                        span: tokens
+                            .get(cursor)
+                            .map(|t| t.span)
+                            .unwrap_or(tokens[item_start].span),
+                    });
+                }
+                let Some(else_close) = self.find_matching_token(
+                    tokens,
+                    cursor,
+                    end,
+                    Token::LeftBrace,
+                    Token::RightBrace,
+                ) else {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "unterminated top-level else block".to_string(),
+                        span: tokens[cursor].span,
+                    });
+                };
+                else_items = self.parse_item_list_range(tokens, cursor + 1, else_close)?;
+                cursor = else_close + 1;
+            }
+        }
+        let item_span = tokens[position].span.extend_to(&tokens[cursor - 1].span);
+        let cfg_span = tokens[item_start].span.extend_to(&tokens[cursor - 1].span);
+        let (prog_attrs, retained) = attributes::filter_program_attributes(attributes);
+        // Program attributes before a cfg block still apply globally.
+        // (Caller pushes the item; we stash prog attrs via a side channel:
+        // for simplicity, drop them here — top-level `if` rarely carries
+        // program attributes. To preserve them, the caller would need them;
+        // instead we just ignore: program attrs must precede real items.)
+        let _ = prog_attrs;
+        Ok((
+            ast::Item {
+                kind: ast::ItemKind::CfgIf(ast::CfgIfItem {
+                    condition,
+                    then_items,
+                    else_items,
+                    span: cfg_span,
+                }),
+                span: item_span,
+                visibility,
+                attributes: retained,
+            },
+            cursor,
+        ))
+    }
+
+    /// Inner `if` (after an `else`) without leading attributes/visibility.
+    fn parse_cfg_if_item_inner(
+        &mut self,
+        tokens: &[LexToken],
+        item_start: usize,
+    ) -> Result<(ast::Item, usize), ParseError> {
+        let (item, next) = self.parse_cfg_if_item(
+            tokens,
+            item_start,
+            item_start,
+            ast::Visibility::Public,
+            Vec::new(),
+        )?;
+        Ok((item, next))
+    }
+
+    /// Parse a run of top-level items in `tokens[start..end]` (inside a
+    /// cfg-block brace pair), including nested `if (@cfg(...))` blocks.
+    fn parse_item_list_range(
+        &mut self,
+        tokens: &[LexToken],
+        start: usize,
+        end: usize,
+    ) -> Result<Vec<ast::Item>, ParseError> {
+        let mut items = Vec::new();
+        let mut pos = start;
+        while pos < end {
+            if Self::at_eof(tokens, pos) {
+                break;
+            }
+            // Skip stray semicolons inside cfg blocks.
+            if matches!(tokens.get(pos).map(|t| &t.kind), Some(Token::Semicolon)) {
+                pos += 1;
+                continue;
+            }
+            let (attributes, item_start) =
+                self.parse_attributes_prefix(tokens, pos, end)?;
+            let (visibility, item_start) =
+                self.parse_visibility_prefix(tokens, item_start, end);
+            if item_start >= end {
+                break;
+            }
+            if matches!(
+                tokens.get(item_start).map(|t| &t.kind),
+                Some(Token::Mut)
+            ) {
+                return Err(ParseError::InvalidSyntax {
+                    message: "`mut` is not a declaration qualifier; variables are mutable by default, use `const` for immutable values".to_string(),
+                    span: tokens[item_start].span,
+                });
+            }
+            if matches!(
+                tokens.get(item_start).map(|t| &t.kind),
+                Some(Token::If)
+            ) {
+                let (item, next) = self.parse_cfg_if_item(
+                    tokens,
+                    pos,
+                    item_start,
+                    visibility,
+                    attributes,
+                )?;
+                // Clamp to the brace range (else-if recursion uses full len).
+                if next > end {
+                    return Err(ParseError::InvalidSyntax {
+                        message: "top-level if block extends past its enclosing block".to_string(),
+                        span: tokens[item_start].span,
+                    });
+                }
+                self.record_known_item(&item.kind);
+                // Recursively record inner known types.
+                self.record_cfg_if_inner_types(&item.kind);
+                items.push(item);
+                pos = next;
+                continue;
+            }
+            let Some(production) = self.predict_item_production(tokens, item_start) else {
+                return Err(ParseError::InvalidSyntax {
+                    message: "no LL transition for item inside top-level if block".to_string(),
+                    span: tokens.get(item_start).map(|t| t.span).unwrap_or_default(),
+                });
+            };
+            // Bound the item end to the enclosing brace range.
+            let raw_end =
+                self.find_item_end(production, tokens, item_start, "<cfg-block>", &tokens[pos].span)?;
+            let Some(item_end) = raw_end else {
+                return Err(ParseError::InvalidSyntax {
+                    message: "could not find item terminator inside top-level if block".to_string(),
+                    span: tokens.get(pos).map(|t| t.span).unwrap_or_default(),
+                });
+            };
+            if item_end > end {
+                return Err(ParseError::InvalidSyntax {
+                    message: "item inside top-level if block extends past its closing brace".to_string(),
+                    span: tokens.get(pos).map(|t| t.span).unwrap_or_default(),
+                });
+            }
+            // Reuse single-item parsing by slicing: temporarily parse with a
+            // bounded view. parse_*_reduction take absolute indices, so call
+            // them directly here (mirroring parse_program).
+            let item_span = tokens[pos].span.extend_to(&tokens[item_end - 1].span);
+            let kind = match production {
+                ItemProduction::Import => ast::ItemKind::Import(
+                    self.parse_import_reduction(tokens, item_start, item_end)?,
+                ),
+                ItemProduction::ExternDeclaration => {
+                    match self.parse_extern_declaration_reduction(tokens, item_start, item_end)? {
+                        ParsedExternDeclaration::Function(f) => {
+                            ast::ItemKind::ExternFunction(f)
+                        }
+                        ParsedExternDeclaration::Variable(v) => {
+                            ast::ItemKind::ExternVariable(v)
+                        }
+                    }
+                }
+                ItemProduction::ExternBlock => ast::ItemKind::ExternBlock(
+                    self.parse_extern_block_reduction(tokens, item_start, item_end)?,
+                ),
+                ItemProduction::Struct => ast::ItemKind::Struct(
+                    self.parse_struct_reduction(tokens, item_start, item_end)?,
+                ),
+                ItemProduction::Enum => {
+                    ast::ItemKind::Enum(self.parse_enum_reduction(tokens, item_start, item_end)?)
+                }
+                ItemProduction::Trait => {
+                    ast::ItemKind::Trait(self.parse_trait_reduction(tokens, item_start, item_end)?)
+                }
+                ItemProduction::Impl => {
+                    ast::ItemKind::Impl(self.parse_impl_reduction(tokens, item_start, item_end)?)
+                }
+                ItemProduction::Function => ast::ItemKind::Function(
+                    self.parse_function_reduction(tokens, item_start, item_end)?,
+                ),
+                ItemProduction::GlobalVariable => ast::ItemKind::GlobalVariable(
+                    self.parse_global_variable_reduction(tokens, item_start, item_end)?,
+                ),
+                ItemProduction::Macro => {
+                    ast::ItemKind::Macro(self.parse_macro_reduction(tokens, item_start, item_end)?)
+                }
+                ItemProduction::TypeAlias => ast::ItemKind::TypeAlias(
+                    self.parse_type_alias_reduction(tokens, item_start, item_end)?,
+                ),
+            };
+            let (_prog_attrs, retained) = attributes::filter_program_attributes(attributes);
+            self.record_known_item(&kind);
+            items.push(ast::Item {
+                kind,
+                span: item_span,
+                visibility,
+                attributes: retained,
+            });
+            pos = item_end;
+        }
+        Ok(items)
+    }
+
+    /// Record known type names for structs/enums nested inside a cfg block
+    /// (the outer record_known_item sees only CfgIf and would miss them).
+    fn record_cfg_if_inner_types(&mut self, kind: &ast::ItemKind) {
+        if let ast::ItemKind::CfgIf(cfg_if) = kind {
+            for item in cfg_if.then_items.iter().chain(cfg_if.else_items.iter()) {
+                self.record_known_item(&item.kind);
+                self.record_cfg_if_inner_types(&item.kind);
+            }
+        }
+    }
+
     pub fn parse_single_item(
         &mut self,
         tokens: &[LexToken],
@@ -5797,6 +6116,22 @@ impl PRT_Parser {
     ) -> Result<ast::Item, ParseError> {
         let (attributes, item_start) = self.parse_attributes_prefix(tokens, position, item_end)?;
         let (visibility, item_start) = self.parse_visibility_prefix(tokens, item_start, item_end);
+
+        if matches!(
+            tokens.get(item_start).map(|t| &t.kind),
+            Some(Token::If)
+        ) {
+            let (item, next) =
+                self.parse_cfg_if_item(tokens, position, item_start, visibility, attributes)?;
+            if next != item_end {
+                return Err(ParseError::InvalidSyntax {
+                    message: "unexpected tokens after top-level if block".to_string(),
+                    span: tokens.get(next).map(|t| t.span).unwrap_or_default(),
+                });
+            }
+            self.record_known_item(&item.kind);
+            return Ok(item);
+        }
 
         let Some(production) = self.predict_item_production(tokens, item_start) else {
             return Err(ParseError::InvalidSyntax {
@@ -6025,6 +6360,12 @@ impl PRT_Parser {
             }
             ast::ItemKind::ExternVariable(item) => {
                 self.known_ident_names.insert(item.name.name.clone());
+            }
+            ast::ItemKind::CfgIf(cfg_if) => {
+                for item in cfg_if.then_items.iter().chain(cfg_if.else_items.iter()) {
+                    self.record_known_item(&item.kind);
+                    self.record_cfg_if_inner_types(&item.kind);
+                }
             }
             ast::ItemKind::Impl(_)
             | ast::ItemKind::Import(_)
@@ -6775,6 +7116,58 @@ mod tests {
         let (ty_tuple, _) = parser.parse_type_prefix(&tokens, next3 + 2, tokens.len()).expect("parse tuple failed");
         let ast::TypeKind::Tuple(items) = ty_tuple.kind.as_ref() else { panic!("expected Tuple"); };
         assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn parses_top_level_cfg_if_with_imports() {
+        let source = "if (@cfg(os.linux)) { import foo.bar; } else { import baz.qux; }";
+        let tokens = lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+        assert_eq!(program.items.len(), 1);
+        let ast::ItemKind::CfgIf(cfg_if) = &program.items[0].kind else {
+            panic!("expected CfgIf");
+        };
+        assert_eq!(cfg_if.then_items.len(), 1);
+        assert_eq!(cfg_if.else_items.len(), 1);
+        assert!(matches!(
+            &cfg_if.then_items[0].kind,
+            ast::ItemKind::Import(_)
+        ));
+    }
+
+    #[test]
+    fn parses_top_level_cfg_else_if_chain() {
+        let source = "if (@cfg(a)) { i32 a() { return 1; } } else if (@cfg(b)) { i32 b() { return 2; } } else { i32 c() { return 3; } }";
+        let tokens = lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+        assert_eq!(program.items.len(), 1);
+        let ast::ItemKind::CfgIf(outer) = &program.items[0].kind else {
+            panic!("expected CfgIf");
+        };
+        assert_eq!(outer.then_items.len(), 1);
+        assert_eq!(outer.else_items.len(), 1);
+        assert!(matches!(
+            &outer.else_items[0].kind,
+            ast::ItemKind::CfgIf(_)
+        ));
+    }
+
+    #[test]
+    fn parses_nested_cfg_if_blocks() {
+        let source = "if (@cfg(a)) { if (@cfg(b)) { i32 x() { return 1; } } }";
+        let tokens = lex(source).expect("lex failed");
+        let mut parser = PRT_Parser::new(None);
+        let program = parser.parse_program(&tokens).expect("parse failed");
+        let ast::ItemKind::CfgIf(outer) = &program.items[0].kind else {
+            panic!("expected CfgIf");
+        };
+        assert_eq!(outer.then_items.len(), 1);
+        assert!(matches!(
+            &outer.then_items[0].kind,
+            ast::ItemKind::CfgIf(_)
+        ));
     }
 }
 

@@ -72,6 +72,7 @@ fn item_node(item: &ast::Item) -> Node {
         ast::ItemKind::ExternBlock(extern_block) => extern_block_node(extern_block),
         ast::ItemKind::Macro(macro_def) => macro_node(macro_def),
         ast::ItemKind::TypeAlias(alias) => type_node(&alias.type_def),
+        ast::ItemKind::CfgIf(cfg_if) => cfg_if_node(cfg_if),
     };
 
     node.label = format!("{} [{}..{}]", node.label, item.span.start, item.span.end);
@@ -196,6 +197,22 @@ fn impl_node(impl_item: &ast::ImplItem) -> Node {
 
 fn import_node(import: &ast::ImportItem) -> Node {
     Node::new(format!("Import {}", path_name(&import.path)))
+}
+
+fn cfg_if_node(cfg_if: &ast::CfgIfItem) -> Node {
+    let mut node = Node::new("CfgIf");
+    let mut cond = Node::new("condition");
+    cond.children.push(expression_node(&cfg_if.condition));
+    node.children.push(cond);
+    let mut then_node = Node::new("then");
+    then_node.children = cfg_if.then_items.iter().map(item_node).collect();
+    node.children.push(then_node);
+    if !cfg_if.else_items.is_empty() {
+        let mut else_node = Node::new("else");
+        else_node.children = cfg_if.else_items.iter().map(item_node).collect();
+        node.children.push(else_node);
+    }
+    node
 }
 
 fn extern_fn_node(extern_fn: &ast::ExternFunctionItem) -> Node {

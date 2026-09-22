@@ -349,10 +349,33 @@ impl<'a> FileImportResolverHook<'a> {
         &mut self,
         program: &mut ast::Program,
         base_dir: Option<&Path>,
-    ) -> Result<(), String> {        let mut original_items = Vec::new();
+    ) -> Result<(), String> {
+        // Conditional compilation at global scope runs BEFORE imports resolve:
+        // `if (@cfg(os.windows)) { import ... }` dead branches (and their
+        // imports) never reach the resolver, enabling per-platform files.
+        let mut cfg_set = crate::cfg::CfgSet::parse(&self.loader.cfg_flags);
+        crate::cfg::add_derived_cfgs(
+            &mut cfg_set,
+            self.loader.opt_level.as_deref(),
+            self.loader.target.as_deref(),
+        );
+        let cfg_block_errors = crate::cfg::expand_cfg_blocks(program, &cfg_set);
+        if !cfg_block_errors.is_empty() {
+            let first = &cfg_block_errors[0];
+            let rendered = crate::diagnostics::render(
+                first.span,
+                &first.message,
+                crate::diagnostics::Severity::Error,
+            );
+            return Err(rendered);
+        }
+        let mut original_items = Vec::new();
         let mut lowered_program_attributes = std::mem::take(&mut program.attributes);
         // (alias_plan removed)
 
+        // Malformed #[cfg] on imports is reported here (imports vanish after
+        // lowering, so the post-lowering gate would never see them).
+        let mut cfg_attr_errors: Vec<crate::cfg::CfgError> = Vec::new();
         for item in std::mem::take(&mut program.items) {
             let ast::Item {
                 kind,
@@ -360,6 +383,17 @@ impl<'a> FileImportResolverHook<'a> {
                 visibility,
                 attributes,
             } = item;
+
+            // Gate imports BEFORE resolving: a cfg-rejected import must not
+            // inline its file. Non-import items stay for the post-lowering
+            // `gate_items` pass (which also handles impl methods).
+            if let ast::ItemKind::Import(_) = &kind
+                && let Some(keep) =
+                    crate::cfg::eval_cfg_attrs(&attributes, &cfg_set, &mut cfg_attr_errors)
+                && !keep
+            {
+                continue;
+            }
 
             let ast::ItemKind::Import(import_item) = kind else {
                 original_items.push(ast::Item {
@@ -485,6 +519,15 @@ impl<'a> FileImportResolverHook<'a> {
                         .push((resolved.module_path.clone(), artifact));
                 }
             }
+        }
+        if !cfg_attr_errors.is_empty() {
+            let first = &cfg_attr_errors[0];
+            let rendered = crate::diagnostics::render(
+                first.span,
+                &first.message,
+                crate::diagnostics::Severity::Error,
+            );
+            return Err(rendered);
         }
         program.items = original_items;
         program.attributes = lowered_program_attributes;

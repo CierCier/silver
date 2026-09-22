@@ -88,6 +88,7 @@ pub enum AstItem<'g> {
     TypeAlias(AstTypeAlias<'g>),
     Function(AstFunction<'g>),
     Global(AstGlobalVar<'g>),
+    CfgBlock(NodeRef<'g>),
 }
 
 impl<'g> AstItem<'g> {
@@ -118,6 +119,8 @@ impl<'g> AstItem<'g> {
             Some(AstItem::Function(AstFunction(node)))
         } else if kind == NodeKind::GlobalVariable as u16 {
             Some(AstItem::Global(AstGlobalVar(node)))
+        } else if kind == NodeKind::CfgBlock as u16 {
+            Some(AstItem::CfgBlock(node))
         } else {
             None
         }
@@ -136,6 +139,7 @@ impl<'g> AstItem<'g> {
             AstItem::TypeAlias(it) => it.0,
             AstItem::Function(it) => it.0,
             AstItem::Global(it) => it.0,
+            AstItem::CfgBlock(n) => *n,
         }
     }
 

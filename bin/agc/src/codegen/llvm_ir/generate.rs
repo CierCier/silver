@@ -1291,6 +1291,8 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             ),
             ast::ItemKind::Macro(_) => Ok(()),
             ast::ItemKind::TypeAlias(_) => Ok(()),
+            // Expanded before codegen; a surviving block is a pipeline bug.
+            ast::ItemKind::CfgIf(_) => Ok(()),
         }
     }
 

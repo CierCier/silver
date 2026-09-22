@@ -92,6 +92,20 @@ pub enum ItemKind {
     ExternBlock(ExternBlockItem),
     Macro(MacroDef),
     TypeAlias(TypeAliasItem),
+    /// Top-level conditional block: `if (@cfg(...)) { items } [else { items }]`.
+    /// Expanded by `crate::cfg::expand_cfg_blocks` before import lowering;
+    /// downstream passes should never observe it (they skip it defensively).
+    CfgIf(CfgIfItem),
+}
+
+/// Top-level `if (@cfg(...))` block holding items (not statements).
+/// `else if` chains are stored as a single nested `CfgIf` inside `else_items`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CfgIfItem {
+    pub condition: Expression,
+    pub then_items: Vec<Item>,
+    pub else_items: Vec<Item>,
+    pub span: Span,
 }
 
 /// Macro definition

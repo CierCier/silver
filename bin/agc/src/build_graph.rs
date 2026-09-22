@@ -848,6 +848,8 @@ impl<'a> ParallelGraphExecutor<'a> {
             self.loader.opt_level.as_deref(),
             self.loader.target.as_deref(),
         );
+        // Defensive: import lowering already expanded top-level cfg blocks.
+        let _ = crate::cfg::expand_cfg_blocks(&mut ast, &cfg_set);
         crate::cfg::gate_items(&mut ast, &cfg_set);
         crate::semantic::cfg_hook::fold_and_prune(&mut ast, &cfg_set);
         crate::semantic::serialize::synthesize_serialization_for_program(&mut ast);

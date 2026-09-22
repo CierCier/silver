@@ -384,6 +384,13 @@ impl CompilerSymbolTable {
                 );
             }
             ast::ItemKind::TypeAlias(_) => {}
+            // Expanded before symbol registration; walk inner defensively so
+            // unexpanded blocks (e.g. tooling) still register symbols.
+            ast::ItemKind::CfgIf(cfg_if) => {
+                for inner in cfg_if.then_items.iter().chain(cfg_if.else_items.iter()) {
+                    self.record_item_symbols(inner, phase);
+                }
+            }
         }
     }
 }

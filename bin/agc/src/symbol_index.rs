@@ -817,6 +817,12 @@ impl Walker<'_> {
                 );
                 self.walk_type(&a.type_def);
             }
+            ItemKind::CfgIf(cfg_if) => {
+                self.walk_expr(&cfg_if.condition);
+                for inner in cfg_if.then_items.iter().chain(cfg_if.else_items.iter()) {
+                    self.walk_item(inner);
+                }
+            }
         }
     }
 

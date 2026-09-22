@@ -364,6 +364,42 @@ type qualifier, which makes loads/stores LLVM-volatile.
 `@attr(...)` is **not** attribute syntax — `@` is for expression macro calls
 (`@println`, `@size`, etc.).
 
+### Conditional Compilation (`#[cfg]` / `@cfg` / top-level `if`)
+
+Platform and build configuration gate through one key space:
+
+- Derived: `debug`/`release` (opt level), `arch.<arch>` / `os.<os>`
+  (target triple or host), `cpu.<feature>` (native x86_64 probe only).
+- Custom: `--cfg "key=val,..."` (repeatable, AND-composed).
+
+```silver
+#[cfg(os.linux)]
+i32 linux_only() { return 1; }
+
+i32 v() {
+    if (@cfg(os.linux)) { return 1; } else { return 2; }
+    // absent key -> false (dead branch pruned before typeck);
+    // present cpu.* -> runtime probe global (g_has_<feat>).
+}
+```
+
+Top-level `if (@cfg(...))` blocks compose per-platform files. They expand
+before import lowering, so dead-branch imports are never resolved:
+
+```silver
+if (@cfg(os.linux)) {
+    import cfg_platform.linux;
+} else if (@cfg(os.windows)) {
+    import cfg_platform.windows;
+} else {
+    import cfg_platform.windows; // fallback
+}
+```
+
+Conditions support `!`, `&&`, `||`. `cpu.*` is runtime-only and cannot
+gate items (top-level use is an error). `#[cfg(...)]` on an `import`
+likewise skips resolution when rejected.
+
 ### Macro Definitions
 
 Macro definitions parse but are **not expanded** — only built-in compiler macros

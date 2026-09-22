@@ -70,6 +70,17 @@ fn rewrite_item(item: &mut ast::Item, cfg: &CfgSet) {
             }
         }
         ast::ItemKind::Macro(m) => rewrite_block(&mut m.body, cfg),
+        // Defensive: expansion runs before folding, so no CfgIf survives.
+        // Recurse anyway so direct fold_and_prune callers still fold inner.
+        ast::ItemKind::CfgIf(cfg_if) => {
+            for inner in cfg_if
+                .then_items
+                .iter_mut()
+                .chain(cfg_if.else_items.iter_mut())
+            {
+                rewrite_item(inner, cfg);
+            }
+        }
         _ => {}
     }
 }

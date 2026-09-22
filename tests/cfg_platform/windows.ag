@@ -1,0 +1,2 @@
+// tests/cfg_platform/windows.ag — Windows (and fallback) composition leaf.
+i32 cfg_platform_val() { return 22; }

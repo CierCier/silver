@@ -107,14 +107,19 @@ impl Backend {
                 }
             };
 
-        // Mirror the compiler driver: gate #[cfg(...)] items and fold
-        // @cfg(...) expressions BEFORE semantic analysis/type checking —
-        // otherwise @cfg calls reach the macro registry as "unknown builtin
-        // macro '@cfg'". Default cfg set (no --cfg flags) plus derived
-        // debug/arch/os cfgs matches `agc` with no flags.
+        // Mirror the compiler driver: expand top-level `if (@cfg(...))`
+        // blocks (import lowering already did, defensively repeat), gate
+        // #[cfg(...)] items and fold @cfg(...) expressions BEFORE semantic
+        // analysis/type checking — otherwise @cfg calls reach the macro
+        // registry as "unknown builtin macro '@cfg'". Default cfg set (no
+        // --cfg flags) plus derived debug/arch/os cfgs matches `agc` with no
+        // flags.
         let mut cfg_set = agc::cfg::CfgSet::parse(&[]);
         agc::cfg::add_derived_cfgs(&mut cfg_set, None, None);
-        for error in agc::cfg::gate_items(&mut program, &cfg_set) {
+        for error in agc::cfg::expand_cfg_blocks(&mut program, &cfg_set)
+            .into_iter()
+            .chain(agc::cfg::gate_items(&mut program, &cfg_set))
+        {
             diagnostics.push(Diagnostic {
                 range: span_to_range(text, &error.span),
                 severity: Some(DiagnosticSeverity::ERROR),
@@ -211,7 +216,8 @@ mod tests {
 
         let mut cfg_set = agc::cfg::CfgSet::parse(&[]);
         agc::cfg::add_derived_cfgs(&mut cfg_set, None, None);
-        let cfg_errors = agc::cfg::gate_items(&mut program, &cfg_set);
+        let mut cfg_errors = agc::cfg::expand_cfg_blocks(&mut program, &cfg_set);
+        cfg_errors.extend(agc::cfg::gate_items(&mut program, &cfg_set));
         assert!(cfg_errors.is_empty(), "cfg errors: {}", cfg_errors.len());
         agc::semantic::cfg_hook::fold_and_prune(&mut program, &cfg_set);
         agc::semantic::serialize::synthesize_serialization_for_program(&mut program);
