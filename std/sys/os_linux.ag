@@ -1,0 +1,362 @@
+// std/sys/os_linux.ag — Linux implementation of the OS seam.
+//
+// Delegates to the generated raw syscall wrappers (std/sys/raw/*).
+// Imported by std/sys/os.ag only on `os.linux`; unconditional here.
+
+import std.sys.raw.fs;
+import std.sys.raw.memory;
+import std.sys.raw.process;
+import std.sys.raw.sync;
+import std.sys.raw.time;
+import std.sys.raw.misc;
+import std.sys.raw.poll;
+import std.sys.syscall;
+import std.sys.errno;
+import std.sys.result;
+
+// ---------------------------------------------------------------------------
+// Memory: mmap-like page allocation.
+// ---------------------------------------------------------------------------
+
+i64 sys_mmap(i64 addr, i64 len, i64 prot, i64 flags, i64 fd, i64 off) {
+    return raw_sys_mmap(addr, len, prot, flags, fd, off);
+}
+
+i64 sys_munmap(i64 addr, i64 len) {
+    return raw_sys_munmap(addr, len);
+}
+
+i64 sys_write(i64 fd, i64 buf, i64 len) {
+    return raw_sys_write(fd, buf, len);
+}
+
+i64 sys_read(i64 fd, i64 buf, i64 len) {
+    return raw_sys_read(fd, buf, len);
+}
+
+/// Linux: raw open(2) passthrough — the O_* bit layout consumed here is the
+/// Linux layout defined in std/sys/result.ag.
+i64 sys_open(i64 path, i64 flags, i64 mode) {
+    return raw_sys_open(path, flags, mode);
+}
+
+/// Linux: raw stat(2) passthrough — fills the kernel struct stat in the
+/// caller's buffer (st_size at offset 48, st_mtim at 88/96 on x86_64).
+i64 sys_stat(i64 path, i64 buf) {
+    return raw_sys_stat(path, buf);
+}
+
+i64 sys_close(i64 fd) {
+    return raw_sys_close(fd);
+}
+
+i64 sys_openat(i64 dirfd, i64 path, i64 flags, i64 mode) {
+    // raw/fs.ag's generated wrapper has the same name as this one; call the
+    // syscall seam directly to stay unambiguous.
+    return syscall4((i64)RAW_FS.OPENAT, dirfd, path, flags, mode);
+}
+
+i64 sys_fcntl(i64 fd, i64 cmd, i64 arg) {
+    return syscall3((i64)RAW_FS.FCNTL, fd, cmd, arg);
+}
+
+i64 sys_mremap(i64 old_addr, i64 old_size, i64 new_size, i64 flags, i64 new_addr) {
+    return syscall5((i64)RAW_MEMORY.MREMAP, old_addr, old_size, new_size, flags, new_addr);
+}
+
+i64 sys_exit(i64 code) {
+    return raw_sys_exit(code);
+}
+
+i64 sys_lseek(i64 fd, i64 off, i64 whence) {
+    return raw_sys_lseek(fd, off, whence);
+}
+
+i64 sys_unlink(i64 path) {
+    return raw_sys_unlink(path);
+}
+
+i64 sys_rename(i64 from, i64 to) {
+    return raw_sys_rename(from, to);
+}
+
+// ---------------------------------------------------------------------------
+// Process-level: exit, signals (abort only), pid.
+// ---------------------------------------------------------------------------
+
+i64 sys_exit_group(i64 code) {
+    return raw_sys_exit_group(code);
+}
+
+i64 sys_getpid() {
+    return raw_sys_getpid();
+}
+
+/// Only the abort path (SIGABRT, signal 6) uses sys_kill. Windows has no
+/// signal semantics, so it maps to a forced exit with the 134 (128+SIGABRT)
+/// convention the test harness and backtrace printing expect.
+i64 sys_kill(i64 pid, i64 sig) {
+    return raw_sys_kill(pid, sig);
+}
+
+/// Thread-local exit: ends only the calling thread. The thread runtime's
+/// child entry uses this after storing its done flag.
+void thread_exit(i64 code) {
+    raw_sys_exit(code);
+}
+
+void thread_yield() {
+    // raw/thread.ag's generated wrapper has the same name as this one (and
+    // importing that module makes the overload ambiguous), so call the
+    // syscall seam directly: SYS_sched_yield = 24 on x86_64.
+    syscall0(24);
+}
+
+// ---------------------------------------------------------------------------
+// Threads: spawn seam. Linux maps a dedicated stack via clone; Windows uses
+// CreateThread with an OS-managed stack (the caller's stack pointer is
+// ignored there). The start function always has signature void(i64).
+// ---------------------------------------------------------------------------
+
+i64 thread_spawn_raw(i64 flags, u8* stack_top, i64 fn, i64 arg, i32* ctid) {
+    // clone + child trampoline. Parent returns the child tid in %rax; the
+    // child resumes with rsp = stack_top, calls fn(arg) (arg arrives in r9,
+    // fn in r8 under the asm() syscall register convention), then exits via
+    // sys_exit(60) — CLONE_THREAD ends only this thread.
+    return asm("
+        syscall
+        test %rax, %rax
+        jnz 1f
+        mov %r9, %rdi
+        call *%r8
+        mov $$0, %rdi
+        mov $$60, %eax
+        syscall
+        1:
+    ", [56, flags, stack_top, 0, (i64)ctid, fn, arg]);
+}
+
+// ---------------------------------------------------------------------------
+// Futex -> WaitOnAddress.
+// ---------------------------------------------------------------------------
+
+i64 sys_futex(i64 uaddr, i64 op, i64 val, i64 timeout, i64 uaddr2, i64 val3) {
+    return raw_sys_futex(uaddr, op, val, timeout, uaddr2, val3);
+}
+
+// ---------------------------------------------------------------------------
+// Time.
+// ---------------------------------------------------------------------------
+
+i64 sys_clock_gettime(i64 clk, i64 ts) {
+    return raw_sys_clock_gettime(clk, ts);
+}
+
+/// Suspend the calling thread for the requested timespec ({i64 sec, i64 nsec}).
+i64 sys_nanosleep(i64 req, i64 rem) {
+    return raw_sys_nanosleep(req, rem);
+}
+
+/// Release the OS resources of a joined thread. Linux: the tid is a kernel id
+/// reaped by the CLONE_THREAD exit — nothing to do. Windows: tid carries the
+/// CreateThread handle; closing it is what frees the kernel thread object,
+/// so skipped joins would otherwise leak one handle per spawn.
+void thread_reclaim(i64 tid) {}
+
+// ---------------------------------------------------------------------------
+// Randomness.
+// ---------------------------------------------------------------------------
+
+i64 sys_getrandom(i64 buf, i64 len, i64 flags) {
+    return raw_sys_getrandom(buf, len, flags);
+}
+
+void sys_platform_init() {
+}
+
+// ---------------------------------------------------------------------------
+// Filesystem seam: mkdir / access / rmdir / directory listing.
+// ---------------------------------------------------------------------------
+
+i64 sys_mkdir(i64 path, i64 mode) {
+    return raw_sys_mkdir(path, mode);
+}
+
+i64 sys_access(i64 path, i64 mode) {
+    return raw_sys_access(path, mode);
+}
+
+i64 sys_rmdir(i64 path) {
+    return raw_sys_rmdir(path);
+}
+
+/// List NUL-separated entry names of directory `path` into `buf` (capacity
+/// `cap` bytes). Returns the entry count, or a negative errno. "." and ".."
+/// are excluded. Overflow (names do not fit) reports ENAMETOOLONG (-36).
+i64 sys_list_dir(i64 path, u8* buf, i64 cap) {
+    if (path == 0 || buf == (u8*)0 || cap <= 0) {
+        return -22; // EINVAL
+    }
+    i64 fd = raw_sys_open(path, 65536, 0); // O_DIRECTORY
+    if (fd < 0) {
+        return fd;
+    }
+    u8 tmp[4096];
+    i64 off = 0;
+    i64 count = 0;
+    while (true) {
+        i64 nread = sys_getdents64(fd, (i64)&tmp[0], 4096);
+        if (nread < 0) {
+            raw_sys_close(fd);
+            return nread;
+        }
+        if (nread == 0) {
+            break;
+        }
+        i64 bpos = 0;
+        while (bpos < nread) {
+            u16 reclen = (u16)tmp[bpos + 16] | ((u16)tmp[bpos + 17] << (u16)8);
+            if (reclen == (u16)0) {
+                break;
+            }
+            u8* name = &tmp[bpos + 19];
+            // Measure the NUL-terminated name.
+            i64 len = 0;
+            while (name[len] != (u8)0) {
+                len += 1;
+            }
+            // Skip "." and ".." (single/double dot + terminator).
+            bool dot = len == 1 && name[0] == (u8)46;
+            bool dotdot = len == 2 && name[0] == (u8)46 && name[1] == (u8)46;
+            if (!dot && !dotdot) {
+                if (off + len + 1 > cap) {
+                    raw_sys_close(fd);
+                    return -36; // ENAMETOOLONG
+                }
+                i64 k = 0;
+                while (k < len) {
+                    buf[off + k] = name[k];
+                    k += 1;
+                }
+                buf[off + len] = (u8)0;
+                off += len + 1;
+                count += 1;
+            }
+            bpos = bpos + (i64)reclen;
+        }
+    }
+    raw_sys_close(fd);
+    return count;
+}
+
+// ---------------------------------------------------------------------------
+// Console seam: window size, raw mode, tty test, readable-wait.
+// ---------------------------------------------------------------------------
+
+/// Write the terminal window size for `fd` ({rows, cols} as i64) through
+/// `rows_ptr` / `cols_ptr`. 0 on success, negative errno otherwise.
+i64 sys_console_size(i64 fd, i64 rows_ptr, i64 cols_ptr) {
+    u8 w[8];
+    i64 i = 0;
+    while (i < 8) {
+        w[i] = (u8)0;
+        i += 1;
+    }
+    i64 r = sys_ioctl(fd, 0x5413, (i64)&w[0]); // TIOCGWINSZ
+    if (r != 0) {
+        return r;
+    }
+    i64 rows = (i64)w[0] | ((i64)w[1] << 8);
+    i64 cols = (i64)w[2] | ((i64)w[3] << 8);
+    i64* rp = (i64*)rows_ptr;
+    i64* cp = (i64*)cols_ptr;
+    rp[0] = rows;
+    cp[0] = cols;
+    return 0;
+}
+
+/// True (1) when `fd` is a terminal, 0 otherwise.
+i64 sys_is_tty(i64 fd) {
+    u8 dummy[60];
+    i64 i = 0;
+    while (i < 60) {
+        dummy[i] = (u8)0;
+        i += 1;
+    }
+    return sys_ioctl(fd, 0x5401, (i64)&dummy[0]) == 0; // TCGETS probes
+}
+
+/// Put `fd` into raw (cfmakeraw-equivalent) mode, saving the previous
+/// 60-byte termios into `saved` (`len` must be >= 60). 0 on success,
+/// negative errno otherwise. Bit ops mirror termios_make_raw.
+i64 sys_raw_enable(i64 fd, u8* saved, i64 len) {
+    if (saved == (u8*)0 || len < 60) {
+        return -22; // EINVAL
+    }
+    i64 r = sys_ioctl(fd, 0x5401, (i64)saved); // TCGETS
+    if (r != 0) {
+        return r;
+    }
+    // c_iflag &= ~(BRKINT|ICRNL|INPCK|ISTRIP|IXON); c_oflag &= ~OPOST;
+    // c_cflag |= CS8; c_lflag &= ~(ECHO|ICANON|IEXTEN|ISIG).
+    i64 iflag = (i64)saved[0] | ((i64)saved[1] << 8) | ((i64)saved[2] << 16) | ((i64)saved[3] << 24);
+    i64 oflag = (i64)saved[4] | ((i64)saved[5] << 8) | ((i64)saved[6] << 16) | ((i64)saved[7] << 24);
+    i64 cflag = (i64)saved[8] | ((i64)saved[9] << 8) | ((i64)saved[10] << 16) | ((i64)saved[11] << 24);
+    i64 lflag = (i64)saved[12] | ((i64)saved[13] << 8) | ((i64)saved[14] << 16) | ((i64)saved[15] << 24);
+    iflag = iflag & ~0x532;
+    oflag = oflag & ~0x1;
+    cflag = cflag | 0x30;
+    lflag = lflag & ~0x800B;
+    saved[0] = (u8)(iflag & 0xFF);
+    saved[1] = (u8)((iflag >> 8) & 0xFF);
+    saved[2] = (u8)((iflag >> 16) & 0xFF);
+    saved[3] = (u8)((iflag >> 24) & 0xFF);
+    saved[4] = (u8)(oflag & 0xFF);
+    saved[5] = (u8)((oflag >> 8) & 0xFF);
+    saved[6] = (u8)((oflag >> 16) & 0xFF);
+    saved[7] = (u8)((oflag >> 24) & 0xFF);
+    saved[8] = (u8)(cflag & 0xFF);
+    saved[9] = (u8)((cflag >> 8) & 0xFF);
+    saved[10] = (u8)((cflag >> 16) & 0xFF);
+    saved[11] = (u8)((cflag >> 24) & 0xFF);
+    saved[12] = (u8)(lflag & 0xFF);
+    saved[13] = (u8)((lflag >> 8) & 0xFF);
+    saved[14] = (u8)((lflag >> 16) & 0xFF);
+    saved[15] = (u8)((lflag >> 24) & 0xFF);
+    saved[23] = (u8)1; // c_cc[VMIN]
+    saved[22] = (u8)0; // c_cc[VTIME]
+    return sys_ioctl(fd, 0x5404, (i64)saved); // TCSETSF
+}
+
+/// Restore a termios previously saved by sys_raw_enable. 0 on success,
+/// negative errno otherwise.
+i64 sys_raw_restore(i64 fd, u8* saved) {
+    if (saved == (u8*)0) {
+        return -22; // EINVAL
+    }
+    return sys_ioctl(fd, 0x5403, (i64)saved); // TCSETSW
+}
+
+/// Block up to `timeout_ms` (>= 0; negative waits forever) for `fd` to
+/// become readable. Returns 1 when readable, 0 on timeout, negative errno.
+i64 sys_wait_readable(i64 fd, i64 timeout_ms) {
+    u8 pfd[8];
+    i64 i = 0;
+    while (i < 8) {
+        pfd[i] = (u8)0;
+        i += 1;
+    }
+    pfd[0] = (u8)(fd & 0xFF);
+    pfd[1] = (u8)((fd >> 8) & 0xFF);
+    pfd[2] = (u8)((fd >> 16) & 0xFF);
+    pfd[3] = (u8)((fd >> 24) & 0xFF);
+    pfd[4] = (u8)1; // POLLIN
+    i64 r = sys_poll((i64)&pfd[0], 1, timeout_ms);
+    if (r < 0) {
+        return r;
+    }
+    if (r == 0) {
+        return 0;
+    }
+    return 1;
+}

@@ -347,7 +347,7 @@ void bt_print_args(i64 fd, i64 callee_rbp, i64 fn_addr) {
 /// the established frame pointer the args table needs.
 /// `skip` frames are omitted from the top (the walker's own frame and the
 /// abort/assert frame that invoked it).
-#[cfg(os.linux)]
+if (@cfg(os.linux)) {
 void silver_print_backtrace(i64 skip) {
     i64 fd = 2;
     bt_write_cstr(fd, (u8*)"backtrace:
@@ -416,14 +416,15 @@ void silver_print_backtrace(i64 skip) {
         frame = frame + 1;
     }
 }
+}
 
+if (@cfg(os.windows)) {
 // x64 CONTEXT offsets (byte) used by the Windows walker.
 // Rsp = 0x98, Rbp = 0xa0, Rip = 0xf8; sizeof(CONTEXT) = 0x4d0 (1232).
 const i64 CTX_RSP = 0x98;
 const i64 CTX_RIP = 0xf8;
 const i64 CTX_SIZE = 0x4d0;
 
-#[cfg(os.windows)]
 extern "C" {
     #[link_name("RtlCaptureContext")]
     void win_RtlCaptureContext(void* ctx);
@@ -433,13 +434,11 @@ extern "C" {
     void win_RtlVirtualUnwind(u32 handler_type, u64 image_base, u64 control_pc, void* fn_entry, void* ctx, void** handler_data, u64* establisher_frame, void* context_pointers);
 }
 
-#[cfg(os.windows)]
 i64 ctx_get_rip(u8* ctx) {
     i64* q = (i64*)ctx;
     return q[CTX_RIP / 8];
 }
 
-#[cfg(os.windows)]
 void silver_print_backtrace(i64 skip) {
     i64 fd = 2;
     bt_write_cstr(fd, (u8*)"backtrace:
@@ -552,4 +551,4 @@ void silver_print_backtrace(i64 skip) {
         frame = frame + 1;
     }
 }
-
+}

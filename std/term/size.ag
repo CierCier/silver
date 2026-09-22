@@ -1,7 +1,9 @@
 // std/term/size.ag — terminal window-size query and control.
 //
-// Thin wrappers over TIOCGWINSZ / TIOCSWINSZ. Linux-only for now.
+// term_get_size is portable over the sys_console_size seam; term_set_size
+// needs TIOCSWINSZ and stays Linux-only (other platforms report an error).
 
+import std.sys.os;
 import std.sys.raw.fs;
 import std.error;
 import std.result;
@@ -30,30 +32,33 @@ TermSize TermSize_new(i64 rows, i64 cols) {
     return s;
 }
 
-#[cfg(os.linux)]
 Result<TermSize, Error> term_get_size(i32 fd) {
-    Winsize w;
-    w.rows = (u16)0;
-    w.cols = (u16)0;
-    w.xp = (u16)0;
-    w.yp = (u16)0;
-    i64 r = sys_ioctl((i64)fd, TIOCGWINSZ, (i64)&w);
+    i64 rows = 0;
+    i64 cols = 0;
+    i64 r = sys_console_size((i64)fd, (i64)&rows, (i64)&cols);
     if (r != 0) {
-        return Err(-r, "TIOCGWINSZ failed");
+        return Err(-r, "console size failed");
     }
-    return Ok(TermSize_new((i64)w.rows, (i64)w.cols));
+    return Ok(TermSize_new(rows, cols));
 }
 
-#[cfg(os.linux)]
-Result<i64, Error> term_set_size(i32 fd, i64 rows, i64 cols) {
-    Winsize w;
-    w.rows = (u16)rows;
-    w.cols = (u16)cols;
-    w.xp = (u16)0;
-    w.yp = (u16)0;
-    i64 r = sys_ioctl((i64)fd, TIOCSWINSZ, (i64)&w);
-    if (r != 0) {
-        return Err(-r, "TIOCSWINSZ failed");
+if (@cfg(os.linux)) {
+    Result<i64, Error> term_set_size(i32 fd, i64 rows, i64 cols) {
+        Winsize w;
+        w.rows = (u16)rows;
+        w.cols = (u16)cols;
+        w.xp = (u16)0;
+        w.yp = (u16)0;
+        i64 r = sys_ioctl((i64)fd, TIOCSWINSZ, (i64)&w);
+        if (r != 0) {
+            return Err(-r, "TIOCSWINSZ failed");
+        }
+        return Ok((i64)0);
     }
-    return Ok((i64)0);
+} else {
+    // No portable console-resize primitive behind the seam yet; the Linux
+    // pty path (the only in-tree caller) never runs here.
+    Result<i64, Error> term_set_size(i32 fd, i64 rows, i64 cols) {
+        return Err(38, "terminal resize not supported on this platform");
+    }
 }

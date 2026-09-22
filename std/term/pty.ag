@@ -55,7 +55,7 @@ impl PtyStatus {
     }
 }
 
-#[cfg(os.linux)]
+if (@cfg(os.linux)) {
 struct Pty {
     i32 master;
     i64 child_pid; // <= 0 when no live child
@@ -64,7 +64,6 @@ struct Pty {
     i32 exit_sig;
 }
 
-#[cfg(os.linux)]
 impl Pty {
     /// Open a bare master fd: unlock the pty, no slave, no child.
     /// Useful for winsize tests and manual slave setup.
@@ -282,11 +281,11 @@ impl Pty {
     }
 }
 
-#[cfg(os.linux)]
 impl Drop for Pty {
     /// Drop closes the master (the kernel SIGHUPs the foreground child).
     /// It does not kill or wait: call kill/poll_exit explicitly.
     void drop(*self) {
         self.close();
     }
+}
 }

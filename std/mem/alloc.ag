@@ -191,32 +191,29 @@ ThreadCache g_mem_tcaches[64];
 /// sole live thread, so the 0 -> 1 transition is race-free); never reset.
 i64 g_mem_multithreaded;
 
-#[cfg(os.linux)]
-i64 mem_get_tid() {
-    return syscall0(186); // SYS_gettid
-}
+if (@cfg(os.linux)) {
+    i64 mem_get_tid() {
+        return syscall0(186); // SYS_gettid
+    }
 
-#[cfg(os.windows)]
-extern "C" {
-    #[link_name("GetCurrentThreadId")]
-    u32 win_GetCurrentThreadId();
-}
+    bool mem_thread_alive(i64 tid) {
+        if (tid <= 0) { return false; }
+        i64 r = syscall2(200, tid, 0); // SYS_tkill
+        return r == 0;
+    }
+} else {
+    extern "C" {
+        #[link_name("GetCurrentThreadId")]
+        u32 win_GetCurrentThreadId();
+    }
 
-#[cfg(os.windows)]
-i64 mem_get_tid() {
-    return (i64)win_GetCurrentThreadId();
-}
+    i64 mem_get_tid() {
+        return (i64)win_GetCurrentThreadId();
+    }
 
-#[cfg(os.linux)]
-bool mem_thread_alive(i64 tid) {
-    if (tid <= 0) { return false; }
-    i64 r = syscall2(200, tid, 0); // SYS_tkill
-    return r == 0;
-}
-
-#[cfg(os.windows)]
-bool mem_thread_alive(i64 tid) {
-    return true;
+    bool mem_thread_alive(i64 tid) {
+        return true;
+    }
 }
 
 void mem_tcache_flush_slot(i64 slot) {
@@ -444,10 +441,11 @@ void mem_free_raw_impl(u8* ptr) {
 
 extern "C" { bool __silver_leak_check_enabled; }
 
-#[cfg(os.windows)]
-extern "C" {
-    #[link_name("RtlCaptureStackBackTrace")]
-    u16 win_RtlCaptureStackBackTrace(u32 skip_frames, u32 count, void** backtrace, u32* hash);
+if (@cfg(os.windows)) {
+    extern "C" {
+        #[link_name("RtlCaptureStackBackTrace")]
+        u16 win_RtlCaptureStackBackTrace(u32 skip_frames, u32 count, void** backtrace, u32* hash);
+    }
 }
 
 const i64 LEAK_MAX_RECORDS = 65536;

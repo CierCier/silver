@@ -1,10 +1,13 @@
 // std/term/raw.ag — termios definitions and the raw-mode guard.
 //
 // RawMode.enable puts a tty fd into raw (cfmakeraw-equivalent) state and
-// restores the saved termios on drop, so early returns cannot leave the
-// terminal unusable. All ioctl paths are Linux-only for now.
+// restores the saved mode on drop, so early returns cannot leave the
+// terminal unusable. Linux uses termios ioctls; other platforms go through
+// the sys_raw_enable/sys_raw_restore seam (Win32 console mode), sharing
+// the same guard shape.
 
 import std.sys.raw.fs;
+import std.sys.os;
 import std.sys.result;
 import std.error;
 import std.result;
@@ -48,7 +51,7 @@ struct Termios {
     u32 c_ospeed;
 }
 
-#[cfg(os.linux)]
+if (@cfg(os.linux)) {
 Result<i64, Error> try_tcgetattr(i32 fd, Termios* out) {
     i64 r = sys_ioctl((i64)fd, TCGETS, (i64)out);
     if (r != 0) {
@@ -57,7 +60,6 @@ Result<i64, Error> try_tcgetattr(i32 fd, Termios* out) {
     return Ok((i64)0);
 }
 
-#[cfg(os.linux)]
 Result<i64, Error> try_tcsetattr(i32 fd, i64 action, Termios* t) {
     i64 r = sys_ioctl((i64)fd, action, (i64)t);
     if (r != 0) {
@@ -65,12 +67,12 @@ Result<i64, Error> try_tcsetattr(i32 fd, i64 action, Termios* t) {
     }
     return Ok((i64)0);
 }
+}
 
-/// True when `fd` is a terminal (TCGETS succeeds on it).
-#[cfg(os.linux)]
+/// True when `fd` is a terminal. Portable over the sys_is_tty seam
+/// (TCGETS probe on Linux, GetConsoleMode on Windows).
 bool term_is_tty(i32 fd) {
-    Termios t;
-    return sys_ioctl((i64)fd, TCGETS, (i64)&t) == 0;
+    return sys_is_tty((i64)fd) != 0;
 }
 
 /// Apply cfmakeraw-equivalent bits to a termios value in place.
@@ -83,14 +85,13 @@ void termios_make_raw(Termios* t) {
     t.c_cc[VTIME] = (u8)0;
 }
 
-#[cfg(os.linux)]
+if (@cfg(os.linux)) {
 struct RawMode {
     i32 fd;
     Termios saved;
     bool active;
 }
 
-#[cfg(os.linux)]
 impl RawMode {
     /// Put `fd` into raw mode, saving its termios for restore on drop.
     /// Fails (without touching the fd) when `fd` is not a tty.
@@ -122,9 +123,48 @@ impl RawMode {
     }
 }
 
-#[cfg(os.linux)]
 impl Drop for RawMode {
     void drop(*self) {
         self.restore();
+    }
+}
+} else {
+    // Windows RawMode: same guard shape, but the saved slot carries the
+    // console input mode DWORD (little-endian in the first 4 Termios bytes)
+    // managed by the sys_raw_enable/sys_raw_restore seam.
+    struct RawMode {
+        i32 fd;
+        Termios saved;
+        bool active;
+    }
+
+    impl RawMode {
+        /// Put `fd` into raw mode, saving its console mode for restore.
+        /// Fails (without touching the fd) when `fd` is not a console.
+        Result<RawMode, Error> enable(i32 fd) {
+            RawMode g;
+            g.fd = fd;
+            g.active = false;
+            i64 r = sys_raw_enable((i64)fd, (u8*)&g.saved, 60);
+            if (r != 0) {
+                return Err(-r, "raw mode failed");
+            }
+            g.active = true;
+            return Ok(move g);
+        }
+
+        /// Restore the saved console mode early; also runs from drop.
+        void restore(*self) {
+            if (self.active) {
+                sys_raw_restore((i64)self.fd, (u8*)&self.saved);
+                self.active = false;
+            }
+        }
+    }
+
+    impl Drop for RawMode {
+        void drop(*self) {
+            self.restore();
+        }
     }
 }

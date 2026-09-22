@@ -9,14 +9,13 @@ import std.error;
 import std.sys.raw.fs;
 import std.sys.result;
 
-#[cfg(os.linux)]
+if (@cfg(os.linux)) {
 /// Linux struct iovec (void* iov_base, size_t iov_len) — 16 bytes on x86_64.
 struct IoVec {
     void* base;
     i64   len;
 }
 
-#[cfg(os.linux)]
 impl IoVec {
     IoVec new(void* base, i64 len) {
         IoVec iov;
@@ -26,21 +25,19 @@ impl IoVec {
     }
 }
 
-#[cfg(os.linux)]
 /// Write data from multiple buffers in a single system call (writev(2)).
 Result<i64, Error> try_writev(i32 fd, IoVec* iov, i64 count) {
     return Result<i64, Error>.from_raw(sys_writev((i64)fd, (i64)iov, count));
 }
 
-#[cfg(os.linux)]
 /// Read data into multiple buffers in a single system call (readv(2)).
 Result<i64, Error> try_readv(i32 fd, IoVec* iov, i64 count) {
     return Result<i64, Error>.from_raw(sys_readv((i64)fd, (i64)iov, count));
 }
 
-#[cfg(os.linux)]
 /// Zero-copy transfer from file descriptor `in_fd` to socket `out_fd` (sendfile(2)).
 /// If `offset` is non-null, reading starts at `*offset` and updates it upon completion.
 Result<i64, Error> try_sendfile(i32 out_fd, i32 in_fd, i64* offset, i64 count) {
     return Result<i64, Error>.from_raw(sys_sendfile((i64)out_fd, (i64)in_fd, (i64)offset, count));
+}
 }

@@ -59,7 +59,7 @@ i64 pty_pump_once(i32 src, i32 dst) {
     return off;
 }
 
-#[cfg(os.linux)]
+if (@cfg(os.linux)) {
 struct PtySession {
     Pty pty;
     Epoll ep;
@@ -72,7 +72,6 @@ struct PtySession {
     bool watch_stdin;
 }
 
-#[cfg(os.linux)]
 impl PtySession {
     /// Spawn `prog` and watch the master plus our stdin. Stdin goes
     /// nonblocking (restored on drop); attach fails only when fds do.
@@ -188,11 +187,11 @@ impl PtySession {
     }
 }
 
-#[cfg(os.linux)]
 impl Drop for PtySession {
     void drop(*self) {
         if (self.stdin_flags >= 0) {
             try_fcntl(0, F_SETFL, self.stdin_flags);
         }
     }
+}
 }

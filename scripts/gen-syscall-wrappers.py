@@ -160,6 +160,7 @@ def generate_wrappers(
     lines = generate_header(len(syscalls))
     lines.append("import std.sys.syscall;")
     lines.append("")
+    lines.append("if (@cfg(os.linux)) {")
     lines += generate_enum(syscalls, enum_name)
 
     for name in sorted(syscalls, key=syscalls.get):
@@ -182,6 +183,7 @@ def generate_wrappers(
         lines.append(f"    return syscall{n}({call_args});{comment}")
         lines.append("}")
         lines.append("")
+    lines.append("}")
     return "\n".join(lines)
 
 
@@ -222,7 +224,10 @@ def generate_split(
     raw_dir = Path(split_dir)
     raw_dir.mkdir(parents=True, exist_ok=True)
     (raw_dir / "numbers.ag").write_text(
-        "\n".join(generate_header(len(syscalls)) + generate_enum(syscalls, "SYSCALL"))
+        "\n".join(generate_header(len(syscalls)))
+        + "if (@cfg(os.linux)) {\n"
+        + "\n".join(generate_enum(syscalls, "SYSCALL"))
+        + "}\n"
     )
     groups = sorted(grouped)
     for group in groups:

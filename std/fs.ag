@@ -1,4 +1,8 @@
 // std/fs.ag — native filesystem operations.
+//
+// Portable over the `sys_*` platform seam (std/sys/os.ag): directory
+// listing, mkdir/rmdir, and existence probes resolve per-platform, so this
+// module carries no cfg gating of its own.
 
 import std.error;
 import std.io.file;
@@ -6,7 +10,7 @@ import std.mem.memory;
 import std.mem.vec;
 import std.result;
 import std.string;
-import std.sys.raw.fs;
+import std.sys.os;
 
 /// Metadata for a file or directory.
 struct Metadata {
@@ -85,37 +89,25 @@ Result<Vec<String>, Error> read_dir(str path) {
         Error e = Error.new(22, "invalid path"); // EINVAL
         return Result<Vec<String>, Error>.Err(move e);
     }
-    i64 fd = raw_sys_open((i64)path, 65536, 0); // O_DIRECTORY = 0x10000 = 65536
-    if (fd < 0) {
-        Error e = Error.new(-fd, "open directory failed");
+    // One seam call fills a NUL-separated name buffer on either platform.
+    u8 buf[16384];
+    i64 n = sys_list_dir((i64)path, &buf[0], 16384);
+    if (n < 0) {
+        Error e = Error.new(-n, "list directory failed");
         return Result<Vec<String>, Error>.Err(move e);
     }
     Vec<String> entries = Vec<String>.new();
-    u8 buf[4096];
-    while (true) {
-        i64 nread = sys_getdents64(fd, (i64)&buf[0], 4096);
-        if (nread < 0) {
-            raw_sys_close(fd);
-            Error e = Error.new(-nread, "getdents64 failed");
-            return Result<Vec<String>, Error>.Err(move e);
+    i64 off = 0;
+    i64 i = 0;
+    while (i < n) {
+        str name = (str)&buf[off];
+        entries.push(String.from_str(name));
+        while (buf[off] != (u8)0) {
+            off += 1;
         }
-        if (nread == 0) {
-            break;
-        }
-        i64 bpos = 0;
-        while (bpos < nread) {
-            u16 reclen = (u16)buf[bpos + 16] | ((u16)buf[bpos + 17] << (u16)8);
-            if (reclen == (u16)0) {
-                break;
-            }
-            str name = (str)&buf[bpos + 19];
-            if (strcmp(name, ".") != 0 && strcmp(name, "..") != 0) {
-                entries.push(String.from_str(name));
-            }
-            bpos = bpos + (i64)reclen;
-        }
+        off += 1;
+        i += 1;
     }
-    raw_sys_close(fd);
     return Result<Vec<String>, Error>.Ok(move entries);
 }
 
@@ -133,7 +125,7 @@ bool remove_file(str path) {
     if (path == (str)0) {
         return false;
     }
-    i64 r = raw_sys_unlink((i64)path);
+    i64 r = sys_unlink((i64)path);
     return r == 0;
 }
 

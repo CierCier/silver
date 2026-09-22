@@ -1,0 +1,943 @@
+// std/sys/os_windows.ag — Windows implementation of the OS seam.
+//
+// Calls Win32 directly (kernel32 / ucrt; no libc). Handles travel as i64;
+// BOOL as i32. Imported by std/sys/os.ag only on `os.windows`;
+// unconditional here.
+//
+// fd semantics: 0/1/2 resolve to the standard handles lazily; file fds are
+// the Win32 HANDLE truncated to i32. All fds are binary — no CRLF
+// translation anywhere; console output expects UTF-8 (entry sets
+// SetConsoleOutputCP(CP_UTF8)).
+
+import std.sys.errno;
+import std.sys.result;
+
+// ---------------------------------------------------------------------------
+// Win32 externs (kernel32 unless noted). Handles travel as i64; BOOL as i32.
+// ---------------------------------------------------------------------------
+
+extern "C" {
+    #[link_name("GetLastError")]
+    u32 win_GetLastError();
+    #[link_name("VirtualAlloc")]
+    u8* win_VirtualAlloc(u8* addr, u64 size, u32 alloc_type, u32 protect);
+    #[link_name("VirtualFree")]
+    i32 win_VirtualFree(u8* addr, u64 size, u32 free_type);
+
+    #[link_name("GetStdHandle")]
+    i64 win_GetStdHandle(i32 which);
+    #[link_name("WriteFile")]
+    i32 win_WriteFile(i64 handle, u8* buf, u32 len, u32* written, u8* overlapped);
+    #[link_name("ReadFile")]
+    i32 win_ReadFile(i64 handle, u8* buf, u32 len, u32* read, u8* overlapped);
+    #[link_name("SetFilePointer")]
+    i32 win_SetFilePointer(i64 handle, i32 dist_low, i32* dist_high, u32 method);
+    #[link_name("CloseHandle")]
+    i32 win_CloseHandle(i64 handle);
+    #[link_name("CreateFileW")]
+    i64 win_CreateFileW(u16* name, u32 access, u32 share, u8* sa, u32 disp, u32 flags, u64 tmpl);
+    #[link_name("GetFileInformationByHandle")]
+    i32 win_GetFileInformationByHandle(i64 handle, u8* info);
+    #[link_name("DeleteFileW")]
+    i32 win_DeleteFileW(u16* name);
+    #[link_name("MoveFileExW")]
+    i32 win_MoveFileExW(u16* from, u16* to, u32 flags);
+
+    #[link_name("WaitOnAddress")]
+    i32 win_WaitOnAddress(u32* addr, u32* compare, u64 size, u32 ms);
+    #[link_name("WakeByAddressSingle")]
+    void win_WakeByAddressSingle(u32* addr);
+    #[link_name("WakeByAddressAll")]
+    void win_WakeByAddressAll(u32* addr);
+
+    #[link_name("ExitProcess")]
+    void win_ExitProcess(u32 code);
+    #[link_name("ExitThread")]
+    void win_ExitThread(u32 code);
+    #[link_name("GetCurrentProcessId")]
+    u32 win_GetCurrentProcessId();
+    #[link_name("TerminateProcess")]
+    i32 win_TerminateProcess(i64 process, u32 code);
+    #[link_name("GetCurrentProcess")]
+    i64 win_GetCurrentProcess();
+
+    #[link_name("QueryPerformanceCounter")]
+    i32 win_QueryPerformanceCounter(i64* count);
+    #[link_name("QueryPerformanceFrequency")]
+    i32 win_QueryPerformanceFrequency(i64* freq);
+    #[link_name("Sleep")]
+    void win_Sleep(u32 ms);
+    #[link_name("OpenProcess")]
+    i64 win_OpenProcess(u32 access, i32 inherit, u32 pid);
+    #[link_name("GetSystemTimePreciseAsFileTime")]
+    void win_GetSystemTimePreciseAsFileTime(u64* ft);
+
+    #[link_name("SetConsoleOutputCP")]
+    i32 win_SetConsoleOutputCP(u32 codepage);
+    #[link_name("SetConsoleCP")]
+    i32 win_SetConsoleCP(u32 codepage);
+    #[link_name("SwitchToThread")]
+    void win_SwitchToThread();
+    #[link_name("CreateThread")]
+    i64 win_CreateThread(u8* attrs, u64 stack_size, u64(u64) start, u8* param, u32 flags, u32* tid);
+    #[link_name("GetCommandLineW")]
+    u16* win_GetCommandLineW();
+    #[link_name("CommandLineToArgvW")]
+    u16** win_CommandLineToArgvW(u16* cmd, i32* count);
+    #[link_name("LocalFree")]
+    u8* win_LocalFree(u8* mem);
+}
+
+// bcrypt is linked by the driver's windows default lib set (like kernel32):
+// an item-level #[link(bcrypt)] here would leak -lbcrypt into posix links.
+extern "C" {
+    #[link_name("BCryptGenRandom")]
+    i32 win_BCryptGenRandom(i64 alg, u8* buf, u64 len, u32 flags);
+}
+
+// Win32 constants used below.
+const u32 WIN_MEM_COMMIT = 0x1000;
+const u32 WIN_MEM_RESERVE = 0x2000;
+const u32 WIN_MEM_RELEASE = 0x8000;
+const u32 WIN_PAGE_READWRITE = 4;
+const u32 WIN_GENERIC_READ = 0x80000000;
+const u32 WIN_GENERIC_WRITE = 0x40000000;
+const u32 WIN_FILE_SHARE_RW = 3;
+const u32 WIN_CREATE_NEW = 1;
+const u32 WIN_CREATE_ALWAYS = 2;
+const u32 WIN_OPEN_EXISTING = 3;
+const u32 WIN_TRUNCATE_EXISTING = 5;
+const u32 WIN_OPEN_ALWAYS = 4;
+const u32 WIN_FILE_ATTRIBUTE_NORMAL = 0x80;
+const u32 WIN_FILE_BEGIN = 0;
+const u32 WIN_FILE_CURRENT = 1;
+const u32 WIN_FILE_END = 2;
+const u32 WIN_MOVE_REPLACE = 1;
+const u32 WIN_MOVE_COPY_ALLOWED = 2;
+const u32 WIN_INFINITE = 0xFFFFFFFF;
+const i32 WIN_STD_INPUT = -10;
+const i32 WIN_STD_OUTPUT = -11;
+const i32 WIN_STD_ERROR = -12;
+const u32 WIN_CP_UTF8 = 65001;
+
+// Linux O_* flag bits come from std/sys/result.ag (Linux numeric values);
+// the windows sys_open translates them into Win32 create dispositions.
+
+// ---------------------------------------------------------------------------
+// UTF-8 <-> UTF-16 (Win32 *W APIs take UTF-16; std strings are UTF-8).
+// ---------------------------------------------------------------------------
+
+/// UTF-8 string length in UTF-16 code units (excluding the terminator).
+/// Non-BMP code points (4-byte UTF-8) encode as surrogate pairs: 2 units.
+i64 win_utf16_len(u8* s) {
+    i64 n = 0;
+    i64 i = 0;
+    while (s[i] != 0) {
+        u32 cp = (u32)s[i];
+        i64 advance = 1;
+        if ((cp & 0xE0) == 0xC0) { advance = 2; }
+        else if ((cp & 0xF0) == 0xE0) { advance = 3; }
+        else if ((cp & 0xF8) == 0xF0) { advance = 4; n += 1; }
+        i += advance;
+        n += 1;
+    }
+    return n;
+}
+
+/// Convert NUL-terminated UTF-8 into `dst` (UTF-16, NUL-terminated).
+/// Returns the number of UTF-16 code units written.
+i64 win_utf8_to_utf16(u8* s, u16* dst) {
+    i64 out = 0;
+    i64 i = 0;
+    while (s[i] != 0) {
+        u32 cp = (u32)s[i];
+        i64 advance = 1;
+        if ((cp & 0xE0) == 0xC0) {
+            advance = 2;
+            cp = cp & 0x1F;
+        } else if ((cp & 0xF0) == 0xE0) {
+            advance = 3;
+            cp = cp & 0x0F;
+        } else if ((cp & 0xF8) == 0xF0) {
+            advance = 4;
+            cp = cp & 0x07;
+        } else {
+            cp = cp & 0x7F;
+        }
+        i += 1;
+        // Gather continuation bytes.
+        i64 k = 1;
+        while (k < advance) {
+            cp = (cp << 6) | ((u32)s[i] & 0x3F);
+            i += 1;
+            k += 1;
+        }
+        if (cp >= 0x10000) {
+            // Surrogate pair.
+            u32 v = cp - 0x10000;
+            dst[out] = (u16)(0xD800 + (v >> 10));
+            dst[out + 1] = (u16)(0xDC00 + (v & 0x3FF));
+            out += 2;
+        } else {
+            dst[out] = (u16)cp;
+            out += 1;
+        }
+    }
+    dst[out] = 0;
+    return out;
+}
+
+/// Convert a NUL-terminated UTF-16 string to NUL-terminated UTF-8 into dst
+/// (capacity bytes). Returns bytes written.
+i64 win_utf16_to_utf8(u16* src, u8* dst, i64 dst_cap) {
+    i64 out = 0;
+    i64 i = 0;
+    while (src[i] != 0 && out < dst_cap - 4) {
+        u32 cp = (u32)src[i];
+        i += 1;
+        if (cp >= 0xD800 && cp < 0xDC00) {
+            u32 lo = (u32)src[i];
+            i += 1;
+            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+        }
+        if (cp < 0x80) {
+            dst[out] = (u8)cp;
+            out += 1;
+        } else if (cp < 0x800) {
+            dst[out] = (u8)(0xC0 | (cp >> 6));
+            dst[out + 1] = (u8)(0x80 | (cp & 0x3F));
+            out += 2;
+        } else if (cp < 0x10000) {
+            dst[out] = (u8)(0xE0 | (cp >> 12));
+            dst[out + 1] = (u8)(0x80 | ((cp >> 6) & 0x3F));
+            dst[out + 2] = (u8)(0x80 | (cp & 0x3F));
+            out += 3;
+        } else {
+            dst[out] = (u8)(0xF0 | (cp >> 18));
+            dst[out + 1] = (u8)(0x80 | ((cp >> 12) & 0x3F));
+            dst[out + 2] = (u8)(0x80 | ((cp >> 6) & 0x3F));
+            dst[out + 3] = (u8)(0x80 | (cp & 0x3F));
+            out += 4;
+        }
+    }
+    dst[out] = 0;
+    return out;
+}
+
+/// Anonymous RW pages, zero-initialized. prot/flags/fd/off follow the Linux
+/// mmap convention (3 = R|W, 34 = PRIVATE|ANONYMOUS); the Windows
+/// implementation reserves+commits RW pages, which are also zeroed.
+i64 sys_mmap(i64 addr, i64 len, i64 prot, i64 flags, i64 fd, i64 off) {
+    if (len == 0) {
+        return -22; // EINVAL
+    }
+    if ((flags & 3) == 0) {
+        // Neither MAP_PRIVATE (2) nor MAP_SHARED (1): the Linux kernel
+        // rejects this with EINVAL; mirror it.
+        return -22;
+    }
+    u8* p = win_VirtualAlloc((u8*)addr, (u64)len, WIN_MEM_RESERVE | WIN_MEM_COMMIT, WIN_PAGE_READWRITE);
+    if (p == (u8*)0) {
+        return -12; // ENOMEM
+    }
+    return (i64)p;
+}
+
+/// MEM_RELEASE frees the whole reservation and requires the exact base
+/// address the allocator records in its block header, so `len` is unused.
+i64 sys_munmap(i64 addr, i64 len) {
+    if (addr == 0) {
+        return -22;
+    }
+    if (win_VirtualFree((u8*)addr, 0, WIN_MEM_RELEASE) == 0) {
+        return -22;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// File I/O. See the fd semantics note in the header.
+// ---------------------------------------------------------------------------
+
+/// Approximate errno from a failed Win32 call: invalid-handle errors map to
+/// EBADF (the errno_test failure paths expect it), everything else EIO.
+i64 win_errno_or_io() {
+    if (win_GetLastError() == 6) { // ERROR_INVALID_HANDLE
+        return 9; // EBADF
+    }
+    return 5; // EIO
+}
+
+/// Resolve fd 0/1/2 to the standard handles; pass everything through as a
+/// (sign-extended) Win32 handle.
+i64 win_fd_handle(i64 fd) {
+    if (fd == 0) { return win_GetStdHandle(WIN_STD_INPUT); }
+    if (fd == 1) { return win_GetStdHandle(WIN_STD_OUTPUT); }
+    if (fd == 2) { return win_GetStdHandle(WIN_STD_ERROR); }
+    return fd;
+}
+
+i64 sys_write(i64 fd, i64 buf, i64 len) {
+    if (len == 0) {
+        return 0;
+    }
+    u32 written = 0;
+    i64 h = win_fd_handle(fd);
+    if (win_WriteFile(h, (u8*)buf, (u32)len, &written, (u8*)0) == 0) {
+        return -win_errno_or_io();
+    }
+    return (i64)written;
+}
+
+i64 sys_read(i64 fd, i64 buf, i64 len) {
+    u32 nread = 0;
+    i64 h = win_fd_handle(fd);
+    if (win_ReadFile(h, (u8*)buf, (u32)len, &nread, (u8*)0) == 0) {
+        // EOF on a pipe arrives as a ReadFile FAILURE (not a 0-byte
+        // success): the write end closed -> ERROR_BROKEN_PIPE (109), a
+        // synchronous handle drained -> ERROR_HANDLE_EOF (38). Both are
+        // clean EOF; anything else maps through the errno approximation.
+        i64 err = (i64)win_GetLastError();
+        if (err == 109 || err == 38) {
+            return 0;
+        }
+        return -win_errno_or_io();
+    }
+    return (i64)nread;
+}
+
+/// Translate the Linux O_* bit layout (std/sys/result.ag) into a Win32
+/// create/open call. Always binary; the returned fd is the truncated handle.
+i64 sys_open(i64 path, i64 flags, i64 mode) {
+    u8* p8 = (u8*)path;
+    i64 units = win_utf16_len(p8);
+    // UTF-16 buffer on the stack: path lengths are small; over-allocate 4x.
+    u16 wpath[1024];
+    if (units >= 1000) {
+        return -36; // ENAMETOOLONG
+    }
+    win_utf8_to_utf16(p8, &wpath[0]);
+
+    u32 access = WIN_GENERIC_READ;
+    if ((flags & O_RDWR) == O_RDWR) {
+        access = WIN_GENERIC_READ | WIN_GENERIC_WRITE;
+    } else if ((flags & O_WRONLY) == O_WRONLY) {
+        access = WIN_GENERIC_WRITE;
+    }
+
+    u32 disp = WIN_OPEN_EXISTING;
+    if ((flags & O_CREAT) == O_CREAT && (flags & O_TRUNC) == O_TRUNC) {
+        disp = WIN_CREATE_ALWAYS;
+    } else if ((flags & O_CREAT) == O_CREAT) {
+        if ((flags & O_EXCL) == O_EXCL) {
+            disp = WIN_CREATE_NEW;
+        } else {
+            disp = WIN_OPEN_ALWAYS;
+        }
+    } else if ((flags & O_TRUNC) == O_TRUNC) {
+        disp = WIN_TRUNCATE_EXISTING;
+    }
+
+    i64 h = win_CreateFileW(&wpath[0], access, WIN_FILE_SHARE_RW, (u8*)0, disp, WIN_FILE_ATTRIBUTE_NORMAL, 0);
+    if (h == -1) {
+        return -2; // ENOENT (approximate; detailed mapping not needed by std)
+    }
+    if ((flags & O_APPEND) == O_APPEND) {
+        win_SetFilePointer(h, 0, (i32*)0, WIN_FILE_END);
+    }
+    return (i64)(i32)h;
+}
+
+/// Only AT_FDCWD semantics are consumed by std: relative paths resolve
+/// against the process CWD, which is what the handle-less open does.
+i64 sys_openat(i64 dirfd, i64 path, i64 flags, i64 mode) {
+    // Only AT_FDCWD semantics exist here; a bad explicit dirfd is EBADF.
+    if (dirfd != -100) { // AT_FDCWD
+        return -9;
+    }
+    return sys_open(path, flags, mode);
+}
+
+/// Only F_GETFL/F_SETFL (O_NONBLOCK toggling) are consumed; regular files on
+/// Windows have no non-blocking mode, so report read/write capability and
+/// accept any set. Socket fcntl goes through the winsock layer.
+i64 sys_fcntl(i64 fd, i64 cmd, i64 arg) {
+    if (cmd == 3) { // F_GETFL
+        return 2;   // O_RDWR
+    }
+    return 0;       // F_SETFL: accepted
+}
+
+/// mremap via allocate-copy-free. The page allocator's reallocations stay
+/// within one mapping in practice; this path is the general fallback.
+i64 sys_mremap(i64 old_addr, i64 old_size, i64 new_size, i64 flags, i64 new_addr) {
+    // Unaligned or zero addresses are EINVAL (the Linux kernel also rejects
+    // them) — and dereferencing an unaligned address here would fault.
+    if (old_addr == 0 || new_size == 0 || (old_addr & 4095) != 0) {
+        return -22;
+    }
+    if (new_size <= old_size) {
+        return old_addr;
+    }
+    i64 fresh = sys_mmap(0, new_size, 3, 34, -1, 0);
+    if (fresh <= 0) {
+        return fresh;
+    }
+    i64 n = old_size;
+    if (new_size < n) {
+        n = new_size;
+    }
+    u8* src = (u8*)old_addr;
+    u8* dst = (u8*)fresh;
+    i64 i = 0;
+    while (i < n) {
+        dst[i] = src[i];
+        i += 1;
+    }
+    sys_munmap(old_addr, old_size);
+    return fresh;
+}
+
+/// Process-wide exit fallback (never returns on either platform).
+i64 sys_exit(i64 code) {
+    win_ExitProcess((u32)code);
+    return 0;
+}
+
+i64 sys_close(i64 fd) {
+    if (fd >= 0 && fd <= 2) {
+        return 0; // standard handles are not ours to close
+    }
+    if (fd == -1 || fd == -2) {
+        // Current-process/thread pseudo handles: CloseHandle on them
+        // succeeds silently on some Windows builds, but they are never
+        // ours to close — report EBADF like a bad descriptor.
+        return -9;
+    }
+    if (win_CloseHandle(fd) == 0) {
+        return -9; // EBADF
+    }
+    return 0;
+}
+
+/// 64-bit seek via the low/high split of SetFilePointer.
+i64 sys_lseek(i64 fd, i64 off, i64 whence) {
+    i64 h = win_fd_handle(fd);
+    i32 high = (i32)(off >> 32);
+    i32 low = (i32)off;
+    i32 method = WIN_FILE_BEGIN;
+    if (whence == 1) { method = WIN_FILE_CURRENT; }
+    else if (whence == 2) { method = WIN_FILE_END; }
+    i32 res = win_SetFilePointer(h, low, &high, method);
+    if (res == -1 && win_GetLastError() != 0) {
+        return -win_errno_or_io();
+    }
+    return ((i64)(u32)high << 32) | (i64)(u32)res;
+}
+
+i64 sys_unlink(i64 path) {
+    u16 wpath[1024];
+    if (win_utf16_len((u8*)path) >= 1000) {
+        return -36;
+    }
+    win_utf8_to_utf16((u8*)path, &wpath[0]);
+    if (win_DeleteFileW(&wpath[0]) == 0) {
+        return -2;
+    }
+    return 0;
+}
+
+i64 sys_rename(i64 from, i64 to) {
+    u16 wfrom[1024];
+    u16 wto[1024];
+    if (win_utf16_len((u8*)from) >= 1000 || win_utf16_len((u8*)to) >= 1000) {
+        return -36;
+    }
+    win_utf8_to_utf16((u8*)from, &wfrom[0]);
+    win_utf8_to_utf16((u8*)to, &wto[0]);
+    if (win_MoveFileExW(&wfrom[0], &wto[0], WIN_MOVE_REPLACE | WIN_MOVE_COPY_ALLOWED) == 0) {
+        return -2;
+    }
+    return 0;
+}
+
+/// Writes the Linux x86_64 `struct stat` layout consumed by std/io/file.ag:
+/// st_size at offset 48, st_mtim sec at 88, nsec at 96. Everything else is
+/// left as the caller's zeroed buffer.
+i64 sys_stat(i64 path, i64 buf) {
+    u16 wpath[1024];
+    if (win_utf16_len((u8*)path) >= 1000) {
+        return -36;
+    }
+    win_utf8_to_utf16((u8*)path, &wpath[0]);
+    i64 h = win_CreateFileW(&wpath[0], WIN_GENERIC_READ, WIN_FILE_SHARE_RW, (u8*)0, WIN_OPEN_EXISTING, WIN_FILE_ATTRIBUTE_NORMAL, 0);
+    if (h == -1) {
+        return -2;
+    }
+    // BY_HANDLE_FILE_INFORMATION (52 bytes): ftLastWriteTime (u64) at 20,
+    // nFileSizeHigh at 32, nFileSizeLow at 36. A short buffer would let
+    // the write run off the stack slot.
+    u8 info[52];
+    i64 i = 0;
+    while (i < 52) {
+        info[i] = 0;
+        i += 1;
+    }
+    i32 ok = win_GetFileInformationByHandle(h, &info[0]);
+    win_CloseHandle(h);
+    if (ok == 0) {
+        return -5;
+    }
+    i64 size = ((i64)(u32)win_le_i64(&info[0], 32) << 32) | (i64)(u32)win_le_i64(&info[0], 36);
+    i64 ft = win_le_i64(&info[0], 20);
+    // FILETIME (1601) -> Unix epoch (1970).
+    i64 unix100 = ft - 116444736000000000;
+    i64 sec = unix100 / 10000000;
+    i64 nsec = (unix100 % 10000000) * 100;
+    i64 attr = win_le_i64(&info[0], 0);
+    i64 mode = 33188;
+    if ((attr & 16) != 0) {
+        mode = 16877;
+    }
+    win_store_le_i64((u8*)buf, 24, mode);
+    win_store_le_i64((u8*)buf, 48, size);
+    win_store_le_i64((u8*)buf, 88, sec);
+    win_store_le_i64((u8*)buf, 96, nsec);
+    return 0;
+}
+
+i64 win_le_i64(u8* buf, i64 off) {
+    return (i64)win_le_u64(buf, off);
+}
+
+u64 win_le_u64(u8* buf, i64 off) {
+    u64 v = 0;
+    i64 i = 7;
+    while (i >= 0) {
+        v = (v << 8) | (u64)buf[off + i];
+        i -= 1;
+    }
+    return v;
+}
+
+void win_store_le_i64(u8* buf, i64 off, i64 v) {
+    i64 i = 0;
+    while (i < 8) {
+        buf[off + i] = (u8)((u64)v & 0xFF);
+        v = (i64)((u64)v >> 8);
+        i += 1;
+    }
+}
+
+i64 sys_exit_group(i64 code) {
+    win_ExitProcess((u32)code);
+    return 0;
+}
+
+i64 sys_getpid() {
+    return (i64)win_GetCurrentProcessId();
+}
+
+i64 sys_kill(i64 pid, i64 sig) {
+    if (sig == 0) {
+        // Existence probe (signal 0): a process is alive when it can be
+        // opened for query, or when access is denied to a protected one;
+        // only a missing process reports ESRCH.
+        if (pid == win_GetCurrentProcessId()) {
+            return 0;
+        }
+        i64 h = win_OpenProcess(0x1000, 0, (u32)pid); // PROCESS_QUERY_LIMITED_INFORMATION
+        if (h != 0) {
+            win_CloseHandle(h);
+            return 0;
+        }
+        if (win_GetLastError() == 5) { // ERROR_ACCESS_DENIED: alive but protected
+            return 0;
+        }
+        return -3; // ESRCH
+    }
+    if (sig == 6) {
+        win_ExitProcess(134);
+        return 0;
+    }
+    win_TerminateProcess(win_GetCurrentProcess(), 1);
+    return 0;
+}
+
+/// Yield the current thread's timeslice.
+void thread_yield() {
+    win_SwitchToThread();
+}
+
+void thread_exit(i64 code) {
+    win_ExitThread((u32)code);
+}
+
+/// Returns the thread handle (>0) or 0 on failure. `stack_top` is the
+/// Linux-only dedicated stack; Windows threads get an OS-managed stack.
+i64 thread_spawn_raw(i64 flags, u8* stack_top, i64 fn, i64 arg, i32* ctid) {
+    i64 h = win_CreateThread((u8*)0, 2097152, (u64(u64))fn, (u8*)arg, 0, (u32*)0);
+    if (h == 0) {
+        return 0;
+    }
+    return h;
+}
+
+/// FUTEX_WAIT (op 0) sleeps while *uaddr == val; FUTEX_WAKE (op 1) wakes up
+/// to `val` waiters. WaitOnAddress re-checks the compare value atomically in
+/// the kernel, giving the same lost-wake guarantees. Timeout is a timespec*
+/// ({i64 sec, i64 nsec}) or null.
+i64 sys_futex(i64 uaddr, i64 op, i64 val, i64 timeout, i64 uaddr2, i64 val3) {
+    u32* addr = (u32*)uaddr;
+    if (op == 1) {
+        // FUTEX_WAKE: wake all waiters when asked for more than one; the
+        // futex protocol re-checks state after waking, so over-waking is
+        // semantically safe.
+        if (val == 1) {
+            win_WakeByAddressSingle(addr);
+        } else {
+            win_WakeByAddressAll(addr);
+        }
+        return val;
+    }
+    if (op != 0) {
+        return -22; // EINVAL: only WAIT/WAKE are used by std
+    }
+    // FUTEX_WAIT: kernel-side compare against `val`.
+    u32 expected = (u32)val;
+    u32 ms = WIN_INFINITE;
+    if (timeout != 0) {
+        i64 sec = raw_le_i64_at((i64*)timeout, 0);
+        i64 nsec = raw_le_i64_at((i64*)timeout, 1);
+        if (sec < 0) {
+            return -22;
+        }
+        ms = (u32)(sec * 1000 + nsec / 1000000);
+        if (ms == 0 && (sec > 0 || nsec > 0)) {
+            ms = 1;
+        }
+    }
+    i64 r = win_WaitOnAddress(addr, &expected, 4, ms);
+    if (r == 0) {
+        // Timed out (the only failure mode for a valid address).
+        return -110; // ETIMEDOUT
+    }
+    return 0;
+}
+
+i64 raw_le_i64_at(i64* p, i64 idx) {
+    return p[idx];
+}
+
+void thread_reclaim(i64 tid) {
+    if (tid > 0) {
+        win_CloseHandle(tid);
+    }
+}
+
+// MSVC compatibility markers for the freestanding (no-CRT) Windows link:
+// the backend references `_fltused` whenever float operations exist, and
+// emits `__chkstk` calls before frames larger than one page. The probe
+// walks down from the current stack pointer one 4KB page at a time so the
+// guard page is hit in order; RAX carries the frame size on entry (it is
+// preserved, which is the contract the compiler-generated call relies on).
+i32 _fltused = 1;
+
+void __chkstk() {
+    asm("
+        push %rcx
+        push %rax
+        cmp $$0x1000, %rax
+        jb 1f
+        mov %rsp, %rcx
+        2:
+        sub $$0x1000, %rcx
+        sub $$0x1000, %rax
+        testl $$0, (%rcx)
+        cmp $$0x1000, %rax
+        ja 2b
+        1:
+        pop %rax
+        pop %rcx
+    ", []);
+}
+
+/// Windows: Sleep(ms) with round-up — sub-millisecond precision is not
+/// required by std callers. `rem` is left untouched (callers pass 0).
+i64 sys_nanosleep(i64 req, i64 rem) {
+    i64* ts = (i64*)req;
+    i64 ms = ts[0] * 1000 + (ts[1] + 999999) / 1000000;
+    if (ms < 1) {
+        ms = 1;
+    }
+    win_Sleep((u32)ms);
+    return 0;
+}
+
+/// Fills {i64 sec, i64 nsec} at ts. clk 1 = CLOCK_MONOTONIC (QPC), anything
+/// else = CLOCK_REALTIME (GetSystemTimePreciseAsFileTime).
+i64 sys_clock_gettime(i64 clk, i64 ts) {    u8* p = (u8*)ts;
+    if (clk == 1) {
+        i64 count = 0;
+        i64 freq = 0;
+        win_QueryPerformanceCounter(&count);
+        win_QueryPerformanceFrequency(&freq);
+        if (freq == 0) {
+            freq = 10000000;
+        }
+        i64 sec = count / freq;
+        i64 frac = count % freq;
+        win_store_le_i64(p, 0, sec);
+        win_store_le_i64(p, 8, frac * 1000000000 / freq);
+        return 0;
+    }
+    u64 ft = 0;
+    win_GetSystemTimePreciseAsFileTime(&ft);
+    i64 unix100 = (i64)ft - 116444736000000000;
+    win_store_le_i64(p, 0, unix100 / 10000000);
+    win_store_le_i64(p, 8, (unix100 % 10000000) * 100);
+    return 0;
+}
+
+/// BCryptGenRandom with the system-preferred RNG fills the whole buffer;
+/// getrandom semantics (partial fills, EINTR) are not exercised by callers
+/// here.
+i64 sys_getrandom(i64 buf, i64 len, i64 flags) {
+    // BCRYPT_USE_SYSTEM_PREFERRED_RNG = 2; null algorithm handle.
+    if (win_BCryptGenRandom(0, (u8*)buf, (u64)len, 2) != 0) {
+        return -5;
+    }
+    return len;
+}
+
+// ---------------------------------------------------------------------------
+// One-time platform setup, called by _start before cpu init: UTF-8 console
+// codepages so @println renders correctly on a real console.
+// ---------------------------------------------------------------------------
+
+void sys_platform_init() {
+    win_SetConsoleOutputCP(WIN_CP_UTF8);
+    win_SetConsoleCP(WIN_CP_UTF8);
+}
+
+// ---------------------------------------------------------------------------
+// Filesystem seam: mkdir / access / rmdir / directory listing.
+// ---------------------------------------------------------------------------
+
+extern "C" {
+    #[link_name("CreateDirectoryW")]
+    i32 win_CreateDirectoryW(u16* path, u8* attrs);
+    #[link_name("RemoveDirectoryW")]
+    i32 win_RemoveDirectoryW(u16* path);
+    #[link_name("GetFileAttributesW")]
+    u32 win_GetFileAttributesW(u16* path);
+    #[link_name("FindFirstFileW")]
+    i64 win_FindFirstFileW(u16* pattern, u8* data);
+    #[link_name("FindNextFileW")]
+    i32 win_FindNextFileW(i64 handle, u8* data);
+    #[link_name("FindClose")]
+    i32 win_FindClose(i64 handle);
+}
+
+/// Convert a NUL-terminated UTF-8 path into `wpath` (capacity units).
+/// Returns false when the path is too long for the buffer.
+bool win_path_to_wide(u8* path, u16* wpath, i64 cap) {
+    if (win_utf16_len(path) + 1 >= cap) {
+        return false;
+    }
+    win_utf8_to_utf16(path, wpath);
+    return true;
+}
+
+i64 sys_mkdir(i64 path, i64 mode) {
+    u16 wpath[1024];
+    if (!win_path_to_wide((u8*)path, &wpath[0], 1024)) {
+        return -36; // ENAMETOOLONG
+    }
+    if (win_CreateDirectoryW(&wpath[0], (u8*)0) == 0) {
+        return -2; // ENOENT (approximate; std needs only failure)
+    }
+    return 0;
+}
+
+/// Existence probe (only F_OK semantics are consumed: mode is ignored).
+i64 sys_access(i64 path, i64 mode) {
+    u16 wpath[1024];
+    if (!win_path_to_wide((u8*)path, &wpath[0], 1024)) {
+        return -36;
+    }
+    if (win_GetFileAttributesW(&wpath[0]) == (u32)0xFFFFFFFF) {
+        return -2; // ENOENT
+    }
+    return 0;
+}
+
+i64 sys_rmdir(i64 path) {
+    u16 wpath[1024];
+    if (!win_path_to_wide((u8*)path, &wpath[0], 1024)) {
+        return -36;
+    }
+    if (win_RemoveDirectoryW(&wpath[0]) == 0) {
+        return -2;
+    }
+    return 0;
+}
+
+/// List NUL-separated entry names of directory `path` into `buf` (capacity
+/// `cap` bytes). Returns the entry count, or a negative errno. "." and ".."
+/// are excluded. Overflow reports ENAMETOOLONG (-36). Layout matches the
+/// Linux counterpart so consumers stay portable.
+i64 sys_list_dir(i64 path, u8* buf, i64 cap) {
+    if (path == 0 || buf == (u8*)0 || cap <= 0) {
+        return -22; // EINVAL
+    }
+    // Build the "path\*" search pattern (tolerates a trailing separator).
+    u8 pat[1024];
+    i64 n = 0;
+    u8* p8 = (u8*)path;
+    while (p8[n] != 0 && n < 1000) {
+        pat[n] = p8[n];
+        n += 1;
+    }
+    if (p8[n] != 0) {
+        return -36;
+    }
+    if (n > 0 && pat[n - 1] != (u8)47 && pat[n - 1] != (u8)92) {
+        pat[n] = (u8)92; // backslash
+        n += 1;
+    }
+    pat[n] = (u8)42; // '*'
+    pat[n + 1] = (u8)0;
+    u16 wpat[1024];
+    win_utf8_to_utf16(&pat[0], &wpat[0]);
+    // WIN32_FIND_DATAW is 592 bytes; cFileName (WCHAR[260]) starts at 44.
+    u8 data[592];
+    i64 h = win_FindFirstFileW(&wpat[0], &data[0]);
+    if (h == -1) {
+        return -2; // ENOENT
+    }
+    i64 off = 0;
+    i64 count = 0;
+    while (true) {
+        u16* name = (u16*)&data[44];
+        bool dot = name[0] == (u16)46 && name[1] == (u16)0;
+        bool dotdot = name[0] == (u16)46 && name[1] == (u16)46 && name[2] == (u16)0;
+        if (!dot && !dotdot) {
+            // Worst case 3 UTF-8 bytes per unit plus terminator.
+            i64 units = 0;
+            while (name[units] != (u16)0) {
+                units += 1;
+            }
+            if (off + units * 3 + 1 > cap) {
+                win_FindClose(h);
+                return -36;
+            }
+            i64 used = win_utf16_to_utf8(name, &buf[off], cap - off);
+            off += used + 1;
+            count += 1;
+        }
+        if (win_FindNextFileW(h, &data[0]) == 0) {
+            break;
+        }
+    }
+    win_FindClose(h);
+    return count;
+}
+
+// ---------------------------------------------------------------------------
+// Console seam: window size, raw mode, tty test, readable-wait.
+// ---------------------------------------------------------------------------
+
+extern "C" {
+    #[link_name("GetConsoleScreenBufferInfo")]
+    i32 win_GetConsoleScreenBufferInfo(i64 handle, u8* info);
+    #[link_name("GetConsoleMode")]
+    i32 win_GetConsoleMode(i64 handle, u32* mode);
+    #[link_name("SetConsoleMode")]
+    i32 win_SetConsoleMode(i64 handle, u32 mode);
+    #[link_name("WaitForSingleObject")]
+    i32 win_WaitForSingleObject(i64 handle, u32 ms);
+}
+
+/// Write the console window size for `fd` ({rows, cols} as i64) through
+/// `rows_ptr` / `cols_ptr`. 0 on success, negative errno otherwise.
+i64 sys_console_size(i64 fd, i64 rows_ptr, i64 cols_ptr) {
+    // CONSOLE_SCREEN_BUFFER_INFO (22 bytes): srWindow = 4 shorts
+    // (Left@10, Top@12, Right@14, Bottom@16), each little-endian.
+    u8 info[22];
+    i64 i = 0;
+    while (i < 22) {
+        info[i] = (u8)0;
+        i += 1;
+    }
+    if (win_GetConsoleScreenBufferInfo(win_fd_handle(fd), &info[0]) == 0) {
+        return -5; // EIO (not a console, e.g. a pipe)
+    }
+    i64 left = (i64)info[10] | ((i64)info[11] << 8);
+    i64 top = (i64)info[12] | ((i64)info[13] << 8);
+    i64 right = (i64)info[14] | ((i64)info[15] << 8);
+    i64 bottom = (i64)info[16] | ((i64)info[17] << 8);
+    i64* rp = (i64*)rows_ptr;
+    i64* cp = (i64*)cols_ptr;
+    rp[0] = bottom - top + 1;
+    cp[0] = right - left + 1;
+    return 0;
+}
+
+/// True (1) when `fd` is a console, 0 otherwise.
+i64 sys_is_tty(i64 fd) {
+    u32 mode = 0;
+    return win_GetConsoleMode(win_fd_handle(fd), &mode) != 0;
+}
+
+/// Put `fd` into raw mode, saving the previous console input mode (DWORD,
+/// little-endian) into `saved[0..4]` (`len` must be >= 4). 0 on success,
+/// negative errno otherwise. Clears ENABLE_PROCESSED/LINE/ECHO_INPUT.
+i64 sys_raw_enable(i64 fd, u8* saved, i64 len) {
+    if (saved == (u8*)0 || len < 4) {
+        return -22; // EINVAL
+    }
+    u32 mode = 0;
+    if (win_GetConsoleMode(win_fd_handle(fd), &mode) == 0) {
+        return -5; // EIO
+    }
+    saved[0] = (u8)(mode & 0xFF);
+    saved[1] = (u8)((mode >> 8) & 0xFF);
+    saved[2] = (u8)((mode >> 16) & 0xFF);
+    saved[3] = (u8)((mode >> 24) & 0xFF);
+    u32 raw = mode & ~(u32)7;
+    if (win_SetConsoleMode(win_fd_handle(fd), raw) == 0) {
+        return -5;
+    }
+    return 0;
+}
+
+/// Restore a console mode previously saved by sys_raw_enable.
+i64 sys_raw_restore(i64 fd, u8* saved) {
+    if (saved == (u8*)0) {
+        return -22; // EINVAL
+    }
+    u32 mode = (u32)saved[0] | ((u32)saved[1] << 8) | ((u32)saved[2] << 16) | ((u32)saved[3] << 24);
+    if (win_SetConsoleMode(win_fd_handle(fd), mode) == 0) {
+        return -5;
+    }
+    return 0;
+}
+
+/// Block up to `timeout_ms` (>= 0; negative waits forever) for `fd` to
+/// become readable. Returns 1 when readable, 0 on timeout, negative errno.
+/// Console and pipe handles are both waitable kernel objects.
+i64 sys_wait_readable(i64 fd, i64 timeout_ms) {
+    u32 ms = WIN_INFINITE;
+    if (timeout_ms >= 0) {
+        ms = (u32)timeout_ms;
+    }
+    i64 r = win_WaitForSingleObject(win_fd_handle(fd), ms);
+    if (r == 0) {
+        return 1; // WAIT_OBJECT_0
+    }
+    if (r == 258) {
+        return 0; // WAIT_TIMEOUT
+    }
+    return -5; // EIO
+}
