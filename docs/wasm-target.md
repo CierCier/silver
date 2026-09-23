@@ -1,6 +1,6 @@
 # WebAssembly Target — Design & Implementation Status
 
-Target: `wasm32-wasip1` · Status: P0–P3 implemented in worktree (uncommitted) · Author: implementation survey, 2026-09-23
+Target: `wasm32-wasip1` · Status: P0–P3 implemented (commit 9e9ad6e) · Author: implementation survey, 2026-09-23
 
 This document records the WebAssembly target as implemented: every
 Linux/x86_64 assumption the port had to remove, the WASI mapping chosen for
@@ -136,18 +136,17 @@ module: re-check against the wat control before touching the compiler.
 
 ## 5. Open items
 
-1. **Uncommitted** — the port (plus the fixes in §6) is worktree-only.
-2. **CI leg** — added (`.github/workflows/ci.yml`, `wasm` job: LLVM 22 +
+1. **CI leg** — added (`.github/workflows/ci.yml`, `wasm` job: LLVM 22 +
    node 24 + `run_tests.py --release --target wasm32-wasip1`), not yet
    observed on a remote runner.
-3. **Full wasm-leg suite run** — done: **143 passed, 0 failed, 57 skipped**
+2. **Full wasm-leg suite run** — done: **143 passed, 0 failed, 57 skipped**
    (see §6 for what the failures taught). Re-run after any seam change.
-4. **Non-goals holding**: WASI-threads, sockets, DWARF, `mprotect`
+3. **Non-goals holding**: WASI-threads, sockets, DWARF, `mprotect`
    semantics, atelier-on-wasm (explicitly out of scope).
-5. **Scratch leftovers** — `.agents/`, `amt`, `silver_dbg.txt`,
-   `ball.ag`, `plan.md` are untracked and unrelated to the port;
-   `tests/adversarial_mem_intrinsics_test.ag` belongs to the intrinsics
-   work and should be committed deliberately.
+4. **Scratch leftovers** — `.agents/`, `amt`, `silver_dbg.txt`,
+   `ball.ag`, `plan.md` are untracked and unrelated to the port.
+   (`tests/adversarial_mem_intrinsics_test.ag` shipped with the port and
+   passes both legs.)
 
 ## 6. Verification log (2026-09-23)
 

@@ -224,6 +224,38 @@ def wasm_runner_shim_path() -> str:
     return os.path.join(tempfile.gettempdir(), "silver-wasm-run.mjs")
 
 
+def prime_wasm_runner_shim(agc_bin: Path) -> None:
+    """Ensure the node WASI shim exists before the harness references it.
+
+    The shim's content lives in driver.rs and is written by the driver's run
+    path only. The harness compiles tests without running them through agc, so
+    on a fresh machine (e.g. CI) nothing would have created the shim yet and
+    every run would die with `Cannot find module .../silver-wasm-run.mjs`.
+    Prime it with a trivial `agc run`, which routes through the driver's own
+    writer and keeps driver.rs the single source of truth for the shim.
+    """
+    if os.path.exists(wasm_runner_shim_path()):
+        return
+    prime_dir = Path(tempfile.mkdtemp(prefix="silver-wasm-shim-"))
+    try:
+        src = prime_dir / "prime.ag"
+        src.write_text("i32 main() {\n    return 0;\n}\n")
+        subprocess.run(
+            [str(agc_bin), "run", "--target", "wasm32-wasip1", str(src)],
+            capture_output=True,
+            timeout=120,
+        )
+    finally:
+        shutil.rmtree(prime_dir, ignore_errors=True)
+    if not os.path.exists(wasm_runner_shim_path()):
+        print(
+            f"{C_RED}error: the wasm runner shim was not created at "
+            f"{wasm_runner_shim_path()}; run `agc run --target wasm32-wasip1 <file>` "
+            f"once to generate it, or set SILVER_TEST_RUNNER{C_RESET}"
+        )
+        sys.exit(1)
+
+
 class BackgroundServices:
     def __init__(self, root: Path, workdir: Path, target: Optional[str] = None):
         self.root = root
@@ -757,6 +789,7 @@ def main():
         if env_runner:
             runner = shlex.split(env_runner)
         elif services.has_node:
+            prime_wasm_runner_shim(agc_bin)
             runner = ["node", "--no-warnings", wasm_runner_shim_path()]
     # Each --libdir value is already a complete path from the shell/argparse;
     # re-splitting it would break paths containing spaces (e.g. a Windows SDK
