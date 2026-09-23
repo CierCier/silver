@@ -57,8 +57,12 @@ extern "C" {
 }
 
 /// Read the current frame pointer (rbp). The asm emitter returns rax.
+/// Only the Linux printer and the Linux leak-check origin walker use this
+/// (wasm has no rbp chain).
+if (@cfg(os.linux)) {
 i64 bt_read_rbp() {
     return asm("movq %rbp, %rax", [], []);
+}
 }
 
 /// Write a NUL-terminated string to fd via raw write(2).
@@ -139,6 +143,29 @@ void bt_write_hex(i64 fd, i64 value) {
 i64 g_bt_lock;
 i32 g_bt_sorted;
 
+if (@cfg(os.wasi)) {
+// WebAssembly v1 is single-threaded: the table sort needs no locking, and
+// the wasm printer is a stub anyway (the host unwinds via the names section).
+// Plain loads/stores keep the shared `bt_ensure_sorted` code compiling
+// without inline asm (which is a hard compile error on wasm).
+i64 bt_xchg(i64 addr) {
+    i64* p = (i64*)addr;
+    i64 prev = *p;
+    *p = 1;
+    return prev;
+}
+
+i64 bt_sorted_load(i64 addr) {
+    i32* p = (i32*)addr;
+    return (i64)*p;
+}
+
+void bt_lock_acquire() {
+}
+
+void bt_lock_release() {
+}
+} else {
 /// Atomically exchange 1 with *addr; returns the previous value.
 i64 bt_xchg(i64 addr) {
     return asm("movq $1, %rax\nxchgq %rax, (%rdi)", [0, addr], ["memory"]);
@@ -162,6 +189,7 @@ void bt_lock_acquire() {
 void bt_lock_release() {
     i64 addr = (i64)&g_bt_lock;
     i64 _s = asm("movq $0, (%rdi)", [0, addr], ["memory"]);
+}
 }
 
 bool bt_line_before(BtLine a, BtLine b) {
@@ -550,5 +578,17 @@ void silver_print_backtrace(i64 skip) {
         }
         frame = frame + 1;
     }
+}
+}
+
+if (@cfg(os.wasi)) {
+// WebAssembly: there is no frame-pointer chain to walk (wasm has no
+// registers) and no runtime unwinder import in preview1. The host runtime
+// resolves frames from the module's `name` section instead, so the runtime
+// printer is a stub: it announces the failure and exits, and the leak-check
+// origin capture in std/mem/alloc.ag degrades to "caller unknown".
+void silver_print_backtrace(i64 skip) {
+    i64 fd = 2;
+    bt_write_cstr(fd, (u8*)"backtrace: unavailable on WebAssembly (use a host debugger or the module names section)\n");
 }
 }

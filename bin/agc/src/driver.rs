@@ -470,16 +470,25 @@ fn derive_emit(cli: &Cli) -> Result<EmitKind, String> {
 
 fn default_output_for(emit: EmitKind, inputs: &[PathBuf], target: Option<&str>) -> PathBuf {
     let windows = crate::codegen::abi::target_is_windows(target);
+    let wasm = crate::codegen::abi::target_is_wasm(target);
     match emit {
         EmitKind::Exe => {
-            if windows {
+            if wasm {
+                PathBuf::from("a.wasm")
+            } else if windows {
                 PathBuf::from("a.exe")
             } else {
                 PathBuf::from("a.out")
             }
         }
         EmitKind::Check => PathBuf::from(""),
-        EmitKind::Obj => with_ext_or_default(inputs, if windows { "obj" } else { "o" }),
+        EmitKind::Obj => {
+            if wasm {
+                with_ext_or_default(inputs, "o.wasm")
+            } else {
+                with_ext_or_default(inputs, if windows { "obj" } else { "o" })
+            }
+        }
         EmitKind::Asm => with_ext_or_default(inputs, if windows { "asm" } else { "s" }),
         EmitKind::LlvmIr => with_ext_or_default(inputs, "ll"),
         EmitKind::Tokens => with_ext_or_default(inputs, "tokens"),
@@ -716,6 +725,12 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
             false
         } else if cli.debug_info {
             true
+        } else if crate::codegen::abi::target_is_wasm(cli.target.as_deref()) {
+            // WebAssembly: DWARF is not emitted by default. The host runtime
+            // unwinds through the module's `name` section, and the DWARF-BT
+            // post-pass (`codegen/dwarf_bt.rs`) parses ELF objects, which
+            // wasm objects are not. An explicit -g still forces it on.
+            false
         } else {
             !matches!(
                 cli.opt_level.as_deref(),
@@ -842,11 +857,17 @@ fn module_path_from_source_path(plan: &CompilePlan, input: &Path) -> String {
 
 fn module_binary_output_path(manifest_path: &Path, shared: bool, target: Option<&str>) -> PathBuf {
     let ext = if shared {
-        if crate::codegen::abi::target_is_windows(target) {
+        if crate::codegen::abi::target_is_wasm(target) {
+            "wasm"
+        } else if crate::codegen::abi::target_is_windows(target) {
             "dll"
         } else {
             "so"
         }
+    } else if crate::codegen::abi::target_is_wasm(target) {
+        // wasm-ld consumes wasm object files (it also accepts ELF relocatable
+        // inputs, but the LLVM wasm backend emits wasm objects).
+        "o.wasm"
     } else if crate::codegen::abi::target_is_windows(target) {
         "obj"
     } else {
@@ -954,6 +975,35 @@ fn build_target_runner_command(
     target: Option<&str>,
 ) -> Result<std::process::Command, String> {
     let target_is_windows = crate::codegen::abi::target_is_windows(target);
+    // WebAssembly modules need a wasm runtime. Node (with WASI support) is the
+    // default; SILVER_TEST_RUNNER overrides (e.g. 'wasmtime run --dir .').
+    if crate::codegen::abi::target_is_wasm(target) {
+        if let Ok(runner) = std::env::var("SILVER_TEST_RUNNER") {
+            let mut parts = split_shell_words(&runner);
+            if !parts.is_empty() {
+                let prog = parts.remove(0);
+                let mut cmd = std::process::Command::new(prog);
+                cmd.args(&parts);
+                cmd.arg(binary_path);
+                return Ok(cmd);
+            }
+        }
+        if crate::link::command_exists("node") {
+            // Node's bare `node file.wasm` path treats the module as an ESM
+            // import and cannot resolve WASI imports, so run through a small
+            // shim that instantiates the module with a preview1 WASI context
+            // (args, env, and the working directory preopened as `.`).
+            let shim = wasm_runner_shim_path()?;
+            let mut cmd = std::process::Command::new("node");
+            cmd.arg("--no-warnings");
+            cmd.arg(shim);
+            cmd.arg(binary_path);
+            return Ok(cmd);
+        }
+        return Err(
+            "cannot execute WebAssembly module without a runtime; install node or set SILVER_TEST_RUNNER (e.g. 'wasmtime run --dir .')".to_string(),
+        );
+    }
     if target_is_windows && !cfg!(target_os = "windows") {
         if let Ok(runner) = std::env::var("SILVER_TEST_RUNNER") {
             let mut parts = split_shell_words(&runner);
@@ -980,6 +1030,39 @@ fn build_target_runner_command(
         );
     }
     Ok(std::process::Command::new(binary_path))
+}
+
+/// JS shim used to run WASI modules under node. `node file.wasm` alone does
+/// not work (node treats the argument as an ES module and fails to resolve
+/// `wasi_snapshot_preview1`), so the driver runs this instead. Written once to
+/// the system temp dir and reused.
+const WASM_RUNNER_SHIM: &str = r#"import { readFileSync } from 'node:fs';
+import { WASI } from 'node:wasi';
+import { argv, exit } from 'node:process';
+const file = argv[2];
+const wasi = new WASI({
+  version: 'preview1',
+  args: argv.slice(2),
+  env: process.env,
+  preopens: { '.': process.cwd() },
+});
+const bytes = readFileSync(file);
+const wasm = await WebAssembly.compile(bytes);
+const instance = await WebAssembly.instantiate(wasm, wasi.getImportObject());
+exit(wasi.start(instance) ?? 0);
+"#;
+
+fn wasm_runner_shim_path() -> Result<PathBuf, String> {
+    let dir = std::env::temp_dir();
+    let path = dir.join("silver-wasm-run.mjs");
+    let needs_write = std::fs::read_to_string(&path)
+        .map(|existing| existing != WASM_RUNNER_SHIM)
+        .unwrap_or(true);
+    if needs_write {
+        std::fs::write(&path, WASM_RUNNER_SHIM)
+            .map_err(|e| format!("failed to write wasm runner shim to {}: {e}", path.display()))?;
+    }
+    Ok(path)
 }
 
 fn collect_dependency_link_artifacts(
@@ -1626,6 +1709,7 @@ pub fn run(cli: Cli) {
                     &imported_modules,
                 );
                 let mut checker = TypeChecker::new().with_imported_modules(&imported_modules);
+                checker.target_triple = plan.target.clone().unwrap_or_default();
                 let (type_errors, mut monomorphs) =
                     checker.check_program_with_table(&ast, &mut symbol_table);
                 // Populate ForIn iterator_type from typeck-resolved types
@@ -2166,7 +2250,17 @@ pub fn run(cli: Cli) {
                             .file_stem()
                             .and_then(|s| s.to_str())
                             .unwrap_or("input");
-                        let temp_o = temp_dir.join(format!("{stem}.o"));
+                        // The LLVM wasm backend emits wasm object files; give
+                        // them the .wasm extension so wasm-ld classifies them
+                        // correctly (ELF objects are also accepted, but the
+                        // extension keeps the temp dir readable).
+                        let obj_ext = if crate::codegen::abi::target_is_wasm(plan.target.as_deref())
+                        {
+                            "o.wasm"
+                        } else {
+                            "o"
+                        };
+                        let temp_o = temp_dir.join(format!("{stem}.{obj_ext}"));
                         let root_elements = crate::build_graph::CodegenElements::from_program(&ast);
                         let start_time = std::time::Instant::now();
 

@@ -89,6 +89,16 @@ i64 __fmt_clz64(u64 x) {
     if (x == (u64)0) {
         return 64;
     }
+    if (@cfg(os.wasi)) {
+        // No bsr instruction on wasm: shift left until the top bit appears.
+        i64 n = 0;
+        u64 v = x;
+        while ((v & (u64)0x8000000000000000) == (u64)0) {
+            v = v << 1;
+            n = n + 1;
+        }
+        return n;
+    }
     i64 msb = asm("bsrq %rax, %rax", [(i64)x], []);
     return 63 - msb;
 }

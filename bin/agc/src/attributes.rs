@@ -118,6 +118,25 @@ pub fn function_link_name(attributes: &[ast::Attribute]) -> Option<&str> {
     None
 }
 
+/// Extracts a `#[link_module("...")]` value from an attribute list, if present.
+///
+/// Used with extern declarations on WebAssembly targets: the function becomes
+/// an *import* from the named wasm module (e.g. `wasi_snapshot_preview1`),
+/// emitted as `wasm-import-module`/`wasm-import-name` LLVM attributes. On
+/// native targets the attribute is inert (imports there come from `#[link]`
+/// libraries at the symbol level).
+pub fn function_link_module(attributes: &[ast::Attribute]) -> Option<&str> {
+    for attr in attributes {
+        if attr.name.name == "link_module"
+            && let Some(ast::AttributeArg::Literal(ast::Literal::String(s))) = attr.args.first()
+            && !s.is_empty()
+        {
+            return Some(s);
+        }
+    }
+    None
+}
+
 /// Map a `#[target_feature("name")]` name (the same namespace as the
 /// `cpu.*` cfg keys and `std/cpu.ag` probe globals) to the LLVM x86 target
 /// feature string. `None` for unknown names — typeck reports those.
@@ -196,6 +215,33 @@ mod tests {
     fn no_target_features_returns_none() {
         let program = parse("#[link_name(\"strlen\")]\ni64 f() { return 1; }\n");
         assert_eq!(function_target_features(&program.items[0].attributes), None);
+    }
+
+    #[test]
+    fn extracts_link_module() {
+        let name = |n: &str| ast::Identifier {
+            name: n.to_string(),
+            span: Span::default(),
+        };
+        // `#[link_module("wasi_snapshot_preview1")]`
+        let attr = ast::Attribute {
+            name: name("link_module"),
+            args: vec![ast::AttributeArg::Literal(ast::Literal::String(
+                "wasi_snapshot_preview1".to_string(),
+            ))],
+            span: Span::default(),
+        };
+        assert_eq!(function_link_module(&[attr]), Some("wasi_snapshot_preview1"));
+
+        // No attribute -> None.
+        assert_eq!(function_link_module(&[]), None);
+        // Non-string arg -> None.
+        let bad = ast::Attribute {
+            name: name("link_module"),
+            args: vec![ast::AttributeArg::Identifier(name("wasi"))],
+            span: Span::default(),
+        };
+        assert_eq!(function_link_module(&[bad]), None);
     }
 
     fn parse(source: &str) -> ast::Program {

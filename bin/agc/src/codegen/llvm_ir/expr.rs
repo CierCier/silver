@@ -1817,7 +1817,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .any(|word| word == "syscall")
     }
 
-pub(crate) fn emit_asm_expression(
+    pub(crate) fn emit_asm_expression(
         &mut self,
         code: &str,
         inputs: &[ast::Expression],
@@ -1832,9 +1832,24 @@ pub(crate) fn emit_asm_expression(
         // Win64, so they are implicitly added as clobbers — LLVM then spills
         // and restores any live values around the asm. User-mode `syscall`
         // has no stable contract on Windows (WoW64 breaks it) and is rejected.
-        let is_windows = crate::codegen::abi::target_is_windows(Some(
-            self.module.get_triple().as_str().to_str().unwrap_or(""),
-        ));
+        let triple = self
+            .module
+            .get_triple()
+            .as_str()
+            .to_str()
+            .unwrap_or("")
+            .to_string();
+        let is_windows = crate::codegen::abi::target_is_windows(Some(&triple));
+        // WebAssembly has no registers, no x86 instruction set, and the fixed
+        // register model below cannot be expressed — mirror the asm()-on-
+        // windows `syscall` policy and reject every asm() at compile time
+        // rather than letting LLVM crash or silently mis-lower the blob.
+        if crate::codegen::abi::target_is_wasm(Some(&triple)) {
+            return Err(CodegenError::with_span(
+                "inline asm() is not supported on WebAssembly targets: wasm has no registers or x86 instructions — use the std.sys.wasi imports or @wasm_memory_size/@wasm_memory_grow builtins instead",
+                *span,
+            ));
+        }
         if is_windows
             && Self::normalized_asm_contains_syscall(code)
         {

@@ -14,7 +14,7 @@ use inkwell::values::{ArrayValue, AsValueRef};
 use llvm_sys::prelude::LLVMValueRef;
 use llvm_sys::transforms::pass_builder::LLVMRunPasses;
 
-use crate::attributes::function_link_name;
+use crate::attributes::{function_link_module, function_link_name};
 use crate::codegen::llvm_ir::LlvmIrGenerator;
 use crate::codegen::{CodegenError, CodegenResult, SilverGenerator};
 use crate::parser::ast;
@@ -52,6 +52,23 @@ pub(crate) fn map_opt_level(opt_level: Option<&str>) -> OptimizationLevel {
         "2" | "s" | "z" | "fast" => OptimizationLevel::Default,
         "3" => OptimizationLevel::Aggressive,
         _ => OptimizationLevel::Default,
+    }
+}
+
+/// WebAssembly targets always run the IR optimization pipeline, even in debug
+/// builds. LLVM 22's wasm backend does not truncate i64 GEP indices to the
+/// 32-bit address width at `-O0`, emitting Wasm whose `i64.load` feeds an
+/// `i32.load8_u` address operand (validation failure at instantiation);
+/// InstCombine folds the index/truncates it and the output is valid.
+/// `-O1`-equivalent IR is therefore the floor for wasm.
+pub(crate) fn wasm_min_opt_level<'a>(
+    target: Option<&str>,
+    opt_level: Option<&'a str>,
+) -> Option<&'a str> {
+    if crate::codegen::abi::target_is_wasm(target) && matches!(opt_level, None | Some("0")) {
+        Some("1")
+    } else {
+        opt_level
     }
 }
 
@@ -462,6 +479,64 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     func.set_linkage(inkwell::module::Linkage::Internal);
                 }
             }
+            return;
+        }
+        // WebAssembly has no instruction addresses: `ptrtoint(ptr @F to i64)`
+        // is not a static-initializer constant there (function pointers are
+        // table indices), and the runtime printer is a stub anyway. Define the
+        // runtime-visible tables as empty so std/rt/backtrace.ag's externs
+        // resolve and `bt_resolve` short-circuits on a zero count.
+        if crate::codegen::abi::target_is_wasm(Some(
+            self.module.get_triple().as_str().to_str().unwrap_or(""),
+        )) {
+            let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+            let zero_i64 = self.context.i64_type().const_zero();
+            let ptr_zero = ptr_ty.const_null();
+            let entries = self
+                .module
+                .get_global("__silver_bt_entries")
+                .unwrap_or_else(|| self.module.add_global(ptr_ty, None, "__silver_bt_entries"));
+            entries.set_initializer(&ptr_zero);
+            let count = self
+                .module
+                .get_global("__silver_bt_count")
+                .unwrap_or_else(|| {
+                    self.module
+                        .add_global(self.context.i64_type(), None, "__silver_bt_count")
+                });
+            count.set_initializer(&zero_i64);
+            let lines = self
+                .module
+                .get_global("__silver_bt_lines")
+                .unwrap_or_else(|| self.module.add_global(ptr_ty, None, "__silver_bt_lines"));
+            lines.set_initializer(&ptr_zero);
+            let lines_count = self
+                .module
+                .get_global("__silver_bt_lines_count")
+                .unwrap_or_else(|| {
+                    self.module.add_global(
+                        self.context.i64_type(),
+                        None,
+                        "__silver_bt_lines_count",
+                    )
+                });
+            lines_count.set_initializer(&zero_i64);
+            let args = self
+                .module
+                .get_global("__silver_bt_args")
+                .unwrap_or_else(|| self.module.add_global(ptr_ty, None, "__silver_bt_args"));
+            args.set_initializer(&ptr_zero);
+            let args_count = self
+                .module
+                .get_global("__silver_bt_args_count")
+                .unwrap_or_else(|| {
+                    self.module.add_global(
+                        self.context.i64_type(),
+                        None,
+                        "__silver_bt_args_count",
+                    )
+                });
+            args_count.set_initializer(&zero_i64);
             return;
         }
         let functions: Vec<_> = self
@@ -1674,6 +1749,42 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             )?;
             let function = self.module.add_function(llvm_name, fn_ty, None);
             self.apply_abi_attributes(function, &sig)?;
+        }
+        // #[link_module("...")] declares a WebAssembly import: the function
+        // resolves in the host environment under the named wasm module (e.g.
+        // `wasi_snapshot_preview1`) rather than at link time. LLVM encodes it
+        // as `wasm-import-module`/`wasm-import-name` attributes; on native
+        // targets the attribute set is meaningless and is not emitted.
+        if let Some(import_module) = function_link_module(attributes) {
+            let triple = self
+                .module
+                .get_triple()
+                .as_str()
+                .to_str()
+                .unwrap_or("")
+                .to_string();
+            if !crate::codegen::abi::target_is_wasm(Some(&triple)) {
+                return Err(CodegenError::with_span(
+                    format!(
+                        "#[link_module] is only meaningful on WebAssembly targets (this module targets `{triple}`); use #[link(\"lib\")] + #[link_name] for native symbols"
+                    ),
+                    item.name.span,
+                ));
+            }
+            if let Some(function) = self.module.get_function(llvm_name) {
+                // LLVM encodes wasm imports as the string attributes
+                // `wasm-import-module` / `wasm-import-name` (each value is the
+                // actual module/symbol name).
+                let import_module_attr = self
+                    .context
+                    .create_string_attribute("wasm-import-module", import_module);
+                function.add_attribute(AttributeLoc::Function, import_module_attr);
+                let import_name = link_name.unwrap_or(item.name.name.as_str());
+                let import_name_attr =
+                    self.context
+                        .create_string_attribute("wasm-import-name", import_name);
+                function.add_attribute(AttributeLoc::Function, import_name_attr);
+            }
         }
         let is_noreturn = attributes.iter().any(|attr| attr.name.name == "noreturn")
             || self.noreturn_functions.contains(&item.name.name)

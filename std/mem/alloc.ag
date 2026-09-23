@@ -201,6 +201,17 @@ if (@cfg(os.linux)) {
         i64 r = syscall2(200, tid, 0); // SYS_tkill
         return r == 0;
     }
+} else if (@cfg(os.wasi)) {
+    // WebAssembly v1 is single-threaded: no gettid, no threads to probe.
+    // A constant tid keeps the tcache fast path deterministic (slot math is
+    // skipped entirely while `g_mem_multithreaded` stays 0).
+    i64 mem_get_tid() {
+        return 1;
+    }
+
+    bool mem_thread_alive(i64 tid) {
+        return true;
+    }
 } else {
     extern "C" {
         #[link_name("GetCurrentThreadId")]

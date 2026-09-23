@@ -97,6 +97,22 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         &mut self,
         ty: &ast::Type,
     ) -> CodegenResult<BasicTypeEnum<'ctx>> {
+        // x87 80-bit floats have no WebAssembly representation: LLVM's wasm
+        // backend only models IEEE types, and x86_f80_type is an x86-only
+        // target extension. Reject with a clear error instead of crashing the
+        // backend (docs/wasm-target.md, non-goals for v1).
+        if crate::codegen::abi::target_is_wasm(Some(
+            self.module.get_triple().as_str().to_str().unwrap_or(""),
+        )) && matches!(
+            ty.kind.as_ref(),
+            ast::TypeKind::Primitive(ast::PrimitiveType::F80)
+                | ast::TypeKind::Primitive(ast::PrimitiveType::C80)
+        ) {
+            return Err(CodegenError::with_span(
+                "type `f80`/`c80` (x87 80-bit float) is not supported on WebAssembly targets: LLVM has no wasm representation for x87 types — use `f64` instead",
+                ty.span,
+            ));
+        }
         match ty.kind.as_ref() {
             ast::TypeKind::Primitive(primitive) => {
                 let basic = match primitive {
@@ -583,8 +599,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         {
             let lowered_ret = self.lower_basic_type(ret_ty)?;
             if let BasicTypeEnum::StructType(struct_ty) = lowered_ret {
-                let size = target_data.get_store_size(&struct_ty);
-                if self.abi_handler.needs_sret(size) {
+                if self
+                    .abi_handler
+                    .struct_needs_sret(self.context, &target_data, struct_ty)
+                {
                     sret_offset = 1;
                     // Add sret attribute to the first parameter (implicit return pointer)
                     let sret_kind = Attribute::get_named_enum_kind_id("sret");
@@ -605,8 +623,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         for (i, param_ty) in sig.params.iter().enumerate() {
             let lowered = self.lower_basic_type(param_ty)?;
             if let BasicTypeEnum::StructType(struct_ty) = lowered {
-                let size = target_data.get_store_size(&struct_ty);
-                if self.abi_handler.needs_byval(size) {
+                if self
+                    .abi_handler
+                    .struct_needs_byval(self.context, &target_data, struct_ty)
+                {
                     let param_idx = (i as u32) + sret_offset;
                     let byval_kind = Attribute::get_named_enum_kind_id("byval");
                     let attr = self
@@ -644,8 +664,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         {
             let lowered_ret = self.lower_basic_type(ret)?;
             if let BasicTypeEnum::StructType(struct_ty) = lowered_ret {
-                let size = target_data.get_store_size(&struct_ty);
-                if self.abi_handler.needs_sret(size) {
+                if self
+                    .abi_handler
+                    .struct_needs_sret(self.context, &target_data, struct_ty)
+                {
                     needs_sret = true;
                 }
             }

@@ -60,6 +60,7 @@ impl Child {
     }
 
     /// Wait for the child to exit and return its ExitStatus.
+#[cfg(os.linux)]
     ExitStatus wait_status(&mut self) {
         ExitStatus st;
         st.code = -1;
@@ -122,6 +123,7 @@ impl Command {
     }
 
     /// Spawn the command as a child process.
+#[cfg(os.linux)]
     Result<Child, i64> spawn(&self) {
         i64 pid = sys_fork();
         if (pid < 0) {
@@ -161,6 +163,7 @@ impl Command {
     }
 
     /// Spawn the command and wait for it to complete.
+#[cfg(os.linux)]
     Result<ExitStatus, i64> status(&self) {
         Result<Child, i64> res = self.spawn();
         if (res.is_err()) {
@@ -183,6 +186,7 @@ i64 getpid() {
 }
 
 /// Return the process ID of the parent process.
+#[cfg(os.linux)]
 i64 getppid() {
     return sys_getppid();
 }

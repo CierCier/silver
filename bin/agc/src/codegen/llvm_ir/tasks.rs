@@ -40,6 +40,21 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         &mut self,
         expr: &ast::Expression,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        // WebAssembly (WASI preview1) is single-threaded: `launch` has no
+        // thread runtime to reach. Fail fast with a target-specific message
+        // instead of the generic missing-`__silver_launch` error.
+        if crate::codegen::abi::target_is_wasm(Some(
+            self.module
+                .get_triple()
+                .as_str()
+                .to_str()
+                .unwrap_or(""),
+        )) {
+            return Err(CodegenError::with_span(
+                "`launch` is not supported on WebAssembly targets: WASI preview1 is single-threaded",
+                expr.span,
+            ));
+        }
         let ast::ExpressionKind::Launch(inner) = expr.kind.as_ref() else {
             return Err(CodegenError::with_span(
                 "internal: Launch arm reached with a non-launch expression",

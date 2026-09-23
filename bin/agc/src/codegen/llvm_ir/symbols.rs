@@ -1599,6 +1599,42 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     false,
                     None,
                 )?;
+                // Register the signature under the mangled name, mirroring
+                // the declare pass for monomorphized impls. Without this,
+                // call sites find the function in the module but miss the
+                // signature, silently skipping argument conversion, drop-flag
+                // clearing, user casts, and ABI coercion. Native targets
+                // tolerate int-width mismatches; wasm validation rejects them.
+                let has_variadic_param = func.parameters.iter().any(|p| p.is_variadic);
+                self.register_function_signature(
+                    &mangled_name,
+                    FunctionSig {
+                        params: func
+                            .parameters
+                            .iter()
+                            .map(|param| {
+                                if param.is_variadic {
+                                    ast::Type {
+                                        kind: Box::new(ast::TypeKind::Slice(Box::new(
+                                            ast::SliceType {
+                                                element_type: Box::new(param.param_type.clone()),
+                                            },
+                                        ))),
+                                        span: param.param_type.span,
+                                    }
+                                } else {
+                                    param.param_type.clone()
+                                }
+                            })
+                            .collect(),
+                        return_type: func.return_type.clone(),
+                        is_variadic: func.is_variadic,
+                        is_slice_variadic: has_variadic_param,
+                        linkage: None,
+                    },
+                    Some(func.name.span),
+                    SymbolKind::ImplMethod,
+                );
                 let function = self.module.add_function(&mangled_name, fn_ty, None);
                 self.apply_function_linkage(function, &func.visibility, &func.attributes);
 

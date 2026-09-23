@@ -84,6 +84,87 @@ def target_is_windows_name(target: Optional[str]) -> bool:
         t in target.lower() for t in ("windows", "win32", "mingw")
     )
 
+
+def target_is_wasm(target: Optional[str]) -> bool:
+    return bool(target) and ("wasm" in target.lower())
+
+
+# Tests that cannot run on the wasm32-wasip1 target. Everything not listed
+# here is expected to work: the WASI seam covers fd I/O, clocks, args, env,
+# and random, and the portable std core (mem/rt/fmt/collections) is
+# target-independent. Groups:
+#   - threads/launch/atomics-backed sync: no WASI threading in v1
+#   - sockets/process/pty/io_uring: std modules are empty on wasm (linux-gated)
+#   - raw syscall/asm tests: x86_64 asm does not exist on wasm
+#   - SIMD probes: cpu.* cfg keys are false on cross targets
+WASM_SKIP = {
+    # raw x86_64 asm / syscalls
+    "syscall_test": "raw Linux syscall asm (x86_64 syscall ABI)",
+    "syscall_wrapper_test": "raw Linux syscall wrappers (std.sys.syscall)",
+    "backtrace_test": "rbp-chain walker + cpuid probes (x86_64 asm)",
+    # threads & launch (no WASI threads in v1)
+    "allocator_threads_test": "raw clone(2) thread creation",
+    "thread_test": "WASI threading pending (threads are a compile error on wasm)",
+    "thread_stress_test": "WASI threading pending (threads are a compile error on wasm)",
+    "channel_test": "depends on threads/atomics (WASI threading pending)",
+    "channel_bounded_test": "depends on threads/atomics (WASI threading pending)",
+    "condvar_test": "depends on threads/atomics (WASI threading pending)",
+    "rwlock_test": "depends on threads/atomics (WASI threading pending)",
+    "select_test": "depends on threads/atomics (WASI threading pending)",
+    "launch_send_test": "launch requires the thread runtime (unsupported on wasm)",
+    "launch_wait_test": "launch requires the thread runtime (unsupported on wasm)",
+    "launch_send_error_test": "launch requires the thread runtime (unsupported on wasm)",
+    "launch_wait_error_test": "launch requires the thread runtime (unsupported on wasm)",
+    "guard_test": "guarded counter across launched tasks (launch is a compile error on wasm)",
+    "rust_ffi_test": "links a native-arch Rust staticlib (no wasm FFI artifact in v1)",
+    # process / sockets / pty / kernel interfaces (std modules empty on wasm)
+    "process_test": "fork/exec via Linux process syscalls",
+    "libc_test": "Linux libc interop test",
+    "io_uring_test": "Linux io_uring kernel interface",
+    "net_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "net_udp_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "net_dns_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "socket_addr_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "udp_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "tcp_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "dial_timeout_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "timeout_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "http_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "http_server_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "http2_server_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "http2_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "http2_tls_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "https_server_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "http_bench": "std.net over Linux socket syscalls (empty on wasm)",
+    "http_perf_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "json_tcp_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "server_raw_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "pool_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "sse_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "tls_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "websocket_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "cookie_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "stream_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "display_net_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "term_pty_test": "pty via Linux kernel interfaces (empty on wasm)",
+    "term_raw_test": "raw terminal mode via termios (empty on wasm)",
+    "term_keys_test": "raw terminal mode via termios (empty on wasm)",
+    "term_loop_test": "raw terminal mode via termios (empty on wasm)",
+    # target-specific probes
+    "target_feature_test": "cpu.* cfg probes are false on cross targets",
+    "cfg_derived_test": "asserts native DWARF/section layout in the object",
+    "cfg_test": "cfg matrix expects native os/arch values",
+    "static_link_test": "asserts ELF dynamic-linking properties",
+    "static_volatile_test": "asserts ELF section/codegen layout",
+    "cfg_global_block_test": "native-gated global block semantics",
+    # module artifact test precompiles a .agm with native defaults
+    "module_import_test": "precompiled .agm artifact workflow is native-only in v1",
+    # benches / long-running
+    "memcpy_bench": "performance benchmark, not a correctness test",
+    "memory_stress": "large memory footprint (wasm linear memory cap)",
+    "mem_growth_watch": "manual 30-sec memory growth benchmark",
+}
+
 # Tests that exercise Linux-only mechanisms (raw syscall/clone asm, epoll-
 # adjacent kernel interfaces). These are platform tests by design, not
 # portable suite members; on Windows the equivalent coverage comes from the
@@ -134,6 +215,13 @@ class TestResult:
     run_output: str = ""
     exit_code: Optional[int] = None
     expected_exit: int = 0
+
+
+# Path of the node WASI shim. Mirrors driver.rs (wasm_runner_shim_path): the
+# shim is written to the system temp dir and reused; `agc run` on a wasm
+# target keeps it fresh, so the harness just needs to reference the same file.
+def wasm_runner_shim_path() -> str:
+    return os.path.join(tempfile.gettempdir(), "silver-wasm-run.mjs")
 
 
 class BackgroundServices:
@@ -358,6 +446,11 @@ def run_single_test(
         # COFF has no linkonce dedup: cached .agm artifacts and the app unit
         # would define the same std symbols twice. Single-unit linking until
         # artifact dedup/import-libs land (docs/windows-port.md §4.3).
+        extra_flags += ["--no-cache"]
+    if target_is_wasm(target):
+        # Same hazard as the COFF path, plus the std.cpu artifact cache can
+        # hold native-cfg definitions that are wrong for wasm. The portable
+        # core is small enough that single-unit linking is not a bottleneck.
         extra_flags += ["--no-cache"]
     for libdir in libdirs or []:
         extra_flags += ["-L", *libdir]
@@ -657,6 +750,14 @@ def main():
         env_runner = os.environ.get("SILVER_TEST_RUNNER") or os.environ.get("WINE")
         if env_runner:
             runner = shlex.split(env_runner)
+    if not runner and target_is_wasm(target) and not IS_WINDOWS:
+        # Mirror the driver's runner resolution: SILVER_TEST_RUNNER wins,
+        # then node + the WASI shim the driver also writes to the temp dir.
+        env_runner = os.environ.get("SILVER_TEST_RUNNER")
+        if env_runner:
+            runner = shlex.split(env_runner)
+        elif services.has_node:
+            runner = ["node", "--no-warnings", wasm_runner_shim_path()]
     # Each --libdir value is already a complete path from the shell/argparse;
     # re-splitting it would break paths containing spaces (e.g. a Windows SDK
     # under "Program Files").
@@ -704,6 +805,8 @@ def main():
             elif target and target_is_windows_name(target) and name in WINDOWS_SKIP:
                 # Cross-target runs: same skip set as a windows host.
                 skip_reason = WINDOWS_SKIP[name]
+            elif target and target_is_wasm(target) and name in WASM_SKIP:
+                skip_reason = WASM_SKIP[name]
 
             if skip_reason:
                 res = TestResult(name, "SKIP", skip_reason)

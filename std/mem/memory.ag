@@ -18,6 +18,8 @@
 
 import std.cpu;
 
+if (!@cfg(os.wasi)) {
+
 /// Copy 64 bytes per iteration (`blocks` iterations), AVX-512.
 #[target_feature("avx512f")]
 void memcpy_v512(u8* d, u8* s, i64 blocks) {
@@ -107,6 +109,9 @@ void memset_v256(u8* d, u8 value, i64 blocks) {
     ", [blocks, d, value], ["rbx", "rdx", "r8", "r9", "xmm0"]);
 }
 
+}
+
+
 /// Fill `len` bytes at `dst` with `value`. Returns `dst`. Null-tolerant.
 u8* silver_rt_memset(u8* dst, u8 value, i64 len) {
     if (dst == (u8*)0) {
@@ -115,7 +120,7 @@ u8* silver_rt_memset(u8* dst, u8 value, i64 len) {
     u8* result = dst;
     i64 n = len;
     if (n >= 64) {
-        if (@cfg(cpu.avx512f)) {
+        if (!@cfg(os.wasi) && @cfg(cpu.avx512f)) {
             i64 blocks = n / 64;
             memset_v512(dst, value, blocks);
             n = n - blocks * 64;
@@ -123,7 +128,7 @@ u8* silver_rt_memset(u8* dst, u8 value, i64 len) {
         }
     }
     if (n >= 32) {
-        if (@cfg(cpu.avx2)) {
+        if (!@cfg(os.wasi) && @cfg(cpu.avx2)) {
             i64 blocks = n / 32;
             memset_v256(dst, value, blocks);
             n = n - blocks * 32;
@@ -157,7 +162,7 @@ u8* silver_rt_memcpy(u8* dst, u8* src, i64 len) {
     u8* result = dst;
     i64 n = len;
     if (n >= 64) {
-        if (@cfg(cpu.avx512f)) {
+        if (!@cfg(os.wasi) && @cfg(cpu.avx512f)) {
             i64 blocks = n / 64;
             memcpy_v512(dst, src, blocks);
             n = n - blocks * 64;
@@ -166,7 +171,7 @@ u8* silver_rt_memcpy(u8* dst, u8* src, i64 len) {
         }
     }
     if (n >= 32) {
-        if (@cfg(cpu.avx2)) {
+        if (!@cfg(os.wasi) && @cfg(cpu.avx2)) {
             i64 blocks = n / 32;
             memcpy_v256(dst, src, blocks);
             n = n - blocks * 32;
@@ -175,7 +180,7 @@ u8* silver_rt_memcpy(u8* dst, u8* src, i64 len) {
         }
     }
     if (n >= 16) {
-        if (@cfg(cpu.sse41)) {
+        if (!@cfg(os.wasi) && @cfg(cpu.sse41)) {
             i64 blocks = n / 16;
             memcpy_v128(dst, src, blocks);
             n = n - blocks * 16;
@@ -209,6 +214,8 @@ u8* silver_rt_memcpy(u8* dst, u8* src, i64 len) {
 /// overlap-safe: reads always trail writes. SIMD is build-gated via @cfg,
 /// exactly like memcpy; small moves skip the probes (size guard first).
 ///
+if (!@cfg(os.wasi)) {
+
 /// Copy 64 bytes per iteration backwards, AVX-512.
 #[target_feature("avx512f")]
 void memmove_v512_back(u8* dend, u8* send, i64 blocks) {
@@ -262,6 +269,9 @@ void memmove_v128_back(u8* dend, u8* send, i64 blocks) {
     ", [blocks, dend, send], ["rbx", "rdx", "r8", "r9", "r10", "xmm0"]);
 }
 
+}
+
+
 u8* silver_rt_memmove(u8* dst, u8* src, i64 len) {
     if (dst == (u8*)0 || src == (u8*)0) {
         return dst;
@@ -273,7 +283,7 @@ u8* silver_rt_memmove(u8* dst, u8* src, i64 len) {
     if (d < s) {
         // Copy forward: reads stay ahead of writes. Same cascade as memcpy.
         if (n >= 64) {
-            if (@cfg(cpu.avx512f)) {
+            if (!@cfg(os.wasi) && @cfg(cpu.avx512f)) {
                 i64 blocks = n / 64;
                 memcpy_v512(dst, src, blocks);
                 n = n - blocks * 64;
@@ -282,7 +292,7 @@ u8* silver_rt_memmove(u8* dst, u8* src, i64 len) {
             }
         }
         if (n >= 32) {
-            if (@cfg(cpu.avx2)) {
+            if (!@cfg(os.wasi) && @cfg(cpu.avx2)) {
                 i64 blocks = n / 32;
                 memcpy_v256(dst, src, blocks);
                 n = n - blocks * 32;
@@ -291,7 +301,7 @@ u8* silver_rt_memmove(u8* dst, u8* src, i64 len) {
             }
         }
         if (n >= 16) {
-            if (@cfg(cpu.sse41)) {
+            if (!@cfg(os.wasi) && @cfg(cpu.sse41)) {
                 i64 blocks = n / 16;
                 memcpy_v128(dst, src, blocks);
                 n = n - blocks * 16;
@@ -310,7 +320,7 @@ u8* silver_rt_memmove(u8* dst, u8* src, i64 len) {
         u8* dend = (u8*)(d + n);
         u8* send = (u8*)(s + n);
         if (n >= 64) {
-            if (@cfg(cpu.avx512f)) {
+            if (!@cfg(os.wasi) && @cfg(cpu.avx512f)) {
                 i64 blocks = n / 64;
                 memmove_v512_back(dend, send, blocks);
                 n = n - blocks * 64;
@@ -319,7 +329,7 @@ u8* silver_rt_memmove(u8* dst, u8* src, i64 len) {
             }
         }
         if (n >= 32) {
-            if (@cfg(cpu.avx2)) {
+            if (!@cfg(os.wasi) && @cfg(cpu.avx2)) {
                 i64 blocks = n / 32;
                 memmove_v256_back(dend, send, blocks);
                 n = n - blocks * 32;
@@ -328,7 +338,7 @@ u8* silver_rt_memmove(u8* dst, u8* src, i64 len) {
             }
         }
         if (n >= 16) {
-            if (@cfg(cpu.sse41)) {
+            if (!@cfg(os.wasi) && @cfg(cpu.sse41)) {
                 i64 blocks = n / 16;
                 memmove_v128_back(dend, send, blocks);
                 n = n - blocks * 16;
@@ -359,7 +369,14 @@ i64 silver_rt_strlen(const char* s) {
     if (p == (u8*)0) {
         return 0;
     }
-    return asm("
+    if (@cfg(os.wasi)) {
+        i64 n = 0;
+        while (p[n] != (u8)0) {
+            n = n + 1;
+        }
+        return n;
+    } else {
+        return asm("
         movq %rax, %r8
         movq %rax, %r9
         andq $$15, %rax
@@ -389,7 +406,10 @@ i64 silver_rt_strlen(const char* s) {
         movq %r9, %rax
         subq %r8, %rax
     ", [p], ["rbx", "rdx", "r8", "r9", "xmm0", "xmm1"]);
+    }
 }
+
+if (!@cfg(os.wasi)) {
 
 /// Find byte `c` across 32-byte chunks with AVX2.
 #[target_feature("avx2")]
@@ -423,24 +443,43 @@ i64 mem_find_byte_v256(u8* p, u8 c, i64 blocks) {
     ", [blocks, p, (i64)c], ["rbx", "rdx", "r8", "r9", "xmm0", "xmm1"]);
 }
 
+}
+
+
 /// Find the first occurrence of byte `c` in the first `n` bytes of `p`.
 /// Returns the byte index, or -1 when absent.
 i64 mem_find_byte(u8* p, u8 c, i64 n) {
     if (p == (u8*)0 || n <= 0) {
         return -1;
     }
-    i64 i = 0;
-    if (n >= 32 && @cfg(cpu.avx2)) {
-        i64 blocks = n / 32;
-        i64 r = mem_find_byte_v256(p, c, blocks);
-        if (r >= 0) {
-            return r;
+    if (@cfg(os.wasi)) {
+        i64 j = 0;
+        while (j < n) {
+            if (p[j] == c) {
+                return j;
+            }
+            j = j + 1;
         }
-        i = blocks * 32;
-    }
-    while (i + 16 <= n) {
-        i64 blocks = (n - i) / 16;
-        i64 r = asm("
+        return -1;
+    } else {
+        i64 i = 0;
+        // Nested (not `cond && @cfg(cpu.x)`) so platforms without the feature
+        // prune the SIMD helper reference from the AST entirely — a helper kept
+        // alive only by an unfolded `&&` still gets codegen'd and would trip the
+        // wasm asm() rejection.
+        if (@cfg(cpu.avx2)) {
+            if (n >= 32) {
+                i64 blocks = n / 32;
+                i64 r = mem_find_byte_v256(p, c, blocks);
+                if (r >= 0) {
+                    return r;
+                }
+                i = blocks * 32;
+            }
+        }
+        while (i + 16 <= n) {
+            i64 blocks = (n - i) / 16;
+            i64 r = asm("
             movq %rax, %r8
             movq %rdi, %r9
             movl %esi, %eax
@@ -467,18 +506,19 @@ i64 mem_find_byte(u8* p, u8 c, i64 n) {
             addq %rdx, %rax
             3:
         ", [blocks, &p[i], (i64)c], ["rbx", "rdx", "r8", "r9", "xmm0", "xmm1"]);
-        if (r >= 0) {
-            return i + r;
+            if (r >= 0) {
+                return i + r;
+            }
+            i = i + blocks * 16;
         }
-        i = i + blocks * 16;
-    }
-    while (i < n) {
-        if (p[i] == c) {
-            return i;
+        while (i < n) {
+            if (p[i] == c) {
+                return i;
+            }
+            i = i + 1;
         }
-        i = i + 1;
+        return -1;
     }
-    return -1;
 }
 
 /// Find the last occurrence of byte `c` in the first `n` bytes of `p`.
@@ -487,10 +527,20 @@ i64 mem_find_byte_back(u8* p, u8 c, i64 n) {
     if (p == (u8*)0 || n <= 0) {
         return -1;
     }
-    i64 i = n;
-    while (i >= 16) {
-        i64 offset = i - 16;
-        i64 r = asm("
+    if (@cfg(os.wasi)) {
+        i64 j = n - 1;
+        while (j >= 0) {
+            if (p[j] == c) {
+                return j;
+            }
+            j = j - 1;
+        }
+        return -1;
+    } else {
+        i64 i = n;
+        while (i >= 16) {
+            i64 offset = i - 16;
+            i64 r = asm("
             movl %edi, %edx
             movd %edx, %xmm0
             punpcklbw %xmm0, %xmm0
@@ -508,18 +558,19 @@ i64 mem_find_byte_back(u8* p, u8 c, i64 n) {
             movq $$-1, %rax
             2:
         ", [&p[offset], (i64)c], ["rbx", "rdx", "rcx", "xmm0", "xmm1"]);
-        if (r >= 0) {
-            return offset + r;
+            if (r >= 0) {
+                return offset + r;
+            }
+            i = offset;
         }
-        i = offset;
-    }
-    while (i > 0) {
-        i = i - 1;
-        if (p[i] == c) {
-            return i;
+        while (i > 0) {
+            i = i - 1;
+            if (p[i] == c) {
+                return i;
+            }
         }
+        return -1;
     }
-    return -1;
 }
 
 /// Count occurrences of byte `c` in the first `n` bytes of `p`.
@@ -527,10 +578,21 @@ i64 mem_count_byte(u8* p, u8 c, i64 n) {
     if (p == (u8*)0 || n <= 0) {
         return 0;
     }
-    i64 count = 0;
-    i64 i = 0;
-    while (i + 16 <= n) {
-        i64 match_count = asm("
+    if (@cfg(os.wasi)) {
+        i64 c2 = 0;
+        i64 j = 0;
+        while (j < n) {
+            if (p[j] == c) {
+                c2 = c2 + 1;
+            }
+            j = j + 1;
+        }
+        return c2;
+    } else {
+        i64 count = 0;
+        i64 i = 0;
+        while (i + 16 <= n) {
+            i64 match_count = asm("
             movl %edi, %edx
             movd %edx, %xmm0
             punpcklbw %xmm0, %xmm0
@@ -541,16 +603,17 @@ i64 mem_count_byte(u8* p, u8 c, i64 n) {
             pmovmskb %xmm1, %ecx
             popcntl %ecx, %eax
         ", [&p[i], (i64)c], ["rbx", "rdx", "rcx", "xmm0", "xmm1"]);
-        count = count + match_count;
-        i = i + 16;
-    }
-    while (i < n) {
-        if (p[i] == c) {
-            count = count + 1;
+            count = count + match_count;
+            i = i + 16;
         }
-        i = i + 1;
+        while (i < n) {
+            if (p[i] == c) {
+                count = count + 1;
+            }
+            i = i + 1;
+        }
+        return count;
     }
-    return count;
 }
 
 /// Standard C memchr: returns pointer to first occurrence, or null.
@@ -572,6 +635,8 @@ u8* memrchr(const void* s, i32 c, i64 n) {
     }
     return (u8*)((i64)p + idx);
 }
+
+if (!@cfg(os.wasi)) {
 
 /// Compare two regions in 32-byte chunks with AVX2.
 #[target_feature("avx2")]
@@ -608,6 +673,9 @@ i64 memcmp_v256(u8* p1, u8* p2, i64 blocks) {
     ", [blocks, p1, p2], ["rbx", "rdx", "r8", "r9", "r10", "xmm0", "xmm1"]);
 }
 
+}
+
+
 /// Compare the first `n` bytes of two regions. Returns 0 when equal, else the
 /// difference of the first differing bytes. Null inputs are not tolerated
 /// (matches the C contract).
@@ -619,17 +687,29 @@ i64 memcmp_v256(u8* p1, u8* p2, i64 blocks) {
 i32 memcmp(const void* s1, const void* s2, i64 n) {
     u8* p1 = (u8*)s1;
     u8* p2 = (u8*)s2;
-    i64 i = 0;
-    if (n >= 32 && @cfg(cpu.avx2)) {
-        i64 blocks = n / 32;
-        i64 diff = memcmp_v256(p1, p2, blocks);
-        if (diff != 0) {
-            return (i32)diff;
+    if (@cfg(os.wasi)) {
+        i64 j = 0;
+        while (j < n) {
+            if (p1[j] != p2[j]) {
+                return (i32)p1[j] - (i32)p2[j];
+            }
+            j = j + 1;
         }
-        i = blocks * 32;
-    }
-    while (n - i >= 16) {
-        i64 diff = asm("
+        return 0;
+    } else {
+        i64 i = 0;
+        if (!@cfg(os.wasi) && @cfg(cpu.avx2)) {
+            if (n >= 32) {
+                i64 blocks = n / 32;
+                i64 diff = memcmp_v256(p1, p2, blocks);
+                if (diff != 0) {
+                    return (i32)diff;
+                }
+                i = blocks * 32;
+            }
+        }
+        while (n - i >= 16) {
+            i64 diff = asm("
             movq %rax, %r8
             movq %rdi, %r9
             movq %rsi, %r10
@@ -657,18 +737,19 @@ i32 memcmp(const void* s1, const void* s2, i64 n) {
             subl %edx, %eax
             3:
         ", [((n - i) / 16), &p1[i], &p2[i]], ["rbx", "rdx", "r8", "r9", "r10", "xmm0", "xmm1"]);
-        if (diff != 0) {
-            return (i32)diff;
+            if (diff != 0) {
+                return (i32)diff;
+            }
+            i = i + (n - i) / 16 * 16;
         }
-        i = i + (n - i) / 16 * 16;
-    }
-    while (i < n) {
-        if (p1[i] != p2[i]) {
-            return (i32)p1[i] - (i32)p2[i];
+        while (i < n) {
+            if (p1[i] != p2[i]) {
+                return (i32)p1[i] - (i32)p2[i];
+            }
+            i = i + 1;
         }
-        i = i + 1;
+        return 0;
     }
-    return 0;
 }
 
 /// libc-compatible `bcmp`: zero when the regions are equal, non-zero

@@ -84,6 +84,29 @@ pub trait AbiHandler {
     /// Returns true if this ABI requires `sret` attribute for struct returns of the given size.
     fn needs_sret(&self, size: u64) -> bool;
 
+    /// Type-aware by-reference decision. The size alone cannot express wasm's
+    /// rule (a `{i64}` aggregate passes by value while `{i32,i32}` — the same
+    /// 8 bytes — passes by pointer), so callers that know the struct type use
+    /// this; the default falls back to the size-only predicate.
+    fn struct_needs_byval<'ctx>(
+        &self,
+        _context: &'ctx inkwell::context::Context,
+        target_data: &TargetData,
+        struct_ty: StructType<'ctx>,
+    ) -> bool {
+        self.needs_byval(target_data.get_store_size(&struct_ty))
+    }
+
+    /// Type-aware `sret` decision; see `struct_needs_byval`.
+    fn struct_needs_sret<'ctx>(
+        &self,
+        _context: &'ctx inkwell::context::Context,
+        target_data: &TargetData,
+        struct_ty: StructType<'ctx>,
+    ) -> bool {
+        self.needs_sret(target_data.get_store_size(&struct_ty))
+    }
+
     /// Returns the alignment to use for `byval`/`sret` attributes.
     fn byval_alignment(&self, struct_ty: StructType, target_data: &TargetData) -> u64;
 }
@@ -415,6 +438,152 @@ impl AbiHandler for Win64Abi {
     }
 }
 
+/// WebAssembly (wasm32/wasm64) Basic C ABI handler.
+///
+/// Implements the struct rules from the WebAssembly tool-conventions
+/// "Basic C ABI" (https://github.com/WebAssembly/tool-conventions/blob/main/BasicCABI.md):
+///
+/// 1. Aggregates with exactly one member (recursively: a single field, a
+///    single-element array of it, or a nested single-member struct) pass by
+///    value with LLVM field extraction: the aggregate signature type is the
+///    member's own type ({i32}→i32, {f32}→float, {i64}→i64, {i128}→i128,
+///    {f64}→double). Clang 22 verified: `struct {int a[1];}` → i32,
+///    `struct {__int128 x;}` → i128, `struct {double x;}` → double.
+/// 2. Every other aggregate passes by reference: the caller makes a copy in
+///    the frame and passes a pointer (modeled as pointer + `byval`).
+/// 3. Returns mirror the argument rules; multi-member returns use a hidden
+///    `sret` pointer.
+///
+/// Scalars (including i128) pass directly; variadics use plain LLVM varargs.
+pub struct WasmAbi;
+
+impl Default for WasmAbi {
+    fn default() -> Self {
+        Self
+    }
+}
+
+impl WasmAbi {
+    /// Creates a new Wasm ABI handler.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// True when the struct has exactly one direct member (fields for struct
+    /// types, one element for `[1 x T]` arrays). The wasm ABI recurses into
+    /// that single member when classifying.
+    fn single_member(struct_ty: StructType) -> bool {
+        struct_ty.count_fields() == 1
+    }
+
+    /// Flattens a single-member chain down to the first non-single-member
+    /// level, returning the LLVM type that would be extracted for by-value
+    /// passing. Returns `None` when the chain bottoms out in a multi-member
+    /// aggregate (use byval instead).
+    fn extracted_field_type(struct_ty: StructType) -> Option<BasicTypeEnum> {
+        let mut current = struct_ty.as_basic_type_enum();
+        loop {
+            match current {
+                BasicTypeEnum::ArrayType(arr) => {
+                    if arr.len() != 1 {
+                        return None;
+                    }
+                    current = arr.get_element_type();
+                }
+                BasicTypeEnum::StructType(inner) => {
+                    if !Self::single_member(inner) {
+                        return None;
+                    }
+                    // Exactly one field: descend into it.
+                    current = inner.get_field_types()[0];
+                }
+                other => return Some(other),
+            }
+        }
+    }
+}
+
+impl AbiHandler for WasmAbi {
+    fn name(&self) -> &str {
+        "wasm"
+    }
+
+    fn classify_argument<'ctx>(
+        &self,
+        context: &'ctx inkwell::context::Context,
+        _target_data: &TargetData,
+        struct_ty: StructType<'ctx>,
+    ) -> BasicTypeEnum<'ctx> {
+        match Self::extracted_field_type(struct_ty) {
+            Some(field_ty) => field_ty,
+            None => context
+                .ptr_type(inkwell::AddressSpace::default())
+                .as_basic_type_enum(),
+        }
+    }
+
+    fn classify_return<'ctx>(
+        &self,
+        context: &'ctx inkwell::context::Context,
+        target_data: &TargetData,
+        struct_ty: StructType<'ctx>,
+    ) -> BasicTypeEnum<'ctx> {
+        self.classify_argument(context, target_data, struct_ty)
+    }
+
+    fn needs_byval(&self, _size: u64) -> bool {
+        // Size-only answers are ambiguous on wasm ({i64} and {i32,i32} are
+        // both 8 bytes but classify differently). The type-aware decision is
+        // made via `struct_needs_byval`/`struct_needs_sret`; this size-based
+        // predicate is the conservative fallback used when only a size is
+        // known (matches the multi-member default).
+        true
+    }
+
+    fn needs_sret(&self, _size: u64) -> bool {
+        true
+    }
+
+    fn struct_needs_byval<'ctx>(
+        &self,
+        _context: &'ctx inkwell::context::Context,
+        _target_data: &TargetData,
+        struct_ty: StructType<'ctx>,
+    ) -> bool {
+        // Single-member aggregates (recursively) pass by value; everything
+        // else passes by reference.
+        Self::extracted_field_type(struct_ty).is_none()
+    }
+
+    fn struct_needs_sret<'ctx>(
+        &self,
+        _context: &'ctx inkwell::context::Context,
+        _target_data: &TargetData,
+        struct_ty: StructType<'ctx>,
+    ) -> bool {
+        // A single-member aggregate returns its member directly, no sret.
+        Self::extracted_field_type(struct_ty).is_none()
+    }
+
+    fn byval_alignment(&self, struct_ty: StructType, target_data: &TargetData) -> u64 {
+        target_data.get_abi_alignment(&struct_ty) as u64
+    }
+}
+
+/// Type-aware wasm classification used by the signature/attribute emitters:
+/// returns the extracted by-value field type for single-member aggregates
+/// (`Some`) or `None` when the aggregate must pass via byval/sret. Non-struct
+/// types never need coercion.
+pub fn wasm_extracted_field<'ctx>(
+    _target_data: &TargetData,
+    lowered: BasicTypeEnum<'ctx>,
+) -> Option<BasicTypeEnum<'ctx>> {
+    match lowered {
+        BasicTypeEnum::StructType(struct_ty) => WasmAbi::extracted_field_type(struct_ty),
+        _ => None,
+    }
+}
+
 /// Factory function to get the appropriate ABI handler for a target triple.
 ///
 /// Dispatch considers both the architecture and the OS component: the same
@@ -424,13 +593,16 @@ impl AbiHandler for Win64Abi {
 /// Currently supports:
 /// - x86_64 linux/mac/bsd: System V AMD64 ABI
 /// - x86_64 windows: Win64 (Microsoft x64) ABI
+/// - wasm32/wasm64: WebAssembly Basic C ABI
 ///
 /// Future support:
 /// - aarch64 (arm64): AAPCS64 ABI
 pub fn get_abi_handler(target_triple: &str) -> Box<dyn AbiHandler> {
     let triple = target_triple.to_ascii_lowercase();
     let is_windows = target_is_windows(Some(&triple));
-    if triple.contains("x86_64") || triple.contains("amd64") {
+    if target_is_wasm(Some(&triple)) {
+        Box::new(WasmAbi::new())
+    } else if triple.contains("x86_64") || triple.contains("amd64") {
         if is_windows {
             Box::new(Win64Abi::new())
         } else {
@@ -449,6 +621,20 @@ pub fn get_abi_handler(target_triple: &str) -> Box<dyn AbiHandler> {
     } else {
         // Default to AMD64 for unknown targets
         Box::new(Amd64Abi::new())
+    }
+}
+
+/// Returns true when the target triple denotes a WebAssembly target.
+///
+/// Shared by codegen/link/driver passes that must branch on the architecture
+/// component of the triple rather than the host OS.
+pub fn target_is_wasm(target_triple: Option<&str>) -> bool {
+    match target_triple {
+        Some(triple) => {
+            let t = triple.to_ascii_lowercase();
+            t.starts_with("wasm32") || t.starts_with("wasm64") || t.contains("wasm")
+        }
+        None => false,
     }
 }
 
@@ -843,6 +1029,137 @@ mod tests {
             target_is_windows(None),
             cfg!(target_os = "windows"),
             "None defers to the host OS"
+        );
+    }
+
+    fn setup_wasm_target_machine() -> TargetMachine {
+        Target::initialize_all(&InitializationConfig::default());
+        let triple = TargetTriple::create("wasm32-unknown-unknown");
+        Target::from_triple(&triple)
+            .unwrap()
+            .create_target_machine(
+                &triple,
+                "",
+                "",
+                OptimizationLevel::None,
+                RelocMode::PIC,
+                CodeModel::Default,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn test_get_abi_handler_wasm_selects_wasm() {
+        let handler = get_abi_handler("wasm32-unknown-unknown");
+        assert_eq!(handler.name(), "wasm");
+        let handler = get_abi_handler("wasm32-wasip1");
+        assert_eq!(handler.name(), "wasm");
+        let handler = get_abi_handler("WASM32-UNKNOWN-UNKNOWN");
+        assert_eq!(handler.name(), "wasm");
+    }
+
+    #[test]
+    fn test_wasm_single_member_aggregates_extract_field() {
+        let machine = setup_wasm_target_machine();
+        let tdata = machine.get_target_data();
+        let context = Context::create();
+        let handler = WasmAbi::new();
+
+        // { i32 } -> i32
+        let one_i32 = context.struct_type(&[context.i32_type().as_basic_type_enum()], false);
+        let result = handler.classify_argument(&context, &tdata, one_i32);
+        assert!(result.is_int_type(), "single i32 member extracts to i32");
+
+        // { f32 } -> float
+        let one_f32 = context.struct_type(&[context.f32_type().as_basic_type_enum()], false);
+        let result = handler.classify_argument(&context, &tdata, one_f32);
+        assert!(result.is_float_type(), "single f32 member extracts to float");
+
+        // { i64 } -> i64 (clang: struct{long long} passes as i64 on wasm32)
+        let one_i64 = context.struct_type(&[context.i64_type().as_basic_type_enum()], false);
+        let result = handler.classify_argument(&context, &tdata, one_i64);
+        assert!(
+            result.is_int_type() && result.into_int_type().get_bit_width() == 64,
+            "single i64 member extracts to i64"
+        );
+
+        // { f64 } -> double
+        let one_f64 = context.struct_type(&[context.f64_type().as_basic_type_enum()], false);
+        let result = handler.classify_argument(&context, &tdata, one_f64);
+        assert!(result.is_float_type(), "single f64 member extracts to double");
+
+        // { i32 a[1] } -> i32 (single-element array member, clang-verified)
+        let arr_one = context.struct_type(
+            &[context.i32_type().array_type(1).as_basic_type_enum()],
+            false,
+        );
+        let result = handler.classify_argument(&context, &tdata, arr_one);
+        assert!(result.is_int_type(), "single-element array member extracts");
+    }
+
+    #[test]
+    fn test_wasm_multi_member_aggregates_pass_by_reference() {
+        let machine = setup_wasm_target_machine();
+        let tdata = machine.get_target_data();
+        let context = Context::create();
+        let handler = WasmAbi::new();
+
+        // { i32, i32 }: byval pointer
+        let pair = context.struct_type(
+            &[
+                context.i32_type().as_basic_type_enum(),
+                context.i32_type().as_basic_type_enum(),
+            ],
+            false,
+        );
+        let result = handler.classify_argument(&context, &tdata, pair);
+        assert!(result.is_pointer_type(), "two-member struct passes byval");
+
+        // { float, int } mixed: byval pointer (no two-eightbyte promotion)
+        let mixed = context.struct_type(
+            &[
+                context.f32_type().as_basic_type_enum(),
+                context.i32_type().as_basic_type_enum(),
+            ],
+            false,
+        );
+        let result = handler.classify_argument(&context, &tdata, mixed);
+        assert!(result.is_pointer_type(), "mixed float/int struct passes byval");
+
+        // Nested single multi-field struct: byval pointer (no recursive extraction)
+        let wrap = context.struct_type(&[pair.as_basic_type_enum()], false);
+        let result = handler.classify_argument(&context, &tdata, wrap);
+        assert!(
+            result.is_pointer_type(),
+            "wrapper over a two-member struct passes byval"
+        );
+    }
+
+    #[test]
+    fn test_wasm_extracted_field_helper() {
+        let machine = setup_wasm_target_machine();
+        let tdata = machine.get_target_data();
+        let context = Context::create();
+
+        let one_i32 = context.struct_type(&[context.i32_type().as_basic_type_enum()], false);
+        assert_eq!(
+            wasm_extracted_field(&tdata, one_i32.as_basic_type_enum()),
+            Some(context.i32_type().as_basic_type_enum())
+        );
+
+        let pair = context.struct_type(
+            &[
+                context.i32_type().as_basic_type_enum(),
+                context.i32_type().as_basic_type_enum(),
+            ],
+            false,
+        );
+        assert_eq!(wasm_extracted_field(&tdata, pair.as_basic_type_enum()), None);
+
+        // Scalars: None (no coercion needed)
+        assert_eq!(
+            wasm_extracted_field(&tdata, context.i32_type().as_basic_type_enum()),
+            None
         );
     }
 }

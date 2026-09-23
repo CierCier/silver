@@ -9,7 +9,7 @@ use inkwell::module::Linkage;
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetData, TargetMachine,
 };
-use inkwell::types::BasicType;
+use inkwell::types::{AsTypeRef, BasicType, BasicTypeEnum};
 use inkwell::values::AsValueRef;
 use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, PointerValue};
 
@@ -820,7 +820,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             crate::profiler::end_phase("emit backtrace table");
 
             crate::profiler::begin_phase("LLVM opt passes");
-            generate::run_module_optimization_passes(&generator.module, &machine, opt_level)?;
+            generate::run_module_optimization_passes(
+                &generator.module,
+                &machine,
+                generate::wasm_min_opt_level(Some(&effective_triple), opt_level),
+            )?;
             crate::profiler::end_phase("LLVM opt passes");
 
             crate::profiler::begin_phase("finalize debug info");
@@ -858,7 +862,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         crate::profiler::end_phase("emit backtrace table");
 
         crate::profiler::begin_phase("LLVM opt passes");
-        generate::run_module_optimization_passes(&generator.module, &machine, opt_level)?;
+        generate::run_module_optimization_passes(
+            &generator.module,
+            &machine,
+            generate::wasm_min_opt_level(Some(&effective_triple), opt_level),
+        )?;
         crate::profiler::end_phase("LLVM opt passes");
 
         crate::profiler::begin_phase("finalize debug info");
@@ -1484,6 +1492,163 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             kind: Box::new(ast::TypeKind::Primitive(prim)),
             span: crate::lexer::Span::default(),
         })
+    }
+
+    /// Fetch (or create) the canonical LLVM declaration for a WebAssembly
+    /// intrinsic. `add_function` would produce a declaration without the
+    /// intrinsic's required attributes/immarg markers, which the wasm backend
+    /// then fails to select; `LLVMGetIntrinsicDeclaration` returns the proper
+    /// signature-attributed intrinsic.
+    fn wasm_intrinsic(
+        &mut self,
+        name: &str,
+        params: &[BasicTypeEnum<'ctx>],
+    ) -> FunctionValue<'ctx> {
+        let cname = std::ffi::CString::new(name).expect("intrinsic name has no NUL");
+        let mut param_refs: Vec<llvm_sys::prelude::LLVMTypeRef> =
+            params.iter().map(|p| p.as_type_ref()).collect();
+        let value = unsafe {
+            let id = llvm_sys::core::LLVMLookupIntrinsicID(cname.as_ptr(), name.len());
+            llvm_sys::core::LLVMGetIntrinsicDeclaration(
+                self.module.as_mut_ptr(),
+                id,
+                param_refs.as_mut_ptr(),
+                param_refs.len(),
+            )
+        };
+        unsafe { FunctionValue::new(value) }.expect("intrinsic declaration is a FunctionValue")
+    }
+
+    /// True when this module targets a WebAssembly triple.
+    fn is_wasm_target(&self) -> bool {
+        crate::codegen::abi::target_is_wasm(Some(
+            self.module.get_triple().as_str().to_str().unwrap_or(""),
+        ))
+    }
+
+    /// `@wasm_memory_size()` -> u32: current linear memory size in 64 KiB
+    /// pages, via the `llvm.wasm.memory.size.i32` intrinsic. The memory index
+    /// argument is always 0 (the default linear memory).
+    pub(crate) fn wasm_memory_size_codegen(
+        &mut self,
+        expr: &ast::Expression,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        if !self.is_wasm_target() {
+            return Err(CodegenError::with_span(
+                "@wasm_memory_size is only available on WebAssembly targets (the native linear memory model has no page counter)",
+                expr.span,
+            ));
+        }
+        let intrinsic_name = "llvm.wasm.memory.size.i32";
+        let function = self.wasm_intrinsic(intrinsic_name, &[self.context.i32_type().as_basic_type_enum()]);
+        let zero = self.context.i32_type().const_int(0, false);
+        let call = self
+            .builder
+            .build_call(
+                function,
+                &[zero.into()],
+                "wasm_memory_size",
+            )
+            .map_err(|e| CodegenError::with_span(format!("wasm memory.size call failed: {e}"), expr.span))?;
+        call.try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::with_span("wasm memory.size returned void".to_string(), expr.span))
+    }
+
+    /// `@wasm_memory_grow(delta)` -> i32: grow linear memory by `delta` pages,
+    /// returning the previous size or -1, via `llvm.wasm.memory.grow.i32`.
+    pub(crate) fn wasm_memory_grow_codegen(
+        &mut self,
+        expr: &ast::Expression,
+        delta: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        if !self.is_wasm_target() {
+            return Err(CodegenError::with_span(
+                "@wasm_memory_grow is only available on WebAssembly targets (native memory grows via the OS allocator seam instead)",
+                expr.span,
+            ));
+        }
+        let delta_u32 = if delta.is_int_value() {
+            let i32_ty = self.context.i32_type();
+            if delta.into_int_value().get_type().get_bit_width() == 32 {
+                delta
+            } else {
+                self.builder
+                    .build_int_cast(delta.into_int_value(), i32_ty, "wasm_grow_delta")
+                    .map_err(|e| CodegenError::with_span(format!("wasm memory.grow cast failed: {e}"), expr.span))?
+                    .as_basic_value_enum()
+            }
+        } else {
+            return Err(CodegenError::with_span(
+                "@wasm_memory_grow expects an integer page delta",
+                expr.span,
+            ));
+        };
+        // i32 @llvm.wasm.memory.grow.i32(i32 immarg memidx, i32 delta)
+        let intrinsic_name = "llvm.wasm.memory.grow.i32";
+        let function = self.wasm_intrinsic(
+            intrinsic_name,
+            &[
+                self.context.i32_type().as_basic_type_enum(),
+                self.context.i32_type().as_basic_type_enum(),
+            ],
+        );
+        let zero = self.context.i32_type().const_int(0, false);
+        let call = self
+            .builder
+            .build_call(
+                function,
+                &[zero.into(), delta_u32.into()],
+                "wasm_memory_grow",
+            )
+            .map_err(|e| CodegenError::with_span(format!("wasm memory.grow call failed: {e}"), expr.span))?;
+        call.try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::with_span("wasm memory.grow returned void".to_string(), expr.span))
+    }
+
+    /// `@call_main()` -> i32: locate the user program's `main` in the module
+    /// (tree-shaking keeps it as a root) and call it, normalizing the exit code
+    /// to i32 (void -> 0, i64 -> trunc). Used by the WebAssembly `_start`, which
+    /// has no x86 asm trampoline to make the call signature-agnostic.
+    pub(crate) fn call_main_codegen(
+        &mut self,
+        expr: &ast::Expression,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let function = self.module.get_function("main").ok_or_else(|| {
+            CodegenError::with_span(
+                "@call_main found no `main` function in the module".to_string(),
+                expr.span,
+            )
+        })?;
+        let call = self
+            .builder
+            .build_call(function, &[], "call_main")
+            .map_err(|e| CodegenError::with_span(format!("@call_main call failed: {e}"), expr.span))?;
+        let Some(value) = call.try_as_basic_value().basic() else {
+            // `void main()`: exit code 0.
+            return Ok(self.context.i32_type().const_int(0, false).as_basic_value_enum());
+        };
+        if !value.is_int_value() {
+            return Err(CodegenError::with_span(
+                "`main` must return an integer (i32/i64) or void".to_string(),
+                expr.span,
+            ));
+        }
+        let int = value.into_int_value();
+        let width = int.get_type().get_bit_width();
+        if width == 32 {
+            return Ok(value);
+        }
+        let normalized = if width < 32 {
+            self.builder
+                .build_int_z_extend(int, self.context.i32_type(), "main_rc")
+        } else {
+            self.builder
+                .build_int_truncate(int, self.context.i32_type(), "main_rc")
+        }
+        .map_err(|e| CodegenError::with_span(format!("@call_main return coercion failed: {e}"), expr.span))?;
+        Ok(normalized.as_basic_value_enum())
     }
 
     pub(crate) fn size_codegen(

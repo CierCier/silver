@@ -48,6 +48,35 @@ pub enum Type {
     Unknown,
 }
 
+impl Type {
+    /// True when the type mentions 80-bit floats (`f80`/`c80`) anywhere,
+    /// including nested positions (`Vec<f80>`, `f80*`, `f80` return types).
+    /// Used by the WebAssembly target gate: wasm has no 80-bit float type.
+    pub fn contains_extended_float(&self) -> bool {
+        match self {
+            Type::Primitive(ast::PrimitiveType::F80 | ast::PrimitiveType::C80) => true,
+            Type::Primitive(_) | Type::Unit | Type::Never | Type::Unknown => false,
+            Type::Named { generics, .. } => generics.iter().any(Self::contains_extended_float),
+            Type::Reference { inner, .. }
+            | Type::Pointer { inner, .. }
+            | Type::Slice { element: inner }
+            | Type::Task(inner)
+            | Type::Optional { inner }
+            | Type::Array {
+                element: inner, ..
+            } => inner.contains_extended_float(),
+            Type::Tuple(items) => items.iter().any(Self::contains_extended_float),
+            Type::Function {
+                params,
+                return_type,
+            } => {
+                params.iter().any(Self::contains_extended_float)
+                    || return_type.contains_extended_float()
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TypeLayout {
     pub size: Option<usize>,

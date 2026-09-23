@@ -12,6 +12,8 @@ use crate::driver::CompilePlan;
 /// - `GnuLd`: GNU ld / ld.lld / mold via GNU flags (ELF, Mach-O).
 /// - `LldLink`: COFF linking with MSVC-style flags — `lld-link`, or the MSVC
 ///   toolchain `link.exe` located via vswhere as a drop-in replacement.
+/// - `WasmLd`: wasm-ld linking a standalone WebAssembly module from wasm
+///   object files (`--no-standard-libraries`, custom `_start` entry).
 /// - `UnsupportedMinGW`: MinGW triples use the Win64 ABI for codegen but need
 ///   a dedicated GNU-ld-on-PE link flavor (mingw CRT, `-Wl` flags) that does
 ///   not exist yet; linking fails with a clear error instead of silently
@@ -20,6 +22,7 @@ use crate::driver::CompilePlan;
 pub(crate) enum LinkFlavor {
     GnuLd,
     LldLink,
+    WasmLd,
     UnsupportedMinGW,
 }
 
@@ -28,6 +31,9 @@ impl LinkFlavor {
     /// given the host is assumed: windows hosts link via the MSVC model,
     /// everything else via the GNU model.
     fn for_target(target: Option<&str>) -> Self {
+        if crate::codegen::abi::target_is_wasm(target) {
+            return Self::WasmLd;
+        }
         let is_windows = crate::codegen::abi::target_is_windows(target);
         let is_mingw = target
             .map(|t| t.to_ascii_lowercase().contains("mingw"))
@@ -391,6 +397,7 @@ pub(crate) fn link_exe(
         LinkFlavor::LldLink => {
             link_exe_with_lld_link(plan, object_paths, dependency_paths, native_libs)
         }
+        LinkFlavor::WasmLd => link_exe_with_wasm_ld(plan, object_paths, dependency_paths),
         LinkFlavor::UnsupportedMinGW => Err(MINGW_UNSUPPORTED_ERR.to_string()),
         LinkFlavor::GnuLd => link_exe_with_ld_lld(
             plan,
@@ -404,6 +411,56 @@ pub(crate) fn link_exe(
             })
         }),
     }
+}
+
+/// WebAssembly link via wasm-ld.
+///
+/// Produces a standalone `.wasm` module with `_start` as the entry point.
+/// std and the program's own code are already inside the objects (static,
+/// no-libc model like every Silver target); WASI imports resolve in the host
+/// runtime (node, wasmtime, wasmer) at instantiation.
+pub(crate) fn link_exe_with_wasm_ld(
+    plan: &CompilePlan,
+    object_paths: &[PathBuf],
+    dependency_paths: &[PathBuf],
+) -> Result<(), String> {
+    let lld_name = if command_exists("wasm-ld") {
+        "wasm-ld"
+    } else if command_exists("ld.lld") {
+        // Unified lld: `-flavor wasm` selects the wasm driver.
+        "lld"
+    } else {
+        return Err(
+            "no wasm linker found: install LLVM (wasm-ld), or set SILVER_LINKER".to_string(),
+        );
+    };
+
+    let mut link = Command::new(lld_name);
+    if lld_name == "lld" {
+        link.arg("-flavor").arg("wasm");
+    }
+    // WASI command model: `_start` is an exported function the host runtime
+    // calls (node's `wasi.start`, wasmtime's default), NOT a wasm start
+    // section, so --no-entry + --export keeps it from running at
+    // instantiation and then again from the host.
+    link.arg("--no-entry");
+    link.arg("--export=_start");
+    link.arg("-o").arg(&plan.output);
+    // WASI imports resolve in the host, so the symbols stay undefined here.
+    link.arg("--allow-undefined");
+    // The linear stack: 1 MiB matches the runtime's expectations for deep
+    // recursion in parser/fmt code paths. Placed first so stack overflow
+    // traps on unmapped memory instead of corrupting the heap.
+    link.arg("-z").arg("stack-size=1048576");
+    link.arg("--stack-first");
+    link.arg("--gc-sections");
+    for obj in object_paths {
+        link.arg(obj);
+    }
+    for dep in dependency_paths {
+        link.arg(dep);
+    }
+    run_tool(link, "wasm linker")
 }
 
 /// Windows-flavored executable link via `lld-link` (or MSVC link.exe).
@@ -655,6 +712,11 @@ pub(crate) fn link_shared_module(
     let flavor = LinkFlavor::for_target(plan.target.as_deref());
     if flavor == LinkFlavor::UnsupportedMinGW {
         return Err(MINGW_UNSUPPORTED_ERR.to_string());
+    }
+    if flavor == LinkFlavor::WasmLd {
+        return Err(
+            "shared modules (--shared) are not yet supported for WebAssembly targets; build modules without --shared".to_string(),
+        );
     }
     if flavor == LinkFlavor::LldLink {
         let mut link = find_lld_link()?;

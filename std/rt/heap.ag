@@ -442,37 +442,18 @@ impl Heap {
         }
         stack.drop();
 
-        // Sweep phase: release unmarked occupied slots using 16-slot SIMD chunk scan.
+        // Sweep phase: release unmarked occupied slots.
+        //
+        // NOTE: deliberately scalar. A previous 16-slot SIMD chunk scan had
+        // two independent bugs: (1) `pandn %xmm0, %xmm1` in AT&T syntax
+        // computes (~xmm1) & xmm0 = ~occupied & marked — the complement of
+        // the sweep condition — and (2) `pmovmskb` extracts bit 7 of each
+        // byte, which is always 0 for byte-sized 0/1 booleans. The mask was
+        // therefore always 0 and full-chunk slots silently leaked. The scalar
+        // loop below is correct for every slot_count; revisit SIMD only with
+        // a mask-based (1 bit per slot) occupied/mark representation.
         i64 freed = 0;
         i = 0;
-        bool* occ_ptr = self.occupied.data;
-        bool* mark_ptr = self.marked.data;
-
-        while (i + 16 <= slot_count) {
-            i64 sweep_mask = asm("
-                movq %rax, %r8
-                movq %rdi, %r9
-                movdqu (%r8), %xmm0
-                movdqu (%r9), %xmm1
-                pandn %xmm0, %xmm1
-                pmovmskb %xmm1, %eax
-                movzwq %ax, %rax
-            ", [(u8*)&mark_ptr[i], (u8*)&occ_ptr[i]], ["r8", "r9", "xmm0", "xmm1"]);
-
-            while (sweep_mask != 0) {
-                i64 bit = asm("bsfq %rax, %rax", [sweep_mask], []);
-                i64 slot = i + bit;
-                Object* object = self.objects.get_ptr(slot);
-                object.drop();
-                *object = Object.blank();
-                self.occupied.set(slot, false);
-                self.generations.set(slot, self.generations.get(slot) + (u32)1);
-                self.free_list.push((u32)slot);
-                freed = freed + 1;
-                sweep_mask = sweep_mask & (sweep_mask - 1);
-            }
-            i = i + 16;
-        }
 
         while (i < slot_count) {
             if (self.occupied.get(i) && !self.marked.get(i)) {

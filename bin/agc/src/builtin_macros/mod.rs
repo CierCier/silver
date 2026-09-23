@@ -56,6 +56,9 @@ impl MacroRegistry {
         registry.register("memset", Box::new(MemsetHandler));
         registry.register("memmove", Box::new(MemmoveHandler));
         registry.register("drop_in_place", Box::new(DropInPlaceHandler));
+        registry.register("wasm_memory_size", Box::new(WasmMemorySizeHandler));
+        registry.register("wasm_memory_grow", Box::new(WasmMemoryGrowHandler));
+        registry.register("call_main", Box::new(CallMainHandler));
         registry.register("file", Box::new(FileHandler));
         registry.register("line", Box::new(LineHandler));
         registry.register("column", Box::new(ColumnHandler));
@@ -311,6 +314,119 @@ impl MacroHandler for DropInPlaceHandler {
 }
 
 pub struct FileHandler;
+
+pub struct CallMainHandler;
+
+/// `@call_main()` -> i32: invoke the user program's `main` and yield its exit
+/// code (0 for `void main`). Native targets call `main` from an x86 `_start`
+/// blob that is signature-agnostic; wasm has no such trampoline, so the
+/// portable Silver entry (std/sys/entry.ag, os.wasi branch) uses this builtin
+/// to reach `main` with whatever declared return type it has.
+impl MacroHandler for CallMainHandler {
+    fn type_check(
+        &self,
+        checker: &mut TypeChecker,
+        _name: &str,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> Type {
+        if !args.is_empty() {
+            checker.error("@call_main expects no arguments", expr.span);
+        }
+        Type::Primitive(ast::PrimitiveType::I32)
+    }
+
+    fn codegen<'ctx>(
+        &self,
+        generator: &mut LlvmIrGenerator<'ctx>,
+        _name: &str,
+        expr: &ast::Expression,
+        _args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        generator.call_main_codegen(expr)
+    }
+}
+
+pub struct WasmMemorySizeHandler;
+
+/// `@wasm_memory_size()` -> u32: current linear memory size in 64 KiB pages.
+/// Lowers to the `llvm.wasm.memory.size` intrinsic; a compile error on native
+/// targets (there is no linear memory to query).
+impl MacroHandler for WasmMemorySizeHandler {
+    fn type_check(
+        &self,
+        checker: &mut TypeChecker,
+        _name: &str,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> Type {
+        if !args.is_empty() {
+            checker.error(
+                "@wasm_memory_size expects no arguments",
+                expr.span,
+            );
+        }
+        Type::Primitive(ast::PrimitiveType::U32)
+    }
+
+    fn codegen<'ctx>(
+        &self,
+        generator: &mut LlvmIrGenerator<'ctx>,
+        _name: &str,
+        expr: &ast::Expression,
+        _args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        generator.wasm_memory_size_codegen(expr)
+    }
+}
+
+pub struct WasmMemoryGrowHandler;
+
+/// `@wasm_memory_grow(delta)` -> i32: grow linear memory by `delta` 64 KiB
+/// pages, returning the previous size in pages or -1 on failure. Lowers to
+/// the `llvm.wasm.memory.grow` intrinsic; a compile error on native targets.
+impl MacroHandler for WasmMemoryGrowHandler {
+    fn type_check(
+        &self,
+        checker: &mut TypeChecker,
+        _name: &str,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> Type {
+        if args.len() != 1 {
+            checker.error(
+                "@wasm_memory_grow expects exactly one argument (page delta)",
+                expr.span,
+            );
+            return Type::Unknown;
+        }
+        let ast::MacroArg::Expression(inner) = &args[0] else {
+            checker.error(
+                "@wasm_memory_grow expects exactly one argument (page delta)",
+                expr.span,
+            );
+            return Type::Unknown;
+        };
+        checker.check_expr(inner, None)
+    }
+
+    fn codegen<'ctx>(
+        &self,
+        generator: &mut LlvmIrGenerator<'ctx>,
+        _name: &str,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let Some(ast::MacroArg::Expression(inner)) = args.first() else {
+            return Err(CodegenError::with_span(
+                "@wasm_memory_grow expects exactly one argument (page delta)",
+                expr.span,
+            ));
+        };
+        let delta = generator.emit_expression_value(inner)?;
+        generator.wasm_memory_grow_codegen(expr, delta)
+    }
+}
 
 impl MacroHandler for FileHandler {
     fn type_check(

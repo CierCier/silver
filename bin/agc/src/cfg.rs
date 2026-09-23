@@ -120,7 +120,9 @@ pub fn add_derived_cfgs(set: &mut CfgSet, opt_level: Option<&str>, target: Optio
 }
 
 /// Best-effort OS extraction from a target triple: the token that matches a
-/// known OS name, else the vendor position.
+/// known OS name, else the vendor position. WASI triples (wasm32-wasi,
+/// wasm32-wasip1, wasm32-wasip2) normalize to `wasi` regardless of where the
+/// token sits, so `@cfg(os.wasi)` gates the std seam consistently.
 fn triple_os(triple: &str) -> &str {
     for os in [
         "linux", "darwin", "macos", "windows", "freebsd", "netbsd", "openbsd", "solaris",
@@ -130,7 +132,13 @@ fn triple_os(triple: &str) -> &str {
             return os;
         }
     }
-    triple.split('-').nth(1).unwrap_or("unknown")
+    let parts: Vec<&str> = triple.split('-').collect();
+    for part in &parts {
+        if *part == "wasi" || part.starts_with("wasip") {
+            return "wasi";
+        }
+    }
+    parts.get(1).copied().unwrap_or("unknown")
 }
 
 /// A malformed `#[cfg(...)]` attribute.
@@ -492,6 +500,27 @@ mod tests {
         add_derived_cfgs(&mut set, None, Some("aarch64-apple-darwin"));
         assert!(set.contains("arch.aarch64"));
         assert!(set.contains("os.darwin"));
+    }
+
+    #[test]
+    fn derives_os_wasi_from_wasi_triples() {
+        for triple in [
+            "wasm32-wasip1",
+            "wasm32-wasi",
+            "wasm32-unknown-wasip1",
+            "wasm64-wasip2",
+        ] {
+            let mut set = CfgSet::default();
+            add_derived_cfgs(&mut set, None, Some(triple));
+            assert!(set.contains("os.wasi"), "{triple} derives os.wasi");
+            assert!(!set.contains("os.unknown"), "{triple} is not os.unknown");
+        }
+
+        // unknown-unknown keeps the vendor-fallback name.
+        let mut set = CfgSet::default();
+        add_derived_cfgs(&mut set, None, Some("wasm32-unknown-unknown"));
+        assert!(set.contains("os.unknown"));
+        assert!(!set.contains("os.wasi"));
     }
 
     #[test]

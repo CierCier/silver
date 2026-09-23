@@ -357,8 +357,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             for (index, param_ty) in sig.params.iter().enumerate() {
                 let lowered = self.lower_basic_type(param_ty)?;
                 if let BasicTypeEnum::StructType(struct_ty) = lowered {
-                    let size = target_data.get_store_size(&struct_ty);
-                    if self.abi_handler.needs_byval(size) {
+                    if self
+                        .abi_handler
+                        .struct_needs_byval(self.context, &target_data, struct_ty)
+                    {
                         let byval_kind = Attribute::get_named_enum_kind_id("byval");
                         let attr = self
                             .context
@@ -842,8 +844,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let selected_name = selected.as_ref().map(|(name, _)| name.clone());
         let selected_fn = selected.map(|(_, function)| function);
 
-        let function = if let Some(function) = selected_fn {
-            function
+        let (function, lazy_name): (_, Option<String>) = if let Some(function) = selected_fn
+        {
+            (function, None)
         } else {
             let receiver_ty = self.resolve_receiver_type(receiver);
 
@@ -851,14 +854,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 if let Some(instantiated_name) =
                     self.try_instantiate_generic_impl_method_for_type(&receiver_ty, &method.name)?
                 {
-                    self.module
+                    let function = self
+                        .module
                         .get_function(&instantiated_name)
                         .ok_or_else(|| {
                             CodegenError::with_span(
                                 format!("failed to materialize method `{}`", method.name),
                                 method.span,
                             )
-                        })?
+                        })?;
+                    (function, Some(instantiated_name))
                 } else {
                     return Err(CodegenError::with_span(
                         format!("unknown method `{}`", method.name),
@@ -873,7 +878,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
         };
 
-        let call_name = selected_name.clone().unwrap_or_else(|| method.name.clone());
+        // The lazy path materializes (and registers) the mangled instance
+        // after selection ran: resolve the signature against the MATERIALIZED
+        // name. Otherwise conversion, drop-flag clearing, user casts, and ABI
+        // coercion are silently skipped for lazily-instantiated generic
+        // methods (native targets tolerate the resulting int-width
+        // mismatches; wasm validation rejects them).
+        let call_name = selected_name
+            .or(lazy_name)
+            .unwrap_or_else(|| method.name.clone());
         let signature = self.signature_for_name(&call_name);
         let declared_param_count = signature
             .as_ref()
@@ -1301,8 +1314,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             for (index, param_ty) in sig.params.iter().enumerate() {
                 let lowered = self.lower_basic_type(param_ty)?;
                 if let BasicTypeEnum::StructType(struct_ty) = lowered {
-                    let size = target_data.get_store_size(&struct_ty);
-                    if self.abi_handler.needs_byval(size) {
+                    if self
+                        .abi_handler
+                        .struct_needs_byval(self.context, &target_data, struct_ty)
+                    {
                         let byval_kind = Attribute::get_named_enum_kind_id("byval");
                         let attr = self
                             .context

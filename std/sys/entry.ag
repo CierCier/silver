@@ -1,22 +1,26 @@
 // std/sys/entry.ag — Silver _start entry point for static (no-libc) binaries.
-import std.cpu;
 import std.io.file;
 import std.rt.builtins;
 import std.rt.thread_registry;
 import std.sys.os;
-import std.thread;
 //
 // Importing this module inlines a `_start` symbol that:
-//   1. Zeroes %rbp (ABI: marks outermost stack frame).
-//   2. Loads argc from (%rsp) into %rdi (first arg to main).
-//   3. Computes argv = rsp+8 into %rsi (second arg, for future use).
-//   4. Re-aligns the stack to 16 bytes (and $-16, %rsp).
-//   5. Calls __silver_cpu_init() so @cfg(cpu.*) probe globals are set.
-//   6. Calls main().
-//   7. Saves return value in %r12, calls __silver_thread_registry_join_all()
-//      so every spawned thread finishes before exit, then calls
-//      __silver_flush_all() to flush any buffered I/O (BufWriter STDOUT/STDERR).
-//   8. Restores the return value into %rdi and invokes exit_group via syscall 231.
+//   1. Sets up argc/argv/envp for the platform.
+//   2. Runs platform init (CPU feature probe on x86; nothing on wasm).
+//   3. Calls the user program's `main`.
+//   4. Waits for spawned threads, flushes buffered I/O, reports leaks.
+//   5. Exits the process with main's return value (or 1 on a leak).
+//
+// Platform entry points:
+//   - Linux x86_64: a raw ET_EXEC `_start` blob reads argc/argv/envp off the
+//     process stack and exits via exit_group (syscall 231).
+//   - Windows: `_start` is the /ENTRY point; argc/argv come from
+//     GetCommandLineW/CommandLineToArgvW and exit is ExitProcess.
+//   - WebAssembly (wasi): a portable `_start` built from WASI preview1
+//     imports — args_sizes_get/args_get, proc_exit. No registers, no rbp, no
+//     cpuid, no clone. `main` is reached through the `@call_main()` builtin,
+//     which calls the declared `main` symbol at whatever return type it has
+//     (the x86 blobs are signature-agnostic only because they are asm).
 //
 // Usage:
 //   import std.sys.entry;       // in any Silver program (linking is always static; no libc)
@@ -24,11 +28,6 @@ import std.thread;
 //
 // The module's _start is inlined into the consumer's object file by the import
 // hook, so no separate linking step is needed.
-extern "C" {
-    i32 __silver_argc;
-    i8** __silver_argv;
-    i8** __silver_envp;
-}
 
 i32 silver_argc() {
     return __silver_argc;
@@ -41,6 +40,112 @@ i8** silver_argv() {
 i8** silver_envp() {
     return __silver_envp;
 }
+
+if (@cfg(os.wasi)) {
+    // WebAssembly / WASI preview1 entry.
+    //
+    // The argv/envp globals are real Silver globals here (the x86 entries
+    // define them out of a `.bss` section directive inside an asm blob, which
+    // wasm cannot express).
+    i32 __silver_argc;
+    i8** __silver_argv;
+    i8** __silver_envp;
+
+    extern "C" {
+        #[link_module("wasi_snapshot_preview1")]
+        #[link_name("args_sizes_get")]
+        i32 wasi_args_sizes_get(u32* argc, u32* buf_size);
+        #[link_module("wasi_snapshot_preview1")]
+        #[link_name("args_get")]
+        i32 wasi_args_get(i8** argv, u8* argv_buf);
+        #[link_module("wasi_snapshot_preview1")]
+        #[link_name("environ_sizes_get")]
+        i32 wasi_environ_sizes_get(u32* count, u32* buf_size);
+        #[link_module("wasi_snapshot_preview1")]
+        #[link_name("environ_get")]
+        i32 wasi_environ_get(i8** environ, u8* environ_buf);
+        #[link_module("wasi_snapshot_preview1")]
+        #[link_name("proc_exit")]
+        void wasi_proc_exit(i32 code);
+    }
+
+    void _start() {
+        __silver_wasi_arg_setup();
+        __silver_wasi_env_setup();
+        i32 rc = @call_main();
+        __silver_thread_registry_join_all();
+        __silver_flush_all();
+        i32 leak = __silver_leak_check_report();
+        if (leak != 0) {
+            rc = 1;
+        }
+        wasi_proc_exit(rc);
+    }
+
+    /// Fill __silver_argc/__silver_argv from WASI args_sizes_get/args_get.
+    /// The pointer array and string bytes come from one page allocation that
+    /// lives for the process lifetime. On wasm32 an `i8*` is 4 bytes.
+    void __silver_wasi_arg_setup() {
+        u32 argc = 0;
+        u32 buf_size = 0;
+        if (wasi_args_sizes_get(&argc, &buf_size) != 0) {
+            __silver_argc = 0;
+            __silver_argv = (i8**)0;
+            return;
+        }
+        i64 ptr_bytes = ((i64)argc + 1) * 4;
+        u8* block = mem_sys_alloc(ptr_bytes + (i64)buf_size + 1);
+        if (block == (u8*)0) {
+            __silver_argc = 0;
+            __silver_argv = (i8**)0;
+            return;
+        }
+        i8** argv = (i8**)block;
+        u8* argbuf = block + ptr_bytes;
+        if (wasi_args_get(argv, argbuf) != 0) {
+            __silver_argc = 0;
+            __silver_argv = (i8**)0;
+            return;
+        }
+        argv[argc] = (i8*)0;
+        __silver_argc = (i32)argc;
+        __silver_argv = argv;
+    }
+
+    /// Fill __silver_envp from WASI environ_sizes_get/environ_get. WASI passes
+    /// environment variables as a NUL-separated "KEY=VALUE" block, which is
+    /// exactly what std.env expects.
+    void __silver_wasi_env_setup() {
+        u32 count = 0;
+        u32 buf_size = 0;
+        if (wasi_environ_sizes_get(&count, &buf_size) != 0) {
+            __silver_envp = (i8**)0;
+            return;
+        }
+        i64 ptr_bytes = ((i64)count + 1) * 4;
+        u8* block = mem_sys_alloc(ptr_bytes + (i64)buf_size + 1);
+        if (block == (u8*)0) {
+            __silver_envp = (i8**)0;
+            return;
+        }
+        i8** envp = (i8**)block;
+        u8* envbuf = block + ptr_bytes;
+        if (wasi_environ_get(envp, envbuf) != 0) {
+            __silver_envp = (i8**)0;
+            return;
+        }
+        envp[count] = (i8*)0;
+        __silver_envp = envp;
+    }
+} else {
+    import std.cpu;
+    import std.thread;
+
+    extern "C" {
+        i32 __silver_argc;
+        i8** __silver_argv;
+        i8** __silver_envp;
+    }
 
 if (@cfg(os.linux)) {
     // Linux entry: raw ET_EXEC _start. argc/argv come off the process stack and
@@ -176,4 +281,5 @@ if (@cfg(os.linux)) {
         __silver_argv = argv;
         win_LocalFree((u8*)argvw);
     }
+}
 }

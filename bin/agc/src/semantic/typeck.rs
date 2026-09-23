@@ -76,6 +76,9 @@ pub struct TypeChecker {
     /// Checked at every concrete monomorphization request.
     current_implicit_reqs: Vec<ImplicitReq>,
     implicit_reqs: HashMap<String, Vec<ImplicitReq>>,
+    /// Target triple of the compilation unit (empty = host default). Used for
+    /// target-gated semantic checks, e.g. rejecting `launch` on wasm.
+    pub target_triple: String,
     /// Trait-style method calls on bare type params, deferred until concrete
     /// monomorphization.
     current_implicit_method_reqs: Vec<ImplicitMethodReq>,
@@ -712,7 +715,11 @@ impl TypeChecker {
                     let fields = struct_item
                         .fields
                         .iter()
-                        .map(|field| (field.name.name.clone(), Type::from_ast(&field.field_type)))
+                        .map(|field| {
+                            let ty = Type::from_ast(&field.field_type);
+                            self.reject_wasm_extended_float(&ty, field.field_type.span);
+                            (field.name.name.clone(), ty)
+                        })
                         .collect::<HashMap<_, _>>();
                     self.struct_defs.insert(
                         struct_item.name.name.clone(),
@@ -915,6 +922,9 @@ impl TypeChecker {
             .as_ref()
             .map(Type::from_ast)
             .unwrap_or(Type::Unit);
+        if let Some(ast_ty) = func.return_type.as_ref() {
+            self.reject_wasm_extended_float(&return_type, ast_ty.span);
+        }
         self.current_return = Some(return_type);
 
         self.push_scope();
@@ -926,6 +936,7 @@ impl TypeChecker {
                 };
             }
             self.reject_plain_void_value_type(&param_type, param.param_type.span);
+            self.reject_wasm_extended_float(&param_type, param.param_type.span);
             self.bind(&param.name.name, param_type, param.is_mutable, param.span);
         }
         self.check_block(&func.body);
@@ -943,6 +954,9 @@ impl TypeChecker {
             .as_ref()
             .map(|t| self.substitute_self_type(&Type::from_ast(t), self_ty))
             .unwrap_or(Type::Unit);
+        if let Some(ast_ty) = func.return_type.as_ref() {
+            self.reject_wasm_extended_float(&return_type, ast_ty.span);
+        }
         self.current_return = Some(return_type);
 
         self.push_scope();
@@ -954,6 +968,7 @@ impl TypeChecker {
                 };
             }
             self.reject_plain_void_value_type(&param_type, param.param_type.span);
+            self.reject_wasm_extended_float(&param_type, param.param_type.span);
             self.bind(&param.name.name, param_type, param.is_mutable, param.span);
         }
         self.check_block(&func.body);
@@ -966,12 +981,14 @@ impl TypeChecker {
 
     fn check_impl_cast(&mut self, self_ty: &Type, cast: &ast::ImplCast) {
         let return_type = self.substitute_self_type(&Type::from_ast(&cast.target_type), self_ty);
+        self.reject_wasm_extended_float(&return_type, cast.target_type.span);
         self.current_return = Some(return_type);
 
         self.push_scope();
         for param in &cast.parameters {
             let param_type = self.substitute_self_type(&Type::from_ast(&param.param_type), self_ty);
             self.reject_plain_void_value_type(&param_type, param.param_type.span);
+            self.reject_wasm_extended_float(&param_type, param.param_type.span);
             self.bind(&param.name.name, param_type, param.is_mutable, param.span);
         }
         self.check_block(&cast.body);
@@ -1026,6 +1043,7 @@ impl TypeChecker {
                 if let Some(annotation) = &let_stmt.type_annotation {
                     let declared = self.type_from_ast(annotation);
                     self.reject_plain_void_value_type(&declared, annotation.span);
+                    self.reject_wasm_extended_float(&declared, annotation.span);
 
                     if let Some(init) = &let_stmt.initializer {
                         let init_type = self.check_expr(init, Some(&declared));
@@ -1905,6 +1923,7 @@ impl TypeChecker {
             } => {
                 let from = self.check_expr(expression, None);
                 let to = Type::from_ast(target_type);
+                self.reject_wasm_extended_float(&to, target_type.span);
                 if !self.is_castable(&from, &to) {
                     self.error(msg::invalid_cast(&from, &to), expr.span);
                 }
@@ -1991,6 +2010,15 @@ impl TypeChecker {
             }
             ast::ExpressionKind::Comptime(inner) => self.check_expr(inner, None),
             ast::ExpressionKind::Launch(inner) => {
+                // WebAssembly (WASI preview1) is single-threaded: reject
+                // `launch` at typecheck time so `agc check` catches it and
+                // users get a target-specific message before codegen.
+                if crate::codegen::abi::target_is_wasm(Some(&self.target_triple.clone())) {
+                    self.error(
+                        "`launch` is not supported on WebAssembly targets: WASI preview1 is single-threaded".to_string(),
+                        inner.span,
+                    );
+                }
                 // `launch f(args...)`: the callee must be a directly-named
                 // function (no indirect/fn-pointer launch in v1). The wrapped
                 // call is validated through the normal overload path, which
@@ -4283,6 +4311,7 @@ impl TypeChecker {
     fn check_global_variable(&mut self, var: &ast::GlobalVariableItem) {
         let declared = Type::from_ast(&var.var_type);
         self.reject_plain_void_value_type(&declared, var.var_type.span);
+        self.reject_wasm_extended_float(&declared, var.var_type.span);
         if let Some(init) = &var.initializer {
             let init_type = self.check_expr(init, Some(&declared));
             if !self.is_assignable(&declared, &init_type)
@@ -6258,6 +6287,20 @@ impl TypeChecker {
         if is_void(ty) {
             self.error(
                 "plain `void` is only valid as a function return type; use `void*` for opaque data",
+                span,
+            );
+        }
+    }
+
+    /// WebAssembly has no 80-bit float type: reject `f80`/`c80` anywhere they
+    /// enter through source-level types so `agc check` reports a
+    /// target-specific message instead of an LLVM lowering failure.
+    fn reject_wasm_extended_float(&mut self, ty: &Type, span: Span) {
+        if crate::codegen::abi::target_is_wasm(Some(&self.target_triple))
+            && ty.contains_extended_float()
+        {
+            self.error(
+                "`f80`/`c80` are not supported on WebAssembly targets: wasm has no 80-bit float type (use `f64`/`c64`)",
                 span,
             );
         }
@@ -8695,6 +8738,29 @@ mod tests {
         let program = parse("struct Foo { i32 x; } i32 main() { Foo f; i32 x = f; return x; }");
         let (errors, _) = TypeChecker::new().check_program(&program);
         assert!(!errors.is_empty(), "expected type errors");
+    }
+
+    #[test]
+    fn rejects_f80_on_wasm() {
+        let program = parse("f80 g = 1.5; f80 ident(f80 x) { return x; } i32 main() { return 0; }");
+        let checker = TypeChecker {
+            target_triple: "wasm32-wasip1".to_string(),
+            ..TypeChecker::new()
+        };
+        let (errors, _) = checker.check_program(&program);
+        assert!(!errors.is_empty(), "expected f80 wasm errors");
+        assert!(
+            errors.iter().all(|e| e.message.contains("80-bit")),
+            "all errors target-specific, got: {:?}",
+            errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn allows_f80_on_native() {
+        let program = parse("f80 g = 1.5; i32 main() { return 0; }");
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "native f80 must stay legal: {errors:?}");
     }
 
     #[test]
