@@ -1,0 +1,355 @@
+===============================================================================
+ SILVER SELF-HOSTING PARITY PLAN
+ docs/selfhost-plan.txt — 2026-09-23
+===============================================================================
+
+Goal
+----
+One day `agc` should be written in Silver and built by the Rust bootstrap
+("stage0"), producing a stage1 Silver compiler with 1:1 behavioral parity:
+same diagnostics, same codegen decisions, same test results, same artifacts.
+
+Scope of the bootstrap today
+----------------------------
+bin/agc/src: ~90.0k lines of Rust.
+  - semantic/          ~28.4k LOC (typeck.rs alone is 9,952)
+  - codegen/           ~23.3k LOC (llvm_ir/ 20.8k, dwarf_bt.rs 1,265)
+  - parser/            ~13.6k LOC (prt_parser.rs 7,173)
+  - grammar/           ~3.1k LOC on elise-core/elise-lex/elise-parse (external repo)
+  - driver/link/package/misc: remainder
+
+Everything below is grouped by severity: S1 items make a self-host compiler
+impossible or unsound; S2 items break parity (wrong or divergent behavior);
+S3 items make the port slow, fragile, or unmaintainable.
+
+Each item: WHAT the bootstrap uses today -> WHY it blocks the self-host ->
+FIX (with the stage order it must land in).
+
+===============================================================================
+ S1 — HARD BLOCKERS
+===============================================================================
+
+S1-1. LLVM is the only codegen backend, reached only through Rust bindings.
+  Evidence: inkwell 0.9 (llvm22-1 feature) + raw llvm-sys calls; 54 `unsafe`
+  blocks concentrated in codegen/llvm_ir/{entry,generate,scope}.rs;
+  codegen/dwarf_bt.rs walks raw ELF/DWARF via llvm-sys; @wasm_memory_size/
+  grow builtins call LLVMGetIntrinsicDeclaration directly.
+  Why it blocks: Silver has no FFI story for a C library with 1,500+ API
+  entry points and no stable C ABI contract to re-declare. LLVM-C is
+  technically stable, but re-declaring even the ~120 functions agc uses by
+  hand is a parity hazard: every struct-by-value ABI rule we just
+  implemented for wasm would also apply to these extern declarations, and
+  one wrong field = silent miscompilation of the compiler itself.
+  FIX (staged):
+    a. Introduce a narrow compiler-owned IR boundary. Today llvm_ir/*.rs
+       builds LLVM values inline everywhere (BasicValueEnum flows through
+       ~20k LOC). Define a minimal `Ir` layer in the bootstrap: opaque
+       instruction/value handles, a builder with ~40 ops (alloca, load,
+       store, gep, icmp, br, call, phi, switch, bitcast...), and module/
+       function/type constructors. Port llvm_ir/*.rs onto it INCREMENTALLY
+       (file by file; it still lowers to LLVM underneath). This is the
+       single largest refactor and must precede everything else.
+    b. Once llvm_ir/*.rs touches only `Ir`, write ONE LLVM lowering
+       (Rust, ~3-5k LOC) for stage0. Stage1 in Silver gets a second
+       lowering by emitting textual LLVM IR (.ll) directly to stdout/file —
+       textual IR is a stable format and needs no C FFI at all. Parity is
+       checkable with `llvm-as`/`llc` and the existing test suite.
+    c. Same treatment for dwarf_bt.rs: it reads ELF+DWARF from the object;
+       the Silver version can emit the __silver_bt_* tables by parsing the
+       .ll/assembly output of the toolchain instead of raw ELF, or defer
+       full DWARF to the toolchain (document as a known parity gap).
+  Stage: S1-1a before any Silver compiler code is written.
+
+S1-2. The PRT parser tables and the elise grammar engine.
+  Evidence: parser/prt_parser.rs (7,173) + prt_table.rs + expr_parser.rs
+  (2,415) sit on elise-core/elise-lex/elise-parse (a *separate git repo*,
+  pinned by commit in Cargo.toml). grammar/ wraps it (3,056 LOC).
+  Why it blocks: the self-host compiler must lex/parse without elise. The
+  tables ARE the grammar: hand-porting 7k lines of reduction logic while
+  keeping identical error spans/recovery is the highest-parity-risk item
+  after LLVM.
+  FIX: make the bootstrap its own harness generator.
+    a. Write a Silver program (bootstrap stage0 tool) that dumps the
+       compiled PRT tables (states, reductions, TokenClass map) to a
+       binary/JSON artifact.
+    b. Write the Silver table *interpreter* (~1k LOC: lexer spec driving +
+       reduce loop + error recovery). Interpreting tables is far smaller
+       and safer than re-translating generated Rust.
+    c. Parity gate: for every test file, stage1 token stream and AST
+       (via the existing --emit=ast style dumps, or a new `agc parse
+       --dump`) must be byte-identical to stage0's. Add this as a CI leg
+       NOW so drift is caught continuously.
+  Stage: dump tooling first (cheap), interpreter when the Silver core is
+  ready; the CI diff gate from day one.
+
+S1-3. No self-compilation loop exists at all.
+  Evidence: bootstrap/ contains only aglsp; there is no Silver "agc" tree.
+  Why it blocks: obvious, but the *shape* is a decision, not an afterthought.
+  FIX: stage the bootstrap explicitly:
+    stage0: Rust agc (today).
+    stage1: Silver agc, compiled BY stage0, output must equal stage0's
+            output on the test corpus (differential testing).
+    stage2: stage1 compiles itself; stage2 output must equal stage1's
+            output (fixpoint check).
+  Add `tests/selfhost/` with a `run_stage.sh` harness implementing the
+  stage0-vs-stage1 differential gate over the full test corpus (143 wasm +
+  199 native integration files today, plus unit-test expectations
+  mirrored in-diagnostic).
+  Stage: harness and directory scaffolding can land before any compiler
+  Silver code exists.
+
+S1-4. Closure-free std but compiler-shaped control flow requires it.
+  Evidence: 716 closure-shaped call sites in bootstrap (map/filter/iter
+  chains, rayon par_iter); Silver has NO first-class function *values*
+  (Type::Function exists — ast.rs:357 — and is used for fn-type params and
+  trait fns, but there is no closure syntax, no environment capture, and
+  no fn-pointer literal). std/iter.ag's Iterator trait is concrete-struct
+  based (documented "iterator structs stay concrete").
+  Why it blocks: rewriting 716 iterator-chain sites into while-loops is
+  mechanical but changes error-path structure and evaluation order — a
+  parity risk in typeck error emission order (diagnostics must come out in
+  the same order!).
+  FIX (pick deliberately, do not drift):
+    Option A (recommended): no closures in the language; port with
+      concrete iterator structs + while loops (the std/iter.ag pattern).
+      Keep the port a *transcription*, not a redesign. Accept diagnostic
+      ordering divergence ONLY if the diff gate (S1-3) sorts diagnostics
+      by span before comparison.
+    Option B: add minimal non-capturing fn pointers `fn(i32) -> i32`
+      (values only, no capture). ~2 weeks compiler work; unblocks ports
+      of `map`-style code without vtable machinery.
+    Either way: DO NOT add full closures for self-hosting. Capture +
+    drop-flag interaction is a research project, not a port prerequisite.
+  Also required for both options: diagnostic ORDER parity strategy —
+  bootstrap emits errors as it walks; make both compilers emit
+  (span-sorted) diagnostic lists in the diff gate.
+
+===============================================================================
+ S2 — PARITY BREAKERS (behavior will diverge without deliberate work)
+===============================================================================
+
+S2-1. Diagnostic messages bypass the catalog; text is scattered inline.
+  Evidence: diagnostics/messages.rs exists and typeck.rs calls msg:: 82
+  times, but only 6 files use the catalog at all while ~466 error sites
+  across the compiler carry raw string literals (typeck.rs has ~350 such
+  sites; codegen another large share). Fuzzy suggestions (Levenshtein)
+  live in code.
+  Why it breaks parity: a self-host will be written from the *messages*,
+  and any drift (wording, span choice, note vs error) makes the diff gate
+  fail everywhere at once.
+  FIX: before porting, finish the catalog: every user-facing string must
+  be a `msg::` function with a test that pins its exact text (this is a
+  ~450-site mechanical migration, split across port-sized files as they
+  get touched for S3-1). Then the Silver side ports ONE file (a data
+  table), not 90k LOC of prose. Track with a grep-gate: no `error(` call
+  with a raw literal outside messages.rs.
+
+S2-2. HashMap/FxHashMap/rustc-hash iteration order is load-bearing.
+  Evidence: 693 HashMap/HashSet uses in 40 files (rustc-hash FxHashMap).
+  Iteration order leaks into: symbol table walks, monomorphization
+  request order (it HAS a fixpoint cap at 256 generations — order
+  changes WHICH non-convergent error you get), tree-shake keep sets,
+  .agm symbol ordering, mangled name registry, diagnostics dedup.
+  Why it breaks parity: stage1 will use std/map.ag (hashbrown-style,
+  FNV-1a std/hash.ag); iteration order is different *by design*.
+  FIX: two-part.
+    a. Audit and de-order: any place whose OUTPUT depends on map
+       iteration (emission order, request order, diagnostic order) must
+       be keyed by a deterministic secondary sort (span, then name) in
+       the BOOTSTRAP first. Add the same to stage1. This is a
+       correctness improvement for stage0 independent of self-hosting
+       (build reproducibility).
+    b. In the diff gate, compare artifacts modulo known-order-insensitive
+       sections, and make symbol tables in .agm sorted.
+  This item is the silent killer; budget a full pass over semantic/.
+
+S2-3. Growable hash map + string interner with compiler-grade performance.
+  Evidence: std/map.ag is hashbrown-style (SSE2 probe_group — currently
+  x86 asm, need a wasi/scalar fallback — same gating pattern as
+  memory.ag/search.ag, already established). FxHashMap's key strength
+  for compiler workloads is speed; FNV-1a over long identifiers is fine,
+  but the interner pattern (thousands of String clones today) needs
+  std/intern.ag with u32 symbol IDs and a bump-allocated arena.
+  FIX: build std/intern.ag (u32 ids, arena, FNV or wyhash) + make
+  map.ag's CPU-asm dispatch follow the !@cfg(os.wasi) pattern used in
+  memory.ag. Do this BEFORE the typeck port so the Silver typeck is
+  written against symbols, not Strings (avoids a rewrite).
+
+S2-4. Recursion without depth guards — self-host stack overflow risk.
+  Evidence: recursive AST walkers everywhere; typeck.rs has NO recursion
+  depth limit found (monomorph.rs has MAX_FIXPOINT_GENERATIONS=256, the
+  one exception); wasm link sets 1 MiB stack. Rust debug builds have
+  8 MiB stacks and survive deep nesting; a Silver self-host under node
+  (wasm) or a default-thread native build may not.
+  Why it breaks parity: same input file, stage0 compiles, stage1 dies
+  with a stack overflow on the wasm leg.
+  FIX: add explicit depth counters (with the same limit constants) to
+  the top recursive entry points in the BOOTSTRAP (typeck expression
+  walker, monomorph type substitution, parser expression nesting, drop
+  elaboration), THEN port the same counters. This is a stage0 change
+  that must land first so both sides share the limit.
+
+S2-5. Quickcheck property tests have no Silver equivalent.
+  Evidence: quickcheck in lexer.rs, typeck.rs, analyzer.rs, types/mod.rs.
+  Why it breaks parity: these tests pin compiler behavior (lexer roundtrip
+  invariants, type-substitution laws). Stage1 can't run them; without an
+  equivalent the two compilers drift exactly where the property tests
+  used to catch it.
+  FIX: keep property tests in the stage0-only suite (they test the
+  LANGUAGE contract, not the compiler binary), and add the same
+  properties as deterministic seeded loops in tests/ (Silver has
+  std/random.ag with seeds) so they run in both stages. Also std/test.ag
+  needs an assert-eq + seedable rng story locked down first.
+
+S2-6. Compiler-internal determinism: Rayon parallelism.
+  Evidence: rayon in driver.rs + build_graph.rs (parallel module compile).
+  Why it breaks parity: any nondeterministic merge of per-module results
+  (diagnostics, .agm contents) breaks stage0-vs-stage1 diffs — and even
+  stage0-vs-stage0 reproducibility.
+  FIX: make all parallel joins collect into ordered results today
+  (indexed map, not fold-into-shared-map); verify with a repeat-build
+  byte-identity check in CI. Stage1 can start single-threaded; parity
+  gate doesn't care about compile speed.
+
+S2-7. Package/project model (toml crate, clap CLI).
+  Evidence: package.rs parses silver.toml via `toml`; CLI via clap derive
+  with 30+ flags and subcommands (build/check/run/test/cache...).
+  Why it breaks parity: `agc` the BINARY must behave identically (help
+  text excepted) or test tooling breaks.
+  FIX: write the CLI contract down as a table (flag -> semantics -> error
+  text) and implement stage1's arg parser against std/args.ag from that
+  table. TOML subset needed: only what silver.toml uses today (tables,
+  strings, arrays, bools) — write a ~200 LOC mini-TOML in the self-host;
+  do not port the full toml crate.
+
+S2-8. Windows/Win64 + wasm ABI parity in the self-host.
+  Evidence: Win64Abi + WasmAbi + SysV in abi.rs; this session added
+  type-aware struct_needs_byval/sret precisely because silent ABI
+  fallbacks miscompile.
+  Why it breaks parity: the self-host compiler must implement ALL of
+  them, including the sret/byval attribute placement and wasm single-
+  member extraction, or stage1 output diverges per-target.
+  FIX: abi.rs is already trait-shaped with unit tests per ABI (this
+  session added wasm tests). Require the diff gate to run per-target
+  (native + wasm32-wasip1) so ABI divergence is caught mechanically.
+
+===============================================================================
+ S3 — MAINTENANCE / FRAGILITY (fix during, not before)
+===============================================================================
+
+S3-1. God files.
+  typeck.rs 9,952 LOC; prt_parser.rs 7,173; monomorph.rs 4,110;
+  expr.rs 3,852; driver.rs 3,197. Porting a 10k-line file in one go
+  guarantees drift. FIX: split typeck.rs into (resolution, inference/
+  unification, overload/trait matching, diagnostics emission, layout)
+  in the bootstrap FIRST; each split file becomes a self-contained port
+  unit with its own diff gate. Same for prt_parser (tables vs interpreter
+  split in S1-2 solves it naturally).
+
+S3-2. Drop-flag/debug-info LLVM invariants encoded only in comments.
+  AGENTS.md documents LLVM 22 crash invariants (DILexicalBlock parenting,
+  CU-scoped DILocation, nested save/restore). A Silver rewrite WILL
+  rediscover them by crashing. FIX: these live in scope.rs/entry.rs;
+  port those files with a "known invariants" header and add IR-level
+  regression tests (opt -passes=verify on emitted .ll in the diff gate)
+  so the Silver port fails the same way stage0 would.
+
+S3-3. The .agm module format and the artifact cache are Rust-private.
+  Evidence: module_artifact.rs (magic AGM\x00\x00\x02), cache_storage.rs,
+  build_graph.rs; this session hit a cache-poisoning bug that required
+  --no-cache to work around. A self-host must read/write .agm
+  byte-compatibly (or the ecosystem splits).
+  FIX: document the .agm format in a docs/agm-format.md with a
+  byte-level spec + a roundtrip test; give stage1 an owned serializer
+  (std/serialize exists for JSON already); keep the version byte bump
+  discipline (v2 header today).
+
+S3-4. Float formatting / JSON (fmt.rs float paths, llvm_ir/json.rs).
+  Diagnostics and .agm embed formatted floats (ryu/Grisu-style shortest
+  representation in Rust via std fmt). A Silver port must reproduce
+  shortest-roundtrip formatting byte-for-byte or every float-bearing
+  diagnostic/artifact differs. FIX: implement the same algorithm
+  (document which one Rust uses: Grisu3 + fallback) in std/fmt before
+  porting anything that prints floats; add a differential fuzz test
+  stage0-vs-stage1 over random f64s.
+
+S3-5. Comptime evaluation surface (macro_expand.rs, comptime_cast_hook,
+  @format/@json builtins) executes AST interpretation in Rust.
+  The Silver self-host needs the SAME builtins while bootstrapping, i.e.
+  the interpreter interpreter problem. FIX: keep builtin macro
+  implementations in the runtime library they belong to (std-side),
+  expressed in Silver, so stage1 can reuse them; the bootstrap keeps
+  fallbacks. Sequence: port builtins to std Silver first, test via
+  stage0 (they're just Silver code), then the self-host gets them for
+  free.
+
+S3-6. std/engine gaps discovered during porting (running list).
+  - std/algo/sort: stable sort needed for S2-2 deterministic ordering.
+  - std/collections: no ordered map (BTreeMap equivalent) — needed for
+    symbol tables that iterate in insertion/sorted order (S2-2a).
+  - Box<T> deref-into-move exists; Rc/RefCell equivalents absent — port
+    uses arenas instead (compiler ASTs are arena-shaped anyway; std/mem/
+    arena.ag exists).
+  - No unions or bit-level punning: the IR boundary (S1-1) must be
+    opaque handles so the self-host never needs them.
+  - abort()/backtrace on native exists; ensure --leak-check stays off in
+    stage builds (compiler allocates heavily; leak reports on every
+    compile would break the diff gate output).
+
+===============================================================================
+ EXECUTION ORDER (recommended)
+===============================================================================
+
+Phase 0 — foundations in the bootstrap (no Silver compiler code yet)
+  [ ] S2-1 diagnostic catalog completion + grep gate
+  [ ] S2-2a determinism audit of map-ordered output (with tests)
+  [ ] S2-4 recursion depth guards with named constants
+  [ ] S2-6 ordered parallel joins + build reproducibility CI check
+  [ ] S1-2a PRT table dump tooling + parse-diff CI leg
+  [ ] S3-1 split typeck.rs into port-sized units
+  [ ] S1-3 scaffolding: tests/selfhost/ + run_stage.sh diff harness
+
+Phase 1 — std readiness (Silver side)
+  [ ] S2-3 std/intern.ag + map.ag portable probe fallbacks
+  [ ] S1-4 decision: iterator-struct transcription vs fn pointers
+  [ ] S3-6 sort/BTreeMap/arena fill-ins
+  [ ] S3-4 float shortest-format in std/fmt
+  [ ] S2-5 seeded property tests in Silver
+
+Phase 2 — the IR boundary
+  [ ] S1-1a `Ir` layer in bootstrap, port llvm_ir/ onto it incrementally
+  [ ] S1-1b .ll textual emitter contract (stage1 target)
+  [ ] S3-2 invariant tests into the diff gate
+
+Phase 3 — the Silver compiler
+  [ ] Port in this order: lexer (table interp, S1-2b) -> parser ->
+      semantic (split units) -> ownership passes -> IR layer -> driver.
+      Each unit: stage1 output must byte-match stage0 on the corpus
+      before the next unit starts.
+  [ ] S2-7 CLI/TOML from the contract table
+  [ ] S3-3 .agm byte-compat serializer
+
+Phase 4 — the loop closes
+  [ ] stage1 compiles stage1; fixpoint check (S1-3)
+  [ ] retire elise from the loop; keep stage0 only as a fallback seed
+
+PARITY GATE (the one rule that makes this safe)
+  Every phase ends with: same inputs -> same outputs. Concretely,
+  tests/selfhost/diff.sh runs stage0 and stage1 over tests/*.ag and
+  compares: exit codes, stdout/stderr, diagnostic lists (span-sorted),
+  emitted .ll (normalized for labels), .wasm/.elf bytes where stable,
+  and .agm contents (sorted). No phase merges with the gate red.
+
+===============================================================================
+ RISK REGISTER (top 5, ranked)
+ 1. S2-2 map-order determinism — invisible until stage1, then everywhere.
+ 2. S1-1 LLVM boundary — largest refactor; without it there is no
+    self-host at all. Budget: multi-month.
+ 3. S1-2 parser tables — highest-fidelity-surface port (spans, recovery).
+ 4. S2-4 stack depth — crashes late, on real inputs, in CI-only configs.
+ 5. S3-4 float formatting — trivial to forget, breaks every float diff.
+
+ Non-goal for v1 of the self-host: incremental compilation, LSP feature
+ parity (aglsp stays Rust), release-mode optimization parity, and
+ multithreaded stage1.
+===============================================================================
