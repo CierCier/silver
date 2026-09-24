@@ -1,0 +1,35 @@
+# silver.toml — Silver workspace manifest (self-host root).
+#
+# The repository root is a Silver project: `bin/agc/` (the stage1
+# self-hosting compiler driver) and `libs/agc/` (its reusable frontend
+# library), built stage-by-stage toward parity with bootstrap/stage0/agc.
+#
+# The Rust bootstrap lives under bootstrap/ (stage0) and is built with
+# cargo from the same root; see docs/selfhost-plan.txt for the migration
+# plan and docs/wasm-target.md for the wasm target survey.
+#
+# P0 goal: 1:1 linux/x86_64 frontend parity between bootstrap/stage0/agc
+# (Rust) and bin/agc (Silver). The reusable frontend lives in libs/agc. The
+# LLVM backend remains deferred while the frontend, module loading, and
+# semantic projections are migrated. Native stage1 commands currently use the
+# explicit SILVER_STAGE0 compatibility seam until the Silver backend owns code
+# generation and linking.
+
+name = "silver"
+version = "0.2.6"
+
+# Stage1 frontend binary. Its target manifest lives in bin/agc; stage0
+# builds this entry point with the commands in tests/selfhost/run_stage.sh.
+# It currently implements lex, parse, and check.
+[bin."agc"]
+manifest = "./bin/agc"
+
+# Reusable compiler frontend library. The binary package depends on this
+# target, and tooling can consume the same library independently.
+[lib."agc"]
+manifest = "./libs/agc"
+
+[bin."aglsp"]
+manifest = "./bin/aglsp"
+
+# The standard library is imported as source for now.

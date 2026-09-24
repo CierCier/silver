@@ -727,25 +727,33 @@ def main():
     parser.add_argument("--timeout", type=int, default=120, help="Per-test timeout in seconds")
     parser.add_argument("--target", type=str, default="", help="Cross-compile for this target triple (e.g. x86_64-pc-windows-msvc)")
     parser.add_argument("--runner", type=str, default="", help="Prefix command used to execute each test binary (e.g. 'wine' on a posix host)")
+    parser.add_argument("--compiler", type=Path, default=None, help="Use an existing agc-compatible binary instead of building stage0 (for self-host parity runs)")
     parser.add_argument("--libdir", action="append", default=[], help="Library search dir passed as -L to every compile (repeatable; e.g. generated Windows import libs)")
     parser.add_argument("--compare", type=str, default="", help="Compare run time metrics with a baseline file")
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parent.parent
+    compiler = args.compiler.resolve() if args.compiler is not None else None
     os.chdir(root)
 
     mode = "release" if args.release else "debug"
-    agc_bin = root / "target" / mode / ("agc.exe" if IS_WINDOWS else "agc")
+    if compiler is None:
+        # Cargo workspace root is the repo root, so stage0 binaries land in the
+        # root target/ dir even though the crates live under bootstrap/.
+        agc_bin = root / "target" / mode / ("agc.exe" if IS_WINDOWS else "agc")
 
-    # Ensure agc is built
-    print(f"{C_BOLD}== Building agc ({mode}) =={C_RESET}")
-    build_cmd = ["cargo", "build", "-p", "agc"]
-    if args.release:
-        build_cmd.append("--release")
-    res = subprocess.run(build_cmd)
-    if res.returncode != 0:
-        print(f"{C_RED}error: failed to build agc{C_RESET}")
-        sys.exit(1)
+        # Ensure stage0 is built for the ordinary integration path.
+        print(f"{C_BOLD}== Building agc ({mode}) =={C_RESET}")
+        build_cmd = ["cargo", "build", "-p", "agc"]
+        if args.release:
+            build_cmd.append("--release")
+        res = subprocess.run(build_cmd)
+        if res.returncode != 0:
+            print(f"{C_RED}error: failed to build agc{C_RESET}")
+            sys.exit(1)
+    else:
+        agc_bin = compiler
+        print(f"{C_BOLD}== Using compiler {agc_bin} =={C_RESET}")
 
     if not agc_bin.is_file():
         print(f"{C_RED}error: agc binary not found at {agc_bin}{C_RESET}")
@@ -832,7 +840,7 @@ def main():
             elif name == "http_perf_test" and not services.has_go:
                 skip_reason = "requires Go compiler"
             elif name == "rust_ffi_test" and not services.ffi_dir:
-                skip_reason = "requires built Rust FFI library (build ffi/rust)"
+                skip_reason = "requires built Rust FFI library (build bootstrap/stage0/ffi-rust)"
             elif IS_WINDOWS and name in WINDOWS_SKIP:
                 skip_reason = WINDOWS_SKIP[name]
             elif target and target_is_windows_name(target) and name in WINDOWS_SKIP:

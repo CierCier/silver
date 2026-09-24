@@ -31,7 +31,7 @@ through the same node shim the driver writes to the temp dir.
 
 ## 1. Target plumbing (compiler)
 
-All in `bin/agc/src`, all following the Windows-port precedent of failing
+All in `bootstrap/stage0/agc/src`, all following the Windows-port precedent of failing
 loudly instead of miscompiling silently:
 
 - **Cfg derivation** (`cfg.rs`): `triple_os` normalizes `wasi`/`wasip*`

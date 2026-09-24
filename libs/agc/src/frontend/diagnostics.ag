@@ -1,0 +1,190 @@
+// Source locations and compiler diagnostics for the stage1 frontend.
+import std.fmt;
+import std.mem.vec;
+import std.string;
+
+struct Span {
+    i64 start;
+    i64 end;
+    i64 file;
+    i64 start_line;
+    i64 start_col;
+    i64 end_line;
+    i64 end_col;
+}
+
+enum Severity {
+    Error;
+    Warning;
+    Note;
+}
+
+struct Diagnostic {
+    Span span;
+    Severity severity;
+    String message;
+}
+
+struct DiagnosticBag {
+    Vec<Diagnostic> items;
+}
+
+impl Span {
+    Span synthetic() {
+        Span s;
+        s.start = 0;
+        s.end = 0;
+        s.file = 0;
+        s.start_line = 0;
+        s.start_col = 0;
+        s.end_line = 0;
+        s.end_col = 0;
+        return s;
+    }
+
+    Span extend(Span* self, Span other) {
+        Span s = *self;
+        s.end = other.end;
+        s.end_line = other.end_line;
+        s.end_col = other.end_col;
+        return s;
+    }
+
+    bool is_synthetic(&self) {
+        return self.file == 0 || self.start_line == 0;
+    }
+}
+
+impl DiagnosticBag {
+    DiagnosticBag new() {
+        DiagnosticBag bag;
+        bag.items = Vec<Diagnostic>.new();
+        return bag;
+    }
+
+    void push(DiagnosticBag* self, Span span, Severity severity, String message) {
+        Diagnostic item;
+        item.span = span;
+        item.severity = severity;
+        item.message = move message;
+        self.items.push(move item);
+    }
+
+    void error(DiagnosticBag* self, Span span, String message) {
+        self.push(span, Severity.Error, move message);
+    }
+
+    i64 len(&self) {
+        return self.items.len();
+    }
+
+    bool is_empty(&self) {
+        return self.items.is_empty();
+    }
+
+    Diagnostic* get(DiagnosticBag* self, i64 index) {
+        return self.items.get_ptr(index);
+    }
+}
+
+String cfg_requires_argument_message() {
+    return String.from_str("#[cfg] requires at least one argument");
+}
+
+String invalid_cfg_argument_message() {
+    return String.from_str("invalid #[cfg] argument: expected a name, string, or dotted path");
+}
+
+void append_i64(String* out, i64 value) {
+    u8 buffer[32];
+    i64 length = itoa(value, (u8*)&buffer[0]);
+    out.push_bytes((u8*)&buffer[0], length);
+}
+
+String source_line(u8* data, i64 length, i64 line) {
+    String result = String.new();
+    if (line <= 0 || data == (u8*)0) {
+        return result;
+    }
+
+    i64 current_line = 1;
+    i64 start = 0;
+    i64 i = 0;
+    while (i < length && current_line < line) {
+        if (data[i] == (u8)10) {
+            current_line += 1;
+            start = i + 1;
+        }
+        i += 1;
+    }
+    i64 end = start;
+    while (end < length && data[end] != (u8)10) {
+        end += 1;
+    }
+    if (end > start && data[end - 1] == (u8)13) {
+        end -= 1;
+    }
+    result.push_bytes(&data[start], end - start);
+    return result;
+}
+
+String render_diagnostic(Diagnostic* diagnostic, str path, &String source) {
+    String out = String.new();
+    Span span = diagnostic.span;
+    String line = source_line(source.data, source.len, span.start_line);
+
+    out.push_str("error: ");
+    if (span.start_line > 0) {
+        out.push_str(path);
+        out.push_str(":");
+        append_i64(&out, span.start_line);
+        out.push_str(":");
+        append_i64(&out, span.start_col);
+        out.push_str(": ");
+    }
+    out.push_str(diagnostic.message.to_str());
+    out.push_str("\n");
+
+    if (span.start_line <= 0 || line.is_empty()) {
+        return out;
+    }
+
+    String prefix = String.new();
+    prefix.push_str("  ");
+    out.push_str(prefix.to_str());
+    out.push_str("| ");
+    out.push_str(line.to_str());
+    out.push_str("\n  | ");
+
+    i64 caret_count = span.end - span.start;
+    if (caret_count < 1) {
+        caret_count = 1;
+    }
+    i64 column = span.start_col;
+    if (column < 1) {
+        column = 1;
+    }
+    i64 index = 0;
+    while (index < column - 1 && index < line.len()) {
+        if (line.data[index] == (u8)9) {
+            out.push_str("    ");
+        } else {
+            out.push_str(" ");
+        }
+        index += 1;
+    }
+    index = 0;
+    while (index < caret_count && column - 1 + index < line.len()) {
+        if (line.data[column - 1 + index] == (u8)9) {
+            out.push_str("^^^^");
+        } else {
+            out.push_str("^");
+        }
+        index += 1;
+    }
+    if (column - 1 >= line.len() && line.len() > 0) {
+        out.push_str("^");
+    }
+    out.push_str("\n");
+    return out;
+}

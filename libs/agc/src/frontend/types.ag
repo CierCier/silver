@@ -1,0 +1,304 @@
+// libs/agc/src/frontend/types.ag — Canonical TypeTable & TypeId representation.
+import std.intern;
+import std.mem.vec;
+import std.string;
+
+const u32 TYPE_UNKNOWN = 0;
+const u32 TYPE_VOID = 1;
+const u32 TYPE_BOOL = 2;
+const u32 TYPE_I8 = 3;
+const u32 TYPE_I16 = 4;
+const u32 TYPE_I32 = 5;
+const u32 TYPE_I64 = 6;
+const u32 TYPE_I128 = 7;
+const u32 TYPE_U8 = 8;
+const u32 TYPE_U16 = 9;
+const u32 TYPE_U32 = 10;
+const u32 TYPE_U64 = 11;
+const u32 TYPE_U128 = 12;
+const u32 TYPE_F32 = 13;
+const u32 TYPE_F64 = 14;
+const u32 TYPE_F80 = 15;
+const u32 TYPE_C32 = 16;
+const u32 TYPE_C64 = 17;
+const u32 TYPE_C80 = 18;
+const u32 TYPE_STR = 19;
+const u32 TYPE_CHAR = 20;
+const u32 TYPE_PRIMITIVE_MAX = 20;
+
+enum TypeKind {
+    Unknown;
+    Void;
+    Bool;
+    I8;
+    I16;
+    I32;
+    I64;
+    I128;
+    U8;
+    U16;
+    U32;
+    U64;
+    U128;
+    F32;
+    F64;
+    F80;
+    C32;
+    C64;
+    C80;
+    Str;
+    Char;
+    Pointer;
+    Reference;
+    Array;
+    Slice;
+    Named;
+    TypeParam;
+    Function;
+}
+
+struct TypeEntry {
+    TypeKind kind;
+    u32 inner;
+    u32 name_id;
+    i64 count;
+    bool is_mut;
+}
+
+struct TypeTable {
+    Interner names;
+    Vec<TypeEntry> types;
+}
+
+impl TypeTable {
+    TypeTable new() {
+        TypeTable table;
+        table.names = Interner.new();
+        table.types = Vec<TypeEntry>.new();
+
+        // 0: Unknown
+        table.add_prim(TypeKind.Unknown, "unknown");
+        // 1: Void
+        table.add_prim(TypeKind.Void, "void");
+        // 2: Bool
+        table.add_prim(TypeKind.Bool, "bool");
+        // 3..7: Signed integers
+        table.add_prim(TypeKind.I8, "i8");
+        table.add_prim(TypeKind.I16, "i16");
+        table.add_prim(TypeKind.I32, "i32");
+        table.add_prim(TypeKind.I64, "i64");
+        table.add_prim(TypeKind.I128, "i128");
+        // 8..12: Unsigned integers
+        table.add_prim(TypeKind.U8, "u8");
+        table.add_prim(TypeKind.U16, "u16");
+        table.add_prim(TypeKind.U32, "u32");
+        table.add_prim(TypeKind.U64, "u64");
+        table.add_prim(TypeKind.U128, "u128");
+        // 13..15: Floats
+        table.add_prim(TypeKind.F32, "f32");
+        table.add_prim(TypeKind.F64, "f64");
+        table.add_prim(TypeKind.F80, "f80");
+        // 16..18: Complex
+        table.add_prim(TypeKind.C32, "c32");
+        table.add_prim(TypeKind.C64, "c64");
+        table.add_prim(TypeKind.C80, "c80");
+        // 19: Str
+        table.add_prim(TypeKind.Str, "str");
+        // 20: Char
+        table.add_prim(TypeKind.Char, "char");
+
+        return move table;
+    }
+
+    void add_prim(TypeTable* self, TypeKind kind, str name) {
+        TypeEntry entry;
+        entry.kind = kind;
+        entry.inner = 0;
+        entry.name_id = self.names.intern(name);
+        entry.count = 0;
+        entry.is_mut = false;
+        self.types.push(move entry);
+    }
+
+    u32 get_pointer(TypeTable* self, u32 inner, bool is_mut) {
+        i64 i = (i64)(TYPE_PRIMITIVE_MAX + 1);
+        while (i < self.types.len()) {
+            TypeEntry* cur = self.types.get_ptr(i);
+            if (cur.kind == TypeKind.Pointer && cur.inner == inner && cur.is_mut == is_mut) {
+                return (u32)i;
+            }
+            i += 1;
+        }
+        TypeEntry entry;
+        entry.kind = TypeKind.Pointer;
+        entry.inner = inner;
+        entry.name_id = 0;
+        entry.count = 0;
+        entry.is_mut = is_mut;
+        self.types.push(move entry);
+        return (u32)(self.types.len() - 1);
+    }
+
+    u32 get_reference(TypeTable* self, u32 inner, bool is_mut) {
+        i64 i = (i64)(TYPE_PRIMITIVE_MAX + 1);
+        while (i < self.types.len()) {
+            TypeEntry* cur = self.types.get_ptr(i);
+            if (cur.kind == TypeKind.Reference && cur.inner == inner && cur.is_mut == is_mut) {
+                return (u32)i;
+            }
+            i += 1;
+        }
+        TypeEntry entry;
+        entry.kind = TypeKind.Reference;
+        entry.inner = inner;
+        entry.name_id = 0;
+        entry.count = 0;
+        entry.is_mut = is_mut;
+        self.types.push(move entry);
+        return (u32)(self.types.len() - 1);
+    }
+
+    u32 get_named(TypeTable* self, str name) {
+        u32 name_id = self.names.intern(name);
+        i64 i = (i64)(TYPE_PRIMITIVE_MAX + 1);
+        while (i < self.types.len()) {
+            TypeEntry* cur = self.types.get_ptr(i);
+            if (cur.kind == TypeKind.Named && cur.name_id == name_id) {
+                return (u32)i;
+            }
+            i += 1;
+        }
+        TypeEntry entry;
+        entry.kind = TypeKind.Named;
+        entry.inner = 0;
+        entry.name_id = name_id;
+        entry.count = 0;
+        entry.is_mut = false;
+        self.types.push(move entry);
+        return (u32)(self.types.len() - 1);
+    }
+
+    u32 get_type_param(TypeTable* self, str name) {
+        u32 name_id = self.names.intern(name);
+        i64 i = (i64)(TYPE_PRIMITIVE_MAX + 1);
+        while (i < self.types.len()) {
+            TypeEntry* cur = self.types.get_ptr(i);
+            if (cur.kind == TypeKind.TypeParam && cur.name_id == name_id) {
+                return (u32)i;
+            }
+            i += 1;
+        }
+        TypeEntry entry;
+        entry.kind = TypeKind.TypeParam;
+        entry.inner = 0;
+        entry.name_id = name_id;
+        entry.count = 0;
+        entry.is_mut = false;
+        self.types.push(move entry);
+        return (u32)(self.types.len() - 1);
+    }
+
+    u32 parse_type_name(TypeTable* self, str name) {
+        if (strcmp(name, "void") == 0) { return TYPE_VOID; }
+        if (strcmp(name, "bool") == 0) { return TYPE_BOOL; }
+        if (strcmp(name, "i8") == 0) { return TYPE_I8; }
+        if (strcmp(name, "i16") == 0) { return TYPE_I16; }
+        if (strcmp(name, "i32") == 0) { return TYPE_I32; }
+        if (strcmp(name, "i64") == 0) { return TYPE_I64; }
+        if (strcmp(name, "i128") == 0) { return TYPE_I128; }
+        if (strcmp(name, "u8") == 0) { return TYPE_U8; }
+        if (strcmp(name, "u16") == 0) { return TYPE_U16; }
+        if (strcmp(name, "u32") == 0) { return TYPE_U32; }
+        if (strcmp(name, "u64") == 0) { return TYPE_U64; }
+        if (strcmp(name, "u128") == 0) { return TYPE_U128; }
+        if (strcmp(name, "f32") == 0) { return TYPE_F32; }
+        if (strcmp(name, "f64") == 0) { return TYPE_F64; }
+        if (strcmp(name, "f80") == 0) { return TYPE_F80; }
+        if (strcmp(name, "c32") == 0) { return TYPE_C32; }
+        if (strcmp(name, "c64") == 0) { return TYPE_C64; }
+        if (strcmp(name, "c80") == 0) { return TYPE_C80; }
+        if (strcmp(name, "str") == 0) { return TYPE_STR; }
+        if (strcmp(name, "char") == 0) { return TYPE_CHAR; }
+        return self.get_named(name);
+    }
+
+    TypeEntry* get(TypeTable* self, u32 id) {
+        if ((i64)id >= self.types.len()) {
+            return self.types.get_ptr(0);
+        }
+        return self.types.get_ptr((i64)id);
+    }
+
+    str type_name(TypeTable* self, u32 id) {
+        if ((i64)id >= self.types.len()) {
+            return "unknown";
+        }
+        TypeEntry* entry = self.types.get_ptr((i64)id);
+        if (entry.name_id != 0) {
+            return self.names.get(entry.name_id);
+        }
+        if (entry.kind == TypeKind.Pointer) {
+            return "*";
+        }
+        if (entry.kind == TypeKind.Reference) {
+            return "&";
+        }
+        return "unknown";
+    }
+
+    bool is_copy(TypeTable* self, u32 id) {
+        if (id <= TYPE_PRIMITIVE_MAX) {
+            return true;
+        }
+        TypeEntry* entry = self.get(id);
+        if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) {
+            return true;
+        }
+        return false;
+    }
+}
+
+bool type_is_primitive(u32 id) {
+    return id >= TYPE_VOID && id <= TYPE_PRIMITIVE_MAX;
+}
+
+bool type_is_integer(u32 id) {
+    return id >= TYPE_I8 && id <= TYPE_U128;
+}
+
+bool type_is_signed_integer(u32 id) {
+    return id >= TYPE_I8 && id <= TYPE_I128;
+}
+
+bool type_is_unsigned_integer(u32 id) {
+    return id >= TYPE_U8 && id <= TYPE_U128;
+}
+
+bool type_is_float(u32 id) {
+    return id >= TYPE_F32 && id <= TYPE_F80;
+}
+
+bool type_is_numeric(u32 id) {
+    return id >= TYPE_I8 && id <= TYPE_C80;
+}
+
+bool types_is_primitive_name(str name) {
+    if (strlen(name) == 0) { return false; }
+    if (strcmp(name, "void") == 0 || strcmp(name, "bool") == 0
+        || strcmp(name, "str") == 0 || strcmp(name, "char") == 0) {
+        return true;
+    }
+    if (name[0] == (u8)'i' || name[0] == (u8)'u') {
+        return strcmp(name, "i8") == 0 || strcmp(name, "i16") == 0
+            || strcmp(name, "i32") == 0 || strcmp(name, "i64") == 0
+            || strcmp(name, "i128") == 0 || strcmp(name, "u8") == 0
+            || strcmp(name, "u16") == 0 || strcmp(name, "u32") == 0
+            || strcmp(name, "u64") == 0 || strcmp(name, "u128") == 0;
+    }
+    if (name[0] == (u8)'f' || name[0] == (u8)'c') {
+        return strcmp(name, "f32") == 0 || strcmp(name, "f64") == 0
+            || strcmp(name, "f80") == 0 || strcmp(name, "c32") == 0
+            || strcmp(name, "c64") == 0 || strcmp(name, "c80") == 0;
+    }
+    return false;
+}

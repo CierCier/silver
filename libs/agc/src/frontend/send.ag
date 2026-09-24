@@ -1,0 +1,209 @@
+// Structural Send gate for launch arguments over the typed CST projections.
+// It covers the declaration/expression slice needed by the launch tests while
+// leaving the full generic type checker to the next migration stage.
+import std.mem.memory;
+import std.mem.vec;
+import std.string;
+import frontend.ast;
+import frontend.bindings;
+import frontend.cfg;
+import frontend.diagnostics;
+import frontend.expressions;
+
+struct SendAnalyzer {
+    DiagnosticBag* diagnostics;
+    bool failed;
+}
+
+impl SendAnalyzer {
+    SendAnalyzer new(DiagnosticBag* diagnostics) {
+        SendAnalyzer analyzer;
+        analyzer.diagnostics = diagnostics;
+        analyzer.failed = false;
+        return analyzer;
+    }
+}
+
+bool send_text_equals(str left, str right) {
+    return strcmp(left, right) == 0;
+}
+
+Binding* send_find_binding(Vec<Binding>* bindings, str name) {
+    i64 i = 0;
+    while (i < bindings.len()) {
+        Binding* binding = bindings.get_ptr(i);
+        if (send_text_equals(binding.name, name)) {
+            return binding;
+        }
+        i += 1;
+    }
+    return (Binding*)0;
+}
+
+String send_type_display(TypeProjection* value) {
+    String result = String.from_str(value.name);
+    if (value.kind == ProjectionTypeKind.Reference) {
+        String reference = String.from_str("&");
+        if (value.is_mutable) {
+            reference.push_str("mut ");
+        }
+        reference.push_str(result.to_str());
+        result.drop();
+        return move reference;
+    }
+    if (value.kind == ProjectionTypeKind.Pointer) {
+        result.push((u8)'*');
+        return result;
+    }
+    if (value.kind == ProjectionTypeKind.Array) {
+        String array = String.from_str("Array<");
+        array.push_str(value.name);
+        array.push((u8)'>');
+        result.drop();
+        return move array;
+    }
+    if (value.argument0 != (str)0 && strlen(value.argument0) > 0) {
+        result.push((u8)'<');
+        result.push_str(value.argument0);
+        if (value.argument1 != (str)0 && strlen(value.argument1) > 0) {
+            result.push_str(", ");
+            result.push_str(value.argument1);
+        }
+        result.push((u8)'>');
+    }
+    return result;
+}
+
+bool send_type_name_is_send(str name, String* reason) {
+    if (send_text_equals(name, "Rc")) {
+        reason.push_str("Rc<T> carries a shared non-atomic reference count");
+        return false;
+    }
+    if (send_text_equals(name, "Handle")) {
+        reason.push_str("GC heap handles are not Send (the heap is single-threaded)");
+        return false;
+    }
+    if (send_text_equals(name, "Guard")) {
+        reason.push_str("a live Guard holds its Mutex locked; drop it (or move the unlocked Mutex itself), never the guard");
+        return false;
+    }
+    return true;
+}
+
+bool send_type_is_send(TypeProjection* value, String* reason) {
+    if (value.kind == ProjectionTypeKind.Unknown
+        || value.kind == ProjectionTypeKind.Primitive) {
+        return true;
+    }
+    if (value.kind == ProjectionTypeKind.Pointer) {
+        reason.push_str("raw pointer types are not Send: move owned values (Box/Vec) or pass a Channel across threads");
+        return false;
+    }
+    if (value.kind == ProjectionTypeKind.Reference) {
+        reason.push_str("references cannot cross a thread boundary in v1 (scoped threads are not implemented yet)");
+        return false;
+    }
+    if (value.kind == ProjectionTypeKind.Array) {
+        return send_type_name_is_send(value.argument0, reason);
+    }
+    if (value.kind != ProjectionTypeKind.Named) {
+        return true;
+    }
+    if (!send_type_name_is_send(value.name, reason)) {
+        return false;
+    }
+    if (send_text_equals(value.name, "Vec")
+        || send_text_equals(value.name, "Box")
+        || send_text_equals(value.name, "Optional")) {
+        if (value.argument0 != (str)0 && strlen(value.argument0) > 0
+            && !send_type_name_is_send(value.argument0, reason)) {
+            return false;
+        }
+        if (value.argument1 != (str)0 && strlen(value.argument1) > 0
+            && !send_type_name_is_send(value.argument1, reason)) {
+            return false;
+        }
+    }
+    // Named user structs are outside this first slice's field resolver. Treat
+    // their declaration as a value type for now; Rc/pointer/reference leaves
+    // remain rejected above.
+    return true;
+}
+
+void send_report_type(SendAnalyzer* analyzer, Span span, str type_name, str reason) {
+    String message = String.from_str("launch argument of type ");
+    message.push_str(type_name);
+    message.push_str(" is not Send: ");
+    message.push_str(reason);
+    analyzer.diagnostics.error(span, move message);
+    analyzer.failed = true;
+}
+
+void check_launch_argument(SendAnalyzer* analyzer, Vec<Binding>* bindings, LaunchArgument* argument) {
+    if ((*argument).kind == ProjectionExpressionKind.Address) {
+        String type_name = String.from_str("unknown");
+        Binding* binding = send_find_binding(bindings, (*argument).name);
+        if (binding != (Binding*)0) {
+            String declared = send_type_display(&(*binding).declared_type);
+            type_name = move declared;
+        }
+        type_name.push((u8)'*');
+        send_report_type(
+            analyzer,
+            (*argument).span,
+            type_name.to_str(),
+            "raw pointer types are not Send: move owned values (Box/Vec) or pass a Channel across threads"
+        );
+        type_name.drop();
+        return;
+    }
+
+    if ((*argument).kind != ProjectionExpressionKind.Identifier
+        && (*argument).kind != ProjectionExpressionKind.Move) {
+        return;
+    }
+    Binding* binding = send_find_binding(bindings, (*argument).name);
+    if (binding == (Binding*)0) {
+        return;
+    }
+    String reason = String.new();
+    if (!send_type_is_send(&(*binding).declared_type, &reason)) {
+        String type_name = send_type_display(&(*binding).declared_type);
+        send_report_type(analyzer, (*argument).span, type_name.to_str(), reason.to_str());
+        type_name.drop();
+    }
+    reason.drop();
+}
+
+bool check_send(SyntaxTree* tree, DiagnosticBag* diagnostics, CfgSet* cfg) {
+    bool ok = true;
+    Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
+    cfg_collect_items(tree.root, cfg, diagnostics, &items);
+    i64 i = 0;
+    while (i < items.len()) {
+        if (items.get(i).kind == NodeKind.Function) {
+            SendAnalyzer analyzer = SendAnalyzer.new(diagnostics);
+            Vec<Binding> bindings = Vec<Binding>.new();
+            collect_function_bindings(items.get(i), &bindings);
+            Vec<LaunchArgument> launch_arguments = Vec<LaunchArgument>.new();
+            project_function_launch_arguments(items.get(i), cfg, &launch_arguments);
+            i64 argument_index = 0;
+            while (argument_index < launch_arguments.len()) {
+                check_launch_argument(
+                    &analyzer,
+                    &bindings,
+                    launch_arguments.get_ptr(argument_index)
+                );
+                argument_index += 1;
+            }
+            launch_arguments.drop();
+            bindings.drop();
+            if (analyzer.failed) {
+                ok = false;
+            }
+        }
+        i += 1;
+    }
+    items.drop();
+    return ok;
+}

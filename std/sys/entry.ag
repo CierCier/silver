@@ -29,16 +29,25 @@ import std.sys.os;
 // The module's _start is inlined into the consumer's object file by the import
 // hook, so no separate linking step is needed.
 
+// Cached module objects call these runtime ABI shims; keep them externally rooted.
+#[link_name("silver_argc")]
 i32 silver_argc() {
     return __silver_argc;
 }
 
+#[link_name("silver_argv")]
 i8** silver_argv() {
     return __silver_argv;
 }
 
+#[link_name("silver_envp")]
 i8** silver_envp() {
     return __silver_envp;
+}
+
+#[link_name("silver_set_envp")]
+void silver_set_envp(i8** value) {
+    __silver_envp = value;
 }
 
 if (@cfg(os.wasi)) {

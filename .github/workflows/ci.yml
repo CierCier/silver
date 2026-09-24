@@ -54,7 +54,7 @@ jobs:
       - name: Validate C ABI consumer
         run: |
           clang-22 -std=c11 -Wall -Wextra -Werror \
-            -I ffi/rust/include ffi/rust/tests/abi_smoke.c \
+            -I bootstrap/stage0/ffi-rust/include bootstrap/stage0/ffi-rust/tests/abi_smoke.c \
             -L target/debug -Wl,-rpath,"$GITHUB_WORKSPACE/target/debug" \
             -lsilver_ffi -o "$RUNNER_TEMP/silver_ffi_abi_smoke"
           "$RUNNER_TEMP/silver_ffi_abi_smoke"
@@ -63,8 +63,16 @@ jobs:
         run: |
           SILVER_FFI_LIBRARY_DIR="$GITHUB_WORKSPACE/target/debug" python3 tests/run_tests.py rust_ffi_test
 
+      - name: Build stage1 and run frontend parity gates
+        run: tests/selfhost/run_stage.sh --include-std
+
       - name: Run integration tests
         run: python3 tests/run_tests.py --release
+
+      - name: Run native command-surface parity through stage1
+        env:
+          SILVER_STAGE0: ${{ github.workspace }}/target/release/agc
+        run: tests/selfhost/run_native.sh --release --no-tui --jobs 4
 
   wasm:
     runs-on: ubuntu-24.04

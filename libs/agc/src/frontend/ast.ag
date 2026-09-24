@@ -1,0 +1,528 @@
+// Lossless syntax tree used by the stage1 parser. It keeps every non-comment
+// token and preserves byte spans, so semantic lowering can add typed views
+// without making the parser rewrite source text.
+import std.mem.alloc;
+import std.mem.memory;
+import std.recursion;
+import frontend.diagnostics;
+import frontend.lexer;
+
+enum NodeKind {
+    Program;
+    Item;
+    Import;
+    Struct;
+    Enum;
+    Trait;
+    Impl;
+    Function;
+    Global;
+    TypeAlias;
+    Extern;
+    Macro;
+    CfgBlock;
+    Attribute;
+    Generic;
+    Type;
+    Parameter;
+    Field;
+    Variant;
+    Block;
+    Parenthesized;
+    Bracket;
+    Statement;
+    Let;
+    Return;
+    Break;
+    Continue;
+    If;
+    While;
+    For;
+    Match;
+    Defer;
+    Expression;
+    Token;
+}
+
+struct SyntaxNode {
+    NodeKind kind;
+    TokenKind token_kind;
+    Span span;
+    str text;
+    SyntaxNode* parent;
+    SyntaxNode* first_child;
+    SyntaxNode* last_child;
+    SyntaxNode* next_sibling;
+    SyntaxNode* pool_next;
+}
+
+struct NodePool {
+    SyntaxNode* head;
+}
+
+struct SyntaxTree {
+    SyntaxNode* root;
+}
+
+struct Parser {
+    TokenStream* tokens;
+    DiagnosticBag* diagnostics;
+    NodePool* pool;
+    DepthBudget budget;
+    i64 cursor;
+    i64 nesting;
+    bool failed;
+}
+
+impl NodePool {
+    NodePool new() {
+        NodePool pool;
+        pool.head = (SyntaxNode*)0;
+        return pool;
+    }
+
+    SyntaxNode* create(NodePool* self, NodeKind kind, Span span, str text) {
+        SyntaxNode* node = (SyntaxNode*)alloc<SyntaxNode>();
+        if (node == (SyntaxNode*)0) {
+            return (SyntaxNode*)0;
+        }
+        node.kind = kind;
+        node.token_kind = TokenKind.Eof;
+        node.span = span;
+        node.text = text;
+        node.parent = (SyntaxNode*)0;
+        node.first_child = (SyntaxNode*)0;
+        node.last_child = (SyntaxNode*)0;
+        node.next_sibling = (SyntaxNode*)0;
+        node.pool_next = self.head;
+        self.head = node;
+        return node;
+    }
+
+    void destroy(NodePool* self) {
+        SyntaxNode* node = self.head;
+        while (node != (SyntaxNode*)0) {
+            SyntaxNode* next = node.pool_next;
+            free(node);
+            node = next;
+        }
+        self.head = (SyntaxNode*)0;
+    }
+}
+
+void append_child(SyntaxNode* parent, SyntaxNode* child) {
+    if (parent == (SyntaxNode*)0 || child == (SyntaxNode*)0) {
+        return;
+    }
+    child.parent = parent;
+    child.next_sibling = (SyntaxNode*)0;
+    if (parent.first_child == (SyntaxNode*)0) {
+        parent.first_child = child;
+        parent.last_child = child;
+    } else {
+        parent.last_child.next_sibling = child;
+        parent.last_child = child;
+    }
+}
+
+i64 token_count(TokenStream* self) {
+    return self.len();
+}
+
+Token* token_at(TokenStream* self, i64 index) {
+    if (index < 0 || index >= self.len()) {
+        return (Token*)0;
+    }
+    return self.get(index);
+}
+
+bool is_comment(Token* token) {
+    if (token == (Token*)0) {
+        return false;
+    }
+    return (i64)token.kind == (i64)TokenKind.Comment;
+}
+
+bool is_eof(Token* token) {
+    return token != (Token*)0 && (i64)token.kind == (i64)TokenKind.Eof;
+}
+
+bool is_open(Token* token) {
+    if (token == (Token*)0) {
+        return false;
+    }
+    return match token.kind {
+        TokenKind.LeftParen : true,
+        TokenKind.LeftBrace : true,
+        TokenKind.LeftBracket : true,
+        _ : false,
+    };
+}
+
+bool is_close(Token* token) {
+    if (token == (Token*)0) {
+        return false;
+    }
+    return match token.kind {
+        TokenKind.RightParen : true,
+        TokenKind.RightBrace : true,
+        TokenKind.RightBracket : true,
+        _ : false,
+    };
+}
+
+bool is_semicolon(Token* token) {
+    return token != (Token*)0 && (i64)token.kind == (i64)TokenKind.Semicolon;
+}
+
+bool matching_open(Token* open, Token* close) {
+    if (open == (Token*)0 || close == (Token*)0) {
+        return false;
+    }
+    return match open.kind {
+        TokenKind.LeftParen : (i64)close.kind == (i64)TokenKind.RightParen,
+        TokenKind.LeftBrace : (i64)close.kind == (i64)TokenKind.RightBrace,
+        TokenKind.LeftBracket : (i64)close.kind == (i64)TokenKind.RightBracket,
+        _ : false,
+    };
+}
+
+Span span_between(Span first, Span last) {
+    Span result = first;
+    result.end = last.end;
+    result.end_line = last.end_line;
+    result.end_col = last.end_col;
+    return result;
+}
+
+void skip_comments(Parser* self) {
+    while (self.cursor < token_count(self.tokens)) {
+        Token* token = token_at(self.tokens, self.cursor);
+        if (is_comment(token)) {
+            self.cursor += 1;
+        } else {
+            break;
+        }
+    }
+}
+
+i64 matching_index(Parser* self, i64 open_index) {
+    Token* open = token_at(self.tokens, open_index);
+    if (!is_open(open)) {
+        return -1;
+    }
+    i64 depth = 0;
+    i64 i = open_index;
+    while (i < token_count(self.tokens)) {
+        Token* token = token_at(self.tokens, i);
+        if (is_open(token)) {
+            depth += 1;
+        } else if (is_close(token)) {
+            depth -= 1;
+            if (depth == 0) {
+                if (!matching_open(open, token)) {
+                    return -1;
+                }
+                return i;
+            }
+        } else if (is_eof(token)) {
+            break;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+NodeKind group_kind(Token* token) {
+    return match token.kind {
+        TokenKind.LeftBrace : NodeKind.Block,
+        TokenKind.LeftParen : NodeKind.Parenthesized,
+        TokenKind.LeftBracket : NodeKind.Bracket,
+        _ : NodeKind.Token,
+    };
+}
+
+Span region_span(Parser* self, i64 start, i64 end) {
+    Token* first = token_at(self.tokens, start);
+    Token* last = token_at(self.tokens, end - 1);
+    if (first == (Token*)0 || last == (Token*)0) {
+        return Span.synthetic();
+    }
+    return span_between(first.span, last.span);
+}
+
+void build_token_region(Parser* self, SyntaxNode* parent, i64 start, i64 end) {
+    i64 i = start;
+    while (i < end) {
+        Token* token = token_at(self.tokens, i);
+        if (token == (Token*)0 || is_comment(token)) {
+            i += 1;
+            continue;
+        }
+        if (is_eof(token)) {
+            i += 1;
+            continue;
+        }
+        if (is_open(token)) {
+            i64 close = matching_index(self, i);
+            if (close < 0 || close >= end) {
+                self.diagnostics.error(token.span, String.from_str("unclosed delimiter"));
+                self.failed = true;
+                SyntaxNode* bad = self.pool.create(NodeKind.Token, token.span, token.text.to_str());
+                bad.token_kind = token.kind;
+                append_child(parent, bad);
+                i += 1;
+                continue;
+            }
+            SyntaxNode* group = self.pool.create(group_kind(token), region_span(self, i, close + 1), "");
+            append_child(parent, group);
+            if (!self.budget.enter()) {
+                self.diagnostics.error(token.span, String.from_str("maximum syntax nesting depth exceeded"));
+                self.failed = true;
+                i = close + 1;
+                continue;
+            }
+            build_token_region(self, group, i + 1, close);
+            self.budget.leave();
+            i = close + 1;
+            continue;
+        }
+        if (is_close(token)) {
+            self.diagnostics.error(token.span, String.from_str("unexpected closing delimiter"));
+            self.failed = true;
+            SyntaxNode* leaf = self.pool.create(NodeKind.Token, token.span, token.text.to_str());
+            leaf.token_kind = token.kind;
+            append_child(parent, leaf);
+            i += 1;
+            continue;
+        }
+        SyntaxNode* leaf = self.pool.create(NodeKind.Token, token.span, token.text.to_str());
+        leaf.token_kind = token.kind;
+        append_child(parent, leaf);
+        i += 1;
+    }
+}
+
+Token* first_code_token(Parser* self, i64 start) {
+    i64 i = start;
+    while (i < token_count(self.tokens)) {
+        Token* token = token_at(self.tokens, i);
+        if (!is_comment(token) && !is_eof(token)) {
+            return token;
+        }
+        i += 1;
+    }
+    return (Token*)0;
+}
+
+bool has_top_level_assign_before_brace(Parser* self, i64 start, i64 end) {
+    i64 depth = 0;
+    i64 i = start;
+    while (i < end) {
+        Token* token = token_at(self.tokens, i);
+        if (is_open(token)) {
+            depth += 1;
+        } else if (is_close(token)) {
+            if (depth > 0) { depth -= 1; }
+        } else if (depth == 0 && token != (Token*)0 && (i64)token.kind == (i64)TokenKind.Assign) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+i64 item_boundary(Parser* self, i64 start) {
+    Token* first = first_code_token(self, start);
+    if (first == (Token*)0) {
+        return token_count(self.tokens);
+    }
+    bool cfg_item = (i64)first.kind == (i64)TokenKind.If;
+    i64 first_brace = -1;
+    i64 depth = 0;
+    i64 i = start;
+
+    while (i < token_count(self.tokens)) {
+        Token* token = token_at(self.tokens, i);
+        if (is_eof(token)) {
+            return i;
+        }
+        if (is_open(token)) {
+            if (first_brace < 0 && (i64)token.kind == (i64)TokenKind.LeftBrace) {
+                first_brace = i;
+            }
+            depth += 1;
+            i += 1;
+            continue;
+        }
+        if (is_close(token)) {
+            if (depth == 0) {
+                return i;
+            }
+            depth -= 1;
+            if (depth == 0 && first_brace >= 0) {
+                i64 next = i + 1;
+                while (next < token_count(self.tokens) && is_comment(token_at(self.tokens, next))) {
+                    next += 1;
+                }
+                Token* next_token = token_at(self.tokens, next);
+                if (cfg_item) {
+                    if (next_token != (Token*)0 && (i64)next_token.kind == (i64)TokenKind.Else) {
+                        i += 1;
+                        continue;
+                    }
+                    return i + 1;
+                }
+                if (next_token != (Token*)0 && !is_semicolon(next_token)) {
+                    return i + 1;
+                }
+            }
+            i += 1;
+            continue;
+        }
+        if (depth == 0 && is_semicolon(token)) {
+            return i + 1;
+        }
+        i += 1;
+    }
+    return token_count(self.tokens);
+}
+
+Token* first_declaration_token(Parser* self, i64 start, i64 end) {
+    i64 i = start;
+    while (i < end) {
+        Token* token = token_at(self.tokens, i);
+        if (is_comment(token) || is_eof(token)) {
+            i += 1;
+            continue;
+        }
+        if (token != (Token*)0 && token.text == "#") {
+            i64 bracket = i + 1;
+            while (bracket < end && is_comment(token_at(self.tokens, bracket))) {
+                bracket += 1;
+            }
+            Token* bracket_token = token_at(self.tokens, bracket);
+            if (bracket_token != (Token*)0 && bracket_token.kind == TokenKind.LeftBracket) {
+                i64 close = matching_index(self, bracket);
+                if (close >= 0 && close < end) {
+                    i = close + 1;
+                    continue;
+                }
+            }
+        }
+        if (is_open(token)) {
+            i64 close = matching_index(self, i);
+            if (close >= 0 && close < end) {
+                i = close + 1;
+                continue;
+            }
+        }
+        return token;
+    }
+    return (Token*)0;
+}
+
+NodeKind item_kind(Parser* self, i64 start, i64 end) {
+    Token* first = first_declaration_token(self, start, end);
+    if (first == (Token*)0) {
+        return NodeKind.Item;
+    }
+    if ((i64)first.kind == (i64)TokenKind.Import) { return NodeKind.Import; }
+    if ((i64)first.kind == (i64)TokenKind.Struct) { return NodeKind.Struct; }
+    if ((i64)first.kind == (i64)TokenKind.Enum) { return NodeKind.Enum; }
+    if ((i64)first.kind == (i64)TokenKind.Trait) { return NodeKind.Trait; }
+    if ((i64)first.kind == (i64)TokenKind.Impl) { return NodeKind.Impl; }
+    if ((i64)first.kind == (i64)TokenKind.Extern) { return NodeKind.Extern; }
+    if ((i64)first.kind == (i64)TokenKind.Macro) { return NodeKind.Macro; }
+    if ((i64)first.kind == (i64)TokenKind.Type) { return NodeKind.TypeAlias; }
+    if ((i64)first.kind == (i64)TokenKind.If) { return NodeKind.CfgBlock; }
+    if (has_top_level_assign_before_brace(self, start, end) || (first_brace_before(self, start, end) < 0 && ends_with_semicolon(self, end))) {
+        return NodeKind.Global;
+    }
+    return NodeKind.Function;
+}
+
+bool ends_with_semicolon(Parser* self, i64 end) {
+    i64 i = end - 1;
+    while (i >= 0 && is_comment(token_at(self.tokens, i))) {
+        i -= 1;
+    }
+    return i >= 0 && is_semicolon(token_at(self.tokens, i));
+}
+
+i64 first_brace_before(Parser* self, i64 start, i64 end) {
+    i64 i = start;
+    while (i < end) {
+        Token* token = token_at(self.tokens, i);
+        if (token != (Token*)0 && (i64)token.kind == (i64)TokenKind.LeftBrace) {
+            return i;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+void report_unbalanced(Parser* self, i64 index, String message) {
+    Token* token = token_at(self.tokens, index);
+    Span span = Span.synthetic();
+    if (token != (Token*)0) {
+        span = token.span;
+    }
+    self.diagnostics.error(span, move message);
+    self.failed = true;
+}
+
+void parse_items(Parser* self, SyntaxNode* parent, i64 end_index) {
+    while (self.cursor < end_index && !self.failed) {
+        skip_comments(self);
+        while (self.cursor < end_index && is_semicolon(token_at(self.tokens, self.cursor))) {
+            self.cursor += 1;
+            skip_comments(self);
+        }
+        if (self.cursor >= end_index) {
+            break;
+        }
+        Token* start_token = token_at(self.tokens, self.cursor);
+        if (is_eof(start_token)) {
+            break;
+        }
+        i64 start = self.cursor;
+        i64 finish = item_boundary(self, start);
+        if (finish <= start) {
+            report_unbalanced(self, start, String.from_str("parser could not determine item boundary"));
+            break;
+        }
+        if (finish > token_count(self.tokens)) {
+            finish = token_count(self.tokens);
+        }
+        NodeKind kind = item_kind(self, start, finish);
+        Span span = region_span(self, start, finish);
+        SyntaxNode* item = self.pool.create(kind, span, "");
+        append_child(parent, item);
+        build_token_region(self, item, start, finish);
+        self.cursor = finish;
+    }
+}
+
+void parse(TokenStream* tokens, DiagnosticBag* diagnostics, NodePool* pool, SyntaxTree* tree) {
+    Parser parser;
+    parser.tokens = tokens;
+    parser.diagnostics = diagnostics;
+    parser.pool = pool;
+    parser.budget = DepthBudget.new(DEFAULT_MAX_RECURSION_DEPTH);
+    parser.cursor = 0;
+    parser.nesting = 0;
+    parser.failed = false;
+
+    Span root_span = Span.synthetic();
+    Token* first = first_code_token(&parser, 0);
+    Token* last = tokens.last();
+    if (first != (Token*)0 && last != (Token*)0) {
+        root_span = span_between(first.span, last.span);
+    }
+    tree.root = pool.create(NodeKind.Program, root_span, "");
+    parse_items(&parser, tree.root, tokens.len());
+    if (parser.cursor < tokens.len() && !is_eof(token_at(tokens, parser.cursor))) {
+        report_unbalanced(&parser, parser.cursor, String.from_str("unexpected tokens after item"));
+    }
+}

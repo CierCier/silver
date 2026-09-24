@@ -1,0 +1,299 @@
+// Small stage1-owned Linux backend for the native smoke path.
+//
+// It intentionally recognizes only a single `i32 main()` returning an integer.
+// The smoke link uses the host `cc` entry point; production static entry/runtime
+// emission is part of the later native backend work. Unsupported programs
+// return false so the explicit stage0 bridge remains the compatibility path.
+import std.env;
+import std.error;
+import std.fmt;
+import std.fs;
+import std.io.file;
+import std.mem.vec;
+import std.path;
+import std.process;
+import std.result;
+import std.string;
+
+bool native_backend_enabled() {
+    Optional<String> requested = var("SILVER_STAGE1_NATIVE");
+    if (requested.is_none()) { return false; }
+    String value = requested.unwrap();
+    bool enabled = value.equals("1") || value.equals("true") || value.equals("yes");
+    value.drop();
+    return enabled;
+}
+
+void native_set_tool(String* tool, str environment_name) {
+    Optional<String> configured = var(environment_name);
+    if (configured.is_some()) {
+        String resolved = configured.unwrap();
+        tool.clear();
+        tool.push_str(resolved.to_str());
+        resolved.drop();
+    }
+}
+
+bool native_argument_consumes_value(Vec<String>* arguments, i64 index) {
+    String* argument = arguments.get_ptr(index);
+    return argument.equals("-o") || argument.equals("--output")
+        || argument.equals("-I") || argument.equals("--root")
+        || argument.equals("-D") || argument.equals("-L") || argument.equals("-l")
+        || argument.equals("-W") || argument.equals("--target")
+        || argument.equals("--sysroot") || argument.equals("--cfg")
+        || argument.equals("--cache-dir") || argument.equals("-j")
+        || argument.equals("--jobs") || argument.equals("--emit")
+        || argument.equals("--run-arg");
+}
+
+bool native_source_path(Vec<String>* arguments, String* source) {
+    i64 start = 1;
+    if (arguments.len() > 1) {
+        String* first = arguments.get_ptr(1);
+        if (first.equals("build") || first.equals("b") || first.equals("run") || first.equals("r")
+            || first.equals("check") || first.equals("c") || first.equals("test") || first.equals("t")) {
+            start = 2;
+        }
+    }
+    i64 i = start;
+    while (i < arguments.len()) {
+        String* argument = arguments.get_ptr(i);
+        if (argument.equals("--")) { return false; }
+        if (argument.starts_with("-")) {
+            if (native_argument_consumes_value(arguments, i)) { i += 2; }
+            else { i += 1; }
+            continue;
+        }
+        source.clear();
+        source.push_str(argument.to_str());
+        return true;
+    }
+    return false;
+}
+
+bool native_output_path(Vec<String>* arguments, String* output) {
+    i64 i = 1;
+    while (i < arguments.len()) {
+        String* argument = arguments.get_ptr(i);
+        if (argument.equals("--")) { break; }
+        if (argument.equals("-o") || argument.equals("--output")) {
+            if (i + 1 >= arguments.len()) { return false; }
+            output.clear();
+            output.push_str(arguments.get_ptr(i + 1).to_str());
+            return true;
+        }
+        if (argument.starts_with("-o") && argument.len() > 2) {
+            String value = argument.strip_prefix("-o");
+            output.clear();
+            output.push_str(value.to_str());
+            value.drop();
+            return true;
+        }
+        i += 1;
+    }
+    output.clear();
+    output.push_str("a.out");
+    return true;
+}
+
+bool native_is_run(Vec<String>* arguments) {
+    i64 i = 1;
+    while (i < arguments.len()) {
+        String* argument = arguments.get_ptr(i);
+        if (argument.equals("--")) { return false; }
+        if (argument.equals("run") || argument.equals("r")) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+i64 native_find_from(String* source, str needle, i64 start) {
+    i64 needle_len = strlen(needle);
+    if (start < 0) { start = 0; }
+    if (needle_len == 0) { return start <= source.len ? start : -1; }
+    i64 i = start;
+    while (i + needle_len <= source.len) {
+        i64 j = 0;
+        while (j < needle_len && source.data[i + j] == needle[j]) { j += 1; }
+        if (j == needle_len) { return i; }
+        i += 1;
+    }
+    return -1;
+}
+
+bool native_parse_main(String* source, i64* value) {
+    if (source.contains("import") || source.contains("struct") || source.contains("enum")) {
+        return false;
+    }
+    i64 main_at = source.find("i32 main");
+    if (main_at < 0) { return false; }
+    i64 before_main = 0;
+    while (before_main < main_at && (source.data[before_main] == (u8)32
+        || source.data[before_main] == (u8)9 || source.data[before_main] == (u8)13
+        || source.data[before_main] == (u8)10)) {
+        before_main += 1;
+    }
+    if (before_main != main_at) { return false; }
+    i64 paren = native_find_from(source, "(", main_at);
+    if (paren != main_at + 8) { return false; }
+    i64 close_paren = native_find_from(source, ")", paren);
+    if (close_paren < 0) { return false; }
+    i64 open = native_find_from(source, "{", close_paren);
+    if (open < 0) { return false; }
+    i64 return_at = native_find_from(source, "return", open);
+    if (return_at < 0) { return false; }
+    i64 prefix = open + 1;
+    while (prefix < return_at && (source.data[prefix] == (u8)32
+        || source.data[prefix] == (u8)9 || source.data[prefix] == (u8)13
+        || source.data[prefix] == (u8)10)) {
+        prefix += 1;
+    }
+    if (prefix != return_at) { return false; }
+    i64 nested_open = native_find_from(source, "{", open + 1);
+    if (nested_open >= 0 && nested_open < return_at) { return false; }
+    i64 semicolon = native_find_from(source, ";", return_at);
+    if (semicolon < 0) { return false; }
+    i64 close = native_find_from(source, "}", semicolon);
+    if (close < 0) { return false; }
+    i64 first_close = native_find_from(source, "}", open + 1);
+    if (first_close != close) { return false; }
+    i64 trailing = close + 1;
+    while (trailing < source.len && (source.data[trailing] == (u8)32
+        || source.data[trailing] == (u8)9 || source.data[trailing] == (u8)13
+        || source.data[trailing] == (u8)10)) {
+        trailing += 1;
+    }
+    if (trailing != source.len) { return false; }
+    i64 i = return_at + 6;
+    while (i < semicolon && (source.data[i] == (u8)32 || source.data[i] == (u8)9
+        || source.data[i] == (u8)13 || source.data[i] == (u8)10)) {
+        i += 1;
+    }
+    bool negative = false;
+    if (i < semicolon && source.data[i] == (u8)45) {
+        negative = true;
+        i += 1;
+    }
+    i64 start = i;
+    i64 result = 0;
+    while (i < semicolon && source.data[i] >= (u8)'0' && source.data[i] <= (u8)'9') {
+        result = result * 10 + (i64)(source.data[i] - (u8)'0');
+        i += 1;
+    }
+    if (i == start) { return false; }
+    while (i < semicolon && (source.data[i] == (u8)32 || source.data[i] == (u8)9
+        || source.data[i] == (u8)13 || source.data[i] == (u8)10)) {
+        i += 1;
+    }
+    if (i != semicolon) { return false; }
+    *value = negative ? -result : result;
+    return true;
+}
+
+void native_append_i64(String* output, i64 value) {
+    u8 buffer[32];
+    i64 length = itoa(value, (u8*)&buffer[0]);
+    output.push_bytes((u8*)&buffer[0], length);
+}
+
+String native_render_ir(i64 value) {
+    String ir = String.new();
+    ir.push_str("; generated by the stage1 native smoke backend\n");
+    ir.push_str("define i32 @main() {\nentry:\n  ret i32 ");
+    native_append_i64(&ir, value);
+    ir.push_str("\n}\n");
+    return ir;
+}
+
+String native_temp_path(str suffix, i64 pid) {
+    String path = String.from_str("/tmp/silver-stage1-native-");
+    native_append_i64(&path, pid);
+    path.push_str(suffix);
+    return path;
+}
+
+bool native_backend_try(Vec<String>* arguments, str source_path, i32* result) {
+    if (!native_backend_enabled()) { return false; }
+    String output = String.new();
+    if (!native_output_path(arguments, &output)) {
+        output.drop();
+        return false;
+    }
+    Result<String, Error> loaded = String.from_file(source_path);
+    if (loaded.is_err()) {
+        output.drop();
+        return false;
+    }
+    String source = loaded.unwrap();
+    i64 value = 0;
+    if (!native_parse_main(&source, &value)) {
+        source.drop();
+        output.drop();
+        return false;
+    }
+    String ir = native_render_ir(value);
+    i64 pid = getpid();
+    String ir_path = native_temp_path(".ll", pid);
+    String object_path = native_temp_path(".o", pid);
+    bool wrote = write_file(ir_path.to_str(), ir.to_str());
+    ir.drop();
+    source.drop();
+    if (!wrote) {
+        ir_path.drop();
+        object_path.drop();
+        output.drop();
+        return false;
+    }
+
+    String llc = String.from_str("llc");
+    native_set_tool(&llc, "SILVER_STAGE1_LLC");
+    Command llc_command = Command.new(llc.to_str());
+    llc_command.arg("-filetype=obj");
+    llc_command.arg(ir_path.to_str());
+    llc_command.arg("-o");
+    llc_command.arg(object_path.to_str());
+    Result<ExitStatus, i64> llc_result = llc_command.status();
+    llc.drop();
+    ir_path.drop();
+    if (llc_result.is_err() || !llc_result.unwrap().success()) {
+        object_path.drop();
+        output.drop();
+        *result = 2;
+        return true;
+    }
+
+    String cc = String.from_str("cc");
+    native_set_tool(&cc, "SILVER_STAGE1_CC");
+    Command cc_command = Command.new(cc.to_str());
+    cc_command.arg(object_path.to_str());
+    cc_command.arg("-o");
+    cc_command.arg(output.to_str());
+    Result<ExitStatus, i64> cc_result = cc_command.status();
+    cc.drop();
+    object_path.drop();
+    if (cc_result.is_err() || !cc_result.unwrap().success()) {
+        output.drop();
+        *result = 2;
+        return true;
+    }
+
+    i32 exit_code = 0;
+    if (native_is_run(arguments)) {
+        Command run_command = Command.new(output.to_str());
+        Result<ExitStatus, i64> run_result = run_command.status();
+        if (run_result.is_err()) {
+            exit_code = 2;
+        } else {
+            ExitStatus status = run_result.unwrap();
+            if (status.exited) {
+                exit_code = status.exit_code();
+            } else {
+                exit_code = 128;
+                exit_code += status.signal;
+            }
+        }
+    }
+    output.drop();
+    *result = exit_code;
+    return true;
+}

@@ -1,0 +1,844 @@
+// Compile-time configuration for the stage1 frontend. The CST keeps cfg
+// attributes and branches intact; these helpers project the active view over
+// that tree without rewriting the lossless representation.
+import std.mem.vec;
+import std.string;
+import frontend.ast;
+import frontend.diagnostics;
+import frontend.lexer;
+
+struct CfgVisibleName {
+    str name;
+    Span span;
+}
+
+struct CfgImportBinding {
+    str original;
+    str alias;
+    Span span;
+}
+
+struct CfgSet {
+    Vec<String> keys;
+}
+
+impl CfgSet {
+    CfgSet new() {
+        CfgSet set;
+        set.keys = Vec<String>.new();
+        return set;
+    }
+
+    bool contains(CfgSet* self, str key) {
+        i64 i = 0;
+        while (i < self.keys.len()) {
+            if (self.keys.get_ptr(i).equals(key)) {
+                return true;
+            }
+            i += 1;
+        }
+        return false;
+    }
+
+    void add(CfgSet* self, str key) {
+        if (strlen(key) == 0 || self.contains(key)) {
+            return;
+        }
+        String owned = String.from_str(key);
+        self.keys.push(move owned);
+    }
+
+    void remove(CfgSet* self, str key) {
+        i64 i = 0;
+        while (i < self.keys.len()) {
+            if (self.keys.get_ptr(i).equals(key)) {
+                String removed = self.keys.take(i);
+                removed.drop();
+                return;
+            }
+            i += 1;
+        }
+    }
+
+    void set_release(CfgSet* self) {
+        self.remove("debug");
+        self.add("release");
+    }
+
+    void add_flag(CfgSet* self, str flag) {
+        String text = String.from_str(flag);
+        i64 cursor = 0;
+        while (cursor <= text.len) {
+            i64 end = cursor;
+            while (end < text.len && text.data[end] != (u8)',') {
+                end += 1;
+            }
+            i64 key_start = cursor;
+            while (key_start < end && cfg_is_space(text.data[key_start])) {
+                key_start += 1;
+            }
+            i64 key_end = key_start;
+            while (key_end < end && text.data[key_end] != (u8)'=') {
+                key_end += 1;
+            }
+            while (key_end > key_start && cfg_is_space(text.data[key_end - 1])) {
+                key_end -= 1;
+            }
+            if (key_end > key_start) {
+                String key = text.substr(key_start, key_end - key_start);
+                self.add(key.to_str());
+                key.drop();
+            }
+            if (end >= text.len) {
+                break;
+            }
+            cursor = end + 1;
+        }
+        text.drop();
+    }
+}
+
+CfgSet linux_defaults() {
+    CfgSet set = CfgSet.new();
+    set.add("debug");
+    set.add("arch.x86_64");
+    set.add("os.linux");
+    return set;
+}
+
+bool cfg_is_space(u8 value) {
+    return value == (u8)' ' || value == (u8)'\t'
+        || value == (u8)'\n' || value == (u8)'\r';
+}
+
+void cfg_collect_leaves(SyntaxNode* node, Vec<SyntaxNode*>* leaves) {
+    if (node == (SyntaxNode*)0) {
+        return;
+    }
+    if (node.kind == NodeKind.Token) {
+        leaves.push(node);
+        return;
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        cfg_collect_leaves(child, leaves);
+        child = child.next_sibling;
+    }
+}
+
+bool cfg_node_text(SyntaxNode* node, str text) {
+    return node != (SyntaxNode*)0 && strcmp(node.text, text) == 0;
+}
+
+bool cfg_is_cfg_call(SyntaxNode* node) {
+    if (node == (SyntaxNode*)0 || node.kind != NodeKind.Parenthesized) {
+        return false;
+    }
+    Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+    cfg_collect_leaves(node, &leaves);
+    bool result = leaves.len() >= 2
+        && leaves.get(0).token_kind == TokenKind.At
+        && leaves.get(1).token_kind == TokenKind.Identifier
+        && cfg_node_text(leaves.get(1), "cfg");
+    leaves.drop();
+    return result;
+}
+
+bool cfg_append_key(Vec<SyntaxNode*>* leaves, i64 start, i64 end, String* key) {
+    if (start >= end) {
+        return false;
+    }
+    if (end == start + 1 && leaves.get(start).token_kind == TokenKind.StringLiteral) {
+        str raw = leaves.get(start).text;
+        i64 length = strlen(raw);
+        if (length >= 2 && raw[0] == (u8)'"' && raw[length - 1] == (u8)'"') {
+            key.push_bytes((u8*)raw + 1, length - 2);
+            return true;
+        }
+        return false;
+    }
+    bool have = false;
+    i64 i = start;
+    while (i < end) {
+        SyntaxNode* token = leaves.get(i);
+        if (token.token_kind == TokenKind.Identifier) {
+            if (have && i > start && cfg_node_text(leaves.get(i - 1), ".")) {
+                key.push((u8)'.');
+            }
+            key.push_str(token.text);
+            have = true;
+            i += 1;
+            continue;
+        }
+        if (token.token_kind == TokenKind.Dot) {
+            if (!have || i + 1 >= end) {
+                return false;
+            }
+            i += 1;
+            continue;
+        }
+        return false;
+    }
+    return have;
+}
+
+void cfg_eval_args(SyntaxNode* args, CfgSet* cfg, bool* keep, bool* malformed) {
+    Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+    cfg_collect_leaves(args, &leaves);
+    if (leaves.len() == 0) {
+        *malformed = true;
+        leaves.drop();
+        return;
+    }
+    i64 start = 0;
+    i64 i = 0;
+    while (i <= leaves.len()) {
+        if (i == leaves.len() || leaves.get(i).token_kind == TokenKind.Comma) {
+            String key = String.new();
+            bool valid = cfg_append_key(&leaves, start, i, &key);
+            if (!valid) {
+                *malformed = true;
+            } else if (!cfg.contains(key.to_str())) {
+                *keep = false;
+            }
+            key.drop();
+            start = i + 1;
+        }
+        i += 1;
+    }
+    leaves.drop();
+}
+
+bool cfg_item_enabled(SyntaxNode* item, CfgSet* cfg, DiagnosticBag* diagnostics) {
+    bool keep = true;
+    SyntaxNode* child = item.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Token && cfg_node_text(child, "#")) {
+            SyntaxNode* bracket = child.next_sibling;
+            if (bracket != (SyntaxNode*)0 && bracket.kind == NodeKind.Bracket) {
+                SyntaxNode* name = bracket.first_child;
+                if (name != (SyntaxNode*)0 && name.kind == NodeKind.Token && cfg_node_text(name, "cfg")) {
+                    SyntaxNode* args = name.next_sibling;
+                    if (args == (SyntaxNode*)0 || args.kind != NodeKind.Parenthesized) {
+                        keep = false;
+                        if (diagnostics != (DiagnosticBag*)0) {
+                            diagnostics.error(bracket.span, cfg_requires_argument_message());
+                        }
+                    } else if (args.first_child == (SyntaxNode*)0) {
+                        keep = false;
+                        if (diagnostics != (DiagnosticBag*)0) {
+                            diagnostics.error(bracket.span, cfg_requires_argument_message());
+                        }
+                    } else {
+                        bool malformed = false;
+                        cfg_eval_args(args, cfg, &keep, &malformed);
+                        if (malformed && diagnostics != (DiagnosticBag*)0) {
+                            diagnostics.error(args.span, invalid_cfg_argument_message());
+                        }
+                    }
+                }
+            }
+        }
+        child = child.next_sibling;
+    }
+    return keep;
+}
+
+struct CfgExprParser {
+    Vec<SyntaxNode*>* leaves;
+    CfgSet* cfg;
+    i64 cursor;
+}
+
+i64 cfg_expr_key(CfgExprParser* parser) {
+    String key = String.new();
+    bool have = false;
+    while (parser.cursor < parser.leaves.len()) {
+        SyntaxNode* token = parser.leaves.data[parser.cursor];
+        if (token.token_kind == TokenKind.Identifier) {
+            if (have && parser.cursor > 0 && cfg_node_text(parser.leaves.data[parser.cursor - 1], ".")) {
+                key.push((u8)'.');
+            }
+            key.push_str(token.text);
+            have = true;
+            parser.cursor += 1;
+            continue;
+        }
+        if (token.token_kind == TokenKind.Dot && have) {
+            parser.cursor += 1;
+            continue;
+        }
+        if (token.token_kind == TokenKind.StringLiteral && !have) {
+            str raw = token.text;
+            i64 length = strlen(raw);
+            if (length >= 2) {
+                key.push_bytes((u8*)raw + 1, length - 2);
+                have = true;
+                parser.cursor += 1;
+                continue;
+            }
+        }
+        break;
+    }
+    bool present = have && parser.cfg.contains(key.to_str());
+    bool cpu = have && key.starts_with("cpu.");
+    key.drop();
+    if (cpu) {
+        return 2;
+    }
+    return present ? 1 : 0;
+}
+
+i64 cfg_expr_primary(CfgExprParser* parser) {
+    if (parser.cursor >= parser.leaves.len()) {
+        return 2;
+    }
+    SyntaxNode* token = parser.leaves.data[parser.cursor];
+    if (token.token_kind == TokenKind.At) {
+        parser.cursor += 1;
+        if (parser.cursor >= parser.leaves.len()
+            || parser.leaves.data[parser.cursor].token_kind != TokenKind.Identifier
+            || !cfg_node_text(parser.leaves.data[parser.cursor], "cfg")) {
+            return 2;
+        }
+        parser.cursor += 1;
+        return cfg_expr_key(parser);
+    }
+    if (token.token_kind == TokenKind.Not) {
+        parser.cursor += 1;
+        i64 value = cfg_expr_primary(parser);
+        if (value == 0) { return 1; }
+        if (value == 1) { return 0; }
+        return 2;
+    }
+    if (token.token_kind == TokenKind.True) {
+        parser.cursor += 1;
+        return 1;
+    }
+    if (token.token_kind == TokenKind.False) {
+        parser.cursor += 1;
+        return 0;
+    }
+    if (token.token_kind == TokenKind.Identifier) {
+        parser.cursor += 1;
+        return 2;
+    }
+    parser.cursor += 1;
+    return 2;
+}
+
+i64 cfg_expr_and(CfgExprParser* parser) {
+    i64 left = cfg_expr_primary(parser);
+    while (parser.cursor < parser.leaves.len() && cfg_node_text(parser.leaves.data[parser.cursor], "&&")) {
+        parser.cursor += 1;
+        i64 right = cfg_expr_primary(parser);
+        if (left == 0 || right == 0) {
+            left = 0;
+        } else if (left == 1 && right == 1) {
+            left = 1;
+        } else {
+            left = 2;
+        }
+    }
+    return left;
+}
+
+i64 cfg_expr_value(CfgExprParser* parser) {
+    i64 value = cfg_expr_and(parser);
+    while (parser.cursor < parser.leaves.len() && cfg_node_text(parser.leaves.data[parser.cursor], "||")) {
+        parser.cursor += 1;
+        i64 right = cfg_expr_and(parser);
+        if (value == 1 || right == 1) {
+            value = 1;
+        } else if (value == 0 && right == 0) {
+            value = 0;
+        } else {
+            value = 2;
+        }
+    }
+    return value;
+}
+
+i64 cfg_condition_value(SyntaxNode* condition, CfgSet* cfg) {
+    Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+    cfg_collect_leaves(condition, &leaves);
+    CfgExprParser parser;
+    parser.leaves = &leaves;
+    parser.cfg = cfg;
+    parser.cursor = 0;
+    i64 value = cfg_expr_value(&parser);
+    leaves.drop();
+    return value;
+}
+
+i64 cfg_argument_value(SyntaxNode* argument, CfgSet* cfg) {
+    Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+    cfg_collect_leaves(argument, &leaves);
+    CfgExprParser parser;
+    parser.leaves = &leaves;
+    parser.cfg = cfg;
+    parser.cursor = 0;
+    i64 value = cfg_expr_key(&parser);
+    leaves.drop();
+    return value;
+}
+
+SyntaxNode* cfg_find_direct_token(SyntaxNode* first, str text) {
+    SyntaxNode* cursor = first;
+    while (cursor != (SyntaxNode*)0) {
+        if (cursor.kind == NodeKind.Token && cfg_node_text(cursor, text)) {
+            return cursor;
+        }
+        if (cursor.kind == NodeKind.Token && cfg_node_text(cursor, ";")) {
+            return (SyntaxNode*)0;
+        }
+        cursor = cursor.next_sibling;
+    }
+    return (SyntaxNode*)0;
+}
+
+SyntaxNode* cfg_previous_sibling(SyntaxNode* node) {
+    if (node == (SyntaxNode*)0 || node.parent == (SyntaxNode*)0) {
+        return (SyntaxNode*)0;
+    }
+    SyntaxNode* child = node.parent.first_child;
+    SyntaxNode* previous = (SyntaxNode*)0;
+    while (child != (SyntaxNode*)0 && child != node) {
+        previous = child;
+        child = child.next_sibling;
+    }
+    return previous;
+}
+
+void cfg_collect_live_leaves(SyntaxNode* node, CfgSet* cfg, Vec<SyntaxNode*>* leaves) {
+    if (node == (SyntaxNode*)0) {
+        return;
+    }
+    if (node.kind == NodeKind.Token) {
+        leaves.push(node);
+        return;
+    }
+    if (cfg_is_cfg_call(node)) {
+        return;
+    }
+    if (node.kind == NodeKind.Bracket) {
+        SyntaxNode* previous = cfg_previous_sibling(node);
+        if (previous != (SyntaxNode*)0 && cfg_node_text(previous, "#")) {
+            return;
+        }
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Token && child.token_kind == TokenKind.At
+            && child.next_sibling != (SyntaxNode*)0
+            && child.next_sibling.kind == NodeKind.Token
+            && cfg_node_text(child.next_sibling, "cfg")
+            && child.next_sibling.next_sibling != (SyntaxNode*)0
+            && child.next_sibling.next_sibling.kind == NodeKind.Parenthesized) {
+            SyntaxNode* argument = child.next_sibling.next_sibling;
+            i64 value = cfg_argument_value(argument, cfg);
+            SyntaxNode* question = argument.next_sibling;
+            if (value != 2 && question != (SyntaxNode*)0 && cfg_node_text(question, "?")) {
+                SyntaxNode* colon = cfg_find_direct_token(question.next_sibling, ":");
+                if (colon != (SyntaxNode*)0) {
+                    SyntaxNode* start = value == 1 ? question.next_sibling : colon.next_sibling;
+                    SyntaxNode* end = value == 1 ? colon : cfg_find_direct_token(start, ";");
+                    SyntaxNode* cursor = start;
+                    while (cursor != (SyntaxNode*)0 && cursor != end) {
+                        cfg_collect_live_leaves(cursor, cfg, leaves);
+                        cursor = cursor.next_sibling;
+                    }
+                    child = end == (SyntaxNode*)0 ? (SyntaxNode*)0 : end.next_sibling;
+                    continue;
+                }
+            }
+            child = argument.next_sibling;
+            continue;
+        }
+        if (child.kind == NodeKind.Token && cfg_node_text(child, "if")) {
+            leaves.push(child);
+            SyntaxNode* condition = child.next_sibling;
+            SyntaxNode* then_block = condition == (SyntaxNode*)0 ? (SyntaxNode*)0 : condition.next_sibling;
+            if (condition != (SyntaxNode*)0 && !cfg_is_cfg_call(condition)) {
+                cfg_collect_live_leaves(condition, cfg, leaves);
+            }
+            if (then_block != (SyntaxNode*)0 && then_block.kind == NodeKind.Block) {
+                i64 value = condition == (SyntaxNode*)0 ? 2 : cfg_condition_value(condition, cfg);
+                if (value != 0) {
+                    cfg_collect_live_leaves(then_block, cfg, leaves);
+                }
+                SyntaxNode* else_token = then_block.next_sibling;
+                if (else_token != (SyntaxNode*)0 && cfg_node_text(else_token, "else")) {
+                    SyntaxNode* else_tail = else_token.next_sibling;
+                    if (value != 1 && else_tail != (SyntaxNode*)0 && else_tail.kind == NodeKind.Block) {
+                        cfg_collect_live_leaves(else_tail, cfg, leaves);
+                    }
+                    if (else_tail != (SyntaxNode*)0) {
+                        child = else_tail;
+                    } else {
+                        child = else_token;
+                    }
+                    if (child != (SyntaxNode*)0) {
+                        child = child.next_sibling;
+                    }
+                    continue;
+                }
+            }
+            if (then_block != (SyntaxNode*)0) {
+                child = then_block.next_sibling;
+            } else {
+                child = child.next_sibling;
+            }
+            continue;
+        }
+        if (child.kind == NodeKind.Token && cfg_node_text(child, "else")) {
+            child = child.next_sibling;
+            continue;
+        }
+        cfg_collect_live_leaves(child, cfg, leaves);
+        child = child.next_sibling;
+    }
+}
+
+bool cfg_is_parser_fragment(SyntaxNode* item) {
+    if (item.kind == NodeKind.Item) {
+        return true;
+    }
+    if (item.kind == NodeKind.Function && item.first_child != (SyntaxNode*)0
+        && cfg_node_text(item.first_child, "else")) {
+        return true;
+    }
+    return false;
+}
+
+void cfg_collect_items(SyntaxNode* parent, CfgSet* cfg, DiagnosticBag* diagnostics, Vec<SyntaxNode*>* items) {
+    SyntaxNode* child = parent.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind != NodeKind.CfgBlock && !cfg_is_parser_fragment(child)
+            && cfg_item_enabled(child, cfg, diagnostics)) {
+            items.push(child);
+        }
+        child = child.next_sibling;
+    }
+}
+
+SyntaxNode* cfg_raw_function_name(SyntaxNode* block) {
+    SyntaxNode* child = block;
+    if (child.kind != NodeKind.Token) {
+        child = child.first_child;
+    }
+    SyntaxNode* candidate = (SyntaxNode*)0;
+    while (child != (SyntaxNode*)0 && child.kind != NodeKind.Block) {
+        if (child.kind == NodeKind.Token && child.token_kind == TokenKind.Identifier) {
+            candidate = child;
+        }
+        if (child.kind == NodeKind.Parenthesized) {
+            break;
+        }
+        child = child.next_sibling;
+    }
+    return candidate;
+}
+
+void cfg_raw_add_name(SyntaxNode* name, Vec<CfgVisibleName>* names) {
+    if (name == (SyntaxNode*)0) {
+        return;
+    }
+    CfgVisibleName visible;
+    visible.name = name.text;
+    visible.span = name.span;
+    names.push(move visible);
+}
+
+void cfg_raw_scan_declarations(SyntaxNode* block, CfgSet* cfg, Vec<CfgVisibleName>* names) {
+    SyntaxNode* child = block.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Token && cfg_node_text(child, "if")) {
+            SyntaxNode* condition = child.next_sibling;
+            SyntaxNode* then_block = condition == (SyntaxNode*)0 ? (SyntaxNode*)0 : condition.next_sibling;
+            if (then_block != (SyntaxNode*)0 && then_block.kind == NodeKind.Block) {
+                i64 value = condition == (SyntaxNode*)0 ? 2 : cfg_condition_value(condition, cfg);
+                if (value != 0) {
+                    cfg_raw_scan_declarations(then_block, cfg, names);
+                }
+                SyntaxNode* else_token = then_block.next_sibling;
+                if (value != 1 && else_token != (SyntaxNode*)0 && cfg_node_text(else_token, "else")) {
+                    SyntaxNode* else_tail = else_token.next_sibling;
+                    if (else_tail != (SyntaxNode*)0 && else_tail.kind == NodeKind.Block) {
+                        cfg_raw_scan_declarations(else_tail, cfg, names);
+                    }
+                    child = else_tail == (SyntaxNode*)0 ? else_token : else_tail;
+                    child = child.next_sibling;
+                } else {
+                    child = then_block.next_sibling;
+                }
+                continue;
+            }
+        }
+        if (child.kind == NodeKind.Token && cfg_node_text(child, "extern")) {
+            SyntaxNode* extern_block = child.next_sibling;
+            while (extern_block != (SyntaxNode*)0 && extern_block.kind != NodeKind.Block) {
+                extern_block = extern_block.next_sibling;
+            }
+            if (extern_block != (SyntaxNode*)0) {
+                SyntaxNode* declaration = extern_block.first_child;
+                SyntaxNode* candidate = (SyntaxNode*)0;
+                while (declaration != (SyntaxNode*)0) {
+                    if (declaration.kind == NodeKind.Token && declaration.token_kind == TokenKind.Identifier) {
+                        candidate = declaration;
+                    }
+                    if (declaration.kind == NodeKind.Token && cfg_node_text(declaration, ";")) {
+                        if (candidate != (SyntaxNode*)0) {
+                            cfg_raw_add_name(candidate, names);
+                        }
+                        candidate = (SyntaxNode*)0;
+                    }
+                    declaration = declaration.next_sibling;
+                }
+            }
+            while (child != (SyntaxNode*)0 && child.kind != NodeKind.Block) {
+                child = child.next_sibling;
+            }
+            child = child == (SyntaxNode*)0 ? (SyntaxNode*)0 : child.next_sibling;
+            continue;
+        }
+        if (child.kind == NodeKind.Token && cfg_node_text(child, "import")) {
+            while (child != (SyntaxNode*)0 && !cfg_node_text(child, ";")) {
+                child = child.next_sibling;
+            }
+            child = child == (SyntaxNode*)0 ? (SyntaxNode*)0 : child.next_sibling;
+            continue;
+        }
+        if (child.kind == NodeKind.Token && (cfg_node_text(child, "struct") || cfg_node_text(child, "enum")
+            || cfg_node_text(child, "trait") || cfg_node_text(child, "type"))) {
+            SyntaxNode* name = child.next_sibling;
+            while (name != (SyntaxNode*)0 && name.kind != NodeKind.Token) {
+                name = name.next_sibling;
+            }
+            if (name != (SyntaxNode*)0 && name.token_kind == TokenKind.Identifier) {
+                cfg_raw_add_name(name, names);
+            }
+            while (child != (SyntaxNode*)0 && child.kind != NodeKind.Block) {
+                child = child.next_sibling;
+            }
+            child = child == (SyntaxNode*)0 ? (SyntaxNode*)0 : child.next_sibling;
+            continue;
+        }
+        if (child.kind == NodeKind.Token && cfg_node_text(child, "impl")) {
+            SyntaxNode* name = child.next_sibling;
+            if (name != (SyntaxNode*)0 && name.kind == NodeKind.Token && name.token_kind == TokenKind.Identifier) {
+                cfg_raw_add_name(name, names);
+            }
+            while (child != (SyntaxNode*)0 && child.kind != NodeKind.Block) {
+                child = child.next_sibling;
+            }
+            child = child == (SyntaxNode*)0 ? (SyntaxNode*)0 : child.next_sibling;
+            continue;
+        }
+        SyntaxNode* function_name = cfg_raw_function_name(child);
+        if (function_name != (SyntaxNode*)0) {
+            cfg_raw_add_name(function_name, names);
+        }
+        while (child != (SyntaxNode*)0 && child.kind != NodeKind.Block) {
+            child = child.next_sibling;
+        }
+        if (child != (SyntaxNode*)0) {
+            child = child.next_sibling;
+        }
+    }
+}
+
+void cfg_collect_extern_from_item(SyntaxNode* item, Vec<CfgVisibleName>* names) {
+    if (item.kind != NodeKind.Extern) {
+        return;
+    }
+    SyntaxNode* block = item.first_child;
+    while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+        block = block.next_sibling;
+    }
+    if (block == (SyntaxNode*)0) {
+        return;
+    }
+    SyntaxNode* declaration = block.first_child;
+    SyntaxNode* candidate = (SyntaxNode*)0;
+    while (declaration != (SyntaxNode*)0) {
+        if (declaration.kind == NodeKind.Token && declaration.token_kind == TokenKind.Identifier) {
+            candidate = declaration;
+        }
+        if (declaration.kind == NodeKind.Token && cfg_node_text(declaration, ";")) {
+            if (candidate != (SyntaxNode*)0) {
+                cfg_raw_add_name(candidate, names);
+            }
+            candidate = (SyntaxNode*)0;
+        }
+        declaration = declaration.next_sibling;
+    }
+}
+
+void cfg_collect_extern_names(SyntaxNode* parent, Vec<CfgVisibleName>* names) {
+    SyntaxNode* child = parent.first_child;
+    while (child != (SyntaxNode*)0) {
+        cfg_collect_extern_from_item(child, names);
+        child = child.next_sibling;
+    }
+}
+
+void cfg_collect_cfg_names(SyntaxNode* parent, CfgSet* cfg, Vec<CfgVisibleName>* names) {
+    SyntaxNode* child = parent.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.CfgBlock) {
+            SyntaxNode* condition = child.first_child == (SyntaxNode*)0 ? (SyntaxNode*)0 : child.first_child.next_sibling;
+            SyntaxNode* then_block = condition == (SyntaxNode*)0 ? (SyntaxNode*)0 : condition.next_sibling;
+            i64 value = condition == (SyntaxNode*)0 ? 2 : cfg_condition_value(condition, cfg);
+            if (value != 0 && then_block != (SyntaxNode*)0) {
+                cfg_raw_scan_declarations(then_block, cfg, names);
+            }
+            SyntaxNode* else_token = then_block == (SyntaxNode*)0 ? (SyntaxNode*)0 : then_block.next_sibling;
+            if (value != 1 && else_token != (SyntaxNode*)0 && cfg_node_text(else_token, "else")) {
+                SyntaxNode* else_tail = else_token.next_sibling;
+                if (else_tail != (SyntaxNode*)0 && else_tail.kind == NodeKind.Block) {
+                    cfg_raw_scan_declarations(else_tail, cfg, names);
+                }
+            }
+        }
+        child = child.next_sibling;
+    }
+}
+
+String cfg_import_name_from_leaves(Vec<SyntaxNode*>* leaves) {
+    String result = String.new();
+    bool started = false;
+    i64 i = 0;
+    while (i < leaves.len()) {
+        SyntaxNode* token = leaves.get(i);
+        if (token.token_kind == TokenKind.Identifier) {
+            if (started) {
+                result.push((u8)'.');
+            }
+            result.push_str(token.text);
+            started = true;
+        } else if (started && token.token_kind != TokenKind.Dot) {
+            break;
+        }
+        i += 1;
+    }
+    return result;
+}
+
+String cfg_raw_import_name(SyntaxNode* block) {
+    SyntaxNode* child = block.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Token && cfg_node_text(child, "import")) {
+            Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+            SyntaxNode* cursor = child.next_sibling;
+            while (cursor != (SyntaxNode*)0 && !cfg_node_text(cursor, ";")) {
+                if (cursor.kind == NodeKind.Token) {
+                    leaves.push(cursor);
+                }
+                cursor = cursor.next_sibling;
+            }
+            String result = cfg_import_name_from_leaves(&leaves);
+            leaves.drop();
+            return result;
+        }
+        child = child.next_sibling;
+    }
+    return String.new();
+}
+
+String cfg_import_name_from_item(SyntaxNode* item) {
+    String result = String.new();
+    bool started = false;
+    SyntaxNode* child = item.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind != NodeKind.Token) {
+            break;
+        }
+        if (child.token_kind == TokenKind.Identifier) {
+            if (started) {
+                result.push((u8)'.');
+            }
+            result.push_str(child.text);
+            started = true;
+        } else if (started && !cfg_node_text(child, ".")) {
+            break;
+        }
+        if (cfg_node_text(child, ";")) {
+            break;
+        }
+        child = child.next_sibling;
+    }
+    return result;
+}
+
+void cfg_collect_import_bindings(SyntaxNode* parent, CfgSet* cfg, Vec<CfgImportBinding>* bindings) {
+    SyntaxNode* child = parent.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Import && cfg_item_enabled(child, cfg, (DiagnosticBag*)0)) {
+            SyntaxNode* selection = child.first_child;
+            while (selection != (SyntaxNode*)0 && selection.kind == NodeKind.Token) {
+                selection = selection.next_sibling;
+            }
+            if (selection != (SyntaxNode*)0 && selection.kind == NodeKind.Block) {
+                SyntaxNode* item = selection.first_child;
+                while (item != (SyntaxNode*)0) {
+                    if (item.kind == NodeKind.Token && item.token_kind == TokenKind.Identifier) {
+                        SyntaxNode* as_token = item.next_sibling;
+                        SyntaxNode* alias = as_token == (SyntaxNode*)0 ? (SyntaxNode*)0 : as_token.next_sibling;
+                        if (as_token != (SyntaxNode*)0 && cfg_node_text(as_token, "as")
+                            && alias != (SyntaxNode*)0 && alias.kind == NodeKind.Token
+                            && alias.token_kind == TokenKind.Identifier) {
+                            CfgImportBinding binding;
+                            binding.original = item.text;
+                            binding.alias = alias.text;
+                            binding.span = alias.span;
+                            bindings.push(move binding);
+                            item = alias.next_sibling;
+                        }
+                    }
+                    item = item.next_sibling;
+                }
+            }
+        }
+        child = child.next_sibling;
+    }
+}
+
+void cfg_collect_import_names(SyntaxNode* parent, CfgSet* cfg, Vec<String>* names) {
+    SyntaxNode* child = parent.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Import && cfg_item_enabled(child, cfg, (DiagnosticBag*)0)) {
+            String name = cfg_import_name_from_item(child);
+            if (name.len() > 0) {
+                names.push(move name);
+            } else {
+                name.drop();
+            }
+        } else if (child.kind == NodeKind.CfgBlock) {
+            SyntaxNode* condition = child.first_child == (SyntaxNode*)0 ? (SyntaxNode*)0 : child.first_child.next_sibling;
+            SyntaxNode* then_block = condition == (SyntaxNode*)0 ? (SyntaxNode*)0 : condition.next_sibling;
+            i64 value = condition == (SyntaxNode*)0 ? 2 : cfg_condition_value(condition, cfg);
+            if (value != 0 && then_block != (SyntaxNode*)0) {
+                String name = cfg_raw_import_name(then_block);
+                if (name.len() > 0) {
+                    names.push(move name);
+                } else {
+                    name.drop();
+                }
+            }
+            SyntaxNode* else_token = then_block == (SyntaxNode*)0 ? (SyntaxNode*)0 : then_block.next_sibling;
+            if (value != 1 && else_token != (SyntaxNode*)0 && cfg_node_text(else_token, "else")) {
+                SyntaxNode* else_tail = else_token.next_sibling;
+                if (else_tail != (SyntaxNode*)0 && else_tail.kind == NodeKind.Block) {
+                    String name = cfg_raw_import_name(else_tail);
+                    if (name.len() > 0) {
+                        names.push(move name);
+                    } else {
+                        name.drop();
+                    }
+                }
+            }
+        }
+        child = child.next_sibling;
+    }
+}

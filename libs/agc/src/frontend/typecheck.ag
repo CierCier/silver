@@ -1,0 +1,201 @@
+// Small declaration type-name check built on the existing CST projections.
+// This is the first narrow type-checking slice; full type representation and
+// inference will replace these helpers once the stable behavior is pinned.
+import std.mem.vec;
+import frontend.ast;
+import frontend.bindings;
+import frontend.cfg;
+import frontend.diagnostics;
+import frontend.expressions;
+import frontend.symbols;
+import frontend.types;
+
+bool typecheck_is_primitive(str name) {
+    return types_is_primitive_name(name);
+}
+
+bool typecheck_is_builtin(str name) {
+    return strcmp(name, "Self") == 0
+        || strcmp(name, "String") == 0
+        || strcmp(name, "Vec") == 0
+        || strcmp(name, "Optional") == 0
+        || strcmp(name, "Result") == 0
+        || strcmp(name, "Box") == 0
+        || strcmp(name, "Rc") == 0
+        || strcmp(name, "Arc") == 0
+        || strcmp(name, "Array") == 0
+        || strcmp(name, "Range") == 0
+        || strcmp(name, "HashMap") == 0
+        || strcmp(name, "HashSet") == 0
+        || strcmp(name, "Deque") == 0
+        || strcmp(name, "File") == 0
+        || strcmp(name, "Channel") == 0
+        || strcmp(name, "Task") == 0
+        || strcmp(name, "Mutex") == 0
+        || strcmp(name, "RwLock") == 0;
+}
+
+void typecheck_collect_leaves(SyntaxNode* node, Vec<SyntaxNode*>* leaves) {
+    if (node == (SyntaxNode*)0) {
+        return;
+    }
+    if (node.kind == NodeKind.Token) {
+        leaves.push(node);
+        return;
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        typecheck_collect_leaves(child, leaves);
+        child = child.next_sibling;
+    }
+}
+
+bool typecheck_has_type_parameter(SyntaxNode* declaration, str name) {
+    if (declaration == (SyntaxNode*)0 || strlen(name) == 0) {
+        return false;
+    }
+    Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+    typecheck_collect_leaves(declaration, &leaves);
+    bool in_parameters = false;
+    i64 depth = 0;
+    i64 index = 0;
+    while (index < leaves.len()) {
+        SyntaxNode* leaf = leaves.get(index);
+        if (leaf.text == "<") {
+            in_parameters = true;
+            depth = 1;
+        } else if (in_parameters && leaf.text == ">") {
+            depth -= 1;
+            if (depth == 0) {
+                in_parameters = false;
+            }
+        } else if (in_parameters && depth == 1 && leaf.token_kind == TokenKind.Identifier
+            && leaf.text == name) {
+            leaves.drop();
+            return true;
+        }
+        index += 1;
+    }
+    leaves.drop();
+    return false;
+}
+
+void typecheck_report_unknown(SymbolTable* symbols, SyntaxNode* declaration,
+                              TypeProjection* projection, Span span,
+                              DiagnosticBag* diagnostics, bool* ok) {
+    if (projection_is_unknown(projection) || strlen(projection.name) == 0) {
+        return;
+    }
+    if (typecheck_is_primitive(projection.name) || typecheck_is_builtin(projection.name)
+        || typecheck_has_type_parameter(declaration, projection.name)
+        || symbols.find(projection.name) >= 0) {
+        return;
+    }
+    String message = String.from_str("unknown type '");
+    message.push_str(projection.name);
+    message.push_str("'");
+    diagnostics.error(span, move message);
+    *ok = false;
+}
+
+TypeProjection typecheck_function_return(SyntaxNode* function) {
+    TypeProjection result = projection_type_empty();
+    SyntaxNode* parameters = binding_function_parameters(function);
+    SyntaxNode* name = function_identifier(function);
+    Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+    SyntaxNode* child = function.first_child;
+    while (child != (SyntaxNode*)0 && child != parameters) {
+        if (child != name) {
+            typecheck_collect_leaves(child, &leaves);
+        }
+        child = child.next_sibling;
+    }
+    if (leaves.len() > 0) {
+        result = projection_parse_type(&leaves, 0, leaves.len());
+    }
+    leaves.drop();
+    return result;
+}
+
+void typecheck_function(SymbolTable* symbols, SyntaxNode* function,
+                        DiagnosticBag* diagnostics, bool* ok) {
+    TypeProjection return_type = typecheck_function_return(function);
+    if (!projection_is_unknown(&return_type)) {
+        typecheck_report_unknown(symbols, function, &return_type, function.span, diagnostics, ok);
+    }
+
+    // Local declarations are intentionally left to the expression checker.
+    // Stage0 currently accepts some uninitialized unknown-type declarations;
+    // checking them here would create a false semantic parity difference.
+}
+
+void typecheck_struct(SymbolTable* symbols, SyntaxNode* item,
+                      DiagnosticBag* diagnostics, bool* ok) {
+    SyntaxNode* body = (SyntaxNode*)0;
+    SyntaxNode* child = item.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Block) {
+            body = child;
+            break;
+        }
+        child = child.next_sibling;
+    }
+    if (body == (SyntaxNode*)0) {
+        return;
+    }
+
+    Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+    typecheck_collect_leaves(body, &leaves);
+    i64 start = 0;
+    while (start < leaves.len()) {
+        i64 end = start;
+        while (end < leaves.len() && leaves.get(end).token_kind != TokenKind.Semicolon) {
+            end += 1;
+        }
+        if (end > start) {
+            i64 name_index = -1;
+            i64 cursor = end - 1;
+            while (cursor >= start) {
+                if (leaves.get(cursor).token_kind == TokenKind.Identifier) {
+                    name_index = cursor;
+                    break;
+                }
+                cursor -= 1;
+            }
+            if (name_index > start) {
+                TypeProjection field_type = projection_parse_type(&leaves, start, name_index);
+                if (!projection_is_unknown(&field_type)) {
+                    typecheck_report_unknown(
+                        symbols,
+                        item,
+                        &field_type,
+                        leaves.get(start).span,
+                        diagnostics,
+                        ok
+                    );
+                }
+            }
+        }
+        start = end + 1;
+    }
+    leaves.drop();
+}
+
+bool check_declared_types(SymbolTable* symbols, SyntaxTree* tree, CfgSet* cfg,
+                          DiagnosticBag* diagnostics) {
+    bool ok = true;
+    Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
+    cfg_collect_items(tree.root, cfg, diagnostics, &items);
+    i64 index = 0;
+    while (index < items.len()) {
+        SyntaxNode* item = items.get(index);
+        if (symbol_item_is_function(item)) {
+            typecheck_function(symbols, item, diagnostics, &ok);
+        } else if (symbol_item_is_struct(item)) {
+            typecheck_struct(symbols, item, diagnostics, &ok);
+        }
+        index += 1;
+    }
+    items.drop();
+    return ok;
+}

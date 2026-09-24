@@ -1,0 +1,242 @@
+// libs/agc/src/frontend/ast_expr.ag — Lowered typed expression and statement representations.
+import std.intern;
+import std.mem.vec;
+import frontend.ast;
+import frontend.lexer;
+import frontend.types;
+
+enum ExprKind {
+    Literal;       // aux = literal type_id
+    Var;           // aux = name_id
+    Unary;         // aux = op token kind, inner0 = operand
+    Binary;        // aux = op token kind, inner0 = lhs, inner1 = rhs
+    Call;          // inner0 = callee_id, inner1 = args_start, aux = args_count
+    MethodCall;    // inner0 = receiver_id, aux = method_name_id, inner1 = args_start
+    Field;         // inner0 = target_id, aux = field_name_id
+    Index;         // inner0 = target_id, inner1 = index_id
+    Cast;          // inner0 = expr_id, aux = target_type_id
+    Move;          // aux = var_name_id
+}
+
+struct AstExpr {
+    ExprKind kind;
+    u32 inner0;
+    u32 inner1;
+    u32 aux;
+    Span span;
+    u32 inferred_type;
+}
+
+enum StmtKind {
+    Let;           // aux = var_name_id, inner0 = type_id, inner1 = init_expr_id
+    Assign;        // inner0 = target_expr_id, inner1 = val_expr_id
+    Expr;          // inner0 = expr_id
+    Return;        // inner0 = expr_id
+    If;            // inner0 = cond_expr_id, inner1 = then_block_id, aux = else_block_id
+    While;         // inner0 = cond_expr_id, inner1 = body_block_id
+    For;           // aux = iter_var_id, inner0 = iterable_id, inner1 = body_id
+    Break;
+    Continue;
+    Defer;         // inner0 = block_id
+}
+
+struct AstStmt {
+    StmtKind kind;
+    u32 inner0;
+    u32 inner1;
+    u32 aux;
+    Span span;
+}
+
+struct AstPool {
+    Vec<AstExpr> exprs;
+    Vec<AstStmt> stmts;
+    Vec<u32> args;
+}
+
+impl AstPool {
+    AstPool new() {
+        AstPool pool;
+        pool.exprs = Vec<AstExpr>.new();
+        pool.stmts = Vec<AstStmt>.new();
+        pool.args = Vec<u32>.new();
+
+        // 0: Dummy null expr
+        AstExpr null_expr;
+        null_expr.kind = ExprKind.Literal;
+        null_expr.inner0 = 0;
+        null_expr.inner1 = 0;
+        null_expr.aux = TYPE_UNKNOWN;
+        null_expr.span = Span.synthetic();
+        null_expr.inferred_type = TYPE_UNKNOWN;
+        pool.exprs.push(move null_expr);
+
+        return move pool;
+    }
+
+    u32 add_literal(AstPool* self, u32 type_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Literal;
+        expr.inner0 = 0;
+        expr.inner1 = 0;
+        expr.aux = type_id;
+        expr.span = span;
+        expr.inferred_type = type_id;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_var(AstPool* self, u32 name_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Var;
+        expr.inner0 = 0;
+        expr.inner1 = 0;
+        expr.aux = name_id;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_binary(AstPool* self, TokenKind op, u32 lhs, u32 rhs, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Binary;
+        expr.inner0 = lhs;
+        expr.inner1 = rhs;
+        expr.aux = (u32)op;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_unary(AstPool* self, TokenKind op, u32 operand, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Unary;
+        expr.inner0 = operand;
+        expr.inner1 = 0;
+        expr.aux = (u32)op;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_move(AstPool* self, u32 var_name_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Move;
+        expr.inner0 = 0;
+        expr.inner1 = 0;
+        expr.aux = var_name_id;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_call(AstPool* self, u32 callee, u32 args_start, u32 args_count, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Call;
+        expr.inner0 = callee;
+        expr.inner1 = args_start;
+        expr.aux = args_count;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_method_call(AstPool* self, u32 receiver, u32 method_name_id, u32 args_start, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.MethodCall;
+        expr.inner0 = receiver;
+        expr.inner1 = args_start;
+        expr.aux = method_name_id;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_field(AstPool* self, u32 target, u32 field_name_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Field;
+        expr.inner0 = target;
+        expr.inner1 = 0;
+        expr.aux = field_name_id;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_index(AstPool* self, u32 target, u32 index_expr, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Index;
+        expr.inner0 = target;
+        expr.inner1 = index_expr;
+        expr.aux = 0;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_stmt_return(AstPool* self, u32 expr_id, Span span) {
+        AstStmt stmt;
+        stmt.kind = StmtKind.Return;
+        stmt.inner0 = expr_id;
+        stmt.inner1 = 0;
+        stmt.aux = 0;
+        stmt.span = span;
+        self.stmts.push(move stmt);
+        return (u32)(self.stmts.len() - 1);
+    }
+
+    u32 add_stmt_let(AstPool* self, u32 var_name_id, u32 type_id, u32 init_expr_id, Span span) {
+        AstStmt stmt;
+        stmt.kind = StmtKind.Let;
+        stmt.inner0 = type_id;
+        stmt.inner1 = init_expr_id;
+        stmt.aux = var_name_id;
+        stmt.span = span;
+        self.stmts.push(move stmt);
+        return (u32)(self.stmts.len() - 1);
+    }
+
+    u32 add_stmt_assign(AstPool* self, u32 target_expr_id, u32 val_expr_id, Span span) {
+        AstStmt stmt;
+        stmt.kind = StmtKind.Assign;
+        stmt.inner0 = target_expr_id;
+        stmt.inner1 = val_expr_id;
+        stmt.aux = 0;
+        stmt.span = span;
+        self.stmts.push(move stmt);
+        return (u32)(self.stmts.len() - 1);
+    }
+
+    u32 add_stmt_expr(AstPool* self, u32 expr_id, Span span) {
+        AstStmt stmt;
+        stmt.kind = StmtKind.Expr;
+        stmt.inner0 = expr_id;
+        stmt.inner1 = 0;
+        stmt.aux = 0;
+        stmt.span = span;
+        self.stmts.push(move stmt);
+        return (u32)(self.stmts.len() - 1);
+    }
+
+    AstExpr* get_expr(AstPool* self, u32 id) {
+        if ((i64)id >= self.exprs.len()) {
+            return self.exprs.get_ptr(0);
+        }
+        return self.exprs.get_ptr((i64)id);
+    }
+
+    AstStmt* get_stmt(AstPool* self, u32 id) {
+        if ((i64)id >= self.stmts.len()) {
+            return self.stmts.get_ptr(0);
+        }
+        return self.stmts.get_ptr((i64)id);
+    }
+}

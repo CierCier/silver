@@ -11,7 +11,7 @@ same diagnostics, same codegen decisions, same test results, same artifacts.
 
 Scope of the bootstrap today
 ----------------------------
-bin/agc/src: ~90.0k lines of Rust.
+bootstrap/stage0/agc/src: ~90.0k lines of Rust.
   - semantic/          ~28.4k LOC (typeck.rs alone is 9,952)
   - codegen/           ~23.3k LOC (llvm_ir/ 20.8k, dwarf_bt.rs 1,265)
   - parser/            ~13.6k LOC (prt_parser.rs 7,173)
@@ -352,4 +352,27 @@ PARITY GATE (the one rule that makes this safe)
  Non-goal for v1 of the self-host: incremental compilation, LSP feature
  parity (aglsp stays Rust), release-mode optimization parity, and
  multithreaded stage1.
+
+===============================================================================
+  CURRENT EXECUTION RECORD (2026-09-24)
+===============================================================================
+
+  The Linux compatibility boundary is executable:
+
+    - stage1 builds from silver.toml through stage0;
+    - lex/parse parity covers 346 files;
+    - semantic status parity covers 346 files with no deferred skips;
+    - typed Send primary diagnostics match on the focused launch fixtures;
+    - AGM v2/v6/v7/v8/v9/v10/v11 metadata and malformed inputs are checked;
+    - tests/selfhost/run_native.sh passes the 200-test native corpus (one
+      intentional benchmark skip) through the explicit SILVER_STAGE0 bridge;
+    - dependency cache keys include target/emit/tree-shake/test-harness and
+      deterministic dependency ordering; root-object reuse is disabled until
+      implicit imports are represented in the graph; and
+    - cargo test -p agc --lib passes 562 tests.
+
+  This is a compatibility seam, not stage1 backend ownership. The remaining
+  gates are the Silver type checker/monomorphizer, textual IR and linker,
+  package/submodule execution, stage1-owned cache, and stage1-on-stage1
+  fixpoint.
 ===============================================================================

@@ -1,0 +1,392 @@
+// Initial borrow/escape projection over the CST. It models root-place loans
+// conservatively; field/index overlap and NLL expiry are intentionally left
+// to the typed place pass.
+import std.mem.vec;
+import std.mem.memory;
+import std.intern;
+import frontend.ast;
+import frontend.diagnostics;
+import frontend.cfg;
+import frontend.place;
+
+bool borrow_text_equals(str left, str right) {
+    return strcmp(left, right) == 0;
+}
+
+enum LoanKind {
+    Shared;
+    Mutable;
+}
+
+struct Loan {
+    u32 name_id;
+    Place place;
+    u32 holder_id;
+    LoanKind kind;
+    bool persistent;
+    i64 release_index;
+    bool active;
+}
+
+struct BorrowAnalyzer {
+    Interner names;
+    Vec<Loan> loans;
+    Vec<Projection> projections;
+    DiagnosticBag* diagnostics;
+    bool failed;
+}
+
+impl BorrowAnalyzer {
+    BorrowAnalyzer new(DiagnosticBag* diagnostics) {
+        BorrowAnalyzer analyzer;
+        analyzer.names = Interner.new();
+        analyzer.loans = Vec<Loan>.new();
+        analyzer.projections = Vec<Projection>.new();
+        analyzer.diagnostics = diagnostics;
+        analyzer.failed = false;
+        return analyzer;
+    }
+
+    i64 find_conflict(BorrowAnalyzer* self, Place* target, LoanKind incoming_kind) {
+        i64 i = 0;
+        while (i < self.loans.len()) {
+            Loan* loan = self.loans.get_ptr(i);
+            if (loan.active && places_overlap(&loan.place, target, &self.projections)) {
+                bool old_mutable = loan.kind == LoanKind.Mutable;
+                bool new_mutable = incoming_kind == LoanKind.Mutable;
+                if (old_mutable || new_mutable) {
+                    return i;
+                }
+            }
+            i += 1;
+        }
+        return -1;
+    }
+
+    void conflict(BorrowAnalyzer* self, str name, Span span, bool incoming_mutable) {
+        String message = String.from_str("cannot borrow '");
+        message.push_str(name);
+        if (incoming_mutable) {
+            message.push_str("' as mutable because it is already borrowed as shared");
+        } else {
+            message.push_str("' as shared because it is already borrowed as mutable");
+        }
+        self.diagnostics.error(span, move message);
+        self.failed = true;
+    }
+
+    void add(BorrowAnalyzer* self, Place place, str name, Span span, LoanKind kind, bool persistent, u32 holder_id, i64 release_index) {
+        i64 existing = self.find_conflict(&place, kind);
+        if (existing >= 0) {
+            Loan* loan = self.loans.get_ptr(existing);
+            bool old_mutable = loan.kind == LoanKind.Mutable;
+            bool new_mutable = kind == LoanKind.Mutable;
+            if (old_mutable != new_mutable) {
+                self.conflict(name, span, new_mutable);
+            }
+        }
+        Loan loan;
+        loan.name_id = self.names.intern(name);
+        loan.place = move place;
+        loan.holder_id = holder_id;
+        loan.kind = kind;
+        loan.persistent = persistent;
+        loan.release_index = release_index;
+        loan.active = true;
+        self.loans.push(move loan);
+    }
+
+    void assign_place(BorrowAnalyzer* self, Place* target, str name, Span span) {
+        i64 i = 0;
+        while (i < self.loans.len()) {
+            Loan* loan = self.loans.get_ptr(i);
+            if (loan.active && places_overlap(&loan.place, target, &self.projections)) {
+                String message = String.from_str("cannot assign to '");
+                message.push_str(name);
+                message.push_str("' because it is borrowed");
+                self.diagnostics.error(span, move message);
+                self.failed = true;
+                return;
+            }
+            i += 1;
+        }
+    }
+
+    void assign(BorrowAnalyzer* self, str name, Span span) {
+        Place p = Place.new(self.names.intern(name));
+        self.assign_place(&p, name, span);
+    }
+
+    void release_due(BorrowAnalyzer* self, i64 index) {
+        i64 i = 0;
+        while (i < self.loans.len()) {
+            Loan* loan = self.loans.get_ptr(i);
+            if (loan.active && loan.persistent && loan.release_index <= index) {
+                loan.active = false;
+            }
+            i += 1;
+        }
+    }
+
+    void end_statement(BorrowAnalyzer* self) {
+        i64 i = 0;
+        while (i < self.loans.len()) {
+            Loan* loan = self.loans.get_ptr(i);
+            if (loan.active && !loan.persistent) {
+                loan.active = false;
+            }
+            i += 1;
+        }
+    }
+}
+
+void collect_borrow_leaves(SyntaxNode* node, Vec<SyntaxNode*>* leaves) {
+    if (node == (SyntaxNode*)0) {
+        return;
+    }
+    if (node.kind == NodeKind.Token) {
+        leaves.push(node);
+        return;
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        collect_borrow_leaves(child, leaves);
+        child = child.next_sibling;
+    }
+}
+
+SyntaxNode* borrow_function_body(SyntaxNode* function) {
+    SyntaxNode* child = function.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Block) {
+            return child;
+        }
+        child = child.next_sibling;
+    }
+    return (SyntaxNode*)0;
+}
+
+SyntaxNode* borrow_function_parameters(SyntaxNode* function) {
+    SyntaxNode* child = function.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Parenthesized) {
+            return child;
+        }
+        child = child.next_sibling;
+    }
+    return (SyntaxNode*)0;
+}
+
+bool is_reference_parameter(SyntaxNode* function, str name) {
+    SyntaxNode* parameters = borrow_function_parameters(function);
+    if (parameters == (SyntaxNode*)0) {
+        return false;
+    }
+    Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+    collect_borrow_leaves(parameters, &leaves);
+    i64 i = 0;
+    while (i < leaves.len()) {
+        if (leaves.get(i).token_kind == TokenKind.BitwiseAnd) {
+            i64 j = i + 1;
+            if (j < leaves.len() && borrow_text_equals(leaves.get(j).text, "mut")) {
+                j += 1;
+            }
+            while (j < leaves.len() && borrow_text_equals(leaves.get(j).text, ",") == false) {
+                if (leaves.get(j).token_kind == TokenKind.Identifier && borrow_text_equals(leaves.get(j).text, name)) {
+                    return true;
+                }
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+    return false;
+}
+
+void report_escape(BorrowAnalyzer* analyzer, SyntaxNode* function, str name, Span span) {
+    if (is_reference_parameter(function, name)) {
+        return;
+    }
+    String message = String.from_str("returned reference does not outlive the function (it borrows a local value; return a reference to a global or a reference parameter instead)");
+    analyzer.diagnostics.error(span, move message);
+    analyzer.failed = true;
+}
+
+str persistent_holder(Vec<SyntaxNode*>* leaves, i64 borrow_index) {
+    i64 i = borrow_index - 2;
+    while (i >= 0 && leaves.get(i).token_kind == TokenKind.Semicolon) {
+        i -= 1;
+    }
+    if (i < 0 || leaves.get(i).token_kind != TokenKind.Identifier) {
+        return "";
+    }
+    SyntaxNode* candidate = leaves.get(i);
+    i -= 1;
+    while (i >= 1 && leaves.get(i).token_kind == TokenKind.Dot) {
+        i -= 1;
+        if (leaves.get(i).token_kind == TokenKind.Identifier) {
+            candidate = leaves.get(i);
+        }
+        i -= 1;
+    }
+    return candidate.text;
+}
+
+i64 last_use(Vec<SyntaxNode*>* leaves, i64 start, str holder) {
+    i64 i = start;
+    while (i < leaves.len()) {
+        SyntaxNode* node = leaves.get(i);
+        if (node.token_kind == TokenKind.Identifier && borrow_text_equals(node.text, holder)) {
+            bool field_write = i + 3 < leaves.len()
+                && borrow_text_equals(leaves.get(i + 1).text, ".")
+                && leaves.get(i + 2).token_kind == TokenKind.Identifier
+                && borrow_text_equals(leaves.get(i + 3).text, "=");
+            if (!field_write) {
+                return i;
+            }
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+void collect_borrow_release_points(SyntaxNode* node, Vec<SyntaxNode*>* leaves, Vec<i64>* points) {
+    if (node == (SyntaxNode*)0) {
+        return;
+    }
+    if (node.kind == NodeKind.Parenthesized) {
+        i64 last = -1;
+        i64 i = 0;
+        while (i < leaves.len()) {
+            SyntaxNode* leaf = leaves.get(i);
+            if (leaf.span.start >= node.span.start && leaf.span.end <= node.span.end && i > last) {
+                last = i;
+            }
+            i += 1;
+        }
+        if (last >= 0) {
+            points.push(last);
+        }
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        collect_borrow_release_points(child, leaves, points);
+        child = child.next_sibling;
+    }
+}
+
+void scan_borrows(BorrowAnalyzer* analyzer, SyntaxNode* function, CfgSet* cfg) {
+    SyntaxNode* body = borrow_function_body(function);
+    if (body == (SyntaxNode*)0) {
+        return;
+    }
+    Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+    cfg_collect_live_leaves(body, cfg, &leaves);
+    Vec<i64> release_points = Vec<i64>.new();
+    collect_borrow_release_points(body, &leaves, &release_points);
+    i64 i = 0;
+    while (i < leaves.len()) {
+        analyzer.release_due(i);
+        SyntaxNode* node = leaves.get(i);
+        if (node.token_kind == TokenKind.Identifier && i + 1 < leaves.len()) {
+            bool is_field = i > 0 && borrow_text_equals(leaves.get(i - 1).text, ".");
+            if (!is_field) {
+                str next = leaves.get(i + 1).text;
+                if (borrow_text_equals(next, "=") || borrow_text_equals(next, "+=") || borrow_text_equals(next, "-=") || borrow_text_equals(next, "*=") || borrow_text_equals(next, "/=") || borrow_text_equals(next, "%=")) {
+                    analyzer.assign(node.text, node.span);
+                }
+            }
+        }
+        if (node.token_kind == TokenKind.Return) {
+            i64 j = i + 1;
+            if (j < leaves.len() && leaves.get(j).token_kind == TokenKind.BitwiseAnd) {
+                j += 1;
+                if (j < leaves.len() && borrow_text_equals(leaves.get(j).text, "mut")) {
+                    j += 1;
+                }
+                if (j < leaves.len() && leaves.get(j).token_kind == TokenKind.Identifier) {
+                    report_escape(analyzer, function, leaves.get(j).text, leaves.get(j).span);
+                }
+            }
+        }
+        if (node.token_kind == TokenKind.BitwiseAnd) {
+            bool expression_position = i > 0;
+            if (i > 0) {
+                str previous = leaves.get(i - 1).text;
+                expression_position = borrow_text_equals(previous, "=") || borrow_text_equals(previous, "(") || borrow_text_equals(previous, ",") || borrow_text_equals(previous, "return") || leaves.get(i - 1).token_kind == TokenKind.Identifier;
+            }
+            if (expression_position) {
+                i64 j = i + 1;
+                bool mutable = false;
+                if (j < leaves.len() && borrow_text_equals(leaves.get(j).text, "mut")) {
+                    mutable = true;
+                    j += 1;
+                }
+                if (j < leaves.len() && leaves.get(j).token_kind == TokenKind.Identifier) {
+                    str name = leaves.get(j).text;
+                    u32 local_id = analyzer.names.intern(name);
+                    u32 proj_start = (u32)analyzer.projections.len();
+                    u16 proj_count = 0;
+                    i64 k = j + 1;
+                    while (k + 1 < leaves.len() && borrow_text_equals(leaves.get(k).text, ".") && leaves.get(k + 1).token_kind == TokenKind.Identifier) {
+                        Projection proj;
+                        proj.kind = ProjectionKind.Field;
+                        proj.field_name_id = analyzer.names.intern(leaves.get(k + 1).text);
+                        analyzer.projections.push(move proj);
+                        proj_count = proj_count + 1;
+                        k += 2;
+                    }
+                    Place place = Place.with_projections(local_id, proj_start, proj_count);
+                    bool persistent = i > 0 && borrow_text_equals(leaves.get(i - 1).text, "=");
+                    LoanKind kind = LoanKind.Shared;
+                    if (mutable) {
+                        kind = LoanKind.Mutable;
+                    }
+                    u32 holder_id = (u32)0;
+                    i64 release_index = leaves.len();
+                    if (persistent) {
+                        str holder = persistent_holder(&leaves, i);
+                        if (strlen(holder) > 0) {
+                            holder_id = analyzer.names.intern(holder);
+                            i64 use_index = last_use(&leaves, i + 1, holder);
+                            if (use_index >= 0) {
+                                release_index = use_index;
+                            }
+                        }
+                    }
+                    analyzer.add(move place, name, leaves.get(j).span, kind, persistent, holder_id, release_index);
+                }
+            }
+        }
+        if (node.token_kind == TokenKind.Semicolon) {
+            analyzer.end_statement();
+        }
+        i64 point = 0;
+        while (point < release_points.len()) {
+            if (release_points.get(point) == i) {
+                analyzer.end_statement();
+            }
+            point += 1;
+        }
+        i += 1;
+    }
+}
+
+bool check_borrows(SyntaxTree* tree, DiagnosticBag* diagnostics, CfgSet* cfg) {
+    bool ok = true;
+    Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
+    cfg_collect_items(tree.root, cfg, diagnostics, &items);
+    i64 i = 0;
+    while (i < items.len()) {
+        if (items.get(i).kind == NodeKind.Function) {
+            BorrowAnalyzer analyzer = BorrowAnalyzer.new(diagnostics);
+            scan_borrows(&analyzer, items.get(i), cfg);
+            if (analyzer.failed) {
+                ok = false;
+            }
+        }
+        i += 1;
+    }
+    items.drop();
+    return ok;
+}

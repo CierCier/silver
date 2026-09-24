@@ -12,10 +12,10 @@ then runs real Silver programs against a Win32-backed runtime.
 
 Silver is currently **ELF-only in three independent places**, any one of which breaks Windows:
 
-1. **The link driver** (`bin/agc/src/link.rs`) is a GNU/ELF machine: `cc`, `ld.lld -flavor gnu`,
+1. **The link driver** (`bootstrap/stage0/agc/src/link.rs`) is a GNU/ELF machine: `cc`, `ld.lld -flavor gnu`,
    PT_INTERP, `-rpath`, `.so`, and a `-nostdlib` "no CRT" design that relies on Linux's
    custom-`_start` ET_EXEC model.
-2. **The ABI layer** (`bin/agc/src/codegen/abi.rs`) implements System V AMD64 classification
+2. **The ABI layer** (`bootstrap/stage0/agc/src/codegen/abi.rs`) implements System V AMD64 classification
    only, and its dispatcher (`abi.rs:316-333`) selects on *architecture*, ignoring the OS in the
    triple — an `x86_64-pc-windows-msvc` triple today compiles **silently wrong** calls.
 3. **The stdlib runtime** (`std/sys/**`) is a freestanding, libc-less Linux runtime: every OS
@@ -91,7 +91,7 @@ uses it for artifact compatibility checks).
 
 ### 2.2 `prefer-dynamic` on Windows
 
-`bin/agc/Cargo.toml:9` sets `llvm-sys` feature `prefer-dynamic`. The official Windows
+`bootstrap/stage0/agc/Cargo.toml:9` sets `llvm-sys` feature `prefer-dynamic`. The official Windows
 installer ships **no static LLVM archives** and **no `LLVM.lib`** — only `LLVM-C.lib`
 (import lib for `LLVM-C.dll`). Consequences:
 
@@ -177,7 +177,7 @@ Consequence for `link.rs`: the `-nostdlib` fallback (`link.rs:293-307`) and
 `DYNAMIC_LINKER`/PT_INTERP logic (`link.rs:104-117, 232, 305`) become `GnuLd`-flavor-only.
 The Windows flavor adds the CRT + SDK libs and *drops* `--dynamic-linker`.
 
-### 3.3 Link driver (`bin/agc/src/link.rs`)
+### 3.3 Link driver (`bootstrap/stage0/agc/src/link.rs`)
 
 Restructure around a `LinkFlavor { GnuLd, LldLink, MsvcLink }` (MinGW later, not required):
 
@@ -191,7 +191,7 @@ Restructure around a `LinkFlavor { GnuLd, LldLink, MsvcLink }` (MinGW later, not
 | `-Wl` passthrough | multiple sites | `/FOO` passthrough; no `-Wl,` on MSVC |
 | CRT | deliberately omitted (`293-307`) | `libcmt.lib` (static) or `msvcrt.lib` + `vcruntime.lib`, `kernel32.lib`, `ucrt.lib`, `/SUBSYSTEM:CONSOLE` |
 
-### 3.4 Driver/output plumbing (`bin/agc/src/driver.rs`)
+### 3.4 Driver/output plumbing (`bootstrap/stage0/agc/src/driver.rs`)
 
 - `default_output_for` (`471-491`): `a.out` → `a.exe` on windows triples; `.o` → `.obj`; `.s` → `.asm`.
 - Run-mode temp binary (`665-670`, `2182-2186`): append `.exe` and delete the actual produced file

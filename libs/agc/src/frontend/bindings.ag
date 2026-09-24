@@ -1,0 +1,374 @@
+// Typed local-binding projection over the lossless CST. This is deliberately
+// independent of source text: later ownership and borrow passes can consume
+// the same binding records without re-parsing declarations.
+import std.mem.vec;
+import frontend.ast;
+import frontend.expressions;
+import frontend.lexer;
+import frontend.symbols;
+
+enum BindingKind {
+    Parameter;
+    Let;
+    Variable;
+    Array;
+    MatchBinding;
+    For;
+}
+
+struct Binding {
+    str name;
+    Span span;
+    BindingKind kind;
+    TypeProjection declared_type;
+}
+
+void add_typed_binding(Vec<Binding>* bindings, SyntaxNode* name, BindingKind kind, TypeProjection* declared_type) {
+    if (name == (SyntaxNode*)0 || name.token_kind != TokenKind.Identifier || name.text == "_") {
+        return;
+    }
+    Binding binding;
+    binding.name = name.text;
+    binding.span = name.span;
+    binding.kind = kind;
+    if (declared_type == (TypeProjection*)0) {
+        TypeProjection unknown = projection_type_empty();
+        binding.declared_type = move unknown;
+    } else {
+        binding.declared_type = *declared_type;
+    }
+    bindings.push(move binding);
+}
+
+void add_binding(Vec<Binding>* bindings, SyntaxNode* name, BindingKind kind) {
+    add_typed_binding(bindings, name, kind, (TypeProjection*)0);
+}
+
+SyntaxNode* binding_previous_sibling(SyntaxNode* node) {
+    if (node == (SyntaxNode*)0 || node.parent == (SyntaxNode*)0) {
+        return (SyntaxNode*)0;
+    }
+    SyntaxNode* child = node.parent.first_child;
+    SyntaxNode* previous = (SyntaxNode*)0;
+    while (child != (SyntaxNode*)0 && child != node) {
+        previous = child;
+        child = child.next_sibling;
+    }
+    return previous;
+}
+
+bool binding_token_is_decl_type(SyntaxNode* node) {
+    if (node == (SyntaxNode*)0 || node.kind != NodeKind.Token) {
+        return false;
+    }
+    if (is_primitive_type_token(node.token_kind)) {
+        return true;
+    }
+    if (node.token_kind == TokenKind.Identifier) {
+        return strlen(node.text) > 0
+            && node.text[0] >= (u8)'A'
+            && node.text[0] <= (u8)'Z';
+    }
+    return node.token_kind == TokenKind.Const
+        || node.token_kind == TokenKind.Static
+        || node.token_kind == TokenKind.Volatile
+        || node.token_kind == TokenKind.Mut
+        || node.token_kind == TokenKind.BitwiseAnd;
+}
+
+void binding_collect_leaves(SyntaxNode* node, Vec<SyntaxNode*>* leaves) {
+    if (node == (SyntaxNode*)0) {
+        return;
+    }
+    if (node.kind == NodeKind.Token) {
+        leaves.push(node);
+        return;
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        binding_collect_leaves(child, leaves);
+        child = child.next_sibling;
+    }
+}
+
+bool binding_is_value_name(SyntaxNode* node) {
+    if (node == (SyntaxNode*)0 || node.kind != NodeKind.Token
+        || node.token_kind != TokenKind.Identifier || strlen(node.text) == 0) {
+        return false;
+    }
+    return node.text[0] == (u8)'_'
+        || (node.text[0] >= (u8)'a' && node.text[0] <= (u8)'z');
+}
+
+void collect_bracket_bindings(SyntaxNode* bracket, Vec<Binding>* bindings) {
+    Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+    binding_collect_leaves(bracket, &leaves);
+    i64 i = 0;
+    while (i < leaves.len()) {
+        SyntaxNode* leaf = leaves.get(i);
+        if (binding_is_value_name(leaf)) {
+            add_binding(bindings, leaf, BindingKind.Let);
+        }
+        i += 1;
+    }
+    leaves.drop();
+}
+
+bool binding_is_match_block(SyntaxNode* node) {
+    SyntaxNode* previous = binding_previous_sibling(node);
+    while (previous != (SyntaxNode*)0) {
+        if (previous.kind == NodeKind.Token && previous.token_kind == TokenKind.Match) {
+            return true;
+        }
+        if (previous.kind == NodeKind.Block
+            || (previous.kind == NodeKind.Token && previous.token_kind == TokenKind.Semicolon)) {
+            break;
+        }
+        previous = binding_previous_sibling(previous);
+    }
+    SyntaxNode* parent = node.parent;
+    return parent != (SyntaxNode*)0 && parent.kind == NodeKind.Block
+        && binding_is_match_block(parent);
+}
+
+void collect_match_arm_bindings(SyntaxNode* block, Vec<Binding>* bindings) {
+    SyntaxNode* child = block.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (binding_is_value_name(child)) {
+            SyntaxNode* next = child.next_sibling;
+            if (next != (SyntaxNode*)0 && next.kind == NodeKind.Token
+                && (next.token_kind == TokenKind.Comma || next.token_kind == TokenKind.Colon
+                    || next.token_kind == TokenKind.Greater || next.token_kind == TokenKind.Less
+                    || next.token_kind == TokenKind.Equal || next.token_kind == TokenKind.NotEqual)) {
+                add_binding(bindings, child, BindingKind.MatchBinding);
+            }
+        }
+        child = child.next_sibling;
+    }
+}
+
+bool binding_has_match_ancestor(SyntaxNode* node) {
+    SyntaxNode* parent = node.parent;
+    while (parent != (SyntaxNode*)0) {
+        if (parent.kind == NodeKind.Block && binding_is_match_block(parent)) {
+            return true;
+        }
+        parent = parent.parent;
+    }
+    return false;
+}
+
+void collect_pattern_bindings_in_tree(SyntaxNode* node, Vec<Binding>* bindings) {
+    if (node == (SyntaxNode*)0) {
+        return;
+    }
+    if (node.kind == NodeKind.Block && binding_is_match_block(node)) {
+        collect_match_arm_bindings(node, bindings);
+    }
+    if (node.kind == NodeKind.Parenthesized) {
+        SyntaxNode* previous = binding_previous_sibling(node);
+        if (binding_has_match_ancestor(node)
+            && previous != (SyntaxNode*)0 && previous.kind == NodeKind.Token
+            && strlen(previous.text) > 0
+            && previous.text[0] >= (u8)'A'
+            && previous.text[0] <= (u8)'Z') {
+            Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+            binding_collect_leaves(node, &leaves);
+            i64 i = 0;
+            while (i < leaves.len()) {
+                SyntaxNode* leaf = leaves.get(i);
+                if (binding_is_value_name(leaf)) {
+                    add_binding(bindings, leaf, BindingKind.MatchBinding);
+                }
+                i += 1;
+            }
+            leaves.drop();
+        }
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        collect_pattern_bindings_in_tree(child, bindings);
+        child = child.next_sibling;
+    }
+}
+
+void collect_parameter_bindings(SyntaxNode* parameters, Vec<Binding>* bindings) {
+    if (parameters == (SyntaxNode*)0) {
+        return;
+    }
+    SyntaxNode* start = parameters.first_child;
+    while (start != (SyntaxNode*)0) {
+        SyntaxNode* cursor = start;
+        SyntaxNode* last_identifier = (SyntaxNode*)0;
+        Vec<SyntaxNode*> segment = Vec<SyntaxNode*>.new();
+        while (cursor != (SyntaxNode*)0 && !(cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Comma)) {
+            binding_collect_leaves(cursor, &segment);
+            if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Identifier) {
+                last_identifier = cursor;
+            }
+            cursor = cursor.next_sibling;
+        }
+
+        TypeProjection declared_type = projection_type_empty();
+        if (last_identifier != (SyntaxNode*)0) {
+            i64 name_index = -1;
+            i64 i = 0;
+            while (i < segment.len()) {
+                if (segment.get(i) == last_identifier) {
+                    name_index = i;
+                    break;
+                }
+                i += 1;
+            }
+            if (name_index > 0) {
+                declared_type = projection_parse_type(&segment, 0, name_index);
+            }
+        }
+        add_typed_binding(bindings, last_identifier, BindingKind.Parameter, &declared_type);
+        segment.drop();
+        if (cursor == (SyntaxNode*)0) {
+            break;
+        }
+        start = cursor.next_sibling;
+    }
+}
+
+bool binding_lowercase_type_start(SyntaxNode* child) {
+    if (child == (SyntaxNode*)0 || child.kind != NodeKind.Token
+        || child.token_kind != TokenKind.Identifier
+        || strlen(child.text) == 0
+        || (child.text[0] >= (u8)'A' && child.text[0] <= (u8)'Z')) {
+        return false;
+    }
+    SyntaxNode* next = child.next_sibling;
+    if (next == (SyntaxNode*)0) {
+        return false;
+    }
+    if (next.kind == NodeKind.Bracket) {
+        return true;
+    }
+    if (next.kind != NodeKind.Token) {
+        return false;
+    }
+    return next.token_kind == TokenKind.Identifier
+        || next.token_kind == TokenKind.Star
+        || next.token_kind == TokenKind.BitwiseAnd
+        || next.text == "<";
+}
+
+TypeProjection binding_declared_type(SyntaxNode* first, SyntaxNode* name) {
+    TypeProjection result = projection_type_empty();
+    if (first == (SyntaxNode*)0 || name == (SyntaxNode*)0) {
+        return result;
+    }
+    Vec<SyntaxNode*> prefix = Vec<SyntaxNode*>.new();
+    SyntaxNode* cursor = first;
+    while (cursor != (SyntaxNode*)0 && cursor != name) {
+        binding_collect_leaves(cursor, &prefix);
+        cursor = cursor.next_sibling;
+    }
+    if (prefix.len() > 0) {
+        result = projection_parse_type(&prefix, 0, prefix.len());
+    }
+    prefix.drop();
+    return result;
+}
+
+void collect_block_bindings(SyntaxNode* block, Vec<Binding>* bindings) {
+    if (block == (SyntaxNode*)0) {
+        return;
+    }
+    collect_pattern_bindings_in_tree(block, bindings);
+    SyntaxNode* child = block.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Token && child.token_kind == TokenKind.Let) {
+            SyntaxNode* cursor = child.next_sibling;
+            while (cursor != (SyntaxNode*)0 && cursor.kind == NodeKind.Token
+                && cursor.token_kind == TokenKind.Mut) {
+                cursor = cursor.next_sibling;
+            }
+            if (cursor != (SyntaxNode*)0 && cursor.kind == NodeKind.Bracket) {
+                collect_bracket_bindings(cursor, bindings);
+            } else {
+                add_binding(bindings, cursor, BindingKind.Let);
+            }
+        } else if (child.kind == NodeKind.Token && child.token_kind == TokenKind.For) {
+            SyntaxNode* cursor = child.next_sibling;
+            SyntaxNode* first = cursor;
+            while (cursor != (SyntaxNode*)0 && cursor.kind != NodeKind.Parenthesized
+                && !(cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.In)) {
+                cursor = cursor.next_sibling;
+            }
+            if (cursor != (SyntaxNode*)0 && cursor.kind == NodeKind.Parenthesized) {
+                collect_parameter_bindings(cursor, bindings);
+            } else {
+                SyntaxNode* name = (SyntaxNode*)0;
+                SyntaxNode* scan = first;
+                while (scan != (SyntaxNode*)0 && scan != cursor) {
+                    if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Identifier) {
+                        name = scan;
+                    }
+                    scan = scan.next_sibling;
+                }
+                add_binding(bindings, name, BindingKind.For);
+            }
+        } else if ((child.kind == NodeKind.Token && binding_token_is_decl_type(child))
+            || child.kind == NodeKind.Bracket || binding_lowercase_type_start(child)) {
+            SyntaxNode* cursor = child;
+            SyntaxNode* candidate = (SyntaxNode*)0;
+            bool array = false;
+            i64 angle_depth = 0;
+            while (cursor != (SyntaxNode*)0) {
+                if (cursor.kind == NodeKind.Token && cursor.text == "<") {
+                    angle_depth += 1;
+                } else if (cursor.kind == NodeKind.Token && cursor.text == ">" && angle_depth > 0) {
+                    angle_depth -= 1;
+                } else if (cursor.kind == NodeKind.Bracket) {
+                    array = true;
+                } else if (angle_depth == 0 && cursor.kind == NodeKind.Token
+                    && cursor.token_kind == TokenKind.Identifier) {
+                    candidate = cursor;
+                }
+                if (cursor.kind == NodeKind.Token
+                    && (cursor.token_kind == TokenKind.Assign || cursor.token_kind == TokenKind.Semicolon)) {
+                    TypeProjection declared_type = binding_declared_type(child, candidate);
+                    add_typed_binding(bindings, candidate, array ? BindingKind.Array : BindingKind.Variable, &declared_type);
+                    break;
+                }
+                if (cursor.kind == NodeKind.Block) {
+                    break;
+                }
+                cursor = cursor.next_sibling;
+            }
+        }
+        collect_block_bindings(child, bindings);
+        child = child.next_sibling;
+    }
+}
+
+SyntaxNode* binding_function_parameters(SyntaxNode* function) {
+    SyntaxNode* child = function.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Parenthesized) {
+            return child;
+        }
+        child = child.next_sibling;
+    }
+    return (SyntaxNode*)0;
+}
+
+SyntaxNode* binding_function_body(SyntaxNode* function) {
+    SyntaxNode* child = function.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Block) {
+            return child;
+        }
+        child = child.next_sibling;
+    }
+    return (SyntaxNode*)0;
+}
+
+void collect_function_bindings(SyntaxNode* function, Vec<Binding>* bindings) {
+    collect_parameter_bindings(binding_function_parameters(function), bindings);
+    collect_block_bindings(binding_function_body(function), bindings);
+}

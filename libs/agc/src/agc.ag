@@ -1,0 +1,23 @@
+// Reusable Silver compiler frontend library.
+import frontend.artifacts;
+import frontend.ast;
+import frontend.bindings;
+import frontend.borrow;
+import frontend.cfg;
+import frontend.diagnostics;
+import frontend.expressions;
+import frontend.hir;
+import frontend.lexer;
+import frontend.module_loader;
+import frontend.names;
+import frontend.ownership;
+import frontend.send;
+import frontend.symbols;
+import frontend.typecheck;
+import frontend.types;
+import frontend.ast_expr;
+import frontend.lower_expr;
+import frontend.typecheck_expr;
+import frontend.place;
+import frontend.monomorph;
+import frontend.messages;

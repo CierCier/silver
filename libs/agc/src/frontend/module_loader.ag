@@ -1,0 +1,414 @@
+// Source and binary-module visibility for the stage1 name pass. It resolves
+// the small import subset used by the repository and records declarations with
+// an explicit worklist.
+import std.args;
+import std.error;
+import std.fs;
+import std.io;
+import std.mem.memory;
+import std.mem.vec;
+import std.path;
+import std.result;
+import std.string;
+import frontend.artifacts;
+import frontend.ast;
+import frontend.diagnostics;
+import frontend.lexer;
+import frontend.symbols;
+import frontend.cfg;
+
+struct ModuleLoader {
+    SymbolTable* symbols;
+    Vec<String> visited;
+    Vec<String> pending;
+    Vec<String> include_dirs;
+    bool failed;
+}
+
+impl ModuleLoader {
+    ModuleLoader new(SymbolTable* symbols) {
+        ModuleLoader loader;
+        loader.symbols = symbols;
+        loader.visited = Vec<String>.new();
+        loader.pending = Vec<String>.new();
+        loader.include_dirs = Vec<String>.new();
+        loader.failed = false;
+        return loader;
+    }
+}
+
+bool module_text_equals(str left, str right) {
+    return strcmp(left, right) == 0;
+}
+
+bool module_seen(ModuleLoader* loader, str path) {
+    i64 i = 0;
+    while (i < loader.visited.len()) {
+        if (module_text_equals(loader.visited.get_ptr(i).to_str(), path)) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+bool module_pending(ModuleLoader* loader, str path) {
+    i64 i = 0;
+    while (i < loader.pending.len()) {
+        if (module_text_equals(loader.pending.get_ptr(i).to_str(), path)) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+bool module_path_is_artifact(str path) {
+    i64 length = strlen(path);
+    return length >= 4 && path[length - 4] == (u8)46
+        && path[length - 3] == (u8)97
+        && path[length - 2] == (u8)103
+        && path[length - 1] == (u8)109;
+}
+
+void report_unresolved_import(ModuleLoader* loader, DiagnosticBag* diagnostics, str module_name) {
+    loader.failed = true;
+    if (diagnostics == (DiagnosticBag*)0) {
+        return;
+    }
+    String message = String.from_str("import `");
+    message.push_str(module_name);
+    message.push_str("` could not be resolved");
+    diagnostics.error(Span.synthetic(), move message);
+}
+
+void report_module_error(ModuleLoader* loader, DiagnosticBag* diagnostics, str path, str detail) {
+    loader.failed = true;
+    if (diagnostics == (DiagnosticBag*)0) {
+        return;
+    }
+    String message = String.from_str("could not load imported module `");
+    message.push_str(path);
+    message.push_str("`: ");
+    message.push_str(detail);
+    diagnostics.error(Span.synthetic(), move message);
+}
+
+void enqueue_module(ModuleLoader* loader, str path) {
+    if (strlen(path) == 0 || module_seen(loader, path) || module_pending(loader, path)) {
+        return;
+    }
+    String owned = String.from_str(path);
+    loader.pending.push(move owned);
+}
+
+void collect_include_dirs(ModuleLoader* loader) {
+    Vec<String> arguments = args();
+    i64 index = 1;
+    while (index < arguments.len()) {
+        String* argument = arguments.get_ptr(index);
+        if (argument.equals("-I") && index + 1 < arguments.len()) {
+            String directory = String.from_str(arguments.get_ptr(index + 1).to_str());
+            loader.include_dirs.push(move directory);
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    arguments.drop();
+}
+
+String module_root(str input_path) {
+    String root = String.from_str(".");
+    String probe = path_join(root.to_str(), "std/io.ag");
+    if (file_exists(probe.to_str())) {
+        probe.drop();
+        return root;
+    }
+    probe.drop();
+
+    String directory = path_dirname(input_path);
+    while (true) {
+        String candidate = path_join(directory.to_str(), "std/io.ag");
+        if (file_exists(candidate.to_str())) {
+            candidate.drop();
+            root.drop();
+            return directory;
+        }
+        candidate.drop();
+        String parent = path_dirname(directory.to_str());
+        if (parent.equals(directory.to_str())) {
+            parent.drop();
+            break;
+        }
+        directory.drop();
+        directory = move parent;
+    }
+    directory.drop();
+    return root;
+}
+
+bool module_text_starts_with(str text, str prefix) {
+    i64 text_len = strlen(text);
+    i64 prefix_len = strlen(prefix);
+    if (prefix_len > text_len) {
+        return false;
+    }
+    i64 i = 0;
+    while (i < prefix_len) {
+        if (text[i] != prefix[i]) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+String module_candidate(str base_path, str relative_path, str extension) {
+    String candidate = path_join(base_path, relative_path);
+    candidate.push_str(extension);
+    return move candidate;
+}
+
+String resolve_from_base(str base, str relative) {
+    String source = module_candidate(base, relative, ".ag");
+    if (file_exists(source.to_str())) {
+        return source;
+    }
+    source.drop();
+    String artifact = module_candidate(base, relative, ".agm");
+    if (file_exists(artifact.to_str())) {
+        source.drop();
+        return artifact;
+    }
+    artifact.drop();
+    return String.new();
+}
+
+String resolve_module_path(str owner_path, str root_path, str module_name, Vec<String>* include_dirs) {
+    String module_text = String.from_str(module_name);
+    String relative = module_text.replace(".", "/");
+    module_text.drop();
+    String base = String.from_str(root_path);
+    bool is_std = module_text_equals(module_name, "std") || module_text_starts_with(module_name, "std.");
+    if (!is_std) {
+        base.drop();
+        base = path_dirname(owner_path);
+    }
+
+    String resolved = resolve_from_base(base.to_str(), relative.to_str());
+    base.drop();
+    if (resolved.len() > 0) {
+        relative.drop();
+        return resolved;
+    }
+    resolved.drop();
+
+    String local_base = path_dirname(owner_path);
+    resolved = resolve_from_base(local_base.to_str(), relative.to_str());
+    local_base.drop();
+    if (resolved.len() > 0) {
+        relative.drop();
+        return resolved;
+    }
+    resolved.drop();
+
+    resolved = resolve_from_base(root_path, relative.to_str());
+    if (resolved.len() > 0) {
+        relative.drop();
+        return resolved;
+    }
+    resolved.drop();
+
+    i64 include_index = 0;
+    while (include_index < include_dirs.len()) {
+        String include_base = String.from_str(include_dirs.get_ptr(include_index).to_str());
+        resolved = resolve_from_base(include_base.to_str(), relative.to_str());
+        include_base.drop();
+        if (resolved.len() > 0) {
+            relative.drop();
+            return resolved;
+        }
+        resolved.drop();
+        include_index += 1;
+    }
+    relative.drop();
+    return String.new();
+}
+
+SymbolKind artifact_symbol_kind(ArtifactExportKind kind) {
+    return match kind {
+        ArtifactExportKind.Function : SymbolKind.Function,
+        ArtifactExportKind.Struct : SymbolKind.Struct,
+        ArtifactExportKind.Enum : SymbolKind.Enum,
+        ArtifactExportKind.Trait : SymbolKind.Trait,
+        ArtifactExportKind.Constant : SymbolKind.Global,
+        ArtifactExportKind.Global : SymbolKind.Global,
+        ArtifactExportKind.TypeAlias : SymbolKind.TypeAlias,
+    };
+}
+
+void load_artifact_module(ModuleLoader* loader, DiagnosticBag* diagnostics, str path) {
+    if (module_seen(loader, path)) {
+        return;
+    }
+    String visited_path = String.from_str(path);
+    loader.visited.push(move visited_path);
+    Artifact artifact = Artifact.new();
+    if (!read_artifact(path, &artifact)) {
+        if (diagnostics != (DiagnosticBag*)0) {
+            String message = String.from_str("invalid module artifact `");
+            message.push_str(path);
+            message.push_str("`");
+            diagnostics.error(Span.synthetic(), move message);
+        }
+        loader.failed = true;
+        artifact_drop(&artifact);
+        return;
+    }
+    i64 index = 0;
+    while (index < artifact.exports.len()) {
+        ArtifactExport* export = artifact.exports.get_ptr(index);
+        if (export.name.len() > 0) {
+            u32 name_id = loader.symbols.names.intern(export.name.to_str());
+            SymbolKind kind = artifact_symbol_kind(export.kind);
+            u32 type_id = 0;
+            if (kind == SymbolKind.Struct || kind == SymbolKind.Enum || kind == SymbolKind.Trait || kind == SymbolKind.TypeAlias) {
+                type_id = loader.symbols.types.get_named(export.name.to_str());
+            }
+            loader.symbols.declare_typed(name_id, kind, Span.synthetic(), (SyntaxNode*)0, type_id);
+        }
+        index += 1;
+    }
+    artifact_drop(&artifact);
+}
+
+void load_source_module(ModuleLoader* loader, DiagnosticBag* diagnostics, str path, str root_path, CfgSet* cfg, Vec<String>* include_dirs) {
+    if (module_seen(loader, path)) {
+        return;
+    }
+    String visited_path = String.from_str(path);
+    loader.visited.push(move visited_path);
+    Result<String, Error> loaded = String.from_file(path);
+    if (loaded.is_err()) {
+        report_module_error(loader, diagnostics, path, "read failed");
+        return;
+    }
+    String source = loaded.unwrap();
+    TokenStream stream = TokenStream.new();
+    DiagnosticBag local_diagnostics = DiagnosticBag.new();
+    Vec<SyntaxNode*> active_items = Vec<SyntaxNode*>.new();
+    lex(move source, &stream, &local_diagnostics);
+    if (!local_diagnostics.is_empty()) {
+        report_module_error(loader, diagnostics, path, "lexer errors");
+        return;
+    }
+    NodePool pool = NodePool.new();
+    SyntaxTree tree;
+    parse(&stream, &local_diagnostics, &pool, &tree);
+    if (!local_diagnostics.is_empty()) {
+        report_module_error(loader, diagnostics, path, "parser errors");
+        pool.destroy();
+        return;
+    }
+    cfg_collect_items(tree.root, cfg, (DiagnosticBag*)0, &active_items);
+    i64 item_index = 0;
+    while (item_index < active_items.len()) {
+        SyntaxNode* item = active_items.get(item_index);
+        if (item.kind != NodeKind.Import) {
+            SyntaxNode* name = item_identifier(item);
+            if (name != (SyntaxNode*)0) {
+                loader.symbols.add_visible(name.text, name.span, (SyntaxNode*)0);
+            }
+        }
+        item_index += 1;
+    }
+    active_items.drop();
+    Vec<CfgVisibleName> cfg_names = Vec<CfgVisibleName>.new();
+    cfg_collect_cfg_names(tree.root, cfg, &cfg_names);
+    i64 cfg_index = 0;
+    while (cfg_index < cfg_names.len()) {
+        CfgVisibleName* visible = cfg_names.get_ptr(cfg_index);
+        loader.symbols.add_visible(visible.name, visible.span, (SyntaxNode*)0);
+        cfg_index += 1;
+    }
+    cfg_names.drop();
+    Vec<CfgVisibleName> extern_names = Vec<CfgVisibleName>.new();
+    cfg_collect_extern_names(tree.root, &extern_names);
+    i64 extern_index = 0;
+    while (extern_index < extern_names.len()) {
+        CfgVisibleName* visible = extern_names.get_ptr(extern_index);
+        loader.symbols.add_visible(visible.name, visible.span, (SyntaxNode*)0);
+        extern_index += 1;
+    }
+    extern_names.drop();
+    Vec<CfgImportBinding> bindings = Vec<CfgImportBinding>.new();
+    cfg_collect_import_bindings(tree.root, cfg, &bindings);
+    i64 binding_index = 0;
+    while (binding_index < bindings.len()) {
+        CfgImportBinding* binding = bindings.get_ptr(binding_index);
+        loader.symbols.add_visible(binding.alias, binding.span, (SyntaxNode*)0);
+        binding_index += 1;
+    }
+    bindings.drop();
+    Vec<String> imports = Vec<String>.new();
+    cfg_collect_import_names(tree.root, cfg, &imports);
+    i64 i = 0;
+    while (i < imports.len()) {
+        String* module_name = imports.get_ptr(i);
+        if (module_name.len() > 0) {
+            String resolved = resolve_module_path(path, root_path, module_name.to_str(), include_dirs);
+            if (resolved.len() > 0) {
+                enqueue_module(loader, resolved.to_str());
+            } else {
+                report_unresolved_import(loader, diagnostics, module_name.to_str());
+            }
+            resolved.drop();
+        }
+        i += 1;
+    }
+    imports.drop();
+    pool.destroy();
+}
+
+void load_module(ModuleLoader* loader, DiagnosticBag* diagnostics, str path, str root_path, CfgSet* cfg, Vec<String>* include_dirs) {
+    if (module_path_is_artifact(path)) {
+        load_artifact_module(loader, diagnostics, path);
+    } else {
+        load_source_module(loader, diagnostics, path, root_path, cfg, include_dirs);
+    }
+}
+
+bool load_imported_declarations(SymbolTable* symbols, DiagnosticBag* diagnostics, SyntaxTree* tree, str owner_path, CfgSet* cfg, Vec<String>* include_dirs) {
+    ModuleLoader loader = ModuleLoader.new(symbols);
+    String root = module_root(owner_path);
+    Vec<String> imports = Vec<String>.new();
+    cfg_collect_import_names(tree.root, cfg, &imports);
+    i64 i = 0;
+    while (i < imports.len()) {
+        String* module_name = imports.get_ptr(i);
+        if (module_name.len() > 0) {
+            String resolved = resolve_module_path(owner_path, root.to_str(), module_name.to_str(), include_dirs);
+            if (resolved.len() > 0) {
+                enqueue_module(&loader, resolved.to_str());
+            } else {
+                report_unresolved_import(&loader, diagnostics, module_name.to_str());
+            }
+            resolved.drop();
+        }
+        i += 1;
+    }
+    imports.drop();
+    i64 next = 0;
+    while (next < loader.pending.len()) {
+        String current = String.from_str(loader.pending.get_ptr(next).to_str());
+        load_module(&loader, diagnostics, current.to_str(), root.to_str(), cfg, include_dirs);
+        current.drop();
+        next += 1;
+    }
+    bool ok = !loader.failed;
+    loader.pending.drop();
+    loader.visited.drop();
+    root.drop();
+    return ok;
+}

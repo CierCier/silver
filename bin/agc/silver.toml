@@ -1,0 +1,9 @@
+# Driver-only Silver package. Reusable compiler code lives in ../../libs/agc.
+name = "agc-bin"
+version = "0.2.6"
+
+[bin."agc"]
+entry = "src/main.ag"
+
+[dependencies.agc]
+manifest = "../../libs/agc"

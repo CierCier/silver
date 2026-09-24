@@ -1,0 +1,758 @@
+// Silver frontend lexer. This is the stage1 transcription of the stage0
+// token contract: byte spans, line/column locations, comments, literals,
+// keywords, and the complete operator set.
+import std.fmt;
+import std.mem.alloc;
+import std.mem.memory;
+import std.mem.vec;
+import std.string;
+import frontend.diagnostics;
+
+enum CommentKind {
+    Line;
+    DocLine;
+    Block;
+    DocBlock;
+}
+
+enum TokenKind {
+    IntLiteral;
+    FloatLiteral;
+    ComplexLiteral;
+    StringLiteral;
+    CharLiteral;
+    Lifetime;
+    BoolLiteral;
+
+    Struct;
+    Enum;
+    Impl;
+    Trait;
+    Mut;
+    Const;
+    Static;
+    Volatile;
+    If;
+    Else;
+    While;
+    For;
+    Match;
+    Break;
+    Continue;
+    Return;
+    Type;
+    Let;
+    SelfType;
+    Defer;
+    Import;
+    Comptime;
+    Cast;
+    Move;
+    Extern;
+    Private;
+    Asm;
+    As;
+    In;
+    Macro;
+    True;
+    False;
+    Launch;
+    Wait;
+
+    I8;
+    I16;
+    I32;
+    I64;
+    I128;
+    U8;
+    U16;
+    U32;
+    U64;
+    U128;
+    F32;
+    F64;
+    F80;
+    C32;
+    C64;
+    C80;
+    Bool;
+    Str;
+    Char;
+    Void;
+    VecType;
+    OptionalType;
+
+    Plus;
+    Minus;
+    Star;
+    Slash;
+    Percent;
+    Equal;
+    NotEqual;
+    Less;
+    Greater;
+    LessEqual;
+    GreaterEqual;
+    And;
+    Or;
+    Not;
+    Assign;
+    PlusAssign;
+    MinusAssign;
+    StarAssign;
+    SlashAssign;
+    PercentAssign;
+    BitwiseAndAssign;
+    BitwiseOrAssign;
+    BitwiseXorAssign;
+    LeftShiftAssign;
+    RightShiftAssign;
+    BitwiseAnd;
+    BitwiseOr;
+    BitwiseXor;
+    BitwiseNot;
+    Increment;
+    Decrement;
+
+    LeftParen;
+    RightParen;
+    LeftBrace;
+    RightBrace;
+    LeftBracket;
+    RightBracket;
+    Semicolon;
+    Comma;
+    Dot;
+    DotDot;
+    DotDotDot;
+    Colon;
+    DoubleColon;
+    Question;
+    At;
+    Hash;
+    Comment;
+    Identifier;
+    Eof;
+}
+
+struct Token {
+    TokenKind kind;
+    CommentKind comment_kind;
+    Span span;
+    String text;
+    i128 integer_value;
+    f64 float_value;
+    u32 char_value;
+    bool bool_value;
+}
+
+struct TokenStream {
+    Vec<Token> tokens;
+}
+
+struct Lexer {
+    String source;
+    i64 position;
+    i64 line;
+    i64 column;
+    TokenStream* output;
+    DiagnosticBag* diagnostics;
+    bool failed;
+}
+
+impl TokenStream {
+    TokenStream new() {
+        TokenStream stream;
+        stream.tokens = Vec<Token>.new();
+        return stream;
+    }
+
+    void clear(TokenStream* self) {
+        self.tokens.clear();
+    }
+
+    i64 len(&self) {
+        return self.tokens.len();
+    }
+
+    Token* get(TokenStream* self, i64 index) {
+        return self.tokens.get_ptr(index);
+    }
+
+    Token* first(TokenStream* self) {
+        if (self.tokens.is_empty()) {
+            return (Token*)0;
+        }
+        return self.tokens.get_ptr(0);
+    }
+
+    Token* last(TokenStream* self) {
+        if (self.tokens.is_empty()) {
+            return (Token*)0;
+        }
+        return self.tokens.get_ptr(self.tokens.len() - 1);
+    }
+}
+
+impl Lexer {
+    Lexer new(String source, TokenStream* output, DiagnosticBag* diagnostics) {
+        Lexer lexer;
+        lexer.source = move source;
+        lexer.position = 0;
+        lexer.line = 1;
+        lexer.column = 1;
+        lexer.output = output;
+        lexer.diagnostics = diagnostics;
+        lexer.failed = false;
+        return lexer;
+    }
+
+    bool is_at_end(&self) {
+        return self.position >= self.source.len;
+    }
+
+    u8 peek(&self) {
+        if (self.is_at_end()) {
+            return (u8)0;
+        }
+        return self.source.data[self.position];
+    }
+
+    u8 peek_next(&self) {
+        if (self.position + 1 >= self.source.len) {
+            return (u8)0;
+        }
+        return self.source.data[self.position + 1];
+    }
+
+    u8 advance(Lexer* self) {
+        if (self.is_at_end()) {
+            return (u8)0;
+        }
+        u8 ch = self.source.data[self.position];
+        self.position += 1;
+        if (ch == (u8)10) {
+            self.line += 1;
+            self.column = 1;
+        } else {
+            self.column += 1;
+        }
+        return ch;
+    }
+
+    bool match_char(Lexer* self, u8 expected) {
+        if (self.is_at_end() || self.peek() != expected) {
+            return false;
+        }
+        self.advance();
+        return true;
+    }
+
+    Span span_from(Lexer* self, i64 start, i64 start_line, i64 start_col) {
+        Span span;
+        span.start = start;
+        span.end = self.position;
+        span.file = 1;
+        span.start_line = start_line;
+        span.start_col = start_col;
+        span.end_line = self.line;
+        span.end_col = self.column;
+        return span;
+    }
+
+    String copy_text(u8* data, i64 start, i64 length) {
+        String result = String.with_capacity(length + 1);
+        if (length > 0) {
+            result.push_bytes(&data[start], length);
+        }
+        return result;
+    }
+
+    String trimmed_text(u8* data, i64 start, i64 end) {
+        i64 first = start;
+        i64 last = end;
+        while (first < last) {
+            u8 ch = data[first];
+            if (ch != (u8)32 && ch != (u8)9 && ch != (u8)10 && ch != (u8)13) {
+                break;
+            }
+            first += 1;
+        }
+        while (last > first) {
+            u8 ch = data[last - 1];
+            if (ch != (u8)32 && ch != (u8)9 && ch != (u8)10 && ch != (u8)13) {
+                break;
+            }
+            last -= 1;
+        }
+        return Lexer.copy_text(data, first, last - first);
+    }
+
+    void push_token(Lexer* self, TokenKind kind, i64 start, i64 start_line, i64 start_col, String text) {
+        Token token;
+        token.kind = kind;
+        token.comment_kind = CommentKind.Line;
+        token.span = self.span_from(start, start_line, start_col);
+        token.text = move text;
+        token.integer_value = (i128)0;
+        token.float_value = 0.0;
+        token.char_value = (u32)0;
+        token.bool_value = false;
+        self.output.tokens.push(move token);
+    }
+
+    void report(Lexer* self, Span span, String message) {
+        self.diagnostics.error(span, move message);
+        self.failed = true;
+    }
+
+    bool is_ident_start(u8 ch) {
+        return (ch >= (u8)'a' && ch <= (u8)'z')
+            || (ch >= (u8)'A' && ch <= (u8)'Z')
+            || ch == (u8)'_';
+    }
+
+    bool is_ident_continue(u8 ch) {
+        return Lexer.is_ident_start(ch) || (ch >= (u8)'0' && ch <= (u8)'9');
+    }
+
+    bool is_digit(u8 ch) {
+        return ch >= (u8)'0' && ch <= (u8)'9';
+    }
+
+    bool slice_equals(u8* data, i64 start, i64 length, str expected) {
+        i64 expected_length = strlen(expected);
+        if (length != expected_length) {
+            return false;
+        }
+        i64 i = 0;
+        while (i < length) {
+            if (data[start + i] != (u8)expected[i]) {
+                return false;
+            }
+            i += 1;
+        }
+        return true;
+    }
+
+    TokenKind keyword_kind(u8* data, i64 start, i64 length) {
+        if (Lexer.slice_equals(data, start, length, "struct")) { return TokenKind.Struct; }
+        if (Lexer.slice_equals(data, start, length, "enum")) { return TokenKind.Enum; }
+        if (Lexer.slice_equals(data, start, length, "impl")) { return TokenKind.Impl; }
+        if (Lexer.slice_equals(data, start, length, "trait")) { return TokenKind.Trait; }
+        if (Lexer.slice_equals(data, start, length, "mut")) { return TokenKind.Mut; }
+        if (Lexer.slice_equals(data, start, length, "const")) { return TokenKind.Const; }
+        if (Lexer.slice_equals(data, start, length, "static")) { return TokenKind.Static; }
+        if (Lexer.slice_equals(data, start, length, "volatile")) { return TokenKind.Volatile; }
+        if (Lexer.slice_equals(data, start, length, "if")) { return TokenKind.If; }
+        if (Lexer.slice_equals(data, start, length, "else")) { return TokenKind.Else; }
+        if (Lexer.slice_equals(data, start, length, "while")) { return TokenKind.While; }
+        if (Lexer.slice_equals(data, start, length, "for")) { return TokenKind.For; }
+        if (Lexer.slice_equals(data, start, length, "match")) { return TokenKind.Match; }
+        if (Lexer.slice_equals(data, start, length, "break")) { return TokenKind.Break; }
+        if (Lexer.slice_equals(data, start, length, "continue")) { return TokenKind.Continue; }
+        if (Lexer.slice_equals(data, start, length, "return")) { return TokenKind.Return; }
+        if (Lexer.slice_equals(data, start, length, "type")) { return TokenKind.Type; }
+        if (Lexer.slice_equals(data, start, length, "let")) { return TokenKind.Let; }
+        if (Lexer.slice_equals(data, start, length, "Self")) { return TokenKind.SelfType; }
+        if (Lexer.slice_equals(data, start, length, "defer")) { return TokenKind.Defer; }
+        if (Lexer.slice_equals(data, start, length, "import")) { return TokenKind.Import; }
+        if (Lexer.slice_equals(data, start, length, "comptime")) { return TokenKind.Comptime; }
+        if (Lexer.slice_equals(data, start, length, "cast")) { return TokenKind.Cast; }
+        if (Lexer.slice_equals(data, start, length, "move")) { return TokenKind.Move; }
+        if (Lexer.slice_equals(data, start, length, "extern")) { return TokenKind.Extern; }
+        if (Lexer.slice_equals(data, start, length, "private")) { return TokenKind.Private; }
+        if (Lexer.slice_equals(data, start, length, "asm")) { return TokenKind.Asm; }
+        if (Lexer.slice_equals(data, start, length, "as")) { return TokenKind.As; }
+        if (Lexer.slice_equals(data, start, length, "in")) { return TokenKind.In; }
+        if (Lexer.slice_equals(data, start, length, "macro")) { return TokenKind.Macro; }
+        if (Lexer.slice_equals(data, start, length, "true")) { return TokenKind.True; }
+        if (Lexer.slice_equals(data, start, length, "false")) { return TokenKind.False; }
+        if (Lexer.slice_equals(data, start, length, "launch")) { return TokenKind.Launch; }
+        if (Lexer.slice_equals(data, start, length, "wait")) { return TokenKind.Wait; }
+        if (Lexer.slice_equals(data, start, length, "i8")) { return TokenKind.I8; }
+        if (Lexer.slice_equals(data, start, length, "i16")) { return TokenKind.I16; }
+        if (Lexer.slice_equals(data, start, length, "i32")) { return TokenKind.I32; }
+        if (Lexer.slice_equals(data, start, length, "i64")) { return TokenKind.I64; }
+        if (Lexer.slice_equals(data, start, length, "i128")) { return TokenKind.I128; }
+        if (Lexer.slice_equals(data, start, length, "u8")) { return TokenKind.U8; }
+        if (Lexer.slice_equals(data, start, length, "u16")) { return TokenKind.U16; }
+        if (Lexer.slice_equals(data, start, length, "u32")) { return TokenKind.U32; }
+        if (Lexer.slice_equals(data, start, length, "u64")) { return TokenKind.U64; }
+        if (Lexer.slice_equals(data, start, length, "u128")) { return TokenKind.U128; }
+        if (Lexer.slice_equals(data, start, length, "f32")) { return TokenKind.F32; }
+        if (Lexer.slice_equals(data, start, length, "f64")) { return TokenKind.F64; }
+        if (Lexer.slice_equals(data, start, length, "f80")) { return TokenKind.F80; }
+        if (Lexer.slice_equals(data, start, length, "c32")) { return TokenKind.C32; }
+        if (Lexer.slice_equals(data, start, length, "c64")) { return TokenKind.C64; }
+        if (Lexer.slice_equals(data, start, length, "c80")) { return TokenKind.C80; }
+        if (Lexer.slice_equals(data, start, length, "bool")) { return TokenKind.Bool; }
+        if (Lexer.slice_equals(data, start, length, "str")) { return TokenKind.Str; }
+        if (Lexer.slice_equals(data, start, length, "char")) { return TokenKind.Char; }
+        if (Lexer.slice_equals(data, start, length, "void")) { return TokenKind.Void; }
+        if (Lexer.slice_equals(data, start, length, "Vec")) { return TokenKind.VecType; }
+        if (Lexer.slice_equals(data, start, length, "Optional")) { return TokenKind.OptionalType; }
+        return TokenKind.Identifier;
+    }
+
+    i64 hex_value(u8 ch) {
+        if (ch >= (u8)'0' && ch <= (u8)'9') { return (i64)(ch - (u8)'0'); }
+        if (ch >= (u8)'a' && ch <= (u8)'f') { return (i64)(ch - (u8)'a') + 10; }
+        if (ch >= (u8)'A' && ch <= (u8)'F') { return (i64)(ch - (u8)'A') + 10; }
+        return -1;
+    }
+
+    i128 parse_integer(u8* data, i64 start, i64 end, i64 radix) {
+        i128 value = (i128)0;
+        i128 base = (i128)radix;
+        i64 i = start;
+        while (i < end) {
+            u8 ch = data[i];
+            if (ch == (u8)'_') {
+                i += 1;
+                continue;
+            }
+            i64 digit = Lexer.hex_value(ch);
+            if (digit < 0 || digit >= radix) {
+                return (i128)-1;
+            }
+            value = value * base + (i128)digit;
+            i += 1;
+        }
+        return value;
+    }
+
+    void consume_number(Lexer* self, i64 start, i64 start_line, i64 start_col, u8 first) {
+        i64 radix = 10;
+        if (first == (u8)'0' && !self.is_at_end()) {
+            u8 prefix = self.peek();
+            if (prefix == (u8)'x' || prefix == (u8)'X') {
+                self.advance();
+                radix = 16;
+            } else if (prefix == (u8)'b' || prefix == (u8)'B') {
+                self.advance();
+                radix = 2;
+            } else if (prefix == (u8)'o' || prefix == (u8)'O') {
+                self.advance();
+                radix = 8;
+            }
+        }
+
+        i64 digits_start = self.position;
+        while (!self.is_at_end()) {
+            u8 ch = self.peek();
+            if (ch == (u8)'_' || Lexer.hex_value(ch) >= 0 && Lexer.hex_value(ch) < radix) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        if (radix != 10) {
+            i128 value = Lexer.parse_integer(self.source.data, digits_start, self.position, radix);
+            String text = Lexer.copy_text(self.source.data, start, self.position - start);
+            self.push_token(TokenKind.IntLiteral, start, start_line, start_col, move text);
+            Token* token = self.output.last();
+            token.integer_value = value;
+            return;
+        }
+
+        bool is_float = false;
+        if (!self.is_at_end() && self.peek() == (u8)'.' && self.peek_next() >= (u8)'0' && self.peek_next() <= (u8)'9') {
+            is_float = true;
+            self.advance();
+            while (!self.is_at_end() && (Lexer.is_digit(self.peek()) || self.peek() == (u8)'_')) {
+                self.advance();
+            }
+        }
+        if (!self.is_at_end() && self.peek() == (u8)'i') {
+            self.advance();
+            String text = Lexer.copy_text(self.source.data, start, self.position - start);
+            self.push_token(TokenKind.ComplexLiteral, start, start_line, start_col, move text);
+            return;
+        }
+
+        String text = Lexer.copy_text(self.source.data, start, self.position - start);
+        if (is_float) {
+            self.push_token(TokenKind.FloatLiteral, start, start_line, start_col, move text);
+        } else {
+            self.push_token(TokenKind.IntLiteral, start, start_line, start_col, move text);
+            Token* token = self.output.last();
+            token.integer_value = Lexer.parse_integer(self.source.data, start, self.position, 10);
+        }
+    }
+
+    void consume_string(Lexer* self, i64 start, i64 start_line, i64 start_col) {
+        bool escaped = false;
+        while (!self.is_at_end()) {
+            u8 ch = self.advance();
+            if (ch == (u8)'\\' && !escaped) {
+                escaped = true;
+                continue;
+            }
+            if (ch == (u8)'"' && !escaped) {
+                String text = Lexer.copy_text(self.source.data, start, self.position - start);
+                self.push_token(TokenKind.StringLiteral, start, start_line, start_col, move text);
+                return;
+            }
+            escaped = false;
+        }
+        Span span = self.span_from(start, start_line, start_col);
+        self.report(span, String.from_str("invalid string literal: Unterminated string literal"));
+    }
+
+    void consume_character(Lexer* self, i64 start, i64 start_line, i64 start_col) {
+        if (self.is_at_end()) {
+            Span span = self.span_from(start, start_line, start_col);
+            self.report(span, String.from_str("invalid character literal: Unterminated character literal"));
+            return;
+        }
+        u8 first = self.peek();
+        if (Lexer.is_ident_start(first) && self.peek_next() != (u8)'\'') {
+            self.advance();
+            while (!self.is_at_end() && Lexer.is_ident_continue(self.peek()) && self.peek() != (u8)'\'') {
+                self.advance();
+            }
+            String text = Lexer.copy_text(self.source.data, start, self.position - start);
+            self.push_token(TokenKind.Lifetime, start, start_line, start_col, move text);
+            return;
+        }
+
+        u8 value = (u8)0;
+        if (self.match_char((u8)'\\')) {
+            if (self.is_at_end()) {
+                Span span = self.span_from(start, start_line, start_col);
+                self.report(span, String.from_str("invalid character literal: Unterminated character literal"));
+                return;
+            }
+            u8 escaped = self.advance();
+            if (escaped == (u8)'n') { value = (u8)10; }
+            else if (escaped == (u8)'t') { value = (u8)9; }
+            else if (escaped == (u8)'r') { value = (u8)13; }
+            else if (escaped == (u8)'\\') { value = (u8)'\\'; }
+            else if (escaped == (u8)'"') { value = (u8)'"'; }
+            else if (escaped == (u8)'\'') { value = (u8)'\''; }
+            else if (escaped == (u8)'0') { value = (u8)0; }
+            else {
+                Span span = self.span_from(start, start_line, start_col);
+                self.report(span, String.from_str("invalid character literal: Invalid escape sequence"));
+                return;
+            }
+        } else {
+            value = self.advance();
+        }
+        if (!self.match_char((u8)'\'')) {
+            Span span = self.span_from(start, start_line, start_col);
+            self.report(span, String.from_str("invalid character literal: Unterminated character literal"));
+            return;
+        }
+        String text = Lexer.copy_text(self.source.data, start, self.position - start);
+        self.push_token(TokenKind.CharLiteral, start, start_line, start_col, move text);
+        self.output.last().char_value = (u32)value;
+    }
+
+    void consume_comment(Lexer* self, i64 start, i64 start_line, i64 start_col) {
+        self.advance();
+        CommentKind kind = CommentKind.Line;
+        i64 content_start = self.position;
+        if (self.match_char((u8)'/')) {
+            if (self.match_char((u8)'/')) {
+                kind = CommentKind.DocLine;
+                content_start = self.position;
+            } else {
+                content_start = self.position;
+            }
+            while (!self.is_at_end() && self.peek() != (u8)10) {
+                self.advance();
+            }
+        } else {
+            self.advance();
+            if (self.match_char((u8)'*')) {
+                kind = CommentKind.DocBlock;
+            }
+            content_start = self.position;
+            i64 depth = 1;
+            i64 content_end = self.position;
+            while (!self.is_at_end() && depth > 0) {
+                u8 ch = self.advance();
+                if (ch == (u8)'/' && !self.is_at_end() && self.peek() == (u8)'*') {
+                    self.advance();
+                    depth += 1;
+                } else if (ch == (u8)'*' && !self.is_at_end() && self.peek() == (u8)'/') {
+                    self.advance();
+                    depth -= 1;
+                    if (depth == 0) {
+                        content_end = self.position - 2;
+                    }
+                }
+            }
+            if (depth > 0) {
+                Span span = self.span_from(start, start_line, start_col);
+                self.report(span, String.from_str("unexpected end of file"));
+                return;
+            }
+            String text = Lexer.trimmed_text(self.source.data, content_start, content_end);
+            self.push_token(TokenKind.Comment, start, start_line, start_col, move text);
+            self.output.last().comment_kind = kind;
+            return;
+        }
+        String text = Lexer.trimmed_text(self.source.data, content_start, self.position);
+        self.push_token(TokenKind.Comment, start, start_line, start_col, move text);
+        self.output.last().comment_kind = kind;
+    }
+
+    void next_token(Lexer* self) {
+        i64 start = self.position;
+        i64 start_line = self.line;
+        i64 start_col = self.column;
+        u8 ch = self.advance();
+
+        if (Lexer.is_ident_start(ch)) {
+            while (!self.is_at_end() && Lexer.is_ident_continue(self.peek())) {
+                self.advance();
+            }
+            i64 length = self.position - start;
+            TokenKind kind = Lexer.keyword_kind(self.source.data, start, length);
+            String text = Lexer.copy_text(self.source.data, start, length);
+            self.push_token(kind, start, start_line, start_col, move text);
+            return;
+        }
+        if (Lexer.is_digit(ch)) {
+            self.consume_number(start, start_line, start_col, ch);
+            return;
+        }
+        if (ch == (u8)'/') {
+            u8 next = self.peek();
+            if (next == (u8)'/' || next == (u8)'*') {
+                self.position = start;
+                self.line = start_line;
+                self.column = start_col;
+                self.consume_comment(start, start_line, start_col);
+                return;
+            }
+            if (self.match_char((u8)'=')) {
+                String text = Lexer.copy_text(self.source.data, start, self.position - start);
+                self.push_token(TokenKind.SlashAssign, start, start_line, start_col, move text);
+            } else {
+                String text = Lexer.copy_text(self.source.data, start, self.position - start);
+                self.push_token(TokenKind.Slash, start, start_line, start_col, move text);
+            }
+            return;
+        }
+        if (ch == (u8)'"') {
+            self.consume_string(start, start_line, start_col);
+            return;
+        }
+        if (ch == (u8)'\'') {
+            self.consume_character(start, start_line, start_col);
+            return;
+        }
+
+        TokenKind kind = TokenKind.Eof;
+        if (ch == (u8)'(') { kind = TokenKind.LeftParen; }
+        else if (ch == (u8)')') { kind = TokenKind.RightParen; }
+        else if (ch == (u8)'{') { kind = TokenKind.LeftBrace; }
+        else if (ch == (u8)'}') { kind = TokenKind.RightBrace; }
+        else if (ch == (u8)'[') { kind = TokenKind.LeftBracket; }
+        else if (ch == (u8)']') { kind = TokenKind.RightBracket; }
+        else if (ch == (u8)';') { kind = TokenKind.Semicolon; }
+        else if (ch == (u8)',') { kind = TokenKind.Comma; }
+        else if (ch == (u8)'.') {
+            if (self.match_char((u8)'.')) {
+                if (self.match_char((u8)'.')) { kind = TokenKind.DotDotDot; }
+                else { kind = TokenKind.DotDot; }
+            } else { kind = TokenKind.Dot; }
+        } else if (ch == (u8)'?') { kind = TokenKind.Question; }
+        else if (ch == (u8)'@') { kind = TokenKind.At; }
+        else if (ch == (u8)'#') { kind = TokenKind.Hash; }
+        else if (ch == (u8)'~') { kind = TokenKind.BitwiseNot; }
+        else if (ch == (u8)'+') {
+            if (self.match_char((u8)'+')) { kind = TokenKind.Increment; }
+            else if (self.match_char((u8)'=')) { kind = TokenKind.PlusAssign; }
+            else { kind = TokenKind.Plus; }
+        } else if (ch == (u8)'-') {
+            if (self.match_char((u8)'-')) { kind = TokenKind.Decrement; }
+            else if (self.match_char((u8)'=')) { kind = TokenKind.MinusAssign; }
+            else { kind = TokenKind.Minus; }
+        } else if (ch == (u8)'*') {
+            if (self.match_char((u8)'=')) { kind = TokenKind.StarAssign; }
+            else { kind = TokenKind.Star; }
+        } else if (ch == (u8)'%') {
+            if (self.match_char((u8)'=')) { kind = TokenKind.PercentAssign; }
+            else { kind = TokenKind.Percent; }
+        } else if (ch == (u8)'=') {
+            if (self.match_char((u8)'=')) { kind = TokenKind.Equal; }
+            else { kind = TokenKind.Assign; }
+        } else if (ch == (u8)'!') {
+            if (self.match_char((u8)'=')) { kind = TokenKind.NotEqual; }
+            else { kind = TokenKind.Not; }
+        } else if (ch == (u8)'<') {
+            if (self.peek() == (u8)'<' && self.peek_next() == (u8)'=') {
+                self.advance();
+                self.advance();
+                kind = TokenKind.LeftShiftAssign;
+            } else if (self.match_char((u8)'=')) { kind = TokenKind.LessEqual; }
+            else { kind = TokenKind.Less; }
+        } else if (ch == (u8)'>') {
+            if (self.peek() == (u8)'>' && self.peek_next() == (u8)'=') {
+                self.advance();
+                self.advance();
+                kind = TokenKind.RightShiftAssign;
+            } else if (self.match_char((u8)'=')) { kind = TokenKind.GreaterEqual; }
+            else { kind = TokenKind.Greater; }
+        } else if (ch == (u8)'&') {
+            if (self.match_char((u8)'&')) { kind = TokenKind.And; }
+            else if (self.match_char((u8)'=')) { kind = TokenKind.BitwiseAndAssign; }
+            else { kind = TokenKind.BitwiseAnd; }
+        } else if (ch == (u8)'|') {
+            if (self.match_char((u8)'|')) { kind = TokenKind.Or; }
+            else if (self.match_char((u8)'=')) { kind = TokenKind.BitwiseOrAssign; }
+            else { kind = TokenKind.BitwiseOr; }
+        } else if (ch == (u8)'^') {
+            if (self.match_char((u8)'=')) { kind = TokenKind.BitwiseXorAssign; }
+            else { kind = TokenKind.BitwiseXor; }
+        } else if (ch == (u8)':') {
+            if (self.match_char((u8)':')) { kind = TokenKind.DoubleColon; }
+            else { kind = TokenKind.Colon; }
+        } else {
+            Span span = self.span_from(start, start_line, start_col);
+            self.report(span, String.from_str("unexpected character"));
+            return;
+        }
+        String text = Lexer.copy_text(self.source.data, start, self.position - start);
+        self.push_token(kind, start, start_line, start_col, move text);
+    }
+
+    void tokenize(Lexer* self) {
+        while (!self.is_at_end() && !self.failed) {
+            while (!self.is_at_end()) {
+                u8 ch = self.peek();
+                if (ch != (u8)32 && ch != (u8)9 && ch != (u8)10 && ch != (u8)13) {
+                    break;
+                }
+                self.advance();
+            }
+            if (!self.is_at_end() && !self.failed) {
+                self.next_token();
+            }
+        }
+        if (!self.failed) {
+            i64 start = self.position;
+            Span span = self.span_from(start, start, self.column);
+            Token token;
+            token.kind = TokenKind.Eof;
+            token.comment_kind = CommentKind.Line;
+            token.span = span;
+            token.text = String.new();
+            token.integer_value = (i128)0;
+            token.float_value = 0.0;
+            token.char_value = (u32)0;
+            token.bool_value = false;
+            self.output.tokens.push(move token);
+        }
+    }
+}
+
+void lex(String source, TokenStream* output, DiagnosticBag* diagnostics) {
+    Lexer lexer = Lexer.new(move source, output, diagnostics);
+    lexer.tokenize();
+}

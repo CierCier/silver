@@ -1,0 +1,295 @@
+// Deterministic top-level symbol collection for the stage1 frontend.
+import std.mem.vec;
+import std.mem.memory;
+import std.string;
+import std.intern;
+import frontend.ast;
+import frontend.diagnostics;
+import frontend.cfg;
+import frontend.types;
+
+enum SymbolKind {
+    Function;
+    Struct;
+    Enum;
+    Trait;
+    Global;
+    TypeAlias;
+}
+
+struct Symbol {
+    u32 name_id;
+    SymbolKind kind;
+    Span span;
+    SyntaxNode* declaration;
+    u32 type_id;
+}
+
+struct SymbolTable {
+    Interner names;
+    Vec<Symbol> symbols;
+    TypeTable types;
+}
+
+impl SymbolTable {
+    SymbolTable new() {
+        SymbolTable table;
+        table.names = Interner.new();
+        table.symbols = Vec<Symbol>.new();
+        table.types = TypeTable.new();
+        return move table;
+    }
+
+    i64 len(&self) {
+        return self.symbols.len();
+    }
+
+    Symbol* get(SymbolTable* self, i64 index) {
+        return self.symbols.get_ptr(index);
+    }
+
+    i64 find(SymbolTable* self, str name) {
+        i64 i = 0;
+        while (i < self.symbols.len()) {
+            Symbol* symbol = self.symbols.get_ptr(i);
+            if (strcmp(self.names.get(symbol.name_id), name) == 0) {
+                return i;
+            }
+            i += 1;
+        }
+        return -1;
+    }
+
+    bool declare(SymbolTable* self, u32 name_id, SymbolKind kind, Span span, SyntaxNode* declaration) {
+        return self.declare_typed(name_id, kind, span, declaration, 0);
+    }
+
+    bool declare_typed(SymbolTable* self, u32 name_id, SymbolKind kind, Span span, SyntaxNode* declaration, u32 type_id) {
+        i64 existing = self.find(self.names.get(name_id));
+        if (existing >= 0) {
+            Symbol* previous = self.symbols.get_ptr(existing);
+            // Stage0 permits free-function overloads and cfg-dependent
+            // globals. Signature-sensitive duplicate checks belong in the
+            // typed symbol-table pass; the CST pass must not reject them.
+            if (previous.kind == SymbolKind.Function
+                || kind == SymbolKind.Function
+                || previous.kind == SymbolKind.Global
+                || kind == SymbolKind.Global) {
+                return true;
+            }
+            return false;
+        }
+        Symbol symbol;
+        symbol.name_id = name_id;
+        symbol.kind = kind;
+        symbol.span = span;
+        symbol.declaration = declaration;
+        symbol.type_id = type_id;
+        self.symbols.push(move symbol);
+        return true;
+    }
+
+    u32 get_type(SymbolTable* self, str name) {
+        i64 idx = self.find(name);
+        if (idx < 0) {
+            return TYPE_UNKNOWN;
+        }
+        return self.symbols.get_ptr(idx).type_id;
+    }
+
+    void set_type(SymbolTable* self, str name, u32 type_id) {
+        i64 idx = self.find(name);
+        if (idx >= 0) {
+            self.symbols.get_ptr(idx).type_id = type_id;
+        }
+    }
+
+    void add_visible(SymbolTable* self, str name, Span span, SyntaxNode* declaration) {
+        if (self.find(name) >= 0) {
+            return;
+        }
+        Symbol symbol;
+        symbol.name_id = self.names.intern(name);
+        symbol.kind = SymbolKind.Global;
+        symbol.span = span;
+        symbol.declaration = declaration;
+        symbol.type_id = 0;
+        self.symbols.push(move symbol);
+    }
+}
+
+bool node_is_identifier(SyntaxNode* node) {
+    return node != (SyntaxNode*)0
+        && node.kind == NodeKind.Token
+        && node.token_kind == TokenKind.Identifier;
+}
+
+bool is_primitive_type_token(TokenKind kind) {
+    return match kind {
+        TokenKind.I8 : true,
+        TokenKind.I16 : true,
+        TokenKind.I32 : true,
+        TokenKind.I64 : true,
+        TokenKind.I128 : true,
+        TokenKind.U8 : true,
+        TokenKind.U16 : true,
+        TokenKind.U32 : true,
+        TokenKind.U64 : true,
+        TokenKind.U128 : true,
+        TokenKind.F32 : true,
+        TokenKind.F64 : true,
+        TokenKind.F80 : true,
+        TokenKind.C32 : true,
+        TokenKind.C64 : true,
+        TokenKind.C80 : true,
+        TokenKind.Bool : true,
+        TokenKind.Str : true,
+        TokenKind.Char : true,
+        TokenKind.Void : true,
+        TokenKind.VecType : true,
+        TokenKind.OptionalType : true,
+        _ : false,
+    };
+}
+
+SyntaxNode* function_identifier(SyntaxNode* item) {
+    SyntaxNode* child = item.first_child;
+    SyntaxNode* candidate = (SyntaxNode*)0;
+    i64 angle_depth = 0;
+    while (child != (SyntaxNode*)0 && child.kind != NodeKind.Parenthesized) {
+        if (child.kind == NodeKind.Token && child.text == "<") {
+            angle_depth += 1;
+        } else if (child.kind == NodeKind.Token && child.text == ">" && angle_depth > 0) {
+            angle_depth -= 1;
+        } else if (angle_depth == 0 && node_is_identifier(child)) {
+            candidate = child;
+        }
+        child = child.next_sibling;
+    }
+    return candidate;
+}
+
+SyntaxNode* item_identifier(SyntaxNode* item) {
+    if (item == (SyntaxNode*)0) {
+        return (SyntaxNode*)0;
+    }
+    if (item.kind == NodeKind.Struct || item.kind == NodeKind.Enum || item.kind == NodeKind.Trait || item.kind == NodeKind.TypeAlias) {
+        SyntaxNode* child = item.first_child;
+        bool saw_type_keyword = false;
+        while (child != (SyntaxNode*)0) {
+            if (child.kind == NodeKind.Token && !saw_type_keyword) {
+                if (child.text == "struct" || child.text == "enum" || child.text == "trait" || child.text == "type") {
+                    saw_type_keyword = true;
+                }
+            } else if (saw_type_keyword && node_is_identifier(child)) {
+                return child;
+            }
+            child = child.next_sibling;
+        }
+        return (SyntaxNode*)0;
+    }
+    if (item.kind == NodeKind.Function) {
+        return function_identifier(item);
+    }
+    if (item.kind == NodeKind.Global) {
+        SyntaxNode* child = item.first_child;
+        SyntaxNode* last_identifier = (SyntaxNode*)0;
+        while (child != (SyntaxNode*)0) {
+            if (child.kind == NodeKind.Token && child.text == "=") {
+                break;
+            }
+            if (node_is_identifier(child)) {
+                last_identifier = child;
+            }
+            child = child.next_sibling;
+        }
+        return last_identifier;
+    }
+    return (SyntaxNode*)0;
+}
+
+bool symbol_item_is_function(SyntaxNode* item) {
+    return item != (SyntaxNode*)0 && item.kind == NodeKind.Function;
+}
+
+bool symbol_item_is_struct(SyntaxNode* item) {
+    return item != (SyntaxNode*)0 && item.kind == NodeKind.Struct;
+}
+
+SymbolKind symbol_kind_for_item(SyntaxNode* item) {
+    return match item.kind {
+        NodeKind.Function : SymbolKind.Function,
+        NodeKind.Struct : SymbolKind.Struct,
+        NodeKind.Enum : SymbolKind.Enum,
+        NodeKind.Trait : SymbolKind.Trait,
+        NodeKind.Global : SymbolKind.Global,
+        NodeKind.TypeAlias : SymbolKind.TypeAlias,
+        _ : SymbolKind.Global,
+    };
+}
+
+bool record_item(SymbolTable* table, DiagnosticBag* diagnostics, SyntaxNode* item) {
+    if (item.kind == NodeKind.Import || item.kind == NodeKind.CfgBlock || item.kind == NodeKind.Extern || item.kind == NodeKind.Macro) {
+        return true;
+    }
+    SyntaxNode* name = item_identifier(item);
+    if (name == (SyntaxNode*)0) {
+        return true;
+    }
+    u32 name_id = table.names.intern(name.text);
+    SymbolKind kind = symbol_kind_for_item(item);
+    u32 type_id = 0;
+    if (kind == SymbolKind.Struct || kind == SymbolKind.Enum || kind == SymbolKind.Trait || kind == SymbolKind.TypeAlias) {
+        type_id = table.types.get_named(name.text);
+    }
+    if (!table.declare_typed(name_id, kind, name.span, item, type_id)) {
+        String message = String.from_str("duplicate symbol '");
+        message.push_str(name.text);
+        message.push_str("'");
+        diagnostics.error(name.span, move message);
+        return false;
+    }
+    return true;
+}
+
+bool collect_symbols(SymbolTable* table, DiagnosticBag* diagnostics, SyntaxTree* tree, CfgSet* cfg) {
+    bool ok = true;
+    Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
+    cfg_collect_items(tree.root, cfg, diagnostics, &items);
+    i64 i = 0;
+    while (i < items.len()) {
+        if (!record_item(table, diagnostics, items.get(i))) {
+            ok = false;
+        }
+        i += 1;
+    }
+    items.drop();
+    Vec<CfgVisibleName> cfg_names = Vec<CfgVisibleName>.new();
+    cfg_collect_cfg_names(tree.root, cfg, &cfg_names);
+    i64 cfg_index = 0;
+    while (cfg_index < cfg_names.len()) {
+        CfgVisibleName* visible = cfg_names.get_ptr(cfg_index);
+        table.add_visible(visible.name, visible.span, (SyntaxNode*)0);
+        cfg_index += 1;
+    }
+    cfg_names.drop();
+    Vec<CfgVisibleName> extern_names = Vec<CfgVisibleName>.new();
+    cfg_collect_extern_names(tree.root, &extern_names);
+    i64 extern_index = 0;
+    while (extern_index < extern_names.len()) {
+        CfgVisibleName* visible = extern_names.get_ptr(extern_index);
+        table.add_visible(visible.name, visible.span, (SyntaxNode*)0);
+        extern_index += 1;
+    }
+    extern_names.drop();
+    Vec<CfgImportBinding> bindings = Vec<CfgImportBinding>.new();
+    cfg_collect_import_bindings(tree.root, cfg, &bindings);
+    i64 binding_index = 0;
+    while (binding_index < bindings.len()) {
+        CfgImportBinding* binding = bindings.get_ptr(binding_index);
+        table.add_visible(binding.alias, binding.span, (SyntaxNode*)0);
+        binding_index += 1;
+    }
+    bindings.drop();
+    return ok;
+}

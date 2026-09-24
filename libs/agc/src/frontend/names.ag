@@ -1,0 +1,174 @@
+// Lexical name resolution over the lossless CST. This is the first semantic
+// projection; it deliberately keeps declaration order and does not iterate a
+// hash table.
+import std.mem.vec;
+import std.intern;
+import frontend.ast;
+import frontend.diagnostics;
+import frontend.symbols;
+import frontend.module_loader;
+import frontend.cfg;
+import frontend.bindings;
+
+struct NameResolver {
+    Interner local_names;
+    Vec<u32> locals;
+    SymbolTable* symbols;
+    DiagnosticBag* diagnostics;
+    bool has_imports;
+    bool failed;
+}
+
+impl NameResolver {
+    NameResolver new(SymbolTable* symbols, DiagnosticBag* diagnostics) {
+        NameResolver resolver;
+        resolver.local_names = Interner.new();
+        resolver.locals = Vec<u32>.new();
+        resolver.symbols = symbols;
+        resolver.diagnostics = diagnostics;
+        resolver.has_imports = false;
+        resolver.failed = false;
+        return resolver;
+    }
+
+    void add_local(NameResolver* self, str name) {
+        self.locals.push(self.local_names.intern(name));
+    }
+
+    bool has_local(NameResolver* self, str name) {
+        i64 i = 0;
+        while (i < self.locals.len()) {
+            if (self.local_names.get(self.locals.get(i)) == name) {
+                return true;
+            }
+            i += 1;
+        }
+        return false;
+    }
+
+    void unknown(NameResolver* self, str name, Span span) {
+        String message = String.from_str("unknown identifier '");
+        message.push_str(name);
+        message.push_str("'");
+        self.diagnostics.error(span, move message);
+        self.failed = true;
+    }
+}
+
+SyntaxNode* function_body(SyntaxNode* function) {
+    SyntaxNode* child = function.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Block) {
+            return child;
+        }
+        child = child.next_sibling;
+    }
+    return (SyntaxNode*)0;
+}
+
+bool likely_type_name(Vec<SyntaxNode*>* leaves, i64 index) {
+    if (index + 1 < leaves.len()) {
+        str next = leaves.get(index + 1).text;
+        if (next == "<" || next == "*" || next == "&" || next == "[") {
+            return true;
+        }
+    }
+    if (index > 0) {
+        str previous = leaves.get(index - 1).text;
+        if (previous == "type" || previous == "as" || previous == ":") {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool name_starts_with(str text, str prefix) {
+    i64 text_len = strlen(text);
+    i64 prefix_len = strlen(prefix);
+    if (prefix_len > text_len) {
+        return false;
+    }
+    i64 i = 0;
+    while (i < prefix_len) {
+        if (text[i] != prefix[i]) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+void resolve_function(NameResolver* resolver, SyntaxNode* function, CfgSet* cfg) {
+    SyntaxNode* body = function_body(function);
+    if (body == (SyntaxNode*)0) {
+        return;
+    }
+    Vec<SyntaxNode*> body_leaves = Vec<SyntaxNode*>.new();
+    cfg_collect_live_leaves(body, cfg, &body_leaves);
+    Vec<Binding> typed_bindings = Vec<Binding>.new();
+    collect_function_bindings(function, &typed_bindings);
+    i64 binding_index = 0;
+    while (binding_index < typed_bindings.len()) {
+        Binding* binding = typed_bindings.get_ptr(binding_index);
+        resolver.add_local(binding.name);
+        binding_index += 1;
+    }
+    typed_bindings.drop();
+
+    i64 i = 0;
+    while (i < body_leaves.len()) {
+        SyntaxNode* node = body_leaves.get(i);
+        if (node.token_kind != TokenKind.Identifier || node.text == "_") {
+            i += 1;
+            continue;
+        }
+        if (i > 0 && body_leaves.get(i - 1).text == ".") {
+            i += 1;
+            continue;
+        }
+        if (i > 0 && body_leaves.get(i - 1).text == "@") {
+            i += 1;
+            continue;
+        }
+        if (resolver.has_local(node.text) || resolver.symbols.find(node.text) >= 0 || likely_type_name(&body_leaves, i)) {
+            i += 1;
+            continue;
+        }
+        if (name_starts_with(node.text, "__atomic_")) {
+            i += 1;
+            continue;
+        }
+        // Uppercase names are commonly imported types or enum constructors;
+        // the typed import/type pass will resolve them precisely.
+        if (strlen(node.text) > 0 && node.text[0] >= (u8)'A' && node.text[0] <= (u8)'Z') {
+            i += 1;
+            continue;
+        }
+        resolver.unknown(node.text, node.span);
+        i += 1;
+    }
+}
+
+bool resolve_names(SymbolTable* symbols, DiagnosticBag* diagnostics, SyntaxTree* tree, str owner_path, CfgSet* cfg, Vec<String>* include_dirs) {
+    NameResolver resolver = NameResolver.new(symbols, diagnostics);
+    Vec<String> import_names = Vec<String>.new();
+    cfg_collect_import_names(tree.root, cfg, &import_names);
+    resolver.has_imports = import_names.len() > 0;
+    import_names.drop();
+    if (resolver.has_imports
+        && !load_imported_declarations(symbols, diagnostics, tree, owner_path, cfg, include_dirs)) {
+        resolver.failed = true;
+        return false;
+    }
+    Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
+    cfg_collect_items(tree.root, cfg, diagnostics, &items);
+    i64 i = 0;
+    while (i < items.len()) {
+        if (items.get(i).kind == NodeKind.Function) {
+            resolve_function(&resolver, items.get(i), cfg);
+        }
+        i += 1;
+    }
+    items.drop();
+    return !resolver.failed;
+}

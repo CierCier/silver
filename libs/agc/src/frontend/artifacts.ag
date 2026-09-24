@@ -1,0 +1,524 @@
+// Binary module metadata reader for the stage1 frontend.  This is a
+// deliberately small projection of the AGM format: it validates and walks the
+// header and export records, retaining the fields the name pass needs without
+// attempting to type-check or generate code from an imported module.
+import std.error;
+import std.mem.vec;
+import std.result;
+import std.string;
+
+enum ArtifactExportKind {
+    Function;
+    Struct;
+    Enum;
+    Trait;
+    Constant;
+    Global;
+    TypeAlias;
+}
+
+struct ArtifactExport {
+    ArtifactExportKind kind;
+    String name;
+    String signature;
+    i64 type_param_count;
+}
+
+struct Artifact {
+    u8 version;
+    String module_name;
+    String module_path;
+    Vec<ArtifactExport> exports;
+}
+
+struct ArtifactReader {
+    u8* data;
+    i64 length;
+    i64 cursor;
+    bool failed;
+}
+
+impl Artifact {
+    Artifact new() {
+        Artifact artifact;
+        artifact.version = 0;
+        artifact.module_name = String.new();
+        artifact.module_path = String.new();
+        artifact.exports = Vec<ArtifactExport>.new();
+        return artifact;
+    }
+}
+
+void artifact_drop(Artifact* self) {
+    self.exports.drop();
+    self.module_name.drop();
+    self.module_path.drop();
+}
+
+ArtifactReader artifact_reader(String* bytes) {
+    ArtifactReader reader;
+    reader.data = bytes.data;
+    reader.length = bytes.len;
+    reader.cursor = 0;
+    reader.failed = false;
+    return reader;
+}
+
+bool artifact_reader_has(ArtifactReader* self, i64 count) {
+    if (count < 0 || self.cursor < 0 || self.cursor > self.length
+        || count > self.length - self.cursor) {
+        self.failed = true;
+        return false;
+    }
+    return true;
+}
+
+bool artifact_reader_skip(ArtifactReader* self, i64 count) {
+    if (!artifact_reader_has(self, count)) {
+        return false;
+    }
+    self.cursor += count;
+    return true;
+}
+
+bool artifact_reader_u8(ArtifactReader* self, u8* out) {
+    if (!artifact_reader_has(self, 1)) {
+        return false;
+    }
+    *out = self.data[self.cursor];
+    self.cursor += 1;
+    return true;
+}
+
+bool artifact_reader_u32(ArtifactReader* self, u32* out) {
+    if (!artifact_reader_has(self, 4)) {
+        return false;
+    }
+    u64 value = (u64)self.data[self.cursor];
+    value += (u64)self.data[self.cursor + 1] * (u64)256;
+    value += (u64)self.data[self.cursor + 2] * (u64)65536;
+    value += (u64)self.data[self.cursor + 3] * (u64)16777216;
+    *out = (u32)value;
+    self.cursor += 4;
+    return true;
+}
+
+bool artifact_reader_count(ArtifactReader* self, i64* out) {
+    u32 raw = 0;
+    if (!artifact_reader_u32(self, &raw)) {
+        return false;
+    }
+    i64 count = (i64)raw;
+    // Every count below is followed by at least one byte.  Rejecting an
+    // impossible count here keeps malformed input from becoming a long loop.
+    if (count > self.length - self.cursor) {
+        self.failed = true;
+        return false;
+    }
+    *out = count;
+    return true;
+}
+
+bool artifact_reader_string(ArtifactReader* self, String* out) {
+    i64 count = 0;
+    if (!artifact_reader_count(self, &count)) {
+        return false;
+    }
+    i64 start = self.cursor;
+    if (!artifact_reader_skip(self, count)) {
+        return false;
+    }
+    if (count > 0) {
+        out.push_bytes(&self.data[start], count);
+    }
+    if (!out.is_valid_utf8()) {
+        self.failed = true;
+        return false;
+    }
+    return true;
+}
+
+bool artifact_reader_skip_string(ArtifactReader* self) {
+    i64 count = 0;
+    if (!artifact_reader_count(self, &count)) {
+        return false;
+    }
+    i64 start = self.cursor;
+    if (!artifact_reader_skip(self, count)) {
+        return false;
+    }
+    if (count == 0) {
+        return true;
+    }
+    String value = String.new();
+    value.push_bytes(&self.data[start], count);
+    bool valid = value.is_valid_utf8();
+    value.drop();
+    if (!valid) {
+        self.failed = true;
+    }
+    return valid;
+}
+
+bool artifact_reader_skip_strings(ArtifactReader* self) {
+    i64 count = 0;
+    if (!artifact_reader_count(self, &count)) {
+        return false;
+    }
+    i64 index = 0;
+    while (index < count) {
+        if (!artifact_reader_skip_string(self)) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}
+
+bool artifact_reader_optional_string(ArtifactReader* self) {
+    u8 tag = 0;
+    if (!artifact_reader_u8(self, &tag)) {
+        return false;
+    }
+    if (tag == 0) {
+        return true;
+    }
+    if (tag != 1) {
+        self.failed = true;
+        return false;
+    }
+    return artifact_reader_skip_string(self);
+}
+
+bool artifact_reader_abi(ArtifactReader* self) {
+    u8 tag = 0;
+    if (!artifact_reader_u8(self, &tag)) {
+        return false;
+    }
+    if (tag == 0) {
+        return true;
+    }
+    if (tag != 1) {
+        self.failed = true;
+        return false;
+    }
+    u8 value = 0;
+    if (!artifact_reader_u8(self, &value)) {
+        return false;
+    }
+    if (value < (u8)1 || value > (u8)7) {
+        self.failed = true;
+        return false;
+    }
+    return true;
+}
+
+bool artifact_reader_optional_u64(ArtifactReader* self) {
+    u8 tag = 0;
+    if (!artifact_reader_u8(self, &tag)) {
+        return false;
+    }
+    if (tag == 0) {
+        return true;
+    }
+    if (tag != 1) {
+        self.failed = true;
+        return false;
+    }
+    return artifact_reader_skip(self, 8);
+}
+
+bool artifact_reader_tags(ArtifactReader* self, bool enabled) {
+    if (!enabled) {
+        return true;
+    }
+    i64 count = 0;
+    if (!artifact_reader_count(self, &count)) {
+        return false;
+    }
+    i64 index = 0;
+    while (index < count) {
+        if (!artifact_reader_skip_string(self) || !artifact_reader_skip_string(self)) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}
+
+bool artifact_reader_layout(ArtifactReader* self, bool has_packed) {
+    u8 tag = 0;
+    if (!artifact_reader_u8(self, &tag)) {
+        return false;
+    }
+    if (tag == 0) {
+        return true;
+    }
+    if (tag != 1) {
+        self.failed = true;
+        return false;
+    }
+    if (!artifact_reader_optional_u64(self) || !artifact_reader_optional_u64(self)) {
+        return false;
+    }
+    if (has_packed) {
+        u8 packed = 0;
+        if (!artifact_reader_u8(self, &packed)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool artifact_reader_fields(ArtifactReader* self, bool has_tags) {
+    i64 count = 0;
+    if (!artifact_reader_count(self, &count)) {
+        return false;
+    }
+    i64 index = 0;
+    while (index < count) {
+        if (!artifact_reader_skip_string(self) || !artifact_reader_skip_string(self)
+            || !artifact_reader_tags(self, has_tags)) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}
+
+bool artifact_reader_variants(ArtifactReader* self, bool has_tags) {
+    i64 count = 0;
+    if (!artifact_reader_count(self, &count)) {
+        return false;
+    }
+    i64 index = 0;
+    while (index < count) {
+        if (!artifact_reader_skip_string(self) || !artifact_reader_skip(self, 16)
+            || !artifact_reader_skip_strings(self)) {
+            return false;
+        }
+        if (has_tags && !artifact_reader_fields(self, true)) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}
+
+bool artifact_reader_trait_items(ArtifactReader* self) {
+    i64 count = 0;
+    if (!artifact_reader_count(self, &count)) {
+        return false;
+    }
+    i64 index = 0;
+    while (index < count) {
+        if (!artifact_reader_skip_string(self) || !artifact_reader_skip_string(self)) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}
+
+bool artifact_supported_version(u8 version) {
+    return version == (u8)2 || version == (u8)6 || version == (u8)7
+        || version == (u8)8 || version == (u8)9 || version == (u8)10
+        || version == (u8)11;
+}
+
+// The format gained fields in separate releases; numeric version order is
+// not a valid shorthand for the record layout.
+bool artifact_has_field_tags(u8 version) {
+    return version == (u8)6 || version == (u8)7 || version == (u8)8
+        || version == (u8)9 || version == (u8)10 || version == (u8)11;
+}
+
+bool artifact_has_packed(u8 version) {
+    return version == (u8)10 || version == (u8)11;
+}
+
+bool artifact_has_constants_and_globals(u8 version) {
+    return version == (u8)8 || version == (u8)9 || version == (u8)11;
+}
+
+bool artifact_has_lib_paths(u8 version) {
+    return version == (u8)7 || version == (u8)8 || version == (u8)9
+        || version == (u8)11;
+}
+
+bool artifact_has_generic_templates(u8 version) {
+    return version == (u8)11;
+}
+
+bool artifact_has_impl_trait(u8 version) {
+    return version == (u8)11;
+}
+
+bool artifact_reader_magic(ArtifactReader* self, u8* version) {
+    if (!artifact_reader_has(self, 6)) {
+        return false;
+    }
+    if (self.data[0] != (u8)65 || self.data[1] != (u8)71
+        || self.data[2] != (u8)77 || self.data[3] != (u8)0
+        || self.data[4] != (u8)0 || !artifact_supported_version(self.data[5])) {
+        self.failed = true;
+        return false;
+    }
+    *version = self.data[5];
+    self.cursor += 6;
+    return true;
+}
+
+bool artifact_export_kind(u8 raw, ArtifactExportKind* out) {
+    if (raw == (u8)1) {
+        *out = ArtifactExportKind.Function;
+        return true;
+    }
+    if (raw == (u8)2) {
+        *out = ArtifactExportKind.Struct;
+        return true;
+    }
+    if (raw == (u8)3) {
+        *out = ArtifactExportKind.Enum;
+        return true;
+    }
+    if (raw == (u8)4) {
+        *out = ArtifactExportKind.Trait;
+        return true;
+    }
+    if (raw == (u8)5) {
+        *out = ArtifactExportKind.Constant;
+        return true;
+    }
+    if (raw == (u8)6) {
+        *out = ArtifactExportKind.Global;
+        return true;
+    }
+    if (raw == (u8)7) {
+        *out = ArtifactExportKind.TypeAlias;
+        return true;
+    }
+    return false;
+}
+
+bool artifact_reader_export(ArtifactReader* self, u8 version, ArtifactExport* out) {
+    u8 raw_kind = 0;
+    if (!artifact_reader_u8(self, &raw_kind)
+        || !artifact_export_kind(raw_kind, &out.kind)) {
+        self.failed = true;
+        return false;
+    }
+    if (!artifact_reader_string(self, &out.name)
+        || !artifact_reader_string(self, &out.signature)) {
+        return false;
+    }
+    if (!artifact_reader_count(self, &out.type_param_count)) {
+        return false;
+    }
+    i64 index = 0;
+    while (index < out.type_param_count) {
+        if (!artifact_reader_skip_string(self)) {
+            return false;
+        }
+        index += 1;
+    }
+    if (!artifact_reader_optional_string(self) || !artifact_reader_abi(self)) {
+        return false;
+    }
+    u8 ignored = 0;
+    if (!artifact_reader_u8(self, &ignored) || !artifact_reader_optional_string(self)
+        || !artifact_reader_fields(self, artifact_has_field_tags(version))
+        || !artifact_reader_layout(self, artifact_has_packed(version))
+        || !artifact_reader_optional_string(self)
+        || !artifact_reader_variants(self, artifact_has_field_tags(version))
+        || !artifact_reader_trait_items(self)) {
+        return false;
+    }
+    if (artifact_has_constants_and_globals(version)
+        && (!artifact_reader_optional_string(self)
+        || !artifact_reader_u8(self, &ignored))) {
+        return false;
+    }
+    if (artifact_has_impl_trait(version) && !artifact_reader_optional_string(self)) {
+        return false;
+    }
+    return true;
+}
+
+bool read_artifact(str path, Artifact* out) {
+    Result<String, Error> loaded = String.from_file(path);
+    if (loaded.is_err()) {
+        return false;
+    }
+    String bytes = loaded.unwrap();
+    ArtifactReader reader = artifact_reader(&bytes);
+    u8 version = 0;
+    bool ok = artifact_reader_magic(&reader, &version);
+    if (ok) {
+        ok = artifact_reader_string(&reader, &out.module_name);
+    }
+    if (ok) {
+        ok = artifact_reader_string(&reader, &out.module_path);
+    }
+    if (ok) {
+        ok = artifact_reader_skip_string(&reader); // source path
+    }
+    if (ok) {
+        ok = artifact_reader_skip(&reader, 8); // source hash
+    }
+    if (ok) {
+        ok = artifact_reader_skip_string(&reader); // compiler version
+    }
+    if (ok) {
+        ok = artifact_reader_skip_string(&reader); // target triple
+    }
+    if (ok) {
+        u8 static_library = 0;
+        u8 shared_library = 0;
+        ok = artifact_reader_u8(&reader, &static_library)
+            && artifact_reader_u8(&reader, &shared_library);
+    }
+    if (ok) {
+        ok = artifact_reader_skip_strings(&reader); // direct dependencies
+    }
+    if (ok) {
+        ok = artifact_reader_skip_strings(&reader); // transitive dependencies
+    }
+
+    i64 export_count = 0;
+    if (ok) {
+        ok = artifact_reader_count(&reader, &export_count);
+    }
+    i64 export_index = 0;
+    while (ok && export_index < export_count) {
+        ArtifactExport export;
+        export.kind = ArtifactExportKind.Function;
+        export.name = String.new();
+        export.signature = String.new();
+        export.type_param_count = 0;
+        if (!artifact_reader_export(&reader, version, &export)) {
+            export.name.drop();
+            export.signature.drop();
+            ok = false;
+            break;
+        }
+        out.exports.push(move export);
+        export_index += 1;
+    }
+
+    if (ok) {
+        ok = artifact_reader_skip_strings(&reader); // native libraries
+    }
+    if (ok && artifact_has_lib_paths(version)) {
+        ok = artifact_reader_skip_strings(&reader); // native library paths
+    }
+    if (ok && artifact_has_generic_templates(version)) {
+        ok = artifact_reader_skip_strings(&reader); // generic templates
+    }
+    bytes.drop();
+    if (!ok || reader.failed) {
+        return false;
+    }
+    out.version = version;
+    return true;
+}

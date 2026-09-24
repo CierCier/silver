@@ -1,5 +1,11 @@
 # Silver Compiler Agent Guide (AGENTS.md)
 
+> **Layout note (bootstrap migration):** the Rust toolchain lives under
+> `bootstrap/`; the Silver self-host workspace is split into the `bin/agc`
+> driver and the reusable `libs/agc` frontend library. All `cargo` commands
+> still run from the repo root; `cargo build -p agc` builds the stage0
+> bootstrap from `bootstrap/stage0/agc`.
+
 This document is the authoritative technical reference for the Silver systems programming language compiler (`agc`) and runtime. It defines the architecture, pipeline stages, syntax specifications, memory management model, coding invariants, and guidelines for future development passes.
 
 ---
@@ -20,32 +26,39 @@ Silver is a statically typed, LLVM-backed systems programming language exploring
 
 ```
 silver/
-├── bin/                         # Executable CLI binaries
-│   ├── agc/                     # The Silver compiler source code (Rust crate, uses Elise)
-│   │   ├── src/
-│   │   │   ├── main.rs          # Compiler driver, CLI options parsing, and build orchestrator
-│   │   │   ├── lib.rs           # Exported frontend modules (for reuse by tooling/LSP)
-│   │   │   ├── lexer.rs         # Token definition, lexical scanner, and spans
-│   │   │   ├── parser/          # Syntactic analysis and import resolution
-│   │   │   ├── semantic/        # Semantic analysis, type checking, and monomorphization
-│   │   │   │   ├── place.rs          # Place {local, projections} — structural location
-│   │   │   │   ├── move_path.rs      # MovePathTree + InitState (Partial/Init/Uninit)
-│   │   │   │   ├── init.rs           # move_out / copy_from / initialize / read
-│   │   │   │   ├── type_properties.rs # TypeProperties {is_copy, needs_drop}
-│   │   │   │   ├── drop_elaborate.rs # Drop elaboration + hybrid flag plan
-│   │   │   │   ├── move_check.rs / borrow_check.rs # Place-based analyses
-│   │   │   ├── symbol_table.rs  # Phase-aware compiler symbol registration & scopes
-│   │   │   ├── symbol_index.rs  # LSP symbol index + move/copy inlay hints
-│   │   │   ├── diagnostics/     # Centralized message catalog and error visualizer
-│   │   │   └── profiler.rs      # Phase timing instrumenter
-│   ├── aglsp/                   # Language Server Protocol server
-│   └── agsm/                    # Source maps and module artifact generator
+├── silver.toml                  # Silver workspace manifest (self-host root)
+├── bin/agc/                     # Stage1 Silver compiler driver
+├── bin/aglsp/                   # Silver language-server package and future port target
+├── libs/agc/                    # Reusable Stage1 Silver compiler library
+├── bootstrap/                   # Rust bootstrap (stage0) — the pre-self-host toolchain
+│   ├── stage0/
+│   │   ├── agc/                 # The Silver compiler source code (Rust crate, uses Elise)
+│   │   │   ├── src/
+│   │   │   │   ├── main.rs          # Compiler driver, CLI options parsing, and build orchestrator
+│   │   │   │   ├── lib.rs           # Exported frontend modules (for reuse by tooling/LSP)
+│   │   │   │   ├── lexer.rs         # Token definition, lexical scanner, and spans
+│   │   │   │   ├── parser/          # Syntactic analysis and import resolution
+│   │   │   │   ├── semantic/        # Semantic analysis, type checking, and monomorphization
+│   │   │   │   │   ├── place.rs          # Place {local, projections} — structural location
+│   │   │   │   │   ├── move_path.rs      # MovePathTree + InitState (Partial/Init/Uninit)
+│   │   │   │   │   ├── init.rs           # move_out / copy_from / initialize / read
+│   │   │   │   │   ├── type_properties.rs # TypeProperties {is_copy, needs_drop}
+│   │   │   │   │   ├── drop_elaborate.rs # Drop elaboration + hybrid flag plan
+│   │   │   │   │   ├── move_check.rs / borrow_check.rs # Place-based analyses
+│   │   │   │   ├── symbol_table.rs  # Phase-aware compiler symbol registration & scopes
+│   │   │   │   ├── symbol_index.rs  # LSP symbol index + move/copy inlay hints
+│   │   │   │   ├── diagnostics/     # Centralized message catalog and error visualizer
+│   │   │   │   └── profiler.rs      # Phase timing instrumenter
+│   │   │   └── Cargo.toml
+│   │   ├── agsm/                # Source maps and module artifact generator
+│   │   └── ffi-rust/            # Optional Rust implementation behind Silver's versioned C ABI
+│   ├── aglsp/                   # Language Server Protocol server (Rust, driven by stage0)
+│   └── target/                  # Rust build output (cargo)
 ├── std/                         # Silver standard library sources (bootstrap-copied)
 │   ├── mem/                     # Allocator, smart pointers (Box, Rc, Vec, Arena)
 │   ├── rt/                      # Pure-Silver runtime: GC heap, type system, casts, method dispatch
 │   └── ops.ag                   # Core arithmetic and index operator overloading traits
 ├── examples/                    # Silver example applications (.ag files)
-├── bootstrap/                   # Rust bootstrap compiler and tooling projects
 ├── tests/                       # Test suite including integration tests
 └── scripts/                     # Packaging and release scripts
 ```
@@ -111,7 +124,7 @@ flowchart TD
 #### 3. Import Lowering (`parser/import_hook.rs`)
 - Resolves module import directives (`import std.io;`) recursively:
   - **Source File Imports**: The target `.ag` file is parsed, its imports recursively lowered, and its AST items are **fully inlined** into the importing program's item list.
-  - **Precompiled Module Imports**: Reads compiled `.agm` binary artifacts containing magic header `AGM\x00\x00\x02`. These exports are cached as type signatures in `module_imports` and not merged directly into the AST items.
+  - **Precompiled Module Imports**: Reads compiled `.agm` binary artifacts (current writer header `AGM\x00\x00\x0B`; stage1 also validates the supported v2/v6-v10 layouts). These exports are cached as type signatures in `module_imports` and not merged directly into the AST items.
 
 #### 4. Symbol Table Init (`symbol_table.rs`)
 - Registers top-level functions, structs, globals, and traits.
@@ -210,7 +223,7 @@ The Silver compiler implements a lightweight deterministic memory and resource c
 ## 7. Diagnostics
 
 Compiler diagnostic messages are rendered using the `diagnostics::render` utility.
-- **Centralized message catalog**: every user-facing diagnostic string lives in `agc/src/diagnostics/messages.rs` as a named function (`msg::unknown_identifier`, `msg::type_mismatch`, `msg::use_of_moved_value`, ...). Passes import `crate::diagnostics::messages as msg` and call catalog functions instead of inlining literals — editing/translating messages is a single-file change.
+- **Centralized message catalog**: every user-facing diagnostic string lives in `bootstrap/stage0/agc/src/diagnostics/messages.rs` as a named function (`msg::unknown_identifier`, `msg::type_mismatch`, `msg::use_of_moved_value`, ...). Passes import `crate::diagnostics::messages as msg` and call catalog functions instead of inlining literals — editing/translating messages is a single-file change.
 - Formatting reports: `error: file:line:col: message` or `warn: file:line:col: message` followed by the source line text and carets (`^`) pointing precisely to the span (with automatic tab expansion for character alignment).
 - Severity levels are defined by the `Severity` enum (`Error`, `Warning`, or `Note`).
 - **Multi-Span Move Diagnostics**: `move_check` records the original move site and reason, rendering a secondary `note: file:line:col: value explicitly moved here` under use-after-move errors.
@@ -240,7 +253,7 @@ The compiler emits a link-time-resolved symbol table for every function with a b
 - `@__silver_bt_entries` (linkonce_odr, pointer to a private `[N x {i64 addr, u8* name}]` array; `addr` is `ptrtoint(ptr @F to i64)` in a global initializer, resolved by the linker) and `@__silver_bt_count`.
 - `linkonce_odr` dedups the table when .agm library objects are linked into a consumer — the application's own copy (first in link order) wins, so its addresses match the final binary.
 - `std/rt/backtrace.ag` walks the rbp chain (inline asm reads rbp), resolves each return address to the entry with the largest `addr <= ret_addr`, and prints `#N  <name> (0x...)` to stderr. `abort()` (in `std/mem/memory.ag`) and `__silver_assert_failed` print the trace before dying.
-- **Exact source lines and argument values** come from a compiler post-pass: after emitting the object, `agc/src/codegen/dwarf_bt.rs` parses the object's ELF + DWARF (`.symtab`, `.debug_line` v4/v5, `.debug_info`/`.debug_abbrev`/`.debug_str` — including relocations) and folds the results into alloc'd, link-time-resolved tables: `__silver_bt_lines` ({fn start, offset, line, file} per line transition) and `__silver_bt_args` ({fn start, count, args} where each arg = {name, rbp-relative fbreg, size}; the DWARF frame base is rbp, so the slot is `rbp + fbreg`). The object is then re-emitted with the tables. Frames print the call-site line (`level3 at probe.ag:4` — the assert's line) and `args: x=42`. Without DWARF (`-O1+`, `-g0`) the tables are empty and the trace falls back to declaration lines, no args.
+- **Exact source lines and argument values** come from a compiler post-pass: after emitting the object, `bootstrap/stage0/agc/src/codegen/dwarf_bt.rs` parses the object's ELF + DWARF (`.symtab`, `.debug_line` v4/v5, `.debug_info`/`.debug_abbrev`/`.debug_str` — including relocations) and folds the results into alloc'd, link-time-resolved tables: `__silver_bt_lines` ({fn start, offset, line, file} per line transition) and `__silver_bt_args` ({fn start, count, args} where each arg = {name, rbp-relative fbreg, size}; the DWARF frame base is rbp, so the slot is `rbp + fbreg`). The object is then re-emitted with the tables. Frames print the call-site line (`level3 at probe.ag:4` — the assert's line) and `args: x=42`. Without DWARF (`-O1+`, `-g0`) the tables are empty and the trace falls back to declaration lines, no args.
 - Integration test: `tests/backtrace_test.ag` (exit 134 + the harness greps stderr for the resolved `level1`/`level2`/`level3`/`main` names and `args: x=`).
 
 ## 7.3 Leak-Check Allocation Origins
@@ -256,7 +269,7 @@ leak-check: leak ptr=0x... size=64 allocated at create_user (test.ag:15)
 ## 8. Testing Expectations
 
 ### Writing Tests
-- All language features should be tested using both unit tests in `agc/src/` (e.g. mock AST tests in `typeck.rs`, `monomorph.rs`) and integration test scripts in `tests/`.
+- All language features should be tested using both unit tests in `bootstrap/stage0/agc/src/` (e.g. mock AST tests in `typeck.rs`, `monomorph.rs`) and integration test scripts in `tests/`.
 - The suite at `tests/memory_pentest.ag` acts as the definitive regression suite for verifying RAII, move semantics, nested scopes, loop breaks/continues, and early returns. Any modifications to compiler pass structures must verify cleanly against this suite.
 
 ---
@@ -293,7 +306,7 @@ When introducing a new syntax item or language capability, follow this checklist
    - Add code generation logic translating the AST nodes to LLVM instructions.
    - Setup debug info lines, stack allocations, drop flags, and defer stack scopes if needed.
 9. **Tests**:
-   - Add unit tests verifying compiler behavior under `agc/src/`.
+   - Add unit tests verifying compiler behavior under `bootstrap/stage0/agc/src/`.
    - Add integration files in `tests/` to run final compilation and execute the generated binary.
 
 ---

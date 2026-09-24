@@ -1,0 +1,586 @@
+// Stage1 command-line frontend. Lex/parse/ast/check stay local while native
+// commands are forwarded through the transitional stage0 backend bridge.
+import std.args;
+import std.error;
+import std.fmt;
+import std.io;
+import std.mem.vec;
+import std.result;
+import std.string;
+import agc;
+import backend_bridge;
+import native_backend;
+import workspace;
+
+str token_kind_name(TokenKind kind) {
+    return match kind {
+        TokenKind.IntLiteral : "IntLiteral",
+        TokenKind.FloatLiteral : "FloatLiteral",
+        TokenKind.ComplexLiteral : "ComplexLiteral",
+        TokenKind.StringLiteral : "StringLiteral",
+        TokenKind.CharLiteral : "CharLiteral",
+        TokenKind.Lifetime : "Lifetime",
+        TokenKind.BoolLiteral : "BoolLiteral",
+        TokenKind.Struct : "Struct",
+        TokenKind.Enum : "Enum",
+        TokenKind.Impl : "Impl",
+        TokenKind.Trait : "Trait",
+        TokenKind.Mut : "Mut",
+        TokenKind.Const : "Const",
+        TokenKind.Static : "Static",
+        TokenKind.Volatile : "Volatile",
+        TokenKind.If : "If",
+        TokenKind.Else : "Else",
+        TokenKind.While : "While",
+        TokenKind.For : "For",
+        TokenKind.Match : "Match",
+        TokenKind.Break : "Break",
+        TokenKind.Continue : "Continue",
+        TokenKind.Return : "Return",
+        TokenKind.Type : "Type",
+        TokenKind.Let : "Let",
+        TokenKind.SelfType : "SelfType",
+        TokenKind.Defer : "Defer",
+        TokenKind.Import : "Import",
+        TokenKind.Comptime : "Comptime",
+        TokenKind.Cast : "Cast",
+        TokenKind.Move : "Move",
+        TokenKind.Extern : "Extern",
+        TokenKind.Private : "Private",
+        TokenKind.Asm : "Asm",
+        TokenKind.As : "As",
+        TokenKind.In : "In",
+        TokenKind.Macro : "Macro",
+        TokenKind.True : "True",
+        TokenKind.False : "False",
+        TokenKind.Launch : "Launch",
+        TokenKind.Wait : "Wait",
+        TokenKind.I8 : "I8",
+        TokenKind.I16 : "I16",
+        TokenKind.I32 : "I32",
+        TokenKind.I64 : "I64",
+        TokenKind.I128 : "I128",
+        TokenKind.U8 : "U8",
+        TokenKind.U16 : "U16",
+        TokenKind.U32 : "U32",
+        TokenKind.U64 : "U64",
+        TokenKind.U128 : "U128",
+        TokenKind.F32 : "F32",
+        TokenKind.F64 : "F64",
+        TokenKind.F80 : "F80",
+        TokenKind.C32 : "C32",
+        TokenKind.C64 : "C64",
+        TokenKind.C80 : "C80",
+        TokenKind.Bool : "Bool",
+        TokenKind.Str : "Str",
+        TokenKind.Char : "Char",
+        TokenKind.Void : "Void",
+        TokenKind.VecType : "Vec",
+        TokenKind.OptionalType : "Optional",
+        TokenKind.Plus : "Plus",
+        TokenKind.Minus : "Minus",
+        TokenKind.Star : "Star",
+        TokenKind.Slash : "Slash",
+        TokenKind.Percent : "Percent",
+        TokenKind.Equal : "Equal",
+        TokenKind.NotEqual : "NotEqual",
+        TokenKind.Less : "Less",
+        TokenKind.Greater : "Greater",
+        TokenKind.LessEqual : "LessEqual",
+        TokenKind.GreaterEqual : "GreaterEqual",
+        TokenKind.And : "And",
+        TokenKind.Or : "Or",
+        TokenKind.Not : "Not",
+        TokenKind.Assign : "Assign",
+        TokenKind.PlusAssign : "PlusAssign",
+        TokenKind.MinusAssign : "MinusAssign",
+        TokenKind.StarAssign : "StarAssign",
+        TokenKind.SlashAssign : "SlashAssign",
+        TokenKind.PercentAssign : "PercentAssign",
+        TokenKind.BitwiseAndAssign : "BitwiseAndAssign",
+        TokenKind.BitwiseOrAssign : "BitwiseOrAssign",
+        TokenKind.BitwiseXorAssign : "BitwiseXorAssign",
+        TokenKind.LeftShiftAssign : "LeftShiftAssign",
+        TokenKind.RightShiftAssign : "RightShiftAssign",
+        TokenKind.BitwiseAnd : "BitwiseAnd",
+        TokenKind.BitwiseOr : "BitwiseOr",
+        TokenKind.BitwiseXor : "BitwiseXor",
+        TokenKind.BitwiseNot : "BitwiseNot",
+        TokenKind.Increment : "Increment",
+        TokenKind.Decrement : "Decrement",
+        TokenKind.LeftParen : "LeftParen",
+        TokenKind.RightParen : "RightParen",
+        TokenKind.LeftBrace : "LeftBrace",
+        TokenKind.RightBrace : "RightBrace",
+        TokenKind.LeftBracket : "LeftBracket",
+        TokenKind.RightBracket : "RightBracket",
+        TokenKind.Semicolon : "Semicolon",
+        TokenKind.Comma : "Comma",
+        TokenKind.Dot : "Dot",
+        TokenKind.DotDot : "DotDot",
+        TokenKind.DotDotDot : "DotDotDot",
+        TokenKind.Colon : "Colon",
+        TokenKind.DoubleColon : "DoubleColon",
+        TokenKind.Question : "Question",
+        TokenKind.At : "At",
+        TokenKind.Hash : "Hash",
+        TokenKind.Comment : "Comment",
+        TokenKind.Identifier : "Identifier",
+        TokenKind.Eof : "Eof",
+    };
+}
+
+void append_hex(String* out, str text) {
+    u8* data = (u8*)text;
+    i64 length = strlen(text);
+    const str digits = "0123456789abcdef";
+    i64 i = 0;
+    while (i < length) {
+        u8 ch = data[i];
+        out.push(digits[(ch >> 4) & 15]);
+        out.push(digits[ch & 15]);
+        i += 1;
+    }
+}
+
+void append_escaped(String* out, str text) {
+    u8* data = (u8*)text;
+    i64 length = strlen(text);
+    i64 i = 0;
+    while (i < length) {
+        u8 ch = data[i];
+        if (ch == (u8)'\\') {
+            out.push_str("\\\\");
+        } else if (ch == (u8)10) {
+            out.push_str("\\n");
+        } else if (ch == (u8)13) {
+            out.push_str("\\r");
+        } else if (ch == (u8)9) {
+            out.push_str("\\t");
+        } else if (ch == (u8)'|') {
+            out.push_str("\\|");
+        } else {
+            out.push(ch);
+        }
+        i += 1;
+    }
+}
+
+String token_record(Token* token) {
+    String out = String.new();
+    out.push_str(token_kind_name(token.kind));
+    out.push_str("|");
+    append_i64(&out, token.span.start);
+    out.push_str("|");
+    append_i64(&out, token.span.end);
+    out.push_str("|");
+    append_i64(&out, token.span.start_line);
+    out.push_str(":");
+    append_i64(&out, token.span.start_col);
+    out.push_str("|");
+    append_i64(&out, token.span.end_line);
+    out.push_str(":");
+    append_i64(&out, token.span.end_col);
+    out.push_str("|");
+    append_hex(&out, token.text.to_str());
+    out.push_str("\n");
+    return out;
+}
+
+i32 emit_tokens(str path) {
+    Result<String, Error> loaded = String.from_file(path);
+    if (loaded.is_err()) {
+        STDERR.write_str("agc: error: failed to read ");
+        STDERR.write_str(path);
+        STDERR.write_str("\n");
+        return 2;
+    }
+    String source = loaded.unwrap();
+    String source_copy = source.clone();
+    TokenStream stream = TokenStream.new();
+    DiagnosticBag diagnostics = DiagnosticBag.new();
+    lex(move source, &stream, &diagnostics);
+    if (!diagnostics.is_empty()) {
+        STDERR.write_str("agc: error: lexer errors in ");
+        STDERR.write_str(path);
+        STDERR.write_str("\n");
+        i64 i = 0;
+        while (i < diagnostics.len()) {
+            Diagnostic* diagnostic = diagnostics.get(i);
+            String rendered = render_diagnostic(diagnostic, path, &source_copy);
+            STDERR.write_str(rendered.to_str());
+            i += 1;
+        }
+        return 2;
+    }
+    i64 i = 0;
+    while (i < stream.len()) {
+        String record = token_record(stream.get(i));
+        STDOUT.write_str(record.to_str());
+        i += 1;
+    }
+    return 0;
+}
+
+str node_kind_name(NodeKind kind) {
+    return match kind {
+        NodeKind.Program : "Program",
+        NodeKind.Item : "Item",
+        NodeKind.Import : "Import",
+        NodeKind.Struct : "Struct",
+        NodeKind.Enum : "Enum",
+        NodeKind.Trait : "Trait",
+        NodeKind.Impl : "Impl",
+        NodeKind.Function : "Function",
+        NodeKind.Global : "Global",
+        NodeKind.TypeAlias : "TypeAlias",
+        NodeKind.Extern : "Extern",
+        NodeKind.Macro : "Macro",
+        NodeKind.CfgBlock : "CfgBlock",
+        NodeKind.Attribute : "Attribute",
+        NodeKind.Generic : "Generic",
+        NodeKind.Type : "Type",
+        NodeKind.Parameter : "Parameter",
+        NodeKind.Field : "Field",
+        NodeKind.Variant : "Variant",
+        NodeKind.Block : "Block",
+        NodeKind.Parenthesized : "Parenthesized",
+        NodeKind.Bracket : "Bracket",
+        NodeKind.Statement : "Statement",
+        NodeKind.Expression : "Expression",
+        NodeKind.Token : "Token",
+    };
+}
+
+void render_node(String* out, SyntaxNode* node, str prefix, bool last) {
+    out.push_str(prefix);
+    if (last) {
+        out.push_str("`-- ");
+    } else {
+        out.push_str("|-- ");
+    }
+    out.push_str(node_kind_name(node.kind));
+    out.push_str(" [");
+    append_i64(out, node.span.start);
+    out.push_str("..");
+    append_i64(out, node.span.end);
+    out.push_str("]");
+    if (node.kind == NodeKind.Token) {
+        out.push_str(" ");
+        append_escaped(out, node.text);
+    }
+    out.push_str("\n");
+
+    String child_prefix = String.new();
+    child_prefix.push_str(prefix);
+    if (last) {
+        child_prefix.push_str("    ");
+    } else {
+        child_prefix.push_str("|   ");
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        render_node(out, child, child_prefix.to_str(), child.next_sibling == (SyntaxNode*)0);
+        child = child.next_sibling;
+    }
+}
+
+String render_tree(SyntaxTree* tree) {
+    String out = String.new();
+    if (tree.root == (SyntaxNode*)0) {
+        return out;
+    }
+    render_node(&out, tree.root, "", true);
+    return out;
+}
+
+i32 emit_ast(str path) {
+    Result<String, Error> loaded = String.from_file(path);
+    if (loaded.is_err()) {
+        STDERR.write_str("agc: error: failed to read ");
+        STDERR.write_str(path);
+        STDERR.write_str("\n");
+        return 2;
+    }
+    String source = loaded.unwrap();
+    String source_copy = source.clone();
+    TokenStream stream = TokenStream.new();
+    DiagnosticBag diagnostics = DiagnosticBag.new();
+    lex(move source, &stream, &diagnostics);
+    if (!diagnostics.is_empty()) {
+        i64 i = 0;
+        while (i < diagnostics.len()) {
+            Diagnostic* diagnostic = diagnostics.get(i);
+            String rendered = render_diagnostic(diagnostic, path, &source_copy);
+            STDERR.write_str(rendered.to_str());
+            i += 1;
+        }
+        return 2;
+    }
+
+    NodePool pool = NodePool.new();
+    SyntaxTree tree;
+    parse(&stream, &diagnostics, &pool, &tree);
+    if (!diagnostics.is_empty()) {
+        i64 i = 0;
+        while (i < diagnostics.len()) {
+            Diagnostic* diagnostic = diagnostics.get(i);
+            String rendered = render_diagnostic(diagnostic, path, &source_copy);
+            STDERR.write_str(rendered.to_str());
+            i += 1;
+        }
+        pool.destroy();
+        return 2;
+    }
+    String rendered = render_tree(&tree);
+    STDOUT.write_str(rendered.to_str());
+    pool.destroy();
+    return 0;
+}
+
+i32 emit_check(str path, CfgSet* cfg, Vec<String>* include_dirs) {
+    Result<String, Error> loaded = String.from_file(path);
+    if (loaded.is_err()) {
+        STDERR.write_str("agc: error: failed to read ");
+        STDERR.write_str(path);
+        STDERR.write_str("\n");
+        return 2;
+    }
+    String source = loaded.unwrap();
+    String source_copy = source.clone();
+    TokenStream stream = TokenStream.new();
+    DiagnosticBag diagnostics = DiagnosticBag.new();
+    lex(move source, &stream, &diagnostics);
+    if (diagnostics.is_empty()) {
+        NodePool pool = NodePool.new();
+        SyntaxTree tree;
+        parse(&stream, &diagnostics, &pool, &tree);
+        if (diagnostics.is_empty()) {
+            check_hir(&tree, cfg, &diagnostics);
+        }
+        if (diagnostics.is_empty()) {
+            SymbolTable symbols = SymbolTable.new();
+            collect_symbols(&symbols, &diagnostics, &tree, cfg);
+            if (diagnostics.is_empty()) {
+                resolve_names(&symbols, &diagnostics, &tree, path, cfg, include_dirs);
+            }
+            if (diagnostics.is_empty()) {
+                check_declared_types(&symbols, &tree, cfg, &diagnostics);
+            }
+            if (diagnostics.is_empty()) {
+                check_borrows(&tree, &diagnostics, cfg);
+            }
+            if (diagnostics.is_empty()) {
+                check_send(&tree, &diagnostics, cfg);
+            }
+            if (diagnostics.is_empty()) {
+                check_ownership(&tree, &diagnostics, cfg);
+            }
+            if (diagnostics.is_empty()) {
+                String summary = String.from_str("check ok: ");
+                append_i64(&summary, symbols.len());
+                summary.push_str(" top-level symbols\n");
+                STDOUT.write_str(summary.to_str());
+                pool.destroy();
+                return 0;
+            }
+        }
+        i64 i = 0;
+        while (i < diagnostics.len()) {
+            Diagnostic* diagnostic = diagnostics.get(i);
+            String rendered = render_diagnostic(diagnostic, path, &source_copy);
+            STDERR.write_str(rendered.to_str());
+            i += 1;
+        }
+        pool.destroy();
+        return 2;
+    }
+    i64 i = 0;
+    while (i < diagnostics.len()) {
+        Diagnostic* diagnostic = diagnostics.get(i);
+        String rendered = render_diagnostic(diagnostic, path, &source_copy);
+        STDERR.write_str(rendered.to_str());
+        i += 1;
+    }
+    return 2;
+}
+
+void collect_workspace_check_options(Vec<String>* arguments, CfgSet* cfg, Vec<String>* include_dirs, WorkspacePlan* plan) {
+    workspace_collect_roots(plan, include_dirs);
+    i64 i = 1;
+    while (i < arguments.len()) {
+        String* argument = arguments.get_ptr(i);
+        if (argument.equals("-I") && i + 1 < arguments.len()) {
+            String value = String.from_str(arguments.get_ptr(i + 1).to_str());
+            include_dirs.push(move value);
+            i += 2;
+            continue;
+        }
+        if (argument.starts_with("-I") && argument.len() > 2) {
+            String value = argument.strip_prefix("-I");
+            include_dirs.push(move value);
+            i += 1;
+            continue;
+        }
+        if (argument.equals("--cfg") && i + 1 < arguments.len()) {
+            cfg.add_flag(arguments.get_ptr(i + 1).to_str());
+            i += 2;
+            continue;
+        }
+        if (argument.starts_with("--cfg=")) {
+            String value = argument.strip_prefix("--cfg=");
+            cfg.add_flag(value.to_str());
+            value.drop();
+            i += 1;
+            continue;
+        }
+        if (argument.equals("-O") || argument.equals("-O1") || argument.equals("-O2")
+            || argument.equals("-O3") || argument.equals("-Os") || argument.equals("-Oz")
+            || argument.equals("-Ofast")) {
+            cfg.set_release();
+        }
+        i += 1;
+    }
+}
+
+i32 run_workspace_check(Vec<String>* arguments, WorkspacePlan* plan) {
+    CfgSet cfg = linux_defaults();
+    Vec<String> include_dirs = Vec<String>.new();
+    collect_workspace_check_options(arguments, &cfg, &include_dirs, plan);
+    i32 result = emit_check(plan.entry.to_str(), &cfg, &include_dirs);
+    include_dirs.drop();
+    return result;
+}
+
+i32 run_workspace_native(Vec<String>* arguments, WorkspacePlan* plan) {
+    i64 command_index = workspace_command_index(arguments);
+    if (command_index >= 0) {
+        String* command = arguments.get_ptr(command_index);
+        if (command.equals("check") || command.equals("c")) {
+            return run_workspace_check(arguments, plan);
+        }
+    }
+
+    i32 check_result = run_workspace_check(arguments, plan);
+    if (check_result != 0) {
+        return check_result;
+    }
+
+    i32 native_result = 0;
+    if (native_backend_try(arguments, plan.entry.to_str(), &native_result)) {
+        return native_result;
+    }
+
+    // Keep the manifest in the transitional backend request. Stage1 has
+    // already selected and checked the target above; stage0 still needs the
+    // package graph to perform its existing native link/runtime setup.
+    return run_stage0_backend(arguments);
+}
+
+bool is_frontend_command(String* command) {
+    return command.equals("lex") || command.equals("parse")
+        || command.equals("ast") || command.equals("check");
+}
+
+i32 run_frontend() {
+    Vec<String> arguments = args();
+    WorkspacePlan workspace = workspace_plan_empty();
+    String workspace_error = String.new();
+    bool has_workspace = false;
+    if (!workspace_package_arguments(&arguments, &workspace, &has_workspace, &workspace_error)) {
+        STDERR.write_str("agc: error: ");
+        STDERR.write_str(workspace_error.to_str());
+        STDERR.write_str("\n");
+        workspace_error.drop();
+        workspace_plan_drop(&workspace);
+        arguments.drop();
+        return 2;
+    }
+    workspace_error.drop();
+    if (has_workspace) {
+        i32 result = run_workspace_native(&arguments, &workspace);
+        workspace_plan_drop(&workspace);
+        arguments.drop();
+        return result;
+    }
+    workspace_plan_drop(&workspace);
+    if (arguments.len() < 2) {
+        return run_stage0_backend(&arguments);
+    }
+    String* command = arguments.get_ptr(1);
+    if (!is_frontend_command(command)) {
+        String native_source = String.new();
+        i32 native_result = 0;
+        if (native_source_path(&arguments, &native_source)
+            && native_backend_try(&arguments, native_source.to_str(), &native_result)) {
+            native_source.drop();
+            return native_result;
+        }
+        native_source.drop();
+        return run_stage0_backend(&arguments);
+    }
+    if (arguments.len() < 3) {
+        STDERR.write_str("usage: agc <lex|parse|check> <source.ag> [--cfg key=value,...] [-I dir] [-O2]\n");
+        return 2;
+    }
+    String* input = arguments.get_ptr(2);
+    CfgSet cfg = linux_defaults();
+    Vec<String> include_dirs = Vec<String>.new();
+    i64 option = 3;
+    while (option < arguments.len()) {
+        String* argument = arguments.get_ptr(option);
+        if (argument.equals("-I")) {
+            if (option + 1 >= arguments.len()) {
+                STDERR.write_str("agc: error: -I requires a directory\n");
+                include_dirs.drop();
+                return 2;
+            }
+            String include = String.from_str(arguments.get_ptr(option + 1).to_str());
+            include_dirs.push(move include);
+            option += 2;
+            continue;
+        }
+        if (argument.starts_with("-I") && argument.len() > 2) {
+            String include = argument.strip_prefix("-I");
+            include_dirs.push(move include);
+            option += 1;
+            continue;
+        }
+        if (argument.equals("-O") || argument.equals("-O1") || argument.equals("-O2")
+            || argument.equals("-O3") || argument.equals("-Os") || argument.equals("-Oz")
+            || argument.equals("-Ofast")) {
+            cfg.set_release();
+            option += 1;
+            continue;
+        }
+        if (argument.equals("--cfg")) {
+            if (option + 1 >= arguments.len()) {
+                STDERR.write_str("agc: error: --cfg requires a value\n");
+                include_dirs.drop();
+                return 2;
+            }
+            cfg.add_flag(arguments.get_ptr(option + 1).to_str());
+            option += 2;
+            continue;
+        }
+        if (argument.starts_with("--cfg=")) {
+            String value = argument.strip_prefix("--cfg=");
+            cfg.add_flag(value.to_str());
+            value.drop();
+            option += 1;
+            continue;
+        }
+        option += 1;
+    }
+    i32 result = 2;
+    if (command.equals("lex")) {
+        result = emit_tokens(input.to_str());
+    } else if (command.equals("check")) {
+        result = emit_check(input.to_str(), &cfg, &include_dirs);
+    } else {
+        result = emit_ast(input.to_str());
+    }
+    include_dirs.drop();
+    return result;
+}
+

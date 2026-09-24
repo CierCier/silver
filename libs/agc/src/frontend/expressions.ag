@@ -1,0 +1,333 @@
+// Small typed declaration/expression projection over the lossless CST.
+// This is intentionally not a replacement AST: it records the type shape and
+// source spans needed by the launch Send gate while keeping the CST intact.
+//
+// The first slice keeps type text borrowed from CST tokens. That makes Binding
+// records copyable and avoids putting a recursive owned type tree into every
+// local declaration before the typed checker exists.
+import std.mem.memory;
+import std.mem.vec;
+import frontend.ast;
+import frontend.cfg;
+import frontend.lexer;
+import frontend.symbols;
+
+enum ProjectionTypeKind {
+    Unknown;
+    Primitive;
+    Named;
+    Pointer;
+    Reference;
+    Array;
+}
+
+enum ProjectionExpressionKind {
+    Unknown;
+    Identifier;
+    Literal;
+    Address;
+    Move;
+}
+
+struct TypeProjection {
+    ProjectionTypeKind kind;
+    str name;
+    str argument0;
+    str argument1;
+    bool is_mutable;
+}
+
+struct LaunchArgument {
+    ProjectionExpressionKind kind;
+    str name;
+    Span span;
+}
+
+struct ProjectionTypeParser {
+    Vec<SyntaxNode*>* leaves;
+    i64 cursor;
+    i64 end;
+}
+
+bool projection_is_unknown(TypeProjection* projection) {
+    return projection.kind == ProjectionTypeKind.Unknown;
+}
+
+TypeProjection projection_type_empty() {
+    TypeProjection result;
+    result.kind = ProjectionTypeKind.Unknown;
+    result.name = "";
+    result.argument0 = "";
+    result.argument1 = "";
+    result.is_mutable = false;
+    return result;
+}
+
+bool projection_token_text(SyntaxNode* node, str text) {
+    return node != (SyntaxNode*)0 && strcmp(node.text, text) == 0;
+}
+
+bool projection_is_qualifier(SyntaxNode* node) {
+    return node != (SyntaxNode*)0 && node.kind == NodeKind.Token
+        && (node.token_kind == TokenKind.Const
+            || node.token_kind == TokenKind.Static
+            || node.token_kind == TokenKind.Volatile
+            || node.token_kind == TokenKind.Mut);
+}
+
+void projection_skip_qualifiers(ProjectionTypeParser* parser) {
+    while (parser.cursor < parser.end && projection_is_qualifier(parser.leaves.get(parser.cursor))) {
+        parser.cursor += 1;
+    }
+}
+
+bool projection_is_type_name(SyntaxNode* node) {
+    return node != (SyntaxNode*)0 && node.kind == NodeKind.Token
+        && (is_primitive_type_token(node.token_kind) || node.token_kind == TokenKind.Identifier);
+}
+
+TypeProjection projection_parse_type_at(ProjectionTypeParser* parser) {
+    projection_skip_qualifiers(parser);
+    if (parser.cursor >= parser.end) {
+        return projection_type_empty();
+    }
+
+    SyntaxNode* node = parser.leaves.get(parser.cursor);
+    if (node.kind != NodeKind.Token) {
+        parser.cursor += 1;
+        return projection_type_empty();
+    }
+
+    if (node.token_kind == TokenKind.BitwiseAnd) {
+        parser.cursor += 1;
+        bool is_mutable = false;
+        if (parser.cursor < parser.end && parser.leaves.get(parser.cursor).token_kind == TokenKind.Mut) {
+            is_mutable = true;
+            parser.cursor += 1;
+        }
+        TypeProjection inner = projection_parse_type_at(parser);
+        TypeProjection result = projection_type_empty();
+        result.kind = ProjectionTypeKind.Reference;
+        result.name = inner.name;
+        result.argument0 = inner.argument0;
+        result.argument1 = inner.argument1;
+        result.is_mutable = is_mutable;
+        return result;
+    }
+
+    if (node.token_kind == TokenKind.Star) {
+        parser.cursor += 1;
+        TypeProjection inner = projection_parse_type_at(parser);
+        TypeProjection result = projection_type_empty();
+        result.kind = ProjectionTypeKind.Pointer;
+        result.name = inner.name;
+        result.argument0 = inner.argument0;
+        result.argument1 = inner.argument1;
+        result.is_mutable = true;
+        return result;
+    }
+
+    if (node.token_kind == TokenKind.LeftBracket) {
+        parser.cursor += 1;
+        TypeProjection element = projection_parse_type_at(parser);
+        if (parser.cursor < parser.end && parser.leaves.get(parser.cursor).token_kind == TokenKind.RightBracket) {
+            parser.cursor += 1;
+        }
+        TypeProjection result = projection_type_empty();
+        result.kind = ProjectionTypeKind.Array;
+        result.name = element.name;
+        result.argument0 = element.argument0;
+        result.argument1 = element.argument1;
+        return result;
+    }
+
+    if (!projection_is_type_name(node)) {
+        parser.cursor += 1;
+        return projection_type_empty();
+    }
+
+    str name = node.text;
+    parser.cursor += 1;
+    TypeProjection result = projection_type_empty();
+    result.name = name;
+    if (node.token_kind == TokenKind.VecType || node.token_kind == TokenKind.OptionalType
+        || node.token_kind == TokenKind.Identifier || node.token_kind == TokenKind.SelfType) {
+        result.kind = ProjectionTypeKind.Named;
+    } else {
+        result.kind = ProjectionTypeKind.Primitive;
+    }
+
+    if (parser.cursor < parser.end && projection_token_text(parser.leaves.get(parser.cursor), "<")) {
+        parser.cursor += 1;
+        if (parser.cursor < parser.end && !projection_token_text(parser.leaves.get(parser.cursor), ">")) {
+            TypeProjection argument0 = projection_parse_type_at(parser);
+            result.argument0 = argument0.name;
+            if (parser.cursor < parser.end
+                && parser.leaves.get(parser.cursor).token_kind == TokenKind.Comma) {
+                parser.cursor += 1;
+                if (parser.cursor < parser.end && !projection_token_text(parser.leaves.get(parser.cursor), ">")) {
+                    TypeProjection argument1 = projection_parse_type_at(parser);
+                    result.argument1 = argument1.name;
+                }
+            }
+        }
+        while (parser.cursor < parser.end && !projection_token_text(parser.leaves.get(parser.cursor), ">")) {
+            parser.cursor += 1;
+        }
+        if (parser.cursor < parser.end && projection_token_text(parser.leaves.get(parser.cursor), ">")) {
+            parser.cursor += 1;
+        }
+    }
+    return result;
+}
+
+TypeProjection projection_parse_type(Vec<SyntaxNode*>* leaves, i64 start, i64 end) {
+    if (start >= end) {
+        return projection_type_empty();
+    }
+    ProjectionTypeParser parser;
+    parser.leaves = leaves;
+    parser.cursor = start;
+    parser.end = end;
+    return projection_parse_type_at(&parser);
+}
+
+Span projection_range_span(Vec<SyntaxNode*>* leaves, i64 start, i64 end) {
+    if (start >= end || end > leaves.len()) {
+        return Span.synthetic();
+    }
+    return span_between(leaves.get(start).span, leaves.get(end - 1).span);
+}
+
+bool projection_is_literal(SyntaxNode* node) {
+    if (node == (SyntaxNode*)0 || node.kind != NodeKind.Token) {
+        return false;
+    }
+    return node.token_kind == TokenKind.IntLiteral
+        || node.token_kind == TokenKind.FloatLiteral
+        || node.token_kind == TokenKind.ComplexLiteral
+        || node.token_kind == TokenKind.StringLiteral
+        || node.token_kind == TokenKind.CharLiteral
+        || node.token_kind == TokenKind.BoolLiteral;
+}
+
+LaunchArgument projection_argument(Vec<SyntaxNode*>* leaves, i64 start, i64 end) {
+    LaunchArgument argument;
+    argument.kind = ProjectionExpressionKind.Unknown;
+    argument.name = "";
+    argument.span = projection_range_span(leaves, start, end);
+    if (start >= end) {
+        return argument;
+    }
+
+    SyntaxNode* first = leaves.get(start);
+    if (first.token_kind == TokenKind.Move) {
+        argument.kind = ProjectionExpressionKind.Move;
+        if (start + 1 < end && leaves.get(start + 1).token_kind == TokenKind.Identifier) {
+            argument.name = leaves.get(start + 1).text;
+        }
+        return argument;
+    }
+    if (first.token_kind == TokenKind.BitwiseAnd) {
+        argument.kind = ProjectionExpressionKind.Address;
+        i64 name_index = start + 1;
+        if (name_index < end && leaves.get(name_index).token_kind == TokenKind.Mut) {
+            name_index += 1;
+        }
+        if (name_index < end && leaves.get(name_index).token_kind == TokenKind.Identifier) {
+            argument.name = leaves.get(name_index).text;
+        }
+        return argument;
+    }
+    if (first.token_kind == TokenKind.Identifier) {
+        argument.kind = ProjectionExpressionKind.Identifier;
+        argument.name = first.text;
+        return argument;
+    }
+    if (projection_is_literal(first)) {
+        argument.kind = ProjectionExpressionKind.Literal;
+    }
+    return argument;
+}
+
+void projection_add_argument(Vec<SyntaxNode*>* leaves, i64 start, i64 end, Vec<LaunchArgument>* arguments) {
+    if (start >= end) {
+        return;
+    }
+    LaunchArgument argument = projection_argument(leaves, start, end);
+    arguments.push(move argument);
+}
+
+void projection_collect_argument_group(SyntaxNode* group, CfgSet* cfg, Vec<LaunchArgument>* arguments) {
+    SyntaxNode* child = group.first_child;
+    while (child != (SyntaxNode*)0) {
+        Vec<SyntaxNode*> segment = Vec<SyntaxNode*>.new();
+        while (child != (SyntaxNode*)0
+            && !(child.kind == NodeKind.Token && child.token_kind == TokenKind.Comma)) {
+            cfg_collect_live_leaves(child, cfg, &segment);
+            child = child.next_sibling;
+        }
+        projection_add_argument(&segment, 0, segment.len(), arguments);
+        segment.drop();
+        if (child != (SyntaxNode*)0) {
+            child = child.next_sibling;
+        }
+    }
+}
+
+SyntaxNode* projection_function_body(SyntaxNode* function) {
+    SyntaxNode* child = function.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Block) {
+            return child;
+        }
+        child = child.next_sibling;
+    }
+    return (SyntaxNode*)0;
+}
+
+bool projection_live_leaf(Vec<SyntaxNode*>* leaves, SyntaxNode* node) {
+    i64 i = 0;
+    while (i < leaves.len()) {
+        if (leaves.get(i) == node) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+void projection_walk_launches(SyntaxNode* node, CfgSet* cfg, Vec<SyntaxNode*>* live_leaves, Vec<LaunchArgument>* arguments) {
+    if (node == (SyntaxNode*)0) {
+        return;
+    }
+    if (node.kind == NodeKind.Token && node.token_kind == TokenKind.Launch
+        && projection_live_leaf(live_leaves, node)) {
+        SyntaxNode* callee = node.next_sibling;
+        SyntaxNode* group = (SyntaxNode*)0;
+        if (callee != (SyntaxNode*)0) {
+            group = callee.next_sibling;
+        }
+        if (callee != (SyntaxNode*)0 && callee.kind == NodeKind.Token
+            && callee.token_kind == TokenKind.Identifier
+            && group != (SyntaxNode*)0 && group.kind == NodeKind.Parenthesized) {
+            projection_collect_argument_group(group, cfg, arguments);
+        }
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        projection_walk_launches(child, cfg, live_leaves, arguments);
+        child = child.next_sibling;
+    }
+}
+
+void project_function_launch_arguments(SyntaxNode* function, CfgSet* cfg, Vec<LaunchArgument>* arguments) {
+    SyntaxNode* body = projection_function_body(function);
+    if (body == (SyntaxNode*)0) {
+        return;
+    }
+    Vec<SyntaxNode*> live_leaves = Vec<SyntaxNode*>.new();
+    cfg_collect_live_leaves(body, cfg, &live_leaves);
+    projection_walk_launches(body, cfg, &live_leaves, arguments);
+    live_leaves.drop();
+}

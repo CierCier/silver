@@ -1,0 +1,41 @@
+// Shared recursion budget for recursive compiler and runtime walkers.
+const i64 DEFAULT_MAX_RECURSION_DEPTH = 256;
+
+struct DepthBudget {
+    i64 limit;
+    i64 depth;
+}
+
+impl DepthBudget {
+    DepthBudget new(i64 limit) {
+        DepthBudget budget;
+        budget.limit = limit;
+        if (budget.limit <= 0) {
+            budget.limit = DEFAULT_MAX_RECURSION_DEPTH;
+        }
+        budget.depth = 0;
+        return budget;
+    }
+
+    bool enter(DepthBudget* self) {
+        if (self.depth >= self.limit) {
+            return false;
+        }
+        self.depth += 1;
+        return true;
+    }
+
+    void leave(DepthBudget* self) {
+        if (self.depth > 0) {
+            self.depth -= 1;
+        }
+    }
+
+    bool exceeded(&self) {
+        return self.depth >= self.limit;
+    }
+
+    i64 current(&self) {
+        return self.depth;
+    }
+}

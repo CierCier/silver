@@ -113,15 +113,25 @@ cargo test -p agc
 
 # Run integration test suite
 python3 tests/run_tests.py --no-tui
+
+# Build stage1 with stage0 and run frontend parity gates
+tests/selfhost/run_stage.sh --include-std
+
+# Exercise the full Linux command surface through stage1's compatibility seam
+bash tests/selfhost/run_native.sh --no-tui --jobs 4
 ```
 
 ## Repository layout
 
-- `bin/agc/`: Compiler driver and LLVM backend, using [Elise](https://github.com/CierCier/elise) for parsing
-- `bin/aglsp/`: Language Server Protocol implementation
-- `bin/agsm/`: Source maps and module artifact generator
+- `bootstrap/stage0/agc/`: Rust bootstrap compiler (stage0): driver, frontend, and LLVM backend, using [Elise](https://github.com/CierCier/elise) for parsing
+- `bootstrap/stage0/agsm/`: Source maps and module artifact generator
+- `bootstrap/stage0/ffi-rust/`: Optional Rust implementation behind Silver's versioned C ABI
+- `bootstrap/aglsp/`: Rust Language Server Protocol server
+- `bin/agc/`: Stage1 self-hosting compiler driver (Silver); see `docs/selfhost-plan.txt`
+- `bin/aglsp/`: Silver language-server binary package and future LSP port target
+- `libs/agc/`: Reusable stage1 compiler frontend library (Silver)
+- `silver.toml`: Silver workspace manifest for the self-host root
 - `std/`: Standard library (allocators, collections, I/O, networking, runtime)
-- `ffi/rust/`: Optional Rust implementation behind Silver's versioned C ABI
 - `examples/`: Sample programs
 - `tests/`: Unit, ownership, and integration test suites
 - `docs/`: Language specifications and standard protocol designs

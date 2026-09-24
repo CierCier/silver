@@ -1,0 +1,180 @@
+// libs/agc/src/frontend/messages.ag — Centralized diagnostic message catalog and typo suggestions.
+import std.mem.vec;
+import std.string;
+
+String did_you_mean(str suggestion) {
+    String s = String.from_str(", did you mean '");
+    s.push_str(suggestion);
+    s.push_str("'?");
+    return move s;
+}
+
+String unknown_type(str name) {
+    String s = String.from_str("unknown type '");
+    s.push_str(name);
+    s.push_str("'");
+    return move s;
+}
+
+String unknown_identifier(str name) {
+    String s = String.from_str("unknown identifier '");
+    s.push_str(name);
+    s.push_str("'");
+    return move s;
+}
+
+String unknown_function(str name) {
+    String s = String.from_str("unknown function '");
+    s.push_str(name);
+    s.push_str("'");
+    return move s;
+}
+
+String unknown_field(str field, str ty) {
+    String s = String.from_str("unknown field '");
+    s.push_str(field);
+    s.push_str("' on type ");
+    s.push_str(ty);
+    return move s;
+}
+
+String duplicate_symbol(str name) {
+    String s = String.from_str("duplicate symbol '");
+    s.push_str(name);
+    s.push_str("'");
+    return move s;
+}
+
+String type_mismatch(str expected, str found) {
+    String s = String.from_str("type mismatch: expected ");
+    s.push_str(expected);
+    s.push_str(", found ");
+    s.push_str(found);
+    return move s;
+}
+
+String return_type_mismatch(str expected, str found) {
+    String s = String.from_str("return type mismatch: expected ");
+    s.push_str(expected);
+    s.push_str(", found ");
+    s.push_str(found);
+    return move s;
+}
+
+str void_func_cannot_return_value() {
+    return "void function cannot return a value";
+}
+
+str return_not_allowed_in_defer() {
+    return "return statement is not allowed inside a defer block";
+}
+
+str break_not_allowed_in_defer() {
+    return "break statement is not allowed inside a defer block";
+}
+
+String use_of_moved_value(str name) {
+    String s = String.from_str("use of moved value '");
+    s.push_str(name);
+    s.push_str("'");
+    return move s;
+}
+
+String cannot_assign_to_moved_value(str name) {
+    String s = String.from_str("cannot assign to moved value '");
+    s.push_str(name);
+    s.push_str("'");
+    return move s;
+}
+
+str note_value_explicitly_moved() {
+    return "value explicitly moved here";
+}
+
+String cannot_borrow_as_mutable_while_shared(str name) {
+    String s = String.from_str("cannot borrow '");
+    s.push_str(name);
+    s.push_str("' as mutable because it is already borrowed as shared");
+    return move s;
+}
+
+String cannot_borrow_as_mutable_more_than_once(str name) {
+    String s = String.from_str("cannot borrow '");
+    s.push_str(name);
+    s.push_str("' as mutable more than once at a time");
+    return move s;
+}
+
+String cannot_borrow_as_shared_while_mutable(str name) {
+    String s = String.from_str("cannot borrow '");
+    s.push_str(name);
+    s.push_str("' as shared because it is already borrowed as mutable");
+    return move s;
+}
+
+String cannot_assign_borrowed(str name) {
+    String s = String.from_str("cannot assign to '");
+    s.push_str(name);
+    s.push_str("' because it is borrowed");
+    return move s;
+}
+
+str ref_does_not_outlive_func() {
+    return "returned reference does not outlive the function (it borrows a local value; return a reference to a global or a reference parameter instead)";
+}
+
+i64 min3(i64 a, i64 b, i64 c) {
+    i64 m = a;
+    if (b < m) { m = b; }
+    if (c < m) { m = c; }
+    return m;
+}
+
+i64 levenshtein(str s1, str s2) {
+    i64 l1 = strlen(s1);
+    i64 l2 = strlen(s2);
+    if (l1 == 0) { return l2; }
+    if (l2 == 0) { return l1; }
+    if (l1 > 48 || l2 > 48) { return 999; }
+
+    i64 d[2500];
+    for (i64 i = 0; i <= l1; i = i + 1) {
+        d[i * 50] = i;
+    }
+    for (i64 j = 0; j <= l2; j = j + 1) {
+        d[j] = j;
+    }
+    for (i64 i = 1; i <= l1; i = i + 1) {
+        for (i64 j = 1; j <= l2; j = j + 1) {
+            i64 cost = 0;
+            if (s1[i - 1] != s2[j - 1]) {
+                cost = 1;
+            }
+            d[i * 50 + j] = min3(
+                d[(i - 1) * 50 + j] + 1,
+                d[i * 50 + (j - 1)] + 1,
+                d[(i - 1) * 50 + (j - 1)] + cost
+            );
+        }
+    }
+    return d[l1 * 50 + l2];
+}
+
+str fuzzy_suggest(str target, Vec<str>* candidates, i64 max_dist) {
+    i64 best_dist = max_dist + 1;
+    str best_cand = "";
+    i64 i = 0;
+    while (i < candidates.len()) {
+        str cand = candidates.get(i);
+        i64 dist = levenshtein(target, cand);
+        if (dist < best_dist) {
+            best_dist = dist;
+            best_cand = cand;
+        }
+        i += 1;
+    }
+    if (best_dist <= max_dist) {
+        return best_cand;
+    }
+    return "";
+}

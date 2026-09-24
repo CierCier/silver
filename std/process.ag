@@ -6,7 +6,7 @@ import std.mem.alloc;
 import std.mem.vec;
 import std.result;
 import std.string;
-import std.sys.entry;
+import std.sys.entry_api;
 import std.sys.os;
 import std.sys.raw.process;
 

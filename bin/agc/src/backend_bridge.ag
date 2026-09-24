@@ -1,0 +1,66 @@
+// Transitional bridge to the stage0 native backend.
+// The stage1 frontend keeps ownership of lex/parse/ast/check while the
+// native command surface is still owned by stage0.
+import std.env;
+import std.fs;
+import std.io;
+import std.mem.vec;
+import std.process;
+import std.string;
+import std.sys.os;
+
+bool stage0_available(str path) {
+    // access(2) mode 1 is X_OK; is_file keeps directories out of the candidate.
+    return is_file(path) && sys_access((i64)path, 1) == 0;
+}
+
+Optional<String> resolve_stage0() {
+    Optional<String> configured = var("SILVER_STAGE0");
+    if (configured.is_some()) {
+        // An explicit override is authoritative; do not silently use another backend.
+        String path = configured.unwrap();
+        if (stage0_available(path.to_str())) {
+            return Optional<String>.some(move path);
+        }
+        path.drop();
+        return Optional<String>.none();
+    }
+
+    String fallback = String.from_str("target/debug/agc");
+    if (stage0_available(fallback.to_str())) {
+        return Optional<String>.some(move fallback);
+    }
+    fallback.drop();
+    return Optional<String>.none();
+}
+
+i32 run_stage0_backend(Vec<String>* arguments) {
+    Optional<String> resolved = resolve_stage0();
+    if (resolved.is_none()) {
+        STDERR.write_str("agc: error: stage0 backend unavailable; set SILVER_STAGE0 to an executable or build target/debug/agc\n");
+        return 2;
+    }
+
+    String program = resolved.unwrap();
+    Command command = Command.new(program.to_str());
+    i64 index = 1;
+    while (index < arguments.len) {
+        command.arg(arguments.get_ptr(index).to_str());
+        index += 1;
+    }
+
+    Result<ExitStatus, i64> result = command.status();
+    if (result.is_err()) {
+        STDERR.write_str("agc: error: failed to start stage0 backend '");
+        STDERR.write_str(program.to_str());
+        STDERR.write_str("'\n");
+        return 2;
+    }
+
+    ExitStatus status = result.unwrap();
+    if (!status.exited) {
+        // Preserve the shell's conventional signal status for native commands.
+        return 128 + status.signal;
+    }
+    return status.exit_code();
+}
