@@ -32,6 +32,7 @@ struct ManifestTarget {
     str manifest;
     bool has_entry;
     bool has_manifest;
+    bool is_default;
 }
 
 struct PackageManifest {
@@ -43,6 +44,7 @@ struct PackageManifest {
     str name;
     str version;
     str url;
+    str default_target;
     Vec<ManifestTarget> targets;
     Vec<ManifestDependency> dependencies;
 }
@@ -88,6 +90,7 @@ void workspace_manifest_init(PackageManifest* manifest, str manifest_path, str r
     manifest.name = "";
     manifest.version = "";
     manifest.url = "";
+    manifest.default_target = "";
     manifest.targets = Vec<ManifestTarget>.new();
     manifest.dependencies = Vec<ManifestDependency>.new();
 }
@@ -219,6 +222,7 @@ ManifestTarget* workspace_ensure_target(PackageManifest* manifest, TargetKind ki
     target.manifest = "";
     target.has_entry = false;
     target.has_manifest = false;
+    target.is_default = false;
     manifest.targets.push(target);
     return manifest.targets.get_ptr(manifest.targets.len - 1);
 }
@@ -412,6 +416,18 @@ bool workspace_parse_manifest_text(str manifest_path, str source, PackageManifes
                             return false;
                         }
                         manifest.url = workspace_intern_bytes(manifest, bytes, value_start, value_end);
+                    } else if (workspace_slice_equals(bytes, key_start, key_end, "default_target")
+                        || workspace_slice_equals(bytes, key_start, key_end, "default-target")
+                        || workspace_slice_equals(bytes, key_start, key_end, "default")) {
+                        if (strlen(manifest.default_target) > 0) {
+                            workspace_error(error, "duplicate package manifest field `default_target`");
+                            return false;
+                        }
+                        if (!workspace_quoted_slice(bytes, value_start, value_end)) {
+                            workspace_error(error, "package manifest `default_target` must be a string");
+                            return false;
+                        }
+                        manifest.default_target = workspace_intern_bytes(manifest, bytes, value_start, value_end);
                     } else {
                         workspace_error(error, "unsupported package manifest key");
                         return false;
@@ -440,6 +456,15 @@ bool workspace_parse_manifest_text(str manifest_path, str source, PackageManifes
                         }
                         target.manifest = workspace_intern_bytes(manifest, bytes, value_start, value_end);
                         target.has_manifest = true;
+                    } else if (workspace_slice_equals(bytes, key_start, key_end, "default")) {
+                        if (workspace_slice_equals(bytes, value_start, value_end, "true")) {
+                            target.is_default = true;
+                        } else if (workspace_slice_equals(bytes, value_start, value_end, "false")) {
+                            target.is_default = false;
+                        } else {
+                            workspace_error(error, "package target `default` must be a boolean");
+                            return false;
+                        }
                     } else {
                         workspace_error(error, "unsupported package target key");
                         return false;
@@ -521,19 +546,107 @@ void workspace_add_root(WorkspacePlan* plan, str root) {
     plan.package_roots.push(move owned);
 }
 
-bool workspace_select_target(PackageManifest* manifest, TargetKind kind, str requested, ManifestTarget** selected, String* error) {
+bool workspace_select_target(PackageManifest* manifest, TargetKind kind, bool has_explicit_kind, str requested, ManifestTarget** selected, String* error) {
+    if (strlen(requested) > 0) {
+        i64 i = 0;
+        while (i < manifest.targets.len()) {
+            ManifestTarget* target = manifest.targets.get_ptr(i);
+            if ((!has_explicit_kind || target.kind == kind) && strcmp(target.name, requested) == 0) {
+                *selected = target;
+                return true;
+            }
+            i += 1;
+        }
+        workspace_error_value(error, "package has no `", requested, "` target of the requested kind");
+        return false;
+    }
+
+    if (!has_explicit_kind) {
+        if (strlen(manifest.default_target) > 0) {
+            i64 i = 0;
+            while (i < manifest.targets.len()) {
+                ManifestTarget* target = manifest.targets.get_ptr(i);
+                if (strcmp(target.name, manifest.default_target) == 0) {
+                    *selected = target;
+                    return true;
+                }
+                i += 1;
+            }
+        }
+        i64 i = 0;
+        while (i < manifest.targets.len()) {
+            ManifestTarget* target = manifest.targets.get_ptr(i);
+            if (target.is_default) {
+                *selected = target;
+                return true;
+            }
+            i += 1;
+        }
+        if (strlen(manifest.name) > 0) {
+            i64 i = 0;
+            while (i < manifest.targets.len()) {
+                ManifestTarget* target = manifest.targets.get_ptr(i);
+                if (strcmp(target.name, manifest.name) == 0) {
+                    *selected = target;
+                    return true;
+                }
+                i += 1;
+            }
+        }
+        i64 bin_count = 0;
+        ManifestTarget* bin_first = (ManifestTarget*)0;
+        i64 j = 0;
+        while (j < manifest.targets.len()) {
+            ManifestTarget* target = manifest.targets.get_ptr(j);
+            if (target.kind == TargetKind.Bin) {
+                if (bin_first == (ManifestTarget*)0) { bin_first = target; }
+                bin_count += 1;
+            }
+            j += 1;
+        }
+        if (bin_count == 1 && bin_first != (ManifestTarget*)0) {
+            *selected = bin_first;
+            return true;
+        }
+        if (bin_count > 1) {
+            workspace_error(error, "package target is ambiguous; select one with `--bin` or `--lib`");
+            return false;
+        }
+        i64 lib_count = 0;
+        ManifestTarget* lib_first = (ManifestTarget*)0;
+        j = 0;
+        while (j < manifest.targets.len()) {
+            ManifestTarget* target = manifest.targets.get_ptr(j);
+            if (target.kind == TargetKind.Lib) {
+                if (lib_first == (ManifestTarget*)0) { lib_first = target; }
+                lib_count += 1;
+            }
+            j += 1;
+        }
+        if (lib_count == 1 && lib_first != (ManifestTarget*)0) {
+            *selected = lib_first;
+            return true;
+        }
+        workspace_error(error, "package target is ambiguous; select one with `--bin` or `--lib`");
+        return false;
+    }
+
     i64 count = 0;
-    ManifestTarget* package_match = (ManifestTarget*)0;
     ManifestTarget* first = (ManifestTarget*)0;
+    ManifestTarget* package_match = (ManifestTarget*)0;
+    ManifestTarget* default_target_match = (ManifestTarget*)0;
+    ManifestTarget* is_default_match = (ManifestTarget*)0;
     i64 i = 0;
     while (i < manifest.targets.len()) {
         ManifestTarget* target = manifest.targets.get_ptr(i);
         if (target.kind == kind) {
             if (first == (ManifestTarget*)0) { first = target; }
             count += 1;
-            if (strcmp(target.name, requested) == 0) {
-                *selected = target;
-                return true;
+            if (strlen(manifest.default_target) > 0 && strcmp(target.name, manifest.default_target) == 0) {
+                default_target_match = target;
+            }
+            if (target.is_default) {
+                is_default_match = target;
             }
             if (strlen(manifest.name) > 0 && strcmp(target.name, manifest.name) == 0) {
                 package_match = target;
@@ -541,9 +654,13 @@ bool workspace_select_target(PackageManifest* manifest, TargetKind kind, str req
         }
         i += 1;
     }
-    if (strlen(requested) > 0) {
-        workspace_error_value(error, "package has no `", requested, "` target of the requested kind");
-        return false;
+    if (default_target_match != (ManifestTarget*)0) {
+        *selected = default_target_match;
+        return true;
+    }
+    if (is_default_match != (ManifestTarget*)0) {
+        *selected = is_default_match;
+        return true;
     }
     if (package_match != (ManifestTarget*)0) {
         *selected = package_match;
@@ -609,7 +726,7 @@ bool workspace_manifest_target_path(ManifestTarget* target, str root, String* pa
     return true;
 }
 
-bool workspace_visit_manifest(WorkspaceResolver* resolver, str manifest_path, TargetKind kind, str requested, i64 depth, String* error) {
+bool workspace_visit_manifest(WorkspaceResolver* resolver, str manifest_path, TargetKind kind, bool has_explicit_kind, str requested, i64 depth, String* error) {
     if (depth > 64) {
         workspace_error(error, "package manifest reference cycle is too deep");
         return false;
@@ -635,7 +752,7 @@ bool workspace_visit_manifest(WorkspaceResolver* resolver, str manifest_path, Ta
     workspace_set_string(&resolver.plan.root, root.to_str());
 
     ManifestTarget* target = (ManifestTarget*)0;
-    if (!workspace_select_target(&manifest, kind, requested, &target, error)) {
+    if (!workspace_select_target(&manifest, kind, has_explicit_kind, requested, &target, error)) {
 
         return false;
     }
@@ -667,7 +784,7 @@ bool workspace_visit_manifest(WorkspaceResolver* resolver, str manifest_path, Ta
         }
         String child_name = String.from_str(target.name);
 
-        bool ok = workspace_visit_manifest(resolver, child.to_str(), kind, child_name.to_str(), depth + 1, error);
+        bool ok = workspace_visit_manifest(resolver, child.to_str(), kind, has_explicit_kind, child_name.to_str(), depth + 1, error);
         child_name.drop();
         child.drop();
         return ok;
@@ -714,9 +831,9 @@ bool workspace_visit_manifest(WorkspaceResolver* resolver, str manifest_path, Ta
     return true;
 }
 
-bool workspace_plan_for_manifest(str manifest_path, TargetKind kind, str requested, WorkspacePlan* plan, String* error) {
+bool workspace_plan_for_manifest(str manifest_path, TargetKind kind, bool has_explicit_kind, str requested, WorkspacePlan* plan, String* error) {
     WorkspaceResolver resolver = workspace_resolver_new(plan);
-    bool ok = workspace_visit_manifest(&resolver, manifest_path, kind, requested, 0, error);
+    bool ok = workspace_visit_manifest(&resolver, manifest_path, kind, has_explicit_kind, requested, 0, error);
     resolver.visited.drop();
     return ok;
 }
@@ -736,14 +853,14 @@ void workspace_plan_drop(WorkspacePlan* plan) {
     plan.target_name.drop();
 }
 
-bool workspace_plan_from_manifest(str manifest_path, TargetKind kind, str requested, WorkspacePlan* plan, String* error) {
+bool workspace_plan_from_manifest(str manifest_path, TargetKind kind, bool has_explicit_kind, str requested, WorkspacePlan* plan, String* error) {
     String absolute = String.new();
     workspace_make_absolute(&absolute, manifest_path);
     String normalized = path_normalize(absolute.to_str());
     workspace_set_string(&plan.manifest_path, normalized.to_str());
     String root = path_dirname(normalized.to_str());
     workspace_set_string(&plan.root, root.to_str());
-    bool ok = workspace_plan_for_manifest(normalized.to_str(), kind, requested, plan, error);
+    bool ok = workspace_plan_for_manifest(normalized.to_str(), kind, has_explicit_kind, requested, plan, error);
     normalized.drop();
     root.drop();
     absolute.drop();
@@ -769,7 +886,14 @@ bool workspace_manifest_file(str path) {
     String value = String.from_str(path);
     bool result = !value.ends_with(".ag") && !value.ends_with(".agm");
     value.drop();
-    return result;
+    if (!result) { return false; }
+    File f = File.open_read(path);
+    if (!f.valid()) { return false; }
+    u8 magic = (u8)0;
+    i64 n = f.read((void*)&magic, 1, 1);
+    f.close();
+    if (n > 0 && magic == (u8)127) { return false; }
+    return true;
 }
 
 bool workspace_manifest_input(str input, String* manifest) {
@@ -804,6 +928,18 @@ bool workspace_is_terminal_option(str value) {
         || workspace_str_starts_with(value, "--cache-prune=");
 }
 
+bool workspace_has_later_input(Vec<String>* arguments, i64 after_index) {
+    i64 i = after_index + 1;
+    while (i < arguments.len()) {
+        String* arg = arguments.get_ptr(i);
+        if (!arg.starts_with("-") && !workspace_is_command(arg.to_str())) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
 bool workspace_selector_consumes_value(Vec<String>* arguments, i64 index) {
     String* selector = arguments.get_ptr(index);
     if (strcmp(selector.to_str(), "--bin") != 0
@@ -813,6 +949,7 @@ bool workspace_selector_consumes_value(Vec<String>* arguments, i64 index) {
     if (index + 1 >= arguments.len()) { return false; }
     String* next = arguments.get_ptr(index + 1);
     if (next.starts_with("-") || workspace_is_command(next.to_str())) { return false; }
+    if (workspace_has_later_input(arguments, index + 1)) { return true; }
     String candidate = String.new();
     bool manifest = workspace_manifest_input(next.to_str(), &candidate);
     candidate.drop();
@@ -919,11 +1056,12 @@ bool workspace_find_package_input(Vec<String>* arguments, i64 command_index, Str
     return false;
 }
 
-bool workspace_package_kind(Vec<String>* arguments, TargetKind* kind, String* requested) {
+bool workspace_package_kind(Vec<String>* arguments, TargetKind* kind, String* requested, bool* has_explicit_kind) {
     requested.clear();
     bool is_lib = workspace_has_option(arguments, "--lib");
     bool is_bin = workspace_has_option(arguments, "--bin");
     if (is_lib && is_bin) { return false; }
+    *has_explicit_kind = is_lib || is_bin;
     *kind = is_lib ? TargetKind.Lib : TargetKind.Bin;
     if (is_lib || is_bin) {
         String value = String.new();
@@ -999,13 +1137,14 @@ bool workspace_package_arguments(Vec<String>* arguments, WorkspacePlan* plan, bo
     }
     TargetKind kind = TargetKind.Bin;
     String requested = String.new();
-    if (!workspace_package_kind(arguments, &kind, &requested)) {
+    bool has_explicit_kind = false;
+    if (!workspace_package_kind(arguments, &kind, &requested, &has_explicit_kind)) {
         workspace_error(error, "only one of `--bin` or `--lib` may be specified");
         input.drop();
         requested.drop();
         return false;
     }
-    if (!workspace_plan_from_manifest(input.to_str(), kind, requested.to_str(), plan, error)) {
+    if (!workspace_plan_from_manifest(input.to_str(), kind, has_explicit_kind, requested.to_str(), plan, error)) {
         input.drop();
         requested.drop();
         return false;

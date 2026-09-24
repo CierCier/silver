@@ -467,7 +467,7 @@ i32 run_workspace_native(Vec<String>* arguments, WorkspacePlan* plan) {
     }
 
     i32 native_result = 0;
-    if (native_backend_try(arguments, plan.entry.to_str(), &native_result)) {
+    if (native_backend_try(arguments, plan.entry.to_str(), plan.target_name.to_str(), &native_result)) {
         return native_result;
     }
 
@@ -512,7 +512,7 @@ i32 run_frontend() {
         String native_source = String.new();
         i32 native_result = 0;
         if (native_source_path(&arguments, &native_source)
-            && native_backend_try(&arguments, native_source.to_str(), &native_result)) {
+            && native_backend_try(&arguments, native_source.to_str(), "", &native_result)) {
             native_source.drop();
             return native_result;
         }

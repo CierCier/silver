@@ -542,7 +542,13 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
     let mut package_target_kind = None;
     let mut package_target_name = None;
     let mut include_dirs = cli.include_dirs;
-    let selector_package_manifest = if inputs.is_empty() {
+    let selector_package_manifest = if inputs.is_empty()
+        && !current_dir.join(package::MANIFEST_FILE).is_file()
+        && !explicit_root
+            .as_deref()
+            .map(|r| r.join(package::MANIFEST_FILE).is_file())
+            .unwrap_or(false)
+    {
         cli.bin
             .as_deref()
             .or(cli.lib.as_deref())
@@ -606,7 +612,7 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
         (None, Some(name)) => package::TargetSelection::lib(
             (!name.is_empty() && selector_package_manifest.is_none()).then(|| name.clone()),
         ),
-        (None, None) => package::TargetSelection::bin(None),
+        (None, None) => package::TargetSelection::default_target(),
         (Some(_), Some(_)) => {
             return Err("only one of --bin or --lib may be specified".to_string());
         }
@@ -695,6 +701,20 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
             "{}.agm",
             package_target_name.as_deref().unwrap_or("lib")
         ))
+    } else if auto_output
+        && emit == EmitKind::Exe
+        && (package_target_kind == Some(package::TargetKind::Bin) || package_target_name.is_some())
+    {
+        let base_name = package_target_name.as_deref().unwrap_or("a");
+        let windows = crate::codegen::abi::target_is_windows(cli.target.as_deref());
+        let wasm = crate::codegen::abi::target_is_wasm(cli.target.as_deref());
+        if wasm {
+            PathBuf::from(format!("{base_name}.wasm"))
+        } else if windows {
+            PathBuf::from(format!("{base_name}.exe"))
+        } else {
+            PathBuf::from(base_name)
+        }
     } else {
         cli.output
             .unwrap_or_else(|| default_output_for(emit, &inputs, cli.target.as_deref()))

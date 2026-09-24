@@ -1,0 +1,119 @@
+// bin/aglsp/src/completion.ag — Code completion provider for aglsp.
+import std.mem.alloc;
+import std.string;
+import agc;
+import json_rpc;
+
+void append_completion_item(String* out, str label, i64 kind, str detail, bool* is_first) {
+    if (!*is_first) {
+        out.push(',');
+    }
+    *is_first = false;
+
+    out.push_str("{\"label\":\"");
+    json_escape(label, out);
+    out.push_str("\",\"kind\":");
+    u8 num_buf[32];
+    i64 n = itoa(kind, (u8*)&num_buf[0]);
+    for (i64 k = 0; k < n; k += 1) { out.push((char)num_buf[k]); }
+
+    if (strlen(detail) > 0) {
+        out.push_str(",\"detail\":\"");
+        json_escape(detail, out);
+        out.push('"');
+    }
+    out.push('}');
+}
+
+String compute_completion(str text, i64 _line, i64 _character) {
+    String out = String.from_str("{\"isIncomplete\":false,\"items\":[");
+    bool first = true;
+
+    // 1. Silver keywords
+    append_completion_item(&out, "fn", 14, "keyword", &first);
+    append_completion_item(&out, "let", 14, "keyword", &first);
+    append_completion_item(&out, "mut", 14, "keyword", &first);
+    append_completion_item(&out, "struct", 14, "keyword", &first);
+    append_completion_item(&out, "enum", 14, "keyword", &first);
+    append_completion_item(&out, "impl", 14, "keyword", &first);
+    append_completion_item(&out, "trait", 14, "keyword", &first);
+    append_completion_item(&out, "type", 14, "keyword", &first);
+    append_completion_item(&out, "pub", 14, "keyword", &first);
+    append_completion_item(&out, "const", 14, "keyword", &first);
+    append_completion_item(&out, "static", 14, "keyword", &first);
+    append_completion_item(&out, "if", 14, "keyword", &first);
+    append_completion_item(&out, "else", 14, "keyword", &first);
+    append_completion_item(&out, "while", 14, "keyword", &first);
+    append_completion_item(&out, "for", 14, "keyword", &first);
+    append_completion_item(&out, "match", 14, "keyword", &first);
+    append_completion_item(&out, "break", 14, "keyword", &first);
+    append_completion_item(&out, "continue", 14, "keyword", &first);
+    append_completion_item(&out, "return", 14, "keyword", &first);
+    append_completion_item(&out, "move", 14, "keyword", &first);
+    append_completion_item(&out, "defer", 14, "keyword", &first);
+    append_completion_item(&out, "import", 14, "keyword", &first);
+    append_completion_item(&out, "comptime", 14, "keyword", &first);
+    append_completion_item(&out, "true", 14, "keyword", &first);
+    append_completion_item(&out, "false", 14, "keyword", &first);
+
+    // 2. Builtin primitive types
+    append_completion_item(&out, "i8", 7, "primitive type", &first);
+    append_completion_item(&out, "i16", 7, "primitive type", &first);
+    append_completion_item(&out, "i32", 7, "primitive type", &first);
+    append_completion_item(&out, "i64", 7, "primitive type", &first);
+    append_completion_item(&out, "u8", 7, "primitive type", &first);
+    append_completion_item(&out, "u16", 7, "primitive type", &first);
+    append_completion_item(&out, "u32", 7, "primitive type", &first);
+    append_completion_item(&out, "u64", 7, "primitive type", &first);
+    append_completion_item(&out, "f32", 7, "primitive type", &first);
+    append_completion_item(&out, "f64", 7, "primitive type", &first);
+    append_completion_item(&out, "bool", 7, "primitive type", &first);
+    append_completion_item(&out, "char", 7, "primitive type", &first);
+    append_completion_item(&out, "str", 7, "primitive type", &first);
+    append_completion_item(&out, "void", 7, "primitive type", &first);
+    append_completion_item(&out, "String", 7, "std.string", &first);
+    append_completion_item(&out, "Vec", 7, "std.mem.vec", &first);
+    append_completion_item(&out, "Result", 7, "std.result", &first);
+    append_completion_item(&out, "Optional", 7, "std.optional", &first);
+
+    // 3. Document symbols
+    TokenStream stream = TokenStream.new();
+    DiagnosticBag diagnostics = DiagnosticBag.new();
+    String source = String.from_str(text);
+    lex(move source, &stream, &diagnostics);
+
+    NodePool pool = NodePool.new();
+    SyntaxTree tree;
+    parse(&stream, &diagnostics, &pool, &tree);
+
+    CfgSet cfg = linux_defaults();
+    SymbolTable symbols = SymbolTable.new();
+    collect_symbols(&symbols, &diagnostics, &tree, &cfg);
+
+    i64 idx = 0;
+    while (idx < symbols.len()) {
+        Symbol* sym = symbols.get(idx);
+        str sym_name = symbols.names.get(sym.name_id);
+        i64 sym_kind = 6; // Variable
+        str detail = "";
+        if (sym.kind == SymbolKind.Function) {
+            sym_kind = 3; // Function
+            detail = "fn";
+        } else if (sym.kind == SymbolKind.Struct) {
+            sym_kind = 7; // Struct
+            detail = "struct";
+        } else if (sym.kind == SymbolKind.Enum) {
+            sym_kind = 13; // Enum
+            detail = "enum";
+        } else if (sym.kind == SymbolKind.Trait) {
+            sym_kind = 8; // Interface
+            detail = "trait";
+        }
+        append_completion_item(&out, sym_name, sym_kind, detail, &first);
+        idx += 1;
+    }
+
+    pool.destroy();
+    out.push_str("]}");
+    return move out;
+}

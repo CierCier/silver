@@ -17,6 +17,8 @@
 
 name = "silver"
 version = "0.2.6"
+default_target = "agc"
+
 
 # Stage1 frontend binary. Its target manifest lives in bin/agc; stage0
 # builds this entry point with the commands in tests/selfhost/run_stage.sh.

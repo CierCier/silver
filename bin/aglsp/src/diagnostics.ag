@@ -1,0 +1,87 @@
+// bin/aglsp/src/diagnostics.ag — Semantic diagnostics publisher for open LSP buffers.
+import std.mem.vec;
+import std.string;
+import agc;
+import json_rpc;
+
+void publish_file_diagnostics(str uri, str text) {
+    TokenStream stream = TokenStream.new();
+    DiagnosticBag diagnostics = DiagnosticBag.new();
+    String source = String.from_str(text);
+    lex(move source, &stream, &diagnostics);
+
+    if (diagnostics.is_empty()) {
+        NodePool pool = NodePool.new();
+        SyntaxTree tree;
+        parse(&stream, &diagnostics, &pool, &tree);
+        if (diagnostics.is_empty()) {
+            CfgSet cfg = linux_defaults();
+            check_hir(&tree, &cfg, &diagnostics);
+            if (diagnostics.is_empty()) {
+                SymbolTable symbols = SymbolTable.new();
+                collect_symbols(&symbols, &diagnostics, &tree, &cfg);
+                check_declared_types(&symbols, &tree, &cfg, &diagnostics);
+                check_borrows(&tree, &diagnostics, &cfg);
+                check_ownership(&tree, &diagnostics, &cfg);
+            }
+        }
+        pool.destroy();
+    }
+
+    String params = String.from_str("{\"uri\":\"");
+    json_escape(uri, &params);
+    params.push_str("\",\"diagnostics\":[");
+
+    i64 i = 0;
+    while (i < diagnostics.len()) {
+        Diagnostic* d = diagnostics.get(i);
+        if (i > 0) {
+            params.push(',');
+        }
+        params.push_str("{\"range\":{\"start\":{\"line\":");
+        i64 start_line = d.span.start_line;
+        if (start_line > 0) { start_line -= 1; }
+        i64 start_col = d.span.start_col;
+        if (start_col > 0) { start_col -= 1; }
+        i64 end_line = d.span.end_line;
+        if (end_line > 0) { end_line -= 1; }
+        i64 end_col = d.span.end_col;
+        if (end_col > 0) { end_col -= 1; }
+
+        u8 num_buf[32];
+        i64 n = itoa(start_line, (u8*)&num_buf[0]);
+        for (i64 k = 0; k < n; k += 1) { params.push((char)num_buf[k]); }
+
+        params.push_str(",\"character\":");
+        n = itoa(start_col, (u8*)&num_buf[0]);
+        for (i64 k = 0; k < n; k += 1) { params.push((char)num_buf[k]); }
+
+        params.push_str("},\"end\":{\"line\":");
+        n = itoa(end_line, (u8*)&num_buf[0]);
+        for (i64 k = 0; k < n; k += 1) { params.push((char)num_buf[k]); }
+
+        params.push_str(",\"character\":");
+        n = itoa(end_col, (u8*)&num_buf[0]);
+        for (i64 k = 0; k < n; k += 1) { params.push((char)num_buf[k]); }
+
+        params.push_str("}},\"severity\":");
+        i64 sev = 1;
+        if (d.severity == Severity.Warning) {
+            sev = 2;
+        } else if (d.severity == Severity.Note) {
+            sev = 3;
+        }
+        n = itoa(sev, (u8*)&num_buf[0]);
+        for (i64 k = 0; k < n; k += 1) { params.push((char)num_buf[k]); }
+
+        params.push_str(",\"message\":\"");
+        json_escape(d.message.to_str(), &params);
+        params.push_str("\"}");
+
+        i += 1;
+    }
+
+    params.push_str("]}");
+    send_notification("textDocument/publishDiagnostics", params.to_str());
+    params.drop();
+}

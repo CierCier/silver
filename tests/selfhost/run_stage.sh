@@ -14,7 +14,12 @@ fi
 stage0="$root/target/debug/agc"
 
 stage1="$work/agc-stage1"
-"$stage0" --no-cache build "$root/silver.toml" -o "$stage1"
+"$stage0" --no-cache build "$root/silver.toml" --bin agc -o "$stage1"
+
+aglsp="$work/aglsp-stage1"
+"$stage0" --no-cache build "$root/silver.toml" --bin aglsp -o "$aglsp"
+python3 "$root/tests/selfhost/test_aglsp.py" "$aglsp"
+
 python3 "$root/tests/selfhost/check_workspace.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_hir.py" --stage0 "$stage0" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_declared_types.py" --stage0 "$stage0" --stage1 "$stage1"

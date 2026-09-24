@@ -215,32 +215,40 @@ impl TargetKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetSelection {
-    pub kind: TargetKind,
+    pub kind: Option<TargetKind>,
     pub name: Option<String>,
 }
 
 impl TargetSelection {
     pub fn bin(name: Option<String>) -> Self {
         Self {
-            kind: TargetKind::Bin,
+            kind: Some(TargetKind::Bin),
             name,
         }
     }
 
     pub fn lib(name: Option<String>) -> Self {
         Self {
-            kind: TargetKind::Lib,
+            kind: Some(TargetKind::Lib),
             name,
         }
     }
 
     pub fn test(name: Option<String>) -> Self {
         Self {
-            kind: TargetKind::Test,
+            kind: Some(TargetKind::Test),
             name,
         }
     }
+
+    pub fn default_target() -> Self {
+        Self {
+            kind: None,
+            name: None,
+        }
+    }
 }
+
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GitSelector {
@@ -285,6 +293,7 @@ pub struct ManifestTarget {
     pub name: String,
     pub kind: TargetKind,
     pub source: TargetSourceSpec,
+    pub is_default: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -299,6 +308,7 @@ pub struct PackageManifest {
     pub name: String,
     pub version: String,
     pub url: Option<String>,
+    pub default_target: Option<String>,
     pub targets: Vec<ManifestTarget>,
     pub dependencies: BTreeMap<String, DependencySpec>,
 }
@@ -331,6 +341,7 @@ pub struct PackageTarget {
     pub name: String,
     pub kind: TargetKind,
     pub source: ResolvedTargetSource,
+    pub is_default: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -345,6 +356,7 @@ pub struct Package {
     pub name: String,
     pub version: String,
     pub url: Option<String>,
+    pub default_target: Option<String>,
     pub manifest_path: PathBuf,
     pub source: PackageSource,
     pub targets: Vec<PackageTarget>,
@@ -484,7 +496,40 @@ impl PackageGraph {
         let root = self
             .package(self.root)
             .ok_or_else(|| "package graph root is missing".to_string())?;
-        let target = find_target(root, selection.kind, selection.name.as_deref(), None)?;
+        let target = if let Some(ref name) = selection.name {
+            if let Some(kind) = selection.kind {
+                find_target(root, kind, Some(name.as_str()), None)?
+            } else {
+                root.targets
+                    .iter()
+                    .find(|t| &t.name == name)
+                    .ok_or_else(|| format!("package `{}` has no target `{name}`", root.name))?
+            }
+        } else if let Some(kind) = selection.kind {
+            if let Some(ref def_name) = root.default_target
+                && let Some(t) = root.targets.iter().find(|t| &t.name == def_name && t.kind == kind)
+            {
+                t
+            } else if let Some(t) = root.targets.iter().find(|t| t.is_default && t.kind == kind) {
+                t
+            } else {
+                find_target(root, kind, None, None)?
+            }
+        } else {
+            if let Some(ref def_name) = root.default_target
+                && let Some(t) = root.targets.iter().find(|t| &t.name == def_name)
+            {
+                t
+            } else if let Some(t) = root.targets.iter().find(|t| t.is_default) {
+                t
+            } else if let Some(t) = root.targets.iter().find(|t| t.name == root.name) {
+                t
+            } else if root.targets.iter().any(|t| t.kind == TargetKind::Bin) {
+                find_target(root, TargetKind::Bin, None, None)?
+            } else {
+                find_target(root, TargetKind::Lib, None, None)?
+            }
+        };
         let mut seen = HashSet::new();
         let resolved = self.flatten_target(root.id, target, &mut seen)?;
         if !resolved.entry.is_file() {
@@ -626,7 +671,18 @@ pub fn parse_manifest_text(
 
     validate_keys(
         table,
-        &["name", "version", "url", "bin", "lib", "test", "dependencies"],
+        &[
+            "name",
+            "version",
+            "url",
+            "default_target",
+            "default-target",
+            "default",
+            "bin",
+            "lib",
+            "test",
+            "dependencies",
+        ],
         &manifest_path,
         "package manifest",
     )?;
@@ -634,6 +690,9 @@ pub fn parse_manifest_text(
     let name = required_string(table, "name", &manifest_path)?;
     let version = required_string(table, "version", &manifest_path)?;
     let url = optional_string(table, "url", &manifest_path)?;
+    let default_target = optional_string(table, "default_target", &manifest_path)?
+        .or_else(|| optional_string(table, "default-target", &manifest_path).ok().flatten())
+        .or_else(|| optional_string(table, "default", &manifest_path).ok().flatten());
     let mut targets = Vec::new();
 
     for (kind, field) in [
@@ -668,10 +727,15 @@ pub fn parse_manifest_text(
                 ))
             })?;
             let source = parse_target_source(target_table, &manifest_path, kind, target_name)?;
+            let is_default = target_table
+                .get("default")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             targets.push(ManifestTarget {
                 name: target_name.to_string(),
                 kind,
                 source,
+                is_default,
             });
         }
     }
@@ -691,6 +755,7 @@ pub fn parse_manifest_text(
                                     name: stem.to_string(),
                                     kind: TargetKind::Test,
                                     source: TargetSourceSpec::Entry(PathBuf::from(format!("tests/{stem}.ag"))),
+                                    is_default: false,
                                 });
                             }
                         }
@@ -743,6 +808,7 @@ pub fn parse_manifest_text(
         name,
         version,
         url,
+        default_target,
         targets,
         dependencies,
     })
@@ -806,7 +872,7 @@ fn parse_target_source(
     let label = format!("[{}.{}]", kind.label(), target_name);
     validate_keys(
         table,
-        &["entry", "manifest", "branch", "tag", "rev"],
+        &["entry", "manifest", "branch", "tag", "rev", "default"],
         manifest_path,
         &format!("target `{label}`"),
     )?;
@@ -996,11 +1062,26 @@ fn relative_path(
 /// or module artifact. Manifest filenames are intentionally not restricted to
 /// `silver.toml` so nested target manifests can use names such as `agc`.
 pub fn is_manifest_candidate(path: &Path) -> bool {
-    path.is_file()
-        && !matches!(
-            path.extension().and_then(|extension| extension.to_str()),
-            Some("ag" | "agm")
-        )
+    if !path.is_file() {
+        return false;
+    }
+    if matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("ag" | "agm")
+    ) {
+        return false;
+    }
+    if let Ok(mut file) = fs::File::open(path) {
+        use std::io::Read;
+        let mut magic = [0u8; 1];
+        if let Ok(n) = file.read(&mut magic)
+            && n >= 1
+            && magic[0] == 0x7f
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn canonical_manifest_path(path: &Path) -> Result<PathBuf, PackageError> {
@@ -1104,6 +1185,21 @@ fn find_target<'a>(
             .targets
             .iter()
             .find(|target| target.kind == kind && target.name == name)
+    {
+        return Ok(target);
+    }
+    if let Some(ref def_name) = package.default_target
+        && let Some(target) = package
+            .targets
+            .iter()
+            .find(|target| target.kind == kind && &target.name == def_name)
+    {
+        return Ok(target);
+    }
+    if let Some(target) = package
+        .targets
+        .iter()
+        .find(|target| target.kind == kind && target.is_default)
     {
         return Ok(target);
     }
@@ -1253,6 +1349,7 @@ impl PackageResolver {
             name: resolved.manifest.name.clone(),
             version: resolved.manifest.version.clone(),
             url: resolved.manifest.url.clone(),
+            default_target: resolved.manifest.default_target.clone(),
             manifest_path: resolved.manifest.manifest_path.clone(),
             source: resolved.source.clone(),
             targets: Vec::new(),
@@ -1337,6 +1434,7 @@ impl PackageResolver {
                 name: target.name.clone(),
                 kind: target.kind,
                 source,
+                is_default: target.is_default,
             });
         }
 
@@ -2233,6 +2331,52 @@ entry = "tests/custom_test.ag"
         let target_names: Vec<&str> = test_targets.iter().map(|t| t.name.as_str()).collect();
         assert!(target_names.contains(&"explicit_test"));
         assert!(target_names.contains(&"unit_test"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolves_default_target_from_manifest_or_target_flag() {
+        let root = unique_temp_dir("pkg-default-target");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/main.ag"), "i32 main() { return 0; }").unwrap();
+        fs::write(root.join("src/lib.ag"), "i32 foo() { return 1; }").unwrap();
+        fs::write(root.join("src/other.ag"), "i32 other() { return 2; }").unwrap();
+
+        let manifest = r#"
+name = "pkg"
+version = "0.1.0"
+default_target = "tool"
+
+[bin.tool]
+entry = "src/main.ag"
+
+[bin.other]
+entry = "src/other.ag"
+"#;
+        let manifest_path = root.join(MANIFEST_FILE);
+        fs::write(&manifest_path, manifest).unwrap();
+
+        let mut resolver = PackageResolver::new().unwrap();
+        let graph = resolver.resolve(&manifest_path).unwrap();
+        let target = graph.select_target(&TargetSelection::default_target()).unwrap();
+        assert_eq!(target.name, "tool");
+
+        let manifest2 = r#"
+name = "pkg2"
+version = "0.1.0"
+
+[bin.first]
+entry = "src/other.ag"
+
+[bin.favored]
+entry = "src/main.ag"
+default = true
+"#;
+        fs::write(&manifest_path, manifest2).unwrap();
+        let graph2 = resolver.resolve(&manifest_path).unwrap();
+        let target2 = graph2.select_target(&TargetSelection::default_target()).unwrap();
+        assert_eq!(target2.name, "favored");
 
         let _ = fs::remove_dir_all(root);
     }

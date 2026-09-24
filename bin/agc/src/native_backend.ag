@@ -71,7 +71,7 @@ bool native_source_path(Vec<String>* arguments, String* source) {
     return false;
 }
 
-bool native_output_path(Vec<String>* arguments, String* output) {
+bool native_output_path(Vec<String>* arguments, str default_name, String* output) {
     i64 i = 1;
     while (i < arguments.len()) {
         String* argument = arguments.get_ptr(i);
@@ -92,7 +92,11 @@ bool native_output_path(Vec<String>* arguments, String* output) {
         i += 1;
     }
     output.clear();
-    output.push_str("a.out");
+    if (strlen(default_name) > 0) {
+        output.push_str(default_name);
+    } else {
+        output.push_str("a.out");
+    }
     return true;
 }
 
@@ -212,10 +216,10 @@ String native_temp_path(str suffix, i64 pid) {
     return path;
 }
 
-bool native_backend_try(Vec<String>* arguments, str source_path, i32* result) {
+bool native_backend_try(Vec<String>* arguments, str source_path, str default_name, i32* result) {
     if (!native_backend_enabled()) { return false; }
     String output = String.new();
-    if (!native_output_path(arguments, &output)) {
+    if (!native_output_path(arguments, default_name, &output)) {
         output.drop();
         return false;
     }
