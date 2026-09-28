@@ -5,11 +5,10 @@
 // silver_runtime/src/runtime/casts.rs (CastRegistry: a (from, to) -> cast
 // table prepopulated with the 156 numeric pairs).
 //
-// FN-POINTER-FREE DESIGN
-// ──────────────────────
-// The Rust CastRegistry stores one `Arc<dyn Fn>` closure per (from, to)
-// pair.  Silver has no fn pointers, so each registered pair maps to an
-// INTEGER OPCODE and a single dispatcher (`cast_exec_opcode`) executes the
+// FN-POINTER-FREE DESIGN (LANG-008: Silver HAS non-capturing fn pointers —
+// see sort_by in std/algo/sort.ag and SYNTAX.md — but no closures/capture,
+// so a per-pair `Arc<dyn Fn>` table still cannot port directly; each
+// registered pair maps to an INTEGER OPCODE and a single dispatcher (`cast_exec_opcode`) executes the
 // cast by opcode with an if-chain.  Opcodes are laid out on the 13x12
 // numeric-type grid:
 //
