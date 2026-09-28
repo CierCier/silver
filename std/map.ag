@@ -7,6 +7,7 @@ import std.hash;
 import std.io.file;
 import std.mem.drop;
 import std.iter;
+import std.string;
 
 // Internal entry state: Swiss Table 16-byte metadata control groups.
 // Control byte values:
@@ -861,6 +862,57 @@ impl<K, V> HashMapEntryRef<K, V> {
         if (self.idx < 0) { return; }
         f(&self.map.values[self.idx]);
     }
+}
+
+// -- Borrowed-content lookup for String-keyed maps (STD-002) ----------------
+// Free functions with concrete `HashMap<String, V>` (K fixed, V generic):
+// hashing the `str` content directly avoids cloning a lookup key. A method on
+// the generic impl cannot do this — stage0 checks method bodies per
+// instantiation and `K == str` fails for non-String K (e.g. map_test's
+// HashMap<i64, _>).
+i64 map_find_slot_str<V>(HashMap<String, V>* m, str key) {
+    if (m.capacity == 0 || m.len == 0) {
+        return -1;
+    }
+    i64 h = @hash(key);
+    if (h < 0) { h = -h; }
+    u8 h2 = h2_fingerprint(h);
+    i64 mask = m.capacity - 1;
+    i64 idx = h & mask;
+    i64 step = 0;
+
+    while (true) {
+        i64 matches = probe_group_match(&m.ctrl[idx], h2);
+        while (matches != 0) {
+            i64 bit = trailing_zeros(matches);
+            i64 slot = (idx + bit) & mask;
+            if (m.keys[slot] == key) {
+                return slot;
+            }
+            matches = matches & (matches - 1);
+        }
+        i64 empties = probe_group_empty(&m.ctrl[idx]);
+        if (empties != 0) {
+            return -1;
+        }
+        step = step + 16;
+        idx = (idx + step) & mask;
+    }
+    return -1;
+}
+
+/// Get value for a String key without cloning it.
+Optional<V> map_get_opt_str<V>(HashMap<String, V>* m, str key) {
+    i64 idx = map_find_slot_str<V>(m, key);
+    if (idx >= 0) {
+        return Optional<V>.some(m.values[idx]);
+    }
+    return Optional<V>.none();
+}
+
+/// Borrowed-content existence check for String-keyed maps.
+bool map_contains_key_str<V>(HashMap<String, V>* m, str key) {
+    return map_find_slot_str<V>(m, key) >= 0;
 }
 
 // -- Ownership smoke (manual check) ---------------------------------------
