@@ -87,6 +87,13 @@ String cannot_assign_to_moved_value(str name) {
     return move s;
 }
 
+String cannot_assign_const(str name) {
+    String s = String.from_str("cannot assign to const variable '");
+    s.push_str(name);
+    s.push_str("'");
+    return move s;
+}
+
 str note_value_explicitly_moved() {
     return "value explicitly moved here";
 }

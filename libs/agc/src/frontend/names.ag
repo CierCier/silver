@@ -14,6 +14,7 @@ import frontend.bindings;
 struct NameResolver {
     Interner local_names;
     Vec<u32> locals;
+    Vec<u32> const_locals;
     SymbolTable* symbols;
     DiagnosticBag* diagnostics;
     bool has_imports;
@@ -25,6 +26,7 @@ impl NameResolver {
         NameResolver resolver;
         resolver.local_names = Interner.new();
         resolver.locals = Vec<u32>.new();
+        resolver.const_locals = Vec<u32>.new();
         resolver.symbols = symbols;
         resolver.diagnostics = diagnostics;
         resolver.has_imports = false;
@@ -47,11 +49,137 @@ impl NameResolver {
         return false;
     }
 
+    void mark_const(NameResolver* self, str name) {
+        u32 name_id = self.local_names.intern(name);
+        i64 i = 0;
+        while (i < self.const_locals.len()) {
+            if (self.const_locals.get(i) == name_id) {
+                return;
+            }
+            i += 1;
+        }
+        self.const_locals.push(name_id);
+    }
+
+    bool is_const(NameResolver* self, str name) {
+        u32 name_id = self.local_names.intern(name);
+        i64 i = 0;
+        while (i < self.const_locals.len()) {
+            if (self.const_locals.get(i) == name_id) {
+                return true;
+            }
+            i += 1;
+        }
+        return false;
+    }
+
     void unknown(NameResolver* self, str name, Span span) {
         String message = unknown_identifier(name);
         self.diagnostics.error(span, move message);
         self.failed = true;
     }
+}
+
+bool const_is_assign_op(SyntaxNode* node) {
+    if (node == (SyntaxNode*)0 || node.kind != NodeKind.Token) {
+        return false;
+    }
+    return node.token_kind == TokenKind.Assign
+        || node.token_kind == TokenKind.PlusAssign
+        || node.token_kind == TokenKind.MinusAssign
+        || node.token_kind == TokenKind.StarAssign
+        || node.token_kind == TokenKind.SlashAssign
+        || node.token_kind == TokenKind.PercentAssign
+        || node.token_kind == TokenKind.BitwiseAndAssign
+        || node.token_kind == TokenKind.BitwiseOrAssign
+        || node.token_kind == TokenKind.BitwiseXorAssign
+        || node.token_kind == TokenKind.LeftShiftAssign
+        || node.token_kind == TokenKind.RightShiftAssign;
+}
+
+bool const_is_delimiter(SyntaxNode* node) {
+    return node != (SyntaxNode*)0 && node.kind == NodeKind.Token
+        && (node.token_kind == TokenKind.Semicolon || node.text == ";" || node.text == ",");
+}
+
+// Check one sibling-run segment for const violations (LANG-004, locals only).
+// A segment declares iff a `const` token precedes its first assign-op; the
+// declared name is the identifier immediately before that `=`. Boundaries are
+// structural (Block/Parenthesized/Bracket delimit segments), so parameter
+// lists and cast contents can never poison the scan. Index stores
+// (`buf[i] = v`) and globals are documented misses.
+void const_check_segment(NameResolver* resolver, Vec<SyntaxNode*>* segment) {
+    i64 const_at = -1;
+    i64 i = 0;
+    while (i < segment.len()) {
+        SyntaxNode* node = segment.get(i);
+        if (node.kind == NodeKind.Token && node.token_kind == TokenKind.Const) {
+            const_at = i;
+            break;
+        }
+        i += 1;
+    }
+    i64 eq_at = -1;
+    i = 0;
+    while (i < segment.len()) {
+        if (const_is_assign_op(segment.get(i))) {
+            eq_at = i;
+            break;
+        }
+        i += 1;
+    }
+    SyntaxNode* declared = (SyntaxNode*)0;
+    if (const_at >= 0 && eq_at >= 0 && const_at < eq_at && eq_at > 0) {
+        SyntaxNode* candidate = segment.get(eq_at - 1);
+        if (candidate.kind == NodeKind.Token && candidate.token_kind == TokenKind.Identifier) {
+            resolver.mark_const(candidate.text);
+            declared = candidate;
+        }
+    }
+    i = 0;
+    while (i < segment.len()) {
+        if (const_is_assign_op(segment.get(i)) && i > 0) {
+            SyntaxNode* target = segment.get(i - 1);
+            if (target != declared
+                && target.kind == NodeKind.Token && target.token_kind == TokenKind.Identifier
+                && resolver.is_const(target.text)) {
+                bool is_field = i >= 2 && segment.get(i - 2).kind == NodeKind.Token
+                    && segment.get(i - 2).text == ".";
+                if (!is_field) {
+                    String message = cannot_assign_const(target.text);
+                    resolver.diagnostics.error(target.span, move message);
+                    resolver.failed = true;
+                }
+            }
+        }
+        i += 1;
+    }
+}
+
+void const_scan_children(NameResolver* resolver, SyntaxNode* parent) {
+    if (parent == (SyntaxNode*)0) {
+        return;
+    }
+    Vec<SyntaxNode*> segment = Vec<SyntaxNode*>.new();
+    SyntaxNode* child = parent.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Block || child.kind == NodeKind.Parenthesized) {
+            const_check_segment(resolver, &segment);
+            segment.len = 0;
+            const_scan_children(resolver, child);
+        } else if (child.kind == NodeKind.Bracket) {
+            const_check_segment(resolver, &segment);
+            segment.len = 0;
+        } else if (const_is_delimiter(child)) {
+            const_check_segment(resolver, &segment);
+            segment.len = 0;
+        } else {
+            segment.push(child);
+        }
+        child = child.next_sibling;
+    }
+    const_check_segment(resolver, &segment);
+    segment.drop();
 }
 
 SyntaxNode* function_body(SyntaxNode* function) {
@@ -102,6 +230,11 @@ void resolve_function(NameResolver* resolver, SyntaxNode* function, CfgSet* cfg)
     if (body == (SyntaxNode*)0) {
         return;
     }
+    // Const-ness is function-scoped: a `const c` in one function must not
+    // poison an unrelated `c` in another. (Plain locals stay flat, matching
+    // the existing conservative projection.)
+    resolver.const_locals.len = 0;
+    const_scan_children(resolver, body);
     Vec<SyntaxNode*> body_leaves = Vec<SyntaxNode*>.new();
     cfg_collect_live_leaves(body, cfg, &body_leaves);
     Vec<Binding> typed_bindings = Vec<Binding>.new();
