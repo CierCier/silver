@@ -434,6 +434,18 @@ void collect_workspace_check_options(Vec<String>* arguments, CfgSet* cfg, Vec<St
             i += 1;
             continue;
         }
+        if (argument.equals("--target") && i + 1 < arguments.len()) {
+            cfg_apply_target(cfg, arguments.get_ptr(i + 1).to_str());
+            i += 2;
+            continue;
+        }
+        if (argument.starts_with("--target=")) {
+            String value = argument.strip_prefix("--target=");
+            cfg_apply_target(cfg, value.to_str());
+            value.drop();
+            i += 1;
+            continue;
+        }
         if (argument.equals("-O") || argument.equals("-O1") || argument.equals("-O2")
             || argument.equals("-O3") || argument.equals("-Os") || argument.equals("-Oz")
             || argument.equals("-Ofast")) {
@@ -566,6 +578,23 @@ i32 run_frontend() {
         if (argument.starts_with("--cfg=")) {
             String value = argument.strip_prefix("--cfg=");
             cfg.add_flag(value.to_str());
+            value.drop();
+            option += 1;
+            continue;
+        }
+        if (argument.equals("--target")) {
+            if (option + 1 >= arguments.len()) {
+                STDERR.write_str("agc: error: --target requires a value\n");
+                include_dirs.drop();
+                return 2;
+            }
+            cfg_apply_target(&cfg, arguments.get_ptr(option + 1).to_str());
+            option += 2;
+            continue;
+        }
+        if (argument.starts_with("--target=")) {
+            String value = argument.strip_prefix("--target=");
+            cfg_apply_target(&cfg, value.to_str());
             value.drop();
             option += 1;
             continue;

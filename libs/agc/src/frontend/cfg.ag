@@ -106,6 +106,103 @@ CfgSet linux_defaults() {
     return set;
 }
 
+bool cfg_part_equals(str part, str word) {
+    return strcmp(part, word) == 0;
+}
+
+bool cfg_part_starts_with(str part, str prefix) {
+    i64 plen = strlen(part);
+    i64 flen = strlen(prefix);
+    if (flen > plen) {
+        return false;
+    }
+    i64 i = 0;
+    while (i < flen) {
+        if (part[i] != prefix[i]) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// LANG-005: derive arch.*/os.* from a target triple, mirroring stage0
+// `cfg.rs::add_derived_cfgs` (arch = first component; os = known-OS token,
+// wasi/wasip* normalized to wasi, else vendor position, else unknown).
+// Replaces the linux_defaults arch/os keys when the triple says otherwise;
+// explicit --cfg keys are never clobbered (add is insert-if-absent).
+void cfg_apply_target(CfgSet* self, str triple) {
+    if (strlen(triple) == 0) {
+        return;
+    }
+    String owned = String.from_str(triple);
+    SplitIter parts = owned.split("-");
+    Optional<str> first = parts.next();
+    if (first.is_some()) {
+        str arch = first.unwrap();
+        if (!cfg_part_equals(arch, "x86_64")) {
+            self.remove("arch.x86_64");
+            String key = String.from_str("arch.");
+            key.push_str(arch);
+            self.add(key.to_str());
+            key.drop();
+        }
+    }
+    Vec<String> seen = Vec<String>.new();
+    while (true) {
+        Optional<str> item = parts.next();
+        if (item.is_none()) {
+            break;
+        }
+        seen.push(String.from_str(item.unwrap()));
+    }
+    str os = (str)0;
+    i64 i = 0;
+    while (i < seen.len()) {
+        str part = seen.get_ptr(i).to_str();
+        if (cfg_part_equals(part, "linux") || cfg_part_equals(part, "darwin")
+            || cfg_part_equals(part, "macos") || cfg_part_equals(part, "windows")
+            || cfg_part_equals(part, "freebsd") || cfg_part_equals(part, "netbsd")
+            || cfg_part_equals(part, "openbsd") || cfg_part_equals(part, "solaris")
+            || cfg_part_equals(part, "illumos") || cfg_part_equals(part, "android")
+            || cfg_part_equals(part, "ios") || cfg_part_equals(part, "haiku")) {
+            os = part;
+            break;
+        }
+        i += 1;
+    }
+    if (os == (str)0) {
+        i = 0;
+        while (i < seen.len()) {
+            str part = seen.get_ptr(i).to_str();
+            if (cfg_part_equals(part, "wasi") || cfg_part_starts_with(part, "wasip")) {
+                os = "wasi";
+                break;
+            }
+            i += 1;
+        }
+    }
+    String vendor = String.new();
+    if (os == (str)0) {
+        if (seen.len() >= 2) {
+            vendor = String.from_str(seen.get_ptr(1).to_str());
+        } else {
+            vendor = String.from_str("unknown");
+        }
+        os = vendor.to_str();
+    }
+    if (!cfg_part_equals(os, "linux")) {
+        self.remove("os.linux");
+        String key = String.from_str("os.");
+        key.push_str(os);
+        self.add(key.to_str());
+        key.drop();
+    }
+    vendor.drop();
+    seen.drop();
+    owned.drop();
+}
+
 bool cfg_is_space(u8 value) {
     return value == (u8)' ' || value == (u8)'\t'
         || value == (u8)'\n' || value == (u8)'\r';
