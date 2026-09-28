@@ -1,0 +1,9 @@
+// Middle module for the transitive-visibility fixtures.
+// Imports chain_c (same directory) and re-exports its value through
+// chain_b_val. Consumers of chain_b must NOT see chain_c_val directly:
+// Silver has no re-export syntax, so transitive names stay private.
+import chain_c;
+
+i32 chain_b_val() {
+    return chain_c_val() + 1;
+}
