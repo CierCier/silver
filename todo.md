@@ -171,3 +171,19 @@ Still open, triaged (blocked or multi-week ports — see §H order):
 - STD-004 fix (exact-shortest fallback), STD-001 remainder (monomorph/Tarjan
   sorts, order-insensitive diff, stage1 sorts), P0-001 `%rdi` fix, stage0
   cached-vs-nocache triage: recorded follow-ups with evidence.
+
+## Commit record 2026-09-28 (branch `bootstrap-migration`, unpushed)
+
+13 atomic commits: docs consistency (MIG-001..005), gitignore (MIG-008),
+trait-error sort (STD-001), borrowed map lookup (STD-002), closure comments
+(LANG-008), catalog routing (FE-002), const enforcement (LANG-004), --target
+threading (LANG-005), gates (STD-005/008, GATE-002), more gates + audits
+(GATE-004, STD-004, BE-006, STD-001), transitive fixtures (FE-009),
+experimental backend snapshot + fail-closed fixes (P0-002/003), tracker.
+Lesson: git 2.55 `git commit -- <pathspec>` folds unstaged worktree hunks of
+named paths into the commit — use plain `git commit` with a precisely staged
+index plus per-hunk `git apply --cached` filtering (first attempt
+contaminated two commits; repaired by replay onto upstream, verified clean).
+Left uncommitted by design: all pre-existing modified files, untouched
+untracked files, and 3 pre-existing hunks (silver agsm block, driver bridge
+hunks, run_stage agsm block). Nothing pushed.
