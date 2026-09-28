@@ -18,6 +18,11 @@ Stage1 owns the complete source frontend:
 
 Every slice must preserve the stage0 baseline and run the self-host stage gate.
 
+> Correction (2026-09-28): several `[x]` below overstate parity — see
+> `todo.md` FE-001..FE-010. Overclaimed items are marked `[~]` (partial:
+> collection/projection lands, fixpoint/enforcement deferred). Do not promote
+> back to `[x]` without the gate named in the item's Done-when.
+
 ## 0. Baseline and infrastructure
 
 - [x] Keep the stage0 Rust bootstrap as the seed compiler.
@@ -64,7 +69,7 @@ primary diagnostics over the full expression corpus.
 - [x] Type method receivers and associated functions.
 - [x] Type generic parameters, defaults, and generic arguments.
 - [x] Record monomorphization requests for functions, impls, and nested calls (`monomorph.ag`).
-- [x] Run generic request fixpoint and enforce the generation limit (256 cap in `monomorph.ag`).
+- [~] Run generic request fixpoint and enforce the generation limit (256 cap in `monomorph.ag` — currently stored at `monomorph.ag:83`, never read; see FE-001).
 - [x] Type generic operators and methods deferred until concrete substitution.
 - [x] Type aliases and imported generic templates.
 - [x] Add generic/trait/method differential fixtures.
@@ -78,8 +83,8 @@ acceptance and primary diagnostics as stage0.
 - [x] Resolve selective imports, aliases, re-exports, and transitive visibility.
 - [x] Load source-module declarations with their typed signatures.
 - [x] Load `.agm` signatures, layouts, generic templates, and dependencies.
-- [x] Implement stage1 `.agm` serialization with version compatibility.
-- [x] Implement stage1 dependency cache keys and artifact publication.
+- [~] Implement stage1 `.agm` serialization with version compatibility (reader-only today, `artifacts.ag:1-4`; see FE-006).
+- [~] Implement stage1 dependency cache keys and artifact publication (planning stage1-owned, publishing stage0-owned; see FE-006).
 - [x] Implement package test target discovery and dependency-aware execution.
 - [x] Implement submodule build selection and failure behavior.
 - [x] Add package/import/artifact differential fixtures.
@@ -89,28 +94,28 @@ dependencies without delegating planning to stage0.
 
 ## 5. Ownership and borrowing
 
-- [x] Implement `TypeProperties {is_copy, needs_drop}`.
+- [~] Implement `TypeProperties {is_copy, needs_drop}` (only `is_copy` stub exists, `types.ag:274-283`, no `needs_drop`; see FE-005).
 - [x] Implement `Place` and projection overlap for fields and indices (`place.ag`).
 - [x] Implement $O(1)$ `BitSet` local variable state tracking (`bitset.ag`, `ownership.ag`).
-- [x] Implement `move_out`, `copy_from`, `initialize`, and `read` operations.
-- [x] Implement move diagnostics with original move spans and notes.
-- [x] Implement lexical scopes and control-flow-sensitive move state.
-- [x] Implement shared/mutable borrow loans and NLL release points.
-- [x] Implement field/index disjointness and call/receiver borrow propagation (`borrow.ag`).
-- [x] Implement reference escape checks.
-- [x] Implement Drop type propagation and per-field drop decisions.
-- [x] Implement enum payload ownership and active-variant cleanup.
-- [x] Implement loop, branch, defer, and early-return cleanup behavior.
-- [x] Add the full ownership/borrow/RAII fixture matrix.
+- [~] Implement `move_out`, `copy_from`, `initialize`, and `read` operations (name-based transfer only, `ownership.ag:274-315`; see FE-003).
+- [~] Implement move diagnostics with original move spans and notes (no note spans, `ownership.ag:46-56`; see FE-002).
+- [~] Implement lexical scopes and control-flow-sensitive move state (flat source-order walk; see FE-003).
+- [~] Implement shared/mutable borrow loans and NLL release points (root-place loans only, `borrow.ag:1-3`; see FE-004).
+- [~] Implement field/index disjointness and call/receiver borrow propagation (`borrow.ag`) (partial; see FE-004).
+- [~] Implement reference escape checks (`return &local` only, `borrow.ag:206-213`; see FE-004).
+- [~] Implement Drop type propagation and per-field drop decisions (absent; see FE-005/LANG-006).
+- [~] Implement enum payload ownership and active-variant cleanup (constructor `move` check only, `ownership.ag:153-197`; see LANG-006).
+- [~] Implement loop, branch, defer, and early-return cleanup behavior (see LANG-006).
+- [~] Add the full ownership/borrow/RAII fixture matrix (acceptance-status parity only; see GATE-003).
 
 **Exit evidence:** stage0 and stage1 agree on ownership acceptance, move
 origins, borrow conflicts, and escape diagnostics.
 
 ## 6. Diagnostics and frontend driver
 
-- [x] Move every user-facing message into a shared catalog (`messages.ag`).
-- [x] Match stage0 severity, span, note, and source-rendering behavior.
-- [x] Add warning flags and linter diagnostics.
+- [~] Move every user-facing message into a shared catalog (`messages.ag` — 19 fns vs 100+ in stage0; see FE-002).
+- [~] Match stage0 severity, span, note, and source-rendering behavior (`error:` hardcoded, `diagnostics.ag:131-146`; see FE-002).
+- [ ] Add warning flags and linter diagnostics (absent; see FE-002).
 - [x] Add fuzzy typo suggestions (`levenshtein`, `fuzzy_suggest` in `messages.ag`).
 - [x] Implement the complete frontend CLI contract (`driver.ag`).
 - [x] Own `lex`, `parse`, `ast`, and `check` argument planning in stage1.
@@ -123,9 +128,9 @@ bridge for all non-native operations.
 
 ## 7. Verification and fixpoint
 
-- [x] Compare full rendered diagnostics, not only exit status.
-- [x] Compare AST structure, spans, and recovery behavior.
-- [x] Compare normalized `.agm` contents and cache keys.
+- [~] Compare full rendered diagnostics, not only exit status (status + Send/artifact primaries only; see GATE-003).
+- [~] Compare AST structure, spans, and recovery behavior (acceptance parity; see FE-008).
+- [~] Compare normalized `.agm` contents and cache keys (version read + malformed rejection; no writer diff; see FE-006).
 - [x] Add seeded property tests for lexer, types, ownership, and diagnostics.
 - [x] Run native test matrix (200 passed, 0 failed, 1 skip).
 - [x] Build stage1 with stage0 and run the 348-file self-host stage gate (348/348 passed, 0 skips).
@@ -136,9 +141,15 @@ bridge for all non-native operations.
 frontend compatibility seam remaining except the explicitly separate native
 backend migration.
 
-## Backend work tracked separately
+## Backend work tracked separately (see `todo.md` P0-001..003, BE-001..006, GATE-001/002; experimental handoff fixes in `handoff.md` §§4,7: C-cast lowering, recursive if/else-if, Self receiver default, extern-C return stars, String==str extract, _start entry, __silver_argc/argv globals, Vec<T> mangling)
 
-- [ ] Replace the native bridge with stage1 textual IR emission.
+- [ ] Replace the native bridge with stage1 textual IR emission (P0-001..003 first for the FFI path).
 - [ ] Implement stage1 linker/runtime startup and artifacts.
 - [ ] Implement debug info, backtrace tables, and leak-check origins.
 - [ ] Compare stage1 native output with stage0 before retiring the bridge.
+
+### Uncommitted work inventory (MIG-007, 2026-09-28 — commit deferred to owner, do not start Phase 2 with a dirty tree)
+- Untracked, part of experimental backend (tracked by P0/BE items): `libs/agc/src/backend/llvm/` (5 files), `vendor/llvm/llvm.ag`, `tests/selfhost/check_native_coverage.py` (informational, GATE-002).
+- Untracked, needs a tracking home: `bin/agsm/` (wired in `silver.toml:37-38` + `run_stage.sh:23-25`, no plan row), `libs/agc/src/frontend/items.ag` (410 lines, type parser — no todos row).
+- Modified, covered by this file + handoff §§4,7: `bin/agc/src/{driver,native_backend}.ag`, `libs/agc/src/frontend/{ast_expr,bindings,expressions,lower_expr,module_loader,symbols,typecheck_expr,types}.ag`.
+- Modified, stage0-side: `bootstrap/stage0/agc/src/{driver.rs,link.rs}` (cache/bridge), `bootstrap/stage0/agsm/src/extract.rs`, `silver.toml`, `tests/selfhost/{run_stage.sh,check_native_backend.py,README.md}`.

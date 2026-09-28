@@ -9,20 +9,31 @@
 # plan and docs/wasm-target.md for the wasm target survey.
 #
 # P0 goal: 1:1 linux/x86_64 frontend parity between bootstrap/stage0/agc
-# (Rust) and bin/agc (Silver). The reusable frontend lives in libs/agc. The
-# LLVM backend remains deferred while the frontend, module loading, and
-# semantic projections are migrated. Native stage1 commands currently use the
-# explicit SILVER_STAGE0 compatibility seam until the Silver backend owns code
-# generation and linking.
+# (Rust) and bin/agc (Silver). The reusable frontend lives in libs/agc.
+# Native stage1 commands use the explicit SILVER_STAGE0 compatibility seam.
+# The committed stage1-owned backend is a smoke path only (single
+# `i32 main()` via SILVER_STAGE1_NATIVE=1; see bin/agc/src/native_backend.ag
+# and tests/selfhost/check_native_backend.py). The full Silver LLVM backend
+# (libs/agc/src/backend/llvm/, vendor/llvm/llvm.ag) is experimental,
+# untracked work in progress — see handoff.md — not the committed build path.
 
 name = "silver"
 version = "0.2.6"
+# NOTE (MIG-006): `default_target = "agc"` below matches two same-named targets
+# ([bin."agc"] and [lib."agc"]). This is kind-namespaced, not a conflict: every
+# caller passes `--bin agc` or `--lib agc` (see tests/selfhost/run_stage.sh,
+# check_workspace.py:132-133), and a bare `agc build` resolves to the binary by
+# manifest declaration order (bin first, cf. package.rs:519-531 first-match).
+# Do NOT rename either target without updating check_workspace.py:133
+# (`--lib agc`), bin/agc + bin/aglsp `import agc;` sites, and package.rs:1884-1887.
+# The stdlib is not a manifest dependency — it arrives via source `import std.*`.
 default_target = "agc"
 
 
 # Stage1 frontend binary. Its target manifest lives in bin/agc; stage0
 # builds this entry point with the commands in tests/selfhost/run_stage.sh.
-# It currently implements lex, parse, and check.
+# It owns lex, parse, ast, and check locally; native build/run/package/cache
+# go through the stage0 bridge except for the i32-main() smoke path.
 [bin."agc"]
 manifest = "./bin/agc"
 

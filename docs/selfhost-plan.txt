@@ -335,8 +335,8 @@ Phase 4 — the loop closes
 
 PARITY GATE (the one rule that makes this safe)
   Every phase ends with: same inputs -> same outputs. Concretely,
-  tests/selfhost/diff.sh runs stage0 and stage1 over tests/*.ag and
-  compares: exit codes, stdout/stderr, diagnostic lists (span-sorted),
+  tests/selfhost/diff_tokens.py + check_parse.py + check_semantics.py run stage0 and stage1 over tests/*.ag and
+  compare: exit codes, stdout/stderr, diagnostic lists (span-sorted),
   emitted .ll (normalized for labels), .wasm/.elf bytes where stable,
   and .agm contents (sorted). No phase merges with the gate red.
 
@@ -360,8 +360,8 @@ PARITY GATE (the one rule that makes this safe)
   The Linux compatibility boundary is executable:
 
     - stage1 builds from silver.toml through stage0;
-    - lex/parse parity covers 346 files;
-    - semantic status parity covers 346 files with no deferred skips;
+    - lex/parse parity covers 348 files (201 tests + 26 examples + 121 std; was 346 before aglsp/agsm additions);
+    - semantic status parity covers 348 files with no deferred skips;
     - typed Send primary diagnostics match on the focused launch fixtures;
     - AGM v2/v6/v7/v8/v9/v10/v11 metadata and malformed inputs are checked;
     - tests/selfhost/run_native.sh passes the 200-test native corpus (one

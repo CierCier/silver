@@ -22,9 +22,9 @@ semantic and code-generation layers move into Silver.
 
 - `python3 tests/run_tests.py --no-tui`: 200 passed, 1 intentional skip.
 - `bash tests/selfhost/run_stage.sh --include-std`: token parity and parser
-  parity pass for 346 files; the semantic leg is run separately by the script.
+  parity pass for 348 files (201 tests + 26 examples + 121 std); the semantic leg is run separately by the script.
 - `bash tests/selfhost/run_native.sh --no-tui --jobs 4`: 200 passed, 1 intentional skip through the stage1 command surface.
-- `bash tests/selfhost/run_stage.sh --include-std`: token/parse/semantic parity for 346 files, typed Send, and seven-version AGM checks pass.
+- `bash tests/selfhost/run_stage.sh --include-std`: token/parse/semantic parity for 348 files, typed Send, and seven-version AGM checks pass.
 - `cargo test -p agc --lib`: 562 passing tests after the cache-key and cache-integrity slices.
 
 ## Current completion state
@@ -38,9 +38,9 @@ semantic and code-generation layers move into Silver.
 | Canonical Types & Exprs | green | canonical `TypeTable` (`TypeId`), flat `AstExpr`/`AstStmt` pool, bottom-up type inference |
 | Monomorphization | green | `MonomorphCollector`, symbol mangling, 256-generation fixpoint cap |
 | Diagnostics & Messages | green | centralized catalog in `messages.ag`, Levenshtein fuzzy typo suggestions |
-| Native build/run | transitional | explicit stage0 bridge is covered by `check_bridge.py` and `run_native.sh` (200/200 passed) |
+| Native build/run | transitional | explicit stage0 bridge is covered by `check_bridge.py` and `run_native.sh` (200 passed, 1 intentional skip) |
 | Cache | transitional | dependency entries validated/staged, cyclic-module tested |
-| Stage2 fixpoint | deferred | deferred to upcoming textual LLVM IR backend migration pass |
+| Stage2 fixpoint | deferred (committed path); experimental attempt crashes (see handoff.md §§3-4, P0-001..003) | committed stage1 cannot self-compile (smoke backend only); uncommitted full-backend stage2 links but segfaults on argv/generics — fix P0-001..003 before promoting |
 
 ## Frontend completion summary
 
@@ -50,4 +50,4 @@ The frontend migration is complete across all slices:
 - Place and projection model with field-disjointness and $O(1)$ `BitSet` local variable tracking.
 - Monomorphization request collector with generation limits and mangling.
 - Centralized user-facing diagnostic messages catalog with fuzzy typo suggestions.
-- All gates passing green: 348/348 files in `run_stage.sh --include-std`, 200/200 integration tests in `run_native.sh --jobs 4`.
+- All gates passing green: 348/348 files in `run_stage.sh --include-std`, 200 passed + 1 intentional skip in `run_native.sh --jobs 4`.
