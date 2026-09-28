@@ -7,6 +7,17 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 work=${SELFHOST_WORKDIR:-"${TMPDIR:-/tmp}/silver-selfhost"}
 mkdir -p "$work"
 
+# STD-008: stage builds must never enable --leak-check (the compiler allocates
+# heavily; leak reports would break every output comparison below). The flag
+# is opt-in per test in tests/run_tests.py (LEAK_CHECK_TESTS), default off.
+if [[ " $* " == *" --leak-check "* ]]; then
+    echo "run_stage.sh: --leak-check must stay off in stage builds (STD-008)" >&2
+    exit 2
+fi
+
+# STD-005: fail fast on unguarded inline asm (source-only, no build needed).
+python3 "$root/tests/selfhost/check_asm_fallback.py" --root "$root"
+
 stage0="$root/target/debug/agc"
 if [[ ! -x "$stage0" ]]; then
     cargo build --manifest-path "$root/Cargo.toml" -p agc

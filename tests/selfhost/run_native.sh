@@ -8,6 +8,12 @@ set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 work=${SELFHOST_WORKDIR:-"${TMPDIR:-/tmp}/silver-selfhost"}
 
+# STD-008: stage builds must never enable --leak-check (see run_stage.sh).
+if [[ " $* " == *" --leak-check "* ]]; then
+    echo "run_native.sh: --leak-check must stay off in stage builds (STD-008)" >&2
+    exit 2
+fi
+
 profile=debug
 for argument in "$@"; do
     if [[ "$argument" == "--release" ]]; then
