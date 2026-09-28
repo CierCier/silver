@@ -5,6 +5,7 @@ import std.mem.vec;
 import std.intern;
 import frontend.ast;
 import frontend.diagnostics;
+import frontend.messages;
 import frontend.symbols;
 import frontend.module_loader;
 import frontend.cfg;
@@ -47,9 +48,7 @@ impl NameResolver {
     }
 
     void unknown(NameResolver* self, str name, Span span) {
-        String message = String.from_str("unknown identifier '");
-        message.push_str(name);
-        message.push_str("'");
+        String message = unknown_identifier(name);
         self.diagnostics.error(span, move message);
         self.failed = true;
     }
