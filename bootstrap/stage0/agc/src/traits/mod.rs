@@ -923,6 +923,7 @@ fn trait_path_key(path: &[ast::Identifier]) -> String {
 pub fn validate_traits(program: &ast::Program) -> Vec<TraitError> {
     let (registry, mut errors) = TraitRegistry::collect(program);
     errors.extend(registry.validate_impls(program));
+    sort_trait_errors(&mut errors);
     errors
 }
 
@@ -933,7 +934,23 @@ pub fn validate_traits_with_imports(
     let (mut registry, mut errors) = TraitRegistry::collect(program);
     registry.trait_names.extend(imported_traits.iter().cloned());
     errors.extend(registry.validate_impls(program));
+    sort_trait_errors(&mut errors);
     errors
+}
+
+// STD-001 (plan S2-2a): missing-method/assoc-type errors are discovered by
+// iterating FxHashMap (`methods.values()` etc.), whose order is arbitrary.
+// Sort by (file, start, end, message) so stage0 output is deterministic and
+// stage1 can match it with the same secondary sort.
+fn sort_trait_errors(errors: &mut Vec<TraitError>) {
+    errors.sort_by(|a, b| {
+        (a.span.file, a.span.start, a.span.end, &a.message).cmp(&(
+            b.span.file,
+            b.span.start,
+            b.span.end,
+            &b.message,
+        ))
+    });
 }
 
 #[cfg(test)]
