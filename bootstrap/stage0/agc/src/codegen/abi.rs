@@ -921,6 +921,71 @@ mod tests {
         assert!(handler.needs_sret(17));
         assert!(handler.needs_sret(24));
     }
+    #[test]
+    fn test_amd64_argument_and_return_classification_boundaries() {
+        let machine = setup_target_machine();
+        let tdata = machine.get_target_data();
+        let context = Context::create();
+        let handler = Amd64Abi::new();
+
+        let one_eightbyte =
+            context.struct_type(&[context.i64_type().as_basic_type_enum()], false);
+        let two_eightbytes = context.struct_type(
+            &[
+                context.i64_type().as_basic_type_enum(),
+                context.i64_type().as_basic_type_enum(),
+            ],
+            false,
+        );
+        let three_eightbytes = context.struct_type(
+            &[
+                context.i64_type().as_basic_type_enum(),
+                context.i64_type().as_basic_type_enum(),
+                context.i64_type().as_basic_type_enum(),
+            ],
+            false,
+        );
+
+        assert_eq!(
+            handler.classify_argument(&context, &tdata, one_eightbyte),
+            context.i64_type().as_basic_type_enum(),
+            "an 8-byte aggregate is coerced to one integer register"
+        );
+        assert_eq!(
+            handler.classify_return(&context, &tdata, one_eightbyte),
+            context.i64_type().as_basic_type_enum(),
+            "an 8-byte aggregate return uses the same direct coercion"
+        );
+        assert!(
+            handler
+                .classify_argument(&context, &tdata, two_eightbytes)
+                .is_struct_type(),
+            "a 16-byte aggregate is split across two eightbytes"
+        );
+        assert!(
+            handler
+                .classify_return(&context, &tdata, two_eightbytes)
+                .is_struct_type(),
+            "a 16-byte aggregate return remains register-classified"
+        );
+        assert!(
+            handler
+                .classify_argument(&context, &tdata, three_eightbytes)
+                .is_pointer_type(),
+            "a 24-byte aggregate argument is passed indirectly"
+        );
+        assert!(
+            handler
+                .classify_return(&context, &tdata, three_eightbytes)
+                .is_pointer_type(),
+            "a 24-byte aggregate return uses the hidden result pointer"
+        );
+        assert!(handler.struct_needs_byval(&context, &tdata, three_eightbytes));
+        assert!(handler.struct_needs_sret(&context, &tdata, three_eightbytes));
+        assert!(!handler.struct_needs_byval(&context, &tdata, two_eightbytes));
+        assert!(!handler.struct_needs_sret(&context, &tdata, two_eightbytes));
+    }
+
 
     #[test]
     fn test_get_abi_handler_x86_64() {
@@ -1069,6 +1134,13 @@ mod tests {
         let one_i32 = context.struct_type(&[context.i32_type().as_basic_type_enum()], false);
         let result = handler.classify_argument(&context, &tdata, one_i32);
         assert!(result.is_int_type(), "single i32 member extracts to i32");
+        assert!(
+            handler
+                .classify_return(&context, &tdata, one_i32)
+                .is_int_type()
+        );
+        assert!(!handler.struct_needs_byval(&context, &tdata, one_i32));
+        assert!(!handler.struct_needs_sret(&context, &tdata, one_i32));
 
         // { f32 } -> float
         let one_f32 = context.struct_type(&[context.f32_type().as_basic_type_enum()], false);
@@ -1095,6 +1167,13 @@ mod tests {
         );
         let result = handler.classify_argument(&context, &tdata, arr_one);
         assert!(result.is_int_type(), "single-element array member extracts");
+        assert!(
+            handler
+                .classify_return(&context, &tdata, arr_one)
+                .is_int_type()
+        );
+        assert!(!handler.struct_needs_byval(&context, &tdata, arr_one));
+        assert!(!handler.struct_needs_sret(&context, &tdata, arr_one));
     }
 
     #[test]
@@ -1114,6 +1193,13 @@ mod tests {
         );
         let result = handler.classify_argument(&context, &tdata, pair);
         assert!(result.is_pointer_type(), "two-member struct passes byval");
+        assert!(
+            handler
+                .classify_return(&context, &tdata, pair)
+                .is_pointer_type()
+        );
+        assert!(handler.struct_needs_byval(&context, &tdata, pair));
+        assert!(handler.struct_needs_sret(&context, &tdata, pair));
 
         // { float, int } mixed: byval pointer (no two-eightbyte promotion)
         let mixed = context.struct_type(
@@ -1125,6 +1211,13 @@ mod tests {
         );
         let result = handler.classify_argument(&context, &tdata, mixed);
         assert!(result.is_pointer_type(), "mixed float/int struct passes byval");
+        assert!(
+            handler
+                .classify_return(&context, &tdata, mixed)
+                .is_pointer_type()
+        );
+        assert!(handler.struct_needs_byval(&context, &tdata, mixed));
+        assert!(handler.struct_needs_sret(&context, &tdata, mixed));
 
         // Nested single multi-field struct: byval pointer (no recursive extraction)
         let wrap = context.struct_type(&[pair.as_basic_type_enum()], false);

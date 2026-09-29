@@ -1,0 +1,87 @@
+// Exercise by-value ABI lowering at argument and return boundaries.
+// The same fixture runs natively and with `--target wasm32-wasip1`.
+import std.test;
+
+struct SingleWord {
+    i64 value;
+}
+
+struct TwoWords {
+    i64 first;
+    i64 second;
+}
+
+struct MixedWords {
+    f64 fraction;
+    i32 tag;
+}
+
+struct ThreeWords {
+    i64 first;
+    i64 second;
+    i64 third;
+}
+
+SingleWord round_trip_single(SingleWord value) {
+    SingleWord result;
+    result.value = value.value + 1;
+    return result;
+}
+
+TwoWords round_trip_pair(TwoWords value) {
+    TwoWords result;
+    result.first = value.second + 2;
+    result.second = value.first + 3;
+    return result;
+}
+
+MixedWords round_trip_mixed(MixedWords value) {
+    MixedWords result;
+    result.fraction = value.fraction * 2.0;
+    result.tag = value.tag + 4;
+    return result;
+}
+
+ThreeWords round_trip_large(ThreeWords value) {
+    ThreeWords result;
+    result.first = value.first + 5;
+    result.second = value.second + 6;
+    result.third = value.third + 7;
+    return result;
+}
+
+i32 main() {
+    test_start("single-member struct argument and return");
+    SingleWord single;
+    single.value = 10;
+    SingleWord single_result = round_trip_single(single);
+    assert_eq_i64(11, single_result.value, "single member survives both ABI directions");
+
+    test_start("two-word struct argument and return");
+    TwoWords pair;
+    pair.first = 20;
+    pair.second = 30;
+    TwoWords pair_result = round_trip_pair(pair);
+    assert_eq_i64(32, pair_result.first, "pair first member");
+    assert_eq_i64(23, pair_result.second, "pair second member");
+
+    test_start("mixed float/integer struct argument and return");
+    MixedWords mixed;
+    mixed.fraction = 1.5;
+    mixed.tag = 40;
+    MixedWords mixed_result = round_trip_mixed(mixed);
+    assert_eq_i64(3, (i64)mixed_result.fraction, "mixed float member");
+    assert_eq_i64(44, mixed_result.tag, "mixed integer member");
+
+    test_start("large indirect struct argument and return");
+    ThreeWords large;
+    large.first = 50;
+    large.second = 60;
+    large.third = 70;
+    ThreeWords large_result = round_trip_large(large);
+    assert_eq_i64(55, large_result.first, "large first member");
+    assert_eq_i64(66, large_result.second, "large second member");
+    assert_eq_i64(77, large_result.third, "large third member");
+
+    return done();
+}
