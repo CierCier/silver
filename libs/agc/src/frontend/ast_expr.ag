@@ -1,6 +1,7 @@
 // libs/agc/src/frontend/ast_expr.ag — Lowered typed expression and statement representations.
 import std.intern;
 import std.mem.vec;
+import std.string;
 import frontend.ast;
 import frontend.lexer;
 import frontend.types;
@@ -16,6 +17,10 @@ enum ExprKind {
     Index;         // inner0 = target_id, inner1 = index_id
     Cast;          // inner0 = expr_id, aux = target_type_id
     Move;          // aux = var_name_id
+    Ternary;       // inner0 = cond_id, inner1 = then_id, aux = else_id
+    Match;         // inner0 = scrutinee_id, inner1 = arms_start, aux = arms_count
+    Asm;           // inner0 = code_text_id, inner1 = args_start, aux = args_count
+    SizeOf;        // aux = type_id
 }
 
 struct AstExpr {
@@ -34,10 +39,10 @@ enum StmtKind {
     Return;        // inner0 = expr_id
     If;            // inner0 = cond_expr_id, inner1 = then_block_id, aux = else_block_id
     While;         // inner0 = cond_expr_id, inner1 = body_block_id
-    For;           // aux = iter_var_id, inner0 = iterable_id, inner1 = body_id
     Break;
     Continue;
     Defer;         // inner0 = block_id
+    Block;         // inner0 = block_stmts_start, aux = block_stmts_count
 }
 
 struct AstStmt {
@@ -48,10 +53,70 @@ struct AstStmt {
     Span span;
 }
 
+enum MatchPatternKind {
+    Wildcard;
+    Variant;
+    Binding;
+    Literal;
+}
+
+struct MatchArm {
+    MatchPatternKind pattern;
+    u32 enum_name_id;
+    u32 variant_name_id;
+    u32 bindings_start;
+    u32 bindings_count;
+    u32 literal_id;
+    u32 guard_id;
+    u32 value_id;
+    Span span;
+}
+
+struct AstAsm {
+    u32 code_id;
+    u32 constraints_id;
+    u32 args_start;
+    u32 args_count;
+}
+
+String unescape_string_literal(str text) {
+    String out = String.new();
+    if (text == (str)0) { return move out; }
+    i64 len = strlen(text);
+    i64 start = 0;
+    i64 end = len;
+    if (len >= 2 && text[0] == '"' && text[len - 1] == '"') {
+        start = 1;
+        end = len - 1;
+    }
+    i64 i = start;
+    while (i < end) {
+        if (text[i] == '\\' && i + 1 < end) {
+            i += 1;
+            u8 next = (u8)text[i];
+            if (next == (u8)'n') { out.push((u8)10); }
+            else if (next == (u8)'r') { out.push((u8)13); }
+            else if (next == (u8)'t') { out.push((u8)9); }
+            else if (next == (u8)'0') { out.push((u8)0); }
+            else if (next == (u8)'\\') { out.push((u8)'\\'); }
+            else if (next == (u8)'"') { out.push((u8)'"'); }
+            else { out.push(next); }
+        } else {
+            out.push((u8)text[i]);
+        }
+        i += 1;
+    }
+    return move out;
+}
+
 struct AstPool {
     Vec<AstExpr> exprs;
     Vec<AstStmt> stmts;
     Vec<u32> args;
+    Vec<u32> block_stmts;
+    Vec<MatchArm> arms;
+    Vec<u32> arm_bindings;
+    Vec<AstAsm> asms;
 }
 
 impl AstPool {
@@ -60,6 +125,23 @@ impl AstPool {
         pool.exprs = Vec<AstExpr>.new();
         pool.stmts = Vec<AstStmt>.new();
         pool.args = Vec<u32>.new();
+        pool.block_stmts = Vec<u32>.new();
+        pool.arms = Vec<MatchArm>.new();
+        pool.arm_bindings = Vec<u32>.new();
+        pool.asms = Vec<AstAsm>.new();
+
+        // 0: Dummy null arm
+        MatchArm null_arm;
+        null_arm.pattern = MatchPatternKind.Wildcard;
+        null_arm.enum_name_id = 0;
+        null_arm.variant_name_id = 0;
+        null_arm.bindings_start = 0;
+        null_arm.bindings_count = 0;
+        null_arm.literal_id = 0;
+        null_arm.guard_id = 0;
+        null_arm.value_id = 0;
+        null_arm.span = Span.synthetic();
+        pool.arms.push(move null_arm);
 
         // 0: Dummy null expr
         AstExpr null_expr;
@@ -75,9 +157,13 @@ impl AstPool {
     }
 
     u32 add_literal(AstPool* self, u32 type_id, Span span) {
+        return self.add_literal_val(type_id, 0, span);
+    }
+
+    u32 add_literal_val(AstPool* self, u32 type_id, u32 val_id, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.Literal;
-        expr.inner0 = 0;
+        expr.inner0 = val_id;
         expr.inner1 = 0;
         expr.aux = type_id;
         expr.span = span;
@@ -122,6 +208,47 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    u32 add_ternary(AstPool* self, u32 cond_id, u32 then_id, u32 else_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Ternary;
+        expr.inner0 = cond_id;
+        expr.inner1 = then_id;
+        expr.aux = else_id;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_match_arm(AstPool* self, MatchPatternKind pattern, u32 enum_name_id,
+                      u32 variant_name_id, u32 bindings_start, u32 bindings_count,
+                      u32 literal_id, u32 guard_id, u32 value_id, Span span) {
+        MatchArm arm;
+        arm.pattern = pattern;
+        arm.enum_name_id = enum_name_id;
+        arm.variant_name_id = variant_name_id;
+        arm.bindings_start = bindings_start;
+        arm.bindings_count = bindings_count;
+        arm.literal_id = literal_id;
+        arm.guard_id = guard_id;
+        arm.value_id = value_id;
+        arm.span = span;
+        self.arms.push(move arm);
+        return (u32)(self.arms.len() - 1);
+    }
+
+    u32 add_match(AstPool* self, u32 scrutinee_id, u32 arms_start, u32 arms_count, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Match;
+        expr.inner0 = scrutinee_id;
+        expr.inner1 = arms_start;
+        expr.aux = arms_count;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
     u32 add_move(AstPool* self, u32 var_name_id, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.Move;
@@ -130,6 +257,25 @@ impl AstPool {
         expr.aux = var_name_id;
         expr.span = span;
         expr.inferred_type = TYPE_UNKNOWN;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_asm(AstPool* self, u32 code_id, u32 constraints_id, u32 args_start, u32 args_count, Span span) {
+        AstAsm item;
+        item.code_id = code_id;
+        item.constraints_id = constraints_id;
+        item.args_start = args_start;
+        item.args_count = args_count;
+        self.asms.push(move item);
+        u32 asm_idx = (u32)(self.asms.len() - 1);
+        AstExpr expr;
+        expr.kind = ExprKind.Asm;
+        expr.inner0 = 0;
+        expr.inner1 = 0;
+        expr.aux = asm_idx;
+        expr.span = span;
+        expr.inferred_type = TYPE_I64;
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
     }
@@ -182,6 +328,30 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    u32 add_cast(AstPool* self, u32 expr_id, u32 target_type_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Cast;
+        expr.inner0 = expr_id;
+        expr.inner1 = 0;
+        expr.aux = target_type_id;
+        expr.span = span;
+        expr.inferred_type = target_type_id;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_sizeof(AstPool* self, u32 type_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.SizeOf;
+        expr.inner0 = 0;
+        expr.inner1 = 0;
+        expr.aux = type_id;
+        expr.span = span;
+        expr.inferred_type = TYPE_I64;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
     u32 add_stmt_return(AstPool* self, u32 expr_id, Span span) {
         AstStmt stmt;
         stmt.kind = StmtKind.Return;
@@ -226,6 +396,61 @@ impl AstPool {
         return (u32)(self.stmts.len() - 1);
     }
 
+    u32 add_stmt_if(AstPool* self, u32 cond_id, u32 then_stmt_id, u32 else_stmt_id, Span span) {
+        AstStmt stmt;
+        stmt.kind = StmtKind.If;
+        stmt.inner0 = cond_id;
+        stmt.inner1 = then_stmt_id;
+        stmt.aux = else_stmt_id;
+        stmt.span = span;
+        self.stmts.push(move stmt);
+        return (u32)(self.stmts.len() - 1);
+    }
+
+    u32 add_stmt_while(AstPool* self, u32 cond_id, u32 body_stmt_id, Span span) {
+        AstStmt stmt;
+        stmt.kind = StmtKind.While;
+        stmt.inner0 = cond_id;
+        stmt.inner1 = body_stmt_id;
+        stmt.aux = 0;
+        stmt.span = span;
+        self.stmts.push(move stmt);
+        return (u32)(self.stmts.len() - 1);
+    }
+
+    u32 add_stmt_break(AstPool* self, Span span) {
+        AstStmt stmt;
+        stmt.kind = StmtKind.Break;
+        stmt.inner0 = 0;
+        stmt.inner1 = 0;
+        stmt.aux = 0;
+        stmt.span = span;
+        self.stmts.push(move stmt);
+        return (u32)(self.stmts.len() - 1);
+    }
+
+    u32 add_stmt_continue(AstPool* self, Span span) {
+        AstStmt stmt;
+        stmt.kind = StmtKind.Continue;
+        stmt.inner0 = 0;
+        stmt.inner1 = 0;
+        stmt.aux = 0;
+        stmt.span = span;
+        self.stmts.push(move stmt);
+        return (u32)(self.stmts.len() - 1);
+    }
+
+    u32 add_stmt_block(AstPool* self, u32 start, u32 count, Span span) {
+        AstStmt stmt;
+        stmt.kind = StmtKind.Block;
+        stmt.inner0 = start;
+        stmt.inner1 = 0;
+        stmt.aux = count;
+        stmt.span = span;
+        self.stmts.push(move stmt);
+        return (u32)(self.stmts.len() - 1);
+    }
+
     AstExpr* get_expr(AstPool* self, u32 id) {
         if ((i64)id >= self.exprs.len()) {
             return self.exprs.get_ptr(0);
@@ -238,5 +463,12 @@ impl AstPool {
             return self.stmts.get_ptr(0);
         }
         return self.stmts.get_ptr((i64)id);
+    }
+
+    MatchArm* get_arm(AstPool* self, u32 id) {
+        if ((i64)id >= self.arms.len()) {
+            return self.arms.get_ptr(0);
+        }
+        return self.arms.get_ptr((i64)id);
     }
 }

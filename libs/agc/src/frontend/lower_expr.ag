@@ -4,14 +4,28 @@ import std.mem.vec;
 import std.string;
 import frontend.ast;
 import frontend.ast_expr;
+import frontend.items;
 import frontend.lexer;
 import frontend.symbols;
 import frontend.types;
+
+bool match_head_has_question(SyntaxNode* start, SyntaxNode* end) {
+    SyntaxNode* cursor = start;
+    while (cursor != (SyntaxNode*)0 && cursor != end) {
+        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Question) {
+            return true;
+        }
+        cursor = cursor.next_sibling;
+    }
+    return false;
+}
 
 struct ExprLowerer {
     AstPool* pool;
     TypeTable* types;
     Interner* names;
+    SyntaxNode* unit_root;
+    bool unsupported;
 }
 
 impl ExprLowerer {
@@ -20,6 +34,8 @@ impl ExprLowerer {
         lowerer.pool = pool;
         lowerer.types = types;
         lowerer.names = names;
+        lowerer.unit_root = (SyntaxNode*)0;
+        lowerer.unsupported = false;
         return move lowerer;
     }
 
@@ -35,21 +51,30 @@ impl ExprLowerer {
 
         if (node.kind == NodeKind.Token) {
             if (node.token_kind == TokenKind.IntLiteral) {
-                return self.pool.add_literal(TYPE_I32, node.span);
+                u32 val_id = self.names.intern(node.text);
+                return self.pool.add_literal_val(TYPE_I32, val_id, node.span);
             }
             if (node.token_kind == TokenKind.FloatLiteral) {
-                return self.pool.add_literal(TYPE_F64, node.span);
+                u32 val_id = self.names.intern(node.text);
+                return self.pool.add_literal_val(TYPE_F64, val_id, node.span);
             }
             if (node.token_kind == TokenKind.StringLiteral) {
-                return self.pool.add_literal(TYPE_STR, node.span);
+                u32 val_id = self.names.intern(node.text);
+                return self.pool.add_literal_val(TYPE_STR, val_id, node.span);
             }
             if (node.token_kind == TokenKind.CharLiteral) {
-                return self.pool.add_literal(TYPE_CHAR, node.span);
+                u32 val_id = self.names.intern(node.text);
+                return self.pool.add_literal_val(TYPE_CHAR, val_id, node.span);
             }
-            if (node.token_kind == TokenKind.True || node.token_kind == TokenKind.False) {
-                return self.pool.add_literal(TYPE_BOOL, node.span);
+            if (node.token_kind == TokenKind.True) {
+                u32 val_id = self.names.intern("true");
+                return self.pool.add_literal_val(TYPE_BOOL, val_id, node.span);
             }
-            if (node.token_kind == TokenKind.Identifier) {
+            if (node.token_kind == TokenKind.False) {
+                u32 val_id = self.names.intern("false");
+                return self.pool.add_literal_val(TYPE_BOOL, val_id, node.span);
+            }
+            if (node_is_identifier(node)) {
                 u32 name_id = self.names.intern(node.text);
                 return self.pool.add_var(name_id, node.span);
             }
@@ -58,10 +83,451 @@ impl ExprLowerer {
         return 0;
     }
 
+    u32 lower_match_arm_pattern(ExprLowerer* self, SyntaxNode* start, SyntaxNode* end,
+                                MatchPatternKind* kind_out, u32* variant_out,
+                                u32* bindings_start_out, u32* bindings_count_out,
+                                u32* literal_out) {
+        *kind_out = MatchPatternKind.Wildcard;
+        *variant_out = 0;
+        *bindings_start_out = 0;
+        *bindings_count_out = 0;
+        *literal_out = 0;
+        if (start == (SyntaxNode*)0 || start == end) {
+            self.unsupported = true;
+            return 0;
+        }
+        // Literal patterns: single int/bool/char literal.
+        if (start.kind == NodeKind.Token && start.next_sibling == end
+            && (start.token_kind == TokenKind.IntLiteral || start.token_kind == TokenKind.True
+                || start.token_kind == TokenKind.False || start.token_kind == TokenKind.CharLiteral)) {
+            *kind_out = MatchPatternKind.Literal;
+            if (start.token_kind == TokenKind.IntLiteral) {
+                u32 val_id = self.names.intern(start.text);
+                *literal_out = self.pool.add_literal_val(TYPE_I32, val_id, start.span);
+            } else if (start.token_kind == TokenKind.True) {
+                u32 val_id = self.names.intern("true");
+                *literal_out = self.pool.add_literal_val(TYPE_BOOL, val_id, start.span);
+            } else if (start.token_kind == TokenKind.False) {
+                u32 val_id = self.names.intern("false");
+                *literal_out = self.pool.add_literal_val(TYPE_BOOL, val_id, start.span);
+            } else {
+                u32 val_id = self.names.intern(start.text);
+                *literal_out = self.pool.add_literal_val(TYPE_CHAR, val_id, start.span);
+            }
+            return 0;
+        }
+        // Wildcard or bare binding: single identifier.
+        if (start.kind == NodeKind.Token && start.token_kind == TokenKind.Identifier
+            && start.next_sibling == end) {
+            if (start.text == "_") {
+                *kind_out = MatchPatternKind.Wildcard;
+                return 0;
+            }
+            if (strlen(start.text) > 0 && start.text[0] >= (u8)65 && start.text[0] <= (u8)90) {
+                *kind_out = MatchPatternKind.Variant;
+                *variant_out = self.names.intern(start.text);
+                return 0;
+            }
+            *kind_out = MatchPatternKind.Binding;
+            u32 bindings_start = (u32)self.pool.arm_bindings.len();
+            self.pool.arm_bindings.push(self.names.intern(start.text));
+            *bindings_start_out = bindings_start;
+            *bindings_count_out = 1;
+            return 0;
+        }
+        // Qualified or bare variant with optional payload: Name[.Variant][(binds)].
+        SyntaxNode* cursor = start;
+        SyntaxNode* variant_node = (SyntaxNode*)0;
+        while (cursor != (SyntaxNode*)0 && cursor != end) {
+            if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Identifier) {
+                variant_node = cursor;
+            } else if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Dot) {
+                variant_node = (SyntaxNode*)0;
+            } else if (cursor.kind != NodeKind.Parenthesized) {
+                self.unsupported = true;
+                return 0;
+            }
+            if (cursor.kind == NodeKind.Parenthesized) {
+                break;
+            }
+            cursor = cursor.next_sibling;
+        }
+        if (variant_node == (SyntaxNode*)0) {
+            self.unsupported = true;
+            return 0;
+        }
+        *kind_out = MatchPatternKind.Variant;
+        *variant_out = self.names.intern(variant_node.text);
+        SyntaxNode* payload = variant_node.next_sibling;
+        while (payload != (SyntaxNode*)0 && payload != end && payload.kind != NodeKind.Parenthesized) {
+            payload = payload.next_sibling;
+        }
+        if (payload != (SyntaxNode*)0 && payload != end) {
+            u32 bindings_start = (u32)self.pool.arm_bindings.len();
+            u32 bindings_count = 0;
+            SyntaxNode* bind = payload.first_child;
+            while (bind != (SyntaxNode*)0) {
+                if (bind.kind == NodeKind.Token && bind.token_kind == TokenKind.Comma) {
+                    bind = bind.next_sibling;
+                    continue;
+                }
+                if (bind.kind != NodeKind.Token || bind.token_kind != TokenKind.Identifier) {
+                    self.unsupported = true;
+                    return 0;
+                }
+                self.pool.arm_bindings.push(self.names.intern(bind.text));
+                bindings_count += 1;
+                bind = bind.next_sibling;
+            }
+            *bindings_start_out = bindings_start;
+            *bindings_count_out = bindings_count;
+        }
+        return 0;
+    }
+
+    u32 lower_match(ExprLowerer* self, SyntaxNode* match_token, SyntaxNode** next_out) {
+        *next_out = (SyntaxNode*)0;
+        SyntaxNode* block = match_token.next_sibling;
+        while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+            block = block.next_sibling;
+        }
+        if (block == (SyntaxNode*)0) {
+            self.unsupported = true;
+            return 0;
+        }
+        u32 scrutinee = self.lower_sequence(match_token.next_sibling, block);
+        u32 arms_start = (u32)self.pool.arms.len();
+        u32 arms_count = 0;
+        SyntaxNode* cursor = block.first_child;
+        while (cursor != (SyntaxNode*)0) {
+            while (cursor != (SyntaxNode*)0
+                && (cursor.kind == NodeKind.Token
+                    && (cursor.token_kind == TokenKind.Comma || cursor.token_kind == TokenKind.Semicolon))) {
+                cursor = cursor.next_sibling;
+            }
+            if (cursor == (SyntaxNode*)0) {
+                break;
+            }
+            SyntaxNode* colon = cursor;
+            while (colon != (SyntaxNode*)0
+                && !(colon.kind == NodeKind.Token && colon.token_kind == TokenKind.Colon)) {
+                colon = colon.next_sibling;
+            }
+            if (colon == (SyntaxNode*)0) {
+                self.unsupported = true;
+                return 0;
+            }
+            if (match_head_has_question(cursor, colon)) {
+                self.unsupported = true;
+                return 0;
+            }
+            // Split head into pattern and guards at top-level commas.
+            SyntaxNode* head_end = cursor;
+            while (head_end != (SyntaxNode*)0 && head_end != colon
+                && !(head_end.kind == NodeKind.Token && head_end.token_kind == TokenKind.Comma)) {
+                head_end = head_end.next_sibling;
+            }
+            MatchPatternKind pattern_kind = MatchPatternKind.Wildcard;
+            u32 variant_id = 0;
+            u32 bindings_start = 0;
+            u32 bindings_count = 0;
+            u32 literal_id = 0;
+            self.lower_match_arm_pattern(cursor, head_end, &pattern_kind, &variant_id,
+                                         &bindings_start, &bindings_count, &literal_id);
+            u32 guard_id = 0;
+            SyntaxNode* guard_cursor = head_end;
+            while (guard_cursor != (SyntaxNode*)0 && guard_cursor != colon) {
+                if (guard_cursor.kind == NodeKind.Token && guard_cursor.token_kind == TokenKind.Comma) {
+                    SyntaxNode* guard_end = guard_cursor.next_sibling;
+                    while (guard_end != (SyntaxNode*)0 && guard_end != colon
+                        && !(guard_end.kind == NodeKind.Token && guard_end.token_kind == TokenKind.Comma)) {
+                        guard_end = guard_end.next_sibling;
+                    }
+                    u32 guard_part = self.lower_sequence(guard_cursor.next_sibling, guard_end);
+                    if (guard_id == 0) {
+                        guard_id = guard_part;
+                    } else {
+                        guard_id = self.pool.add_binary(TokenKind.And, guard_id, guard_part, guard_cursor.span);
+                    }
+                    guard_cursor = guard_end;
+                    continue;
+                }
+                guard_cursor = guard_cursor.next_sibling;
+            }
+            SyntaxNode* value_end = colon.next_sibling;
+            while (value_end != (SyntaxNode*)0
+                && !(value_end.kind == NodeKind.Token && value_end.token_kind == TokenKind.Comma)) {
+                value_end = value_end.next_sibling;
+            }
+            u32 value_id = self.lower_sequence(colon.next_sibling, value_end);
+            self.pool.add_match_arm(pattern_kind, 0, variant_id, bindings_start, bindings_count,
+                                    literal_id, guard_id, value_id, cursor.span);
+            arms_count += 1;
+            cursor = value_end;
+            if (cursor != (SyntaxNode*)0) {
+                cursor = cursor.next_sibling;
+            }
+        }
+        *next_out = block.next_sibling;
+        return self.pool.add_match(scrutinee, arms_start, arms_count, match_token.span);
+    }
+
+    u32 lower_asm(ExprLowerer* self, SyntaxNode* node, SyntaxNode** next_out) {
+        SyntaxNode* paren = node.next_sibling;
+        if (paren == (SyntaxNode*)0 || paren.kind != NodeKind.Parenthesized) {
+            *next_out = (SyntaxNode*)0;
+            self.unsupported = true;
+            return 0;
+        }
+        *next_out = paren.next_sibling;
+
+        SyntaxNode* cursor = paren.first_child;
+        String raw_code = String.new();
+        while (cursor != (SyntaxNode*)0 && cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.StringLiteral) {
+            if (raw_code.len() > 0) {
+                raw_code.push((u8)'\n');
+            }
+            String unesc = unescape_string_literal(cursor.text);
+            raw_code.push_str(unesc.to_str());
+            unesc.drop();
+            cursor = cursor.next_sibling;
+        }
+
+        String norm_code = String.new();
+        i64 code_len = raw_code.len();
+        str raw_str = raw_code.to_str();
+        i64 line_start = 0;
+        while (line_start < code_len) {
+            i64 line_end = line_start;
+            while (line_end < code_len && raw_str[line_end] != (u8)'\n') {
+                line_end += 1;
+            }
+            i64 s = line_start;
+            while (s < line_end && (raw_str[s] == (u8)' ' || raw_str[s] == (u8)'\t' || raw_str[s] == (u8)'\r')) {
+                s += 1;
+            }
+            i64 e = line_end;
+            while (e > s && (raw_str[e - 1] == (u8)' ' || raw_str[e - 1] == (u8)'\t' || raw_str[e - 1] == (u8)'\r')) {
+                e -= 1;
+            }
+            if (e > s) {
+                if (norm_code.len() > 0) {
+                    norm_code.push((u8)'\n');
+                    norm_code.push((u8)'\t');
+                }
+                i64 k = s;
+                while (k < e) {
+                    norm_code.push(raw_str[k]);
+                    k += 1;
+                }
+            }
+            line_start = line_end + 1;
+        }
+        raw_code.drop();
+
+        if (cursor != (SyntaxNode*)0 && cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Comma) {
+            cursor = cursor.next_sibling;
+        }
+
+        Vec<u32> temp_args = Vec<u32>.new();
+        if (cursor != (SyntaxNode*)0 && cursor.kind == NodeKind.Bracket) {
+            SyntaxNode* arg = cursor.first_child;
+            while (arg != (SyntaxNode*)0) {
+                if (arg.kind != NodeKind.Token || arg.token_kind != TokenKind.Comma) {
+                    SyntaxNode* next_arg = (SyntaxNode*)0;
+                    u32 arg_id = self.lower_sequence_until_comma(arg, &next_arg);
+                    if (arg_id != 0) {
+                        temp_args.push(arg_id);
+                    }
+                    arg = next_arg;
+                    continue;
+                }
+                arg = arg.next_sibling;
+            }
+            cursor = cursor.next_sibling;
+        }
+
+        u32 args_start = (u32)self.pool.args.len();
+        u32 args_count = (u32)temp_args.len();
+        i64 ai = 0;
+        while (ai < temp_args.len()) {
+            self.pool.args.push(temp_args.get(ai));
+            ai += 1;
+        }
+        temp_args.drop();
+
+        String constraints = String.from_str("={rax}");
+        str reg_names[7];
+        reg_names[0] = "{rax}";
+        reg_names[1] = "{rdi}";
+        reg_names[2] = "{rsi}";
+        reg_names[3] = "{rdx}";
+        reg_names[4] = "{r10}";
+        reg_names[5] = "{r8}";
+        reg_names[6] = "{r9}";
+
+        i64 r = 0;
+        while (r < (i64)args_count && r < 7) {
+            constraints.push((u8)',');
+            constraints.push_str(reg_names[r]);
+            r += 1;
+        }
+        constraints.push_str(",~{rcx},~{r11}");
+
+        if (cursor != (SyntaxNode*)0 && cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Comma) {
+            cursor = cursor.next_sibling;
+        }
+        if (cursor != (SyntaxNode*)0 && cursor.kind == NodeKind.Bracket) {
+            SyntaxNode* clobber = cursor.first_child;
+            while (clobber != (SyntaxNode*)0) {
+                if (clobber.kind == NodeKind.Token && clobber.token_kind == TokenKind.StringLiteral) {
+                    String cname = unescape_string_literal(clobber.text);
+                    str cstr = cname.to_str();
+                    if (cstr[0] == (u8)'%') {
+                        cstr = (str)((u64)cstr + 1);
+                    }
+                    if (strlen(cstr) > 0) {
+                        String pattern = String.from_str("~{");
+                        pattern.push_str(cstr);
+                        pattern.push((u8)'}');
+                        if (!constraints.contains(pattern.to_str())) {
+                            constraints.push((u8)',');
+                            constraints.push_str(pattern.to_str());
+                        }
+                        pattern.drop();
+                    }
+                    cname.drop();
+                }
+                clobber = clobber.next_sibling;
+            }
+        }
+
+        u32 code_id = self.names.intern(norm_code.to_str());
+        u32 constraints_id = self.names.intern(constraints.to_str());
+        norm_code.drop();
+        constraints.drop();
+
+        return self.pool.add_asm(code_id, constraints_id, args_start, args_count, node.span);
+    }
+
+    bool cannot_be_cast_operand(ExprLowerer* self, SyntaxNode* next) {
+        if (next == (SyntaxNode*)0) { return true; }
+        if (next.kind == NodeKind.Block || next.kind == NodeKind.Bracket) {
+            return true;
+        }
+        if (next.kind == NodeKind.Token) {
+            TokenKind tk = next.token_kind;
+            if (tk == TokenKind.Semicolon || tk == TokenKind.Comma || tk == TokenKind.Colon
+                || tk == TokenKind.RightParen || tk == TokenKind.RightBracket || tk == TokenKind.RightBrace
+                || tk == TokenKind.Dot || tk == TokenKind.Assign
+                || tk == TokenKind.Equal || tk == TokenKind.NotEqual
+                || tk == TokenKind.Less || tk == TokenKind.LessEqual
+                || tk == TokenKind.Greater || tk == TokenKind.GreaterEqual
+                || tk == TokenKind.Or || tk == TokenKind.And
+                || tk == TokenKind.Question
+                || tk == TokenKind.Plus || tk == TokenKind.Slash || tk == TokenKind.Percent
+                || tk == TokenKind.BitwiseOr || tk == TokenKind.BitwiseXor) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool try_parse_cast_type(ExprLowerer* self, SyntaxNode* paren_node, u32* type_id_out) {
+        if (paren_node == (SyntaxNode*)0 || paren_node.kind != NodeKind.Parenthesized) {
+            return false;
+        }
+        SyntaxNode* first = paren_node.first_child;
+        if (first == (SyntaxNode*)0) {
+            return false;
+        }
+        if (self.cannot_be_cast_operand(paren_node.next_sibling)) {
+            return false;
+        }
+        SyntaxNode* cur = first;
+        bool has_type_tokens = false;
+        bool has_pointer_or_ref = false;
+        while (cur != (SyntaxNode*)0) {
+            if (cur.kind == NodeKind.Token) {
+                TokenKind tk = cur.token_kind;
+                if (tk == TokenKind.Star || tk == TokenKind.BitwiseAnd || tk == TokenKind.Const || tk == TokenKind.Mut) {
+                    has_pointer_or_ref = true;
+                } else if (types_is_primitive_name(cur.text) || tk == TokenKind.Identifier) {
+                    has_type_tokens = true;
+                } else {
+                    return false;
+                }
+            } else if (cur.kind != NodeKind.Bracket) {
+                return false;
+            }
+            cur = cur.next_sibling;
+        }
+        if (!has_type_tokens) {
+            return false;
+        }
+        if (!has_pointer_or_ref) {
+            if (first.kind != NodeKind.Token) { return false; }
+            bool is_prim = types_is_primitive_name(first.text);
+            bool is_upper = strlen(first.text) > 0 && first.text[0] >= (u8)'A' && first.text[0] <= (u8)'Z';
+            if (!is_prim && !is_upper) {
+                return false;
+            }
+        }
+        String type_str = String.new();
+        cur = first;
+        while (cur != (SyntaxNode*)0) {
+            if (cur.kind == NodeKind.Token) {
+                if (cur.token_kind != TokenKind.Const) {
+                    type_str.push_str(cur.text);
+                }
+            }
+            cur = cur.next_sibling;
+        }
+        u32 type_id = type_id_from_text(self.types, type_str.to_str());
+        type_str.drop();
+        if (type_id == TYPE_UNKNOWN) {
+            return false;
+        }
+        *type_id_out = type_id;
+        return true;
+    }
+
     u32 lower_postfix(ExprLowerer* self, SyntaxNode* node, SyntaxNode** next_out) {
         if (node == (SyntaxNode*)0) {
             *next_out = (SyntaxNode*)0;
             return 0;
+        }
+
+        if (node.kind == NodeKind.Token && node.token_kind == TokenKind.Match) {
+            return self.lower_match(node, next_out);
+        }
+
+        if (node.kind == NodeKind.Token && node.token_kind == TokenKind.Asm) {
+            return self.lower_asm(node, next_out);
+        }
+
+        // Builtin macro @size(Type) — byte size of a type.
+        if (node.kind == NodeKind.Token && node.token_kind == TokenKind.At) {
+            SyntaxNode* name_node = node.next_sibling;
+            if (name_node != (SyntaxNode*)0 && name_node.kind == NodeKind.Token
+                && name_node.token_kind == TokenKind.Identifier
+                && strcmp(name_node.text, "size") == 0) {
+                SyntaxNode* paren = name_node.next_sibling;
+                if (paren != (SyntaxNode*)0 && paren.kind == NodeKind.Parenthesized) {
+                    String type_text = String.new();
+                    SyntaxNode* tcur = paren.first_child;
+                    while (tcur != (SyntaxNode*)0) {
+                        if (tcur.kind == NodeKind.Token) {
+                            type_text.push_str(tcur.text);
+                        }
+                        tcur = tcur.next_sibling;
+                    }
+                    u32 type_id = type_id_from_text(self.types, type_text.to_str());
+                    type_text.drop();
+                    *next_out = paren.next_sibling;
+                    return self.pool.add_sizeof(type_id, node.span);
+                }
+            }
         }
 
         // Check for unary move
@@ -86,29 +552,164 @@ impl ExprLowerer {
             return self.pool.add_unary(op, operand_id, node.span);
         }
 
+        // Check for type cast: (type)operand
+        u32 cast_type = 0;
+        if (node.kind == NodeKind.Parenthesized && self.try_parse_cast_type(node, &cast_type)) {
+            SyntaxNode* after_operand = (SyntaxNode*)0;
+            u32 operand_id = self.lower_postfix(node.next_sibling, &after_operand);
+            *next_out = after_operand;
+            return self.pool.add_cast(operand_id, cast_type, node.span);
+        }
+
         u32 expr = self.lower_primary(node);
         SyntaxNode* cursor = node.next_sibling;
 
-        // Postfix loop: calls, field accesses, indices
-        while (cursor != (SyntaxNode*)0) {
-            if (cursor.kind == NodeKind.Parenthesized) {
-                // Call expression: expr(args...)
-                u32 args_start = (u32)self.pool.args.len();
-                u32 args_count = 0;
-                SyntaxNode* arg = cursor.first_child;
+        // Generic free-function call: name<Args>(expr, ...). Without this the
+        // `<` misparses as a comparison and the call vanishes. Lower as a call
+        // on the base name; the backend resolves the template by base name.
+        if (expr != 0 && self.pool.get_expr(expr).kind == ExprKind.Var
+            && cursor != (SyntaxNode*)0 && cursor.kind == NodeKind.Token
+            && cursor.token_kind == TokenKind.Less) {
+            SyntaxNode* scan = cursor;
+            i64 gdepth = 0;
+            SyntaxNode* greater = (SyntaxNode*)0;
+            while (scan != (SyntaxNode*)0) {
+                if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Less) {
+                    gdepth += 1;
+                } else if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Greater) {
+                    gdepth -= 1;
+                    if (gdepth == 0) {
+                        greater = scan;
+                        break;
+                    }
+                }
+                scan = scan.next_sibling;
+            }
+            if (greater != (SyntaxNode*)0 && greater.next_sibling != (SyntaxNode*)0
+                && greater.next_sibling.kind == NodeKind.Parenthesized) {
+                SyntaxNode* paren = greater.next_sibling;
+                Vec<u32> temp_args = Vec<u32>.new();
+                SyntaxNode* arg = paren.first_child;
                 while (arg != (SyntaxNode*)0) {
                     if (arg.kind != NodeKind.Token || arg.token_kind != TokenKind.Comma) {
                         SyntaxNode* next_arg = (SyntaxNode*)0;
                         u32 arg_id = self.lower_sequence_until_comma(arg, &next_arg);
                         if (arg_id != 0) {
-                            self.pool.args.push(arg_id);
-                            args_count += 1;
+                            temp_args.push(arg_id);
                         }
                         arg = next_arg;
                         continue;
                     }
                     arg = arg.next_sibling;
                 }
+                u32 args_start = (u32)self.pool.args.len();
+                u32 args_count = (u32)temp_args.len();
+                i64 ai = 0;
+                while (ai < temp_args.len()) {
+                    self.pool.args.push(temp_args.get(ai));
+                    ai += 1;
+                }
+                temp_args.drop();
+                expr = self.pool.add_call(expr, args_start, args_count, paren.span);
+                cursor = paren.next_sibling;
+            }
+        }
+
+        // Generic static call: Type<args>.method(...). Without this the `<`
+        // would misparse as a comparison. The receiver keeps the full
+        // instantiation text so layouts stay distinct per instantiation.
+        if (expr != 0 && self.pool.get_expr(expr).kind == ExprKind.Var
+            && cursor != (SyntaxNode*)0 && cursor.kind == NodeKind.Token
+            && cursor.token_kind == TokenKind.Less) {
+            SyntaxNode* scan = cursor;
+            i64 depth = 0;
+            SyntaxNode* greater = (SyntaxNode*)0;
+            while (scan != (SyntaxNode*)0) {
+                if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Less) {
+                    depth += 1;
+                } else if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Greater) {
+                    depth -= 1;
+                    if (depth == 0) {
+                        greater = scan;
+                        break;
+                    }
+                }
+                scan = scan.next_sibling;
+            }
+            if (greater != (SyntaxNode*)0 && greater.next_sibling != (SyntaxNode*)0
+                && greater.next_sibling.kind == NodeKind.Token
+                && greater.next_sibling.token_kind == TokenKind.Dot
+                && greater.next_sibling.next_sibling != (SyntaxNode*)0
+                && greater.next_sibling.next_sibling.kind == NodeKind.Token
+                && greater.next_sibling.next_sibling.token_kind == TokenKind.Identifier) {
+                String full = String.new();
+                SyntaxNode* part = node;
+                while (part != (SyntaxNode*)0 && part != greater.next_sibling) {
+                    if (part.kind == NodeKind.Token) {
+                        full.push_str(part.text);
+                    }
+                    part = part.next_sibling;
+                }
+                u32 receiver_id = self.pool.add_var(self.names.intern(full.to_str()), node.span);
+                full.drop();
+                SyntaxNode* method_node = greater.next_sibling.next_sibling;
+                SyntaxNode* paren = method_node.next_sibling;
+                if (paren != (SyntaxNode*)0 && paren.kind == NodeKind.Parenthesized) {
+                    Vec<u32> temp_args = Vec<u32>.new();
+                    SyntaxNode* arg = paren.first_child;
+                    while (arg != (SyntaxNode*)0) {
+                        if (arg.kind != NodeKind.Token || arg.token_kind != TokenKind.Comma) {
+                            SyntaxNode* next_arg = (SyntaxNode*)0;
+                            u32 arg_id = self.lower_sequence_until_comma(arg, &next_arg);
+                            if (arg_id != 0) {
+                                temp_args.push(arg_id);
+                            }
+                            arg = next_arg;
+                            continue;
+                        }
+                        arg = arg.next_sibling;
+                    }
+                    u32 args_start = (u32)self.pool.args.len();
+                    u32 args_count = (u32)temp_args.len();
+                    self.pool.args.push(args_count);
+                    i64 ai = 0;
+                    while (ai < temp_args.len()) {
+                        self.pool.args.push(temp_args.get(ai));
+                        ai += 1;
+                    }
+                    temp_args.drop();
+                    expr = self.pool.add_method_call(receiver_id, self.names.intern(method_node.text), args_start, paren.span);
+                    cursor = paren.next_sibling;
+                }
+            }
+        }
+
+        // Postfix loop: calls, field accesses, indices
+        while (cursor != (SyntaxNode*)0) {
+            if (cursor.kind == NodeKind.Parenthesized) {
+                // Call expression: expr(args...)
+                Vec<u32> temp_args = Vec<u32>.new();
+                SyntaxNode* arg = cursor.first_child;
+                while (arg != (SyntaxNode*)0) {
+                    if (arg.kind != NodeKind.Token || arg.token_kind != TokenKind.Comma) {
+                        SyntaxNode* next_arg = (SyntaxNode*)0;
+                        u32 arg_id = self.lower_sequence_until_comma(arg, &next_arg);
+                        if (arg_id != 0) {
+                            temp_args.push(arg_id);
+                        }
+                        arg = next_arg;
+                        continue;
+                    }
+                    arg = arg.next_sibling;
+                }
+                u32 args_start = (u32)self.pool.args.len();
+                u32 args_count = (u32)temp_args.len();
+                i64 ai = 0;
+                while (ai < temp_args.len()) {
+                    self.pool.args.push(temp_args.get(ai));
+                    ai += 1;
+                }
+                temp_args.drop();
                 expr = self.pool.add_call(expr, args_start, args_count, cursor.span);
                 cursor = cursor.next_sibling;
                 continue;
@@ -121,22 +722,29 @@ impl ExprLowerer {
                     SyntaxNode* after_member = member.next_sibling;
                     if (after_member != (SyntaxNode*)0 && after_member.kind == NodeKind.Parenthesized) {
                         // Method call: expr.method(args...)
-                        u32 args_start = (u32)self.pool.args.len();
-                        u32 args_count = 0;
+                        Vec<u32> temp_args = Vec<u32>.new();
                         SyntaxNode* arg = after_member.first_child;
                         while (arg != (SyntaxNode*)0) {
                             if (arg.kind != NodeKind.Token || arg.token_kind != TokenKind.Comma) {
                                 SyntaxNode* next_arg = (SyntaxNode*)0;
                                 u32 arg_id = self.lower_sequence_until_comma(arg, &next_arg);
                                 if (arg_id != 0) {
-                                    self.pool.args.push(arg_id);
-                                    args_count += 1;
+                                    temp_args.push(arg_id);
                                 }
                                 arg = next_arg;
                                 continue;
                             }
                             arg = arg.next_sibling;
                         }
+                        u32 args_start = (u32)self.pool.args.len();
+                        u32 args_count = (u32)temp_args.len();
+                        self.pool.args.push(args_count);
+                        i64 ai = 0;
+                        while (ai < temp_args.len()) {
+                            self.pool.args.push(temp_args.get(ai));
+                            ai += 1;
+                        }
+                        temp_args.drop();
                         expr = self.pool.add_method_call(expr, member_name_id, args_start, after_member.span);
                         cursor = after_member.next_sibling;
                         continue;
@@ -164,28 +772,67 @@ impl ExprLowerer {
         return expr;
     }
 
-    u32 lower_sequence(ExprLowerer* self, SyntaxNode* start, SyntaxNode* end) {
+    i32 binary_op_precedence(ExprLowerer* self, TokenKind kind) {
+        if (kind == TokenKind.Or) { return 1; }
+        if (kind == TokenKind.And) { return 2; }
+        if (kind == TokenKind.BitwiseOr) { return 3; }
+        if (kind == TokenKind.BitwiseXor) { return 4; }
+        if (kind == TokenKind.BitwiseAnd) { return 5; }
+        if (kind == TokenKind.Equal || kind == TokenKind.NotEqual) { return 6; }
+        if (kind == TokenKind.Less || kind == TokenKind.LessEqual
+            || kind == TokenKind.Greater || kind == TokenKind.GreaterEqual) { return 7; }
+        if (kind == TokenKind.Plus || kind == TokenKind.Minus) { return 8; }
+        if (kind == TokenKind.Star || kind == TokenKind.Slash || kind == TokenKind.Percent) { return 9; }
+        return 0;
+    }
+
+    u32 lower_expr_prec(ExprLowerer* self, SyntaxNode* start, SyntaxNode* end, i32 min_prec, SyntaxNode** next_out) {
         if (start == (SyntaxNode*)0 || start == end) {
+            *next_out = start;
             return 0;
         }
 
-        SyntaxNode* next = (SyntaxNode*)0;
-        u32 lhs = self.lower_postfix(start, &next);
+        SyntaxNode* cursor = (SyntaxNode*)0;
+        u32 lhs = self.lower_postfix(start, &cursor);
 
-        if (next == (SyntaxNode*)0 || next == end) {
-            return lhs;
+        while (cursor != (SyntaxNode*)0 && cursor != end) {
+            if (cursor.kind != NodeKind.Token || !self.is_binary_op(cursor.token_kind)) {
+                break;
+            }
+            i32 prec = self.binary_op_precedence(cursor.token_kind);
+            if (prec < min_prec) {
+                break;
+            }
+            TokenKind op = cursor.token_kind;
+            Span span = cursor.span;
+            SyntaxNode* rhs_start = cursor.next_sibling;
+            SyntaxNode* next_cursor = (SyntaxNode*)0;
+            u32 rhs = self.lower_expr_prec(rhs_start, end, prec + 1, &next_cursor);
+            lhs = self.pool.add_binary(op, lhs, rhs, span);
+            cursor = next_cursor;
         }
 
-        // Binary operators
-        if (next.kind == NodeKind.Token && self.is_binary_op(next.token_kind)) {
-            TokenKind op = next.token_kind;
-            Span span = next.span;
-            SyntaxNode* rhs_start = next.next_sibling;
-            u32 rhs = self.lower_sequence(rhs_start, end);
-            return self.pool.add_binary(op, lhs, rhs, span);
-        }
-
+        *next_out = cursor;
         return lhs;
+    }
+
+    u32 lower_sequence(ExprLowerer* self, SyntaxNode* start, SyntaxNode* end) {
+        SyntaxNode* next = (SyntaxNode*)0;
+        u32 result = self.lower_expr_prec(start, end, 1, &next);
+        if (next != (SyntaxNode*)0 && next != end
+            && next.kind == NodeKind.Token && next.token_kind == TokenKind.Question) {
+            SyntaxNode* colon = next.next_sibling;
+            while (colon != (SyntaxNode*)0 && colon != end
+                && !(colon.kind == NodeKind.Token && colon.token_kind == TokenKind.Colon)) {
+                colon = colon.next_sibling;
+            }
+            if (colon != (SyntaxNode*)0 && colon != end) {
+                u32 then_id = self.lower_sequence(next.next_sibling, colon);
+                u32 else_id = self.lower_sequence(colon.next_sibling, end);
+                return self.pool.add_ternary(result, then_id, else_id, next.span);
+            }
+        }
+        return result;
     }
 
     u32 lower_sequence_until_comma(ExprLowerer* self, SyntaxNode* start, SyntaxNode** next_out) {
@@ -216,21 +863,28 @@ impl ExprLowerer {
         if (start.kind == NodeKind.Token && types_is_primitive_name(start.text)) {
             return true;
         }
+        if (node_is_identifier(start) && (start.token_kind == TokenKind.VecType || start.token_kind == TokenKind.OptionalType)) {
+            return true;
+        }
         SyntaxNode* cursor = start;
         i64 ident_count = 0;
         bool has_dot = false;
+        bool has_angle = false;
         while (cursor != limit && cursor != (SyntaxNode*)0) {
             if (cursor.kind == NodeKind.Token) {
                 if (cursor.token_kind == TokenKind.Dot) {
                     has_dot = true;
                 }
-                if (cursor.token_kind == TokenKind.Identifier) {
+                if (node_is_identifier(cursor)) {
                     ident_count += 1;
+                }
+                if (cursor.token_kind == TokenKind.Less || strcmp(cursor.text, "<") == 0) {
+                    has_angle = true;
                 }
             }
             cursor = cursor.next_sibling;
         }
-        return !has_dot && ident_count >= 2;
+        return !has_dot && (ident_count >= 2 || (has_angle && ident_count >= 1));
     }
 
     SyntaxNode* find_decl_var_node(ExprLowerer* self, SyntaxNode* start, SyntaxNode* limit) {
@@ -354,6 +1008,53 @@ impl ExprLowerer {
         }
     }
 
+    u32 lower_block_stmt(ExprLowerer* self, SyntaxNode* block) {
+        if (block == (SyntaxNode*)0) { return 0; }
+        Vec<u32> inner_stmts = Vec<u32>.new();
+        self.lower_block(block, &inner_stmts);
+        u32 start = (u32)self.pool.block_stmts.len();
+        i64 i = 0;
+        while (i < inner_stmts.len()) {
+            self.pool.block_stmts.push(inner_stmts.get(i));
+            i += 1;
+        }
+        u32 count = (u32)inner_stmts.len();
+        inner_stmts.drop();
+        return self.pool.add_stmt_block(start, count, block.span);
+    }
+
+    u32 lower_if_stmt(ExprLowerer* self, SyntaxNode* if_token, SyntaxNode** next_cursor_out) {
+        SyntaxNode* cond_node = if_token.next_sibling;
+        if (cond_node == (SyntaxNode*)0 || cond_node.kind != NodeKind.Parenthesized) {
+            *next_cursor_out = (cond_node != (SyntaxNode*)0) ? cond_node.next_sibling : (SyntaxNode*)0;
+            return 0;
+        }
+        SyntaxNode* then_node = cond_node.next_sibling;
+        if (then_node == (SyntaxNode*)0 || then_node.kind != NodeKind.Block) {
+            *next_cursor_out = (then_node != (SyntaxNode*)0) ? then_node.next_sibling : (SyntaxNode*)0;
+            return 0;
+        }
+        Span span = if_token.span;
+        u32 cond_id = self.lower_sequence(cond_node.first_child, (SyntaxNode*)0);
+        u32 then_stmt = self.lower_block_stmt(then_node);
+        u32 else_stmt = 0;
+        SyntaxNode* next_after_then = then_node.next_sibling;
+        if (next_after_then != (SyntaxNode*)0 && next_after_then.kind == NodeKind.Token && next_after_then.token_kind == TokenKind.Else) {
+            SyntaxNode* else_target = next_after_then.next_sibling;
+            if (else_target != (SyntaxNode*)0 && else_target.kind == NodeKind.Block) {
+                else_stmt = self.lower_block_stmt(else_target);
+                *next_cursor_out = else_target.next_sibling;
+            } else if (else_target != (SyntaxNode*)0 && else_target.kind == NodeKind.Token && else_target.token_kind == TokenKind.If) {
+                else_stmt = self.lower_if_stmt(else_target, next_cursor_out);
+            } else {
+                *next_cursor_out = next_after_then.next_sibling;
+            }
+        } else {
+            *next_cursor_out = next_after_then;
+        }
+        return self.pool.add_stmt_if(cond_id, then_stmt, else_stmt, span);
+    }
+
     void lower_block(ExprLowerer* self, SyntaxNode* block, Vec<u32>* stmt_ids) {
         if (block == (SyntaxNode*)0) { return; }
         SyntaxNode* cursor = block.first_child;
@@ -362,6 +1063,91 @@ impl ExprLowerer {
                 cursor = cursor.next_sibling;
                 continue;
             }
+
+            if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.If) {
+                SyntaxNode* next_cursor = (SyntaxNode*)0;
+                u32 if_id = self.lower_if_stmt(cursor, &next_cursor);
+                if (if_id != 0) {
+                    stmt_ids.push(if_id);
+                }
+                cursor = next_cursor;
+                continue;
+            }
+
+            if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.While) {
+                SyntaxNode* cond_node = cursor.next_sibling;
+                if (cond_node != (SyntaxNode*)0 && cond_node.kind == NodeKind.Parenthesized) {
+                    SyntaxNode* body_node = cond_node.next_sibling;
+                    if (body_node != (SyntaxNode*)0 && body_node.kind == NodeKind.Block) {
+                        Span span = cursor.span;
+                        u32 cond_id = self.lower_sequence(cond_node.first_child, (SyntaxNode*)0);
+                        u32 body_stmt = self.lower_block_stmt(body_node);
+                        u32 while_id = self.pool.add_stmt_while(cond_id, body_stmt, span);
+                        stmt_ids.push(while_id);
+                        cursor = body_node.next_sibling;
+                        continue;
+                    }
+                }
+            }
+
+            if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.For) {
+                SyntaxNode* paren_node = cursor.next_sibling;
+                if (paren_node != (SyntaxNode*)0 && paren_node.kind == NodeKind.Parenthesized) {
+                    SyntaxNode* body_node = paren_node.next_sibling;
+                    if (body_node != (SyntaxNode*)0 && body_node.kind == NodeKind.Block) {
+                        SyntaxNode* init_start = paren_node.first_child;
+                        SyntaxNode* semi1 = (SyntaxNode*)0;
+                        SyntaxNode* semi2 = (SyntaxNode*)0;
+                        SyntaxNode* scan = init_start;
+                        while (scan != (SyntaxNode*)0) {
+                            if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Semicolon) {
+                                if (semi1 == (SyntaxNode*)0) { semi1 = scan; }
+                                else if (semi2 == (SyntaxNode*)0) { semi2 = scan; }
+                            }
+                            scan = scan.next_sibling;
+                        }
+                        if (semi1 != (SyntaxNode*)0 && semi2 != (SyntaxNode*)0) {
+                            self.lower_statement(init_start, semi1, stmt_ids);
+                            u32 cond_id = self.lower_sequence(semi1.next_sibling, semi2);
+                            Vec<u32> loop_body_stmts = Vec<u32>.new();
+                            self.lower_block(body_node, &loop_body_stmts);
+                            self.lower_statement(semi2.next_sibling, (SyntaxNode*)0, &loop_body_stmts);
+                            u32 b_start = (u32)self.pool.block_stmts.len();
+                            i64 bi = 0;
+                            while (bi < loop_body_stmts.len()) {
+                                self.pool.block_stmts.push(loop_body_stmts.get(bi));
+                                bi += 1;
+                            }
+                            u32 b_count = (u32)loop_body_stmts.len();
+                            loop_body_stmts.drop();
+                            u32 body_block = self.pool.add_stmt_block(b_start, b_count, body_node.span);
+                            u32 while_id = self.pool.add_stmt_while(cond_id, body_block, cursor.span);
+                            stmt_ids.push(while_id);
+                            cursor = body_node.next_sibling;
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Break) {
+                stmt_ids.push(self.pool.add_stmt_break(cursor.span));
+                cursor = cursor.next_sibling;
+                if (cursor != (SyntaxNode*)0 && cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
+                    cursor = cursor.next_sibling;
+                }
+                continue;
+            }
+
+            if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Continue) {
+                stmt_ids.push(self.pool.add_stmt_continue(cursor.span));
+                cursor = cursor.next_sibling;
+                if (cursor != (SyntaxNode*)0 && cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
+                    cursor = cursor.next_sibling;
+                }
+                continue;
+            }
+
             SyntaxNode* stmt_start = cursor;
             SyntaxNode* stmt_end = cursor;
             while (stmt_end != (SyntaxNode*)0 && (stmt_end.kind != NodeKind.Token || stmt_end.token_kind != TokenKind.Semicolon)) {

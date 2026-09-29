@@ -9,7 +9,9 @@ import std.mem.memory;
 import std.mem.vec;
 import std.path;
 import std.result;
-import std.string;
+import std.env;
+import std.process;
+import std.sys.os;
 import frontend.artifacts;
 import frontend.ast;
 import frontend.diagnostics;
@@ -170,6 +172,73 @@ String module_candidate(str base_path, str relative_path, str extension) {
     return move candidate;
 }
 
+bool agsm_tool_available(str path) {
+    return is_file(path) && sys_access((i64)path, 1) == 0;
+}
+
+Optional<String> find_agsm_tool() {
+    Optional<String> configured = var("SILVER_AGSM");
+    if (configured.is_some()) {
+        String path = configured.unwrap();
+        if (agsm_tool_available(path.to_str())) {
+            return Optional<String>.some(move path);
+        }
+        path.drop();
+        return Optional<String>.none();
+    }
+
+    String fallback = String.from_str("target/debug/agsm");
+    if (agsm_tool_available(fallback.to_str())) {
+        return Optional<String>.some(move fallback);
+    }
+    fallback.drop();
+
+    Optional<String> path_env = var("PATH");
+    if (path_env.is_some()) {
+        String path_str = path_env.unwrap();
+        SplitIter iter = path_str.split(":");
+        while (true) {
+            Optional<str> item = iter.next();
+            if (item.is_none()) { break; }
+            str dir = item.unwrap();
+            String candidate = String.from_str(dir);
+            candidate.push('/');
+            candidate.push_str("agsm");
+            if (agsm_tool_available(candidate.to_str())) {
+                path_str.drop();
+                return Optional<String>.some(move candidate);
+            }
+            candidate.drop();
+        }
+        path_str.drop();
+    }
+
+    return Optional<String>.none();
+}
+
+bool ensure_submodule_built(str submodule_path, str artifact_path) {
+    if (file_exists(artifact_path)) {
+        return true;
+    }
+    Optional<String> agsm_path = find_agsm_tool();
+    if (agsm_path.is_none()) {
+        return false;
+    }
+    String bin = agsm_path.unwrap();
+    Command cmd = Command.new(bin.to_str());
+    cmd.arg("build");
+    cmd.arg(submodule_path);
+    cmd.arg("-o");
+    cmd.arg(artifact_path);
+    Result<ExitStatus, i64> res = cmd.status();
+    bin.drop();
+    if (res.is_err()) {
+        return false;
+    }
+    ExitStatus status = res.unwrap();
+    return status.success();
+}
+
 String resolve_from_base(str base, str relative) {
     String source = module_candidate(base, relative, ".ag");
     if (file_exists(source.to_str())) {
@@ -178,9 +247,16 @@ String resolve_from_base(str base, str relative) {
     source.drop();
     String artifact = module_candidate(base, relative, ".agm");
     if (file_exists(artifact.to_str())) {
-        source.drop();
         return artifact;
     }
+    String submodule = module_candidate(base, relative, ".submodule.toml");
+    if (file_exists(submodule.to_str())) {
+        if (ensure_submodule_built(submodule.to_str(), artifact.to_str())) {
+            submodule.drop();
+            return artifact;
+        }
+    }
+    submodule.drop();
     artifact.drop();
     return String.new();
 }

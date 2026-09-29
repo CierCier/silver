@@ -178,6 +178,19 @@ TypeProjection projection_parse_type_at(ProjectionTypeParser* parser) {
             parser.cursor += 1;
         }
     }
+    while (parser.cursor < parser.end) {
+        SyntaxNode* next = parser.leaves.get(parser.cursor);
+        if (next.token_kind == TokenKind.Star) {
+            parser.cursor += 1;
+            result.kind = ProjectionTypeKind.Pointer;
+            result.is_mutable = true;
+        } else if (next.token_kind == TokenKind.BitwiseAnd) {
+            parser.cursor += 1;
+            result.kind = ProjectionTypeKind.Reference;
+        } else {
+            break;
+        }
+    }
     return result;
 }
 

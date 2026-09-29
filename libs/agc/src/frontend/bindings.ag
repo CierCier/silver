@@ -2,6 +2,7 @@
 // independent of source text: later ownership and borrow passes can consume
 // the same binding records without re-parsing declarations.
 import std.mem.vec;
+import std.string;
 import frontend.ast;
 import frontend.expressions;
 import frontend.lexer;
@@ -42,6 +43,23 @@ void add_typed_binding(Vec<Binding>* bindings, SyntaxNode* name, BindingKind kin
 
 void add_binding(Vec<Binding>* bindings, SyntaxNode* name, BindingKind kind) {
     add_typed_binding(bindings, name, kind, (TypeProjection*)0);
+}
+
+String binding_declared_type_text(TypeProjection* proj) {
+    if (proj == (TypeProjection*)0 || strlen(proj.name) == 0) {
+        return String.new();
+    }
+    String s = String.from_str(proj.name);
+    if (strlen(proj.argument0) > 0) {
+        s.push('<');
+        s.push_str(proj.argument0);
+        if (strlen(proj.argument1) > 0) {
+            s.push_str(", ");
+            s.push_str(proj.argument1);
+        }
+        s.push('>');
+    }
+    return move s;
 }
 
 SyntaxNode* binding_previous_sibling(SyntaxNode* node) {
@@ -223,6 +241,9 @@ void collect_parameter_bindings(SyntaxNode* parameters, Vec<Binding>* bindings) 
             if (name_index > 0) {
                 declared_type = projection_parse_type(&segment, 0, name_index);
             }
+        }
+        if (last_identifier != (SyntaxNode*)0 && strcmp(last_identifier.text, "self") == 0 && strlen(declared_type.name) == 0) {
+            declared_type.name = "Self";
         }
         add_typed_binding(bindings, last_identifier, BindingKind.Parameter, &declared_type);
         segment.drop();

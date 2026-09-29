@@ -7,6 +7,7 @@ import frontend.ast_expr;
 import frontend.bindings;
 import frontend.diagnostics;
 import frontend.expressions;
+import frontend.items;
 import frontend.lexer;
 import frontend.lower_expr;
 import frontend.symbols;
@@ -68,38 +69,108 @@ bool types_match(TypeTable* types, u32 expected, u32 actual) {
     TypeEntry* act_entry = types.get(actual);
     if ((exp_entry.kind == TypeKind.Pointer || exp_entry.kind == TypeKind.Reference)
         && (act_entry.kind == TypeKind.Pointer || act_entry.kind == TypeKind.Reference)) {
+        if (exp_entry.inner == TYPE_VOID || exp_entry.inner == TYPE_UNKNOWN
+            || act_entry.inner == TYPE_VOID || act_entry.inner == TYPE_UNKNOWN) {
+            return true;
+        }
         return exp_entry.inner == act_entry.inner;
+    }
+    if (exp_entry.kind == TypeKind.Named && act_entry.kind == TypeKind.Named) {
+        str exp_name = types.names.get(exp_entry.name_id);
+        str act_name = types.names.get(act_entry.name_id);
+        i64 i = 0;
+        while (exp_name[i] != (u8)0 && act_name[i] != (u8)0 && exp_name[i] == act_name[i]) {
+            i += 1;
+        }
+        if ((exp_name[i] == (u8)0 || exp_name[i] == (u8)60)
+            && (act_name[i] == (u8)0 || act_name[i] == (u8)60)) {
+            return true;
+        }
+    }
+    if (type_is_integer(expected) && type_is_integer(actual)) {
+        return true;
     }
     return false;
 }
 
-SyntaxNode* find_function_by_name(SyntaxNode* root, str name) {
+bool types_match_value(TypeTable* types, u32 expected, u32 actual, bool actual_is_literal) {
+    if (types_match(types, expected, actual)) {
+        return true;
+    }
+    if (!actual_is_literal) {
+        return false;
+    }
+    // Integer and float literals fold into the expected width, mirroring the
+    // stage0 literal promotion (`i64 a = 5` is accepted).
+    if (type_is_integer(expected) && type_is_integer(actual)) {
+        return true;
+    }
+    if (type_is_float(expected) && type_is_float(actual)) {
+        return true;
+    }
+    return false;
+}
+
+bool expr_is_literal(AstPool* pool, u32 expr_id) {
+    if (expr_id == 0) {
+        return false;
+    }
+    return pool.get_expr(expr_id).kind == ExprKind.Literal;
+}
+
+SyntaxNode* find_function_by_name_and_arity(SyntaxNode* root, str name, i64 arity) {
     if (root == (SyntaxNode*)0) { return (SyntaxNode*)0; }
     SyntaxNode* child = root.first_child;
+    SyntaxNode* fallback = (SyntaxNode*)0;
     while (child != (SyntaxNode*)0) {
         if (child.kind == NodeKind.Function) {
             SyntaxNode* id_node = function_identifier(child);
             if (id_node != (SyntaxNode*)0 && strcmp(id_node.text, name) == 0) {
-                return child;
+                if (arity < 0) {
+                    return child;
+                }
+                Vec<Binding> params = Vec<Binding>.new();
+                collect_parameter_bindings(binding_function_parameters(child), &params);
+                i64 p_len = params.len();
+                params.drop();
+                if (p_len == arity) {
+                    return child;
+                }
+                if (fallback == (SyntaxNode*)0) {
+                    fallback = child;
+                }
             }
         }
         child = child.next_sibling;
     }
-    return (SyntaxNode*)0;
+    return fallback;
+}
+
+SyntaxNode* find_function_by_name(SyntaxNode* root, str name) {
+    return find_function_by_name_and_arity(root, name, -1);
 }
 
 u32 function_return_type_id(TypeTable* types, SyntaxNode* function) {
     if (function == (SyntaxNode*)0) { return TYPE_VOID; }
     SyntaxNode* parameters = binding_function_parameters(function);
     SyntaxNode* name = function_identifier(function);
+    if (name == (SyntaxNode*)0) { return TYPE_VOID; }
+    String ret_text = String.new();
     SyntaxNode* child = function.first_child;
-    while (child != (SyntaxNode*)0 && child != parameters) {
-        if (child != name && child.kind == NodeKind.Token && (is_primitive_type_token(child.token_kind) || child.token_kind == TokenKind.Identifier)) {
-            return types.parse_type_name(child.text);
+    while (child != (SyntaxNode*)0 && child != name && child != parameters) {
+        if (child.kind == NodeKind.Token) {
+            if (strcmp(child.text, "pub") != 0 && strcmp(child.text, "static") != 0 && strcmp(child.text, "extern") != 0) {
+                ret_text.push_str(child.text);
+            }
         }
         child = child.next_sibling;
     }
-    return TYPE_VOID;
+    u32 ret_type = type_id_from_text(types, ret_text.to_str());
+    ret_text.drop();
+    if (ret_type == TYPE_UNKNOWN || ret_type == 0) {
+        return TYPE_VOID;
+    }
+    return ret_type;
 }
 
 u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode* root,
@@ -119,8 +190,38 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
             str var_name = symbols.names.get(expr.aux);
             inferred = symbols.get_type(var_name);
         }
+        if (inferred == TYPE_UNKNOWN) {
+            str var_name = symbols.names.get(expr.aux);
+            if (strlen(var_name) > 0 && var_name[0] >= (u8)65 && var_name[0] <= (u8)90) {
+                SyntaxNode* enum_item = (SyntaxNode*)0;
+                if (find_variant_enum(root, var_name, &enum_item)) {
+                    SyntaxNode* enum_id = item_identifier(enum_item);
+                    if (enum_id != (SyntaxNode*)0) {
+                        i64 tag = 0;
+                        i64 arity = 0;
+                        if (enum_variant_info(root, enum_id.text, var_name, &tag, &arity) && arity == 0) {
+                            inferred = types.get_named(enum_id.text);
+                        }
+                    }
+                }
+            }
+        }
     } else if (expr.kind == ExprKind.Move) {
         inferred = env.lookup(expr.aux);
+    } else if (expr.kind == ExprKind.SizeOf) {
+        inferred = TYPE_I64;
+    } else if (expr.kind == ExprKind.Cast) {
+        infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
+        inferred = expr.aux;
+    } else if (expr.kind == ExprKind.Asm) {
+        AstAsm* asm_info = pool.asms.get_ptr((i64)expr.aux);
+        i64 i = 0;
+        while (i < (i64)asm_info.args_count) {
+            u32 arg_id = pool.args.get((i64)asm_info.args_start + i);
+            infer_expr(pool, types, symbols, root, env, arg_id, diagnostics, ok);
+            i += 1;
+        }
+        inferred = TYPE_I64;
     } else if (expr.kind == ExprKind.Unary) {
         u32 op = expr.aux;
         u32 op_type = infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
@@ -150,11 +251,166 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         } else {
             inferred = (lhs == TYPE_UNKNOWN) ? rhs : lhs;
         }
+    } else if (expr.kind == ExprKind.Ternary) {
+        u32 cond_type = infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
+        u32 then_type = infer_expr(pool, types, symbols, root, env, expr.inner1, diagnostics, ok);
+        u32 else_type = infer_expr(pool, types, symbols, root, env, expr.aux, diagnostics, ok);
+        if (cond_type != TYPE_UNKNOWN && cond_type != TYPE_BOOL) {
+            String message = String.from_str("type mismatch: ternary condition must be bool, found ");
+            message.push_str(types.type_name(cond_type));
+            diagnostics.error(pool.get_expr(expr.inner0).span, move message);
+            *ok = false;
+        }
+        // A literal condition folds to the taken branch, mirroring stage0.
+        AstExpr* cond = pool.get_expr(expr.inner0);
+        if (cond.kind == ExprKind.Literal && cond.inferred_type == TYPE_BOOL) {
+            str text = symbols.names.get(cond.inner0);
+            if (strcmp(text, "true") == 0) {
+                inferred = then_type;
+            } else if (strcmp(text, "false") == 0) {
+                inferred = else_type;
+            }
+        }
+        if (inferred == TYPE_UNKNOWN) {
+            if (then_type != TYPE_UNKNOWN && else_type != TYPE_UNKNOWN
+                && !types_match_value(types, then_type, else_type, expr_is_literal(pool, expr.aux))) {
+                String message = String.from_str("type mismatch in ternary branches: ");
+                message.push_str(types.type_name(then_type));
+                message.push_str(" vs ");
+                message.push_str(types.type_name(else_type));
+                diagnostics.error(expr.span, move message);
+                *ok = false;
+            }
+            inferred = (then_type == TYPE_UNKNOWN) ? else_type : then_type;
+        }
+    } else if (expr.kind == ExprKind.Match) {
+        u32 scrut_type = infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
+        str scrut_enum = "";
+        if (scrut_type != TYPE_UNKNOWN) {
+            TypeEntry* scrut_entry = types.get(scrut_type);
+            if (scrut_entry.kind == TypeKind.Named) {
+                scrut_enum = types.names.get(scrut_entry.name_id);
+            }
+        }
+        u32 result_type = TYPE_UNKNOWN;
+        bool has_wildcard = false;
+        Vec<i64> covered = Vec<i64>.new();
+        i64 arm_index = 0;
+        while (arm_index < (i64)expr.aux) {
+            MatchArm* arm = pool.get_arm(expr.inner1 + (u32)arm_index);
+            str arm_enum = scrut_enum;
+            if (arm.pattern == MatchPatternKind.Variant) {
+                str variant = symbols.names.get(arm.variant_name_id);
+                if (strlen(arm_enum) == 0) {
+                    SyntaxNode* found_item = (SyntaxNode*)0;
+                    if (!find_variant_enum(root, variant, &found_item)) {
+                        String message = String.from_str("unknown variant '");
+                        message.push_str(variant);
+                        message.push_str("'");
+                        diagnostics.error(arm.span, move message);
+                        *ok = false;
+                    } else {
+                        SyntaxNode* enum_id = item_identifier(found_item);
+                        if (enum_id != (SyntaxNode*)0) {
+                            arm_enum = enum_id.text;
+                        }
+                    }
+                }
+                if (strlen(arm_enum) > 0) {
+                    i64 tag = 0;
+                    i64 arity = 0;
+                    if (!enum_variant_info(root, arm_enum, variant, &tag, &arity)) {
+                        String message = String.from_str("unknown variant '");
+                        message.push_str(variant);
+                        message.push_str("'");
+                        diagnostics.error(arm.span, move message);
+                        *ok = false;
+                    } else {
+                        if (arity != (i64)arm.bindings_count) {
+                            String message = String.from_str("pattern binding count mismatch for '");
+                            message.push_str(variant);
+                            message.push_str("'");
+                            diagnostics.error(arm.span, move message);
+                            *ok = false;
+                        }
+                        i64 binding_index = 0;
+                        while (binding_index < (i64)arm.bindings_count) {
+                            u32 binding_name = pool.arm_bindings.get((i64)arm.bindings_start + binding_index);
+                            String payload_text = String.new();
+                            u32 payload_type = TYPE_UNKNOWN;
+                            if (enum_payload_type_text(root, arm_enum, variant, binding_index, &payload_text)) {
+                                payload_type = type_id_from_text(types, payload_text.to_str());
+                            }
+                            payload_text.drop();
+                            env.insert(binding_name, payload_type);
+                            binding_index += 1;
+                        }
+                        bool seen_tag = false;
+                        i64 covered_index = 0;
+                        while (covered_index < covered.len()) {
+                            if (covered.get(covered_index) == tag) {
+                                seen_tag = true;
+                            }
+                            covered_index += 1;
+                        }
+                        if (!seen_tag) {
+                            covered.push(tag);
+                        }
+                    }
+                }
+            } else if (arm.pattern == MatchPatternKind.Binding) {
+                u32 binding_name = pool.arm_bindings.get((i64)arm.bindings_start);
+                env.insert(binding_name, scrut_type);
+                has_wildcard = true;
+            } else if (arm.pattern == MatchPatternKind.Wildcard) {
+                has_wildcard = true;
+            } else if (arm.pattern == MatchPatternKind.Literal) {
+                if (strlen(scrut_enum) > 0) {
+                    String message = String.from_str("type mismatch: literal pattern on enum scrutinee");
+                    diagnostics.error(arm.span, move message);
+                    *ok = false;
+                }
+            }
+            if (arm.guard_id != 0) {
+                u32 guard_type = infer_expr(pool, types, symbols, root, env, arm.guard_id, diagnostics, ok);
+                if (guard_type != TYPE_UNKNOWN && guard_type != TYPE_BOOL) {
+                    String message = String.from_str("type mismatch: match guard must be bool, found ");
+                    message.push_str(types.type_name(guard_type));
+                    diagnostics.error(pool.get_expr(arm.guard_id).span, move message);
+                    *ok = false;
+                }
+            }
+            u32 arm_type = infer_expr(pool, types, symbols, root, env, arm.value_id, diagnostics, ok);
+            if (result_type == TYPE_UNKNOWN) {
+                result_type = arm_type;
+            } else if (arm_type != TYPE_UNKNOWN
+                && !types_match_value(types, result_type, arm_type, expr_is_literal(pool, arm.value_id))) {
+                String message = String.from_str("type mismatch in match arms: ");
+                message.push_str(types.type_name(result_type));
+                message.push_str(" vs ");
+                message.push_str(types.type_name(arm_type));
+                diagnostics.error(pool.get_expr(arm.value_id).span, move message);
+                *ok = false;
+            }
+            arm_index += 1;
+        }
+        if (!has_wildcard && strlen(scrut_enum) > 0) {
+            i64 total = enum_variant_count(root, scrut_enum);
+            if (total >= 0 && covered.len() < total) {
+                String message = String.from_str("non-exhaustive match on '");
+                message.push_str(scrut_enum);
+                message.push_str("'");
+                diagnostics.error(expr.span, move message);
+                *ok = false;
+            }
+        }
+        covered.drop();
+        inferred = result_type;
     } else if (expr.kind == ExprKind.Call) {
         AstExpr* callee = pool.get_expr(expr.inner0);
         if (callee.kind == ExprKind.Var) {
             str callee_name = symbols.names.get(callee.aux);
-            SyntaxNode* callee_fn = find_function_by_name(root, callee_name);
+            SyntaxNode* callee_fn = find_function_by_name_and_arity(root, callee_name, (i64)expr.aux);
             if (callee_fn != (SyntaxNode*)0) {
                 u32 ret_type = function_return_type_id(types, callee_fn);
                 inferred = ret_type;
@@ -174,10 +430,10 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                     i64 i = 0;
                     while (i < params.len()) {
                         Binding* param = params.get_ptr(i);
-                        u32 expected_arg_type = types.parse_type_name(param.declared_type.name);
+                        u32 expected_arg_type = type_id_from_text(types, param.declared_type.name);
                         u32 arg_expr_id = pool.args.get((i64)expr.inner1 + i);
                         u32 actual_arg_type = infer_expr(pool, types, symbols, root, env, arg_expr_id, diagnostics, ok);
-                        if (!types_match(types, expected_arg_type, actual_arg_type)) {
+                        if (!types_match_value(types, expected_arg_type, actual_arg_type, expr_is_literal(pool, arg_expr_id))) {
                             String message = String.from_str("type mismatch: expected ");
                             message.push_str(types.type_name(expected_arg_type));
                             message.push_str(", found ");
@@ -189,7 +445,67 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                     }
                 }
                 params.drop();
+            } else if (strlen(callee_name) > 0 && callee_name[0] >= (u8)65 && callee_name[0] <= (u8)90) {
+                SyntaxNode* enum_item = (SyntaxNode*)0;
+                if (find_variant_enum(root, callee_name, &enum_item)) {
+                    SyntaxNode* enum_id = item_identifier(enum_item);
+                    if (enum_id != (SyntaxNode*)0) {
+                        i64 tag = 0;
+                        i64 arity = 0;
+                        if (enum_variant_info(root, enum_id.text, callee_name, &tag, &arity)) {
+                            if (arity != (i64)expr.aux) {
+                                String message = String.from_str("argument count mismatch: expected ");
+                                append_i64(&message, arity);
+                                message.push_str(", found ");
+                                append_i64(&message, (i64)expr.aux);
+                                diagnostics.error(expr.span, move message);
+                                *ok = false;
+                            }
+                            inferred = types.get_named(enum_id.text);
+                        }
+                    }
+                }
             }
+        }
+    } else if (expr.kind == ExprKind.MethodCall) {
+        AstExpr* receiver = pool.get_expr(expr.inner0);
+        if (receiver.kind == ExprKind.Var) {
+            str receiver_name = symbols.names.get(receiver.aux);
+            str method_name = symbols.names.get(expr.aux);
+            String base = String.new();
+            i64 bi = 0;
+            while (receiver_name[bi] != (u8)0 && receiver_name[bi] != (u8)60) {
+                base.push(receiver_name[bi]);
+                bi += 1;
+            }
+            SyntaxNode* enum_item = find_enum_item(root, base.to_str());
+            if (enum_item != (SyntaxNode*)0) {
+                Vec<SyntaxNode*> variant_names = Vec<SyntaxNode*>.new();
+                Vec<i64> variant_tags = Vec<i64>.new();
+                Vec<i64> variant_arities = Vec<i64>.new();
+                enum_each_variant(enum_item, &variant_names, &variant_tags, &variant_arities);
+                i64 vi = 0;
+                while (vi < variant_names.len()) {
+                    if (method_matches_variant(method_name, variant_names.get(vi).text)) {
+                        u32 args_count = pool.args.get((i64)expr.inner1);
+                        if (variant_arities.get(vi) != (i64)args_count) {
+                            String message = String.from_str("argument count mismatch: expected ");
+                            append_i64(&message, variant_arities.get(vi));
+                            message.push_str(", found ");
+                            append_i64(&message, (i64)args_count);
+                            diagnostics.error(expr.span, move message);
+                            *ok = false;
+                        }
+                        inferred = types.get_named(receiver_name);
+                        break;
+                    }
+                    vi += 1;
+                }
+                variant_names.drop();
+                variant_tags.drop();
+                variant_arities.drop();
+            }
+            base.drop();
         }
     }
 
@@ -197,9 +513,95 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
     return inferred;
 }
 
+void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
+                         SyntaxNode* root, TypeEnv* env, u32 expected_return,
+                         u32 stmt_id, DiagnosticBag* diagnostics, bool* ok) {
+    AstStmt* stmt = pool.get_stmt(stmt_id);
+    if (stmt.kind == StmtKind.Let) {
+        u32 declared_type = stmt.inner0;
+        u32 init_id = stmt.inner1;
+        u32 var_name = stmt.aux;
+        if (init_id != 0) {
+            u32 actual_type = infer_expr(pool, types, symbols, root, env, init_id, diagnostics, ok);
+            if (declared_type != TYPE_UNKNOWN && actual_type != TYPE_UNKNOWN
+                && !types_match_value(types, declared_type, actual_type, expr_is_literal(pool, init_id))) {
+                String message = String.from_str("type mismatch: expected ");
+                message.push_str(types.type_name(declared_type));
+                message.push_str(", found ");
+                message.push_str(types.type_name(actual_type));
+                diagnostics.error(stmt.span, move message);
+                *ok = false;
+            }
+            if (declared_type == TYPE_UNKNOWN) {
+                env.insert(var_name, actual_type);
+            } else {
+                env.insert(var_name, declared_type);
+            }
+        } else {
+            env.insert(var_name, declared_type);
+        }
+    } else if (stmt.kind == StmtKind.Assign) {
+        u32 target_type = infer_expr(pool, types, symbols, root, env, stmt.inner0, diagnostics, ok);
+        u32 val_type = infer_expr(pool, types, symbols, root, env, stmt.inner1, diagnostics, ok);
+        if (target_type != TYPE_UNKNOWN && val_type != TYPE_UNKNOWN
+            && !types_match_value(types, target_type, val_type, expr_is_literal(pool, stmt.inner1))) {
+            String message = String.from_str("type mismatch: expected ");
+            message.push_str(types.type_name(target_type));
+            message.push_str(", found ");
+            message.push_str(types.type_name(val_type));
+            diagnostics.error(stmt.span, move message);
+            *ok = false;
+        }
+    } else if (stmt.kind == StmtKind.Return) {
+        u32 expr_id = stmt.inner0;
+        if (expr_id != 0) {
+            u32 actual_type = infer_expr(pool, types, symbols, root, env, expr_id, diagnostics, ok);
+            if (expected_return != TYPE_UNKNOWN && actual_type != TYPE_UNKNOWN
+                && !types_match_value(types, expected_return, actual_type, expr_is_literal(pool, expr_id))) {
+                String message = String.from_str("type mismatch: expected ");
+                message.push_str(types.type_name(expected_return));
+                message.push_str(", found ");
+                message.push_str(types.type_name(actual_type));
+                diagnostics.error(pool.get_expr(expr_id).span, move message);
+                *ok = false;
+            }
+        }
+    } else if (stmt.kind == StmtKind.Expr) {
+        infer_expr(pool, types, symbols, root, env, stmt.inner0, diagnostics, ok);
+    } else if (stmt.kind == StmtKind.If) {
+        infer_expr(pool, types, symbols, root, env, stmt.inner0, diagnostics, ok);
+        if (stmt.inner1 != 0) {
+            typecheck_statement(pool, types, symbols, root, env, expected_return, stmt.inner1, diagnostics, ok);
+        }
+        if (stmt.aux != 0) {
+            typecheck_statement(pool, types, symbols, root, env, expected_return, stmt.aux, diagnostics, ok);
+        }
+    } else if (stmt.kind == StmtKind.While) {
+        infer_expr(pool, types, symbols, root, env, stmt.inner0, diagnostics, ok);
+        if (stmt.inner1 != 0) {
+            typecheck_statement(pool, types, symbols, root, env, expected_return, stmt.inner1, diagnostics, ok);
+        }
+    } else if (stmt.kind == StmtKind.Block) {
+        u32 start = stmt.inner0;
+        u32 count = stmt.aux;
+        i64 i = 0;
+        while (i < (i64)count) {
+            u32 s_id = pool.block_stmts.get((i64)start + i);
+            typecheck_statement(pool, types, symbols, root, env, expected_return, s_id, diagnostics, ok);
+            i += 1;
+        }
+    }
+}
+
 void typecheck_function_statements(AstPool* pool, TypeTable* types, SymbolTable* symbols,
                                   SyntaxNode* root, SyntaxNode* function,
                                   DiagnosticBag* diagnostics, bool* ok) {
+    typecheck_function_statements_scoped(pool, types, symbols, root, function, diagnostics, ok, (bool*)0);
+}
+
+void typecheck_function_statements_scoped(AstPool* pool, TypeTable* types, SymbolTable* symbols,
+                                          SyntaxNode* root, SyntaxNode* function,
+                                          DiagnosticBag* diagnostics, bool* ok, bool* unsupported_out) {
     SyntaxNode* body = find_function_body(function);
     if (body == (SyntaxNode*)0) { return; }
 
@@ -213,68 +615,23 @@ void typecheck_function_statements(AstPool* pool, TypeTable* types, SymbolTable*
     while (p < params.len()) {
         Binding* param = params.get_ptr(p);
         u32 name_id = symbols.names.intern(param.name);
-        u32 type_id = types.parse_type_name(param.declared_type.name);
+        u32 type_id = type_id_from_text(types, param.declared_type.name);
         env.insert(name_id, type_id);
         p += 1;
     }
     params.drop();
 
     ExprLowerer lowerer = ExprLowerer.new(pool, types, &symbols.names);
+    lowerer.unit_root = root;
     Vec<u32> stmt_ids = Vec<u32>.new();
     lowerer.lower_block(body, &stmt_ids);
+    if (lowerer.unsupported && unsupported_out != (bool*)0) {
+        *unsupported_out = true;
+    }
 
     i64 s = 0;
     while (s < stmt_ids.len()) {
-        AstStmt* stmt = pool.get_stmt(stmt_ids.get(s));
-        if (stmt.kind == StmtKind.Let) {
-            u32 declared_type = stmt.inner0;
-            u32 init_id = stmt.inner1;
-            u32 var_name = stmt.aux;
-            if (init_id != 0) {
-                u32 actual_type = infer_expr(pool, types, symbols, root, &env, init_id, diagnostics, ok);
-                if (declared_type != TYPE_UNKNOWN && actual_type != TYPE_UNKNOWN && !types_match(types, declared_type, actual_type)) {
-                    String message = String.from_str("type mismatch: expected ");
-                    message.push_str(types.type_name(declared_type));
-                    message.push_str(", found ");
-                    message.push_str(types.type_name(actual_type));
-                    diagnostics.error(stmt.span, move message);
-                    *ok = false;
-                }
-                if (declared_type == TYPE_UNKNOWN) {
-                    env.insert(var_name, actual_type);
-                } else {
-                    env.insert(var_name, declared_type);
-                }
-            } else {
-                env.insert(var_name, declared_type);
-            }
-        } else if (stmt.kind == StmtKind.Assign) {
-            u32 target_type = infer_expr(pool, types, symbols, root, &env, stmt.inner0, diagnostics, ok);
-            u32 val_type = infer_expr(pool, types, symbols, root, &env, stmt.inner1, diagnostics, ok);
-            if (target_type != TYPE_UNKNOWN && val_type != TYPE_UNKNOWN && !types_match(types, target_type, val_type)) {
-                String message = String.from_str("type mismatch: expected ");
-                message.push_str(types.type_name(target_type));
-                message.push_str(", found ");
-                message.push_str(types.type_name(val_type));
-                diagnostics.error(stmt.span, move message);
-                *ok = false;
-            }
-        } else if (stmt.kind == StmtKind.Return) {
-            u32 expr_id = stmt.inner0;
-            if (expr_id != 0) {
-                u32 actual_type = infer_expr(pool, types, symbols, root, &env, expr_id, diagnostics, ok);
-                if (expected_return != TYPE_UNKNOWN && actual_type != TYPE_UNKNOWN && !types_match(types, expected_return, actual_type)) {
-                    String message = String.from_str("type mismatch: expected ");
-                    message.push_str(types.type_name(expected_return));
-                    message.push_str(", found ");
-                    message.push_str(types.type_name(actual_type));
-                    diagnostics.error(pool.get_expr(expr_id).span, move message);
-                    *ok = false;
-                }
-            }
-        } else if (stmt.kind == StmtKind.Expr) {
-            infer_expr(pool, types, symbols, root, &env, stmt.inner0, diagnostics, ok);
-        }
+        typecheck_statement(pool, types, symbols, root, &env, expected_return, stmt_ids.get(s), diagnostics, ok);
         s += 1;
     }
 

@@ -121,7 +121,9 @@ impl SymbolTable {
 bool node_is_identifier(SyntaxNode* node) {
     return node != (SyntaxNode*)0
         && node.kind == NodeKind.Token
-        && node.token_kind == TokenKind.Identifier;
+        && (node.token_kind == TokenKind.Identifier
+            || node.token_kind == TokenKind.VecType
+            || node.token_kind == TokenKind.OptionalType);
 }
 
 bool is_primitive_type_token(TokenKind kind) {
@@ -178,7 +180,7 @@ SyntaxNode* item_identifier(SyntaxNode* item) {
         bool saw_type_keyword = false;
         while (child != (SyntaxNode*)0) {
             if (child.kind == NodeKind.Token && !saw_type_keyword) {
-                if (child.text == "struct" || child.text == "enum" || child.text == "trait" || child.text == "type") {
+                if (child.token_kind == TokenKind.Struct || child.token_kind == TokenKind.Enum || child.token_kind == TokenKind.Trait || child.token_kind == TokenKind.Type || strcmp(child.text, "struct") == 0 || strcmp(child.text, "enum") == 0 || strcmp(child.text, "trait") == 0 || strcmp(child.text, "type") == 0) {
                     saw_type_keyword = true;
                 }
             } else if (saw_type_keyword && node_is_identifier(child)) {

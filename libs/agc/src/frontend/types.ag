@@ -253,6 +253,28 @@ impl TypeTable {
                 }
             }
         }
+        if (name[len - 1] == (u8)42) {
+            String base = String.new();
+            i64 i = 0;
+            while (i < len - 1) {
+                base.push(name[i]);
+                i += 1;
+            }
+            u32 inner = self.parse_type_name(base.to_str());
+            base.drop();
+            return self.get_pointer(inner, true);
+        }
+        if (name[len - 1] == (u8)38) {
+            String base = String.new();
+            i64 i = 0;
+            while (i < len - 1) {
+                base.push(name[i]);
+                i += 1;
+            }
+            u32 inner = self.parse_type_name(base.to_str());
+            base.drop();
+            return self.get_reference(inner, false);
+        }
         if (strcmp(name, "void") == 0) { return TYPE_VOID; }
         if (strcmp(name, "bool") == 0) { return TYPE_BOOL; }
         if (strcmp(name, "i8") == 0) { return TYPE_I8; }
