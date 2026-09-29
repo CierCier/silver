@@ -190,7 +190,9 @@ LLVMOpaqueValue* llvm_emit_enum_build(LlvmContext* ctx, str enum_name, str varia
     }
     i64 zero_index = 0;
     while ((u64)zero_index < data_size) {
-        LLVMOpaqueValue* byte_index = LLVMConstInt(LLVMInt64TypeInContext(ctx.ctx), (u64)zero_index, 0);
+        // Payload bytes live after the 2-byte tag; zeroing from 0 would wipe
+        // the tag stored above (every constructed enum would read as variant 0).
+        LLVMOpaqueValue* byte_index = LLVMConstInt(LLVMInt64TypeInContext(ctx.ctx), (u64)(zero_index + 2), 0);
         LLVMOpaqueValue* byte_ptr = LLVMBuildGEP2(ctx.builder, byte_ty, bytes, &byte_index, 1, "enum_zero");
         LLVMBuildStore(ctx.builder, LLVMConstInt(byte_ty, 0, 0), byte_ptr);
         zero_index += 1;
