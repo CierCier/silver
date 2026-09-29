@@ -30,9 +30,9 @@ use owo_colors::OwoColorize;
 
 use crate::link::{link_exe, link_shared_module};
 
-/// Root objects contain implicit imports injected after graph discovery. Keep
-/// them uncached until those imports are represented in the dependency key.
-const ROOT_OBJECT_CACHE_ENABLED: bool = false;
+/// Root object keys include both graph dependencies and source files inlined
+/// during import lowering, including implicit imports.
+const ROOT_OBJECT_CACHE_ENABLED: bool = true;
 
 /// Command-line options for the `agc` driver binary.
 #[derive(Parser, Debug)]
@@ -1620,6 +1620,7 @@ pub fn run(cli: Cli) {
                 profiler::end_phase("import lowering");
                 let module_dependencies = import_lowering.module_dependencies;
                 let transitive_module_deps = import_lowering.transitive_module_deps;
+                let source_import_files = import_lowering.source_files;
                 let imported_modules = import_lowering.module_artifacts;
                 for module in &imported_modules {
                     if let Some(error) = artifact_compatibility_error(module, &plan) {
@@ -2139,6 +2140,22 @@ pub fn run(cli: Cli) {
                                             .or_else(|| loader.compute_cache_key(path, name))
                                             .map(|key| (name.clone(), key.hash_hex))
                                     })
+                                    .chain(source_import_files.iter().filter_map(|path| {
+                                        let path = std::fs::canonicalize(path)
+                                            .unwrap_or_else(|_| path.clone());
+                                        let represented_by_graph = dep_graph.source_paths.values().any(|graph_path| {
+                                            std::fs::canonicalize(graph_path)
+                                                .unwrap_or_else(|_| graph_path.clone())
+                                                == path
+                                        });
+                                        if represented_by_graph {
+                                            return None;
+                                        }
+                                        let name = format!("source:{}", path.display());
+                                        loader
+                                            .compute_cache_key(&path, &name)
+                                            .map(|key| (name, key.hash_hex))
+                                    }))
                                     .chain(imported_modules.iter().map(|artifact| {
                                         (
                                             artifact.module_path.clone(),
@@ -2315,6 +2332,22 @@ pub fn run(cli: Cli) {
                                             .or_else(|| loader.compute_cache_key(path, name))
                                             .map(|key| (name.clone(), key.hash_hex))
                                     })
+                                    .chain(source_import_files.iter().filter_map(|path| {
+                                        let path = std::fs::canonicalize(path)
+                                            .unwrap_or_else(|_| path.clone());
+                                        let represented_by_graph = dep_graph.source_paths.values().any(|graph_path| {
+                                            std::fs::canonicalize(graph_path)
+                                                .unwrap_or_else(|_| graph_path.clone())
+                                                == path
+                                        });
+                                        if represented_by_graph {
+                                            return None;
+                                        }
+                                        let name = format!("source:{}", path.display());
+                                        loader
+                                            .compute_cache_key(&path, &name)
+                                            .map(|key| (name, key.hash_hex))
+                                    }))
                                     .chain(imported_modules.iter().map(|artifact| {
                                         (
                                             artifact.module_path.clone(),

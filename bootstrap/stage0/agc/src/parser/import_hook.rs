@@ -18,6 +18,7 @@ pub struct ImportLoweringResult {
     pub module_artifacts: Vec<ModuleArtifact>,
     pub module_dependencies: Vec<String>,
     pub transitive_module_deps: Vec<String>,
+    pub source_files: Vec<PathBuf>,
 }
 
 pub const RUNTIME_ENTRY_MODULE: &str = "std.sys.entry";
@@ -301,10 +302,13 @@ impl<'a> FileImportResolverHook<'a> {
             .cloned()
             .collect();
 
+        let mut source_files: Vec<PathBuf> = self.seen_files.into_iter().collect();
+        source_files.sort();
         Ok(ImportLoweringResult {
             module_dependencies: direct_deps.into_iter().collect(),
             transitive_module_deps: transitive,
             module_artifacts: self.module_imports.into_iter().map(|(_, m)| m).collect(),
+            source_files,
         })
     }
     /// Close the dependency cone: every transitive dependency named by a
@@ -1286,6 +1290,32 @@ mod tests {
         program
     }
 
+
+    #[test]
+    fn lowering_records_implicit_source_imports_for_cache_keys() {
+        let root = std::env::temp_dir().join(format!(
+            "agc-implicit-import-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let entry = root.join("std/sys/entry.ag");
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::fs::write(root.join("main.ag"), "i32 main() { return 0; }\n").unwrap();
+        std::fs::write(&entry, "void _start() {}\n").unwrap();
+        let mut loader = ModuleLoader::new();
+        loader.add_search_dir(&root);
+        let mut program = parse("i32 main() { return 0; }");
+        let result = FileImportResolverHook::new(&loader)
+            .with_entry_import(true)
+            .lower_program_imports(&mut program, Some(&root), Some(&root.join("main.ag")))
+            .unwrap();
+        let entry = std::fs::canonicalize(entry).unwrap();
+        assert!(result.source_files.contains(&entry));
+        let _ = std::fs::remove_dir_all(root);
+    }
     #[test]
     fn artifact_alias_export_uses_original_link_name() {
         // `println as pln` on an artifact: the alias export must carry the

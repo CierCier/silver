@@ -194,7 +194,11 @@ impl DependencyGraph {
             eprintln!("  {}", layer_title.bold().yellow());
             for (idx, mod_name) in layer.iter().enumerate() {
                 let is_last = idx + 1 == layer.len();
-                let prefix = if is_last { "    └── " } else { "    ├── " };
+                let prefix = if is_last {
+                    "    └── "
+                } else {
+                    "    ├── "
+                };
                 let node = self.nodes.get(mod_name);
                 let elem_str = node
                     .map(|n| format!(" ({})", n.codegen_elements.summary()))
@@ -236,7 +240,8 @@ impl DependencyGraph {
         visited: &mut HashSet<PathBuf>,
         allow_entry_import: bool,
     ) -> Result<Option<String>, String> {
-        let canonical = std::fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
+        let canonical =
+            std::fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
         if !visited.insert(canonical.clone()) {
             if let Some(module_path) = &module_path {
                 self.source_paths
@@ -257,7 +262,8 @@ impl DependencyGraph {
             Err(_) => return Ok(None),
         };
 
-        let mut parser = crate::parser::Parser::new_with_source(tokens, source_path.display().to_string());
+        let mut parser =
+            crate::parser::Parser::new_with_source(tokens, source_path.display().to_string());
         let (ast, errors) = parser.parse_program();
         if !errors.is_empty() {
             for error in &errors {
@@ -344,6 +350,8 @@ impl DependencyGraph {
     }
 
     /// Finds all strongly connected components (SCCs) using Tarjan's algorithm.
+    /// Components and their members are normalized so scheduling is independent
+    /// of hash-map iteration and dependency discovery order.
     pub fn strongly_connected_components(&self) -> Vec<Vec<String>> {
         let mut index = 0usize;
         let mut stack = Vec::new();
@@ -366,6 +374,10 @@ impl DependencyGraph {
             }
         }
 
+        for scc in &mut sccs {
+            scc.sort();
+        }
+        sccs.sort_by(|left, right| left[0].cmp(&right[0]));
         sccs
     }
 
@@ -389,15 +401,7 @@ impl DependencyGraph {
             for dep in &node.dependencies {
                 if self.nodes.contains_key(dep) {
                     if !indices.contains_key(dep) {
-                        self.strongconnect(
-                            dep,
-                            index,
-                            stack,
-                            indices,
-                            lowlink,
-                            on_stack,
-                            sccs,
-                        );
+                        self.strongconnect(dep, index, stack, indices, lowlink, on_stack, sccs);
                         let dep_low = lowlink[dep];
                         let cur_low = lowlink.get_mut(node_name).unwrap();
                         *cur_low = (*cur_low).min(dep_low);
@@ -443,7 +447,9 @@ impl DependencyGraph {
                 if let Some(node_item) = self.nodes.get(node) {
                     for dep in &node_item.dependencies {
                         if let Some(&dep_scc) = node_to_scc.get(dep) {
-                            if dep_scc != scc_idx && scc_dependents.entry(dep_scc).or_default().insert(scc_idx) {
+                            if dep_scc != scc_idx
+                                && scc_dependents.entry(dep_scc).or_default().insert(scc_idx)
+                            {
                                 *scc_in_degree.entry(scc_idx).or_insert(0) += 1;
                             }
                         }
@@ -476,7 +482,11 @@ impl DependencyGraph {
                     }
                 }
             }
-
+            layer_modules.sort_by(|left, right| {
+                let left_path = self.nodes.get(left).map(|node| node.source_path.as_path());
+                let right_path = self.nodes.get(right).map(|node| node.source_path.as_path());
+                left_path.cmp(&right_path).then_with(|| left.cmp(right))
+            });
             layers.push(layer_modules);
             current_sccs = next_sccs;
         }
@@ -574,7 +584,11 @@ impl BuildProgress {
         active.insert(module_name.to_string());
         let current = (self.completed.load(Ordering::Relaxed) + 1).min(self.total_steps);
         let total = self.total_steps;
-        let percent = if total > 0 { (current * 100) / total } else { 100 };
+        let percent = if total > 0 {
+            (current * 100) / total
+        } else {
+            100
+        };
 
         use owo_colors::OwoColorize;
         let step_prefix = format!("[{:>2}/{:<2}] {:>3}%", current, total, percent.min(100));
@@ -622,14 +636,23 @@ impl BuildProgress {
         active.remove(module_name);
         let current = self.completed.fetch_add(1, Ordering::Relaxed) + 1;
         let total = self.total_steps;
-        let percent = if total > 0 { (current * 100) / total } else { 100 };
+        let percent = if total > 0 {
+            (current * 100) / total
+        } else {
+            100
+        };
 
         if !self.enabled && !self.verbose {
             return;
         }
 
         use owo_colors::OwoColorize;
-        let step_prefix = format!("[{:>2}/{:<2}] {:>3}%", current.min(total), total, percent.min(100));
+        let step_prefix = format!(
+            "[{:>2}/{:<2}] {:>3}%",
+            current.min(total),
+            total,
+            percent.min(100)
+        );
         let status = if is_cached {
             "[cached]".bold().green().to_string()
         } else {
@@ -666,9 +689,18 @@ impl BuildProgress {
         }
         let current = self.completed.fetch_add(1, Ordering::Relaxed) + 1;
         let total = self.total_steps;
-        let percent = if total > 0 { (current * 100) / total } else { 100 };
+        let percent = if total > 0 {
+            (current * 100) / total
+        } else {
+            100
+        };
         use owo_colors::OwoColorize;
-        let step_prefix = format!("[{:>2}/{:<2}] {:>3}%", current.min(total), total, percent.min(100));
+        let step_prefix = format!(
+            "[{:>2}/{:<2}] {:>3}%",
+            current.min(total),
+            total,
+            percent.min(100)
+        );
         if self.is_terminal && !self.verbose {
             eprintln!(
                 "\r\x1b[2K{} {} {}",
@@ -755,7 +787,8 @@ impl<'a> ParallelGraphExecutor<'a> {
     }
 
     fn is_root_input(&self, source_path: &Path) -> bool {
-        let canonical = std::fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
+        let canonical =
+            std::fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
         self.root_inputs.iter().any(|root| {
             let root_canon = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
             root_canon == canonical
@@ -763,10 +796,7 @@ impl<'a> ParallelGraphExecutor<'a> {
     }
 
     pub fn execute(&self) -> Result<ParallelBuildReport, Vec<String>> {
-        let layers = self
-            .graph
-            .topological_layers()
-            .map_err(|e| vec![e])?;
+        let layers = self.graph.topological_layers().map_err(|e| vec![e])?;
 
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(self.jobs)
@@ -791,10 +821,11 @@ impl<'a> ParallelGraphExecutor<'a> {
                 let mut layer_misses = Vec::new();
                 for module_name in layer {
                     if let Some(node) = self.graph.nodes.get(&module_name) {
-                        let dep_hashes = match self
-                            .graph
-                            .cache_dependency_hashes(self.loader, node, &module_keys)
-                        {
+                        let dep_hashes = match self.graph.cache_dependency_hashes(
+                            self.loader,
+                            node,
+                            &module_keys,
+                        ) {
                             Ok(hashes) => hashes,
                             Err(error) => {
                                 failed.store(true, Ordering::Relaxed);
@@ -803,16 +834,24 @@ impl<'a> ParallelGraphExecutor<'a> {
                             }
                         };
 
-                        let key = match self.loader.compute_cache_key_with_deps(&node.source_path, &node.module_path, &dep_hashes) {
+                        let key = match self.loader.compute_cache_key_with_deps(
+                            &node.source_path,
+                            &node.module_path,
+                            &dep_hashes,
+                        ) {
                             Some(k) => k,
                             None => {
                                 failed.store(true, Ordering::Relaxed);
-                                errors.lock().unwrap().push(format!("failed to compute cache key for {}", node.source_path.display()));
+                                errors.lock().unwrap().push(format!(
+                                    "failed to compute cache key for {}",
+                                    node.source_path.display()
+                                ));
                                 continue;
                             }
                         };
 
-                        self.loader.record_computed_cache_key(&node.source_path, key.clone());
+                        self.loader
+                            .record_computed_cache_key(&node.source_path, key.clone());
                         module_keys.insert(module_name.clone(), key.clone());
 
                         if self.is_root_input(&node.source_path) {
@@ -822,7 +861,12 @@ impl<'a> ParallelGraphExecutor<'a> {
                             total_hits += 1;
                             object_artifacts.push(cached.obj_path);
                             if let Some(p) = &self.progress {
-                                p.on_finish(&node.module_path, &node.codegen_elements, true, std::time::Duration::ZERO);
+                                p.on_finish(
+                                    &node.module_path,
+                                    &node.codegen_elements,
+                                    true,
+                                    std::time::Duration::ZERO,
+                                );
                             }
                         } else {
                             layer_misses.push((node.clone(), key));
@@ -880,7 +924,11 @@ impl<'a> ParallelGraphExecutor<'a> {
         })
     }
 
-    fn compile_single_module(&self, node: &ModuleNode, key: &CacheKey) -> Result<CachedModule, String> {
+    fn compile_single_module(
+        &self,
+        node: &ModuleNode,
+        key: &CacheKey,
+    ) -> Result<CachedModule, String> {
         let start = std::time::Instant::now();
         if let Some(p) = &self.progress {
             p.on_start(&node.module_path, &node.codegen_elements);
@@ -895,7 +943,11 @@ impl<'a> ParallelGraphExecutor<'a> {
         res
     }
 
-    fn compile_single_module_inner(&self, node: &ModuleNode, key: &CacheKey) -> Result<CachedModule, String> {
+    fn compile_single_module_inner(
+        &self,
+        node: &ModuleNode,
+        key: &CacheKey,
+    ) -> Result<CachedModule, String> {
         if let Some(cached) = self.store.get(key) {
             return Ok(cached);
         }
@@ -908,7 +960,8 @@ impl<'a> ParallelGraphExecutor<'a> {
         let tokens = crate::lexer::lex_with_source(&src, file_id)
             .map_err(|e| format!("lexer error in {}: {e:?}", node.source_path.display()))?;
 
-        let mut parser = crate::parser::Parser::new_with_source(tokens, node.source_path.display().to_string());
+        let mut parser =
+            crate::parser::Parser::new_with_source(tokens, node.source_path.display().to_string());
         let (mut ast, errors) = parser.parse_program();
         if !errors.is_empty() {
             eprint!("\r\x1b[2K");
@@ -925,10 +978,13 @@ impl<'a> ParallelGraphExecutor<'a> {
             return Err(format!("syntax error in {}", node.source_path.display()));
         }
 
-        let import_resolver = crate::parser::FileImportResolverHook::new(self.loader)
-            .with_entry_import(false);
-        let import_lowering = import_resolver
-            .lower_program_imports(&mut ast, node.source_path.parent(), Some(&node.source_path))?;
+        let import_resolver =
+            crate::parser::FileImportResolverHook::new(self.loader).with_entry_import(false);
+        let import_lowering = import_resolver.lower_program_imports(
+            &mut ast,
+            node.source_path.parent(),
+            Some(&node.source_path),
+        )?;
 
         let mut cfg_set = crate::cfg::CfgSet::parse(&self.loader.cfg_flags);
         crate::cfg::add_derived_cfgs(
@@ -945,13 +1001,18 @@ impl<'a> ParallelGraphExecutor<'a> {
 
         let mut symbol_table = crate::symbol_table::CompilerSymbolTable::new();
         symbol_table.record_program_symbols(&ast, crate::symbol_table::CompilerPhase::Parse);
-        crate::driver::run_semantic_hooks(&mut ast, &mut symbol_table, &import_lowering.module_artifacts);
+        crate::driver::run_semantic_hooks(
+            &mut ast,
+            &mut symbol_table,
+            &import_lowering.module_artifacts,
+        );
 
         crate::semantic::typeck::TypeChecker::resolve_type_aliases_in_program_with_imports(
             &mut ast,
             &import_lowering.module_artifacts,
         );
-        let mut checker = crate::semantic::typeck::TypeChecker::new().with_imported_modules(&import_lowering.module_artifacts);
+        let mut checker = crate::semantic::typeck::TypeChecker::new()
+            .with_imported_modules(&import_lowering.module_artifacts);
         let (type_errors, monomorphs) = checker.check_program_with_table(&ast, &mut symbol_table);
         if !type_errors.is_empty() {
             eprint!("\r\x1b[2K");
@@ -985,7 +1046,11 @@ impl<'a> ParallelGraphExecutor<'a> {
 
         let mut monomorphs = monomorphs;
         crate::semantic::monomorph::refresh_monomorph_bodies(&mut monomorphs, &ast);
-        crate::semantic::monomorph::append_monomorphs(&mut ast, &monomorphs, &import_lowering.module_artifacts);
+        crate::semantic::monomorph::append_monomorphs(
+            &mut ast,
+            &monomorphs,
+            &import_lowering.module_artifacts,
+        );
         let _ = checker.check_program_with_table(&ast, &mut symbol_table);
         let post_bare = checker.take_bare_constructors();
         if !post_bare.is_empty() {
@@ -1024,7 +1089,8 @@ impl<'a> ParallelGraphExecutor<'a> {
                 .to_string()
         });
 
-        let mut module_native_libs = crate::attributes::collect_program_link_libraries(&ast).unwrap_or_default();
+        let mut module_native_libs =
+            crate::attributes::collect_program_link_libraries(&ast).unwrap_or_default();
         for imp_art in &import_lowering.module_artifacts {
             for lib in &imp_art.native_libs {
                 if !module_native_libs.contains(lib) {
@@ -1049,7 +1115,9 @@ impl<'a> ParallelGraphExecutor<'a> {
             module_native_libs,
         );
 
-        let agm_bytes = artifact.to_bytes().map_err(|e| format!("failed to encode .agm: {e}"))?;
+        let agm_bytes = artifact
+            .to_bytes()
+            .map_err(|e| format!("failed to encode .agm: {e}"))?;
 
         let pid = std::process::id();
         let temp_o = std::env::temp_dir().join(format!("par_mod_{pid}_{}.o", key.hash_hex));
@@ -1082,10 +1150,14 @@ impl<'a> ParallelGraphExecutor<'a> {
             format!("LLVM codegen error in {}: {}", node.source_path.display(), e.message)
         })?;
 
-        let obj_bytes = std::fs::read(&temp_o).map_err(|e| format!("failed to read temp object: {e}"))?;
+        let obj_bytes =
+            std::fs::read(&temp_o).map_err(|e| format!("failed to read temp object: {e}"))?;
         let _ = std::fs::remove_file(&temp_o);
 
-        let cached = self.store.put(&key, &agm_bytes, &obj_bytes).map_err(|e| format!("failed to write cache: {e}"))?;
+        let cached = self
+            .store
+            .put(&key, &agm_bytes, &obj_bytes)
+            .map_err(|e| format!("failed to write cache: {e}"))?;
         Ok(cached)
     }
 }
@@ -1107,7 +1179,7 @@ mod tests {
             "a".to_string(),
             ModuleNode {
                 module_path: "a".to_string(),
-                source_path: PathBuf::from("a.ag"),
+                source_path: PathBuf::from("z.ag"),
                 dependencies: vec![],
                 codegen_elements: CodegenElements::default(),
             },
@@ -1116,15 +1188,15 @@ mod tests {
             "b".to_string(),
             ModuleNode {
                 module_path: "b".to_string(),
-                source_path: PathBuf::from("b.ag"),
+                source_path: PathBuf::from("a.ag"),
                 dependencies: vec![],
                 codegen_elements: CodegenElements::default(),
             },
         );
 
         let layers = graph.topological_layers().unwrap();
-        assert_eq!(layers.len(), 1);
-        assert_eq!(layers[0].len(), 2);
+        assert_eq!(layers, graph.topological_layers().unwrap());
+        assert_eq!(layers, vec![vec!["b".to_string(), "a".to_string()]]);
     }
 
     #[test]
@@ -1199,6 +1271,67 @@ mod tests {
         let layers = graph.topological_layers().unwrap();
         assert_eq!(layers.len(), 1);
         assert_eq!(layers[0].len(), 2);
+    }
+
+    #[test]
+    fn tarjan_components_and_layers_ignore_graph_insertion_order() {
+        fn graph_in_order(order: &[&str], reverse_dependencies: bool) -> DependencyGraph {
+            let dependencies = [
+                ("a", &["b"][..]),
+                ("b", &["a"][..]),
+                ("c", &["a", "e"][..]),
+                ("d", &["c"][..]),
+                ("e", &[][..]),
+                ("f", &["e"][..]),
+            ];
+            let mut graph = DependencyGraph::new();
+            for &name in order {
+                let (_, deps) = dependencies
+                    .iter()
+                    .find(|(module, _)| *module == name)
+                    .unwrap();
+                let mut deps = deps.to_vec();
+                if reverse_dependencies {
+                    deps.reverse();
+                }
+                graph.nodes.insert(
+                    name.to_string(),
+                    ModuleNode {
+                        module_path: name.to_string(),
+                        source_path: PathBuf::from(format!("{name}.ag")),
+                        dependencies: deps.into_iter().map(str::to_string).collect(),
+                        codegen_elements: CodegenElements::default(),
+                    },
+                );
+            }
+            graph
+        }
+
+        let first = graph_in_order(&["a", "b", "c", "d", "e", "f"], false);
+        let second = graph_in_order(&["f", "e", "d", "c", "b", "a"], true);
+
+        let components = first.strongly_connected_components();
+        let layers = first.topological_layers().unwrap();
+        assert_eq!(components, second.strongly_connected_components());
+        assert_eq!(layers, second.topological_layers().unwrap());
+        assert_eq!(
+            components,
+            vec![
+                vec!["a".to_string(), "b".to_string()],
+                vec!["c".to_string()],
+                vec!["d".to_string()],
+                vec!["e".to_string()],
+                vec!["f".to_string()],
+            ]
+        );
+        assert_eq!(
+            layers,
+            vec![
+                vec!["a".to_string(), "b".to_string(), "e".to_string()],
+                vec!["c".to_string(), "f".to_string()],
+                vec!["d".to_string()],
+            ]
+        );
     }
 
     #[test]
@@ -1296,15 +1429,21 @@ mod tests {
         ));
         let std_root = root.join("std/sys");
         std::fs::create_dir_all(&std_root).unwrap();
-        std::fs::write(std_root.join("entry_api.ag"), "extern \"C\" { i8** silver_envp(); }\n")
-            .unwrap();
+        std::fs::write(
+            std_root.join("entry_api.ag"),
+            "extern \"C\" { i8** silver_envp(); }\n",
+        )
+        .unwrap();
         std::fs::write(root.join("testdep.ag"), "import std.sys.entry;\n").unwrap();
         std::fs::write(root.join("main.ag"), "import testdep;\n").unwrap();
 
         let mut loader = ModuleLoader::new();
         loader.add_search_dir(&root);
         let graph = DependencyGraph::build(&loader, &[root.join("main.ag")]).unwrap();
-        let node = graph.nodes.get("testdep").expect("cacheable test dependency");
+        let node = graph
+            .nodes
+            .get("testdep")
+            .expect("cacheable test dependency");
         let deps = graph
             .cache_dependency_hashes(&loader, node, &HashMap::default())
             .unwrap();

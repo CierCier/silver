@@ -23,7 +23,7 @@ fn unique_temp_dir() -> PathBuf {
 }
 
 #[test]
-fn root_object_cache_stays_disabled_for_implicit_entry_imports() {
+fn root_object_cache_includes_implicit_entry_imports() {
     let root = repo_root();
     let temp = unique_temp_dir();
     let cache_parent = temp.join("xdg");
@@ -55,9 +55,9 @@ fn root_object_cache_stays_disabled_for_implicit_entry_imports() {
     let cached_objects = fs::read_dir(object_dir)
         .map(|entries| entries.count())
         .unwrap_or(0);
-    assert_eq!(
-        cached_objects, 0,
-        "root objects must stay uncached until implicit imports are in the graph"
+    assert!(
+        cached_objects > 0,
+        "root objects with implicit imports should be cached"
     );
 
     let _ = fs::remove_dir_all(temp);
