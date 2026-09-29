@@ -1,0 +1,327 @@
+// libs/agc/src/backend/llvm/context.ag — LLVM codegen context and local symbol tracking.
+import vendor.llvm.llvm;
+import std.intern;
+import std.io;
+import std.mem.vec;
+import std.string;
+import frontend.ast;
+import frontend.ast_expr;
+import frontend.items;
+import frontend.symbols;
+import frontend.types;
+import backend.llvm.types;
+
+struct LlvmLocal {
+    u32 name_id;
+    LLVMOpaqueValue* ptr;
+    u32 type_id;
+    bool is_mut;
+}
+
+struct LlvmFieldInfo {
+    u32 name_id;
+    u32 type_id;
+    u32 index;
+}
+
+struct LlvmStructDef {
+    u32 name_id;
+    LLVMOpaqueType* llvm_type;
+    Vec<LlvmFieldInfo> fields;
+}
+
+struct LlvmTypeBinding {
+    u32 param_name_id;
+    u32 type_id;
+}
+
+struct LlvmSymbolInfo {
+    bool is_global;
+    u32 type_id;
+}
+
+struct LlvmContext {
+    LLVMOpaqueContext* ctx;
+    LLVMOpaqueContext* ctx_unused;
+    LLVMOpaqueModule* module;
+    LLVMOpaqueBuilder* builder;
+    TypeTable* types;
+    Interner* names;
+    AstPool* pool;
+    SyntaxNode* root;
+    LLVMOpaqueValue* current_fn;
+    u32 current_return_type;
+    Vec<LlvmLocal> locals;
+    Vec<LlvmStructDef> struct_defs;
+    Vec<i64> scope_markers;
+    Vec<LLVMOpaqueBasicBlock*> loop_breaks;
+    Vec<LLVMOpaqueBasicBlock*> loop_continues;
+    Vec<LlvmTypeBinding> type_subst;
+    i64 unresolved_calls;
+}
+
+impl LlvmContext {
+    LlvmContext new(LLVMOpaqueContext* ctx, LLVMOpaqueModule* module, LLVMOpaqueBuilder* builder,
+                    TypeTable* types, Interner* names, AstPool* pool, SyntaxNode* root) {
+        LlvmContext c;
+        c.ctx = ctx;
+        c.module = module;
+        c.builder = builder;
+        c.types = types;
+        c.names = names;
+        c.pool = pool;
+        c.root = root;
+        c.current_fn = (LLVMOpaqueValue*)0;
+        c.current_return_type = TYPE_VOID;
+        c.locals = Vec<LlvmLocal>.new();
+        c.struct_defs = Vec<LlvmStructDef>.new();
+        c.scope_markers = Vec<i64>.new();
+        c.loop_breaks = Vec<LLVMOpaqueBasicBlock*>.new();
+        c.loop_continues = Vec<LLVMOpaqueBasicBlock*>.new();
+        c.type_subst = Vec<LlvmTypeBinding>.new();
+        c.unresolved_calls = 0;
+        return move c;
+    }
+
+    void push_type_binding(LlvmContext* self, str param_name, u32 type_id) {
+        LlvmTypeBinding binding;
+        binding.param_name_id = self.names.intern(param_name);
+        binding.type_id = type_id;
+        self.type_subst.push(move binding);
+    }
+
+    void pop_type_bindings(LlvmContext* self, i64 count) {
+        while (count > 0 && self.type_subst.len() > 0) {
+            self.type_subst.pop();
+            count -= 1;
+        }
+    }
+
+    /// Resolve a type text through the active generic substitution stack.
+    /// Returns TYPE_UNKNOWN when no binding applies.
+    u32 subst_type(LlvmContext* self, str type_text) {
+        if (self.type_subst.len() == 0 || strlen(type_text) == 0) {
+            return TYPE_UNKNOWN;
+        }
+        i64 i = self.type_subst.len() - 1;
+        while (i >= 0) {
+            LlvmTypeBinding* binding = self.type_subst.get_ptr(i);
+            if (strcmp(self.names.get(binding.param_name_id), type_text) == 0) {
+                return binding.type_id;
+            }
+            i -= 1;
+        }
+        return TYPE_UNKNOWN;
+    }
+
+    /// Identify a top-level name: global variables report their declared type
+    /// so method-call receivers mangle through the TYPE, not the variable name.
+    LlvmSymbolInfo lookup_symbol(LlvmContext* self, str name) {
+        LlvmSymbolInfo info;
+        info.is_global = false;
+        info.type_id = TYPE_UNKNOWN;
+        if (strlen(name) == 0) {
+            return info;
+        }
+        SyntaxNode* item = self.root.first_child;
+        while (item != (SyntaxNode*)0) {
+            if (item.kind == NodeKind.Global) {
+                SyntaxNode* id_node = item_identifier(item);
+                if (id_node != (SyntaxNode*)0 && strcmp(id_node.text, name) == 0) {
+                    String g_text = String.new();
+                    SyntaxNode* g_scan = item.first_child;
+                    while (g_scan != (SyntaxNode*)0 && g_scan != id_node) {
+                        if (g_scan.kind == NodeKind.Token && g_scan.text == "#") {
+                            g_scan = g_scan.next_sibling;
+                            if (g_scan != (SyntaxNode*)0 && g_scan.kind == NodeKind.Bracket) {
+                                g_scan = g_scan.next_sibling;
+                            }
+                            continue;
+                        }
+                        if (g_scan.kind == NodeKind.Token && g_scan.text != "pub" && g_scan.text != "static") {
+                            g_text.push_str(g_scan.text);
+                        }
+                        g_scan = g_scan.next_sibling;
+                    }
+                    info.is_global = true;
+                    info.type_id = type_id_from_text(self.types, g_text.to_str());
+                    g_text.drop();
+                    return info;
+                }
+            }
+            item = item.next_sibling;
+        }
+        return info;
+    }
+
+    void note_unresolved(LlvmContext* self, str kind, str name) {
+        self.unresolved_calls += 1;
+        STDERR.write_str("agc: error: native backend cannot resolve ");
+        STDERR.write_str(kind);
+        STDERR.write_str(" '");
+        STDERR.write_str(name);
+        STDERR.write_str("'");
+        if (self.current_fn != (LLVMOpaqueValue*)0) {
+            str fn_name = LLVMGetValueName(self.current_fn);
+            if (fn_name != (str)0 && strlen(fn_name) > 0) {
+                STDERR.write_str(" in ");
+                STDERR.write_str(fn_name);
+            }
+        }
+        STDERR.write_str("\n");
+    }
+
+    LlvmStructDef* find_struct(LlvmContext* self, u32 name_id) {
+        str name = self.names.get(name_id);
+        return self.find_struct_by_str(name);
+    }
+
+    LlvmStructDef* find_struct_by_str(LlvmContext* self, str name) {
+        if (name == (str)0 || strlen(name) == 0) {
+            return (LlvmStructDef*)0;
+        }
+        String base = String.new();
+        i64 b = 0;
+        while (name[b] != (u8)0 && name[b] != (u8)60) {
+            base.push(name[b]);
+            b += 1;
+        }
+        str lookup = (base.len() > 0) ? base.to_str() : name;
+        i64 i = 0;
+        while (i < self.struct_defs.len()) {
+            LlvmStructDef* def = self.struct_defs.get_ptr(i);
+            str def_name = self.names.get(def.name_id);
+            if (strcmp(def_name, lookup) == 0) {
+                base.drop();
+                return def;
+            }
+            i += 1;
+        }
+        base.drop();
+        return (LlvmStructDef*)0;
+    }
+
+    i32 find_field_index(LlvmContext* self, LlvmStructDef* def, u32 field_name_id) {
+        i64 i = 0;
+        while (i < def.fields.len()) {
+            LlvmFieldInfo* f = def.fields.get_ptr(i);
+            if (f.name_id == field_name_id) {
+                return (i32)f.index;
+            }
+            i += 1;
+        }
+        return -1;
+    }
+
+    u32 find_field_type(LlvmContext* self, LlvmStructDef* def, u32 field_name_id) {
+        i64 i = 0;
+        while (i < def.fields.len()) {
+            LlvmFieldInfo* f = def.fields.get_ptr(i);
+            if (f.name_id == field_name_id) {
+                return f.type_id;
+            }
+            i += 1;
+        }
+        return TYPE_UNKNOWN;
+    }
+
+
+    void push_scope(LlvmContext* self) {
+        self.scope_markers.push(self.locals.len());
+    }
+
+    void pop_scope(LlvmContext* self) {
+        if (self.scope_markers.len() > 0) {
+            i64 mark = self.scope_markers.pop();
+            while (self.locals.len() > mark) {
+                self.locals.pop();
+            }
+        }
+    }
+
+    LlvmLocal* find_local(LlvmContext* self, u32 name_id) {
+        i64 i = self.locals.len() - 1;
+        while (i >= 0) {
+            LlvmLocal* cur = self.locals.get_ptr(i);
+            if (cur.name_id == name_id) {
+                return cur;
+            }
+            i -= 1;
+        }
+        return (LlvmLocal*)0;
+    }
+
+    void add_local(LlvmContext* self, u32 name_id, LLVMOpaqueValue* ptr, u32 type_id, bool is_mut) {
+        LlvmLocal local;
+        local.name_id = name_id;
+        local.ptr = ptr;
+        local.type_id = type_id;
+        local.is_mut = is_mut;
+        self.locals.push(move local);
+    }
+
+    void push_loop(LlvmContext* self, LLVMOpaqueBasicBlock* break_bb, LLVMOpaqueBasicBlock* cont_bb) {
+        self.loop_breaks.push(break_bb);
+        self.loop_continues.push(cont_bb);
+    }
+
+    void pop_loop(LlvmContext* self) {
+        if (self.loop_breaks.len() > 0) {
+            self.loop_breaks.pop();
+            self.loop_continues.pop();
+        }
+    }
+
+    LLVMOpaqueBasicBlock* current_break(LlvmContext* self) {
+        if (self.loop_breaks.len() == 0) {
+            return (LLVMOpaqueBasicBlock*)0;
+        }
+        return self.loop_breaks.get(self.loop_breaks.len() - 1);
+    }
+
+    LLVMOpaqueBasicBlock* current_continue(LlvmContext* self) {
+        if (self.loop_continues.len() == 0) {
+            return (LLVMOpaqueBasicBlock*)0;
+        }
+        return self.loop_continues.get(self.loop_continues.len() - 1);
+    }
+
+    bool is_terminated(LlvmContext* self) {
+        LLVMOpaqueBasicBlock* bb = LLVMGetInsertBlock(self.builder);
+        if (bb == (LLVMOpaqueBasicBlock*)0) {
+            return true;
+        }
+        return LLVMGetBasicBlockTerminator(bb) != (LLVMOpaqueValue*)0;
+    }
+}
+
+bool str_starts_with(str s, str prefix) {
+    if (s == (str)0 || prefix == (str)0) { return false; }
+    i64 slen = strlen(s);
+    i64 plen = strlen(prefix);
+    if (slen < plen) { return false; }
+    i64 i = 0;
+    while (i < plen) {
+        if (s[i] != prefix[i]) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+bool str_contains(str s, str sub) {
+    if (s == (str)0 || sub == (str)0) { return false; }
+    i64 slen = strlen(s);
+    i64 sublen = strlen(sub);
+    if (slen < sublen) { return false; }
+    i64 i = 0;
+    while (i <= slen - sublen) {
+        i64 j = 0;
+        while (j < sublen && s[i + j] == sub[j]) {
+            j += 1;
+        }
+        if (j == sublen) { return true; }
+        i += 1;
+    }
+    return false;
+}
+

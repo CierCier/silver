@@ -1,0 +1,370 @@
+// libs/agc/src/backend/llvm/types.ag — Lowering canonical Silver TypeId to LLVM types.
+import vendor.llvm.llvm;
+import frontend.ast;
+import frontend.items;
+import frontend.lexer;
+import frontend.symbols;
+import frontend.types;
+import backend.llvm.context;
+
+u64 llvm_align_up(u64 offset, u64 align) {
+    if (align <= 1) {
+        return offset;
+    }
+    u64 remainder = offset % align;
+    if (remainder == 0) {
+        return offset;
+    }
+    return offset + (align - remainder);
+}
+
+u64 llvm_struct_field_type(SyntaxNode* root, str struct_name, i64 field_index, TypeTable* types) {
+    SyntaxNode* item = find_item_by_name(root, NodeKind.Struct, struct_name);
+    if (item == (SyntaxNode*)0) {
+        return TYPE_UNKNOWN;
+    }
+    SyntaxNode* block = item.first_child;
+    while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+        block = block.next_sibling;
+    }
+    if (block == (SyntaxNode*)0) {
+        return TYPE_UNKNOWN;
+    }
+    i64 index = 0;
+    SyntaxNode* cursor = block.first_child;
+    while (cursor != (SyntaxNode*)0) {
+        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
+            cursor = cursor.next_sibling;
+            continue;
+        }
+        SyntaxNode* start = cursor;
+        SyntaxNode* last_ident = (SyntaxNode*)0;
+        while (cursor != (SyntaxNode*)0
+            && !(cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon)) {
+            if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Identifier) {
+                last_ident = cursor;
+            }
+            cursor = cursor.next_sibling;
+        }
+        if (last_ident != (SyntaxNode*)0) {
+            if (index == field_index) {
+                String text = String.new();
+                SyntaxNode* part = start;
+                while (part != (SyntaxNode*)0 && part != last_ident) {
+                    if (part.kind == NodeKind.Token) {
+                        text.push_str(part.text);
+                    }
+                    part = part.next_sibling;
+                }
+                u32 field_type = type_id_from_text(types, text.to_str());
+                text.drop();
+                return field_type;
+            }
+            index += 1;
+        }
+        if (cursor != (SyntaxNode*)0) {
+            cursor = cursor.next_sibling;
+        }
+    }
+    return TYPE_UNKNOWN;
+}
+
+i64 llvm_struct_field_count(SyntaxNode* root, str struct_name) {
+    SyntaxNode* item = find_item_by_name(root, NodeKind.Struct, struct_name);
+    if (item == (SyntaxNode*)0) {
+        return -1;
+    }
+    SyntaxNode* block = item.first_child;
+    while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+        block = block.next_sibling;
+    }
+    if (block == (SyntaxNode*)0) {
+        return 0;
+    }
+    i64 count = 0;
+    SyntaxNode* cursor = block.first_child;
+    while (cursor != (SyntaxNode*)0) {
+        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
+            cursor = cursor.next_sibling;
+            continue;
+        }
+        SyntaxNode* last_ident = (SyntaxNode*)0;
+        while (cursor != (SyntaxNode*)0
+            && !(cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon)) {
+            if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Identifier) {
+                last_ident = cursor;
+            }
+            cursor = cursor.next_sibling;
+        }
+        if (last_ident != (SyntaxNode*)0) {
+            count += 1;
+        }
+        if (cursor != (SyntaxNode*)0) {
+            cursor = cursor.next_sibling;
+        }
+    }
+    return count;
+}
+
+void llvm_enum_payload_types(TypeTable* types, SyntaxNode* root, str enum_name,
+                             str variant_name, Vec<u32>* out) {
+    SyntaxNode* item = find_enum_item(root, enum_name);
+    if (item == (SyntaxNode*)0) {
+        return;
+    }
+    SyntaxNode* block = item.first_child;
+    while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+        block = block.next_sibling;
+    }
+    if (block == (SyntaxNode*)0) {
+        return;
+    }
+    SyntaxNode* cursor = block.first_child;
+    while (cursor != (SyntaxNode*)0) {
+        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Identifier
+            && cursor.text == variant_name) {
+            SyntaxNode* payload = cursor.next_sibling;
+            if (payload == (SyntaxNode*)0 || payload.kind != NodeKind.Parenthesized) {
+                return;
+            }
+            SyntaxNode* part = payload.first_child;
+            while (part != (SyntaxNode*)0) {
+                SyntaxNode* part_end = part;
+                while (part_end != (SyntaxNode*)0
+                    && !(part_end.kind == NodeKind.Token && part_end.token_kind == TokenKind.Comma)) {
+                    part_end = part_end.next_sibling;
+                }
+                String text = String.new();
+                SyntaxNode* tok = part;
+                while (tok != (SyntaxNode*)0 && tok != part_end) {
+                    if (tok.kind == NodeKind.Token) {
+                        text.push_str(tok.text);
+                    }
+                    tok = tok.next_sibling;
+                }
+                if (text.len > 0) {
+                    out.push(type_id_from_text(types, text.to_str()));
+                }
+                text.drop();
+                part = (part_end == (SyntaxNode*)0) ? part_end : part_end.next_sibling;
+            }
+            return;
+        }
+        cursor = cursor.next_sibling;
+    }
+}
+
+u64 llvm_enum_variant_size(TypeTable* types, SyntaxNode* root, str enum_name, str variant_name) {
+    Vec<u32> payloads = Vec<u32>.new();
+    llvm_enum_payload_types(types, root, enum_name, variant_name, &payloads);
+    u64 offset = 0;
+    i64 i = 0;
+    while (i < payloads.len()) {
+        u32 field_type = payloads.get(i);
+        offset = llvm_align_up(offset, llvm_abi_align(types, root, field_type, 0)) + llvm_abi_size(types, root, field_type, 0);
+        i += 1;
+    }
+    payloads.drop();
+    return offset;
+}
+
+u64 llvm_enum_size(TypeTable* types, SyntaxNode* root, str enum_name) {
+    SyntaxNode* item = find_enum_item(root, enum_name);
+    if (item == (SyntaxNode*)0) {
+        return 8;
+    }
+    Vec<SyntaxNode*> names = Vec<SyntaxNode*>.new();
+    Vec<i64> tags = Vec<i64>.new();
+    Vec<i64> arities = Vec<i64>.new();
+    enum_each_variant(item, &names, &tags, &arities);
+    u64 data = 0;
+    i64 i = 0;
+    while (i < names.len()) {
+        u64 variant_size = llvm_enum_variant_size(types, root, enum_name, names.get(i).text);
+        if (variant_size > data) {
+            data = variant_size;
+        }
+        i += 1;
+    }
+    names.drop();
+    tags.drop();
+    arities.drop();
+    return llvm_align_up((u64)2 + data, 2);
+}
+
+u64 llvm_enum_field_offset(TypeTable* types, SyntaxNode* root, str enum_name,
+                           str variant_name, i64 field_index) {
+    Vec<u32> payloads = Vec<u32>.new();
+    llvm_enum_payload_types(types, root, enum_name, variant_name, &payloads);
+    u64 offset = 0;
+    i64 i = 0;
+    while (i < field_index && i < payloads.len()) {
+        u32 field_type = payloads.get(i);
+        offset = llvm_align_up(offset, llvm_abi_align(types, root, field_type, 0)) + llvm_abi_size(types, root, field_type, 0);
+        i += 1;
+    }
+    if (i < payloads.len()) {
+        offset = llvm_align_up(offset, llvm_abi_align(types, root, payloads.get(i), 0));
+    }
+    payloads.drop();
+    return offset;
+}
+
+u64 llvm_named_size(TypeTable* types, SyntaxNode* root, str name, i64 depth) {
+    if (depth > 16) {
+        return 8;
+    }
+    if (find_item_by_name(root, NodeKind.Struct, name) != (SyntaxNode*)0) {
+        i64 count = llvm_struct_field_count(root, name);
+        u64 offset = 0;
+        u64 max_align = 1;
+        i64 i = 0;
+        while (i < count) {
+            u64 field_type = llvm_struct_field_type(root, name, i, types);
+            u64 align = llvm_abi_align(types, root, (u32)field_type, depth + 1);
+            u64 size = llvm_abi_size(types, root, (u32)field_type, depth + 1);
+            if (align > max_align) {
+                max_align = align;
+            }
+            offset = llvm_align_up(offset, align) + size;
+            i += 1;
+        }
+        return llvm_align_up(offset, max_align);
+    }
+    if (find_enum_item(root, name) != (SyntaxNode*)0) {
+        return llvm_enum_size(types, root, name);
+    }
+    return 8;
+}
+
+u64 llvm_abi_size(TypeTable* types, SyntaxNode* root, u32 type_id, i64 depth) {
+    TypeEntry* entry = types.get(type_id);
+    if (entry.kind == TypeKind.Void) {
+        return 1;
+    }
+    if (entry.kind == TypeKind.Bool || entry.kind == TypeKind.I8 || entry.kind == TypeKind.U8) {
+        return 1;
+    }
+    if (entry.kind == TypeKind.Char) {
+        return 1;
+    }
+    if (entry.kind == TypeKind.I16 || entry.kind == TypeKind.U16) {
+        return 2;
+    }
+    if (entry.kind == TypeKind.I32 || entry.kind == TypeKind.U32 || entry.kind == TypeKind.F32) {
+        return 4;
+    }
+    if (entry.kind == TypeKind.I64 || entry.kind == TypeKind.U64 || entry.kind == TypeKind.F64
+        || entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) {
+        return 8;
+    }
+    if (entry.kind == TypeKind.C32) {
+        return 8;
+    }
+    if (entry.kind == TypeKind.I128 || entry.kind == TypeKind.U128 || entry.kind == TypeKind.C64) {
+        return 16;
+    }
+    if (entry.kind == TypeKind.F80 || entry.kind == TypeKind.C80) {
+        return 16;
+    }
+    if (entry.kind == TypeKind.Str) {
+        return 8;
+    }
+    if (entry.kind == TypeKind.Array) {
+        return 8;
+    }
+    if (entry.kind == TypeKind.Named) {
+        return llvm_named_size(types, root, types.names.get(entry.name_id), depth);
+    }
+    if (entry.kind == TypeKind.TypeParam || entry.kind == TypeKind.Function) {
+        return 8;
+    }
+    return 8;
+}
+
+u64 llvm_abi_align(TypeTable* types, SyntaxNode* root, u32 type_id, i64 depth) {
+    u64 size = llvm_abi_size(types, root, type_id, depth);
+    if (size >= 8) {
+        return 8;
+    }
+    if (size >= 4) {
+        return 4;
+    }
+    if (size >= 2) {
+        return 2;
+    }
+    return 1;
+}
+
+// Resolve a type name through the active generic substitution stack (backend
+// mini-monomorphizer). Returns TYPE_UNKNOWN when nothing applies.
+u32 llvm_subst_type_name(LlvmContext* ctx, str name) {
+    return ctx.subst_type(name);
+}
+
+// Resolve a Named type that names a generic parameter (e.g. "T" inside a
+// monomorphized body) to its concrete substituted TypeId. Returns the input
+// id when no binding applies.
+u32 llvm_resolve_named(LlvmContext* lctx, TypeTable* types, u32 type_id) {
+    TypeEntry* entry = types.get(type_id);
+    if (entry.kind != TypeKind.Named) {
+        return type_id;
+    }
+    str name = types.names.get(entry.name_id);
+    u32 concrete = lctx.subst_type(name);
+    if (concrete != TYPE_UNKNOWN) {
+        return concrete;
+    }
+    return type_id;
+}
+
+LLVMOpaqueType* llvm_lower_type(LLVMOpaqueContext* ctx, TypeTable* types, u32 type_id) {
+    TypeEntry* entry = types.get(type_id);
+    if (entry.kind == TypeKind.Array) {
+        LLVMOpaqueType* elem = llvm_lower_type(ctx, types, entry.inner);
+        return LLVMArrayType(elem, (u32)entry.count);
+    }
+    if (entry.kind == TypeKind.Named) {
+        str name = types.names.get(entry.name_id);
+        LLVMOpaqueType* named_ty = LLVMGetTypeByName2(ctx, name);
+        if (named_ty != (LLVMOpaqueType*)0) {
+            return named_ty;
+        }
+        String base = String.new();
+        i64 b_i = 0;
+        while (name[b_i] != (u8)0 && name[b_i] != (u8)60) {
+            base.push(name[b_i]);
+            b_i += 1;
+        }
+        if (base.len() > 0) {
+            named_ty = LLVMGetTypeByName2(ctx, base.to_str());
+        }
+        base.drop();
+        if (named_ty != (LLVMOpaqueType*)0) {
+            return named_ty;
+        }
+        return LLVMInt32TypeInContext(ctx);
+    }
+    return match entry.kind {
+        TypeKind.Void : LLVMVoidTypeInContext(ctx),
+        TypeKind.Bool : LLVMInt1TypeInContext(ctx),
+        TypeKind.I8 : LLVMInt8TypeInContext(ctx),
+        TypeKind.U8 : LLVMInt8TypeInContext(ctx),
+        TypeKind.Char : LLVMInt8TypeInContext(ctx),
+        TypeKind.I16 : LLVMInt16TypeInContext(ctx),
+        TypeKind.U16 : LLVMInt16TypeInContext(ctx),
+        TypeKind.I32 : LLVMInt32TypeInContext(ctx),
+        TypeKind.U32 : LLVMInt32TypeInContext(ctx),
+        TypeKind.I64 : LLVMInt64TypeInContext(ctx),
+        TypeKind.U64 : LLVMInt64TypeInContext(ctx),
+        TypeKind.I128 : LLVMInt128TypeInContext(ctx),
+        TypeKind.U128 : LLVMInt128TypeInContext(ctx),
+        TypeKind.F32 : LLVMFloatTypeInContext(ctx),
+        TypeKind.F64 : LLVMDoubleTypeInContext(ctx),
+        TypeKind.Str : LLVMPointerTypeInContext(ctx, (u32)0),
+        TypeKind.Pointer : LLVMPointerTypeInContext(ctx, (u32)0),
+        TypeKind.Reference : LLVMPointerTypeInContext(ctx, (u32)0),
+        TypeKind.Function : LLVMPointerTypeInContext(ctx, (u32)0),
+        _ : LLVMInt64TypeInContext(ctx),
+    };
+}
