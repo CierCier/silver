@@ -478,8 +478,12 @@ i32 run_workspace_native(Vec<String>* arguments, WorkspacePlan* plan) {
         return check_result;
     }
 
+    Vec<String> workspace_roots = Vec<String>.new();
+    workspace_collect_roots(plan, &workspace_roots);
     i32 native_result = 0;
-    if (native_backend_try(arguments, plan.entry.to_str(), plan.target_name.to_str(), &native_result)) {
+    bool native_handled = native_backend_try(arguments, plan.entry.to_str(), plan.target_name.to_str(), &workspace_roots, &native_result);
+    workspace_roots.drop();
+    if (native_handled) {
         return native_result;
     }
 
@@ -522,11 +526,15 @@ i32 run_frontend() {
     String* command = arguments.get_ptr(1);
     if (!is_frontend_command(command)) {
         String native_source = String.new();
-        i32 native_result = 0;
-        if (native_source_path(&arguments, &native_source)
-            && native_backend_try(&arguments, native_source.to_str(), "", &native_result)) {
-            native_source.drop();
-            return native_result;
+        if (native_source_path(&arguments, &native_source)) {
+            i32 native_result = 0;
+            Vec<String> empty_includes = Vec<String>.new();
+            bool handled = native_backend_try(&arguments, native_source.to_str(), "", &empty_includes, &native_result);
+            empty_includes.drop();
+            if (handled) {
+                native_source.drop();
+                return native_result;
+            }
         }
         native_source.drop();
         return run_stage0_backend(&arguments);
