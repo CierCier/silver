@@ -494,6 +494,9 @@ u32 llvm_expr_type(LlvmContext* ctx, u32 expr_id) {
         if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) {
             return entry.inner;
         }
+        if (entry.kind == TypeKind.Array) {
+            return entry.inner;
+        }
         str t_name = ctx.types.type_name(target_type);
         if (str_starts_with(t_name, "Vec<") || str_starts_with(t_name, "Slice<")) {
             String type_arg = String.new();
@@ -576,6 +579,13 @@ LLVMOpaqueValue* llvm_emit_lvalue(LlvmContext* ctx, u32 expr_id) {
             if (LLVMGetTypeKind(LLVMTypeOf(target_ptr)) != (u32)12) {
                 target_ptr = LLVMBuildIntToPtr(ctx.builder, target_ptr, LLVMPointerTypeInContext(ctx.ctx, (u32)0), "idx_ptr");
             }
+            // Array base decay: the local holds ptr-to-[N x elem]; a
+            // single-index GEP must stride by elements, so decay to a plain
+            // element pointer first (GEP over the array type would stride by
+            // the whole array).
+            if (tentry.kind == TypeKind.Array) {
+                target_ptr = LLVMBuildBitCast(ctx.builder, target_ptr, LLVMPointerTypeInContext(ctx.ctx, (u32)0), "arr_decay");
+            }
             u32 target_type = llvm_expr_type(ctx, expr.inner0);
             TypeEntry* entry = ctx.types.get(target_type);
             u32 elem_type = entry.inner;
@@ -610,6 +620,124 @@ LLVMOpaqueValue* llvm_emit_lvalue(LlvmContext* ctx, u32 expr_id) {
         return (LLVMOpaqueValue*)0;
     }
     return (LLVMOpaqueValue*)0;
+}
+
+u32 llvm_index_elem_type(LlvmContext* ctx, u32 target_expr_id) {
+    u32 target_type = llvm_expr_type(ctx, target_expr_id);
+    TypeEntry* entry = ctx.types.get(target_type);
+    u32 elem_type = entry.inner;
+    if (elem_type == 0 || elem_type == TYPE_UNKNOWN) {
+        str t_name = ctx.types.type_name(target_type);
+        if (str_starts_with(t_name, "Vec<") || str_starts_with(t_name, "Slice<")) {
+            String type_arg = String.new();
+            i64 ti = 0;
+            i64 tlen = strlen(t_name);
+            while (ti < tlen && t_name[ti] != (u8)60) { ti += 1; }
+            if (ti < tlen && t_name[ti] == (u8)60) {
+                ti += 1;
+                while (ti < tlen && t_name[ti] != (u8)62 && t_name[ti] != (u8)44) {
+                    if (t_name[ti] != (u8)32 && t_name[ti] != (u8)9) {
+                        type_arg.push(t_name[ti]);
+                    }
+                    ti += 1;
+                }
+            }
+            if (type_arg.len() > 0) {
+                elem_type = type_id_from_text(ctx.types, type_arg.to_str());
+            }
+            type_arg.drop();
+        }
+    }
+    return elem_type;
+}
+
+u32 llvm_lvalue_type(LlvmContext* ctx, u32 expr_id) {
+    if (expr_id == 0) { return TYPE_UNKNOWN; }
+    AstExpr* expr = ctx.pool.get_expr(expr_id);
+    if (expr.kind == ExprKind.Var) {
+        LlvmLocal* local = ctx.find_local(expr.aux);
+        if (local != (LlvmLocal*)0) {
+            return local.type_id;
+        }
+        return TYPE_UNKNOWN;
+    }
+    if (expr.kind == ExprKind.Field) {
+        u32 target_type = llvm_expr_type(ctx, expr.inner0);
+        TypeEntry* entry = ctx.types.get(target_type);
+        while (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) {
+            target_type = entry.inner;
+            entry = ctx.types.get(target_type);
+        }
+        LlvmStructDef* def = ctx.find_struct_by_str(ctx.types.type_name(target_type));
+        if (def != (LlvmStructDef*)0) {
+            i32 field_idx = ctx.find_field_index(def, expr.aux);
+            if (field_idx >= 0) {
+                return def.fields.get_ptr(field_idx).type_id;
+            }
+        }
+        return TYPE_UNKNOWN;
+    }
+    if (expr.kind == ExprKind.Index) {
+        return llvm_index_elem_type(ctx, expr.inner0);
+    }
+    if (expr.kind == ExprKind.Unary && expr.aux == (u32)TokenKind.Star) {
+        u32 target_type = llvm_expr_type(ctx, expr.inner0);
+        TypeEntry* entry = ctx.types.get(target_type);
+        if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) {
+            return entry.inner;
+        }
+    }
+    return TYPE_UNKNOWN;
+}
+
+bool llvm_type_is_signed(TypeTable* types, u32 id) {
+    TypeEntry* entry = types.get(id);
+    return entry.kind == TypeKind.I8 || entry.kind == TypeKind.I16
+        || entry.kind == TypeKind.I32 || entry.kind == TypeKind.I64
+        || entry.kind == TypeKind.I128;
+}
+
+// Convert val to the lowered target type so stores never silently truncate
+// (opaque pointers hide width mismatches from the LLVM verifier). Unknown
+// or unhandled combinations pass through unchanged (status quo).
+LLVMOpaqueValue* llvm_compat_value(LlvmContext* ctx, LLVMOpaqueValue* val, u32 target_type_id) {
+    if (val == (LLVMOpaqueValue*)0 || target_type_id == TYPE_UNKNOWN) {
+        return val;
+    }
+    LLVMOpaqueType* target_ty = llvm_lower_type(ctx.ctx, ctx.types, target_type_id);
+    LLVMOpaqueType* val_ty = LLVMTypeOf(val);
+    if (val_ty == target_ty) {
+        return val;
+    }
+    u32 vk = LLVMGetTypeKind(val_ty);
+    u32 tk = LLVMGetTypeKind(target_ty);
+    if (vk == (u32)8 && tk == (u32)8) {
+        u32 vw = LLVMGetIntTypeWidth(val_ty);
+        u32 tw = LLVMGetIntTypeWidth(target_ty);
+        if (vw == tw) {
+            return val;
+        }
+        if (vw < tw) {
+            if (llvm_type_is_signed(ctx.types, target_type_id)) {
+                return LLVMBuildSExt(ctx.builder, val, target_ty, "compat_sext");
+            }
+            return LLVMBuildZExt(ctx.builder, val, target_ty, "compat_zext");
+        }
+        return LLVMBuildTrunc(ctx.builder, val, target_ty, "compat_trunc");
+    }
+    if ((vk == (u32)2 || vk == (u32)3) && (tk == (u32)2 || tk == (u32)3)) {
+        if (tk == (u32)3) {
+            return LLVMBuildFPExt(ctx.builder, val, target_ty, "compat_fpext");
+        }
+        return LLVMBuildFPTrunc(ctx.builder, val, target_ty, "compat_fptrunc");
+    }
+    if (vk == (u32)8 && tk == (u32)12) {
+        return LLVMBuildIntToPtr(ctx.builder, val, target_ty, "compat_to_ptr");
+    }
+    if (vk == (u32)12 && tk == (u32)8) {
+        return LLVMBuildPtrToInt(ctx.builder, val, target_ty, "compat_to_int");
+    }
+    return val;
 }
 
 void llvm_prepare_call_args(LlvmContext* ctx, LLVMOpaqueType* fn_type, Vec<LLVMOpaqueValue*>* call_args, str callee) {
@@ -1491,31 +1619,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             if (LLVMGetTypeKind(LLVMTypeOf(elem_ptr)) != (u32)12) {
                 elem_ptr = LLVMBuildIntToPtr(ctx.builder, elem_ptr, LLVMPointerTypeInContext(ctx.ctx, (u32)0), "elem_ptr_cast");
             }
-            u32 target_type = llvm_expr_type(ctx, expr.inner0);
-            TypeEntry* entry = ctx.types.get(target_type);
-            u32 elem_type = entry.inner;
-            if (elem_type == 0 || elem_type == TYPE_UNKNOWN) {
-                str t_name = ctx.types.type_name(target_type);
-                if (str_starts_with(t_name, "Vec<") || str_starts_with(t_name, "Slice<")) {
-                    String type_arg = String.new();
-                    i64 ti = 0;
-                    i64 tlen = strlen(t_name);
-                    while (ti < tlen && t_name[ti] != (u8)60) { ti += 1; }
-                    if (ti < tlen && t_name[ti] == (u8)60) {
-                        ti += 1;
-                        while (ti < tlen && t_name[ti] != (u8)62 && t_name[ti] != (u8)44) {
-                            if (t_name[ti] != (u8)32 && t_name[ti] != (u8)9) {
-                                type_arg.push(t_name[ti]);
-                            }
-                            ti += 1;
-                        }
-                    }
-                    if (type_arg.len() > 0) {
-                        elem_type = type_id_from_text(ctx.types, type_arg.to_str());
-                    }
-                    type_arg.drop();
-                }
-            }
+            u32 elem_type = llvm_index_elem_type(ctx, expr.inner0);
             LLVMOpaqueType* elem_ty = (elem_type != 0 && elem_type != TYPE_UNKNOWN && elem_type != TYPE_VOID)
                 ? llvm_lower_type(ctx.ctx, ctx.types, elem_type)
                 : LLVMInt8TypeInContext(ctx.ctx);

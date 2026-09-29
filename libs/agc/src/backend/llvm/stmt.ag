@@ -1,0 +1,201 @@
+// libs/agc/src/backend/llvm/stmt.ag — LLVM statement lowering.
+import vendor.llvm.llvm;
+import std.intern;
+import std.mem.vec;
+import std.string;
+import frontend.ast;
+import frontend.ast_expr;
+import frontend.lexer;
+import frontend.symbols;
+import frontend.types;
+import backend.llvm.context;
+import backend.llvm.expr;
+import backend.llvm.types;
+
+void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
+    if (stmt_id == 0 || ctx.is_terminated()) { return; }
+    AstStmt* stmt = ctx.pool.get_stmt(stmt_id);
+
+    if (stmt.kind == StmtKind.Return) {
+        if (ctx.current_return_type == TYPE_VOID) {
+            LLVMBuildRetVoid(ctx.builder);
+            return;
+        }
+        LLVMOpaqueType* ret_ty = llvm_lower_type(ctx.ctx, ctx.types, ctx.current_return_type);
+        LLVMOpaqueValue* val = (LLVMOpaqueValue*)0;
+        if (stmt.inner0 != 0) {
+            val = llvm_emit_expr(ctx, stmt.inner0);
+        }
+        if (val == (LLVMOpaqueValue*)0) {
+            val = LLVMConstNull(ret_ty);
+        } else if (LLVMTypeOf(val) != ret_ty) {
+            u32 v_kind = LLVMGetTypeKind(LLVMTypeOf(val));
+            u32 r_kind = LLVMGetTypeKind(ret_ty);
+            if (r_kind == (u32)8 && v_kind == (u32)8) {
+                val = llvm_compat_value(ctx, val, ctx.current_return_type);
+            } else if (r_kind == (u32)12 && v_kind == (u32)8) {
+                val = LLVMBuildIntToPtr(ctx.builder, val, ret_ty, "ret_p_cast");
+            } else if (r_kind == (u32)8 && v_kind == (u32)12) {
+                val = LLVMBuildPtrToInt(ctx.builder, val, ret_ty, "ret_i_cast");
+            } else if ((r_kind == (u32)2 || r_kind == (u32)3) && (v_kind == (u32)2 || v_kind == (u32)3)) {
+                if (r_kind == (u32)3) {
+                    val = LLVMBuildFPExt(ctx.builder, val, ret_ty, "ret_fpext");
+                } else {
+                    val = LLVMBuildFPTrunc(ctx.builder, val, ret_ty, "ret_fptrunc");
+                }
+            } else {
+                val = LLVMConstNull(ret_ty);
+            }
+        }
+        LLVMBuildRet(ctx.builder, val);
+        return;
+    }
+
+    if (stmt.kind == StmtKind.Let) {
+        u32 var_name_id = stmt.aux;
+        u32 type_id = stmt.inner0;
+        if (type_id == TYPE_UNKNOWN) {
+            if (stmt.inner1 != 0) {
+                type_id = llvm_expr_type(ctx, stmt.inner1);
+            }
+        }
+        if (type_id == TYPE_UNKNOWN) {
+            type_id = TYPE_I64;
+        }
+
+        LLVMOpaqueType* llvm_ty = llvm_lower_type(ctx.ctx, ctx.types, type_id);
+        str var_name = ctx.names.get(var_name_id);
+        LLVMOpaqueValue* ptr = LLVMBuildAlloca(ctx.builder, llvm_ty, var_name);
+        ctx.add_local(var_name_id, ptr, type_id, true);
+
+        if (stmt.inner1 != 0) {
+            LLVMOpaqueValue* init_val = llvm_emit_expr(ctx, stmt.inner1);
+            if (init_val != (LLVMOpaqueValue*)0) {
+                init_val = llvm_compat_value(ctx, init_val, type_id);
+                LLVMBuildStore(ctx.builder, init_val, ptr);
+            }
+        }
+        return;
+    }
+
+    if (stmt.kind == StmtKind.Assign) {
+        LLVMOpaqueValue* target_ptr = llvm_emit_lvalue(ctx, stmt.inner0);
+        LLVMOpaqueValue* val = llvm_emit_expr(ctx, stmt.inner1);
+        if (target_ptr != (LLVMOpaqueValue*)0 && val != (LLVMOpaqueValue*)0) {
+            val = llvm_compat_value(ctx, val, llvm_lvalue_type(ctx, stmt.inner0));
+            LLVMBuildStore(ctx.builder, val, target_ptr);
+        }
+        return;
+    }
+
+    if (stmt.kind == StmtKind.Expr) {
+        llvm_emit_expr(ctx, stmt.inner0);
+        return;
+    }
+
+    if (stmt.kind == StmtKind.If) {
+        LLVMOpaqueValue* cond_val = llvm_emit_expr(ctx, stmt.inner0);
+        if (cond_val == (LLVMOpaqueValue*)0) { return; }
+        if (LLVMTypeOf(cond_val) != LLVMInt1TypeInContext(ctx.ctx)) {
+            cond_val = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntNE, cond_val, LLVMConstNull(LLVMTypeOf(cond_val)), "if_cond_bool");
+        }
+
+        LLVMOpaqueBasicBlock* then_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "if_then");
+        LLVMOpaqueBasicBlock* else_bb = (stmt.aux != 0) ? LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "if_else") : (LLVMOpaqueBasicBlock*)0;
+        LLVMOpaqueBasicBlock* merge_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "if_merge");
+
+        if (else_bb != (LLVMOpaqueBasicBlock*)0) {
+            LLVMBuildCondBr(ctx.builder, cond_val, then_bb, else_bb);
+        } else {
+            LLVMBuildCondBr(ctx.builder, cond_val, then_bb, merge_bb);
+        }
+
+        // Emit then block
+        LLVMPositionBuilderAtEnd(ctx.builder, then_bb);
+        ctx.push_scope();
+        llvm_emit_stmt(ctx, stmt.inner1);
+        ctx.pop_scope();
+        if (!ctx.is_terminated()) {
+            LLVMBuildBr(ctx.builder, merge_bb);
+        }
+
+        // Emit else block if present
+        if (else_bb != (LLVMOpaqueBasicBlock*)0) {
+            LLVMPositionBuilderAtEnd(ctx.builder, else_bb);
+            ctx.push_scope();
+            llvm_emit_stmt(ctx, stmt.aux);
+            ctx.pop_scope();
+            if (!ctx.is_terminated()) {
+                LLVMBuildBr(ctx.builder, merge_bb);
+            }
+        }
+
+        LLVMPositionBuilderAtEnd(ctx.builder, merge_bb);
+        return;
+    }
+
+    if (stmt.kind == StmtKind.While) {
+        LLVMOpaqueBasicBlock* cond_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "while_cond");
+        LLVMOpaqueBasicBlock* body_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "while_body");
+        LLVMOpaqueBasicBlock* exit_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "while_exit");
+
+        LLVMBuildBr(ctx.builder, cond_bb);
+
+        // Emit condition block
+        LLVMPositionBuilderAtEnd(ctx.builder, cond_bb);
+        LLVMOpaqueValue* cond_val = llvm_emit_expr(ctx, stmt.inner0);
+        if (cond_val != (LLVMOpaqueValue*)0) {
+            if (LLVMTypeOf(cond_val) != LLVMInt1TypeInContext(ctx.ctx)) {
+                cond_val = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntNE, cond_val, LLVMConstNull(LLVMTypeOf(cond_val)), "while_cond_bool");
+            }
+            LLVMBuildCondBr(ctx.builder, cond_val, body_bb, exit_bb);
+        } else {
+            LLVMBuildBr(ctx.builder, exit_bb);
+        }
+
+        // Emit body block
+        LLVMPositionBuilderAtEnd(ctx.builder, body_bb);
+        ctx.push_loop(exit_bb, cond_bb);
+        ctx.push_scope();
+        llvm_emit_stmt(ctx, stmt.inner1);
+        ctx.pop_scope();
+        ctx.pop_loop();
+        if (!ctx.is_terminated()) {
+            LLVMBuildBr(ctx.builder, cond_bb);
+        }
+
+        LLVMPositionBuilderAtEnd(ctx.builder, exit_bb);
+        return;
+    }
+
+    if (stmt.kind == StmtKind.Break) {
+        LLVMOpaqueBasicBlock* break_target = ctx.current_break();
+        if (break_target != (LLVMOpaqueBasicBlock*)0) {
+            LLVMBuildBr(ctx.builder, break_target);
+        }
+        return;
+    }
+
+    if (stmt.kind == StmtKind.Continue) {
+        LLVMOpaqueBasicBlock* cont_target = ctx.current_continue();
+        if (cont_target != (LLVMOpaqueBasicBlock*)0) {
+            LLVMBuildBr(ctx.builder, cont_target);
+        }
+        return;
+    }
+
+    if (stmt.kind == StmtKind.Block) {
+        u32 start = stmt.inner0;
+        u32 count = stmt.aux;
+        ctx.push_scope();
+        i64 i = 0;
+        while (i < (i64)count) {
+            u32 s_id = ctx.pool.block_stmts.get((i64)start + i);
+            llvm_emit_stmt(ctx, s_id);
+            if (ctx.is_terminated()) { break; }
+            i += 1;
+        }
+        ctx.pop_scope();
+        return;
+    }
+}
