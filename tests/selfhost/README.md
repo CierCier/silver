@@ -22,8 +22,10 @@ complete native integration runner with
 `parse`, and `check` local and delegates native build/run/package/cache
 operations to the verified stage0 backend through an explicit compatibility
 seam. The opt-in `SILVER_STAGE1_NATIVE=1` path also builds and runs a small
-`i32 main()` fixture through stage1-owned textual LLVM IR and `llc`/`cc`; it is
-a smoke backend, not the complete native compiler. This makes the boundary
+`i32 main()` fixture through the stage1-owned LLVM backend (direct object
+emission plus `cc` for linking); it is a smoke backend, not the complete
+native compiler. Inputs outside the backend's current scope fail closed to
+the explicit stage0 bridge instead of producing unverified output. This makes the boundary
 executable without presenting the transitional backend as a completed
 self-host implementation. Stage0 dependency-module
 cache entries remain enabled; root-object reuse is currently disabled because

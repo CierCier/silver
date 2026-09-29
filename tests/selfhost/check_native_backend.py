@@ -25,14 +25,12 @@ def run(stage1: pathlib.Path, args: list[str], env: dict[str, str]) -> subproces
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--stage1", required=True, type=pathlib.Path)
-    parser.add_argument("--llc", type=pathlib.Path)
     parser.add_argument("--cc", type=pathlib.Path)
     args = parser.parse_args()
     stage1 = args.stage1.resolve()
-    llc = (args.llc or shutil.which("llc"))
     cc = (args.cc or shutil.which("cc"))
-    if llc is None or cc is None or not pathlib.Path(llc).is_file() or not pathlib.Path(cc).is_file():
-        raise SystemExit("llc and cc are required for the stage1 native smoke gate")
+    if cc is None or not pathlib.Path(cc).is_file():
+        raise SystemExit("cc is required for the stage1 native smoke gate")
 
     with tempfile.TemporaryDirectory(prefix="silver-native-backend-") as temporary:
         root = pathlib.Path(temporary)
@@ -48,7 +46,6 @@ def main() -> int:
         env = os.environ.copy()
         env["SILVER_STAGE0"] = str(root / "missing-stage0")
         env["SILVER_STAGE1_NATIVE"] = "1"
-        env["SILVER_STAGE1_LLC"] = str(pathlib.Path(llc).resolve())
         env["SILVER_STAGE1_CC"] = str(pathlib.Path(cc).resolve())
 
         direct_output = root / "direct"
@@ -85,7 +82,12 @@ def main() -> int:
             )
 
         unsupported = root / "unsupported.ag"
-        unsupported.write_text("i32 main() {\n    i32 value = 1;\n    return value;\n}\n")
+        unsupported.write_text(
+            "i32 main() {\n"
+            "    defer { }\n"
+            "    return 0;\n"
+            "}\n"
+        )
         failed = run(stage1, ["build", str(unsupported), "-o", str(root / "unsupported")], env)
         if failed.returncode == 0 or "stage0 backend unavailable" not in failed.stderr:
             raise AssertionError("unsupported input did not fall back to the explicit bridge")

@@ -45,4 +45,8 @@ manifest = "./libs/agc"
 [bin."aglsp"]
 manifest = "./bin/aglsp"
 
+[bin."agsm"]
+manifest = "./bin/agsm"
+
+
 # The standard library is imported as source for now.
