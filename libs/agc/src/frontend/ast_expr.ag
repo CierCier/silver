@@ -21,6 +21,7 @@ enum ExprKind {
     Match;         // inner0 = scrutinee_id, inner1 = arms_start, aux = arms_count
     Asm;           // inner0 = code_text_id, inner1 = args_start, aux = args_count
     SizeOf;        // aux = type_id
+    ArrayLit;      // inner1 = elems_start, aux = elem_count (pool.args[start] = count, then ids)
 }
 
 struct AstExpr {
@@ -286,6 +287,18 @@ impl AstPool {
         expr.inner0 = callee;
         expr.inner1 = args_start;
         expr.aux = args_count;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_array_lit(AstPool* self, u32 elems_start, u32 elem_count, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.ArrayLit;
+        expr.inner0 = 0;
+        expr.inner1 = elems_start;
+        expr.aux = elem_count;
         expr.span = span;
         expr.inferred_type = TYPE_UNKNOWN;
         self.exprs.push(move expr);

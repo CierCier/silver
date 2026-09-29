@@ -507,6 +507,19 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
             }
             base.drop();
         }
+    } else if (expr.kind == ExprKind.ArrayLit) {
+        u32 elem_count = expr.aux;
+        u32 elem_type = TYPE_UNKNOWN;
+        i64 i = 0;
+        while (i < (i64)elem_count) {
+            u32 elem_id = pool.args.get((i64)expr.inner1 + 1 + i);
+            u32 t = infer_expr(pool, types, symbols, root, env, elem_id, diagnostics, ok);
+            if (i == 0) {
+                elem_type = t;
+            }
+            i += 1;
+        }
+        inferred = types.get_array(elem_type, (i64)elem_count);
     }
 
     expr.inferred_type = inferred;
