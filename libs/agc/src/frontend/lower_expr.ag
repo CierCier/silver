@@ -273,7 +273,31 @@ impl ExprLowerer {
                 SyntaxNode* var_node = self.find_decl_var_node(start, assign_node);
                 if (var_node != (SyntaxNode*)0) {
                     u32 var_name = self.names.intern(var_node.text);
-                    u32 type_id = (start.token_kind == TokenKind.Let) ? TYPE_UNKNOWN : self.types.parse_type_name(start.text);
+                    u32 type_id = TYPE_UNKNOWN;
+                    if (start.token_kind != TokenKind.Let) {
+                        String type_text = String.new();
+                        SyntaxNode* tcur = start;
+                        while (tcur != (SyntaxNode*)0 && tcur != var_node) {
+                            if (tcur.kind == NodeKind.Token) {
+                                type_text.push_str(tcur.text);
+                            }
+                            tcur = tcur.next_sibling;
+                        }
+                        SyntaxNode* ext = var_node.next_sibling;
+                        if (ext != (SyntaxNode*)0 && ext != assign_node && ext.kind == NodeKind.Bracket) {
+                            type_text.push((u8)91);
+                            SyntaxNode* digit = ext.first_child;
+                            while (digit != (SyntaxNode*)0) {
+                                if (digit.kind == NodeKind.Token) {
+                                    type_text.push_str(digit.text);
+                                }
+                                digit = digit.next_sibling;
+                            }
+                            type_text.push((u8)93);
+                        }
+                        type_id = type_id_from_text(self.types, type_text.to_str());
+                        type_text.drop();
+                    }
                     u32 init_id = self.lower_sequence(assign_node.next_sibling, end);
                     u32 id = self.pool.add_stmt_let(var_name, type_id, init_id, start.span);
                     stmt_ids.push(id);
@@ -292,7 +316,31 @@ impl ExprLowerer {
             SyntaxNode* var_node = self.find_decl_var_node(start, end);
             if (var_node != (SyntaxNode*)0) {
                 u32 var_name = self.names.intern(var_node.text);
-                u32 type_id = (start.token_kind == TokenKind.Let) ? TYPE_UNKNOWN : self.types.parse_type_name(start.text);
+                u32 type_id = TYPE_UNKNOWN;
+                if (start.token_kind != TokenKind.Let) {
+                    String type_text = String.new();
+                    SyntaxNode* tcur = start;
+                    while (tcur != (SyntaxNode*)0 && tcur != var_node) {
+                        if (tcur.kind == NodeKind.Token) {
+                            type_text.push_str(tcur.text);
+                        }
+                        tcur = tcur.next_sibling;
+                    }
+                    SyntaxNode* ext = var_node.next_sibling;
+                    if (ext != (SyntaxNode*)0 && ext != end && ext.kind == NodeKind.Bracket) {
+                        type_text.push((u8)91);
+                        SyntaxNode* digit = ext.first_child;
+                        while (digit != (SyntaxNode*)0) {
+                            if (digit.kind == NodeKind.Token) {
+                                type_text.push_str(digit.text);
+                            }
+                            digit = digit.next_sibling;
+                        }
+                        type_text.push((u8)93);
+                    }
+                    type_id = type_id_from_text(self.types, type_text.to_str());
+                    type_text.drop();
+                }
                 u32 id = self.pool.add_stmt_let(var_name, type_id, 0, start.span);
                 stmt_ids.push(id);
                 return;
