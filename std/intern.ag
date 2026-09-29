@@ -19,7 +19,7 @@ impl Interner {
 
     u32 intern(Interner* self, str text) {
         // Borrowed-content lookup: no clone on either path (STD-002).
-        Optional<u32> found = map_get_opt_str<u32>(&self.ids, text);
+        Optional<u32> found = map_get_opt_str_u32(&self.ids, text);
         if (found.is_some()) {
             return found.unwrap();
         }
@@ -41,6 +41,6 @@ impl Interner {
     }
 
     bool contains(Interner* self, str text) {
-        return map_contains_key_str<u32>(&self.ids, text);
+        return map_contains_key_str_u32(&self.ids, text);
     }
 }

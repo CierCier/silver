@@ -865,12 +865,14 @@ impl<K, V> HashMapEntryRef<K, V> {
 }
 
 // -- Borrowed-content lookup for String-keyed maps (STD-002) ----------------
-// Free functions with concrete `HashMap<String, V>` (K fixed, V generic):
-// hashing the `str` content directly avoids cloning a lookup key. A method on
-// the generic impl cannot do this — stage0 checks method bodies per
-// instantiation and `K == str` fails for non-String K (e.g. map_test's
-// HashMap<i64, _>).
-i64 map_find_slot_str<V>(HashMap<String, V>* m, str key) {
+// Concrete `HashMap<String, u32>` free functions: hashing the `str` content
+// directly avoids cloning a lookup key. Concrete (not `<V>` generic) because
+// the Silver backend skips generic free functions instead of monomorphizing
+// them, so a generic version would never be emitted (stage2 needs these
+// symbols; see P0-002). Generalize once FE-001 lands. A method on the generic
+// impl cannot do this either — stage0 checks method bodies per instantiation
+// and `K == str` fails for non-String K (e.g. map_test's `HashMap<i64, _>`).
+i64 map_find_slot_str_u32(HashMap<String, u32>* m, str key) {
     if (m.capacity == 0 || m.len == 0) {
         return -1;
     }
@@ -902,17 +904,17 @@ i64 map_find_slot_str<V>(HashMap<String, V>* m, str key) {
 }
 
 /// Get value for a String key without cloning it.
-Optional<V> map_get_opt_str<V>(HashMap<String, V>* m, str key) {
-    i64 idx = map_find_slot_str<V>(m, key);
+Optional<u32> map_get_opt_str_u32(HashMap<String, u32>* m, str key) {
+    i64 idx = map_find_slot_str_u32(m, key);
     if (idx >= 0) {
-        return Optional<V>.some(m.values[idx]);
+        return Optional<u32>.some(m.values[idx]);
     }
-    return Optional<V>.none();
+    return Optional<u32>.none();
 }
 
 /// Borrowed-content existence check for String-keyed maps.
-bool map_contains_key_str<V>(HashMap<String, V>* m, str key) {
-    return map_find_slot_str<V>(m, key) >= 0;
+bool map_contains_key_str_u32(HashMap<String, u32>* m, str key) {
+    return map_find_slot_str_u32(m, key) >= 0;
 }
 
 // -- Ownership smoke (manual check) ---------------------------------------
