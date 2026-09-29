@@ -169,7 +169,7 @@ if (@cfg(os.linux)) {
         xor %ebp, %ebp
         mov (%rsp), %rdi
         lea 8(%rsp), %rsi
-        mov %rdi, __silver_argc(%rip)
+        mov %edi, __silver_argc(%rip)
         mov %rsi, __silver_argv(%rip)
         lea 16(%rsp,%rdi,8), %rdx
         mov %rdx, __silver_envp(%rip)
