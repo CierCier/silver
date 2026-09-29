@@ -80,6 +80,35 @@ impl ExprLowerer {
             }
         }
 
+        if (node.kind == NodeKind.Bracket) {
+            // Array literal: [a, b, c]. Indexing always has a base expression
+            // before the bracket, so a leading bracket is a literal.
+            Vec<u32> temp_elems = Vec<u32>.new();
+            SyntaxNode* elem = node.first_child;
+            while (elem != (SyntaxNode*)0) {
+                if (elem.kind != NodeKind.Token || elem.token_kind != TokenKind.Comma) {
+                    SyntaxNode* next_elem = (SyntaxNode*)0;
+                    u32 elem_id = self.lower_sequence_until_comma(elem, &next_elem);
+                    if (elem_id != 0) {
+                        temp_elems.push(elem_id);
+                    }
+                    elem = next_elem;
+                    continue;
+                }
+                elem = elem.next_sibling;
+            }
+            u32 elems_start = (u32)self.pool.args.len();
+            u32 elem_count = (u32)temp_elems.len();
+            self.pool.args.push(elem_count);
+            i64 ei = 0;
+            while (ei < temp_elems.len()) {
+                self.pool.args.push(temp_elems.get(ei));
+                ei += 1;
+            }
+            temp_elems.drop();
+            return self.pool.add_array_lit(elems_start, elem_count, node.span);
+        }
+
         return 0;
     }
 
@@ -899,6 +928,31 @@ impl ExprLowerer {
         return last_ident;
     }
 
+    bool lower_is_assign_op(ExprLowerer* self, TokenKind kind) {
+        return kind == TokenKind.Assign || kind == TokenKind.PlusAssign
+            || kind == TokenKind.MinusAssign || kind == TokenKind.StarAssign
+            || kind == TokenKind.SlashAssign || kind == TokenKind.PercentAssign
+            || kind == TokenKind.BitwiseAndAssign || kind == TokenKind.BitwiseOrAssign
+            || kind == TokenKind.BitwiseXorAssign || kind == TokenKind.LeftShiftAssign
+            || kind == TokenKind.RightShiftAssign;
+    }
+
+    bool lower_is_shift_assign(ExprLowerer* self, TokenKind kind) {
+        return kind == TokenKind.LeftShiftAssign || kind == TokenKind.RightShiftAssign;
+    }
+
+    TokenKind lower_compound_base_op(ExprLowerer* self, TokenKind kind) {
+        if (kind == TokenKind.PlusAssign) { return TokenKind.Plus; }
+        if (kind == TokenKind.MinusAssign) { return TokenKind.Minus; }
+        if (kind == TokenKind.StarAssign) { return TokenKind.Star; }
+        if (kind == TokenKind.SlashAssign) { return TokenKind.Slash; }
+        if (kind == TokenKind.PercentAssign) { return TokenKind.Percent; }
+        if (kind == TokenKind.BitwiseAndAssign) { return TokenKind.BitwiseAnd; }
+        if (kind == TokenKind.BitwiseOrAssign) { return TokenKind.BitwiseOr; }
+        if (kind == TokenKind.BitwiseXorAssign) { return TokenKind.BitwiseXor; }
+        return TokenKind.Assign;
+    }
+
     void lower_statement(ExprLowerer* self, SyntaxNode* start, SyntaxNode* end, Vec<u32>* stmt_ids) {
         if (start == (SyntaxNode*)0 || start == end) { return; }
 
@@ -915,7 +969,7 @@ impl ExprLowerer {
         SyntaxNode* assign_node = (SyntaxNode*)0;
         SyntaxNode* scan = start;
         while (scan != end && scan != (SyntaxNode*)0) {
-            if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Assign) {
+            if (scan.kind == NodeKind.Token && self.lower_is_assign_op(scan.token_kind)) {
                 assign_node = scan;
                 break;
             }
@@ -958,9 +1012,31 @@ impl ExprLowerer {
                     return;
                 }
             } else {
+                TokenKind base_op = self.lower_compound_base_op(assign_node.token_kind);
+                if (base_op == TokenKind.Assign) {
+                    if (self.lower_is_shift_assign(assign_node.token_kind)) {
+                        // No bare shift operator exists in the language; fail
+                        // closed (bridge) instead of silently dropping the op.
+                        // Nothing in std/libs/bin uses <<= or >>= today.
+                        self.unsupported = true;
+                        return;
+                    }
+                    u32 target_id = self.lower_sequence(start, assign_node);
+                    u32 val_id = self.lower_sequence(assign_node.next_sibling, end);
+                    u32 id = self.pool.add_stmt_assign(target_id, val_id, start.span);
+                    stmt_ids.push(id);
+                    return;
+                }
+                // Compound assignment desugars to target = target <op> rhs.
+                // The target sequence lowers twice (once for the place, once
+                // for the loaded value), so side-effecting targets evaluate
+                // twice — stage0 evaluates once; accept the divergence for
+                // the pure-local/index/field cases that dominate real code.
                 u32 target_id = self.lower_sequence(start, assign_node);
-                u32 val_id = self.lower_sequence(assign_node.next_sibling, end);
-                u32 id = self.pool.add_stmt_assign(target_id, val_id, start.span);
+                u32 lhs_id = self.lower_sequence(start, assign_node);
+                u32 rhs_id = self.lower_sequence(assign_node.next_sibling, end);
+                u32 bin_id = self.pool.add_binary(base_op, lhs_id, rhs_id, assign_node.span);
+                u32 id = self.pool.add_stmt_assign(target_id, bin_id, start.span);
                 stmt_ids.push(id);
                 return;
             }
