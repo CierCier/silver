@@ -1,0 +1,14 @@
+// Indices conservatively overlap, and dereferences of the same pointer overlap.
+
+void take_two(&mut i64 first, &i64 second) {
+}
+
+i64 main() {
+    i64 values[2];
+    take_two(&mut values[0], &values[1]);
+
+    i64 value = 1;
+    i64* pointer = &value;
+    take_two(&mut *pointer, &*pointer);
+    return 0;
+}

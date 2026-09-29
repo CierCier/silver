@@ -63,13 +63,19 @@ LEAK_CHECK_TESTS = {
 
 EXPECTED_COMPILE_FAILURES = {
     "borrow_origin_escape_error_test",
+    "borrow_alias_escape_error_test",
+    "borrow_global_escape_error_test",
     "enum_move_in_error_test",
     "launch_wait_error_test",
     "launch_send_error_test",
+    "launch_send_declarations_error_test",
+    "match_guard_move_error_test",
     "borrow_conflict_error_test",
     "struct_borrow_error_test",
     "call_borrow_conflict_error_test",
-    "match_guard_move_error_test",
+    "projected_borrow_conflict_error_test",
+    "index_deref_borrow_conflict_error_test",
+    "receiver_borrow_conflict_error_test",
 }
 
 DEFAULT_SKIP = {

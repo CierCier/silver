@@ -62,10 +62,27 @@ pub enum DefView {
 /// Returns `Ok(())` if `ty` may be moved across a thread boundary, or
 /// `Err(reason)` naming the first non-Send leaf.  `resolve` looks up named
 /// types; returning `None` makes the type unprovably Send (conservative).
+const MAX_SEND_TYPE_DEPTH: usize = 64;
+
 pub(crate) fn structural_send(
     ty: &Type,
     resolve: &dyn Fn(&str) -> Option<DefView>,
 ) -> Result<(), String> {
+    structural_send_inner(ty, resolve, &mut Vec::new(), 0)
+}
+
+fn structural_send_inner(
+    ty: &Type,
+    resolve: &dyn Fn(&str) -> Option<DefView>,
+    visiting: &mut Vec<Type>,
+    depth: usize,
+) -> Result<(), String> {
+    if depth >= MAX_SEND_TYPE_DEPTH {
+        return Err(format!(
+            "type nesting exceeds maximum depth ({MAX_SEND_TYPE_DEPTH})"
+        ));
+    }
+
     match ty {
         Type::Unit | Type::Primitive(_) | Type::Never => Ok(()),
         // A Task is a plain i64 handle to a thread-registry slot; the result
@@ -73,11 +90,13 @@ pub(crate) fn structural_send(
         Type::Task(_) => Ok(()),
         // A function value is a bare code address; arguments travel separately.
         Type::Function { .. } => Ok(()),
-        Type::Array { element, .. } => structural_send(element, resolve),
-        Type::Optional { inner } => structural_send(inner, resolve),
+        Type::Array { element, .. } => {
+            structural_send_inner(element, resolve, visiting, depth + 1)
+        }
+        Type::Optional { inner } => structural_send_inner(inner, resolve, visiting, depth + 1),
         Type::Tuple(items) => {
             for item in items {
-                structural_send(item, resolve)?;
+                structural_send_inner(item, resolve, visiting, depth + 1)?;
             }
             Ok(())
         }
@@ -89,7 +108,9 @@ pub(crate) fn structural_send(
             "references cannot cross a thread boundary in v1 (scoped threads are not implemented yet)"
                 .to_string(),
         ),
-        Type::Slice { .. } => Err("slice views are not Send: they borrow memory owned elsewhere".to_string()),
+        Type::Slice { .. } => {
+            Err("slice views are not Send: they borrow memory owned elsewhere".to_string())
+        }
         Type::Unknown => Err("the type is unknown (a prior type error)".to_string()),
         Type::Named { path, generics } => {
             let Some(name) = path.last() else {
@@ -98,7 +119,7 @@ pub(crate) fn structural_send(
             if let Some(&(_, owned)) = OWNING_CONTAINERS.iter().find(|(n, _)| *n == name) {
                 for &idx in owned {
                     if let Some(arg) = generics.get(idx) {
-                        structural_send(arg, resolve)?;
+                        structural_send_inner(arg, resolve, visiting, depth + 1)?;
                     }
                 }
                 return Ok(());
@@ -113,6 +134,10 @@ pub(crate) fn structural_send(
                     name
                 ));
             };
+            if visiting.iter().any(|active| active == ty) {
+                return Ok(());
+            }
+
             let type_params = match &def {
                 DefView::Struct { type_params, .. } | DefView::Enum { type_params, .. } => {
                     type_params
@@ -123,13 +148,15 @@ pub(crate) fn structural_send(
                 .cloned()
                 .zip(generics.iter().cloned())
                 .collect();
-            match def {
+            visiting.push(ty.clone());
+            let result = match def {
                 DefView::Struct { fields, .. } => {
                     for (field_name, field_ty) in fields {
                         let substituted = field_ty.substitute(&mapping);
-                        structural_send(&substituted, resolve).map_err(|reason| {
-                            format!("field '{}' of '{}': {}", field_name, name, reason)
-                        })?;
+                        structural_send_inner(&substituted, resolve, visiting, depth + 1)
+                            .map_err(|reason| {
+                                format!("field '{}' of '{}': {}", field_name, name, reason)
+                            })?;
                     }
                     Ok(())
                 }
@@ -141,13 +168,15 @@ pub(crate) fn structural_send(
                                 .map(|item| item.substitute(&mapping))
                                 .collect(),
                         );
-                        structural_send(&tuple, resolve).map_err(|reason| {
-                            format!("variant {} of enum '{}': {}", index, name, reason)
-                        })?;
+                        structural_send_inner(&tuple, resolve, visiting, depth + 1).map_err(
+                            |reason| format!("variant {} of enum '{}': {}", index, name, reason),
+                        )?;
                     }
                     Ok(())
                 }
-            }
+            };
+            visiting.pop();
+            result
         }
     }
 }
@@ -263,10 +292,7 @@ mod tests {
         // A Guard<T> holds its mutex locked: moving one across a thread
         // boundary is rejected with the guard-specific reason, regardless of
         // the payload type.
-        let guard = named(
-            "Guard",
-            vec![prim(PrimitiveType::I64)],
-        );
+        let guard = named("Guard", vec![prim(PrimitiveType::I64)]);
         let err = structural_send(&guard, &no_defs).unwrap_err();
         assert!(err.contains("Guard holds its Mutex locked"), "{err}");
     }
@@ -282,14 +308,12 @@ mod tests {
                 ("waiters".to_string(), prim(PrimitiveType::I64)),
             ],
         };
-        let mutex = |t: Type| {
-            DefView::Struct {
-                type_params: vec!["T".to_string()],
-                fields: vec![
-                    ("mu".to_string(), named("RawMutex", vec![])),
-                    ("value".to_string(), t),
-                ],
-            }
+        let mutex = |t: Type| DefView::Struct {
+            type_params: vec!["T".to_string()],
+            fields: vec![
+                ("mu".to_string(), named("RawMutex", vec![])),
+                ("value".to_string(), t),
+            ],
         };
         let resolve = |n: &str| match n {
             "RawMutex" => Some(raw_mutex.clone()),
@@ -299,8 +323,7 @@ mod tests {
         let ok_mutex = named("Mutex", vec![prim(PrimitiveType::I64)]);
         assert!(structural_send(&ok_mutex, &resolve).is_ok());
 
-        let bad_mutex =
-            named("Mutex", vec![named("Rc", vec![prim(PrimitiveType::I64)])]);
+        let bad_mutex = named("Mutex", vec![named("Rc", vec![prim(PrimitiveType::I64)])]);
         let resolve_bad = |n: &str| match n {
             "RawMutex" => Some(raw_mutex.clone()),
             "Mutex" => Some(mutex(named("Rc", vec![prim(PrimitiveType::I64)]))),
@@ -312,7 +335,8 @@ mod tests {
     }
 
     #[test]
-    fn user_struct_fields_are_walked() {        let pair = |t: Type| DefView::Struct {
+    fn user_struct_fields_are_walked() {
+        let pair = |t: Type| DefView::Struct {
             type_params: vec!["T".to_string()],
             fields: vec![("a".to_string(), t.clone()), ("b".to_string(), t)],
         };
@@ -365,6 +389,51 @@ mod tests {
         };
         let err = structural_send(&ty, &resolve).unwrap_err();
         assert!(err.contains("Node"), "{err}");
+    }
+    #[test]
+    fn recursive_owned_fields_check_the_remaining_fields() {
+        let recursive = DefView::Struct {
+            type_params: vec![],
+            fields: vec![
+                (
+                    "children".to_string(),
+                    named("Vec", vec![named("Node", vec![])]),
+                ),
+                ("value".to_string(), prim(PrimitiveType::I64)),
+            ],
+        };
+        let resolve = |name: &str| {
+            if name == "Node" {
+                Some(recursive.clone())
+            } else {
+                None
+            }
+        };
+        assert!(structural_send(&named("Node", vec![]), &resolve).is_ok());
+
+        let recursive_with_rc = DefView::Struct {
+            type_params: vec![],
+            fields: vec![
+                (
+                    "children".to_string(),
+                    named("Vec", vec![named("NodeWithRc", vec![])]),
+                ),
+                (
+                    "owner".to_string(),
+                    named("Rc", vec![prim(PrimitiveType::I64)]),
+                ),
+            ],
+        };
+        let resolve_with_rc = |name: &str| {
+            if name == "NodeWithRc" {
+                Some(recursive_with_rc.clone())
+            } else {
+                None
+            }
+        };
+        let error = structural_send(&named("NodeWithRc", vec![]), &resolve_with_rc).unwrap_err();
+        assert!(error.contains("owner"), "{error}");
+        assert!(error.contains("Rc"), "{error}");
     }
 
     #[test]

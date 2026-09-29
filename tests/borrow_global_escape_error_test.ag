@@ -1,0 +1,8 @@
+// Storing a reference to a local in a global lets it outlive the function.
+
+i64* global_ref;
+
+void save_local_reference() {
+    i64 local = 5;
+    global_ref = &local;
+}

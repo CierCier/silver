@@ -1,0 +1,23 @@
+// Declaration-aware Send positives shared by stage0 and stage1.
+import std.thread;
+import std.sys.entry;
+
+struct Point { i64 x; }
+struct Nested { Point point; }
+enum Value { Empty; Number(i64); }
+enum ValueNested { Wrapped(Nested); }
+
+void worker_nested(Nested value) { }
+void worker_value(Value value) { }
+void worker_value_nested(ValueNested value) { }
+
+i64 main() {
+    Point point = { .x = 1 };
+    Nested nested = { .point = point };
+    Value value = Value.Number(2);
+    ValueNested value_nested = ValueNested.Wrapped(nested);
+    launch worker_nested(move nested);
+    launch worker_value(move value);
+    launch worker_value_nested(move value_nested);
+    return 0;
+}

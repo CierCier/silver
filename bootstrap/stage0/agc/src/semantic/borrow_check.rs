@@ -102,6 +102,15 @@ struct CallArgAccess {
     span: Span,
 }
 
+fn named_type_name(ty: &ast::Type) -> Option<&str> {
+    match ty.kind.as_ref() {
+        ast::TypeKind::Named(named) => named.path.last().map(|name| name.name.as_str()),
+        ast::TypeKind::Reference(reference) => named_type_name(&reference.inner),
+        ast::TypeKind::Pointer(pointer) => named_type_name(&pointer.inner),
+        _ => None,
+    }
+}
+
 pub fn check_program(program: &ast::Program) -> Vec<BorrowError> {
     let mut checker = BorrowChecker::new();
     checker.check_program(program);
@@ -116,6 +125,10 @@ struct BorrowChecker {
     block_last_uses: Vec<FxHashMap<String, usize>>,
     /// Maps struct name -> set of field names that are reference types (`&T` / `&'a T`).
     struct_ref_fields: FxHashMap<String, FxHashSet<String>>,
+    struct_field_types: FxHashMap<String, FxHashMap<String, String>>,
+    global_var_types: FxHashMap<String, String>,
+    method_receiver_access: FxHashMap<String, FxHashMap<String, CallAccessKind>>,
+    method_argument_access: FxHashMap<String, FxHashMap<String, Vec<Option<CallAccessKind>>>>,
     /// Maps local variable name -> struct type name.
     var_types: FxHashMap<String, String>,
     /// Active reference variables currently in scope (`r -> RefVarInfo`).
@@ -131,6 +144,10 @@ impl BorrowChecker {
             scopes: vec![Vec::new()],
             block_last_uses: Vec::new(),
             struct_ref_fields: FxHashMap::default(),
+            struct_field_types: FxHashMap::default(),
+            global_var_types: FxHashMap::default(),
+            method_receiver_access: FxHashMap::default(),
+            method_argument_access: FxHashMap::default(),
             var_types: FxHashMap::default(),
             ref_bindings: FxHashMap::default(),
             raw_ptr_vars: FxHashSet::default(),
@@ -326,15 +343,91 @@ impl BorrowChecker {
 
     fn check_program(&mut self, program: &ast::Program) {
         for item in &program.items {
-            if let ast::ItemKind::Struct(st) = &item.kind {
-                let mut ref_fields = FxHashSet::default();
-                for f in &st.fields {
-                    if matches!(f.field_type.kind.as_ref(), ast::TypeKind::Reference(_)) {
-                        ref_fields.insert(f.name.name.clone());
+            match &item.kind {
+                ast::ItemKind::Struct(st) => {
+                    let mut ref_fields = FxHashSet::default();
+                    let mut field_types = FxHashMap::default();
+                    for field in &st.fields {
+                        if matches!(field.field_type.kind.as_ref(), ast::TypeKind::Reference(_)) {
+                            ref_fields.insert(field.name.name.clone());
+                        }
+                        if let Some(ty_name) = named_type_name(&field.field_type) {
+                            field_types.insert(field.name.name.clone(), ty_name.to_string());
+                        }
+                    }
+                    self.struct_ref_fields
+                        .insert(st.name.name.clone(), ref_fields);
+                    self.struct_field_types
+                        .insert(st.name.name.clone(), field_types);
+                }
+                ast::ItemKind::GlobalVariable(global) => {
+                    if let Some(ty_name) = named_type_name(&global.var_type) {
+                        self.global_var_types
+                            .insert(global.name.name.clone(), ty_name.to_string());
                     }
                 }
-                self.struct_ref_fields
-                    .insert(st.name.name.clone(), ref_fields);
+                _ => {}
+            }
+        }
+
+        for item in &program.items {
+            let ast::ItemKind::Impl(imp) = &item.kind else {
+                continue;
+            };
+            let Some(owner) = named_type_name(&imp.self_type) else {
+                continue;
+            };
+            for member in &imp.items {
+                let ast::ImplItemKind::Function(func) = member else {
+                    continue;
+                };
+                let ast::MethodKind::InstancePointer { is_mutable } = &func.method_kind else {
+                    continue;
+                };
+                let Some(receiver) = func.parameters.first() else {
+                    continue;
+                };
+                if !matches!(
+                    receiver.param_type.kind.as_ref(),
+                    ast::TypeKind::Reference(_)
+                ) {
+                    continue;
+                }
+
+                let access = if *is_mutable {
+                    CallAccessKind::Exclusive
+                } else {
+                    CallAccessKind::Shared
+                };
+                self.method_receiver_access
+                    .entry(owner.to_string())
+                    .or_default()
+                    .entry(func.name.name.clone())
+                    .and_modify(|existing| {
+                        if *existing != access {
+                            *existing = CallAccessKind::Exclusive;
+                        }
+                    })
+                    .or_insert(access);
+                let argument_access = func
+                    .parameters
+                    .iter()
+                    .skip(1)
+                    .map(|param| match param.param_type.kind.as_ref() {
+                        ast::TypeKind::Reference(reference) => Some(if reference.is_mutable {
+                            CallAccessKind::Exclusive
+                        } else {
+                            CallAccessKind::Shared
+                        }),
+                        ast::TypeKind::Pointer(_) => None,
+                        _ => Some(CallAccessKind::Read),
+                    })
+                    .collect::<Vec<_>>();
+                self.method_argument_access
+                    .entry(owner.to_string())
+                    .or_default()
+                    .entry(func.name.name.clone())
+                    .or_insert(argument_access);
             }
         }
 
@@ -370,11 +463,9 @@ impl BorrowChecker {
         self.raw_ptr_vars.clear();
 
         for param in parameters {
-            if let ast::TypeKind::Named(named) = param.param_type.kind.as_ref() {
-                if let Some(last) = named.path.last() {
-                    self.var_types
-                        .insert(param.name.name.clone(), last.name.clone());
-                }
+            if let Some(type_name) = named_type_name(&param.param_type) {
+                self.var_types
+                    .insert(param.name.name.clone(), type_name.to_string());
             }
             match param.param_type.kind.as_ref() {
                 ast::TypeKind::Reference(r) => {
@@ -1124,21 +1215,118 @@ impl BorrowChecker {
         }
     }
 
+    fn method_owner_type(&self, receiver: &ast::Expression) -> Option<&str> {
+        let (root, path, _) = self.extract_root_and_path(receiver)?;
+        let mut type_name = self
+            .var_types
+            .get(&root)
+            .or_else(|| self.global_var_types.get(&root))?
+            .as_str();
+        for field in path.split('.').filter(|field| !field.is_empty()) {
+            type_name = self.struct_field_types.get(type_name)?.get(field)?.as_str();
+        }
+        Some(type_name)
+    }
+
+    fn method_receiver_kind(
+        &self,
+        receiver: &ast::Expression,
+        method: &str,
+    ) -> Option<CallAccessKind> {
+        let type_name = self.method_owner_type(receiver)?;
+        self.method_receiver_access
+            .get(type_name)?
+            .get(method)
+            .copied()
+    }
+
+    fn method_argument_kind(
+        &self,
+        receiver: &ast::Expression,
+        method: &str,
+        index: usize,
+    ) -> Option<Option<CallAccessKind>> {
+        let type_name = self.method_owner_type(receiver)?;
+        self.method_argument_access
+            .get(type_name)?
+            .get(method)?
+            .get(index)
+            .copied()
+    }
+
+    fn check_method_receiver_conflict(
+        &mut self,
+        receiver: &ast::Expression,
+        access: CallAccessKind,
+    ) {
+        let Some((root, path, ref_var)) = self.extract_root_and_path(receiver) else {
+            return;
+        };
+        let kind = match access {
+            CallAccessKind::Exclusive => BorrowKind::Exclusive,
+            CallAccessKind::Shared | CallAccessKind::Read => BorrowKind::Shared,
+        };
+        let full_target = if path.is_empty() {
+            root.clone()
+        } else {
+            format!("{root}.{path}")
+        };
+        if let Some(conflict) = self.find_conflict(&root, &path, kind, ref_var.as_deref()) {
+            let message = match (kind, conflict.kind) {
+                (BorrowKind::Shared, BorrowKind::Exclusive) => {
+                    msg::cannot_borrow_as_shared_while_mutable(&full_target)
+                }
+                (BorrowKind::Exclusive, BorrowKind::Shared) => {
+                    msg::cannot_borrow_as_mutable_while_shared(&full_target)
+                }
+                (BorrowKind::Exclusive, BorrowKind::Exclusive) => {
+                    msg::cannot_borrow_as_mutable_more_than_once(&full_target)
+                }
+                (BorrowKind::Shared, BorrowKind::Shared) => unreachable!(),
+            };
+            self.error_with_note(
+                message,
+                receiver.span,
+                Some(conflict.span),
+                Some(msg::note_previous_borrow_here(conflict.kind.as_str())),
+            );
+        }
+    }
+
     /// Check for intra-call argument and receiver borrow conflicts.
     fn check_call_arguments(
         &mut self,
         receiver: Option<&ast::Expression>,
+        receiver_kind: Option<CallAccessKind>,
+        method: Option<&str>,
         arguments: &[ast::Expression],
     ) {
         let mut accesses = Vec::new();
         if let Some(recv) = receiver {
-            if let Some(acc) = self.extract_call_access(recv) {
-                accesses.push(acc);
+            if let Some(mut access) = self.extract_call_access(recv) {
+                if let Some(kind) = receiver_kind {
+                    access.kind = kind;
+                }
+                accesses.push(access);
             }
         }
-        for arg in arguments {
-            if let Some(acc) = self.extract_call_access(arg) {
-                accesses.push(acc);
+        for (index, arg) in arguments.iter().enumerate() {
+            let parameter_access = receiver
+                .zip(method)
+                .and_then(|(receiver, method)| self.method_argument_kind(receiver, method, index));
+            match parameter_access {
+                Some(None) => continue,
+                Some(Some(kind)) => {
+                    if let Some(mut access) = self.extract_call_access(arg) {
+                        access.kind = kind;
+                        accesses.push(access);
+                    }
+                }
+                None => {
+                    if let Some(access) = self.extract_call_access(arg) {
+                        accesses.push(access);
+                    }
+                }
             }
         }
 
@@ -1317,18 +1505,27 @@ impl BorrowChecker {
                 arguments,
             } => {
                 self.check_expr(function);
-                self.check_call_arguments(None, arguments);
+                self.check_call_arguments(None, None, None, arguments);
                 for arg in arguments {
                     self.check_expr(arg);
                 }
             }
             ast::ExpressionKind::MethodCall {
                 receiver,
+                method,
                 arguments,
-                ..
             } => {
                 self.check_expr(receiver);
-                self.check_call_arguments(Some(receiver.as_ref()), arguments);
+                let receiver_kind = self.method_receiver_kind(receiver, &method.name);
+                if let Some(kind) = receiver_kind {
+                    self.check_method_receiver_conflict(receiver, kind);
+                }
+                self.check_call_arguments(
+                    Some(receiver),
+                    receiver_kind,
+                    Some(&method.name),
+                    arguments,
+                );
                 for arg in arguments {
                     self.check_expr(arg);
                 }
@@ -1949,5 +2146,68 @@ mod tests {
         "#;
         let errors = check_source(src);
         assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+    }
+
+    #[test]
+    fn mutable_method_receiver_conflicts_with_live_shared_borrow() {
+        let src = r#"
+            struct Counter { i64 value; }
+            impl Counter {
+                void bump(&mut Counter self) {}
+                i64 read(&Counter self) { return self.value; }
+            }
+            void test() {
+                Counter counter;
+                &Counter shared = &counter;
+                counter.bump();
+                i64 value = shared.value;
+            }
+        "#;
+        let errors = check_source(src);
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0]
+                .message
+                .contains("cannot borrow 'counter' as mutable")
+        );
+    }
+
+    #[test]
+    fn shared_method_receiver_allows_live_shared_borrow() {
+        let src = r#"
+            struct Counter { i64 value; }
+            impl Counter {
+                i64 read(&Counter self) { return self.value; }
+            }
+            void test() {
+                Counter counter;
+                &Counter shared = &counter;
+                i64 value = counter.read();
+                i64 later = shared.value;
+            }
+        "#;
+        let errors = check_source(src);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    #[test]
+    fn mutable_method_receiver_conflicts_with_mutable_argument() {
+        let src = r#"
+            struct Counter { i64 value; }
+            impl Counter {
+                void update(&mut Counter self, &mut i64 value) {}
+            }
+            void test() {
+                Counter counter;
+                counter.update(&mut counter.value);
+            }
+        "#;
+        let errors = check_source(src);
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0]
+                .message
+                .contains("cannot borrow 'counter' as mutable more than once")
+        );
     }
 }
