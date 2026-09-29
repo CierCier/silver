@@ -95,6 +95,10 @@ pub fn build_artifact(
             }
         }
     }
+    for sys_inc in query_compiler_include_paths() {
+        arguments.push("-I".to_string());
+        arguments.push(sys_inc.display().to_string());
+    }
     parser
         .arguments(&arguments)
         .unsaved(&[unsaved])
@@ -1410,6 +1414,35 @@ fn parse_unary_expr(tokens: &[ExprTok], pos: &mut usize) -> Option<i128> {
         return Some(n);
     }
     None
+}
+
+fn query_compiler_include_paths() -> Vec<PathBuf> {
+    let compiler = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
+    let Ok(output) = std::process::Command::new(compiler)
+        .args(["-E", "-Wp,-v", "-xc", "/dev/null"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut paths = Vec::new();
+    let mut collecting = false;
+    for line in stderr.lines() {
+        if line.contains("#include <...> search starts here:") {
+            collecting = true;
+            continue;
+        }
+        if line.contains("End of search list.") {
+            break;
+        }
+        if collecting {
+            let path = PathBuf::from(line.trim());
+            if path.is_dir() && !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    paths
 }
 
 #[cfg(test)]

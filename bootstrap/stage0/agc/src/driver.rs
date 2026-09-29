@@ -921,27 +921,34 @@ fn artifact_compatibility_error(module: &ModuleArtifact, plan: &CompilePlan) -> 
         ));
     }
 
-    for candidate in module.source_candidate_paths() {
-        if !candidate.is_file() {
-            continue;
+    // Foreign (agsm-built) artifacts hash their C-header inputs, not any
+    // sibling .ag file. A handwritten Silver bindings file next to the .agm
+    // is NOT the module's source, so the sibling staleness check must not
+    // apply; rebuild detection for submodules is governed by agsm's own
+    // config-timestamp check in ensure_submodule_built.
+    if module.compiler_version != "foreign" {
+        for candidate in module.source_candidate_paths() {
+            if !candidate.is_file() {
+                continue;
+            }
+            let Ok(source_text) = std::fs::read_to_string(&candidate) else {
+                continue;
+            };
+            let current_hash = hash_source_text(&source_text);
+            if current_hash != module.source_hash_fnv1a64 {
+                return Some(format!(
+                    "module `{}` is stale: source at `{}` has changed since `{}` was built",
+                    module.module_path,
+                    candidate.display(),
+                    module
+                        .artifact_path
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| "its manifest".to_string())
+                ));
+            }
+            break;
         }
-        let Ok(source_text) = std::fs::read_to_string(&candidate) else {
-            continue;
-        };
-        let current_hash = hash_source_text(&source_text);
-        if current_hash != module.source_hash_fnv1a64 {
-            return Some(format!(
-                "module `{}` is stale: source at `{}` has changed since `{}` was built",
-                module.module_path,
-                candidate.display(),
-                module
-                    .artifact_path
-                    .as_ref()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "its manifest".to_string())
-            ));
-        }
-        break;
     }
 
     None

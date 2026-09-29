@@ -629,8 +629,12 @@ pub(crate) fn link_exe_with_ld_lld(
         link.arg(dep);
     }
 
+    let has_shared = !plan.static_link && link_has_shared_libraries(native_libs, &search_dirs, dependency_paths);
     for dir in cc_library_dirs() {
-        link.arg("-L").arg(dir);
+        link.arg("-L").arg(&dir);
+        if has_shared {
+            link.arg("-rpath").arg(&dir);
+        }
     }
     for dir in &plan.lib_dirs {
         link.arg("-L").arg(dir);
@@ -686,6 +690,13 @@ pub(crate) fn link_exe_with_cc(
         link.arg("-Wl,--allow-shlib-undefined");
         if link_has_shared_libraries(native_libs, &search_dirs, dependency_paths) {
             link.arg(format!("-Wl,-dynamic-linker,{}", *DYNAMIC_LINKER));
+        }
+    }
+    let has_shared = !plan.static_link && link_has_shared_libraries(native_libs, &search_dirs, dependency_paths);
+    for dir in cc_library_dirs() {
+        link.arg("-L").arg(&dir);
+        if has_shared {
+            link.arg(format!("-Wl,-rpath,{}", dir.display()));
         }
     }
     for dir in &plan.lib_dirs {
