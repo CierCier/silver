@@ -109,8 +109,7 @@ pub fn refresh_monomorph_bodies(monomorphs: &mut [MonomorphRequest], program: &a
                                 && func.name.name == method.name.name
                             {
                                 for source_member in &mut impl_item.items {
-                                    if let ast::ImplItemKind::Function(source_func) =
-                                        source_member
+                                    if let ast::ImplItemKind::Function(source_func) = source_member
                                         && source_func.name.name == method.name.name
                                     {
                                         source_func.body = func.body.clone();
@@ -224,7 +223,11 @@ pub fn append_monomorphs(
     while !current_requests.is_empty() {
         generation += 1;
         if generation > MAX_FIXPOINT_GENERATIONS {
-            report_nonconvergence("function instances", generation, current_requests[0].call_span());
+            report_nonconvergence(
+                "function instances",
+                generation,
+                current_requests[0].call_span(),
+            );
             break;
         }
         let mut new_items = instantiate_requests(
@@ -262,9 +265,7 @@ pub fn append_monomorphs(
     all_new_items
 }
 
-fn collect_local_generic_defaults(
-    program: &ast::Program,
-) -> Vec<(String, Vec<Option<ast::Type>>)> {
+fn collect_local_generic_defaults(program: &ast::Program) -> Vec<(String, Vec<Option<ast::Type>>)> {
     program
         .items
         .iter()
@@ -1317,7 +1318,6 @@ fn collect_type_instantiations(
     }
 }
 
-
 fn instantiate_struct(
     struct_item: &ast::StructItem,
     mangled: &str,
@@ -1470,14 +1470,59 @@ fn instantiate_impls(
     items
 }
 
+fn monomorph_request_order_key(
+    request: &MonomorphRequest,
+) -> (u32, usize, usize, u32, u32, u32, u32, String) {
+    let span = request.call_span();
+    let symbol = match request {
+        MonomorphRequest::Function {
+            source,
+            type_params,
+            mapping,
+            ..
+        } => {
+            let args = ordered_args(type_params, mapping);
+            format!("fn::{}", mangle_function_instance(source, &args, mapping))
+        }
+        MonomorphRequest::ImplMethod {
+            impl_item,
+            method,
+            type_params,
+            mapping,
+            ..
+        } => {
+            let args = ordered_args(type_params, mapping);
+            let base = impl_self_base_name(&impl_item.self_type).unwrap_or_default();
+            let args = args
+                .iter()
+                .map(Type::canonical_key)
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("impl::{base}::{}<{args}>", method.name.name)
+        }
+    };
+    (
+        span.file,
+        span.start,
+        span.end,
+        span.start_line,
+        span.start_col,
+        span.end_line,
+        span.end_col,
+        symbol,
+    )
+}
+
 fn instantiate_requests(
     program: &mut ast::Program,
     requests: &[MonomorphRequest],
     generated: &mut HashSet<String>,
     imported_fn_templates: &HashMap<String, ast::FunctionItem>,
 ) -> Vec<ast::Item> {
+    let mut ordered_requests: Vec<_> = requests.iter().collect();
+    ordered_requests.sort_by_key(|request| monomorph_request_order_key(request));
     let mut items = Vec::new();
-    for request in requests {
+    for request in ordered_requests {
         match request {
             MonomorphRequest::Function {
                 source,
@@ -3090,9 +3135,9 @@ fn type_mentions_vars(ty: &Type, vars: &HashSet<String>) -> bool {
         Type::Reference { inner, .. } | Type::Pointer { inner, .. } => {
             type_mentions_vars(inner, vars)
         }
-        Type::Slice { element }
-        | Type::Optional { inner: element }
-        | Type::Task(element) => type_mentions_vars(element, vars),
+        Type::Slice { element } | Type::Optional { inner: element } | Type::Task(element) => {
+            type_mentions_vars(element, vars)
+        }
         Type::Array { element, .. } => type_mentions_vars(element, vars),
         Type::Tuple(items) => items.iter().any(|t| type_mentions_vars(t, vars)),
         Type::Function {
@@ -3146,9 +3191,7 @@ fn unify_call_arg(
             // Mirrors typeck inference: a pointer to a reference
             // dereferences through before binding.
             match found_inner.as_ref() {
-                Type::Reference { inner: deref, .. } => {
-                    unify_call_arg(inner, deref, vars, mapping)
-                }
+                Type::Reference { inner: deref, .. } => unify_call_arg(inner, deref, vars, mapping),
                 _ => unify_call_arg(inner, found_inner, vars, mapping),
             }
         }
@@ -3190,14 +3233,8 @@ fn unify_call_arg(
         (Type::Primitive(a), Type::Primitive(b)) => a == b,
         (Type::Unit, Type::Unit) => true,
         (Type::Never, _) | (_, Type::Never) => true,
-        (
-            Type::Slice { element: a },
-            Type::Slice { element: b },
-        )
-        | (
-            Type::Optional { inner: a },
-            Type::Optional { inner: b },
-        )
+        (Type::Slice { element: a }, Type::Slice { element: b })
+        | (Type::Optional { inner: a }, Type::Optional { inner: b })
         | (Type::Task(a), Type::Task(b)) => unify_call_arg(a, b, vars, mapping),
         (
             Type::Array {
@@ -3211,8 +3248,7 @@ fn unify_call_arg(
         ) => sa == sb && unify_call_arg(a, b, vars, mapping),
         (Type::Tuple(a), Type::Tuple(b)) => {
             a.len() == b.len()
-                && a
-                    .iter()
+                && a.iter()
                     .zip(b.iter())
                     .all(|(x, y)| unify_call_arg(x, y, vars, mapping))
         }
@@ -3318,10 +3354,7 @@ impl<'a> BareCallDiscoverer<'a> {
     }
 
     fn bind_let(&self, stmt: &ast::LetStatement, scope: &mut BareCallScope) {
-        let mut ty = stmt
-            .type_annotation
-            .as_ref()
-            .map(Type::from_ast);
+        let mut ty = stmt.type_annotation.as_ref().map(Type::from_ast);
         if ty.is_none()
             && let Some(init) = stmt.initializer.as_ref()
         {
@@ -3463,8 +3496,7 @@ impl<'a> BareCallDiscoverer<'a> {
             | ast::ExpressionKind::Launch(inner)
             | ast::ExpressionKind::Wait(inner)
             | ast::ExpressionKind::Reference {
-                expression: inner,
-                ..
+                expression: inner, ..
             } => self.walk_expr(inner, scope),
             ast::ExpressionKind::MacroCall { args, .. } => {
                 for arg in args.iter_mut() {
@@ -3519,13 +3551,7 @@ impl<'a> BareCallDiscoverer<'a> {
                 .collect();
             let type_params = template_type_params(template);
             let vars: HashSet<String> = type_params.iter().cloned().collect();
-            Some((
-                template.clone(),
-                is_imported,
-                params,
-                vars,
-                type_params,
-            ))
+            Some((template.clone(), is_imported, params, vars, type_params))
         })();
         let Some((source, is_imported, param_types, vars, type_params)) = resolved else {
             return;
@@ -3651,7 +3677,7 @@ mod tests {
             })
             .expect("function not found")
     }
- 
+
     #[test]
     fn normalizes_local_generic_defaults_before_monomorphization() {
         let mut program = parse(
@@ -3770,6 +3796,53 @@ mod tests {
             count, 1,
             "duplicate request should only produce one monomorph"
         );
+    }
+
+    #[test]
+    fn monomorph_instance_order_is_independent_of_request_discovery() {
+        let source = parse(
+            "T zed<T>(T x) { return x; } \
+             T alpha<T>(T x) { return x; } \
+             i32 main() { return 0; }",
+        );
+        let request_for = |name: &str, primitive, start| {
+            let mut call_span = Span::default();
+            call_span.file = 1;
+            call_span.start = start;
+            call_span.end = start + 1;
+            MonomorphRequest::Function {
+                source: Box::new(find_function(&source, name)),
+                type_params: vec!["T".to_string()],
+                mapping: HashMap::from_iter([("T".to_string(), Type::Primitive(primitive))]),
+                call_span,
+                is_imported: false,
+            }
+        };
+        let zed = request_for("zed", ast::PrimitiveType::I32, 10);
+        let alpha = request_for("alpha", ast::PrimitiveType::F64, 10);
+
+        let instance_names = |requests: &[MonomorphRequest]| {
+            let mut program = source.clone();
+            append_monomorphs(&mut program, requests, &[])
+                .iter()
+                .filter_map(|item| match &item.kind {
+                    ast::ItemKind::Function(function) if function.name.name.contains("__") => {
+                        Some(function.name.name.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let ordered = instance_names(&[zed.clone(), alpha.clone()]);
+        assert_eq!(
+            ordered,
+            instance_names(&[alpha, zed]),
+            "emitted instance order must not depend on request discovery"
+        );
+        assert_eq!(ordered.len(), 2, "both unique requests must be emitted");
+        assert!(ordered[0].starts_with("alpha__"));
+        assert!(ordered[1].starts_with("zed__"));
     }
 
     #[test]
@@ -4097,14 +4170,15 @@ mod tests {
         assert!(has_box_struct, "expected monomorphized Box__i32 struct");
 
         let has_box_impl = items.iter().any(|item| match &item.kind {
-            ast::ItemKind::Impl(i) => {
-                i.items.iter().any(|m| match m {
-                    ast::ImplItemKind::Function(f) => f.name.name == "get",
-                    _ => false,
-                })
-            }
+            ast::ItemKind::Impl(i) => i.items.iter().any(|m| match m {
+                ast::ImplItemKind::Function(f) => f.name.name == "get",
+                _ => false,
+            }),
             _ => false,
         });
-        assert!(has_box_impl, "expected monomorphized Box impl with get method");
+        assert!(
+            has_box_impl,
+            "expected monomorphized Box impl with get method"
+        );
     }
 }
