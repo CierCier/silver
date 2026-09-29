@@ -18,6 +18,7 @@ struct ExprCursor<'a> {
     tokens: &'a [LexToken],
     pos: usize,
     end: usize,
+    expression_depth: usize,
     block_parser: BlockParser<'a>,
 }
 
@@ -451,7 +452,9 @@ fn parse_simple_type_prefix(
             cursor += 1;
             ast::Type {
                 kind: Box::new(ast::TypeKind::Tuple(elements)),
-                span: tokens[bracket_start].span.extend_to(&tokens[cursor - 1].span),
+                span: tokens[bracket_start]
+                    .span
+                    .extend_to(&tokens[cursor - 1].span),
             }
         } else {
             let base = match tokens.get(cursor)?.kind {
@@ -1411,7 +1414,9 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
                 let mut type_args = Vec::new();
                 let mut valid = true;
                 while !matches!(cursor.current().map(|t| &t.kind), Some(Token::Greater)) {
-                    if let Some((ty, next_pos)) = parse_simple_type_prefix(cursor.tokens, cursor.pos, cursor.end) {
+                    if let Some((ty, next_pos)) =
+                        parse_simple_type_prefix(cursor.tokens, cursor.pos, cursor.end)
+                    {
                         type_args.push(ty);
                         cursor.pos = next_pos;
                         if matches!(cursor.current().map(|t| &t.kind), Some(Token::Comma)) {
@@ -1642,10 +1647,7 @@ fn parse_postfix(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
                     }
                     if matches!(cursor.current().map(|t| &t.kind), Some(Token::Colon)) {
                         cursor.bump(); // consume second ':'
-                        if !matches!(
-                            cursor.current().map(|t| &t.kind),
-                            Some(Token::RightBracket)
-                        ) {
+                        if !matches!(cursor.current().map(|t| &t.kind), Some(Token::RightBracket)) {
                             step = Some(Box::new(parse_assignment(cursor)?));
                         }
                     }
@@ -2142,7 +2144,22 @@ fn parse_logical_or(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, Pars
     Ok(expr)
 }
 
+const MAX_EXPRESSION_DEPTH: usize = 16;
+
 fn parse_assignment(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseError> {
+    if cursor.expression_depth >= MAX_EXPRESSION_DEPTH {
+        return Err(ParseError::InvalidSyntax {
+            message: format!("expression nesting exceeds maximum depth ({MAX_EXPRESSION_DEPTH})"),
+            span: cursor.current().map(|token| token.span).unwrap_or_default(),
+        });
+    }
+    cursor.expression_depth += 1;
+    let result = parse_assignment_inner(cursor);
+    cursor.expression_depth -= 1;
+    result
+}
+
+fn parse_assignment_inner(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseError> {
     let lhs = parse_logical_or(cursor)?;
 
     // Ternary / Unwrap-or:
@@ -2245,6 +2262,7 @@ pub(crate) fn parse_expression(
         tokens,
         pos: start,
         end,
+        expression_depth: 0,
         block_parser,
     };
     let expr = parse_assignment(&mut cursor)?;
@@ -2267,6 +2285,21 @@ mod tests {
     use crate::lexer::lex;
     use crate::parser::prt_parser::PRT_Parser;
 
+    #[test]
+    fn rejects_expression_nesting_above_the_named_limit() {
+        let rejected_depth = MAX_EXPRESSION_DEPTH + 1;
+        let source = format!(
+            "{}value{}",
+            "(".repeat(rejected_depth),
+            ")".repeat(rejected_depth)
+        );
+        let tokens = lex(&source).expect("lex failed");
+        let error = parse_expression(&tokens, 0, tokens.len(), None)
+            .expect_err("over-limit nesting must fail");
+        assert!(error.to_string().contains(&format!(
+            "expression nesting exceeds maximum depth ({MAX_EXPRESSION_DEPTH})"
+        )));
+    }
     #[test]
     fn parses_function_pointer_type_and_cast() {
         // The fn-pointer type `void(i64)` in a cast `(void(i64))worker` must
