@@ -219,7 +219,16 @@ void collect_parameter_bindings(SyntaxNode* parameters, Vec<Binding>* bindings) 
         SyntaxNode* cursor = start;
         SyntaxNode* last_identifier = (SyntaxNode*)0;
         Vec<SyntaxNode*> segment = Vec<SyntaxNode*>.new();
-        while (cursor != (SyntaxNode*)0 && !(cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Comma)) {
+        i64 angle_depth = 0;
+        while (cursor != (SyntaxNode*)0 && !(cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Comma && angle_depth == 0)) {
+            if (cursor.kind == NodeKind.Token
+                && (cursor.token_kind == TokenKind.Less || strcmp(cursor.text, "<") == 0)) {
+                angle_depth += 1;
+            }
+            if (cursor.kind == NodeKind.Token
+                && (cursor.token_kind == TokenKind.Greater || strcmp(cursor.text, ">") == 0)) {
+                angle_depth -= 1;
+            }
             binding_collect_leaves(cursor, &segment);
             if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Identifier) {
                 last_identifier = cursor;
