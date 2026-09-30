@@ -1300,18 +1300,13 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                     i64 tag = 0;
                     i64 arity = 0;
                     if (enum_variant_info(ctx.root, enum_id.text, name, &tag, &arity) && arity == 0) {
-                        if (enum_has_payload(enum_item)) {
-                            return llvm_emit_enum_build(ctx, enum_id.text, name, 0, 0);
-                        } else {
-                            LLVMOpaqueType* int_ty = LLVMInt64TypeInContext(ctx.ctx);
-                            if (expr.inferred_type != TYPE_UNKNOWN && expr.inferred_type != 0) {
-                                LLVMOpaqueType* candidate = llvm_lower_type(ctx.ctx, ctx.types, expr.inferred_type);
-                                if (LLVMGetTypeKind(candidate) == (u32)8) {
-                                    int_ty = candidate;
-                                }
-                            }
-                            return LLVMConstInt(int_ty, (u64)tag, 0);
+                        // Variant values are {i16 tag, ...} structs in every
+                        // position; Binary ==/!= compares extracted tags.
+                        LLVMOpaqueValue* built = llvm_emit_enum_build(ctx, enum_id.text, name, 0, 0);
+                        if (built == (LLVMOpaqueValue*)0) {
+                            ctx.note_unresolved("enum-variant", name);
                         }
+                        return built;
                     }
                 }
             }
@@ -1463,6 +1458,46 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 return LLVMBuildNot(ctx.builder, final_eq, "strne_res");
             }
             return final_eq;
+        }
+
+        // Enum ==/!= compares extracted i16 tags. Payload-carrying enums
+        // have no structural equality: fail closed like stage0, which
+        // rejects struct == outright.
+        if (op == (u32)TokenKind.Equal || op == (u32)TokenKind.NotEqual) {
+            u32 l_ty_id = llvm_expr_type(ctx, expr.inner0);
+            u32 r_ty_id = llvm_expr_type(ctx, expr.inner1);
+            SyntaxNode* l_enum = find_enum_item(ctx.root, ctx.types.type_name(l_ty_id));
+            SyntaxNode* r_enum = find_enum_item(ctx.root, ctx.types.type_name(r_ty_id));
+            if (l_enum != (SyntaxNode*)0 || r_enum != (SyntaxNode*)0) {
+                if ((l_enum != (SyntaxNode*)0 && enum_has_payload(l_enum))
+                    || (r_enum != (SyntaxNode*)0 && enum_has_payload(r_enum))) {
+                    ctx.note_unresolved("enum-eq", "payload");
+                    return (LLVMOpaqueValue*)0;
+                }
+                LLVMOpaqueValue* l_tag = lhs;
+                LLVMOpaqueValue* r_tag = rhs;
+                if (l_enum != (SyntaxNode*)0) {
+                    l_tag = LLVMBuildExtractValue(ctx.builder, lhs, 0, "enum_l_tag");
+                }
+                if (r_enum != (SyntaxNode*)0) {
+                    r_tag = LLVMBuildExtractValue(ctx.builder, rhs, 0, "enum_r_tag");
+                }
+                LLVMOpaqueType* l_tag_ty = LLVMTypeOf(l_tag);
+                LLVMOpaqueType* r_tag_ty = LLVMTypeOf(r_tag);
+                if (l_tag_ty != r_tag_ty) {
+                    u32 lw = LLVMGetIntTypeWidth(l_tag_ty);
+                    u32 rw = LLVMGetIntTypeWidth(r_tag_ty);
+                    if (lw < rw) {
+                        l_tag = LLVMBuildZExt(ctx.builder, l_tag, r_tag_ty, "enum_l_widen");
+                    } else if (rw < lw) {
+                        r_tag = LLVMBuildZExt(ctx.builder, r_tag, l_tag_ty, "enum_r_widen");
+                    }
+                }
+                if (op == (u32)TokenKind.Equal) {
+                    return LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntEQ, l_tag, r_tag, "enum_eq");
+                }
+                return LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntNE, l_tag, r_tag, "enum_ne");
+            }
         }
 
         LLVMOpaqueType* lty = LLVMTypeOf(lhs);
@@ -1912,20 +1947,14 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 i64 tag = 0;
                 i64 arity = 0;
                 if (enum_variant_info(ctx.root, base.to_str(), variant_name, &tag, &arity)) {
-                    bool has_payload = enum_has_payload(enum_item);
                     base.drop();
-                    if (has_payload) {
-                        return llvm_emit_enum_build(ctx, rx_name, variant_name, 0, 0);
-                    } else {
-                        LLVMOpaqueType* int_ty = LLVMInt64TypeInContext(ctx.ctx);
-                        if (expr.inferred_type != TYPE_UNKNOWN && expr.inferred_type != 0) {
-                            LLVMOpaqueType* candidate = llvm_lower_type(ctx.ctx, ctx.types, expr.inferred_type);
-                            if (LLVMGetTypeKind(candidate) == (u32)8) {
-                                int_ty = candidate;
-                            }
-                        }
-                        return LLVMConstInt(int_ty, (u64)tag, 0);
+                    // Variant values are {i16 tag, ...} structs in every
+                    // position; Binary ==/!= compares extracted tags.
+                    LLVMOpaqueValue* built = llvm_emit_enum_build(ctx, rx_name, variant_name, 0, 0);
+                    if (built == (LLVMOpaqueValue*)0) {
+                        ctx.note_unresolved("enum-variant", variant_name);
                     }
+                    return built;
                 }
             }
             base.drop();
