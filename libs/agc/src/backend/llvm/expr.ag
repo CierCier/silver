@@ -609,7 +609,11 @@ LLVMOpaqueValue* llvm_emit_lvalue(LlvmContext* ctx, u32 expr_id) {
     if (expr.kind == ExprKind.Index) {
         u32 target_type = llvm_expr_type(ctx, expr.inner0);
         TypeEntry* target_entry = ctx.types.get(target_type);
-        bool is_pointer = target_entry.kind == TypeKind.Pointer || target_entry.kind == TypeKind.Reference;
+        // Str is a pointer at runtime (u8*); indexing must GEP the loaded
+        // pointer, not the local slot. Previously fell into lvalue and read
+        // stack bytes (s[0] on a str local returned garbage).
+        bool is_pointer = target_entry.kind == TypeKind.Pointer || target_entry.kind == TypeKind.Reference
+            || target_entry.kind == TypeKind.Str;
         bool is_array = target_entry.kind == TypeKind.Array;
         LLVMOpaqueValue* target_ptr = is_pointer
             ? llvm_emit_expr(ctx, expr.inner0)
