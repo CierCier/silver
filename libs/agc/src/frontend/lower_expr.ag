@@ -1155,6 +1155,14 @@ impl ExprLowerer {
         if (start.kind == NodeKind.Token && start.token_kind == TokenKind.Let) {
             return true;
         }
+        // Leading qualifiers only occur in declaration position at statement
+        // start (const u8* want = ...). Without this the statement falls
+        // into the assignment path and silently vanishes (stage2
+        // map_find_slot_str_u32's `const u8* want`).
+        if (start.kind == NodeKind.Token
+            && (start.token_kind == TokenKind.Const || start.token_kind == TokenKind.Mut)) {
+            return true;
+        }
         if (start.kind == NodeKind.Token && types_is_primitive_name(start.text)) {
             return true;
         }
@@ -1252,7 +1260,9 @@ impl ExprLowerer {
                         String type_text = String.new();
                         SyntaxNode* tcur = start;
                         while (tcur != (SyntaxNode*)0 && tcur != var_node) {
-                            if (tcur.kind == NodeKind.Token) {
+                            if (tcur.kind == NodeKind.Token
+                                && tcur.token_kind != TokenKind.Const
+                                && tcur.token_kind != TokenKind.Mut) {
                                 type_text.push_str(tcur.text);
                             }
                             tcur = tcur.next_sibling;
@@ -1317,7 +1327,9 @@ impl ExprLowerer {
                     String type_text = String.new();
                     SyntaxNode* tcur = start;
                     while (tcur != (SyntaxNode*)0 && tcur != var_node) {
-                        if (tcur.kind == NodeKind.Token) {
+                        if (tcur.kind == NodeKind.Token
+                            && tcur.token_kind != TokenKind.Const
+                            && tcur.token_kind != TokenKind.Mut) {
                             type_text.push_str(tcur.text);
                         }
                         tcur = tcur.next_sibling;
