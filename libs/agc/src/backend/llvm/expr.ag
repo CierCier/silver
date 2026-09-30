@@ -559,6 +559,9 @@ u32 llvm_expr_type(LlvmContext* ctx, u32 expr_id) {
     if (expr.kind == ExprKind.Cast) {
         return ctx.types.resolve_subst(expr.aux);
     }
+    if (expr.kind == ExprKind.Format) {
+        return ctx.types.get_named("String");
+    }
     return TYPE_UNKNOWN;
 }
 
@@ -982,7 +985,12 @@ LLVMOpaqueValue* llvm_emit_format_call(LlvmContext* ctx, str fn_name,
         ctx.note_unresolved("format-runtime", fn_name);
         return (LLVMOpaqueValue*)0;
     }
-    return LLVMBuildCall2(ctx.builder, LLVMGlobalGetValueType(fn), fn, args, arg_count, "format_call");
+    LLVMOpaqueType* fn_ty = LLVMGlobalGetValueType(fn);
+    str call_name = "format_call";
+    if (LLVMGetTypeKind(LLVMGetReturnType(fn_ty)) == (u32)0) {
+        call_name = "";
+    }
+    return LLVMBuildCall2(ctx.builder, fn_ty, fn, args, arg_count, call_name);
 }
 
 LLVMOpaqueValue* llvm_emit_format_call2(LlvmContext* ctx, str fn_name,
@@ -1180,6 +1188,16 @@ LLVMOpaqueValue* llvm_emit_format(LlvmContext* ctx, AstExpr* expr) {
                     LLVMPointerTypeInContext(ctx.ctx, 0), "format.char.ptr");
                 LLVMOpaqueValue* len = LLVMConstInt(LLVMInt64TypeInContext(ctx.ctx), 1, 0);
                 if (llvm_emit_format_call3(ctx, "String__push_bytes", string_slot, char_ptr, len) == (LLVMOpaqueValue*)0) {
+                    format.drop();
+                    return (LLVMOpaqueValue*)0;
+                }
+            } else if (strcmp(ctx.types.type_name(arg_type), "String") == 0) {
+                LLVMOpaqueType* string_ty2 = LLVMGetTypeByName2(ctx.ctx, "String");
+                LLVMOpaqueValue* tmp = LLVMBuildAlloca(ctx.builder, string_ty2, "format.str.tmp");
+                LLVMBuildStore(ctx.builder, arg_val, tmp);
+                LLVMOpaqueValue* data_ptr = LLVMBuildStructGEP2(ctx.builder, string_ty2, tmp, 0, "format.str.data");
+                LLVMOpaqueValue* data = LLVMBuildLoad2(ctx.builder, LLVMPointerTypeInContext(ctx.ctx, 0), data_ptr, "format.str.load");
+                if (llvm_emit_format_call2(ctx, "String__push_str", string_slot, data) == (LLVMOpaqueValue*)0) {
                     format.drop();
                     return (LLVMOpaqueValue*)0;
                 }

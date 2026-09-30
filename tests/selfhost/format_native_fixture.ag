@@ -1,0 +1,12 @@
+import std.string;
+import std.io.file;
+
+i32 main() {
+    bool flag = true;
+    i64 negative = -12;
+    u64 positive = (u64)34;
+    f64 fraction = 1.25;
+    String rendered = @format("escaped {{}}: {} | {} | {} | {} | {}", negative, positive, fraction, flag, 'x');
+    @println("{}", rendered);
+    return 0;
+}

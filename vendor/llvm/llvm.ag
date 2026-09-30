@@ -142,6 +142,7 @@ extern "C" {
     void LLVMDisposeBuilder(LLVMOpaqueBuilder* p0);
     LLVMOpaqueType* LLVMStructCreateNamed(LLVMOpaqueContext* p0, i8* p1);
     void LLVMStructSetBody(LLVMOpaqueType* p0, LLVMOpaqueType** p1, u32 p2, i32 p3);
+    LLVMOpaqueValue* LLVMConstNamedStruct(LLVMOpaqueType* p0, LLVMOpaqueValue** p1, u32 p2);
     LLVMOpaqueType* LLVMGetTypeByName2(LLVMOpaqueContext* p0, i8* p1);
     LLVMOpaqueType* LLVMInt1TypeInContext(LLVMOpaqueContext* p0);
     LLVMOpaqueType* LLVMInt8TypeInContext(LLVMOpaqueContext* p0);

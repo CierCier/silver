@@ -632,6 +632,12 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         }
     } else if (expr.kind == ExprKind.MethodCall) {
         AstExpr* receiver = pool.get_expr(expr.inner0);
+        if (receiver.kind != ExprKind.Var) {
+            // Infer non-Var receivers (e.g. synthetic Format nodes from
+            // @println desugar) so the backend can resolve the method's
+            // struct. Result intentionally unused here.
+            infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
+        }
         if (receiver.kind == ExprKind.Var) {
             str receiver_name = symbols.names.get(receiver.aux);
             str method_name = symbols.names.get(expr.aux);

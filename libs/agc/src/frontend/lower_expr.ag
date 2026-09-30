@@ -712,6 +712,27 @@ impl ExprLowerer {
                 && strcmp(name_node.text, "format") == 0) {
                 return self.lower_format(name_node, next_out);
             }
+            // Builtin @println(fmt, ...): format into a String, then print
+            // it with a trailing newline via println(str). Desugared here so
+            // the backend only ever sees Format/Call/MethodCall nodes.
+            if (name_node != (SyntaxNode*)0 && name_node.kind == NodeKind.Token
+                && name_node.token_kind == TokenKind.Identifier
+                && strcmp(name_node.text, "println") == 0) {
+                SyntaxNode* dummy_next = (SyntaxNode*)0;
+                u32 fmt_id = self.lower_format(name_node, &dummy_next);
+                if (fmt_id == 0) {
+                    *next_out = (SyntaxNode*)0;
+                    return 0;
+                }
+                u32 to_str_args = (u32)self.pool.args.len();
+                self.pool.args.push((u32)0);
+                u32 str_call = self.pool.add_method_call(fmt_id, self.names.intern("to_str"), to_str_args, name_node.span);
+                u32 println_var = self.pool.add_var(self.names.intern("println"), name_node.span);
+                u32 call_args = (u32)self.pool.args.len();
+                self.pool.args.push(str_call);
+                *next_out = dummy_next;
+                return self.pool.add_call(println_var, call_args, 1, name_node.span);
+            }
             if (name_node != (SyntaxNode*)0 && name_node.kind == NodeKind.Token
                 && name_node.token_kind == TokenKind.Identifier
                 && strcmp(name_node.text, "size") == 0) {

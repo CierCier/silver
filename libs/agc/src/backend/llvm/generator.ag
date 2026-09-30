@@ -280,6 +280,62 @@ void llvm_drain_mono_queue(LlvmContext* ctx, TypeTable* types, Interner* names, 
     }
 }
 
+// Lower one struct-literal field value to a compile-time constant of the
+// field's type. Returns null when the value is not a supported literal
+// (caller fails closed via note_unresolved).
+LLVMOpaqueValue* llvm_const_literal_value(LLVMOpaqueContext* raw_ctx, TypeTable* types, u32 target_type_id, SyntaxNode* val) {
+    if (val == (SyntaxNode*)0) {
+        return (LLVMOpaqueValue*)0;
+    }
+    TypeEntry* target_entry = types.get(target_type_id);
+    LLVMOpaqueType* field_ty = llvm_lower_type(raw_ctx, types, target_type_id);
+    bool is_ptr = target_entry.kind == TypeKind.Pointer || target_entry.kind == TypeKind.Reference;
+    if (val.kind == NodeKind.Token && val.token_kind == TokenKind.Minus
+        && val.next_sibling != (SyntaxNode*)0
+        && val.next_sibling.kind == NodeKind.Token
+        && val.next_sibling.token_kind == TokenKind.IntLiteral) {
+        i64 n = -parse_int_literal(val.next_sibling.text);
+        return LLVMConstInt(field_ty, (u64)n, 1);
+    }
+    if (val.kind == NodeKind.Token && val.token_kind == TokenKind.IntLiteral) {
+        i64 n = parse_int_literal(val.text);
+        if (n == 0 && is_ptr) {
+            return LLVMConstNull(field_ty);
+        }
+        return LLVMConstInt(field_ty, (u64)n, 1);
+    }
+    if (val.kind == NodeKind.Token && val.token_kind == TokenKind.True) {
+        return LLVMConstInt(field_ty, 1, 0);
+    }
+    if (val.kind == NodeKind.Token && val.token_kind == TokenKind.False) {
+        return LLVMConstInt(field_ty, 0, 0);
+    }
+    if (val.kind == NodeKind.Token && val.token_kind == TokenKind.CharLiteral) {
+        return LLVMConstInt(field_ty, (u64)parse_char_literal(val.text), 0);
+    }
+    if (val.kind == NodeKind.Token && val.token_kind == TokenKind.FloatLiteral) {
+        return LLVMConstRealOfString(field_ty, val.text);
+    }
+    if (val.kind == NodeKind.Parenthesized) {
+        // Cast form: `(T*)0` parses as Parenthesized[type *] followed by a
+        // sibling IntLiteral; `(u64)1` likewise with a value literal.
+        SyntaxNode* after = val.next_sibling;
+        if (after != (SyntaxNode*)0 && after.kind == NodeKind.Token
+            && after.token_kind == TokenKind.IntLiteral) {
+            i64 n = parse_int_literal(after.text);
+            if (n == 0 && is_ptr) {
+                return LLVMConstNull(field_ty);
+            }
+            return LLVMConstInt(field_ty, (u64)n, 1);
+        }
+        if (after != (SyntaxNode*)0 && after.kind == NodeKind.Token
+            && after.token_kind == TokenKind.FloatLiteral) {
+            return LLVMConstRealOfString(field_ty, after.text);
+        }
+    }
+    return (LLVMOpaqueValue*)0;
+}
+
 struct LlvmGenerator {
     LLVMOpaqueContext* ctx;
     LLVMOpaqueModule* module;
@@ -354,6 +410,18 @@ impl LlvmGenerator {
                                         field_type_text.push_str(scan.text);
                                     }
                                     scan = scan.next_sibling;
+                                }
+                                SyntaxNode* ext = last_ident.next_sibling;
+                                if (ext != (SyntaxNode*)0 && ext.kind == NodeKind.Bracket) {
+                                    field_type_text.push((u8)91);
+                                    SyntaxNode* digit = ext.first_child;
+                                    while (digit != (SyntaxNode*)0) {
+                                        if (digit.kind == NodeKind.Token) {
+                                            field_type_text.push_str(digit.text);
+                                        }
+                                        digit = digit.next_sibling;
+                                    }
+                                    field_type_text.push((u8)93);
                                 }
                                 u32 field_type_id = type_id_from_text(types, field_type_text.to_str());
                                 field_type_text.drop();
@@ -715,6 +783,102 @@ impl LlvmGenerator {
                                 g_init = LLVMConstInt(g_llvm_type, (u64)parse_char_literal(init_node.text), 0);
                             } else if (init_node.token_kind == TokenKind.FloatLiteral) {
                                 g_init = LLVMConstRealOfString(g_llvm_type, init_node.text);
+                            }
+                        } else if (init_node.kind == NodeKind.Block) {
+                            // Struct literal: { .field = lit, ... }. Build one
+                            // constant per struct field in declaration order;
+                            // missing fields zero-fill. Array literal:
+                            // { lit, ... } with exact element count.
+                            // Non-literal values fail closed via note_unresolved.
+                            TypeEntry* g_entry = ctx.types.get(g_type_id);
+                            if (g_entry.kind == TypeKind.Named) {
+                                str g_type_name = types.names.get(g_entry.name_id);
+                                LlvmStructDef* def = ctx.find_struct_by_str(g_type_name);
+                                if (def != (LlvmStructDef*)0) {
+                                    Vec<LLVMOpaqueValue*> field_vals = Vec<LLVMOpaqueValue*>.new();
+                                    bool const_ok = true;
+                                    i64 fi = 0;
+                                    while (fi < def.fields.len() && const_ok) {
+                                        LlvmFieldInfo* field = def.fields.get_ptr(fi);
+                                        str field_name = ctx.names.get(field.name_id);
+                                        SyntaxNode* cur = init_node.first_child;
+                                        LLVMOpaqueValue* field_val = (LLVMOpaqueValue*)0;
+                                        bool found_field = false;
+                                        while (cur != (SyntaxNode*)0 && !found_field) {
+                                            if (cur.kind == NodeKind.Token && strcmp(cur.text, ".") == 0
+                                                && cur.next_sibling != (SyntaxNode*)0
+                                                && cur.next_sibling.kind == NodeKind.Token
+                                                && strcmp(cur.next_sibling.text, field_name) == 0) {
+                                                SyntaxNode* eq = cur.next_sibling.next_sibling;
+                                                if (eq != (SyntaxNode*)0 && eq.kind == NodeKind.Token
+                                                    && (eq.token_kind == TokenKind.Assign || strcmp(eq.text, "=") == 0)) {
+                                                    found_field = true;
+                                                    field_val = llvm_const_literal_value(self.ctx, types, field.type_id, eq.next_sibling);
+                                                    if (field_val == (LLVMOpaqueValue*)0) {
+                                                        const_ok = false;
+                                                    }
+                                                }
+                                            }
+                                            cur = cur.next_sibling;
+                                        }
+                                        if (!found_field) {
+                                            LLVMOpaqueType* field_ty = llvm_lower_type(self.ctx, types, field.type_id);
+                                            field_val = LLVMConstNull(field_ty);
+                                        }
+                                        if (const_ok) {
+                                            field_vals.push(field_val);
+                                        }
+                                        fi += 1;
+                                    }
+                                    if (const_ok) {
+                                        g_init = LLVMConstNamedStruct(g_llvm_type, field_vals.data, (u32)field_vals.len());
+                                    } else {
+                                        ctx.note_unresolved("global-init", g_name);
+                                    }
+                                    field_vals.drop();
+                                } else {
+                                    ctx.note_unresolved("global-init", g_name);
+                                }
+                            } else if (g_entry.kind == TypeKind.Array) {
+                                u32 elem_type_id = g_entry.inner;
+                                i64 elem_count = g_entry.count;
+                                LLVMOpaqueType* elem_ty = llvm_lower_type(self.ctx, types, elem_type_id);
+                                Vec<LLVMOpaqueValue*> elem_vals = Vec<LLVMOpaqueValue*>.new();
+                                bool const_ok = true;
+                                SyntaxNode* cur = init_node.first_child;
+                                while (cur != (SyntaxNode*)0 && const_ok) {
+                                    if (cur.kind == NodeKind.Token && cur.token_kind == TokenKind.Comma) {
+                                        cur = cur.next_sibling;
+                                        continue;
+                                    }
+                                    LLVMOpaqueValue* elem_val = llvm_const_literal_value(self.ctx, types, elem_type_id, cur);
+                                    if (elem_val == (LLVMOpaqueValue*)0) {
+                                        const_ok = false;
+                                    } else {
+                                        elem_vals.push(elem_val);
+                                        // Minus+literal and cast+literal forms each
+                                        // span two sibling nodes; skip the
+                                        // literal already consumed.
+                                        SyntaxNode* after = cur.next_sibling;
+                                        bool two_node = after != (SyntaxNode*)0
+                                            && after.kind == NodeKind.Token
+                                            && after.token_kind == TokenKind.IntLiteral
+                                            && ((cur.kind == NodeKind.Token && cur.token_kind == TokenKind.Minus)
+                                                || cur.kind == NodeKind.Parenthesized);
+                                        if (two_node) {
+                                            cur = after;
+                                        }
+                                    }
+                                    cur = cur.next_sibling;
+                                }
+                                if (const_ok && elem_vals.len() == elem_count) {
+                                    g_init = LLVMConstArray2(elem_ty, elem_vals.data, (u64)elem_count);
+                                } else {
+                                    ctx.note_unresolved("global-init", g_name);
+                                }
+                                elem_vals.drop();
+                            } else {
+                                ctx.note_unresolved("global-init", g_name);
                             }
                         }
                     }
