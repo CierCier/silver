@@ -155,6 +155,20 @@ impl AstPool {
         null_expr.inferred_type = TYPE_UNKNOWN;
         pool.exprs.push(move null_expr);
 
+        // 0: Dummy null stmt. Statement IDs share the same 0-means-null
+        // convention as expressions (llvm_emit_stmt returns early on 0),
+        // so index 0 must never be a real statement. Previously the
+        // typecheck probe pool accidentally pre-filled the pool and masked
+        // this; single lowering exposed lone-`return 42` mains emitting an
+        // empty body.
+        AstStmt null_stmt;
+        null_stmt.kind = StmtKind.Expr;
+        null_stmt.inner0 = 0;
+        null_stmt.inner1 = 0;
+        null_stmt.aux = 0;
+        null_stmt.span = Span.synthetic();
+        pool.stmts.push(move null_stmt);
+
         return move pool;
     }
 

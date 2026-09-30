@@ -782,26 +782,11 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
         return true;
     }
 
+    // Single lowering: LlvmGenerator lowers each function body once and runs
+    // advisory type inference on those same IDs before emitting, so the
+    // backend sees real types. Unsupported constructs fail closed inside
+    // compile via note_unresolved.
     AstPool ast_pool = AstPool.new();
-    bool tc_ok = true;
-    bool unsupported = false;
-    DiagnosticBag tc_diag = DiagnosticBag.new();
-    SyntaxNode* child = tree.root.first_child;
-    while (child != (SyntaxNode*)0) {
-        if (child.kind == NodeKind.Function) {
-            typecheck_function_statements_scoped(&ast_pool, &symbols.types, &symbols, tree.root, child, &tc_diag, &tc_ok, &unsupported);
-            if (unsupported) {
-                break;
-            }
-        }
-        child = child.next_sibling;
-    }
-    if (unsupported) {
-        native_destroy_units(&pools, &streams);
-        pool.destroy();
-        output.drop();
-        return false;
-    }
 
     LlvmGenerator gen = LlvmGenerator.new("silver_native");
     bool compile_ok = gen.compile(&tree, &ast_pool, &symbols.types, &symbols.names, &symbols);

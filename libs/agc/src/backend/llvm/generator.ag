@@ -8,6 +8,7 @@ import std.string;
 import frontend.ast;
 import frontend.ast_expr;
 import frontend.bindings;
+import frontend.diagnostics;
 import frontend.items;
 import frontend.lower_expr;
 import frontend.symbols;
@@ -362,7 +363,7 @@ impl LlvmGenerator {
     }
 
     bool compile(LlvmGenerator* self, SyntaxTree* tree, AstPool* pool,
-                 TypeTable* types, Interner* names, SymbolTable* _symbols) {
+                 TypeTable* types, Interner* names, SymbolTable* symbols) {
         LlvmContext ctx = LlvmContext.new(self.ctx, self.module, self.builder,
                                           types, names, pool, tree.root);
 
@@ -997,6 +998,7 @@ impl LlvmGenerator {
 
                     Vec<Binding> params = Vec<Binding>.new();
                     collect_parameter_bindings(binding_function_parameters(item), &params);
+                    TypeEnv infer_env = TypeEnv.new();
                     i64 p = 0;
                     while (p < params.len()) {
                         Binding* param = params.get_ptr(p);
@@ -1015,6 +1017,7 @@ impl LlvmGenerator {
                         LLVMOpaqueValue* param_val = LLVMGetParam(fn_val, (u32)p);
                         LLVMBuildStore(self.builder, param_val, alloca_ptr);
                         ctx.add_local(param_name_id, alloca_ptr, param_type_id, true);
+                        infer_env.insert(param_name_id, param_type_id);
                         dec_str.drop();
                         p += 1;
                     }
@@ -1023,13 +1026,30 @@ impl LlvmGenerator {
                     ExprLowerer lowerer = ExprLowerer.new(pool, types, names);
                     Vec<u32> stmt_ids = Vec<u32>.new();
                     lowerer.lower_block(body, &stmt_ids);
-                    i64 s = 0;
-                    while (s < stmt_ids.len()) {
-                        llvm_emit_stmt(&ctx, stmt_ids.get(s));
-                        if (ctx.is_terminated()) { break; }
-                        s += 1;
+                    if (lowerer.unsupported) {
+                        ctx.note_unresolved("unsupported", fn_name);
+                        stmt_ids.drop();
+                    } else {
+                        // Single lowering: infer types on these same IDs before
+                        // emitting, so llvm_expr_type sees real types instead
+                        // of UNKNOWN (previously a separate probe pool held the
+                        // inference while codegen re-lowered blind).
+                        // Advisory only: errors are discarded, emit proceeds.
+                        DiagnosticBag infer_diag = DiagnosticBag.new();
+                        bool infer_ok = true;
+                        i64 ti = 0;
+                        while (ti < stmt_ids.len()) {
+                            typecheck_statement(pool, types, symbols, tree.root, &infer_env, ret_type_id, stmt_ids.get(ti), &infer_diag, &infer_ok);
+                            ti += 1;
+                        }
+                        i64 s = 0;
+                        while (s < stmt_ids.len()) {
+                            llvm_emit_stmt(&ctx, stmt_ids.get(s));
+                            if (ctx.is_terminated()) { break; }
+                            s += 1;
+                        }
+                        stmt_ids.drop();
                     }
-                    stmt_ids.drop();
 
                     if (!ctx.is_terminated()) {
                         if (ret_type_id == TYPE_VOID) {
