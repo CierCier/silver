@@ -562,6 +562,9 @@ u32 llvm_expr_type(LlvmContext* ctx, u32 expr_id) {
     if (expr.kind == ExprKind.Format) {
         return ctx.types.get_named("String");
     }
+    if (expr.kind == ExprKind.Hash) {
+        return TYPE_I64;
+    }
     return TYPE_UNKNOWN;
 }
 
@@ -1243,11 +1246,86 @@ LLVMOpaqueValue* llvm_emit_format(LlvmContext* ctx, AstExpr* expr) {
     return LLVMBuildLoad2(ctx.builder, string_ty, string_slot, "format.result");
 }
 
+LLVMOpaqueValue* llvm_emit_hash(LlvmContext* ctx, AstExpr* expr) {
+    // Mirrors stage0 hash_codegen: str -> hash_str(s); String ->
+    // hash_bytes(data, len); anything else -> hash_bytes(&val, abi_size).
+    // hash_str/hash_bytes come from std.hash; missing import fails closed.
+    u32 arg_id = expr.inner0;
+    u32 arg_type = ctx.types.resolve_subst(llvm_expr_type(ctx, arg_id));
+    LLVMOpaqueValue* arg_val = llvm_emit_expr(ctx, arg_id);
+    if (arg_val == (LLVMOpaqueValue*)0) {
+        return (LLVMOpaqueValue*)0;
+    }
+    if (arg_type == TYPE_UNKNOWN || arg_type == 0) {
+        ctx.note_unresolved("hash-arg", ctx.types.type_name(arg_type));
+        return (LLVMOpaqueValue*)0;
+    }
+    if (arg_type == TYPE_STR) {
+        LLVMOpaqueValue* fn = LLVMGetNamedFunction(ctx.module, "hash_str");
+        if (fn == (LLVMOpaqueValue*)0) {
+            ctx.note_unresolved("hash-runtime", "hash_str");
+            return (LLVMOpaqueValue*)0;
+        }
+        Vec<LLVMOpaqueValue*> call_args = Vec<LLVMOpaqueValue*>.with_capacity(1);
+        call_args.push(arg_val);
+        LLVMOpaqueValue* res = LLVMBuildCall2(ctx.builder, LLVMGlobalGetValueType(fn), fn,
+                                              call_args.get_ptr(0), 1, "hash_str_call");
+        call_args.drop();
+        return res;
+    }
+    if (strcmp(ctx.types.type_name(arg_type), "String") == 0) {
+        LLVMOpaqueType* string_ty = LLVMGetTypeByName2(ctx.ctx, "String");
+        if (string_ty == (LLVMOpaqueType*)0) {
+            ctx.note_unresolved("hash-string-type", "String");
+            return (LLVMOpaqueValue*)0;
+        }
+        LLVMOpaqueValue* tmp = LLVMBuildAlloca(ctx.builder, string_ty, "hash.str.tmp");
+        LLVMBuildStore(ctx.builder, arg_val, tmp);
+        LLVMOpaqueValue* data_ptr = LLVMBuildStructGEP2(ctx.builder, string_ty, tmp, 0, "hash.str.data");
+        LLVMOpaqueValue* data = LLVMBuildLoad2(ctx.builder, LLVMPointerTypeInContext(ctx.ctx, 0), data_ptr, "hash.str.load");
+        LLVMOpaqueValue* len_ptr = LLVMBuildStructGEP2(ctx.builder, string_ty, tmp, 1, "hash.str.len");
+        LLVMOpaqueValue* len = LLVMBuildLoad2(ctx.builder, LLVMInt64TypeInContext(ctx.ctx), len_ptr, "hash.str.len.load");
+        LLVMOpaqueValue* fn = LLVMGetNamedFunction(ctx.module, "hash_bytes");
+        if (fn == (LLVMOpaqueValue*)0) {
+            ctx.note_unresolved("hash-runtime", "hash_bytes");
+            return (LLVMOpaqueValue*)0;
+        }
+        Vec<LLVMOpaqueValue*> call_args = Vec<LLVMOpaqueValue*>.with_capacity(2);
+        call_args.push(data);
+        call_args.push(len);
+        LLVMOpaqueValue* res = LLVMBuildCall2(ctx.builder, LLVMGlobalGetValueType(fn), fn,
+                                              call_args.get_ptr(0), 2, "hash_bytes_call");
+        call_args.drop();
+        return res;
+    }
+    LLVMOpaqueValue* fn = LLVMGetNamedFunction(ctx.module, "hash_bytes");
+    if (fn == (LLVMOpaqueValue*)0) {
+        ctx.note_unresolved("hash-runtime", "hash_bytes");
+        return (LLVMOpaqueValue*)0;
+    }
+    LLVMOpaqueType* arg_ty = LLVMTypeOf(arg_val);
+    u64 size = llvm_abi_size(ctx.types, ctx.root, arg_type, 0);
+    LLVMOpaqueValue* slot = LLVMBuildAlloca(ctx.builder, arg_ty, "hash.val");
+    LLVMBuildStore(ctx.builder, arg_val, slot);
+    LLVMOpaqueValue* ptr = LLVMBuildBitCast(ctx.builder, slot, LLVMPointerTypeInContext(ctx.ctx, 0), "hash.ptr");
+    LLVMOpaqueValue* len = LLVMConstInt(LLVMInt64TypeInContext(ctx.ctx), size, 0);
+    Vec<LLVMOpaqueValue*> call_args = Vec<LLVMOpaqueValue*>.with_capacity(2);
+    call_args.push(ptr);
+    call_args.push(len);
+    LLVMOpaqueValue* res = LLVMBuildCall2(ctx.builder, LLVMGlobalGetValueType(fn), fn,
+                                          call_args.get_ptr(0), 2, "hash_bytes_call");
+    call_args.drop();
+    return res;
+}
+
 LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
     if (expr_id == 0) { return (LLVMOpaqueValue*)0; }
     AstExpr* expr = ctx.pool.get_expr(expr_id);
     if (expr.kind == ExprKind.Format) {
         return llvm_emit_format(ctx, expr);
+    }
+    if (expr.kind == ExprKind.Hash) {
+        return llvm_emit_hash(ctx, expr);
     }
 
 

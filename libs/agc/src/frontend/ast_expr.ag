@@ -23,6 +23,7 @@ enum ExprKind {
     SizeOf;        // aux = type_id
     ArrayLit;      // inner1 = elems_start, aux = elem_count (pool.args[start] = count, then ids)
     Format;        // inner0 = format string literal id, inner1 = args_start, aux = args_count
+    Hash;          // inner0 = arg expr id (builtin @hash, always i64)
 }
 
 struct AstExpr {
@@ -328,6 +329,18 @@ impl AstPool {
         expr.aux = args_count;
         expr.span = span;
         expr.inferred_type = TYPE_UNKNOWN;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_hash(AstPool* self, u32 arg_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Hash;
+        expr.inner0 = arg_id;
+        expr.inner1 = 0;
+        expr.aux = 0;
+        expr.span = span;
+        expr.inferred_type = TYPE_I64;
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
     }

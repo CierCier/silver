@@ -287,6 +287,9 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
             arg_index += 1;
         }
         inferred = types.get_named("String");
+    } else if (expr.kind == ExprKind.Hash) {
+        infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
+        inferred = TYPE_I64;
     } else if (expr.kind == ExprKind.Asm) {
         AstAsm* asm_info = pool.asms.get_ptr((i64)expr.aux);
         i64 i = 0;

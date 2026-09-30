@@ -712,9 +712,28 @@ impl ExprLowerer {
                 && strcmp(name_node.text, "format") == 0) {
                 return self.lower_format(name_node, next_out);
             }
-            // Builtin @println(fmt, ...): format into a String, then print
-            // it with a trailing newline via println(str). Desugared here so
-            // the backend only ever sees Format/Call/MethodCall nodes.
+            // Builtin @hash(x): hash a value to i64 (backend emits
+            // hash_str/hash_bytes from std.hash). Exactly one argument.
+            if (name_node != (SyntaxNode*)0 && name_node.kind == NodeKind.Token
+                && name_node.token_kind == TokenKind.Identifier
+                && strcmp(name_node.text, "hash") == 0) {
+                SyntaxNode* paren = name_node.next_sibling;
+                if (paren == (SyntaxNode*)0 || paren.kind != NodeKind.Parenthesized
+                    || paren.first_child == (SyntaxNode*)0) {
+                    self.unsupported = true;
+                    *next_out = (SyntaxNode*)0;
+                    return 0;
+                }
+                SyntaxNode* next_arg = (SyntaxNode*)0;
+                u32 arg_id = self.lower_sequence_until_comma(paren.first_child, &next_arg);
+                if (arg_id == 0 || next_arg != (SyntaxNode*)0) {
+                    self.unsupported = true;
+                    *next_out = (SyntaxNode*)0;
+                    return 0;
+                }
+                *next_out = paren.next_sibling;
+                return self.pool.add_hash(arg_id, name_node.span);
+            }
             if (name_node != (SyntaxNode*)0 && name_node.kind == NodeKind.Token
                 && name_node.token_kind == TokenKind.Identifier
                 && strcmp(name_node.text, "println") == 0) {
