@@ -1638,6 +1638,16 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             AstExpr* then_expr = ctx.pool.get_expr(expr.inner1);
             result_ty_id = then_expr.inferred_type;
         }
+        if (result_ty_id == TYPE_UNKNOWN) {
+            // Frontend Field inference validates but does not propagate
+            // field types, so struct-typed branches (n.span) infer UNKNOWN.
+            // Fall back to backend-level resolution, which reads struct
+            // layouts and handles fields correctly.
+            result_ty_id = llvm_expr_type(ctx, expr.inner1);
+        }
+        if (result_ty_id == TYPE_UNKNOWN) {
+            result_ty_id = llvm_expr_type(ctx, expr.aux);
+        }
         if (result_ty_id == TYPE_UNKNOWN) { return (LLVMOpaqueValue*)0; }
         LLVMOpaqueType* result_ty = llvm_lower_type(ctx.ctx, ctx.types, result_ty_id);
         LLVMOpaqueValue* slot = LLVMBuildAlloca(ctx.builder, result_ty, "ternary");
