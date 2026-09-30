@@ -843,7 +843,8 @@ LLVMOpaqueValue* llvm_emit_atomic_call(LlvmContext* ctx, u32 expr_id, str name) 
         u32 arg1 = ctx.pool.args.get((i64)args_start + 1);
         LLVMOpaqueValue* ptr = llvm_emit_expr(ctx, arg0);
         if (ptr == (LLVMOpaqueValue*)0) {
-            ptr = LLVMConstNull(LLVMPointerTypeInContext(ctx.ctx, (u32)0));
+            ctx.note_unresolved("atomic-arg", name);
+            return (LLVMOpaqueValue*)0;
         }
         i32 order = llvm_atomic_ordering_from_arg(ctx, arg1);
         LLVMOpaqueValue* val = LLVMBuildLoad2(ctx.builder, elem_ty, ptr, "atomic.load");
@@ -858,11 +859,13 @@ LLVMOpaqueValue* llvm_emit_atomic_call(LlvmContext* ctx, u32 expr_id, str name) 
         u32 arg2 = ctx.pool.args.get((i64)args_start + 2);
         LLVMOpaqueValue* ptr = llvm_emit_expr(ctx, arg0);
         if (ptr == (LLVMOpaqueValue*)0) {
-            ptr = LLVMConstNull(LLVMPointerTypeInContext(ctx.ctx, (u32)0));
+            ctx.note_unresolved("atomic-arg", name);
+            return (LLVMOpaqueValue*)0;
         }
         LLVMOpaqueValue* val = llvm_emit_expr(ctx, arg1);
         if (val == (LLVMOpaqueValue*)0) {
-            val = LLVMConstNull(elem_ty);
+            ctx.note_unresolved("atomic-arg", name);
+            return (LLVMOpaqueValue*)0;
         }
         if (LLVMTypeOf(val) != elem_ty) {
             val = LLVMBuildIntCast(ctx.builder, val, elem_ty, "atomic.cast");
@@ -880,11 +883,13 @@ LLVMOpaqueValue* llvm_emit_atomic_call(LlvmContext* ctx, u32 expr_id, str name) 
         u32 arg2 = ctx.pool.args.get((i64)args_start + 2);
         LLVMOpaqueValue* ptr = llvm_emit_expr(ctx, arg0);
         if (ptr == (LLVMOpaqueValue*)0) {
-            ptr = LLVMConstNull(LLVMPointerTypeInContext(ctx.ctx, (u32)0));
+            ctx.note_unresolved("atomic-arg", name);
+            return (LLVMOpaqueValue*)0;
         }
         LLVMOpaqueValue* val = llvm_emit_expr(ctx, arg1);
         if (val == (LLVMOpaqueValue*)0) {
-            val = LLVMConstNull(elem_ty);
+            ctx.note_unresolved("atomic-arg", name);
+            return (LLVMOpaqueValue*)0;
         }
         if (LLVMTypeOf(val) != elem_ty) {
             val = LLVMBuildIntCast(ctx.builder, val, elem_ty, "atomic.cast");
@@ -901,11 +906,13 @@ LLVMOpaqueValue* llvm_emit_atomic_call(LlvmContext* ctx, u32 expr_id, str name) 
         u32 arg2 = ctx.pool.args.get((i64)args_start + 2);
         LLVMOpaqueValue* ptr = llvm_emit_expr(ctx, arg0);
         if (ptr == (LLVMOpaqueValue*)0) {
-            ptr = LLVMConstNull(LLVMPointerTypeInContext(ctx.ctx, (u32)0));
+            ctx.note_unresolved("atomic-arg", name);
+            return (LLVMOpaqueValue*)0;
         }
         LLVMOpaqueValue* val = llvm_emit_expr(ctx, arg1);
         if (val == (LLVMOpaqueValue*)0) {
-            val = LLVMConstNull(elem_ty);
+            ctx.note_unresolved("atomic-arg", name);
+            return (LLVMOpaqueValue*)0;
         }
         if (LLVMTypeOf(val) != elem_ty) {
             val = LLVMBuildIntCast(ctx.builder, val, elem_ty, "atomic.cast");
@@ -922,11 +929,13 @@ LLVMOpaqueValue* llvm_emit_atomic_call(LlvmContext* ctx, u32 expr_id, str name) 
         u32 arg2 = ctx.pool.args.get((i64)args_start + 2);
         LLVMOpaqueValue* ptr = llvm_emit_expr(ctx, arg0);
         if (ptr == (LLVMOpaqueValue*)0) {
-            ptr = LLVMConstNull(LLVMPointerTypeInContext(ctx.ctx, (u32)0));
+            ctx.note_unresolved("atomic-arg", name);
+            return (LLVMOpaqueValue*)0;
         }
         LLVMOpaqueValue* val = llvm_emit_expr(ctx, arg1);
         if (val == (LLVMOpaqueValue*)0) {
-            val = LLVMConstNull(elem_ty);
+            ctx.note_unresolved("atomic-arg", name);
+            return (LLVMOpaqueValue*)0;
         }
         if (LLVMTypeOf(val) != elem_ty) {
             val = LLVMBuildIntCast(ctx.builder, val, elem_ty, "atomic.cast");
@@ -945,15 +954,18 @@ LLVMOpaqueValue* llvm_emit_atomic_call(LlvmContext* ctx, u32 expr_id, str name) 
         u32 arg4 = ctx.pool.args.get((i64)args_start + 4);
         LLVMOpaqueValue* ptr = llvm_emit_expr(ctx, arg0);
         if (ptr == (LLVMOpaqueValue*)0) {
-            ptr = LLVMConstNull(LLVMPointerTypeInContext(ctx.ctx, (u32)0));
+            ctx.note_unresolved("atomic-arg", name);
+            return (LLVMOpaqueValue*)0;
         }
         LLVMOpaqueValue* exp = llvm_emit_expr(ctx, arg1);
         if (exp == (LLVMOpaqueValue*)0) {
-            exp = LLVMConstNull(elem_ty);
+            ctx.note_unresolved("atomic-arg", name);
+            return (LLVMOpaqueValue*)0;
         }
         LLVMOpaqueValue* des = llvm_emit_expr(ctx, arg2);
         if (des == (LLVMOpaqueValue*)0) {
-            des = LLVMConstNull(elem_ty);
+            ctx.note_unresolved("atomic-arg", name);
+            return (LLVMOpaqueValue*)0;
         }
         if (LLVMTypeOf(exp) != elem_ty) {
             exp = LLVMBuildIntCast(ctx.builder, exp, elem_ty, "atomic.cast");
@@ -1789,6 +1801,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             u32 arg_id = ctx.pool.args.get((i64)args_start + i);
             LLVMOpaqueValue* a_val = llvm_emit_expr(ctx, arg_id);
             if (a_val == (LLVMOpaqueValue*)0) {
+                ctx.note_unresolved("call-arg", "arg");
                 u32 a_type = ctx.pool.get_expr(arg_id).inferred_type;
                 if (a_type == TYPE_UNKNOWN) { a_type = TYPE_I64; }
                 LLVMOpaqueType* a_llvm_ty = llvm_lower_type(ctx.ctx, ctx.types, a_type);
@@ -2138,6 +2151,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 }
             }
             if (rx_val == (LLVMOpaqueValue*)0) {
+                ctx.note_unresolved("method-receiver", method_name);
                 u32 rx_type = llvm_expr_type(ctx, expr.inner0);
                 if (rx_type == TYPE_UNKNOWN) { rx_type = TYPE_I64; }
                 if (!rx_is_ptr) { rx_type = ctx.types.get_pointer(rx_type, true); }
@@ -2154,6 +2168,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             u32 arg_id = ctx.pool.args.get((i64)args_start + 1 + i);
             LLVMOpaqueValue* a_val = llvm_emit_expr(ctx, arg_id);
             if (a_val == (LLVMOpaqueValue*)0) {
+                ctx.note_unresolved("method-arg", method_name);
                 u32 a_type = llvm_expr_type(ctx, arg_id);
                 if (a_type == TYPE_UNKNOWN) { a_type = TYPE_I64; }
                 LLVMOpaqueType* a_llvm_ty = llvm_lower_type(ctx.ctx, ctx.types, a_type);
