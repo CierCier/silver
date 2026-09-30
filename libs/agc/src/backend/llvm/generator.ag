@@ -222,7 +222,10 @@ bool llvm_define_method_instance(LlvmContext* ctx, TypeTable* types, Interner* n
 
 // Define all queued specializations. Nested generic calls discovered during
 // definition are declared and queued inline by expression lowering, so the
-// loop runs to fixpoint; the 256-generation cap fails closed instead.
+// loop runs to fixpoint; the 4096-instance cap fails closed instead.
+// (The full compiler needs ~300 instances; the old 256 cap was sized for
+// small programs and broke the stage2 self-build with 20 distinct
+// monomorph-cap notes and zero duplicates.)
 void llvm_drain_mono_queue(LlvmContext* ctx, TypeTable* types, Interner* names, AstPool* pool) {
     i64 index = 0;
     while (index < ctx.mono_queue.len()) {
@@ -245,7 +248,7 @@ void llvm_drain_mono_queue(LlvmContext* ctx, TypeTable* types, Interner* names, 
             continue;
         }
         ctx.mono_count = ctx.mono_count + 1;
-        if (ctx.mono_count > 256) {
+        if (ctx.mono_count > 4096) {
             ctx.note_unresolved("monomorph-cap", mangled);
             continue;
         }
