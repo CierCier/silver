@@ -1732,6 +1732,15 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         if (scrut_val == (LLVMOpaqueValue*)0) { return (LLVMOpaqueValue*)0; }
         AstExpr* scrut_expr = ctx.pool.get_expr(expr.inner0);
         u32 scrut_ty_id = scrut_expr.inferred_type;
+        if (scrut_ty_id == TYPE_UNKNOWN || scrut_ty_id == 0) {
+            // Frontend Field inference validates but does not propagate
+            // field types, so field scrutinees (item.kind) infer UNKNOWN.
+            // Resolve structurally: locals, fields, and call results all
+            // work here. Without this the arm-variant fallback below must
+            // guess the enum from a bare variant name, which fails closed
+            // on ambiguous names (Function in NodeKind and SymbolKind).
+            scrut_ty_id = llvm_expr_type(ctx, expr.inner0);
+        }
         str scrut_enum = "";
         if (scrut_ty_id != TYPE_UNKNOWN) {
             TypeEntry* scrut_entry = ctx.types.get(scrut_ty_id);
