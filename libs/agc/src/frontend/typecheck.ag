@@ -130,10 +130,10 @@ void typecheck_report_unknown(SymbolTable* symbols, SyntaxNode* declaration,
         symbols, declaration, projection.name, span, diagnostics, ok, candidates
     );
     typecheck_report_unknown_name(
-        symbols, declaration, projection.argument0, span, diagnostics, ok, candidates
+        symbols, declaration, projection.argument0.to_str(), span, diagnostics, ok, candidates
     );
     typecheck_report_unknown_name(
-        symbols, declaration, projection.argument1, span, diagnostics, ok, candidates
+        symbols, declaration, projection.argument1.to_str(), span, diagnostics, ok, candidates
     );
 }
 

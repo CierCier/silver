@@ -62,12 +62,12 @@ String send_type_display(TypeProjection* value) {
         result.drop();
         return move array;
     }
-    if (value.argument0 != (str)0 && strlen(value.argument0) > 0) {
+    if (value.argument0.len() > 0) {
         result.push((u8)'<');
-        result.push_str(value.argument0);
-        if (value.argument1 != (str)0 && strlen(value.argument1) > 0) {
+        result.push_str(value.argument0.to_str());
+        if (value.argument1.len() > 0) {
             result.push_str(", ");
-            result.push_str(value.argument1);
+            result.push_str(value.argument1.to_str());
         }
         result.push((u8)'>');
     }
@@ -153,14 +153,14 @@ bool send_field_is_send(SyntaxNode* root, SyntaxNode* first, SyntaxNode* end,
                         Vec<str>* visiting, i64 depth, String* reason) {
     TypeProjection field = send_parse_node_type(first, end);
     if (field.kind == ProjectionTypeKind.Named && send_text_is_identifier(field.name)) {
-        if (send_text_equals(field.name, parameter_name) && strlen(owner.argument0) > 0) {
-            field.name = owner.argument0;
+        if (send_text_equals(field.name, parameter_name) && owner.argument0.len() > 0) {
+            field.name = owner.argument0.to_str();
             field.contains_rc = owner.contains_rc;
             field.contains_non_send = owner.contains_non_send;
             field.contains_unknown = owner.contains_unknown;
-        } else if (send_text_equals(field.argument0, parameter_name)
-                   && strlen(owner.argument0) > 0) {
-            if (send_text_equals(owner.argument0, "Rc")) {
+        } else if (send_text_equals(field.argument0.to_str(), parameter_name)
+                   && owner.argument0.len() > 0) {
+            if (send_text_equals(owner.argument0.to_str(), "Rc")) {
                 field.contains_rc = true;
             }
             field.contains_non_send = field.contains_non_send || owner.contains_non_send;
@@ -329,7 +329,7 @@ bool send_type_is_send(TypeProjection* value, String* reason) {
             || send_text_equals(value.name, "Box")
             || send_text_equals(value.name, "Optional")
             || send_text_equals(value.name, "HashMap"))
-        && value.argument0 != (str)0 && strlen(value.argument0) == 0) {
+        && value.argument0.len() == 0) {
         reason.push_str("the type is unknown (a prior type error)");
         return false;
     }

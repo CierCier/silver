@@ -36,7 +36,16 @@ void add_typed_binding(Vec<Binding>* bindings, SyntaxNode* name, BindingKind kin
         TypeProjection unknown = projection_type_empty();
         binding.declared_type = move unknown;
     } else {
-        binding.declared_type = *declared_type;
+        // Field-wise deep copy: a bitwise struct copy would alias the owned
+        // argument strings and double-free. The source stays usable.
+        binding.declared_type.kind = declared_type.kind;
+        binding.declared_type.name = declared_type.name;
+        binding.declared_type.argument0 = declared_type.argument0.clone();
+        binding.declared_type.argument1 = declared_type.argument1.clone();
+        binding.declared_type.is_mutable = declared_type.is_mutable;
+        binding.declared_type.contains_rc = declared_type.contains_rc;
+        binding.declared_type.contains_non_send = declared_type.contains_non_send;
+        binding.declared_type.contains_unknown = declared_type.contains_unknown;
     }
     bindings.push(move binding);
 }
@@ -50,12 +59,12 @@ String binding_declared_type_text(TypeProjection* proj) {
         return String.new();
     }
     String s = String.from_str(proj.name);
-    if (strlen(proj.argument0) > 0) {
+    if (proj.argument0.len() > 0) {
         s.push('<');
-        s.push_str(proj.argument0);
-        if (strlen(proj.argument1) > 0) {
+        s.push_str(proj.argument0.to_str());
+        if (proj.argument1.len() > 0) {
             s.push_str(", ");
-            s.push_str(proj.argument1);
+            s.push_str(proj.argument1.to_str());
         }
         s.push('>');
     }
