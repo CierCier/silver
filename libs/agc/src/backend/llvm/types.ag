@@ -1,3 +1,4 @@
+import std.string;
 // libs/agc/src/backend/llvm/types.ag — Lowering canonical Silver TypeId to LLVM types.
 import vendor.llvm.llvm;
 import frontend.ast;
@@ -122,7 +123,7 @@ void llvm_enum_payload_types(TypeTable* types, SyntaxNode* root, str enum_name,
     SyntaxNode* cursor = block.first_child;
     while (cursor != (SyntaxNode*)0) {
         if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Identifier
-            && cursor.text == variant_name) {
+            && strcmp(cursor.text, variant_name) == 0) {
             SyntaxNode* payload = cursor.next_sibling;
             if (payload == (SyntaxNode*)0 || payload.kind != NodeKind.Parenthesized) {
                 return;
@@ -185,6 +186,17 @@ u64 llvm_enum_size(TypeTable* types, SyntaxNode* root, str enum_name) {
             data = variant_size;
         }
         i += 1;
+    }
+    bool has_payload = false;
+    i = 0;
+    while (i < arities.len()) {
+        if (arities.get(i) > 0) {
+            has_payload = true;
+        }
+        i += 1;
+    }
+    if (has_payload && data == 0) {
+        data = 32;
     }
     names.drop();
     tags.drop();
@@ -270,10 +282,10 @@ u64 llvm_abi_size(TypeTable* types, SyntaxNode* root, u32 type_id, i64 depth) {
     if (entry.kind == TypeKind.Str) {
         return 8;
     }
-    if (entry.kind == TypeKind.Array) {
-        return 8;
-    }
     if (entry.kind == TypeKind.Named) {
+        if (entry.count > 0) {
+            return 0;
+        }
         return llvm_named_size(types, root, types.names.get(entry.name_id), depth);
     }
     if (entry.kind == TypeKind.TypeParam || entry.kind == TypeKind.Function) {
@@ -318,6 +330,42 @@ u32 llvm_resolve_named(LlvmContext* lctx, TypeTable* types, u32 type_id) {
     return type_id;
 }
 
+str llvm_concrete_type_name(TypeTable* types, u32 type_id) {
+    TypeEntry* entry = types.get(type_id);
+    if (entry.kind != TypeKind.Named || entry.count == 0) {
+        return types.type_name(type_id);
+    }
+    String name = String.from_str(types.names.get(entry.name_id));
+    name.push((u8)'$');
+    i64 i = 0;
+    while (i < entry.count) {
+        if (i > 0) { name.push((u8)'_'); }
+        u32 arg = types.type_args.get(entry.inner + i);
+        String digits = String.new();
+        u32 value = arg;
+        if (value == 0) { digits.push((u8)'0'); }
+        while (value > 0) {
+            digits.push((u8)('0' + (value % 10)));
+            value = value / 10;
+        }
+        i64 left = 0;
+        i64 right = digits.len() - 1;
+        while (left < right) {
+            u8 temp = digits.data[left];
+            digits.data[left] = digits.data[right];
+            digits.data[right] = temp;
+            left += 1;
+            right -= 1;
+        }
+        name.push_str(digits.to_str());
+        digits.drop();
+        i += 1;
+    }
+    u32 name_id = types.names.intern(name.to_str());
+    name.drop();
+    return types.names.get(name_id);
+}
+
 LLVMOpaqueType* llvm_lower_type(LLVMOpaqueContext* ctx, TypeTable* types, u32 type_id) {
     TypeEntry* entry = types.get(type_id);
     if (entry.kind == TypeKind.Array) {
@@ -325,23 +373,23 @@ LLVMOpaqueType* llvm_lower_type(LLVMOpaqueContext* ctx, TypeTable* types, u32 ty
         return LLVMArrayType(elem, (u32)entry.count);
     }
     if (entry.kind == TypeKind.Named) {
-        str name = types.names.get(entry.name_id);
+        str base_name = types.names.get(entry.name_id);
+        if (entry.count > 0) {
+            if (strcmp(base_name, "Result") == 0 || strcmp(base_name, "Optional") == 0) {
+                LLVMOpaqueType* base_ty = LLVMGetTypeByName2(ctx, base_name);
+                if (base_ty != (LLVMOpaqueType*)0) {
+                    return base_ty;
+                }
+            }
+        }
+        str name = entry.count > 0 ? llvm_concrete_type_name(types, type_id)
+                                  : base_name;
         LLVMOpaqueType* named_ty = LLVMGetTypeByName2(ctx, name);
         if (named_ty != (LLVMOpaqueType*)0) {
             return named_ty;
         }
-        String base = String.new();
-        i64 b_i = 0;
-        while (name[b_i] != (u8)0 && name[b_i] != (u8)60) {
-            base.push(name[b_i]);
-            b_i += 1;
-        }
-        if (base.len() > 0) {
-            named_ty = LLVMGetTypeByName2(ctx, base.to_str());
-        }
-        base.drop();
-        if (named_ty != (LLVMOpaqueType*)0) {
-            return named_ty;
+        if (entry.count > 0) {
+            return LLVMStructCreateNamed(ctx, name);
         }
         return LLVMInt32TypeInContext(ctx);
     }

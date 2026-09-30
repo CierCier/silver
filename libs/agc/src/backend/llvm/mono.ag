@@ -1,0 +1,666 @@
+// libs/agc/src/backend/llvm/mono.ag — monomorphization queries (FE-001/P0-002).
+//
+// Pure helpers shared by call-site resolution (expr.ag) and the on-demand
+// specialization driver (generator.ag). Deliberately backend-free: no imports
+// of context/stmt/generator, so neither direction can form a cycle.
+import vendor.llvm.llvm;
+import std.intern;
+import std.mem.vec;
+import std.string;
+import frontend.ast;
+import frontend.bindings;
+import frontend.items;
+import frontend.symbols;
+import frontend.types;
+import frontend.monomorph;
+import backend.llvm.context;
+import backend.llvm.types;
+
+
+
+// True when the full type shape is concrete and all by-value layouts can be
+// named. Pointers still require concrete pointees so a generic argument cannot
+// smuggle an unresolved type parameter through the ABI.
+bool mono_type_is_concrete(LLVMOpaqueContext* raw_ctx, TypeTable* types, u32 id, i64 depth) {
+    if (id == TYPE_UNKNOWN || depth > 64) {
+        return false;
+    }
+    if (id <= TYPE_PRIMITIVE_MAX) {
+        return true;
+    }
+    TypeEntry* entry = types.get(id);
+    if (entry.kind == TypeKind.TypeParam) {
+        return false;
+    }
+    if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) {
+        return mono_type_is_concrete(raw_ctx, types, entry.inner, depth + 1);
+    }
+    if (entry.kind == TypeKind.Array) {
+        return entry.count > 0
+            && mono_type_is_concrete(raw_ctx, types, entry.inner, depth + 1);
+    }
+    if (entry.kind == TypeKind.Named && entry.name_id != 0) {
+        i64 i = 0;
+        while (i < entry.count) {
+            if (!mono_type_is_concrete(raw_ctx, types, types.type_args.get(entry.inner + i), depth + 1)) {
+                return false;
+            }
+            i += 1;
+        }
+        str name = types.names.get(entry.name_id);
+        return LLVMGetTypeByName2(raw_ctx, name) != (LLVMOpaqueType*)0;
+    }
+    return false;
+}
+
+// TypeTable interns structural generic types, so the canonical ID provides a
+// collision-free suffix even for nested applications and pointer/array args.
+String mono_mangle_method(str base, str method, Vec<u32>* arg_ids) {
+    String mangled = String.from_str(base);
+    mangled.push_str("__");
+    mangled.push_str(method);
+    i64 i = 0;
+    while (i < arg_ids.len()) {
+        mangled.push_str("__type_");
+        String digits = String.new();
+        u32 value = arg_ids.get(i);
+        if (value == 0) { digits.push((u8)'0'); }
+        while (value > 0) {
+            digits.push((u8)('0' + (value % 10)));
+            value = value / 10;
+        }
+        i64 left = 0;
+        i64 right = digits.len() - 1;
+        while (left < right) {
+            u8 temp = digits.data[left];
+            digits.data[left] = digits.data[right];
+            digits.data[right] = temp;
+            left += 1;
+            right -= 1;
+        }
+        mangled.push_str(digits.to_str());
+        digits.drop();
+        i += 1;
+    }
+    return move mangled;
+}
+
+// Declare (or fetch) a specialized method instance. Pushes substitution
+// frames so the signature resolves concretely; pops before returning on all
+// paths. Mirrors the Pass1 method declaration; keep in sync.
+LLVMOpaqueValue* mono_declare_specialized(LlvmContext* ctx, str base, MonoMethodTemplate* template, Vec<u32>* param_ids, Vec<u32>* arg_ids, str mangled) {
+    i64 b = 0;
+    while (b < param_ids.len()) {
+        ctx.types.push_subst(param_ids.get(b), arg_ids.get(b));
+        b += 1;
+    }
+    SyntaxNode* rscan = template.ret_start;
+    SyntaxNode* method_name_node = template.name_node;
+    while (rscan != (SyntaxNode*)0 && rscan != method_name_node) {
+        if (rscan.kind == NodeKind.Token && rscan.text == "#") {
+            rscan = rscan.next_sibling;
+            if (rscan != (SyntaxNode*)0 && rscan.kind == NodeKind.Bracket) {
+                rscan = rscan.next_sibling;
+            }
+            continue;
+        }
+        if (rscan.kind == NodeKind.Token && (rscan.text == "pub" || rscan.text == "static")) {
+            rscan = rscan.next_sibling;
+            continue;
+        }
+        break;
+    }
+    String ret_str = String.new();
+    while (rscan != (SyntaxNode*)0 && rscan != method_name_node) {
+        append_node_tokens(rscan, &ret_str);
+        rscan = rscan.next_sibling;
+    }
+    u32 self_instance_id = ctx.types.get_named_args(base, arg_ids);
+    u32 ret_type_id = TYPE_UNKNOWN;
+    if (strcmp(ret_str.to_str(), "Self") == 0) {
+        ret_type_id = self_instance_id;
+    } else {
+        ret_type_id = ctx.types.resolve_subst(type_id_from_text(ctx.types, ret_str.to_str()));
+    }
+    ret_str.drop();
+    mono_ensure_child_layouts(ctx, ret_type_id, &ctx.generic_layout_ids);
+    LLVMOpaqueType* ret_llvm_type = llvm_lower_type(ctx.ctx, ctx.types, ret_type_id);
+    Vec<Binding> params = Vec<Binding>.new();
+    collect_parameter_bindings(template.params_node, &params);
+    Vec<LLVMOpaqueType*> param_types = Vec<LLVMOpaqueType*>.new();
+    i64 p = 0;
+    while (p < params.len()) {
+        Binding* param = params.get_ptr(p);
+        String dec_str = binding_declared_type_text(&param.declared_type);
+        str type_str = dec_str.to_str();
+        u32 param_type_id = TYPE_UNKNOWN;
+        if (strcmp(type_str, "Self") == 0 || (strcmp(param.name, "self") == 0 && strlen(type_str) == 0)) {
+            param_type_id = self_instance_id;
+        } else {
+            param_type_id = ctx.types.resolve_subst(ctx.types.parse_type_name(type_str));
+        }
+        if (param.declared_type.kind == ProjectionTypeKind.Pointer || param.declared_type.kind == ProjectionTypeKind.Reference || param_type_id == TYPE_VOID) {
+            param_type_id = ctx.types.get_pointer(param_type_id, true);
+        }
+        mono_ensure_child_layouts(ctx, param_type_id, &ctx.generic_layout_ids);
+        param_types.push(llvm_lower_type(ctx.ctx, ctx.types, param_type_id));
+        dec_str.drop();
+        p += 1;
+    }
+    params.drop();
+    LLVMOpaqueType* fn_type = LLVMFunctionType(ret_llvm_type, param_types.data, (u32)param_types.len(), 0);
+    LLVMOpaqueValue* fn_val = LLVMGetNamedFunction(ctx.module, mangled);
+    if (fn_val == (LLVMOpaqueValue*)0) {
+        fn_val = LLVMAddFunction(ctx.module, mangled, fn_type);
+    }
+    param_types.drop();
+    ctx.types.pop_subst(param_ids.len());
+    return fn_val;
+}
+
+// Ensure a concrete generic receiver's method is declared and queue its body.
+// Type arguments stay structural here; rendering and reparsing loses nesting.
+LLVMOpaqueValue* mono_ensure_specialized(LlvmContext* ctx, u32 receiver_type_id, str method) {
+    TypeEntry* receiver = ctx.types.get(receiver_type_id);
+    if (receiver.kind != TypeKind.Named || receiver.count == 0) {
+        return (LLVMOpaqueValue*)0;
+    }
+    str base = ctx.types.names.get(receiver.name_id);
+    Vec<u32> arg_ids = Vec<u32>.new();
+    i64 i = 0;
+    while (i < receiver.count) {
+        u32 arg_id = ctx.types.type_args.get(receiver.inner + (u32)i);
+        if (!mono_type_is_concrete(ctx.ctx, ctx.types, arg_id, 0)) {
+            ctx.note_unresolved("monomorph-argument", base);
+            arg_ids.drop();
+            return (LLVMOpaqueValue*)0;
+        }
+        arg_ids.push(arg_id);
+        i += 1;
+    }
+    mono_ensure_type_layout(ctx, receiver_type_id, &ctx.generic_layout_ids);
+    String mangled = mono_mangle_method(base, method, &arg_ids);
+    LLVMOpaqueValue* found = LLVMGetNamedFunction(ctx.module, mangled.to_str());
+    if (found != (LLVMOpaqueValue*)0) {
+        mangled.drop();
+        arg_ids.drop();
+        return found;
+    }
+    MonoMethodTemplate template;
+    Vec<u32> param_ids = Vec<u32>.new();
+    bool ok = mono_find_method_template(ctx.root, ctx.types, base, method, &arg_ids, &template, &param_ids);
+    if (!ok || (param_ids.len() != arg_ids.len() && param_ids.len() != 0)) {
+        ctx.note_unresolved("monomorph-template", mangled.to_str());
+        param_ids.drop();
+        mangled.drop();
+        arg_ids.drop();
+        return (LLVMOpaqueValue*)0;
+    }
+    LLVMOpaqueValue* fn_val = mono_declare_specialized(ctx, base, &template, &param_ids, &arg_ids, mangled.to_str());
+    if (fn_val != (LLVMOpaqueValue*)0) {
+        MonoRequest req;
+        req.base_id = ctx.names.intern(base);
+        req.method_id = ctx.names.intern(method);
+        req.mangled_id = ctx.names.intern(mangled.to_str());
+        req.args_start = (u32)ctx.mono_queue_args.len();
+        req.args_count = (u32)arg_ids.len();
+        i64 k = 0;
+        while (k < arg_ids.len()) {
+            ctx.mono_queue_args.push(arg_ids.get(k));
+            k += 1;
+        }
+        ctx.mono_queue.push(move req);
+    }
+    param_ids.drop();
+    mangled.drop();
+    arg_ids.drop();
+    return fn_val;
+}
+
+struct MonoMethodTemplate {
+    SyntaxNode* ret_start;
+    SyntaxNode* name_node;
+    SyntaxNode* params_node;
+    SyntaxNode* body_node;
+}
+
+bool mono_contains_type_param(Vec<u32>* params, u32 name_id) {
+    i64 i = 0;
+    while (i < params.len()) {
+        if (params.get(i) == name_id) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+void mono_collect_param_segment(SyntaxNode* start, SyntaxNode* end, TypeTable* types, Vec<u32>* out) {
+    SyntaxNode* cursor = start;
+    while (cursor != (SyntaxNode*)0 && cursor != end) {
+        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Const) {
+            return;
+        }
+        if (cursor.kind == NodeKind.Token && node_is_identifier(cursor)) {
+            u32 name_id = types.names.intern(cursor.text);
+            if (!mono_contains_type_param(out, name_id)) {
+                out.push(name_id);
+            }
+            return;
+        }
+        cursor = cursor.next_sibling;
+    }
+}
+
+void mono_collect_generic_parameters(SyntaxNode* less, TypeTable* types, Vec<u32>* out) {
+    if (less == (SyntaxNode*)0 || less.kind != NodeKind.Token || less.token_kind != TokenKind.Less) {
+        return;
+    }
+    i64 depth = 1;
+    SyntaxNode* segment_start = less.next_sibling;
+    SyntaxNode* cursor = segment_start;
+    while (cursor != (SyntaxNode*)0) {
+        if (cursor.kind == NodeKind.Token) {
+            if (cursor.token_kind == TokenKind.Less) {
+                depth += 1;
+            } else if (cursor.token_kind == TokenKind.Greater) {
+                depth -= 1;
+                if (depth == 0) {
+                    mono_collect_param_segment(segment_start, cursor, types, out);
+                    return;
+                }
+            } else if (cursor.token_kind == TokenKind.Comma && depth == 1) {
+                mono_collect_param_segment(segment_start, cursor, types, out);
+                segment_start = cursor.next_sibling;
+            }
+        }
+        cursor = cursor.next_sibling;
+    }
+}
+
+void mono_collect_target_parameters(SyntaxNode* target, TypeTable* types, Vec<u32>* declared, Vec<u32>* out) {
+    if (target == (SyntaxNode*)0) {
+        return;
+    }
+    SyntaxNode* less = target.next_sibling;
+    if (less == (SyntaxNode*)0 || less.kind != NodeKind.Token || less.token_kind != TokenKind.Less) {
+        return;
+    }
+    i64 depth = 1;
+    SyntaxNode* cursor = less.next_sibling;
+    while (cursor != (SyntaxNode*)0 && depth > 0) {
+        if (cursor.kind == NodeKind.Token) {
+            if (cursor.token_kind == TokenKind.Less) {
+                depth += 1;
+            } else if (cursor.token_kind == TokenKind.Greater) {
+                depth -= 1;
+            } else if (cursor.token_kind == TokenKind.Identifier) {
+                u32 name_id = types.names.intern(cursor.text);
+                if (mono_contains_type_param(declared, name_id) && !mono_contains_type_param(out, name_id)) {
+                    out.push(name_id);
+                }
+            }
+        }
+        cursor = cursor.next_sibling;
+    }
+}
+
+bool mono_match_target_args(SyntaxNode* target, TypeTable* types, Vec<u32>* declared_params, Vec<u32>* arg_ids, Vec<u32>* out_param_ids) {
+    if (target == (SyntaxNode*)0) { return false; }
+    SyntaxNode* less = target.next_sibling;
+    if (less == (SyntaxNode*)0 || less.kind != NodeKind.Token || less.token_kind != TokenKind.Less) {
+        return false;
+    }
+    i64 depth = 1;
+    SyntaxNode* seg_start = less.next_sibling;
+    SyntaxNode* cursor = seg_start;
+    i64 arg_idx = 0;
+    while (cursor != (SyntaxNode*)0) {
+        if (cursor.kind == NodeKind.Token) {
+            if (cursor.token_kind == TokenKind.Less) {
+                depth += 1;
+            } else if (cursor.token_kind == TokenKind.Greater) {
+                depth -= 1;
+                if (depth == 0) {
+                    if (arg_idx >= arg_ids.len()) { return false; }
+                    String seg_text = String.new();
+                    SyntaxNode* s = seg_start;
+                    while (s != (SyntaxNode*)0 && s != cursor) {
+                        if (s.kind == NodeKind.Token) { seg_text.push_str(s.text); }
+                        s = s.next_sibling;
+                    }
+                    u32 name_id = types.names.intern(seg_text.to_str());
+                    if (mono_contains_type_param(declared_params, name_id)) {
+                        out_param_ids.push(name_id);
+                    } else {
+                        u32 seg_type_id = type_id_from_text(types, seg_text.to_str());
+                        if (seg_type_id == TYPE_UNKNOWN) {
+                            seg_type_id = types.parse_type_name(seg_text.to_str());
+                        }
+                        if (seg_type_id != arg_ids.get(arg_idx)) {
+                            seg_text.drop();
+                            return false;
+                        }
+                    }
+                    seg_text.drop();
+                    arg_idx += 1;
+                    return arg_idx == arg_ids.len();
+                }
+            } else if (cursor.token_kind == TokenKind.Comma && depth == 1) {
+                if (arg_idx >= arg_ids.len()) { return false; }
+                String seg_text = String.new();
+                SyntaxNode* s = seg_start;
+                while (s != (SyntaxNode*)0 && s != cursor) {
+                    if (s.kind == NodeKind.Token) { seg_text.push_str(s.text); }
+                    s = s.next_sibling;
+                }
+                u32 name_id = types.names.intern(seg_text.to_str());
+                if (mono_contains_type_param(declared_params, name_id)) {
+                    out_param_ids.push(name_id);
+                } else {
+                    u32 seg_type_id = type_id_from_text(types, seg_text.to_str());
+                    if (seg_type_id == TYPE_UNKNOWN) {
+                        seg_type_id = types.parse_type_name(seg_text.to_str());
+                    }
+                    if (seg_type_id != arg_ids.get(arg_idx)) {
+                        seg_text.drop();
+                        return false;
+                    }
+                }
+                seg_text.drop();
+                arg_idx += 1;
+                seg_start = cursor.next_sibling;
+            }
+        }
+        cursor = cursor.next_sibling;
+    }
+    return false;
+}
+
+void mono_collect_struct_parameters(SyntaxNode* root, str base, TypeTable* types, Vec<u32>* out) {
+    SyntaxNode* item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Struct || item.kind == NodeKind.Enum) {
+            SyntaxNode* name_node = item_identifier(item);
+            if (name_node != (SyntaxNode*)0 && strcmp(name_node.text, base) == 0) {
+                SyntaxNode* cursor = name_node.next_sibling;
+                while (cursor != (SyntaxNode*)0 && cursor.kind != NodeKind.Block) {
+                    if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Less) {
+                        mono_collect_generic_parameters(cursor, types, out);
+                        return;
+                    }
+                    cursor = cursor.next_sibling;
+                }
+                return;
+            }
+        }
+        item = item.next_sibling;
+    }
+}
+bool mono_layout_seen(Vec<u32>* layout_ids, u32 type_id) {
+    i64 i = 0;
+    while (i < layout_ids.len()) {
+        if (layout_ids.get(i) == type_id) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+u32 mono_resolve_struct_field_type(LlvmContext* ctx, u32 struct_type_id, u32 field_type_id) {
+    TypeEntry* struct_type = ctx.types.get(struct_type_id);
+    if (struct_type.kind != TypeKind.Named || struct_type.count == 0) {
+        return ctx.types.resolve_subst(field_type_id);
+    }
+    str base = ctx.types.names.get(struct_type.name_id);
+    Vec<u32> param_ids = Vec<u32>.new();
+    mono_collect_struct_parameters(ctx.root, base, ctx.types, &param_ids);
+    if (param_ids.len() != struct_type.count) {
+        param_ids.drop();
+        return TYPE_UNKNOWN;
+    }
+    i64 i = 0;
+    while (i < param_ids.len()) {
+        ctx.types.push_subst(param_ids.get(i), ctx.types.type_args.get(struct_type.inner + (u32)i));
+        i += 1;
+    }
+    u32 resolved = ctx.types.resolve_subst(field_type_id);
+    ctx.types.pop_subst(param_ids.len());
+    param_ids.drop();
+    return resolved;
+}
+
+
+void mono_ensure_child_layouts(LlvmContext* ctx, u32 type_id, Vec<u32>* layout_ids) {
+    TypeEntry* entry = ctx.types.get(type_id);
+    if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference
+        || entry.kind == TypeKind.Array) {
+        u32 inner = entry.inner;
+        mono_ensure_type_layout(ctx, inner, layout_ids);
+        return;
+    }
+    if (entry.kind == TypeKind.Named && entry.count > 0) {
+        mono_ensure_type_layout(ctx, type_id, layout_ids);
+    }
+}
+
+void mono_ensure_type_layout(LlvmContext* ctx, u32 type_id, Vec<u32>* layout_ids) {
+    TypeEntry* source = ctx.types.get(type_id);
+    if (source.kind != TypeKind.Named || source.count == 0 || mono_layout_seen(layout_ids, type_id)) {
+        return;
+    }
+    u32 name_id = source.name_id;
+    u32 args_start = source.inner;
+    i64 arg_count = source.count;
+    if (!mono_type_is_concrete(ctx.ctx, ctx.types, type_id, 0)) {
+        return;
+    }
+    layout_ids.push(type_id);
+    str base = ctx.types.names.get(name_id);
+    SyntaxNode* item = find_item_by_name(ctx.root, NodeKind.Struct, base);
+    if (item == (SyntaxNode*)0) {
+        item = find_item_by_name(ctx.root, NodeKind.Enum, base);
+        if (item != (SyntaxNode*)0) {
+            return;
+        }
+        ctx.note_unresolved("monomorph-layout", base);
+        return;
+    }
+    Vec<u32> param_ids = Vec<u32>.new();
+    mono_collect_struct_parameters(ctx.root, base, ctx.types, &param_ids);
+    if (param_ids.len() != arg_count) {
+        ctx.note_unresolved("monomorph-layout", base);
+        param_ids.drop();
+        return;
+    }
+    i64 i = 0;
+    while (i < arg_count) {
+        ctx.types.push_subst(param_ids.get(i), ctx.types.type_args.get(args_start + (u32)i));
+        i += 1;
+    }
+    i64 field_count = llvm_struct_field_count(ctx.root, base);
+    if (field_count < 0) {
+        ctx.note_unresolved("monomorph-layout", base);
+        ctx.types.pop_subst(arg_count);
+        param_ids.drop();
+        return;
+    }
+    Vec<LLVMOpaqueType*> field_types = Vec<LLVMOpaqueType*>.new();
+    i = 0;
+    bool fields_valid = true;
+    while (i < field_count) {
+        u32 field_type = ctx.types.resolve_subst((u32)llvm_struct_field_type(ctx.root, base, i, ctx.types));
+        if (field_type == TYPE_UNKNOWN) {
+            fields_valid = false;
+        } else {
+            mono_ensure_child_layouts(ctx, field_type, layout_ids);
+            field_types.push(llvm_lower_type(ctx.ctx, ctx.types, field_type));
+        }
+        i += 1;
+    }
+    if (fields_valid && field_types.len() == field_count) {
+        LLVMOpaqueType* llvm_type = llvm_lower_type(ctx.ctx, ctx.types, type_id);
+        LLVMStructSetBody(llvm_type, field_types.data, (u32)field_types.len(), 0);
+    } else {
+        ctx.note_unresolved("monomorph-layout", base);
+    }
+    field_types.drop();
+    ctx.types.pop_subst(arg_count);
+    param_ids.drop();
+}
+
+void mono_define_generic_layouts(LlvmContext* ctx) {
+    i64 i = TYPE_PRIMITIVE_MAX + 1;
+    while (i < ctx.types.types.len()) {
+        TypeEntry* entry = ctx.types.types.get_ptr(i);
+        if (entry.kind == TypeKind.Named && entry.count > 0) {
+            mono_ensure_type_layout(ctx, (u32)i, &ctx.generic_layout_ids);
+        }
+        i += 1;
+    }
+}
+
+// Find an impl block for `base` defining `method`, matching type arguments `arg_ids`.
+// Collects the impl-level type parameter names (deduped, in order) for substitution.
+// For specialized concrete impls, param_ids will be empty (no substitution needed).
+bool mono_find_method_template(SyntaxNode* root, TypeTable* types, str base, str method, Vec<u32>* arg_ids, MonoMethodTemplate* out, Vec<u32>* param_ids) {
+    if (root == (SyntaxNode*)0) {
+        return false;
+    }
+    bool found_any = false;
+    MonoMethodTemplate generic_template;
+    Vec<u32> generic_params = Vec<u32>.new();
+
+    SyntaxNode* item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Impl) {
+            SyntaxNode* target = impl_target_identifier(item);
+            if (target != (SyntaxNode*)0) {
+                String target_base = String.new();
+                i64 bi = 0;
+                while (target.text[bi] != (u8)0 && target.text[bi] != (u8)60) {
+                    target_base.push(target.text[bi]);
+                    bi += 1;
+                }
+                bool is_base = strcmp(target_base.to_str(), base) == 0;
+                target_base.drop();
+                if (is_base) {
+                    SyntaxNode* block = item.first_child;
+                    while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+                        block = block.next_sibling;
+                    }
+                    if (block != (SyntaxNode*)0) {
+                        SyntaxNode* cursor = block.first_child;
+                        while (cursor != (SyntaxNode*)0) {
+                            if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
+                                cursor = cursor.next_sibling;
+                                continue;
+                            }
+                            SyntaxNode* current_ret = cursor;
+                            SyntaxNode* current_name = (SyntaxNode*)0;
+                            SyntaxNode* current_params = (SyntaxNode*)0;
+                            SyntaxNode* current_body = (SyntaxNode*)0;
+                            SyntaxNode* scan = cursor;
+                            bool hit_semi = false;
+                            SyntaxNode* semi_node = (SyntaxNode*)0;
+                            while (scan != (SyntaxNode*)0) {
+                                if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Semicolon) {
+                                    hit_semi = true;
+                                    semi_node = scan;
+                                    break;
+                                }
+                                if (scan.kind == NodeKind.Block) {
+                                    current_body = scan;
+                                    break;
+                                }
+                                if (scan.kind == NodeKind.Parenthesized) {
+                                    current_params = scan;
+                                    if (scan.next_sibling != (SyntaxNode*)0 && scan.next_sibling.kind == NodeKind.Block) {
+                                        current_body = scan.next_sibling;
+                                        break;
+                                    }
+                                }
+                                if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Identifier) {
+                                    current_name = scan;
+                                }
+                                scan = scan.next_sibling;
+                            }
+                            if (hit_semi) {
+                                cursor = semi_node.next_sibling;
+                                continue;
+                            }
+                            if (current_body != (SyntaxNode*)0 && current_body.kind == NodeKind.Block) {
+                                if (current_name != (SyntaxNode*)0 && strcmp(current_name.text, method) == 0
+                                    && current_params != (SyntaxNode*)0) {
+                                    Vec<u32> declared_params = Vec<u32>.new();
+                                    SyntaxNode* impl_head = item.first_child;
+                                    while (impl_head != (SyntaxNode*)0 && impl_head.kind != NodeKind.Block) {
+                                        if (impl_head.kind == NodeKind.Token && impl_head.token_kind == TokenKind.Impl) {
+                                            SyntaxNode* generic_open = impl_head.next_sibling;
+                                            if (generic_open != (SyntaxNode*)0 && generic_open.kind == NodeKind.Token
+                                                && generic_open.token_kind == TokenKind.Less) {
+                                                mono_collect_generic_parameters(generic_open, types, &declared_params);
+                                            }
+                                            break;
+                                        }
+                                        impl_head = impl_head.next_sibling;
+                                    }
+                                    if (declared_params.len() == 0) {
+                                        mono_collect_struct_parameters(root, base, types, &declared_params);
+                                    }
+                                    Vec<u32> candidate_params = Vec<u32>.new();
+                                    bool matched = mono_match_target_args(target, types, &declared_params, arg_ids, &candidate_params);
+                                    declared_params.drop();
+                                    if (matched) {
+                                        if (candidate_params.len() == 0) {
+                                            out.ret_start = current_ret;
+                                            out.name_node = current_name;
+                                            out.params_node = current_params;
+                                            out.body_node = current_body;
+                                            candidate_params.drop();
+                                            generic_params.drop();
+                                            return true;
+                                        }
+                                        if (!found_any) {
+                                            found_any = true;
+                                            generic_template.ret_start = current_ret;
+                                            generic_template.name_node = current_name;
+                                            generic_template.params_node = current_params;
+                                            generic_template.body_node = current_body;
+                                            i64 cp = 0;
+                                            while (cp < candidate_params.len()) {
+                                                generic_params.push(candidate_params.get(cp));
+                                                cp += 1;
+                                            }
+                                        }
+                                    }
+                                    candidate_params.drop();
+                                }
+                                cursor = current_body.next_sibling;
+                                continue;
+                            }
+                            cursor = cursor.next_sibling;
+                        }
+                    }
+                }
+            }
+        }
+        item = item.next_sibling;
+    }
+    if (found_any) {
+        out.ret_start = generic_template.ret_start;
+        out.name_node = generic_template.name_node;
+        out.params_node = generic_template.params_node;
+        out.body_node = generic_template.body_node;
+        i64 cp = 0;
+        while (cp < generic_params.len()) {
+            param_ids.push(generic_params.get(cp));
+            cp += 1;
+        }
+        generic_params.drop();
+        return true;
+    }
+    generic_params.drop();
+    return false;
+}

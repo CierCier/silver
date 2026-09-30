@@ -16,7 +16,7 @@ SyntaxNode* find_item_by_name(SyntaxNode* root, NodeKind kind, str name) {
     while (child != (SyntaxNode*)0) {
         if (child.kind == kind) {
             SyntaxNode* id = item_identifier(child);
-            if (id != (SyntaxNode*)0 && id.text == name) {
+            if (id != (SyntaxNode*)0 && strcmp(id.text, name) == 0) {
                 return child;
             }
         }
@@ -159,7 +159,7 @@ bool enum_variant_info(SyntaxNode* root, str enum_name, str variant_name,
     bool found = false;
     i64 i = 0;
     while (i < names.len()) {
-        if (names.get(i).text == variant_name) {
+        if (strcmp(names.get(i).text, variant_name) == 0) {
             *tag_out = tags.get(i);
             *arity_out = arities.get(i);
             found = true;
@@ -177,6 +177,20 @@ bool find_variant_enum(SyntaxNode* root, str variant_name, SyntaxNode** enum_out
     if (root == (SyntaxNode*)0) {
         return false;
     }
+    if (strcmp(variant_name, "None") == 0 || strcmp(variant_name, "Some") == 0) {
+        SyntaxNode* opt = find_enum_item(root, "Optional");
+        if (opt != (SyntaxNode*)0) {
+            *enum_out = opt;
+            return true;
+        }
+    }
+    if (strcmp(variant_name, "Ok") == 0 || strcmp(variant_name, "Err") == 0) {
+        SyntaxNode* res = find_enum_item(root, "Result");
+        if (res != (SyntaxNode*)0) {
+            *enum_out = res;
+            return true;
+        }
+    }
     SyntaxNode* child = root.first_child;
     SyntaxNode* found = (SyntaxNode*)0;
     while (child != (SyntaxNode*)0) {
@@ -187,7 +201,7 @@ bool find_variant_enum(SyntaxNode* root, str variant_name, SyntaxNode** enum_out
             enum_each_variant(child, &names, &tags, &arities);
             i64 i = 0;
             while (i < names.len()) {
-                if (names.get(i).text == variant_name) {
+                if (strcmp(names.get(i).text, variant_name) == 0) {
                     if (found != (SyntaxNode*)0) {
                         names.drop();
                         tags.drop();
@@ -206,6 +220,41 @@ bool find_variant_enum(SyntaxNode* root, str variant_name, SyntaxNode** enum_out
     }
     *enum_out = found;
     return found != (SyntaxNode*)0;
+}
+
+void append_node_tokens(SyntaxNode* node, String* out) {
+    if (node == (SyntaxNode*)0) {
+        return;
+    }
+    if (node.kind == NodeKind.Token) {
+        out.push_str(node.text);
+        return;
+    }
+    if (node.kind == NodeKind.Bracket) {
+        out.push_str("[");
+        SyntaxNode* c = node.first_child;
+        while (c != (SyntaxNode*)0) {
+            append_node_tokens(c, out);
+            c = c.next_sibling;
+        }
+        out.push_str("]");
+        return;
+    }
+    if (node.kind == NodeKind.Parenthesized) {
+        out.push_str("(");
+        SyntaxNode* c = node.first_child;
+        while (c != (SyntaxNode*)0) {
+            append_node_tokens(c, out);
+            c = c.next_sibling;
+        }
+        out.push_str(")");
+        return;
+    }
+    SyntaxNode* c = node.first_child;
+    while (c != (SyntaxNode*)0) {
+        append_node_tokens(c, out);
+        c = c.next_sibling;
+    }
 }
 
 u32 type_id_from_text(TypeTable* types, str text) {
@@ -298,7 +347,7 @@ bool enum_payload_type_text(SyntaxNode* root, str enum_name, str variant_name,
     SyntaxNode* cursor = block.first_child;
     while (cursor != (SyntaxNode*)0) {
         if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Identifier
-            && cursor.text == variant_name) {
+            && strcmp(cursor.text, variant_name) == 0) {
             SyntaxNode* payload = cursor.next_sibling;
             if (payload == (SyntaxNode*)0 || payload.kind != NodeKind.Parenthesized) {
                 return false;

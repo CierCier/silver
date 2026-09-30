@@ -20,3 +20,8 @@ result-*
 /agc
 /agc2
 /test_silver_io_read_line.txt
+
+# Local-only agent notes
+/todo.md
+/handoff.md
+/.agents/

@@ -1,7 +1,9 @@
 // Middle module for the transitive-visibility fixtures.
-// Imports chain_c (same directory) and re-exports its value through
-// chain_b_val. Consumers of chain_b must NOT see chain_c_val directly:
-// Silver has no re-export syntax, so transitive names stay private.
+// Imports chain_c (same directory) and reuses its value through
+// chain_b_val. Source imports are inlined, so chain_c_val remains directly
+// visible to the outer importer; that is pinned by transitive_direct_test.
+// Silver has no re-export syntax: the stage0 AST has only ItemKind::Import
+// and ImportItem describes imports, not exports (parser/ast.rs:82-99,186-195).
 import chain_c;
 
 i32 chain_b_val() {

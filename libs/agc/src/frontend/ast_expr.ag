@@ -22,6 +22,7 @@ enum ExprKind {
     Asm;           // inner0 = code_text_id, inner1 = args_start, aux = args_count
     SizeOf;        // aux = type_id
     ArrayLit;      // inner1 = elems_start, aux = elem_count (pool.args[start] = count, then ids)
+    Format;        // inner0 = format string literal id, inner1 = args_start, aux = args_count
 }
 
 struct AstExpr {
@@ -299,6 +300,18 @@ impl AstPool {
         expr.inner0 = 0;
         expr.inner1 = elems_start;
         expr.aux = elem_count;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_format(AstPool* self, u32 format_id, u32 args_start, u32 args_count, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Format;
+        expr.inner0 = format_id;
+        expr.inner1 = args_start;
+        expr.aux = args_count;
         expr.span = span;
         expr.inferred_type = TYPE_UNKNOWN;
         self.exprs.push(move expr);

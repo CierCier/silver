@@ -4,8 +4,8 @@
 Generates a deterministic corpus of f64 bit patterns (seeded), formats each
 with the stage0-built Silver program (std/fmt.ag `ftoa`) and with a rustc
 reference (`println!("{}", f64::from_bits)`), and requires byte-identical
-output per line. Catches Grisu2-vs-Grisu3 divergences that would otherwise
-break every float-bearing diagnostic/.agm diff (plan risk #5).
+output per line. Guards the shortest-round-trip contract used by diagnostics
+and `.agm` artifacts.
 """
 
 from __future__ import annotations
@@ -38,6 +38,12 @@ def directed() -> list[int]:
         0x000FFFFFFFFFFFFF,  # max subnormal
         0x0010000000000000,  # min normal
         0x7FEFFFFFFFFFFFFF,  # max finite
+        0x44B52D02C7E14AF5,  # adjacent lower carry-boundary value
+        0x44B52D02C7E14AF6,  # Grisu2 keeps 16 digits; shortest is 1e23.
+        0x44B52D02C7E14AF7,  # adjacent upper carry-boundary value
+        0x511173B251AF8014,  # adjacent lower large-integer value
+        0x511173B251AF8015,  # Grisu2 misses a second decimal carry boundary.
+        0x511173B251AF8016,  # adjacent upper large-integer value
         0x3FF0000000000000,  # 1.0
     ]
     for v in (0.1, 0.2, 0.3, 1.0 / 3.0, 2.0 / 3.0, 1e21, 1e22, 1e23,

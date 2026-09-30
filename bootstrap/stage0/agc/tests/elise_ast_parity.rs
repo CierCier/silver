@@ -54,7 +54,13 @@ fn ast_lowering_smoketest() {
     let src = std::fs::read_to_string(root.join("examples/regression_demo.ag")).unwrap();
     let graph = parse_ag(&src);
     for (i, child) in graph.root().children().enumerate() {
-        eprintln!("CHILD {} kind={} span={:?} text_head={:?}", i, child.kind(), child.span(), &child.text()[..child.text().len().min(40)]);
+        eprintln!(
+            "CHILD {} kind={} span={:?} text_head={:?}",
+            i,
+            child.kind(),
+            child.span(),
+            &child.text()[..child.text().len().min(40)]
+        );
     }
     let program = lower_source_graph(&graph, 0);
     assert_eq!(program.items.len(), 13);
@@ -62,37 +68,48 @@ fn ast_lowering_smoketest() {
 
 #[test]
 fn ast_lowering_corpus_smoketest() {
-    let mut checked = 0usize;
-    let mut skipped = 0usize;
+    // Corpus parsing needs more than the test harness's default 2 MiB stack.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let mut checked = 0usize;
+            let mut skipped = 0usize;
 
-    for (name, source) in corpus() {
-        let tokens = match agc::lexer::lex_with_source(&source, 0) {
-            Ok(toks) => toks,
-            Err(_) => {
-                skipped += 1;
-                continue;
+            for (name, source) in corpus() {
+                let tokens = match agc::lexer::lex_with_source(&source, 0) {
+                    Ok(toks) => toks,
+                    Err(_) => {
+                        skipped += 1;
+                        continue;
+                    }
+                };
+                let mut parser = Parser::new(tokens);
+                let (expected_prog, errors) = parser.parse_program();
+                if !errors.is_empty() {
+                    skipped += 1;
+                    continue;
+                }
+
+                let graph = parse_ag(&source);
+                let actual_prog = lower_source_graph(&graph, 0);
+
+                assert_eq!(
+                    actual_prog.items.len(),
+                    expected_prog.items.len(),
+                    "item count mismatch in {name}: expected {}, got {}",
+                    expected_prog.items.len(),
+                    actual_prog.items.len()
+                );
+
+                checked += 1;
             }
-        };
-        let mut parser = Parser::new(tokens);
-        let (expected_prog, errors) = parser.parse_program();
-        if !errors.is_empty() {
-            skipped += 1;
-            continue;
-        }
 
-        let graph = parse_ag(&source);
-        let actual_prog = lower_source_graph(&graph, 0);
-
-        assert_eq!(
-            actual_prog.items.len(),
-            expected_prog.items.len(),
-            "item count mismatch in {name}: expected {}, got {}",
-            expected_prog.items.len(),
-            actual_prog.items.len()
-        );
-
-        checked += 1;
-    }
-
-    assert!(checked > 200, "checked {checked} corpus files (skipped {skipped})");
+            assert!(
+                checked > 200,
+                "checked {checked} corpus files (skipped {skipped})"
+            );
+        })
+        .expect("spawn AST corpus smoke test")
+        .join()
+        .expect("AST corpus smoke test thread panicked");
 }

@@ -11,7 +11,10 @@ import frontend.items;
 import frontend.lexer;
 import frontend.lower_expr;
 import frontend.symbols;
+import frontend.messages;
 import frontend.types;
+const u32 MAX_TYPE_CHECK_DEPTH = 256;
+
 
 struct LocalVar {
     u32 name_id;
@@ -20,12 +23,14 @@ struct LocalVar {
 
 struct TypeEnv {
     Vec<LocalVar> locals;
+    u32 expression_depth;
 }
 
 impl TypeEnv {
     TypeEnv new() {
         TypeEnv env;
         env.locals = Vec<LocalVar>.new();
+        env.expression_depth = 0;
         return move env;
     }
 
@@ -173,6 +178,60 @@ u32 function_return_type_id(TypeTable* types, SyntaxNode* function) {
     return ret_type;
 }
 
+void typecheck_expr_collect_tokens(SyntaxNode* node, Vec<SyntaxNode*>* tokens) {
+    if (node == (SyntaxNode*)0) {
+        return;
+    }
+    if (node.kind == NodeKind.Token) {
+        tokens.push(node);
+        return;
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        typecheck_expr_collect_tokens(child, tokens);
+        child = child.next_sibling;
+    }
+}
+
+bool typecheck_expr_struct_has_field(SyntaxNode* root, str type_name, str field_name,
+                                     Vec<str>* candidates) {
+    SyntaxNode* item = find_item_by_name(root, NodeKind.Struct, type_name);
+    if (item == (SyntaxNode*)0) {
+        return true;
+    }
+    SyntaxNode* body = item.first_child;
+    while (body != (SyntaxNode*)0 && body.kind != NodeKind.Block) {
+        body = body.next_sibling;
+    }
+    if (body == (SyntaxNode*)0) {
+        return false;
+    }
+    Vec<SyntaxNode*> tokens = Vec<SyntaxNode*>.new();
+    typecheck_expr_collect_tokens(body, &tokens);
+    bool found = false;
+    i64 start = 0;
+    while (start < tokens.len()) {
+        i64 end = start;
+        while (end < tokens.len() && tokens.get(end).token_kind != TokenKind.Semicolon) {
+            end += 1;
+        }
+        i64 name_index = end - 1;
+        while (name_index >= start && tokens.get(name_index).token_kind != TokenKind.Identifier) {
+            name_index -= 1;
+        }
+        if (name_index >= start) {
+            str candidate = tokens.get(name_index).text;
+            candidates.push(candidate);
+            if (candidate == field_name) {
+                found = true;
+            }
+        }
+        start = end + 1;
+    }
+    tokens.drop();
+    return found;
+}
+
 u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode* root,
                TypeEnv* env, u32 expr_id, DiagnosticBag* diagnostics, bool* ok) {
     if (expr_id == 0) { return TYPE_UNKNOWN; }
@@ -180,6 +239,13 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
     if (expr.inferred_type != TYPE_UNKNOWN) {
         return expr.inferred_type;
     }
+    if (env.expression_depth >= MAX_TYPE_CHECK_DEPTH) {
+        String message = String.from_str("type-check expression nesting exceeds maximum depth (256)");
+        diagnostics.error(expr.span, move message);
+        *ok = false;
+        return TYPE_UNKNOWN;
+    }
+    env.expression_depth += 1;
 
     u32 inferred = TYPE_UNKNOWN;
     if (expr.kind == ExprKind.Literal) {
@@ -213,6 +279,14 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
     } else if (expr.kind == ExprKind.Cast) {
         infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
         inferred = expr.aux;
+    } else if (expr.kind == ExprKind.Format) {
+        i64 arg_index = 0;
+        while (arg_index < (i64)expr.aux) {
+            u32 arg_id = pool.args.get((i64)expr.inner1 + arg_index);
+            infer_expr(pool, types, symbols, root, env, arg_id, diagnostics, ok);
+            arg_index += 1;
+        }
+        inferred = types.get_named("String");
     } else if (expr.kind == ExprKind.Asm) {
         AstAsm* asm_info = pool.asms.get_ptr((i64)expr.aux);
         i64 i = 0;
@@ -447,7 +521,24 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 params.drop();
             } else if (strlen(callee_name) > 0 && callee_name[0] >= (u8)65 && callee_name[0] <= (u8)90) {
                 SyntaxNode* enum_item = (SyntaxNode*)0;
-                if (find_variant_enum(root, callee_name, &enum_item)) {
+                if (!find_variant_enum(root, callee_name, &enum_item)
+                    && symbols.find(callee_name) < 0) {
+                    Vec<str> type_names = Vec<str>.new();
+                    i64 symbol_index = 0;
+                    while (symbol_index < symbols.symbols.len()) {
+                        Symbol* symbol = symbols.symbols.get_ptr(symbol_index);
+                        if (symbol.kind == SymbolKind.Struct || symbol.kind == SymbolKind.Enum
+                            || symbol.kind == SymbolKind.TypeAlias || symbol.kind == SymbolKind.Trait) {
+                            type_names.push(symbols.names.get(symbol.name_id));
+                        }
+                        symbol_index += 1;
+                    }
+                    str suggestion = fuzzy_suggest(callee_name, &type_names, 2);
+                    String message = unknown_type_with_suggestion(callee_name, suggestion);
+                    diagnostics.error(expr.span, move message);
+                    *ok = false;
+                    type_names.drop();
+                } else {
                     SyntaxNode* enum_id = item_identifier(enum_item);
                     if (enum_id != (SyntaxNode*)0) {
                         i64 tag = 0;
@@ -464,6 +555,78 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                             inferred = types.get_named(enum_id.text);
                         }
                     }
+                }
+            } else if (find_function_by_name(root, callee_name) == (SyntaxNode*)0
+                       && env.lookup(callee.aux) == TYPE_UNKNOWN
+                       && symbols.get_type(callee_name) == TYPE_UNKNOWN) {
+                Vec<str> function_names = Vec<str>.new();
+                SyntaxNode* item = root.first_child;
+                while (item != (SyntaxNode*)0) {
+                    if (item.kind == NodeKind.Function) {
+                        SyntaxNode* function_name = function_identifier(item);
+                        if (function_name != (SyntaxNode*)0) {
+                            function_names.push(function_name.text);
+                        }
+                    }
+                    item = item.next_sibling;
+                }
+                str suggestion = fuzzy_suggest(callee_name, &function_names, 2);
+                String message = unknown_function_with_suggestion(callee_name, suggestion);
+                diagnostics.error(expr.span, move message);
+                *ok = false;
+                function_names.drop();
+            }
+        }
+    } else if (expr.kind == ExprKind.Field) {
+        AstExpr* rx = pool.get_expr(expr.inner0);
+        str rx_var_name = (str)0;
+        if (rx.kind == ExprKind.Var) {
+            rx_var_name = symbols.names.get(rx.aux);
+        }
+        if (rx_var_name != (str)0 && find_enum_item(root, rx_var_name) != (SyntaxNode*)0) {
+            str field_name = symbols.names.get(expr.aux);
+            i64 tag = 0;
+            i64 arity = 0;
+            if (enum_variant_info(root, rx_var_name, field_name, &tag, &arity)) {
+                inferred = types.get_named(rx_var_name);
+            } else {
+                String message = String.from_str("unknown enum variant '");
+                message.push_str(field_name);
+                message.push_str("' on enum '");
+                message.push_str(rx_var_name);
+                message.push_str("'");
+                diagnostics.error(expr.span, move message);
+                *ok = false;
+            }
+        } else {
+            u32 receiver_type = infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
+            TypeEntry* receiver_entry = types.get(receiver_type);
+            if (receiver_entry.kind == TypeKind.Pointer || receiver_entry.kind == TypeKind.Reference) {
+                receiver_type = receiver_entry.inner;
+                receiver_entry = types.get(receiver_type);
+            }
+            if (receiver_entry.kind == TypeKind.Named) {
+                str receiver_name = types.names.get(receiver_entry.name_id);
+                str field_name = symbols.names.get(expr.aux);
+                if (find_enum_item(root, receiver_name) != (SyntaxNode*)0) {
+                    i64 tag = 0;
+                    i64 arity = 0;
+                    if (enum_variant_info(root, receiver_name, field_name, &tag, &arity)) {
+                        inferred = receiver_type;
+                    }
+                } else {
+                    Vec<str> fields = Vec<str>.new();
+                    if (!typecheck_expr_struct_has_field(root, receiver_name, field_name, &fields)) {
+                        str suggestion = fuzzy_suggest(field_name, &fields, 2);
+                        String message = unknown_field_with_suggestion(
+                            field_name,
+                            types.type_name(receiver_type),
+                            suggestion
+                        );
+                        diagnostics.error(expr.span, move message);
+                        *ok = false;
+                    }
+                    fields.drop();
                 }
             }
         }
@@ -523,6 +686,7 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
     }
 
     expr.inferred_type = inferred;
+    env.expression_depth -= 1;
     return inferred;
 }
 

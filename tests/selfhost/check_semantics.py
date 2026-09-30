@@ -92,6 +92,7 @@ def main() -> int:
     paths = []
     for directory in ("tests", "examples"):
         paths.extend(sorted((root / directory).glob("*.ag")))
+    paths.extend(sorted((root / "tests" / "selfhost").glob("ownership_*_fixture.ag")))
     if args.include_std:
         paths.extend(sorted((root / "std").rglob("*.ag")))
 

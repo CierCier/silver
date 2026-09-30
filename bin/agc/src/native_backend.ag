@@ -147,6 +147,43 @@ bool native_is_run(Vec<String>* arguments) {
 }
 
 
+bool native_static_link_requested(Vec<String>* arguments) {
+    i64 i = 1;
+    while (i < arguments.len()) {
+        String* arg = arguments.get_ptr(i);
+        if (arg.equals("--static") || arg.equals("-static")) { return true; }
+        if (arg.equals("--")) { return false; }
+        i += 1;
+    }
+    return false;
+}
+
+bool native_has_link_inputs(Vec<String>* arguments) {
+    i64 i = 1;
+    while (i < arguments.len()) {
+        String* arg = arguments.get_ptr(i);
+        if (arg.equals("--")) { return false; }
+        if (arg.equals("-l") || (arg.starts_with("-l") && arg.len() > 2)) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+void native_append_run_args(Vec<String>* arguments, Command* command) {
+    i64 i = 1;
+    while (i < arguments.len()) {
+        String* arg = arguments.get_ptr(i);
+        if (arg.equals("--")) { return; }
+        if (arg.equals("--run-arg") && i + 1 < arguments.len()) {
+            command.arg(arguments.get_ptr(i + 1).to_str());
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+}
+
+
 void native_append_i64(String* output, i64 value) {
     u8 buffer[32];
     i64 length = itoa(value, (u8*)&buffer[0]);
@@ -257,6 +294,13 @@ void native_expand_block_items(SyntaxNode* root, SyntaxNode* block, CfgSet* cfg,
     if (block == (SyntaxNode*)0) { return; }
     SyntaxNode* child = block.first_child;
     while (child != (SyntaxNode*)0) {
+        if (child.kind != NodeKind.Token) {
+            SyntaxNode* next = child.next_sibling;
+            child.next_sibling = (SyntaxNode*)0;
+            native_append_expanded_item(root, child, cfg, pool);
+            child = next;
+            continue;
+        }
         if (child.kind == NodeKind.Token && (child.token_kind == TokenKind.Semicolon || strcmp(child.text, ";") == 0)) {
             child = child.next_sibling;
             continue;
@@ -350,6 +394,76 @@ void native_expand_cfg_blocks(SyntaxNode* root, CfgSet* cfg, NodePool* pool) {
         child = next;
     }
 }
+str native_cpu_probe_name(SyntaxNode* args) {
+    SyntaxNode* first = args.first_child;
+    if (first == (SyntaxNode*)0) {
+        return "";
+    }
+    if (first.token_kind == TokenKind.StringLiteral) {
+        if (strcmp(first.text, "\"cpu.sse41\"") == 0) { return "g_has_sse41"; }
+        if (strcmp(first.text, "\"cpu.sse42\"") == 0) { return "g_has_sse42"; }
+        if (strcmp(first.text, "\"cpu.popcnt\"") == 0) { return "g_has_popcnt"; }
+        if (strcmp(first.text, "\"cpu.fma\"") == 0) { return "g_has_fma"; }
+        if (strcmp(first.text, "\"cpu.avx\"") == 0) { return "g_has_avx"; }
+        if (strcmp(first.text, "\"cpu.avx2\"") == 0) { return "g_has_avx2"; }
+        if (strcmp(first.text, "\"cpu.avx512f\"") == 0) { return "g_has_avx512f"; }
+        return "";
+    }
+    SyntaxNode* dot = first.next_sibling;
+    SyntaxNode* feature = dot == (SyntaxNode*)0 ? (SyntaxNode*)0 : dot.next_sibling;
+    if (strcmp(first.text, "cpu") != 0 || dot == (SyntaxNode*)0 || strcmp(dot.text, ".") != 0
+        || feature == (SyntaxNode*)0 || feature.token_kind != TokenKind.Identifier) {
+        return "";
+    }
+    if (strcmp(feature.text, "sse41") == 0) { return "g_has_sse41"; }
+    if (strcmp(feature.text, "sse42") == 0) { return "g_has_sse42"; }
+    if (strcmp(feature.text, "popcnt") == 0) { return "g_has_popcnt"; }
+    if (strcmp(feature.text, "fma") == 0) { return "g_has_fma"; }
+    if (strcmp(feature.text, "avx") == 0) { return "g_has_avx"; }
+    if (strcmp(feature.text, "avx2") == 0) { return "g_has_avx2"; }
+    if (strcmp(feature.text, "avx512f") == 0) { return "g_has_avx512f"; }
+    return "";
+}
+
+bool native_fold_cfg_exprs(SyntaxNode* node, CfgSet* cfg) {
+    if (node == (SyntaxNode*)0) {
+        return true;
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        SyntaxNode* cfg_name = child.next_sibling;
+        SyntaxNode* args = cfg_name == (SyntaxNode*)0 ? (SyntaxNode*)0 : cfg_name.next_sibling;
+        if (child.kind == NodeKind.Token && child.token_kind == TokenKind.At
+            && cfg_name != (SyntaxNode*)0 && cfg_name.kind == NodeKind.Token
+            && strcmp(cfg_name.text, "cfg") == 0
+            && args != (SyntaxNode*)0 && args.kind == NodeKind.Parenthesized) {
+            i64 value = cfg_argument_value(args, cfg);
+            if (value == 2) {
+                str probe = native_cpu_probe_name(args);
+                if (strlen(probe) == 0) {
+                    return false;
+                }
+                child.token_kind = TokenKind.Identifier;
+                child.text = probe;
+            } else {
+                child.token_kind = value == 1 ? TokenKind.True : TokenKind.False;
+                child.text = value == 1 ? "true" : "false";
+            }
+            child.next_sibling = args.next_sibling;
+            if (node.last_child == args) {
+                node.last_child = child;
+            }
+            child = child.next_sibling;
+            continue;
+        }
+        if (!native_fold_cfg_exprs(child, cfg)) {
+            return false;
+        }
+        child = child.next_sibling;
+    }
+    return true;
+}
+
 
 void native_queue_imports(SyntaxNode* unit, str owner, str root_dir, CfgSet* cfg,
                           Vec<String>* includes, Vec<String>* visited, Vec<String>* pending) {
@@ -405,9 +519,6 @@ bool native_load_closure(str source_path, SyntaxTree* tree, CfgSet* cfg,
         String owned = String.from_str(file.to_str());
         visited.push(move owned);
         if (module_path_is_artifact(file.to_str())) {
-            STDERR.write_str("DEBUG: hit artifact: ");
-            STDERR.write_str(file.to_str());
-            STDERR.write_str("\n");
             root_dir.drop();
             visited.drop();
             pending.drop();
@@ -415,9 +526,6 @@ bool native_load_closure(str source_path, SyntaxTree* tree, CfgSet* cfg,
         }
         SyntaxNode* unit = native_load_unit(file.to_str(), pools, streams);
         if (unit == (SyntaxNode*)0) {
-            STDERR.write_str("DEBUG: failed to load unit: ");
-            STDERR.write_str(file.to_str());
-            STDERR.write_str("\n");
             root_dir.drop();
             visited.drop();
             pending.drop();
@@ -494,15 +602,9 @@ bool native_tree_supported(SyntaxNode* node) {
     }
     if (node.kind == NodeKind.Token) {
         if (node.token_kind == TokenKind.Defer) {
-            STDERR.write_str("DEBUG: unsupported Defer\n");
-            return false;
-        }
-        if (node.token_kind == TokenKind.Comptime) {
-            STDERR.write_str("DEBUG: unsupported Comptime\n");
             return false;
         }
         if (node.token_kind == TokenKind.Launch) {
-            STDERR.write_str("DEBUG: unsupported Launch\n");
             return false;
         }
         if (node.token_kind == TokenKind.For) {
@@ -522,6 +624,24 @@ bool native_tree_supported(SyntaxNode* node) {
         child = child.next_sibling;
     }
     return true;
+}
+
+void native_add_rpath(Command* command, bool direct_linker, str dir) {
+    if (direct_linker) {
+        command.arg("-rpath");
+        command.arg(dir);
+    } else {
+        String rpath = String.from_str("-Wl,-rpath,");
+        rpath.push_str(dir);
+        command.arg(rpath.to_str());
+        rpath.drop();
+    }
+}
+
+void native_add_search_path(Command* command, bool direct_linker, str dir) {
+    command.arg("-L");
+    command.arg(dir);
+    native_add_rpath(command, direct_linker, dir);
 }
 
 bool native_backend_try(Vec<String>* arguments, str source_path, str default_name, Vec<String>* extra_includes, i32* result) {
@@ -620,7 +740,6 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
     Vec<NodePool> pools = Vec<NodePool>.new();
     Vec<TokenStream> streams = Vec<TokenStream>.new();
     if (!native_load_closure(source_path, &tree, &cfg, &includes, &pools, &streams)) {
-        STDERR.write_str("DEBUG: native_load_closure failed\n");
         native_destroy_units(&pools, &streams);
         includes.drop();
         pool.destroy();
@@ -628,8 +747,14 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
         return false;
     }
     native_expand_cfg_blocks(tree.root, &cfg, &pool);
+    if (!native_fold_cfg_exprs(tree.root, &cfg)) {
+        native_destroy_units(&pools, &streams);
+        includes.drop();
+        pool.destroy();
+        output.drop();
+        return false;
+    }
     if (!native_tree_supported(tree.root)) {
-        STDERR.write_str("DEBUG: native_tree_supported failed\n");
         native_destroy_units(&pools, &streams);
         includes.drop();
         pool.destroy();
@@ -666,12 +791,6 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
         if (child.kind == NodeKind.Function) {
             typecheck_function_statements_scoped(&ast_pool, &symbols.types, &symbols, tree.root, child, &tc_diag, &tc_ok, &unsupported);
             if (unsupported) {
-                SyntaxNode* fn_id = item_identifier(child);
-                if (fn_id != (SyntaxNode*)0) {
-                    STDERR.write_str("DEBUG: unsupported in fn: ");
-                    STDERR.write_str(fn_id.text);
-                    STDERR.write_str("\n");
-                }
                 break;
             }
         }
@@ -760,48 +879,115 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
     native_destroy_units(&pools, &streams);
     pool.destroy();
 
-    String cc = String.from_str("cc");
-    native_set_tool(&cc, "SILVER_STAGE1_CC");
-    Command cc_command = Command.new(cc.to_str());
-    cc_command.arg(object_path.to_str());
-    cc_command.arg("-o");
-    cc_command.arg(output.to_str());
-    cc_command.arg("-nostdlib");
-    cc_command.arg("-no-pie");
-    cc_command.arg("-Wl,--allow-shlib-undefined");
-
-    Optional<String> dynamic_linker = var("SILVER_DYNAMIC_LINKER");
-    if (dynamic_linker.is_some()) {
-        String dl = dynamic_linker.unwrap();
-        String dl_arg = String.from_str("-Wl,-dynamic-linker,");
-        dl_arg.push_str(dl.to_str());
-        cc_command.arg(dl_arg.to_str());
-        dl_arg.drop();
-        dl.drop();
+    String linker = String.new();
+    bool direct_linker = false;
+    Optional<String> linker_override = var("SILVER_LINKER");
+    if (linker_override.is_some()) {
+        String configured = linker_override.unwrap();
+        if (configured.len() > 0) {
+            linker.push_str(configured.to_str());
+            direct_linker = true;
+        }
+        configured.drop();
+    }
+    if (!direct_linker) {
+        Optional<String> mold = var("SILVER_USE_MOLD");
+        bool prefer_mold = false;
+        if (mold.is_some()) {
+            String value = mold.unwrap();
+            prefer_mold = value.equals("1");
+            value.drop();
+        }
+        if (prefer_mold) {
+            String candidate = String.from_str("mold");
+            native_set_tool(&candidate, "SILVER_STAGE1_MOLD");
+            if (native_is_executable(candidate.to_str())) {
+                linker.push_str(candidate.to_str());
+                direct_linker = true;
+            }
+            candidate.drop();
+        }
+        if (!direct_linker) {
+            String candidate = String.from_str("ld.lld");
+            native_set_tool(&candidate, "SILVER_STAGE1_LLD");
+            if (native_is_executable(candidate.to_str())) {
+                linker.push_str(candidate.to_str());
+                direct_linker = true;
+            } else {
+                candidate.clear();
+                candidate.push_str("lld");
+                native_set_tool(&candidate, "SILVER_STAGE1_LLD");
+                if (native_is_executable(candidate.to_str())) {
+                    linker.push_str(candidate.to_str());
+                    direct_linker = true;
+                }
+            }
+            candidate.drop();
+        }
+    }
+    if (!direct_linker) {
+        linker.clear();
+        linker.push_str("cc");
+        native_set_tool(&linker, "SILVER_STAGE1_CC");
+    }
+    Command cc_command = Command.new(linker.to_str());
+    bool static_link = native_static_link_requested(arguments);
+    bool has_link_inputs = native_has_link_inputs(arguments) || link_libs.len() > 0;
+    if (direct_linker && (linker.equals("lld") || linker.ends_with("/lld"))) {
+        cc_command.arg("-flavor");
+        cc_command.arg("gnu");
+    }
+    if (direct_linker) {
+        cc_command.arg("-o");
+        cc_command.arg(output.to_str());
+        cc_command.arg(object_path.to_str());
+    } else {
+        cc_command.arg(object_path.to_str());
+        cc_command.arg("-o");
+        cc_command.arg(output.to_str());
+        cc_command.arg("-nostdlib");
+        cc_command.arg("-no-pie");
+    }
+    if (static_link) {
+        cc_command.arg("-static");
+    } else if (direct_linker) {
+        cc_command.arg("--allow-shlib-undefined");
+    } else {
+        cc_command.arg("-Wl,--allow-shlib-undefined");
     }
 
-    // Pass library search dirs and link flags from arguments
+    Optional<String> dynamic_linker = var("SILVER_DYNAMIC_LINKER");
+    if (!static_link && has_link_inputs && dynamic_linker.is_some()) {
+        String dl = dynamic_linker.unwrap();
+        if (direct_linker) {
+            cc_command.arg("--dynamic-linker");
+            cc_command.arg(dl.to_str());
+        } else {
+            String dl_arg = String.from_str("-Wl,-dynamic-linker,");
+            dl_arg.push_str(dl.to_str());
+            cc_command.arg(dl_arg.to_str());
+            dl_arg.drop();
+        }
+        dl.drop();
+    } else if (dynamic_linker.is_some()) {
+        dynamic_linker.unwrap().drop();
+    }
+
+
+// Pass library search dirs and link flags from arguments
     i64 carg_idx = 1;
     while (carg_idx < arguments.len()) {
         String* arg = arguments.get_ptr(carg_idx);
+        if (arg.equals("--")) { break; }
         if (arg.equals("-L") && carg_idx + 1 < arguments.len()) {
-            cc_command.arg("-L");
-            cc_command.arg(arguments.get_ptr(carg_idx + 1).to_str());
-            String rpath = String.from_str("-Wl,-rpath,");
-            rpath.push_str(arguments.get_ptr(carg_idx + 1).to_str());
-            cc_command.arg(rpath.to_str());
-            rpath.drop();
+            native_add_search_path(&cc_command, direct_linker, arguments.get_ptr(carg_idx + 1).to_str());
             carg_idx += 2;
             continue;
         }
         if (arg.starts_with("-L") && arg.len() > 2) {
-            cc_command.arg(arg.to_str());
             String dir = arg.strip_prefix("-L");
-            String rpath = String.from_str("-Wl,-rpath,");
-            rpath.push_str(dir.to_str());
-            cc_command.arg(rpath.to_str());
+            native_add_search_path(&cc_command, direct_linker, dir.to_str());
             dir.drop();
-            rpath.drop();
             carg_idx += 1;
             continue;
         }
@@ -837,12 +1023,7 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
                     String dir = String.new();
                     i64 d = start;
                     while (d < end) { dir.push(nstr[d]); d += 1; }
-                    cc_command.arg("-L");
-                    cc_command.arg(dir.to_str());
-                    String rpath = String.from_str("-Wl,-rpath,");
-                    rpath.push_str(dir.to_str());
-                    cc_command.arg(rpath.to_str());
-                    rpath.drop();
+                    native_add_search_path(&cc_command, direct_linker, dir.to_str());
                     dir.drop();
                 }
                 pos = end;
@@ -870,7 +1051,7 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
     link_libs.drop();
 
     Result<ExitStatus, i64> cc_result = cc_command.status();
-    cc.drop();
+    linker.drop();
     object_path.drop();
     if (cc_result.is_err() || !cc_result.unwrap().success()) {
         STDERR.write_str("agc: error: linking failed\n");
@@ -882,6 +1063,7 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
     i32 exit_code = 0;
     if (native_is_run(arguments)) {
         Command run_command = Command.new(output.to_str());
+        native_append_run_args(arguments, &run_command);
         Result<ExitStatus, i64> run_result = run_command.status();
         if (run_result.is_err()) {
             exit_code = 2;

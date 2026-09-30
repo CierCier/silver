@@ -94,6 +94,13 @@ String cannot_assign_const(str name) {
     return move s;
 }
 
+String cannot_assign_const_field(str name) {
+    String s = String.from_str("cannot assign to field of const variable '");
+    s.push_str(name);
+    s.push_str("'");
+    return move s;
+}
+
 str note_value_explicitly_moved() {
     return "value explicitly moved here";
 }
@@ -128,6 +135,111 @@ String cannot_assign_borrowed(str name) {
 
 str ref_does_not_outlive_func() {
     return "returned reference does not outlive the function (it borrows a local value; return a reference to a global or a reference parameter instead)";
+}
+str note_value_moved_by_return() {
+    return "value moved by return";
+}
+
+str note_value_consumed_by_method() {
+    return "value consumed by by-value method call";
+}
+
+str note_value_moved_into_param() {
+    return "value moved into by-value parameter";
+}
+
+str note_value_moved_into_launch() {
+    return "value moved into thread launch";
+}
+
+str note_task_handle_consumed() {
+    return "task handle consumed by wait";
+}
+
+str note_value_moved_here() {
+    return "value moved here";
+}
+
+String cannot_move_out_of_borrowed(str name) {
+    String s = String.from_str("cannot move out of '");
+    s.push_str(name);
+    s.push_str("' because it is borrowed");
+    return move s;
+}
+
+String note_argument_borrow_here(str kind) {
+    String s = String.from_str("argument ");
+    s.push_str(kind);
+    s.push_str(" borrow occurs here");
+    return move s;
+}
+
+String note_previous_borrow_here(str kind) {
+    String s = String.from_str("previous ");
+    s.push_str(kind);
+    s.push_str(" borrow occurs here");
+    return move s;
+}
+
+String unused_variable(str name) {
+    String s = String.from_str("unused variable '");
+    s.push_str(name);
+    s.push_str("' (help: prefix with _ to ignore: '_");
+    s.push_str(name);
+    s.push_str("')");
+    return move s;
+}
+
+String unused_parameter(str name) {
+    String s = String.from_str("unused parameter '");
+    s.push_str(name);
+    s.push_str("' (help: prefix with _ to ignore: '_");
+    s.push_str(name);
+    s.push_str("')");
+    return move s;
+}
+
+str unreachable_statement() {
+    return "unreachable statement";
+}
+
+String duplicate_variable(str name) {
+    String s = String.from_str("duplicate variable '");
+    s.push_str(name);
+    s.push_str("'");
+    return move s;
+}
+
+String unknown_type_with_suggestion(str name, str suggestion) {
+    String s = unknown_type(name);
+    if (strlen(suggestion) > 0) {
+        s.push_str(did_you_mean(suggestion).to_str());
+    }
+    return move s;
+}
+
+String unknown_identifier_with_suggestion(str name, str suggestion) {
+    String s = unknown_identifier(name);
+    if (strlen(suggestion) > 0) {
+        s.push_str(did_you_mean(suggestion).to_str());
+    }
+    return move s;
+}
+
+String unknown_function_with_suggestion(str name, str suggestion) {
+    String s = unknown_function(name);
+    if (strlen(suggestion) > 0) {
+        s.push_str(did_you_mean(suggestion).to_str());
+    }
+    return move s;
+}
+
+String unknown_field_with_suggestion(str field, str ty, str suggestion) {
+    String s = unknown_field(field, ty);
+    if (strlen(suggestion) > 0) {
+        s.push_str(did_you_mean(suggestion).to_str());
+    }
+    return move s;
 }
 
 i64 min3(i64 a, i64 b, i64 c) {

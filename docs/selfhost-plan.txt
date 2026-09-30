@@ -98,31 +98,25 @@ S1-3. No self-compilation loop exists at all.
   Stage: harness and directory scaffolding can land before any compiler
   Silver code exists.
 
-S1-4. Closure-free std but compiler-shaped control flow requires it.
+S1-4. Closure-free std; the compiler uses non-capturing function pointers.
   Evidence: 716 closure-shaped call sites in bootstrap (map/filter/iter
-  chains, rayon par_iter); Silver has NO first-class function *values*
-  (Type::Function exists — ast.rs:357 — and is used for fn-type params and
-  trait fns, but there is no closure syntax, no environment capture, and
-  no fn-pointer literal). std/iter.ag's Iterator trait is concrete-struct
-  based (documented "iterator structs stay concrete").
+  chains, rayon par_iter); Silver has function-typed parameters and
+  non-capturing function pointers (for example std/algo/sort.ag's sort_by),
+  but no closure syntax or environment capture. std/iter.ag's Iterator trait
+  is concrete-struct based (documented "iterator structs stay concrete").
   Why it blocks: rewriting 716 iterator-chain sites into while-loops is
   mechanical but changes error-path structure and evaluation order — a
   parity risk in typeck error emission order (diagnostics must come out in
   the same order!).
-  FIX (pick deliberately, do not drift):
-    Option A (recommended): no closures in the language; port with
-      concrete iterator structs + while loops (the std/iter.ag pattern).
-      Keep the port a *transcription*, not a redesign. Accept diagnostic
-      ordering divergence ONLY if the diff gate (S1-3) sorts diagnostics
-      by span before comparison.
-    Option B: add minimal non-capturing fn pointers `fn(i32) -> i32`
-      (values only, no capture). ~2 weeks compiler work; unblocks ports
-      of `map`-style code without vtable machinery.
-    Either way: DO NOT add full closures for self-hosting. Capture +
-    drop-flag interaction is a research project, not a port prerequisite.
-  Also required for both options: diagnostic ORDER parity strategy —
-  bootstrap emits errors as it walks; make both compilers emit
-  (span-sorted) diagnostic lists in the diff gate.
+  DECISION: Option B — keep non-capturing function pointers as the supported
+  function-value model; capturing closures are out of scope. Preserve and
+  use the existing function-pointer capability where it fits, and transcribe
+  closure-heavy bootstrap code with concrete iterators/while loops otherwise.
+  This is not a plan to add capturing closures or expand fn-pointer semantics.
+  Either way: DO NOT add full closures for self-hosting. Capture + drop-flag
+  interaction is a research project, not a port prerequisite.
+  Also required: a deterministic emission-order gate using a multi-diagnostic
+  fixture; both stage0 and stage1 diagnostics must be span-sorted.
 
 ===============================================================================
  S2 — PARITY BREAKERS (behavior will diverge without deliberate work)
@@ -311,7 +305,8 @@ Phase 0 — foundations in the bootstrap (no Silver compiler code yet)
 
 Phase 1 — std readiness (Silver side)
   [ ] S2-3 std/intern.ag + map.ag portable probe fallbacks
-  [ ] S1-4 decision: iterator-struct transcription vs fn pointers
+  [x] S1-4 decision: Option B, preserve non-capturing fn pointers; capturing
+      closures out of scope; span-sorted diagnostic emission gate
   [ ] S3-6 sort/BTreeMap/arena fill-ins
   [ ] S3-4 float shortest-format in std/fmt
   [ ] S2-5 seeded property tests in Silver

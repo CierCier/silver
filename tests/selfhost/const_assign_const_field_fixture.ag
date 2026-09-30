@@ -1,0 +1,9 @@
+struct ConstFixture {
+    i32 value;
+}
+
+i32 main() {
+    const ConstFixture item = ConstFixture { value: 1 };
+    item.value = 2;
+    return 0;
+}

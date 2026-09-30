@@ -23,6 +23,9 @@ struct Diagnostic {
     Span span;
     Severity severity;
     String message;
+    bool has_note;
+    Span note_span;
+    String note_message;
 }
 
 struct DiagnosticBag {
@@ -67,11 +70,33 @@ impl DiagnosticBag {
         item.span = span;
         item.severity = severity;
         item.message = move message;
+        item.has_note = false;
+        item.note_span = Span.synthetic();
+        item.note_message = String.new();
         self.items.push(move item);
     }
 
     void error(DiagnosticBag* self, Span span, String message) {
         self.push(span, Severity.Error, move message);
+    }
+
+    void error_with_note(DiagnosticBag* self, Span span, String message, Span note_span, String note_message) {
+        Diagnostic item;
+        item.span = span;
+        item.severity = Severity.Error;
+        item.message = move message;
+        item.has_note = true;
+        item.note_span = note_span;
+        item.note_message = move note_message;
+        self.items.push(move item);
+    }
+
+    void warning(DiagnosticBag* self, Span span, String message) {
+        self.push(span, Severity.Warning, move message);
+    }
+
+    void note(DiagnosticBag* self, Span span, String message) {
+        self.push(span, Severity.Note, move message);
     }
 
     i64 len(&self) {
@@ -128,12 +153,30 @@ String source_line(u8* data, i64 length, i64 line) {
     return result;
 }
 
+str severity_name(Severity severity) {
+    return match severity {
+        Severity.Error : "error",
+        Severity.Warning : "warn",
+        Severity.Note : "note",
+    };
+}
+
 String render_diagnostic(Diagnostic* diagnostic, str path, &String source) {
+    String out = render_diagnostic_span(diagnostic.severity, diagnostic.span, diagnostic.message.to_str(), path, &source);
+    if (diagnostic.has_note) {
+        String note = render_diagnostic_span(Severity.Note, diagnostic.note_span, diagnostic.note_message.to_str(), path, &source);
+        out.push_str(note.to_str());
+        note.drop();
+    }
+    return out;
+}
+
+String render_diagnostic_span(Severity severity, Span span, str message, str path, &String source) {
     String out = String.new();
-    Span span = diagnostic.span;
     String line = source_line(source.data, source.len, span.start_line);
 
-    out.push_str("error: ");
+    out.push_str(severity_name(severity));
+    out.push_str(": ");
     if (span.start_line > 0) {
         out.push_str(path);
         out.push_str(":");
@@ -142,17 +185,14 @@ String render_diagnostic(Diagnostic* diagnostic, str path, &String source) {
         append_i64(&out, span.start_col);
         out.push_str(": ");
     }
-    out.push_str(diagnostic.message.to_str());
+    out.push_str(message);
     out.push_str("\n");
 
     if (span.start_line <= 0 || line.is_empty()) {
         return out;
     }
 
-    String prefix = String.new();
-    prefix.push_str("  ");
-    out.push_str(prefix.to_str());
-    out.push_str("| ");
+    out.push_str("  | ");
     out.push_str(line.to_str());
     out.push_str("\n  | ");
 
@@ -188,3 +228,4 @@ String render_diagnostic(Diagnostic* diagnostic, str path, &String source) {
     out.push_str("\n");
     return out;
 }
+

@@ -1,0 +1,32 @@
+#[cfg(debug)]
+i32 debug_case() { return debug_missing; }
+#[cfg(release)]
+i32 release_case() { return release_missing; }
+#[cfg(os.windows)]
+i32 windows_case() { return windows_missing; }
+#[cfg(os.wasi)]
+i32 wasi_case() { return wasi_missing; }
+#[cfg(os.linux)]
+i32 linux_case() { return linux_missing; }
+#[cfg(arch.aarch64)]
+i32 aarch64_case() { return aarch64_missing; }
+#[cfg(arch.wasm32)]
+i32 wasm32_case() { return wasm32_missing; }
+#[cfg(arch.x86_64)]
+i32 x86_64_case() { return x86_64_missing; }
+#[cfg(cpu.sse41)]
+i32 cpu_sse41_case() { return cpu_sse41_missing; }
+#[cfg(cpu.sse42)]
+i32 cpu_sse42_case() { return cpu_sse42_missing; }
+#[cfg(cpu.popcnt)]
+i32 cpu_popcnt_case() { return cpu_popcnt_missing; }
+#[cfg(cpu.fma)]
+i32 cpu_fma_case() { return cpu_fma_missing; }
+#[cfg(cpu.avx)]
+i32 cpu_avx_case() { return cpu_avx_missing; }
+#[cfg(cpu.avx2)]
+i32 cpu_avx2_case() { return cpu_avx2_missing; }
+#[cfg(cpu.avx512f)]
+i32 cpu_avx512f_case() { return cpu_avx512f_missing; }
+
+i32 main() { return 0; }

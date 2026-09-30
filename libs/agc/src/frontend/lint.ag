@@ -1,0 +1,258 @@
+import std.mem.vec;
+import std.string;
+import frontend.ast;
+import frontend.cfg;
+import frontend.diagnostics;
+import frontend.messages;
+
+struct LintConfig {
+    bool unused_variables;
+    bool unused_parameters;
+    bool unreachable_code;
+    bool warnings_as_errors;
+}
+
+LintConfig lint_config_default() {
+    LintConfig config;
+    config.unused_variables = true;
+    config.unused_parameters = true;
+    config.unreachable_code = true;
+    config.warnings_as_errors = false;
+    return config;
+}
+
+void lint_config_flag(LintConfig* config, str flag) {
+    if (strcmp(flag, "-Wall") == 0 || strcmp(flag, "-Wextra") == 0) {
+        config.unused_variables = true;
+        config.unused_parameters = true;
+        config.unreachable_code = true;
+    } else if (strcmp(flag, "-Wunused") == 0 || strcmp(flag, "-Wunused-variables") == 0) {
+        config.unused_variables = true;
+        config.unused_parameters = true;
+    } else if (strcmp(flag, "-Wunreachable-code") == 0) {
+        config.unreachable_code = true;
+    } else if (strcmp(flag, "-Werror") == 0) {
+        config.warnings_as_errors = true;
+    } else if (strcmp(flag, "-Wno-unused") == 0 || strcmp(flag, "-Wno-unused-variables") == 0) {
+        config.unused_variables = false;
+        config.unused_parameters = false;
+    } else if (strcmp(flag, "-Wno-unreachable-code") == 0) {
+        config.unreachable_code = false;
+    } else if (strcmp(flag, "-Wno-error") == 0) {
+        config.warnings_as_errors = false;
+    } else if (strcmp(flag, "-Wno-all") == 0) {
+        config.unused_variables = false;
+        config.unused_parameters = false;
+        config.unreachable_code = false;
+    }
+}
+
+void lint_config_apply_errors(LintConfig* config, DiagnosticBag* diagnostics) {
+    if (!config.warnings_as_errors) { return; }
+    i64 i = 0;
+    while (i < diagnostics.len()) {
+        Diagnostic* diagnostic = diagnostics.get(i);
+        if (diagnostic.severity == Severity.Warning) {
+            diagnostic.severity = Severity.Error;
+        }
+        i += 1;
+    }
+}
+
+bool lint_has_errors(DiagnosticBag* diagnostics) {
+    i64 i = 0;
+    while (i < diagnostics.len()) {
+        if (diagnostics.get(i).severity == Severity.Error) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+struct LintBinding {
+    SyntaxNode* declaration;
+    bool parameter;
+    bool used;
+}
+
+bool lint_same_name(str left, str right) {
+    return strcmp(left, right) == 0;
+}
+
+void lint_add_parameter_bindings(SyntaxNode* parameters, Vec<LintBinding>* bindings) {
+    if (parameters == (SyntaxNode*)0) { return; }
+    SyntaxNode* child = parameters.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Token && child.token_kind == TokenKind.Identifier
+            && (child.next_sibling == (SyntaxNode*)0
+                || child.next_sibling.kind == NodeKind.Token
+                    && child.next_sibling.token_kind == TokenKind.Comma)
+            && !lint_same_name(child.text, "self")) {
+            LintBinding binding;
+            binding.declaration = child;
+            binding.parameter = true;
+            binding.used = false;
+            bindings.push(binding);
+        }
+        child = child.next_sibling;
+    }
+}
+
+void lint_warn_scope(
+    Vec<LintBinding>* bindings,
+    i64 scope_start,
+    DiagnosticBag* diagnostics,
+    bool unused_variables,
+    bool unused_parameters
+) {
+    i64 i = scope_start;
+    while (i < bindings.len()) {
+        LintBinding* binding = bindings.get_ptr(i);
+        str name = binding.declaration.text;
+        if (!binding.used && strlen(name) > 0 && name[0] != (u8)'_') {
+            if (binding.parameter && unused_parameters) {
+                diagnostics.warning(binding.declaration.span, unused_parameter(name));
+            } else if (!binding.parameter && unused_variables) {
+                diagnostics.warning(binding.declaration.span, unused_variable(name));
+            }
+        }
+        i += 1;
+    }
+    while (bindings.len() > scope_start) {
+        bindings.pop();
+    }
+}
+
+void lint_visit_node(
+    SyntaxNode* node,
+    Vec<LintBinding>* bindings,
+    DiagnosticBag* diagnostics,
+    bool unused_variables,
+    bool unused_parameters
+) {
+    if (node == (SyntaxNode*)0) { return; }
+    bool is_block = node.kind == NodeKind.Block;
+    i64 scope_start = bindings.len();
+    SyntaxNode* child = node.first_child;
+    SyntaxNode* previous = (SyntaxNode*)0;
+    while (child != (SyntaxNode*)0) {
+        bool declaration = child.kind == NodeKind.Token
+            && child.token_kind == TokenKind.Identifier
+            && previous != (SyntaxNode*)0 && previous.kind == NodeKind.Token
+            && previous.token_kind == TokenKind.Let;
+        if (declaration) {
+            LintBinding binding;
+            binding.declaration = child;
+            binding.parameter = false;
+            binding.used = false;
+            bindings.push(binding);
+        } else if (child.kind == NodeKind.Token
+            && child.token_kind == TokenKind.Identifier) {
+            i64 index = bindings.len() - 1;
+            while (index >= 0) {
+                LintBinding* binding = bindings.get_ptr(index);
+                if (lint_same_name(binding.declaration.text, child.text)) {
+                    binding.used = true;
+                    break;
+                }
+                index -= 1;
+            }
+        }
+        if (child.kind != NodeKind.Token) {
+            lint_visit_node(
+                child, bindings, diagnostics, unused_variables, unused_parameters
+            );
+        }
+        previous = child;
+        child = child.next_sibling;
+    }
+    if (is_block) {
+        lint_warn_scope(
+            bindings, scope_start, diagnostics, unused_variables, unused_parameters
+        );
+    }
+}
+
+SyntaxNode* lint_parameter_group(SyntaxNode* function) {
+    SyntaxNode* child = function.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Parenthesized) { return child; }
+        if (child.kind == NodeKind.Bracket) { return (SyntaxNode*)0; }
+        child = child.next_sibling;
+    }
+    return (SyntaxNode*)0;
+}
+
+void lint_function(
+    SyntaxNode* function,
+    DiagnosticBag* diagnostics,
+    bool unused_variables,
+    bool unused_parameters
+) {
+    Vec<LintBinding> bindings = Vec<LintBinding>.new();
+    lint_add_parameter_bindings(lint_parameter_group(function), &bindings);
+    SyntaxNode* body = function.first_child;
+    while (body != (SyntaxNode*)0 && body.kind != NodeKind.Block) {
+        body = body.next_sibling;
+    }
+    if (body != (SyntaxNode*)0) {
+        lint_visit_node(
+            body, &bindings, diagnostics, unused_variables, unused_parameters
+        );
+    }
+    lint_warn_scope(&bindings, 0, diagnostics, unused_variables, unused_parameters);
+    bindings.drop();
+}
+
+void lint_functions(SyntaxNode* node, DiagnosticBag* diagnostics, bool unused_variables, bool unused_parameters) {
+    if (node == (SyntaxNode*)0) { return; }
+    if (node.kind == NodeKind.Function) {
+        lint_function(node, diagnostics, unused_variables, unused_parameters);
+        return;
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        lint_functions(child, diagnostics, unused_variables, unused_parameters);
+        child = child.next_sibling;
+    }
+}
+
+bool lint_terminator(SyntaxNode* token) {
+    return token.kind == NodeKind.Token
+        && (token.token_kind == TokenKind.Return || token.token_kind == TokenKind.Break
+            || token.token_kind == TokenKind.Continue);
+}
+
+void lint_unreachable_blocks(SyntaxNode* node, DiagnosticBag* diagnostics, bool enabled) {
+    if (node == (SyntaxNode*)0) { return; }
+    if (enabled && node.kind == NodeKind.Block) {
+        bool has_terminator = false;
+        bool terminated = false;
+        bool warned = false;
+        SyntaxNode* child = node.first_child;
+        while (child != (SyntaxNode*)0) {
+            if (terminated && !warned) {
+                diagnostics.warning(child.span, String.from_str(unreachable_statement()));
+                warned = true;
+            }
+            if (lint_terminator(child)) { has_terminator = true; }
+            if (child.kind == NodeKind.Token && child.token_kind == TokenKind.Semicolon && has_terminator) {
+                terminated = true;
+            }
+            if (child.kind != NodeKind.Token) {
+                lint_unreachable_blocks(child, diagnostics, enabled);
+            }
+            child = child.next_sibling;
+        }
+    } else {
+        SyntaxNode* child = node.first_child;
+        while (child != (SyntaxNode*)0) {
+            lint_unreachable_blocks(child, diagnostics, enabled);
+            child = child.next_sibling;
+        }
+    }
+}
+
+void check_lints(SyntaxTree* tree, DiagnosticBag* diagnostics, LintConfig* config) {
+    lint_functions(tree.root, diagnostics, config.unused_variables, config.unused_parameters);
+    lint_unreachable_blocks(tree.root, diagnostics, config.unreachable_code);
+}

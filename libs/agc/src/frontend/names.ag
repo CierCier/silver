@@ -15,6 +15,7 @@ struct NameResolver {
     Interner local_names;
     Vec<u32> locals;
     Vec<u32> const_locals;
+    Vec<u32> const_globals;
     SymbolTable* symbols;
     DiagnosticBag* diagnostics;
     bool has_imports;
@@ -27,8 +28,9 @@ impl NameResolver {
         resolver.local_names = Interner.new();
         resolver.locals = Vec<u32>.new();
         resolver.const_locals = Vec<u32>.new();
-        resolver.symbols = symbols;
         resolver.diagnostics = diagnostics;
+        resolver.symbols = symbols;
+        resolver.const_globals = Vec<u32>.new();
         resolver.has_imports = false;
         resolver.failed = false;
         return resolver;
@@ -73,9 +75,64 @@ impl NameResolver {
         return false;
     }
 
-    void unknown(NameResolver* self, str name, Span span) {
-        String message = unknown_identifier(name);
-        self.diagnostics.error(span, move message);
+    bool is_const_global(NameResolver* self, str name) {
+        u32 name_id = self.local_names.intern(name);
+        i64 i = 0;
+        while (i < self.const_globals.len()) {
+            if (self.const_globals.get(i) == name_id) {
+                return true;
+            }
+            i += 1;
+        }
+        return false;
+    }
+
+    void unknown(NameResolver* self, str name, Span span, bool is_call) {
+        Vec<str> candidates = Vec<str>.new();
+        i64 i = 0;
+        if (is_call) {
+            while (i < self.symbols.symbols.len()) {
+                Symbol* symbol = self.symbols.symbols.get_ptr(i);
+                if (symbol.kind == SymbolKind.Function) {
+                    str candidate = self.symbols.names.get(symbol.name_id);
+                    bool seen = false;
+                    i64 j = 0;
+                    while (j < candidates.len()) {
+                        if (candidates.get(j) == candidate) { seen = true; break; }
+                        j += 1;
+                    }
+                    if (!seen) { candidates.push(candidate); }
+                }
+                i += 1;
+            }
+            str suggestion = fuzzy_suggest(name, &candidates, 2);
+            String message = unknown_function_with_suggestion(name, suggestion);
+            self.diagnostics.error(span, move message);
+        } else {
+            while (i < self.locals.len()) {
+                candidates.push(self.local_names.get(self.locals.get(i)));
+                i += 1;
+            }
+            i = 0;
+            while (i < self.symbols.symbols.len()) {
+                Symbol* symbol = self.symbols.symbols.get_ptr(i);
+                if (symbol.kind == SymbolKind.Global) {
+                    str candidate = self.symbols.names.get(symbol.name_id);
+                    bool seen = false;
+                    i64 j = 0;
+                    while (j < candidates.len()) {
+                        if (candidates.get(j) == candidate) { seen = true; break; }
+                        j += 1;
+                    }
+                    if (!seen) { candidates.push(candidate); }
+                }
+                i += 1;
+            }
+            str suggestion = fuzzy_suggest(name, &candidates, 2);
+            String message = unknown_identifier_with_suggestion(name, suggestion);
+            self.diagnostics.error(span, move message);
+        }
+        candidates.drop();
         self.failed = true;
     }
 }
@@ -102,12 +159,10 @@ bool const_is_delimiter(SyntaxNode* node) {
         && (node.token_kind == TokenKind.Semicolon || node.text == ";" || node.text == ",");
 }
 
-// Check one sibling-run segment for const violations (LANG-004, locals only).
-// A segment declares iff a `const` token precedes its first assign-op; the
-// declared name is the identifier immediately before that `=`. Boundaries are
-// structural (Block/Parenthesized/Bracket delimit segments), so parameter
-// lists and cast contents can never poison the scan. Index stores
-// (`buf[i] = v`) and globals are documented misses.
+// Check one sibling-run segment for const violations (LANG-004). A segment
+// declares iff a `const` token precedes its first assign-op; the declared name
+// is the identifier immediately before that `=`. Block boundaries keep nested
+// declarations from poisoning this scan.
 void const_check_segment(NameResolver* resolver, Vec<SyntaxNode*>* segment) {
     i64 const_at = -1;
     i64 i = 0;
@@ -140,14 +195,30 @@ void const_check_segment(NameResolver* resolver, Vec<SyntaxNode*>* segment) {
     while (i < segment.len()) {
         if (const_is_assign_op(segment.get(i)) && i > 0) {
             SyntaxNode* target = segment.get(i - 1);
-            if (target != declared
-                && target.kind == NodeKind.Token && target.token_kind == TokenKind.Identifier
-                && resolver.is_const(target.text)) {
-                bool is_field = i >= 2 && segment.get(i - 2).kind == NodeKind.Token
-                    && segment.get(i - 2).text == ".";
-                if (!is_field) {
-                    String message = cannot_assign_const(target.text);
-                    resolver.diagnostics.error(target.span, move message);
+            SyntaxNode* base = target;
+            bool is_field = false;
+            if (target.kind == NodeKind.Parenthesized) {
+                SyntaxNode* inner = target.first_child;
+                while (inner != (SyntaxNode*)0 && inner.kind != NodeKind.Token) { inner = inner.next_sibling; }
+                if (inner != (SyntaxNode*)0 && inner.next_sibling == (SyntaxNode*)0) { base = inner; }
+            }
+            if (i >= 3 && segment.get(i - 2).kind == NodeKind.Token
+                && segment.get(i - 2).text == ".") {
+                is_field = true;
+                base = segment.get(i - 3);
+            } else if (target.kind == NodeKind.Bracket && i >= 2) {
+                base = segment.get(i - 2);
+            }
+            if (base.kind == NodeKind.Token && base.token_kind == TokenKind.Identifier
+                && base != declared && (resolver.is_const(base.text)
+                || (!resolver.has_local(base.text) && resolver.is_const_global(base.text)))) {
+                if (is_field) {
+                    String message = cannot_assign_const_field(base.text);
+                    resolver.diagnostics.error(base.span, move message);
+                    resolver.failed = true;
+                } else {
+                    String message = cannot_assign_const(base.text);
+                    resolver.diagnostics.error(base.span, move message);
                     resolver.failed = true;
                 }
             }
@@ -163,24 +234,25 @@ void const_scan_children(NameResolver* resolver, SyntaxNode* parent) {
     Vec<SyntaxNode*> segment = Vec<SyntaxNode*>.new();
     SyntaxNode* child = parent.first_child;
     while (child != (SyntaxNode*)0) {
-        if (child.kind == NodeKind.Block || child.kind == NodeKind.Parenthesized) {
+        if (child.kind == NodeKind.Block) {
             const_check_segment(resolver, &segment);
             segment.len = 0;
             const_scan_children(resolver, child);
-        } else if (child.kind == NodeKind.Bracket) {
-            const_check_segment(resolver, &segment);
-            segment.len = 0;
         } else if (const_is_delimiter(child)) {
             const_check_segment(resolver, &segment);
             segment.len = 0;
         } else {
             segment.push(child);
+            if (child.kind == NodeKind.Parenthesized || child.kind == NodeKind.Bracket) {
+                const_scan_children(resolver, child);
+            }
         }
         child = child.next_sibling;
     }
     const_check_segment(resolver, &segment);
     segment.drop();
 }
+
 
 SyntaxNode* function_body(SyntaxNode* function) {
     SyntaxNode* child = function.first_child;
@@ -276,7 +348,8 @@ void resolve_function(NameResolver* resolver, SyntaxNode* function, CfgSet* cfg)
             i += 1;
             continue;
         }
-        resolver.unknown(node.text, node.span);
+        bool is_call = i + 1 < body_leaves.len() && body_leaves.get(i + 1).text == "(";
+        resolver.unknown(node.text, node.span, is_call);
         i += 1;
     }
 }
@@ -296,11 +369,30 @@ bool resolve_names(SymbolTable* symbols, DiagnosticBag* diagnostics, SyntaxTree*
     cfg_collect_items(tree.root, cfg, diagnostics, &items);
     i64 i = 0;
     while (i < items.len()) {
+        if (items.get(i).kind == NodeKind.Global) {
+            SyntaxNode* child = items.get(i).first_child;
+            bool has_const = false;
+            SyntaxNode* assigned = (SyntaxNode*)0;
+            while (child != (SyntaxNode*)0) {
+                if (child.kind == NodeKind.Token && child.token_kind == TokenKind.Const) { has_const = true; }
+                if (const_is_assign_op(child)) { break; }
+                if (child.kind == NodeKind.Token && child.token_kind == TokenKind.Identifier) { assigned = child; }
+                child = child.next_sibling;
+            }
+            if (has_const && assigned != (SyntaxNode*)0) {
+                resolver.const_globals.push(resolver.local_names.intern(assigned.text));
+            }
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < items.len()) {
         if (items.get(i).kind == NodeKind.Function) {
             resolve_function(&resolver, items.get(i), cfg);
         }
         i += 1;
     }
     items.drop();
+    resolver.const_globals.drop();
     return !resolver.failed;
 }

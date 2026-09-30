@@ -35,6 +35,9 @@ struct TypeProjection {
     str argument0;
     str argument1;
     bool is_mutable;
+    bool contains_rc;
+    bool contains_non_send;
+    bool contains_unknown;
 }
 
 struct LaunchArgument {
@@ -60,6 +63,9 @@ TypeProjection projection_type_empty() {
     result.argument0 = "";
     result.argument1 = "";
     result.is_mutable = false;
+    result.contains_rc = false;
+    result.contains_non_send = false;
+    result.contains_unknown = true;
     return result;
 }
 
@@ -84,6 +90,29 @@ void projection_skip_qualifiers(ProjectionTypeParser* parser) {
 bool projection_is_type_name(SyntaxNode* node) {
     return node != (SyntaxNode*)0 && node.kind == NodeKind.Token
         && (is_primitive_type_token(node.token_kind) || node.token_kind == TokenKind.Identifier);
+}
+bool projection_type_name_is_forbidden(str name) {
+    return strcmp(name, "Rc") == 0
+        || strcmp(name, "Handle") == 0
+        || strcmp(name, "Guard") == 0;
+}
+
+void projection_merge_type_flags(TypeProjection* target, TypeProjection* source) {
+    target.contains_rc = target.contains_rc || source.contains_rc
+        || strcmp(source.name, "Rc") == 0;
+    target.contains_non_send = target.contains_non_send || source.contains_non_send
+        || source.kind == ProjectionTypeKind.Pointer
+        || source.kind == ProjectionTypeKind.Reference
+        || projection_type_name_is_forbidden(source.name);
+    target.contains_unknown = target.contains_unknown || source.contains_unknown;
+}
+
+void projection_mark_type_known(TypeProjection* value) {
+    value.contains_unknown = false;
+    value.contains_non_send = projection_type_name_is_forbidden(value.name)
+        || value.kind == ProjectionTypeKind.Pointer
+        || value.kind == ProjectionTypeKind.Reference;
+    value.contains_rc = strcmp(value.name, "Rc") == 0;
 }
 
 TypeProjection projection_parse_type_at(ProjectionTypeParser* parser) {
@@ -112,6 +141,8 @@ TypeProjection projection_parse_type_at(ProjectionTypeParser* parser) {
         result.argument0 = inner.argument0;
         result.argument1 = inner.argument1;
         result.is_mutable = is_mutable;
+        projection_mark_type_known(&result);
+        projection_merge_type_flags(&result, &inner);
         return result;
     }
 
@@ -124,6 +155,8 @@ TypeProjection projection_parse_type_at(ProjectionTypeParser* parser) {
         result.argument0 = inner.argument0;
         result.argument1 = inner.argument1;
         result.is_mutable = true;
+        projection_mark_type_known(&result);
+        projection_merge_type_flags(&result, &inner);
         return result;
     }
 
@@ -138,7 +171,10 @@ TypeProjection projection_parse_type_at(ProjectionTypeParser* parser) {
         result.name = element.name;
         result.argument0 = element.argument0;
         result.argument1 = element.argument1;
+        projection_mark_type_known(&result);
+        projection_merge_type_flags(&result, &element);
         return result;
+
     }
 
     if (!projection_is_type_name(node)) {
@@ -156,18 +192,24 @@ TypeProjection projection_parse_type_at(ProjectionTypeParser* parser) {
     } else {
         result.kind = ProjectionTypeKind.Primitive;
     }
+    projection_mark_type_known(&result);
+
 
     if (parser.cursor < parser.end && projection_token_text(parser.leaves.get(parser.cursor), "<")) {
         parser.cursor += 1;
         if (parser.cursor < parser.end && !projection_token_text(parser.leaves.get(parser.cursor), ">")) {
             TypeProjection argument0 = projection_parse_type_at(parser);
             result.argument0 = argument0.name;
+            projection_merge_type_flags(&result, &argument0);
             if (parser.cursor < parser.end
                 && parser.leaves.get(parser.cursor).token_kind == TokenKind.Comma) {
                 parser.cursor += 1;
                 if (parser.cursor < parser.end && !projection_token_text(parser.leaves.get(parser.cursor), ">")) {
                     TypeProjection argument1 = projection_parse_type_at(parser);
                     result.argument1 = argument1.name;
+                    projection_merge_type_flags(&result, &argument1);
+                } else {
+                    result.contains_unknown = true;
                 }
             }
         }
@@ -184,9 +226,11 @@ TypeProjection projection_parse_type_at(ProjectionTypeParser* parser) {
             parser.cursor += 1;
             result.kind = ProjectionTypeKind.Pointer;
             result.is_mutable = true;
+            result.contains_non_send = true;
         } else if (next.token_kind == TokenKind.BitwiseAnd) {
             parser.cursor += 1;
             result.kind = ProjectionTypeKind.Reference;
+            result.contains_non_send = true;
         } else {
             break;
         }

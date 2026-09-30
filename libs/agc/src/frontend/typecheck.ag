@@ -81,20 +81,60 @@ bool typecheck_has_type_parameter(SyntaxNode* declaration, str name) {
     return false;
 }
 
-void typecheck_report_unknown(SymbolTable* symbols, SyntaxNode* declaration,
-                              TypeProjection* projection, Span span,
-                              DiagnosticBag* diagnostics, bool* ok) {
-    if (projection_is_unknown(projection) || strlen(projection.name) == 0) {
+Vec<str> typecheck_type_candidates(SymbolTable* symbols) {
+    Vec<str> candidates = Vec<str>.new();
+    i64 i = 0;
+    while (i < symbols.symbols.len()) {
+        Symbol* symbol = symbols.symbols.get_ptr(i);
+        if (symbol.kind == SymbolKind.Struct || symbol.kind == SymbolKind.Enum
+            || symbol.kind == SymbolKind.TypeAlias || symbol.kind == SymbolKind.Trait) {
+            candidates.push(symbols.names.get(symbol.name_id));
+        }
+        i += 1;
+    }
+    return candidates;
+}
+
+bool typecheck_has_named_type(SymbolTable* symbols, str name) {
+    i64 index = symbols.find(name);
+    if (index < 0) {
+        return false;
+    }
+    Symbol* symbol = symbols.get(index);
+    return symbol.kind == SymbolKind.Struct || symbol.kind == SymbolKind.Enum
+        || symbol.kind == SymbolKind.TypeAlias || symbol.kind == SymbolKind.Trait;
+}
+
+void typecheck_report_unknown_name(SymbolTable* symbols, SyntaxNode* declaration,
+                                   str name, Span span, DiagnosticBag* diagnostics,
+                                   bool* ok, Vec<str>* candidates) {
+    if (strlen(name) == 0 || typecheck_is_primitive(name) || typecheck_is_builtin(name)
+        || typecheck_has_type_parameter(declaration, name)
+        || typecheck_has_named_type(symbols, name)) {
         return;
     }
-    if (typecheck_is_primitive(projection.name) || typecheck_is_builtin(projection.name)
-        || typecheck_has_type_parameter(declaration, projection.name)
-        || symbols.find(projection.name) >= 0) {
-        return;
-    }
-    String message = unknown_type(projection.name);
+    str suggestion = fuzzy_suggest(name, candidates, 2);
+    String message = unknown_type_with_suggestion(name, suggestion);
     diagnostics.error(span, move message);
     *ok = false;
+}
+
+void typecheck_report_unknown(SymbolTable* symbols, SyntaxNode* declaration,
+                              TypeProjection* projection, Span span,
+                              DiagnosticBag* diagnostics, bool* ok,
+                              Vec<str>* candidates) {
+    if (projection_is_unknown(projection)) {
+        return;
+    }
+    typecheck_report_unknown_name(
+        symbols, declaration, projection.name, span, diagnostics, ok, candidates
+    );
+    typecheck_report_unknown_name(
+        symbols, declaration, projection.argument0, span, diagnostics, ok, candidates
+    );
+    typecheck_report_unknown_name(
+        symbols, declaration, projection.argument1, span, diagnostics, ok, candidates
+    );
 }
 
 TypeProjection typecheck_function_return(SyntaxNode* function) {
@@ -118,14 +158,58 @@ TypeProjection typecheck_function_return(SyntaxNode* function) {
 
 void typecheck_function(SymbolTable* symbols, SyntaxNode* function,
                         DiagnosticBag* diagnostics, bool* ok) {
+    Vec<str> candidates = typecheck_type_candidates(symbols);
     TypeProjection return_type = typecheck_function_return(function);
     if (!projection_is_unknown(&return_type)) {
-        typecheck_report_unknown(symbols, function, &return_type, function.span, diagnostics, ok);
+        typecheck_report_unknown(
+            symbols, function, &return_type, function.span, diagnostics, ok, &candidates
+        );
     }
+    Vec<Binding> parameters = Vec<Binding>.new();
+    collect_parameter_bindings(binding_function_parameters(function), &parameters);
+    i64 index = 0;
+    while (index < parameters.len()) {
+        Binding* parameter = parameters.get_ptr(index);
+        typecheck_report_unknown(
+            symbols, function, &parameter.declared_type, parameter.span,
+            diagnostics, ok, &candidates
+        );
+        index += 1;
+    }
+    parameters.drop();
+    candidates.drop();
 
     // Local declarations are intentionally left to the expression checker.
     // Stage0 currently accepts some uninitialized unknown-type declarations;
     // checking them here would create a false semantic parity difference.
+}
+
+
+void typecheck_alias(SymbolTable* symbols, SyntaxNode* item,
+                     DiagnosticBag* diagnostics, bool* ok) {
+    Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+    typecheck_collect_leaves(item, &leaves);
+    i64 start = 0;
+    while (start < leaves.len() && leaves.get(start).token_kind != TokenKind.Assign) {
+        start += 1;
+    }
+    if (start < leaves.len()) {
+        start += 1;
+        i64 end = start;
+        while (end < leaves.len() && leaves.get(end).token_kind != TokenKind.Semicolon) {
+            end += 1;
+        }
+        if (start < end) {
+            TypeProjection alias_type = projection_parse_type(&leaves, start, end);
+            Vec<str> candidates = typecheck_type_candidates(symbols);
+            typecheck_report_unknown(
+                symbols, item, &alias_type, leaves.get(start).span,
+                diagnostics, ok, &candidates
+            );
+            candidates.drop();
+        }
+    }
+    leaves.drop();
 }
 
 void typecheck_struct(SymbolTable* symbols, SyntaxNode* item,
@@ -143,6 +227,7 @@ void typecheck_struct(SymbolTable* symbols, SyntaxNode* item,
         return;
     }
 
+    Vec<str> candidates = typecheck_type_candidates(symbols);
     Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
     typecheck_collect_leaves(body, &leaves);
     i64 start = 0;
@@ -170,7 +255,8 @@ void typecheck_struct(SymbolTable* symbols, SyntaxNode* item,
                         &field_type,
                         leaves.get(start).span,
                         diagnostics,
-                        ok
+                        ok,
+                        &candidates
                     );
                 }
             }
@@ -178,6 +264,7 @@ void typecheck_struct(SymbolTable* symbols, SyntaxNode* item,
         start = end + 1;
     }
     leaves.drop();
+    candidates.drop();
 }
 
 bool check_declared_types(SymbolTable* symbols, SyntaxTree* tree, CfgSet* cfg,
@@ -192,6 +279,8 @@ bool check_declared_types(SymbolTable* symbols, SyntaxTree* tree, CfgSet* cfg,
             typecheck_function(symbols, item, diagnostics, &ok);
         } else if (symbol_item_is_struct(item)) {
             typecheck_struct(symbols, item, diagnostics, &ok);
+        } else if (item.kind == NodeKind.TypeAlias) {
+            typecheck_alias(symbols, item, diagnostics, &ok);
         }
         index += 1;
     }

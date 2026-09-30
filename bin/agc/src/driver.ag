@@ -8,9 +8,12 @@ import std.mem.vec;
 import std.result;
 import std.string;
 import agc;
+import frontend.artifacts;
 import backend_bridge;
 import native_backend;
 import workspace;
+import frontend.ownership;
+import frontend.send;
 
 str token_kind_name(TokenKind kind) {
     return match kind {
@@ -338,7 +341,7 @@ i32 emit_ast(str path) {
     return 0;
 }
 
-i32 emit_check(str path, CfgSet* cfg, Vec<String>* include_dirs) {
+i32 emit_check(str path, CfgSet* cfg, Vec<String>* include_dirs, LintConfig* lint_config) {
     Result<String, Error> loaded = String.from_file(path);
     if (loaded.is_err()) {
         STDERR.write_str("agc: error: failed to read ");
@@ -377,6 +380,10 @@ i32 emit_check(str path, CfgSet* cfg, Vec<String>* include_dirs) {
                 check_ownership(&tree, &diagnostics, cfg);
             }
             if (diagnostics.is_empty()) {
+                check_lints(&tree, &diagnostics, lint_config);
+                lint_config_apply_errors(lint_config, &diagnostics);
+            }
+            if (diagnostics.is_empty()) {
                 String summary = String.from_str("check ok: ");
                 append_i64(&summary, symbols.len());
                 summary.push_str(" top-level symbols\n");
@@ -393,7 +400,7 @@ i32 emit_check(str path, CfgSet* cfg, Vec<String>* include_dirs) {
             i += 1;
         }
         pool.destroy();
-        return 2;
+        return lint_has_errors(&diagnostics) ? 2 : 0;
     }
     i64 i = 0;
     while (i < diagnostics.len()) {
@@ -405,11 +412,12 @@ i32 emit_check(str path, CfgSet* cfg, Vec<String>* include_dirs) {
     return 2;
 }
 
-void collect_workspace_check_options(Vec<String>* arguments, CfgSet* cfg, Vec<String>* include_dirs, WorkspacePlan* plan) {
+void collect_workspace_check_options(Vec<String>* arguments, CfgSet* cfg, Vec<String>* include_dirs, WorkspacePlan* plan, LintConfig* lint_config) {
     workspace_collect_roots(plan, include_dirs);
     i64 i = 1;
     while (i < arguments.len()) {
         String* argument = arguments.get_ptr(i);
+        lint_config_flag(lint_config, argument.to_str());
         if (argument.equals("-I") && i + 1 < arguments.len()) {
             String value = String.from_str(arguments.get_ptr(i + 1).to_str());
             include_dirs.push(move value);
@@ -458,8 +466,9 @@ void collect_workspace_check_options(Vec<String>* arguments, CfgSet* cfg, Vec<St
 i32 run_workspace_check(Vec<String>* arguments, WorkspacePlan* plan) {
     CfgSet cfg = linux_defaults();
     Vec<String> include_dirs = Vec<String>.new();
-    collect_workspace_check_options(arguments, &cfg, &include_dirs, plan);
-    i32 result = emit_check(plan.entry.to_str(), &cfg, &include_dirs);
+    LintConfig lint_config = lint_config_default();
+    collect_workspace_check_options(arguments, &cfg, &include_dirs, plan, &lint_config);
+    i32 result = emit_check(plan.entry.to_str(), &cfg, &include_dirs, &lint_config);
     include_dirs.drop();
     return result;
 }
@@ -498,6 +507,204 @@ bool is_frontend_command(String* command) {
         || command.equals("ast") || command.equals("check");
 }
 
+ArtifactExport artifact_fixture_function(str name) {
+    ArtifactExport export = ArtifactExport.new();
+    export.kind = ArtifactExportKind.Function;
+    export.name = String.from_str(name);
+    export.signature = String.from_str("fn() -> i32");
+    export.link_name_present = true;
+    export.link_name = String.from_str(name);
+    export.abi_present = true;
+    export.abi = (u8)2;
+    return move export;
+}
+
+bool artifact_source_type(SyntaxNode* node, String* out) {
+    if (node == (SyntaxNode*)0 || node.kind != NodeKind.Token) {
+        return false;
+    }
+    if (node.text == "void") {
+        out.push_str("unit");
+        return true;
+    }
+    if (node.token_kind == TokenKind.I8 || node.token_kind == TokenKind.I16
+        || node.token_kind == TokenKind.I32 || node.token_kind == TokenKind.I64
+        || node.token_kind == TokenKind.U8 || node.token_kind == TokenKind.U16
+        || node.token_kind == TokenKind.U32 || node.token_kind == TokenKind.U64
+        || node.token_kind == TokenKind.F32 || node.token_kind == TokenKind.F64
+        || node.token_kind == TokenKind.Bool || node.token_kind == TokenKind.Char) {
+        out.push_str(node.text);
+        return true;
+    }
+    return false;
+}
+
+bool artifact_source_has_attribute(SyntaxNode* item) {
+    SyntaxNode* child = item.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Token && child.text == "#") { return true; }
+        child = child.next_sibling;
+    }
+    return false;
+}
+
+u64 artifact_source_hash(String* source) {
+    u64 hash = (u64)14695981039346656037;
+    i64 index = 0;
+    while (index < source.len) {
+        hash = (hash ^ (u64)source.data[index]) * (u64)1099511628211;
+        index += 1;
+    }
+    return hash;
+}
+
+bool artifact_source_function(SyntaxNode* item, ArtifactExport* out) {
+    if (artifact_source_has_attribute(item)) { return false; }
+    SyntaxNode* name = function_identifier(item);
+    SyntaxNode* parameters = item.first_child;
+    while (parameters != (SyntaxNode*)0 && parameters.kind != NodeKind.Parenthesized) {
+        parameters = parameters.next_sibling;
+    }
+    if (name == (SyntaxNode*)0 || parameters == (SyntaxNode*)0) { return false; }
+    String return_type = String.new();
+    SyntaxNode* child = item.first_child;
+    while (child != name) {
+        if (child.kind == NodeKind.Token && child.text != "pub"
+            && !artifact_source_type(child, &return_type)) {
+            return_type.drop();
+            return false;
+        }
+        child = child.next_sibling;
+    }
+    if (return_type.len == 0) { return_type.push_str("unit"); }
+    String signature = String.from_str("fn(");
+    i64 parameter_count = 0;
+    child = parameters.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.token_kind == TokenKind.Comma && child.kind == NodeKind.Token) {
+            child = child.next_sibling;
+            continue;
+        }
+        String param_type = String.new();
+        if (!artifact_source_type(child, &param_type)) {
+            param_type.drop();
+            signature.drop();
+            return_type.drop();
+            return false;
+        }
+        SyntaxNode* param_name = child.next_sibling;
+        if (param_name == (SyntaxNode*)0 || !node_is_identifier(param_name)) {
+            param_type.drop();
+            signature.drop();
+            return_type.drop();
+            return false;
+        }
+        if (parameter_count > 0) { signature.push_str(","); }
+        signature.push_str(param_type.to_str());
+        param_type.drop();
+        parameter_count += 1;
+        child = param_name.next_sibling;
+        if (child != (SyntaxNode*)0
+            && !(child.kind == NodeKind.Token && child.token_kind == TokenKind.Comma)) {
+            signature.drop();
+            return_type.drop();
+            return false;
+        }
+        if (child != (SyntaxNode*)0) { child = child.next_sibling; }
+    }
+    signature.push_str(") -> ");
+    signature.push_str(return_type.to_str());
+    out.kind = ArtifactExportKind.Function;
+    out.name = String.from_str(name.text);
+    out.signature = move signature;
+    out.link_name_present = true;
+    out.link_name = String.from_str(name.text);
+    out.abi_present = true;
+    out.abi = (u8)2;
+    return_type.drop();
+    return true;
+}
+
+i32 emit_artifact_fixture(str output_path) {
+    Artifact artifact = Artifact.new();
+    artifact.version = (u8)11;
+    artifact.module_name = String.from_str("artifact_fixture");
+    artifact.module_path = String.from_str("artifact_fixture");
+    artifact.source_path = String.from_str("artifact_fixture.ag");
+    artifact.compiler_version = String.from_str("foreign");
+    artifact.target_triple = String.from_str("unknown");
+    artifact.exports.push(artifact_fixture_function("zeta"));
+    artifact.exports.push(artifact_fixture_function("probe"));
+    artifact.exports.push(artifact_fixture_function("alpha"));
+    bool ok = publish_artifact(output_path, &artifact);
+    artifact_drop(&artifact);
+    if (!ok) {
+        STDERR.write_str("agc: error: failed to publish AGM fixture\n");
+        return 2;
+    }
+    return 0;
+}
+
+i32 emit_source_artifact(str source_path, str output_path) {
+    Result<String, Error> loaded = String.from_file(source_path);
+    if (loaded.is_err()) {
+        STDERR.write_str("agc: error: failed to read artifact source\n");
+        return 2;
+    }
+    String source = loaded.unwrap();
+    u64 source_hash = artifact_source_hash(&source);
+    TokenStream stream = TokenStream.new();
+    DiagnosticBag diagnostics = DiagnosticBag.new();
+    lex(move source, &stream, &diagnostics);
+    NodePool pool = NodePool.new();
+    SyntaxTree tree;
+    if (diagnostics.is_empty()) {
+        parse(&stream, &diagnostics, &pool, &tree);
+    }
+    if (!diagnostics.is_empty()) {
+        STDERR.write_str("agc: error: invalid source for AGM publication\n");
+        pool.destroy();
+        return 2;
+    }
+    Artifact artifact = Artifact.new();
+    artifact.version = (u8)11;
+    artifact.module_name = String.from_str(source_path);
+    artifact.module_path = String.from_str(source_path);
+    artifact.source_path = String.from_str(source_path);
+    artifact.source_hash = source_hash;
+    artifact.compiler_version = String.from_str("foreign");
+    artifact.target_triple = String.from_str("unknown");
+    bool supported = true;
+    SyntaxNode* item = tree.root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Function) {
+            ArtifactExport export = ArtifactExport.new();
+            if (!artifact_source_function(item, &export)) {
+                artifact_drop_export(&export);
+                supported = false;
+                break;
+            }
+            artifact.exports.push(move export);
+        } else if (item.kind == NodeKind.Item || item.kind == NodeKind.Attribute) {
+        } else if (item.kind == NodeKind.Struct || item.kind == NodeKind.Enum
+            || item.kind == NodeKind.Trait || item.kind == NodeKind.Global
+            || item.kind == NodeKind.TypeAlias || item.kind == NodeKind.Import) {
+            supported = false;
+            break;
+        }
+        item = item.next_sibling;
+    }
+    bool ok = supported && publish_artifact(output_path, &artifact);
+    if (!supported) {
+        STDERR.write_str("agc: error: AGM source collector cannot yet encode this declaration exactly\n");
+    } else if (!ok) {
+        STDERR.write_str("agc: error: failed to publish source AGM artifact\n");
+    }
+    artifact_drop(&artifact);
+    pool.destroy();
+    return ok ? 0 : 2;
+}
+
 i32 run_frontend() {
     Vec<String> arguments = args();
     WorkspacePlan workspace = workspace_plan_empty();
@@ -520,6 +727,18 @@ i32 run_frontend() {
         return result;
     }
     workspace_plan_drop(&workspace);
+    if (arguments.len() == 4 && arguments.get_ptr(1).equals("artifact-source")) {
+        i32 result = emit_source_artifact(
+            arguments.get_ptr(2).to_str(), arguments.get_ptr(3).to_str()
+        );
+        arguments.drop();
+        return result;
+    }
+    if (arguments.len() == 3 && arguments.get_ptr(1).equals("artifact-fixture")) {
+        i32 result = emit_artifact_fixture(arguments.get_ptr(2).to_str());
+        arguments.drop();
+        return result;
+    }
     if (arguments.len() < 2) {
         return run_stage0_backend(&arguments);
     }
@@ -546,9 +765,11 @@ i32 run_frontend() {
     String* input = arguments.get_ptr(2);
     CfgSet cfg = linux_defaults();
     Vec<String> include_dirs = Vec<String>.new();
+    LintConfig lint_config = lint_config_default();
     i64 option = 3;
     while (option < arguments.len()) {
         String* argument = arguments.get_ptr(option);
+        lint_config_flag(&lint_config, argument.to_str());
         if (argument.equals("-I")) {
             if (option + 1 >= arguments.len()) {
                 STDERR.write_str("agc: error: -I requires a directory\n");
@@ -613,7 +834,7 @@ i32 run_frontend() {
     if (command.equals("lex")) {
         result = emit_tokens(input.to_str());
     } else if (command.equals("check")) {
-        result = emit_check(input.to_str(), &cfg, &include_dirs);
+        result = emit_check(input.to_str(), &cfg, &include_dirs, &lint_config);
     } else {
         result = emit_ast(input.to_str());
     }

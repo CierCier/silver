@@ -8,6 +8,10 @@ struct LLVMOpaqueValue {}
 struct LLVMOpaqueBasicBlock {}
 struct LLVMOpaqueTargetMachine {}
 struct LLVMTarget {}
+struct LLVMOpaqueMetadata {}
+struct LLVMOpaqueDIBuilder {}
+struct LLVMOpaqueDbgRecord {}
+
 
 enum LLVMCodeGenOptLevel {
     LLVMCodeGenLevelNone = 0;
@@ -46,6 +50,45 @@ enum LLVMVerifierFailureAction {
     LLVMPrintMessageAction = 1;
     LLVMReturnStatusAction = 2;
 }
+enum LLVMLinkage {
+    LLVMExternalLinkage = 0;
+    LLVMAvailableExternallyLinkage = 1;
+    LLVMLinkOnceAnyLinkage = 2;
+    LLVMLinkOnceODRLinkage = 3;
+    LLVMLinkOnceODRAutoHideLinkage = 4;
+    LLVMWeakAnyLinkage = 5;
+    LLVMWeakODRLinkage = 6;
+    LLVMAppendingLinkage = 7;
+    LLVMInternalLinkage = 8;
+    LLVMPrivateLinkage = 9;
+    LLVMDLLImportLinkage = 10;
+    LLVMDLLExportLinkage = 11;
+    LLVMExternalWeakLinkage = 12;
+    LLVMGhostLinkage = 13;
+    LLVMCommonLinkage = 14;
+    LLVMLinkerPrivateLinkage = 15;
+    LLVMLinkerPrivateWeakLinkage = 16;
+}
+
+enum LLVMDIFlags {
+    LLVMDIFlagZero = 0;
+    LLVMDIFlagPrivate = 1;
+    LLVMDIFlagProtected = 2;
+    LLVMDIFlagPublic = 3;
+}
+
+enum LLVMDWARFSourceLanguage {
+    LLVMDWARFSourceLanguageC89 = 0;
+    LLVMDWARFSourceLanguageC = 1;
+}
+
+enum LLVMDWARFEmissionKind {
+    LLVMDWARFEmissionNone = 0;
+    LLVMDWARFEmissionFull = 1;
+    LLVMDWARFEmissionLineTablesOnly = 2;
+}
+
+
 
 enum LLVMIntPredicate {
     LLVMIntEQ = 32;
@@ -79,6 +122,16 @@ enum LLVMRealPredicate {
     LLVMRealPredicateTrue = 15;
 }
 
+enum LLVMModuleFlagBehavior {
+    LLVMModuleFlagBehaviorError = 0;
+    LLVMModuleFlagBehaviorWarning = 1;
+    LLVMModuleFlagBehaviorRequire = 2;
+    LLVMModuleFlagBehaviorOverride = 3;
+    LLVMModuleFlagBehaviorAppend = 4;
+    LLVMModuleFlagBehaviorAppendUnique = 5;
+}
+
+
 #[link("LLVM-22")]
 extern "C" {
     LLVMOpaqueContext* LLVMContextCreate();
@@ -100,13 +153,24 @@ extern "C" {
     LLVMOpaqueType* LLVMDoubleTypeInContext(LLVMOpaqueContext* p0);
     LLVMOpaqueType* LLVMPointerTypeInContext(LLVMOpaqueContext* p0, u32 p1);
     LLVMOpaqueType* LLVMVoidTypeInContext(LLVMOpaqueContext* p0);
+    LLVMOpaqueType* LLVMIntTypeInContext(LLVMOpaqueContext* p0, u32 p1);
     LLVMOpaqueType* LLVMArrayType(LLVMOpaqueType* p0, u32 p1);
     LLVMOpaqueType* LLVMFunctionType(LLVMOpaqueType* p0, LLVMOpaqueType** p1, u32 p2, i32 p3);
+    LLVMOpaqueMetadata* LLVMValueAsMetadata(LLVMOpaqueValue* p0);
+    LLVMOpaqueValue* LLVMMetadataAsValue(LLVMOpaqueContext* p0, LLVMOpaqueMetadata* p1);
+    void LLVMAddModuleFlag(LLVMOpaqueModule* p0, LLVMModuleFlagBehavior p1, i8* p2, u64 p3, LLVMOpaqueMetadata* p4);
+
     LLVMOpaqueValue* LLVMAddFunction(LLVMOpaqueModule* p0, i8* p1, LLVMOpaqueType* p2);
     LLVMOpaqueValue* LLVMGetNamedFunction(LLVMOpaqueModule* p0, i8* p1);
     i8* LLVMGetValueName(LLVMOpaqueValue* p0);
     LLVMOpaqueValue* LLVMAddGlobal(LLVMOpaqueModule* p0, LLVMOpaqueType* p1, i8* p2);
     LLVMOpaqueValue* LLVMGetNamedGlobal(LLVMOpaqueModule* p0, i8* p1);
+    void LLVMSetLinkage(LLVMOpaqueValue* p0, LLVMLinkage p1);
+    void LLVMSetGlobalConstant(LLVMOpaqueValue* p0, i32 p1);
+    void LLVMSetThreadLocal(LLVMOpaqueValue* p0, i32 p1);
+    LLVMOpaqueValue* LLVMConstStringInContext2(LLVMOpaqueContext* p0, i8* p1, u64 p2, i32 p3);
+    LLVMOpaqueValue* LLVMConstArray2(LLVMOpaqueType* p0, LLVMOpaqueValue** p1, u64 p2);
+
     void LLVMSetInitializer(LLVMOpaqueValue* p0, LLVMOpaqueValue* p1);
     LLVMOpaqueValue* LLVMGetParam(LLVMOpaqueValue* p0, u32 p1);
     LLVMOpaqueType* LLVMGlobalGetValueType(LLVMOpaqueValue* p0);
@@ -121,6 +185,8 @@ extern "C" {
     LLVMOpaqueBasicBlock* LLVMAppendBasicBlockInContext(LLVMOpaqueContext* p0, LLVMOpaqueValue* p1, i8* p2);
     u32 LLVMCountBasicBlocks(LLVMOpaqueValue* p0);
     void LLVMPositionBuilderAtEnd(LLVMOpaqueBuilder* p0, LLVMOpaqueBasicBlock* p1);
+    void LLVMSetCurrentDebugLocation2(LLVMOpaqueBuilder* p0, LLVMOpaqueMetadata* p1);
+
     LLVMOpaqueBasicBlock* LLVMGetInsertBlock(LLVMOpaqueBuilder* p0);
     LLVMOpaqueValue* LLVMGetBasicBlockTerminator(LLVMOpaqueBasicBlock* p0);
     LLVMOpaqueValue* LLVMBuildRetVoid(LLVMOpaqueBuilder* p0);
@@ -139,6 +205,9 @@ extern "C" {
     LLVMOpaqueValue* LLVMBuildAnd(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueValue* p2, i8* p3);
     LLVMOpaqueValue* LLVMBuildOr(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueValue* p2, i8* p3);
     LLVMOpaqueValue* LLVMBuildXor(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueValue* p2, i8* p3);
+    LLVMOpaqueValue* LLVMBuildShl(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueValue* p2, i8* p3);
+    LLVMOpaqueValue* LLVMBuildLShr(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueValue* p2, i8* p3);
+    LLVMOpaqueValue* LLVMBuildAShr(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueValue* p2, i8* p3);
     LLVMOpaqueValue* LLVMBuildNeg(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, i8* p2);
     LLVMOpaqueValue* LLVMBuildFNeg(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, i8* p2);
     LLVMOpaqueValue* LLVMBuildNot(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, i8* p2);
@@ -185,6 +254,34 @@ extern "C" {
     void LLVMInitializeAArch64AsmPrinter();
     void LLVMInitializeAArch64AsmParser();
     i8* LLVMGetDefaultTargetTriple();
+    void LLVMSetDataLayout(LLVMOpaqueModule* p0, i8* p1);
+    void LLVMSetTarget(LLVMOpaqueModule* p0, i8* p1);
+    LLVMOpaqueDIBuilder* LLVMCreateDIBuilder(LLVMOpaqueModule* p0);
+    void LLVMDisposeDIBuilder(LLVMOpaqueDIBuilder* p0);
+    void LLVMDIBuilderFinalize(LLVMOpaqueDIBuilder* p0);
+    LLVMOpaqueDIBuilder* LLVMCreateDIBuilderDisallowUnresolved(LLVMOpaqueModule* p0);
+    void LLVMDIBuilderFinalizeSubprogram(LLVMOpaqueDIBuilder* p0, LLVMOpaqueMetadata* p1);
+    void LLVMSetSubprogram(LLVMOpaqueValue* p0, LLVMOpaqueMetadata* p1);
+
+    LLVMOpaqueMetadata* LLVMDIBuilderCreateCompileUnit(LLVMOpaqueDIBuilder* p0, LLVMDWARFSourceLanguage p1, LLVMOpaqueMetadata* p2, i8* p3, u64 p4, i32 p5, i8* p6, u64 p7, u32 p8, i8* p9, u64 p10, LLVMDWARFEmissionKind p11, u32 p12, i32 p13, i32 p14, i8* p15, u64 p16, i8* p17, u64 p18);
+    LLVMOpaqueMetadata* LLVMDIBuilderCreateFile(LLVMOpaqueDIBuilder* p0, i8* p1, u64 p2, i8* p3, u64 p4);
+    LLVMOpaqueMetadata* LLVMDIBuilderCreateFunction(LLVMOpaqueDIBuilder* p0, LLVMOpaqueMetadata* p1, i8* p2, u64 p3, i8* p4, u64 p5, LLVMOpaqueMetadata* p6, u32 p7, LLVMOpaqueMetadata* p8, i32 p9, i32 p10, u32 p11, LLVMDIFlags p12, i32 p13);
+    LLVMOpaqueMetadata* LLVMDIBuilderCreateLexicalBlock(LLVMOpaqueDIBuilder* p0, LLVMOpaqueMetadata* p1, LLVMOpaqueMetadata* p2, u32 p3, u32 p4);
+    LLVMOpaqueMetadata* LLVMDIBuilderCreateDebugLocation(LLVMOpaqueContext* p0, u32 p1, u32 p2, LLVMOpaqueMetadata* p3, LLVMOpaqueMetadata* p4);
+    LLVMOpaqueMetadata* LLVMDIBuilderCreateSubroutineType(LLVMOpaqueDIBuilder* p0, LLVMOpaqueMetadata* p1, LLVMOpaqueMetadata** p2, u32 p3, LLVMDIFlags p4);
+    LLVMOpaqueMetadata* LLVMDIBuilderCreateBasicType(LLVMOpaqueDIBuilder* p0, i8* p1, u64 p2, u64 p3, u32 p4, LLVMDIFlags p5);
+    LLVMOpaqueMetadata* LLVMDIBuilderCreateStructType(LLVMOpaqueDIBuilder* p0, LLVMOpaqueMetadata* p1, i8* p2, u64 p3, LLVMOpaqueMetadata* p4, u32 p5, u64 p6, u32 p7, LLVMDIFlags p8, LLVMOpaqueMetadata* p9, LLVMOpaqueMetadata** p10, u32 p11, u32 p12, LLVMOpaqueMetadata* p13, i8* p14, u64 p15);
+    LLVMOpaqueMetadata* LLVMDIBuilderCreateMemberType(LLVMOpaqueDIBuilder* p0, LLVMOpaqueMetadata* p1, i8* p2, u64 p3, LLVMOpaqueMetadata* p4, u32 p5, u64 p6, u32 p7, u64 p8, LLVMDIFlags p9, LLVMOpaqueMetadata* p10);
+    LLVMOpaqueMetadata* LLVMDIBuilderCreatePointerType(LLVMOpaqueDIBuilder* p0, LLVMOpaqueMetadata* p1, u64 p2, u32 p3, u32 p4, i8* p5, u64 p6);
+    LLVMOpaqueMetadata* LLVMDIBuilderCreateArrayType(LLVMOpaqueDIBuilder* p0, u64 p1, u32 p2, LLVMOpaqueMetadata* p3, LLVMOpaqueMetadata** p4, u32 p5);
+
+
+    LLVMOpaqueMetadata* LLVMDIBuilderCreateExpression(LLVMOpaqueDIBuilder* p0, u64* p1, u64 p2);
+    LLVMOpaqueMetadata* LLVMDIBuilderCreateAutoVariable(LLVMOpaqueDIBuilder* p0, LLVMOpaqueMetadata* p1, i8* p2, u64 p3, LLVMOpaqueMetadata* p4, u32 p5, LLVMOpaqueMetadata* p6, i32 p7, LLVMDIFlags p8, u32 p9);
+    LLVMOpaqueMetadata* LLVMDIBuilderCreateParameterVariable(LLVMOpaqueDIBuilder* p0, LLVMOpaqueMetadata* p1, i8* p2, u64 p3, u32 p4, LLVMOpaqueMetadata* p5, u32 p6, LLVMOpaqueMetadata* p7, i32 p8, LLVMDIFlags p9);
+    LLVMOpaqueDbgRecord* LLVMDIBuilderInsertDeclareRecordAtEnd(LLVMOpaqueDIBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueMetadata* p2, LLVMOpaqueMetadata* p3, LLVMOpaqueMetadata* p4, LLVMOpaqueBasicBlock* p5);
+    u32 LLVMGetMetadataKind(LLVMOpaqueMetadata* p0);
+
     i32 LLVMGetTargetFromTriple(i8* p0, LLVMTarget** p1, i8** p2);
     LLVMOpaqueTargetMachine* LLVMCreateTargetMachine(LLVMTarget* p0, i8* p1, i8* p2, i8* p3, LLVMCodeGenOptLevel p4, LLVMRelocMode p5, LLVMCodeModel p6);
     void LLVMDisposeTargetMachine(LLVMOpaqueTargetMachine* p0);

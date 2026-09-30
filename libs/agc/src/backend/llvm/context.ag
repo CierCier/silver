@@ -40,6 +40,14 @@ struct LlvmSymbolInfo {
     u32 type_id;
 }
 
+struct MonoRequest {
+    u32 base_id;
+    u32 method_id;
+    u32 mangled_id;
+    u32 args_start;
+    u32 args_count;
+}
+
 struct LlvmContext {
     LLVMOpaqueContext* ctx;
     LLVMOpaqueContext* ctx_unused;
@@ -58,6 +66,10 @@ struct LlvmContext {
     Vec<LLVMOpaqueBasicBlock*> loop_continues;
     Vec<LlvmTypeBinding> type_subst;
     i64 unresolved_calls;
+    i64 mono_count;
+    Vec<MonoRequest> mono_queue;
+    Vec<u32> mono_queue_args;
+    Vec<u32> generic_layout_ids;
 }
 
 impl LlvmContext {
@@ -80,6 +92,10 @@ impl LlvmContext {
         c.loop_continues = Vec<LLVMOpaqueBasicBlock*>.new();
         c.type_subst = Vec<LlvmTypeBinding>.new();
         c.unresolved_calls = 0;
+        c.mono_count = 0;
+        c.mono_queue = Vec<MonoRequest>.new();
+        c.mono_queue_args = Vec<u32>.new();
+        c.generic_layout_ids = Vec<u32>.new();
         return move c;
     }
 
@@ -138,15 +154,89 @@ impl LlvmContext {
                             }
                             continue;
                         }
-                        if (g_scan.kind == NodeKind.Token && g_scan.text != "pub" && g_scan.text != "static") {
+                        if (g_scan.kind == NodeKind.Token && g_scan.text != "pub" && g_scan.text != "static" && g_scan.text != "const") {
                             g_text.push_str(g_scan.text);
                         }
                         g_scan = g_scan.next_sibling;
+                    }
+                    SyntaxNode* ext = id_node.next_sibling;
+                    if (ext != (SyntaxNode*)0 && ext.kind == NodeKind.Bracket) {
+                        g_text.push((u8)91);
+                        SyntaxNode* digit = ext.first_child;
+                        while (digit != (SyntaxNode*)0) {
+                            if (digit.kind == NodeKind.Token) {
+                                g_text.push_str(digit.text);
+                            }
+                            digit = digit.next_sibling;
+                        }
+                        g_text.push((u8)93);
                     }
                     info.is_global = true;
                     info.type_id = type_id_from_text(self.types, g_text.to_str());
                     g_text.drop();
                     return info;
+                }
+            } else if (item.kind == NodeKind.Extern) {
+                SyntaxNode* block = item.first_child;
+                while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+                    block = block.next_sibling;
+                }
+                if (block != (SyntaxNode*)0) {
+                    SyntaxNode* cursor = block.first_child;
+                    while (cursor != (SyntaxNode*)0) {
+                        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
+                            cursor = cursor.next_sibling;
+                            continue;
+                        }
+                        SyntaxNode* ret_start = cursor;
+                        SyntaxNode* fn_name_node = (SyntaxNode*)0;
+                        SyntaxNode* params_node = (SyntaxNode*)0;
+                        SyntaxNode* scan = cursor;
+                        while (scan != (SyntaxNode*)0 && !(scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Semicolon)) {
+                            if (scan.kind == NodeKind.Parenthesized) {
+                                params_node = scan;
+                                break;
+                            }
+                            if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Identifier) {
+                                fn_name_node = scan;
+                            }
+                            scan = scan.next_sibling;
+                        }
+                        if (fn_name_node != (SyntaxNode*)0 && params_node == (SyntaxNode*)0) {
+                            if (strcmp(fn_name_node.text, name) == 0) {
+                                String g_text = String.new();
+                                SyntaxNode* g_scan = ret_start;
+                                while (g_scan != (SyntaxNode*)0 && g_scan != fn_name_node) {
+                                    if (g_scan.kind == NodeKind.Token) {
+                                        g_text.push_str(g_scan.text);
+                                    }
+                                    g_scan = g_scan.next_sibling;
+                                }
+                                SyntaxNode* ext = fn_name_node.next_sibling;
+                                if (ext != (SyntaxNode*)0 && ext.kind == NodeKind.Bracket) {
+                                    g_text.push((u8)91);
+                                    SyntaxNode* digit = ext.first_child;
+                                    while (digit != (SyntaxNode*)0) {
+                                        if (digit.kind == NodeKind.Token) {
+                                            g_text.push_str(digit.text);
+                                        }
+                                        digit = digit.next_sibling;
+                                    }
+                                    g_text.push((u8)93);
+                                }
+                                info.is_global = true;
+                                info.type_id = type_id_from_text(self.types, g_text.to_str());
+                                g_text.drop();
+                                return info;
+                            }
+                        }
+                        while (cursor != (SyntaxNode*)0 && !(cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon)) {
+                            cursor = cursor.next_sibling;
+                        }
+                        if (cursor != (SyntaxNode*)0) {
+                            cursor = cursor.next_sibling;
+                        }
+                    }
                 }
             }
             item = item.next_sibling;

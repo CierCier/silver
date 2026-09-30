@@ -4,6 +4,7 @@ import std.mem.vec;
 import std.string;
 import frontend.ast;
 import frontend.ast_expr;
+import frontend.cfg;
 import frontend.items;
 import frontend.lexer;
 import frontend.symbols;
@@ -18,6 +19,50 @@ bool match_head_has_question(SyntaxNode* start, SyntaxNode* end) {
         cursor = cursor.next_sibling;
     }
     return false;
+}
+
+bool int_literal_fits_i32(str text) {
+    if (text == (str)0) { return true; }
+    i64 len = strlen(text);
+    if (len == 0) { return true; }
+    i64 i = 0;
+    bool neg = false;
+    if (text[0] == (u8)'-') {
+        neg = true;
+        i += 1;
+    } else if (text[0] == (u8)'+') {
+        i += 1;
+    }
+    if (i + 2 <= len && text[i] == (u8)'0' && (text[i + 1] == (u8)'x' || text[i + 1] == (u8)'X')) {
+        i += 2;
+        i64 hex_digits = 0;
+        while (i < len) {
+            u8 c = (u8)text[i];
+            if (c != (u8)'_') {
+                hex_digits += 1;
+            }
+            i += 1;
+        }
+        return hex_digits <= 8;
+    }
+    i64 val = 0;
+    i64 digits = 0;
+    while (i < len) {
+        u8 c = (u8)text[i];
+        if (c >= (u8)'0' && c <= (u8)'9') {
+            val = val * 10 + (i64)(c - (u8)'0');
+            digits += 1;
+        } else if (c != (u8)'_') {
+            break;
+        }
+        i += 1;
+    }
+    if (digits < 10) { return true; }
+    if (digits > 10) { return false; }
+    if (neg) {
+        return val <= 2147483648;
+    }
+    return val <= 2147483647;
 }
 
 struct ExprLowerer {
@@ -52,7 +97,8 @@ impl ExprLowerer {
         if (node.kind == NodeKind.Token) {
             if (node.token_kind == TokenKind.IntLiteral) {
                 u32 val_id = self.names.intern(node.text);
-                return self.pool.add_literal_val(TYPE_I32, val_id, node.span);
+                u32 lit_type = int_literal_fits_i32(node.text) ? TYPE_I32 : TYPE_I64;
+                return self.pool.add_literal_val(lit_type, val_id, node.span);
             }
             if (node.token_kind == TokenKind.FloatLiteral) {
                 u32 val_id = self.names.intern(node.text);
@@ -132,7 +178,8 @@ impl ExprLowerer {
             *kind_out = MatchPatternKind.Literal;
             if (start.token_kind == TokenKind.IntLiteral) {
                 u32 val_id = self.names.intern(start.text);
-                *literal_out = self.pool.add_literal_val(TYPE_I32, val_id, start.span);
+                u32 lit_type = int_literal_fits_i32(start.text) ? TYPE_I32 : TYPE_I64;
+                *literal_out = self.pool.add_literal_val(lit_type, val_id, start.span);
             } else if (start.token_kind == TokenKind.True) {
                 u32 val_id = self.names.intern("true");
                 *literal_out = self.pool.add_literal_val(TYPE_BOOL, val_id, start.span);
@@ -486,6 +533,8 @@ impl ExprLowerer {
                 } else {
                     return false;
                 }
+            } else if (cur.kind == NodeKind.Parenthesized) {
+                has_pointer_or_ref = true;
             } else if (cur.kind != NodeKind.Bracket) {
                 return false;
             }
@@ -509,6 +558,16 @@ impl ExprLowerer {
                 if (cur.token_kind != TokenKind.Const) {
                     type_str.push_str(cur.text);
                 }
+            } else if (cur.kind == NodeKind.Parenthesized) {
+                type_str.push((u8)'(');
+                SyntaxNode* ptok = cur.first_child;
+                while (ptok != (SyntaxNode*)0) {
+                    if (ptok.kind == NodeKind.Token) {
+                        type_str.push_str(ptok.text);
+                    }
+                    ptok = ptok.next_sibling;
+                }
+                type_str.push((u8)')');
             }
             cur = cur.next_sibling;
         }
@@ -519,6 +578,79 @@ impl ExprLowerer {
         }
         *type_id_out = type_id;
         return true;
+    }
+
+    u32 lower_format(ExprLowerer* self, SyntaxNode* name_node, SyntaxNode** next_out) {
+        SyntaxNode* paren = name_node.next_sibling;
+        *next_out = (SyntaxNode*)0;
+        if (paren == (SyntaxNode*)0 || paren.kind != NodeKind.Parenthesized) {
+            self.unsupported = true;
+            return 0;
+        }
+        SyntaxNode* format_node = paren.first_child;
+        if (format_node == (SyntaxNode*)0 || format_node.kind != NodeKind.Token
+            || format_node.token_kind != TokenKind.StringLiteral) {
+            self.unsupported = true;
+            return 0;
+        }
+        Vec<u32> temp_args = Vec<u32>.new();
+        SyntaxNode* arg = format_node.next_sibling;
+        if (arg != (SyntaxNode*)0 && arg.kind == NodeKind.Token
+            && arg.token_kind == TokenKind.Comma) {
+            arg = arg.next_sibling;
+        }
+        while (arg != (SyntaxNode*)0) {
+            if (arg.kind == NodeKind.Token && arg.token_kind == TokenKind.Comma) {
+                arg = arg.next_sibling;
+                continue;
+            }
+            SyntaxNode* next_arg = (SyntaxNode*)0;
+            u32 arg_id = self.lower_sequence_until_comma(arg, &next_arg);
+            if (arg_id == 0) {
+                temp_args.drop();
+                self.unsupported = true;
+                return 0;
+            }
+            temp_args.push(arg_id);
+            arg = next_arg;
+        }
+        String format = unescape_string_literal(format_node.text);
+        i64 placeholders = 0;
+        i64 i = 0;
+        while (i < format.len) {
+            if (format.data[i] == (u8)'{') {
+                if (i + 1 < format.len && format.data[i + 1] == (u8)'{') {
+                    i += 2;
+                    continue;
+                }
+                if (i + 1 < format.len && format.data[i + 1] == (u8)'}') {
+                    placeholders += 1;
+                    i += 2;
+                    continue;
+                }
+            } else if (format.data[i] == (u8)'}' && i + 1 < format.len
+                && format.data[i + 1] == (u8)'}') {
+                i += 2;
+                continue;
+            }
+            i += 1;
+        }
+        format.drop();
+        if (placeholders != temp_args.len()) {
+            temp_args.drop();
+            self.unsupported = true;
+            return 0;
+        }
+        u32 args_start = (u32)self.pool.args.len();
+        i = 0;
+        while (i < temp_args.len()) {
+            self.pool.args.push(temp_args.get(i));
+            i += 1;
+        }
+        temp_args.drop();
+        u32 format_id = self.names.intern(format_node.text);
+        *next_out = paren.next_sibling;
+        return self.pool.add_format(format_id, args_start, (u32)placeholders, name_node.span);
     }
 
     u32 lower_postfix(ExprLowerer* self, SyntaxNode* node, SyntaxNode** next_out) {
@@ -535,9 +667,51 @@ impl ExprLowerer {
             return self.lower_asm(node, next_out);
         }
 
-        // Builtin macro @size(Type) — byte size of a type.
+        if (node.kind == NodeKind.Token && node.token_kind == TokenKind.Comptime) {
+            SyntaxNode* cast_node = node.next_sibling;
+            u32 target_type = TYPE_UNKNOWN;
+            if (cast_node != (SyntaxNode*)0 && cast_node.kind == NodeKind.Parenthesized
+                && self.try_parse_cast_type(cast_node, &target_type)) {
+                SyntaxNode* after_operand = (SyntaxNode*)0;
+                u32 operand_id = self.lower_postfix(cast_node.next_sibling, &after_operand);
+                if (operand_id != 0) {
+                    AstExpr* operand = self.pool.get_expr(operand_id);
+                    if (operand.kind == ExprKind.Literal) {
+                        u32 source_type = operand.inferred_type;
+                        bool target_integer = type_is_integer(target_type);
+                        bool target_float = target_type == TYPE_F32 || target_type == TYPE_F64;
+                        bool source_integer = type_is_integer(source_type);
+                        bool source_float = source_type == TYPE_F32 || source_type == TYPE_F64;
+                        bool source_bool = source_type == TYPE_BOOL;
+                        if ((source_integer && (target_integer || target_float))
+                            || (source_float && target_float)
+                            || (source_bool && (target_integer || target_float))) {
+                            if (source_bool) {
+                                str boolean_text = self.names.get(operand.inner0);
+                                operand.inner0 = self.names.intern(
+                                    strcmp(boolean_text, "true") == 0 ? "1" : "0");
+                            }
+                            operand.aux = target_type;
+                            operand.inferred_type = target_type;
+                            *next_out = after_operand;
+                            return operand_id;
+                        }
+                    }
+                }
+            }
+            self.unsupported = true;
+            *next_out = (SyntaxNode*)0;
+            return 0;
+        }
+
+        // Builtin @format(fmt, ...): lower a literal format string and its values.
         if (node.kind == NodeKind.Token && node.token_kind == TokenKind.At) {
             SyntaxNode* name_node = node.next_sibling;
+            if (name_node != (SyntaxNode*)0 && name_node.kind == NodeKind.Token
+                && name_node.token_kind == TokenKind.Identifier
+                && strcmp(name_node.text, "format") == 0) {
+                return self.lower_format(name_node, next_out);
+            }
             if (name_node != (SyntaxNode*)0 && name_node.kind == NodeKind.Token
                 && name_node.token_kind == TokenKind.Identifier
                 && strcmp(name_node.text, "size") == 0) {
@@ -557,6 +731,34 @@ impl ExprLowerer {
                     return self.pool.add_sizeof(type_id, node.span);
                 }
             }
+            if (name_node != (SyntaxNode*)0 && name_node.kind == NodeKind.Token
+                && name_node.token_kind == TokenKind.Identifier
+                && strcmp(name_node.text, "drop_in_place") == 0) {
+                SyntaxNode* paren = name_node.next_sibling;
+                if (paren != (SyntaxNode*)0 && paren.kind == NodeKind.Parenthesized) {
+                    *next_out = paren.next_sibling;
+                    return self.pool.add_literal(TYPE_I64, node.span);
+                }
+            }
+            if (name_node != (SyntaxNode*)0 && name_node.kind == NodeKind.Token
+                && name_node.token_kind == TokenKind.Identifier
+                && strcmp(name_node.text, "cfg") == 0) {
+                SyntaxNode* paren = name_node.next_sibling;
+                if (paren != (SyntaxNode*)0 && paren.kind == NodeKind.Parenthesized) {
+                    CfgSet cfg = linux_defaults();
+                    i64 val = cfg_argument_value(paren, &cfg);
+                    *next_out = paren.next_sibling;
+                    if (val == 1) {
+                        u32 val_id = self.names.intern("true");
+                        return self.pool.add_literal_val(TYPE_BOOL, val_id, node.span);
+                    }
+                    u32 val_id = self.names.intern("false");
+                    return self.pool.add_literal_val(TYPE_BOOL, val_id, node.span);
+                }
+            }
+            self.unsupported = true;
+            *next_out = (SyntaxNode*)0;
+            return 0;
         }
 
         // Check for unary move
@@ -810,8 +1012,9 @@ impl ExprLowerer {
         if (kind == TokenKind.Equal || kind == TokenKind.NotEqual) { return 6; }
         if (kind == TokenKind.Less || kind == TokenKind.LessEqual
             || kind == TokenKind.Greater || kind == TokenKind.GreaterEqual) { return 7; }
-        if (kind == TokenKind.Plus || kind == TokenKind.Minus) { return 8; }
-        if (kind == TokenKind.Star || kind == TokenKind.Slash || kind == TokenKind.Percent) { return 9; }
+        if (kind == TokenKind.LeftShift || kind == TokenKind.RightShift) { return 8; }
+        if (kind == TokenKind.Plus || kind == TokenKind.Minus) { return 9; }
+        if (kind == TokenKind.Star || kind == TokenKind.Slash || kind == TokenKind.Percent) { return 10; }
         return 0;
     }
 
@@ -825,16 +1028,28 @@ impl ExprLowerer {
         u32 lhs = self.lower_postfix(start, &cursor);
 
         while (cursor != (SyntaxNode*)0 && cursor != end) {
-            if (cursor.kind != NodeKind.Token || !self.is_binary_op(cursor.token_kind)) {
-                break;
-            }
-            i32 prec = self.binary_op_precedence(cursor.token_kind);
-            if (prec < min_prec) {
-                break;
-            }
             TokenKind op = cursor.token_kind;
             Span span = cursor.span;
             SyntaxNode* rhs_start = cursor.next_sibling;
+            bool is_shift = false;
+            if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Less
+                && rhs_start != (SyntaxNode*)0 && rhs_start.kind == NodeKind.Token && rhs_start.token_kind == TokenKind.Less) {
+                op = TokenKind.LeftShift;
+                rhs_start = rhs_start.next_sibling;
+                is_shift = true;
+            } else if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Greater
+                && rhs_start != (SyntaxNode*)0 && rhs_start.kind == NodeKind.Token && rhs_start.token_kind == TokenKind.Greater) {
+                op = TokenKind.RightShift;
+                rhs_start = rhs_start.next_sibling;
+                is_shift = true;
+            }
+            if (!is_shift && (cursor.kind != NodeKind.Token || !self.is_binary_op(cursor.token_kind))) {
+                break;
+            }
+            i32 prec = self.binary_op_precedence(op);
+            if (prec < min_prec) {
+                break;
+            }
             SyntaxNode* next_cursor = (SyntaxNode*)0;
             u32 rhs = self.lower_expr_prec(rhs_start, end, prec + 1, &next_cursor);
             lhs = self.pool.add_binary(op, lhs, rhs, span);
@@ -856,6 +1071,16 @@ impl ExprLowerer {
                 colon = colon.next_sibling;
             }
             if (colon != (SyntaxNode*)0 && colon != end) {
+                AstExpr* cond_expr = self.pool.get_expr(result);
+                if (cond_expr.kind == ExprKind.Literal && cond_expr.aux == TYPE_BOOL) {
+                    str val_text = self.names.get(cond_expr.inner0);
+                    if (strcmp(val_text, "true") == 0) {
+                        return self.lower_sequence(next.next_sibling, colon);
+                    }
+                    if (strcmp(val_text, "false") == 0) {
+                        return self.lower_sequence(colon.next_sibling, end);
+                    }
+                }
                 u32 then_id = self.lower_sequence(next.next_sibling, colon);
                 u32 else_id = self.lower_sequence(colon.next_sibling, end);
                 return self.pool.add_ternary(result, then_id, else_id, next.span);
@@ -879,6 +1104,7 @@ impl ExprLowerer {
             || kind == TokenKind.Equal || kind == TokenKind.NotEqual
             || kind == TokenKind.Less || kind == TokenKind.LessEqual
             || kind == TokenKind.Greater || kind == TokenKind.GreaterEqual
+            || kind == TokenKind.LeftShift || kind == TokenKind.RightShift
             || kind == TokenKind.And || kind == TokenKind.Or
             || kind == TokenKind.BitwiseAnd || kind == TokenKind.BitwiseOr
             || kind == TokenKind.BitwiseXor;
@@ -1099,6 +1325,25 @@ impl ExprLowerer {
         return self.pool.add_stmt_block(start, count, block.span);
     }
 
+    SyntaxNode* skip_if_chain(ExprLowerer* self, SyntaxNode* if_node) {
+        SyntaxNode* cond = if_node.next_sibling;
+        if (cond == (SyntaxNode*)0) { return (SyntaxNode*)0; }
+        SyntaxNode* then_node = cond.next_sibling;
+        if (then_node == (SyntaxNode*)0) { return (SyntaxNode*)0; }
+        SyntaxNode* after = then_node.next_sibling;
+        if (after != (SyntaxNode*)0 && after.kind == NodeKind.Token && after.token_kind == TokenKind.Else) {
+            SyntaxNode* else_target = after.next_sibling;
+            if (else_target != (SyntaxNode*)0 && else_target.kind == NodeKind.Block) {
+                return else_target.next_sibling;
+            }
+            if (else_target != (SyntaxNode*)0 && else_target.kind == NodeKind.Token && else_target.token_kind == TokenKind.If) {
+                return self.skip_if_chain(else_target);
+            }
+            return after.next_sibling;
+        }
+        return after;
+    }
+
     u32 lower_if_stmt(ExprLowerer* self, SyntaxNode* if_token, SyntaxNode** next_cursor_out) {
         SyntaxNode* cond_node = if_token.next_sibling;
         if (cond_node == (SyntaxNode*)0 || cond_node.kind != NodeKind.Parenthesized) {
@@ -1110,11 +1355,48 @@ impl ExprLowerer {
             *next_cursor_out = (then_node != (SyntaxNode*)0) ? then_node.next_sibling : (SyntaxNode*)0;
             return 0;
         }
+
+        CfgSet defaults = linux_defaults();
+        i64 cfg_val = cfg_condition_value(cond_node, &defaults);
+
+        SyntaxNode* next_after_then = then_node.next_sibling;
+        if (cfg_val == 0) {
+            if (next_after_then != (SyntaxNode*)0 && next_after_then.kind == NodeKind.Token && next_after_then.token_kind == TokenKind.Else) {
+                SyntaxNode* else_target = next_after_then.next_sibling;
+                if (else_target != (SyntaxNode*)0 && else_target.kind == NodeKind.Block) {
+                    *next_cursor_out = else_target.next_sibling;
+                    return self.lower_block_stmt(else_target);
+                }
+                if (else_target != (SyntaxNode*)0 && else_target.kind == NodeKind.Token && else_target.token_kind == TokenKind.If) {
+                    return self.lower_if_stmt(else_target, next_cursor_out);
+                }
+                *next_cursor_out = next_after_then.next_sibling;
+                return 0;
+            }
+            *next_cursor_out = next_after_then;
+            return 0;
+        }
+
+        if (cfg_val == 1) {
+            if (next_after_then != (SyntaxNode*)0 && next_after_then.kind == NodeKind.Token && next_after_then.token_kind == TokenKind.Else) {
+                SyntaxNode* else_target = next_after_then.next_sibling;
+                if (else_target != (SyntaxNode*)0 && else_target.kind == NodeKind.Block) {
+                    *next_cursor_out = else_target.next_sibling;
+                } else if (else_target != (SyntaxNode*)0 && else_target.kind == NodeKind.Token && else_target.token_kind == TokenKind.If) {
+                    *next_cursor_out = self.skip_if_chain(else_target);
+                } else {
+                    *next_cursor_out = next_after_then.next_sibling;
+                }
+            } else {
+                *next_cursor_out = next_after_then;
+            }
+            return self.lower_block_stmt(then_node);
+        }
+
         Span span = if_token.span;
         u32 cond_id = self.lower_sequence(cond_node.first_child, (SyntaxNode*)0);
         u32 then_stmt = self.lower_block_stmt(then_node);
         u32 else_stmt = 0;
-        SyntaxNode* next_after_then = then_node.next_sibling;
         if (next_after_then != (SyntaxNode*)0 && next_after_then.kind == NodeKind.Token && next_after_then.token_kind == TokenKind.Else) {
             SyntaxNode* else_target = next_after_then.next_sibling;
             if (else_target != (SyntaxNode*)0 && else_target.kind == NodeKind.Block) {

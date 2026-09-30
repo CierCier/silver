@@ -107,6 +107,8 @@ enum TokenKind {
     BitwiseXorAssign;
     LeftShiftAssign;
     RightShiftAssign;
+    LeftShift;
+    RightShift;
     BitwiseAnd;
     BitwiseOr;
     BitwiseXor;

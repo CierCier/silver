@@ -57,6 +57,32 @@ enum TypeKind {
     Function;
 }
 
+struct TypeProperties {
+    bool is_copy;
+    bool needs_drop;
+}
+
+bool type_name_needs_drop(str name) {
+    return strcmp(name, "String") == 0 || strcmp(name, "Vec") == 0
+        || strcmp(name, "VecIter") == 0 || strcmp(name, "Bytes") == 0
+        || strcmp(name, "HashMap") == 0 || strcmp(name, "HashSet") == 0
+        || strcmp(name, "Deque") == 0 || strcmp(name, "BinaryHeap") == 0
+        || strcmp(name, "Queue") == 0 || strcmp(name, "Box") == 0
+        || strcmp(name, "Rc") == 0 || strcmp(name, "Arena") == 0
+        || strcmp(name, "File") == 0 || strcmp(name, "BufWriter") == 0
+        || strcmp(name, "Scanner") == 0 || strcmp(name, "ByteStream") == 0
+        || strcmp(name, "Channel") == 0 || strcmp(name, "RawMutex") == 0
+        || strcmp(name, "Mutex") == 0 || strcmp(name, "Socket") == 0
+        || strcmp(name, "TcpStream") == 0 || strcmp(name, "TcpListener") == 0
+        || strcmp(name, "UdpSocket") == 0 || strcmp(name, "HttpConnection") == 0
+        || strcmp(name, "Set") == 0 || strcmp(name, "Map") == 0;
+}
+
+bool type_name_is_move_only(str name) {
+    return strcmp(name, "Task") == 0;
+}
+
+
 struct TypeEntry {
     TypeKind kind;
     u32 inner;
@@ -65,9 +91,83 @@ struct TypeEntry {
     bool is_mut;
 }
 
+struct TypeSubst {
+    u32 name_id;
+    u32 type_id;
+}
+
+struct TypeStructProperties {
+    u32 name_id;
+    u32 field_start;
+    u32 field_count;
+    bool needs_drop;
+}
+
 struct TypeTable {
     Interner names;
     Vec<TypeEntry> types;
+    Vec<TypeSubst> subst;
+    Vec<u32> type_args;
+    Vec<TypeStructProperties> struct_properties;
+    Vec<u32> struct_fields;
+}
+TypeProperties type_properties_at(TypeTable* table, u32 id, u32 depth) {
+    TypeProperties properties;
+    properties.is_copy = false;
+    properties.needs_drop = false;
+    if (depth >= 256 || (i64)id >= table.types.len()) {
+        return properties;
+    }
+    TypeEntry* entry = table.types.get_ptr((i64)id);
+    if ((id >= TYPE_BOOL && id <= TYPE_C80) || id == TYPE_CHAR
+        || entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference
+        || entry.kind == TypeKind.Function) {
+        properties.is_copy = true;
+        return properties;
+    }
+    if (entry.kind == TypeKind.Array || entry.kind == TypeKind.Slice) {
+        TypeProperties element = type_properties_at(table, entry.inner, depth + 1);
+        if (entry.kind == TypeKind.Slice) {
+            element.is_copy = true;
+        }
+        return element;
+    }
+    if (entry.kind == TypeKind.Named) {
+        str name = table.names.get(entry.name_id);
+        properties.needs_drop = type_name_needs_drop(name);
+        properties.is_copy = !properties.needs_drop && !type_name_is_move_only(name);
+        if (type_name_is_move_only(name)) {
+            return properties;
+        }
+        i64 i = 0;
+        while (i < entry.count) {
+            TypeProperties argument = type_properties_at(table, table.type_args.get(entry.inner + i), depth + 1);
+            if (!argument.is_copy) { properties.is_copy = false; }
+            if (argument.needs_drop) { properties.needs_drop = true; }
+            i += 1;
+        }
+        i = 0;
+        while (i < table.struct_properties.len()) {
+            TypeStructProperties* definition = table.struct_properties.get_ptr(i);
+            if (definition.name_id == entry.name_id) {
+                if (definition.needs_drop) {
+                    properties.needs_drop = true;
+                    properties.is_copy = false;
+                }
+                u32 field_index = definition.field_start;
+                u32 field_end = field_index + definition.field_count;
+                while (field_index < field_end) {
+                    TypeProperties field = type_properties_at(table, table.struct_fields.get(field_index), depth + 1);
+                    if (!field.is_copy) { properties.is_copy = false; }
+                    if (field.needs_drop) { properties.needs_drop = true; }
+                    field_index += 1;
+                }
+                break;
+            }
+            i += 1;
+        }
+    }
+    return properties;
 }
 
 impl TypeTable {
@@ -75,7 +175,10 @@ impl TypeTable {
         TypeTable table;
         table.names = Interner.new();
         table.types = Vec<TypeEntry>.new();
-
+        table.subst = Vec<TypeSubst>.new();
+        table.type_args = Vec<u32>.new();
+        table.struct_properties = Vec<TypeStructProperties>.new();
+        table.struct_fields = Vec<u32>.new();
         // 0: Unknown
         table.add_prim(TypeKind.Unknown, "unknown");
         // 1: Void
@@ -177,12 +280,83 @@ impl TypeTable {
         return (u32)(self.types.len() - 1);
     }
 
+
+    // Monomorphization substitution frames (FE-001/P0-002): while emitting a
+    // specialized generic instance, type parameters resolve to concrete ids.
+    // Frames are backend-driver-private; the stack is always empty during
+    // checking, so normal type operations are unaffected.
+    void push_subst(TypeTable* self, u32 name_id, u32 type_id) {
+        TypeSubst binding;
+        binding.name_id = name_id;
+        binding.type_id = type_id;
+        self.subst.push(move binding);
+    }
+
+    void pop_subst(TypeTable* self, i64 count) {
+        while (count > 0 && self.subst.len() > 0) {
+            self.subst.pop();
+            count -= 1;
+        }
+    }
+
+    u32 resolve_subst(TypeTable* self, u32 id) {
+        if ((i64)id >= self.types.len()) { return id; }
+        TypeEntry* source = self.types.get_ptr((i64)id);
+        TypeKind kind = source.kind;
+        u32 inner_id = source.inner;
+        u32 name_id = source.name_id;
+        i64 count = source.count;
+        bool is_mut = source.is_mut;
+        if (kind == TypeKind.TypeParam || (kind == TypeKind.Named && count == 0)) {
+            i64 i = self.subst.len() - 1;
+            while (i >= 0) {
+                TypeSubst* binding = self.subst.get_ptr(i);
+                if (binding.name_id == name_id) {
+                    if (binding.type_id == id) { return id; }
+                    return self.resolve_subst(binding.type_id);
+                }
+                i -= 1;
+            }
+            return id;
+        }
+        if (kind == TypeKind.Pointer || kind == TypeKind.Reference) {
+            u32 inner = self.resolve_subst(inner_id);
+            return inner == inner_id ? id
+                : (kind == TypeKind.Pointer
+                    ? self.get_pointer(inner, is_mut)
+                    : self.get_reference(inner, is_mut));
+        }
+        if (kind == TypeKind.Array) {
+            u32 inner = self.resolve_subst(inner_id);
+            return inner == inner_id ? id : self.get_array(inner, count);
+        }
+        if (kind == TypeKind.Named && count > 0) {
+            Vec<u32> args = Vec<u32>.new();
+            bool changed = false;
+            i64 a = 0;
+            while (a < count) {
+                u32 old_arg = self.type_args.get(inner_id + a);
+                u32 arg = self.resolve_subst(old_arg);
+                if (arg != old_arg) { changed = true; }
+                args.push(arg);
+                a += 1;
+            }
+            if (changed) {
+                u32 result = self.get_named_args(self.names.get(name_id), &args);
+                args.drop();
+                return result;
+            }
+            args.drop();
+        }
+        return id;
+    }
+
     u32 get_named(TypeTable* self, str name) {
         u32 name_id = self.names.intern(name);
         i64 i = (i64)(TYPE_PRIMITIVE_MAX + 1);
         while (i < self.types.len()) {
             TypeEntry* cur = self.types.get_ptr(i);
-            if (cur.kind == TypeKind.Named && cur.name_id == name_id) {
+            if (cur.kind == TypeKind.Named && cur.name_id == name_id && cur.count == 0) {
                 return (u32)i;
             }
             i += 1;
@@ -193,6 +367,41 @@ impl TypeTable {
         entry.name_id = name_id;
         entry.count = 0;
         entry.is_mut = false;
+        self.types.push(move entry);
+        return (u32)(self.types.len() - 1);
+    }
+
+    u32 get_named_args(TypeTable* self, str name, Vec<u32>* args) {
+        u32 name_id = self.names.intern(name);
+        i64 i = (i64)(TYPE_PRIMITIVE_MAX + 1);
+        while (i < self.types.len()) {
+            TypeEntry* cur = self.types.get_ptr(i);
+            if (cur.kind == TypeKind.Named && cur.name_id == name_id
+                && cur.count == args.len()) {
+                bool same = true;
+                i64 a = 0;
+                while (a < cur.count) {
+                    if (self.type_args.get(cur.inner + a) != args.get(a)) {
+                        same = false;
+                        break;
+                    }
+                    a += 1;
+                }
+                if (same) { return (u32)i; }
+            }
+            i += 1;
+        }
+        TypeEntry entry;
+        entry.kind = TypeKind.Named;
+        entry.inner = self.type_args.len();
+        entry.name_id = name_id;
+        entry.count = args.len();
+        entry.is_mut = false;
+        i64 a = 0;
+        while (a < args.len()) {
+            self.type_args.push(args.get(a));
+            a += 1;
+        }
         self.types.push(move entry);
         return (u32)(self.types.len() - 1);
     }
@@ -221,19 +430,33 @@ impl TypeTable {
         if (name == (str)0) { return TYPE_UNKNOWN; }
         i64 len = strlen(name);
         if (len == 0) { return TYPE_UNKNOWN; }
+        bool has_space = false;
+        i64 scan = 0;
+        while (scan < len) {
+            if (name[scan] == (u8)32 || name[scan] == (u8)9) { has_space = true; break; }
+            scan += 1;
+        }
+        if (has_space) {
+            String compact = String.new();
+            scan = 0;
+            while (scan < len) {
+                if (name[scan] != (u8)32 && name[scan] != (u8)9) { compact.push(name[scan]); }
+                scan += 1;
+            }
+            u32 result = self.parse_type_name(compact.to_str());
+            compact.drop();
+            return result;
+        }
+        while (len > 0 && (name[len - 1] == (u8)32 || name[len - 1] == (u8)9)) { len -= 1; }
+        if (len == 0) { return TYPE_UNKNOWN; }
         if (name[len - 1] == (u8)93) {
             i64 open = len - 2;
-            while (open >= 0 && name[open] != (u8)91) {
-                open -= 1;
-            }
+            while (open >= 0 && name[open] != (u8)91) { open -= 1; }
             if (open > 0) {
                 i64 count = 0;
                 bool digits = false;
                 i64 d = open + 1;
-                while (d < len - 1) {
-                    if (name[d] < (u8)48 || name[d] > (u8)57) {
-                        break;
-                    }
+                while (d < len - 1 && name[d] >= (u8)48 && name[d] <= (u8)57) {
                     digits = true;
                     count = count * 10 + ((i64)name[d] - 48);
                     d += 1;
@@ -241,39 +464,97 @@ impl TypeTable {
                 if (digits && d == len - 1 && count > 0) {
                     String base = String.new();
                     i64 i = 0;
-                    while (i < open) {
-                        base.push(name[i]);
-                        i += 1;
-                    }
+                    while (i < open) { base.push(name[i]); i += 1; }
                     u32 inner = self.parse_type_name(base.to_str());
                     base.drop();
-                    if (inner != TYPE_UNKNOWN) {
-                        return self.get_array(inner, count);
-                    }
+                    return self.get_array(inner, count);
                 }
             }
         }
-        if (name[len - 1] == (u8)42) {
+        if (name[len - 1] == (u8)42 || name[len - 1] == (u8)38) {
+            bool pointer = name[len - 1] == (u8)42;
             String base = String.new();
             i64 i = 0;
-            while (i < len - 1) {
-                base.push(name[i]);
-                i += 1;
-            }
+            while (i < len - 1) { base.push(name[i]); i += 1; }
             u32 inner = self.parse_type_name(base.to_str());
             base.drop();
-            return self.get_pointer(inner, true);
+            return pointer ? self.get_pointer(inner, true) : self.get_reference(inner, false);
         }
-        if (name[len - 1] == (u8)38) {
+        if (name[len - 1] == (u8)')') {
+            i64 open = -1;
+            i64 pdepth = 0;
+            i64 pi = len - 1;
+            while (pi >= 0) {
+                if (name[pi] == (u8)')') { pdepth += 1; }
+                else if (name[pi] == (u8)'(') {
+                    pdepth -= 1;
+                    if (pdepth == 0) { open = pi; break; }
+                }
+                pi -= 1;
+            }
+            if (open > 0) {
+                return self.get_pointer(TYPE_VOID, true);
+            }
+        }
+        i64 first = 0;
+        while (first < len && (name[first] == (u8)32 || name[first] == (u8)9)) { first += 1; }
+        i64 open_angle = -1;
+        i64 depth = 0;
+        i64 i = first;
+        while (i < len) {
+            if (name[i] == (u8)'<') {
+                if (depth == 0) { open_angle = i; }
+                depth += 1;
+            } else if (name[i] == (u8)'>') {
+                depth -= 1;
+                if (depth < 0) { return TYPE_UNKNOWN; }
+            }
+            i += 1;
+        }
+        if (open_angle >= 0 && depth == 0 && name[len - 1] == (u8)'>') {
             String base = String.new();
-            i64 i = 0;
-            while (i < len - 1) {
-                base.push(name[i]);
+            i = first;
+            while (i < open_angle) {
+                if (name[i] != (u8)32 && name[i] != (u8)9) { base.push(name[i]); }
                 i += 1;
             }
-            u32 inner = self.parse_type_name(base.to_str());
+            if (base.len() == 0) { base.drop(); return TYPE_UNKNOWN; }
+            Vec<u32> args = Vec<u32>.new();
+            i64 arg_start = open_angle + 1;
+            i64 angle = 0;
+            i64 square = 0;
+            i64 paren = 0;
+            i = arg_start;
+            while (i <= len - 1) {
+                bool separator = i == len - 1;
+                if (i < len - 1) {
+                    if (name[i] == (u8)'<') { angle += 1; }
+                    else if (name[i] == (u8)'>') { angle -= 1; }
+                    else if (name[i] == (u8)'[') { square += 1; }
+                    else if (name[i] == (u8)']') { square -= 1; }
+                    else if (name[i] == (u8)'(') { paren += 1; }
+                    else if (name[i] == (u8)')') { paren -= 1; }
+                    else if (name[i] == (u8)',' && angle == 0 && square == 0 && paren == 0) {
+                        separator = true;
+                    }
+                }
+                if (separator) {
+                    String arg_text = String.new();
+                    i64 a = arg_start;
+                    while (a < i) { arg_text.push(name[a]); a += 1; }
+                    if (arg_text.len() == 0) {
+                        arg_text.drop(); args.drop(); base.drop(); return TYPE_UNKNOWN;
+                    }
+                    args.push(self.parse_type_name(arg_text.to_str()));
+                    arg_text.drop();
+                    arg_start = i + 1;
+                }
+                i += 1;
+            }
+            u32 result = self.get_named_args(base.to_str(), &args);
+            args.drop();
             base.drop();
-            return self.get_reference(inner, false);
+            return self.resolve_subst(result);
         }
         if (strcmp(name, "void") == 0) { return TYPE_VOID; }
         if (strcmp(name, "bool") == 0) { return TYPE_BOOL; }
@@ -295,6 +576,13 @@ impl TypeTable {
         if (strcmp(name, "c80") == 0) { return TYPE_C80; }
         if (strcmp(name, "str") == 0) { return TYPE_STR; }
         if (strcmp(name, "char") == 0) { return TYPE_CHAR; }
+        u32 probe_id = self.names.intern(name);
+        i64 si = self.subst.len() - 1;
+        while (si >= 0) {
+            TypeSubst* binding = self.subst.get_ptr(si);
+            if (binding.name_id == probe_id) { return self.resolve_subst(binding.type_id); }
+            si -= 1;
+        }
         return self.get_named(name);
     }
 
@@ -310,27 +598,140 @@ impl TypeTable {
             return "unknown";
         }
         TypeEntry* entry = self.types.get_ptr((i64)id);
-        if (entry.name_id != 0) {
-            return self.names.get(entry.name_id);
+        TypeKind kind = entry.kind;
+        u32 inner = entry.inner;
+        u32 name_id = entry.name_id;
+        i64 count = entry.count;
+
+        if (kind == TypeKind.Pointer) {
+            if (name_id != 0) {
+                return self.names.get(name_id);
+            }
+            str inner_name = self.type_name(inner);
+            String formatted = String.from_str(inner_name);
+            formatted.push((u8)'*');
+            u32 cached_id = self.names.intern(formatted.to_str());
+            formatted.drop();
+            self.types.get_ptr((i64)id).name_id = cached_id;
+            return self.names.get(cached_id);
         }
-        if (entry.kind == TypeKind.Pointer) {
-            return "*";
+        if (kind == TypeKind.Reference) {
+            if (name_id != 0) {
+                return self.names.get(name_id);
+            }
+            str inner_name = self.type_name(inner);
+            String formatted = String.from_str(inner_name);
+            formatted.push((u8)'&');
+            u32 cached_id = self.names.intern(formatted.to_str());
+            formatted.drop();
+            self.types.get_ptr((i64)id).name_id = cached_id;
+            return self.names.get(cached_id);
         }
-        if (entry.kind == TypeKind.Reference) {
-            return "&";
+        if (kind == TypeKind.Array) {
+            if (name_id != 0) {
+                return self.names.get(name_id);
+            }
+            str inner_name = self.type_name(inner);
+            String formatted = String.from_str(inner_name);
+            formatted.push((u8)'[');
+            String digits = String.new();
+            i64 c = count;
+            if (c == 0) { digits.push((u8)'0'); }
+            while (c > 0) {
+                digits.push((u8)('0' + (c % 10)));
+                c = c / 10;
+            }
+            i64 left = 0;
+            i64 right = digits.len() - 1;
+            while (left < right) {
+                u8 temp = digits.data[left];
+                digits.data[left] = digits.data[right];
+                digits.data[right] = temp;
+                left += 1;
+                right -= 1;
+            }
+            formatted.push_str(digits.to_str());
+            digits.drop();
+            formatted.push((u8)']');
+            u32 cached_id = self.names.intern(formatted.to_str());
+            formatted.drop();
+            self.types.get_ptr((i64)id).name_id = cached_id;
+            return self.names.get(cached_id);
+        }
+        if (kind == TypeKind.Named && count > 0) {
+            str base_name = self.names.get(name_id);
+            String formatted = String.from_str(base_name);
+            formatted.push((u8)'<');
+            i64 i = 0;
+            while (i < count) {
+                if (i > 0) {
+                    formatted.push((u8)',');
+                }
+                u32 arg_id = self.type_args.get(inner + (u32)i);
+                formatted.push_str(self.type_name(arg_id));
+                i += 1;
+            }
+            formatted.push((u8)'>');
+            u32 formatted_id = self.names.intern(formatted.to_str());
+            formatted.drop();
+            return self.names.get(formatted_id);
+        }
+        if (name_id != 0) {
+            return self.names.get(name_id);
         }
         return "unknown";
     }
 
+    TypeProperties properties(TypeTable* self, u32 id) {
+        return type_properties_at(self, id, 0);
+    }
+    void register_struct_properties(TypeTable* self, str name, Vec<u32>* fields) {
+        u32 name_id = self.names.intern(name);
+        u32 start = (u32)self.struct_fields.len();
+        i64 i = 0;
+        while (i < fields.len()) {
+            self.struct_fields.push(fields.get(i));
+            i += 1;
+        }
+        i = 0;
+        while (i < self.struct_properties.len()) {
+            TypeStructProperties* existing = self.struct_properties.get_ptr(i);
+            if (existing.name_id == name_id) {
+                existing.field_start = start;
+                existing.field_count = (u32)fields.len();
+                return;
+            }
+            i += 1;
+        }
+        TypeStructProperties definition;
+        definition.name_id = name_id;
+        definition.field_start = start;
+        definition.field_count = (u32)fields.len();
+        definition.needs_drop = false;
+        self.struct_properties.push(definition);
+    }
+    void mark_type_needs_drop(TypeTable* self, str name) {
+        u32 name_id = self.names.intern(name);
+        i64 i = 0;
+        while (i < self.struct_properties.len()) {
+            TypeStructProperties* definition = self.struct_properties.get_ptr(i);
+            if (definition.name_id == name_id) {
+                definition.needs_drop = true;
+                return;
+            }
+            i += 1;
+        }
+        TypeStructProperties definition;
+        definition.name_id = name_id;
+        definition.field_start = 0;
+        definition.field_count = 0;
+        definition.needs_drop = true;
+        self.struct_properties.push(definition);
+    }
+
+
     bool is_copy(TypeTable* self, u32 id) {
-        if (id <= TYPE_PRIMITIVE_MAX) {
-            return true;
-        }
-        TypeEntry* entry = self.get(id);
-        if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) {
-            return true;
-        }
-        return false;
+        return self.properties(id).is_copy;
     }
 }
 

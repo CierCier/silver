@@ -7,41 +7,64 @@
 3. exercise stage1-owned manifest planning, target selection, argument
    boundaries, and the transitional native request;
 4. run focused HIR declaration, call, arity, and return-type checks;
-5. compare stage0 `--emit=tokens` with stage1 `lex` over `tests/` and
-   `examples/` (add `--include-std` for the full standard-library corpus);
-6. compare parser acceptance for the same corpus;
-7. compare semantic check status over the same corpus with the integration
+5. require stage0 and stage1 diagnostics for a real two-error fixture to be
+   emitted in source-span order;
+6. compare stage0 `--emit=tokens` with stage1 `lex` over the deterministic
+   top-level `tests/*.ag` and `examples/*.ag` corpus (`--include-std` adds
+   recursively discovered `std/**/*.ag` files);
+7. compare stage0 AST span boundaries with stage1 CST span boundaries over
+   that same corpus, preserving source locations without requiring identical
+   tree shapes;
+8. compare parser acceptance for that corpus;
+9. compare semantic check status over that corpus with the integration
    CPU cfg defaults and fixture-specific additions;
-8. compare the focused typed Send boundary and exercise the AGM reader.
+10. compare the focused typed Send boundary and exercise the AGM reader.
+
+Stage1's executable dump interfaces are `agc lex <file>` (token records) and
+`agc parse <file>` (a lossless CST tree with byte spans). Stage0
+`--emit=tokens` and `--emit=ast` use different serializations and tree models.
+The token gate normalizes token kind, raw text, and byte span. The AST-span gate
+excludes parser-specific root `Program` spans and requires each semantic AST
+span's start and end boundaries to appear among stage1 CST node/token boundaries.
+It does not claim byte-identical AST/CST serialization or equality of tree
+shapes. Both gates report the first mismatch per file.
+
+`check_diagnostic_order.py` validates the exact pair of primary error locations
+from `diagnostic_order_fixture.ag`, then fails if either compiler changes the
+diagnostic sequence away from ascending line/column order.
 
 `run_native.sh` is the Linux command-surface gate. It builds the same stage1
-binary, exports `SILVER_STAGE0`, checks the bridge boundary, exercises the
-opt-in stage1 native smoke path, checks cache reproducibility, and runs the
-complete native integration runner with
-`--compiler "$stage1"`. During the backend migration, stage1 keeps `lex`,
-`parse`, and `check` local and delegates native build/run/package/cache
-operations to the verified stage0 backend through an explicit compatibility
-seam. The opt-in `SILVER_STAGE1_NATIVE=1` path also builds and runs a small
-`i32 main()` fixture through the stage1-owned LLVM backend (direct object
-emission plus `cc` for linking); it is a smoke backend, not the complete
-native compiler. Inputs outside the backend's current scope fail closed to
-the explicit stage0 bridge instead of producing unverified output. This makes the boundary
-executable without presenting the transitional backend as a completed
-self-host implementation. Stage0 dependency-module
-cache entries remain enabled; root-object reuse is currently disabled because
-implicit imports are injected after dependency-graph discovery.
+binary, exports `SILVER_STAGE0`, checks the bridge boundary, runs the opt-in
+stage1 native smoke and linker-contract gates, checks native cache behavior,
+and runs the integration runner through `--compiler "$stage1"`. During the
+backend migration, stage1 keeps `lex`, `parse`, and `check` local and delegates
+native build/run/package/cache operations to the verified stage0 backend
+through an explicit compatibility seam. The `SILVER_STAGE1_NATIVE=1` path
+tests direct, package, and run invocations plus cfg selection, raw argc/argv,
+literal comptime casts, and fail-closed fallback for `defer`; it is a smoke
+backend, not the complete native compiler. Inputs outside the backend's current
+scope fail closed to the explicit stage0 bridge instead of producing
+unverified output. Stage0 root-object caching is enabled, and source imports
+inlined during lowering are included in dependency keys.
 
 The frontend gate compares token kind, raw text, byte span, and line/column
 span. `check_hir.py` covers the retained HIR's first typed declaration,
 call-argument, arity, and return-expression slice. The semantic gate compares
 acceptance status rather than the complete
-stage0 diagnostic catalog because the typed checker is still being built. It
-now prepares temporary AGM artifacts (including a deterministic RayGUI
-namespace fixture), checks malformed-artifact rejection, and reports zero
+stage0 diagnostic catalog because the typed checker is still being built;
+this remains a conservative projection. It prepares temporary AGM artifacts
+(including a deterministic RayGUI namespace
+fixture), checks malformed-artifact rejection, and reports zero
 deferred-boundary skips. `check_send.py` adds an exact primary-diagnostic
-boundary for the typed launch projection, while `check_artifacts.py` covers
-all supported AGM versions and malformed inputs. The name pass consumes a
-typed local-binding projection, while ownership and borrow checks remain
-conservative projections. The frontend gates are intentionally independent
+boundary for the typed launch projection. `check_artifacts.py` covers all
+supported reader versions, empty source strings, the legacy v9 empty trailer
+in synthetic and vendored artifacts, malformed-input rejection, and three
+cross-stage roundtrips: both stage1 publication paths are read by stage0, and
+a stage0-produced artifact is imported by stage1. See `docs/agm-format.md`
+for the byte layout and version-bump contract. Stage1 publication currently
+covers only its frontend metadata projection; rich layout/ABI/native-library
+metadata remains stage0-produced.
+
+The frontend gates are intentionally independent
 of LLVM and of the linker. A green frontend gate is not a claim that native
 backend or stage2 parity is complete.

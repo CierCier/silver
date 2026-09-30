@@ -4,7 +4,7 @@
 //! Files where the legacy parser itself reports parse errors are skipped
 //! (both parsers are expected to be imperfect there in different ways).
 
-use agc::grammar::{parse_ag, NodeKind, Tok};
+use agc::grammar::{NodeKind, Tok, parse_ag};
 use agc::parser::Parser;
 
 fn collect(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -75,43 +75,60 @@ fn legacy_item_kinds(source: &str) -> Option<Vec<&'static str>> {
 /// M3 gate part 1: item-count/kind parity over the corpus.
 #[test]
 fn item_parity_over_corpus() {
-    let mut checked = 0usize;
-    let mut skipped = 0usize;
+    // Corpus parsing needs more than the test harness's default 2 MiB stack.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let mut checked = 0usize;
+            let mut skipped = 0usize;
 
-    for (name, source) in corpus() {
-        let Some(expected) = legacy_item_kinds(&source) else {
-            skipped += 1;
-            continue;
-        };
+            for (name, source) in corpus() {
+                let Some(expected) = legacy_item_kinds(&source) else {
+                    skipped += 1;
+                    continue;
+                };
 
-        let graph = parse_ag(&source);
-        if graph.has_errors() || name.ends_with("destructure_let_test.ag") {
-            skipped += 1;
-            continue;
-        }
-        let elise_items: Vec<&'static str> = graph
-            .root()
-            .children()
-            .filter(|c| {
-                // Skip trivia leaves (kinds at/above the trivia base) and
-                // attribute wrappers: legacy attaches attributes to the
-                // following item rather than listing them separately.
-                c.kind() < Tok::TriviaLayout as u16
-                    && c.kind() != NodeKind::Attribute as u16
-            })
-            .map(|c| NodeKind::from_u16(c.kind()).map(|k| kind_name(k)).unwrap_or("UNKNOWN"))
-            .collect();
+                let graph = parse_ag(&source);
+                if graph.has_errors() || name.ends_with("destructure_let_test.ag") {
+                    skipped += 1;
+                    continue;
+                }
+                let elise_items: Vec<&'static str> = graph
+                    .root()
+                    .children()
+                    .filter(|c| {
+                        // Skip trivia leaves (kinds at/above the trivia base) and
+                        // attribute wrappers: legacy attaches attributes to the
+                        // following item rather than listing them separately.
+                        c.kind() < Tok::TriviaLayout as u16
+                            && c.kind() != NodeKind::Attribute as u16
+                    })
+                    .map(|c| {
+                        NodeKind::from_u16(c.kind())
+                            .map(|k| kind_name(k))
+                            .unwrap_or("UNKNOWN")
+                    })
+                    .collect();
 
-        assert_eq!(
-            elise_items, expected,
-            "{name}: item sequence differs (raw kinds: {:?})",
-            graph.root().children().map(|c| c.kind()).collect::<Vec<_>>()
-        );
-        checked += 1;
-    }
+                assert_eq!(
+                    elise_items,
+                    expected,
+                    "{name}: item sequence differs (raw kinds: {:?})",
+                    graph
+                        .root()
+                        .children()
+                        .map(|c| c.kind())
+                        .collect::<Vec<_>>()
+                );
+                checked += 1;
+            }
 
-    eprintln!("elise item parity verified over {checked} files ({skipped} skipped)");
-    assert!(checked > 200);
+            eprintln!("elise item parity verified over {checked} files ({skipped} skipped)");
+            assert!(checked > 200);
+        })
+        .expect("spawn AST item parity test")
+        .join()
+        .expect("AST item parity test thread panicked");
 }
 
 fn kind_name(kind: NodeKind) -> &'static str {

@@ -257,26 +257,18 @@ bool record_item(SymbolTable* table, DiagnosticBag* diagnostics, SyntaxNode* ite
 bool collect_symbols(SymbolTable* table, DiagnosticBag* diagnostics, SyntaxTree* tree, CfgSet* cfg) {
     bool ok = true;
     Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
+    Vec<CfgVisibleName> extern_names = Vec<CfgVisibleName>.new();
     cfg_collect_items(tree.root, cfg, diagnostics, &items);
     i64 i = 0;
     while (i < items.len()) {
-        if (!record_item(table, diagnostics, items.get(i))) {
+        SyntaxNode* item = items.get(i);
+        if (!record_item(table, diagnostics, item)) {
             ok = false;
         }
+        cfg_collect_extern_from_item(item, &extern_names);
         i += 1;
     }
     items.drop();
-    Vec<CfgVisibleName> cfg_names = Vec<CfgVisibleName>.new();
-    cfg_collect_cfg_names(tree.root, cfg, &cfg_names);
-    i64 cfg_index = 0;
-    while (cfg_index < cfg_names.len()) {
-        CfgVisibleName* visible = cfg_names.get_ptr(cfg_index);
-        table.add_visible(visible.name, visible.span, (SyntaxNode*)0);
-        cfg_index += 1;
-    }
-    cfg_names.drop();
-    Vec<CfgVisibleName> extern_names = Vec<CfgVisibleName>.new();
-    cfg_collect_extern_names(tree.root, &extern_names);
     i64 extern_index = 0;
     while (extern_index < extern_names.len()) {
         CfgVisibleName* visible = extern_names.get_ptr(extern_index);

@@ -500,8 +500,52 @@ void parse_items(Parser* self, SyntaxNode* parent, i64 end_index) {
         SyntaxNode* item = self.pool.create(kind, span, "");
         append_child(parent, item);
         build_token_region(self, item, start, finish);
+        if (kind == NodeKind.CfgBlock) {
+            parse_cfg_block_items(self, item, start, finish);
+        }
         self.cursor = finish;
     }
+}
+
+i64 token_index_at_span_start(Parser* self, i64 start, i64 end, Span span) {
+    i64 i = start;
+    while (i < end) {
+        Token* token = token_at(self.tokens, i);
+        if (token != (Token*)0 && token.span.start == span.start) {
+            return i;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+void parse_cfg_block_items(Parser* self, SyntaxNode* item, i64 start, i64 end) {
+    if (!self.budget.enter()) {
+        self.diagnostics.error(item.span, String.from_str("maximum syntax nesting depth exceeded"));
+        self.failed = true;
+        return;
+    }
+    i64 token_cursor = start;
+    SyntaxNode* child = item.first_child;
+    while (child != (SyntaxNode*)0 && !self.failed) {
+        if (child.kind == NodeKind.Block) {
+            i64 open = token_index_at_span_start(self, token_cursor, end, child.span);
+            if (open >= token_cursor) {
+                i64 close = matching_index(self, open);
+                if (close > open && close < end) {
+                    child.first_child = (SyntaxNode*)0;
+                    child.last_child = (SyntaxNode*)0;
+                    i64 saved_cursor = self.cursor;
+                    self.cursor = open + 1;
+                    parse_items(self, child, close);
+                    self.cursor = saved_cursor;
+                    token_cursor = close + 1;
+                }
+            }
+        }
+        child = child.next_sibling;
+    }
+    self.budget.leave();
 }
 
 void parse(TokenStream* tokens, DiagnosticBag* diagnostics, NodePool* pool, SyntaxTree* tree) {

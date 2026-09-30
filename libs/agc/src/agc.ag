@@ -13,6 +13,7 @@ import frontend.module_loader;
 import frontend.names;
 import frontend.ownership;
 import frontend.send;
+import frontend.lint;
 import frontend.symbols;
 import frontend.typecheck;
 import frontend.types;
