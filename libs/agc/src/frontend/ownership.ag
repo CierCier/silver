@@ -30,6 +30,8 @@ struct MoveOrigin {
     u32 name_id;
     u32 variable_index;
     Span span;
+    Span scope;
+    bool branch_local;
     bool active;
 }
 
@@ -138,6 +140,8 @@ impl OwnershipAnalyzer {
         while (i >= 0) {
             MoveOrigin* origin = self.move_origins.get_ptr(i);
             if (origin.active && origin.variable_index == (u32)variable_index
+                && (!origin.branch_local || (origin.scope.start <= span.start
+                    && span.end <= origin.scope.end))
                 && ownership_place_overlaps(self.names.get(origin.name_id), place)) {
                 origin_span = origin.span;
                 moved_name_id = origin.name_id;
@@ -155,7 +159,8 @@ impl OwnershipAnalyzer {
         self.observed_set.set((i64)place_id);
     }
 
-    void transfer(OwnershipAnalyzer* self, str place, Span span, bool continues) {
+    void transfer(OwnershipAnalyzer* self, str place, Span span, bool continues,
+                  bool branch_local, Span scope) {
         i64 variable_index = self.variable_index(place, span);
         if (variable_index < 0 || !self.needs_move_tracking(place, span)) { return; }
         self.observe(place, span);
@@ -164,6 +169,8 @@ impl OwnershipAnalyzer {
         origin.name_id = self.names.intern(place);
         origin.variable_index = (u32)variable_index;
         origin.span = span;
+        origin.scope = scope;
+        origin.branch_local = branch_local;
         origin.active = true;
         self.move_origins.push(origin);
         self.moved_set.set((i64)origin.name_id);
@@ -538,6 +545,48 @@ bool ownership_place_is_slice(Vec<SyntaxNode*>* leaves, i64 end) {
     return false;
 }
 
+SyntaxNode* ownership_enclosing_block(SyntaxNode* node) {
+    SyntaxNode* parent = node.parent;
+    while (parent != (SyntaxNode*)0) {
+        if (parent.kind == NodeKind.Block) {
+            return parent;
+        }
+        parent = parent.parent;
+    }
+    return (SyntaxNode*)0;
+}
+
+bool ownership_block_returns_after(SyntaxNode* move_node, CfgSet* cfg) {
+    SyntaxNode* block = ownership_enclosing_block(move_node);
+    if (block == (SyntaxNode*)0) {
+        return false;
+    }
+    Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+    cfg_collect_live_leaves(block, cfg, &leaves);
+    i64 index = 0;
+    while (index < leaves.len() && leaves.get(index).span.start <= move_node.span.start) {
+        index += 1;
+    }
+    while (index < leaves.len()) {
+        SyntaxNode* node = leaves.get(index);
+        if (ownership_enclosing_block(node) == block) {
+            if (node.token_kind == TokenKind.Return) {
+                leaves.drop();
+                return true;
+            }
+            if (node.token_kind == TokenKind.If || node.token_kind == TokenKind.While
+                || node.token_kind == TokenKind.For || node.token_kind == TokenKind.Match
+                || node.token_kind == TokenKind.Break || node.token_kind == TokenKind.Continue) {
+                leaves.drop();
+                return false;
+            }
+        }
+        index += 1;
+    }
+    leaves.drop();
+    return false;
+}
+
 
 Span ownership_binding_scope(SyntaxNode* name, SyntaxNode* function) {
     SyntaxNode* parent = name.parent;
@@ -621,7 +670,8 @@ void check_move_sequences(OwnershipAnalyzer* analyzer, SyntaxNode* function, Cfg
             if (non_consuming) {
                 analyzer.observe(returned.to_str(), leaves.get(i + 1).span);
             } else {
-                analyzer.transfer(returned.to_str(), leaves.get(i + 1).span, false);
+                analyzer.transfer(returned.to_str(), leaves.get(i + 1).span, false,
+                    false, function.span);
             }
             returned.drop();
             i = return_end + 1;
@@ -637,12 +687,15 @@ void check_move_sequences(OwnershipAnalyzer* analyzer, SyntaxNode* function, Cfg
                 analyzer.failed = true;
             }
             bool continues = i == 0 || !ownership_text_equals(leaves.get(i - 1).text, "return");
+            SyntaxNode* branch = continues ? ownership_enclosing_block(node) : (SyntaxNode*)0;
+            bool branch_local = branch != (SyntaxNode*)0 && ownership_block_returns_after(node, cfg);
             bool non_consuming = ownership_place_is_call(&leaves, end)
                 || ownership_place_is_slice(&leaves, end);
             if (non_consuming) {
                 analyzer.observe(place.to_str(), leaves.get(i + 1).span);
             } else {
-                analyzer.transfer(place.to_str(), leaves.get(i + 1).span, continues);
+                analyzer.transfer(place.to_str(), leaves.get(i + 1).span, continues,
+                    branch_local, branch_local ? branch.span : function.span);
             }
             place.drop();
             i = end + 1;
@@ -666,7 +719,8 @@ void check_move_sequences(OwnershipAnalyzer* analyzer, SyntaxNode* function, Cfg
                         if (non_consuming) {
                             analyzer.observe(source.to_str(), leaves.get(end + 2).span);
                         } else {
-                            analyzer.transfer(source.to_str(), leaves.get(end + 2).span, true);
+                            analyzer.transfer(source.to_str(), leaves.get(end + 2).span, true,
+                                false, function.span);
                             i = source_end;
                         }
                         source.drop();

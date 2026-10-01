@@ -371,7 +371,7 @@ i32 emit_check(str path, CfgSet* cfg, Vec<String>* include_dirs, LintConfig* lin
                 check_declared_types(&symbols, &tree, cfg, &diagnostics);
             }
             if (diagnostics.is_empty()) {
-                check_borrows(&tree, &diagnostics, cfg);
+                check_borrows(&tree, &symbols, &diagnostics, cfg);
             }
             if (diagnostics.is_empty()) {
                 check_send(&tree, &diagnostics, cfg);

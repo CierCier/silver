@@ -1,0 +1,10 @@
+import std.string;
+
+void consume_string(String _value) { }
+
+void move_then_fallthrough(String incoming, bool duplicate) {
+    if (duplicate) {
+        consume_string(move incoming);
+    }
+    consume_string(move incoming);
+}

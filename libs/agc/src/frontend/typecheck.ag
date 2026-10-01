@@ -57,23 +57,34 @@ bool typecheck_has_type_parameter(SyntaxNode* declaration, str name) {
     }
     Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
     typecheck_collect_leaves(declaration, &leaves);
-    bool in_parameters = false;
-    i64 depth = 0;
-    i64 index = 0;
-    while (index < leaves.len()) {
+    SyntaxNode* declared_name = declaration.kind == NodeKind.Function
+        ? function_identifier(declaration) : item_identifier(declaration);
+    i64 name_index = 0;
+    while (name_index < leaves.len() && leaves.get(name_index) != declared_name) {
+        name_index += 1;
+    }
+    i64 index = name_index + 1;
+    if (name_index == leaves.len() || index >= leaves.len() || leaves.get(index).text != "<") {
+        leaves.drop();
+        return false;
+    }
+    i64 depth = 1;
+    bool segment_name = true;
+    index += 1;
+    while (index < leaves.len() && depth > 0) {
         SyntaxNode* leaf = leaves.get(index);
         if (leaf.text == "<") {
-            in_parameters = true;
-            depth = 1;
-        } else if (in_parameters && leaf.text == ">") {
+            depth += 1;
+        } else if (leaf.text == ">") {
             depth -= 1;
-            if (depth == 0) {
-                in_parameters = false;
+        } else if (depth == 1 && leaf.token_kind == TokenKind.Comma) {
+            segment_name = true;
+        } else if (depth == 1 && segment_name && leaf.token_kind == TokenKind.Identifier) {
+            if (leaf.text == name) {
+                leaves.drop();
+                return true;
             }
-        } else if (in_parameters && depth == 1 && leaf.token_kind == TokenKind.Identifier
-            && leaf.text == name) {
-            leaves.drop();
-            return true;
+            segment_name = false;
         }
         index += 1;
     }
@@ -119,6 +130,80 @@ void typecheck_report_unknown_name(SymbolTable* symbols, SyntaxNode* declaration
     *ok = false;
 }
 
+bool typecheck_name_start(u8 ch) {
+    return (ch >= (u8)'a' && ch <= (u8)'z')
+        || (ch >= (u8)'A' && ch <= (u8)'Z') || ch == (u8)'_';
+}
+
+bool typecheck_name_continue(u8 ch) {
+    return typecheck_name_start(ch) || (ch >= (u8)'0' && ch <= (u8)'9');
+}
+
+void typecheck_skip_rendered_type_punctuation(str text, i64* cursor) {
+    while (text[*cursor] == (u8)' ' || text[*cursor] == (u8)'*'
+        || text[*cursor] == (u8)'&' || text[*cursor] == (u8)'['
+        || text[*cursor] == (u8)']') {
+        *cursor = *cursor + 1;
+    }
+}
+
+void typecheck_report_rendered_type(SymbolTable* symbols, SyntaxNode* declaration,
+                                    str text, i64* cursor, Span span,
+                                    DiagnosticBag* diagnostics, bool* ok,
+                                    Vec<str>* candidates) {
+    typecheck_skip_rendered_type_punctuation(text, cursor);
+    if (!typecheck_name_start(text[*cursor])) {
+        return;
+    }
+    i64 start = *cursor;
+    while (typecheck_name_continue(text[*cursor])) {
+        *cursor = *cursor + 1;
+    }
+    String name = String.new();
+    i64 index = start;
+    while (index < *cursor) {
+        name.push(text[index]);
+        index += 1;
+    }
+    typecheck_report_unknown_name(
+        symbols, declaration, name.to_str(), span, diagnostics, ok, candidates
+    );
+    name.drop();
+
+    while (text[*cursor] == (u8)' ') {
+        *cursor = *cursor + 1;
+    }
+    if (text[*cursor] != (u8)'<') {
+        return;
+    }
+    *cursor = *cursor + 1;
+    while (text[*cursor] != 0 && text[*cursor] != (u8)'>') {
+        i64 before = *cursor;
+        typecheck_report_rendered_type(
+            symbols, declaration, text, cursor, span, diagnostics, ok, candidates
+        );
+        if (*cursor == before) {
+            *cursor = *cursor + 1;
+        }
+        if (text[*cursor] == (u8)',') {
+            *cursor = *cursor + 1;
+        }
+    }
+    if (text[*cursor] == (u8)'>') {
+        *cursor = *cursor + 1;
+    }
+}
+
+void typecheck_report_unknown_nested(SymbolTable* symbols, SyntaxNode* declaration,
+                                     str rendered_type, Span span,
+                                     DiagnosticBag* diagnostics, bool* ok,
+                                     Vec<str>* candidates) {
+    i64 cursor = 0;
+    typecheck_report_rendered_type(
+        symbols, declaration, rendered_type, &cursor, span, diagnostics, ok, candidates
+    );
+}
+
 void typecheck_report_unknown(SymbolTable* symbols, SyntaxNode* declaration,
                               TypeProjection* projection, Span span,
                               DiagnosticBag* diagnostics, bool* ok,
@@ -129,10 +214,10 @@ void typecheck_report_unknown(SymbolTable* symbols, SyntaxNode* declaration,
     typecheck_report_unknown_name(
         symbols, declaration, projection.name, span, diagnostics, ok, candidates
     );
-    typecheck_report_unknown_name(
+    typecheck_report_unknown_nested(
         symbols, declaration, projection.argument0.to_str(), span, diagnostics, ok, candidates
     );
-    typecheck_report_unknown_name(
+    typecheck_report_unknown_nested(
         symbols, declaration, projection.argument1.to_str(), span, diagnostics, ok, candidates
     );
 }

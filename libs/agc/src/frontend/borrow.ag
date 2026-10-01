@@ -9,6 +9,8 @@ import frontend.diagnostics;
 import frontend.cfg;
 import frontend.place;
 import frontend.messages;
+import frontend.symbols;
+import frontend.expressions;
 bool borrow_text_equals(str left, str right) {
     return strcmp(left, right) == 0;
 }
@@ -207,7 +209,11 @@ bool is_reference_parameter(SyntaxNode* function, str name) {
     return false;
 }
 
-bool borrow_is_global(SyntaxTree* tree, str name) {
+bool borrow_is_global(SyntaxTree* tree, SymbolTable* symbols, str name) {
+    i64 symbol_index = symbols.find(name);
+    if (symbol_index >= 0 && symbols.get(symbol_index).kind == SymbolKind.Global) {
+        return true;
+    }
     SyntaxNode* item = tree.root.first_child;
     while (item != (SyntaxNode*)0) {
         if (item.kind == NodeKind.Global) {
@@ -234,8 +240,26 @@ bool borrow_is_global(SyntaxTree* tree, str name) {
     return false;
 }
 
-void report_escape(BorrowAnalyzer* analyzer, SyntaxTree* tree, SyntaxNode* function, str name, Span span) {
-    if (is_reference_parameter(function, name) || borrow_is_global(tree, name)) {
+bool borrow_function_returns_indirect(SyntaxNode* function) {
+    SyntaxNode* name = function_identifier(function);
+    if (name == (SyntaxNode*)0) {
+        return false;
+    }
+    Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+    collect_borrow_leaves(function, &leaves);
+    i64 name_index = 0;
+    while (name_index < leaves.len() && leaves.get(name_index) != name) {
+        name_index += 1;
+    }
+    TypeProjection return_type = projection_parse_type(&leaves, 0, name_index);
+    leaves.drop();
+    return return_type.kind == ProjectionTypeKind.Pointer
+        || return_type.kind == ProjectionTypeKind.Reference;
+}
+
+void report_escape(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbols,
+                   SyntaxNode* function, str name, Span span) {
+    if (is_reference_parameter(function, name) || borrow_is_global(tree, symbols, name)) {
         return;
     }
     String message = String.from_str(ref_does_not_outlive_func());
@@ -244,24 +268,53 @@ void report_escape(BorrowAnalyzer* analyzer, SyntaxTree* tree, SyntaxNode* funct
 }
 
 
+SyntaxNode* borrow_enclosing_bracket(SyntaxNode* node) {
+    SyntaxNode* parent = node.parent;
+    while (parent != (SyntaxNode*)0) {
+        if (parent.kind == NodeKind.Bracket) {
+            return parent;
+        }
+        parent = parent.parent;
+    }
+    return (SyntaxNode*)0;
+}
+
+bool borrow_node_within(SyntaxNode* node, SyntaxNode* ancestor) {
+    SyntaxNode* parent = node;
+    while (parent != (SyntaxNode*)0) {
+        if (parent == ancestor) {
+            return true;
+        }
+        parent = parent.parent;
+    }
+    return false;
+}
+
 str persistent_holder(Vec<SyntaxNode*>* leaves, i64 borrow_index) {
     i64 i = borrow_index - 2;
-    while (i >= 0 && leaves.get(i).token_kind == TokenKind.Semicolon) {
-        i -= 1;
-    }
-    if (i < 0 || leaves.get(i).token_kind != TokenKind.Identifier) {
-        return "";
-    }
-    SyntaxNode* candidate = leaves.get(i);
-    i -= 1;
-    while (i >= 1 && leaves.get(i).token_kind == TokenKind.Dot) {
-        i -= 1;
-        if (leaves.get(i).token_kind == TokenKind.Identifier) {
-            candidate = leaves.get(i);
+    while (i >= 0) {
+        SyntaxNode* bracket = borrow_enclosing_bracket(leaves.get(i));
+        if (bracket != (SyntaxNode*)0) {
+            while (i >= 0 && borrow_node_within(leaves.get(i), bracket)) {
+                i -= 1;
+            }
+            continue;
         }
-        i -= 1;
+        TokenKind kind = leaves.get(i).token_kind;
+        if (kind == TokenKind.Dot) {
+            i -= 2;
+            continue;
+        }
+        if (kind == TokenKind.Identifier) {
+            if (i > 0 && leaves.get(i - 1).token_kind == TokenKind.Dot) {
+                i -= 2;
+                continue;
+            }
+            return leaves.get(i).text;
+        }
+        break;
     }
-    return candidate.text;
+    return "";
 }
 
 i64 last_use(Vec<SyntaxNode*>* leaves, i64 start, str holder) {
@@ -404,7 +457,8 @@ i64 borrow_method_receiver_kind(SyntaxTree* tree, str method) {
     return -1;
 }
 
-void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SyntaxNode* function, CfgSet* cfg) {
+void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbols,
+                  SyntaxNode* function, CfgSet* cfg) {
     SyntaxNode* body = borrow_function_body(function);
     if (body == (SyntaxNode*)0) {
         return;
@@ -445,22 +499,24 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SyntaxNode* functi
         }
         if (node.token_kind == TokenKind.Return) {
             i64 j = i + 1;
-            if (j < leaves.len() && leaves.get(j).token_kind == TokenKind.BitwiseAnd) {
+            if (borrow_function_returns_indirect(function)
+                && j < leaves.len() && leaves.get(j).token_kind == TokenKind.BitwiseAnd) {
                 j += 1;
                 if (j < leaves.len() && borrow_text_equals(leaves.get(j).text, "mut")) {
                     j += 1;
                 }
                 if (j < leaves.len() && leaves.get(j).token_kind == TokenKind.Identifier) {
-                    report_escape(analyzer, tree, function, leaves.get(j).text, leaves.get(j).span);
+                    report_escape(analyzer, tree, symbols, function, leaves.get(j).text, leaves.get(j).span);
                 }
-            } else if (j < leaves.len() && leaves.get(j).token_kind == TokenKind.Identifier) {
+            } else if (borrow_function_returns_indirect(function)
+                && j < leaves.len() && leaves.get(j).token_kind == TokenKind.Identifier) {
                 u32 holder_id = analyzer.names.intern(leaves.get(j).text);
                 i64 loan_index = 0;
                 while (loan_index < analyzer.loans.len()) {
                     Loan* loan = analyzer.loans.get_ptr(loan_index);
                     if (loan.active && loan.persistent && loan.holder_id == holder_id) {
                         str source = analyzer.names.get(loan.place.local_id);
-                        report_escape(analyzer, tree, function, source, leaves.get(j).span);
+                        report_escape(analyzer, tree, symbols, function, source, leaves.get(j).span);
                     }
                     loan_index += 1;
                 }
@@ -501,8 +557,8 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SyntaxNode* functi
                         }
                     }
                     if (persistent && i >= 2 && borrow_text_equals(leaves.get(i - 1).text, "=")
-                        && borrow_is_global(tree, leaves.get(i - 2).text)) {
-                        report_escape(analyzer, tree, function, name, leaves.get(j).span);
+                        && borrow_is_global(tree, symbols, leaves.get(i - 2).text)) {
+                        report_escape(analyzer, tree, symbols, function, name, leaves.get(j).span);
                     }
                     analyzer.add(move place, name, leaves.get(j).span, kind, persistent, holder_id, release_index);
                 }
@@ -523,7 +579,7 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SyntaxNode* functi
     }
 }
 
-bool check_borrows(SyntaxTree* tree, DiagnosticBag* diagnostics, CfgSet* cfg) {
+bool check_borrows(SyntaxTree* tree, SymbolTable* symbols, DiagnosticBag* diagnostics, CfgSet* cfg) {
     bool ok = true;
     Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
     cfg_collect_items(tree.root, cfg, diagnostics, &items);
@@ -531,7 +587,7 @@ bool check_borrows(SyntaxTree* tree, DiagnosticBag* diagnostics, CfgSet* cfg) {
     while (i < items.len()) {
         if (items.get(i).kind == NodeKind.Function) {
             BorrowAnalyzer analyzer = BorrowAnalyzer.new(diagnostics);
-            scan_borrows(&analyzer, tree, items.get(i), cfg);
+            scan_borrows(&analyzer, tree, symbols, items.get(i), cfg);
             if (analyzer.failed) {
                 ok = false;
             }

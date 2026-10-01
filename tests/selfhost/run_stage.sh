@@ -39,6 +39,7 @@ agsm="$work/agsm-stage1"
 python3 "$root/tests/selfhost/check_workspace.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_hir.py" --stage0 "$stage0" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_declared_types.py" --stage0 "$stage0" --stage1 "$stage1"
+python3 "$root/tests/selfhost/check_semantic_regressions.py" --stage0 "$stage0" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_diagnostic_order.py" \
     --stage0 "$stage0" \
     --stage1 "$stage1"

@@ -21,7 +21,7 @@ void publish_file_diagnostics(str uri, str text) {
                 SymbolTable symbols = SymbolTable.new();
                 collect_symbols(&symbols, &diagnostics, &tree, &cfg);
                 check_declared_types(&symbols, &tree, &cfg, &diagnostics);
-                check_borrows(&tree, &diagnostics, &cfg);
+                check_borrows(&tree, &symbols, &diagnostics, &cfg);
                 check_ownership(&tree, &diagnostics, &cfg);
             }
         }
