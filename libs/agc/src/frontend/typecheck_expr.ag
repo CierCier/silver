@@ -164,6 +164,16 @@ u32 function_return_type_id(TypeTable* types, SyntaxNode* function) {
     SyntaxNode* child = function.first_child;
     while (child != (SyntaxNode*)0 && child != name && child != parameters) {
         if (child.kind == NodeKind.Token) {
+            // Skip attributes (`#` + [bracket]) like pub/static/extern:
+            // otherwise "#void" parses to a bogus named type and falls
+            // back to i32 (broke every #[link_name] void function).
+            if (strcmp(child.text, "#") == 0) {
+                child = child.next_sibling;
+                if (child != (SyntaxNode*)0 && child.kind == NodeKind.Bracket) {
+                    child = child.next_sibling;
+                }
+                continue;
+            }
             if (strcmp(child.text, "pub") != 0 && strcmp(child.text, "static") != 0 && strcmp(child.text, "extern") != 0) {
                 ret_text.push_str(child.text);
             }
