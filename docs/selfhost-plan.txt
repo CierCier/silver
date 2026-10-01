@@ -241,7 +241,7 @@ S3-1. God files.
   split in S1-2 solves it naturally).
 
 S3-2. Drop-flag/debug-info LLVM invariants encoded only in comments.
-  AGENTS.md documents LLVM 22 crash invariants (DILexicalBlock parenting,
+  docs/compiler-guide.md documents LLVM 22 crash invariants (DILexicalBlock parenting,
   CU-scoped DILocation, nested save/restore). A Silver rewrite WILL
   rediscover them by crashing. FIX: these live in scope.rs/entry.rs;
   port those files with a "known invariants" header and add IR-level

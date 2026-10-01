@@ -424,7 +424,7 @@ multi-unit link + execution under Wine); after pulling, run
 `agc --clean` once to drop pre-fix cached objects.
 
 `memory_pentest.ag` remains the definitive regression gate at every phase that touches
-ownership/ABI/codegen (per AGENTS.md §8).
+ownership/ABI/codegen (per docs/compiler-guide.md §8).
 
 ## 8. Risks
 

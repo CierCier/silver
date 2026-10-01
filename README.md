@@ -62,7 +62,7 @@ Prebuilt binaries require LLVM 22 runtime libraries (`libLLVM-22` or `libclang`)
 ### Building from source
 
 Requirements:
-- Rust toolchain with Cargo 1.75+
+- Rust toolchain supporting edition 2024
 - LLVM 22 development headers and libraries (`inkwell` / `llvm-sys`)
 - System C toolchain and linker (`cc`, `clang`, or `ld.lld`)
 
@@ -128,7 +128,8 @@ bash tests/selfhost/run_native.sh --no-tui --jobs 4
 - `bootstrap/stage0/ffi-rust/`: Optional Rust implementation behind Silver's versioned C ABI
 - `bootstrap/aglsp/`: Rust Language Server Protocol server
 - `bin/agc/`: Stage1 self-hosting compiler driver (Silver); see `docs/selfhost-plan.txt`
-- `bin/aglsp/`: Silver language-server binary package and future LSP port target
+- `bin/aglsp/`: Silver language-server binary package
+- `bin/agsm/`: Silver module-tool binary package
 - `libs/agc/`: Reusable stage1 compiler frontend library (Silver)
 - `silver.toml`: Silver workspace manifest for the self-host root
 - `std/`: Standard library (allocators, collections, I/O, networking, runtime)
@@ -139,7 +140,10 @@ bash tests/selfhost/run_native.sh --no-tui --jobs 4
 ## Documentation
 
 - [Syntax Specification](SYNTAX.md)
-- [Compiler Architecture Guide](AGENTS.md)
+- [Agent Working Guide](AGENTS.md)
+- [Contributing](CONTRIBUTING.md)
+- [Compiler Architecture Reference](docs/compiler-guide.md)
+- [Maintainer Preferences](docs/maintainer-preferences.md)
 - [C ABI and FFI](docs/rust-ffi.md)
 - [Standard Library Protocols](docs/standards/README.md)
 
