@@ -8,6 +8,7 @@ import os
 import pathlib
 import subprocess
 import tempfile
+import tomllib
 
 
 def run(binary: pathlib.Path, args: list[str], cwd: pathlib.Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -30,6 +31,8 @@ def main() -> int:
         parser.error(f"stage1 compiler does not exist: {stage1}")
 
     root = pathlib.Path(__file__).parents[2]
+    package = tomllib.loads((root / "bin/agc/silver.toml").read_text(encoding="utf-8"))
+    version = f"agc {package['version']}"
     source = root / "tests/args_test.ag"
     with tempfile.TemporaryDirectory(prefix="silver-bridge-") as temp_name:
         temp = pathlib.Path(temp_name)
@@ -46,6 +49,12 @@ def main() -> int:
         env = os.environ.copy()
         env["SILVER_BRIDGE_SENTINEL"] = "present"
         env["SILVER_STAGE0"] = str(backend)
+
+        for option in ["--version", "-V", "--help", "-h"]:
+            local_info = run(stage1, [option], root, env)
+            expected = version if option in ["--version", "-V"] else "usage: agc"
+            if local_info.returncode != 0 or expected not in local_info.stdout or marker.exists():
+                raise AssertionError(f"{option} did not produce local CLI output")
 
         local = run(stage1, ["lex", str(source)], root, env)
         if local.returncode != 0 or marker.exists():
