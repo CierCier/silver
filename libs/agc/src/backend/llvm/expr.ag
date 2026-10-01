@@ -1749,6 +1749,38 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
 
         LLVMOpaqueType* lty = LLVMTypeOf(lhs);
         LLVMOpaqueType* rty = LLVMTypeOf(rhs);
+        // Pointer arithmetic is GEP, not add: the inttoptr normalization
+        // below produced `add ptr, inttoptr 1`, which fails verify.
+        // Element type comes from the Silver pointer type (opaque LLVM
+        // pointers erased it); unknown pointees fall back to bytes.
+        if (op == (u32)TokenKind.Plus || op == (u32)TokenKind.Minus) {
+            bool l_ptr = l_kind == (u32)12;
+            bool r_ptr = r_kind == (u32)12;
+            bool l_int = l_kind == (u32)8;
+            bool r_int = r_kind == (u32)8;
+            bool ptr_arith = (l_ptr && r_int) || (l_int && r_ptr && op == (u32)TokenKind.Plus);
+            if (ptr_arith) {
+                u32 ptr_side = l_ptr ? expr.inner0 : expr.inner1;
+                LLVMOpaqueValue* base = l_ptr ? lhs : rhs;
+                LLVMOpaqueValue* idx = l_ptr ? rhs : lhs;
+                u32 elem_id = TYPE_UNKNOWN;
+                TypeEntry* ptr_entry = ctx.types.get(ctx.types.resolve_subst(llvm_expr_type(ctx, ptr_side)));
+                if (ptr_entry.kind == TypeKind.Pointer || ptr_entry.kind == TypeKind.Reference) {
+                    elem_id = ctx.types.resolve_subst(ptr_entry.inner);
+                } else if (ptr_entry.kind == TypeKind.Str) {
+                    elem_id = TYPE_U8;
+                }
+                // Unknown pointees fall through to the old path (loud
+                // verify failure) rather than silently using byte stride.
+                if (elem_id != TYPE_UNKNOWN && elem_id != 0 && elem_id != TYPE_VOID) {
+                    if (op == (u32)TokenKind.Minus) {
+                        idx = LLVMBuildNeg(ctx.builder, idx, "ptr_idx_neg");
+                    }
+                    LLVMOpaqueType* elem_ty = llvm_lower_type(ctx.ctx, ctx.types, elem_id);
+                    return LLVMBuildGEP2(ctx.builder, elem_ty, base, &idx, 1, "ptr_arith");
+                }
+            }
+        }
         if (lty != rty) {
             if (l_kind == (u32)8 && r_kind == (u32)8) {
                 u32 l_width = LLVMGetIntTypeWidth(lty);
