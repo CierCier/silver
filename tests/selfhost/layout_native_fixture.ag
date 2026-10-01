@@ -1,0 +1,29 @@
+struct WideLayout {
+    i128 wide;
+    i64 tail;
+}
+
+struct NestedLayout {
+    u8 prefix;
+    WideLayout value;
+    u8 suffix;
+}
+
+struct ArrayLayout {
+    WideLayout[2] values;
+}
+
+struct GenericLayout<T> {
+    T value;
+    u8 tail;
+}
+
+i32 main() {
+    if (@size(i128) != 16) { return 1; }
+    if (@size(WideLayout) != 32) { return 2; }
+    if (@size(NestedLayout) != 64) { return 3; }
+    if (@size(WideLayout[2]) != 64) { return 4; }
+    if (@size(ArrayLayout) != 64) { return 5; }
+    if (@size(GenericLayout<i128>) != 32) { return 6; }
+    return 0;
+}

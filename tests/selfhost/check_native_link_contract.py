@@ -39,6 +39,19 @@ def main() -> int:
         capture = root / "link.json"
         runtime = root / "runtime.json"
         linker = root / "fake-linker"
+        linker_query = root / "fake-cc"
+        discovered_loader = root / "fake-ld-linux.so"
+        discovered_loader.write_text("loader")
+        discovered_loader.chmod(0o755)
+        linker_query.write_text(
+            "#!/usr/bin/env python3\n"
+            "import pathlib, sys\n"
+            "if sys.argv[1:] == ['-print-file-name=ld-linux-x86-64.so.2']:\n"
+            f"    print({str(discovered_loader)!r})\n"
+            "else:\n"
+            "    raise SystemExit(1)\n"
+        )
+        linker_query.chmod(0o755)
         linker.write_text(
             "#!/usr/bin/env python3\n"
             "import json, os, pathlib, sys\n"
@@ -57,6 +70,7 @@ def main() -> int:
             "SILVER_LINKER": str(linker),
             "SILVER_USE_MOLD": "1",
             "SILVER_DYNAMIC_LINKER": "/test/ld-linux.so",
+            "SILVER_STAGE1_CC": str(linker_query),
             "LINK_CAPTURE": str(capture),
             "RUNTIME_CAPTURE": str(runtime),
         })
@@ -99,8 +113,45 @@ def main() -> int:
         static_argv = static_invocation["args"]
         if "-static" not in static_argv or "--dynamic-linker" in static_argv:
             raise AssertionError(f"static link did not suppress dynamic-linker setup: {static_argv!r}")
+        env.pop("SILVER_DYNAMIC_LINKER")
+        auto_output = root / "auto-app"
+        auto_result = run(
+            stage1,
+            ["build", str(source), "--no-cache", "-L", str(root), "-l", "sample",
+             "-o", str(auto_output)],
+            env,
+            root,
+        )
+        if auto_result.returncode != 0:
+            raise AssertionError(f"automatic dynamic-linker discovery failed: {auto_result.returncode}\n{auto_result.stderr}")
+        auto_argv = json.loads(capture.read_text())["args"]
+        if "--dynamic-linker" not in auto_argv or str(discovered_loader) not in auto_argv:
+            raise AssertionError(f"automatic dynamic-linker path was not passed to the linker: {auto_argv!r}")
+        if "-l" not in auto_argv:
+            raise AssertionError(f"linker test lost user link inputs: {auto_argv!r}")
         env.pop("SILVER_LINKER")
+        env.pop("SILVER_USE_MOLD")
+        env["SILVER_STAGE1_LLD"] = str(root / "missing-lld")
+        env["SILVER_STAGE1_CC"] = str(linker)
+        env["SILVER_DYNAMIC_LINKER"] = "/test/cc-ld-linux.so"
+        cc_output = root / "cc-driver-app"
+        cc_result = run(
+            stage1,
+            ["build", str(source), "--no-cache", "-L", str(root), "-l", "sample",
+             "-o", str(cc_output)],
+            env,
+            root,
+        )
+        if cc_result.returncode != 0:
+            raise AssertionError(f"cc-driver link with explicit interpreter failed: {cc_result.returncode}\n{cc_result.stderr}")
+        cc_argv = json.loads(capture.read_text())["args"]
+        if "-Wl,-dynamic-linker,/test/cc-ld-linux.so" not in cc_argv:
+            raise AssertionError(f"cc-driver link dropped SILVER_DYNAMIC_LINKER override: {cc_argv!r}")
         env["SILVER_STAGE1_MOLD"] = str(linker)
+        env.pop("SILVER_STAGE1_LLD")
+        env.pop("SILVER_STAGE1_CC")
+        env.pop("SILVER_DYNAMIC_LINKER")
+        env["SILVER_USE_MOLD"] = "1"
         mold_output = root / "mold-app"
         mold_result = run(
             stage1,

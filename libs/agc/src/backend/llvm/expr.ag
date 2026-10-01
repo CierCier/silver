@@ -264,11 +264,36 @@ LLVMOpaqueValue* llvm_emit_enum_build(LlvmContext* ctx, str enum_name, str varia
     }
     raw_payloads.drop();
     i64 arg_index = 0;
-    u64 cur_payload_offset = 0;
+    u64 payload_base_offset = 0;
+    bool flattened_struct_payload = arity == 1 && args_count > 1;
+    if (args_count > 0) {
+        payload_base_offset = llvm_target_struct_field_offset(ctx, enum_ty, 1);
+    }
     while (arg_index < (i64)args_count) {
         u32 arg_id = ctx.pool.args.get((i64)args_start + arg_index);
         u32 field_type = TYPE_UNKNOWN;
-        if (arg_index < payload_types.len()) {
+        if (flattened_struct_payload && payload_types.len() == 1) {
+            u32 payload_type_id = payload_types.get(0);
+            TypeEntry* payload_entry = ctx.types.get(payload_type_id);
+            if (payload_entry.kind != TypeKind.Named) {
+                ctx.note_unresolved("enum-payload-layout", variant_name);
+                payload_types.drop();
+                base.drop();
+                instance_name.drop();
+                return (LLVMOpaqueValue*)0;
+            }
+            str payload_name = ctx.types.names.get(payload_entry.name_id);
+            i64 payload_field_count = llvm_struct_field_count(ctx.root, payload_name);
+            if (arg_index >= payload_field_count) {
+                ctx.note_unresolved("enum-payload-layout", variant_name);
+                payload_types.drop();
+                base.drop();
+                instance_name.drop();
+                return (LLVMOpaqueValue*)0;
+            }
+            field_type = (u32)llvm_struct_field_type(ctx.root, payload_name, arg_index, ctx.types);
+            field_type = mono_resolve_struct_field_type(ctx, payload_type_id, field_type);
+        } else if (arg_index < payload_types.len()) {
             field_type = payload_types.get(arg_index);
         }
         LLVMOpaqueType* field_ty = (LLVMOpaqueType*)0;
@@ -299,18 +324,27 @@ LLVMOpaqueValue* llvm_emit_enum_build(LlvmContext* ctx, str enum_name, str varia
             instance_name.drop();
             return (LLVMOpaqueValue*)0;
         }
-        u64 field_offset = 0;
-        if (arity == (i64)args_count && arg_index < payload_types.len()) {
-            field_offset = 2 + llvm_payload_field_offset(ctx.types, ctx.root, &payload_types, arg_index);
-        } else {
-            cur_payload_offset = llvm_align_up(cur_payload_offset, 8);
-            field_offset = 2 + cur_payload_offset;
-            cur_payload_offset += 8;
+        if ((!flattened_struct_payload && (arity != (i64)args_count || arg_index >= payload_types.len()))
+            || field_ty == (LLVMOpaqueType*)0) {
+            ctx.note_unresolved("enum-payload-layout", variant_name);
+            payload_types.drop();
+            base.drop();
+            instance_name.drop();
+            return (LLVMOpaqueValue*)0;
         }
+        u64 payload_field_offset = 0;
+        if (flattened_struct_payload) {
+            LLVMOpaqueType* payload_struct_ty = llvm_lower_type(ctx.ctx, ctx.types, payload_types.get(0));
+            payload_field_offset = llvm_target_struct_field_offset(ctx, payload_struct_ty, (u32)arg_index);
+        } else {
+            payload_field_offset = llvm_target_payload_field_offset(ctx, &payload_types, arg_index);
+        }
+        u64 field_offset = payload_base_offset + payload_field_offset;
         LLVMOpaqueValue* field_index = LLVMConstInt(LLVMInt64TypeInContext(ctx.ctx), field_offset, 0);
         LLVMOpaqueValue* field_byte_ptr = LLVMBuildGEP2(ctx.builder, byte_ty, bytes, &field_index, 1, "enum_field_byte");
         LLVMOpaqueValue* field_ptr = LLVMBuildBitCast(ctx.builder, field_byte_ptr, ptr_ty, "enum_field");
-        LLVMBuildStore(ctx.builder, arg_val, field_ptr);
+        LLVMOpaqueValue* store = LLVMBuildStore(ctx.builder, arg_val, field_ptr);
+        LLVMSetAlignment(store, 1);
         arg_index += 1;
     }
     payload_types.drop();
@@ -1409,7 +1443,7 @@ LLVMOpaqueValue* llvm_emit_hash(LlvmContext* ctx, AstExpr* expr) {    // Mirrors
         return (LLVMOpaqueValue*)0;
     }
     LLVMOpaqueType* arg_ty = LLVMTypeOf(arg_val);
-    u64 size = llvm_abi_size(ctx.types, ctx.root, arg_type, 0);
+    u64 size = llvm_target_type_size(ctx, arg_type);
     LLVMOpaqueValue* slot = LLVMBuildAlloca(ctx.builder, arg_ty, "hash.val");
     LLVMBuildStore(ctx.builder, arg_val, slot);
     LLVMOpaqueValue* ptr = LLVMBuildBitCast(ctx.builder, slot, LLVMPointerTypeInContext(ctx.ctx, 0), "hash.ptr");
@@ -1971,6 +2005,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 enum_probe += 1;
             }
         }
+        mono_ensure_child_layouts(ctx, scrut_ty_id, &ctx.generic_layout_ids);
         LLVMOpaqueType* result_ty = llvm_lower_type(ctx.ctx, ctx.types, result_ty_id);
         LLVMOpaqueValue* result_slot = LLVMBuildAlloca(ctx.builder, result_ty, "match_res");
         LLVMOpaqueType* scrut_ty = llvm_lower_type(ctx.ctx, ctx.types, scrut_ty_id);
@@ -2079,11 +2114,15 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                     payload_types.set(payload_index, resolved);
                     payload_index += 1;
                 }
+                u64 payload_base_offset = 0;
+                if (payload_types.len() > 0) {
+                    payload_base_offset = llvm_target_struct_field_offset(ctx, scrut_ty, 1);
+                }
                 i64 binding_index = 0;
                 while (binding_index < (i64)arm.bindings_count && binding_index < payload_types.len()) {
                     u32 binding_name = ctx.pool.arm_bindings.get((i64)arm.bindings_start + binding_index);
                     u32 field_type = payload_types.get(binding_index);
-                    u64 field_offset = 2 + llvm_payload_field_offset(ctx.types, ctx.root, &payload_types, binding_index);
+                    u64 field_offset = payload_base_offset + llvm_target_payload_field_offset(ctx, &payload_types, binding_index);
                     LLVMOpaqueType* field_ty = llvm_lower_type(ctx.ctx, ctx.types, field_type);
                     LLVMOpaqueType* ptr_ty = LLVMPointerTypeInContext(ctx.ctx, (u32)0);
                     LLVMOpaqueValue* slot_bytes = LLVMBuildBitCast(ctx.builder, scrut_slot, ptr_ty, "match_scrut_bytes");
@@ -2092,6 +2131,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                                                                     slot_bytes, &field_index, 1, "match_field_byte");
                     LLVMOpaqueValue* field_ptr = LLVMBuildBitCast(ctx.builder, field_byte_ptr, ptr_ty, "match_field");
                     LLVMOpaqueValue* field_val = LLVMBuildLoad2(ctx.builder, field_ty, field_ptr, "match_field_ld");
+                    LLVMSetAlignment(field_val, 1);
                     LLVMOpaqueValue* bind_slot = LLVMBuildAlloca(ctx.builder, field_ty, "match_bind");
                     LLVMBuildStore(ctx.builder, field_val, bind_slot);
                     ctx.add_local(binding_name, bind_slot, field_type, true);
@@ -2196,15 +2236,27 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                     }
                 }
             }
-            // Generic free-function call: alloc_uninit_n<u8>(16). The callee
-            // name may carry the instantiation text; strip it for lookup.
+            // Generic free-function type arguments are stored structurally on
+            // the call expression, preserving nested applications.
             String callee_base = String.new();
             i64 cb = 0;
             while (cb < (i64)strlen(callee_name) && callee_name[cb] != (u8)60) {
                 callee_base.push(callee_name[cb]);
                 cb += 1;
             }
-            fn_val = LLVMGetNamedFunction(ctx.module, callee_base.to_str());
+            if (expr.generic_args_count > 0) {
+                Vec<u32> generic_ids = Vec<u32>.new();
+                i64 gi = 0;
+                while (gi < (i64)expr.generic_args_count) {
+                    u32 arg_id = ctx.pool.generic_type_args.get((i64)expr.generic_args_start + gi);
+                    generic_ids.push(ctx.types.resolve_subst(arg_id));
+                    gi += 1;
+                }
+                fn_val = mono_ensure_free_function(ctx, callee_base.to_str(), &generic_ids, expr.aux);
+                generic_ids.drop();
+            } else {
+                fn_val = LLVMGetNamedFunction(ctx.module, callee_base.to_str());
+            }
             callee_base.drop();
         }
         if (fn_val == (LLVMOpaqueValue*)0) {
@@ -2272,7 +2324,8 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
     }
 
     if (expr.kind == ExprKind.SizeOf) {
-        u64 size = llvm_abi_size(ctx.types, ctx.root, expr.aux, 0);
+        mono_ensure_child_layouts(ctx, expr.aux, &ctx.generic_layout_ids);
+        u64 size = llvm_target_type_size(ctx, expr.aux);
         LLVMOpaqueType* i64_ty = LLVMInt64TypeInContext(ctx.ctx);
         return LLVMConstInt(i64_ty, size, 0);
     }

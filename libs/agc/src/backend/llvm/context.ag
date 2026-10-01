@@ -41,15 +41,18 @@ struct LlvmSymbolInfo {
 }
 
 struct MonoRequest {
+    bool is_free_function;
     u32 base_id;
     u32 method_id;
     u32 mangled_id;
     u32 args_start;
     u32 args_count;
+    u32 value_arg_count;
 }
 
 struct LlvmContext {
     LLVMOpaqueContext* ctx;
+    LLVMTargetDataRef* target_data;
     LLVMOpaqueContext* ctx_unused;
     LLVMOpaqueModule* module;
     LLVMOpaqueBuilder* builder;
@@ -74,10 +77,12 @@ struct LlvmContext {
 }
 
 impl LlvmContext {
-    LlvmContext new(LLVMOpaqueContext* ctx, LLVMOpaqueModule* module, LLVMOpaqueBuilder* builder,
+    LlvmContext new(LLVMOpaqueContext* ctx, LLVMTargetDataRef* target_data,
+                    LLVMOpaqueModule* module, LLVMOpaqueBuilder* builder,
                     TypeTable* types, Interner* names, AstPool* pool, SyntaxNode* root) {
         LlvmContext c;
         c.ctx = ctx;
+        c.target_data = target_data;
         c.module = module;
         c.builder = builder;
         c.types = types;
@@ -416,4 +421,3 @@ bool str_contains(str s, str sub) {
     }
     return false;
 }
-

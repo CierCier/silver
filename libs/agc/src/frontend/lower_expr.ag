@@ -717,6 +717,27 @@ impl ExprLowerer {
         return self.pool.add_struct_lit(name_id, fields_start, field_count, block.span);
     }
 
+    bool lower_is_generic_function(ExprLowerer* self, str name) {
+        if (self.unit_root == (SyntaxNode*)0) { return false; }
+        SyntaxNode* item = self.unit_root.first_child;
+        while (item != (SyntaxNode*)0) {
+            if (item.kind == NodeKind.Function) {
+                SyntaxNode* id = function_identifier(item);
+                if (id != (SyntaxNode*)0 && strcmp(id.text, name) == 0) {
+                    SyntaxNode* cursor = id.next_sibling;
+                    while (cursor != (SyntaxNode*)0 && cursor.kind != NodeKind.Parenthesized) {
+                        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Less) {
+                            return true;
+                        }
+                        cursor = cursor.next_sibling;
+                    }
+                }
+            }
+            item = item.next_sibling;
+        }
+        return false;
+    }
+
     u32 lower_postfix(ExprLowerer* self, SyntaxNode* node, SyntaxNode** next_out) {
         if (node == (SyntaxNode*)0) {
             *next_out = (SyntaxNode*)0;
@@ -824,9 +845,7 @@ impl ExprLowerer {
                     String type_text = String.new();
                     SyntaxNode* tcur = paren.first_child;
                     while (tcur != (SyntaxNode*)0) {
-                        if (tcur.kind == NodeKind.Token) {
-                            type_text.push_str(tcur.text);
-                        }
+                        append_node_tokens(tcur, &type_text);
                         tcur = tcur.next_sibling;
                     }
                     u32 type_id = type_id_from_text(self.types, type_text.to_str());
@@ -904,11 +923,16 @@ impl ExprLowerer {
         // on the base name; the backend resolves the template by base name.
         if (expr != 0 && self.pool.get_expr(expr).kind == ExprKind.Var
             && cursor != (SyntaxNode*)0 && cursor.kind == NodeKind.Token
-            && cursor.token_kind == TokenKind.Less) {
+            && cursor.token_kind == TokenKind.Less
+            && self.lower_is_generic_function(self.names.get(self.pool.get_expr(expr).aux))) {
             SyntaxNode* scan = cursor;
             i64 gdepth = 0;
             SyntaxNode* greater = (SyntaxNode*)0;
             while (scan != (SyntaxNode*)0) {
+                if (scan.kind == NodeKind.Block
+                    || scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Semicolon) {
+                    break;
+                }
                 if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Less) {
                     gdepth += 1;
                 } else if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Greater) {
@@ -923,6 +947,47 @@ impl ExprLowerer {
             if (greater != (SyntaxNode*)0 && greater.next_sibling != (SyntaxNode*)0
                 && greater.next_sibling.kind == NodeKind.Parenthesized) {
                 SyntaxNode* paren = greater.next_sibling;
+                Vec<u32> generic_ids = Vec<u32>.new();
+                SyntaxNode* type_start = cursor.next_sibling;
+                SyntaxNode* type_scan = type_start;
+                i64 angle_depth = 0;
+                while (type_scan != (SyntaxNode*)0 && type_scan != greater) {
+                    if (type_scan.kind == NodeKind.Token && type_scan.token_kind == TokenKind.Comma
+                        && angle_depth == 0) {
+                        String type_text = String.new();
+                        SyntaxNode* part = type_start;
+                        while (part != (SyntaxNode*)0 && part != type_scan) {
+                            append_node_tokens(part, &type_text);
+                            part = part.next_sibling;
+                        }
+                        generic_ids.push(self.types.parse_type_name(type_text.to_str()));
+                        type_text.drop();
+                        type_start = type_scan.next_sibling;
+                    } else if (type_scan.kind == NodeKind.Token && type_scan.token_kind == TokenKind.Less) {
+                        angle_depth += 1;
+                    } else if (type_scan.kind == NodeKind.Token && type_scan.token_kind == TokenKind.Greater) {
+                        angle_depth -= 1;
+                    }
+                    type_scan = type_scan.next_sibling;
+                }
+                String last_type_text = String.new();
+                SyntaxNode* type_part = type_start;
+                while (type_part != (SyntaxNode*)0 && type_part != greater) {
+                    append_node_tokens(type_part, &last_type_text);
+                    type_part = type_part.next_sibling;
+                }
+                if (last_type_text.len() > 0) {
+                    generic_ids.push(self.types.parse_type_name(last_type_text.to_str()));
+                }
+                last_type_text.drop();
+                u32 generic_start = (u32)self.pool.generic_type_args.len();
+                i64 generic_index = 0;
+                while (generic_index < generic_ids.len()) {
+                    self.pool.generic_type_args.push(generic_ids.get(generic_index));
+                    generic_index += 1;
+                }
+                u32 generic_count = (u32)generic_ids.len();
+                generic_ids.drop();
                 Vec<u32> temp_args = Vec<u32>.new();
                 SyntaxNode* arg = paren.first_child;
                 while (arg != (SyntaxNode*)0) {
@@ -945,7 +1010,8 @@ impl ExprLowerer {
                     ai += 1;
                 }
                 temp_args.drop();
-                expr = self.pool.add_call(expr, args_start, args_count, paren.span);
+                expr = self.pool.add_generic_call(expr, args_start, args_count,
+                    generic_start, generic_count, paren.span);
                 cursor = paren.next_sibling;
             }
         }

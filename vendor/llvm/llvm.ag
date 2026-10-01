@@ -7,6 +7,7 @@ struct LLVMOpaqueType {}
 struct LLVMOpaqueValue {}
 struct LLVMOpaqueBasicBlock {}
 struct LLVMOpaqueTargetMachine {}
+struct LLVMTargetDataRef {}
 struct LLVMTarget {}
 struct LLVMOpaqueMetadata {}
 struct LLVMOpaqueDIBuilder {}
@@ -142,8 +143,10 @@ extern "C" {
     void LLVMDisposeBuilder(LLVMOpaqueBuilder* p0);
     LLVMOpaqueType* LLVMStructCreateNamed(LLVMOpaqueContext* p0, i8* p1);
     void LLVMStructSetBody(LLVMOpaqueType* p0, LLVMOpaqueType** p1, u32 p2, i32 p3);
+    LLVMOpaqueType* LLVMStructTypeInContext(LLVMOpaqueContext* p0, LLVMOpaqueType** p1, u32 p2, i32 p3);
     LLVMOpaqueValue* LLVMConstNamedStruct(LLVMOpaqueType* p0, LLVMOpaqueValue** p1, u32 p2);
     LLVMOpaqueType* LLVMGetTypeByName2(LLVMOpaqueContext* p0, i8* p1);
+    i8* LLVMPrintTypeToString(LLVMOpaqueType* p0);
     LLVMOpaqueType* LLVMInt1TypeInContext(LLVMOpaqueContext* p0);
     LLVMOpaqueType* LLVMInt8TypeInContext(LLVMOpaqueContext* p0);
     LLVMOpaqueType* LLVMInt16TypeInContext(LLVMOpaqueContext* p0);
@@ -287,6 +290,12 @@ extern "C" {
     i32 LLVMGetTargetFromTriple(i8* p0, LLVMTarget** p1, i8** p2);
     LLVMOpaqueTargetMachine* LLVMCreateTargetMachine(LLVMTarget* p0, i8* p1, i8* p2, i8* p3, LLVMCodeGenOptLevel p4, LLVMRelocMode p5, LLVMCodeModel p6);
     void LLVMDisposeTargetMachine(LLVMOpaqueTargetMachine* p0);
+    LLVMTargetDataRef* LLVMCreateTargetDataLayout(LLVMOpaqueTargetMachine* p0);
+    void LLVMDisposeTargetData(LLVMTargetDataRef* p0);
+    i8* LLVMCopyStringRepOfTargetData(LLVMTargetDataRef* p0);
+    u64 LLVMABISizeOfType(LLVMTargetDataRef* p0, LLVMOpaqueType* p1);
+    u64 LLVMOffsetOfElement(LLVMTargetDataRef* p0, LLVMOpaqueType* p1, u32 p2);
+    i32 LLVMTypeIsSized(LLVMOpaqueType* p0);
     i32 LLVMTargetMachineEmitToFile(LLVMOpaqueTargetMachine* p0, LLVMOpaqueModule* p1, i8* p2, LLVMCodeGenFileType p3, i8** p4);
     LLVMOpaqueValue* LLVMGetInlineAsm(LLVMOpaqueType* p0, i8* p1, u64 p2, i8* p3, u64 p4, i32 p5, i32 p6, i32 p7, i32 p8);
 }

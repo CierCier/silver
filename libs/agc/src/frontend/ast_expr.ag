@@ -34,6 +34,8 @@ struct AstExpr {
     u32 aux;
     Span span;
     u32 inferred_type;
+    u32 generic_args_start;
+    u32 generic_args_count;
 }
 
 enum StmtKind {
@@ -118,6 +120,7 @@ struct AstPool {
     Vec<AstExpr> exprs;
     Vec<AstStmt> stmts;
     Vec<u32> args;
+    Vec<u32> generic_type_args;
     Vec<u32> block_stmts;
     Vec<MatchArm> arms;
     Vec<u32> arm_bindings;
@@ -130,6 +133,7 @@ impl AstPool {
         pool.exprs = Vec<AstExpr>.new();
         pool.stmts = Vec<AstStmt>.new();
         pool.args = Vec<u32>.new();
+        pool.generic_type_args = Vec<u32>.new();
         pool.block_stmts = Vec<u32>.new();
         pool.arms = Vec<MatchArm>.new();
         pool.arm_bindings = Vec<u32>.new();
@@ -157,6 +161,8 @@ impl AstPool {
         null_expr.aux = TYPE_UNKNOWN;
         null_expr.span = Span.synthetic();
         null_expr.inferred_type = TYPE_UNKNOWN;
+        null_expr.generic_args_start = 0;
+        null_expr.generic_args_count = 0;
         pool.exprs.push(move null_expr);
 
         // 0: Dummy null stmt. Statement IDs share the same 0-means-null
@@ -188,6 +194,8 @@ impl AstPool {
         expr.aux = type_id;
         expr.span = span;
         expr.inferred_type = type_id;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
     }
@@ -200,6 +208,8 @@ impl AstPool {
         expr.aux = name_id;
         expr.span = span;
         expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
     }
@@ -212,6 +222,8 @@ impl AstPool {
         expr.aux = (u32)op;
         expr.span = span;
         expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
     }
@@ -224,6 +236,8 @@ impl AstPool {
         expr.aux = (u32)op;
         expr.span = span;
         expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
     }
@@ -236,6 +250,8 @@ impl AstPool {
         expr.aux = else_id;
         expr.span = span;
         expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
     }
@@ -266,6 +282,8 @@ impl AstPool {
         expr.aux = arms_count;
         expr.span = span;
         expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
     }
@@ -278,6 +296,8 @@ impl AstPool {
         expr.aux = var_name_id;
         expr.span = span;
         expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
     }
@@ -297,6 +317,8 @@ impl AstPool {
         expr.aux = asm_idx;
         expr.span = span;
         expr.inferred_type = TYPE_I64;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
     }
@@ -309,8 +331,19 @@ impl AstPool {
         expr.aux = args_count;
         expr.span = span;
         expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_generic_call(AstPool* self, u32 callee, u32 args_start, u32 args_count,
+                         u32 generic_start, u32 generic_count, Span span) {
+        u32 call_id = self.add_call(callee, args_start, args_count, span);
+        AstExpr* call = self.exprs.get_ptr((i64)call_id);
+        call.generic_args_start = generic_start;
+        call.generic_args_count = generic_count;
+        return call_id;
     }
 
     u32 add_array_lit(AstPool* self, u32 elems_start, u32 elem_count, Span span) {
@@ -321,6 +354,8 @@ impl AstPool {
         expr.aux = elem_count;
         expr.span = span;
         expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
     }
@@ -333,6 +368,8 @@ impl AstPool {
         expr.aux = args_count;
         expr.span = span;
         expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
     }
@@ -345,6 +382,8 @@ impl AstPool {
         expr.aux = 0;
         expr.span = span;
         expr.inferred_type = TYPE_I64;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
     }
@@ -357,6 +396,8 @@ impl AstPool {
         expr.aux = field_count;
         expr.span = span;
         expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
     }
@@ -368,6 +409,8 @@ impl AstPool {
         expr.aux = method_name_id;
         expr.span = span;
         expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
     }
@@ -380,6 +423,8 @@ impl AstPool {
         expr.aux = field_name_id;
         expr.span = span;
         expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
     }
@@ -392,6 +437,8 @@ impl AstPool {
         expr.aux = 0;
         expr.span = span;
         expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
     }
@@ -404,6 +451,8 @@ impl AstPool {
         expr.aux = target_type_id;
         expr.span = span;
         expr.inferred_type = target_type_id;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
     }
@@ -416,6 +465,8 @@ impl AstPool {
         expr.aux = type_id;
         expr.span = span;
         expr.inferred_type = TYPE_I64;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
     }

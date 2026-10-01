@@ -1,9 +1,5 @@
-// Small stage1-owned Linux backend for the native smoke path.
-//
-// It intentionally recognizes only a single `i32 main()` returning an integer.
-// The smoke link uses the host `cc` entry point; production static entry/runtime
-// emission is part of the later native backend work. Unsupported programs
-// return false so the explicit stage0 bridge remains the compatibility path.
+// Stage1-owned Linux build/run backend. Unsupported programs return false so
+// the stage0 bridge remains available for constructs this backend cannot lower.
 import std.env;
 import std.error;
 import std.fmt;
@@ -16,6 +12,7 @@ import std.process;
 import std.result;
 import std.string;
 import std.sys.os;
+import std.sys.errno;
 import agc;
 
 bool native_backend_enabled() {
@@ -67,6 +64,65 @@ void native_set_tool(String* tool, str environment_name) {
         }
         path_str.drop();
     }
+}
+
+bool native_discover_dynamic_linker(String* output) {
+    String compiler = String.from_str("cc");
+    native_set_tool(&compiler, "SILVER_STAGE1_CC");
+
+    i32 fds[2];
+    if (sys_pipe((i64)&fds[0]) < 0) {
+        compiler.drop();
+        return false;
+    }
+    i64 pid = sys_fork();
+    if (pid < 0) {
+        sys_close((i64)fds[0]);
+        sys_close((i64)fds[1]);
+        compiler.drop();
+        return false;
+    }
+    if (pid == 0) {
+        sys_close((i64)fds[0]);
+        if (sys_dup2((i64)fds[1], 1) < 0) { sys_exit_group(127); }
+        if (fds[1] != 1) { sys_close((i64)fds[1]); }
+        str argv[3];
+        argv[0] = compiler.to_str();
+        argv[1] = "-print-file-name=ld-linux-x86-64.so.2";
+        argv[2] = (str)0;
+        i8** envp = silver_envp();
+        sys_execve((i64)compiler.to_str(), (i64)&argv[0], (i64)envp);
+        sys_exit_group(127);
+    }
+
+    sys_close((i64)fds[1]);
+    output.clear();
+    u8 buffer[256];
+    i64 total = 0;
+    while (total < 4096) {
+        i64 count = sys_read((i64)fds[0], (i64)&buffer[0], 256);
+        if (count == -EINTR) { continue; }
+        if (count <= 0) { break; }
+        i64 keep = count;
+        if (total + keep > 4096) { keep = 4096 - total; }
+        output.push_bytes((u8*)&buffer[0], keep);
+        total += keep;
+    }
+    sys_close((i64)fds[0]);
+    i32 status = 0;
+    i64 waited = 0;
+    while (true) {
+        waited = sys_wait4(pid, (i64)&status, 0, 0);
+        if (waited != -EINTR) { break; }
+    }
+    compiler.drop();
+    if (waited != pid || status != 0 || total == 0 || total >= 4096) { return false; }
+
+    String trimmed = output.trim();
+    output.clear();
+    output.push_str(trimmed.to_str());
+    trimmed.drop();
+    return output.starts_with("/") && native_is_executable(output.to_str());
 }
 
 bool native_argument_consumes_value(Vec<String>* arguments, i64 index) {
@@ -942,8 +998,22 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
     }
 
     Optional<String> dynamic_linker = var("SILVER_DYNAMIC_LINKER");
-    if (!static_link && has_link_inputs && dynamic_linker.is_some()) {
-        String dl = dynamic_linker.unwrap();
+    if (!static_link && has_link_inputs && (direct_linker || dynamic_linker.is_some())) {
+        String dl = String.new();
+        if (dynamic_linker.is_some()) {
+            String configured = dynamic_linker.unwrap();
+            dl.push_str(configured.to_str());
+            configured.drop();
+        } else if (direct_linker && !native_discover_dynamic_linker(&dl)) {
+            STDERR.write_str("agc: error: could not discover the dynamic linker; set SILVER_DYNAMIC_LINKER\n");
+            dl.drop();
+            linker.drop();
+            object_path.drop();
+            link_libs.drop();
+            output.drop();
+            *result = 2;
+            return true;
+        }
         if (direct_linker) {
             cc_command.arg("--dynamic-linker");
             cc_command.arg(dl.to_str());

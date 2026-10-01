@@ -8,17 +8,6 @@ import frontend.symbols;
 import frontend.types;
 import backend.llvm.context;
 
-u64 llvm_align_up(u64 offset, u64 align) {
-    if (align <= 1) {
-        return offset;
-    }
-    u64 remainder = offset % align;
-    if (remainder == 0) {
-        return offset;
-    }
-    return offset + (align - remainder);
-}
-
 u64 llvm_struct_field_type(SyntaxNode* root, str struct_name, i64 field_index, TypeTable* types) {
     SyntaxNode* item = find_item_by_name(root, NodeKind.Struct, struct_name);
     if (item == (SyntaxNode*)0) {
@@ -52,9 +41,7 @@ u64 llvm_struct_field_type(SyntaxNode* root, str struct_name, i64 field_index, T
                 String text = String.new();
                 SyntaxNode* part = start;
                 while (part != (SyntaxNode*)0 && part != last_ident) {
-                    if (part.kind == NodeKind.Token) {
-                        text.push_str(part.text);
-                    }
+                    append_node_tokens(part, &text);
                     part = part.next_sibling;
                 }
                 u32 field_type = type_id_from_text(types, text.to_str());
@@ -138,9 +125,7 @@ void llvm_enum_payload_types(TypeTable* types, SyntaxNode* root, str enum_name,
                 String text = String.new();
                 SyntaxNode* tok = part;
                 while (tok != (SyntaxNode*)0 && tok != part_end) {
-                    if (tok.kind == NodeKind.Token) {
-                        text.push_str(tok.text);
-                    }
+                    append_node_tokens(tok, &text);
                     tok = tok.next_sibling;
                 }
                 if (text.len > 0) {
@@ -155,163 +140,113 @@ void llvm_enum_payload_types(TypeTable* types, SyntaxNode* root, str enum_name,
     }
 }
 
-u64 llvm_enum_variant_size(TypeTable* types, SyntaxNode* root, str enum_name, str variant_name) {
-    Vec<u32> payloads = Vec<u32>.new();
-    llvm_enum_payload_types(types, root, enum_name, variant_name, &payloads);
-    u64 offset = 0;
-    i64 i = 0;
-    while (i < payloads.len()) {
-        u32 field_type = payloads.get(i);
-        offset = llvm_align_up(offset, llvm_abi_align(types, root, field_type, 0)) + llvm_abi_size(types, root, field_type, 0);
-        i += 1;
+bool llvm_layout_type_resolved(LlvmContext* ctx, u32 type_id, i64 depth) {
+    if (depth > 32 || type_id == TYPE_UNKNOWN) {
+        return false;
     }
-    payloads.drop();
-    return offset;
-}
-
-u64 llvm_enum_size(TypeTable* types, SyntaxNode* root, str enum_name) {
-    SyntaxNode* item = find_enum_item(root, enum_name);
-    if (item == (SyntaxNode*)0) {
-        return 8;
+    type_id = ctx.types.resolve_subst(type_id);
+    TypeEntry* entry = ctx.types.get(type_id);
+    if (entry.kind == TypeKind.Unknown || entry.kind == TypeKind.TypeParam || entry.kind == TypeKind.Void) {
+        return false;
     }
-    Vec<SyntaxNode*> names = Vec<SyntaxNode*>.new();
-    Vec<i64> tags = Vec<i64>.new();
-    Vec<i64> arities = Vec<i64>.new();
-    enum_each_variant(item, &names, &tags, &arities);
-    u64 data = 0;
-    i64 i = 0;
-    while (i < names.len()) {
-        u64 variant_size = llvm_enum_variant_size(types, root, enum_name, names.get(i).text);
-        if (variant_size > data) {
-            data = variant_size;
-        }
-        i += 1;
-    }
-    bool has_payload = false;
-    i = 0;
-    while (i < arities.len()) {
-        if (arities.get(i) > 0) {
-            has_payload = true;
-        }
-        i += 1;
-    }
-    if (has_payload && data == 0) {
-        data = 32;
-    }
-    names.drop();
-    tags.drop();
-    arities.drop();
-    return llvm_align_up((u64)2 + data, 2);
-}
-
-u64 llvm_enum_field_offset(TypeTable* types, SyntaxNode* root, str enum_name,
-                           str variant_name, i64 field_index) {
-    Vec<u32> payloads = Vec<u32>.new();
-    llvm_enum_payload_types(types, root, enum_name, variant_name, &payloads);
-    u64 offset = llvm_payload_field_offset(types, root, &payloads, field_index);
-    payloads.drop();
-    return offset;
-}
-
-u64 llvm_payload_field_offset(TypeTable* types, SyntaxNode* root,
-                              Vec<u32>* payloads, i64 field_index) {
-    u64 offset = 0;
-    i64 i = 0;
-    while (i < field_index && i < payloads.len()) {
-        u32 field_type = payloads.get(i);
-        offset = llvm_align_up(offset, llvm_abi_align(types, root, field_type, 0)) + llvm_abi_size(types, root, field_type, 0);
-        i += 1;
-    }
-    if (i < payloads.len()) {
-        offset = llvm_align_up(offset, llvm_abi_align(types, root, payloads.get(i), 0));
-    }
-    return offset;
-}
-
-u64 llvm_named_size(TypeTable* types, SyntaxNode* root, str name, i64 depth) {
-    if (depth > 16) {
-        return 8;
-    }
-    if (find_item_by_name(root, NodeKind.Struct, name) != (SyntaxNode*)0) {
-        i64 count = llvm_struct_field_count(root, name);
-        u64 offset = 0;
-        u64 max_align = 1;
-        i64 i = 0;
-        while (i < count) {
-            u64 field_type = llvm_struct_field_type(root, name, i, types);
-            u64 align = llvm_abi_align(types, root, (u32)field_type, depth + 1);
-            u64 size = llvm_abi_size(types, root, (u32)field_type, depth + 1);
-            if (align > max_align) {
-                max_align = align;
-            }
-            offset = llvm_align_up(offset, align) + size;
-            i += 1;
-        }
-        return llvm_align_up(offset, max_align);
-    }
-    if (find_enum_item(root, name) != (SyntaxNode*)0) {
-        return llvm_enum_size(types, root, name);
-    }
-    return 8;
-}
-
-u64 llvm_abi_size(TypeTable* types, SyntaxNode* root, u32 type_id, i64 depth) {
-    TypeEntry* entry = types.get(type_id);
-    if (entry.kind == TypeKind.Void) {
-        return 1;
-    }
-    if (entry.kind == TypeKind.Bool || entry.kind == TypeKind.I8 || entry.kind == TypeKind.U8) {
-        return 1;
-    }
-    if (entry.kind == TypeKind.Char) {
-        return 1;
-    }
-    if (entry.kind == TypeKind.I16 || entry.kind == TypeKind.U16) {
-        return 2;
-    }
-    if (entry.kind == TypeKind.I32 || entry.kind == TypeKind.U32 || entry.kind == TypeKind.F32) {
-        return 4;
-    }
-    if (entry.kind == TypeKind.I64 || entry.kind == TypeKind.U64 || entry.kind == TypeKind.F64
-        || entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) {
-        return 8;
-    }
-    if (entry.kind == TypeKind.C32) {
-        return 8;
-    }
-    if (entry.kind == TypeKind.I128 || entry.kind == TypeKind.U128 || entry.kind == TypeKind.C64) {
-        return 16;
-    }
-    if (entry.kind == TypeKind.F80 || entry.kind == TypeKind.C80) {
-        return 16;
-    }
-    if (entry.kind == TypeKind.Str) {
-        return 8;
+    if (entry.kind == TypeKind.Array) {
+        return llvm_layout_type_resolved(ctx, entry.inner, depth + 1);
     }
     if (entry.kind == TypeKind.Named) {
-        if (entry.count > 0) {
-            return 0;
+        str name = ctx.types.names.get(entry.name_id);
+        if (find_item_by_name(ctx.root, NodeKind.Struct, name) == (SyntaxNode*)0
+            && find_item_by_name(ctx.root, NodeKind.Enum, name) == (SyntaxNode*)0) {
+            return false;
         }
-        return llvm_named_size(types, root, types.names.get(entry.name_id), depth);
+        i64 i = 0;
+        while (i < entry.count) {
+            if (!llvm_layout_type_resolved(ctx, ctx.types.type_args.get(entry.inner + (u32)i), depth + 1)) {
+                return false;
+            }
+            i += 1;
+        }
     }
-    if (entry.kind == TypeKind.TypeParam || entry.kind == TypeKind.Function) {
-        return 8;
-    }
-    return 8;
+    return true;
 }
 
-u64 llvm_abi_align(TypeTable* types, SyntaxNode* root, u32 type_id, i64 depth) {
-    u64 size = llvm_abi_size(types, root, type_id, depth);
-    if (size >= 8) {
-        return 8;
+u64 llvm_target_type_size(LlvmContext* ctx, u32 type_id) {
+    if (ctx.target_data == (LLVMTargetDataRef*)0) {
+        ctx.note_unresolved("target-layout", ctx.types.type_name(type_id));
+        return 0;
     }
-    if (size >= 4) {
-        return 4;
+    type_id = ctx.types.resolve_subst(type_id);
+    if (!llvm_layout_type_resolved(ctx, type_id, 0)) {
+        ctx.note_unresolved("unresolved-layout", ctx.types.type_name(type_id));
+        return 0;
     }
-    if (size >= 2) {
-        return 2;
+    LLVMOpaqueType* llvm_type = llvm_lower_type(ctx.ctx, ctx.types, type_id);
+    if (LLVMTypeIsSized(llvm_type) == 0) {
+        ctx.note_unresolved("unsized-layout", ctx.types.type_name(type_id));
+        return 0;
     }
-    return 1;
+    return LLVMABISizeOfType(ctx.target_data, llvm_type);
+}
+
+u64 llvm_target_struct_field_offset(LlvmContext* ctx, LLVMOpaqueType* llvm_type, u32 index) {
+    if (ctx.target_data == (LLVMTargetDataRef*)0 || LLVMTypeIsSized(llvm_type) == 0) {
+        i8* type_text = LLVMPrintTypeToString(llvm_type);
+        ctx.note_unresolved("unsized-layout", type_text);
+        LLVMDisposeMessage(type_text);
+        return 0;
+    }
+    return LLVMOffsetOfElement(ctx.target_data, llvm_type, index);
+}
+
+u64 llvm_target_payload_field_offset(LlvmContext* ctx, Vec<u32>* payloads, i64 field_index) {
+    if (field_index < 0 || field_index >= payloads.len()) {
+        ctx.note_unresolved("enum-payload-index", "out of range");
+        return 0;
+    }
+    Vec<LLVMOpaqueType*> field_types = Vec<LLVMOpaqueType*>.new();
+    i64 i = 0;
+    while (i < payloads.len()) {
+        u32 type_id = ctx.types.resolve_subst(payloads.get(i));
+        if (!llvm_layout_type_resolved(ctx, type_id, 0)) {
+            ctx.note_unresolved("enum-payload-type", "unknown or void");
+            field_types.drop();
+            return 0;
+        }
+        field_types.push(llvm_lower_type(ctx.ctx, ctx.types, type_id));
+        i += 1;
+    }
+    LLVMOpaqueType* payload_type = LLVMStructTypeInContext(ctx.ctx, field_types.data, (u32)field_types.len(), 0);
+    u64 offset = 0;
+    if (LLVMTypeIsSized(payload_type) != 0 && ctx.target_data != (LLVMTargetDataRef*)0) {
+        offset = LLVMOffsetOfElement(ctx.target_data, payload_type, (u32)field_index);
+    } else {
+        ctx.note_unresolved("unsized-enum-payload", "field offset");
+    }
+    field_types.drop();
+    return offset;
+}
+
+u64 llvm_target_payload_size(LlvmContext* ctx, Vec<u32>* payloads) {
+    Vec<LLVMOpaqueType*> field_types = Vec<LLVMOpaqueType*>.new();
+    i64 i = 0;
+    while (i < payloads.len()) {
+        u32 type_id = ctx.types.resolve_subst(payloads.get(i));
+        if (!llvm_layout_type_resolved(ctx, type_id, 0)) {
+            ctx.note_unresolved("enum-payload-type", "unknown or void");
+            field_types.drop();
+            return 0;
+        }
+        field_types.push(llvm_lower_type(ctx.ctx, ctx.types, type_id));
+        i += 1;
+    }
+    LLVMOpaqueType* payload_type = LLVMStructTypeInContext(ctx.ctx, field_types.data, (u32)field_types.len(), 0);
+    u64 size = 0;
+    if (LLVMTypeIsSized(payload_type) != 0 && ctx.target_data != (LLVMTargetDataRef*)0) {
+        size = LLVMABISizeOfType(ctx.target_data, payload_type);
+    } else {
+        ctx.note_unresolved("unsized-enum-payload", "payload size");
+    }
+    field_types.drop();
+    return size;
 }
 
 // Resolve a type name through the active generic substitution stack (backend

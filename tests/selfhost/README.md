@@ -33,6 +33,10 @@ shapes. Both gates report the first mismatch per file.
 from `diagnostic_order_fixture.ag`, then fails if either compiler changes the
 diagnostic sequence away from ascending line/column order.
 
+`check_semantic_regressions.py` compares focused nested generic type and borrow
+escape cases against stage0, including accepted scalar returns and rejected
+local reference escapes.
+
 `run_native.sh` is the Linux command-surface gate. It builds the same stage1
 binary, exports `SILVER_STAGE0`, checks the bridge boundary, runs the opt-in
 stage1 native smoke and linker-contract gates, checks native cache behavior,
@@ -53,6 +57,17 @@ inlined during lowering are included in dependency keys.
 String payloads in `Optional` and both `Result` variants. It also checks empty
 variants, assignment, and aligned fields in a generic two-field enum. It does
 not prove native ownership cleanup or a working stage2 compiler.
+
+`check_stage2.py` builds stage2 with the native stage1 backend while stage0 is
+unavailable. It then runs stage2's help, version, lexer, parser, and checker on
+an input exceeding 128 tokens, and builds and executes a program with stage2.
+This proves those stage2 paths. It does not cover the full native corpus or
+stage3 self-compilation.
+
+`check_native_layout.py` checks target ABI sizes for i128, nested and generic
+structs, and arrays. `check_generic_function_native.py` exercises concrete free
+function calls, nested generic arguments, and allocation and reallocation.
+Both gates disable stage0 fallback.
 
 The frontend gate compares token kind, raw text, byte span, and line/column
 span. `check_hir.py` covers the retained HIR's first typed declaration,
