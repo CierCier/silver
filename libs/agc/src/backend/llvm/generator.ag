@@ -324,7 +324,16 @@ LLVMOpaqueValue* llvm_const_literal_value(LLVMOpaqueContext* raw_ctx, TypeTable*
     if (val.kind == NodeKind.Parenthesized) {
         // Cast form: `(T*)0` parses as Parenthesized[type *] followed by a
         // sibling IntLiteral; `(u64)1` likewise with a value literal.
+        // Grouped form: `(5)` holds the literal as its only child.
         SyntaxNode* after = val.next_sibling;
+        if (after != (SyntaxNode*)0 && after.kind == NodeKind.Token
+            && after.token_kind == TokenKind.Minus
+            && after.next_sibling != (SyntaxNode*)0
+            && after.next_sibling.kind == NodeKind.Token
+            && after.next_sibling.token_kind == TokenKind.IntLiteral) {
+            i64 n = -parse_int_literal(after.next_sibling.text);
+            return LLVMConstInt(field_ty, (u64)n, 1);
+        }
         if (after != (SyntaxNode*)0 && after.kind == NodeKind.Token
             && after.token_kind == TokenKind.IntLiteral) {
             i64 n = parse_int_literal(after.text);
@@ -336,6 +345,10 @@ LLVMOpaqueValue* llvm_const_literal_value(LLVMOpaqueContext* raw_ctx, TypeTable*
         if (after != (SyntaxNode*)0 && after.kind == NodeKind.Token
             && after.token_kind == TokenKind.FloatLiteral) {
             return LLVMConstRealOfString(field_ty, after.text);
+        }
+        SyntaxNode* only = val.first_child;
+        if (only != (SyntaxNode*)0 && only.next_sibling == (SyntaxNode*)0) {
+            return llvm_const_literal_value(raw_ctx, types, target_type_id, only);
         }
     }
     return (LLVMOpaqueValue*)0;
@@ -769,9 +782,15 @@ impl LlvmGenerator {
                     if (eq_node != (SyntaxNode*)0) {
                         SyntaxNode* init_node = eq_node.next_sibling;
                         if (init_node != (SyntaxNode*)0 && init_node.kind == NodeKind.Parenthesized) {
-                            init_node = init_node.next_sibling;
-                        }
-                        if (init_node != (SyntaxNode*)0 && init_node.kind == NodeKind.Token) {
+                            // Cast or grouped literal: `(i8**)0`, `(u64)1`,
+                            // `(5)`. The old code skipped the parens and read
+                            // the raw literal, producing `ptr 0` for pointer
+                            // casts (verify failure). Lower properly instead.
+                            g_init = llvm_const_literal_value(self.ctx, types, g_type_id, init_node);
+                            if (g_init == (LLVMOpaqueValue*)0) {
+                                ctx.note_unresolved("global-init", g_name);
+                            }
+                        } else if (init_node != (SyntaxNode*)0 && init_node.kind == NodeKind.Token) {
                             if (init_node.token_kind == TokenKind.Minus && init_node.next_sibling != (SyntaxNode*)0
                                 && init_node.next_sibling.kind == NodeKind.Token
                                 && init_node.next_sibling.token_kind == TokenKind.IntLiteral) {
