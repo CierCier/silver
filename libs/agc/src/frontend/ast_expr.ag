@@ -24,6 +24,7 @@ enum ExprKind {
     ArrayLit;      // inner1 = elems_start, aux = elem_count (pool.args[start] = count, then ids)
     Format;        // inner0 = format string literal id, inner1 = args_start, aux = args_count
     Hash;          // inner0 = arg expr id (builtin @hash, always i64)
+    Assert;        // inner0 = condition, inner1 = message, aux = enabled (debug cfg)
     StructLit;     // inner0 = struct name id, inner1 = fields_start, aux = field count (pool.args: name,expr pairs)
 }
 
@@ -36,6 +37,7 @@ struct AstExpr {
     u32 inferred_type;
     u32 generic_args_start;
     u32 generic_args_count;
+    u32 resolved_callee_id; // interned name ID plus one; zero means unresolved
 }
 
 enum StmtKind {
@@ -163,6 +165,7 @@ impl AstPool {
         null_expr.inferred_type = TYPE_UNKNOWN;
         null_expr.generic_args_start = 0;
         null_expr.generic_args_count = 0;
+        null_expr.resolved_callee_id = 0;
         pool.exprs.push(move null_expr);
 
         // 0: Dummy null stmt. Statement IDs share the same 0-means-null
@@ -333,6 +336,7 @@ impl AstPool {
         expr.inferred_type = TYPE_UNKNOWN;
         expr.generic_args_start = 0;
         expr.generic_args_count = 0;
+        expr.resolved_callee_id = 0;
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
     }
@@ -384,6 +388,21 @@ impl AstPool {
         expr.inferred_type = TYPE_I64;
         expr.generic_args_start = 0;
         expr.generic_args_count = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_assert(AstPool* self, u32 condition_id, u32 message_id, bool enabled, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Assert;
+        expr.inner0 = condition_id;
+        expr.inner1 = message_id;
+        expr.aux = enabled ? (u32)1 : (u32)0;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        expr.resolved_callee_id = 0;
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
     }

@@ -531,6 +531,7 @@ bool ownership_place_is_call(Vec<SyntaxNode*>* leaves, i64 end) {
     }
     return false;
 }
+
 bool ownership_place_is_slice(Vec<SyntaxNode*>* leaves, i64 end) {
     if (end < 0 || end >= leaves.len()) { return false; }
     SyntaxNode* bracket = leaves.get(end).next_sibling;
@@ -543,6 +544,12 @@ bool ownership_place_is_slice(Vec<SyntaxNode*>* leaves, i64 end) {
         child = child.next_sibling;
     }
     return false;
+}
+
+bool ownership_place_has_index(Vec<SyntaxNode*>* leaves, i64 end) {
+    if (end < 0 || end >= leaves.len()) { return false; }
+    SyntaxNode* next = leaves.get(end).next_sibling;
+    return next != (SyntaxNode*)0 && next.kind == NodeKind.Bracket;
 }
 
 SyntaxNode* ownership_enclosing_block(SyntaxNode* node) {
@@ -715,7 +722,10 @@ void check_move_sequences(OwnershipAnalyzer* analyzer, SyntaxNode* function, Cfg
                         i64 source_end = end + 2;
                         String source = ownership_parse_place(&leaves, end + 2, &source_end);
                         bool non_consuming = ownership_place_is_call(&leaves, source_end)
-                            || ownership_place_is_slice(&leaves, source_end);
+                            || ownership_place_is_slice(&leaves, source_end)
+                            // The root type cannot tell whether an indexed element is Copy.
+                            // Do not infer a move from an indexed read until projections are typed.
+                            || ownership_place_has_index(&leaves, source_end);
                         if (non_consuming) {
                             analyzer.observe(source.to_str(), leaves.get(end + 2).span);
                         } else {

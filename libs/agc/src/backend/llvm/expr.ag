@@ -324,6 +324,7 @@ LLVMOpaqueValue* llvm_emit_enum_build(LlvmContext* ctx, str enum_name, str varia
             instance_name.drop();
             return (LLVMOpaqueValue*)0;
         }
+        arg_val = llvm_compat_value(ctx, arg_val, field_type);
         if ((!flattened_struct_payload && (arity != (i64)args_count || arg_index >= payload_types.len()))
             || field_ty == (LLVMOpaqueType*)0) {
             ctx.note_unresolved("enum-payload-layout", variant_name);
@@ -647,6 +648,9 @@ u32 llvm_expr_type(LlvmContext* ctx, u32 expr_id) {
     if (expr.kind == ExprKind.Cast) {
         return ctx.types.resolve_subst(expr.aux);
     }
+    if (expr.kind == ExprKind.Assert) {
+        return TYPE_VOID;
+    }
     if (expr.kind == ExprKind.Format) {
         return ctx.types.get_named("String");
     }
@@ -855,6 +859,12 @@ LLVMOpaqueValue* llvm_compat_value(LlvmContext* ctx, LLVMOpaqueValue* val, u32 t
             return LLVMBuildFPExt(ctx.builder, val, target_ty, "compat_fpext");
         }
         return LLVMBuildFPTrunc(ctx.builder, val, target_ty, "compat_fptrunc");
+    }
+    if (vk == (u32)8 && (tk == (u32)2 || tk == (u32)3)) {
+        return LLVMBuildSIToFP(ctx.builder, val, target_ty, "compat_sitofp");
+    }
+    if ((vk == (u32)2 || vk == (u32)3) && tk == (u32)8) {
+        return LLVMBuildFPToSI(ctx.builder, val, target_ty, "compat_fptosi");
     }
     if (vk == (u32)8 && tk == (u32)12) {
         return LLVMBuildIntToPtr(ctx.builder, val, target_ty, "compat_to_ptr");
@@ -1495,6 +1505,52 @@ LLVMOpaqueValue* llvm_emit_struct_lit(LlvmContext* ctx, AstExpr* expr) {
 LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
     if (expr_id == 0) { return (LLVMOpaqueValue*)0; }
     AstExpr* expr = ctx.pool.get_expr(expr_id);
+    if (expr.kind == ExprKind.Assert) {
+        if (expr.aux == 0) {
+            return (LLVMOpaqueValue*)0;
+        }
+        if (expr.span.file <= 0 || expr.span.file > ctx.source_paths.len()) {
+            ctx.note_unresolved("assert-source", "file path");
+            return (LLVMOpaqueValue*)0;
+        }
+        LLVMOpaqueValue* condition = llvm_emit_expr(ctx, expr.inner0);
+        LLVMOpaqueValue* failure = LLVMGetNamedFunction(ctx.module, "__silver_assert_failed");
+        if (condition == (LLVMOpaqueValue*)0 || failure == (LLVMOpaqueValue*)0) {
+            ctx.note_unresolved("assert-runtime", "__silver_assert_failed");
+            return (LLVMOpaqueValue*)0;
+        }
+        LLVMOpaqueBasicBlock* fail_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "assert.fail");
+        LLVMOpaqueBasicBlock* continue_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "assert.continue");
+        LLVMBuildCondBr(ctx.builder, condition, continue_bb, fail_bb);
+        LLVMPositionBuilderAtEnd(ctx.builder, fail_bb);
+        LLVMOpaqueValue* message = llvm_emit_expr(ctx, expr.inner1);
+        u32 message_type = llvm_expr_type(ctx, expr.inner1);
+        if (message != (LLVMOpaqueValue*)0 && message_type != TYPE_STR
+            && strcmp(ctx.types.type_name(message_type), "String") == 0) {
+            message = LLVMBuildExtractValue(ctx.builder, message, 0, "assert.message.data");
+        }
+        if (message == (LLVMOpaqueValue*)0) {
+            ctx.note_unresolved("assert-message", "expression");
+            LLVMBuildUnreachable(ctx.builder);
+            LLVMPositionBuilderAtEnd(ctx.builder, continue_bb);
+            return (LLVMOpaqueValue*)0;
+        }
+        String* source_path = ctx.source_paths.get_ptr(expr.span.file - 1);
+        LLVMOpaqueValue* file_value = LLVMBuildGlobalStringPtr(ctx.builder, source_path.to_str(), "assert.file");
+        LLVMOpaqueValue* line_value = LLVMConstInt(LLVMInt64TypeInContext(ctx.ctx),
+            (u64)expr.span.start_line, 0);
+        Vec<LLVMOpaqueValue*> args = Vec<LLVMOpaqueValue*>.with_capacity(3);
+        args.push(file_value);
+        args.push(line_value);
+        args.push(message);
+        LLVMOpaqueType* failure_type = LLVMGlobalGetValueType(failure);
+        llvm_prepare_call_args(ctx, failure_type, &args, "__silver_assert_failed");
+        LLVMBuildCall2(ctx.builder, failure_type, failure, args.data, 3, "");
+        args.drop();
+        LLVMBuildUnreachable(ctx.builder);
+        LLVMPositionBuilderAtEnd(ctx.builder, continue_bb);
+        return (LLVMOpaqueValue*)0;
+    }
     if (expr.kind == ExprKind.Format) {
         return llvm_emit_format(ctx, expr);
     }
@@ -2006,8 +2062,13 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             }
         }
         mono_ensure_child_layouts(ctx, scrut_ty_id, &ctx.generic_layout_ids);
-        LLVMOpaqueType* result_ty = llvm_lower_type(ctx.ctx, ctx.types, result_ty_id);
-        LLVMOpaqueValue* result_slot = LLVMBuildAlloca(ctx.builder, result_ty, "match_res");
+        bool void_match = result_ty_id == TYPE_VOID;
+        LLVMOpaqueType* result_ty = (LLVMOpaqueType*)0;
+        LLVMOpaqueValue* result_slot = (LLVMOpaqueValue*)0;
+        if (!void_match) {
+            result_ty = llvm_lower_type(ctx.ctx, ctx.types, result_ty_id);
+            result_slot = LLVMBuildAlloca(ctx.builder, result_ty, "match_res");
+        }
         LLVMOpaqueType* scrut_ty = llvm_lower_type(ctx.ctx, ctx.types, scrut_ty_id);
         LLVMOpaqueValue* scrut_slot = LLVMBuildAlloca(ctx.builder, scrut_ty, "match_scrut");
         LLVMBuildStore(ctx.builder, scrut_val, scrut_slot);
@@ -2174,6 +2235,8 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                         // terminate explicitly instead of recording a note.
                         if (match_body_diverges(ctx, body_stmt)) {
                             LLVMBuildUnreachable(ctx.builder);
+                        } else if (void_match) {
+                            LLVMBuildBr(ctx.builder, merge_bb);
                         } else {
                             ctx.note_unresolved("match-value", "expression");
                             ctx.pop_scope();
@@ -2203,7 +2266,11 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 // store and no edge to merge; the result slot is only read
                 // on paths that cannot reach here.
             } else if (arm_val != (LLVMOpaqueValue*)0) {
-                LLVMBuildStore(ctx.builder, arm_val, result_slot);
+                if (!void_match) {
+                    LLVMBuildStore(ctx.builder, arm_val, result_slot);
+                }
+                LLVMBuildBr(ctx.builder, merge_bb);
+            } else if (void_match) {
                 LLVMBuildBr(ctx.builder, merge_bb);
             } else {
                 ctx.note_unresolved("match-value", "expression");
@@ -2216,6 +2283,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         }
         LLVMBuildBr(ctx.builder, merge_bb);
         LLVMPositionBuilderAtEnd(ctx.builder, merge_bb);
+        if (void_match) { return (LLVMOpaqueValue*)0; }
         return LLVMBuildLoad2(ctx.builder, result_ty, result_slot, "match_val");
     }
 
@@ -2254,6 +2322,8 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 }
                 fn_val = mono_ensure_free_function(ctx, callee_base.to_str(), &generic_ids, expr.aux);
                 generic_ids.drop();
+            } else if (expr.resolved_callee_id != 0) {
+                fn_val = LLVMGetNamedFunction(ctx.module, ctx.names.get(expr.resolved_callee_id - 1));
             } else {
                 fn_val = LLVMGetNamedFunction(ctx.module, callee_base.to_str());
             }
@@ -2264,7 +2334,10 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         }
         if (fn_val == (LLVMOpaqueValue*)0) {
             if (callee.kind == ExprKind.Var) {
-                ctx.note_unresolved("function", ctx.names.get(callee.aux));
+                str unresolved_name = expr.resolved_callee_id != 0
+                    ? ctx.names.get(expr.resolved_callee_id - 1)
+                    : ctx.names.get(callee.aux);
+                ctx.note_unresolved("function", unresolved_name);
             }
             return (LLVMOpaqueValue*)0;
         }
@@ -2351,7 +2424,19 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             return LLVMBuildIntToPtr(ctx.builder, val, to_llvm_type, "inttoptr");
         }
         if (v_kind == (u32)8 && t_kind == (u32)8) {
-            return LLVMBuildIntCast(ctx.builder, val, to_llvm_type, "intcast");
+            u32 from_type = llvm_expr_type(ctx, expr.inner0);
+            u32 from_width = LLVMGetIntTypeWidth(from_llvm_type);
+            u32 to_width = LLVMGetIntTypeWidth(to_llvm_type);
+            if (from_width == to_width) {
+                return val;
+            }
+            if (from_width > to_width) {
+                return LLVMBuildTrunc(ctx.builder, val, to_llvm_type, "intcast_trunc");
+            }
+            if (llvm_type_is_signed(ctx.types, from_type)) {
+                return LLVMBuildSExt(ctx.builder, val, to_llvm_type, "intcast_sext");
+            }
+            return LLVMBuildZExt(ctx.builder, val, to_llvm_type, "intcast_zext");
         }
         if ((v_kind == (u32)2 || v_kind == (u32)3) && (t_kind == (u32)2 || t_kind == (u32)3)) {
             if (t_kind == (u32)3) {
@@ -2452,13 +2537,15 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             elem_type = TYPE_I64;
         }
         LLVMOpaqueType* elem_ty = llvm_lower_type(ctx.ctx, ctx.types, elem_type);
-        u32 count = expr.aux;
-        LLVMOpaqueType* arr_ty = LLVMArrayType(elem_ty, count);
+        u32 element_count = expr.aux;
+        u32 array_count = entry.kind == TypeKind.Array ? (u32)entry.count : element_count;
+        LLVMOpaqueType* arr_ty = LLVMArrayType(elem_ty, array_count);
         LLVMOpaqueValue* slot = LLVMBuildAlloca(ctx.builder, arr_ty, "arr_lit");
+        LLVMBuildStore(ctx.builder, LLVMConstNull(arr_ty), slot);
         LLVMOpaqueValue* base = LLVMBuildBitCast(ctx.builder, slot, LLVMPointerTypeInContext(ctx.ctx, (u32)0), "arr_lit_ptr");
         u32 elems_start = expr.inner1;
         i64 i = 0;
-        while (i < (i64)count) {
+        while (i < (i64)element_count) {
             u32 elem_id = ctx.pool.args.get((i64)elems_start + 1 + i);
             LLVMOpaqueValue* elem_val = llvm_emit_expr(ctx, elem_id);
             if (elem_val == (LLVMOpaqueValue*)0) {

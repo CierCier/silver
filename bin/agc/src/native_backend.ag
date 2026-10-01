@@ -274,7 +274,50 @@ void native_destroy_units(Vec<NodePool>* pools, Vec<TokenStream>* streams) {
     streams.drop();
 }
 
-SyntaxNode* native_load_unit(str path, Vec<NodePool>* pools, Vec<TokenStream>* streams) {
+void native_set_source_file_node(SyntaxNode* node, u32 file_id) {
+    if (node == (SyntaxNode*)0) { return; }
+    node.span.file = (i64)file_id;
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        native_set_source_file_node(child, file_id);
+        child = child.next_sibling;
+    }
+}
+
+void native_set_source_file(SyntaxNode* node, u32 file_id) {
+    SyntaxNode* cursor = node;
+    while (cursor != (SyntaxNode*)0) {
+        native_set_source_file_node(cursor, file_id);
+        cursor = cursor.next_sibling;
+    }
+}
+
+bool native_node_uses_assert(SyntaxNode* node) {
+    if (node == (SyntaxNode*)0) { return false; }
+    if (node.kind == NodeKind.Token && node.token_kind == TokenKind.At
+        && node.next_sibling != (SyntaxNode*)0
+        && node.next_sibling.kind == NodeKind.Token
+        && strcmp(node.next_sibling.text, "assert") == 0) {
+        return true;
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (native_node_uses_assert(child)) { return true; }
+        child = child.next_sibling;
+    }
+    return false;
+}
+
+bool native_tree_uses_assert(SyntaxNode* node) {
+    SyntaxNode* cursor = node;
+    while (cursor != (SyntaxNode*)0) {
+        if (native_node_uses_assert(cursor)) { return true; }
+        cursor = cursor.next_sibling;
+    }
+    return false;
+}
+
+SyntaxNode* native_load_unit(str path, u32 file_id, Vec<NodePool>* pools, Vec<TokenStream>* streams) {
     Result<String, Error> loaded = String.from_file(path);
     if (loaded.is_err()) {
         return (SyntaxNode*)0;
@@ -293,6 +336,7 @@ SyntaxNode* native_load_unit(str path, Vec<NodePool>* pools, Vec<TokenStream>* s
         unit_pool.destroy();
         return (SyntaxNode*)0;
     }
+    native_set_source_file(unit_tree.root, file_id);
     pools.push(move unit_pool);
     streams.push(move stream);
     return unit_tree.root;
@@ -525,6 +569,9 @@ void native_queue_imports(SyntaxNode* unit, str owner, str root_dir, CfgSet* cfg
                           Vec<String>* includes, Vec<String>* visited, Vec<String>* pending) {
     Vec<String> names = Vec<String>.new();
     cfg_collect_import_names(unit, cfg, &names);
+    if (native_tree_uses_assert(unit)) {
+        names.push(String.from_str("std.mem.memory"));
+    }
     i64 i = 0;
     while (i < names.len()) {
         String* name = names.get_ptr(i);
@@ -544,10 +591,13 @@ void native_queue_imports(SyntaxNode* unit, str owner, str root_dir, CfgSet* cfg
 // backend compiles real multi-file programs. Returns false when the program
 // needs the bridge (binary artifacts, unloadable units, resolution failures).
 bool native_load_closure(str source_path, SyntaxTree* tree, CfgSet* cfg,
-                         Vec<String>* includes, Vec<NodePool>* pools, Vec<TokenStream>* streams) {
+                         Vec<String>* includes, Vec<String>* source_paths,
+                         Vec<NodePool>* pools, Vec<TokenStream>* streams) {
     String root_dir = module_root(source_path);
     Vec<String> visited = Vec<String>.new();
     Vec<String> pending = Vec<String>.new();
+    source_paths.push(String.from_str(source_path));
+    native_set_source_file(tree.root, 1);
     visited.push(String.from_str(source_path));
     native_queue_imports(tree.root, source_path, root_dir.to_str(), cfg, includes, &visited, &pending);
 
@@ -580,13 +630,15 @@ bool native_load_closure(str source_path, SyntaxTree* tree, CfgSet* cfg,
             pending.drop();
             return false;
         }
-        SyntaxNode* unit = native_load_unit(file.to_str(), pools, streams);
+        u32 file_id = (u32)source_paths.len() + (u32)1;
+        SyntaxNode* unit = native_load_unit(file.to_str(), file_id, pools, streams);
         if (unit == (SyntaxNode*)0) {
             root_dir.drop();
             visited.drop();
             pending.drop();
             return false;
         }
+        source_paths.push(String.from_str(file.to_str()));
         native_queue_imports(unit, file.to_str(), root_dir.to_str(), cfg, includes, &visited, &pending);
         native_merge_unit(tree.root, unit);
     }
@@ -795,8 +847,10 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
 
     Vec<NodePool> pools = Vec<NodePool>.new();
     Vec<TokenStream> streams = Vec<TokenStream>.new();
-    if (!native_load_closure(source_path, &tree, &cfg, &includes, &pools, &streams)) {
+    Vec<String> source_paths = Vec<String>.new();
+    if (!native_load_closure(source_path, &tree, &cfg, &includes, &source_paths, &pools, &streams)) {
         native_destroy_units(&pools, &streams);
+        source_paths.drop();
         includes.drop();
         pool.destroy();
         output.drop();
@@ -805,6 +859,7 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
     native_expand_cfg_blocks(tree.root, &cfg, &pool);
     if (!native_fold_cfg_exprs(tree.root, &cfg)) {
         native_destroy_units(&pools, &streams);
+        source_paths.drop();
         includes.drop();
         pool.destroy();
         output.drop();
@@ -812,6 +867,7 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
     }
     if (!native_tree_supported(tree.root)) {
         native_destroy_units(&pools, &streams);
+        source_paths.drop();
         includes.drop();
         pool.destroy();
         output.drop();
@@ -821,6 +877,12 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
     SymbolTable symbols = SymbolTable.new();
     collect_symbols(&symbols, &diagnostics, &tree, &cfg);
     resolve_names(&symbols, &diagnostics, &tree, source_path, &cfg, &includes);
+    if (diagnostics.is_empty()) {
+        check_borrows(&tree, &symbols, &diagnostics, &cfg);
+    }
+    if (diagnostics.is_empty()) {
+        check_ownership(&tree, &diagnostics, &cfg);
+    }
     includes.drop();
 
     if (!diagnostics.is_empty()) {
@@ -832,6 +894,7 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
             i += 1;
         }
         native_destroy_units(&pools, &streams);
+        source_paths.drop();
         pool.destroy();
         output.drop();
         *result = 2;
@@ -845,7 +908,9 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
     AstPool ast_pool = AstPool.new();
 
     LlvmGenerator gen = LlvmGenerator.new("silver_native");
-    bool compile_ok = gen.compile(&tree, &ast_pool, &symbols.types, &symbols.names, &symbols);
+    bool compile_ok = gen.compile(&tree, &ast_pool, &symbols.types, &symbols.names, &symbols,
+                                  &source_paths, cfg.contains("debug"));
+    source_paths.drop();
 
     Optional<String> dump_ir = var("SILVER_DUMP_IR");
     if (dump_ir.is_some()) {

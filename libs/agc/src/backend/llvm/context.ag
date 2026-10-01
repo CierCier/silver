@@ -60,6 +60,8 @@ struct LlvmContext {
     Interner* names;
     AstPool* pool;
     SyntaxNode* root;
+    Vec<String>* source_paths;
+    bool debug_mode;
     LLVMOpaqueValue* current_fn;
     u32 current_return_type;
     u32 expected_type_id;
@@ -79,7 +81,8 @@ struct LlvmContext {
 impl LlvmContext {
     LlvmContext new(LLVMOpaqueContext* ctx, LLVMTargetDataRef* target_data,
                     LLVMOpaqueModule* module, LLVMOpaqueBuilder* builder,
-                    TypeTable* types, Interner* names, AstPool* pool, SyntaxNode* root) {
+                    TypeTable* types, Interner* names, AstPool* pool, SyntaxNode* root,
+                    Vec<String>* source_paths, bool debug_mode) {
         LlvmContext c;
         c.ctx = ctx;
         c.target_data = target_data;
@@ -89,6 +92,8 @@ impl LlvmContext {
         c.names = names;
         c.pool = pool;
         c.root = root;
+        c.source_paths = source_paths;
+        c.debug_mode = debug_mode;
         c.current_fn = (LLVMOpaqueValue*)0;
         c.current_return_type = TYPE_VOID;
         c.expected_type_id = 0;

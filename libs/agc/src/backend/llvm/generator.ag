@@ -57,6 +57,14 @@ bool llvm_item_is_generic_fn(SyntaxNode* fn_item) {
     return false;
 }
 
+String llvm_free_function_symbol(TypeTable* types, SyntaxNode* root, SyntaxNode* function) {
+    SyntaxNode* id_node = function_identifier(function);
+    if (!typecheck_has_free_overloads(types, root, id_node.text)) {
+        return String.from_str(id_node.text);
+    }
+    return typecheck_overloaded_free_symbol(types, id_node.text, function);
+}
+
 Vec<LLVMOpaqueType*> llvm_param_types(LLVMOpaqueContext* ctx, TypeTable* types, Vec<Binding>* params, str self_type_name) {
     Vec<LLVMOpaqueType*> param_types = Vec<LLVMOpaqueType*>.new();
     i64 p = 0;
@@ -207,6 +215,7 @@ bool llvm_define_method_instance(LlvmContext* ctx, TypeTable* types, Interner* n
     params.drop();
     ExprLowerer lowerer = ExprLowerer.new(pool, types, names);
     lowerer.unit_root = ctx.root;
+    lowerer.debug_mode = ctx.debug_mode;
     Vec<u32> stmt_ids = Vec<u32>.new();
     lowerer.lower_block(body_node, &stmt_ids);
     i64 s = 0;
@@ -284,6 +293,7 @@ bool llvm_define_free_function_instance(LlvmContext* ctx, TypeTable* types,
     params.drop();
     ExprLowerer lowerer = ExprLowerer.new(pool, types, names);
     lowerer.unit_root = ctx.root;
+    lowerer.debug_mode = ctx.debug_mode;
     Vec<u32> statements = Vec<u32>.new();
     lowerer.lower_block(body_node, &statements);
     i = 0;
@@ -512,9 +522,10 @@ impl LlvmGenerator {
     }
 
     bool compile(LlvmGenerator* self, SyntaxTree* tree, AstPool* pool,
-                 TypeTable* types, Interner* names, SymbolTable* symbols) {
+                 TypeTable* types, Interner* names, SymbolTable* symbols,
+                 Vec<String>* source_paths, bool debug_mode) {
         LlvmContext ctx = LlvmContext.new(self.ctx, self.target_data, self.module, self.builder,
-                                          types, names, pool, tree.root);
+                                          types, names, pool, tree.root, source_paths, debug_mode);
         if (self.target_data == (LLVMTargetDataRef*)0) {
             ctx.note_unresolved("target-layout", "native target initialization failed");
             self.unresolved_calls = ctx.unresolved_calls;
@@ -673,18 +684,19 @@ impl LlvmGenerator {
                 }
                 SyntaxNode* id_node = function_identifier(item);
                 if (id_node != (SyntaxNode*)0) {
-                    str fn_name = id_node.text;
+                    String fn_name = llvm_free_function_symbol(types, tree.root, item);
                     u32 ret_type_id = function_return_type_id(types, item);
                     LLVMOpaqueType* ret_llvm_type = llvm_lower_type(self.ctx, types, ret_type_id);
                     Vec<Binding> params = Vec<Binding>.new();
                     collect_parameter_bindings(binding_function_parameters(item), &params);
                     Vec<LLVMOpaqueType*> param_types = llvm_param_types(self.ctx, types, &params, (str)0);
                     LLVMOpaqueType* fn_type = LLVMFunctionType(ret_llvm_type, param_types.data, (u32)param_types.len(), 0);
-                    if (LLVMGetNamedFunction(self.module, fn_name) == (LLVMOpaqueValue*)0) {
-                        LLVMAddFunction(self.module, fn_name, fn_type);
+                    if (LLVMGetNamedFunction(self.module, fn_name.to_str()) == (LLVMOpaqueValue*)0) {
+                        LLVMAddFunction(self.module, fn_name.to_str(), fn_type);
                     }
                     param_types.drop();
                     params.drop();
+                    fn_name.drop();
                 }
             } else if (item.kind == NodeKind.Impl) {
                 if (llvm_item_is_generic_impl(item)) {
@@ -1149,9 +1161,10 @@ impl LlvmGenerator {
                         item = item.next_sibling;
                         continue;
                     }
-                    str fn_name = id_node.text;
-                    LLVMOpaqueValue* fn_val = LLVMGetNamedFunction(self.module, fn_name);
+                    String fn_name = llvm_free_function_symbol(types, tree.root, item);
+                    LLVMOpaqueValue* fn_val = LLVMGetNamedFunction(self.module, fn_name.to_str());
                     if (fn_val == (LLVMOpaqueValue*)0 || LLVMCountBasicBlocks(fn_val) > 0) {
+                        fn_name.drop();
                         item = item.next_sibling;
                         continue;
                     }
@@ -1192,10 +1205,11 @@ impl LlvmGenerator {
 
                     ExprLowerer lowerer = ExprLowerer.new(pool, types, names);
                     lowerer.unit_root = tree.root;
+                    lowerer.debug_mode = ctx.debug_mode;
                     Vec<u32> stmt_ids = Vec<u32>.new();
                     lowerer.lower_block(body, &stmt_ids);
                     if (lowerer.unsupported) {
-                        ctx.note_unresolved("unsupported", fn_name);
+                        ctx.note_unresolved("unsupported", fn_name.to_str());
                         stmt_ids.drop();
                     } else {
                         // Single lowering: infer types on these same IDs before
@@ -1228,6 +1242,7 @@ impl LlvmGenerator {
                         }
                     }
                     ctx.pop_scope();
+                    fn_name.drop();
                 }
             } else if (item.kind == NodeKind.Impl) {
                 if (llvm_item_is_generic_impl(item)) {
@@ -1348,6 +1363,7 @@ impl LlvmGenerator {
 
                                         ExprLowerer lowerer = ExprLowerer.new(pool, types, names);
                                         lowerer.unit_root = tree.root;
+                                        lowerer.debug_mode = ctx.debug_mode;
                                         Vec<u32> stmt_ids = Vec<u32>.new();
                                         lowerer.lower_block(body_node, &stmt_ids);
                                         i64 s = 0;

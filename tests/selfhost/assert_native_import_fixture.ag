@@ -1,0 +1,7 @@
+import std.sys.entry;
+import assert_native_helper;
+
+i32 main() {
+    assert_imported();
+    return 0;
+}

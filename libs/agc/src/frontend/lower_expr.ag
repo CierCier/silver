@@ -71,6 +71,7 @@ struct ExprLowerer {
     Interner* names;
     SyntaxNode* unit_root;
     bool unsupported;
+    bool debug_mode;
 }
 
 impl ExprLowerer {
@@ -81,6 +82,7 @@ impl ExprLowerer {
         lowerer.names = names;
         lowerer.unit_root = (SyntaxNode*)0;
         lowerer.unsupported = false;
+        lowerer.debug_mode = true;
         return move lowerer;
     }
 
@@ -129,30 +131,7 @@ impl ExprLowerer {
         if (node.kind == NodeKind.Bracket) {
             // Array literal: [a, b, c]. Indexing always has a base expression
             // before the bracket, so a leading bracket is a literal.
-            Vec<u32> temp_elems = Vec<u32>.new();
-            SyntaxNode* elem = node.first_child;
-            while (elem != (SyntaxNode*)0) {
-                if (elem.kind != NodeKind.Token || elem.token_kind != TokenKind.Comma) {
-                    SyntaxNode* next_elem = (SyntaxNode*)0;
-                    u32 elem_id = self.lower_sequence_until_comma(elem, &next_elem);
-                    if (elem_id != 0) {
-                        temp_elems.push(elem_id);
-                    }
-                    elem = next_elem;
-                    continue;
-                }
-                elem = elem.next_sibling;
-            }
-            u32 elems_start = (u32)self.pool.args.len();
-            u32 elem_count = (u32)temp_elems.len();
-            self.pool.args.push(elem_count);
-            i64 ei = 0;
-            while (ei < temp_elems.len()) {
-                self.pool.args.push(temp_elems.get(ei));
-                ei += 1;
-            }
-            temp_elems.drop();
-            return self.pool.add_array_lit(elems_start, elem_count, node.span);
+            return self.lower_array_initializer(node);
         }
 
         return 0;
@@ -672,6 +651,42 @@ impl ExprLowerer {
         return self.pool.add_format(format_id, args_start, (u32)placeholders, name_node.span);
     }
 
+    u32 lower_assert(ExprLowerer* self, SyntaxNode* at_node, SyntaxNode* name_node,
+                     SyntaxNode** next_out) {
+        SyntaxNode* paren = name_node.next_sibling;
+        *next_out = (SyntaxNode*)0;
+        if (paren == (SyntaxNode*)0 || paren.kind != NodeKind.Parenthesized
+            || paren.first_child == (SyntaxNode*)0) {
+            self.unsupported = true;
+            return 0;
+        }
+        SyntaxNode* after_condition = (SyntaxNode*)0;
+        u32 condition_id = self.lower_sequence_until_comma(paren.first_child, &after_condition);
+        if (condition_id == 0) {
+            self.unsupported = true;
+            return 0;
+        }
+        u32 message_id = 0;
+        if (after_condition != (SyntaxNode*)0) {
+            SyntaxNode* message_start = after_condition.next_sibling;
+            if (message_start == (SyntaxNode*)0) {
+                self.unsupported = true;
+                return 0;
+            }
+            SyntaxNode* after_message = (SyntaxNode*)0;
+            message_id = self.lower_sequence_until_comma(message_start, &after_message);
+            if (message_id == 0 || after_message != (SyntaxNode*)0) {
+                self.unsupported = true;
+                return 0;
+            }
+        } else {
+            message_id = self.pool.add_literal_val(TYPE_STR,
+                self.names.intern("\"assertion failed\""), at_node.span);
+        }
+        *next_out = paren.next_sibling;
+        return self.pool.add_assert(condition_id, message_id, self.debug_mode, at_node.span);
+    }
+
     u32 lower_struct_lit(ExprLowerer* self, str struct_name, SyntaxNode* block) {
         // Lower `{ .field = value, ... }` designators into name/expr pairs.
         // Caller verified the struct exists. Malformed entries fail closed.
@@ -715,6 +730,36 @@ impl ExprLowerer {
         pairs.drop();
         u32 name_id = self.names.intern(struct_name);
         return self.pool.add_struct_lit(name_id, fields_start, field_count, block.span);
+    }
+
+    u32 lower_array_initializer(ExprLowerer* self, SyntaxNode* initializer) {
+        Vec<u32> elements = Vec<u32>.new();
+        SyntaxNode* element = initializer.first_child;
+        while (element != (SyntaxNode*)0) {
+            if (element.kind == NodeKind.Token && element.token_kind == TokenKind.Comma) {
+                element = element.next_sibling;
+                continue;
+            }
+            SyntaxNode* next_element = (SyntaxNode*)0;
+            u32 element_id = self.lower_sequence_until_comma(element, &next_element);
+            if (element_id == 0) {
+                elements.drop();
+                self.unsupported = true;
+                return 0;
+            }
+            elements.push(element_id);
+            element = next_element;
+        }
+        u32 elements_start = (u32)self.pool.args.len();
+        u32 element_count = (u32)elements.len();
+        self.pool.args.push(element_count);
+        i64 i = 0;
+        while (i < elements.len()) {
+            self.pool.args.push(elements.get(i));
+            i += 1;
+        }
+        elements.drop();
+        return self.pool.add_array_lit(elements_start, element_count, initializer.span);
     }
 
     bool lower_is_generic_function(ExprLowerer* self, str name) {
@@ -792,6 +837,11 @@ impl ExprLowerer {
         // Builtin @format(fmt, ...): lower a literal format string and its values.
         if (node.kind == NodeKind.Token && node.token_kind == TokenKind.At) {
             SyntaxNode* name_node = node.next_sibling;
+            if (name_node != (SyntaxNode*)0 && name_node.kind == NodeKind.Token
+                && name_node.token_kind == TokenKind.Identifier
+                && strcmp(name_node.text, "assert") == 0) {
+                return self.lower_assert(node, name_node, next_out);
+            }
             if (name_node != (SyntaxNode*)0 && name_node.kind == NodeKind.Token
                 && name_node.token_kind == TokenKind.Identifier
                 && strcmp(name_node.text, "format") == 0) {
@@ -1432,7 +1482,17 @@ impl ExprLowerer {
                         type_id = type_id_from_text(self.types, type_text.to_str());
                         type_text.drop();
                     }
-                    u32 init_id = self.lower_sequence(assign_node.next_sibling, end);
+                    SyntaxNode* init_start = assign_node.next_sibling;
+                    TypeEntry* value_type = self.types.get(type_id);
+                    bool array_initializer = value_type.kind == TypeKind.Array
+                        && init_start != (SyntaxNode*)0 && init_start.kind == NodeKind.Block
+                        && init_start.next_sibling == end;
+                    u32 init_id = 0;
+                    if (array_initializer) {
+                        init_id = self.lower_array_initializer(init_start);
+                    } else {
+                        init_id = self.lower_sequence(init_start, end);
+                    }
                     u32 id = self.pool.add_stmt_let(var_name, type_id, init_id, start.span);
                     stmt_ids.push(id);
                     return;

@@ -94,7 +94,13 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
             LLVMOpaqueValue* init_val = llvm_emit_expr(ctx, stmt.inner1);
             ctx.expected_type_id = saved_expected;
             if (init_val != (LLVMOpaqueValue*)0) {
-                init_val = llvm_compat_value(ctx, init_val, type_id);
+                AstExpr* initializer = ctx.pool.get_expr(stmt.inner1);
+                TypeEntry* declared = ctx.types.get(type_id);
+                if (initializer.kind == ExprKind.ArrayLit && declared.kind == TypeKind.Array) {
+                    init_val = LLVMBuildLoad2(ctx.builder, llvm_ty, init_val, "array_init_value");
+                } else {
+                    init_val = llvm_compat_value(ctx, init_val, type_id);
+                }
                 LLVMBuildStore(ctx.builder, init_val, ptr);
             } else {
                 ctx.note_unresolved("local-initializer", var_name);
