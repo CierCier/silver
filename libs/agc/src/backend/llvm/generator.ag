@@ -630,6 +630,14 @@ impl LlvmGenerator {
                                     }
                                     u32 ret_type_id = type_id_from_text(types, ret_str.to_str());
                                     ret_str.drop();
+                                    // Keep unsupported signatures undeclared. An actual
+                                    // call fails closed through method resolution.
+                                    if (!mono_type_is_concrete(self.ctx, types, ret_type_id, 0)) {
+                                        mangled.drop();
+                                        cursor = body_node.next_sibling;
+                                        continue;
+                                    }
+                                    mono_ensure_child_layouts(&ctx, ret_type_id, &ctx.generic_layout_ids);
                                     LLVMOpaqueType* ret_llvm_type = llvm_lower_type(self.ctx, types, ret_type_id);
 
                                     Vec<Binding> params = Vec<Binding>.new();

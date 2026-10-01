@@ -208,6 +208,13 @@ u64 llvm_enum_field_offset(TypeTable* types, SyntaxNode* root, str enum_name,
                            str variant_name, i64 field_index) {
     Vec<u32> payloads = Vec<u32>.new();
     llvm_enum_payload_types(types, root, enum_name, variant_name, &payloads);
+    u64 offset = llvm_payload_field_offset(types, root, &payloads, field_index);
+    payloads.drop();
+    return offset;
+}
+
+u64 llvm_payload_field_offset(TypeTable* types, SyntaxNode* root,
+                              Vec<u32>* payloads, i64 field_index) {
     u64 offset = 0;
     i64 i = 0;
     while (i < field_index && i < payloads.len()) {
@@ -218,7 +225,6 @@ u64 llvm_enum_field_offset(TypeTable* types, SyntaxNode* root, str enum_name,
     if (i < payloads.len()) {
         offset = llvm_align_up(offset, llvm_abi_align(types, root, payloads.get(i), 0));
     }
-    payloads.drop();
     return offset;
 }
 
@@ -374,16 +380,9 @@ LLVMOpaqueType* llvm_lower_type(LLVMOpaqueContext* ctx, TypeTable* types, u32 ty
     }
     if (entry.kind == TypeKind.Named) {
         str base_name = types.names.get(entry.name_id);
-        if (entry.count > 0) {
-            if (strcmp(base_name, "Result") == 0 || strcmp(base_name, "Optional") == 0) {
-                LLVMOpaqueType* base_ty = LLVMGetTypeByName2(ctx, base_name);
-                if (base_ty != (LLVMOpaqueType*)0) {
-                    return base_ty;
-                }
-            }
-        }
+        // Generic enums need distinct layouts for different payload sizes.
         str name = entry.count > 0 ? llvm_concrete_type_name(types, type_id)
-                                  : base_name;
+                                   : base_name;
         LLVMOpaqueType* named_ty = LLVMGetTypeByName2(ctx, name);
         if (named_ty != (LLVMOpaqueType*)0) {
             return named_ty;

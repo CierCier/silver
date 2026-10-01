@@ -41,11 +41,18 @@ backend migration, stage1 keeps `lex`, `parse`, and `check` local and delegates
 native build/run/package/cache operations to the verified stage0 backend
 through an explicit compatibility seam. The `SILVER_STAGE1_NATIVE=1` path
 tests direct, package, and run invocations plus cfg selection, raw argc/argv,
-literal comptime casts, and fail-closed fallback for `defer`; it is a smoke
+literal comptime casts, generic `Vec<String>` methods and chained receivers,
+formatting, concrete generic enum payload round trips, and fail-closed fallback
+for `defer`; it is a smoke
 backend, not the complete native compiler. Inputs outside the backend's current
 scope fail closed to the explicit stage0 bridge instead of producing
 unverified output. Stage0 root-object caching is enabled, and source imports
 inlined during lowering are included in dependency keys.
+
+`check_native_enum_layout.py` disables the stage0 bridge and checks small and
+String payloads in `Optional` and both `Result` variants. It also checks empty
+variants, assignment, and aligned fields in a generic two-field enum. It does
+not prove native ownership cleanup or a working stage2 compiler.
 
 The frontend gate compares token kind, raw text, byte span, and line/column
 span. `check_hir.py` covers the retained HIR's first typed declaration,

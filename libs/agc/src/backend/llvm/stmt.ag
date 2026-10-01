@@ -25,7 +25,11 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
         LLVMOpaqueType* ret_ty = llvm_lower_type(ctx.ctx, ctx.types, ctx.current_return_type);
         LLVMOpaqueValue* val = (LLVMOpaqueValue*)0;
         if (stmt.inner0 != 0) {
+            // Generic enum constructors need the concrete return type.
+            u32 saved_expected = ctx.expected_type_id;
+            ctx.expected_type_id = ctx.current_return_type;
             val = llvm_emit_expr(ctx, stmt.inner0);
+            ctx.expected_type_id = saved_expected;
         }
         if (val == (LLVMOpaqueValue*)0) {
             ctx.note_unresolved("return-value", "expression");
@@ -82,7 +86,13 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
         ctx.add_local(var_name_id, ptr, type_id, true);
 
         if (stmt.inner1 != 0) {
+            // Generic enum constructors need the declared local type.
+            u32 saved_expected = ctx.expected_type_id;
+            if (type_id != TYPE_UNKNOWN && type_id != 0) {
+                ctx.expected_type_id = type_id;
+            }
             LLVMOpaqueValue* init_val = llvm_emit_expr(ctx, stmt.inner1);
+            ctx.expected_type_id = saved_expected;
             if (init_val != (LLVMOpaqueValue*)0) {
                 init_val = llvm_compat_value(ctx, init_val, type_id);
                 LLVMBuildStore(ctx.builder, init_val, ptr);
@@ -95,7 +105,10 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
 
     if (stmt.kind == StmtKind.Assign) {
         LLVMOpaqueValue* target_ptr = llvm_emit_lvalue(ctx, stmt.inner0);
+        u32 saved_expected = ctx.expected_type_id;
+        ctx.expected_type_id = llvm_lvalue_type(ctx, stmt.inner0);
         LLVMOpaqueValue* val = llvm_emit_expr(ctx, stmt.inner1);
+        ctx.expected_type_id = saved_expected;
         if (target_ptr == (LLVMOpaqueValue*)0) {
             ctx.note_unresolved("assignment-target", "expression");
         }

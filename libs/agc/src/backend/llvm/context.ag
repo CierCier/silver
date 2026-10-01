@@ -59,6 +59,7 @@ struct LlvmContext {
     SyntaxNode* root;
     LLVMOpaqueValue* current_fn;
     u32 current_return_type;
+    u32 expected_type_id;
     Vec<LlvmLocal> locals;
     Vec<LlvmStructDef> struct_defs;
     Vec<i64> scope_markers;
@@ -85,6 +86,7 @@ impl LlvmContext {
         c.root = root;
         c.current_fn = (LLVMOpaqueValue*)0;
         c.current_return_type = TYPE_VOID;
+        c.expected_type_id = 0;
         c.locals = Vec<LlvmLocal>.new();
         c.struct_defs = Vec<LlvmStructDef>.new();
         c.scope_markers = Vec<i64>.new();

@@ -197,16 +197,39 @@ LLVMOpaqueValue* llvm_emit_asm(LlvmContext* ctx, u32 expr_id) {
 
 LLVMOpaqueValue* llvm_emit_enum_build(LlvmContext* ctx, str enum_name, str variant_name,
                                       u32 args_start, u32 args_count) {
-    // Layouts are registered under the base enum name; instantiations share it.
     String base = String.new();
     i64 i = 0;
     while (enum_name[i] != (u8)0 && enum_name[i] != (u8)60) {
         base.push(enum_name[i]);
         i += 1;
     }
-    LLVMOpaqueType* enum_ty = LLVMGetTypeByName2(ctx.ctx, base.to_str());
+    // Returns and initializers supply the concrete enum payload layout.
+    u32 instance_id = 0;
+    if (enum_name[i] == (u8)60) {
+        instance_id = ctx.types.resolve_subst(type_id_from_text(ctx.types, enum_name));
+        if (!mono_type_is_concrete(ctx.ctx, ctx.types, instance_id, 0)) {
+            instance_id = 0;
+        }
+    }
+    u32 exp = ctx.expected_type_id;
+    if (instance_id == 0 && exp != 0 && exp != TYPE_UNKNOWN) {
+        TypeEntry* exp_entry = ctx.types.get(ctx.types.resolve_subst(exp));
+        if (exp_entry.kind == TypeKind.Named && exp_entry.count > 0
+            && strcmp(ctx.types.names.get(exp_entry.name_id), base.to_str()) == 0) {
+            instance_id = ctx.types.resolve_subst(exp);
+        }
+    }
+    String instance_name = String.new();
+    str llvm_name = base.to_str();
+    if (instance_id != 0) {
+        mono_ensure_type_layout(ctx, instance_id, &ctx.generic_layout_ids);
+        instance_name.push_str(llvm_concrete_type_name(ctx.types, instance_id));
+        llvm_name = instance_name.to_str();
+    }
+    LLVMOpaqueType* enum_ty = LLVMGetTypeByName2(ctx.ctx, llvm_name);
     if (enum_ty == (LLVMOpaqueType*)0) {
         base.drop();
+        instance_name.drop();
         return (LLVMOpaqueValue*)0;
     }
     i64 tag = 0;
@@ -214,30 +237,32 @@ LLVMOpaqueValue* llvm_emit_enum_build(LlvmContext* ctx, str enum_name, str varia
     if (!enum_variant_info(ctx.root, base.to_str(), variant_name, &tag, &arity)
         || (arity != (i64)args_count && !(arity == 1 && args_count > 1))) {
         base.drop();
+        instance_name.drop();
         return (LLVMOpaqueValue*)0;
     }
     LLVMOpaqueType* byte_ty = LLVMInt8TypeInContext(ctx.ctx);
     LLVMOpaqueType* ptr_ty = LLVMPointerTypeInContext(ctx.ctx, (u32)0);
     LLVMOpaqueValue* slot = LLVMBuildAlloca(ctx.builder, enum_ty, "enum_tmp");
+    LLVMBuildStore(ctx.builder, LLVMConstNull(enum_ty), slot);
     LLVMOpaqueValue* bytes = LLVMBuildBitCast(ctx.builder, slot, ptr_ty, "enum_bytes");
     LLVMOpaqueValue* tag_ptr = LLVMBuildStructGEP2(ctx.builder, enum_ty, slot, 0, "enum_tag");
     LLVMBuildStore(ctx.builder, LLVMConstInt(LLVMInt16TypeInContext(ctx.ctx), (u64)tag, 0), tag_ptr);
-    u64 total = llvm_enum_size(ctx.types, ctx.root, base.to_str());
-    u64 data_size = 0;
-    if (total > (u64)2) {
-        data_size = total - (u64)2;
-    }
-    i64 zero_index = 0;
-    while ((u64)zero_index < data_size) {
-        // Payload bytes live after the 2-byte tag; zeroing from 0 would wipe
-        // the tag stored above (every constructed enum would read as variant 0).
-        LLVMOpaqueValue* byte_index = LLVMConstInt(LLVMInt64TypeInContext(ctx.ctx), (u64)(zero_index + 2), 0);
-        LLVMOpaqueValue* byte_ptr = LLVMBuildGEP2(ctx.builder, byte_ty, bytes, &byte_index, 1, "enum_zero");
-        LLVMBuildStore(ctx.builder, LLVMConstInt(byte_ty, 0, 0), byte_ptr);
-        zero_index += 1;
-    }
+    Vec<u32> raw_payloads = Vec<u32>.new();
+    llvm_enum_payload_types(ctx.types, ctx.root, base.to_str(), variant_name, &raw_payloads);
     Vec<u32> payload_types = Vec<u32>.new();
-    llvm_enum_payload_types(ctx.types, ctx.root, base.to_str(), variant_name, &payload_types);
+    i64 resolved_index = 0;
+    while (resolved_index < raw_payloads.len()) {
+        u32 raw = raw_payloads.get(resolved_index);
+        u32 resolved = (instance_id != 0)
+            ? mono_resolve_struct_field_type(ctx, instance_id, raw)
+            : ctx.types.resolve_subst(raw);
+        payload_types.push(resolved);
+        if (resolved != TYPE_UNKNOWN && resolved != 0) {
+            mono_ensure_child_layouts(ctx, resolved, &ctx.generic_layout_ids);
+        }
+        resolved_index += 1;
+    }
+    raw_payloads.drop();
     i64 arg_index = 0;
     u64 cur_payload_offset = 0;
     while (arg_index < (i64)args_count) {
@@ -263,16 +288,20 @@ LLVMOpaqueValue* llvm_emit_enum_build(LlvmContext* ctx, str enum_name, str varia
             }
         }
         if (arg_val == (LLVMOpaqueValue*)0) {
+            u32 saved_expected = ctx.expected_type_id;
+            ctx.expected_type_id = field_type;
             arg_val = llvm_emit_expr(ctx, arg_id);
+            ctx.expected_type_id = saved_expected;
         }
         if (arg_val == (LLVMOpaqueValue*)0) {
             payload_types.drop();
             base.drop();
+            instance_name.drop();
             return (LLVMOpaqueValue*)0;
         }
         u64 field_offset = 0;
         if (arity == (i64)args_count && arg_index < payload_types.len()) {
-            field_offset = 2 + llvm_enum_field_offset(ctx.types, ctx.root, base.to_str(), variant_name, arg_index);
+            field_offset = 2 + llvm_payload_field_offset(ctx.types, ctx.root, &payload_types, arg_index);
         } else {
             cur_payload_offset = llvm_align_up(cur_payload_offset, 8);
             field_offset = 2 + cur_payload_offset;
@@ -286,6 +315,7 @@ LLVMOpaqueValue* llvm_emit_enum_build(LlvmContext* ctx, str enum_name, str varia
     }
     payload_types.drop();
     base.drop();
+    instance_name.drop();
     // Materialize the value so construction composes with loads and returns.
     return LLVMBuildLoad2(ctx.builder, enum_ty, slot, "enum_val");
 }
@@ -2000,6 +2030,10 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                     base_index += 1;
                 }
                 LLVMOpaqueType* enum_ty = LLVMGetTypeByName2(ctx.ctx, base_name.to_str());
+                TypeEntry* scrut_entry = ctx.types.get(scrut_ty_id);
+                if (scrut_entry.kind == TypeKind.Named && scrut_entry.count > 0) {
+                    enum_ty = scrut_ty;
+                }
                 base_name.drop();
                 if (enum_ty != (LLVMOpaqueType*)0) {
                     LLVMOpaqueValue* tag_ptr = LLVMBuildStructGEP2(ctx.builder, enum_ty, scrut_slot, 0, "match_tag");
@@ -2039,15 +2073,17 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 }
                 Vec<u32> payload_types = Vec<u32>.new();
                 llvm_enum_payload_types(ctx.types, ctx.root, arm_enum, variant, &payload_types);
+                i64 payload_index = 0;
+                while (payload_index < payload_types.len()) {
+                    u32 resolved = mono_resolve_struct_field_type(ctx, scrut_ty_id, payload_types.get(payload_index));
+                    payload_types.set(payload_index, resolved);
+                    payload_index += 1;
+                }
                 i64 binding_index = 0;
                 while (binding_index < (i64)arm.bindings_count && binding_index < payload_types.len()) {
                     u32 binding_name = ctx.pool.arm_bindings.get((i64)arm.bindings_start + binding_index);
-                    // Resolve template payload types (T, E) against the
-                    // concrete scrutinee instance (Result<i64, Error>);
-                    // raw params lower to placeholder widths and break
-                    // downstream field uses.
-                    u32 field_type = mono_resolve_struct_field_type(ctx, scrut_ty_id, payload_types.get(binding_index));
-                    u64 field_offset = 2 + llvm_enum_field_offset(ctx.types, ctx.root, arm_enum, variant, binding_index);
+                    u32 field_type = payload_types.get(binding_index);
+                    u64 field_offset = 2 + llvm_payload_field_offset(ctx.types, ctx.root, &payload_types, binding_index);
                     LLVMOpaqueType* field_ty = llvm_lower_type(ctx.ctx, ctx.types, field_type);
                     LLVMOpaqueType* ptr_ty = LLVMPointerTypeInContext(ctx.ctx, (u32)0);
                     LLVMOpaqueValue* slot_bytes = LLVMBuildBitCast(ctx.builder, scrut_slot, ptr_ty, "match_scrut_bytes");
