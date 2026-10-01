@@ -12,6 +12,7 @@ import frontend.typecheck_expr;
 import frontend.types;
 import backend.llvm.context;
 import backend.llvm.mono;
+import backend.llvm.stmt;
 import backend.llvm.types;
 
 i64 parse_int_literal(str text) {
@@ -454,7 +455,30 @@ u32 llvm_expr_type(LlvmContext* ctx, u32 expr_id) {
     if (expr_id == 0) { return TYPE_UNKNOWN; }
     AstExpr* expr = ctx.pool.get_expr(expr_id);
     if (expr.inferred_type != TYPE_UNKNOWN && expr.inferred_type != 0) {
-        return ctx.types.resolve_subst(expr.inferred_type);
+        u32 inferred = ctx.types.resolve_subst(expr.inferred_type);
+        if (expr.kind == ExprKind.Var) {
+            // Frontend match bindings record raw template types (E), which
+            // resolve_subst cannot expand outside substitution frames. Such
+            // a stale unbound parameter must not shadow the concrete
+            // binding local (ErrInfo): the local is the allocation.
+            TypeEntry* inf_entry = ctx.types.get(inferred);
+            bool unbound = inf_entry.kind == TypeKind.TypeParam;
+            if (!unbound && inf_entry.kind == TypeKind.Named && inf_entry.count == 0) {
+                str iname = ctx.types.names.get(inf_entry.name_id);
+                if (find_item_by_name(ctx.root, NodeKind.Struct, iname) == (SyntaxNode*)0
+                    && find_enum_item(ctx.root, iname) == (SyntaxNode*)0
+                    && find_item_by_name(ctx.root, NodeKind.TypeAlias, iname) == (SyntaxNode*)0) {
+                    unbound = true;
+                }
+            }
+            if (unbound) {
+                LlvmLocal* loc = ctx.find_local(expr.aux);
+                if (loc != (LlvmLocal*)0) {
+                    return ctx.types.resolve_subst(loc.type_id);
+                }
+            }
+        }
+        return inferred;
     }
     if (expr.kind == ExprKind.Var) {
         LlvmLocal* loc = ctx.find_local(expr.aux);
@@ -565,6 +589,14 @@ u32 llvm_expr_type(LlvmContext* ctx, u32 expr_id) {
     if (expr.kind == ExprKind.Hash) {
         return TYPE_I64;
     }
+    if (expr.kind == ExprKind.StructLit) {
+        str struct_name = ctx.names.get(expr.inner0);
+        u32 named_id = ctx.types.get_named(struct_name);
+        if (named_id != TYPE_UNKNOWN && named_id != 0) {
+            return ctx.types.resolve_subst(named_id);
+        }
+        return TYPE_UNKNOWN;
+    }
     return TYPE_UNKNOWN;
 }
 
@@ -593,6 +625,9 @@ LLVMOpaqueValue* llvm_emit_lvalue(LlvmContext* ctx, u32 expr_id) {
         }
         str struct_name = ctx.types.type_name(target_type);
         LlvmStructDef* def = ctx.find_struct_by_str(struct_name);
+        if (def == (LlvmStructDef*)0) {
+            return (LLVMOpaqueValue*)0;
+        }
         if (def != (LlvmStructDef*)0) {
             i32 field_idx = ctx.find_field_index(def, expr.aux);
             if (field_idx >= 0) {
@@ -1262,8 +1297,32 @@ LLVMOpaqueValue* llvm_emit_format(LlvmContext* ctx, AstExpr* expr) {
     return LLVMBuildLoad2(ctx.builder, string_ty, string_slot, "format.result");
 }
 
-LLVMOpaqueValue* llvm_emit_hash(LlvmContext* ctx, AstExpr* expr) {
-    // Mirrors stage0 hash_codegen: str -> hash_str(s); String ->
+    // True when a match arm body ends in a call that never returns, so an
+    // unterminated body still diverges (Optional::unwrap's none arm ends in
+    // __optional_abort). Anything else unterminated fails closed.
+    bool match_body_diverges(LlvmContext* ctx, AstStmt* body_stmt) {
+        if (body_stmt.kind != StmtKind.Block || body_stmt.aux == 0) {
+            return false;
+        }
+        u32 last_id = ctx.pool.block_stmts.get((i64)body_stmt.inner0 + (i64)body_stmt.aux - 1);
+        AstStmt* last = ctx.pool.get_stmt(last_id);
+        if (last.kind != StmtKind.Expr) {
+            return false;
+        }
+        AstExpr* last_expr = ctx.pool.get_expr(last.inner0);
+        if (last_expr.kind != ExprKind.Call) {
+            return false;
+        }
+        AstExpr* callee = ctx.pool.get_expr(last_expr.inner0);
+        if (callee.kind != ExprKind.Var) {
+            return false;
+        }
+        str name = ctx.names.get(callee.aux);
+        return strcmp(name, "abort") == 0 || strcmp(name, "__optional_abort") == 0
+            || strcmp(name, "__result_abort") == 0;
+    }
+
+LLVMOpaqueValue* llvm_emit_hash(LlvmContext* ctx, AstExpr* expr) {    // Mirrors stage0 hash_codegen: str -> hash_str(s); String ->
     // hash_bytes(data, len); anything else -> hash_bytes(&val, abi_size).
     // hash_str/hash_bytes come from std.hash; missing import fails closed.
     u32 arg_id = expr.inner0;
@@ -1334,6 +1393,41 @@ LLVMOpaqueValue* llvm_emit_hash(LlvmContext* ctx, AstExpr* expr) {
     return res;
 }
 
+LLVMOpaqueValue* llvm_emit_struct_lit(LlvmContext* ctx, AstExpr* expr) {
+    // Runtime struct literal: alloca + zero-init (missing fields stay zero,
+    // mirroring global initializers) + per-field stores, then load.
+    str struct_name = ctx.names.get(expr.inner0);
+    LlvmStructDef* def = ctx.find_struct_by_str(struct_name);
+    if (def == (LlvmStructDef*)0) {
+        ctx.note_unresolved("struct-lit", struct_name);
+        return (LLVMOpaqueValue*)0;
+    }
+    u32 named_id = ctx.types.get_named(struct_name);
+    LLVMOpaqueValue* slot = LLVMBuildAlloca(ctx.builder, def.llvm_type, "struct.lit");
+    LLVMBuildStore(ctx.builder, LLVMConstNull(def.llvm_type), slot);
+    i64 fi = 0;
+    while (fi < (i64)expr.aux) {
+        u32 field_name_id = ctx.pool.args.get((i64)expr.inner1 + fi * 2);
+        u32 val_id = ctx.pool.args.get((i64)expr.inner1 + fi * 2 + 1);
+        i32 field_idx = ctx.find_field_index(def, field_name_id);
+        if (field_idx < 0) {
+            ctx.note_unresolved("struct-lit-field", ctx.names.get(field_name_id));
+            return (LLVMOpaqueValue*)0;
+        }
+        u32 raw_field_type = ctx.find_field_type(def, field_name_id);
+        u32 field_type = mono_resolve_struct_field_type(ctx, named_id, raw_field_type);
+        LLVMOpaqueValue* val = llvm_emit_expr(ctx, val_id);
+        if (val == (LLVMOpaqueValue*)0) {
+            return (LLVMOpaqueValue*)0;
+        }
+        val = llvm_compat_value(ctx, val, field_type);
+        LLVMOpaqueValue* field_ptr = LLVMBuildStructGEP2(ctx.builder, def.llvm_type, slot, (u32)field_idx, "struct.lit.field");
+        LLVMBuildStore(ctx.builder, val, field_ptr);
+        fi += 1;
+    }
+    return LLVMBuildLoad2(ctx.builder, def.llvm_type, slot, "struct.lit.val");
+}
+
 LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
     if (expr_id == 0) { return (LLVMOpaqueValue*)0; }
     AstExpr* expr = ctx.pool.get_expr(expr_id);
@@ -1342,6 +1436,9 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
     }
     if (expr.kind == ExprKind.Hash) {
         return llvm_emit_hash(ctx, expr);
+    }
+    if (expr.kind == ExprKind.StructLit) {
+        return llvm_emit_struct_lit(ctx, expr);
     }
 
 
@@ -1782,6 +1879,16 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 probe += 1;
             }
         }
+        if (result_ty_id == TYPE_UNKNOWN) {
+            // Arms whose values are diverging blocks (return inside) carry
+            // no usable type. Fall back to the enclosing function return
+            // type: diverging arms never store to the slot, so it is only
+            // read on paths that cannot happen.
+            if (ctx.current_return_type != TYPE_UNKNOWN && ctx.current_return_type != TYPE_VOID
+                && ctx.current_return_type != 0) {
+                result_ty_id = ctx.current_return_type;
+            }
+        }
         if (result_ty_id == TYPE_UNKNOWN) { return (LLVMOpaqueValue*)0; }
         if (scrut_ty_id == TYPE_UNKNOWN) {
             i64 enum_probe = 0;
@@ -1903,7 +2010,11 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 i64 binding_index = 0;
                 while (binding_index < (i64)arm.bindings_count && binding_index < payload_types.len()) {
                     u32 binding_name = ctx.pool.arm_bindings.get((i64)arm.bindings_start + binding_index);
-                    u32 field_type = payload_types.get(binding_index);
+                    // Resolve template payload types (T, E) against the
+                    // concrete scrutinee instance (Result<i64, Error>);
+                    // raw params lower to placeholder widths and break
+                    // downstream field uses.
+                    u32 field_type = mono_resolve_struct_field_type(ctx, scrut_ty_id, payload_types.get(binding_index));
                     u64 field_offset = 2 + llvm_enum_field_offset(ctx.types, ctx.root, arm_enum, variant, binding_index);
                     LLVMOpaqueType* field_ty = llvm_lower_type(ctx.ctx, ctx.types, field_type);
                     LLVMOpaqueType* ptr_ty = LLVMPointerTypeInContext(ctx.ctx, (u32)0);
@@ -1933,7 +2044,40 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             AstExpr* arm_val_expr = ctx.pool.get_expr(arm.value_id);
             u32 arm_val_ty = arm_val_expr.inferred_type;
             LLVMOpaqueValue* arm_val = (LLVMOpaqueValue*)0;
-            if (arm_val_ty != result_ty_id && arm_val_expr.kind == ExprKind.Literal) {
+            if (arm.body_stmt_id != 0) {
+                // Block arm body: run its statements inline (diverging arms
+                // return from the function here). No value is produced.
+                AstStmt* body_stmt = ctx.pool.get_stmt(arm.body_stmt_id);
+                if (body_stmt.kind == StmtKind.Block) {
+                    u32 start = body_stmt.inner0;
+                    u32 count = body_stmt.aux;
+                    ctx.push_scope();
+                    i64 bi = 0;
+                    while (bi < (i64)count) {
+                        llvm_emit_stmt(ctx, ctx.pool.block_stmts.get((i64)start + bi));
+                        if (ctx.is_terminated()) { break; }
+                        bi += 1;
+                    }
+                    ctx.pop_scope();
+                    if (!ctx.is_terminated()) {
+                        // Unterminated bodies with no value fail closed,
+                        // unless the body ends in a known-diverging call
+                        // (abort): then control can never reach merge, so
+                        // terminate explicitly instead of recording a note.
+                        if (match_body_diverges(ctx, body_stmt)) {
+                            LLVMBuildUnreachable(ctx.builder);
+                        } else {
+                            ctx.note_unresolved("match-value", "expression");
+                            ctx.pop_scope();
+                            return (LLVMOpaqueValue*)0;
+                        }
+                    }
+                } else {
+                    ctx.note_unresolved("match-body", "expression");
+                    ctx.pop_scope();
+                    return (LLVMOpaqueValue*)0;
+                }
+            } else if (arm_val_ty != result_ty_id && arm_val_expr.kind == ExprKind.Literal) {
                 str arm_text = ctx.names.get(arm_val_expr.inner0);
                 if (type_is_integer(result_ty_id) && type_is_integer(arm_val_ty)) {
                     arm_val = LLVMConstInt(result_ty, (u64)parse_int_literal(arm_text), 0);
@@ -1946,10 +2090,18 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             if (arm_val == (LLVMOpaqueValue*)0) {
                 arm_val = llvm_emit_expr(ctx, arm.value_id);
             }
-            if (arm_val != (LLVMOpaqueValue*)0) {
+            if (ctx.is_terminated()) {
+                // Diverging arm value (explicit return inside): nothing to
+                // store and no edge to merge; the result slot is only read
+                // on paths that cannot reach here.
+            } else if (arm_val != (LLVMOpaqueValue*)0) {
                 LLVMBuildStore(ctx.builder, arm_val, result_slot);
+                LLVMBuildBr(ctx.builder, merge_bb);
+            } else {
+                ctx.note_unresolved("match-value", "expression");
+                ctx.pop_scope();
+                return (LLVMOpaqueValue*)0;
             }
-            LLVMBuildBr(ctx.builder, merge_bb);
             ctx.pop_scope();
             LLVMPositionBuilderAtEnd(ctx.builder, next_bb);
             arm_index += 1;
@@ -2130,6 +2282,9 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         }
 
         LLVMOpaqueValue* field_ptr = llvm_emit_lvalue(ctx, expr_id);
+        if (field_ptr == (LLVMOpaqueValue*)0) {
+            return (LLVMOpaqueValue*)0;
+        }
         if (field_ptr != (LLVMOpaqueValue*)0) {
             u32 field_type = llvm_expr_type(ctx, expr_id);
             if (field_type == TYPE_UNKNOWN || field_type == 0) {
@@ -2355,6 +2510,28 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 if (!rx_is_ptr) { rx_type = ctx.types.get_pointer(rx_type, true); }
                 LLVMOpaqueType* rx_llvm_ty = llvm_lower_type(ctx.ctx, ctx.types, rx_type);
                 rx_val = LLVMConstNull(rx_llvm_ty);
+            }
+            // Normalize to what the callee actually takes: by-value self
+            // (struct/array/int) needs the loaded value, but locals and
+            // rvalue spills hand us the address. Without this the call
+            // silently degrades to null in llvm_prepare_call_args
+            // (Optional::unwrap received zeroinitializer and took None).
+            LLVMOpaqueType* callee_ty = LLVMGlobalGetValueType(fn_val);
+            u32 callee_param_count = LLVMCountParamTypes(callee_ty);
+            if (callee_param_count > 0 && rx_val != (LLVMOpaqueValue*)0) {
+                Vec<LLVMOpaqueType*> callee_params = Vec<LLVMOpaqueType*>.new();
+                u32 ppi = 0;
+                while (ppi < callee_param_count) {
+                    callee_params.push((LLVMOpaqueType*)0);
+                    ppi += 1;
+                }
+                LLVMGetParamTypes(callee_ty, callee_params.get_ptr(0));
+                LLVMOpaqueType* self_ty = callee_params.get(0);
+                callee_params.drop();
+                if (LLVMGetTypeKind(self_ty) != (u32)12
+                    && LLVMGetTypeKind(LLVMTypeOf(rx_val)) == (u32)12) {
+                    rx_val = LLVMBuildLoad2(ctx.builder, self_ty, rx_val, "method_rx_val");
+                }
             }
             call_args.push(rx_val);
         }

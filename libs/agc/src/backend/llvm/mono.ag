@@ -461,10 +461,61 @@ void mono_ensure_type_layout(LlvmContext* ctx, u32 type_id, Vec<u32>* layout_ids
     SyntaxNode* item = find_item_by_name(ctx.root, NodeKind.Struct, base);
     if (item == (SyntaxNode*)0) {
         item = find_item_by_name(ctx.root, NodeKind.Enum, base);
-        if (item != (SyntaxNode*)0) {
+        if (item == (SyntaxNode*)0) {
+            ctx.note_unresolved("monomorph-layout", base);
             return;
         }
-        ctx.note_unresolved("monomorph-layout", base);
+        // Generic enum instance: lay out {i16 tag, [N x i8]} with
+        // substituted payload sizes. Without this the instance type stays
+        // opaque and every use fails verify (unsized type).
+        Vec<u32> param_ids = Vec<u32>.new();
+        mono_collect_struct_parameters(ctx.root, base, ctx.types, &param_ids);
+        if (param_ids.len() != arg_count) {
+            ctx.note_unresolved("monomorph-layout", base);
+            param_ids.drop();
+            return;
+        }
+        i64 pi = 0;
+        while (pi < arg_count) {
+            ctx.types.push_subst(param_ids.get(pi), ctx.types.type_args.get(args_start + (u32)pi));
+            pi += 1;
+        }
+        param_ids.drop();
+        Vec<SyntaxNode*> variant_names = Vec<SyntaxNode*>.new();
+        Vec<i64> variant_tags = Vec<i64>.new();
+        Vec<i64> variant_arities = Vec<i64>.new();
+        enum_each_variant(item, &variant_names, &variant_tags, &variant_arities);
+        u64 data_size = 0;
+        i64 vi = 0;
+        while (vi < variant_names.len()) {
+            Vec<u32> payloads = Vec<u32>.new();
+            llvm_enum_payload_types(ctx.types, ctx.root, base, variant_names.get(vi).text, &payloads);
+            u64 offset = 0;
+            i64 pj = 0;
+            while (pj < payloads.len()) {
+                u32 field_type = ctx.types.resolve_subst(payloads.get(pj));
+                offset = llvm_align_up(offset, llvm_abi_align(ctx.types, ctx.root, field_type, 0)) + llvm_abi_size(ctx.types, ctx.root, field_type, 0);
+                pj += 1;
+            }
+            payloads.drop();
+            if (offset > data_size) {
+                data_size = offset;
+            }
+            vi += 1;
+        }
+        variant_names.drop();
+        variant_tags.drop();
+        variant_arities.drop();
+        LLVMOpaqueType* tag_ty = LLVMInt16TypeInContext(ctx.ctx);
+        LLVMOpaqueType* llvm_type = llvm_lower_type(ctx.ctx, ctx.types, type_id);
+        Vec<LLVMOpaqueType*> enum_body = Vec<LLVMOpaqueType*>.new();
+        enum_body.push(tag_ty);
+        if (data_size > 0) {
+            enum_body.push(LLVMArrayType(LLVMInt8TypeInContext(ctx.ctx), (u32)data_size));
+        }
+        LLVMStructSetBody(llvm_type, enum_body.data, (u32)enum_body.len(), 0);
+        enum_body.drop();
+        ctx.types.pop_subst(arg_count);
         return;
     }
     Vec<u32> param_ids = Vec<u32>.new();

@@ -247,6 +247,15 @@ impl ExprLowerer {
                     bind = bind.next_sibling;
                     continue;
                 }
+                // A `move` binding transfers ownership out of the matched
+                // value. The stage1 backend emits no drops yet, so there is
+                // no source drop flag to clear: move binds exactly like a
+                // borrow (plain copy into the binding slot). Accept the
+                // token and bind the following identifier.
+                if (bind.kind == NodeKind.Token && bind.token_kind == TokenKind.Move) {
+                    bind = bind.next_sibling;
+                    continue;
+                }
                 if (bind.kind != NodeKind.Token || bind.token_kind != TokenKind.Identifier) {
                     self.unsupported = true;
                     return 0;
@@ -335,9 +344,19 @@ impl ExprLowerer {
                 && !(value_end.kind == NodeKind.Token && value_end.token_kind == TokenKind.Comma)) {
                 value_end = value_end.next_sibling;
             }
-            u32 value_id = self.lower_sequence(colon.next_sibling, value_end);
+            u32 value_id = 0;
+            u32 body_stmt_id = 0;
+            SyntaxNode* value_node = colon.next_sibling;
+            if (value_node != (SyntaxNode*)0 && value_node.kind == NodeKind.Block
+                && value_node != value_end) {
+                // Block arm body: statements (typically diverging via
+                // return) instead of an expression value.
+                body_stmt_id = self.lower_block_stmt(value_node);
+            } else {
+                value_id = self.lower_sequence(colon.next_sibling, value_end);
+            }
             self.pool.add_match_arm(pattern_kind, 0, variant_id, bindings_start, bindings_count,
-                                    literal_id, guard_id, value_id, cursor.span);
+                                    literal_id, guard_id, value_id, body_stmt_id, cursor.span);
             arms_count += 1;
             cursor = value_end;
             if (cursor != (SyntaxNode*)0) {
@@ -651,6 +670,51 @@ impl ExprLowerer {
         u32 format_id = self.names.intern(format_node.text);
         *next_out = paren.next_sibling;
         return self.pool.add_format(format_id, args_start, (u32)placeholders, name_node.span);
+    }
+
+    u32 lower_struct_lit(ExprLowerer* self, str struct_name, SyntaxNode* block) {
+        // Lower `{ .field = value, ... }` designators into name/expr pairs.
+        // Caller verified the struct exists. Malformed entries fail closed.
+        Vec<u32> pairs = Vec<u32>.new();
+        SyntaxNode* cur = block.first_child;
+        while (cur != (SyntaxNode*)0) {
+            if (cur.kind == NodeKind.Token && cur.token_kind == TokenKind.Comma) {
+                cur = cur.next_sibling;
+                continue;
+            }
+            SyntaxNode* dot = cur;
+            SyntaxNode* name_node = dot.next_sibling;
+            SyntaxNode* eq = name_node != (SyntaxNode*)0 ? name_node.next_sibling : (SyntaxNode*)0;
+            if (dot.kind != NodeKind.Token || strcmp(dot.text, ".") != 0
+                || name_node == (SyntaxNode*)0 || name_node.kind != NodeKind.Token
+                || name_node.token_kind != TokenKind.Identifier
+                || eq == (SyntaxNode*)0 || eq.kind != NodeKind.Token
+                || (eq.token_kind != TokenKind.Assign && strcmp(eq.text, "=") != 0)) {
+                pairs.drop();
+                self.unsupported = true;
+                return 0;
+            }
+            SyntaxNode* after = (SyntaxNode*)0;
+            u32 val_id = self.lower_sequence_until_comma(eq.next_sibling, &after);
+            if (val_id == 0) {
+                pairs.drop();
+                self.unsupported = true;
+                return 0;
+            }
+            pairs.push(self.names.intern(name_node.text));
+            pairs.push(val_id);
+            cur = after;
+        }
+        u32 fields_start = (u32)self.pool.args.len();
+        u32 field_count = (u32)pairs.len() / (u32)2;
+        i64 pi = 0;
+        while (pi < pairs.len()) {
+            self.pool.args.push(pairs.get(pi));
+            pi += 1;
+        }
+        pairs.drop();
+        u32 name_id = self.names.intern(struct_name);
+        return self.pool.add_struct_lit(name_id, fields_start, field_count, block.span);
     }
 
     u32 lower_postfix(ExprLowerer* self, SyntaxNode* node, SyntaxNode** next_out) {
@@ -1034,6 +1098,26 @@ impl ExprLowerer {
                 expr = self.pool.add_index(expr, index_id, cursor.span);
                 cursor = cursor.next_sibling;
                 continue;
+            }
+
+            if (cursor.kind == NodeKind.Block) {
+                // Struct literal: TypeName { .field = value, ... }. Only
+                // when the base is a bare type name resolving to a struct
+                // item; anything else keeps today's behavior.
+                AstExpr* base = self.pool.get_expr(expr);
+                if (base.kind == ExprKind.Var && self.unit_root != (SyntaxNode*)0) {
+                    str base_name = self.names.get(base.aux);
+                    if (find_item_by_name(self.unit_root, NodeKind.Struct, base_name) != (SyntaxNode*)0) {
+                        u32 lit_id = self.lower_struct_lit(base_name, cursor);
+                        if (lit_id == 0) {
+                            *next_out = (SyntaxNode*)0;
+                            return 0;
+                        }
+                        expr = lit_id;
+                        cursor = cursor.next_sibling;
+                        continue;
+                    }
+                }
             }
 
             break;

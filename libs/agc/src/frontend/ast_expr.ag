@@ -24,6 +24,7 @@ enum ExprKind {
     ArrayLit;      // inner1 = elems_start, aux = elem_count (pool.args[start] = count, then ids)
     Format;        // inner0 = format string literal id, inner1 = args_start, aux = args_count
     Hash;          // inner0 = arg expr id (builtin @hash, always i64)
+    StructLit;     // inner0 = struct name id, inner1 = fields_start, aux = field count (pool.args: name,expr pairs)
 }
 
 struct AstExpr {
@@ -72,6 +73,7 @@ struct MatchArm {
     u32 literal_id;
     u32 guard_id;
     u32 value_id;
+    u32 body_stmt_id;
     Span span;
 }
 
@@ -143,6 +145,7 @@ impl AstPool {
         null_arm.literal_id = 0;
         null_arm.guard_id = 0;
         null_arm.value_id = 0;
+        null_arm.body_stmt_id = 0;
         null_arm.span = Span.synthetic();
         pool.arms.push(move null_arm);
 
@@ -239,7 +242,7 @@ impl AstPool {
 
     u32 add_match_arm(AstPool* self, MatchPatternKind pattern, u32 enum_name_id,
                       u32 variant_name_id, u32 bindings_start, u32 bindings_count,
-                      u32 literal_id, u32 guard_id, u32 value_id, Span span) {
+                      u32 literal_id, u32 guard_id, u32 value_id, u32 body_stmt_id, Span span) {
         MatchArm arm;
         arm.pattern = pattern;
         arm.enum_name_id = enum_name_id;
@@ -249,6 +252,7 @@ impl AstPool {
         arm.literal_id = literal_id;
         arm.guard_id = guard_id;
         arm.value_id = value_id;
+        arm.body_stmt_id = body_stmt_id;
         arm.span = span;
         self.arms.push(move arm);
         return (u32)(self.arms.len() - 1);
@@ -345,6 +349,17 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    u32 add_struct_lit(AstPool* self, u32 struct_name_id, u32 fields_start, u32 field_count, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.StructLit;
+        expr.inner0 = struct_name_id;
+        expr.inner1 = fields_start;
+        expr.aux = field_count;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
     u32 add_method_call(AstPool* self, u32 receiver, u32 method_name_id, u32 args_start, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.MethodCall;

@@ -193,6 +193,7 @@ extern "C" {
     LLVMOpaqueValue* LLVMBuildRetVoid(LLVMOpaqueBuilder* p0);
     LLVMOpaqueValue* LLVMBuildRet(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1);
     LLVMOpaqueValue* LLVMBuildBr(LLVMOpaqueBuilder* p0, LLVMOpaqueBasicBlock* p1);
+    LLVMOpaqueValue* LLVMBuildUnreachable(LLVMOpaqueBuilder* p0);
     LLVMOpaqueValue* LLVMBuildCondBr(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueBasicBlock* p2, LLVMOpaqueBasicBlock* p3);
     LLVMOpaqueValue* LLVMBuildAdd(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueValue* p2, i8* p3);
     LLVMOpaqueValue* LLVMBuildFAdd(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueValue* p2, i8* p3);
