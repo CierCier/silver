@@ -1533,9 +1533,21 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
 
         AstExpr* lexpr = ctx.pool.get_expr(expr.inner0);
         AstExpr* rexpr = ctx.pool.get_expr(expr.inner1);
-        str l_name = ctx.types.type_name(lexpr.inferred_type);
-        str r_name = ctx.types.type_name(rexpr.inferred_type);
-        bool is_str_cmp = (lexpr.inferred_type == TYPE_STR || rexpr.inferred_type == TYPE_STR
+        u32 l_id = lexpr.inferred_type;
+        u32 r_id = rexpr.inferred_type;
+        if (l_id == TYPE_UNKNOWN || l_id == 0) {
+            // Index/field operands often infer UNKNOWN (frontend Field
+            // inference is validation-only); resolve structurally so
+            // String-typed comparisons still route to strcmp below
+            // instead of emitting invalid struct icmp.
+            l_id = llvm_expr_type(ctx, expr.inner0);
+        }
+        if (r_id == TYPE_UNKNOWN || r_id == 0) {
+            r_id = llvm_expr_type(ctx, expr.inner1);
+        }
+        str l_name = ctx.types.type_name(l_id);
+        str r_name = ctx.types.type_name(r_id);
+        bool is_str_cmp = (l_id == TYPE_STR || r_id == TYPE_STR
                            || strcmp(l_name, "String") == 0 || strcmp(r_name, "String") == 0);
         if (is_str_cmp && (op == (u32)TokenKind.Equal || op == (u32)TokenKind.NotEqual)) {
             if (LLVMGetTypeKind(LLVMTypeOf(lhs)) == (u32)10) {
