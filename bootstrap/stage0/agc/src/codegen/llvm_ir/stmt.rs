@@ -454,6 +454,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
                 let cond_bb = self.context.append_basic_block(function, "forin.cond");
                 let body_bb = self.context.append_basic_block(function, "forin.body");
+                let incr_bb = self.context.append_basic_block(function, "forin.incr");
                 let end_bb = self.context.append_basic_block(function, "forin.end");
 
                 self.builder
@@ -498,11 +499,23 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .build_conditional_branch(is_slt, body_bb, end_bb)
                     .map_err(|e| CodegenError::new(format!("failed for-in branch: {e}")))?;
 
-                self.loop_stack.push((end_bb, cond_bb));
+                self.loop_stack.push((end_bb, incr_bb));
                 self.loop_defers_base.push(self.defers.len());
                 self.builder.position_at_end(body_bb);
                 self.generate_block(body)?;
                 self.loop_defers_base.pop();
+
+                let body_terminated = self
+                    .builder
+                    .get_insert_block()
+                    .and_then(|bb| bb.get_terminator())
+                    .is_some();
+                if !body_terminated {
+                    self.builder
+                        .build_unconditional_branch(incr_bb)
+                        .map_err(|e| CodegenError::new(format!("failed to advance for-in: {e}")))?;
+                }
+                self.builder.position_at_end(incr_bb);
 
                 let i_val2_raw = self
                     .builder
@@ -521,16 +534,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .build_store(i_ptr, next)
                     .map_err(|e| CodegenError::new(format!("failed to store incr: {e}")))?;
 
-                let body_terminated = self
-                    .builder
-                    .get_insert_block()
-                    .and_then(|bb| bb.get_terminator())
-                    .is_some();
-                if !body_terminated {
-                    self.builder
-                        .build_unconditional_branch(cond_bb)
-                        .map_err(|e| CodegenError::new(format!("failed to loop for-in: {e}")))?;
-                }
+                self.builder
+                    .build_unconditional_branch(cond_bb)
+                    .map_err(|e| CodegenError::new(format!("failed to loop for-in: {e}")))?;
                 self.loop_stack.pop();
 
                 self.builder.position_at_end(end_bb);
