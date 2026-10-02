@@ -1200,6 +1200,29 @@ impl TypeChecker {
         }
     }
 
+    /// If `block` is a lone `if` expression statement (an `else if` arm),
+    /// return its parts so the checker can walk the chain iteratively
+    /// instead of nesting one frame per arm.
+    fn as_else_if_arm(
+        else_branch: &Option<ast::Block>,
+    ) -> Option<(&Box<ast::Expression>, &ast::Block, &Option<ast::Block>)> {
+        let block = else_branch.as_ref()?;
+        if block.statements.len() != 1 {
+            return None;
+        }
+        if let ast::StatementKind::Expression(next) = &block.statements[0].kind {
+            if let ast::ExpressionKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } = next.kind.as_ref()
+            {
+                return Some((condition, then_branch, else_branch));
+            }
+        }
+        None
+    }
+
     pub(crate) fn check_expr(&mut self, expr: &ast::Expression, expected: Option<&Type>) -> Type {
         if self.expression_depth >= MAX_TYPE_CHECK_DEPTH {
             self.error(
@@ -1855,16 +1878,37 @@ impl TypeChecker {
                 then_branch,
                 else_branch,
             } => {
-                let cond_ty = self.check_expr(condition, None);
-                if !is_bool(&cond_ty) {
-                    self.error(
-                        format!("if condition must be bool, found {}", cond_ty),
-                        condition.span,
-                    );
-                }
-                self.check_block(then_branch);
-                if let Some(block) = else_branch {
-                    self.check_block(block);
+                // Check else-if chains iteratively. Statement-level chains
+                // nest If expressions (Silver has no If statement), and
+                // holding one check_expr frame per arm exhausts the 32-deep
+                // budget on legitimate long dispatch chains. Conditions and
+                // bodies are still checked at the usual depth; only the
+                // chaining itself no longer nests.
+                let mut cond = condition;
+                let mut then_b = then_branch;
+                let mut else_b = else_branch;
+                loop {
+                    let cond_ty = self.check_expr(cond, None);
+                    if !is_bool(&cond_ty) {
+                        self.error(
+                            format!("if condition must be bool, found {}", cond_ty),
+                            cond.span,
+                        );
+                    }
+                    self.check_block(then_b);
+                    match Self::as_else_if_arm(else_b) {
+                        Some((next_cond, next_then, next_else)) => {
+                            cond = next_cond;
+                            then_b = next_then;
+                            else_b = next_else;
+                        }
+                        None => {
+                            if let Some(block) = else_b {
+                                self.check_block(block);
+                            }
+                            break;
+                        }
+                    }
                 }
                 Type::Unit
             }
