@@ -16,12 +16,12 @@ while still lacking type checking, native lowering, or runtime parity.
 
 - [x] Stage1 is built by stage0 from the Silver workspace and has its own CLI.
 - [x] Stage1-owned `lex`, `parse`, and `check` commands run locally.
-- [x] Stage0 verification passes: 592 Cargo tests; complete fresh-cache integration run has 224 passed, 0 failed, and 2 skipped. The range-continue regression passes after repairing the bootstrap increment target.
+- [x] Stage0 verification passes: 592 Cargo tests; complete fresh-cache integration run has 224 passed, 0 failed, and 2 skipped. The range-continue regression passes after repairing the bootstrap increment target. Stage0 now checks `else-if` chains iteratively instead of nesting one frame per arm, so long Silver dispatch chains no longer exhaust its 32-deep budget.
 - [x] Expanded frontend checks compare 373 source files for token/span and AST/CST-span behavior, and 377 files for semantic acceptance status; current evidence reports zero mismatches and zero deferred-boundary skips.
 - [x] Eleven focused semantic regression fixtures pass, including generic type and borrow-escape cases.
 - [~] Selected direct-native stage1 gates pass with stage0 disabled: smoke builds/runs, formatting, linker behavior, assertions, raw argv, enum/layout and target ABI cases, generic free calls, cache behavior, and the selected stage2 gate.
 - [~] Stage1 builds stage2 with stage0 unavailable; stage2 handles help/version, lex/parse/check on input over 128 tokens, and builds/runs six programs covering control flow, generic calls, function pointers, and aggregate layouts. This is selected stage2 evidence, not full stage2 or stage3 parity.
-- [ ] The latest full integration corpus with direct native stage1 and stage0 unavailable has 108 passed, 116 failed, and 2 skipped out of 226. `condvar_test` and `rwlock_test` timed out. Channels now fail payload assertions because unwrap-or lowering is missing. Native parity is incomplete.
+- [ ] The latest full integration corpus with direct native stage1 and stage0 unavailable has 111 passed, 113 failed, and 2 skipped out of 226. `condvar_test` and `rwlock_test` timed out. `unwrap_or_test`, `channel_test`, and `channel_bounded_test` now pass after unwrap-or lowering landed. Native parity is incomplete.
 - [ ] Full stage0-independent package/build/run/test behavior, complete stage2 coverage, stage3 self-compilation, native ownership/leak parity, and full runtime parity are not established.
 
 Primary evidence: [self-host gate definitions](tests/selfhost/README.md) and
@@ -85,7 +85,7 @@ run and should be refreshed after material changes.
 | Feature | Current status | Remaining work |
 | --- | --- | --- |
 | Arithmetic, comparison, logical, bitwise, unary, and cast expressions | [~] | Selected native paths pass. Full operator/type combinations and error behavior remain incomplete. |
-| Unwrap-or expressions (`value ? fallback`) | [ ] | Stage1 has no unwrap-or AST/lowering. `Optional<i32>.some(10) ? -1` produces 655361 instead of 10; `.unwrap()` returns 10. Add Optional, Result, and pointer handling with lazy fallback evaluation. This is the diagnosed channel payload failure. |
+| Unwrap-or expressions (`value ? fallback`) | [~] | Native `UnwrapOr` AST/lowering covers Optional, Result, and pointer handling with lazy fallback evaluation; [unwrap-or tests](tests/unwrap_or_test.ag) pass natively, including struct payloads, chained fallbacks, single-evaluation of calls, and fallback laziness, and both channel fixtures pass. `check` promotes the unwrap-or diagnostics and rejects dangling-`?` operands; broader inference promotion stays partial with FE-010 and full rendered diagnostics with GATE-003. |
 | Direct calls, method calls, static methods, and chained receivers | [~] | Concrete calls plus selected `Vec<String>`/`String` receiver chains pass. Many methods and generic receiver cases remain unsupported or fail. |
 | Field access, pointer/reference auto-dereference, and indexing | [~] | Selected pointer/string/indexed reads work and a `String.data[index]` ownership regression is fixed. Aggregate/index-set coverage and indexed ownership typing remain open. |
 | Struct/array initialization and aggregate values | [~] | Local array initialization, selected structs, arrays, globals, and nested/generic layouts have coverage. General aggregate expressions and argument/return contexts remain incomplete. |
@@ -108,7 +108,7 @@ run and should be refreshed after material changes.
 | `defer` and cleanup order on early exits | [ ] | Full native LIFO cleanup and return/break/continue coverage is not established. |
 | Allocation and reallocation | [~] | Selected generic allocation/reallocation and layout paths pass; complete allocator and resource cleanup parity remains open. |
 | Runtime panic/assertion behavior | [~] | Selected `@assert` failure reporting is covered; panic/unwind behavior and cleanup interactions remain open. |
-| Threads, `launch`/`wait`, channels, condition variables, and locks | [~] | [Futex wake](tests/native_futex_wake_test.ag) passes after globals take precedence over colliding unqualified enum variants. Channel payload assertions still fail; condition-variable and RwLock guards depend on missing native cleanup. Full concurrency behavior remains open. |
+| Threads, `launch`/`wait`, channels, condition variables, and locks | [~] | [Futex wake](tests/native_futex_wake_test.ag) passes after globals take precedence over colliding unqualified enum variants. Channel payload assertions now pass with unwrap-or lowering; condition-variable and RwLock guards still time out and depend on missing native cleanup. Full concurrency behavior remains open. |
 | Standard library behavior | [~] | Frontend status includes 121 stdlib files in the expanded history and current stdlib-inclusive semantic comparison; many stdlib-heavy programs still fail in the native backend. This does not certify every library API. |
 
 ## Diagnostics, artifacts, and compatibility
