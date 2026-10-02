@@ -16,6 +16,21 @@ struct LlvmLocal {
     LLVMOpaqueValue* ptr;
     u32 type_id;
     bool is_mut;
+    LLVMOpaqueValue* drop_flag;
+    Vec<LlvmFieldFlag> field_flags;
+}
+
+struct LlvmFieldFlag {
+    u32 name_id;
+    LLVMOpaqueValue* flag;
+}
+
+// One payload binding of a match arm and the scrutinee expression it was
+// extracted from. While the arm emits, moving the binding out also releases
+// the scrutinee side (its payload was moved away).
+struct ScrutineeMove {
+    u32 binding_name;
+    u32 scrutinee_expr;
 }
 
 struct LlvmFieldInfo {
@@ -70,6 +85,8 @@ struct LlvmContext {
     Vec<i64> scope_markers;
     Vec<LLVMOpaqueBasicBlock*> loop_breaks;
     Vec<LLVMOpaqueBasicBlock*> loop_continues;
+    Vec<i64> loop_drop_marks;
+    Vec<ScrutineeMove> scrutinee_moves;
     Vec<LlvmTypeBinding> type_subst;
     i64 unresolved_calls;
     i64 mono_count;
@@ -102,6 +119,8 @@ impl LlvmContext {
         c.scope_markers = Vec<i64>.new();
         c.loop_breaks = Vec<LLVMOpaqueBasicBlock*>.new();
         c.loop_continues = Vec<LLVMOpaqueBasicBlock*>.new();
+        c.loop_drop_marks = Vec<i64>.new();
+        c.scrutinee_moves = Vec<ScrutineeMove>.new();
         c.type_subst = Vec<LlvmTypeBinding>.new();
         c.unresolved_calls = 0;
         c.mono_count = 0;
@@ -359,18 +378,24 @@ impl LlvmContext {
         local.ptr = ptr;
         local.type_id = type_id;
         local.is_mut = is_mut;
+        local.drop_flag = (LLVMOpaqueValue*)0;
+        local.field_flags = Vec<LlvmFieldFlag>.new();
         self.locals.push(move local);
     }
 
     void push_loop(LlvmContext* self, LLVMOpaqueBasicBlock* break_bb, LLVMOpaqueBasicBlock* cont_bb) {
         self.loop_breaks.push(break_bb);
         self.loop_continues.push(cont_bb);
+        self.loop_drop_marks.push((i64)self.locals.len());
     }
 
     void pop_loop(LlvmContext* self) {
         if (self.loop_breaks.len() > 0) {
             self.loop_breaks.pop();
             self.loop_continues.pop();
+        }
+        if (self.loop_drop_marks.len() > 0) {
+            self.loop_drop_marks.pop();
         }
     }
 

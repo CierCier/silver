@@ -11,6 +11,7 @@ import frontend.symbols;
 import frontend.typecheck_expr;
 import frontend.types;
 import backend.llvm.context;
+import backend.llvm.drop;
 import backend.llvm.mono;
 import backend.llvm.stmt;
 import backend.llvm.types;
@@ -351,6 +352,13 @@ LLVMOpaqueValue* llvm_emit_enum_build(LlvmContext* ctx, str enum_name, str varia
     payload_types.drop();
     base.drop();
     instance_name.drop();
+    // Payloads copied out of tracked locals transfer ownership to the
+    // aggregate temp (which a flagged destination then owns exactly once).
+    i64 cleared_index = 0;
+    while (cleared_index < (i64)args_count) {
+        llvm_clear_copy_source(ctx, ctx.pool.args.get((i64)args_start + cleared_index));
+        cleared_index += 1;
+    }
     // Materialize the value so construction composes with loads and returns.
     return LLVMBuildLoad2(ctx.builder, enum_ty, slot, "enum_val");
 }
@@ -1613,6 +1621,14 @@ LLVMOpaqueValue* llvm_emit_struct_lit(LlvmContext* ctx, AstExpr* expr) {
         LLVMBuildStore(ctx.builder, val, field_ptr);
         fi += 1;
     }
+    // Field values copied out of tracked locals transfer ownership to the
+    // aggregate temp (which a flagged destination then owns exactly once).
+    i64 cleared_index = 0;
+    while (cleared_index < (i64)expr.aux) {
+        u32 cleared_val_id = ctx.pool.args.get((i64)expr.inner1 + cleared_index * 2 + 1);
+        llvm_clear_copy_source(ctx, cleared_val_id);
+        cleared_index += 1;
+    }
     return LLVMBuildLoad2(ctx.builder, def.llvm_type, slot, "struct.lit.val");
 }
 
@@ -1761,6 +1777,16 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
     }
 
     if (expr.kind == ExprKind.Move) {
+        // Moving out transfers ownership: clear the source drops first so
+        // scope exit does not free what was moved. Clearing is idempotent
+        // and a no-op for unflagged sources. A payload binding moved out of
+        // a match arm additionally releases its scrutinee side.
+        if (expr.inner0 != 0) {
+            llvm_clear_place_drops(ctx, expr.inner0);
+            llvm_clear_scrutinee_source(ctx, expr.inner0);
+        } else if (expr.aux != 0) {
+            llvm_clear_local_drops(ctx, expr.aux);
+        }
         if (expr.inner0 != 0) {
             return llvm_emit_expr(ctx, expr.inner0);
         }
@@ -2458,6 +2484,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 LLVMOpaqueValue* scrut_loaded = LLVMBuildLoad2(ctx.builder, scrut_ty, scrut_slot, "match_scrut_ld");
                 LLVMBuildStore(ctx.builder, scrut_loaded, bind_slot);
                 ctx.add_local(binding_name, bind_slot, scrut_ty_id, true);
+                llvm_push_scrutinee_move(ctx, binding_name, expr.inner0);
             } else if (arm.pattern == MatchPatternKind.Variant) {
                 str variant = ctx.names.get(arm.variant_name_id);
                 str arm_enum = scrut_enum;
@@ -2499,6 +2526,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                     LLVMOpaqueValue* bind_slot = LLVMBuildAlloca(ctx.builder, field_ty, "match_bind");
                     LLVMBuildStore(ctx.builder, field_val, bind_slot);
                     ctx.add_local(binding_name, bind_slot, field_type, true);
+                    llvm_push_scrutinee_move(ctx, binding_name, expr.inner0);
                     binding_index += 1;
                 }
                 payload_types.drop();
@@ -2582,6 +2610,11 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             }
             ctx.pop_scope();
             LLVMPositionBuilderAtEnd(ctx.builder, next_bb);
+            if (arm.pattern == MatchPatternKind.Variant) {
+                llvm_pop_scrutinee_moves(ctx, (i64)arm.bindings_count);
+            } else if (arm.pattern == MatchPatternKind.Binding) {
+                llvm_pop_scrutinee_moves(ctx, 1);
+            }
             arm_index += 1;
         }
         LLVMBuildBr(ctx.builder, merge_bb);
@@ -2766,6 +2799,14 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         str call_label = callee.kind == ExprKind.Var ? ctx.names.get(callee.aux) : "";
         llvm_prepare_call_args(ctx, fn_type, &call_args, &call_arg_types, &call_target_types, call_label);
         LLVMOpaqueValue* res = LLVMBuildCall2(ctx.builder, fn_type, fn_val, call_args.data, (u32)call_args.len(), "");
+        // By-value arguments transfer ownership to the callee, whose
+        // parameter flags drop them; clear the caller side accordingly.
+        i64 cleared = 0;
+        while (cleared < (i64)args_count) {
+            u32 cleared_arg_id = ctx.pool.args.get((i64)args_start + cleared);
+            llvm_clear_transferred_arg(ctx, fn_type, cleared, cleared_arg_id);
+            cleared += 1;
+        }
         call_target_types.drop();
         call_arg_types.drop();
         call_args.drop();
@@ -3101,9 +3142,12 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         Vec<LLVMOpaqueValue*> call_args = Vec<LLVMOpaqueValue*>.new();
         Vec<u32> call_arg_types = Vec<u32>.new();
         Vec<u32> call_target_types = Vec<u32>.new();
+        bool rx_moved = false;
         if (is_instance) {
             u32 rx_type = llvm_expr_type(ctx, expr.inner0);
             if (rx_type == TYPE_UNKNOWN) { rx_type = receiver_type_id; }
+            // A by-value `self` moves the receiver into the callee; record
+            // the transfer below so the caller side is not dropped again.
             LLVMOpaqueValue* rx_val = rx_is_ptr ? llvm_emit_expr(ctx, expr.inner0) : llvm_emit_lvalue(ctx, expr.inner0);
             if (rx_val == (LLVMOpaqueValue*)0 && !rx_is_ptr) {
                 LLVMOpaqueValue* val = llvm_emit_expr(ctx, expr.inner0);
@@ -3142,6 +3186,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 if (LLVMGetTypeKind(self_ty) != (u32)12
                     && LLVMGetTypeKind(LLVMTypeOf(rx_val)) == (u32)12) {
                     rx_val = LLVMBuildLoad2(ctx.builder, self_ty, rx_val, "method_rx_val");
+                    rx_moved = true;
                 }
             }
             call_args.push(rx_val);
@@ -3172,6 +3217,23 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         llvm_prepare_call_args(ctx, fn_type, &call_args, &call_arg_types,
                               &call_target_types, method_name);
         LLVMOpaqueValue* res = LLVMBuildCall2(ctx.builder, fn_type, fn_val, call_args.data, (u32)call_args.len(), "");
+        // Ownership transfer: a by-value receiver moves into the callee, as
+        // does any by-value argument (proven by the callee parameter kind).
+        // Borrowed positions keep the caller side live. An explicit `drop`
+        // call always consumes its receiver, mirroring stage0.
+        if (is_instance && rx_moved) {
+            llvm_clear_place_drops(ctx, expr.inner0);
+        }
+        if (strcmp(method_name, "drop") == 0 && is_instance) {
+            llvm_clear_place_drops(ctx, expr.inner0);
+        }
+        i64 cleared = 0;
+        while (cleared < (i64)args_count) {
+            u32 cleared_arg_id = ctx.pool.args.get((i64)args_start + 1 + cleared);
+            i64 cleared_param = is_instance ? cleared + 1 : cleared;
+            llvm_clear_transferred_arg(ctx, fn_type, cleared_param, cleared_arg_id);
+            cleared += 1;
+        }
         call_target_types.drop();
         call_arg_types.drop();
         call_args.drop();

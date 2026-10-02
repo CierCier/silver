@@ -15,6 +15,7 @@ import frontend.symbols;
 import frontend.typecheck_expr;
 import frontend.types;
 import backend.llvm.context;
+import backend.llvm.drop;
 import backend.llvm.expr;
 import backend.llvm.mono;
 import backend.llvm.stmt;
@@ -218,6 +219,9 @@ bool llvm_define_method_instance(LlvmContext* ctx, TypeTable* types, Interner* n
         LLVMOpaqueValue* param_val = LLVMGetParam(fn_val, (u32)p);
         LLVMBuildStore(ctx.builder, param_val, alloca_ptr);
         ctx.add_local(param_name_id, alloca_ptr, param_type_id, true);
+        // By-value parameters arrive fully initialized: the callee owns them
+        // and drops them on exit (the caller's side was cleared at the call).
+        llvm_register_local_drops(ctx, param_name_id, alloca_ptr, param_type_id, true);
         dec_str.drop();
         p += 1;
     }
@@ -235,6 +239,7 @@ bool llvm_define_method_instance(LlvmContext* ctx, TypeTable* types, Interner* n
     }
     stmt_ids.drop();
     if (!ctx.is_terminated()) {
+        llvm_emit_drops_above(ctx, (i64)0);
         if (ret_type_id == TYPE_VOID) {
             LLVMBuildRetVoid(ctx.builder);
         } else {
@@ -298,6 +303,7 @@ bool llvm_define_free_function_instance(LlvmContext* ctx, TypeTable* types,
         LLVMOpaqueValue* slot = LLVMBuildAlloca(ctx.builder, llvm_ty, param.name);
         LLVMBuildStore(ctx.builder, LLVMGetParam(fn_val, (u32)i), slot);
         ctx.add_local(names.intern(param.name), slot, type_id, true);
+        llvm_register_local_drops(ctx, names.intern(param.name), slot, type_id, true);
         text.drop();
         i += 1;
     }
@@ -315,6 +321,7 @@ bool llvm_define_free_function_instance(LlvmContext* ctx, TypeTable* types,
     }
     statements.drop();
     if (!ctx.is_terminated()) {
+        llvm_emit_drops_above(ctx, (i64)0);
         if (ret_id == TYPE_VOID) {
             LLVMBuildRetVoid(ctx.builder);
         } else {
@@ -1236,6 +1243,7 @@ impl LlvmGenerator {
                         LLVMOpaqueValue* param_val = LLVMGetParam(fn_val, (u32)p);
                         LLVMBuildStore(self.builder, param_val, alloca_ptr);
                         ctx.add_local(param_name_id, alloca_ptr, param_type_id, true);
+                        llvm_register_local_drops(&ctx, param_name_id, alloca_ptr, param_type_id, true);
                         infer_env.insert(param_name_id, param_type_id);
                         dec_str.drop();
                         p += 1;
@@ -1273,6 +1281,7 @@ impl LlvmGenerator {
                     }
 
                     if (!ctx.is_terminated()) {
+                        llvm_emit_drops_above(&ctx, (i64)0);
                         if (ret_type_id == TYPE_VOID) {
                             LLVMBuildRetVoid(self.builder);
                         } else {
@@ -1409,8 +1418,16 @@ impl LlvmGenerator {
                                             LLVMOpaqueValue* param_val = LLVMGetParam(fn_val, (u32)p);
                                             LLVMBuildStore(self.builder, param_val, alloca_ptr);
                                             ctx.add_local(param_name_id, alloca_ptr, param_type_id, true);
+                                            llvm_register_local_drops(&ctx, param_name_id, alloca_ptr, param_type_id, true);
                                             dec_str.drop();
                                             p += 1;
+                                        }
+                                        // Cast receivers are borrowed views, not owned values:
+                                        // the caller retains ownership, so the by-value
+                                        // receiver must not run the destructor on exit.
+                                        if (is_cast && params.len() > 0) {
+                                            Binding* first_param = params.get_ptr(0);
+                                            llvm_clear_local_drops(&ctx, names.intern(first_param.name));
                                         }
                                         params.drop();
 
@@ -1428,6 +1445,7 @@ impl LlvmGenerator {
                                         stmt_ids.drop();
 
                                         if (!ctx.is_terminated()) {
+                                            llvm_emit_drops_above(&ctx, (i64)0);
                                             if (ret_type_id == TYPE_VOID) {
                                                 LLVMBuildRetVoid(self.builder);
                                             } else {

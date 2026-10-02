@@ -140,12 +140,13 @@ impl ExprLowerer {
     u32 lower_match_arm_pattern(ExprLowerer* self, SyntaxNode* start, SyntaxNode* end,
                                 MatchPatternKind* kind_out, u32* variant_out,
                                 u32* bindings_start_out, u32* bindings_count_out,
-                                u32* literal_out) {
+                                u32* literal_out, bool* has_move_out) {
         *kind_out = MatchPatternKind.Wildcard;
         *variant_out = 0;
         *bindings_start_out = 0;
         *bindings_count_out = 0;
         *literal_out = 0;
+        *has_move_out = false;
         if (start == (SyntaxNode*)0 || start == end) {
             self.unsupported = true;
             return 0;
@@ -227,11 +228,10 @@ impl ExprLowerer {
                     continue;
                 }
                 // A `move` binding transfers ownership out of the matched
-                // value. The stage1 backend emits no drops yet, so there is
-                // no source drop flag to clear: move binds exactly like a
-                // borrow (plain copy into the binding slot). Accept the
-                // token and bind the following identifier.
+                // value. Record it so the backend can release the scrutinee
+                // side; the binding itself is still a plain slot copy.
                 if (bind.kind == NodeKind.Token && bind.token_kind == TokenKind.Move) {
+                    *has_move_out = true;
                     bind = bind.next_sibling;
                     continue;
                 }
@@ -296,8 +296,10 @@ impl ExprLowerer {
             u32 bindings_start = 0;
             u32 bindings_count = 0;
             u32 literal_id = 0;
+            bool arm_has_move = false;
             self.lower_match_arm_pattern(cursor, head_end, &pattern_kind, &variant_id,
-                                         &bindings_start, &bindings_count, &literal_id);
+                                         &bindings_start, &bindings_count, &literal_id,
+                                         &arm_has_move);
             u32 guard_id = 0;
             SyntaxNode* guard_cursor = head_end;
             while (guard_cursor != (SyntaxNode*)0 && guard_cursor != colon) {
@@ -333,6 +335,15 @@ impl ExprLowerer {
                 body_stmt_id = self.lower_block_stmt(value_node);
             } else {
                 value_id = self.lower_sequence(colon.next_sibling, value_end);
+                // A move-pattern arm transfers its payload out: wrap the
+                // value so the backend's move machinery releases the
+                // scrutinee side exactly once, on the taken path.
+                if (arm_has_move && value_id != 0) {
+                    AstExpr* value_expr = self.pool.get_expr(value_id);
+                    if (value_expr.kind != ExprKind.Move) {
+                        value_id = self.pool.add_move(value_id, value_expr.span);
+                    }
+                }
             }
             self.pool.add_match_arm(pattern_kind, 0, variant_id, bindings_start, bindings_count,
                                     literal_id, guard_id, value_id, body_stmt_id, cursor.span);
