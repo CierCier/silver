@@ -324,7 +324,7 @@ LLVMOpaqueValue* llvm_emit_enum_build(LlvmContext* ctx, str enum_name, str varia
             instance_name.drop();
             return (LLVMOpaqueValue*)0;
         }
-        arg_val = llvm_compat_value(ctx, arg_val, field_type);
+        arg_val = llvm_compat_value(ctx, arg_val, arg_expr.inferred_type, field_type);
         if ((!flattened_struct_payload && (arity != (i64)args_count || arg_index >= payload_types.len()))
             || field_ty == (LLVMOpaqueType*)0) {
             ctx.note_unresolved("enum-payload-layout", variant_name);
@@ -425,17 +425,42 @@ u32 find_method_return_type(SyntaxNode* root, TypeTable* types, str struct_name,
                             cursor = cursor.next_sibling;
                             continue;
                         }
+                        bool is_cast = cursor.kind == NodeKind.Token && (cursor.token_kind == TokenKind.Cast || strcmp(cursor.text, "cast") == 0);
                         SyntaxNode* ret_start = cursor;
                         SyntaxNode* m_name = (SyntaxNode*)0;
+                        SyntaxNode* params_node = (SyntaxNode*)0;
                         SyntaxNode* scan = cursor;
-                        while (scan != (SyntaxNode*)0 && scan.kind != NodeKind.Block) {
+                        while (scan != (SyntaxNode*)0 && scan.kind != NodeKind.Block
+                            && !(scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Semicolon)) {
                             if (scan.kind == NodeKind.Parenthesized) {
+                                params_node = scan;
                                 break;
                             }
-                            if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Identifier) {
+                            if (!is_cast && scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Identifier) {
                                 m_name = scan;
                             }
                             scan = scan.next_sibling;
+                        }
+                        if (is_cast && params_node != (SyntaxNode*)0) {
+                            String ret_text = String.new();
+                            SyntaxNode* rscan = cursor.next_sibling;
+                            while (rscan != (SyntaxNode*)0 && rscan != params_node) {
+                                append_node_tokens(rscan, &ret_text);
+                                rscan = rscan.next_sibling;
+                            }
+                            String cname = String.from_str("cast_");
+                            cname.push_str(ret_text.to_str());
+                            bool match_cast = strcmp(cname.to_str(), method_name) == 0;
+                            cname.drop();
+                            if (match_cast) {
+                                u32 ret_type_id = type_id_from_text(types, ret_text.to_str());
+                                ret_text.drop();
+                                base_name.drop();
+                                type_arg0.drop();
+                                type_arg1.drop();
+                                return ret_type_id;
+                            }
+                            ret_text.drop();
                         }
                         if (m_name != (SyntaxNode*)0 && strcmp(m_name.text, method_name) == 0) {
                             SyntaxNode* rscan = ret_start;
@@ -454,42 +479,17 @@ u32 find_method_return_type(SyntaxNode* root, TypeTable* types, str struct_name,
                                 break;
                             }
                             String ret_text = String.new();
-                            bool is_t_ptr = false;
-                            bool is_t = false;
-                            bool is_e_ptr = false;
-                            bool is_e = false;
                             while (rscan != (SyntaxNode*)0 && rscan != m_name) {
                                 if (rscan.kind == NodeKind.Token) {
                                     if (strcmp(rscan.text, "T") == 0 && type_arg0.len() > 0) {
-                                        if (rscan.next_sibling != (SyntaxNode*)0 && rscan.next_sibling.token_kind == TokenKind.Star) {
-                                            is_t_ptr = true;
-                                            rscan = rscan.next_sibling;
-                                        } else {
-                                            is_t = true;
-                                        }
+                                        ret_text.push_str(type_arg0.to_str());
                                     } else if (strcmp(rscan.text, "E") == 0 && type_arg1.len() > 0) {
-                                        if (rscan.next_sibling != (SyntaxNode*)0 && rscan.next_sibling.token_kind == TokenKind.Star) {
-                                            is_e_ptr = true;
-                                            rscan = rscan.next_sibling;
-                                        } else {
-                                            is_e = true;
-                                        }
+                                        ret_text.push_str(type_arg1.to_str());
                                     } else {
                                         ret_text.push_str(rscan.text);
                                     }
                                 }
                                 rscan = rscan.next_sibling;
-                            }
-                            if (is_t_ptr) {
-                                ret_text.push_str(type_arg0.to_str());
-                                ret_text.push('*');
-                            } else if (is_t) {
-                                ret_text.push_str(type_arg0.to_str());
-                            } else if (is_e_ptr) {
-                                ret_text.push_str(type_arg1.to_str());
-                                ret_text.push('*');
-                            } else if (is_e) {
-                                ret_text.push_str(type_arg1.to_str());
                             }
                             u32 ret_type_id = type_id_from_text(types, ret_text.to_str());
                             ret_text.drop();
@@ -516,41 +516,44 @@ u32 find_method_return_type(SyntaxNode* root, TypeTable* types, str struct_name,
     return TYPE_UNKNOWN;
 }
 
+bool llvm_type_has_unresolved(LlvmContext* ctx, u32 type_id, i64 depth) {
+    if (type_id == TYPE_UNKNOWN || depth > 64) { return true; }
+    type_id = ctx.types.resolve_subst(type_id);
+    if (type_id <= TYPE_PRIMITIVE_MAX) { return false; }
+    TypeEntry* entry = ctx.types.get(type_id);
+    if (entry.kind == TypeKind.TypeParam) { return true; }
+    if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference || entry.kind == TypeKind.Array) {
+        return llvm_type_has_unresolved(ctx, entry.inner, depth + 1);
+    }
+    if (entry.kind == TypeKind.Named) {
+        i64 i = 0;
+        while (i < entry.count) {
+            if (llvm_type_has_unresolved(ctx, ctx.types.type_args.get(entry.inner + i), depth + 1)) {
+                return true;
+            }
+            i += 1;
+        }
+    }
+    return false;
+}
+
 u32 llvm_expr_type(LlvmContext* ctx, u32 expr_id) {
     if (expr_id == 0) { return TYPE_UNKNOWN; }
     AstExpr* expr = ctx.pool.get_expr(expr_id);
+    if (expr.kind == ExprKind.Var) {
+        LlvmLocal* local = ctx.find_local(expr.aux);
+        if (local != (LlvmLocal*)0 && local.type_id != TYPE_UNKNOWN) {
+            return ctx.types.resolve_subst(local.type_id);
+        }
+        LlvmSymbolInfo info = ctx.lookup_symbol(ctx.names.get(expr.aux));
+        if (info.type_id != TYPE_UNKNOWN) {
+            return ctx.types.resolve_subst(info.type_id);
+        }
+    }
     if (expr.inferred_type != TYPE_UNKNOWN && expr.inferred_type != 0) {
         u32 inferred = ctx.types.resolve_subst(expr.inferred_type);
-        if (expr.kind == ExprKind.Var) {
-            // Frontend match bindings record raw template types (E), which
-            // resolve_subst cannot expand outside substitution frames. Such
-            // a stale unbound parameter must not shadow the concrete
-            // binding local (ErrInfo): the local is the allocation.
-            TypeEntry* inf_entry = ctx.types.get(inferred);
-            bool unbound = inf_entry.kind == TypeKind.TypeParam;
-            if (!unbound && inf_entry.kind == TypeKind.Named && inf_entry.count == 0) {
-                str iname = ctx.types.names.get(inf_entry.name_id);
-                if (find_item_by_name(ctx.root, NodeKind.Struct, iname) == (SyntaxNode*)0
-                    && find_enum_item(ctx.root, iname) == (SyntaxNode*)0
-                    && find_item_by_name(ctx.root, NodeKind.TypeAlias, iname) == (SyntaxNode*)0) {
-                    unbound = true;
-                }
-            }
-            if (unbound) {
-                LlvmLocal* loc = ctx.find_local(expr.aux);
-                if (loc != (LlvmLocal*)0) {
-                    return ctx.types.resolve_subst(loc.type_id);
-                }
-            }
-        }
-        return inferred;
-    }
-    if (expr.kind == ExprKind.Var) {
-        LlvmLocal* loc = ctx.find_local(expr.aux);
-        if (loc != (LlvmLocal*)0) { return ctx.types.resolve_subst(loc.type_id); }
-        str receiver_name = ctx.names.get(expr.aux);
-        LlvmSymbolInfo info = ctx.lookup_symbol(receiver_name);
-        if (info.type_id != TYPE_UNKNOWN) { return ctx.types.resolve_subst(info.type_id); }
+        bool unresolved_shape = llvm_type_has_unresolved(ctx, inferred, 0);
+        if (!unresolved_shape) { return inferred; }
     }
     if (expr.kind == ExprKind.Field) {
         AstExpr* rx = ctx.pool.get_expr(expr.inner0);
@@ -600,6 +603,11 @@ u32 llvm_expr_type(LlvmContext* ctx, u32 expr_id) {
     }
     if (expr.kind == ExprKind.Call) {
         AstExpr* callee = ctx.pool.get_expr(expr.inner0);
+        u32 callee_type = llvm_expr_type(ctx, expr.inner0);
+        TypeEntry* signature = ctx.types.get(callee_type);
+        if (signature.kind == TypeKind.Function) {
+            return ctx.types.resolve_subst(ctx.types.type_args.get(signature.inner));
+        }
         if (callee.kind == ExprKind.Var) {
             str fn_name = ctx.names.get(callee.aux);
             u32 ret_ty = find_function_return_type_by_name(ctx.root, ctx.types, fn_name);
@@ -654,6 +662,12 @@ u32 llvm_expr_type(LlvmContext* ctx, u32 expr_id) {
     if (expr.kind == ExprKind.Format) {
         return ctx.types.get_named("String");
     }
+    if (expr.kind == ExprKind.SizeOf) {
+        return TYPE_I64;
+    }
+    if (expr.kind == ExprKind.AlignOf) {
+        return TYPE_U64;
+    }
     if (expr.kind == ExprKind.Hash) {
         return TYPE_I64;
     }
@@ -663,6 +677,14 @@ u32 llvm_expr_type(LlvmContext* ctx, u32 expr_id) {
         if (named_id != TYPE_UNKNOWN && named_id != 0) {
             return ctx.types.resolve_subst(named_id);
         }
+        return TYPE_UNKNOWN;
+    }
+    if (expr.kind == ExprKind.Move) {
+        if (expr.inner0 != 0) {
+            return llvm_expr_type(ctx, expr.inner0);
+        }
+        LlvmLocal* loc = ctx.find_local(expr.aux);
+        if (loc != (LlvmLocal*)0) { return ctx.types.resolve_subst(loc.type_id); }
         return TYPE_UNKNOWN;
     }
     return TYPE_UNKNOWN;
@@ -677,7 +699,19 @@ LLVMOpaqueValue* llvm_emit_lvalue(LlvmContext* ctx, u32 expr_id) {
             return local.ptr;
         }
         str name = ctx.names.get(expr.aux);
-        return LLVMGetNamedGlobal(ctx.module, name);
+        LLVMOpaqueValue* global = LLVMGetNamedGlobal(ctx.module, name);
+        if (global != (LLVMOpaqueValue*)0) { return global; }
+        return LLVMGetNamedFunction(ctx.module, name);
+    }
+    if (expr.kind == ExprKind.Move) {
+        if (expr.inner0 != 0) {
+            return llvm_emit_lvalue(ctx, expr.inner0);
+        }
+        LlvmLocal* local = ctx.find_local(expr.aux);
+        if (local != (LlvmLocal*)0) {
+            return local.ptr;
+        }
+        return (LLVMOpaqueValue*)0;
     }
     if (expr.kind == ExprKind.Unary && expr.aux == (u32)TokenKind.Star) {
         return llvm_emit_expr(ctx, expr.inner0);
@@ -826,10 +860,49 @@ bool llvm_type_is_signed(TypeTable* types, u32 id) {
         || entry.kind == TypeKind.I128;
 }
 
+bool llvm_type_is_unsigned(TypeTable* types, u32 id) {
+    TypeEntry* entry = types.get(id);
+    return entry.kind == TypeKind.U8 || entry.kind == TypeKind.U16
+        || entry.kind == TypeKind.U32 || entry.kind == TypeKind.U64
+        || entry.kind == TypeKind.U128
+        || entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference;
+}
+
+LLVMOpaqueValue* llvm_try_apply_user_cast(LlvmContext* ctx, LLVMOpaqueValue* val, u32 from_type, u32 to_type) {
+    if (val == (LLVMOpaqueValue*)0 || from_type == TYPE_UNKNOWN || to_type == TYPE_UNKNOWN || from_type == to_type) {
+        return (LLVMOpaqueValue*)0;
+    }
+    TypeEntry* from_entry = ctx.types.get(from_type);
+    while (from_entry.kind == TypeKind.Pointer || from_entry.kind == TypeKind.Reference) {
+        from_type = from_entry.inner;
+        from_entry = ctx.types.get(from_type);
+    }
+    if (from_entry.kind != TypeKind.Named) {
+        return (LLVMOpaqueValue*)0;
+    }
+    str from_name = ctx.types.names.get(from_entry.name_id);
+    str to_name = ctx.types.type_name(to_type);
+    String cast_name = String.from_str(from_name);
+    cast_name.push_str("__cast_");
+    cast_name.push_str(to_name);
+    LLVMOpaqueValue* cast_fn = LLVMGetNamedFunction(ctx.module, cast_name.to_str());
+    cast_name.drop();
+    if (cast_fn == (LLVMOpaqueValue*)0) {
+        return (LLVMOpaqueValue*)0;
+    }
+    LLVMOpaqueType* cast_fn_ty = LLVMGlobalGetValueType(cast_fn);
+    Vec<LLVMOpaqueValue*> args = Vec<LLVMOpaqueValue*>.new();
+    args.push(val);
+    LLVMOpaqueValue* result = LLVMBuildCall2(ctx.builder, cast_fn_ty, cast_fn, args.data, 1, "cast.arg");
+    args.drop();
+    return result;
+}
+
 // Convert val to the lowered target type so stores never silently truncate
 // (opaque pointers hide width mismatches from the LLVM verifier). Unknown
 // or unhandled combinations pass through unchanged (status quo).
-LLVMOpaqueValue* llvm_compat_value(LlvmContext* ctx, LLVMOpaqueValue* val, u32 target_type_id) {
+LLVMOpaqueValue* llvm_compat_value(LlvmContext* ctx, LLVMOpaqueValue* val,
+                                   u32 source_type_id, u32 target_type_id) {
     if (val == (LLVMOpaqueValue*)0 || target_type_id == TYPE_UNKNOWN) {
         return val;
     }
@@ -861,9 +934,15 @@ LLVMOpaqueValue* llvm_compat_value(LlvmContext* ctx, LLVMOpaqueValue* val, u32 t
         return LLVMBuildFPTrunc(ctx.builder, val, target_ty, "compat_fptrunc");
     }
     if (vk == (u32)8 && (tk == (u32)2 || tk == (u32)3)) {
+        if (llvm_type_is_unsigned(ctx.types, source_type_id)) {
+            return LLVMBuildUIToFP(ctx.builder, val, target_ty, "compat_uitofp");
+        }
         return LLVMBuildSIToFP(ctx.builder, val, target_ty, "compat_sitofp");
     }
     if ((vk == (u32)2 || vk == (u32)3) && tk == (u32)8) {
+        if (!llvm_type_is_signed(ctx.types, target_type_id)) {
+            return LLVMBuildFPToUI(ctx.builder, val, target_ty, "compat_fptoui");
+        }
         return LLVMBuildFPToSI(ctx.builder, val, target_ty, "compat_fptosi");
     }
     if (vk == (u32)8 && tk == (u32)12) {
@@ -875,7 +954,9 @@ LLVMOpaqueValue* llvm_compat_value(LlvmContext* ctx, LLVMOpaqueValue* val, u32 t
     return val;
 }
 
-void llvm_prepare_call_args(LlvmContext* ctx, LLVMOpaqueType* fn_type, Vec<LLVMOpaqueValue*>* call_args, str callee) {
+void llvm_prepare_call_args(LlvmContext* ctx, LLVMOpaqueType* fn_type,
+                            Vec<LLVMOpaqueValue*>* call_args, Vec<u32>* source_types,
+                            Vec<u32>* target_types, str callee) {
     if (fn_type == (LLVMOpaqueType*)0) { return; }
     u32 expected_params_count = LLVMCountParamTypes(fn_type);
     if (expected_params_count == 0) {
@@ -906,6 +987,22 @@ void llvm_prepare_call_args(LlvmContext* ctx, LLVMOpaqueType* fn_type, Vec<LLVMO
                 call_args.set(pi, LLVMBuildPtrToInt(ctx.builder, arg_v, exp_ty, "arg_to_int"));
             } else if (exp_kind == (u32)8 && act_kind == (u32)8 && exp_ty != act_ty) {
                 call_args.set(pi, LLVMBuildIntCast(ctx.builder, arg_v, exp_ty, "arg_int_cast"));
+            } else if ((exp_kind == (u32)2 || exp_kind == (u32)3) && act_kind == (u32)8) {
+                u32 source_type = TYPE_UNKNOWN;
+                if (pi < source_types.len()) { source_type = source_types.get(pi); }
+                if (llvm_type_is_unsigned(ctx.types, source_type)) {
+                    call_args.set(pi, LLVMBuildUIToFP(ctx.builder, arg_v, exp_ty, "arg_uitofp"));
+                } else {
+                    call_args.set(pi, LLVMBuildSIToFP(ctx.builder, arg_v, exp_ty, "arg_sitofp"));
+                }
+            } else if (exp_kind == (u32)8 && (act_kind == (u32)2 || act_kind == (u32)3)) {
+                u32 target_type = TYPE_UNKNOWN;
+                if (pi < target_types.len()) { target_type = target_types.get(pi); }
+                if (llvm_type_is_unsigned(ctx.types, target_type)) {
+                    call_args.set(pi, LLVMBuildFPToUI(ctx.builder, arg_v, exp_ty, "arg_fptoui"));
+                } else {
+                    call_args.set(pi, LLVMBuildFPToSI(ctx.builder, arg_v, exp_ty, "arg_fptosi"));
+                }
             } else if ((exp_kind == (u32)2 || exp_kind == (u32)3) && (act_kind == (u32)2 || act_kind == (u32)3)) {
                 if (exp_kind == (u32)3) {
                     call_args.set(pi, LLVMBuildFPExt(ctx.builder, arg_v, exp_ty, "arg_fpext"));
@@ -1494,7 +1591,7 @@ LLVMOpaqueValue* llvm_emit_struct_lit(LlvmContext* ctx, AstExpr* expr) {
         if (val == (LLVMOpaqueValue*)0) {
             return (LLVMOpaqueValue*)0;
         }
-        val = llvm_compat_value(ctx, val, field_type);
+        val = llvm_compat_value(ctx, val, llvm_expr_type(ctx, val_id), field_type);
         LLVMOpaqueValue* field_ptr = LLVMBuildStructGEP2(ctx.builder, def.llvm_type, slot, (u32)field_idx, "struct.lit.field");
         LLVMBuildStore(ctx.builder, val, field_ptr);
         fi += 1;
@@ -1544,7 +1641,12 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         args.push(line_value);
         args.push(message);
         LLVMOpaqueType* failure_type = LLVMGlobalGetValueType(failure);
-        llvm_prepare_call_args(ctx, failure_type, &args, "__silver_assert_failed");
+        Vec<u32> source_types = Vec<u32>.new();
+        Vec<u32> target_types = Vec<u32>.new();
+        llvm_prepare_call_args(ctx, failure_type, &args, &source_types, &target_types,
+                              "__silver_assert_failed");
+        source_types.drop();
+        target_types.drop();
         LLVMBuildCall2(ctx.builder, failure_type, failure, args.data, 3, "");
         args.drop();
         LLVMBuildUnreachable(ctx.builder);
@@ -1607,6 +1709,14 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             return LLVMBuildLoad2(ctx.builder, ty, local.ptr, "load_var");
         }
         str name = ctx.names.get(expr.aux);
+        LLVMOpaqueValue* g_val = LLVMGetNamedGlobal(ctx.module, name);
+        if (g_val != (LLVMOpaqueValue*)0) {
+            LLVMOpaqueType* g_ty = LLVMGlobalGetValueType(g_val);
+            if (LLVMGetTypeKind(g_ty) == (u32)11) {
+                return g_val;
+            }
+            return LLVMBuildLoad2(ctx.builder, g_ty, g_val, "load_global");
+        }
         if (strlen(name) > 0 && name[0] >= (u8)65 && name[0] <= (u8)90) {
             SyntaxNode* enum_item = (SyntaxNode*)0;
             if (find_variant_enum(ctx.root, name, &enum_item)) {
@@ -1630,18 +1740,13 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         if (fn_val != (LLVMOpaqueValue*)0) {
             return fn_val;
         }
-        LLVMOpaqueValue* g_val = LLVMGetNamedGlobal(ctx.module, name);
-        if (g_val != (LLVMOpaqueValue*)0) {
-            LLVMOpaqueType* g_ty = LLVMGlobalGetValueType(g_val);
-            if (LLVMGetTypeKind(g_ty) == (u32)11) {
-                return g_val;
-            }
-            return LLVMBuildLoad2(ctx.builder, g_ty, g_val, "load_global");
-        }
         return (LLVMOpaqueValue*)0;
     }
 
     if (expr.kind == ExprKind.Move) {
+        if (expr.inner0 != 0) {
+            return llvm_emit_expr(ctx, expr.inner0);
+        }
         LlvmLocal* local = ctx.find_local(expr.aux);
         if (local != (LlvmLocal*)0) {
             LLVMOpaqueType* ty = llvm_lower_type(ctx.ctx, ctx.types, local.type_id);
@@ -1731,9 +1836,19 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
 
         if (is_float) {
             if (l_kind == (u32)8) {
-                lhs = LLVMBuildSIToFP(ctx.builder, lhs, LLVMTypeOf(rhs), "sitofp_l");
+                u32 lt = llvm_expr_type(ctx, expr.inner0);
+                if (!llvm_type_is_signed(ctx.types, lt)) {
+                    lhs = LLVMBuildUIToFP(ctx.builder, lhs, LLVMTypeOf(rhs), "uitofp_l");
+                } else {
+                    lhs = LLVMBuildSIToFP(ctx.builder, lhs, LLVMTypeOf(rhs), "sitofp_l");
+                }
             } else if (r_kind == (u32)8) {
-                rhs = LLVMBuildSIToFP(ctx.builder, rhs, LLVMTypeOf(lhs), "sitofp_r");
+                u32 rt = llvm_expr_type(ctx, expr.inner1);
+                if (!llvm_type_is_signed(ctx.types, rt)) {
+                    rhs = LLVMBuildUIToFP(ctx.builder, rhs, LLVMTypeOf(lhs), "uitofp_r");
+                } else {
+                    rhs = LLVMBuildSIToFP(ctx.builder, rhs, LLVMTypeOf(lhs), "sitofp_r");
+                }
             }
             if (op == (u32)TokenKind.Plus) { return LLVMBuildFAdd(ctx.builder, lhs, rhs, "fadd"); }
             if (op == (u32)TokenKind.Minus) { return LLVMBuildFSub(ctx.builder, lhs, rhs, "fsub"); }
@@ -1917,31 +2032,67 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             }
         }
 
+        u32 op_ty_id = llvm_expr_type(ctx, expr.inner0);
+        bool is_unsigned = (l_kind == (u32)12 || r_kind == (u32)12 || llvm_type_is_unsigned(ctx.types, op_ty_id));
+        if (!is_unsigned) {
+            u32 r_ty_id = llvm_expr_type(ctx, expr.inner1);
+            is_unsigned = llvm_type_is_unsigned(ctx.types, r_ty_id);
+        }
+
         if (op == (u32)TokenKind.Plus) { return LLVMBuildAdd(ctx.builder, lhs, rhs, "add"); }
         if (op == (u32)TokenKind.Minus) { return LLVMBuildSub(ctx.builder, lhs, rhs, "sub"); }
         if (op == (u32)TokenKind.Star) { return LLVMBuildMul(ctx.builder, lhs, rhs, "mul"); }
-        if (op == (u32)TokenKind.Slash) { return LLVMBuildSDiv(ctx.builder, lhs, rhs, "sdiv"); }
-        if (op == (u32)TokenKind.Percent) { return LLVMBuildSRem(ctx.builder, lhs, rhs, "srem"); }
+        if (op == (u32)TokenKind.Slash) {
+            if (is_unsigned) {
+                return LLVMBuildUDiv(ctx.builder, lhs, rhs, "udiv");
+            }
+            return LLVMBuildSDiv(ctx.builder, lhs, rhs, "sdiv");
+        }
+        if (op == (u32)TokenKind.Percent) {
+            if (is_unsigned) {
+                return LLVMBuildURem(ctx.builder, lhs, rhs, "urem");
+            }
+            return LLVMBuildSRem(ctx.builder, lhs, rhs, "srem");
+        }
         if (op == (u32)TokenKind.BitwiseAnd) { return LLVMBuildAnd(ctx.builder, lhs, rhs, "and"); }
         if (op == (u32)TokenKind.BitwiseOr) { return LLVMBuildOr(ctx.builder, lhs, rhs, "or"); }
         if (op == (u32)TokenKind.BitwiseXor) { return LLVMBuildXor(ctx.builder, lhs, rhs, "xor"); }
         if (op == (u32)TokenKind.LeftShift) { return LLVMBuildShl(ctx.builder, lhs, rhs, "shl"); }
         if (op == (u32)TokenKind.RightShift) {
-            u32 l_ty_id = llvm_expr_type(ctx, expr.inner0);
-            if (llvm_type_is_signed(ctx.types, l_ty_id)) {
-                return LLVMBuildAShr(ctx.builder, lhs, rhs, "ashr");
+            if (is_unsigned) {
+                return LLVMBuildLShr(ctx.builder, lhs, rhs, "lshr");
             }
-            return LLVMBuildLShr(ctx.builder, lhs, rhs, "lshr");
+            return LLVMBuildAShr(ctx.builder, lhs, rhs, "ashr");
         }
         if (op == (u32)TokenKind.And) { return LLVMBuildAnd(ctx.builder, lhs, rhs, "and"); }
         if (op == (u32)TokenKind.Or) { return LLVMBuildOr(ctx.builder, lhs, rhs, "or"); }
 
         if (op == (u32)TokenKind.Equal) { return LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntEQ, lhs, rhs, "eq"); }
         if (op == (u32)TokenKind.NotEqual) { return LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntNE, lhs, rhs, "ne"); }
-        if (op == (u32)TokenKind.Less) { return LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntSLT, lhs, rhs, "slt"); }
-        if (op == (u32)TokenKind.LessEqual) { return LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntSLE, lhs, rhs, "sle"); }
-        if (op == (u32)TokenKind.Greater) { return LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntSGT, lhs, rhs, "sgt"); }
-        if (op == (u32)TokenKind.GreaterEqual) { return LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntSGE, lhs, rhs, "sge"); }
+        if (op == (u32)TokenKind.Less) {
+            if (is_unsigned) {
+                return LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntULT, lhs, rhs, "ult");
+            }
+            return LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntSLT, lhs, rhs, "slt");
+        }
+        if (op == (u32)TokenKind.LessEqual) {
+            if (is_unsigned) {
+                return LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntULE, lhs, rhs, "ule");
+            }
+            return LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntSLE, lhs, rhs, "sle");
+        }
+        if (op == (u32)TokenKind.Greater) {
+            if (is_unsigned) {
+                return LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntUGT, lhs, rhs, "ugt");
+            }
+            return LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntSGT, lhs, rhs, "sgt");
+        }
+        if (op == (u32)TokenKind.GreaterEqual) {
+            if (is_unsigned) {
+                return LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntUGE, lhs, rhs, "uge");
+            }
+            return LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntSGE, lhs, rhs, "sge");
+        }
     }
 
     if (expr.kind == ExprKind.Ternary) {
@@ -2289,8 +2440,13 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
 
     if (expr.kind == ExprKind.Call) {
         AstExpr* callee = ctx.pool.get_expr(expr.inner0);
+        u32 callee_type = llvm_expr_type(ctx, expr.inner0);
+        TypeEntry* callee_signature = ctx.types.get(callee_type);
+        bool indirect = callee_signature.kind == TypeKind.Function;
+        u32 signature_start = callee_signature.inner;
+        i64 signature_count = callee_signature.count;
         LLVMOpaqueValue* fn_val = (LLVMOpaqueValue*)0;
-        if (callee.kind == ExprKind.Var) {
+        if (callee.kind == ExprKind.Var && !indirect) {
             str callee_name = ctx.names.get(callee.aux);
             if (str_starts_with(callee_name, "__atomic_")) {
                 return llvm_emit_atomic_call(ctx, expr_id, callee_name);
@@ -2322,9 +2478,31 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 }
                 fn_val = mono_ensure_free_function(ctx, callee_base.to_str(), &generic_ids, expr.aux);
                 generic_ids.drop();
-            } else if (expr.resolved_callee_id != 0) {
-                fn_val = LLVMGetNamedFunction(ctx.module, ctx.names.get(expr.resolved_callee_id - 1));
             } else {
+                Vec<u32> actual_types = Vec<u32>.new();
+                Vec<bool> numeric_literals = Vec<bool>.new();
+                Vec<u32> inferred_ids = Vec<u32>.new();
+                i64 ai = 0;
+                while (ai < (i64)expr.aux) {
+                    u32 arg_id = ctx.pool.args.get((i64)expr.inner1 + ai);
+                    u32 actual_type = llvm_expr_type(ctx, arg_id);
+                    actual_types.push(actual_type);
+                    numeric_literals.push(ctx.pool.get_expr(arg_id).kind == ExprKind.Literal
+                        && type_is_numeric(actual_type));
+                    ai += 1;
+                }
+                bool inferred = mono_infer_free_function_args(ctx, callee_base.to_str(), expr.aux,
+                        &actual_types, &numeric_literals, &inferred_ids);
+                if (inferred) {
+                    fn_val = mono_ensure_free_function(ctx, callee_base.to_str(), &inferred_ids, expr.aux);
+                }
+                inferred_ids.drop();
+                numeric_literals.drop();
+                actual_types.drop();
+            }
+            if (fn_val == (LLVMOpaqueValue*)0 && expr.resolved_callee_id != 0) {
+                fn_val = LLVMGetNamedFunction(ctx.module, ctx.names.get(expr.resolved_callee_id - 1));
+            } else if (fn_val == (LLVMOpaqueValue*)0) {
                 fn_val = LLVMGetNamedFunction(ctx.module, callee_base.to_str());
             }
             callee_base.drop();
@@ -2345,6 +2523,8 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         u32 args_count = expr.aux;
         u32 args_start = expr.inner1;
         Vec<LLVMOpaqueValue*> call_args = Vec<LLVMOpaqueValue*>.new();
+        Vec<u32> call_arg_types = Vec<u32>.new();
+        Vec<u32> call_target_types = Vec<u32>.new();
         i64 i = 0;
         while (i < (i64)args_count) {
             u32 arg_id = ctx.pool.args.get((i64)args_start + i);
@@ -2356,7 +2536,42 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 LLVMOpaqueType* a_llvm_ty = llvm_lower_type(ctx.ctx, ctx.types, a_type);
                 a_val = LLVMConstNull(a_llvm_ty);
             }
+            if (indirect) {
+                if (i < signature_count) {
+                    call_target_types.push(ctx.types.type_args.get(signature_start + 1 + (u32)i));
+                } else {
+                    call_target_types.push(TYPE_UNKNOWN);
+                }
+            } else if (callee.kind == ExprKind.Var) {
+                str cname = ctx.names.get(callee.aux);
+                SyntaxNode* callee_fn = find_function_by_name_and_arity(ctx.root, cname, (i64)args_count);
+                if (callee_fn != (SyntaxNode*)0) {
+                    Vec<Binding> params = Vec<Binding>.new();
+                    collect_parameter_bindings(binding_function_parameters(callee_fn), &params);
+                    if (i < params.len()) {
+                        Binding* param = params.get_ptr(i);
+                        u32 expected_arg_type = typecheck_parameter_type_id(ctx.types, param);
+                        u32 actual_arg_type = ctx.pool.get_expr(arg_id).inferred_type;
+                        if (actual_arg_type == TYPE_UNKNOWN) {
+                            actual_arg_type = llvm_expr_type(ctx, arg_id);
+                        }
+                        LLVMOpaqueValue* user_cast = llvm_try_apply_user_cast(ctx, a_val, actual_arg_type, expected_arg_type);
+                        if (user_cast != (LLVMOpaqueValue*)0) {
+                            a_val = user_cast;
+                        }
+                        call_target_types.push(expected_arg_type);
+                    } else {
+                        call_target_types.push(TYPE_UNKNOWN);
+                    }
+                    params.drop();
+                } else {
+                    call_target_types.push(TYPE_UNKNOWN);
+                }
+            } else {
+                call_target_types.push(TYPE_UNKNOWN);
+            }
             call_args.push(a_val);
+            call_arg_types.push(llvm_expr_type(ctx, arg_id));
             i += 1;
         }
 
@@ -2370,43 +2585,70 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 LLVMOpaqueType* ptr_ty = LLVMPointerTypeInContext(ctx.ctx, (u32)0);
                 fn_val = LLVMBuildIntToPtr(ctx.builder, fn_val, ptr_ty, "fn_ptr_cast");
             } else if (vk != (u32)12) {
+                call_target_types.drop();
+                call_arg_types.drop();
                 call_args.drop();
                 return (LLVMOpaqueValue*)0;
             }
+            u32 result_type = llvm_expr_type(ctx, expr_id);
             LLVMOpaqueType* ret_ty = LLVMInt64TypeInContext(ctx.ctx);
-            if (expr.inferred_type == TYPE_VOID) {
+            if (result_type == TYPE_VOID) {
                 ret_ty = LLVMVoidTypeInContext(ctx.ctx);
-            } else if (expr.inferred_type != TYPE_UNKNOWN) {
-                ret_ty = llvm_lower_type(ctx.ctx, ctx.types, expr.inferred_type);
+            } else if (result_type != TYPE_UNKNOWN) {
+                ret_ty = llvm_lower_type(ctx.ctx, ctx.types, result_type);
             }
             Vec<LLVMOpaqueType*> param_tys = Vec<LLVMOpaqueType*>.new();
             i64 pi = 0;
-            while (pi < call_args.len()) {
-                param_tys.push(LLVMTypeOf(call_args.get(pi)));
+            i64 parameter_count = indirect ? signature_count : call_args.len();
+            while (pi < parameter_count) {
+                LLVMOpaqueType* parameter_type = indirect
+                    ? llvm_lower_type(ctx.ctx, ctx.types, ctx.types.type_args.get(signature_start + 1 + (u32)pi))
+                    : LLVMTypeOf(call_args.get(pi));
+                param_tys.push(parameter_type);
                 pi += 1;
             }
-            fn_type = LLVMFunctionType(ret_ty, param_tys.data, (u32)call_args.len(), 0);
+            fn_type = LLVMFunctionType(ret_ty, param_tys.data, (u32)param_tys.len(), 0);
             param_tys.drop();
         }
 
         str call_label = callee.kind == ExprKind.Var ? ctx.names.get(callee.aux) : "";
-        llvm_prepare_call_args(ctx, fn_type, &call_args, call_label);
+        llvm_prepare_call_args(ctx, fn_type, &call_args, &call_arg_types, &call_target_types, call_label);
         LLVMOpaqueValue* res = LLVMBuildCall2(ctx.builder, fn_type, fn_val, call_args.data, (u32)call_args.len(), "");
+        call_target_types.drop();
+        call_arg_types.drop();
         call_args.drop();
         return res;
     }
 
-    if (expr.kind == ExprKind.SizeOf) {
-        mono_ensure_child_layouts(ctx, expr.aux, &ctx.generic_layout_ids);
-        u64 size = llvm_target_type_size(ctx, expr.aux);
-        LLVMOpaqueType* i64_ty = LLVMInt64TypeInContext(ctx.ctx);
-        return LLVMConstInt(i64_ty, size, 0);
+    if (expr.kind == ExprKind.SizeOf || expr.kind == ExprKind.AlignOf) {
+        u32 target_type = expr.aux;
+        if (expr.inner0 != 0) {
+            u32 expr_type = llvm_expr_type(ctx, expr.inner0);
+            if (expr_type != TYPE_UNKNOWN && expr_type != 0) {
+                target_type = expr_type;
+            }
+        }
+        target_type = ctx.types.resolve_subst(target_type);
+        mono_ensure_child_layouts(ctx, target_type, &ctx.generic_layout_ids);
+        if (expr.kind == ExprKind.SizeOf) {
+            u64 size = llvm_target_type_size(ctx, target_type);
+            LLVMOpaqueType* i64_ty = LLVMInt64TypeInContext(ctx.ctx);
+            return LLVMConstInt(i64_ty, size, 0);
+        }
+        u64 align = llvm_target_type_align(ctx, target_type);
+        LLVMOpaqueType* u64_ty = LLVMInt64TypeInContext(ctx.ctx);
+        return LLVMConstInt(u64_ty, align, 0);
     }
 
     if (expr.kind == ExprKind.Cast) {
         LLVMOpaqueValue* val = llvm_emit_expr(ctx, expr.inner0);
         if (val == (LLVMOpaqueValue*)0) { return (LLVMOpaqueValue*)0; }
         u32 to_type = expr.aux;
+        u32 from_type = llvm_expr_type(ctx, expr.inner0);
+        LLVMOpaqueValue* user_cast = llvm_try_apply_user_cast(ctx, val, from_type, to_type);
+        if (user_cast != (LLVMOpaqueValue*)0) {
+            return user_cast;
+        }
         LLVMOpaqueType* to_llvm_type = llvm_lower_type(ctx.ctx, ctx.types, to_type);
         LLVMOpaqueType* from_llvm_type = LLVMTypeOf(val);
         if (from_llvm_type == to_llvm_type) {
@@ -2446,9 +2688,16 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             }
         }
         if (v_kind == (u32)8 && (t_kind == (u32)2 || t_kind == (u32)3)) {
+            u32 from_type = llvm_expr_type(ctx, expr.inner0);
+            if (!llvm_type_is_signed(ctx.types, from_type)) {
+                return LLVMBuildUIToFP(ctx.builder, val, to_llvm_type, "uitofp");
+            }
             return LLVMBuildSIToFP(ctx.builder, val, to_llvm_type, "sitofp");
         }
         if ((v_kind == (u32)2 || v_kind == (u32)3) && t_kind == (u32)8) {
+            if (!llvm_type_is_signed(ctx.types, to_type)) {
+                return LLVMBuildFPToUI(ctx.builder, val, to_llvm_type, "fptoui");
+            }
             return LLVMBuildFPToSI(ctx.builder, val, to_llvm_type, "fptosi");
         }
         if (v_kind == (u32)10 && t_kind == (u32)8) {
@@ -2552,7 +2801,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 ctx.note_unresolved("array-elem", "literal");
                 return (LLVMOpaqueValue*)0;
             }
-            elem_val = llvm_compat_value(ctx, elem_val, elem_type);
+            elem_val = llvm_compat_value(ctx, elem_val, llvm_expr_type(ctx, elem_id), elem_type);
             LLVMOpaqueValue* idx = LLVMConstInt(LLVMInt64TypeInContext(ctx.ctx), (u64)i, 0);
             LLVMOpaqueValue* elem_ptr = LLVMBuildGEP2(ctx.builder, elem_ty, base, &idx, 1, "arr_lit_gep");
             LLVMBuildStore(ctx.builder, elem_val, elem_ptr);
@@ -2698,13 +2947,15 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         base_name.drop();
 
         Vec<LLVMOpaqueValue*> call_args = Vec<LLVMOpaqueValue*>.new();
+        Vec<u32> call_arg_types = Vec<u32>.new();
+        Vec<u32> call_target_types = Vec<u32>.new();
         if (is_instance) {
+            u32 rx_type = llvm_expr_type(ctx, expr.inner0);
+            if (rx_type == TYPE_UNKNOWN) { rx_type = receiver_type_id; }
             LLVMOpaqueValue* rx_val = rx_is_ptr ? llvm_emit_expr(ctx, expr.inner0) : llvm_emit_lvalue(ctx, expr.inner0);
             if (rx_val == (LLVMOpaqueValue*)0 && !rx_is_ptr) {
                 LLVMOpaqueValue* val = llvm_emit_expr(ctx, expr.inner0);
                 if (val != (LLVMOpaqueValue*)0) {
-                    u32 rx_type = llvm_expr_type(ctx, expr.inner0);
-                    if (rx_type == TYPE_UNKNOWN) { rx_type = receiver_type_id; }
                     LLVMOpaqueType* val_ty = llvm_lower_type(ctx.ctx, ctx.types, rx_type);
                     LLVMOpaqueValue* tmp = LLVMBuildAlloca(ctx.builder, val_ty, "method_rx_tmp");
                     LLVMBuildStore(ctx.builder, val, tmp);
@@ -2713,10 +2964,10 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             }
             if (rx_val == (LLVMOpaqueValue*)0) {
                 ctx.note_unresolved("method-receiver", method_name);
-                u32 rx_type = llvm_expr_type(ctx, expr.inner0);
-                if (rx_type == TYPE_UNKNOWN) { rx_type = TYPE_I64; }
-                if (!rx_is_ptr) { rx_type = ctx.types.get_pointer(rx_type, true); }
-                LLVMOpaqueType* rx_llvm_ty = llvm_lower_type(ctx.ctx, ctx.types, rx_type);
+                u32 fallback_rx_type = rx_type;
+                if (fallback_rx_type == TYPE_UNKNOWN) { fallback_rx_type = TYPE_I64; }
+                if (!rx_is_ptr) { fallback_rx_type = ctx.types.get_pointer(fallback_rx_type, true); }
+                LLVMOpaqueType* rx_llvm_ty = llvm_lower_type(ctx.ctx, ctx.types, fallback_rx_type);
                 rx_val = LLVMConstNull(rx_llvm_ty);
             }
             // Normalize to what the callee actually takes: by-value self
@@ -2742,6 +2993,8 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 }
             }
             call_args.push(rx_val);
+            call_arg_types.push(rx_type);
+            call_target_types.push(TYPE_UNKNOWN);
         }
 
         u32 args_start = expr.inner1;
@@ -2758,12 +3011,17 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 a_val = LLVMConstNull(a_llvm_ty);
             }
             call_args.push(a_val);
+            call_arg_types.push(llvm_expr_type(ctx, arg_id));
+            call_target_types.push(TYPE_UNKNOWN);
             i += 1;
         }
 
         LLVMOpaqueType* fn_type = LLVMGlobalGetValueType(fn_val);
-        llvm_prepare_call_args(ctx, fn_type, &call_args, method_name);
+        llvm_prepare_call_args(ctx, fn_type, &call_args, &call_arg_types,
+                              &call_target_types, method_name);
         LLVMOpaqueValue* res = LLVMBuildCall2(ctx.builder, fn_type, fn_val, call_args.data, (u32)call_args.len(), "");
+        call_target_types.drop();
+        call_arg_types.drop();
         call_args.drop();
         return res;
     }

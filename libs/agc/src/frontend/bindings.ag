@@ -5,6 +5,7 @@ import std.mem.vec;
 import std.string;
 import frontend.ast;
 import frontend.expressions;
+import frontend.items;
 import frontend.lexer;
 import frontend.symbols;
 
@@ -22,6 +23,9 @@ struct Binding {
     Span span;
     BindingKind kind;
     TypeProjection declared_type;
+    // Parameter spans borrow from the caller-owned CST and preserve nested signatures.
+    SyntaxNode* type_start;
+    SyntaxNode* type_end;
 }
 
 void add_typed_binding(Vec<Binding>* bindings, SyntaxNode* name, BindingKind kind, TypeProjection* declared_type) {
@@ -32,6 +36,8 @@ void add_typed_binding(Vec<Binding>* bindings, SyntaxNode* name, BindingKind kin
     binding.name = name.text;
     binding.span = name.span;
     binding.kind = kind;
+    binding.type_start = (SyntaxNode*)0;
+    binding.type_end = (SyntaxNode*)0;
     if (declared_type == (TypeProjection*)0) {
         TypeProjection unknown = projection_type_empty();
         binding.declared_type = move unknown;
@@ -69,6 +75,36 @@ String binding_declared_type_text(TypeProjection* proj) {
         s.push('>');
     }
     return move s;
+}
+
+bool binding_has_function_type(Binding* binding) {
+    if (binding == (Binding*)0 || binding.type_start == (SyntaxNode*)0) {
+        return false;
+    }
+    SyntaxNode* cursor = binding.type_start;
+    while (cursor != (SyntaxNode*)0 && cursor != binding.type_end) {
+        if (cursor.kind == NodeKind.Parenthesized) {
+            return true;
+        }
+        cursor = cursor.next_sibling;
+    }
+    return false;
+}
+
+String binding_parameter_type_text(Binding* binding) {
+    if (!binding_has_function_type(binding)) {
+        return binding_declared_type_text(&binding.declared_type);
+    }
+    String text = String.new();
+    SyntaxNode* cursor = binding.type_start;
+    while (cursor != (SyntaxNode*)0 && cursor != binding.type_end) {
+        if (cursor.kind != NodeKind.Token
+            || (cursor.token_kind != TokenKind.Const && cursor.token_kind != TokenKind.Mut)) {
+            append_node_tokens(cursor, &text);
+        }
+        cursor = cursor.next_sibling;
+    }
+    return move text;
 }
 
 SyntaxNode* binding_previous_sibling(SyntaxNode* node) {
@@ -263,7 +299,13 @@ void collect_parameter_bindings(SyntaxNode* parameters, Vec<Binding>* bindings) 
         if (last_identifier != (SyntaxNode*)0 && strcmp(last_identifier.text, "self") == 0 && strlen(declared_type.name) == 0) {
             declared_type.name = "Self";
         }
+        i64 binding_count = bindings.len();
         add_typed_binding(bindings, last_identifier, BindingKind.Parameter, &declared_type);
+        if (bindings.len() > binding_count) {
+            Binding* binding = bindings.get_ptr(bindings.len() - 1);
+            binding.type_start = start;
+            binding.type_end = last_identifier;
+        }
         segment.drop();
         if (cursor == (SyntaxNode*)0) {
             break;

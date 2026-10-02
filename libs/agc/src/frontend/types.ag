@@ -280,6 +280,43 @@ impl TypeTable {
         return (u32)(self.types.len() - 1);
     }
 
+    u32 get_function(TypeTable* self, u32 result_type, Vec<u32>* parameters) {
+        String signature = String.from_str(self.type_name(result_type));
+        signature.push((u8)'(');
+        i64 i = 0;
+        while (i < parameters.len()) {
+            if (i > 0) { signature.push((u8)','); }
+            signature.push_str(self.type_name(parameters.get(i)));
+            i += 1;
+        }
+        signature.push((u8)')');
+        u32 name_id = self.names.intern(signature.to_str());
+        signature.drop();
+        i = (i64)(TYPE_PRIMITIVE_MAX + 1);
+        while (i < self.types.len()) {
+            TypeEntry* existing = self.types.get_ptr(i);
+            if (existing.kind == TypeKind.Function && existing.name_id == name_id) {
+                return (u32)i;
+            }
+            i += 1;
+        }
+        TypeEntry entry;
+        entry.kind = TypeKind.Function;
+        // Function signatures store the return type before their parameters.
+        entry.inner = (u32)self.type_args.len();
+        entry.name_id = name_id;
+        entry.count = parameters.len();
+        entry.is_mut = false;
+        self.type_args.push(result_type);
+        i = 0;
+        while (i < parameters.len()) {
+            self.type_args.push(parameters.get(i));
+            i += 1;
+        }
+        self.types.push(move entry);
+        return (u32)(self.types.len() - 1);
+    }
+
 
     // Monomorphization substitution frames (FE-001/P0-002): while emitting a
     // specialized generic instance, type parameters resolve to concrete ids.
@@ -329,6 +366,18 @@ impl TypeTable {
         if (kind == TypeKind.Array) {
             u32 inner = self.resolve_subst(inner_id);
             return inner == inner_id ? id : self.get_array(inner, count);
+        }
+        if (kind == TypeKind.Function) {
+            u32 result_type = self.resolve_subst(self.type_args.get(inner_id));
+            Vec<u32> parameters = Vec<u32>.new();
+            i64 i = 0;
+            while (i < count) {
+                parameters.push(self.resolve_subst(self.type_args.get(inner_id + 1 + (u32)i)));
+                i += 1;
+            }
+            u32 result = self.get_function(result_type, &parameters);
+            parameters.drop();
+            return result;
         }
         if (kind == TypeKind.Named && count > 0) {
             Vec<u32> args = Vec<u32>.new();
@@ -493,7 +542,54 @@ impl TypeTable {
                 pi -= 1;
             }
             if (open > 0) {
-                return self.get_pointer(TYPE_VOID, true);
+                String result_text = String.new();
+                pi = 0;
+                while (pi < open) { result_text.push(name[pi]); pi += 1; }
+                u32 result_type = self.parse_type_name(result_text.to_str());
+                result_text.drop();
+                if (result_type == TYPE_UNKNOWN) { return TYPE_UNKNOWN; }
+                Vec<u32> parameters = Vec<u32>.new();
+                i64 start = open + 1;
+                i64 angle = 0;
+                i64 square = 0;
+                pdepth = 0;
+                pi = start;
+                while (pi < len) {
+                    bool separator = pi == len - 1;
+                    if (!separator) {
+                        if (name[pi] == (u8)'<') { angle += 1; }
+                        else if (name[pi] == (u8)'>') { angle -= 1; }
+                        else if (name[pi] == (u8)'[') { square += 1; }
+                        else if (name[pi] == (u8)']') { square -= 1; }
+                        else if (name[pi] == (u8)'(') { pdepth += 1; }
+                        else if (name[pi] == (u8)')') { pdepth -= 1; }
+                        else if (name[pi] == (u8)',' && angle == 0 && square == 0 && pdepth == 0) {
+                            separator = true;
+                        }
+                    }
+                    if (separator) {
+                        if (pi == start) {
+                            if (pi == len - 1 && start == open + 1) { break; }
+                            parameters.drop();
+                            return TYPE_UNKNOWN;
+                        }
+                        String parameter = String.new();
+                        i64 j = start;
+                        while (j < pi) { parameter.push(name[j]); j += 1; }
+                        u32 parameter_type = self.parse_type_name(parameter.to_str());
+                        parameter.drop();
+                        if (parameter_type == TYPE_UNKNOWN) {
+                            parameters.drop();
+                            return TYPE_UNKNOWN;
+                        }
+                        parameters.push(parameter_type);
+                        start = pi + 1;
+                    }
+                    pi += 1;
+                }
+                u32 result = self.get_function(result_type, &parameters);
+                parameters.drop();
+                return result;
             }
         }
         i64 first = 0;

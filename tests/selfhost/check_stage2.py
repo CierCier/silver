@@ -49,7 +49,66 @@ def main() -> int:
         executed = subprocess.run([str(app)], timeout=30, check=False)
         if executed.returncode != 42:
             raise AssertionError(f"stage2-compiled program returned {executed.returncode}, expected 42")
-    print("native stage2 build, frontend commands, and program execution passed without stage0")
+
+        programs = {
+            "arithmetic-control": """i32 main() {
+    i32 total = 0;
+    for (i32 i = 1; i <= 10; i = i + 1) {
+        if (i % 2 == 0) { total = total + i; }
+        else { total = total - i; }
+    }
+    return total + 37;
+}
+""",
+            "generic-free-function": """T identity<T>(T value) {
+    return value;
+}
+
+i32 main() {
+    i64 first = identity((i64)17);
+    i32 second = identity((i32)25);
+    return (i32)first + second;
+}
+""",
+            "function-pointer": """i32 add_one(i32 value) {
+    return value + 1;
+}
+
+i32 main() {
+    i32(i32) operation = add_one;
+    return operation(41);
+}
+""",
+            "aggregate-layout": """struct Cell {
+    i64 left;
+    i64 right;
+}
+
+i32 main() {
+    Cell cells[2];
+    cells[0].left = 7;
+    cells[0].right = 11;
+    cells[1].left = 13;
+    cells[1].right = 17;
+    return (i32)(cells[0].left + cells[0].right
+        + cells[1].left + cells[1].right) - 6;
+}
+""",
+        }
+        programs["nested-aggregate-layout"] = (
+            root / "tests/selfhost/semantic_regressions/stage2_nested_layout.ag"
+        ).read_text(encoding="utf-8")
+        for name, contents in programs.items():
+            program_source = work / f"{name}.ag"
+            program_source.write_text(contents, encoding="utf-8")
+            program = work / name
+            invoke(stage2, ["build", str(program_source), "--no-cache", "-o", str(program)])
+            executed = subprocess.run([str(program)], timeout=30, check=False)
+            if executed.returncode != 42:
+                raise AssertionError(
+                    f"stage2-compiled {name} program returned {executed.returncode}, expected 42"
+                )
+    print("native stage2 frontend commands and six runtime programs passed without stage0")
     return 0
 
 

@@ -13,7 +13,21 @@ import frontend.lower_expr;
 import frontend.symbols;
 import frontend.messages;
 import frontend.types;
+import frontend.cfg;
 const u32 MAX_TYPE_CHECK_DEPTH = 256;
+
+bool typecheck_str_starts_with(str s, str prefix) {
+    if (s == (str)0 || prefix == (str)0) { return false; }
+    i64 slen = strlen(s);
+    i64 plen = strlen(prefix);
+    if (slen < plen) { return false; }
+    i64 i = 0;
+    while (i < plen) {
+        if (s[i] != prefix[i]) { return false; }
+        i += 1;
+    }
+    return true;
+}
 
 
 struct LocalVar {
@@ -63,6 +77,14 @@ impl TypeEnv {
     }
 }
 
+bool type_is_byte_like(u32 id) {
+    return id == TYPE_U8 || id == TYPE_I8 || id == TYPE_CHAR;
+}
+
+bool type_is_numeric_or_char(u32 id) {
+    return type_is_numeric(id) || id == TYPE_CHAR;
+}
+
 bool types_match(TypeTable* types, u32 expected, u32 actual) {
     if (expected == TYPE_UNKNOWN || actual == TYPE_UNKNOWN) {
         return true;
@@ -78,7 +100,34 @@ bool types_match(TypeTable* types, u32 expected, u32 actual) {
             || act_entry.inner == TYPE_VOID || act_entry.inner == TYPE_UNKNOWN) {
             return true;
         }
-        return exp_entry.inner == act_entry.inner;
+        if (exp_entry.inner == act_entry.inner) {
+            return true;
+        }
+        if (type_is_byte_like(exp_entry.inner) && type_is_byte_like(act_entry.inner)) {
+            return true;
+        }
+        TypeEntry* act_inner_entry = types.get(act_entry.inner);
+        if (act_entry.kind == TypeKind.Reference && act_inner_entry.kind == TypeKind.Pointer) {
+            return exp_entry.inner == act_inner_entry.inner || exp_entry.inner == TYPE_VOID;
+        }
+    }
+    if ((exp_entry.kind == TypeKind.Pointer || exp_entry.kind == TypeKind.Reference)
+        && act_entry.kind == TypeKind.Array) {
+        if (exp_entry.inner == TYPE_VOID || exp_entry.inner == TYPE_UNKNOWN
+            || exp_entry.inner == act_entry.inner
+            || (type_is_byte_like(exp_entry.inner) && type_is_byte_like(act_entry.inner))) {
+            return true;
+        }
+    }
+    if (expected == TYPE_STR && (act_entry.kind == TypeKind.Pointer || act_entry.kind == TypeKind.Reference)) {
+        if (type_is_byte_like(act_entry.inner) || act_entry.inner == TYPE_VOID || act_entry.inner == TYPE_STR) {
+            return true;
+        }
+    }
+    if (actual == TYPE_STR && (exp_entry.kind == TypeKind.Pointer || exp_entry.kind == TypeKind.Reference)) {
+        if (type_is_byte_like(exp_entry.inner) || exp_entry.inner == TYPE_VOID || exp_entry.inner == TYPE_STR) {
+            return true;
+        }
     }
     if (exp_entry.kind == TypeKind.Named && act_entry.kind == TypeKind.Named) {
         str exp_name = types.names.get(exp_entry.name_id);
@@ -92,8 +141,58 @@ bool types_match(TypeTable* types, u32 expected, u32 actual) {
             return true;
         }
     }
-    if (type_is_integer(expected) && type_is_integer(actual)) {
+    if (type_is_numeric_or_char(expected) && type_is_numeric_or_char(actual)) {
         return true;
+    }
+    return false;
+}
+
+bool has_user_cast(SyntaxNode* root, TypeTable* types, u32 actual_type, u32 expected_type) {
+    if (root == (SyntaxNode*)0 || actual_type == TYPE_UNKNOWN || expected_type == TYPE_UNKNOWN) {
+        return false;
+    }
+    TypeEntry* act_entry = types.get(actual_type);
+    while (act_entry.kind == TypeKind.Pointer || act_entry.kind == TypeKind.Reference) {
+        actual_type = act_entry.inner;
+        act_entry = types.get(actual_type);
+    }
+    if (act_entry.kind != TypeKind.Named) {
+        return false;
+    }
+    str act_name = types.names.get(act_entry.name_id);
+    str exp_name = types.type_name(expected_type);
+    SyntaxNode* item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Impl) {
+            SyntaxNode* target = impl_target_identifier(item);
+            if (target != (SyntaxNode*)0 && strcmp(target.text, act_name) == 0) {
+                SyntaxNode* block = item.first_child;
+                while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+                    block = block.next_sibling;
+                }
+                if (block != (SyntaxNode*)0) {
+                    SyntaxNode* cursor = block.first_child;
+                    while (cursor != (SyntaxNode*)0) {
+                        if (cursor.kind == NodeKind.Token
+                            && (cursor.token_kind == TokenKind.Cast || strcmp(cursor.text, "cast") == 0)) {
+                            SyntaxNode* scan = cursor.next_sibling;
+                            String target_type_str = String.new();
+                            while (scan != (SyntaxNode*)0 && scan.kind != NodeKind.Parenthesized && scan.kind != NodeKind.Block) {
+                                append_node_tokens(scan, &target_type_str);
+                                scan = scan.next_sibling;
+                            }
+                            bool matches = strcmp(target_type_str.to_str(), exp_name) == 0;
+                            target_type_str.drop();
+                            if (matches) {
+                                return true;
+                            }
+                        }
+                        cursor = cursor.next_sibling;
+                    }
+                }
+            }
+        }
+        item = item.next_sibling;
     }
     return false;
 }
@@ -107,7 +206,7 @@ bool types_match_value(TypeTable* types, u32 expected, u32 actual, bool actual_i
     }
     // Integer and float literals fold into the expected width, mirroring the
     // stage0 literal promotion (`i64 a = 5` is accepted).
-    if (type_is_integer(expected) && type_is_integer(actual)) {
+    if ((type_is_integer(expected) || expected == TYPE_CHAR) && (type_is_integer(actual) || actual == TYPE_CHAR)) {
         return true;
     }
     if (type_is_float(expected) && type_is_float(actual)) {
@@ -121,6 +220,36 @@ bool expr_is_literal(AstPool* pool, u32 expr_id) {
         return false;
     }
     return pool.get_expr(expr_id).kind == ExprKind.Literal;
+}
+
+u32 numeric_rank(u32 id) {
+    if (id == TYPE_BOOL) { return 1; }
+    if (id == TYPE_I8) { return 10; }
+    if (id == TYPE_U8) { return 11; }
+    if (id == TYPE_I16) { return 20; }
+    if (id == TYPE_U16) { return 21; }
+    if (id == TYPE_CHAR) { return 29; }
+    if (id == TYPE_I32) { return 30; }
+    if (id == TYPE_U32) { return 31; }
+    if (id == TYPE_I64) { return 40; }
+    if (id == TYPE_U64) { return 41; }
+    if (id == TYPE_I128) { return 50; }
+    if (id == TYPE_U128) { return 51; }
+    if (id == TYPE_F32) { return 60; }
+    if (id == TYPE_F64) { return 70; }
+    if (id == TYPE_F80) { return 80; }
+    if (id == TYPE_C32) { return 90; }
+    if (id == TYPE_C64) { return 100; }
+    if (id == TYPE_C80) { return 110; }
+    return 0;
+}
+
+u32 common_numeric_type(u32 left, u32 right) {
+    if (left == right) { return left; }
+    if (type_is_numeric(left) && type_is_numeric(right)) {
+        return numeric_rank(left) >= numeric_rank(right) ? left : right;
+    }
+    return left != TYPE_UNKNOWN ? left : right;
 }
 
 SyntaxNode* find_function_by_name_and_arity(SyntaxNode* root, str name, i64 arity) {
@@ -345,13 +474,14 @@ bool typecheck_has_free_overloads(TypeTable* types, SyntaxNode* root, str name) 
 }
 
 u32 typecheck_parameter_type_id(TypeTable* types, Binding* param) {
-    String declared = binding_declared_type_text(&param.declared_type);
+    bool exact_function_type = binding_has_function_type(param);
+    String declared = binding_parameter_type_text(param);
     u32 type_id = types.parse_type_name(declared.to_str());
-    if (param.declared_type.kind == ProjectionTypeKind.Pointer) {
+    if (!exact_function_type && param.declared_type.kind == ProjectionTypeKind.Pointer) {
         type_id = types.get_pointer(type_id, true);
-    } else if (param.declared_type.kind == ProjectionTypeKind.Reference) {
+    } else if (!exact_function_type && param.declared_type.kind == ProjectionTypeKind.Reference) {
         type_id = types.get_reference(type_id, param.declared_type.is_mutable);
-    } else if (type_id == TYPE_VOID) {
+    } else if (!exact_function_type && type_id == TYPE_VOID) {
         type_id = types.get_pointer(type_id, true);
     }
     declared.drop();
@@ -505,6 +635,57 @@ bool typecheck_expr_struct_has_field(SyntaxNode* root, str type_name, str field_
     return found;
 }
 
+u32 resolve_generic_member_type(TypeTable* types, SyntaxNode* root, u32 composite_type_id, u32 member_type_id) {
+    u32 actual_composite_id = composite_type_id;
+    TypeEntry* comp = types.get(actual_composite_id);
+    while (comp.kind == TypeKind.Pointer || comp.kind == TypeKind.Reference) {
+        actual_composite_id = comp.inner;
+        comp = types.get(actual_composite_id);
+    }
+    if (comp.kind != TypeKind.Named || comp.count == 0) {
+        return types.resolve_subst(member_type_id);
+    }
+    str base = types.names.get(comp.name_id);
+    Vec<u32> param_ids = Vec<u32>.new();
+    SyntaxNode* item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Struct || item.kind == NodeKind.Enum) {
+            SyntaxNode* name_node = item_identifier(item);
+            if (name_node != (SyntaxNode*)0 && strcmp(name_node.text, base) == 0) {
+                SyntaxNode* cursor = name_node.next_sibling;
+                while (cursor != (SyntaxNode*)0 && cursor.kind != NodeKind.Block) {
+                    if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Less) {
+                        SyntaxNode* p = cursor.next_sibling;
+                        while (p != (SyntaxNode*)0 && !(p.kind == NodeKind.Token && p.token_kind == TokenKind.Greater)) {
+                            if (p.kind == NodeKind.Token && p.token_kind == TokenKind.Identifier) {
+                                param_ids.push(types.names.intern(p.text));
+                            }
+                            p = p.next_sibling;
+                        }
+                        break;
+                    }
+                    cursor = cursor.next_sibling;
+                }
+                break;
+            }
+        }
+        item = item.next_sibling;
+    }
+    if (param_ids.len() != comp.count) {
+        param_ids.drop();
+        return types.resolve_subst(member_type_id);
+    }
+    i64 i = 0;
+    while (i < param_ids.len()) {
+        types.push_subst(param_ids.get(i), types.type_args.get(comp.inner + (u32)i));
+        i += 1;
+    }
+    u32 resolved = types.resolve_subst(member_type_id);
+    types.pop_subst(param_ids.len());
+    param_ids.drop();
+    return resolved;
+}
+
 u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode* root,
                TypeEnv* env, u32 expr_id, DiagnosticBag* diagnostics, bool* ok) {
     if (expr_id == 0) { return TYPE_UNKNOWN; }
@@ -546,9 +727,15 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
             }
         }
     } else if (expr.kind == ExprKind.Move) {
-        inferred = env.lookup(expr.aux);
+        if (expr.inner0 != 0) {
+            inferred = infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
+        } else {
+            inferred = env.lookup(expr.aux);
+        }
     } else if (expr.kind == ExprKind.SizeOf) {
         inferred = TYPE_I64;
+    } else if (expr.kind == ExprKind.AlignOf) {
+        inferred = TYPE_U64;
     } else if (expr.kind == ExprKind.Cast) {
         infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
         inferred = expr.aux;
@@ -622,7 +809,7 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
             || op == (u32)TokenKind.And || op == (u32)TokenKind.Or) {
             inferred = TYPE_BOOL;
         } else {
-            inferred = (lhs == TYPE_UNKNOWN) ? rhs : lhs;
+            inferred = common_numeric_type(lhs, rhs);
         }
     } else if (expr.kind == ExprKind.Ternary) {
         u32 cond_type = infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
@@ -713,6 +900,9 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                             u32 payload_type = TYPE_UNKNOWN;
                             if (enum_payload_type_text(root, arm_enum, variant, binding_index, &payload_text)) {
                                 payload_type = type_id_from_text(types, payload_text.to_str());
+                                if (scrut_type != TYPE_UNKNOWN) {
+                                    payload_type = resolve_generic_member_type(types, root, scrut_type, payload_type);
+                                }
                             }
                             payload_text.drop();
                             env.insert(binding_name, payload_type);
@@ -783,6 +973,26 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         AstExpr* callee = pool.get_expr(expr.inner0);
         if (callee.kind == ExprKind.Var) {
             str callee_name = symbols.names.get(callee.aux);
+            if (typecheck_str_starts_with(callee_name, "__atomic_")) {
+                inferred = TYPE_UNKNOWN;
+                return inferred;
+            }
+            if (strcmp(callee_name, "alloc") == 0 || strcmp(callee_name, "realloc") == 0) {
+                if (expr.generic_args_count > 0) {
+                    u32 elem_type = pool.generic_type_args.get((i64)expr.generic_args_start);
+                    inferred = types.get_pointer(elem_type, false);
+                    expr.inferred_type = inferred;
+                    return inferred;
+                }
+                inferred = types.get_pointer(TYPE_VOID, false);
+                expr.inferred_type = inferred;
+                return inferred;
+            }
+            if (strcmp(callee_name, "Ok") == 0 || strcmp(callee_name, "Err") == 0) {
+                inferred = types.get_named("Result");
+                expr.inferred_type = inferred;
+                return inferred;
+            }
             bool overloaded = false;
             bool ambiguous = false;
             bool no_match = false;
@@ -821,7 +1031,8 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                         u32 expected_arg_type = typecheck_parameter_type_id(types, param);
                         u32 arg_expr_id = pool.args.get((i64)expr.inner1 + i);
                         u32 actual_arg_type = infer_expr(pool, types, symbols, root, env, arg_expr_id, diagnostics, ok);
-                        if (!types_match_value(types, expected_arg_type, actual_arg_type, expr_is_literal(pool, arg_expr_id))) {
+                        if (!types_match_value(types, expected_arg_type, actual_arg_type, expr_is_literal(pool, arg_expr_id))
+                            && !has_user_cast(root, types, actual_arg_type, expected_arg_type)) {
                             String message = String.from_str("type mismatch: expected ");
                             message.push_str(types.type_name(expected_arg_type));
                             message.push_str(", found ");
@@ -860,7 +1071,21 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                         i64 tag = 0;
                         i64 arity = 0;
                         if (enum_variant_info(root, enum_id.text, callee_name, &tag, &arity)) {
-                            if (arity != (i64)expr.aux) {
+                            bool flattened = false;
+                            if (arity == 1 && (i64)expr.aux > 1) {
+                                if (strcmp(callee_name, "Err") == 0) {
+                                    flattened = true;
+                                } else {
+                                    String payload_text = String.new();
+                                    if (enum_payload_type_text(root, enum_id.text, callee_name, 0, &payload_text)) {
+                                        if (find_item_by_name(root, NodeKind.Struct, payload_text.to_str()) != (SyntaxNode*)0) {
+                                            flattened = true;
+                                        }
+                                    }
+                                    payload_text.drop();
+                                }
+                            }
+                            if (arity != (i64)expr.aux && !flattened) {
                                 String message = String.from_str("argument count mismatch: expected ");
                                 append_i64(&message, arity);
                                 message.push_str(", found ");
@@ -874,7 +1099,7 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 }
             } else if (find_function_by_name(root, callee_name) == (SyntaxNode*)0
                        && env.lookup(callee.aux) == TYPE_UNKNOWN
-                       && symbols.get_type(callee_name) == TYPE_UNKNOWN) {
+                       && symbols.find(callee_name) < 0) {
                 Vec<str> function_names = Vec<str>.new();
                 SyntaxNode* item = root.first_child;
                 while (item != (SyntaxNode*)0) {
@@ -974,12 +1199,28 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                     if (method_matches_variant(method_name, variant_names.get(vi).text)) {
                         u32 args_count = pool.args.get((i64)expr.inner1);
                         if (variant_arities.get(vi) != (i64)args_count) {
-                            String message = String.from_str("argument count mismatch: expected ");
-                            append_i64(&message, variant_arities.get(vi));
-                            message.push_str(", found ");
-                            append_i64(&message, (i64)args_count);
-                            diagnostics.error(expr.span, move message);
-                            *ok = false;
+                            bool flattened = false;
+                            if (variant_arities.get(vi) == 1 && (i64)args_count > 1) {
+                                if (strcmp(variant_names.get(vi).text, "Err") == 0) {
+                                    flattened = true;
+                                } else {
+                                    String ptext = String.new();
+                                    if (enum_payload_type_text(root, base.to_str(), variant_names.get(vi).text, 0, &ptext)) {
+                                        if (find_item_by_name(root, NodeKind.Struct, ptext.to_str()) != (SyntaxNode*)0) {
+                                            flattened = true;
+                                        }
+                                    }
+                                    ptext.drop();
+                                }
+                            }
+                            if (!flattened) {
+                                String message = String.from_str("argument count mismatch: expected ");
+                                append_i64(&message, variant_arities.get(vi));
+                                message.push_str(", found ");
+                                append_i64(&message, (i64)args_count);
+                                diagnostics.error(expr.span, move message);
+                                *ok = false;
+                            }
                         }
                         inferred = types.get_named(receiver_name);
                         break;
@@ -1005,6 +1246,22 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
             i += 1;
         }
         inferred = types.get_array(elem_type, (i64)elem_count);
+    } else if (expr.kind == ExprKind.Index) {
+        u32 target_type = infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
+        infer_expr(pool, types, symbols, root, env, expr.inner1, diagnostics, ok);
+        if (target_type != TYPE_UNKNOWN) {
+            TypeEntry* entry = types.get(target_type);
+            if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference || entry.kind == TypeKind.Array) {
+                inferred = types.resolve_subst(entry.inner);
+            } else if (entry.kind == TypeKind.Str) {
+                inferred = TYPE_U8;
+            } else if (entry.kind == TypeKind.Named && entry.count > 0) {
+                str base = types.names.get(entry.name_id);
+                if (strcmp(base, "Vec") == 0 || strcmp(base, "Slice") == 0) {
+                    inferred = types.resolve_subst(types.type_args.get(entry.inner));
+                }
+            }
+        }
     }
 
     expr.inferred_type = inferred;
@@ -1055,7 +1312,8 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
                 }
             }
             if (!array_initializer && declared_type != TYPE_UNKNOWN && actual_type != TYPE_UNKNOWN
-                && !types_match_value(types, declared_type, actual_type, expr_is_literal(pool, init_id))) {
+                && !types_match_value(types, declared_type, actual_type, expr_is_literal(pool, init_id))
+                && !has_user_cast(root, types, actual_type, declared_type)) {
                 String message = String.from_str("type mismatch: expected ");
                 message.push_str(types.type_name(declared_type));
                 message.push_str(", found ");
@@ -1075,7 +1333,8 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
         u32 target_type = infer_expr(pool, types, symbols, root, env, stmt.inner0, diagnostics, ok);
         u32 val_type = infer_expr(pool, types, symbols, root, env, stmt.inner1, diagnostics, ok);
         if (target_type != TYPE_UNKNOWN && val_type != TYPE_UNKNOWN
-            && !types_match_value(types, target_type, val_type, expr_is_literal(pool, stmt.inner1))) {
+            && !types_match_value(types, target_type, val_type, expr_is_literal(pool, stmt.inner1))
+            && !has_user_cast(root, types, val_type, target_type)) {
             String message = String.from_str("type mismatch: expected ");
             message.push_str(types.type_name(target_type));
             message.push_str(", found ");
@@ -1088,7 +1347,8 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
         if (expr_id != 0) {
             u32 actual_type = infer_expr(pool, types, symbols, root, env, expr_id, diagnostics, ok);
             if (expected_return != TYPE_UNKNOWN && actual_type != TYPE_UNKNOWN
-                && !types_match_value(types, expected_return, actual_type, expr_is_literal(pool, expr_id))) {
+                && !types_match_value(types, expected_return, actual_type, expr_is_literal(pool, expr_id))
+                && !has_user_cast(root, types, actual_type, expected_return)) {
                 String message = String.from_str("type mismatch: expected ");
                 message.push_str(types.type_name(expected_return));
                 message.push_str(", found ");
@@ -1111,6 +1371,9 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
         infer_expr(pool, types, symbols, root, env, stmt.inner0, diagnostics, ok);
         if (stmt.inner1 != 0) {
             typecheck_statement(pool, types, symbols, root, env, expected_return, stmt.inner1, diagnostics, ok);
+        }
+        if (stmt.aux != 0) {
+            typecheck_statement(pool, types, symbols, root, env, expected_return, stmt.aux, diagnostics, ok);
         }
     } else if (stmt.kind == StmtKind.Block) {
         u32 start = stmt.inner0;
@@ -1146,7 +1409,7 @@ void typecheck_function_statements_scoped(AstPool* pool, TypeTable* types, Symbo
     while (p < params.len()) {
         Binding* param = params.get_ptr(p);
         u32 name_id = symbols.names.intern(param.name);
-        u32 type_id = type_id_from_text(types, param.declared_type.name);
+        u32 type_id = typecheck_parameter_type_id(types, param);
         env.insert(name_id, type_id);
         p += 1;
     }
@@ -1156,8 +1419,12 @@ void typecheck_function_statements_scoped(AstPool* pool, TypeTable* types, Symbo
     lowerer.unit_root = root;
     Vec<u32> stmt_ids = Vec<u32>.new();
     lowerer.lower_block(body, &stmt_ids);
-    if (lowerer.unsupported && unsupported_out != (bool*)0) {
-        *unsupported_out = true;
+    if (lowerer.unsupported) {
+        if (unsupported_out != (bool*)0) {
+            *unsupported_out = true;
+        }
+        stmt_ids.drop();
+        return;
     }
 
     i64 s = 0;
@@ -1167,4 +1434,45 @@ void typecheck_function_statements_scoped(AstPool* pool, TypeTable* types, Symbo
     }
 
     stmt_ids.drop();
+}
+
+bool typecheck_expressions_scoped(AstPool* pool, SymbolTable* symbols, SyntaxTree* tree,
+                                  CfgSet* cfg, DiagnosticBag* diagnostics, u32 file_id_filter) {
+    bool ok = true;
+    Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
+    cfg_collect_items(tree.root, cfg, diagnostics, &items);
+    i64 index = 0;
+    while (index < items.len()) {
+        SyntaxNode* item = items.get(index);
+        if (file_id_filter == 0 || item.span.file == (i64)file_id_filter) {
+            if (symbol_item_is_function(item)) {
+                if (!typecheck_is_generic_function(item)) {
+                    DiagnosticBag function_diagnostics = DiagnosticBag.new();
+                    bool function_ok = true;
+                    typecheck_function_statements(pool, &symbols.types, symbols, tree.root, item,
+                                                  &function_diagnostics, &function_ok);
+                    i64 diagnostic_index = 0;
+                    while (diagnostic_index < function_diagnostics.len()) {
+                        Diagnostic* diagnostic = function_diagnostics.get(diagnostic_index);
+                        // Expression inference is still incomplete. Only report the
+                        // overload ambiguity check that this pass can establish reliably.
+                        if (typecheck_str_starts_with(diagnostic.message.to_str(),
+                                                     "call to overloaded function '")) {
+                            diagnostics.error(diagnostic.span, diagnostic.message.clone());
+                            ok = false;
+                        }
+                        diagnostic_index += 1;
+                    }
+                }
+            }
+        }
+        index += 1;
+    }
+    items.drop();
+    return ok;
+}
+
+bool typecheck_expressions(AstPool* pool, SymbolTable* symbols, SyntaxTree* tree,
+                           CfgSet* cfg, DiagnosticBag* diagnostics) {
+    return typecheck_expressions_scoped(pool, symbols, tree, cfg, diagnostics, 0);
 }

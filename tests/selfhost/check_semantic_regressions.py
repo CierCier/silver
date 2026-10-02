@@ -25,6 +25,10 @@ CASES = {
     "local_reference_return.ag": (
         False, False, "returned reference does not outlive the function"
     ),
+    "ambiguous_overload.ag": (
+        False, False, "call to overloaded function 'g' is ambiguous"
+    ),
+    "unsigned_float_cast.ag": (True, True, ""),
 }
 
 

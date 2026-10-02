@@ -202,6 +202,60 @@ def main() -> int:
                 f"native comptime bool cast returned {executed.returncode}, expected 1"
             )
 
+        function_pointer_global = root / "function-pointer-global.ag"
+        function_pointer_global.write_text(
+            "i32 plus_one(i32 value) { return value + 1; }\n"
+            "i32(i32) callback = &plus_one;\n"
+            "i32 main() { return callback(41); }\n"
+        )
+        rejected_global = run(
+            stage1,
+            [
+                "build",
+                str(function_pointer_global),
+                "--no-cache",
+                "-o",
+                str(root / "function-pointer-global"),
+            ],
+            env,
+            root,
+        )
+        if (
+            rejected_global.returncode == 0
+            or "global-init 'callback'" not in rejected_global.stderr
+        ):
+            raise AssertionError(
+                "unsupported global function-pointer initializer did not fail closed\n"
+                f"return code: {rejected_global.returncode}\n"
+                f"stdout:\n{rejected_global.stdout}\nstderr:\n{rejected_global.stderr}"
+            )
+
+        malformed_parameter = root / "malformed-function-pointer.ag"
+        malformed_parameter.write_text(
+            "i32 apply(i32(i32(,)) callback) { return 0; }\n"
+            "i32 main() { return 0; }\n"
+        )
+        rejected_parameter = run(
+            stage1,
+            [
+                "build",
+                str(malformed_parameter),
+                "--no-cache",
+                "-o",
+                str(root / "malformed-function-pointer"),
+            ],
+            env,
+            root,
+        )
+        if (
+            rejected_parameter.returncode == 0
+            or "parameter-type 'callback'" not in rejected_parameter.stderr
+        ):
+            raise AssertionError(
+                "malformed nested function-pointer parameter did not fail closed\n"
+                f"return code: {rejected_parameter.returncode}\n"
+                f"stdout:\n{rejected_parameter.stdout}\nstderr:\n{rejected_parameter.stderr}"
+            )
 
         unsupported = root / "unsupported.ag"
         unsupported.write_text(

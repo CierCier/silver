@@ -21,6 +21,7 @@ enum ExprKind {
     Match;         // inner0 = scrutinee_id, inner1 = arms_start, aux = arms_count
     Asm;           // inner0 = code_text_id, inner1 = args_start, aux = args_count
     SizeOf;        // aux = type_id
+    AlignOf;       // aux = type_id
     ArrayLit;      // inner1 = elems_start, aux = elem_count (pool.args[start] = count, then ids)
     Format;        // inner0 = format string literal id, inner1 = args_start, aux = args_count
     Hash;          // inner0 = arg expr id (builtin @hash, always i64)
@@ -46,7 +47,7 @@ enum StmtKind {
     Expr;          // inner0 = expr_id
     Return;        // inner0 = expr_id
     If;            // inner0 = cond_expr_id, inner1 = then_block_id, aux = else_block_id
-    While;         // inner0 = cond_expr_id, inner1 = body_block_id
+    While;         // inner0 = cond, inner1 = body block, aux = optional step stmt
     Break;
     Continue;
     Defer;         // inner0 = block_id
@@ -291,12 +292,18 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
-    u32 add_move(AstPool* self, u32 var_name_id, Span span) {
+    u32 add_move(AstPool* self, u32 operand_id, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.Move;
-        expr.inner0 = 0;
+        expr.inner0 = operand_id;
         expr.inner1 = 0;
-        expr.aux = var_name_id;
+        expr.aux = 0;
+        if (operand_id < (u32)self.exprs.len()) {
+            AstExpr* op = self.get_expr(operand_id);
+            if (op.kind == ExprKind.Var) {
+                expr.aux = op.aux;
+            }
+        }
         expr.span = span;
         expr.inferred_type = TYPE_UNKNOWN;
         expr.generic_args_start = 0;
@@ -476,16 +483,32 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
-    u32 add_sizeof(AstPool* self, u32 type_id, Span span) {
+    u32 add_sizeof(AstPool* self, u32 type_id, u32 expr_id, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.SizeOf;
-        expr.inner0 = 0;
+        expr.inner0 = expr_id;
         expr.inner1 = 0;
         expr.aux = type_id;
         expr.span = span;
         expr.inferred_type = TYPE_I64;
         expr.generic_args_start = 0;
         expr.generic_args_count = 0;
+        expr.resolved_callee_id = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_alignof(AstPool* self, u32 type_id, u32 expr_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.AlignOf;
+        expr.inner0 = expr_id;
+        expr.inner1 = 0;
+        expr.aux = type_id;
+        expr.span = span;
+        expr.inferred_type = TYPE_U64;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        expr.resolved_callee_id = 0;
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
     }
@@ -551,6 +574,18 @@ impl AstPool {
         stmt.inner0 = cond_id;
         stmt.inner1 = body_stmt_id;
         stmt.aux = 0;
+        stmt.span = span;
+        self.stmts.push(move stmt);
+        return (u32)(self.stmts.len() - 1);
+    }
+
+    u32 add_stmt_while_step(AstPool* self, u32 cond_id, u32 body_stmt_id,
+                            u32 step_stmt_id, Span span) {
+        AstStmt stmt;
+        stmt.kind = StmtKind.While;
+        stmt.inner0 = cond_id;
+        stmt.inner1 = body_stmt_id;
+        stmt.aux = step_stmt_id;
         stmt.span = span;
         self.stmts.push(move stmt);
         return (u32)(self.stmts.len() - 1);

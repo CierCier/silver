@@ -380,6 +380,10 @@ i32 emit_check(str path, CfgSet* cfg, Vec<String>* include_dirs, LintConfig* lin
                 check_ownership(&tree, &diagnostics, cfg);
             }
             if (diagnostics.is_empty()) {
+                AstPool check_pool = AstPool.new();
+                typecheck_expressions(&check_pool, &symbols, &tree, cfg, &diagnostics);
+            }
+            if (diagnostics.is_empty()) {
                 check_lints(&tree, &diagnostics, lint_config);
                 lint_config_apply_errors(lint_config, &diagnostics);
             }

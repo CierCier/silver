@@ -205,8 +205,10 @@ extern "C" {
     LLVMOpaqueValue* LLVMBuildMul(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueValue* p2, i8* p3);
     LLVMOpaqueValue* LLVMBuildFMul(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueValue* p2, i8* p3);
     LLVMOpaqueValue* LLVMBuildSDiv(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueValue* p2, i8* p3);
+    LLVMOpaqueValue* LLVMBuildUDiv(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueValue* p2, i8* p3);
     LLVMOpaqueValue* LLVMBuildFDiv(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueValue* p2, i8* p3);
     LLVMOpaqueValue* LLVMBuildSRem(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueValue* p2, i8* p3);
+    LLVMOpaqueValue* LLVMBuildURem(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueValue* p2, i8* p3);
     LLVMOpaqueValue* LLVMBuildAnd(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueValue* p2, i8* p3);
     LLVMOpaqueValue* LLVMBuildOr(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueValue* p2, i8* p3);
     LLVMOpaqueValue* LLVMBuildXor(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueValue* p2, i8* p3);
@@ -231,6 +233,8 @@ extern "C" {
     LLVMOpaqueValue* LLVMBuildTrunc(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueType* p2, i8* p3);
     LLVMOpaqueValue* LLVMBuildSIToFP(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueType* p2, i8* p3);
     LLVMOpaqueValue* LLVMBuildFPToSI(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueType* p2, i8* p3);
+    LLVMOpaqueValue* LLVMBuildUIToFP(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueType* p2, i8* p3);
+    LLVMOpaqueValue* LLVMBuildFPToUI(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueType* p2, i8* p3);
     LLVMOpaqueValue* LLVMBuildFPExt(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueType* p2, i8* p3);
     LLVMOpaqueValue* LLVMBuildFPTrunc(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueType* p2, i8* p3);
     LLVMOpaqueValue* LLVMBuildICmp(LLVMOpaqueBuilder* p0, LLVMIntPredicate p1, LLVMOpaqueValue* p2, LLVMOpaqueValue* p3, i8* p4);
@@ -294,6 +298,7 @@ extern "C" {
     void LLVMDisposeTargetData(LLVMTargetDataRef* p0);
     i8* LLVMCopyStringRepOfTargetData(LLVMTargetDataRef* p0);
     u64 LLVMABISizeOfType(LLVMTargetDataRef* p0, LLVMOpaqueType* p1);
+    u32 LLVMABIAlignmentOfType(LLVMTargetDataRef* p0, LLVMOpaqueType* p1);
     u64 LLVMOffsetOfElement(LLVMTargetDataRef* p0, LLVMOpaqueType* p1, u32 p2);
     i32 LLVMTypeIsSized(LLVMOpaqueType* p0);
     i32 LLVMTargetMachineEmitToFile(LLVMOpaqueTargetMachine* p0, LLVMOpaqueModule* p1, i8* p2, LLVMCodeGenFileType p3, i8** p4);

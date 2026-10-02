@@ -75,6 +75,7 @@ impl OwnershipAnalyzer {
         OwnershipAnalyzer analyzer;
         analyzer.names = Interner.new();
         analyzer.moved_set = BitSet.new();
+        analyzer.move_origins = Vec<MoveOrigin>.new();
         analyzer.type_table = TypeTable.new();
         analyzer.variables = Vec<OwnershipVar>.new();
         analyzer.observed_set = BitSet.new();

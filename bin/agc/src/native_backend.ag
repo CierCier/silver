@@ -317,6 +317,33 @@ bool native_tree_uses_assert(SyntaxNode* node) {
     return false;
 }
 
+bool native_node_uses_format(SyntaxNode* node) {
+    if (node == (SyntaxNode*)0) { return false; }
+    if (node.kind == NodeKind.Token && node.token_kind == TokenKind.At
+        && node.next_sibling != (SyntaxNode*)0
+        && node.next_sibling.kind == NodeKind.Token
+        && (strcmp(node.next_sibling.text, "println") == 0
+            || strcmp(node.next_sibling.text, "print") == 0
+            || strcmp(node.next_sibling.text, "format") == 0)) {
+        return true;
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (native_node_uses_format(child)) { return true; }
+        child = child.next_sibling;
+    }
+    return false;
+}
+
+bool native_tree_uses_format(SyntaxNode* node) {
+    SyntaxNode* cursor = node;
+    while (cursor != (SyntaxNode*)0) {
+        if (native_node_uses_format(cursor)) { return true; }
+        cursor = cursor.next_sibling;
+    }
+    return false;
+}
+
 SyntaxNode* native_load_unit(str path, u32 file_id, Vec<NodePool>* pools, Vec<TokenStream>* streams) {
     Result<String, Error> loaded = String.from_file(path);
     if (loaded.is_err()) {
@@ -572,6 +599,9 @@ void native_queue_imports(SyntaxNode* unit, str owner, str root_dir, CfgSet* cfg
     if (native_tree_uses_assert(unit)) {
         names.push(String.from_str("std.mem.memory"));
     }
+    if (native_tree_uses_format(unit)) {
+        names.push(String.from_str("std.string"));
+    }
     i64 i = 0;
     while (i < names.len()) {
         String* name = names.get_ptr(i);
@@ -716,6 +746,15 @@ bool native_tree_supported(SyntaxNode* node) {
             return false;
         }
         if (node.token_kind == TokenKind.For) {
+            SyntaxNode* binding = node.next_sibling;
+            if (binding != (SyntaxNode*)0 && binding.kind == NodeKind.Token
+                && (binding.token_kind == TokenKind.Const || binding.token_kind == TokenKind.Mut)) {
+                binding = binding.next_sibling;
+            }
+            if (binding != (SyntaxNode*)0 && binding.kind == NodeKind.Token
+                && (binding.token_kind == TokenKind.Star || binding.token_kind == TokenKind.BitwiseAnd)) {
+                return false;
+            }
             SyntaxNode* paren = node.next_sibling;
             if (paren != (SyntaxNode*)0 && paren.kind == NodeKind.Parenthesized) {
                 if (!native_for_is_c_style(node)) {

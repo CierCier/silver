@@ -60,7 +60,10 @@ not prove native ownership cleanup or a working stage2 compiler.
 
 `check_stage2.py` builds stage2 with the native stage1 backend while stage0 is
 unavailable. It then runs stage2's help, version, lexer, parser, and checker on
-an input exceeding 128 tokens, and builds and executes a program with stage2.
+an input exceeding 128 tokens, and builds and executes six programs with stage2.
+These cover arithmetic and control flow, generic free functions, function
+pointers, struct arrays, and nested aggregate layouts. The nested-layout case
+also exercises ownership analysis after initializing its move-origin storage.
 This proves those stage2 paths. It does not cover the full native corpus or
 stage3 self-compilation.
 

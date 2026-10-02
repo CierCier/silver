@@ -35,27 +35,43 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
             ctx.note_unresolved("return-value", "expression");
             val = LLVMConstNull(ret_ty);
         } else if (LLVMTypeOf(val) != ret_ty) {
-            u32 v_kind = LLVMGetTypeKind(LLVMTypeOf(val));
-            u32 r_kind = LLVMGetTypeKind(ret_ty);
-            if (r_kind == (u32)8 && v_kind == (u32)8) {
-                val = llvm_compat_value(ctx, val, ctx.current_return_type);
-            } else if (r_kind == (u32)12 && v_kind == (u32)8) {
-                val = LLVMBuildIntToPtr(ctx.builder, val, ret_ty, "ret_p_cast");
-            } else if (r_kind == (u32)8 && v_kind == (u32)12) {
-                val = LLVMBuildPtrToInt(ctx.builder, val, ret_ty, "ret_i_cast");
-            } else if ((r_kind == (u32)2 || r_kind == (u32)3) && (v_kind == (u32)2 || v_kind == (u32)3)) {
-                if (r_kind == (u32)3) {
-                    val = LLVMBuildFPExt(ctx.builder, val, ret_ty, "ret_fpext");
-                } else {
-                    val = LLVMBuildFPTrunc(ctx.builder, val, ret_ty, "ret_fptrunc");
-                }
-            } else if ((r_kind == (u32)2 || r_kind == (u32)3) && v_kind == (u32)8) {
-                val = LLVMBuildSIToFP(ctx.builder, val, ret_ty, "ret_sitofp");
-            } else if (r_kind == (u32)8 && (v_kind == (u32)2 || v_kind == (u32)3)) {
-                val = LLVMBuildFPToSI(ctx.builder, val, ret_ty, "ret_fptosi");
+            u32 from_type = llvm_expr_type(ctx, stmt.inner0);
+            LLVMOpaqueValue* user_cast = llvm_try_apply_user_cast(ctx, val, from_type, ctx.current_return_type);
+            if (user_cast != (LLVMOpaqueValue*)0) {
+                val = user_cast;
             } else {
-                ctx.note_unresolved("return-type", "expression");
-                val = LLVMConstNull(ret_ty);
+                u32 v_kind = LLVMGetTypeKind(LLVMTypeOf(val));
+                u32 r_kind = LLVMGetTypeKind(ret_ty);
+                if (r_kind == (u32)8 && v_kind == (u32)8) {
+                    val = llvm_compat_value(ctx, val, llvm_expr_type(ctx, stmt.inner0),
+                                            ctx.current_return_type);
+                } else if (r_kind == (u32)12 && v_kind == (u32)8) {
+                    val = LLVMBuildIntToPtr(ctx.builder, val, ret_ty, "ret_p_cast");
+                } else if (r_kind == (u32)8 && v_kind == (u32)12) {
+                    val = LLVMBuildPtrToInt(ctx.builder, val, ret_ty, "ret_i_cast");
+                } else if ((r_kind == (u32)2 || r_kind == (u32)3) && (v_kind == (u32)2 || v_kind == (u32)3)) {
+                    if (r_kind == (u32)3) {
+                        val = LLVMBuildFPExt(ctx.builder, val, ret_ty, "ret_fpext");
+                    } else {
+                        val = LLVMBuildFPTrunc(ctx.builder, val, ret_ty, "ret_fptrunc");
+                    }
+                } else if ((r_kind == (u32)2 || r_kind == (u32)3) && v_kind == (u32)8) {
+                    u32 v_type = llvm_expr_type(ctx, stmt.inner0);
+                    if (!llvm_type_is_signed(ctx.types, v_type)) {
+                        val = LLVMBuildUIToFP(ctx.builder, val, ret_ty, "ret_uitofp");
+                    } else {
+                        val = LLVMBuildSIToFP(ctx.builder, val, ret_ty, "ret_sitofp");
+                    }
+                } else if (r_kind == (u32)8 && (v_kind == (u32)2 || v_kind == (u32)3)) {
+                    if (!llvm_type_is_signed(ctx.types, ctx.current_return_type)) {
+                        val = LLVMBuildFPToUI(ctx.builder, val, ret_ty, "ret_fptoui");
+                    } else {
+                        val = LLVMBuildFPToSI(ctx.builder, val, ret_ty, "ret_fptosi");
+                    }
+                } else {
+                    ctx.note_unresolved("return-type", "expression");
+                    val = LLVMConstNull(ret_ty);
+                }
             }
         }
         LLVMBuildRet(ctx.builder, val);
@@ -71,7 +87,7 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
             }
         }
         if (type_id == TYPE_UNKNOWN) {
-            ctx.note_unresolved("local-type", "unknown");
+            ctx.note_unresolved("local-type", ctx.names.get(var_name_id));
             type_id = TYPE_I64;
         }
 
@@ -94,12 +110,18 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
             LLVMOpaqueValue* init_val = llvm_emit_expr(ctx, stmt.inner1);
             ctx.expected_type_id = saved_expected;
             if (init_val != (LLVMOpaqueValue*)0) {
-                AstExpr* initializer = ctx.pool.get_expr(stmt.inner1);
-                TypeEntry* declared = ctx.types.get(type_id);
-                if (initializer.kind == ExprKind.ArrayLit && declared.kind == TypeKind.Array) {
-                    init_val = LLVMBuildLoad2(ctx.builder, llvm_ty, init_val, "array_init_value");
+                u32 from_type = llvm_expr_type(ctx, stmt.inner1);
+                LLVMOpaqueValue* user_cast = llvm_try_apply_user_cast(ctx, init_val, from_type, type_id);
+                if (user_cast != (LLVMOpaqueValue*)0) {
+                    init_val = user_cast;
                 } else {
-                    init_val = llvm_compat_value(ctx, init_val, type_id);
+                    AstExpr* initializer = ctx.pool.get_expr(stmt.inner1);
+                    TypeEntry* declared = ctx.types.get(type_id);
+                    if (initializer.kind == ExprKind.ArrayLit && declared.kind == TypeKind.Array) {
+                        init_val = LLVMBuildLoad2(ctx.builder, llvm_ty, init_val, "array_init_value");
+                    } else {
+                        init_val = llvm_compat_value(ctx, init_val, llvm_expr_type(ctx, stmt.inner1), type_id);
+                    }
                 }
                 LLVMBuildStore(ctx.builder, init_val, ptr);
             } else {
@@ -122,7 +144,14 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
             ctx.note_unresolved("assignment-value", "expression");
         }
         if (target_ptr != (LLVMOpaqueValue*)0 && val != (LLVMOpaqueValue*)0) {
-            val = llvm_compat_value(ctx, val, llvm_lvalue_type(ctx, stmt.inner0));
+            u32 target_type = llvm_lvalue_type(ctx, stmt.inner0);
+            u32 val_type = llvm_expr_type(ctx, stmt.inner1);
+            LLVMOpaqueValue* user_cast = llvm_try_apply_user_cast(ctx, val, val_type, target_type);
+            if (user_cast != (LLVMOpaqueValue*)0) {
+                val = user_cast;
+            } else {
+                val = llvm_compat_value(ctx, val, val_type, target_type);
+            }
             LLVMBuildStore(ctx.builder, val, target_ptr);
         }
         return;
@@ -177,6 +206,9 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
     if (stmt.kind == StmtKind.While) {
         LLVMOpaqueBasicBlock* cond_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "while_cond");
         LLVMOpaqueBasicBlock* body_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "while_body");
+        LLVMOpaqueBasicBlock* step_bb = stmt.aux != 0
+            ? LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "while_step")
+            : cond_bb;
         LLVMOpaqueBasicBlock* exit_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "while_exit");
 
         LLVMBuildBr(ctx.builder, cond_bb);
@@ -196,13 +228,21 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
 
         // Emit body block
         LLVMPositionBuilderAtEnd(ctx.builder, body_bb);
-        ctx.push_loop(exit_bb, cond_bb);
+        ctx.push_loop(exit_bb, step_bb);
         ctx.push_scope();
         llvm_emit_stmt(ctx, stmt.inner1);
         ctx.pop_scope();
         ctx.pop_loop();
         if (!ctx.is_terminated()) {
-            LLVMBuildBr(ctx.builder, cond_bb);
+            LLVMBuildBr(ctx.builder, step_bb);
+        }
+
+        if (stmt.aux != 0) {
+            LLVMPositionBuilderAtEnd(ctx.builder, step_bb);
+            llvm_emit_stmt(ctx, stmt.aux);
+            if (!ctx.is_terminated()) {
+                LLVMBuildBr(ctx.builder, cond_bb);
+            }
         }
 
         LLVMPositionBuilderAtEnd(ctx.builder, exit_bb);

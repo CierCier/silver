@@ -65,21 +65,27 @@ String llvm_free_function_symbol(TypeTable* types, SyntaxNode* root, SyntaxNode*
     return typecheck_overloaded_free_symbol(types, id_node.text, function);
 }
 
-Vec<LLVMOpaqueType*> llvm_param_types(LLVMOpaqueContext* ctx, TypeTable* types, Vec<Binding>* params, str self_type_name) {
+Vec<LLVMOpaqueType*> llvm_param_types(LlvmContext* ctx, TypeTable* types, Vec<Binding>* params, str self_type_name) {
     Vec<LLVMOpaqueType*> param_types = Vec<LLVMOpaqueType*>.new();
     i64 p = 0;
     while (p < params.len()) {
         Binding* param = params.get_ptr(p);
-        String dec_str = binding_declared_type_text(&param.declared_type);
+        bool exact_function_type = binding_has_function_type(param);
+        String dec_str = binding_parameter_type_text(param);
         str type_str = dec_str.to_str();
         if (self_type_name != (str)0 && (strcmp(type_str, "Self") == 0 || (strcmp(param.name, "self") == 0 && strlen(type_str) == 0))) {
             type_str = self_type_name;
         }
         u32 param_type_id = types.parse_type_name(type_str);
-        if (param.declared_type.kind == ProjectionTypeKind.Pointer || param.declared_type.kind == ProjectionTypeKind.Reference || param_type_id == TYPE_VOID) {
+        if (param_type_id == TYPE_UNKNOWN) {
+            ctx.note_unresolved("parameter-type", param.name);
+            param_type_id = TYPE_I64;
+        } else if (!exact_function_type
+            && (param.declared_type.kind == ProjectionTypeKind.Pointer
+                || param.declared_type.kind == ProjectionTypeKind.Reference || param_type_id == TYPE_VOID)) {
             param_type_id = types.get_pointer(param_type_id, true);
         }
-        param_types.push(llvm_lower_type(ctx, types, param_type_id));
+        param_types.push(llvm_lower_type(ctx.ctx, types, param_type_id));
         dec_str.drop();
         p += 1;
     }
@@ -188,7 +194,8 @@ bool llvm_define_method_instance(LlvmContext* ctx, TypeTable* types, Interner* n
     while (p < params.len()) {
         Binding* param = params.get_ptr(p);
         u32 param_name_id = names.intern(param.name);
-        String dec_str = binding_declared_type_text(&param.declared_type);
+        bool exact_function_type = binding_has_function_type(param);
+        String dec_str = binding_parameter_type_text(param);
         str type_str = dec_str.to_str();
         u32 param_type_id = TYPE_UNKNOWN;
         if (strcmp(type_str, "Self") == 0 || (strcmp(param.name, "self") == 0 && strlen(type_str) == 0)) {
@@ -200,7 +207,9 @@ bool llvm_define_method_instance(LlvmContext* ctx, TypeTable* types, Interner* n
             }
             param_type_id = types.resolve_subst(param_type_id);
         }
-        if (param.declared_type.kind == ProjectionTypeKind.Pointer || param.declared_type.kind == ProjectionTypeKind.Reference || param_type_id == TYPE_VOID) {
+        if (!exact_function_type
+            && (param.declared_type.kind == ProjectionTypeKind.Pointer
+                || param.declared_type.kind == ProjectionTypeKind.Reference || param_type_id == TYPE_VOID)) {
             param_type_id = types.get_pointer(param_type_id, true);
         }
         mono_ensure_child_layouts(ctx, param_type_id, &ctx.generic_layout_ids);
@@ -276,10 +285,12 @@ bool llvm_define_free_function_instance(LlvmContext* ctx, TypeTable* types,
     i64 i = 0;
     while (i < params.len()) {
         Binding* param = params.get_ptr(i);
-        String text = binding_declared_type_text(&param.declared_type);
+        bool exact_function_type = binding_has_function_type(param);
+        String text = binding_parameter_type_text(param);
         u32 type_id = types.resolve_subst(types.parse_type_name(text.to_str()));
-        if (param.declared_type.kind == ProjectionTypeKind.Pointer
-            || param.declared_type.kind == ProjectionTypeKind.Reference || type_id == TYPE_VOID) {
+        if (!exact_function_type
+            && (param.declared_type.kind == ProjectionTypeKind.Pointer
+                || param.declared_type.kind == ProjectionTypeKind.Reference || type_id == TYPE_VOID)) {
             type_id = types.get_pointer(type_id, true);
         }
         mono_ensure_child_layouts(ctx, type_id, &ctx.generic_layout_ids);
@@ -689,7 +700,7 @@ impl LlvmGenerator {
                     LLVMOpaqueType* ret_llvm_type = llvm_lower_type(self.ctx, types, ret_type_id);
                     Vec<Binding> params = Vec<Binding>.new();
                     collect_parameter_bindings(binding_function_parameters(item), &params);
-                    Vec<LLVMOpaqueType*> param_types = llvm_param_types(self.ctx, types, &params, (str)0);
+                    Vec<LLVMOpaqueType*> param_types = llvm_param_types(&ctx, types, &params, (str)0);
                     LLVMOpaqueType* fn_type = LLVMFunctionType(ret_llvm_type, param_types.data, (u32)param_types.len(), 0);
                     if (LLVMGetNamedFunction(self.module, fn_name.to_str()) == (LLVMOpaqueValue*)0) {
                         LLVMAddFunction(self.module, fn_name.to_str(), fn_type);
@@ -717,6 +728,7 @@ impl LlvmGenerator {
                                 cursor = cursor.next_sibling;
                                 continue;
                             }
+                            bool is_cast = cursor.kind == NodeKind.Token && (cursor.token_kind == TokenKind.Cast || strcmp(cursor.text, "cast") == 0);
                             SyntaxNode* ret_start = cursor;
                             SyntaxNode* method_name_node = (SyntaxNode*)0;
                             SyntaxNode* params_node = (SyntaxNode*)0;
@@ -741,7 +753,7 @@ impl LlvmGenerator {
                                         break;
                                     }
                                 }
-                                if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Identifier) {
+                                if (!is_cast && scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Identifier) {
                                     method_name_node = scan;
                                 }
                                 scan = scan.next_sibling;
@@ -751,30 +763,39 @@ impl LlvmGenerator {
                                 continue;
                             }
                             if (body_node != (SyntaxNode*)0 && body_node.kind == NodeKind.Block) {
-                                if (method_name_node != (SyntaxNode*)0 && params_node != (SyntaxNode*)0) {
+                                if ((is_cast || method_name_node != (SyntaxNode*)0) && params_node != (SyntaxNode*)0) {
                                     String mangled = String.from_str(struct_name);
                                     mangled.push_str("__");
-                                    mangled.push_str(method_name_node.text);
-
-                                    SyntaxNode* rscan = ret_start;
-                                    while (rscan != (SyntaxNode*)0 && rscan != method_name_node) {
-                                        if (rscan.kind == NodeKind.Token && rscan.text == "#") {
-                                            rscan = rscan.next_sibling;
-                                            if (rscan != (SyntaxNode*)0 && rscan.kind == NodeKind.Bracket) {
-                                                rscan = rscan.next_sibling;
-                                            }
-                                            continue;
-                                        }
-                                        if (rscan.kind == NodeKind.Token && (rscan.text == "pub" || rscan.text == "static")) {
-                                            rscan = rscan.next_sibling;
-                                            continue;
-                                        }
-                                        break;
-                                    }
                                     String ret_str = String.new();
-                                    while (rscan != (SyntaxNode*)0 && rscan != method_name_node) {
-                                        append_node_tokens(rscan, &ret_str);
-                                        rscan = rscan.next_sibling;
+                                    if (is_cast) {
+                                        SyntaxNode* rscan = cursor.next_sibling;
+                                        while (rscan != (SyntaxNode*)0 && rscan != params_node) {
+                                            append_node_tokens(rscan, &ret_str);
+                                            rscan = rscan.next_sibling;
+                                        }
+                                        mangled.push_str("cast_");
+                                        mangled.push_str(ret_str.to_str());
+                                    } else {
+                                        mangled.push_str(method_name_node.text);
+                                        SyntaxNode* rscan = ret_start;
+                                        while (rscan != (SyntaxNode*)0 && rscan != method_name_node) {
+                                            if (rscan.kind == NodeKind.Token && rscan.text == "#") {
+                                                rscan = rscan.next_sibling;
+                                                if (rscan != (SyntaxNode*)0 && rscan.kind == NodeKind.Bracket) {
+                                                    rscan = rscan.next_sibling;
+                                                }
+                                                continue;
+                                            }
+                                            if (rscan.kind == NodeKind.Token && (rscan.text == "pub" || rscan.text == "static")) {
+                                                rscan = rscan.next_sibling;
+                                                continue;
+                                            }
+                                            break;
+                                        }
+                                        while (rscan != (SyntaxNode*)0 && rscan != method_name_node) {
+                                            append_node_tokens(rscan, &ret_str);
+                                            rscan = rscan.next_sibling;
+                                        }
                                     }
                                     u32 ret_type_id = type_id_from_text(types, ret_str.to_str());
                                     ret_str.drop();
@@ -790,7 +811,7 @@ impl LlvmGenerator {
 
                                     Vec<Binding> params = Vec<Binding>.new();
                                     collect_parameter_bindings(params_node, &params);
-                                    Vec<LLVMOpaqueType*> param_types = llvm_param_types(self.ctx, types, &params, struct_name);
+                                    Vec<LLVMOpaqueType*> param_types = llvm_param_types(&ctx, types, &params, struct_name);
                                     LLVMOpaqueType* fn_type = LLVMFunctionType(ret_llvm_type, param_types.data, (u32)param_types.len(), 0);
                                     if (LLVMGetNamedFunction(self.module, mangled.to_str()) == (LLVMOpaqueValue*)0) {
                                         LLVMAddFunction(self.module, mangled.to_str(), fn_type);
@@ -845,7 +866,7 @@ impl LlvmGenerator {
                             LLVMOpaqueType* ret_llvm_type = llvm_lower_type(self.ctx, types, ret_type_id);
                             Vec<Binding> params = Vec<Binding>.new();
                             collect_parameter_bindings(params_node, &params);
-                            Vec<LLVMOpaqueType*> param_types = llvm_param_types(self.ctx, types, &params, (str)0);
+                            Vec<LLVMOpaqueType*> param_types = llvm_param_types(&ctx, types, &params, (str)0);
                             LLVMOpaqueType* fn_type = LLVMFunctionType(ret_llvm_type, param_types.data, (u32)param_types.len(), 0);
                             if (LLVMGetNamedFunction(self.module, fn_name) == (LLVMOpaqueValue*)0) {
                                 LLVMAddFunction(self.module, fn_name, fn_type);
@@ -963,6 +984,21 @@ impl LlvmGenerator {
                                 g_init = LLVMConstInt(g_llvm_type, (u64)parse_char_literal(init_node.text), 0);
                             } else if (init_node.token_kind == TokenKind.FloatLiteral) {
                                 g_init = LLVMConstRealOfString(g_llvm_type, init_node.text);
+                            } else if (init_node.token_kind == TokenKind.StringLiteral
+                                && g_type_id == TYPE_STR) {
+                                String decoded = unescape_string_literal(init_node.text);
+                                LLVMOpaqueValue* literal = LLVMConstStringInContext2(self.ctx,
+                                    (i8*)decoded.data, (u64)decoded.len(), 0);
+                                decoded.drop();
+                                String literal_name = String.from_str(g_name);
+                                literal_name.push_str(".literal");
+                                g_init = LLVMAddGlobal(self.module, LLVMTypeOf(literal), literal_name.to_str());
+                                literal_name.drop();
+                                LLVMSetInitializer(g_init, literal);
+                                LLVMSetGlobalConstant(g_init, 1);
+                                LLVMSetLinkage(g_init, LLVMLinkage.LLVMPrivateLinkage);
+                            } else {
+                                ctx.note_unresolved("global-init", g_name);
                             }
                         } else if (init_node.kind == NodeKind.Block) {
                             // Struct literal: { .field = lit, ... }. Build one
@@ -1183,13 +1219,16 @@ impl LlvmGenerator {
                     while (p < params.len()) {
                         Binding* param = params.get_ptr(p);
                         u32 param_name_id = names.intern(param.name);
-                        String dec_str = binding_declared_type_text(&param.declared_type);
+                        bool exact_function_type = binding_has_function_type(param);
+                        String dec_str = binding_parameter_type_text(param);
                         str type_str = dec_str.to_str();
                         u32 param_type_id = ctx.subst_type(type_str);
                         if (param_type_id == TYPE_UNKNOWN) {
                             param_type_id = types.parse_type_name(type_str);
                         }
-                        if (param.declared_type.kind == ProjectionTypeKind.Pointer || param.declared_type.kind == ProjectionTypeKind.Reference || param_type_id == TYPE_VOID) {
+                        if (!exact_function_type
+                            && (param.declared_type.kind == ProjectionTypeKind.Pointer
+                                || param.declared_type.kind == ProjectionTypeKind.Reference || param_type_id == TYPE_VOID)) {
                             param_type_id = types.get_pointer(param_type_id, true);
                         }
                         LLVMOpaqueType* param_llvm_type = llvm_lower_type(self.ctx, types, param_type_id);
@@ -1263,6 +1302,7 @@ impl LlvmGenerator {
                                 cursor = cursor.next_sibling;
                                 continue;
                             }
+                            bool is_cast = cursor.kind == NodeKind.Token && (cursor.token_kind == TokenKind.Cast || strcmp(cursor.text, "cast") == 0);
                             SyntaxNode* ret_start = cursor;
                             SyntaxNode* method_name_node = (SyntaxNode*)0;
                             SyntaxNode* params_node = (SyntaxNode*)0;
@@ -1287,7 +1327,7 @@ impl LlvmGenerator {
                                         break;
                                     }
                                 }
-                                if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Identifier) {
+                                if (!is_cast && scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Identifier) {
                                     method_name_node = scan;
                                 }
                                 scan = scan.next_sibling;
@@ -1297,13 +1337,20 @@ impl LlvmGenerator {
                                 continue;
                             }
                             if (body_node != (SyntaxNode*)0 && body_node.kind == NodeKind.Block) {
-                                if (method_name_node != (SyntaxNode*)0 && params_node != (SyntaxNode*)0) {
+                                if ((is_cast || method_name_node != (SyntaxNode*)0) && params_node != (SyntaxNode*)0) {
                                     String mangled = String.from_str(struct_name);
                                     mangled.push_str("__");
-                                    mangled.push_str(method_name_node.text);
-                                    LLVMOpaqueValue* fn_val = LLVMGetNamedFunction(self.module, mangled.to_str());
-                                    mangled.drop();
-                                    if (fn_val != (LLVMOpaqueValue*)0 && LLVMCountBasicBlocks(fn_val) == 0) {
+                                    String ret_str = String.new();
+                                    if (is_cast) {
+                                        SyntaxNode* rscan = cursor.next_sibling;
+                                        while (rscan != (SyntaxNode*)0 && rscan != params_node) {
+                                            append_node_tokens(rscan, &ret_str);
+                                            rscan = rscan.next_sibling;
+                                        }
+                                        mangled.push_str("cast_");
+                                        mangled.push_str(ret_str.to_str());
+                                    } else {
+                                        mangled.push_str(method_name_node.text);
                                         SyntaxNode* rscan = ret_start;
                                         while (rscan != (SyntaxNode*)0 && rscan != method_name_node) {
                                             if (rscan.kind == NodeKind.Token && rscan.text == "#") {
@@ -1319,13 +1366,16 @@ impl LlvmGenerator {
                                             }
                                             break;
                                         }
-                                        String ret_str = String.new();
                                         while (rscan != (SyntaxNode*)0 && rscan != method_name_node) {
                                             append_node_tokens(rscan, &ret_str);
                                             rscan = rscan.next_sibling;
                                         }
-                                        u32 ret_type_id = type_id_from_text(types, ret_str.to_str());
-                                        ret_str.drop();
+                                    }
+                                    u32 ret_type_id = type_id_from_text(types, ret_str.to_str());
+                                    ret_str.drop();
+                                    LLVMOpaqueValue* fn_val = LLVMGetNamedFunction(self.module, mangled.to_str());
+                                    mangled.drop();
+                                    if (fn_val != (LLVMOpaqueValue*)0 && LLVMCountBasicBlocks(fn_val) == 0) {
                                         ctx.current_fn = fn_val;
                                         ctx.current_return_type = ret_type_id;
 
@@ -1339,7 +1389,8 @@ impl LlvmGenerator {
                                         while (p < params.len()) {
                                             Binding* param = params.get_ptr(p);
                                             u32 param_name_id = names.intern(param.name);
-                                            String dec_str = binding_declared_type_text(&param.declared_type);
+                                            bool exact_function_type = binding_has_function_type(param);
+                                            String dec_str = binding_parameter_type_text(param);
                                             str type_str = dec_str.to_str();
                                             if (strcmp(type_str, "Self") == 0 || (strcmp(param.name, "self") == 0 && strlen(type_str) == 0)) {
                                                 type_str = struct_name;
@@ -1348,7 +1399,9 @@ impl LlvmGenerator {
                                             if (param_type_id == TYPE_UNKNOWN) {
                                                 param_type_id = types.parse_type_name(type_str);
                                             }
-                                            if (param.declared_type.kind == ProjectionTypeKind.Pointer || param.declared_type.kind == ProjectionTypeKind.Reference || param_type_id == TYPE_VOID) {
+                                            if (!exact_function_type
+                                                && (param.declared_type.kind == ProjectionTypeKind.Pointer
+                                                    || param.declared_type.kind == ProjectionTypeKind.Reference || param_type_id == TYPE_VOID)) {
                                                 param_type_id = types.get_pointer(param_type_id, true);
                                             }
                                             LLVMOpaqueType* param_llvm_type = llvm_lower_type(self.ctx, types, param_type_id);

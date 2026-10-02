@@ -164,6 +164,118 @@ bool mono_find_function_template(SyntaxNode* root, TypeTable* types, str base,
     return false;
 }
 
+bool mono_unify_free_parameter(TypeTable* types, u32 formal_id, u32 actual_id,
+                               Vec<u32>* param_ids, Vec<u32>* inferred,
+                               bool numeric_literal) {
+    if (actual_id == TYPE_UNKNOWN) { return false; }
+    TypeEntry* formal = types.get(formal_id);
+    TypeEntry* actual = types.get(actual_id);
+    if (formal.kind == TypeKind.Named && formal.count == 0) {
+        i64 i = 0;
+        while (i < param_ids.len()) {
+            if (formal.name_id == param_ids.get(i)) {
+                u32* found = inferred.get_ptr(i);
+                if (*found == TYPE_UNKNOWN) {
+                    *found = actual_id;
+                    return true;
+                }
+                return *found == actual_id
+                    || (numeric_literal && type_is_numeric(*found) && type_is_numeric(actual_id));
+            }
+            i += 1;
+        }
+    }
+    if ((formal.kind == TypeKind.Reference && actual.kind == TypeKind.Pointer)
+        || (formal.kind == TypeKind.Pointer && actual.kind == TypeKind.Reference)) {
+        return mono_unify_free_parameter(types, formal.inner, actual.inner, param_ids, inferred,
+            numeric_literal);
+    }
+    if (formal.kind != actual.kind) { return false; }
+    if (formal.kind == TypeKind.Pointer || formal.kind == TypeKind.Reference) {
+        return mono_unify_free_parameter(types, formal.inner, actual.inner, param_ids, inferred,
+            numeric_literal);
+    }
+    if (formal.kind == TypeKind.Array) {
+        return formal.count == actual.count
+            && mono_unify_free_parameter(types, formal.inner, actual.inner, param_ids, inferred,
+                numeric_literal);
+    }
+    if (formal.kind == TypeKind.Named) {
+        if (formal.name_id != actual.name_id || formal.count != actual.count) { return false; }
+        i64 i = 0;
+        while (i < formal.count) {
+            if (!mono_unify_free_parameter(types, types.type_args.get(formal.inner + i),
+                    types.type_args.get(actual.inner + i), param_ids, inferred, numeric_literal)) {
+                return false;
+            }
+            i += 1;
+        }
+        return true;
+    }
+    return formal_id == actual_id
+        || (numeric_literal && type_is_numeric(formal_id) && type_is_numeric(actual_id));
+}
+
+bool mono_infer_free_function_args(LlvmContext* ctx, str base, u32 value_arg_count,
+                                   Vec<u32>* actual_types, Vec<bool>* numeric_literals,
+                                   Vec<u32>* arg_ids) {
+    MonoMethodTemplate template;
+    Vec<u32> param_ids = Vec<u32>.new();
+    if (!mono_find_function_template(ctx.root, ctx.types, base, value_arg_count,
+            &template, &param_ids) || actual_types.len() != value_arg_count
+        || numeric_literals.len() != value_arg_count) {
+        param_ids.drop();
+        return false;
+    }
+    i64 i = 0;
+    while (i < param_ids.len()) {
+        u32 name_id = param_ids.get(i);
+        u32 shadow_id = ctx.types.get_named(ctx.types.names.get(name_id));
+        ctx.types.push_subst(name_id, shadow_id);
+        i += 1;
+    }
+    Vec<u32> inferred = Vec<u32>.new();
+    i = 0;
+    while (i < param_ids.len()) {
+        inferred.push(TYPE_UNKNOWN);
+        i += 1;
+    }
+    Vec<Binding> params = Vec<Binding>.new();
+    collect_parameter_bindings(template.params_node, &params);
+    bool matched = params.len() == value_arg_count;
+    i = 0;
+    while (matched && i < params.len()) {
+        Binding* param = params.get_ptr(i);
+        bool exact_function_type = binding_has_function_type(param);
+        String text = binding_parameter_type_text(param);
+        u32 formal_id = ctx.types.parse_type_name(text.to_str());
+        if (!exact_function_type && param.declared_type.kind == ProjectionTypeKind.Pointer) {
+            formal_id = ctx.types.get_pointer(formal_id, true);
+        } else if (!exact_function_type && param.declared_type.kind == ProjectionTypeKind.Reference) {
+            formal_id = ctx.types.get_reference(formal_id, param.declared_type.is_mutable);
+        }
+        text.drop();
+        matched = mono_unify_free_parameter(ctx.types, formal_id, actual_types.get(i),
+            &param_ids, &inferred, numeric_literals.get(i));
+        i += 1;
+    }
+    i = 0;
+    while (matched && i < inferred.len()) {
+        u32 inferred_id = inferred.get(i);
+        if (inferred_id == TYPE_UNKNOWN || !mono_type_is_concrete(ctx.ctx, ctx.types, inferred_id, 0)) {
+            matched = false;
+        } else {
+            arg_ids.push(inferred_id);
+        }
+        i += 1;
+    }
+    params.drop();
+    inferred.drop();
+    ctx.types.pop_subst(param_ids.len());
+    param_ids.drop();
+    return matched;
+}
+
 // Declare a structural free-function instance and queue its body for emission.
 LLVMOpaqueValue* mono_ensure_free_function(LlvmContext* ctx, str base, Vec<u32>* arg_ids,
                                            u32 value_arg_count) {
@@ -211,10 +323,12 @@ LLVMOpaqueValue* mono_ensure_free_function(LlvmContext* ctx, str base, Vec<u32>*
     i = 0;
     while (i < params.len()) {
         Binding* param = params.get_ptr(i);
-        String param_text = binding_declared_type_text(&param.declared_type);
+        bool exact_function_type = binding_has_function_type(param);
+        String param_text = binding_parameter_type_text(param);
         u32 type_id = ctx.types.resolve_subst(ctx.types.parse_type_name(param_text.to_str()));
-        if (param.declared_type.kind == ProjectionTypeKind.Pointer
-            || param.declared_type.kind == ProjectionTypeKind.Reference || type_id == TYPE_VOID) {
+        if (!exact_function_type
+            && (param.declared_type.kind == ProjectionTypeKind.Pointer
+                || param.declared_type.kind == ProjectionTypeKind.Reference || type_id == TYPE_VOID)) {
             type_id = ctx.types.get_pointer(type_id, true);
         }
         mono_ensure_child_layouts(ctx, type_id, &ctx.generic_layout_ids);
@@ -292,7 +406,8 @@ LLVMOpaqueValue* mono_declare_specialized(LlvmContext* ctx, str base, MonoMethod
     i64 p = 0;
     while (p < params.len()) {
         Binding* param = params.get_ptr(p);
-        String dec_str = binding_declared_type_text(&param.declared_type);
+        bool exact_function_type = binding_has_function_type(param);
+        String dec_str = binding_parameter_type_text(param);
         str type_str = dec_str.to_str();
         u32 param_type_id = TYPE_UNKNOWN;
         if (strcmp(type_str, "Self") == 0 || (strcmp(param.name, "self") == 0 && strlen(type_str) == 0)) {
@@ -300,7 +415,9 @@ LLVMOpaqueValue* mono_declare_specialized(LlvmContext* ctx, str base, MonoMethod
         } else {
             param_type_id = ctx.types.resolve_subst(ctx.types.parse_type_name(type_str));
         }
-        if (param.declared_type.kind == ProjectionTypeKind.Pointer || param.declared_type.kind == ProjectionTypeKind.Reference || param_type_id == TYPE_VOID) {
+        if (!exact_function_type
+            && (param.declared_type.kind == ProjectionTypeKind.Pointer
+                || param.declared_type.kind == ProjectionTypeKind.Reference || param_type_id == TYPE_VOID)) {
             param_type_id = ctx.types.get_pointer(param_type_id, true);
         }
         mono_ensure_child_layouts(ctx, param_type_id, &ctx.generic_layout_ids);

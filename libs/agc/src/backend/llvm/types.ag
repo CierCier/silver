@@ -187,6 +187,24 @@ u64 llvm_target_type_size(LlvmContext* ctx, u32 type_id) {
     return LLVMABISizeOfType(ctx.target_data, llvm_type);
 }
 
+u64 llvm_target_type_align(LlvmContext* ctx, u32 type_id) {
+    if (ctx.target_data == (LLVMTargetDataRef*)0) {
+        ctx.note_unresolved("target-layout", ctx.types.type_name(type_id));
+        return 0;
+    }
+    type_id = ctx.types.resolve_subst(type_id);
+    if (!llvm_layout_type_resolved(ctx, type_id, 0)) {
+        ctx.note_unresolved("unresolved-layout", ctx.types.type_name(type_id));
+        return 0;
+    }
+    LLVMOpaqueType* llvm_type = llvm_lower_type(ctx.ctx, ctx.types, type_id);
+    if (LLVMTypeIsSized(llvm_type) == 0) {
+        ctx.note_unresolved("unsized-layout", ctx.types.type_name(type_id));
+        return 0;
+    }
+    return (u64)LLVMABIAlignmentOfType(ctx.target_data, llvm_type);
+}
+
 u64 llvm_target_struct_field_offset(LlvmContext* ctx, LLVMOpaqueType* llvm_type, u32 index) {
     if (ctx.target_data == (LLVMTargetDataRef*)0 || LLVMTypeIsSized(llvm_type) == 0) {
         i8* type_text = LLVMPrintTypeToString(llvm_type);
