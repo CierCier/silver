@@ -2169,12 +2169,20 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         LLVMPositionBuilderAtEnd(ctx.builder, then_bb);
         LLVMOpaqueValue* then_val = llvm_emit_expr(ctx, expr.inner1);
         if (then_val != (LLVMOpaqueValue*)0) {
+            // Branches may legally differ in width from the result slot
+            // (numeric literals infer narrower than the other branch); with
+            // opaque pointers the verifier cannot see the mismatch, so an
+            // unconverted wide store would smash neighboring stack slots.
+            then_val = llvm_compat_value(ctx, then_val, llvm_expr_type(ctx, expr.inner1),
+                                         result_ty_id);
             LLVMBuildStore(ctx.builder, then_val, slot);
         }
         LLVMBuildBr(ctx.builder, merge_bb);
         LLVMPositionBuilderAtEnd(ctx.builder, else_bb);
         LLVMOpaqueValue* else_val = llvm_emit_expr(ctx, expr.aux);
         if (else_val != (LLVMOpaqueValue*)0) {
+            else_val = llvm_compat_value(ctx, else_val, llvm_expr_type(ctx, expr.aux),
+                                         result_ty_id);
             LLVMBuildStore(ctx.builder, else_val, slot);
         }
         LLVMBuildBr(ctx.builder, merge_bb);
