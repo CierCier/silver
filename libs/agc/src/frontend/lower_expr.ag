@@ -1416,6 +1416,11 @@ impl ExprLowerer {
                 u32 else_id = self.lower_sequence(colon.next_sibling, end);
                 return self.pool.add_ternary(result, then_id, else_id, next.span);
             }
+            // No colon follows: this is unwrap-or (`value ? fallback`),
+            // not a ternary. The fallback parses with full assignment
+            // precedence so chains associate to the right.
+            u32 fallback_id = self.lower_sequence(next.next_sibling, end);
+            return self.pool.add_unwrap_or(result, fallback_id, next.span);
         }
         return result;
     }

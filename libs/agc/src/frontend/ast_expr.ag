@@ -18,6 +18,7 @@ enum ExprKind {
     Cast;          // inner0 = expr_id, aux = target_type_id
     Move;          // aux = var_name_id
     Ternary;       // inner0 = cond_id, inner1 = then_id, aux = else_id
+    UnwrapOr;      // inner0 = value_id, inner1 = fallback_id
     Match;         // inner0 = scrutinee_id, inner1 = arms_start, aux = arms_count
     Asm;           // inner0 = code_text_id, inner1 = args_start, aux = args_count
     SizeOf;        // aux = type_id
@@ -252,6 +253,20 @@ impl AstPool {
         expr.inner0 = cond_id;
         expr.inner1 = then_id;
         expr.aux = else_id;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_unwrap_or(AstPool* self, u32 value_id, u32 fallback_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.UnwrapOr;
+        expr.inner0 = value_id;
+        expr.inner1 = fallback_id;
+        expr.aux = 0;
         expr.span = span;
         expr.inferred_type = TYPE_UNKNOWN;
         expr.generic_args_start = 0;

@@ -843,6 +843,52 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
             }
             inferred = (then_type == TYPE_UNKNOWN) ? else_type : then_type;
         }
+    } else if (expr.kind == ExprKind.UnwrapOr) {
+        // A missing operand means the CST had a dangling `?` (stage0
+        // rejects this at parse time as "expected expression"). Fail the
+        // expression here so `check` can report it; the backend also
+        // refuses to emit operand-less nodes.
+        if (expr.inner0 == 0 || expr.inner1 == 0) {
+            String message = String.from_str("expected expression");
+            diagnostics.error(expr.span, move message);
+            *ok = false;
+        } else {
+            u32 unwrap_value_ty = infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
+            u32 unwrap_target_ty = TYPE_UNKNOWN;
+            bool unwrap_has_target = false;
+            if (unwrap_value_ty != TYPE_UNKNOWN) {
+                TypeEntry* unwrap_entry = types.get(unwrap_value_ty);
+                if (unwrap_entry.kind == TypeKind.Pointer) {
+                    unwrap_target_ty = unwrap_value_ty;
+                    unwrap_has_target = true;
+                } else if (unwrap_entry.kind == TypeKind.Named && unwrap_entry.count > 0) {
+                    str unwrap_base = types.names.get(unwrap_entry.name_id);
+                    if (strcmp(unwrap_base, "Optional") == 0 || strcmp(unwrap_base, "Result") == 0
+                        || strcmp(unwrap_base, "SysResult") == 0) {
+                        unwrap_target_ty = types.resolve_subst(types.type_args.get(unwrap_entry.inner));
+                        unwrap_has_target = true;
+                    }
+                }
+            }
+            u32 unwrap_fallback_ty = infer_expr(pool, types, symbols, root, env, expr.inner1, diagnostics, ok);
+            if (unwrap_has_target) {
+                if (unwrap_fallback_ty != TYPE_UNKNOWN
+                    && !types_match_value(types, unwrap_target_ty, unwrap_fallback_ty, expr_is_literal(pool, expr.inner1))) {
+                    String message = String.from_str("unwrap-or fallback type mismatch: expected ");
+                    message.push_str(types.type_name(unwrap_target_ty));
+                    message.push_str(", found ");
+                    message.push_str(types.type_name(unwrap_fallback_ty));
+                    diagnostics.error(pool.get_expr(expr.inner1).span, move message);
+                    *ok = false;
+                }
+                inferred = unwrap_target_ty;
+            } else if (unwrap_value_ty != TYPE_UNKNOWN) {
+                String message = String.from_str("unwrap-or operator '?' requires Optional, Result, or pointer on left-hand side, found ");
+                message.push_str(types.type_name(unwrap_value_ty));
+                diagnostics.error(pool.get_expr(expr.inner0).span, move message);
+                *ok = false;
+            }
+        }
     } else if (expr.kind == ExprKind.Match) {
         u32 scrut_type = infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
         str scrut_enum = "";
@@ -1455,9 +1501,15 @@ bool typecheck_expressions_scoped(AstPool* pool, SymbolTable* symbols, SyntaxTre
                     while (diagnostic_index < function_diagnostics.len()) {
                         Diagnostic* diagnostic = function_diagnostics.get(diagnostic_index);
                         // Expression inference is still incomplete. Only report the
-                        // overload ambiguity check that this pass can establish reliably.
-                        if (typecheck_str_starts_with(diagnostic.message.to_str(),
-                                                     "call to overloaded function '")) {
+                        // checks this pass can establish reliably: overload
+                        // ambiguity, unwrap-or operand/type errors, and the
+                        // dangling-`?` shape error. Everything else stays
+                        // deferred with FE-010.
+                        str diagnostic_text = diagnostic.message.to_str();
+                        if (typecheck_str_starts_with(diagnostic_text,
+                                                     "call to overloaded function '")
+                            || typecheck_str_starts_with(diagnostic_text, "unwrap-or ")
+                            || strcmp(diagnostic_text, "expected expression") == 0) {
                             diagnostics.error(diagnostic.span, diagnostic.message.clone());
                             ok = false;
                         }

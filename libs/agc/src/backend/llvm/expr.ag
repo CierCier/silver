@@ -679,6 +679,23 @@ u32 llvm_expr_type(LlvmContext* ctx, u32 expr_id) {
         }
         return TYPE_UNKNOWN;
     }
+    if (expr.kind == ExprKind.UnwrapOr) {
+        u32 val_ty = llvm_expr_type(ctx, expr.inner0);
+        if (val_ty != TYPE_UNKNOWN) {
+            TypeEntry* val_entry = ctx.types.get(val_ty);
+            if (val_entry.kind == TypeKind.Pointer) {
+                return ctx.types.resolve_subst(val_ty);
+            }
+            if (val_entry.kind == TypeKind.Named && val_entry.count > 0) {
+                str base = ctx.types.names.get(val_entry.name_id);
+                if (strcmp(base, "Optional") == 0 || strcmp(base, "Result") == 0
+                    || strcmp(base, "SysResult") == 0) {
+                    return ctx.types.resolve_subst(ctx.types.type_args.get(val_entry.inner));
+                }
+            }
+        }
+        return llvm_expr_type(ctx, expr.inner1);
+    }
     if (expr.kind == ExprKind.Move) {
         if (expr.inner0 != 0) {
             return llvm_expr_type(ctx, expr.inner0);
@@ -2137,6 +2154,141 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         LLVMBuildBr(ctx.builder, merge_bb);
         LLVMPositionBuilderAtEnd(ctx.builder, merge_bb);
         return LLVMBuildLoad2(ctx.builder, result_ty, slot, "ternary_val");
+    }
+
+    if (expr.kind == ExprKind.UnwrapOr) {
+        // `value ? fallback`: evaluate the value once, test presence,
+        // and only evaluate the fallback on the absent path. Pointers
+        // compare against null; Optional checks the Some tag and Result
+        // checks the Ok tag, reusing the match payload layout helpers.
+        // Operand-less nodes come from a dangling `?` and have no valid
+        // lowering; fail closed so they can never silently miscompile.
+        if (expr.inner0 == 0 || expr.inner1 == 0) {
+            ctx.note_unresolved("unwrap-or", "missing operand");
+            return (LLVMOpaqueValue*)0;
+        }
+        u32 val_ty_id = llvm_expr_type(ctx, expr.inner0);
+        if (val_ty_id == TYPE_UNKNOWN || val_ty_id == 0) {
+            AstExpr* val_expr = ctx.pool.get_expr(expr.inner0);
+            if (val_expr.inferred_type != TYPE_UNKNOWN && val_expr.inferred_type != 0) {
+                val_ty_id = ctx.types.resolve_subst(val_expr.inferred_type);
+            }
+        }
+        if (val_ty_id == TYPE_UNKNOWN || val_ty_id == 0) { return (LLVMOpaqueValue*)0; }
+        TypeEntry* val_entry = ctx.types.get(val_ty_id);
+        bool is_pointer = val_entry.kind == TypeKind.Pointer;
+        str enum_base = "";
+        if (!is_pointer) {
+            if (val_entry.kind != TypeKind.Named || val_entry.count == 0) {
+                ctx.note_unresolved("unwrap-or", "unsupported value type");
+                return (LLVMOpaqueValue*)0;
+            }
+            enum_base = ctx.types.names.get(val_entry.name_id);
+            if (strcmp(enum_base, "Optional") != 0 && strcmp(enum_base, "Result") != 0
+                && strcmp(enum_base, "SysResult") != 0) {
+                ctx.note_unresolved("unwrap-or", "unsupported value type");
+                return (LLVMOpaqueValue*)0;
+            }
+        }
+        u32 result_ty_id = expr.inferred_type;
+        if (result_ty_id == TYPE_UNKNOWN || result_ty_id == 0) {
+            if (is_pointer) {
+                result_ty_id = val_ty_id;
+            } else if (val_entry.count > 0) {
+                result_ty_id = ctx.types.resolve_subst(ctx.types.type_args.get(val_entry.inner));
+            }
+        }
+        if (result_ty_id == TYPE_UNKNOWN || result_ty_id == 0) {
+            result_ty_id = llvm_expr_type(ctx, expr.inner1);
+        }
+        if (result_ty_id == TYPE_UNKNOWN || result_ty_id == 0) { return (LLVMOpaqueValue*)0; }
+        LLVMOpaqueType* result_ty = llvm_lower_type(ctx.ctx, ctx.types, result_ty_id);
+        LLVMOpaqueValue* slot = LLVMBuildAlloca(ctx.builder, result_ty, "unwrap_or");
+        LLVMOpaqueBasicBlock* present_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "unwrap_or_some");
+        LLVMOpaqueBasicBlock* absent_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "unwrap_or_none");
+        LLVMOpaqueBasicBlock* merge_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "unwrap_or_merge");
+        if (is_pointer) {
+            LLVMOpaqueValue* ptr_val = llvm_emit_expr(ctx, expr.inner0);
+            if (ptr_val == (LLVMOpaqueValue*)0) { return (LLVMOpaqueValue*)0; }
+            LLVMOpaqueValue* null_ptr = LLVMConstNull(LLVMTypeOf(ptr_val));
+            LLVMOpaqueValue* non_null = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntNE, ptr_val, null_ptr, "unwrap_or_nonnull");
+            LLVMBuildCondBr(ctx.builder, non_null, present_bb, absent_bb);
+            LLVMPositionBuilderAtEnd(ctx.builder, present_bb);
+            LLVMOpaqueValue* present_val = llvm_compat_value(ctx, ptr_val, val_ty_id, result_ty_id);
+            LLVMBuildStore(ctx.builder, present_val, slot);
+            LLVMBuildBr(ctx.builder, merge_bb);
+            LLVMPositionBuilderAtEnd(ctx.builder, absent_bb);
+            LLVMOpaqueValue* fallback_val = llvm_emit_expr(ctx, expr.inner1);
+            if (fallback_val != (LLVMOpaqueValue*)0) {
+                u32 fallback_ty_id = llvm_expr_type(ctx, expr.inner1);
+                fallback_val = llvm_compat_value(ctx, fallback_val, fallback_ty_id, result_ty_id);
+                LLVMBuildStore(ctx.builder, fallback_val, slot);
+            }
+            LLVMBuildBr(ctx.builder, merge_bb);
+            LLVMPositionBuilderAtEnd(ctx.builder, merge_bb);
+            return LLVMBuildLoad2(ctx.builder, result_ty, slot, "unwrap_or_val");
+        }
+        mono_ensure_child_layouts(ctx, val_ty_id, &ctx.generic_layout_ids);
+        str variant_name = "Some";
+        if (strcmp(enum_base, "Result") == 0 || strcmp(enum_base, "SysResult") == 0) {
+            variant_name = "Ok";
+        }
+        i64 present_tag = 0;
+        i64 present_arity = 0;
+        if (!enum_variant_info(ctx.root, enum_base, variant_name, &present_tag, &present_arity)) {
+            ctx.note_unresolved("unwrap-or", variant_name);
+            return (LLVMOpaqueValue*)0;
+        }
+        Vec<u32> payload_types = Vec<u32>.new();
+        llvm_enum_payload_types(ctx.types, ctx.root, enum_base, variant_name, &payload_types);
+        i64 payload_index = 0;
+        while (payload_index < payload_types.len()) {
+            u32 resolved = mono_resolve_struct_field_type(ctx, val_ty_id, payload_types.get(payload_index));
+            payload_types.set(payload_index, resolved);
+            payload_index += 1;
+        }
+        if (payload_types.len() == 0) {
+            payload_types.drop();
+            ctx.note_unresolved("unwrap-or", "missing payload");
+            return (LLVMOpaqueValue*)0;
+        }
+        u32 payload_ty_id = payload_types.get(0);
+        LLVMOpaqueType* scrut_ty = llvm_lower_type(ctx.ctx, ctx.types, val_ty_id);
+        u64 payload_base_offset = llvm_target_struct_field_offset(ctx, scrut_ty, 1);
+        u64 field_offset = payload_base_offset + llvm_target_payload_field_offset(ctx, &payload_types, 0);
+        LLVMOpaqueType* payload_ty = llvm_lower_type(ctx.ctx, ctx.types, payload_ty_id);
+        payload_types.drop();
+        LLVMOpaqueValue* scrut_val = llvm_emit_expr(ctx, expr.inner0);
+        if (scrut_val == (LLVMOpaqueValue*)0) { return (LLVMOpaqueValue*)0; }
+        LLVMOpaqueValue* scrut_slot = LLVMBuildAlloca(ctx.builder, scrut_ty, "unwrap_or_scrut");
+        LLVMBuildStore(ctx.builder, scrut_val, scrut_slot);
+        LLVMOpaqueValue* tag_ptr = LLVMBuildStructGEP2(ctx.builder, scrut_ty, scrut_slot, 0, "unwrap_or_tag");
+        LLVMOpaqueValue* tag_val = LLVMBuildLoad2(ctx.builder, LLVMInt16TypeInContext(ctx.ctx), tag_ptr, "unwrap_or_tag_ld");
+        LLVMOpaqueValue* expected = LLVMConstInt(LLVMInt16TypeInContext(ctx.ctx), (u64)present_tag, 0);
+        LLVMOpaqueValue* is_present = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntEQ, tag_val, expected, "unwrap_or_present");
+        LLVMBuildCondBr(ctx.builder, is_present, present_bb, absent_bb);
+        LLVMPositionBuilderAtEnd(ctx.builder, present_bb);
+        LLVMOpaqueType* ptr_ty = LLVMPointerTypeInContext(ctx.ctx, (u32)0);
+        LLVMOpaqueValue* slot_bytes = LLVMBuildBitCast(ctx.builder, scrut_slot, ptr_ty, "unwrap_or_bytes");
+        LLVMOpaqueValue* field_index = LLVMConstInt(LLVMInt64TypeInContext(ctx.ctx), field_offset, 0);
+        LLVMOpaqueValue* field_byte_ptr = LLVMBuildGEP2(ctx.builder, LLVMInt8TypeInContext(ctx.ctx),
+                                                        slot_bytes, &field_index, 1, "unwrap_or_field_byte");
+        LLVMOpaqueValue* field_ptr = LLVMBuildBitCast(ctx.builder, field_byte_ptr, ptr_ty, "unwrap_or_field");
+        LLVMOpaqueValue* field_val = LLVMBuildLoad2(ctx.builder, payload_ty, field_ptr, "unwrap_or_field_ld");
+        LLVMSetAlignment(field_val, 1);
+        field_val = llvm_compat_value(ctx, field_val, payload_ty_id, result_ty_id);
+        LLVMBuildStore(ctx.builder, field_val, slot);
+        LLVMBuildBr(ctx.builder, merge_bb);
+        LLVMPositionBuilderAtEnd(ctx.builder, absent_bb);
+        LLVMOpaqueValue* none_fallback = llvm_emit_expr(ctx, expr.inner1);
+        if (none_fallback != (LLVMOpaqueValue*)0) {
+            u32 none_fallback_ty = llvm_expr_type(ctx, expr.inner1);
+            none_fallback = llvm_compat_value(ctx, none_fallback, none_fallback_ty, result_ty_id);
+            LLVMBuildStore(ctx.builder, none_fallback, slot);
+        }
+        LLVMBuildBr(ctx.builder, merge_bb);
+        LLVMPositionBuilderAtEnd(ctx.builder, merge_bb);
+        return LLVMBuildLoad2(ctx.builder, result_ty, slot, "unwrap_or_val");
     }
 
     if (expr.kind == ExprKind.Match) {
