@@ -1,0 +1,34 @@
+import std.test;
+
+i64 drops = 0;
+i64 dropped_values = 0;
+
+struct Tracked {
+    i64 value;
+}
+impl Drop for Tracked {
+    void drop(Tracked* self) {
+        drops = drops + 1;
+        dropped_values = dropped_values + self.value;
+    }
+}
+
+struct OwnedPair {
+    Tracked item;
+    Tracked sibling;
+}
+
+// Stage0 currently drops both copies; native source clearing transfers ownership.
+i32 main() {
+    {
+        Tracked item = { .value = 14 };
+        Tracked sibling = { .value = 15 };
+        OwnedPair source = { .item = move item, .sibling = move sibling };
+        OwnedPair target = source;
+        assert_eq_i64(14, target.item.value, "implicit transfer keeps the owned field");
+        assert_eq_i64(0, drops, "implicit transfer does not drop source storage");
+    }
+    assert_eq_i64(2, drops, "implicit transfer leaves one final owner per field");
+    assert_eq_i64(29, dropped_values, "implicit transfer preserves both payloads");
+    return 42;
+}

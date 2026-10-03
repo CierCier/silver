@@ -25,10 +25,6 @@ struct Bundle {
     i64 first;
     i64 second;
 }
-impl Drop for Bundle {
-    void drop(Bundle* self) {}
-}
-
 struct Pair<T> {
     T left;
     T right;

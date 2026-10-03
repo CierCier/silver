@@ -101,6 +101,18 @@ i32 main() {
         programs["aggregate-init-drop"] = (
             root / "tests/aggregate_init_drop_test.ag"
         ).read_text(encoding="utf-8")
+        programs["wrapper-drop-transfer"] = (
+            root / "tests/wrapper_drop_transfer_test.ag"
+        ).read_text(encoding="utf-8")
+        programs["wrapper-implicit-transfer"] = (
+            root / "tests/selfhost/semantic_regressions/wrapper_implicit_transfer_native.ag"
+        ).read_text(encoding="utf-8")
+        programs["enum-custom-drop"] = (
+            root / "tests/enum_custom_drop_test.ag"
+        ).read_text(encoding="utf-8")
+        programs["direct-field-partial-move"] = (
+            root / "tests/direct_field_partial_move_test.ag"
+        ).read_text(encoding="utf-8")
         for name, contents in programs.items():
             program_source = work / f"{name}.ag"
             program_source.write_text(contents, encoding="utf-8")
@@ -111,7 +123,7 @@ i32 main() {
                 raise AssertionError(
                     f"stage2-compiled {name} program returned {executed.returncode}, expected 42"
                 )
-    print("native stage2 frontend commands and seven runtime programs passed without stage0")
+    print("native stage2 frontend commands and eleven runtime programs passed without stage0")
     return 0
 
 
