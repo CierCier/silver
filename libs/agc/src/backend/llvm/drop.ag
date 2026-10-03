@@ -567,19 +567,19 @@ i64 llvm_current_drop_mark(LlvmContext* ctx) {
 }
 
 // Emit scope-exit drops for locals at stack positions [mark, len), newest
-// first. Within one local, field drops precede the whole drop, mirroring
-// stage0's reverse-registration order. Every place drops at most once.
+// first. A struct's own destructor runs before its live fields, which drop
+// in declaration order. Each place keeps its independent ownership flag.
 void llvm_emit_drops_above(LlvmContext* ctx, i64 mark) {
     if (ctx.current_fn == (LLVMOpaqueValue*)0) { return; }
     i64 i = (i64)ctx.locals.len() - 1;
     while (i >= mark) {
         LlvmLocal* local = ctx.locals.get_ptr(i);
-        i64 fi = local.field_flags.len() - 1;
-        while (fi >= 0) {
-            llvm_emit_local_field_drop(ctx, local, local.field_flags.get_ptr(fi));
-            fi -= 1;
-        }
         llvm_emit_local_whole_drop(ctx, local);
+        i64 fi = 0;
+        while (fi < local.field_flags.len()) {
+            llvm_emit_local_field_drop(ctx, local, local.field_flags.get_ptr(fi));
+            fi += 1;
+        }
         i -= 1;
     }
 }
@@ -599,10 +599,10 @@ void llvm_emit_assign_predrop(LlvmContext* ctx, u32 target_id, u32 rhs_id) {
         LlvmLocal* local = ctx.find_local(target.aux);
         if (local == (LlvmLocal*)0) { return; }
         llvm_emit_local_whole_drop(ctx, local);
-        i64 fi = local.field_flags.len() - 1;
-        while (fi >= 0) {
+        i64 fi = 0;
+        while (fi < local.field_flags.len()) {
             llvm_emit_local_field_drop(ctx, local, local.field_flags.get_ptr(fi));
-            fi -= 1;
+            fi += 1;
         }
         return;
     }
