@@ -116,6 +116,9 @@ i32 main() {
         programs["destructor-order"] = (
             root / "tests/destructor_order_test.ag"
         ).read_text(encoding="utf-8")
+        programs["nested-field-drop"] = (
+            root / "tests/nested_field_drop_test.ag"
+        ).read_text(encoding="utf-8")
         for name, contents in programs.items():
             program_source = work / f"{name}.ag"
             program_source.write_text(contents, encoding="utf-8")
@@ -126,7 +129,7 @@ i32 main() {
                 raise AssertionError(
                     f"stage2-compiled {name} program returned {executed.returncode}, expected 42"
                 )
-    print("native stage2 frontend commands and twelve runtime programs passed without stage0")
+    print("native stage2 frontend commands and thirteen runtime programs passed without stage0")
     return 0
 
 

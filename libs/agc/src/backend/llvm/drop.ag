@@ -1,7 +1,7 @@
 // libs/agc/src/backend/llvm/drop.ag — RAII drop elaboration for the native backend.
 //
 // Mirrors stage0's scope/drop-flag design: every live droppable local owns a
-// runtime `i1` drop flag (plus per-direct-field flags), and scope exits run
+// runtime `i1` drop flag (plus per-field-path flags), and scope exits run
 // guarded drops LIFO. Flags - not static analysis - decide liveness, so
 // conditional moves, partial initialization, and shadowing stay correct.
 // Any case this pass cannot lower is skipped, which leaks exactly as the
@@ -12,6 +12,7 @@ import std.mem.vec;
 import frontend.ast;
 import frontend.ast_expr;
 import frontend.items;
+import frontend.place;
 import frontend.symbols;
 import frontend.types;
 import backend.llvm.context;
@@ -101,32 +102,51 @@ LLVMOpaqueValue* llvm_drop_fn_for_type(LlvmContext* ctx, u32 type_id) {
 // resolvable (covers user types like `Owned`, which the name-based
 // needs_drop predicate cannot see) or some part of it needs dropping.
 // Tracking a value that later proves unlowerable only leaks, as before.
-bool llvm_type_needs_tracking(LlvmContext* ctx, u32 type_id) {
+bool llvm_type_needs_tracking_inner(LlvmContext* ctx, u32 type_id, Vec<u32>* active) {
     u32 resolved = ctx.types.resolve_subst(type_id);
     if (resolved == TYPE_UNKNOWN || resolved == 0) { return false; }
     TypeEntry* entry = ctx.types.get(resolved);
     TypeKind kind = entry.kind;
     u32 name_id = entry.name_id;
     if (kind == TypeKind.Pointer || kind == TypeKind.Reference) { return false; }
-    if (llvm_type_needs_drop(ctx, resolved)) { return true; }
     if (llvm_can_resolve_drop_fn(ctx, resolved)) { return true; }
+    if (kind == TypeKind.Named && active.len() > 0) {
+        str nested_name = ctx.types.names.get(name_id);
+        if (find_enum_item(ctx.root, nested_name) != (SyntaxNode*)0) { return false; }
+    }
+    if (llvm_type_needs_drop(ctx, resolved)) { return true; }
     if (kind != TypeKind.Named) { return false; }
 
     str type_name = ctx.types.names.get(name_id);
     if (find_enum_item(ctx.root, type_name) != (SyntaxNode*)0) { return false; }
+    i64 ai = 0;
+    while (ai < active.len()) {
+        if (active.get(ai) == resolved) { return false; }
+        ai += 1;
+    }
     LlvmStructDef* def = ctx.find_struct_by_str(type_name);
     if (def == (LlvmStructDef*)0) { return false; }
+    active.push(resolved);
     i64 i = 0;
     while (i < def.fields.len()) {
         LlvmFieldInfo* field = def.fields.get_ptr(i);
         u32 field_ty = mono_resolve_struct_field_type(ctx, resolved, field.type_id);
         if (field_ty != TYPE_UNKNOWN && field_ty != 0
-            && llvm_can_resolve_drop_fn(ctx, field_ty)) {
+            && llvm_type_needs_tracking_inner(ctx, field_ty, active)) {
+            active.pop();
             return true;
         }
         i += 1;
     }
+    active.pop();
     return false;
+}
+
+bool llvm_type_needs_tracking(LlvmContext* ctx, u32 type_id) {
+    Vec<u32> active = Vec<u32>.new();
+    bool needed = llvm_type_needs_tracking_inner(ctx, type_id, &active);
+    active.drop();
+    return needed;
 }
 
 void llvm_emit_guarded_drop_call(LlvmContext* ctx, LLVMOpaqueValue* flag,
@@ -173,6 +193,100 @@ bool llvm_drop_field_place(LlvmContext* ctx, LLVMOpaqueValue* local_ptr, u32 typ
     }
     *ptr_out = LLVMBuildStructGEP2(ctx.builder, struct_ty, base_ptr, (u32)field_idx, "drop_field");
     *type_out = field_ty;
+    return true;
+}
+
+bool llvm_drop_path_matches(LlvmLocal* local, LlvmFieldFlag* entry,
+                            Vec<Projection>* path) {
+    if (path.len() == 0 || entry.projections_count == 0) { return false; }
+    if (path.len() > (i64)entry.projections_count) { return false; }
+    i64 i = 0;
+    while (i < path.len()) {
+        Projection* stored = local.drop_projections.get_ptr((i64)entry.projections_start + i);
+        Projection* requested = path.get_ptr(i);
+        if (stored.kind != requested.kind
+            || (stored.kind == ProjectionKind.Field
+                && stored.field_name_id != requested.field_name_id)) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+// Register own-destructor flags in preorder. Pointer-like fields and enums
+// stop traversal because their pointees/payloads have separate ownership rules.
+void llvm_register_struct_drop_paths(LlvmContext* ctx, LlvmLocal* local,
+                                    u32 type_id, bool initialized,
+                                    Vec<Projection>* path, Vec<u32>* active) {
+    u32 resolved = ctx.types.resolve_subst(type_id);
+    if (resolved == TYPE_UNKNOWN || resolved == 0) { return; }
+    TypeEntry* entry = ctx.types.get(resolved);
+    if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference
+        || entry.kind != TypeKind.Named) { return; }
+    str type_name = ctx.types.names.get(entry.name_id);
+    if (find_enum_item(ctx.root, type_name) != (SyntaxNode*)0) { return; }
+    i64 ai = 0;
+    while (ai < active.len()) {
+        if (active.get(ai) == resolved) { return; }
+        ai += 1;
+    }
+    LlvmStructDef* def = ctx.find_struct_by_str(type_name);
+    if (def == (LlvmStructDef*)0) { return; }
+    active.push(resolved);
+    i64 i = 0;
+    while (i < def.fields.len()) {
+        LlvmFieldInfo* field = def.fields.get_ptr(i);
+        u32 field_name_id = field.name_id;
+        u32 raw_field_ty = field.type_id;
+        u32 field_ty = mono_resolve_struct_field_type(ctx, resolved, raw_field_ty);
+        if (field_ty != TYPE_UNKNOWN && field_ty != 0) {
+            Projection projection;
+            projection.kind = ProjectionKind.Field;
+            projection.field_name_id = field_name_id;
+            path.push(move projection);
+            if (llvm_can_resolve_drop_fn(ctx, field_ty)) {
+                LlvmFieldFlag flag;
+                flag.projections_start = (u32)local.drop_projections.len();
+                flag.projections_count = (u32)path.len();
+                flag.flag = llvm_alloca_drop_flag(ctx, "drop_field_flag", initialized);
+                i64 pi = 0;
+                while (pi < path.len()) {
+                    local.drop_projections.push(path.get(pi));
+                    pi += 1;
+                }
+                local.field_flags.push(move flag);
+            }
+            llvm_register_struct_drop_paths(ctx, local, field_ty, initialized, path, active);
+            path.pop();
+        }
+        i += 1;
+    }
+    active.pop();
+}
+
+// Compute a nested field address by applying the existing typed GEP helper at
+// each projection so generic field types are resolved at each step.
+bool llvm_drop_projection_place(LlvmContext* ctx, LLVMOpaqueValue* local_ptr,
+                                u32 type_id, LlvmLocal* local, LlvmFieldFlag* entry,
+                                LLVMOpaqueValue** ptr_out, u32* type_out) {
+    LLVMOpaqueValue* ptr = local_ptr;
+    u32 current_type = type_id;
+    u32 i = 0;
+    while (i < entry.projections_count) {
+        Projection* projection = local.drop_projections.get_ptr(
+            (i64)entry.projections_start + (i64)i);
+        if (projection.kind != ProjectionKind.Field) { return false; }
+        LLVMOpaqueValue* next_ptr = (LLVMOpaqueValue*)0;
+        u32 next_type = 0;
+        if (!llvm_drop_field_place(ctx, ptr, current_type, projection.field_name_id,
+                                   &next_ptr, &next_type)) {
+            return false;
+        }
+        ptr = next_ptr;
+        current_type = next_type;
+        i += 1;
+    }
+    *ptr_out = ptr;
+    *type_out = current_type;
     return true;
 }
 
@@ -291,10 +405,10 @@ bool llvm_enum_needs_payload_drop(LlvmContext* ctx, u32 type_id, str enum_name) 
 }
 
 // Register drop tracking for a freshly stored local. The whole flag starts
-// live exactly when the local was wholly initialized; direct droppable
+// live exactly when the local was wholly initialized; reachable droppable
 // fields each get a flag starting the same way. A whole flag exists only
 // when the scope-exit whole entry would do something (own `drop` or enum
-// payload dispatch); field flags exist per droppable direct field.
+// payload dispatch); field flags exist per reachable droppable field.
 // Registration never fails: untracked values simply leak as before.
 void llvm_register_local_drops(LlvmContext* ctx, u32 name_id, LLVMOpaqueValue* ptr,
                                u32 type_id, bool initialized) {
@@ -321,23 +435,12 @@ void llvm_register_local_drops(LlvmContext* ctx, u32 name_id, LLVMOpaqueValue* p
     if (whole_needed) {
         local.drop_flag = llvm_alloca_drop_flag(ctx, "drop_flag", initialized);
     }
-    if (!named_here) { return; }
-    if (is_enum) { return; }
-    LlvmStructDef* def = ctx.find_struct_by_str(type_name);
-    if (def == (LlvmStructDef*)0) { return; }
-    i64 i = 0;
-    while (i < def.fields.len()) {
-        LlvmFieldInfo* field = def.fields.get_ptr(i);
-        u32 field_ty = mono_resolve_struct_field_type(ctx, resolved, field.type_id);
-        if (field_ty != TYPE_UNKNOWN && field_ty != 0
-            && llvm_can_resolve_drop_fn(ctx, field_ty)) {
-            LlvmFieldFlag entry;
-            entry.name_id = field.name_id;
-            entry.flag = llvm_alloca_drop_flag(ctx, "drop_field_flag", initialized);
-            local.field_flags.push(move entry);
-        }
-        i += 1;
-    }
+    if (!named_here || is_enum) { return; }
+    Vec<Projection> path = Vec<Projection>.new();
+    Vec<u32> active = Vec<u32>.new();
+    llvm_register_struct_drop_paths(ctx, local, resolved, initialized, &path, &active);
+    path.drop();
+    active.drop();
 }
 
 void llvm_set_local_drop_live(LlvmContext* ctx, u32 name_id, bool live) {
@@ -352,18 +455,25 @@ void llvm_set_local_drop_live(LlvmContext* ctx, u32 name_id, bool live) {
     }
 }
 
-void llvm_set_field_drop_live(LlvmContext* ctx, u32 name_id, u32 field_name_id) {
-    LlvmLocal* local = ctx.find_local(name_id);
+void llvm_set_path_drop_live(LlvmContext* ctx, LlvmLocal* local,
+                             Vec<Projection>* path, bool live) {
     if (local == (LlvmLocal*)0) { return; }
-    llvm_store_drop_flag(ctx, local.drop_flag, true);
     i64 i = 0;
     while (i < local.field_flags.len()) {
         LlvmFieldFlag* entry = local.field_flags.get_ptr(i);
-        if (entry.name_id == field_name_id) {
-            llvm_store_drop_flag(ctx, entry.flag, true);
+        if (llvm_drop_path_matches(local, entry, path)) {
+            llvm_store_drop_flag(ctx, entry.flag, live);
         }
         i += 1;
     }
+}
+
+void llvm_set_field_drop_live(LlvmContext* ctx, u32 name_id,
+                              Vec<Projection>* path) {
+    LlvmLocal* local = ctx.find_local(name_id);
+    if (local == (LlvmLocal*)0) { return; }
+    llvm_store_drop_flag(ctx, local.drop_flag, true);
+    llvm_set_path_drop_live(ctx, local, path, true);
 }
 
 // Clear every drop flag of a local: the value was moved out and must not be
@@ -469,38 +579,50 @@ void llvm_clear_aggregate_sources(LlvmContext* ctx, u32 args_start, u32 args_cou
     }
 }
 
-// Direct field transfers clear that field; whole transfers clear every flag.
-// Nested/indexed places still conservatively release their whole root.
+u32 llvm_collect_drop_field_path(LlvmContext* ctx, u32 expr_id,
+                                 Vec<Projection>* path) {
+    if (expr_id == 0) { return 0; }
+    AstExpr* expr = ctx.pool.get_expr(expr_id);
+    if (expr.kind == ExprKind.Var) { return expr.aux; }
+    if (expr.kind == ExprKind.Move) {
+        return llvm_collect_drop_field_path(ctx, expr.inner0, path);
+    }
+    if (expr.kind != ExprKind.Field || expr.inner0 == 0) { return 0; }
+    u32 root_name = llvm_collect_drop_field_path(ctx, expr.inner0, path);
+    if (root_name == 0) { return 0; }
+    Projection projection;
+    projection.kind = ProjectionKind.Field;
+    projection.field_name_id = expr.aux;
+    path.push(move projection);
+    return root_name;
+}
+
+// Field transfers clear the selected subtree; indexed places retain the
+// conservative whole-root fallback because no per-element state exists.
 void llvm_clear_place_drops(LlvmContext* ctx, u32 expr_id) {
     if (expr_id == 0) { return; }
     AstExpr* expr = ctx.pool.get_expr(expr_id);
     while (expr.kind == ExprKind.Move && expr.inner0 != 0) {
         expr = ctx.pool.get_expr(expr.inner0);
     }
-    if (expr.kind == ExprKind.Field && expr.inner0 != 0) {
-        AstExpr* base = ctx.pool.get_expr(expr.inner0);
-        if (base.kind == ExprKind.Var) {
-            LlvmLocal* local = ctx.find_local(base.aux);
-            if (local == (LlvmLocal*)0) { return; }
+    Vec<Projection> path = Vec<Projection>.new();
+    u32 root_name = llvm_collect_drop_field_path(ctx, expr_id, &path);
+    if (root_name != 0 && path.len() > 0) {
+        LlvmLocal* local = ctx.find_local(root_name);
+        if (local != (LlvmLocal*)0) {
             u32 root_ty = ctx.types.resolve_subst(local.type_id);
-            if (root_ty == TYPE_UNKNOWN || root_ty == 0) { return; }
-            TypeEntry* root_entry = ctx.types.get(root_ty);
-            if (root_entry.kind == TypeKind.Pointer || root_entry.kind == TypeKind.Reference) {
-                return;
-            }
-            i64 i = 0;
-            while (i < local.field_flags.len()) {
-                LlvmFieldFlag* entry = local.field_flags.get_ptr(i);
-                if (entry.name_id == expr.aux) {
-                    llvm_store_drop_flag(ctx, entry.flag, false);
-                    return;
+            if (root_ty != TYPE_UNKNOWN && root_ty != 0) {
+                TypeEntry* root_entry = ctx.types.get(root_ty);
+                if (root_entry.kind != TypeKind.Pointer
+                    && root_entry.kind != TypeKind.Reference) {
+                    llvm_set_path_drop_live(ctx, local, &path, false);
                 }
-                i += 1;
             }
-            // Untracked or unknown fields have no field-level ownership flag.
-            return;
         }
+        path.drop();
+        return;
     }
+    path.drop();
     while (expr.kind == ExprKind.Field || expr.kind == ExprKind.Index) {
         if (expr.inner0 == 0) { return; }
         expr = ctx.pool.get_expr(expr.inner0);
@@ -542,14 +664,12 @@ void llvm_emit_local_whole_drop(LlvmContext* ctx, LlvmLocal* local) {
     }
 }
 
-// Emit one direct-field entry: that field's own `drop`, guarded by the
-// field's flag. Nested places below the field are slice-2 work; they leak
-// as before when the field has no resolvable own drop.
+// Emit one field-path entry: that place's own `drop`, guarded by its flag.
 void llvm_emit_local_field_drop(LlvmContext* ctx, LlvmLocal* local, LlvmFieldFlag* entry) {
     LLVMOpaqueValue* field_ptr = (LLVMOpaqueValue*)0;
     u32 field_ty = 0;
-    if (!llvm_drop_field_place(ctx, local.ptr, local.type_id, entry.name_id,
-                               &field_ptr, &field_ty)) {
+    if (!llvm_drop_projection_place(ctx, local.ptr, local.type_id, local, entry,
+                                    &field_ptr, &field_ty)) {
         return;
     }
     if (!llvm_can_resolve_drop_fn(ctx, field_ty)) { return; }
@@ -584,10 +704,7 @@ void llvm_emit_drops_above(LlvmContext* ctx, i64 mark) {
     }
 }
 
-// Overwrite predrop for an assignment target: release the value being
-// overwritten so it does not leak. Whole locals drop own-first then fields;
-// direct field targets drop just that field. Anything else is slice-2 work
-// and is skipped (status-quo leak).
+// Overwrite predrop releases the target subtree in parent-first preorder.
 void llvm_emit_assign_predrop(LlvmContext* ctx, u32 target_id, u32 rhs_id) {
     if (target_id == 0 || rhs_id == 0 || ctx.current_fn == (LLVMOpaqueValue*)0) { return; }
     AstExpr* target = ctx.pool.get_expr(target_id);
@@ -606,25 +723,26 @@ void llvm_emit_assign_predrop(LlvmContext* ctx, u32 target_id, u32 rhs_id) {
         }
         return;
     }
-    if (target.kind == ExprKind.Field && target.inner0 != 0) {
-        AstExpr* base = ctx.pool.get_expr(target.inner0);
-        if (base.kind != ExprKind.Var) { return; }
-        LlvmLocal* local = ctx.find_local(base.aux);
-        if (local == (LlvmLocal*)0) { return; }
-        i64 fi = 0;
-        while (fi < local.field_flags.len()) {
-            LlvmFieldFlag* entry = local.field_flags.get_ptr(fi);
-            if (entry.name_id == target.aux) {
-                llvm_emit_local_field_drop(ctx, local, entry);
+    Vec<Projection> path = Vec<Projection>.new();
+    u32 root_name = llvm_collect_drop_field_path(ctx, target_id, &path);
+    if (root_name != 0 && path.len() > 0) {
+        LlvmLocal* local = ctx.find_local(root_name);
+        if (local != (LlvmLocal*)0) {
+            i64 fi = 0;
+            while (fi < local.field_flags.len()) {
+                LlvmFieldFlag* entry = local.field_flags.get_ptr(fi);
+                if (llvm_drop_path_matches(local, entry, &path)) {
+                    llvm_emit_local_field_drop(ctx, local, entry);
+                }
+                fi += 1;
             }
-            fi += 1;
         }
     }
+    path.drop();
 }
 
-// Mark the assignment target live after the new value was stored: whole
-// locals go fully live; direct field targets mark their field plus the root
-// container (mirroring stage0's root promotion).
+// Mark the assigned subtree live and promote the root flag. Intermediate
+// owning ancestors retain their previous state, matching stage0.
 void llvm_mark_assign_live(LlvmContext* ctx, u32 target_id) {
     if (target_id == 0) { return; }
     AstExpr* target = ctx.pool.get_expr(target_id);
@@ -632,11 +750,12 @@ void llvm_mark_assign_live(LlvmContext* ctx, u32 target_id) {
         llvm_set_local_drop_live(ctx, target.aux, true);
         return;
     }
-    if (target.kind == ExprKind.Field && target.inner0 != 0) {
-        AstExpr* base = ctx.pool.get_expr(target.inner0);
-        if (base.kind != ExprKind.Var) { return; }
-        llvm_set_field_drop_live(ctx, base.aux, target.aux);
+    Vec<Projection> path = Vec<Projection>.new();
+    u32 root_name = llvm_collect_drop_field_path(ctx, target_id, &path);
+    if (root_name != 0 && path.len() > 0) {
+        llvm_set_field_drop_live(ctx, root_name, &path);
     }
+    path.drop();
 }
 
 // Tag-dispatched payload drops guarded by an existing whole-local flag.

@@ -7,6 +7,7 @@ import std.string;
 import frontend.ast;
 import frontend.ast_expr;
 import frontend.items;
+import frontend.place;
 import frontend.symbols;
 import frontend.types;
 import backend.llvm.types;
@@ -18,10 +19,12 @@ struct LlvmLocal {
     bool is_mut;
     LLVMOpaqueValue* drop_flag;
     Vec<LlvmFieldFlag> field_flags;
+    Vec<Projection> drop_projections;
 }
 
 struct LlvmFieldFlag {
-    u32 name_id;
+    u32 projections_start;
+    u32 projections_count;
     LLVMOpaqueValue* flag;
 }
 
@@ -355,7 +358,7 @@ impl LlvmContext {
         if (self.scope_markers.len() > 0) {
             i64 mark = self.scope_markers.pop();
             while (self.locals.len() > mark) {
-                self.locals.pop();
+                LlvmLocal _local = self.locals.pop();
             }
         }
     }
@@ -380,6 +383,7 @@ impl LlvmContext {
         local.is_mut = is_mut;
         local.drop_flag = (LLVMOpaqueValue*)0;
         local.field_flags = Vec<LlvmFieldFlag>.new();
+        local.drop_projections = Vec<Projection>.new();
         self.locals.push(move local);
     }
 
