@@ -1,0 +1,281 @@
+// bin/aglsp/src/params.ag — Parameter extraction from LSP JSON-RPC request bodies.
+import std.json;
+import std.string;
+
+bool skip_comma_if_present(JsonReader* r) {
+    r.skip_whitespace();
+    if (r.failed) { return false; }
+    u8* bytes = (u8*)r.input;
+    if (r.index < r.length && bytes[r.index] == (u8)44) {
+        r.index += 1;
+        return true;
+    }
+    return false;
+}
+
+bool parse_did_open_params(str json, String* uri_out, String* text_out, i64* ver_out) {
+    uri_out.clear();
+    text_out.clear();
+    *ver_out = 0;
+    JsonReader r = JsonReader.new(json);
+    if (!r.begin_object()) {
+        return false;
+    }
+    while (true) {
+        r.skip_whitespace();
+        if (r.failed) { break; }
+        u8* bytes = (u8*)r.input;
+        if (r.index < r.length && bytes[r.index] == (u8)125) { break; }
+        String key = r.read_string();
+        if (r.failed) { key.drop(); break; }
+        if (!r.expect((u8)58)) { key.drop(); break; }
+
+        if (key.equals("textDocument")) {
+            if (r.begin_object()) {
+                while (true) {
+                    r.skip_whitespace();
+                    if (r.failed) { break; }
+                    u8* inner_bytes = (u8*)r.input;
+                    if (r.index < r.length && inner_bytes[r.index] == (u8)125) { break; }
+                    String inner_key = r.read_string();
+                    if (r.failed) { inner_key.drop(); break; }
+                    if (!r.expect((u8)58)) { inner_key.drop(); break; }
+
+                    if (inner_key.equals("uri")) {
+                        String s = r.read_string();
+                        uri_out.push_str(s.to_str());
+                        s.drop();
+                    } else if (inner_key.equals("text")) {
+                        String s = r.read_string();
+                        text_out.push_str(s.to_str());
+                        s.drop();
+                    } else if (inner_key.equals("version")) {
+                        r.read_i64(ver_out);
+                    } else {
+                        r.skip_value();
+                    }
+                    inner_key.drop();
+                    if (!skip_comma_if_present(&r)) { break; }
+                }
+                r.end_object();
+            }
+        } else {
+            r.skip_value();
+        }
+        key.drop();
+        if (!skip_comma_if_present(&r)) { break; }
+    }
+    r.end_object();
+    return uri_out.len() > 0;
+}
+
+bool parse_did_change_params(str json, String* uri_out, String* text_out, i64* ver_out) {
+    uri_out.clear();
+    text_out.clear();
+    *ver_out = 0;
+    JsonReader r = JsonReader.new(json);
+    if (!r.begin_object()) {
+        return false;
+    }
+    while (true) {
+        r.skip_whitespace();
+        if (r.failed) { break; }
+        u8* bytes = (u8*)r.input;
+        if (r.index < r.length && bytes[r.index] == (u8)125) { break; }
+        String key = r.read_string();
+        if (r.failed) { key.drop(); break; }
+        if (!r.expect((u8)58)) { key.drop(); break; }
+
+        if (key.equals("textDocument")) {
+            if (r.begin_object()) {
+                while (true) {
+                    r.skip_whitespace();
+                    if (r.failed) { break; }
+                    u8* inner_bytes = (u8*)r.input;
+                    if (r.index < r.length && inner_bytes[r.index] == (u8)125) { break; }
+                    String inner_key = r.read_string();
+                    if (r.failed) { inner_key.drop(); break; }
+                    if (!r.expect((u8)58)) { inner_key.drop(); break; }
+
+                    if (inner_key.equals("uri")) {
+                        String s = r.read_string();
+                        uri_out.push_str(s.to_str());
+                        s.drop();
+                    } else if (inner_key.equals("version")) {
+                        r.read_i64(ver_out);
+                    } else {
+                        r.skip_value();
+                    }
+                    inner_key.drop();
+                    if (!skip_comma_if_present(&r)) { break; }
+                }
+                r.end_object();
+            }
+        } else if (key.equals("contentChanges")) {
+            if (r.begin_array()) {
+                r.skip_whitespace();
+                u8* arr_bytes = (u8*)r.input;
+                if (r.index < r.length && arr_bytes[r.index] != (u8)93) {
+                    if (r.begin_object()) {
+                        while (true) {
+                            r.skip_whitespace();
+                            if (r.failed) { break; }
+                            u8* obj_bytes = (u8*)r.input;
+                            if (r.index < r.length && obj_bytes[r.index] == (u8)125) { break; }
+                            String obj_key = r.read_string();
+                            if (r.failed) { obj_key.drop(); break; }
+                            if (!r.expect((u8)58)) { obj_key.drop(); break; }
+
+                            if (obj_key.equals("text")) {
+                                String s = r.read_string();
+                                text_out.push_str(s.to_str());
+                                s.drop();
+                            } else {
+                                r.skip_value();
+                            }
+                            obj_key.drop();
+                            if (!skip_comma_if_present(&r)) { break; }
+                        }
+                        r.end_object();
+                    }
+                }
+                while (true) {
+                    r.skip_whitespace();
+                    if (r.failed) { break; }
+                    u8* obj_bytes = (u8*)r.input;
+                    if (r.index < r.length && obj_bytes[r.index] == (u8)93) { break; }
+                    if (!skip_comma_if_present(&r)) { break; }
+                    r.skip_value();
+                }
+                r.end_array();
+            }
+        } else {
+            r.skip_value();
+        }
+        key.drop();
+        if (!skip_comma_if_present(&r)) { break; }
+    }
+    r.end_object();
+    return uri_out.len() > 0 && text_out.len() > 0;
+}
+
+bool parse_position_params(str json, String* uri_out, i64* line_out, i64* col_out) {
+    uri_out.clear();
+    *line_out = 0;
+    *col_out = 0;
+    JsonReader r = JsonReader.new(json);
+    if (!r.begin_object()) {
+        return false;
+    }
+    while (true) {
+        r.skip_whitespace();
+        if (r.failed) { break; }
+        u8* bytes = (u8*)r.input;
+        if (r.index < r.length && bytes[r.index] == (u8)125) { break; }
+        String key = r.read_string();
+        if (r.failed) { key.drop(); break; }
+        if (!r.expect((u8)58)) { key.drop(); break; }
+
+        if (key.equals("textDocument")) {
+            if (r.begin_object()) {
+                while (true) {
+                    r.skip_whitespace();
+                    if (r.failed) { break; }
+                    u8* inner_bytes = (u8*)r.input;
+                    if (r.index < r.length && inner_bytes[r.index] == (u8)125) { break; }
+                    String inner_key = r.read_string();
+                    if (r.failed) { inner_key.drop(); break; }
+                    if (!r.expect((u8)58)) { inner_key.drop(); break; }
+
+                    if (inner_key.equals("uri")) {
+                        String s = r.read_string();
+                        uri_out.push_str(s.to_str());
+                        s.drop();
+                    } else {
+                        r.skip_value();
+                    }
+                    inner_key.drop();
+                    if (!skip_comma_if_present(&r)) { break; }
+                }
+                r.end_object();
+            }
+        } else if (key.equals("position")) {
+            if (r.begin_object()) {
+                while (true) {
+                    r.skip_whitespace();
+                    if (r.failed) { break; }
+                    u8* inner_bytes = (u8*)r.input;
+                    if (r.index < r.length && inner_bytes[r.index] == (u8)125) { break; }
+                    String inner_key = r.read_string();
+                    if (r.failed) { inner_key.drop(); break; }
+                    if (!r.expect((u8)58)) { inner_key.drop(); break; }
+
+                    if (inner_key.equals("line")) {
+                        r.read_i64(line_out);
+                    } else if (inner_key.equals("character")) {
+                        r.read_i64(col_out);
+                    } else {
+                        r.skip_value();
+                    }
+                    inner_key.drop();
+                    if (!skip_comma_if_present(&r)) { break; }
+                }
+                r.end_object();
+            }
+        } else {
+            r.skip_value();
+        }
+        key.drop();
+        if (!skip_comma_if_present(&r)) { break; }
+    }
+    r.end_object();
+    return uri_out.len() > 0;
+}
+
+bool parse_document_uri_param(str json, String* uri_out) {
+    uri_out.clear();
+    JsonReader r = JsonReader.new(json);
+    if (!r.begin_object()) {
+        return false;
+    }
+    while (true) {
+        r.skip_whitespace();
+        if (r.failed) { break; }
+        u8* bytes = (u8*)r.input;
+        if (r.index < r.length && bytes[r.index] == (u8)125) { break; }
+        String key = r.read_string();
+        if (r.failed) { key.drop(); break; }
+        if (!r.expect((u8)58)) { key.drop(); break; }
+
+        if (key.equals("textDocument")) {
+            if (r.begin_object()) {
+                while (true) {
+                    r.skip_whitespace();
+                    if (r.failed) { break; }
+                    u8* inner_bytes = (u8*)r.input;
+                    if (r.index < r.length && inner_bytes[r.index] == (u8)125) { break; }
+                    String inner_key = r.read_string();
+                    if (r.failed) { inner_key.drop(); break; }
+                    if (!r.expect((u8)58)) { inner_key.drop(); break; }
+
+                    if (inner_key.equals("uri")) {
+                        String s = r.read_string();
+                        uri_out.push_str(s.to_str());
+                        s.drop();
+                    } else {
+                        r.skip_value();
+                    }
+                    inner_key.drop();
+                    if (!skip_comma_if_present(&r)) { break; }
+                }
+                r.end_object();
+            }
+        } else {
+            r.skip_value();
+        }
+        key.drop();
+        if (!skip_comma_if_present(&r)) { break; }
+    }
+    r.end_object();
+    return uri_out.len() > 0;
+}

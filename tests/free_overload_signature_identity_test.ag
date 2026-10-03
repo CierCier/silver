@@ -1,0 +1,19 @@
+// Signature identity for free-function overloads must match stage0's ABI key.
+
+import std.sys.entry;
+
+i32 pointer_or_reference(i32* _value) { return 1; }
+i32 pointer_or_reference(&i32 _value) { return 2; }
+
+void fixed_or_variadic(i32 _value) {}
+void fixed_or_variadic(i32... _values) {}
+
+void return_signature(i32 _value) {}
+i32 return_signature(i32 _value) { return 1; }
+
+i32 main() {
+    i32 value = 0;
+    i32* pointer = &value;
+    if (pointer_or_reference(pointer) != 1) { return 1; }
+    return 0;
+}

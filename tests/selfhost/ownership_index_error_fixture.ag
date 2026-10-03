@@ -1,0 +1,4 @@
+i64 read_other_index_after_move(String values[2], i64 first, i64 second) {
+    String taken = move values[first];
+    return values[second].len();
+}

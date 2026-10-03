@@ -142,6 +142,80 @@ u128 __multi3(i128 a, i128 b) {
 }
 
 // ---------------------------------------------------------------------------
+// 128-bit variable shifts, matching the compiler-rt RTLIB ABI exactly:
+//   i128 __ashlti3(i128 a, i32 b)   — a << b
+//   u128 __lshrti3(u128 a, i32 b)   — a >> b (logical)
+//   i128 __ashrti3(i128 a, i32 b)   — a >> b (arithmetic)
+// The LLVM WebAssembly backend lowers `shl/lshr/ashr i128` with a runtime
+// shift count to external calls with these (i128, i32) signatures; x86-64
+// legalizes the same ops inline and never references them. Providing the
+// definitions here resolves the wasm references without any call-site
+// interception. The count is treated as unsigned (a negative i32 count is
+// UB per the compiler-rt contract); bodies use only 64-bit shifts so no
+// helper recurses into itself.
+// ---------------------------------------------------------------------------
+i128 __ashlti3(i128 a, i32 count) {
+    u64 s = (u32)count;
+    if (s == (u64)0) {
+        return a;
+    }
+    if (s >= (u64)128) {
+        return (i128)0;
+    }
+    u64 lo = (u64)(u128)a;
+    u64 hi = (u64)((u128)a >> (u128)64);
+    if (s >= (u64)64) {
+        hi = lo << (s - (u64)64);
+        lo = (u64)0;
+    } else {
+        hi = (hi << s) | (lo >> ((u64)64 - s));
+        lo = lo << s;
+    }
+    return (i128)(((u128)hi << (u128)64) | (u128)lo);
+}
+
+u128 __lshrti3(u128 a, i32 count) {
+    u64 s = (u32)count;
+    if (s == (u64)0) {
+        return a;
+    }
+    if (s >= (u64)128) {
+        return (u128)0;
+    }
+    u64 lo = (u64)a;
+    u64 hi = (u64)(a >> (u128)64);
+    if (s >= (u64)64) {
+        lo = hi >> (s - (u64)64);
+        hi = (u64)0;
+    } else {
+        lo = (lo >> s) | (hi << ((u64)64 - s));
+        hi = hi >> s;
+    }
+    return ((u128)hi << (u128)64) | (u128)lo;
+}
+
+i128 __ashrti3(i128 a, i32 count) {
+    u64 s = (u32)count;
+    if (s == (u64)0) {
+        return a;
+    }
+    u64 lo = (u64)(u128)a;
+    u64 hi = (u64)((u128)a >> (u128)64);
+    if (s >= (u64)128) {
+        // Shift count consumes the whole value: result is all sign bits.
+        return (i128)((i64)hi >> (i64)63);
+    }
+    if (s >= (u64)64) {
+        lo = (u64)((i64)hi >> (i64)(s - (u64)64));
+        hi = (u64)((i64)hi >> (i64)63);
+    } else {
+        lo = (lo >> s) | (hi << ((u64)64 - s));
+        hi = (u64)((i64)hi >> (i64)s);
+    }
+    return (i128)(((u128)hi << (u128)64) | (u128)lo);
+}
+
+// ---------------------------------------------------------------------------
 // f64 <-> i128 conversions. Convert through the u64 hi/lo split so the body
 // never contains an f64 <-> i128 cast (which would recurse into this file).
 // Out-of-range f64 inputs saturate; the compiler-rt contract leaves them UB.

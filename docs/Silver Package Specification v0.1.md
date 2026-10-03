@@ -6,11 +6,11 @@ not add a second package-manager executable.
 
 ## 1. Package roots
 
-A package root is a directory containing `silver.toml`. The compiler accepts a
-package root directory, an explicit `silver.toml` path, or (when no source
-input is given) an implicit `silver.toml` in the current directory. A package
-may still be compiled directly from one or more `.ag` files; direct source
-compilation does not require a manifest.
+A package root is a directory containing `silver.toml`, or an explicit
+manifest file. The compiler accepts a package root directory, a manifest file,
+or (when no source input is given) an implicit `silver.toml` in the current
+directory. A package may still be compiled directly from one or more `.ag`
+files; direct source compilation does not require a manifest.
 
 All paths in a manifest are relative to the manifest that contains them.
 Manifest paths and source entries are canonicalized while resolving the graph.
@@ -41,9 +41,35 @@ instead forward to another package manifest:
 manifest = "../widgets"
 ```
 
-Manifest-backed targets may use the Git fields described below. An `entry`
-target may not specify Git selectors. A target entry must exist and absolute
-target paths are rejected.
+Manifest-backed targets may use the Git fields described below. A manifest
+path may name any existing local file, so a workspace can keep a target
+manifest under a submodule-specific name:
+
+```toml
+# silver.toml
+[bin.agc]
+manifest = "./bin/agc"
+
+[lib.agc]
+manifest = "./bin/agc"
+```
+
+The referenced `bin/agc` file is a normal package manifest. Its paths are
+relative to its own directory:
+
+```toml
+name = "compiler"
+version = "0.1.0"
+
+[bin.agc]
+entry = "src/main.ag"
+
+[lib.agc]
+entry = "src/lib.ag"
+```
+
+An `entry` target may not specify Git selectors. A target entry must exist and
+absolute target paths are rejected.
 
 Target names are local to their kind. If no target name is supplied on the
 command line, `agc` selects the target whose name equals the package name, or
@@ -63,12 +89,12 @@ manifest = "git+https://example.com/graphics.git"
 branch = "stable"
 ```
 
-The `manifest` value is either a local package directory or `silver.toml`, or
-a Git URL prefixed with `git+`. Local dependencies are resolved relative to
-the containing manifest. Every dependency is parsed and recursively resolved,
-including dependencies of Git packages. Repeated canonical local manifests
-and repeated Git revisions are deduplicated. A dependency cycle is an error
-and reports the package chain.
+The `manifest` value is either a local package directory, a local manifest
+file, or a Git URL prefixed with `git+`. Local dependencies are resolved
+relative to the containing manifest. Every dependency is parsed and
+recursively resolved, including dependencies of Git packages. Repeated
+canonical local manifests and repeated Git revisions are deduplicated. A
+dependency cycle is an error and reports the package chain.
 
 The dependency alias maps to the dependency package's library target. A
 binary-only package is valid as a graph dependency but does not provide an

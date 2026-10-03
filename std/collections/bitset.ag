@@ -1,0 +1,75 @@
+// std/collections/bitset.ag — Dynamic bitset for dense integer sets and flags.
+import std.mem.vec;
+
+struct BitSet {
+    Vec<u64> words;
+    i64 bit_count;
+}
+
+impl BitSet {
+    BitSet new() {
+        BitSet b;
+        b.words = Vec<u64>.new();
+        b.bit_count = 0;
+        return move b;
+    }
+
+    BitSet with_capacity(i64 bits) {
+        BitSet b;
+        b.words = Vec<u64>.new();
+        b.bit_count = bits;
+        i64 words_needed = (bits + 63) / 64;
+        i64 i = 0;
+        while (i < words_needed) {
+            b.words.push(0);
+            i += 1;
+        }
+        return move b;
+    }
+
+    void set(BitSet* self, i64 bit) {
+        if (bit < 0) { return; }
+        i64 word_idx = bit / 64;
+        i64 bit_idx = bit % 64;
+        while (word_idx >= self.words.len()) {
+            self.words.push(0);
+        }
+        u64 mask = (u64)1 << (u32)bit_idx;
+        u64 cur = self.words.get(word_idx);
+        self.words.set(word_idx, cur | mask);
+        if (bit >= self.bit_count) {
+            self.bit_count = bit + 1;
+        }
+    }
+
+    void clear_bit(BitSet* self, i64 bit) {
+        if (bit < 0) { return; }
+        i64 word_idx = bit / 64;
+        if (word_idx >= self.words.len()) { return; }
+        i64 bit_idx = bit % 64;
+        u64 mask = ~((u64)1 << (u32)bit_idx);
+        u64 cur = self.words.get(word_idx);
+        self.words.set(word_idx, cur & mask);
+    }
+
+    bool test(BitSet* self, i64 bit) {
+        if (bit < 0) { return false; }
+        i64 word_idx = bit / 64;
+        if (word_idx >= self.words.len()) { return false; }
+        i64 bit_idx = bit % 64;
+        u64 mask = (u64)1 << (u32)bit_idx;
+        return (self.words.get(word_idx) & mask) != 0;
+    }
+
+    void clear_all(BitSet* self) {
+        i64 i = 0;
+        while (i < self.words.len()) {
+            self.words.set(i, 0);
+            i += 1;
+        }
+    }
+
+    i64 len(&self) {
+        return self.bit_count;
+    }
+}

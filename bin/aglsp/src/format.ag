@@ -1,0 +1,97 @@
+// bin/aglsp/src/format.ag — Conservative whitespace-only document formatter for aglsp.
+import std.mem.alloc;
+import std.string;
+import json_rpc;
+
+String format_silver(str text) {
+    i64 len = strlen(text);
+    if (len == 0) {
+        return String.new();
+    }
+
+    String out = String.new();
+    bool pending_blank = false;
+    bool any_content = false;
+    i64 pos = 0;
+
+    while (pos < len) {
+        i64 line_start = pos;
+        while (pos < len && text[pos] != '\n') {
+            pos += 1;
+        }
+        i64 line_end = pos;
+        if (pos < len && text[pos] == '\n') {
+            pos += 1;
+        }
+
+        // Trim trailing whitespace (spaces, tabs, carriage returns)
+        while (line_end > line_start) {
+            u8 c = (u8)text[line_end - 1];
+            if (c == (u8)32 || c == (u8)9 || c == (u8)13) {
+                line_end -= 1;
+            } else {
+                break;
+            }
+        }
+
+        if (line_end == line_start) {
+            if (any_content) {
+                pending_blank = true;
+            }
+            continue;
+        }
+
+        if (pending_blank) {
+            out.push('\n');
+        }
+
+        i64 k = line_start;
+        while (k < line_end) {
+            out.push(text[k]);
+            k += 1;
+        }
+        out.push('\n');
+        any_content = true;
+        pending_blank = false;
+    }
+
+    return move out;
+}
+
+String compute_formatting(str text) {
+    String formatted = format_silver(text);
+    if (strcmp(formatted.to_str(), text) == 0) {
+        formatted.drop();
+        return String.from_str("[]");
+    }
+
+    i64 len = strlen(text);
+    i64 end_line = 0;
+    i64 last_line_len = 0;
+    i64 i = 0;
+    while (i < len) {
+        if (text[i] == '\n') {
+            end_line += 1;
+            last_line_len = 0;
+        } else {
+            last_line_len += 1;
+        }
+        i += 1;
+    }
+
+    String out = String.from_str("[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":");
+    u8 num_buf[32];
+    i64 n = itoa(end_line, (u8*)&num_buf[0]);
+    for (i64 k = 0; k < n; k += 1) { out.push((char)num_buf[k]); }
+
+    out.push_str(",\"character\":");
+    n = itoa(last_line_len, (u8*)&num_buf[0]);
+    for (i64 k = 0; k < n; k += 1) { out.push((char)num_buf[k]); }
+
+    out.push_str("}},\"newText\":\"");
+    json_escape(formatted.to_str(), &out);
+    out.push_str("\"}]");
+
+    formatted.drop();
+    return move out;
+}

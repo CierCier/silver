@@ -1,0 +1,252 @@
+// bin/aglsp/src/json_rpc.ag — JSON-RPC 2.0 transport over stdin and stdout.
+import std.io;
+import std.io.file;
+import std.io.byte_stream;
+import std.json;
+import std.mem.alloc;
+import std.mem.memory;
+import std.mem.vec;
+import std.string;
+
+struct JsonRpcMessage {
+    i64 id;
+    bool has_id;
+    String id_raw;
+    String method;
+    String params_json;
+}
+
+impl JsonRpcMessage {
+    JsonRpcMessage new() {
+        JsonRpcMessage m;
+        m.id = -1;
+        m.has_id = false;
+        m.id_raw = String.new();
+        m.method = String.new();
+        m.params_json = String.new();
+        return move m;
+    }
+}
+
+void json_escape(str input, String* out) {
+    i64 len = strlen(input);
+    i64 i = 0;
+    while (i < len) {
+        char ch = input[i];
+        if (ch == '"') {
+            out.push_str("\\\"");
+        } else if (ch == '\\') {
+            out.push_str("\\\\");
+        } else if (ch == '\n') {
+            out.push_str("\\n");
+        } else if (ch == '\r') {
+            out.push_str("\\r");
+        } else if (ch == '\t') {
+            out.push_str("\\t");
+        } else {
+            out.push(ch);
+        }
+        i += 1;
+    }
+}
+
+void send_raw_payload(str payload) {
+    i64 payload_len = strlen(payload);
+    String header = String.from_str("Content-Length: ");
+    u8 num_buf[32];
+    i64 n = itoa(payload_len, (u8*)&num_buf[0]);
+    i64 k = 0;
+    while (k < n) {
+        header.push((char)num_buf[k]);
+        k += 1;
+    }
+    header.push_str("\r\n\r\n");
+
+    STDOUT.write_str(header.to_str());
+    STDOUT.write_str(payload);
+    STDOUT.flush();
+    header.drop();
+}
+
+void send_response(i64 id, str result_json) {
+    String resp = String.from_str("{\"jsonrpc\":\"2.0\",\"id\":");
+    u8 num_buf[32];
+    i64 n = itoa(id, (u8*)&num_buf[0]);
+    i64 k = 0;
+    while (k < n) {
+        resp.push((char)num_buf[k]);
+        k += 1;
+    }
+    resp.push_str(",\"result\":");
+    resp.push_str(result_json);
+    resp.push_str("}");
+    send_raw_payload(resp.to_str());
+    resp.drop();
+}
+
+void send_notification(str method, str params_json) {
+    String notif = String.from_str("{\"jsonrpc\":\"2.0\",\"method\":\"");
+    notif.push_str(method);
+    notif.push_str("\",\"params\":");
+    notif.push_str(params_json);
+    notif.push_str("}");
+    send_raw_payload(notif.to_str());
+    notif.drop();
+}
+
+void send_error(i64 id, i64 code, str message) {
+    String resp = String.from_str("{\"jsonrpc\":\"2.0\",\"id\":");
+    u8 num_buf[32];
+    i64 n = itoa(id, (u8*)&num_buf[0]);
+    i64 k = 0;
+    while (k < n) {
+        resp.push((char)num_buf[k]);
+        k += 1;
+    }
+    resp.push_str(",\"error\":{\"code\":");
+    n = itoa(code, (u8*)&num_buf[0]);
+    k = 0;
+    while (k < n) {
+        resp.push((char)num_buf[k]);
+        k += 1;
+    }
+    resp.push_str(",\"message\":\"");
+    json_escape(message, &resp);
+    resp.push_str("\"}}");
+    send_raw_payload(resp.to_str());
+    resp.drop();
+}
+
+bool parse_rpc_request(str body, JsonRpcMessage* msg) {
+    msg.has_id = false;
+    msg.id = -1;
+    msg.method.clear();
+    msg.params_json.clear();
+    msg.id_raw.clear();
+
+    JsonReader r = JsonReader.new(body);
+    if (!r.begin_object()) {
+        return false;
+    }
+
+    while (true) {
+        r.skip_whitespace();
+        if (r.failed) { break; }
+        u8* bytes = (u8*)r.input;
+        if (r.index < r.length && bytes[r.index] == (u8)125) { break; }
+        String key = r.read_string();
+        if (r.failed) {
+            key.drop();
+            break;
+        }
+        if (!r.expect((u8)58)) {
+            key.drop();
+            break;
+        }
+
+        if (key.equals("method")) {
+            String m = r.read_string();
+            msg.method.push_str(m.to_str());
+            m.drop();
+        } else if (key.equals("id")) {
+            msg.has_id = true;
+            r.skip_whitespace();
+            u8* in_bytes = (u8*)r.input;
+            if (r.index < r.length && in_bytes[r.index] == (u8)34) {
+                String id_str = r.read_string();
+                msg.id_raw.push_str(id_str.to_str());
+                id_str.drop();
+            } else {
+                i64 id_val = 0;
+                if (r.read_i64(&id_val)) {
+                    msg.id = id_val;
+                }
+            }
+        } else if (key.equals("params")) {
+            r.skip_whitespace();
+            i64 p_start = r.index;
+            r.skip_value();
+            i64 p_end = r.index;
+            i64 j = p_start;
+            while (j < p_end && j < r.length) {
+                msg.params_json.push(body[j]);
+                j += 1;
+            }
+        } else {
+            r.skip_value();
+        }
+        key.drop();
+        if (!r.comma()) { break; }
+    }
+    r.end_object();
+    return msg.method.len() > 0;
+}
+
+bool read_header_line(ByteStream* stream, String* line) {
+    line.clear();
+    while (true) {
+        i32 b = stream.read_byte();
+        if (b < 0) {
+            return false;
+        }
+        if (b == 10) { // \n
+            return true;
+        }
+        if (b != 13) { // skip \r
+            line.push((char)b);
+        }
+    }
+    return true;
+}
+
+bool read_rpc_message(ByteStream* stream, String* body_out) {
+    body_out.clear();
+    i64 content_length = -1;
+    String line = String.new();
+
+    while (true) {
+        if (!read_header_line(stream, &line)) {
+            line.drop();
+            return false;
+        }
+        if (line.len() == 0) {
+            // End of headers (\r\n\r\n reached)
+            break;
+        }
+        if (line.starts_with("Content-Length:")) {
+            str s = line.to_str();
+            i64 idx = 15;
+            while (idx < line.len() && (s[idx] == ' ' || s[idx] == '\t')) {
+                idx += 1;
+            }
+            i64 val = 0;
+            while (idx < line.len() && s[idx] >= '0' && s[idx] <= '9') {
+                val = val * 10 + (i64)(s[idx] - '0');
+                idx += 1;
+            }
+            content_length = val;
+        }
+    }
+    line.drop();
+
+    if (content_length <= 0) {
+        return false;
+    }
+
+    u8* buf = alloc<u8>(content_length + 1);
+    i64 total_read = 0;
+    while (total_read < content_length) {
+        i32 ch = stream.read_byte();
+        if (ch < 0) {
+            free(buf);
+            return false;
+        }
+        buf[total_read] = (u8)ch;
+        total_read += 1;
+    }
+    buf[content_length] = (u8)0;
+
+    body_out.push_str((str)buf);
+    free(buf);
+    return true;
+}

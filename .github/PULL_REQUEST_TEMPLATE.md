@@ -1,0 +1,15 @@
+## Change
+
+Describe the problem and the resulting behavior. For language or compiler
+changes, include a concrete input and expected outcome.
+
+## Verification
+
+List the commands run and their results, including failures, skips, and checks
+not run. For self-host changes, identify the compiler stage and whether native
+execution used the stage0 bridge. For performance changes, include comparable
+before/after measurements and the benchmark configuration.
+
+## Remaining limits
+
+Describe unresolved behavior or follow-up work, or state that there is none.

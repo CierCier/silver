@@ -1,0 +1,13 @@
+// bin/agc/src/main.ag — stage1 self-hosting compiler entry point.
+//
+// Stage1 currently owns the lossless lexer, CST parser, source/artifact module
+// projection, and typed frontend checks. Stage0 builds this binary while the
+// LLVM-backed backend and full type checker are migrated in later slices;
+// native commands use the explicit compatibility bridge during that phase.
+import std.io;
+import std.sys.entry;
+import driver;
+
+i32 main() {
+    return run_frontend();
+}

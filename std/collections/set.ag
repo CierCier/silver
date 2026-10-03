@@ -24,6 +24,17 @@ u8 set_h2(i64 hash) {
 }
 
 i64 set_probe_match(u8* ctrl_ptr, u8 h2) {
+    if (@cfg(os.wasi)) {
+        i64 mask = 0;
+        i64 i = 0;
+        while (i < 16) {
+            if (ctrl_ptr[i] == h2) {
+                mask = mask | ((i64)1 << i);
+            }
+            i = i + 1;
+        }
+        return mask;
+    }
     return asm("
         movq %rax, %r8
         movl %edi, %edx
@@ -39,6 +50,17 @@ i64 set_probe_match(u8* ctrl_ptr, u8 h2) {
 }
 
 i64 set_probe_empty(u8* ctrl_ptr) {
+    if (@cfg(os.wasi)) {
+        i64 mask = 0;
+        i64 i = 0;
+        while (i < 16) {
+            if (ctrl_ptr[i] == (u8)0x80) {
+                mask = mask | ((i64)1 << i);
+            }
+            i = i + 1;
+        }
+        return mask;
+    }
     return asm("
         movq %rax, %r8
         movl $$0x80808080, %edx
@@ -52,6 +74,17 @@ i64 set_probe_empty(u8* ctrl_ptr) {
 }
 
 i64 set_probe_free(u8* ctrl_ptr) {
+    if (@cfg(os.wasi)) {
+        i64 mask = 0;
+        i64 i = 0;
+        while (i < 16) {
+            if ((ctrl_ptr[i] & (u8)0x80) != (u8)0) {
+                mask = mask | ((i64)1 << i);
+            }
+            i = i + 1;
+        }
+        return mask;
+    }
     return asm("
         movdqu (%rax), %xmm0
         pmovmskb %xmm0, %eax
@@ -60,6 +93,18 @@ i64 set_probe_free(u8* ctrl_ptr) {
 }
 
 i64 set_trailing_zeros(i64 mask) {
+    if (@cfg(os.wasi)) {
+        if (mask == 0) {
+            return 64;
+        }
+        i64 n = 0;
+        i64 m = mask;
+        while ((m & 1) == 0) {
+            m = m >> 1;
+            n = n + 1;
+        }
+        return n;
+    }
     return asm("
         bsfq %rax, %rax
     ", [mask], []);

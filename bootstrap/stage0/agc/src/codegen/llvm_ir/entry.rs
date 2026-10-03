@@ -1,0 +1,3113 @@
+use rustc_hash::FxHashSet as HashSet;
+use std::path::Path;
+
+use rustc_hash::FxHashMap as HashMap;
+
+use inkwell::AddressSpace;
+use inkwell::context::Context;
+use inkwell::module::Linkage;
+use inkwell::targets::{
+    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetData, TargetMachine,
+};
+use inkwell::types::{AsTypeRef, BasicType, BasicTypeEnum};
+use inkwell::values::AsValueRef;
+use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, PointerValue};
+
+use crate::codegen::SilverGenerator;
+use crate::codegen::abi;
+use crate::codegen::llvm_ir::VarInfo;
+use crate::codegen::llvm_ir::generate;
+use crate::codegen::llvm_ir::{FunctionSig, LlvmIrGenerator};
+use crate::codegen::{CodegenError, CodegenResult};
+use crate::debug_info::DebugContext;
+use crate::module_artifact::{ModuleArtifact, ast_type_from_canonical_key};
+use crate::parser::ast;
+use crate::symbol_table::{CompilerSymbolTable, SymbolKind};
+use crate::types::Type;
+impl<'ctx> LlvmIrGenerator<'ctx> {
+    pub(crate) fn is_private(visibility: &ast::Visibility) -> bool {
+        matches!(visibility, ast::Visibility::Private)
+    }
+
+    pub(crate) fn method_effective_visibility(
+        impl_visibility: &ast::Visibility,
+        method_visibility: &ast::Visibility,
+    ) -> ast::Visibility {
+        if Self::is_private(impl_visibility) || Self::is_private(method_visibility) {
+            ast::Visibility::Private
+        } else {
+            ast::Visibility::Public
+        }
+    }
+
+    pub(crate) fn apply_function_linkage(
+        &self,
+        function: FunctionValue<'ctx>,
+        visibility: &ast::Visibility,
+        attributes: &[ast::Attribute],
+    ) {
+        let fn_name = function.get_name().to_str().unwrap_or("");
+        // Monomorphized generic instances (e.g. alloc__1_u8__...) carry arity markers `__\d+_`
+        // and use linkonce_odr so they are shared and deduplicated across compilation units.
+        // Method instances (`Owner__method__<hash>`) are name-ambiguous with plain
+        // methods, so monomorph tags those with the synthetic
+        // `silver_monomorph_instance` attribute instead.
+        let is_monomorph = (0..=9).any(|d| fn_name.contains(&format!("__{d}_")))
+            || attributes
+                .iter()
+                .any(|attr| attr.name.name == crate::semantic::monomorph::MONOMORPH_INSTANCE_ATTR);
+        if is_monomorph {
+            function.set_linkage(Linkage::LinkOnceODR);
+            // COFF has no dedup for bare weak symbols: without an explicit COMDAT,
+            // every object keeps its own `.weak.<name>.*` copy and the link fails
+            // with duplicate symbols. An `any` COMDAT deduplicates on COFF exactly
+            // like linkonce_odr does on ELF (this is what Clang emits for C++
+            // inline functions).
+            let comdat = self.module.get_or_insert_comdat(fn_name);
+            comdat.set_selection_kind(inkwell::comdat::ComdatSelectionKind::Any);
+            function.as_global_value().set_comdat(comdat);
+        } else if Self::is_private(visibility) {
+            function.set_linkage(Linkage::Internal);
+        } else {
+            function.set_linkage(Linkage::External);
+        }
+    }
+
+    /// Apply `#[inline(always)]` as the LLVM alwaysinline attribute, so the
+    /// always-inline pass inlines the function into every caller.
+    pub(crate) fn apply_inline_always_attribute(
+        function: FunctionValue<'ctx>,
+        attributes: &[ast::Attribute],
+        context: &inkwell::context::Context,
+    ) {
+        if crate::attributes::function_always_inline(attributes) {
+            let kind_id = inkwell::attributes::Attribute::get_named_enum_kind_id("alwaysinline");
+            let attr = context.create_enum_attribute(kind_id, 0);
+            function.add_attribute(inkwell::attributes::AttributeLoc::Function, attr);
+        }
+    }
+
+    /// Apply `#[target_feature("name")]` attributes as an LLVM
+    /// `target-features` function attribute, so the x86 backend may select
+    /// instructions from the listed feature sets for this function only.
+    /// Calling such a function on a CPU lacking the feature is illegal —
+    /// guard with the runtime probes in `std/cpu.ag`.
+    pub(crate) fn apply_target_feature_attributes(
+        function: FunctionValue<'ctx>,
+        attributes: &[ast::Attribute],
+    ) {
+        let Some(features) = crate::attributes::function_target_features(attributes) else {
+            return;
+        };
+        let kind =
+            std::ffi::CString::new("target-features").expect("target-features contains no NUL");
+        let value = std::ffi::CString::new(features).expect("feature string contains no NUL");
+        unsafe {
+            llvm_sys::core::LLVMAddTargetDependentFunctionAttr(
+                function.as_value_ref(),
+                kind.as_ptr(),
+                value.as_ptr(),
+            );
+        }
+    }
+
+    pub fn generate(program: &ast::Program) -> CodegenResult<String> {
+        let mut table = CompilerSymbolTable::new();
+        Self::generate_with_table(program, &mut table)
+    }
+
+    pub fn generate_with_table(
+        program: &ast::Program,
+        table: &mut CompilerSymbolTable,
+    ) -> CodegenResult<String> {
+        Self::generate_with_table_and_source(program, table, None, None, false)
+    }
+
+    pub fn generate_with_table_and_source(
+        program: &ast::Program,
+        table: &mut CompilerSymbolTable,
+        source_path: Option<&std::path::Path>,
+        source_text: Option<&str>,
+        debug_info: bool,
+    ) -> CodegenResult<String> {
+        let context = Context::create();
+        let module = context.create_module("silver");
+        let builder = context.create_builder();
+        let debug = if debug_info {
+            match (source_path, source_text) {
+                (Some(path), Some(text)) => {
+                    let main_file_id = crate::lexer::register_source(&path.to_string_lossy(), text);
+                    Some(DebugContext::new(
+                        &context,
+                        &module,
+                        main_file_id,
+                        path,
+                        text,
+                    ))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let mut generator = LlvmIrGenerator {
+            context: &context,
+            module,
+            builder,
+            current_fn: None,
+            current_return_type: None,
+            variables: vec![HashMap::default()],
+            function_sigs: HashMap::default(),
+            function_name_to_symbol: HashMap::default(),
+            imported_function_links: HashMap::default(),
+            extern_globals: HashMap::default(),
+            global_variables: HashMap::default(),
+            global_const_values: HashMap::default(),
+            struct_types: HashMap::default(),
+            struct_fields: HashMap::default(),
+            union_types: HashSet::default(),
+            struct_packed: HashSet::default(),
+            enum_backing_types: HashMap::default(),
+            enum_variants: HashMap::default(),
+            enum_variant_payload_types: HashMap::default(),
+            enum_payload_layouts: HashMap::default(),
+            defers: vec![vec![]],
+            volatile_globals: HashSet::default(),
+            type_aliases: HashSet::default(),
+            static_local_counter: 0,
+            method_receivers: HashMap::default(),
+            method_overload_signatures: HashMap::default(),
+            string_constants: HashMap::default(),
+            struct_generics: HashMap::default(),
+            free_function_sigs: HashMap::default(),
+            source_function_symbols: HashMap::default(),
+            drop_trait_impl_owners: HashSet::default(),
+            display_trait_impl_owners: HashSet::default(),
+            generic_impl_templates: Vec::new(),
+            generic_function_templates: HashMap::default(),
+            loop_stack: Vec::new(),
+            doc_comments: Vec::new(),
+            loop_defers_base: Vec::new(),
+            symbol_table: table.clone(),
+            temp_counter: 0,
+            task_trampoline_counter: 0,
+            debug,
+            debug_nested: false,
+            fn_source_info: rustc_hash::FxHashMap::default(),
+            abi_handler: abi::get_abi_handler(
+                TargetMachine::get_default_triple()
+                    .as_str()
+                    .to_str()
+                    .unwrap_or("x86_64-unknown-linux-gnu"),
+            ),
+            leak_check: false,
+            emit_bt_tables: true,
+            root_symbols: HashSet::default(),
+            keep_items: Vec::new(),
+            noreturn_functions: Self::default_noreturn_functions(),
+        };
+        // Set the module's target triple and data layout from the effective
+        // target before generating IR: lower_abi_type and TargetData queries
+        // must observe the target's layout (Win64 i128 alignment etc.), and
+        // emit_asm_expression branches on the module triple.
+        Target::initialize_all(&InitializationConfig::default());
+        let host_triple = TargetMachine::get_default_triple();
+        generator.module.set_triple(&host_triple);
+        if let Ok(target) = Target::from_triple(&host_triple) {
+            if let Some(machine) = target.create_target_machine(
+                &host_triple,
+                "generic",
+                "",
+                generate::map_opt_level(None),
+                RelocMode::Default,
+                CodeModel::Default,
+            ) {
+                generator
+                    .module
+                    .set_data_layout(&machine.get_target_data().get_data_layout());
+            }
+        }
+        generator.generate_program(program)?;
+        generator.emit_backtrace_table();
+        table.absorb_from(&generator.symbol_table);
+        Ok(generator.finish())
+    }
+
+    pub fn generate_with_imports_and_table(
+        program: &ast::Program,
+        imported_modules: &[ModuleArtifact],
+        table: &mut CompilerSymbolTable,
+    ) -> CodegenResult<String> {
+        Self::generate_with_imports_and_table_and_source(
+            program,
+            imported_modules,
+            table,
+            None,
+            None,
+            false,
+        )
+    }
+
+    pub fn generate_with_imports_and_table_and_source(
+        program: &ast::Program,
+        imported_modules: &[ModuleArtifact],
+        table: &mut CompilerSymbolTable,
+        source_path: Option<&std::path::Path>,
+        source_text: Option<&str>,
+        debug_info: bool,
+    ) -> CodegenResult<String> {
+        Self::generate_with_imports_and_table_and_source_with_leak_check(
+            program,
+            imported_modules,
+            table,
+            source_path,
+            source_text,
+            debug_info,
+            false,
+            None,
+        )
+    }
+    pub fn generate_with_imports_and_table_and_source_with_leak_check(
+        program: &ast::Program,
+        imported_modules: &[ModuleArtifact],
+        table: &mut CompilerSymbolTable,
+        source_path: Option<&std::path::Path>,
+        source_text: Option<&str>,
+        debug_info: bool,
+        leak_check: bool,
+        target_triple: Option<&str>,
+    ) -> CodegenResult<String> {
+        let context = Context::create();
+        let module = context.create_module("silver");
+        let builder = context.create_builder();
+        let effective_triple = target_triple.map(str::to_string).unwrap_or_else(|| {
+            TargetMachine::get_default_triple()
+                .as_str()
+                .to_str()
+                .unwrap_or("x86_64-unknown-linux-gnu")
+                .to_string()
+        });
+        let debug = if debug_info {
+            match (source_path, source_text) {
+                (Some(path), Some(text)) => {
+                    let main_file_id = crate::lexer::register_source(&path.to_string_lossy(), text);
+                    Some(DebugContext::new(
+                        &context,
+                        &module,
+                        main_file_id,
+                        path,
+                        text,
+                    ))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let mut generator = LlvmIrGenerator {
+            context: &context,
+            module,
+            builder,
+            current_fn: None,
+            current_return_type: None,
+            variables: vec![HashMap::default()],
+            function_sigs: HashMap::default(),
+            function_name_to_symbol: HashMap::default(),
+            imported_function_links: HashMap::default(),
+            extern_globals: HashMap::default(),
+            global_variables: HashMap::default(),
+            global_const_values: HashMap::default(),
+            struct_types: HashMap::default(),
+            struct_fields: HashMap::default(),
+            union_types: HashSet::default(),
+            struct_packed: HashSet::default(),
+            enum_backing_types: HashMap::default(),
+            enum_variant_payload_types: HashMap::default(),
+            enum_variants: HashMap::default(),
+            enum_payload_layouts: HashMap::default(),
+            defers: vec![vec![]],
+            volatile_globals: HashSet::default(),
+            type_aliases: HashSet::default(),
+            static_local_counter: 0,
+            method_receivers: HashMap::default(),
+            method_overload_signatures: HashMap::default(),
+            string_constants: HashMap::default(),
+            struct_generics: HashMap::default(),
+            free_function_sigs: HashMap::default(),
+            source_function_symbols: HashMap::default(),
+            generic_impl_templates: Vec::new(),
+            generic_function_templates: HashMap::default(),
+            drop_trait_impl_owners: HashSet::default(),
+            display_trait_impl_owners: HashSet::default(),
+            loop_stack: Vec::new(),
+            doc_comments: Vec::new(),
+            loop_defers_base: Vec::new(),
+            symbol_table: table.clone(),
+            debug,
+            debug_nested: false,
+            fn_source_info: rustc_hash::FxHashMap::default(),
+            abi_handler: abi::get_abi_handler(&effective_triple),
+            temp_counter: 0,
+            task_trampoline_counter: 0,
+            leak_check,
+            emit_bt_tables: true,
+            root_symbols: HashSet::default(),
+            keep_items: Vec::new(),
+            noreturn_functions: Self::default_noreturn_functions(),
+        };
+        // Configure the module's target before declare_imported_modules: it
+        // performs TargetData queries for imported enums, which must observe
+        // the effective target's layout, not the module's unset default.
+        Target::initialize_all(&InitializationConfig::default());
+        let triple = inkwell::targets::TargetTriple::create(&effective_triple);
+        generator.module.set_triple(&triple);
+        let target = Target::from_triple(&triple).map_err(|e| {
+            CodegenError::new(format!("failed to resolve LLVM target `{}`: {e}", triple))
+        })?;
+        let machine = target
+            .create_target_machine(
+                &triple,
+                "generic",
+                "",
+                generate::map_opt_level(None),
+                RelocMode::Default,
+                CodeModel::Default,
+            )
+            .ok_or_else(|| {
+                CodegenError::new(format!(
+                    "failed to create LLVM target machine for `{}`",
+                    triple
+                ))
+            })?;
+        generator
+            .module
+            .set_data_layout(&machine.get_target_data().get_data_layout());
+        generator.declare_imported_modules(program, imported_modules)?;
+        generator.generate_program(program)?;
+        generator.emit_backtrace_table();
+        table.absorb_from(&generator.symbol_table);
+        Ok(generator.finish())
+    }
+
+    pub fn emit_object_file(
+        program: &ast::Program,
+        path: &Path,
+        target_triple: Option<&str>,
+        opt_level: Option<&str>,
+    ) -> CodegenResult<()> {
+        let mut table = CompilerSymbolTable::new();
+        Self::emit_object_file_with_table(program, path, target_triple, opt_level, &mut table)
+    }
+
+    pub fn emit_object_file_with_table(
+        program: &ast::Program,
+        path: &Path,
+        target_triple: Option<&str>,
+        opt_level: Option<&str>,
+        table: &mut CompilerSymbolTable,
+    ) -> CodegenResult<()> {
+        Self::emit_target_file(
+            program,
+            path,
+            target_triple,
+            opt_level,
+            FileType::Object,
+            table,
+            None,
+            None,
+            false,
+        )
+    }
+
+    pub fn emit_object_file_with_imports_and_table(
+        program: &ast::Program,
+        imported_modules: &[ModuleArtifact],
+        path: &Path,
+        target_triple: Option<&str>,
+        opt_level: Option<&str>,
+        table: &mut CompilerSymbolTable,
+    ) -> CodegenResult<()> {
+        Self::emit_target_file_with_imports(
+            program,
+            imported_modules,
+            path,
+            target_triple,
+            opt_level,
+            FileType::Object,
+            table,
+            None,
+            None,
+            false,
+            false,
+            true,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "codegen context threading; a config struct would hide more than it clarifies"
+    )]
+    pub fn emit_object_file_with_imports_and_table_and_source(
+        program: &ast::Program,
+        imported_modules: &[ModuleArtifact],
+        path: &Path,
+        target_triple: Option<&str>,
+        opt_level: Option<&str>,
+        table: &mut CompilerSymbolTable,
+        source_path: Option<&Path>,
+        source_text: Option<&str>,
+        debug_info: bool,
+    ) -> CodegenResult<()> {
+        Self::emit_object_file_with_imports_and_table_and_source_with_leak_check(
+            program,
+            imported_modules,
+            path,
+            target_triple,
+            opt_level,
+            table,
+            source_path,
+            source_text,
+            debug_info,
+            false,
+        )
+    }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "codegen context threading; a config struct would hide more than it clarifies"
+    )]
+    pub fn emit_object_file_with_imports_and_table_and_source_with_leak_check(
+        program: &ast::Program,
+        imported_modules: &[ModuleArtifact],
+        path: &Path,
+        target_triple: Option<&str>,
+        opt_level: Option<&str>,
+        table: &mut CompilerSymbolTable,
+        source_path: Option<&Path>,
+        source_text: Option<&str>,
+        debug_info: bool,
+        leak_check: bool,
+    ) -> CodegenResult<()> {
+        Self::emit_object_file_with_imports_and_table_and_source_with_leak_check_and_bt(
+            program,
+            imported_modules,
+            path,
+            target_triple,
+            opt_level,
+            table,
+            source_path,
+            source_text,
+            debug_info,
+            leak_check,
+            true,
+        )
+    }
+
+    /// `emit_bt_tables=false` is used by per-module unit builds: the
+    /// backtrace tables are process-global (only the entry-point object's
+    /// copy survives linkonce dedup on ELF), and COFF has no equivalent
+    /// dedup for their weak symbols, so unit objects must not define them.
+    pub fn emit_object_file_with_imports_and_table_and_source_with_leak_check_and_bt(
+        program: &ast::Program,
+        imported_modules: &[ModuleArtifact],
+        path: &Path,
+        target_triple: Option<&str>,
+        opt_level: Option<&str>,
+        table: &mut CompilerSymbolTable,
+        source_path: Option<&Path>,
+        source_text: Option<&str>,
+        debug_info: bool,
+        leak_check: bool,
+        emit_bt_tables: bool,
+    ) -> CodegenResult<()> {
+        Self::emit_target_file_with_imports(
+            program,
+            imported_modules,
+            path,
+            target_triple,
+            opt_level,
+            FileType::Object,
+            table,
+            source_path,
+            source_text,
+            debug_info,
+            leak_check,
+            emit_bt_tables,
+        )
+    }
+
+    pub fn emit_assembly_file(
+        program: &ast::Program,
+        path: &Path,
+        target_triple: Option<&str>,
+        opt_level: Option<&str>,
+    ) -> CodegenResult<()> {
+        let mut table = CompilerSymbolTable::new();
+        Self::emit_assembly_file_with_table(program, path, target_triple, opt_level, &mut table)
+    }
+
+    pub fn emit_assembly_file_with_table(
+        program: &ast::Program,
+        path: &Path,
+        target_triple: Option<&str>,
+        opt_level: Option<&str>,
+        table: &mut CompilerSymbolTable,
+    ) -> CodegenResult<()> {
+        Self::emit_target_file(
+            program,
+            path,
+            target_triple,
+            opt_level,
+            FileType::Assembly,
+            table,
+            None,
+            None,
+            false,
+        )
+    }
+
+    pub fn emit_assembly_file_with_imports_and_table(
+        program: &ast::Program,
+        imported_modules: &[ModuleArtifact],
+        path: &Path,
+        target_triple: Option<&str>,
+        opt_level: Option<&str>,
+        table: &mut CompilerSymbolTable,
+    ) -> CodegenResult<()> {
+        Self::emit_target_file_with_imports(
+            program,
+            imported_modules,
+            path,
+            target_triple,
+            opt_level,
+            FileType::Assembly,
+            table,
+            None,
+            None,
+            false,
+            false,
+            true,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "codegen context threading; a config struct would hide more than it clarifies"
+    )]
+    pub fn emit_assembly_file_with_imports_and_table_and_source(
+        program: &ast::Program,
+        imported_modules: &[ModuleArtifact],
+        path: &Path,
+        target_triple: Option<&str>,
+        opt_level: Option<&str>,
+        table: &mut CompilerSymbolTable,
+        source_path: Option<&Path>,
+        source_text: Option<&str>,
+        debug_info: bool,
+    ) -> CodegenResult<()> {
+        Self::emit_assembly_file_with_imports_and_table_and_source_with_leak_check(
+            program,
+            imported_modules,
+            path,
+            target_triple,
+            opt_level,
+            table,
+            source_path,
+            source_text,
+            debug_info,
+            false,
+        )
+    }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "codegen context threading; a config struct would hide more than it clarifies"
+    )]
+    pub fn emit_assembly_file_with_imports_and_table_and_source_with_leak_check(
+        program: &ast::Program,
+        imported_modules: &[ModuleArtifact],
+        path: &Path,
+        target_triple: Option<&str>,
+        opt_level: Option<&str>,
+        table: &mut CompilerSymbolTable,
+        source_path: Option<&Path>,
+        source_text: Option<&str>,
+        debug_info: bool,
+        leak_check: bool,
+    ) -> CodegenResult<()> {
+        Self::emit_target_file_with_imports(
+            program,
+            imported_modules,
+            path,
+            target_triple,
+            opt_level,
+            FileType::Assembly,
+            table,
+            source_path,
+            source_text,
+            debug_info,
+            leak_check,
+            true,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "codegen context threading; a config struct would hide more than it clarifies"
+    )]
+    fn emit_target_file(
+        program: &ast::Program,
+        path: &Path,
+        target_triple: Option<&str>,
+        opt_level: Option<&str>,
+        file_type: FileType,
+        table: &mut CompilerSymbolTable,
+        source_path: Option<&Path>,
+        source_text: Option<&str>,
+        debug_info: bool,
+    ) -> CodegenResult<()> {
+        Self::emit_target_file_with_imports(
+            program,
+            &[],
+            path,
+            target_triple,
+            opt_level,
+            file_type,
+            table,
+            source_path,
+            source_text,
+            debug_info,
+            false,
+            true,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "codegen context threading; a config struct would hide more than it clarifies"
+    )]
+    fn emit_target_file_with_imports(
+        program: &ast::Program,
+        imported_modules: &[ModuleArtifact],
+        path: &Path,
+        target_triple: Option<&str>,
+        opt_level: Option<&str>,
+        file_type: FileType,
+        table: &mut CompilerSymbolTable,
+        source_path: Option<&Path>,
+        source_text: Option<&str>,
+        debug_info: bool,
+        leak_check: bool,
+        emit_bt_tables: bool,
+    ) -> CodegenResult<()> {
+        let context = Context::create();
+        let module = context.create_module("silver");
+        let builder = context.create_builder();
+        // One resolved triple drives both the ABI handler and the module
+        // triple: a windows triple must select Win64 struct passing, and the
+        // default must be the host triple (not a hardcoded Linux triple).
+        let effective_triple = target_triple.map(str::to_string).unwrap_or_else(|| {
+            TargetMachine::get_default_triple()
+                .as_str()
+                .to_str()
+                .unwrap_or("x86_64-unknown-linux-gnu")
+                .to_string()
+        });
+        let debug = if debug_info {
+            match (source_path, source_text) {
+                (Some(p), Some(text)) => {
+                    let main_file_id = crate::lexer::register_source(&p.to_string_lossy(), text);
+                    Some(DebugContext::new(&context, &module, main_file_id, p, text))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let mut generator = LlvmIrGenerator {
+            context: &context,
+            module,
+            builder,
+            current_fn: None,
+            current_return_type: None,
+            variables: vec![HashMap::default()],
+            function_sigs: HashMap::default(),
+            function_name_to_symbol: HashMap::default(),
+            imported_function_links: HashMap::default(),
+            extern_globals: HashMap::default(),
+            global_variables: HashMap::default(),
+            global_const_values: HashMap::default(),
+            struct_types: HashMap::default(),
+            struct_fields: HashMap::default(),
+            union_types: HashSet::default(),
+            struct_packed: HashSet::default(),
+            enum_variant_payload_types: HashMap::default(),
+            enum_backing_types: HashMap::default(),
+            enum_variants: HashMap::default(),
+            enum_payload_layouts: HashMap::default(),
+            defers: vec![vec![]],
+            volatile_globals: HashSet::default(),
+            type_aliases: HashSet::default(),
+            static_local_counter: 0,
+            method_receivers: HashMap::default(),
+            method_overload_signatures: HashMap::default(),
+            string_constants: HashMap::default(),
+            struct_generics: HashMap::default(),
+            free_function_sigs: HashMap::default(),
+            source_function_symbols: HashMap::default(),
+            generic_impl_templates: Vec::new(),
+            generic_function_templates: HashMap::default(),
+            drop_trait_impl_owners: HashSet::default(),
+            display_trait_impl_owners: HashSet::default(),
+            loop_stack: Vec::new(),
+            doc_comments: Vec::new(),
+            loop_defers_base: Vec::new(),
+            symbol_table: table.clone(),
+            debug,
+            debug_nested: false,
+            fn_source_info: rustc_hash::FxHashMap::default(),
+            abi_handler: abi::get_abi_handler(&effective_triple),
+            temp_counter: 0,
+            task_trampoline_counter: 0,
+            leak_check,
+            emit_bt_tables,
+            root_symbols: HashSet::default(),
+            keep_items: Vec::new(),
+            noreturn_functions: Self::default_noreturn_functions(),
+        };
+        // Set the module's target triple and data layout BEFORE declaring
+        // imported modules: declare_imported_modules performs TargetData
+        // queries for imported enums and must observe the effective target's
+        // layout, not the module's unset default.
+        Target::initialize_all(&InitializationConfig::default());
+        let triple = inkwell::targets::TargetTriple::create(&effective_triple);
+        generator.module.set_triple(&triple);
+
+        let target = Target::from_triple(&triple).map_err(|e| {
+            CodegenError::new(format!("failed to resolve LLVM target `{}`: {e}", triple))
+        })?;
+        let machine = target
+            .create_target_machine(
+                &triple,
+                "generic",
+                "",
+                generate::map_opt_level(opt_level),
+                RelocMode::Default,
+                CodeModel::Default,
+            )
+            .ok_or_else(|| {
+                CodegenError::new(format!(
+                    "failed to create LLVM target machine for `{}`",
+                    triple
+                ))
+            })?;
+        generator
+            .module
+            .set_data_layout(&machine.get_target_data().get_data_layout());
+        generator.declare_imported_modules(program, imported_modules)?;
+
+        if !debug_info {
+            generator.emit_bt_debug_tables(&[]);
+            crate::profiler::begin_phase("codegen IR generation");
+            generator.generate_program(program)?;
+            table.absorb_from(&generator.symbol_table);
+            crate::profiler::end_phase("codegen IR generation");
+
+            crate::profiler::begin_phase("eliminate dead functions");
+            generator.eliminate_dead_functions(&machine)?;
+            crate::profiler::end_phase("eliminate dead functions");
+
+            crate::profiler::begin_phase("emit backtrace table");
+            generator.emit_backtrace_table();
+            crate::profiler::end_phase("emit backtrace table");
+
+            crate::profiler::begin_phase("LLVM opt passes");
+            generate::run_module_optimization_passes(
+                &generator.module,
+                &machine,
+                generate::wasm_min_opt_level(Some(&effective_triple), opt_level),
+            )?;
+            crate::profiler::end_phase("LLVM opt passes");
+
+            crate::profiler::begin_phase("finalize debug info");
+            generator.finalize_debug();
+            crate::profiler::end_phase("finalize debug info");
+
+            crate::profiler::begin_phase("LLVM machine emit");
+            machine
+                .write_to_file(&generator.module, file_type, path)
+                .map_err(|e| {
+                    CodegenError::new(format!(
+                        "failed to emit {} via LLVM target machine to {}: {e}",
+                        match file_type {
+                            FileType::Object => "object file",
+                            FileType::Assembly => "assembly file",
+                        },
+                        path.display()
+                    ))
+                })?;
+            crate::profiler::end_phase("LLVM machine emit");
+            return Ok(());
+        }
+
+        crate::profiler::begin_phase("codegen IR generation");
+        generator.generate_program(program)?;
+        table.absorb_from(&generator.symbol_table);
+        crate::profiler::end_phase("codegen IR generation");
+
+        crate::profiler::begin_phase("eliminate dead functions");
+        generator.eliminate_dead_functions(&machine)?;
+        crate::profiler::end_phase("eliminate dead functions");
+
+        crate::profiler::begin_phase("emit backtrace table");
+        generator.emit_backtrace_table();
+        crate::profiler::end_phase("emit backtrace table");
+
+        crate::profiler::begin_phase("LLVM opt passes");
+        generate::run_module_optimization_passes(
+            &generator.module,
+            &machine,
+            generate::wasm_min_opt_level(Some(&effective_triple), opt_level),
+        )?;
+        crate::profiler::end_phase("LLVM opt passes");
+
+        crate::profiler::begin_phase("finalize debug info");
+        generator.finalize_debug();
+        crate::profiler::end_phase("finalize debug info");
+
+        crate::profiler::begin_phase("LLVM machine emit (pass 1)");
+        machine
+            .write_to_file(&generator.module, file_type, path)
+            .map_err(|e| {
+                CodegenError::new(format!(
+                    "failed to emit {} via LLVM target machine to {}: {e}",
+                    match file_type {
+                        FileType::Object => "object file",
+                        FileType::Assembly => "assembly file",
+                    },
+                    path.display()
+                ))
+            })?;
+        crate::profiler::end_phase("LLVM machine emit (pass 1)");
+
+        // Post-pass: the runtime backtrace walker needs exact source lines
+        // and spilled argument offsets, but DWARF sections are not loaded
+        // into the running binary. Parse the object we just emitted and fold
+        // the interesting bits into alloc'd, link-time-resolved tables, then
+        // re-emit.
+        if file_type == FileType::Object
+            && let Ok(obj) = std::fs::read(path)
+        {
+            crate::profiler::begin_phase("DWARF backtrace parsing");
+            let mut fn_debug = crate::codegen::dwarf_bt::parse_object_debug_lines(&obj);
+            let targets: rustc_hash::FxHashSet<String> =
+                fn_debug.iter().map(|f| f.name.clone()).collect();
+            let params = crate::codegen::dwarf_bt::parse_object_params(&obj, &targets);
+            let by_name: rustc_hash::FxHashMap<String, usize> = fn_debug
+                .iter()
+                .enumerate()
+                .map(|(i, f)| (f.name.clone(), i))
+                .collect();
+            for (name, p) in params {
+                if let Some(&i) = by_name.get(&name) {
+                    fn_debug[i].params = p;
+                }
+            }
+            crate::profiler::end_phase("DWARF backtrace parsing");
+
+            crate::profiler::begin_phase("emit backtrace tables");
+            generator.emit_bt_debug_tables(&fn_debug);
+            crate::profiler::end_phase("emit backtrace tables");
+
+            crate::profiler::begin_phase("LLVM machine emit (pass 2)");
+            machine
+                .write_to_file(&generator.module, file_type, path)
+                .map_err(|e| {
+                    CodegenError::new(format!(
+                        "failed to re-emit object with backtrace tables to {}: {e}",
+                        path.display()
+                    ))
+                })?;
+            crate::profiler::end_phase("LLVM machine emit (pass 2)");
+        }
+        Ok(())
+    }
+
+    fn declare_imported_modules(
+        &mut self,
+        program: &ast::Program,
+        imported_modules: &[ModuleArtifact],
+    ) -> CodegenResult<()> {
+        for module in imported_modules {
+            for export in &module.exports {
+                if export.is_struct() {
+                    self.struct_types
+                        .entry(export.name.clone())
+                        .or_insert_with(|| self.context.opaque_struct_type(&export.name));
+                    let fields = export
+                        .fields
+                        .iter()
+                        .map(|field| {
+                            ast_type_from_canonical_key(&field.type_key)
+                                .map(|ty| (field.name.clone(), ty))
+                                .map_err(CodegenError::new)
+                        })
+                        .collect::<CodegenResult<Vec<_>>>()?;
+                    self.struct_fields.insert(export.name.clone(), fields);
+                    if !export.type_params.is_empty() {
+                        self.struct_generics
+                            .insert(export.name.clone(), export.type_params.clone());
+                    }
+                } else if export.is_enum() {
+                    if let Some(backing) = &export.enum_backing_type {
+                        if let Ok(ty) = ast_type_from_canonical_key(backing) {
+                            if let ast::TypeKind::Primitive(primitive) = *ty.kind {
+                                self.enum_backing_types
+                                    .insert(export.name.clone(), primitive);
+                            }
+                        }
+                    }
+                    // Discriminants cross the boundary so imported enums
+                    // match on the same values; payload layouts are set in
+                    // the body phase below, once all struct bodies exist.
+                    let mut variants = HashMap::default();
+                    for variant in &export.enum_variants {
+                        variants.insert(variant.name.clone(), variant.value);
+                    }
+                    self.enum_variants.insert(export.name.clone(), variants);
+                }
+            }
+        }
+
+        // Register program structs and enums metadata before declaring imported functions
+        for item in &program.items {
+            match &item.kind {
+                ast::ItemKind::Struct(struct_item) => {
+                    self.register_struct_fields(struct_item, &item.attributes);
+                }
+                ast::ItemKind::Enum(enum_item) => {
+                    self.register_enum_metadata(enum_item)?;
+                }
+                _ => {}
+            }
+        }
+
+        // Lay out imported struct/enum bodies BEFORE function signatures
+        // lower parameter types: a body set after its first use leaves the
+        // declaration with opaque members, silently mistyping cross-unit
+        // calls. Fixpoint over dependency order; leftovers keep today's
+        // behavior in the loop below.
+        self.lay_out_imported_types(imported_modules)?;
+
+        for module in imported_modules {
+            for export in &module.exports {
+                match export.kind {
+                    crate::module_artifact::ExportKind::Function => {
+                        // Generic function exports have no concrete signature
+                        // to declare here (fn(T) -> T cannot lower); call sites
+                        // monomorphize to mangled instances (identity__i64)
+                        // which are declared from the monomorphized items.
+                        if !export.type_params.is_empty() {
+                            continue;
+                        }
+                        let llvm_name = export
+                            .link_name
+                            .clone()
+                            .unwrap_or_else(|| export.name.clone());
+                        let (params, return_type) =
+                            crate::types::parse_canonical_function_signature(&export.signature)
+                                .map_err(CodegenError::new)?;
+                        let param_ast = params
+                            .into_iter()
+                            .map(|param| param.to_ast())
+                            .collect::<Vec<_>>();
+                        let return_ast = if matches!(return_type, Type::Unit) {
+                            None
+                        } else {
+                            Some(return_type.to_ast())
+                        };
+                        self.imported_function_links
+                            .insert(export.name.clone(), llvm_name.clone());
+                        self.register_source_function_symbol(&export.name, &llvm_name);
+                        let abi = export.abi.map(|abi| match abi {
+                            crate::module_artifact::ModuleAbi::C => ast::ExternLinkage::C,
+                            crate::module_artifact::ModuleAbi::Silver => ast::ExternLinkage::Silver,
+                            crate::module_artifact::ModuleAbi::System => ast::ExternLinkage::System,
+                            crate::module_artifact::ModuleAbi::Rust => ast::ExternLinkage::Rust,
+                            crate::module_artifact::ModuleAbi::Cdecl => ast::ExternLinkage::Cdecl,
+                            crate::module_artifact::ModuleAbi::Stdcall => {
+                                ast::ExternLinkage::Stdcall
+                            }
+                            crate::module_artifact::ModuleAbi::Fastcall => {
+                                ast::ExternLinkage::Fastcall
+                            }
+                        });
+                        self.register_function_signature(
+                            &llvm_name,
+                            FunctionSig {
+                                params: param_ast.clone(),
+                                return_type: return_ast.clone(),
+                                is_variadic: export.is_variadic,
+                                is_slice_variadic: false,
+                                linkage: abi.clone(),
+                            },
+                            None,
+                            SymbolKind::ExternFunction,
+                        );
+                        // Trait-visibility bridge: `impl Display for Owner`
+                        // items from cached modules never enter
+                        // `program.items`, so the pass-1
+                        // `display_trait_impl_owners` scan cannot see them.
+                        // An imported `fmt` with the exact Display shape
+                        // (`fmt(*self, BufWriter*) -> void`) carries the same
+                        // fact. (Generic impls are not exported; only
+                        // concrete owners resolve here.)
+                        if let Some(owner) = export.name.strip_suffix("::fmt")
+                            && !export.is_variadic
+                            && return_ast.is_none()
+                            && param_ast.len() == 2
+                            && let Some(owner_named) = Self::extract_named_type(&param_ast[0])
+                            && (Self::named_type_key(owner_named) == owner
+                                || Self::named_type_name(owner_named) == owner)
+                            && let Some(writer_named) =
+                                Self::extract_named_type(&param_ast[1])
+                            && Self::named_type_name(writer_named) == "BufWriter"
+                        {
+                            self.display_trait_impl_owners.insert(owner.to_string());
+                        }
+                        if self.module.get_function(&llvm_name).is_none() {
+                            let fn_ty = self.lower_function_type(
+                                &param_ast,
+                                return_ast.as_ref(),
+                                export.is_variadic,
+                                abi.clone(),
+                            )?;
+                            let function = self.module.add_function(&llvm_name, fn_ty, None);
+                            self.apply_abi_attributes(
+                                function,
+                                &FunctionSig {
+                                    params: param_ast.clone(),
+                                    return_type: return_ast.clone(),
+                                    is_variadic: export.is_variadic,
+                                    is_slice_variadic: false,
+                                    linkage: abi,
+                                },
+                            )?;
+                        }
+                    }
+                    crate::module_artifact::ExportKind::Struct => {
+                        let is_union = export.trait_items.iter().any(|item| {
+                            item.name == "__foreign_record_kind" && item.signature == "union"
+                        });
+                        if is_union {
+                            self.union_types.insert(export.name.clone());
+                        }
+                        let Some(struct_ty) = self.struct_types.get(&export.name).copied() else {
+                            continue;
+                        };
+                        if is_union {
+                            let size = export.layout.and_then(|l| l.size).unwrap_or(0);
+                            let i8_arr = self.context.i8_type().array_type(size as u32);
+                            if struct_ty.count_fields() == 0 {
+                                struct_ty.set_body(&[i8_arr.into()], false);
+                            }
+                        } else {
+                            let field_types = export
+                                .fields
+                                .iter()
+                                .map(|field| {
+                                    ast_type_from_canonical_key(&field.type_key)
+                                        .map_err(CodegenError::new)
+                                })
+                                .collect::<CodegenResult<Vec<_>>>()?;
+                            let llvm_fields = field_types
+                                .iter()
+                                .map(|field| self.lower_basic_type(field))
+                                .collect::<CodegenResult<Vec<_>>>()?;
+                            if struct_ty.count_fields() == 0 {
+                                struct_ty.set_body(
+                                    &llvm_fields,
+                                    export.layout.map(|l| l.packed).unwrap_or(false),
+                                );
+                            }
+                        }
+                    }
+                    crate::module_artifact::ExportKind::Enum => {
+                        if let Some(backing) = &export.enum_backing_type {
+                            let ty =
+                                ast_type_from_canonical_key(backing).map_err(CodegenError::new)?;
+                            if let ast::TypeKind::Primitive(primitive) = *ty.kind {
+                                self.enum_backing_types
+                                    .insert(export.name.clone(), primitive);
+                            }
+                        }
+                        self.enum_variants.insert(
+                            export.name.clone(),
+                            export
+                                .enum_variants
+                                .iter()
+                                .map(|variant| (variant.name.clone(), variant.value))
+                                .collect(),
+                        );
+                        // Register payload layouts for imported enums with payload
+                        // variants. Generic enums defer layout to the monomorphized
+                        // concrete instantiation (fields may reference T).
+                        if export.type_params.is_empty() {
+                            let mut max_payload_size: u64 = 0;
+                            let mut variant_payload_types: HashMap<String, Vec<ast::Type>> =
+                                HashMap::default();
+                            let target_data = TargetData::create(
+                                self.module.get_data_layout().as_str().to_str().unwrap(),
+                            );
+                            for variant in &export.enum_variants {
+                                if variant.payload_types.is_empty() {
+                                    continue;
+                                }
+                                let payload_types: Vec<ast::Type> = variant
+                                    .payload_types
+                                    .iter()
+                                    .map(|key| ast_type_from_canonical_key(key))
+                                    .collect::<Result<Vec<_>, _>>()
+                                    .unwrap_or_else(|_| vec![]);
+                                let mut variant_size: u64 = 0;
+                                for pt in &payload_types {
+                                    let llvm_ty = self.lower_basic_type(pt)?;
+                                    variant_size += target_data.get_abi_size(&llvm_ty);
+                                }
+                                max_payload_size = max_payload_size.max(variant_size);
+                                variant_payload_types.insert(variant.name.clone(), payload_types);
+                            }
+                            if max_payload_size > 0 {
+                                let i16_ty = self.context.i16_type();
+                                let array_ty =
+                                    self.context.i8_type().array_type(max_payload_size as u32);
+                                let struct_ty = self
+                                    .context
+                                    .struct_type(&[i16_ty.into(), array_ty.into()], false);
+                                struct_ty.set_body(&[i16_ty.into(), array_ty.into()], false);
+                                self.enum_payload_layouts
+                                    .insert(export.name.clone(), struct_ty);
+                                self.struct_types.insert(export.name.clone(), struct_ty);
+                            }
+                            self.enum_variant_payload_types
+                                .insert(export.name.clone(), variant_payload_types);
+                        }
+                    }
+                    crate::module_artifact::ExportKind::Trait => {}
+                    crate::module_artifact::ExportKind::Constant
+                    | crate::module_artifact::ExportKind::Global => {
+                        if let Some(const_val_str) = &export.const_value {
+                            if let Ok(val) = const_val_str.parse::<i128>() {
+                                self.global_const_values.insert(export.name.clone(), val);
+                            }
+                        }
+                        let link_name = export
+                            .link_name
+                            .clone()
+                            .unwrap_or_else(|| export.name.clone());
+                        let ty_ast = export
+                            .type_key
+                            .as_deref()
+                            .map(ast_type_from_canonical_key)
+                            .transpose()
+                            .map_err(CodegenError::new)?;
+                        if let Some(ast_ty) = ty_ast {
+                            self.extern_globals
+                                .insert(export.name.clone(), ast_ty.clone());
+                            let llvm_ty = self.lower_basic_type(&ast_ty)?;
+                            if self.module.get_global(&link_name).is_none() {
+                                let global = self.module.add_global(
+                                    llvm_ty,
+                                    Some(inkwell::AddressSpace::default()),
+                                    &link_name,
+                                );
+                                global.set_linkage(inkwell::module::Linkage::External);
+                                if export.kind == crate::module_artifact::ExportKind::Constant {
+                                    global.set_constant(true);
+                                }
+                            }
+                        }
+                    }
+                    crate::module_artifact::ExportKind::TypeAlias => {
+                        self.type_aliases.insert(export.name.clone());
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn lay_out_imported_types(
+        &mut self,
+        imported_modules: &[ModuleArtifact],
+    ) -> CodegenResult<()> {
+        // Enums whose variants carry payloads (payload layouts required).
+        let mut payload_enums: HashSet<String> = HashSet::default();
+        for module in imported_modules {
+            for export in &module.exports {
+                if export.kind == crate::module_artifact::ExportKind::Enum
+                    && export.type_params.is_empty()
+                    && export
+                        .enum_variants
+                        .iter()
+                        .any(|v| !v.payload_types.is_empty())
+                {
+                    payload_enums.insert(export.name.clone());
+                }
+            }
+        }
+
+        let mut bodied: HashSet<String> = HashSet::default();
+        // Bounded fixpoint: each round sets every body whose members are
+        // ready; dependency chains resolve round by round.
+        let rounds = imported_modules.len() + 1;
+        for _ in 0..rounds {
+            let mut progress = false;
+            for module in imported_modules {
+                for export in &module.exports {
+                    match export.kind {
+                        crate::module_artifact::ExportKind::Struct => {
+                            if bodied.contains(&export.name)
+                                || !export.type_params.is_empty()
+                            {
+                                continue;
+                            }
+                            let is_union = export.trait_items.iter().any(|item| {
+                                item.name == "__foreign_record_kind"
+                                    && item.signature == "union"
+                            });
+                            if is_union {
+                                let size =
+                                    export.layout.and_then(|l| l.size).unwrap_or(0);
+                                if let Some(struct_ty) =
+                                    self.struct_types.get(&export.name).copied()
+                                {
+                                    if struct_ty.count_fields() == 0 {
+                                        let i8_arr = self
+                                            .context
+                                            .i8_type()
+                                            .array_type(size as u32);
+                                        struct_ty.set_body(&[i8_arr.into()], false);
+                                        bodied.insert(export.name.clone());
+                                        progress = true;
+                                    } else {
+                                        bodied.insert(export.name.clone());
+                                    }
+                                }
+                                continue;
+                            }
+                            let field_types = export
+                                .fields
+                                .iter()
+                                .map(|field| {
+                                    ast_type_from_canonical_key(&field.type_key)
+                                        .map_err(CodegenError::new)
+                                })
+                                .collect::<CodegenResult<Vec<_>>>()?;
+                            if !field_types.iter().all(|t| {
+                                self.imported_layout_ready(t, &bodied, &payload_enums)
+                            }) {
+                                continue;
+                            }
+                            let llvm_fields = field_types
+                                .iter()
+                                .map(|field| self.lower_basic_type(field))
+                                .collect::<CodegenResult<Vec<_>>>()?;
+                            if let Some(struct_ty) =
+                                self.struct_types.get(&export.name).copied()
+                            {
+                                if struct_ty.count_fields() == 0 {
+                                    struct_ty.set_body(
+                                    &llvm_fields,
+                                    export.layout.map(|l| l.packed).unwrap_or(false),
+                                );
+                                    progress = true;
+                                }
+                            }
+                            bodied.insert(export.name.clone());
+                        }
+                        crate::module_artifact::ExportKind::Enum => {
+                            if bodied.contains(&export.name)
+                                || !export.type_params.is_empty()
+                                || !payload_enums.contains(&export.name)
+                            {
+                                continue;
+                            }
+                            let mut max_payload_size: u64 = 0;
+                            let mut variant_payload_types: HashMap<String, Vec<ast::Type>> =
+                                HashMap::default();
+                            let mut ready = true;
+                            for variant in &export.enum_variants {
+                                if variant.payload_types.is_empty() {
+                                    continue;
+                                }
+                                let payload_types: Vec<ast::Type> = variant
+                                    .payload_types
+                                    .iter()
+                                    .map(|key| ast_type_from_canonical_key(key))
+                                    .collect::<Result<Vec<_>, _>>()
+                                    .map_err(CodegenError::new)?;
+                                for pt in &payload_types {
+                                    if !self.imported_layout_ready(pt, &bodied, &payload_enums)
+                                    {
+                                        ready = false;
+                                        break;
+                                    }
+                                }
+                                if !ready {
+                                    break;
+                                }
+                                variant_payload_types
+                                    .insert(variant.name.clone(), payload_types);
+                            }
+                            if !ready {
+                                continue;
+                            }
+                            let target_data = inkwell::targets::TargetData::create(
+                                self.module.get_data_layout().as_str().to_str().unwrap(),
+                            );
+                            for payload_types in variant_payload_types.values() {
+                                let mut variant_size: u64 = 0;
+                                for pt in payload_types {
+                                    if let Ok(llvm_ty) = self.lower_basic_type(pt) {
+                                        variant_size +=
+                                            target_data.get_abi_size(&llvm_ty);
+                                    }
+                                }
+                                max_payload_size =
+                                    max_payload_size.max(variant_size);
+                            }
+                            if max_payload_size > 0 {
+                                let i16_ty = self.context.i16_type();
+                                let array_ty = self
+                                    .context
+                                    .i8_type()
+                                    .array_type(max_payload_size as u32);
+                                let struct_ty = self.context.struct_type(
+                                    &[i16_ty.into(), array_ty.into()],
+                                    false,
+                                );
+                                struct_ty.set_body(
+                                    &[i16_ty.into(), array_ty.into()],
+                                    false,
+                                );
+                                self.enum_payload_layouts
+                                    .insert(export.name.clone(), struct_ty);
+                                self.struct_types.insert(export.name.clone(), struct_ty);
+                            }
+                            self.enum_variant_payload_types
+                                .insert(export.name.clone(), variant_payload_types);
+                            bodied.insert(export.name.clone());
+                            progress = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if !progress {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// True when `ty` has a complete LLVM layout in this unit already:
+    /// primitives and pointers never need member bodies; named types need a
+    /// bodied struct (or a complete enum: backing plus payload layout when
+    /// variants carry payloads). Anything else defers to a later fixpoint
+    /// round.
+    fn imported_layout_ready(
+        &self,
+        ty: &ast::Type,
+        bodied: &HashSet<String>,
+        payload_enums: &HashSet<String>,
+    ) -> bool {
+        match ty.kind.as_ref() {
+            ast::TypeKind::Primitive(_)
+            | ast::TypeKind::Function(_)
+            | ast::TypeKind::Generic(_) => true,
+            ast::TypeKind::Pointer(_)
+            | ast::TypeKind::Reference(_)
+            | ast::TypeKind::Slice(_) => true,
+            ast::TypeKind::Array(a) => {
+                self.imported_layout_ready(&a.element_type, bodied, payload_enums)
+            }
+            ast::TypeKind::Tuple(ts) => ts
+                .iter()
+                .all(|t| self.imported_layout_ready(t, bodied, payload_enums)),
+            ast::TypeKind::Optional(inner) => {
+                self.imported_layout_ready(inner, bodied, payload_enums)
+            }
+            ast::TypeKind::Named(named) => {
+                if let Some(args) = &named.generics
+                    && !args
+                        .iter()
+                        .all(|g| self.imported_layout_ready(g, bodied, payload_enums))
+                {
+                    return false;
+                }
+                if named.path.is_empty() {
+                    return false;
+                }
+                let base = &named.path[0].name;
+                if bodied.contains(base) {
+                    return true;
+                }
+                if self.union_types.contains(base) {
+                    return false;
+                }
+                if self.enum_backing_types.contains_key(base) {
+                    return !payload_enums.contains(base)
+                        || self.enum_payload_layouts.contains_key(base);
+                }
+                false
+            }
+        }
+    }
+
+    fn type_name_to_ast_type(&self, name: &str) -> Option<ast::Type> {
+        let prim = match name {
+            "i8" => ast::PrimitiveType::I8,
+            "i16" => ast::PrimitiveType::I16,
+            "i32" => ast::PrimitiveType::I32,
+            "i64" => ast::PrimitiveType::I64,
+            "i128" => ast::PrimitiveType::I128,
+            "u8" => ast::PrimitiveType::U8,
+            "u16" => ast::PrimitiveType::U16,
+            "u32" => ast::PrimitiveType::U32,
+            "u64" => ast::PrimitiveType::U64,
+            "u128" => ast::PrimitiveType::U128,
+            "f32" => ast::PrimitiveType::F32,
+            "f64" => ast::PrimitiveType::F64,
+            "f80" => ast::PrimitiveType::F80,
+            "c32" => ast::PrimitiveType::C32,
+            "c64" => ast::PrimitiveType::C64,
+            "c80" => ast::PrimitiveType::C80,
+            "bool" => ast::PrimitiveType::Bool,
+            "char" => ast::PrimitiveType::Char,
+            "str" => ast::PrimitiveType::Str,
+            "void" => ast::PrimitiveType::Void,
+            _ => return None,
+        };
+        Some(ast::Type {
+            kind: Box::new(ast::TypeKind::Primitive(prim)),
+            span: crate::lexer::Span::default(),
+        })
+    }
+
+    /// Fetch (or create) the canonical LLVM declaration for a WebAssembly
+    /// intrinsic. `add_function` would produce a declaration without the
+    /// intrinsic's required attributes/immarg markers, which the wasm backend
+    /// then fails to select; `LLVMGetIntrinsicDeclaration` returns the proper
+    /// signature-attributed intrinsic.
+    fn wasm_intrinsic(
+        &mut self,
+        name: &str,
+        params: &[BasicTypeEnum<'ctx>],
+    ) -> FunctionValue<'ctx> {
+        let cname = std::ffi::CString::new(name).expect("intrinsic name has no NUL");
+        let mut param_refs: Vec<llvm_sys::prelude::LLVMTypeRef> =
+            params.iter().map(|p| p.as_type_ref()).collect();
+        let value = unsafe {
+            let id = llvm_sys::core::LLVMLookupIntrinsicID(cname.as_ptr(), name.len());
+            llvm_sys::core::LLVMGetIntrinsicDeclaration(
+                self.module.as_mut_ptr(),
+                id,
+                param_refs.as_mut_ptr(),
+                param_refs.len(),
+            )
+        };
+        unsafe { FunctionValue::new(value) }.expect("intrinsic declaration is a FunctionValue")
+    }
+
+    /// True when this module targets a WebAssembly triple.
+    fn is_wasm_target(&self) -> bool {
+        crate::codegen::abi::target_is_wasm(Some(
+            self.module.get_triple().as_str().to_str().unwrap_or(""),
+        ))
+    }
+
+    /// `@wasm_memory_size()` -> u32: current linear memory size in 64 KiB
+    /// pages, via the `llvm.wasm.memory.size.i32` intrinsic. The memory index
+    /// argument is always 0 (the default linear memory).
+    pub(crate) fn wasm_memory_size_codegen(
+        &mut self,
+        expr: &ast::Expression,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        if !self.is_wasm_target() {
+            return Err(CodegenError::with_span(
+                "@wasm_memory_size is only available on WebAssembly targets (the native linear memory model has no page counter)",
+                expr.span,
+            ));
+        }
+        let intrinsic_name = "llvm.wasm.memory.size.i32";
+        let function = self.wasm_intrinsic(intrinsic_name, &[self.context.i32_type().as_basic_type_enum()]);
+        let zero = self.context.i32_type().const_int(0, false);
+        let call = self
+            .builder
+            .build_call(
+                function,
+                &[zero.into()],
+                "wasm_memory_size",
+            )
+            .map_err(|e| CodegenError::with_span(format!("wasm memory.size call failed: {e}"), expr.span))?;
+        call.try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::with_span("wasm memory.size returned void".to_string(), expr.span))
+    }
+
+    /// `@wasm_memory_grow(delta)` -> i32: grow linear memory by `delta` pages,
+    /// returning the previous size or -1, via `llvm.wasm.memory.grow.i32`.
+    pub(crate) fn wasm_memory_grow_codegen(
+        &mut self,
+        expr: &ast::Expression,
+        delta: BasicValueEnum<'ctx>,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        if !self.is_wasm_target() {
+            return Err(CodegenError::with_span(
+                "@wasm_memory_grow is only available on WebAssembly targets (native memory grows via the OS allocator seam instead)",
+                expr.span,
+            ));
+        }
+        let delta_u32 = if delta.is_int_value() {
+            let i32_ty = self.context.i32_type();
+            if delta.into_int_value().get_type().get_bit_width() == 32 {
+                delta
+            } else {
+                self.builder
+                    .build_int_cast(delta.into_int_value(), i32_ty, "wasm_grow_delta")
+                    .map_err(|e| CodegenError::with_span(format!("wasm memory.grow cast failed: {e}"), expr.span))?
+                    .as_basic_value_enum()
+            }
+        } else {
+            return Err(CodegenError::with_span(
+                "@wasm_memory_grow expects an integer page delta",
+                expr.span,
+            ));
+        };
+        // i32 @llvm.wasm.memory.grow.i32(i32 immarg memidx, i32 delta)
+        let intrinsic_name = "llvm.wasm.memory.grow.i32";
+        let function = self.wasm_intrinsic(
+            intrinsic_name,
+            &[
+                self.context.i32_type().as_basic_type_enum(),
+                self.context.i32_type().as_basic_type_enum(),
+            ],
+        );
+        let zero = self.context.i32_type().const_int(0, false);
+        let call = self
+            .builder
+            .build_call(
+                function,
+                &[zero.into(), delta_u32.into()],
+                "wasm_memory_grow",
+            )
+            .map_err(|e| CodegenError::with_span(format!("wasm memory.grow call failed: {e}"), expr.span))?;
+        call.try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::with_span("wasm memory.grow returned void".to_string(), expr.span))
+    }
+
+    /// `@call_main()` -> i32: locate the user program's `main` in the module
+    /// (tree-shaking keeps it as a root) and call it, normalizing the exit code
+    /// to i32 (void -> 0, i64 -> trunc). Used by the WebAssembly `_start`, which
+    /// has no x86 asm trampoline to make the call signature-agnostic.
+    pub(crate) fn call_main_codegen(
+        &mut self,
+        expr: &ast::Expression,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let function = self.module.get_function("main").ok_or_else(|| {
+            CodegenError::with_span(
+                "@call_main found no `main` function in the module".to_string(),
+                expr.span,
+            )
+        })?;
+        let call = self
+            .builder
+            .build_call(function, &[], "call_main")
+            .map_err(|e| CodegenError::with_span(format!("@call_main call failed: {e}"), expr.span))?;
+        let Some(value) = call.try_as_basic_value().basic() else {
+            // `void main()`: exit code 0.
+            return Ok(self.context.i32_type().const_int(0, false).as_basic_value_enum());
+        };
+        if !value.is_int_value() {
+            return Err(CodegenError::with_span(
+                "`main` must return an integer (i32/i64) or void".to_string(),
+                expr.span,
+            ));
+        }
+        let int = value.into_int_value();
+        let width = int.get_type().get_bit_width();
+        if width == 32 {
+            return Ok(value);
+        }
+        let normalized = if width < 32 {
+            self.builder
+                .build_int_z_extend(int, self.context.i32_type(), "main_rc")
+        } else {
+            self.builder
+                .build_int_truncate(int, self.context.i32_type(), "main_rc")
+        }
+        .map_err(|e| CodegenError::with_span(format!("@call_main return coercion failed: {e}"), expr.span))?;
+        Ok(normalized.as_basic_value_enum())
+    }
+
+    pub(crate) fn size_codegen(
+        &mut self,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let Some(ast::MacroArg::Expression(inner_expr)) = args.first() else {
+            return Err(CodegenError::with_span(
+                "@size requires an expression argument".to_string(),
+                expr.span,
+            ));
+        };
+        let llvm_ty = match &inner_expr.kind.as_ref() {
+            ast::ExpressionKind::Identifier(ident) => {
+                let ast_ty = self.type_name_to_ast_type(&ident.name);
+                match ast_ty {
+                    Some(ty) => self.lower_basic_type(&ty)?.as_basic_type_enum(),
+                    None => {
+                        let named_ty = ast::Type {
+                            kind: Box::new(ast::TypeKind::Named(ast::NamedType {
+                                path: vec![ident.clone()],
+                                generics: None,
+                            })),
+                            span: expr.span,
+                        };
+                        let type_result = self.lower_basic_type(&named_ty);
+                        match type_result {
+                            Ok(ty) => ty.as_basic_type_enum(),
+                            Err(_) => {
+                                let inner_val = self.emit_expression_value(inner_expr)?;
+                                inner_val.get_type()
+                            }
+                        }
+                    }
+                }
+            }
+            ast::ExpressionKind::TypeName(ty) => self.lower_basic_type(ty)?.as_basic_type_enum(),
+            _ => {
+                let inner_val = self.emit_expression_value(inner_expr)?;
+                inner_val.get_type()
+            }
+        };
+        let target_data =
+            TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
+        let size = target_data.get_abi_size(&llvm_ty);
+        Ok(self.context.i64_type().const_int(size, false).into())
+    }
+
+    pub(crate) fn align_codegen(
+        &mut self,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let Some(ast::MacroArg::Expression(inner_expr)) = args.first() else {
+            return Err(CodegenError::with_span(
+                "@align requires an expression argument".to_string(),
+                expr.span,
+            ));
+        };
+        let llvm_ty = match &inner_expr.kind.as_ref() {
+            ast::ExpressionKind::Identifier(ident) => {
+                let ast_ty = self.type_name_to_ast_type(&ident.name);
+                match ast_ty {
+                    Some(ty) => self.lower_basic_type(&ty)?.as_basic_type_enum(),
+                    None => {
+                        let named_ty = ast::Type {
+                            kind: Box::new(ast::TypeKind::Named(ast::NamedType {
+                                path: vec![ident.clone()],
+                                generics: None,
+                            })),
+                            span: expr.span,
+                        };
+                        let type_result = self.lower_basic_type(&named_ty);
+                        match type_result {
+                            Ok(ty) => ty.as_basic_type_enum(),
+                            Err(_) => {
+                                let inner_val = self.emit_expression_value(inner_expr)?;
+                                inner_val.get_type()
+                            }
+                        }
+                    }
+                }
+            }
+            ast::ExpressionKind::TypeName(ty) => self.lower_basic_type(ty)?.as_basic_type_enum(),
+            _ => {
+                let inner_val = self.emit_expression_value(inner_expr)?;
+                inner_val.get_type()
+            }
+        };
+        let target_data =
+            TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
+        let align = u64::from(target_data.get_abi_alignment(&llvm_ty));
+        Ok(self.context.i64_type().const_int(align, false).into())
+    }
+
+    pub(crate) fn hash_codegen(
+        &mut self,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let Some(ast::MacroArg::Expression(inner_expr)) = args.first() else {
+            return Err(CodegenError::with_span(
+                "@hash requires an expression argument".to_string(),
+                expr.span,
+            ));
+        };
+
+        let val = self.emit_expression_value(inner_expr)?;
+        let llvm_ty = val.get_type();
+        let i64_ty = self.context.i64_type();
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+
+        let inner_named =
+            self.resolve_receiver_type(inner_expr)
+                .and_then(|ty| match ty.kind.as_ref() {
+                    ast::TypeKind::Named(named) => Some(named.clone()),
+                    ast::TypeKind::Reference(r) => Self::extract_named_type(&r.inner).cloned(),
+                    ast::TypeKind::Pointer(p) => Self::extract_named_type(&p.inner).cloned(),
+                    _ => None,
+                });
+        let is_string_struct = inner_named
+            .as_ref()
+            .map(|named| named.path.last().map(|id| id.name.as_str()) == Some("String"))
+            .unwrap_or(false);
+
+        if is_string_struct {
+            let hash_fn = self.module.get_function("hash_bytes").ok_or_else(|| {
+                CodegenError::with_span("@hash requires `import std.hash;`".to_string(), expr.span)
+            })?;
+            let (data_ptr, len_val) = if val.is_struct_value() {
+                let struct_val = val.into_struct_value();
+                let data = self
+                    .builder
+                    .build_extract_value(struct_val, 0, "str_data")
+                    .map_err(|e| CodegenError::new(format!("extract str data: {e}")))?;
+                let len = self
+                    .builder
+                    .build_extract_value(struct_val, 1, "str_len")
+                    .map_err(|e| CodegenError::new(format!("extract str len: {e}")))?;
+                (data, len)
+            } else if val.is_pointer_value() {
+                let ptr = val.into_pointer_value();
+                let string_struct_ty = self
+                    .context
+                    .struct_type(&[ptr_ty.into(), i64_ty.into(), i64_ty.into()], false);
+                let data_gep = self
+                    .builder
+                    .build_struct_gep(string_struct_ty, ptr, 0, "str_data_gep")
+                    .map_err(|e| CodegenError::new(format!("gep str data: {e}")))?;
+                let data = self
+                    .builder
+                    .build_load(ptr_ty, data_gep, "str_data")
+                    .map_err(|e| CodegenError::new(format!("load str data: {e}")))?;
+                let len_gep = self
+                    .builder
+                    .build_struct_gep(string_struct_ty, ptr, 1, "str_len_gep")
+                    .map_err(|e| CodegenError::new(format!("gep str len: {e}")))?;
+                let len = self
+                    .builder
+                    .build_load(i64_ty, len_gep, "str_len")
+                    .map_err(|e| CodegenError::new(format!("load str len: {e}")))?;
+                (data, len)
+            } else {
+                return Err(CodegenError::with_span(
+                    "unsupported String representation for @hash".to_string(),
+                    expr.span,
+                ));
+            };
+            let call = self
+                .builder
+                .build_call(
+                    hash_fn,
+                    &[data_ptr.into(), len_val.into()],
+                    "hash_string_call",
+                )
+                .map_err(|e| CodegenError::with_span(format!("hash_bytes call: {e}"), expr.span))?;
+            return call
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::new("hash_bytes returned void"));
+        }
+
+        if llvm_ty.is_pointer_type() {
+            // str: hash the string CONTENT via std.hash.hash_str.
+            let hash_fn = self.module.get_function("hash_str").ok_or_else(|| {
+                CodegenError::with_span(
+                    "@hash on a string requires `import std.hash;`".to_string(),
+                    expr.span,
+                )
+            })?;
+            let str_ptr = val.into_pointer_value();
+            let call = self
+                .builder
+                .build_call(hash_fn, &[str_ptr.into()], "hash_str_call")
+                .map_err(|e| CodegenError::with_span(format!("hash_str call: {e}"), expr.span))?;
+            return call
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| CodegenError::new("hash_str returned void"));
+        }
+
+        // Non-str: hash the raw byte representation via std.hash.hash_bytes.
+        let hash_fn = self.module.get_function("hash_bytes").ok_or_else(|| {
+            CodegenError::with_span("@hash requires `import std.hash;`".to_string(), expr.span)
+        })?;
+        let target_data =
+            TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
+        let size = target_data.get_abi_size(&llvm_ty);
+        let function = self
+            .current_fn
+            .ok_or_else(|| CodegenError::new("no active function for hash alloca"))?;
+        let alloca = self.create_entry_alloca(function, "hash_val", llvm_ty)?;
+        self.builder
+            .build_store(alloca, val)
+            .map_err(|e| CodegenError::new(format!("hash store: {e}")))?;
+        let ptr = self
+            .builder
+            .build_pointer_cast(alloca, ptr_ty, "hash_ptr")
+            .map_err(|e| CodegenError::new(format!("hash ptr cast: {e}")))?;
+        let size_val = i64_ty.const_int(size, false);
+        let call = self
+            .builder
+            .build_call(hash_fn, &[ptr.into(), size_val.into()], "hash_call")
+            .map_err(|e| CodegenError::with_span(format!("hash_bytes call: {e}"), expr.span))?;
+        call.try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::new("hash_bytes returned void"))
+    }
+
+    pub(crate) fn memcpy_codegen(
+        &mut self,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let Some(ast::MacroArg::Expression(dst_expr)) = args.first() else {
+            return Err(CodegenError::with_span(
+                "@memcpy expects dst as first argument".to_string(),
+                expr.span,
+            ));
+        };
+        let Some(ast::MacroArg::Expression(src_expr)) = args.get(1) else {
+            return Err(CodegenError::with_span(
+                "@memcpy expects src as second argument".to_string(),
+                expr.span,
+            ));
+        };
+        let Some(ast::MacroArg::Expression(len_expr)) = args.get(2) else {
+            return Err(CodegenError::with_span(
+                "@memcpy expects len as third argument".to_string(),
+                expr.span,
+            ));
+        };
+        let dst_val = self.emit_expression_value(dst_expr)?;
+        let src_val = self.emit_expression_value(src_expr)?;
+        let len_val = self.emit_expression_value(len_expr)?;
+        let dst_ptr = dst_val.into_pointer_value();
+        let src_ptr = src_val.into_pointer_value();
+        let len_i64 = len_val.into_int_value();
+        // Get or declare llvm.memcpy.p0.p0.i64 intrinsic
+        let memcpy_fn = self
+            .module
+            .get_function("llvm.memcpy.p0.p0.i64")
+            .unwrap_or_else(|| {
+                let i64 = self.context.i64_type();
+                let i1 = self.context.bool_type();
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                let fn_type = self
+                    .context
+                    .void_type()
+                    .fn_type(&[ptr.into(), ptr.into(), i64.into(), i1.into()], false);
+                self.module
+                    .add_function("llvm.memcpy.p0.p0.i64", fn_type, None)
+            });
+        self.builder
+            .build_call(
+                memcpy_fn,
+                &[
+                    dst_ptr.into(),
+                    src_ptr.into(),
+                    len_i64.into(),
+                    self.context.bool_type().const_int(0, false).into(),
+                ],
+                "memcpy",
+            )
+            .map_err(|e| CodegenError::with_span(format!("@memcpy call failed: {e}"), expr.span))?;
+        Ok(dst_val)
+    }
+
+    pub(crate) fn memset_codegen(
+        &mut self,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let Some(ast::MacroArg::Expression(dst_expr)) = args.first() else {
+            return Err(CodegenError::with_span(
+                "@memset expects dst as first argument".to_string(),
+                expr.span,
+            ));
+        };
+        let Some(ast::MacroArg::Expression(val_expr)) = args.get(1) else {
+            return Err(CodegenError::with_span(
+                "@memset expects value as second argument".to_string(),
+                expr.span,
+            ));
+        };
+        let Some(ast::MacroArg::Expression(len_expr)) = args.get(2) else {
+            return Err(CodegenError::with_span(
+                "@memset expects len as third argument".to_string(),
+                expr.span,
+            ));
+        };
+        let dst_val = self.emit_expression_value(dst_expr)?;
+        let val_val = self.emit_expression_value(val_expr)?;
+        let len_val = self.emit_expression_value(len_expr)?;
+        let dst_ptr = dst_val.into_pointer_value();
+        let val_i8 = val_val.into_int_value();
+        let len_i64 = len_val.into_int_value();
+        // Get or declare llvm.memset.p0.i64 intrinsic
+        let memset_fn = self
+            .module
+            .get_function("llvm.memset.p0.i64")
+            .unwrap_or_else(|| {
+                let i64 = self.context.i64_type();
+                let i8 = self.context.i8_type();
+                let i1 = self.context.bool_type();
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                let fn_type = self
+                    .context
+                    .void_type()
+                    .fn_type(&[ptr.into(), i8.into(), i64.into(), i1.into()], false);
+                self.module
+                    .add_function("llvm.memset.p0.i64", fn_type, None)
+            });
+        self.builder
+            .build_call(
+                memset_fn,
+                &[
+                    dst_ptr.into(),
+                    val_i8.into(),
+                    len_i64.into(),
+                    self.context.bool_type().const_int(0, false).into(),
+                ],
+                "memset",
+            )
+            .map_err(|e| CodegenError::with_span(format!("@memset call failed: {e}"), expr.span))?;
+        Ok(dst_val)
+    }
+
+    pub(crate) fn memmove_codegen(
+        &mut self,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let Some(ast::MacroArg::Expression(dst_expr)) = args.first() else {
+            return Err(CodegenError::with_span(
+                "@memmove expects dst as first argument".to_string(),
+                expr.span,
+            ));
+        };
+        let Some(ast::MacroArg::Expression(src_expr)) = args.get(1) else {
+            return Err(CodegenError::with_span(
+                "@memmove expects src as second argument".to_string(),
+                expr.span,
+            ));
+        };
+        let Some(ast::MacroArg::Expression(len_expr)) = args.get(2) else {
+            return Err(CodegenError::with_span(
+                "@memmove expects len as third argument".to_string(),
+                expr.span,
+            ));
+        };
+        let dst_val = self.emit_expression_value(dst_expr)?;
+        let src_val = self.emit_expression_value(src_expr)?;
+        let len_val = self.emit_expression_value(len_expr)?;
+        let dst_ptr = dst_val.into_pointer_value();
+        let src_ptr = src_val.into_pointer_value();
+        let len_i64 = len_val.into_int_value();
+        // Get or declare llvm.memmove.p0.p0.i64 intrinsic
+        let memmove_fn = self
+            .module
+            .get_function("llvm.memmove.p0.p0.i64")
+            .unwrap_or_else(|| {
+                let i64 = self.context.i64_type();
+                let i1 = self.context.bool_type();
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                let fn_type = self
+                    .context
+                    .void_type()
+                    .fn_type(&[ptr.into(), ptr.into(), i64.into(), i1.into()], false);
+                self.module
+                    .add_function("llvm.memmove.p0.p0.i64", fn_type, None)
+            });
+        self.builder
+            .build_call(
+                memmove_fn,
+                &[
+                    dst_ptr.into(),
+                    src_ptr.into(),
+                    len_i64.into(),
+                    self.context.bool_type().const_int(0, false).into(),
+                ],
+                "memmove",
+            )
+            .map_err(|e| {
+                CodegenError::with_span(format!("@memmove call failed: {e}"), expr.span)
+            })?;
+        Ok(dst_val)
+    }
+
+    pub(crate) fn emit_value_drop_at_ptr(
+        &mut self,
+        ty: &ast::Type,
+        val_ptr: PointerValue<'ctx>,
+    ) -> CodegenResult<()> {
+        if let Some(drop_fn_name) = self.get_drop_function_name(ty)? {
+            if let Some(func) = self.module.get_function(&drop_fn_name) {
+                self.builder
+                    .build_call(func, &[val_ptr.into()], "")
+                    .map_err(|e| CodegenError::new(format!("failed to call drop: {e}")))?;
+            }
+            return Ok(());
+        }
+        if let Some(named) = Self::extract_named_type(ty).cloned() {
+            let base_name = named.path.last().map(|s| &s.name[..]).unwrap_or_default().to_string();
+            if let Some(struct_ty) = self.struct_types.get(&base_name).copied() {
+                let fields = self.struct_fields.get(&base_name).cloned().unwrap_or_default();
+                for (idx, (_fname, fty)) in fields.iter().enumerate() {
+                    if self.param_type_drops_on_exit(fty)? {
+                        let field_ptr = self
+                            .builder
+                            .build_struct_gep(struct_ty, val_ptr, idx as u32, "dip.fld")
+                            .map_err(|e| CodegenError::new(format!("{e}")))?;
+                        self.emit_value_drop_at_ptr(fty, field_ptr)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn drop_in_place_codegen(
+        &mut self,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let (elem_ty, ptr_expr, count_expr) = if args.len() == 3 {
+            let Some(ast::MacroArg::Expression(arg0)) = args.first() else {
+                return Err(CodegenError::with_span(
+                    "@drop_in_place requires expression arguments".to_string(),
+                    expr.span,
+                ));
+            };
+            let Some(ast::MacroArg::Expression(arg1)) = args.get(1) else {
+                return Err(CodegenError::with_span(
+                    "@drop_in_place requires ptr argument".to_string(),
+                    expr.span,
+                ));
+            };
+            let Some(ast::MacroArg::Expression(arg2)) = args.get(2) else {
+                return Err(CodegenError::with_span(
+                    "@drop_in_place requires count argument".to_string(),
+                    expr.span,
+                ));
+            };
+            let ty = match arg0.kind.as_ref() {
+                ast::ExpressionKind::TypeName(t) => t.clone(),
+                ast::ExpressionKind::Identifier(ident) => {
+                    if let Some(prim) = self.type_name_to_ast_type(&ident.name) {
+                        prim
+                    } else {
+                        ast::Type {
+                            kind: Box::new(ast::TypeKind::Named(ast::NamedType {
+                                path: vec![ident.clone()],
+                                generics: None,
+                            })),
+                            span: expr.span,
+                        }
+                    }
+                }
+                _ => self
+                    .resolve_argument_type(arg0)
+                    .ok_or_else(|| CodegenError::with_span("cannot resolve type for @drop_in_place".to_string(), expr.span))?,
+            };
+            (ty, arg1, arg2)
+        } else if args.len() == 2 {
+            let Some(ast::MacroArg::Expression(ptr_arg)) = args.first() else {
+                return Err(CodegenError::with_span(
+                    "@drop_in_place requires ptr argument".to_string(),
+                    expr.span,
+                ));
+            };
+            let Some(ast::MacroArg::Expression(count_arg)) = args.get(1) else {
+                return Err(CodegenError::with_span(
+                    "@drop_in_place requires count argument".to_string(),
+                    expr.span,
+                ));
+            };
+            let ptr_ty = self
+                .resolve_argument_type(ptr_arg)
+                .ok_or_else(|| CodegenError::with_span("cannot resolve pointer type for @drop_in_place".to_string(), expr.span))?;
+            let elem_ty = match ptr_ty.kind.as_ref() {
+                ast::TypeKind::Pointer(pt) => (*pt.inner).clone(),
+                ast::TypeKind::Reference(rt) => (*rt.inner).clone(),
+                _ => return Err(CodegenError::with_span(
+                    format!("@drop_in_place expects a pointer, got {:?}", ptr_ty.kind),
+                    expr.span,
+                )),
+            };
+            (elem_ty, ptr_arg, count_arg)
+        } else {
+            return Err(CodegenError::with_span(
+                "@drop_in_place expects 2 or 3 arguments".to_string(),
+                expr.span,
+            ));
+        };
+
+        if !self.param_type_drops_on_exit(&elem_ty)? {
+            return Ok(self.context.i64_type().const_zero().into());
+        }
+
+        let ptr_val = self.emit_expression_value(ptr_expr)?.into_pointer_value();
+        let count_val = self.emit_expression_value(count_expr)?.into_int_value();
+        let i64_type = self.context.i64_type();
+        let function = self
+            .current_fn
+            .ok_or_else(|| CodegenError::new("no active function for @drop_in_place"))?;
+
+        let entry_bb = self.builder.get_insert_block().unwrap();
+        let loop_bb = self.context.append_basic_block(function, "dip.body");
+        let merge_bb = self.context.append_basic_block(function, "dip.end");
+
+        // Guard: ptr != null && count > 0
+        let is_non_null = self
+            .builder
+            .build_is_not_null(ptr_val, "dip.is_non_null")
+            .map_err(|e| CodegenError::new(format!("{e}")))?;
+        let has_elems = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SGT,
+                count_val,
+                i64_type.const_zero(),
+                "dip.has_elems",
+            )
+            .map_err(|e| CodegenError::new(format!("{e}")))?;
+        let should_enter = self
+            .builder
+            .build_and(is_non_null, has_elems, "dip.should_enter")
+            .map_err(|e| CodegenError::new(format!("{e}")))?;
+
+        self.builder
+            .build_conditional_branch(should_enter, loop_bb, merge_bb)
+            .map_err(|e| CodegenError::new(format!("{e}")))?;
+
+        self.builder.position_at_end(loop_bb);
+        let i_phi = self
+            .builder
+            .build_phi(i64_type, "dip.i")
+            .map_err(|e| CodegenError::new(format!("{e}")))?;
+        let zero = i64_type.const_zero();
+        i_phi.add_incoming(&[(&zero, entry_bb)]);
+
+        let i_val = i_phi.as_basic_value().into_int_value();
+        let elem_llvm_ty = self.lower_basic_type(&elem_ty)?.as_basic_type_enum();
+        let elem_ptr = unsafe {
+            self.builder
+                .build_gep(elem_llvm_ty, ptr_val, &[i_val], "dip.elem_ptr")
+                .map_err(|e| CodegenError::new(format!("{e}")))?
+        };
+
+        self.emit_value_drop_at_ptr(&elem_ty, elem_ptr)?;
+
+        let i_next = self
+            .builder
+            .build_int_add(i_val, i64_type.const_int(1, false), "dip.i_next")
+            .map_err(|e| CodegenError::new(format!("{e}")))?;
+        let loop_end_bb = self.builder.get_insert_block().unwrap();
+        i_phi.add_incoming(&[(&i_next, loop_end_bb)]);
+
+        let has_more = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SLT,
+                i_next,
+                count_val,
+                "dip.has_more",
+            )
+            .map_err(|e| CodegenError::new(format!("{e}")))?;
+
+        self.builder
+            .build_conditional_branch(has_more, loop_bb, merge_bb)
+            .map_err(|e| CodegenError::new(format!("{e}")))?;
+
+        self.builder.position_at_end(merge_bb);
+        Ok(self.context.i64_type().const_zero().into())
+    }
+
+    /// Maximum recursion depth for the comptime struct-debug fallback in
+    /// `emit_format_value`. Direct self-containment is impossible (infinite
+    /// size) and pointer fields terminate at `write_ptr`; this is a safety
+    /// net for pathological nesting.
+    const MAX_FMT_DEBUG_DEPTH: u32 = 8;
+
+    /// Write a literal string chunk to `writer_expr`.
+    fn emit_write_str_lit(
+        &mut self,
+        writer_expr: &ast::Expression,
+        text: &str,
+        span: &crate::lexer::Span,
+    ) -> CodegenResult<()> {
+        let method = ast::Identifier {
+            name: "write_str".to_string(),
+            span: *span,
+        };
+        let lit_expr = ast::Expression {
+            kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::String(
+                text.to_string(),
+            ))),
+            span: *span,
+        };
+        self.emit_method_call_expression(writer_expr, &method, &[lit_expr], true, span)?;
+        Ok(())
+    }
+
+    /// Dispatch one `{}` value through the `Display` trait guard.
+    fn emit_display_fmt_call(
+        &mut self,
+        writer_expr: &ast::Expression,
+        val_expr: &ast::Expression,
+        span: &crate::lexer::Span,
+    ) -> CodegenResult<()> {
+        let fmt_method = ast::Identifier {
+            name: "fmt".to_string(),
+            span: *span,
+        };
+        let writer_arg = if let Some(ty) = self.resolve_receiver_type(writer_expr) {
+            if matches!(ty.kind.as_ref(), ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)) {
+                writer_expr.clone()
+            } else {
+                ast::Expression {
+                    kind: Box::new(ast::ExpressionKind::Reference {
+                        is_mutable: true,
+                        expression: Box::new(writer_expr.clone()),
+                    }),
+                    span: *span,
+                }
+            }
+        } else {
+            ast::Expression {
+                kind: Box::new(ast::ExpressionKind::Reference {
+                    is_mutable: true,
+                    expression: Box::new(writer_expr.clone()),
+                }),
+                span: *span,
+            }
+        };
+        self.emit_method_call_expression(val_expr, &fmt_method, &[writer_arg], true, span)?;
+        Ok(())
+    }
+
+    /// Clone `val_expr` for repeated field reads, spilling side-effecting
+    /// expressions into a hidden temp so every field reads the same value.
+    /// The temp is borrow-only (no drop flag), mirroring the fprint/sprint
+    /// writer spills — the original keeps sole ownership.
+    fn format_base_expr(
+        &mut self,
+        val_expr: &ast::Expression,
+        span: &crate::lexer::Span,
+    ) -> CodegenResult<ast::Expression> {
+        if matches!(
+            val_expr.kind.as_ref(),
+            ast::ExpressionKind::Identifier(_)
+                | ast::ExpressionKind::FieldAccess { .. }
+                | ast::ExpressionKind::Index { .. }
+                | ast::ExpressionKind::Unary {
+                    operator: ast::UnaryOperator::Dereference,
+                    ..
+                }
+        ) {
+            return Ok(val_expr.clone());
+        }
+        let value = self.emit_expression_value(val_expr)?;
+        let function = self.current_fn.ok_or_else(|| {
+            CodegenError::with_span("format fallback requires an active function", *span)
+        })?;
+        let name = format!("fmt.tmp.{}", self.temp_counter);
+        self.temp_counter += 1;
+        let tmp = self.create_entry_alloca(function, &name, value.get_type())?;
+        self.builder
+            .build_store(tmp, value)
+            .map_err(|e| {
+                CodegenError::with_span(format!("failed to spill format value: {e}"), *span)
+            })?;
+        let ast_ty = self
+            .resolve_receiver_type(val_expr)
+            .unwrap_or_else(|| self.infer_ast_type_from_value(&value, span));
+        if let Some(scope) = self.variables.last_mut() {
+            scope.insert(
+                name.clone(),
+                VarInfo {
+                    ptr: tmp,
+                    ty: ast_ty,
+                    is_mutable: false,
+                    is_volatile: false,
+                    drop_flag: None,
+                    field_flags: Vec::new(),
+                },
+            );
+        }
+        Ok(ast::Expression {
+            kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
+                name,
+                span: *span,
+            })),
+            span: *span,
+        })
+    }
+
+    /// Comptime unit-enum fallback: the variant name (`Red`), `<unknown>`
+    /// for a discriminant with no entry. Payload-carrying enums keep their
+    /// tag-aware runtime behavior and are never dumped. Returns `Ok(false)`
+    /// when `val_expr` is not a unit enum.
+    fn emit_unit_enum_fallback(
+        &mut self,
+        writer_expr: &ast::Expression,
+        val_expr: &ast::Expression,
+        span: &crate::lexer::Span,
+        depth: u32,
+    ) -> CodegenResult<bool> {
+        if depth >= Self::MAX_FMT_DEBUG_DEPTH {
+            self.emit_write_str_lit(writer_expr, "...", span)?;
+            return Ok(true);
+        }
+        let Some(ty) = self.resolve_receiver_type(val_expr) else {
+            return Ok(false);
+        };
+        let Some(named) = Self::extract_named_type(&ty).cloned() else {
+            return Ok(false);
+        };
+        let base = named.path.last().map(|s| s.name.clone()).unwrap_or_default();
+        let monomorph = Self::monomorph_owner_name_from_named(&named);
+        // Payload enums manage their variants at runtime; only unit enums
+        // (every variant payload-free, no payload layout) dump names.
+        if self.enum_payload_layouts.contains_key(&base)
+            || self.enum_payload_layouts.contains_key(&monomorph)
+        {
+            return Ok(false);
+        }
+        if let Some(payloads) = self.enum_variant_payload_types.get(&base)
+            && payloads.values().any(|v| !v.is_empty())
+        {
+            return Ok(false);
+        }
+        let Some(backing) = self
+            .enum_backing_types
+            .get(&base)
+            .or_else(|| self.enum_backing_types.get(&monomorph))
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        let Some(variants) = self
+            .enum_variants
+            .get(&base)
+            .or_else(|| self.enum_variants.get(&monomorph))
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        if variants.is_empty() {
+            return Ok(false);
+        }
+        let base_expr = self.format_base_expr(val_expr, span)?;
+        let value = self.emit_expression_value(&base_expr)?;
+        let inkwell::values::BasicValueEnum::IntValue(disc) = value else {
+            return Ok(false);
+        };
+        let int_ty = disc.get_type();
+        let backing_llvm_ty = self.lower_basic_type(&ast::Type {
+            kind: Box::new(ast::TypeKind::Primitive(backing)),
+            span: *span,
+        })?;
+        if backing_llvm_ty != int_ty.as_basic_type_enum() {
+            return Ok(false);
+        }
+        let function = self.current_fn.ok_or_else(|| {
+            CodegenError::with_span("@print requires an active function", *span)
+        })?;
+        let end_bb = self.context.append_basic_block(function, "fmt.enum.end");
+        let default_bb = self
+            .context
+            .append_basic_block(function, "fmt.enum.unknown");
+        // Sorted for deterministic IR.
+        let mut cases: Vec<(i128, String)> =
+            variants.into_iter().map(|(name, v)| (v, name)).collect();
+        cases.sort();
+        let mut case_bbs = Vec::with_capacity(cases.len());
+        for _ in &cases {
+            case_bbs.push(self.context.append_basic_block(function, "fmt.enum.case"));
+        }
+        let width = int_ty.get_bit_width();
+        let switch_cases: Vec<(inkwell::values::IntValue<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
+            cases
+                .iter()
+                .zip(case_bbs.iter())
+                .map(|((disc_val, _), bb)| {
+                    let const_val = if width > 64 {
+                        let words = [*disc_val as u64, ((*disc_val >> 64) as i64) as u64];
+                        int_ty.const_int_arbitrary_precision(&words)
+                    } else {
+                        int_ty.const_int(*disc_val as u64, false)
+                    };
+                    (const_val, *bb)
+                })
+                .collect();
+        self.builder
+            .build_switch(disc, default_bb, &switch_cases)
+            .map_err(|e| CodegenError::with_span(format!("format enum switch failed: {e}"), *span))?;
+        for ((_, name), bb) in cases.iter().zip(case_bbs.iter()) {
+            self.builder.position_at_end(*bb);
+            self.emit_write_str_lit(writer_expr, name, span)?;
+            self.builder
+                .build_unconditional_branch(end_bb)
+                .map_err(|e| {
+                    CodegenError::with_span(format!("format enum branch failed: {e}"), *span)
+                })?;
+        }
+        self.builder.position_at_end(default_bb);
+        self.emit_write_str_lit(writer_expr, "<unknown>", span)?;
+        self.builder
+            .build_unconditional_branch(end_bb)
+            .map_err(|e| {
+                CodegenError::with_span(format!("format enum branch failed: {e}"), *span)
+            })?;
+        self.builder.position_at_end(end_bb);
+        Ok(true)
+    }
+
+    /// Comptime struct-debug fallback: `Name { field: value, ... }`.
+    /// Returns `Ok(false)` when `val_expr` is not a plain struct, so the
+    /// caller can fall through to the "does not implement Display" error.
+    fn emit_struct_debug_fallback(
+        &mut self,
+        writer_expr: &ast::Expression,
+        val_expr: &ast::Expression,
+        span: &crate::lexer::Span,
+        depth: u32,
+    ) -> CodegenResult<bool> {
+        if depth >= Self::MAX_FMT_DEBUG_DEPTH {
+            self.emit_write_str_lit(writer_expr, "...", span)?;
+            return Ok(true);
+        }
+        let Some(ty) = self.resolve_receiver_type(val_expr) else {
+            return Ok(false);
+        };
+        let Some((display_name, fields)) = self.struct_debug_fields(&ty) else {
+            return Ok(false);
+        };
+        let base = self.format_base_expr(val_expr, span)?;
+        if fields.is_empty() {
+            self.emit_write_str_lit(writer_expr, &format!("{display_name} {{}}"), span)?;
+            return Ok(true);
+        }
+        self.emit_write_str_lit(writer_expr, &format!("{display_name} {{ "), span)?;
+        for (idx, (field_name, _)) in fields.iter().enumerate() {
+            if idx > 0 {
+                self.emit_write_str_lit(writer_expr, ", ", span)?;
+            }
+            self.emit_write_str_lit(writer_expr, &format!("{field_name}: "), span)?;
+            let field_expr = ast::Expression {
+                kind: Box::new(ast::ExpressionKind::FieldAccess {
+                    object: Box::new(base.clone()),
+                    field: ast::Identifier {
+                        name: field_name.clone(),
+                        span: val_expr.span,
+                    },
+                }),
+                span: val_expr.span,
+            };
+            self.emit_format_value(writer_expr, &field_expr, span, depth + 1)?;
+        }
+        self.emit_write_str_lit(writer_expr, " }", span)?;
+        Ok(true)
+    }
+
+    /// Emit one `{}` placeholder value: `Display::fmt` via the trait guard
+    /// (including the `String` fast path above), then primitive writers,
+    /// then the comptime struct-debug fallback.
+    pub(crate) fn emit_format_value(
+        &mut self,
+        writer_expr: &ast::Expression,
+        val_expr: &ast::Expression,
+        span: &crate::lexer::Span,
+        depth: u32,
+    ) -> CodegenResult<()> {
+        if self.is_string_type_expr(val_expr) {
+            let string_expr = match val_expr.kind.as_ref() {
+                ast::ExpressionKind::Reference { expression, .. } => expression.as_ref(),
+                _ => val_expr,
+            };
+            let data_expr = ast::Expression {
+                kind: Box::new(ast::ExpressionKind::FieldAccess {
+                    object: Box::new(string_expr.clone()),
+                    field: ast::Identifier {
+                        name: "data".to_string(),
+                        span: val_expr.span,
+                    },
+                }),
+                span: val_expr.span,
+            };
+            let cast_expr = ast::Expression {
+                kind: Box::new(ast::ExpressionKind::Cast {
+                    expression: Box::new(data_expr),
+                    target_type: Box::new(ast::Type {
+                        kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::Str)),
+                        span: val_expr.span,
+                    }),
+                }),
+                span: val_expr.span,
+            };
+            let method = ast::Identifier {
+                name: "write_str".to_string(),
+                span: *span,
+            };
+            self.emit_method_call_expression(writer_expr, &method, &[cast_expr], true, span)?;
+            return Ok(());
+        }
+        if let Some(ty) = self.resolve_receiver_type(val_expr)
+            && self.type_implements_display(&ty)
+        {
+            self.emit_display_fmt_call(writer_expr, val_expr, span)?;
+            return Ok(());
+        }
+        match self.value_write_method_name(val_expr) {
+            Ok(method_name) => {
+                let method = ast::Identifier {
+                    name: method_name,
+                    span: *span,
+                };
+                self.emit_method_call_expression(
+                    writer_expr,
+                    &method,
+                    std::slice::from_ref(val_expr),
+                    true,
+                    span,
+                )?;
+                Ok(())
+            }
+            Err(write_err) => {
+                if self.emit_struct_debug_fallback(writer_expr, val_expr, span, depth)? {
+                    return Ok(());
+                }
+                if self.emit_unit_enum_fallback(writer_expr, val_expr, span, depth)? {
+                    return Ok(());
+                }
+                Err(CodegenError::with_span(write_err, val_expr.span))
+            }
+        }
+    }
+
+    pub(crate) fn print_codegen(
+        &mut self,
+        name: &str,
+        expr: &ast::Expression,
+        args: &[ast::MacroArg],
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        // Determine writer and format-string arg index
+        let (fmt_arg_idx, writer_expr) = match name {
+            "fprint" => {
+                let Some(ast::MacroArg::Expression(w)) = args.first() else {
+                    return Err(CodegenError::with_span(
+                        "@fprint expects a BufWriter* as first argument".to_string(),
+                        expr.span,
+                    ));
+                };
+                // Evaluate writer expression once and store in a temp
+                let writer_val = self.emit_expression_value(w)?;
+                let fn_ctx = self.current_fn.ok_or_else(|| {
+                    CodegenError::with_span("@fprint requires an active function", expr.span)
+                })?;
+                let writer_tmp =
+                    self.create_entry_alloca(fn_ctx, "fprint.writer", writer_val.get_type())?;
+                self.builder
+                    .build_store(writer_tmp, writer_val)
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("failed to spill fprint receiver: {e}"),
+                            expr.span,
+                        )
+                    })?;
+                let ast_ty = self
+                    .resolve_receiver_type(w)
+                    .unwrap_or_else(|| self.infer_ast_type_from_value(&writer_val, &expr.span));
+                if let Some(scope) = self.variables.last_mut() {
+                    scope.insert(
+                        "__fprint_writer".to_string(),
+                        VarInfo {
+                            ptr: writer_tmp,
+                            ty: ast_ty,
+                            is_mutable: false,
+                            is_volatile: false,
+                            drop_flag: None,
+                            field_flags: Vec::new(),
+                        },
+                    );
+                }
+                let w_ident = ast::Expression {
+                    kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
+                        name: "__fprint_writer".to_string(),
+                        span: expr.span,
+                    })),
+                    span: expr.span,
+                };
+                (1, w_ident)
+            }
+            "sprint" | "format" => {
+                let buf_writer_type = ast::Type {
+                    kind: Box::new(ast::TypeKind::Named(ast::NamedType {
+                        path: vec![ast::Identifier {
+                            name: "BufWriter".to_string(),
+                            span: expr.span,
+                        }],
+                        generics: None,
+                    })),
+                    span: expr.span,
+                };
+                let buf_writer_llvm_ty = self.lower_basic_type(&buf_writer_type)?;
+                let fn_ctx = self.current_fn.ok_or_else(|| {
+                    CodegenError::with_span("@sprint requires an active function", expr.span)
+                })?;
+                let writer_tmp =
+                    self.create_entry_alloca(fn_ctx, "sprint.writer", buf_writer_llvm_ty)?;
+
+                let zero_i64 = self.context.i64_type().const_int(0, false);
+                let neg_one_i32 = self.context.i32_type().const_int(u64::MAX, true);
+
+                // In-memory writers start on a 128-byte stack scratch buffer
+                // (data points at it, cap = -128 sentinel) instead of a
+                // 4096-byte heap allocation, so small @format/@sprint calls
+                // never touch the heap. write() grows to heap when the
+                // sentinel is exceeded and __promote_in_memory copies out
+                // before the buffer is handed to a String / returned as str.
+                let scratch_ty = self.context.i8_type().array_type(128);
+                let scratch_ptr = self.create_entry_alloca(
+                    fn_ctx,
+                    "sprint.scratch",
+                    inkwell::types::BasicTypeEnum::ArrayType(scratch_ty),
+                )?;
+                let scratch_addr = self
+                    .builder
+                    .build_ptr_to_int(scratch_ptr, self.context.i64_type(), "sprint.scratch.addr")
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("sprint scratch addr failed: {e}"),
+                            expr.span,
+                        )
+                    })?;
+                let neg_128_i64 = self.context.i64_type().const_int((-128i64) as u64, true);
+
+                // Initialize BufWriter fields: data=scratch, len=0, cap=-128,
+                // fd=-1. fd=-1 marks this as a string-only writer (no file
+                // descriptor), preventing flush from writing to a real fd.
+                let data_ptr = self
+                    .builder
+                    .build_struct_gep(buf_writer_llvm_ty, writer_tmp, 0, "sprint.data")
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("sprint struct gep 0 failed: {e}"),
+                            expr.span,
+                        )
+                    })?;
+                self.builder
+                    .build_store(data_ptr, scratch_addr)
+                    .map_err(|e| {
+                        CodegenError::with_span(format!("sprint store data failed: {e}"), expr.span)
+                    })?;
+
+                let len_ptr = self
+                    .builder
+                    .build_struct_gep(buf_writer_llvm_ty, writer_tmp, 1, "sprint.len")
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("sprint struct gep 1 failed: {e}"),
+                            expr.span,
+                        )
+                    })?;
+                self.builder.build_store(len_ptr, zero_i64).map_err(|e| {
+                    CodegenError::with_span(format!("sprint store len failed: {e}"), expr.span)
+                })?;
+
+                let cap_ptr = self
+                    .builder
+                    .build_struct_gep(buf_writer_llvm_ty, writer_tmp, 2, "sprint.cap")
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("sprint struct gep 2 failed: {e}"),
+                            expr.span,
+                        )
+                    })?;
+                self.builder
+                    .build_store(cap_ptr, neg_128_i64)
+                    .map_err(|e| {
+                        CodegenError::with_span(format!("sprint store cap failed: {e}"), expr.span)
+                    })?;
+
+                let fd_ptr = self
+                    .builder
+                    .build_struct_gep(buf_writer_llvm_ty, writer_tmp, 3, "sprint.fd")
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("sprint struct gep 3 failed: {e}"),
+                            expr.span,
+                        )
+                    })?;
+                self.builder.build_store(fd_ptr, neg_one_i32).map_err(|e| {
+                    CodegenError::with_span(format!("sprint store fd failed: {e}"), expr.span)
+                })?;
+
+                // mode = IOMODE_MEMORY (3) — marks this writer as an
+                // in-memory @format/@sprint buffer. The runtime keys its
+                // grow-into-heap path off this (u8 loads are exact), never
+                // off fd, whose i32 slot reads as i64 with garbage upper
+                // bits. An uninitialized mode would read as IOMODE_UNBUFFERED
+                // (0) and silently drop all output since fd is -1.
+                let mode_ptr = self
+                    .builder
+                    .build_struct_gep(buf_writer_llvm_ty, writer_tmp, 6, "sprint.mode")
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("sprint struct gep 6 failed: {e}"),
+                            expr.span,
+                        )
+                    })?;
+                self.builder
+                    .build_store(mode_ptr, self.context.i8_type().const_int(3, false))
+                    .map_err(|e| {
+                        CodegenError::with_span(format!("sprint store mode failed: {e}"), expr.span)
+                    })?;
+
+                if let Some(scope) = self.variables.last_mut() {
+                    scope.insert(
+                        "__sprint_writer".to_string(),
+                        VarInfo {
+                            ptr: writer_tmp,
+                            ty: buf_writer_type.clone(),
+                            is_mutable: false,
+                            is_volatile: false,
+                            drop_flag: None,
+                            field_flags: Vec::new(),
+                        },
+                    );
+                }
+                let w_ident = ast::Expression {
+                    kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
+                        name: "__sprint_writer".to_string(),
+                        span: expr.span,
+                    })),
+                    span: expr.span,
+                };
+                (0, w_ident)
+            }
+            _ => {
+                // @print, @println, @eprint, @eprintln
+                let writer_name = if name.starts_with("e") {
+                    "STDERR"
+                } else {
+                    "STDOUT"
+                };
+                let w = ast::Expression {
+                    kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
+                        name: writer_name.to_string(),
+                        span: expr.span,
+                    })),
+                    span: expr.span,
+                };
+                (0, w)
+            }
+        };
+
+        // Extract format string (must be a literal — validated by typeck)
+        let fmt_str = match &args[fmt_arg_idx] {
+            ast::MacroArg::Expression(e) => match &e.kind.as_ref() {
+                ast::ExpressionKind::Literal(ast::Literal::String(s)) => s.clone(),
+                _ => {
+                    return Err(CodegenError::with_span(
+                        crate::diagnostics::messages::format_string_must_be_literal().to_string(),
+                        e.span,
+                    ));
+                }
+            },
+            _ => {
+                return Err(CodegenError::with_span(
+                    crate::diagnostics::messages::format_string_must_be_literal().to_string(),
+                    expr.span,
+                ));
+            }
+        };
+
+        let segments = crate::builtin_macros::parse_format(&fmt_str);
+
+        // Collect value arguments for placeholders
+        let value_start = fmt_arg_idx + 1;
+        let value_args: Vec<&ast::Expression> = args[value_start..]
+            .iter()
+            .map(|a| match a {
+                ast::MacroArg::Expression(e) => e,
+                _ => unreachable!("typeck verified all value args are expressions"),
+            })
+            .collect();
+
+        // Emit method calls for each format segment
+        let mut placeholder_idx = 0;
+        for segment in &segments {
+            match segment {
+                crate::builtin_macros::FormatSegment::Literal(text) => {
+                    let method = ast::Identifier {
+                        name: "write_str".to_string(),
+                        span: expr.span,
+                    };
+                    let lit_expr = ast::Expression {
+                        kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::String(
+                            text.clone(),
+                        ))),
+                        span: expr.span,
+                    };
+                    self.emit_method_call_expression(
+                        &writer_expr,
+                        &method,
+                        &[lit_expr],
+                        true, // allow_void
+                        &expr.span,
+                    )?;
+                }
+                crate::builtin_macros::FormatSegment::Placeholder => {
+                    let val_expr = value_args[placeholder_idx];
+                    placeholder_idx += 1;
+                    self.emit_format_value(&writer_expr, val_expr, &expr.span, 0)?;
+                }
+            }
+        }
+
+        // For println/eprintln, append a newline
+        if name == "println" || name == "eprintln" {
+            let method = ast::Identifier {
+                name: "write_str".to_string(),
+                span: expr.span,
+            };
+            let nl_expr = ast::Expression {
+                kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::String(
+                    "\n".to_string(),
+                ))),
+                span: expr.span,
+            };
+            self.emit_method_call_expression(&writer_expr, &method, &[nl_expr], true, &expr.span)?;
+        }
+
+        if name == "sprint" || name == "format" {
+            // Write a null terminator at the end of the buffer
+            let method = ast::Identifier {
+                name: "write_u8".to_string(),
+                span: expr.span,
+            };
+            let zero_expr = ast::Expression {
+                kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Integer(0))),
+                span: expr.span,
+            };
+            self.emit_method_call_expression(
+                &writer_expr,
+                &method,
+                &[zero_expr],
+                true,
+                &expr.span,
+            )?;
+
+            // Hand the buffer off as an owned heap block: if the writer is
+            // still on its stack scratch buffer (cap < 0), copy it out.
+            let promote_method = ast::Identifier {
+                name: "__promote_in_memory".to_string(),
+                span: expr.span,
+            };
+            self.emit_method_call_expression(&writer_expr, &promote_method, &[], true, &expr.span)?;
+
+            // Load `data` from the stack BufWriter
+            let buf_writer_type = ast::Type {
+                kind: Box::new(ast::TypeKind::Named(ast::NamedType {
+                    path: vec![ast::Identifier {
+                        name: "BufWriter".to_string(),
+                        span: expr.span,
+                    }],
+                    generics: None,
+                })),
+                span: expr.span,
+            };
+            let buf_writer_llvm_ty = self.lower_basic_type(&buf_writer_type)?;
+            let writer_tmp = self
+                .variables
+                .last()
+                .and_then(|scope| scope.get("__sprint_writer"))
+                .map(|info| info.ptr)
+                .ok_or_else(|| {
+                    CodegenError::with_span("sprint writer variable missing".to_string(), expr.span)
+                })?;
+            let data_ptr = self
+                .builder
+                .build_struct_gep(buf_writer_llvm_ty, writer_tmp, 0, "sprint.data")
+                .map_err(|e| {
+                    CodegenError::with_span(format!("sprint struct gep 0 failed: {e}"), expr.span)
+                })?;
+            let data_val = self
+                .builder
+                .build_load(self.context.i64_type(), data_ptr, "sprint.data.val")
+                .map_err(|e| {
+                    CodegenError::with_span(format!("sprint load data failed: {e}"), expr.span)
+                })?;
+
+            if name == "format" {
+                let string_type = ast::Type {
+                    kind: Box::new(ast::TypeKind::Named(ast::NamedType {
+                        path: vec![ast::Identifier {
+                            name: "String".to_string(),
+                            span: expr.span,
+                        }],
+                        generics: None,
+                    })),
+                    span: expr.span,
+                };
+                let string_llvm_ty = self.lower_basic_type(&string_type)?;
+                let fn_ctx = self.current_fn.ok_or_else(|| {
+                    CodegenError::with_span("@format requires an active function", expr.span)
+                })?;
+                let string_tmp =
+                    self.create_entry_alloca(fn_ctx, "format.string", string_llvm_ty)?;
+
+                let data_as_ptr = self
+                    .builder
+                    .build_int_to_ptr(
+                        data_val.into_int_value(),
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
+                        "format.data.ptr",
+                    )
+                    .map_err(|e| {
+                        CodegenError::with_span(format!("format int to ptr failed: {e}"), expr.span)
+                    })?;
+
+                // len in BufWriter includes the NUL byte we just wrote; String len is len - 1
+                let len_ptr = self
+                    .builder
+                    .build_struct_gep(buf_writer_llvm_ty, writer_tmp, 1, "format.len")
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("format struct gep 1 failed: {e}"),
+                            expr.span,
+                        )
+                    })?;
+                let len_val = self
+                    .builder
+                    .build_load(self.context.i64_type(), len_ptr, "format.len.val")
+                    .map_err(|e| {
+                        CodegenError::with_span(format!("format load len failed: {e}"), expr.span)
+                    })?;
+                let one_i64 = self.context.i64_type().const_int(1, false);
+                let str_len_val = self
+                    .builder
+                    .build_int_sub(len_val.into_int_value(), one_i64, "format.str.len")
+                    .map_err(|e| {
+                        CodegenError::with_span(format!("format len sub 1 failed: {e}"), expr.span)
+                    })?;
+
+                let cap_ptr = self
+                    .builder
+                    .build_struct_gep(buf_writer_llvm_ty, writer_tmp, 2, "format.cap")
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("format struct gep 2 failed: {e}"),
+                            expr.span,
+                        )
+                    })?;
+                let cap_val = self
+                    .builder
+                    .build_load(self.context.i64_type(), cap_ptr, "format.cap.val")
+                    .map_err(|e| {
+                        CodegenError::with_span(format!("format load cap failed: {e}"), expr.span)
+                    })?;
+
+                // Store into String fields: 0=data, 1=len, 2=capacity
+                let str_data_slot = self
+                    .builder
+                    .build_struct_gep(string_llvm_ty, string_tmp, 0, "str.data")
+                    .map_err(|e| {
+                        CodegenError::with_span(format!("format str gep 0 failed: {e}"), expr.span)
+                    })?;
+                self.builder
+                    .build_store(str_data_slot, data_as_ptr)
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("format store str data failed: {e}"),
+                            expr.span,
+                        )
+                    })?;
+
+                let str_len_slot = self
+                    .builder
+                    .build_struct_gep(string_llvm_ty, string_tmp, 1, "str.len")
+                    .map_err(|e| {
+                        CodegenError::with_span(format!("format str gep 1 failed: {e}"), expr.span)
+                    })?;
+                self.builder
+                    .build_store(str_len_slot, str_len_val)
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("format store str len failed: {e}"),
+                            expr.span,
+                        )
+                    })?;
+
+                let str_cap_slot = self
+                    .builder
+                    .build_struct_gep(string_llvm_ty, string_tmp, 2, "str.cap")
+                    .map_err(|e| {
+                        CodegenError::with_span(format!("format str gep 2 failed: {e}"), expr.span)
+                    })?;
+                self.builder
+                    .build_store(str_cap_slot, cap_val)
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("format store str cap failed: {e}"),
+                            expr.span,
+                        )
+                    })?;
+
+                let loaded_str = self
+                    .builder
+                    .build_load(string_llvm_ty, string_tmp, "format.result")
+                    .map_err(|e| {
+                        CodegenError::with_span(
+                            format!("format load result failed: {e}"),
+                            expr.span,
+                        )
+                    })?;
+
+                return Ok(loaded_str);
+            }
+
+            let str_val = self
+                .builder
+                .build_int_to_ptr(
+                    data_val.into_int_value(),
+                    self.context.ptr_type(inkwell::AddressSpace::default()),
+                    "sprint.str",
+                )
+                .map_err(|e| {
+                    CodegenError::with_span(format!("sprint int to ptr failed: {e}"), expr.span)
+                })?;
+
+            Ok(str_val.as_basic_value_enum())
+        } else {
+            // All non-sprint variants return void
+            Ok(self.context.i8_type().const_zero().into())
+        }
+    }
+}

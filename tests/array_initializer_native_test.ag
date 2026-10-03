@@ -1,0 +1,12 @@
+import std.sys.entry;
+
+i32 main() {
+    u8 bytes[4] = { 10, 20, 30, 40 };
+    u8* first = &bytes[0];
+    u8* fourth = first + 3;
+    if (fourth[0] != (u8)40) { return 1; }
+
+    str text = &bytes[0];
+    if (text[0] != (u8)10) { return 2; }
+    return 0;
+}

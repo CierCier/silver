@@ -1,0 +1,235 @@
+// bin/aglsp/src/symbols.ag — Document symbols and hover provider for aglsp.
+import std.mem.vec;
+import std.string;
+import agc;
+import json_rpc;
+
+void append_range(String* out, Span span) {
+    out.push_str("{\"start\":{\"line\":");
+    i64 start_line = span.start_line > 0 ? span.start_line - 1 : 0;
+    i64 start_col = span.start_col > 0 ? span.start_col - 1 : 0;
+    i64 end_line = span.end_line > 0 ? span.end_line - 1 : 0;
+    i64 end_col = span.end_col > 0 ? span.end_col - 1 : 0;
+
+    u8 num_buf[32];
+    i64 n = itoa(start_line, (u8*)&num_buf[0]);
+    for (i64 k = 0; k < n; k += 1) { out.push((char)num_buf[k]); }
+
+    out.push_str(",\"character\":");
+    n = itoa(start_col, (u8*)&num_buf[0]);
+    for (i64 k = 0; k < n; k += 1) { out.push((char)num_buf[k]); }
+
+    out.push_str("},\"end\":{\"line\":");
+    n = itoa(end_line, (u8*)&num_buf[0]);
+    for (i64 k = 0; k < n; k += 1) { out.push((char)num_buf[k]); }
+
+    out.push_str(",\"character\":");
+    n = itoa(end_col, (u8*)&num_buf[0]);
+    for (i64 k = 0; k < n; k += 1) { out.push((char)num_buf[k]); }
+    out.push_str("}}");
+}
+
+String get_item_name(SyntaxNode* item) {
+    SyntaxNode* child = item.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Token && child.token_kind == TokenKind.Identifier) {
+            return String.from_str(child.text);
+        }
+        child = child.next_sibling;
+    }
+    return String.from_str("anonymous");
+}
+
+String compute_document_symbols(str text) {
+    TokenStream stream = TokenStream.new();
+    DiagnosticBag diagnostics = DiagnosticBag.new();
+    String source = String.from_str(text);
+    lex(move source, &stream, &diagnostics);
+
+    NodePool pool = NodePool.new();
+    SyntaxTree tree;
+    parse(&stream, &diagnostics, &pool, &tree);
+
+    String out = String.from_str("[");
+    bool first = true;
+
+    if (tree.root != (SyntaxNode*)0) {
+        SyntaxNode* item = tree.root.first_child;
+        while (item != (SyntaxNode*)0) {
+            i64 kind_num = 0;
+            if (item.kind == NodeKind.Function) {
+                kind_num = 12; // LSP Function
+            } else if (item.kind == NodeKind.Struct) {
+                kind_num = 23; // LSP Struct
+            } else if (item.kind == NodeKind.Enum) {
+                kind_num = 10; // LSP Enum
+            } else if (item.kind == NodeKind.Trait) {
+                kind_num = 11; // LSP Interface
+            } else if (item.kind == NodeKind.Impl) {
+                kind_num = 5;  // LSP Class
+            }
+
+            if (kind_num != 0) {
+                if (!first) {
+                    out.push(',');
+                }
+                first = false;
+
+                String name = get_item_name(item);
+                out.push_str("{\"name\":\"");
+                json_escape(name.to_str(), &out);
+                out.push_str("\",\"kind\":");
+                u8 num_buf[32];
+                i64 n = itoa(kind_num, (u8*)&num_buf[0]);
+                for (i64 k = 0; k < n; k += 1) { out.push((char)num_buf[k]); }
+
+                out.push_str(",\"range\":");
+                append_range(&out, item.span);
+                out.push_str(",\"selectionRange\":");
+                append_range(&out, item.span);
+                out.push_str("}");
+                name.drop();
+            }
+            item = item.next_sibling;
+        }
+    }
+
+    out.push(']');
+    pool.destroy();
+    return move out;
+}
+
+SyntaxNode* find_leaf_at_pos(SyntaxNode* node, i64 line, i64 col) {
+    if (node == (SyntaxNode*)0) {
+        return (SyntaxNode*)0;
+    }
+    if (line < node.span.start_line || line > node.span.end_line) {
+        return (SyntaxNode*)0;
+    }
+    if (node.kind == NodeKind.Token) {
+        if (line == node.span.start_line && col >= node.span.start_col && col <= node.span.end_col) {
+            return node;
+        }
+        return (SyntaxNode*)0;
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        SyntaxNode* found = find_leaf_at_pos(child, line, col);
+        if (found != (SyntaxNode*)0) {
+            return found;
+        }
+        child = child.next_sibling;
+    }
+    return (SyntaxNode*)0;
+}
+
+String compute_hover(str text, i64 line, i64 character) {
+    i64 src_line = line + 1;
+    i64 src_col = character + 1;
+
+    TokenStream stream = TokenStream.new();
+    DiagnosticBag diagnostics = DiagnosticBag.new();
+    String source = String.from_str(text);
+    lex(move source, &stream, &diagnostics);
+
+    NodePool pool = NodePool.new();
+    SyntaxTree tree;
+    parse(&stream, &diagnostics, &pool, &tree);
+
+    SyntaxNode* leaf = find_leaf_at_pos(tree.root, src_line, src_col);
+    if (leaf == (SyntaxNode*)0) {
+        pool.destroy();
+        return String.from_str("null");
+    }
+
+    str word = leaf.text;
+    String hover_text = String.new();
+
+    if (types_is_primitive_name(word)) {
+        hover_text.push_str("**type:** `");
+        hover_text.push_str(word);
+        hover_text.push_str("` (primitive)");
+    } else if (strcmp(word, "struct") == 0 || strcmp(word, "enum") == 0 || strcmp(word, "impl") == 0
+        || strcmp(word, "trait") == 0 || strcmp(word, "let") == 0 || strcmp(word, "return") == 0
+        || strcmp(word, "move") == 0 || strcmp(word, "defer") == 0 || strcmp(word, "match") == 0) {
+        hover_text.push_str("`");
+        hover_text.push_str(word);
+        hover_text.push_str("` — keyword");
+    } else {
+        // Look up in symbol table
+        CfgSet cfg = linux_defaults();
+        SymbolTable symbols = SymbolTable.new();
+        collect_symbols(&symbols, &diagnostics, &tree, &cfg);
+        i64 sym_idx = symbols.find(word);
+        if (sym_idx >= 0) {
+            Symbol* sym = symbols.get(sym_idx);
+            hover_text.push_str("```silver\n");
+            if (sym.kind == SymbolKind.Function) {
+                hover_text.push_str("fn ");
+            } else if (sym.kind == SymbolKind.Struct) {
+                hover_text.push_str("struct ");
+            } else if (sym.kind == SymbolKind.Enum) {
+                hover_text.push_str("enum ");
+            } else if (sym.kind == SymbolKind.Trait) {
+                hover_text.push_str("trait ");
+            }
+            hover_text.push_str(word);
+            hover_text.push_str("\n```");
+        }
+    }
+
+    pool.destroy();
+
+    if (hover_text.len() == 0) {
+        hover_text.drop();
+        return String.from_str("null");
+    }
+
+    String resp = String.from_str("{\"contents\":{\"kind\":\"markdown\",\"value\":\"");
+    json_escape(hover_text.to_str(), &resp);
+    resp.push_str("\"}}");
+    hover_text.drop();
+    return move resp;
+}
+
+String compute_definition(str text, str uri, i64 line, i64 character) {
+    i64 src_line = line + 1;
+    i64 src_col = character + 1;
+
+    TokenStream stream = TokenStream.new();
+    DiagnosticBag diagnostics = DiagnosticBag.new();
+    String source = String.from_str(text);
+    lex(move source, &stream, &diagnostics);
+
+    NodePool pool = NodePool.new();
+    SyntaxTree tree;
+    parse(&stream, &diagnostics, &pool, &tree);
+
+    SyntaxNode* leaf = find_leaf_at_pos(tree.root, src_line, src_col);
+    if (leaf == (SyntaxNode*)0) {
+        pool.destroy();
+        return String.from_str("null");
+    }
+
+    str word = leaf.text;
+    CfgSet cfg = linux_defaults();
+    SymbolTable symbols = SymbolTable.new();
+    collect_symbols(&symbols, &diagnostics, &tree, &cfg);
+    i64 sym_idx = symbols.find(word);
+
+    if (sym_idx < 0) {
+        pool.destroy();
+        return String.from_str("null");
+    }
+
+    Symbol* sym = symbols.get(sym_idx);
+    String resp = String.from_str("{\"uri\":\"");
+    json_escape(uri, &resp);
+    resp.push_str("\",\"range\":");
+    append_range(&resp, sym.span);
+    resp.push('}');
+
+    pool.destroy();
+    return move resp;
+}
+

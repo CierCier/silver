@@ -1,0 +1,30 @@
+// Declaration-aware Send negatives shared by stage0 and stage1.
+import std.thread;
+import std.mem.rc;
+import std.sys.entry;
+
+struct RcField { Rc<i64> value; }
+enum RcPayload { Wrapped(Rc<i64>); }
+struct GenericField<T> { T value; }
+struct NestedGeneric<T> { GenericField<T> inner; }
+struct Recursive { Vec<Recursive> next; Rc<i64> value; }
+
+void worker_rc_field(RcField value) { }
+void worker_rc_payload(RcPayload value) { }
+void worker_generic(GenericField<Rc<i64>> value) { }
+void worker_nested_generic(NestedGeneric<Rc<i64>> value) { }
+void worker_recursive(Recursive value) { }
+
+i64 main() {
+    RcField rc_field = { .value = Rc<i64>.new(1) };
+    RcPayload rc_payload = RcPayload.Wrapped(Rc<i64>.new(2));
+    GenericField<Rc<i64>> generic_field = { .value = Rc<i64>.new(3) };
+    NestedGeneric<Rc<i64>> nested_generic = { .inner = { .value = Rc<i64>.new(4) } };
+    Recursive recursive;
+    launch worker_rc_field(move rc_field);
+    launch worker_rc_payload(move rc_payload);
+    launch worker_generic(move generic_field);
+    launch worker_nested_generic(move nested_generic);
+    launch worker_recursive(move recursive);
+    return 0;
+}

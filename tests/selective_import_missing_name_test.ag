@@ -1,0 +1,9 @@
+// An unresolved selected name cannot be called through its import binding.
+// compile_flags: -I tests/modules
+// expected_compile_failure
+import alias_source { absent_selected_name };
+import std.sys.entry;
+
+i32 main() {
+    return absent_selected_name();
+}

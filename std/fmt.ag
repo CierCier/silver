@@ -4,10 +4,10 @@
 // to pure Silver. Output goes straight to the write(2) syscall via std.sys.linux;
 // no libc printf/puts is used on any code path in this file.
 //
-// f64 formatting uses the Grisu2 algorithm (Loitsch 2010), ported from the
-// rapidjson reference implementation (MIT), with digits rendered in positional
-// decimal notation to match Rust's `{}` Display for f64 (which never uses
-// scientific notation: 1e21 prints as "1000000000000000000000").
+// f64 formatting uses Grisu2 (Loitsch 2010), ported from rapidjson, with an
+// exact decimal-interval fallback for difficult shortest-rounding boundaries.
+// Digits render positionally to match Rust's `{}` Display for f64 (which
+// never uses scientific notation: 1e21 prints as "1000000000000000000000").
 //
 // NOTE on unsigned arithmetic: the current codegen lowers all integer division,
 // remainder, comparison and right-shift as SIGNED operations regardless of the
@@ -88,6 +88,16 @@ u64 __fmt_udiv10(u64 x) {
 i64 __fmt_clz64(u64 x) {
     if (x == (u64)0) {
         return 64;
+    }
+    if (@cfg(os.wasi)) {
+        // No bsr instruction on wasm: shift left until the top bit appears.
+        i64 n = 0;
+        u64 v = x;
+        while ((v & (u64)0x8000000000000000) == (u64)0) {
+            v = v << 1;
+            n = n + 1;
+        }
+        return n;
     }
     i64 msb = asm("bsrq %rax, %rax", [(i64)x], []);
     return 63 - msb;
@@ -579,6 +589,193 @@ void __fmt_grisu2(u64 mbits, u8* digits, i64* out_len, i64* out_k) {
     *out_k = bigk;
 }
 
+// Exact decimal representation used only when Grisu2 emits 16+ significant
+// digits. The binary value and both rounding boundaries fit in 800 decimal
+// digits, including the 5^1075 smallest-subnormal boundary.
+struct FmtExactBuf {
+    u8 data[800];
+}
+
+void __fmt_binary_decimal(u64 f, i64 e, u8* out, i64* out_len, i64* out_point) {
+    i64 n = utoa(f, out);
+    i64 i = 0;
+    while (i < n / 2) {
+        u8 t = out[i];
+        out[i] = out[n - i - 1];
+        out[n - i - 1] = t;
+        i += 1;
+    }
+
+    i64 exp10 = 0;
+    i64 count = 0;
+    i64 factor = 2;
+    if (e < 0) {
+        exp10 = e;
+        count = 0 - e;
+        factor = 5;
+    } else {
+        count = e;
+    }
+    i = 0;
+    while (i < count) {
+        i64 carry = 0;
+        i64 j = 0;
+        while (j < n) {
+            i64 v = ((i64)out[j] - 48) * factor + carry;
+            out[j] = (u8)(48 + v % 10);
+            carry = v / 10;
+            j += 1;
+        }
+        while (carry > 0) {
+            out[n] = (u8)(48 + carry % 10);
+            carry = carry / 10;
+            n += 1;
+        }
+        i += 1;
+    }
+
+    i = 0;
+    while (i < n / 2) {
+        u8 t = out[i];
+        out[i] = out[n - i - 1];
+        out[n - i - 1] = t;
+        i += 1;
+    }
+    *out_len = n;
+    *out_point = n + exp10;
+}
+
+// Compare positive decimal representations by decimal-point position and
+// zero-padded significant digits.
+i64 __fmt_decimal_cmp(u8* a, i64 alen, i64 apoint, u8* b, i64 blen, i64 bpoint) {
+    if (apoint < bpoint) { return -1; }
+    if (apoint > bpoint) { return 1; }
+    i64 n = alen;
+    if (blen > n) { n = blen; }
+    i64 i = 0;
+    while (i < n) {
+        i64 ad = 0;
+        i64 bd = 0;
+        if (i < alen) { ad = (i64)a[i] - 48; }
+        if (i < blen) { bd = (i64)b[i] - 48; }
+        if (ad < bd) { return -1; }
+        if (ad > bd) { return 1; }
+        i += 1;
+    }
+    return 0;
+}
+
+bool __fmt_candidate_inside(u8* candidate, i64 clen, i64 point,
+                            u8* lower, i64 llen, i64 lpoint,
+                            u8* upper, i64 ulen, i64 upoint,
+                            bool inclusive) {
+    i64 lc = __fmt_decimal_cmp(candidate, clen, point, lower, llen, lpoint);
+    i64 uc = __fmt_decimal_cmp(candidate, clen, point, upper, ulen, upoint);
+    if (inclusive) { return lc >= 0 && uc <= 0; }
+    return lc > 0 && uc < 0;
+}
+
+// Find the shortest decimal in the exact IEEE-754 rounding interval. For each
+// precision, test the nearest decimal and its adjacent grid points; exact
+// decimal comparisons avoid relying on floating-point parsing or Grisu's
+// rounded 64-bit boundaries.
+void __fmt_exact_shortest(u64 mbits, u8* digits, i64* out_len, i64* out_k) {
+    u64 FRAC_MASK = (u64)4503599627370495;
+    u64 HIDDEN = (u64)4503599627370496;
+    i64 biased = (i64)(__fmt_lshr(mbits, 52) & (u64)2047);
+    u64 f = mbits & FRAC_MASK;
+    i64 e = -1074;
+    if (biased != 0) {
+        f = f + HIDDEN;
+        e = biased - 1075;
+    }
+
+    u64 lower_f = (f << (u64)1) - (u64)1;
+    i64 lower_e = e - 1;
+    if (f == HIDDEN && biased > 1) {
+        lower_f = (f << (u64)2) - (u64)1;
+        lower_e = e - 2;
+    }
+    u64 upper_f = (f << (u64)1) + (u64)1;
+    i64 upper_e = e - 1;
+    FmtExactBuf value_buf;
+    FmtExactBuf lower_buf;
+    FmtExactBuf upper_buf;
+    u8* value = (u8*)&value_buf;
+    u8* lower = (u8*)&lower_buf;
+    u8* upper = (u8*)&upper_buf;
+    i64 vlen = 0;
+    i64 llen = 0;
+    i64 ulen = 0;
+    i64 point = 0;
+    i64 lpoint = 0;
+    i64 upoint = 0;
+    __fmt_binary_decimal(f, e, value, &vlen, &point);
+    __fmt_binary_decimal(lower_f, lower_e, lower, &llen, &lpoint);
+    __fmt_binary_decimal(upper_f, upper_e, upper, &ulen, &upoint);
+
+    bool inclusive = (f & (u64)1) == (u64)0;
+    u8 candidate[24];
+    u8 floor_digits[24];
+    u8 ceil_digits[24];
+    i64 precision = 1;
+    while (precision <= 17) {
+        u64 floor_value = (u64)0;
+        i64 i = 0;
+        while (i < precision) {
+            floor_value = floor_value * (u64)10;
+            if (i < vlen) { floor_value = floor_value + (u64)((i64)value[i] - 48); }
+            i += 1;
+        }
+        i64 next = 0;
+        if (precision < vlen) { next = (i64)value[precision] - 48; }
+        bool later = false;
+        i = precision + 1;
+        while (i < vlen) {
+            if (value[i] != (u8)48) { later = true; }
+            i += 1;
+        }
+        bool round_up = next > 5 || (next == 5 && (later || (floor_value & (u64)1) != (u64)0));
+        u64 rounded = floor_value;
+        if (round_up) { rounded = rounded + (u64)1; }
+        i64 flen = utoa(floor_value, floor_digits);
+        i64 clen = utoa(rounded, candidate);
+        i64 k = point - precision;
+        i64 candidate_point = point + clen - precision;
+        if (__fmt_candidate_inside(candidate, clen, candidate_point, lower, llen, lpoint,
+                                   upper, ulen, upoint, inclusive)) {
+            i = 0;
+            while (i < clen) { digits[i] = candidate[i]; i += 1; }
+            *out_len = clen;
+            *out_k = k;
+            return;
+        }
+
+        // The closest grid point can miss an open interval endpoint. Check
+        // both neighbors before increasing precision.
+        i64 floor_point = point + flen - precision;
+        if (__fmt_candidate_inside(floor_digits, flen, floor_point, lower, llen, lpoint,
+                                  upper, ulen, upoint, inclusive)) {
+            i = 0;
+            while (i < flen) { digits[i] = floor_digits[i]; i += 1; }
+            *out_len = flen;
+            *out_k = k;
+            return;
+        }
+        i64 ceil_len = utoa(floor_value + (u64)1, ceil_digits);
+        i64 ceil_point = point + ceil_len - precision;
+        if (__fmt_candidate_inside(ceil_digits, ceil_len, ceil_point, lower, llen, lpoint,
+                                   upper, ulen, upoint, inclusive)) {
+            i = 0;
+            while (i < ceil_len) { digits[i] = ceil_digits[i]; i += 1; }
+            *out_len = ceil_len;
+            *out_k = k;
+            return;
+        }
+        precision += 1;
+    }
+}
+
 // Scratch space for Grisu digits (never more than ~18 digits).
 struct FmtDigitsBuf {
     u8 data[32];
@@ -636,6 +833,12 @@ i64 ftoa(f64 v, u8* buf) {
     i64 dlen = 0;
     i64 kexp = 0;
     __fmt_grisu2(mbits, digits, &dlen, &kexp);
+    // Grisu2 is exact and fast for the common <=15-digit case. Its bounded
+    // cached-power rounding can miss shortest carry cases; resolve those in
+    // the exact decimal interval path.
+    if (dlen >= 16) {
+        __fmt_exact_shortest(mbits, digits, &dlen, &kexp);
+    }
 
     // Canonicalize: drop trailing zero digits that belong to the fraction.
     while (dlen > 1 && kexp < 0 && digits[dlen - 1] == (u8)48) {

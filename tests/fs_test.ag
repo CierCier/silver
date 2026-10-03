@@ -5,8 +5,8 @@ import std.string;
 i32 main() {
     test_start("std.fs: native filesystem operations");
 
-    str test_file = "/tmp/__silver_fs_test_file.txt";
-    str test_dir = "/tmp/__silver_fs_test_dir";
+    str test_file = "__silver_fs_test_file.txt";
+    str test_dir = "__silver_fs_test_dir";
 
     // Clean up any stale files from prior runs
     if (exists(test_file)) {
@@ -65,8 +65,8 @@ i32 main() {
     }
 
     // Test 8: rename and copy_file
-    str ren_file = "/tmp/__silver_fs_test_file_renamed.txt";
-    str copy_dest = "/tmp/__silver_fs_test_file_copy.txt";
+    str ren_file = "__silver_fs_test_file_renamed.txt";
+    str copy_dest = "__silver_fs_test_file_copy.txt";
     if (exists(ren_file)) { remove_file(ren_file); }
     if (exists(copy_dest)) { remove_file(copy_dest); }
 
@@ -85,7 +85,7 @@ i32 main() {
 
     // Test 9: read_dir
     create_dir(test_dir);
-    str inner_file = "/tmp/__silver_fs_test_dir/inner.txt";
+    str inner_file = "__silver_fs_test_dir/inner.txt";
     write_file(inner_file, "inner data");
     assert_true(is_dir(test_dir), "test_dir is_dir is true");
     assert_true(!is_file(test_dir), "test_dir is_file is false");
@@ -111,10 +111,10 @@ i32 main() {
     remove_dir(test_dir);
 
     // Test 10: remove_dir_all
-    str recur_dir = "/tmp/__silver_fs_test_recur";
-    str recur_sub = "/tmp/__silver_fs_test_recur/subdir";
-    str recur_f1 = "/tmp/__silver_fs_test_recur/file1.txt";
-    str recur_f2 = "/tmp/__silver_fs_test_recur/subdir/file2.txt";
+    str recur_dir = "__silver_fs_test_recur";
+    str recur_sub = "__silver_fs_test_recur/subdir";
+    str recur_f1 = "__silver_fs_test_recur/file1.txt";
+    str recur_f2 = "__silver_fs_test_recur/subdir/file2.txt";
     if (exists(recur_dir)) { remove_dir_all(recur_dir); }
     create_dir(recur_dir);
     create_dir(recur_sub);

@@ -1,0 +1,342 @@
+// libs/agc/src/backend/llvm/stmt.ag — LLVM statement lowering.
+import vendor.llvm.llvm;
+import std.intern;
+import std.mem.vec;
+import std.string;
+import frontend.ast;
+import frontend.ast_expr;
+import frontend.lexer;
+import frontend.symbols;
+import frontend.types;
+import backend.llvm.context;
+import backend.llvm.drop;
+import backend.llvm.expr;
+import backend.llvm.types;
+import backend.llvm.mono;
+
+void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
+    if (stmt_id == 0 || ctx.is_terminated()) { return; }
+    AstStmt* stmt = ctx.pool.get_stmt(stmt_id);
+
+    if (stmt.kind == StmtKind.Return) {
+        if (ctx.current_return_type == TYPE_VOID) {
+            llvm_emit_drops_above(ctx, (i64)0);
+            LLVMBuildRetVoid(ctx.builder);
+            return;
+        }
+        LLVMOpaqueType* ret_ty = llvm_lower_type(ctx.ctx, ctx.types, ctx.current_return_type);
+        LLVMOpaqueValue* val = (LLVMOpaqueValue*)0;
+        if (stmt.inner0 != 0) {
+            // Generic enum constructors need the concrete return type.
+            u32 saved_expected = ctx.expected_type_id;
+            ctx.expected_type_id = ctx.current_return_type;
+            val = llvm_emit_expr(ctx, stmt.inner0);
+            ctx.expected_type_id = saved_expected;
+        }
+        if (val == (LLVMOpaqueValue*)0) {
+            ctx.note_unresolved("return-value", "expression");
+            val = LLVMConstNull(ret_ty);
+        } else if (LLVMTypeOf(val) != ret_ty) {
+            u32 from_type = llvm_expr_type(ctx, stmt.inner0);
+            LLVMOpaqueValue* user_cast = llvm_try_apply_user_cast(ctx, val, from_type, ctx.current_return_type);
+            if (user_cast != (LLVMOpaqueValue*)0) {
+                val = user_cast;
+            } else {
+                u32 v_kind = LLVMGetTypeKind(LLVMTypeOf(val));
+                u32 r_kind = LLVMGetTypeKind(ret_ty);
+                if (r_kind == (u32)8 && v_kind == (u32)8) {
+                    val = llvm_compat_value(ctx, val, llvm_expr_type(ctx, stmt.inner0),
+                                            ctx.current_return_type);
+                } else if (r_kind == (u32)12 && v_kind == (u32)8) {
+                    val = LLVMBuildIntToPtr(ctx.builder, val, ret_ty, "ret_p_cast");
+                } else if (r_kind == (u32)8 && v_kind == (u32)12) {
+                    val = LLVMBuildPtrToInt(ctx.builder, val, ret_ty, "ret_i_cast");
+                } else if ((r_kind == (u32)2 || r_kind == (u32)3) && (v_kind == (u32)2 || v_kind == (u32)3)) {
+                    if (r_kind == (u32)3) {
+                        val = LLVMBuildFPExt(ctx.builder, val, ret_ty, "ret_fpext");
+                    } else {
+                        val = LLVMBuildFPTrunc(ctx.builder, val, ret_ty, "ret_fptrunc");
+                    }
+                } else if ((r_kind == (u32)2 || r_kind == (u32)3) && v_kind == (u32)8) {
+                    u32 v_type = llvm_expr_type(ctx, stmt.inner0);
+                    if (!llvm_type_is_signed(ctx.types, v_type)) {
+                        val = LLVMBuildUIToFP(ctx.builder, val, ret_ty, "ret_uitofp");
+                    } else {
+                        val = LLVMBuildSIToFP(ctx.builder, val, ret_ty, "ret_sitofp");
+                    }
+                } else if (r_kind == (u32)8 && (v_kind == (u32)2 || v_kind == (u32)3)) {
+                    if (!llvm_type_is_signed(ctx.types, ctx.current_return_type)) {
+                        val = LLVMBuildFPToUI(ctx.builder, val, ret_ty, "ret_fptoui");
+                    } else {
+                        val = LLVMBuildFPToSI(ctx.builder, val, ret_ty, "ret_fptosi");
+                    }
+                } else {
+                    ctx.note_unresolved("return-type", "expression");
+                    val = LLVMConstNull(ret_ty);
+                }
+            }
+        }
+        // A returned local is an implicit move: clear its drops before the
+        // scope-exit sequence so the value is freed exactly once, by the
+        // caller side. Only transferring returns clear: a whole non-Copy
+        // place, or a droppable field/index place (which conservatively
+        // clears its root). Copy reads like `return self.payload` leave
+        // the root live.
+        if (stmt.inner0 != 0) {
+            u32 ret_val_ty = llvm_expr_type(ctx, stmt.inner0);
+            if (llvm_type_needs_tracking(ctx, ret_val_ty)) {
+                llvm_clear_place_drops(ctx, stmt.inner0);
+            }
+        }
+        llvm_emit_drops_above(ctx, (i64)0);
+        LLVMBuildRet(ctx.builder, val);
+        return;
+    }
+
+    if (stmt.kind == StmtKind.Let) {
+        u32 var_name_id = stmt.aux;
+        u32 type_id = stmt.inner0;
+        if (type_id == TYPE_UNKNOWN) {
+            if (stmt.inner1 != 0) {
+                type_id = llvm_expr_type(ctx, stmt.inner1);
+            }
+        }
+        if (type_id == TYPE_UNKNOWN) {
+            ctx.note_unresolved("local-type", ctx.names.get(var_name_id));
+            type_id = TYPE_I64;
+        }
+
+        type_id = ctx.types.resolve_subst(type_id);
+        if (type_id == TYPE_VOID) {
+            type_id = ctx.types.get_pointer(TYPE_VOID, true);
+        }
+        mono_ensure_child_layouts(ctx, type_id, &ctx.generic_layout_ids);
+        LLVMOpaqueType* llvm_ty = llvm_lower_type(ctx.ctx, ctx.types, type_id);
+        str var_name = ctx.names.get(var_name_id);
+        LLVMOpaqueValue* ptr = LLVMBuildAlloca(ctx.builder, llvm_ty, var_name);
+        // Zero-initialize every local, mirroring stage0: partially assigned
+        // values must read as zero/null so promoted whole-flag drops never
+        // free garbage siblings (unassigned fields are never destructed).
+        LLVMBuildStore(ctx.builder, LLVMConstNull(llvm_ty), ptr);
+        // A copy initializer transfers drop ownership to the new local: the
+        // bits stay readable from the source, but only the destination
+        // drops. Clearing runs before add_local so a shadowing `let x = x`
+        // resolves to the outer source. Temps and untracked sources are
+        // unaffected.
+        llvm_clear_copy_source(ctx, stmt.inner1);
+        ctx.add_local(var_name_id, ptr, type_id, true);
+
+        if (stmt.inner1 != 0) {
+            // Generic enum constructors need the declared local type.
+            u32 saved_expected = ctx.expected_type_id;
+            if (type_id != TYPE_UNKNOWN && type_id != 0) {
+                ctx.expected_type_id = type_id;
+            }
+            LLVMOpaqueValue* init_val = llvm_emit_expr(ctx, stmt.inner1);
+            ctx.expected_type_id = saved_expected;
+            if (init_val != (LLVMOpaqueValue*)0) {
+                u32 from_type = llvm_expr_type(ctx, stmt.inner1);
+                LLVMOpaqueValue* user_cast = llvm_try_apply_user_cast(ctx, init_val, from_type, type_id);
+                if (user_cast != (LLVMOpaqueValue*)0) {
+                    init_val = user_cast;
+                } else {
+                    AstExpr* initializer = ctx.pool.get_expr(stmt.inner1);
+                    TypeEntry* declared = ctx.types.get(type_id);
+                    if (initializer.kind == ExprKind.ArrayLit && declared.kind == TypeKind.Array) {
+                        init_val = LLVMBuildLoad2(ctx.builder, llvm_ty, init_val, "array_init_value");
+                    } else {
+                        init_val = llvm_compat_value(ctx, init_val, llvm_expr_type(ctx, stmt.inner1), type_id);
+                    }
+                }
+                LLVMBuildStore(ctx.builder, init_val, ptr);
+            } else {
+                ctx.note_unresolved("local-initializer", var_name);
+            }
+        }
+        llvm_register_local_drops(ctx, var_name_id, ptr, type_id, stmt.inner1 != 0);
+        return;
+    }
+
+    if (stmt.kind == StmtKind.Assign) {
+        LLVMOpaqueValue* target_ptr = llvm_emit_lvalue(ctx, stmt.inner0);
+        u32 saved_expected = ctx.expected_type_id;
+        ctx.expected_type_id = llvm_lvalue_type(ctx, stmt.inner0);
+        LLVMOpaqueValue* val = llvm_emit_expr(ctx, stmt.inner1);
+        ctx.expected_type_id = saved_expected;
+        if (target_ptr == (LLVMOpaqueValue*)0) {
+            ctx.note_unresolved("assignment-target", "expression");
+        }
+        if (val == (LLVMOpaqueValue*)0) {
+            ctx.note_unresolved("assignment-value", "expression");
+        }
+        if (target_ptr != (LLVMOpaqueValue*)0 && val != (LLVMOpaqueValue*)0) {
+            u32 target_type = llvm_lvalue_type(ctx, stmt.inner0);
+            u32 val_type = llvm_expr_type(ctx, stmt.inner1);
+            LLVMOpaqueValue* user_cast = llvm_try_apply_user_cast(ctx, val, val_type, target_type);
+            if (user_cast != (LLVMOpaqueValue*)0) {
+                val = user_cast;
+            } else {
+                val = llvm_compat_value(ctx, val, val_type, target_type);
+            }
+            // Release the overwritten value before storing, so Drop-typed
+            // targets do not leak the old resource. The RHS was already
+            // evaluated above, which keeps self-assignment sound. A copied
+            // RHS transfers ownership to the target; the source stays
+            // readable but no longer drops.
+            llvm_clear_copy_source(ctx, stmt.inner1);
+            llvm_emit_assign_predrop(ctx, stmt.inner0, stmt.inner1);
+            LLVMBuildStore(ctx.builder, val, target_ptr);
+            llvm_mark_assign_live(ctx, stmt.inner0);
+        }
+        return;
+    }
+
+    if (stmt.kind == StmtKind.Expr) {
+        llvm_emit_expr(ctx, stmt.inner0);
+        return;
+    }
+    if (stmt.kind == StmtKind.If) {
+        LLVMOpaqueValue* cond_val = llvm_emit_expr(ctx, stmt.inner0);
+        if (cond_val == (LLVMOpaqueValue*)0) {
+            ctx.note_unresolved("if-condition", "expression");
+            return;
+        }
+        if (LLVMTypeOf(cond_val) != LLVMInt1TypeInContext(ctx.ctx)) {
+            cond_val = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntNE, cond_val, LLVMConstNull(LLVMTypeOf(cond_val)), "if_cond_bool");
+        }
+
+        LLVMOpaqueBasicBlock* then_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "if_then");
+        LLVMOpaqueBasicBlock* else_bb = (stmt.aux != 0) ? LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "if_else") : (LLVMOpaqueBasicBlock*)0;
+        LLVMOpaqueBasicBlock* merge_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "if_merge");
+
+        if (else_bb != (LLVMOpaqueBasicBlock*)0) {
+            LLVMBuildCondBr(ctx.builder, cond_val, then_bb, else_bb);
+        } else {
+            LLVMBuildCondBr(ctx.builder, cond_val, then_bb, merge_bb);
+        }
+
+        LLVMPositionBuilderAtEnd(ctx.builder, then_bb);
+        ctx.push_scope();
+        i64 then_drop_mark = llvm_current_drop_mark(ctx);
+        llvm_emit_stmt(ctx, stmt.inner1);
+        if (!ctx.is_terminated()) {
+            llvm_emit_drops_above(ctx, then_drop_mark);
+        }
+        ctx.pop_scope();
+        if (!ctx.is_terminated()) {
+            LLVMBuildBr(ctx.builder, merge_bb);
+        }
+
+        if (else_bb != (LLVMOpaqueBasicBlock*)0) {
+            LLVMPositionBuilderAtEnd(ctx.builder, else_bb);
+            ctx.push_scope();
+            i64 else_drop_mark = llvm_current_drop_mark(ctx);
+            llvm_emit_stmt(ctx, stmt.aux);
+            if (!ctx.is_terminated()) {
+                llvm_emit_drops_above(ctx, else_drop_mark);
+            }
+            ctx.pop_scope();
+            if (!ctx.is_terminated()) {
+                LLVMBuildBr(ctx.builder, merge_bb);
+            }
+        }
+
+        LLVMPositionBuilderAtEnd(ctx.builder, merge_bb);
+        return;
+    }
+
+    if (stmt.kind == StmtKind.While) {
+        LLVMOpaqueBasicBlock* cond_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "while_cond");
+        LLVMOpaqueBasicBlock* body_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "while_body");
+        LLVMOpaqueBasicBlock* step_bb = stmt.aux != 0
+            ? LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "while_step")
+            : cond_bb;
+        LLVMOpaqueBasicBlock* exit_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "while_exit");
+
+        LLVMBuildBr(ctx.builder, cond_bb);
+
+        // Emit condition block
+        LLVMPositionBuilderAtEnd(ctx.builder, cond_bb);
+        LLVMOpaqueValue* cond_val = llvm_emit_expr(ctx, stmt.inner0);
+        if (cond_val != (LLVMOpaqueValue*)0) {
+            if (LLVMTypeOf(cond_val) != LLVMInt1TypeInContext(ctx.ctx)) {
+                cond_val = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntNE, cond_val, LLVMConstNull(LLVMTypeOf(cond_val)), "while_cond_bool");
+            }
+            LLVMBuildCondBr(ctx.builder, cond_val, body_bb, exit_bb);
+        } else {
+            ctx.note_unresolved("while-condition", "expression");
+            LLVMBuildBr(ctx.builder, exit_bb);
+        }
+
+        // Emit body block
+        LLVMPositionBuilderAtEnd(ctx.builder, body_bb);
+        ctx.push_loop(exit_bb, step_bb);
+        ctx.push_scope();
+        i64 body_drop_mark = llvm_current_drop_mark(ctx);
+        llvm_emit_stmt(ctx, stmt.inner1);
+        if (!ctx.is_terminated()) {
+            llvm_emit_drops_above(ctx, body_drop_mark);
+        }
+        ctx.pop_scope();
+        ctx.pop_loop();
+        if (!ctx.is_terminated()) {
+            LLVMBuildBr(ctx.builder, step_bb);
+        }
+
+        if (stmt.aux != 0) {
+            LLVMPositionBuilderAtEnd(ctx.builder, step_bb);
+            llvm_emit_stmt(ctx, stmt.aux);
+            if (!ctx.is_terminated()) {
+                LLVMBuildBr(ctx.builder, cond_bb);
+            }
+        }
+
+        LLVMPositionBuilderAtEnd(ctx.builder, exit_bb);
+        return;
+    }
+
+    if (stmt.kind == StmtKind.Break) {
+        LLVMOpaqueBasicBlock* break_target = ctx.current_break();
+        if (break_target != (LLVMOpaqueBasicBlock*)0) {
+            if (ctx.loop_drop_marks.len() > 0) {
+                llvm_emit_drops_above(ctx, ctx.loop_drop_marks.get(ctx.loop_drop_marks.len() - 1));
+            }
+            LLVMBuildBr(ctx.builder, break_target);
+        } else {
+            ctx.note_unresolved("break-target", "outside loop");
+        }
+        return;
+    }
+
+    if (stmt.kind == StmtKind.Continue) {
+        LLVMOpaqueBasicBlock* cont_target = ctx.current_continue();
+        if (cont_target != (LLVMOpaqueBasicBlock*)0) {
+            if (ctx.loop_drop_marks.len() > 0) {
+                llvm_emit_drops_above(ctx, ctx.loop_drop_marks.get(ctx.loop_drop_marks.len() - 1));
+            }
+            LLVMBuildBr(ctx.builder, cont_target);
+        } else {
+            ctx.note_unresolved("continue-target", "outside loop");
+        }
+        return;
+    }
+
+    if (stmt.kind == StmtKind.Block) {
+        u32 start = stmt.inner0;
+        u32 count = stmt.aux;
+        ctx.push_scope();
+        i64 block_drop_mark = llvm_current_drop_mark(ctx);
+        i64 i = 0;
+        while (i < (i64)count) {
+            u32 s_id = ctx.pool.block_stmts.get((i64)start + i);
+            llvm_emit_stmt(ctx, s_id);
+            if (ctx.is_terminated()) { break; }
+            i += 1;
+        }
+        if (!ctx.is_terminated()) {
+            llvm_emit_drops_above(ctx, block_drop_mark);
+        }
+        ctx.pop_scope();
+        return;
+    }
+}

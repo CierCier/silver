@@ -1,0 +1,459 @@
+// Syntactic queries over top-level items shared by lowering and codegen.
+// These walk the lossless CST directly so enum and method shapes resolve the
+// same way in every pass without a separate registry.
+import std.mem.vec;
+import std.string;
+import frontend.ast;
+import frontend.lexer;
+import frontend.symbols;
+import frontend.types;
+
+SyntaxNode* find_item_by_name(SyntaxNode* root, NodeKind kind, str name) {
+    if (root == (SyntaxNode*)0) {
+        return (SyntaxNode*)0;
+    }
+    SyntaxNode* child = root.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == kind) {
+            SyntaxNode* id = item_identifier(child);
+            if (id != (SyntaxNode*)0 && strcmp(id.text, name) == 0) {
+                return child;
+            }
+        }
+        child = child.next_sibling;
+    }
+    return (SyntaxNode*)0;
+}
+
+SyntaxNode* find_enum_item(SyntaxNode* root, str name) {
+    return find_item_by_name(root, NodeKind.Enum, name);
+}
+
+i64 items_parse_int(str text) {
+    if (text == (str)0) {
+        return 0;
+    }
+    i64 len = strlen(text);
+    if (len == 0) {
+        return 0;
+    }
+    i64 i = 0;
+    bool neg = false;
+    if (text[0] == (u8)45) {
+        neg = true;
+        i += 1;
+    }
+    if (i + 2 <= len && text[i] == (u8)48 && (text[i + 1] == (u8)120 || text[i + 1] == (u8)88)) {
+        i += 2;
+        i64 value = 0;
+        while (i < len) {
+            u8 ch = (u8)text[i];
+            i64 digit = -1;
+            if (ch >= (u8)48 && ch <= (u8)57) {
+                digit = (i64)(ch - (u8)48);
+            } else if (ch >= (u8)97 && ch <= (u8)102) {
+                digit = (i64)(ch - (u8)97) + 10;
+            } else if (ch >= (u8)65 && ch <= (u8)70) {
+                digit = (i64)(ch - (u8)65) + 10;
+            }
+            if (digit < 0) {
+                break;
+            }
+            value = value * 16 + digit;
+            i += 1;
+        }
+        return neg ? -value : value;
+    }
+    i64 value = 0;
+    while (i < len) {
+        u8 ch = (u8)text[i];
+        if (ch < (u8)48 || ch > (u8)57) {
+            break;
+        }
+        value = value * 10 + (i64)(ch - (u8)48);
+        i += 1;
+    }
+    return neg ? -value : value;
+}
+
+// Walk one enum item body. For each variant calls the visitor logic inline:
+// reports name, tag, payload arity, and payload type texts.
+bool enum_each_variant(SyntaxNode* item, Vec<SyntaxNode*>* names, Vec<i64>* tags,
+                       Vec<i64>* arities) {
+    if (item == (SyntaxNode*)0) {
+        return false;
+    }
+    SyntaxNode* block = item.first_child;
+    while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+        block = block.next_sibling;
+    }
+    if (block == (SyntaxNode*)0) {
+        return false;
+    }
+    i64 next_tag = 0;
+    SyntaxNode* cursor = block.first_child;
+    while (cursor != (SyntaxNode*)0) {
+        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Identifier) {
+            SyntaxNode* variant = cursor;
+            i64 tag = next_tag;
+            i64 arity = 0;
+            SyntaxNode* scan = cursor.next_sibling;
+            while (scan != (SyntaxNode*)0
+                && !(scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Semicolon)) {
+                if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Assign) {
+                    SyntaxNode* value = scan.next_sibling;
+                    if (value != (SyntaxNode*)0 && value.kind == NodeKind.Token
+                        && (value.token_kind == TokenKind.IntLiteral || value.token_kind == TokenKind.Minus)) {
+                        if (value.token_kind == TokenKind.Minus && value.next_sibling != (SyntaxNode*)0
+                            && value.next_sibling.kind == NodeKind.Token
+                            && value.next_sibling.token_kind == TokenKind.IntLiteral) {
+                            String combined = String.from_str("-");
+                            combined.push_str(value.next_sibling.text);
+                            tag = items_parse_int(combined.to_str());
+                            combined.drop();
+                        } else {
+                            tag = items_parse_int(value.text);
+                        }
+                    }
+                }
+                if (scan.kind == NodeKind.Parenthesized) {
+                    SyntaxNode* part = scan.first_child;
+                    i64 count = 0;
+                    bool seen = false;
+                    while (part != (SyntaxNode*)0) {
+                        if (part.kind != NodeKind.Token || part.token_kind != TokenKind.Comma) {
+                            if (!seen) {
+                                seen = true;
+                            }
+                        } else if (seen) {
+                            count += 1;
+                        }
+                        part = part.next_sibling;
+                    }
+                    if (seen) {
+                        arity = count + 1;
+                    }
+                }
+                scan = scan.next_sibling;
+            }
+            names.push(variant);
+            tags.push(tag);
+            arities.push(arity);
+            next_tag = tag + 1;
+        }
+        cursor = cursor.next_sibling;
+    }
+    return true;
+}
+
+bool enum_variant_info(SyntaxNode* root, str enum_name, str variant_name,
+                       i64* tag_out, i64* arity_out) {
+    SyntaxNode* item = find_enum_item(root, enum_name);
+    if (item == (SyntaxNode*)0) {
+        return false;
+    }
+    Vec<SyntaxNode*> names = Vec<SyntaxNode*>.new();
+    Vec<i64> tags = Vec<i64>.new();
+    Vec<i64> arities = Vec<i64>.new();
+    enum_each_variant(item, &names, &tags, &arities);
+    bool found = false;
+    i64 i = 0;
+    while (i < names.len()) {
+        if (strcmp(names.get(i).text, variant_name) == 0) {
+            *tag_out = tags.get(i);
+            *arity_out = arities.get(i);
+            found = true;
+            break;
+        }
+        i += 1;
+    }
+    names.drop();
+    tags.drop();
+    arities.drop();
+    return found;
+}
+
+bool find_variant_enum(SyntaxNode* root, str variant_name, SyntaxNode** enum_out) {
+    if (root == (SyntaxNode*)0) {
+        return false;
+    }
+    if (strcmp(variant_name, "None") == 0 || strcmp(variant_name, "Some") == 0) {
+        SyntaxNode* opt = find_enum_item(root, "Optional");
+        if (opt != (SyntaxNode*)0) {
+            *enum_out = opt;
+            return true;
+        }
+    }
+    if (strcmp(variant_name, "Ok") == 0 || strcmp(variant_name, "Err") == 0) {
+        SyntaxNode* res = find_enum_item(root, "Result");
+        if (res != (SyntaxNode*)0) {
+            *enum_out = res;
+            return true;
+        }
+    }
+    SyntaxNode* child = root.first_child;
+    SyntaxNode* found = (SyntaxNode*)0;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Enum) {
+            Vec<SyntaxNode*> names = Vec<SyntaxNode*>.new();
+            Vec<i64> tags = Vec<i64>.new();
+            Vec<i64> arities = Vec<i64>.new();
+            enum_each_variant(child, &names, &tags, &arities);
+            i64 i = 0;
+            while (i < names.len()) {
+                if (strcmp(names.get(i).text, variant_name) == 0) {
+                    if (found != (SyntaxNode*)0) {
+                        names.drop();
+                        tags.drop();
+                        arities.drop();
+                        return false;
+                    }
+                    found = child;
+                }
+                i += 1;
+            }
+            names.drop();
+            tags.drop();
+            arities.drop();
+        }
+        child = child.next_sibling;
+    }
+    *enum_out = found;
+    return found != (SyntaxNode*)0;
+}
+
+void append_node_tokens(SyntaxNode* node, String* out) {
+    if (node == (SyntaxNode*)0) {
+        return;
+    }
+    if (node.kind == NodeKind.Token) {
+        out.push_str(node.text);
+        return;
+    }
+    if (node.kind == NodeKind.Bracket) {
+        out.push_str("[");
+        SyntaxNode* c = node.first_child;
+        while (c != (SyntaxNode*)0) {
+            append_node_tokens(c, out);
+            c = c.next_sibling;
+        }
+        out.push_str("]");
+        return;
+    }
+    if (node.kind == NodeKind.Parenthesized) {
+        out.push_str("(");
+        SyntaxNode* c = node.first_child;
+        while (c != (SyntaxNode*)0) {
+            append_node_tokens(c, out);
+            c = c.next_sibling;
+        }
+        out.push_str(")");
+        return;
+    }
+    SyntaxNode* c = node.first_child;
+    while (c != (SyntaxNode*)0) {
+        append_node_tokens(c, out);
+        c = c.next_sibling;
+    }
+}
+
+u32 type_id_from_text(TypeTable* types, str text) {
+    if (text == (str)0) {
+        return TYPE_UNKNOWN;
+    }
+    i64 len = strlen(text);
+    i64 start = 0;
+    while (start < len && (text[start] == (u8)32 || text[start] == (u8)9)) {
+        start += 1;
+    }
+    if (start + 5 <= len && text[start] == (u8)'c' && text[start + 1] == (u8)'o'
+        && text[start + 2] == (u8)'n' && text[start + 3] == (u8)'s' && text[start + 4] == (u8)'t'
+        && (start + 5 == len || text[start + 5] == (u8)' ' || text[start + 5] == (u8)'\t' || text[start + 5] == (u8)'*')) {
+        start += 5;
+        while (start < len && (text[start] == (u8)32 || text[start] == (u8)9)) {
+            start += 1;
+        }
+    }
+    bool is_reference = false;
+    bool ref_mutable = false;
+    if (start < len && text[start] == (u8)38) {
+        is_reference = true;
+        start += 1;
+        if (start + 3 <= len && text[start] == (u8)109 && text[start + 1] == (u8)117
+            && text[start + 2] == (u8)116) {
+            ref_mutable = true;
+            start += 3;
+        }
+        while (start < len && (text[start] == (u8)32 || text[start] == (u8)9)) {
+            start += 1;
+        }
+        if (start + 5 <= len && text[start] == (u8)'c' && text[start + 1] == (u8)'o'
+            && text[start + 2] == (u8)'n' && text[start + 3] == (u8)'s' && text[start + 4] == (u8)'t'
+            && (start + 5 == len || text[start + 5] == (u8)' ' || text[start + 5] == (u8)'\t' || text[start + 5] == (u8)'*')) {
+            start += 5;
+            while (start < len && (text[start] == (u8)32 || text[start] == (u8)9)) {
+                start += 1;
+            }
+        }
+    }
+    i64 end = len;
+    while (end > start && (text[end - 1] == (u8)32 || text[end - 1] == (u8)9)) {
+        end -= 1;
+    }
+    i64 stars = 0;
+    while (end > start && text[end - 1] == (u8)42) {
+        stars += 1;
+        end -= 1;
+    }
+    while (end > start && (text[end - 1] == (u8)32 || text[end - 1] == (u8)9)) {
+        end -= 1;
+    }
+    if (end <= start) {
+        return TYPE_UNKNOWN;
+    }
+    String base = String.new();
+    i64 i = start;
+    while (i < end) {
+        if (text[i] != (u8)32 && text[i] != (u8)9) {
+            base.push(text[i]);
+        }
+        i += 1;
+    }
+    u32 result = types.parse_type_name(base.to_str());
+    base.drop();
+    while (stars > 0) {
+        result = types.get_pointer(result, true);
+        stars -= 1;
+    }
+    if (is_reference) {
+        result = types.get_reference(result, ref_mutable);
+    }
+    return result;
+}
+
+bool enum_payload_type_text(SyntaxNode* root, str enum_name, str variant_name,
+                            i64 field_index, String* out) {
+    SyntaxNode* item = find_enum_item(root, enum_name);
+    if (item == (SyntaxNode*)0) {
+        return false;
+    }
+    SyntaxNode* block = item.first_child;
+    while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+        block = block.next_sibling;
+    }
+    if (block == (SyntaxNode*)0) {
+        return false;
+    }
+    SyntaxNode* cursor = block.first_child;
+    while (cursor != (SyntaxNode*)0) {
+        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Identifier
+            && strcmp(cursor.text, variant_name) == 0) {
+            SyntaxNode* payload = cursor.next_sibling;
+            if (payload == (SyntaxNode*)0 || payload.kind != NodeKind.Parenthesized) {
+                return false;
+            }
+            i64 index = 0;
+            SyntaxNode* part = payload.first_child;
+            while (part != (SyntaxNode*)0) {
+                SyntaxNode* part_end = part;
+                while (part_end != (SyntaxNode*)0
+                    && !(part_end.kind == NodeKind.Token && part_end.token_kind == TokenKind.Comma)) {
+                    part_end = part_end.next_sibling;
+                }
+                if (index == field_index) {
+                    SyntaxNode* tok = part;
+                    while (tok != (SyntaxNode*)0 && tok != part_end) {
+                        if (tok.kind == NodeKind.Token) {
+                            out.push_str(tok.text);
+                        }
+                        tok = tok.next_sibling;
+                    }
+                    return out.len > 0;
+                }
+                index += 1;
+                part = (part_end == (SyntaxNode*)0) ? part_end : part_end.next_sibling;
+            }
+            return false;
+        }
+        cursor = cursor.next_sibling;
+    }
+    return false;
+}
+
+bool method_matches_variant(str method_name, str variant_name) {
+    if (method_name == (str)0 || variant_name == (str)0) {
+        return false;
+    }
+    if (strcmp(method_name, variant_name) == 0) {
+        return true;
+    }
+    i64 method_len = strlen(method_name);
+    i64 variant_len = strlen(variant_name);
+    if (method_len != variant_len || method_len == 0) {
+        return false;
+    }
+    u8 first = (u8)method_name[0];
+    if (first >= (u8)97 && first <= (u8)122) {
+        first = first - 32;
+    }
+    if (first != (u8)variant_name[0]) {
+        return false;
+    }
+    i64 i = 1;
+    while (i < method_len) {
+        if (method_name[i] != variant_name[i]) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+i64 enum_variant_count(SyntaxNode* root, str enum_name) {
+    SyntaxNode* item = find_enum_item(root, enum_name);
+    if (item == (SyntaxNode*)0) {
+        return -1;
+    }
+    Vec<SyntaxNode*> names = Vec<SyntaxNode*>.new();
+    Vec<i64> tags = Vec<i64>.new();
+    Vec<i64> arities = Vec<i64>.new();
+    enum_each_variant(item, &names, &tags, &arities);
+    i64 count = names.len();
+    names.drop();
+    tags.drop();
+    arities.drop();
+    return count;
+}
+
+SyntaxNode* impl_target_identifier(SyntaxNode* impl_item) {
+    SyntaxNode* child = impl_item.first_child;
+    SyntaxNode* first_ident = (SyntaxNode*)0;
+    SyntaxNode* after_for_ident = (SyntaxNode*)0;
+    bool saw_impl = false;
+    bool saw_for = false;
+    i64 angle_depth = 0;
+    while (child != (SyntaxNode*)0 && child.kind != NodeKind.Block) {
+        if (child.kind == NodeKind.Token) {
+            if (child.token_kind == TokenKind.Impl) {
+                saw_impl = true;
+            } else if (child.token_kind == TokenKind.For || strcmp(child.text, "for") == 0) {
+                saw_for = true;
+            } else if (child.token_kind == TokenKind.Less || strcmp(child.text, "<") == 0) {
+                angle_depth += 1;
+            } else if ((child.token_kind == TokenKind.Greater || strcmp(child.text, ">") == 0) && angle_depth > 0) {
+                angle_depth -= 1;
+            } else if ((node_is_identifier(child) || strcmp(child.text, "Vec") == 0 || strcmp(child.text, "Optional") == 0) && angle_depth == 0) {
+                if (saw_for && after_for_ident == (SyntaxNode*)0) {
+                    after_for_ident = child;
+                } else if (saw_impl && first_ident == (SyntaxNode*)0) {
+                    first_ident = child;
+                }
+            }
+        }
+        child = child.next_sibling;
+    }
+    if (after_for_ident != (SyntaxNode*)0) {
+        return after_for_ident;
+    }
+    return first_ident;
+}

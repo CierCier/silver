@@ -1,0 +1,72 @@
+// libs/agc/src/frontend/place.ag — Place and projection representation for ownership and borrowing.
+import std.intern;
+import std.mem.vec;
+
+enum ProjectionKind {
+    Field;
+    Index;
+    Deref;
+}
+
+struct Projection {
+    ProjectionKind kind;
+    u32 field_name_id;
+}
+
+struct Place {
+    u32 local_id;
+    u32 projections_start;
+    u16 projections_count;
+}
+
+impl Place {
+    Place new(u32 local_id) {
+        Place p;
+        p.local_id = local_id;
+        p.projections_start = 0;
+        p.projections_count = 0;
+        return move p;
+    }
+
+    Place with_projections(u32 local_id, u32 start, u16 count) {
+        Place p;
+        p.local_id = local_id;
+        p.projections_start = start;
+        p.projections_count = count;
+        return move p;
+    }
+
+    bool is_root(&self) {
+        return self.projections_count == 0;
+    }
+}
+
+bool places_overlap(Place* a, Place* b, Vec<Projection>* projections) {
+    if (a.local_id != b.local_id) {
+        return false;
+    }
+    // If either place is the root local, they overlap (e.g. x overlaps x.f)
+    if (a.projections_count == 0 || b.projections_count == 0) {
+        return true;
+    }
+    // Compare common prefix of projections
+    i64 common_len = (i64)a.projections_count;
+    if ((i64)b.projections_count < common_len) {
+        common_len = (i64)b.projections_count;
+    }
+    i64 i = 0;
+    while (i < common_len) {
+        Projection* proj_a = projections.get_ptr((i64)a.projections_start + i);
+        Projection* proj_b = projections.get_ptr((i64)b.projections_start + i);
+        if (proj_a.kind != proj_b.kind) {
+            return false;
+        }
+        if (proj_a.kind == ProjectionKind.Field && proj_a.field_name_id != proj_b.field_name_id) {
+            // Disjoint fields (e.g. x.a vs x.b)
+            return false;
+        }
+        // Indices are conservatively assumed to overlap (v[i] vs v[j])
+        i += 1;
+    }
+    return true;
+}

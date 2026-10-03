@@ -1,0 +1,860 @@
+// Stage1 command-line frontend. Lex/parse/ast/check stay local while native
+// commands are forwarded through the transitional stage0 backend bridge.
+import std.args;
+import std.error;
+import std.fmt;
+import std.io;
+import std.mem.vec;
+import std.result;
+import std.string;
+import agc;
+import frontend.artifacts;
+import backend_bridge;
+import native_backend;
+import workspace;
+import frontend.ownership;
+import frontend.send;
+
+str token_kind_name(TokenKind kind) {
+    return match kind {
+        TokenKind.IntLiteral : "IntLiteral",
+        TokenKind.FloatLiteral : "FloatLiteral",
+        TokenKind.ComplexLiteral : "ComplexLiteral",
+        TokenKind.StringLiteral : "StringLiteral",
+        TokenKind.CharLiteral : "CharLiteral",
+        TokenKind.Lifetime : "Lifetime",
+        TokenKind.BoolLiteral : "BoolLiteral",
+        TokenKind.Struct : "Struct",
+        TokenKind.Enum : "Enum",
+        TokenKind.Impl : "Impl",
+        TokenKind.Trait : "Trait",
+        TokenKind.Mut : "Mut",
+        TokenKind.Const : "Const",
+        TokenKind.Static : "Static",
+        TokenKind.Volatile : "Volatile",
+        TokenKind.If : "If",
+        TokenKind.Else : "Else",
+        TokenKind.While : "While",
+        TokenKind.For : "For",
+        TokenKind.Match : "Match",
+        TokenKind.Break : "Break",
+        TokenKind.Continue : "Continue",
+        TokenKind.Return : "Return",
+        TokenKind.Type : "Type",
+        TokenKind.Let : "Let",
+        TokenKind.SelfType : "SelfType",
+        TokenKind.Defer : "Defer",
+        TokenKind.Import : "Import",
+        TokenKind.Comptime : "Comptime",
+        TokenKind.Cast : "Cast",
+        TokenKind.Move : "Move",
+        TokenKind.Extern : "Extern",
+        TokenKind.Private : "Private",
+        TokenKind.Asm : "Asm",
+        TokenKind.As : "As",
+        TokenKind.In : "In",
+        TokenKind.Macro : "Macro",
+        TokenKind.True : "True",
+        TokenKind.False : "False",
+        TokenKind.Launch : "Launch",
+        TokenKind.Wait : "Wait",
+        TokenKind.I8 : "I8",
+        TokenKind.I16 : "I16",
+        TokenKind.I32 : "I32",
+        TokenKind.I64 : "I64",
+        TokenKind.I128 : "I128",
+        TokenKind.U8 : "U8",
+        TokenKind.U16 : "U16",
+        TokenKind.U32 : "U32",
+        TokenKind.U64 : "U64",
+        TokenKind.U128 : "U128",
+        TokenKind.F32 : "F32",
+        TokenKind.F64 : "F64",
+        TokenKind.F80 : "F80",
+        TokenKind.C32 : "C32",
+        TokenKind.C64 : "C64",
+        TokenKind.C80 : "C80",
+        TokenKind.Bool : "Bool",
+        TokenKind.Str : "Str",
+        TokenKind.Char : "Char",
+        TokenKind.Void : "Void",
+        TokenKind.VecType : "Vec",
+        TokenKind.OptionalType : "Optional",
+        TokenKind.Plus : "Plus",
+        TokenKind.Minus : "Minus",
+        TokenKind.Star : "Star",
+        TokenKind.Slash : "Slash",
+        TokenKind.Percent : "Percent",
+        TokenKind.Equal : "Equal",
+        TokenKind.NotEqual : "NotEqual",
+        TokenKind.Less : "Less",
+        TokenKind.Greater : "Greater",
+        TokenKind.LessEqual : "LessEqual",
+        TokenKind.GreaterEqual : "GreaterEqual",
+        TokenKind.And : "And",
+        TokenKind.Or : "Or",
+        TokenKind.Not : "Not",
+        TokenKind.Assign : "Assign",
+        TokenKind.PlusAssign : "PlusAssign",
+        TokenKind.MinusAssign : "MinusAssign",
+        TokenKind.StarAssign : "StarAssign",
+        TokenKind.SlashAssign : "SlashAssign",
+        TokenKind.PercentAssign : "PercentAssign",
+        TokenKind.BitwiseAndAssign : "BitwiseAndAssign",
+        TokenKind.BitwiseOrAssign : "BitwiseOrAssign",
+        TokenKind.BitwiseXorAssign : "BitwiseXorAssign",
+        TokenKind.LeftShiftAssign : "LeftShiftAssign",
+        TokenKind.RightShiftAssign : "RightShiftAssign",
+        TokenKind.BitwiseAnd : "BitwiseAnd",
+        TokenKind.BitwiseOr : "BitwiseOr",
+        TokenKind.BitwiseXor : "BitwiseXor",
+        TokenKind.BitwiseNot : "BitwiseNot",
+        TokenKind.Increment : "Increment",
+        TokenKind.Decrement : "Decrement",
+        TokenKind.LeftParen : "LeftParen",
+        TokenKind.RightParen : "RightParen",
+        TokenKind.LeftBrace : "LeftBrace",
+        TokenKind.RightBrace : "RightBrace",
+        TokenKind.LeftBracket : "LeftBracket",
+        TokenKind.RightBracket : "RightBracket",
+        TokenKind.Semicolon : "Semicolon",
+        TokenKind.Comma : "Comma",
+        TokenKind.Dot : "Dot",
+        TokenKind.DotDot : "DotDot",
+        TokenKind.DotDotDot : "DotDotDot",
+        TokenKind.Colon : "Colon",
+        TokenKind.DoubleColon : "DoubleColon",
+        TokenKind.Question : "Question",
+        TokenKind.At : "At",
+        TokenKind.Hash : "Hash",
+        TokenKind.Comment : "Comment",
+        TokenKind.Identifier : "Identifier",
+        TokenKind.Eof : "Eof",
+    };
+}
+
+void append_hex(String* out, str text) {
+    u8* data = (u8*)text;
+    i64 length = strlen(text);
+    const str digits = "0123456789abcdef";
+    i64 i = 0;
+    while (i < length) {
+        u8 ch = data[i];
+        out.push(digits[(ch >> 4) & 15]);
+        out.push(digits[ch & 15]);
+        i += 1;
+    }
+}
+
+void append_escaped(String* out, str text) {
+    u8* data = (u8*)text;
+    i64 length = strlen(text);
+    i64 i = 0;
+    while (i < length) {
+        u8 ch = data[i];
+        if (ch == (u8)'\\') {
+            out.push_str("\\\\");
+        } else if (ch == (u8)10) {
+            out.push_str("\\n");
+        } else if (ch == (u8)13) {
+            out.push_str("\\r");
+        } else if (ch == (u8)9) {
+            out.push_str("\\t");
+        } else if (ch == (u8)'|') {
+            out.push_str("\\|");
+        } else {
+            out.push(ch);
+        }
+        i += 1;
+    }
+}
+
+String token_record(Token* token) {
+    String out = String.new();
+    out.push_str(token_kind_name(token.kind));
+    out.push_str("|");
+    append_i64(&out, token.span.start);
+    out.push_str("|");
+    append_i64(&out, token.span.end);
+    out.push_str("|");
+    append_i64(&out, token.span.start_line);
+    out.push_str(":");
+    append_i64(&out, token.span.start_col);
+    out.push_str("|");
+    append_i64(&out, token.span.end_line);
+    out.push_str(":");
+    append_i64(&out, token.span.end_col);
+    out.push_str("|");
+    append_hex(&out, token.text.to_str());
+    out.push_str("\n");
+    return out;
+}
+
+i32 emit_tokens(str path) {
+    Result<String, Error> loaded = String.from_file(path);
+    if (loaded.is_err()) {
+        STDERR.write_str("agc: error: failed to read ");
+        STDERR.write_str(path);
+        STDERR.write_str("\n");
+        return 2;
+    }
+    String source = loaded.unwrap();
+    String source_copy = source.clone();
+    TokenStream stream = TokenStream.new();
+    DiagnosticBag diagnostics = DiagnosticBag.new();
+    lex(move source, &stream, &diagnostics);
+    if (!diagnostics.is_empty()) {
+        STDERR.write_str("agc: error: lexer errors in ");
+        STDERR.write_str(path);
+        STDERR.write_str("\n");
+        i64 i = 0;
+        while (i < diagnostics.len()) {
+            Diagnostic* diagnostic = diagnostics.get(i);
+            String rendered = render_diagnostic(diagnostic, path, &source_copy);
+            STDERR.write_str(rendered.to_str());
+            i += 1;
+        }
+        return 2;
+    }
+    i64 i = 0;
+    while (i < stream.len()) {
+        String record = token_record(stream.get(i));
+        STDOUT.write_str(record.to_str());
+        i += 1;
+    }
+    return 0;
+}
+
+str node_kind_name(NodeKind kind) {
+    return match kind {
+        NodeKind.Program : "Program",
+        NodeKind.Item : "Item",
+        NodeKind.Import : "Import",
+        NodeKind.Struct : "Struct",
+        NodeKind.Enum : "Enum",
+        NodeKind.Trait : "Trait",
+        NodeKind.Impl : "Impl",
+        NodeKind.Function : "Function",
+        NodeKind.Global : "Global",
+        NodeKind.TypeAlias : "TypeAlias",
+        NodeKind.Extern : "Extern",
+        NodeKind.Macro : "Macro",
+        NodeKind.CfgBlock : "CfgBlock",
+        NodeKind.Attribute : "Attribute",
+        NodeKind.Generic : "Generic",
+        NodeKind.Type : "Type",
+        NodeKind.Parameter : "Parameter",
+        NodeKind.Field : "Field",
+        NodeKind.Variant : "Variant",
+        NodeKind.Block : "Block",
+        NodeKind.Parenthesized : "Parenthesized",
+        NodeKind.Bracket : "Bracket",
+        NodeKind.Statement : "Statement",
+        NodeKind.Expression : "Expression",
+        NodeKind.Token : "Token",
+    };
+}
+
+void render_node(String* out, SyntaxNode* node, str prefix, bool last) {
+    out.push_str(prefix);
+    if (last) {
+        out.push_str("`-- ");
+    } else {
+        out.push_str("|-- ");
+    }
+    out.push_str(node_kind_name(node.kind));
+    out.push_str(" [");
+    append_i64(out, node.span.start);
+    out.push_str("..");
+    append_i64(out, node.span.end);
+    out.push_str("]");
+    if (node.kind == NodeKind.Token) {
+        out.push_str(" ");
+        append_escaped(out, node.text);
+    }
+    out.push_str("\n");
+
+    String child_prefix = String.new();
+    child_prefix.push_str(prefix);
+    if (last) {
+        child_prefix.push_str("    ");
+    } else {
+        child_prefix.push_str("|   ");
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        render_node(out, child, child_prefix.to_str(), child.next_sibling == (SyntaxNode*)0);
+        child = child.next_sibling;
+    }
+}
+
+String render_tree(SyntaxTree* tree) {
+    String out = String.new();
+    if (tree.root == (SyntaxNode*)0) {
+        return out;
+    }
+    render_node(&out, tree.root, "", true);
+    return out;
+}
+
+i32 emit_ast(str path) {
+    Result<String, Error> loaded = String.from_file(path);
+    if (loaded.is_err()) {
+        STDERR.write_str("agc: error: failed to read ");
+        STDERR.write_str(path);
+        STDERR.write_str("\n");
+        return 2;
+    }
+    String source = loaded.unwrap();
+    String source_copy = source.clone();
+    TokenStream stream = TokenStream.new();
+    DiagnosticBag diagnostics = DiagnosticBag.new();
+    lex(move source, &stream, &diagnostics);
+    if (!diagnostics.is_empty()) {
+        i64 i = 0;
+        while (i < diagnostics.len()) {
+            Diagnostic* diagnostic = diagnostics.get(i);
+            String rendered = render_diagnostic(diagnostic, path, &source_copy);
+            STDERR.write_str(rendered.to_str());
+            i += 1;
+        }
+        return 2;
+    }
+
+    NodePool pool = NodePool.new();
+    SyntaxTree tree;
+    parse(&stream, &diagnostics, &pool, &tree);
+    if (!diagnostics.is_empty()) {
+        i64 i = 0;
+        while (i < diagnostics.len()) {
+            Diagnostic* diagnostic = diagnostics.get(i);
+            String rendered = render_diagnostic(diagnostic, path, &source_copy);
+            STDERR.write_str(rendered.to_str());
+            i += 1;
+        }
+        pool.destroy();
+        return 2;
+    }
+    String rendered = render_tree(&tree);
+    STDOUT.write_str(rendered.to_str());
+    pool.destroy();
+    return 0;
+}
+
+i32 emit_check(str path, CfgSet* cfg, Vec<String>* include_dirs, LintConfig* lint_config) {
+    Result<String, Error> loaded = String.from_file(path);
+    if (loaded.is_err()) {
+        STDERR.write_str("agc: error: failed to read ");
+        STDERR.write_str(path);
+        STDERR.write_str("\n");
+        return 2;
+    }
+    String source = loaded.unwrap();
+    String source_copy = source.clone();
+    TokenStream stream = TokenStream.new();
+    DiagnosticBag diagnostics = DiagnosticBag.new();
+    lex(move source, &stream, &diagnostics);
+    if (diagnostics.is_empty()) {
+        NodePool pool = NodePool.new();
+        SyntaxTree tree;
+        parse(&stream, &diagnostics, &pool, &tree);
+        if (diagnostics.is_empty()) {
+            check_hir(&tree, cfg, &diagnostics);
+        }
+        if (diagnostics.is_empty()) {
+            SymbolTable symbols = SymbolTable.new();
+            collect_symbols(&symbols, &diagnostics, &tree, cfg);
+            if (diagnostics.is_empty()) {
+                resolve_names(&symbols, &diagnostics, &tree, path, cfg, include_dirs);
+            }
+            if (diagnostics.is_empty()) {
+                check_declared_types(&symbols, &tree, cfg, &diagnostics);
+            }
+            if (diagnostics.is_empty()) {
+                check_borrows(&tree, &symbols, &diagnostics, cfg);
+            }
+            if (diagnostics.is_empty()) {
+                check_send(&tree, &diagnostics, cfg);
+            }
+            if (diagnostics.is_empty()) {
+                check_ownership(&tree, &diagnostics, cfg);
+            }
+            if (diagnostics.is_empty()) {
+                AstPool check_pool = AstPool.new();
+                typecheck_expressions(&check_pool, &symbols, &tree, cfg, &diagnostics);
+            }
+            if (diagnostics.is_empty()) {
+                check_lints(&tree, &diagnostics, lint_config);
+                lint_config_apply_errors(lint_config, &diagnostics);
+            }
+            if (diagnostics.is_empty()) {
+                String summary = String.from_str("check ok: ");
+                append_i64(&summary, symbols.len());
+                summary.push_str(" top-level symbols\n");
+                STDOUT.write_str(summary.to_str());
+                pool.destroy();
+                return 0;
+            }
+        }
+        i64 i = 0;
+        while (i < diagnostics.len()) {
+            Diagnostic* diagnostic = diagnostics.get(i);
+            String rendered = render_diagnostic(diagnostic, path, &source_copy);
+            STDERR.write_str(rendered.to_str());
+            i += 1;
+        }
+        pool.destroy();
+        return lint_has_errors(&diagnostics) ? 2 : 0;
+    }
+    i64 i = 0;
+    while (i < diagnostics.len()) {
+        Diagnostic* diagnostic = diagnostics.get(i);
+        String rendered = render_diagnostic(diagnostic, path, &source_copy);
+        STDERR.write_str(rendered.to_str());
+        i += 1;
+    }
+    return 2;
+}
+
+void collect_workspace_check_options(Vec<String>* arguments, CfgSet* cfg, Vec<String>* include_dirs, WorkspacePlan* plan, LintConfig* lint_config) {
+    workspace_collect_roots(plan, include_dirs);
+    i64 i = 1;
+    while (i < arguments.len()) {
+        String* argument = arguments.get_ptr(i);
+        lint_config_flag(lint_config, argument.to_str());
+        if (argument.equals("-I") && i + 1 < arguments.len()) {
+            String value = String.from_str(arguments.get_ptr(i + 1).to_str());
+            include_dirs.push(move value);
+            i += 2;
+            continue;
+        }
+        if (argument.starts_with("-I") && argument.len() > 2) {
+            String value = argument.strip_prefix("-I");
+            include_dirs.push(move value);
+            i += 1;
+            continue;
+        }
+        if (argument.equals("--cfg") && i + 1 < arguments.len()) {
+            cfg.add_flag(arguments.get_ptr(i + 1).to_str());
+            i += 2;
+            continue;
+        }
+        if (argument.starts_with("--cfg=")) {
+            String value = argument.strip_prefix("--cfg=");
+            cfg.add_flag(value.to_str());
+            value.drop();
+            i += 1;
+            continue;
+        }
+        if (argument.equals("--target") && i + 1 < arguments.len()) {
+            cfg_apply_target(cfg, arguments.get_ptr(i + 1).to_str());
+            i += 2;
+            continue;
+        }
+        if (argument.starts_with("--target=")) {
+            String value = argument.strip_prefix("--target=");
+            cfg_apply_target(cfg, value.to_str());
+            value.drop();
+            i += 1;
+            continue;
+        }
+        if (argument.equals("-O") || argument.equals("-O1") || argument.equals("-O2")
+            || argument.equals("-O3") || argument.equals("-Os") || argument.equals("-Oz")
+            || argument.equals("-Ofast")) {
+            cfg.set_release();
+        }
+        i += 1;
+    }
+}
+
+i32 run_workspace_check(Vec<String>* arguments, WorkspacePlan* plan) {
+    CfgSet cfg = linux_defaults();
+    Vec<String> include_dirs = Vec<String>.new();
+    LintConfig lint_config = lint_config_default();
+    collect_workspace_check_options(arguments, &cfg, &include_dirs, plan, &lint_config);
+    i32 result = emit_check(plan.entry.to_str(), &cfg, &include_dirs, &lint_config);
+    include_dirs.drop();
+    return result;
+}
+
+i32 run_workspace_native(Vec<String>* arguments, WorkspacePlan* plan) {
+    i64 command_index = workspace_command_index(arguments);
+    if (command_index >= 0) {
+        String* command = arguments.get_ptr(command_index);
+        if (command.equals("check") || command.equals("c")) {
+            return run_workspace_check(arguments, plan);
+        }
+    }
+
+    i32 check_result = run_workspace_check(arguments, plan);
+    if (check_result != 0) {
+        return check_result;
+    }
+
+    Vec<String> workspace_roots = Vec<String>.new();
+    workspace_collect_roots(plan, &workspace_roots);
+    i32 native_result = 0;
+    bool native_handled = native_backend_try(arguments, plan.entry.to_str(), plan.target_name.to_str(), &workspace_roots, &native_result);
+    workspace_roots.drop();
+    if (native_handled) {
+        return native_result;
+    }
+
+    // Keep the manifest in the transitional backend request. Stage1 has
+    // already selected and checked the target above; stage0 still needs the
+    // package graph to perform its existing native link/runtime setup.
+    return run_stage0_backend(arguments);
+}
+
+bool is_frontend_command(String* command) {
+    return command.equals("lex") || command.equals("parse")
+        || command.equals("ast") || command.equals("check");
+}
+
+ArtifactExport artifact_fixture_function(str name) {
+    ArtifactExport export = ArtifactExport.new();
+    export.kind = ArtifactExportKind.Function;
+    export.name = String.from_str(name);
+    export.signature = String.from_str("fn() -> i32");
+    export.link_name_present = true;
+    export.link_name = String.from_str(name);
+    export.abi_present = true;
+    export.abi = (u8)2;
+    return move export;
+}
+
+bool artifact_source_type(SyntaxNode* node, String* out) {
+    if (node == (SyntaxNode*)0 || node.kind != NodeKind.Token) {
+        return false;
+    }
+    if (node.text == "void") {
+        out.push_str("unit");
+        return true;
+    }
+    if (node.token_kind == TokenKind.I8 || node.token_kind == TokenKind.I16
+        || node.token_kind == TokenKind.I32 || node.token_kind == TokenKind.I64
+        || node.token_kind == TokenKind.U8 || node.token_kind == TokenKind.U16
+        || node.token_kind == TokenKind.U32 || node.token_kind == TokenKind.U64
+        || node.token_kind == TokenKind.F32 || node.token_kind == TokenKind.F64
+        || node.token_kind == TokenKind.Bool || node.token_kind == TokenKind.Char) {
+        out.push_str(node.text);
+        return true;
+    }
+    return false;
+}
+
+bool artifact_source_has_attribute(SyntaxNode* item) {
+    SyntaxNode* child = item.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Token && child.text == "#") { return true; }
+        child = child.next_sibling;
+    }
+    return false;
+}
+
+u64 artifact_source_hash(String* source) {
+    u64 hash = (u64)14695981039346656037;
+    i64 index = 0;
+    while (index < source.len) {
+        hash = (hash ^ (u64)source.data[index]) * (u64)1099511628211;
+        index += 1;
+    }
+    return hash;
+}
+
+bool artifact_source_function(SyntaxNode* item, ArtifactExport* out) {
+    if (artifact_source_has_attribute(item)) { return false; }
+    SyntaxNode* name = function_identifier(item);
+    SyntaxNode* parameters = item.first_child;
+    while (parameters != (SyntaxNode*)0 && parameters.kind != NodeKind.Parenthesized) {
+        parameters = parameters.next_sibling;
+    }
+    if (name == (SyntaxNode*)0 || parameters == (SyntaxNode*)0) { return false; }
+    String return_type = String.new();
+    SyntaxNode* child = item.first_child;
+    while (child != name) {
+        if (child.kind == NodeKind.Token && child.text != "pub"
+            && !artifact_source_type(child, &return_type)) {
+            return_type.drop();
+            return false;
+        }
+        child = child.next_sibling;
+    }
+    if (return_type.len == 0) { return_type.push_str("unit"); }
+    String signature = String.from_str("fn(");
+    i64 parameter_count = 0;
+    child = parameters.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.token_kind == TokenKind.Comma && child.kind == NodeKind.Token) {
+            child = child.next_sibling;
+            continue;
+        }
+        String param_type = String.new();
+        if (!artifact_source_type(child, &param_type)) {
+            param_type.drop();
+            signature.drop();
+            return_type.drop();
+            return false;
+        }
+        SyntaxNode* param_name = child.next_sibling;
+        if (param_name == (SyntaxNode*)0 || !node_is_identifier(param_name)) {
+            param_type.drop();
+            signature.drop();
+            return_type.drop();
+            return false;
+        }
+        if (parameter_count > 0) { signature.push_str(","); }
+        signature.push_str(param_type.to_str());
+        param_type.drop();
+        parameter_count += 1;
+        child = param_name.next_sibling;
+        if (child != (SyntaxNode*)0
+            && !(child.kind == NodeKind.Token && child.token_kind == TokenKind.Comma)) {
+            signature.drop();
+            return_type.drop();
+            return false;
+        }
+        if (child != (SyntaxNode*)0) { child = child.next_sibling; }
+    }
+    signature.push_str(") -> ");
+    signature.push_str(return_type.to_str());
+    out.kind = ArtifactExportKind.Function;
+    out.name = String.from_str(name.text);
+    out.signature = move signature;
+    out.link_name_present = true;
+    out.link_name = String.from_str(name.text);
+    out.abi_present = true;
+    out.abi = (u8)2;
+    return_type.drop();
+    return true;
+}
+
+i32 emit_artifact_fixture(str output_path) {
+    Artifact artifact = Artifact.new();
+    artifact.version = (u8)11;
+    artifact.module_name = String.from_str("artifact_fixture");
+    artifact.module_path = String.from_str("artifact_fixture");
+    artifact.source_path = String.from_str("artifact_fixture.ag");
+    artifact.compiler_version = String.from_str("foreign");
+    artifact.target_triple = String.from_str("unknown");
+    artifact.exports.push(artifact_fixture_function("zeta"));
+    artifact.exports.push(artifact_fixture_function("probe"));
+    artifact.exports.push(artifact_fixture_function("alpha"));
+    bool ok = publish_artifact(output_path, &artifact);
+    artifact_drop(&artifact);
+    if (!ok) {
+        STDERR.write_str("agc: error: failed to publish AGM fixture\n");
+        return 2;
+    }
+    return 0;
+}
+
+i32 emit_source_artifact(str source_path, str output_path) {
+    Result<String, Error> loaded = String.from_file(source_path);
+    if (loaded.is_err()) {
+        STDERR.write_str("agc: error: failed to read artifact source\n");
+        return 2;
+    }
+    String source = loaded.unwrap();
+    u64 source_hash = artifact_source_hash(&source);
+    TokenStream stream = TokenStream.new();
+    DiagnosticBag diagnostics = DiagnosticBag.new();
+    lex(move source, &stream, &diagnostics);
+    NodePool pool = NodePool.new();
+    SyntaxTree tree;
+    if (diagnostics.is_empty()) {
+        parse(&stream, &diagnostics, &pool, &tree);
+    }
+    if (!diagnostics.is_empty()) {
+        STDERR.write_str("agc: error: invalid source for AGM publication\n");
+        pool.destroy();
+        return 2;
+    }
+    Artifact artifact = Artifact.new();
+    artifact.version = (u8)11;
+    artifact.module_name = String.from_str(source_path);
+    artifact.module_path = String.from_str(source_path);
+    artifact.source_path = String.from_str(source_path);
+    artifact.source_hash = source_hash;
+    artifact.compiler_version = String.from_str("foreign");
+    artifact.target_triple = String.from_str("unknown");
+    bool supported = true;
+    SyntaxNode* item = tree.root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Function) {
+            ArtifactExport export = ArtifactExport.new();
+            if (!artifact_source_function(item, &export)) {
+                artifact_drop_export(&export);
+                supported = false;
+                break;
+            }
+            artifact.exports.push(move export);
+        } else if (item.kind == NodeKind.Item || item.kind == NodeKind.Attribute) {
+        } else if (item.kind == NodeKind.Struct || item.kind == NodeKind.Enum
+            || item.kind == NodeKind.Trait || item.kind == NodeKind.Global
+            || item.kind == NodeKind.TypeAlias || item.kind == NodeKind.Import) {
+            supported = false;
+            break;
+        }
+        item = item.next_sibling;
+    }
+    bool ok = supported && publish_artifact(output_path, &artifact);
+    if (!supported) {
+        STDERR.write_str("agc: error: AGM source collector cannot yet encode this declaration exactly\n");
+    } else if (!ok) {
+        STDERR.write_str("agc: error: failed to publish source AGM artifact\n");
+    }
+    artifact_drop(&artifact);
+    pool.destroy();
+    return ok ? 0 : 2;
+}
+
+i32 run_frontend() {
+    Vec<String> arguments = args();
+    if (arguments.len() == 2) {
+        String* option = arguments.get_ptr(1);
+        if (option.equals("--version") || option.equals("-V")) {
+            STDOUT.write_str("agc 0.2.6\n");
+            arguments.drop();
+            return 0;
+        }
+        if (option.equals("--help") || option.equals("-h")) {
+            STDOUT.write_str("Silver compiler\n\nusage: agc [OPTIONS] <FILE>... [-o <OUT>]\n       agc [OPTIONS] <COMMAND>\n\ncommands:\n  lex, parse, ast, check <source.ag>\n  build <silver.toml> [--bin name] [-o output]\n  run <source.ag> [-- arguments...]\n\noptions:\n  -I <dir>       Add an import directory\n  -O2            Optimize generated code\n  --no-cache     Disable the module cache\n  -h, --help     Show help\n  -V, --version  Show version\n");
+            arguments.drop();
+            return 0;
+        }
+    }
+    WorkspacePlan workspace = workspace_plan_empty();
+    String workspace_error = String.new();
+    bool has_workspace = false;
+    if (!workspace_package_arguments(&arguments, &workspace, &has_workspace, &workspace_error)) {
+        STDERR.write_str("agc: error: ");
+        STDERR.write_str(workspace_error.to_str());
+        STDERR.write_str("\n");
+        workspace_error.drop();
+        workspace_plan_drop(&workspace);
+        arguments.drop();
+        return 2;
+    }
+    workspace_error.drop();
+    if (has_workspace) {
+        i32 result = run_workspace_native(&arguments, &workspace);
+        workspace_plan_drop(&workspace);
+        arguments.drop();
+        return result;
+    }
+    workspace_plan_drop(&workspace);
+    if (arguments.len() == 4 && arguments.get_ptr(1).equals("artifact-source")) {
+        i32 result = emit_source_artifact(
+            arguments.get_ptr(2).to_str(), arguments.get_ptr(3).to_str()
+        );
+        arguments.drop();
+        return result;
+    }
+    if (arguments.len() == 3 && arguments.get_ptr(1).equals("artifact-fixture")) {
+        i32 result = emit_artifact_fixture(arguments.get_ptr(2).to_str());
+        arguments.drop();
+        return result;
+    }
+    if (arguments.len() < 2) {
+        return run_stage0_backend(&arguments);
+    }
+    String* command = arguments.get_ptr(1);
+    if (!is_frontend_command(command)) {
+        String native_source = String.new();
+        if (native_source_path(&arguments, &native_source)) {
+            i32 native_result = 0;
+            Vec<String> empty_includes = Vec<String>.new();
+            bool handled = native_backend_try(&arguments, native_source.to_str(), "", &empty_includes, &native_result);
+            empty_includes.drop();
+            if (handled) {
+                native_source.drop();
+                return native_result;
+            }
+        }
+        native_source.drop();
+        return run_stage0_backend(&arguments);
+    }
+    if (arguments.len() < 3) {
+        STDERR.write_str("usage: agc <lex|parse|check> <source.ag> [--cfg key=value,...] [-I dir] [-O2]\n");
+        return 2;
+    }
+    String* input = arguments.get_ptr(2);
+    CfgSet cfg = linux_defaults();
+    Vec<String> include_dirs = Vec<String>.new();
+    LintConfig lint_config = lint_config_default();
+    i64 option = 3;
+    while (option < arguments.len()) {
+        String* argument = arguments.get_ptr(option);
+        lint_config_flag(&lint_config, argument.to_str());
+        if (argument.equals("-I")) {
+            if (option + 1 >= arguments.len()) {
+                STDERR.write_str("agc: error: -I requires a directory\n");
+                include_dirs.drop();
+                return 2;
+            }
+            String include = String.from_str(arguments.get_ptr(option + 1).to_str());
+            include_dirs.push(move include);
+            option += 2;
+            continue;
+        }
+        if (argument.starts_with("-I") && argument.len() > 2) {
+            String include = argument.strip_prefix("-I");
+            include_dirs.push(move include);
+            option += 1;
+            continue;
+        }
+        if (argument.equals("-O") || argument.equals("-O1") || argument.equals("-O2")
+            || argument.equals("-O3") || argument.equals("-Os") || argument.equals("-Oz")
+            || argument.equals("-Ofast")) {
+            cfg.set_release();
+            option += 1;
+            continue;
+        }
+        if (argument.equals("--cfg")) {
+            if (option + 1 >= arguments.len()) {
+                STDERR.write_str("agc: error: --cfg requires a value\n");
+                include_dirs.drop();
+                return 2;
+            }
+            cfg.add_flag(arguments.get_ptr(option + 1).to_str());
+            option += 2;
+            continue;
+        }
+        if (argument.starts_with("--cfg=")) {
+            String value = argument.strip_prefix("--cfg=");
+            cfg.add_flag(value.to_str());
+            value.drop();
+            option += 1;
+            continue;
+        }
+        if (argument.equals("--target")) {
+            if (option + 1 >= arguments.len()) {
+                STDERR.write_str("agc: error: --target requires a value\n");
+                include_dirs.drop();
+                return 2;
+            }
+            cfg_apply_target(&cfg, arguments.get_ptr(option + 1).to_str());
+            option += 2;
+            continue;
+        }
+        if (argument.starts_with("--target=")) {
+            String value = argument.strip_prefix("--target=");
+            cfg_apply_target(&cfg, value.to_str());
+            value.drop();
+            option += 1;
+            continue;
+        }
+        option += 1;
+    }
+    i32 result = 2;
+    if (command.equals("lex")) {
+        result = emit_tokens(input.to_str());
+    } else if (command.equals("check")) {
+        result = emit_check(input.to_str(), &cfg, &include_dirs, &lint_config);
+    } else {
+        result = emit_ast(input.to_str());
+    }
+    include_dirs.drop();
+    return result;
+}

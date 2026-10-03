@@ -1,0 +1,171 @@
+// expected_exit: 42
+// A wrapper without Drop still owns each initialized direct Drop field.
+import std.test;
+
+i64 drops = 0;
+i64 dropped_values = 0;
+
+struct Tracked {
+    i64 value;
+}
+impl Drop for Tracked {
+    void drop(Tracked* self) {
+        drops = drops + 1;
+        dropped_values = dropped_values + self.value;
+    }
+}
+
+struct Wrapper<T> {
+    T item;
+    Tracked sibling;
+}
+
+struct PointerView {
+    Tracked* borrowed;
+}
+
+void consume_wrapper(Wrapper<Tracked> _value) {
+}
+
+impl Wrapper<Tracked> {
+    i64 consume_receiver(Wrapper<Tracked> self) {
+        return self.item.value;
+    }
+}
+
+Wrapper<Tracked> return_wrapper(Wrapper<Tracked> value) {
+    return move value;
+}
+
+i64 inspect(&Wrapper<Tracked> value) {
+    return value.item.value;
+}
+
+void early_drop(bool leave) {
+    Wrapper<Tracked> value;
+    Tracked first = { .value = 31 };
+    value.item = move first;
+    if (leave) { return; }
+    Tracked second = { .value = 32 };
+    value.sibling = move second;
+}
+
+i32 main() {
+    // An untouched sibling stays zeroed and does not acquire a drop flag.
+    drops = 0;
+    dropped_values = 0;
+    {
+        Wrapper<Tracked> value;
+        if (true) {
+            Tracked item = { .value = 5 };
+            value.item = move item;
+        }
+    }
+    assert_eq_i64(1, drops, "only the conditionally initialized field drops");
+    assert_eq_i64(5, dropped_values, "conditional field keeps its value");
+
+    // Explicit whole-wrapper move transfers both direct field flags.
+    drops = 0;
+    dropped_values = 0;
+    {
+        Wrapper<Tracked> source;
+        Tracked item = { .value = 7 };
+        Tracked sibling = { .value = 8 };
+        source.item = move item;
+        source.sibling = move sibling;
+        Wrapper<Tracked> target = move source;
+        assert_eq_i64(7, target.item.value, "whole move keeps the generic field");
+        Wrapper<Tracked> replacement;
+        Tracked replacement_item = { .value = 9 };
+        Tracked replacement_sibling = { .value = 10 };
+        replacement.item = move replacement_item;
+        replacement.sibling = move replacement_sibling;
+        target = move replacement;
+        assert_eq_i64(2, drops, "whole overwrite drops old initialized fields");
+    }
+    assert_eq_i64(4, drops, "whole move and overwrite retain one final owner");
+    assert_eq_i64(34, dropped_values, "whole move preserves each field payload");
+
+    // A returned wrapper and a by-value callee each become the final owner.
+    drops = 0;
+    dropped_values = 0;
+    {
+        Wrapper<Tracked> source;
+        Tracked item = { .value = 12 };
+        Tracked sibling = { .value = 13 };
+        source.item = move item;
+        source.sibling = move sibling;
+        Wrapper<Tracked> returned = return_wrapper(move source);
+        consume_wrapper(move returned);
+    }
+    assert_eq_i64(2, drops, "return and argument transfer drop once per field");
+    assert_eq_i64(25, dropped_values, "by-value callee receives both fields");
+
+    // The by-value receiver consumes the wrapper; a borrow leaves it live.
+    drops = 0;
+    dropped_values = 0;
+    {
+        Wrapper<Tracked> value;
+        Tracked item = { .value = 19 };
+        Tracked sibling = { .value = 20 };
+        value.item = move item;
+        value.sibling = move sibling;
+        assert_eq_i64(19, inspect(&value), "borrow can read a wrapped field");
+        assert_eq_i64(19, value.consume_receiver(), "receiver reads moved value");
+    }
+    assert_eq_i64(2, drops, "borrow preserves ownership for receiver transfer");
+    assert_eq_i64(39, dropped_values, "receiver-owned fields drop once");
+
+    // Shadowed bindings carry independent direct-field flags.
+    drops = 0;
+    dropped_values = 0;
+    {
+        Wrapper<Tracked> value;
+        Tracked outer_item = { .value = 21 };
+        Tracked outer_sibling = { .value = 22 };
+        value.item = move outer_item;
+        value.sibling = move outer_sibling;
+        {
+            Wrapper<Tracked> value;
+            Tracked item = { .value = 22 };
+            Tracked sibling = { .value = 23 };
+            value.item = move item;
+            value.sibling = move sibling;
+            consume_wrapper(move value);
+        }
+        assert_eq_i64(2, drops, "inner wrapper drops in its by-value callee");
+    }
+    assert_eq_i64(4, drops, "shadowed outer wrapper drops independently");
+    assert_eq_i64(88, dropped_values, "shadowed payloads remain distinct");
+
+    // Overwrite releases the old field, and early return releases live fields.
+    drops = 0;
+    dropped_values = 0;
+    {
+        Wrapper<Tracked> value;
+        Tracked old = { .value = 25 };
+        Tracked fresh = { .value = 26 };
+        value.item = move old;
+        value.item = move fresh;
+        assert_eq_i64(1, drops, "overwritten field drops immediately");
+    }
+    assert_eq_i64(2, drops, "replacement drops at scope exit");
+    assert_eq_i64(51, dropped_values, "overwrite drops old and new values");
+
+    drops = 0;
+    dropped_values = 0;
+    early_drop(true);
+    assert_eq_i64(1, drops, "early return drops initialized direct field");
+    assert_eq_i64(31, dropped_values, "early return skips untouched sibling");
+
+    // Copying a pointer-bearing wrapper must not acquire pointee ownership.
+    drops = 0;
+    {
+        Tracked owner = { .value = 40 };
+        PointerView view = { .borrowed = &owner };
+        PointerView copied = view;
+        assert_eq_i64(40, copied.borrowed.value, "copied pointer view reads pointee");
+    }
+    assert_eq_i64(1, drops, "pointer field does not drop its pointee");
+    return 42;
+}

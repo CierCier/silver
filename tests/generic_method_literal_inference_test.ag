@@ -1,0 +1,30 @@
+struct MethodInferenceBox<T> {
+    T value;
+}
+
+impl<T> MethodInferenceBox<T> {
+    void set(MethodInferenceBox<T>* self, T value) {
+        self.value = value;
+    }
+}
+
+void set_after_receiver<T>(&mut MethodInferenceBox<T> box, T value) {
+    box.set(value);
+}
+
+void set_before_receiver<T>(T value, &mut MethodInferenceBox<T> box) {
+    box.set(value);
+}
+
+i32 main() {
+    MethodInferenceBox<i64> first;
+    MethodInferenceBox<i64> second;
+    i64 explicit_value = 43;
+
+    set_after_receiver(&mut first, 41);
+    set_after_receiver(&mut first, explicit_value);
+    set_before_receiver((i64)42, &mut second);
+
+    if (first.value == 43 && second.value == 42) { return 0; }
+    return 1;
+}

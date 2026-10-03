@@ -1,0 +1,49 @@
+import std.optional;
+import std.result;
+import std.string;
+import std.io.file;
+
+enum PairValue<T, U> {
+    Empty;
+    Pair(T, U);
+}
+
+Optional<String> text_value() {
+    return Optional.Some(String.from_str("enum payload"));
+}
+
+PairValue<u8, i64> pair_value() {
+    return PairValue.Pair((u8)7, (i64)1234567890123);
+}
+
+i64 pair_payload(PairValue<u8, i64> pair) {
+    match pair {
+        Pair(a, b) : {
+            if (a != (u8)7) { return 0; }
+            return b;
+        },
+        Empty : { return 0; }
+    };
+}
+
+i32 main() {
+    Optional<u32> small = Optional<u32>.some((u32)123456);
+    if (small.unwrap() != (u32)123456) { return 1; }
+    Optional<String> text = text_value();
+    String value = text.unwrap();
+    println(value.to_str());
+    Optional<String> absent = Optional<String>.none();
+    if (!absent.is_none()) { return 2; }
+    PairValue<u8, i64> pair = pair_value();
+    if (pair_payload(pair) != (i64)1234567890123) { return 3; }
+    Optional<u32> assigned = Optional<u32>.none();
+    assigned = Optional.Some((u32)42);
+    if (assigned.unwrap() != (u32)42) { return 5; }
+    Result<String, u32> success = Result<String, u32>.ok(String.from_str("result payload"));
+    String result_text = success.unwrap();
+    println(result_text.to_str());
+    Result<u32, String> failure = Result<u32, String>.err(String.from_str("error payload"));
+    String error_text = failure.unwrap_err();
+    println(error_text.to_str());
+    return 42;
+}

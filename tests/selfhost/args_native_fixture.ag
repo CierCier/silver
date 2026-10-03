@@ -1,0 +1,14 @@
+import std.args;
+import std.mem.vec;
+import std.string;
+import std.io.file;
+
+i32 main() {
+    Vec<String> a = args();
+    if (a.len() != 3) {
+        return 1;
+    }
+    println(a.get(1).to_str());
+    println(a.get(2).to_str());
+    return 42;
+}

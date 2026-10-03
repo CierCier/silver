@@ -1,0 +1,10 @@
+const i32 CONST_GLOBAL = 1;
+const i32 CONST_ARRAY[2] = {1, 2};
+
+i32 main() {
+    CONST_GLOBAL = 2;
+    CONST_ARRAY[0] = 3;
+    const i32 local = 4;
+    (local) = 5;
+    return 0;
+}
