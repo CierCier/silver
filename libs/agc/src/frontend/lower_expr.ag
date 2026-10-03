@@ -1594,6 +1594,29 @@ impl ExprLowerer {
                     bool array_initializer = value_type.kind == TypeKind.Array
                         && init_start != (SyntaxNode*)0 && init_start.kind == NodeKind.Block
                         && init_start.next_sibling == end;
+                    if (value_type.kind == TypeKind.Named
+                        && init_start != (SyntaxNode*)0 && init_start.kind == NodeKind.Block
+                        && init_start.next_sibling == end) {
+                        u32 aggregate_id = self.lower_struct_lit(self.names.get(value_type.name_id), init_start);
+                        if (aggregate_id == 0) { return; }
+                        AstExpr* aggregate = self.pool.get_expr(aggregate_id);
+                        u32 fields_start = aggregate.inner1;
+                        u32 field_count = aggregate.aux;
+                        // Ordinary field assignments retain predrop and live-flag handling.
+                        stmt_ids.push(self.pool.add_stmt_let(var_name, type_id, 0, start.span));
+                        u32 field_index = 0;
+                        while (field_index < field_count) {
+                            u32 pair = fields_start + field_index * (u32)2;
+                            u32 field_name = self.pool.args.get((i64)pair);
+                            u32 field_value = self.pool.args.get((i64)(pair + 1));
+                            Span field_span = self.pool.get_expr(field_value).span;
+                            u32 target = self.pool.add_var(var_name, var_node.span);
+                            u32 field = self.pool.add_field(target, field_name, field_span);
+                            stmt_ids.push(self.pool.add_stmt_assign(field, field_value, field_span));
+                            field_index += 1;
+                        }
+                        return;
+                    }
                     u32 init_id = 0;
                     if (array_initializer) {
                         init_id = self.lower_array_initializer(init_start);

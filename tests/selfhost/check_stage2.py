@@ -98,6 +98,9 @@ i32 main() {
         programs["nested-aggregate-layout"] = (
             root / "tests/selfhost/semantic_regressions/stage2_nested_layout.ag"
         ).read_text(encoding="utf-8")
+        programs["aggregate-init-drop"] = (
+            root / "tests/aggregate_init_drop_test.ag"
+        ).read_text(encoding="utf-8")
         for name, contents in programs.items():
             program_source = work / f"{name}.ag"
             program_source.write_text(contents, encoding="utf-8")
@@ -108,7 +111,7 @@ i32 main() {
                 raise AssertionError(
                     f"stage2-compiled {name} program returned {executed.returncode}, expected 42"
                 )
-    print("native stage2 frontend commands and six runtime programs passed without stage0")
+    print("native stage2 frontend commands and seven runtime programs passed without stage0")
     return 0
 
 
