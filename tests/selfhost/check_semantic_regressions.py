@@ -152,21 +152,221 @@ i32 main() {
                 f"{emitted.stdout}\n{emitted.stderr}"
             )
         module_source.unlink()
-        imported = subprocess.run(
-            [str(stage0), "--no-cache", "check", "-I", str(work), str(consumer)],
-            cwd=root, capture_output=True, text=True, check=False,
+        imported = (
+            (
+                "compiled AGM import stage0",
+                subprocess.run(
+                    [str(stage0), "--no-cache", "check", "-I", str(work), str(consumer)],
+                    cwd=root, capture_output=True, text=True, check=False,
+                ),
+            ),
+            (
+                "compiled AGM import stage1",
+                subprocess.run(
+                    [str(stage1), "check", str(consumer), "--no-cache", "-I", str(work)],
+                    cwd=root, env=stage1_env, capture_output=True, text=True, check=False,
+                ),
+            ),
         )
-        output = imported.stdout + imported.stderr
-        if imported.returncode == 0:
-            raise AssertionError(
-                "compiled AGM import accepted field move through custom Drop"
-            )
-        for fragment in DROP_DIAGNOSTIC:
-            if fragment not in output:
+        for label, result in imported:
+            output = result.stdout + result.stderr
+            if result.returncode == 0:
                 raise AssertionError(
-                    f"compiled AGM import diagnostic missing {fragment!r}:\n{output}"
+                    f"{label} accepted field move through custom Drop"
                 )
-    return 3
+            for fragment in DROP_DIAGNOSTIC:
+                if fragment not in output:
+                    raise AssertionError(
+                        f"{label} diagnostic missing {fragment!r}:\n{output}"
+                    )
+    return 4
+
+
+def check_drop_ancestor_enum_imports(
+    stage0: pathlib.Path, stage1: pathlib.Path, root: pathlib.Path
+) -> int:
+    module_source_text = """\
+import std.mem.drop;
+struct Tracked { i64 value; }
+impl Drop for Tracked { void drop(Tracked* self) {} }
+enum OwnedEnum { Item(Tracked); }
+enum CopyEnum { Value(i64); }
+struct EnumOwner {
+    OwnedEnum owned;
+    CopyEnum copyable;
+}
+impl Drop for EnumOwner { void drop(EnumOwner* self) {} }
+"""
+    consumer_rejected_text = """\
+import drop_ancestor_enums;
+
+void consume(OwnedEnum e) {}
+
+i32 main() {
+    EnumOwner owner;
+    consume(owner.owned);
+    return 0;
+}
+"""
+    consumer_accepted_text = """\
+import drop_ancestor_enums;
+
+void consume_copy(CopyEnum e) {}
+
+i32 main() {
+    EnumOwner owner;
+    consume_copy(owner.copyable);
+    return 0;
+}
+"""
+    stage1_env = os.environ.copy()
+    stage1_env["SILVER_STAGE0"] = "/nonexistent"
+    with tempfile.TemporaryDirectory(prefix="silver-drop-ancestor-enum-import-") as name:
+        work = pathlib.Path(name)
+        module_source = work / "drop_ancestor_enums.ag"
+        consumer_bad = work / "consumer_bad.ag"
+        consumer_good = work / "consumer_good.ag"
+        module_source.write_text(module_source_text, encoding="utf-8")
+        consumer_bad.write_text(consumer_rejected_text, encoding="utf-8")
+        consumer_good.write_text(consumer_accepted_text, encoding="utf-8")
+
+        def run_check(label: str, target: pathlib.Path):
+            if "stage0" in label:
+                return subprocess.run(
+                    [str(stage0), "--no-cache", "check", "-I", str(work), str(target)],
+                    cwd=root, capture_output=True, text=True, check=False,
+                )
+            return subprocess.run(
+                [str(stage1), "check", str(target), "--no-cache", "-I", str(work)],
+                cwd=root, env=stage1_env, capture_output=True, text=True, check=False,
+            )
+
+        for label in ("source import stage0", "source import stage1"):
+            bad_res = run_check(label, consumer_bad)
+            output = bad_res.stdout + bad_res.stderr
+            if bad_res.returncode == 0:
+                raise AssertionError(f"{label} accepted owned enum move through custom Drop")
+            for fragment in DROP_DIAGNOSTIC:
+                if fragment not in output:
+                    raise AssertionError(f"{label} diagnostic missing {fragment!r}:\n{output}")
+            good_res = run_check(label, consumer_good)
+            if good_res.returncode != 0:
+                raise AssertionError(f"{label} rejected copyable enum move: {good_res.stderr}")
+
+        emitted = subprocess.run(
+            [str(stage0), "--no-cache", "--emit=module", str(module_source)],
+            cwd=work, capture_output=True, text=True, check=False,
+        )
+        artifact = work / "drop_ancestor_enums.agm"
+        if emitted.returncode != 0 or not artifact.is_file():
+            raise AssertionError(f"failed to emit enum module: {emitted.stdout}\n{emitted.stderr}")
+        module_source.unlink()
+
+        for label in ("compiled AGM import stage0", "compiled AGM import stage1"):
+            bad_res = run_check(label, consumer_bad)
+            output = bad_res.stdout + bad_res.stderr
+            if bad_res.returncode == 0:
+                raise AssertionError(f"{label} accepted owned enum move through custom Drop")
+            for fragment in DROP_DIAGNOSTIC:
+                if fragment not in output:
+                    raise AssertionError(f"{label} diagnostic missing {fragment!r}:\n{output}")
+            good_res = run_check(label, consumer_good)
+            if good_res.returncode != 0:
+                raise AssertionError(f"{label} rejected copyable enum move: {good_res.stderr}")
+    return 4
+
+
+def check_drop_ancestor_method_imports(
+    stage0: pathlib.Path, stage1: pathlib.Path, root: pathlib.Path
+) -> int:
+    module_source_text = """\
+import std.mem.drop;
+struct Leaf { i64 value; }
+impl Drop for Leaf { void drop(Leaf* self) {} }
+struct Managed { Leaf item; }
+impl Drop for Managed { void drop(Managed* self) {} }
+
+struct Worker {}
+impl Worker {
+    void consume(Worker* self, Leaf item) {}
+    void inspect(Worker* self, &Leaf item) {}
+}
+"""
+    consumer_rejected_text = """\
+import drop_ancestor_methods;
+
+i32 main() {
+    Worker w;
+    Managed m;
+    w.consume(m.item);
+    return 0;
+}
+"""
+    consumer_accepted_text = """\
+import drop_ancestor_methods;
+
+i32 main() {
+    Worker w;
+    Managed m;
+    w.inspect(&m.item);
+    return 0;
+}
+"""
+    stage1_env = os.environ.copy()
+    stage1_env["SILVER_STAGE0"] = "/nonexistent"
+    with tempfile.TemporaryDirectory(prefix="silver-drop-ancestor-method-import-") as name:
+        work = pathlib.Path(name)
+        module_source = work / "drop_ancestor_methods.ag"
+        consumer_bad = work / "consumer_bad.ag"
+        consumer_good = work / "consumer_good.ag"
+        module_source.write_text(module_source_text, encoding="utf-8")
+        consumer_bad.write_text(consumer_rejected_text, encoding="utf-8")
+        consumer_good.write_text(consumer_accepted_text, encoding="utf-8")
+
+        def run_check(label: str, target: pathlib.Path):
+            if "stage0" in label:
+                return subprocess.run(
+                    [str(stage0), "--no-cache", "check", "-I", str(work), str(target)],
+                    cwd=root, capture_output=True, text=True, check=False,
+                )
+            return subprocess.run(
+                [str(stage1), "check", str(target), "--no-cache", "-I", str(work)],
+                cwd=root, env=stage1_env, capture_output=True, text=True, check=False,
+            )
+
+        for label in ("source import stage0", "source import stage1"):
+            bad_res = run_check(label, consumer_bad)
+            output = bad_res.stdout + bad_res.stderr
+            if bad_res.returncode == 0:
+                raise AssertionError(f"{label} accepted method move through custom Drop")
+            for fragment in DROP_DIAGNOSTIC:
+                if fragment not in output:
+                    raise AssertionError(f"{label} diagnostic missing {fragment!r}:\n{output}")
+            good_res = run_check(label, consumer_good)
+            if good_res.returncode != 0:
+                raise AssertionError(f"{label} rejected method borrow: {good_res.stderr}")
+
+        emitted = subprocess.run(
+            [str(stage0), "--no-cache", "--emit=module", str(module_source)],
+            cwd=work, capture_output=True, text=True, check=False,
+        )
+        artifact = work / "drop_ancestor_methods.agm"
+        if emitted.returncode != 0 or not artifact.is_file():
+            raise AssertionError(f"failed to emit method module: {emitted.stdout}\n{emitted.stderr}")
+        module_source.unlink()
+
+        for label in ("compiled AGM import stage0", "compiled AGM import stage1"):
+            bad_res = run_check(label, consumer_bad)
+            output = bad_res.stdout + bad_res.stderr
+            if bad_res.returncode == 0:
+                raise AssertionError(f"{label} accepted method move through custom Drop")
+            for fragment in DROP_DIAGNOSTIC:
+                if fragment not in output:
+                    raise AssertionError(f"{label} diagnostic missing {fragment!r}:\n{output}")
+            good_res = run_check(label, consumer_good)
+            if good_res.returncode != 0:
+                raise AssertionError(f"{label} rejected method borrow: {good_res.stderr}")
+    return 4
 
 
 def main() -> int:
@@ -219,6 +419,12 @@ def main() -> int:
                         f"missing {fragment!r}\n{diagnostic}"
                     )
     import_count = check_drop_ancestor_imports(
+        args.stage0.resolve(), args.stage1.resolve(), root
+    )
+    import_count += check_drop_ancestor_enum_imports(
+        args.stage0.resolve(), args.stage1.resolve(), root
+    )
+    import_count += check_drop_ancestor_method_imports(
         args.stage0.resolve(), args.stage1.resolve(), root
     )
     print(

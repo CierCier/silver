@@ -1196,7 +1196,7 @@ bool typecheck_method_parameter_is_value(SyntaxNode* root, TypeTable* types,
         }
         item = item.next_sibling;
     }
-    return false;
+    return types.method_param_is_value(owner_name, method_name, parameter_index);
 }
 
 bool typecheck_method_has_value_receiver(SyntaxNode* root, TypeTable* types,

@@ -107,6 +107,13 @@ struct TypeStructProperties {
     bool needs_drop;
 }
 
+struct TypeMethodParam {
+    u32 owner_name_id;
+    u32 method_name_id;
+    i64 parameter_index;
+    bool is_value;
+}
+
 struct TypeTable {
     Interner names;
     Vec<TypeEntry> types;
@@ -116,6 +123,7 @@ struct TypeTable {
     Vec<u32> struct_fields;
     Vec<u32> struct_field_names;
     Vec<u32> struct_type_params;
+    Vec<TypeMethodParam> method_params;
 }
 TypeProperties type_properties_at(TypeTable* table, u32 id, u32 depth) {
     TypeProperties properties;
@@ -187,6 +195,7 @@ impl TypeTable {
         table.struct_fields = Vec<u32>.new();
         table.struct_field_names = Vec<u32>.new();
         table.struct_type_params = Vec<u32>.new();
+        table.method_params = Vec<TypeMethodParam>.new();
         // 0: Unknown
         table.add_prim(TypeKind.Unknown, "unknown");
         // 1: Void
@@ -877,6 +886,58 @@ impl TypeTable {
         definition.type_param_count = 0;
         definition.needs_drop = true;
         self.struct_properties.push(definition);
+    }
+
+    void register_method_param(TypeTable* self, str owner, str method, i64 index, bool is_value) {
+        String base_owner = String.new();
+        i64 oi = 0;
+        while (owner[oi] != 0 && owner[oi] != (u8)'<') {
+            base_owner.push(owner[oi]);
+            oi += 1;
+        }
+        u32 owner_name_id = self.names.intern(base_owner.to_str());
+        base_owner.drop();
+        u32 method_name_id = self.names.intern(method);
+        i64 i = 0;
+        while (i < self.method_params.len()) {
+            TypeMethodParam* entry = self.method_params.get_ptr(i);
+            if (entry.owner_name_id == owner_name_id
+                && entry.method_name_id == method_name_id
+                && entry.parameter_index == index) {
+                entry.is_value = is_value;
+                return;
+            }
+            i += 1;
+        }
+        TypeMethodParam param;
+        param.owner_name_id = owner_name_id;
+        param.method_name_id = method_name_id;
+        param.parameter_index = index;
+        param.is_value = is_value;
+        self.method_params.push(param);
+    }
+
+    bool method_param_is_value(TypeTable* self, str owner, str method, i64 index) {
+        String base_owner = String.new();
+        i64 oi = 0;
+        while (owner[oi] != 0 && owner[oi] != (u8)'<') {
+            base_owner.push(owner[oi]);
+            oi += 1;
+        }
+        u32 owner_name_id = self.names.intern(base_owner.to_str());
+        base_owner.drop();
+        u32 method_name_id = self.names.intern(method);
+        i64 i = 0;
+        while (i < self.method_params.len()) {
+            TypeMethodParam* entry = self.method_params.get_ptr(i);
+            if (entry.owner_name_id == owner_name_id
+                && entry.method_name_id == method_name_id
+                && entry.parameter_index == index) {
+                return entry.is_value;
+            }
+            i += 1;
+        }
+        return false;
     }
 
 
