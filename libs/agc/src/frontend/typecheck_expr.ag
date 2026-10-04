@@ -1570,6 +1570,7 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 }
                 i += 1;
             }
+            inferred = types.type_args.get(callable_inner);
         }
         if (callee.kind == ExprKind.Var) {
             str callee_name = symbols.names.get(callee.aux);

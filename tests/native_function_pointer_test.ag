@@ -15,6 +15,28 @@ struct CallbackSlot {
     void(i32) callback;
 }
 
+struct Point {
+    i32 x;
+    i32 y;
+}
+
+i32 read_point(&Point point) {
+    return point.x + point.y;
+}
+
+void bump_point(&mut Point point) {
+    point.x += 1;
+    point.y += 2;
+}
+
+i32 apply_ref_callback(i32(&Point) callback, &Point point) {
+    return callback(point);
+}
+
+void apply_mut_callback(void(&mut Point) callback, &mut Point point) {
+    callback(point);
+}
+
 i32 main() {
     test_start("native function pointer signatures");
     i32(i32) callback = &double_value;
@@ -33,5 +55,18 @@ i32 main() {
     void(i32) stored = slot.callback;
     stored(42);
     assert_eq_i32(42, recorded, "void callback loaded from field");
+
+    Point pt = { .x = 20, .y = 22 };
+    i32(&Point) ref_callback = &read_point;
+    assert_eq_i32(42, ref_callback(&pt), "reference callback parameter");
+    assert_eq_i32(42, apply_ref_callback(&read_point, &pt), "higher-order reference callback");
+
+    void(&mut Point) mut_callback = &bump_point;
+    mut_callback(&mut pt);
+    assert_eq_i32(21, pt.x, "mutable reference callback updates field x");
+    assert_eq_i32(24, pt.y, "mutable reference callback updates field y");
+    apply_mut_callback(&bump_point, &mut pt);
+    assert_eq_i32(22, pt.x, "higher-order mutable callback updates field x");
+    assert_eq_i32(26, pt.y, "higher-order mutable callback updates field y");
     return done();
 }

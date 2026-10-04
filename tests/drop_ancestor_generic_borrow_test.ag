@@ -14,6 +14,10 @@ i64 read_callback(Managed<Leaf>* parent) {
     return parent.item.value;
 }
 
+i64 read_callback_ref(&Managed<Leaf> parent) {
+    return parent.item.value;
+}
+
 impl Managed<Leaf> {
     i64 read_method(&Managed<Leaf> self) {
         return self.item.value;
@@ -30,5 +34,8 @@ i32 main() {
     i64(Managed<Leaf>*) callback = &read_callback;
     assert_eq_i64(40, callback(&parent),
                   "function pointer borrows a custom-Drop parent");
+    i64(&Managed<Leaf>) callback_ref = &read_callback_ref;
+    assert_eq_i64(40, callback_ref(&parent),
+                  "function pointer with reference parameter borrows a custom-Drop parent");
     return 42;
 }
