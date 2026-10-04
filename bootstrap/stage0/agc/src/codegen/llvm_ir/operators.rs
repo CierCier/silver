@@ -2303,7 +2303,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
         let prefix = format!("{path}.");
         for (p, flag) in &var.field_flags {
-            if *p == path || p.starts_with(&prefix) {
+            let is_subtree = *p == path || p.starts_with(&prefix);
+            let is_ancestor = path.starts_with(&format!("{p}."));
+            if is_subtree || is_ancestor {
                 self.set_field_flag(*flag)?;
             }
         }

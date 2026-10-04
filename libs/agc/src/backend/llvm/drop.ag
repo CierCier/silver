@@ -20,6 +20,7 @@ import frontend.messages;
 import backend.llvm.context;
 import backend.llvm.types;
 import backend.llvm.mono;
+import backend.llvm.expr;
 
 bool llvm_type_needs_drop(LlvmContext* ctx, u32 type_id) {
     if (type_id == TYPE_UNKNOWN || type_id == 0) { return false; }
@@ -204,6 +205,24 @@ bool llvm_drop_path_matches(LlvmLocal* local, LlvmFieldFlag* entry,
     if (path.len() > (i64)entry.projections_count) { return false; }
     i64 i = 0;
     while (i < path.len()) {
+        Projection* stored = local.drop_projections.get_ptr((i64)entry.projections_start + i);
+        Projection* requested = path.get_ptr(i);
+        if (stored.kind != requested.kind
+            || (stored.kind == ProjectionKind.Field
+                && stored.field_name_id != requested.field_name_id)) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+// Check whether entry represents a proper prefix of path (i.e. an intermediate ancestor).
+bool llvm_drop_path_is_proper_prefix(LlvmLocal* local, LlvmFieldFlag* entry,
+                                     Vec<Projection>* path) {
+    if (entry.projections_count == 0 || (i64)entry.projections_count >= path.len()) {
+        return false;
+    }
+    i64 i = 0;
+    while (i < (i64)entry.projections_count) {
         Projection* stored = local.drop_projections.get_ptr((i64)entry.projections_start + i);
         Projection* requested = path.get_ptr(i);
         if (stored.kind != requested.kind
@@ -476,6 +495,16 @@ void llvm_set_field_drop_live(LlvmContext* ctx, u32 name_id,
     if (local == (LlvmLocal*)0) { return; }
     llvm_store_drop_flag(ctx, local.drop_flag, true);
     llvm_set_path_drop_live(ctx, local, path, true);
+    if (path.len() > 1) {
+        i64 i = 0;
+        while (i < local.field_flags.len()) {
+            LlvmFieldFlag* entry = local.field_flags.get_ptr(i);
+            if (llvm_drop_path_is_proper_prefix(local, entry, path)) {
+                llvm_store_drop_flag(ctx, entry.flag, true);
+            }
+            i += 1;
+        }
+    }
 }
 
 // Clear every drop flag of a local: the value was moved out and must not be
@@ -788,8 +817,8 @@ void llvm_emit_assign_predrop(LlvmContext* ctx, u32 target_id, u32 rhs_id) {
     path.drop();
 }
 
-// Mark the assigned subtree live and promote the root flag. Intermediate
-// owning ancestors retain their previous state, matching stage0.
+// Mark the assigned subtree and its intermediate owning ancestors live,
+// and promote the root flag.
 void llvm_mark_assign_live(LlvmContext* ctx, u32 target_id) {
     if (target_id == 0) { return; }
     AstExpr* target = ctx.pool.get_expr(target_id);

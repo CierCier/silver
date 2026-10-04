@@ -141,6 +141,9 @@ i32 main() {
         programs["drop-ancestor-generic-borrow"] = (
             root / "tests/drop_ancestor_generic_borrow_test.ag"
         ).read_text(encoding="utf-8")
+        programs["intermediate-drop-activation"] = (
+            root / "tests/intermediate_drop_activation_test.ag"
+        ).read_text(encoding="utf-8")
         for name, contents in programs.items():
             program_source = work / f"{name}.ag"
             program_source.write_text(contents, encoding="utf-8")

@@ -1,0 +1,74 @@
+// expected_exit: 42
+import std.test;
+
+i64 drops = 0;
+i64 branch_drops = 0;
+i64 leaf_drops = 0;
+i64 branch_observed_right = 0;
+
+struct Leaf {
+    i64 value;
+}
+
+impl Drop for Leaf {
+    void drop(Leaf* self) {
+        drops = drops + 1;
+        leaf_drops = leaf_drops + 1;
+    }
+}
+
+struct Branch {
+    Leaf left;
+    Leaf right;
+}
+
+impl Drop for Branch {
+    void drop(Branch* self) {
+        drops = drops + 100;
+        branch_drops = branch_drops + 1;
+        branch_observed_right = self.right.value;
+    }
+}
+
+struct Wrapper {
+    Branch branch;
+}
+
+Leaf make_leaf(i64 val) {
+    Leaf leaf = { .value = val };
+    return move leaf;
+}
+
+i64 main() {
+    // 1. Initializing wrapper.branch.right must activate Branch.drop and Leaf.drop
+    drops = 0;
+    branch_drops = 0;
+    leaf_drops = 0;
+    branch_observed_right = 0;
+    {
+        Wrapper w;
+        w.branch.right = make_leaf(42);
+    }
+    assert_eq_i64(1, branch_drops, "intermediate branch drop ran once");
+    assert_eq_i64(1, leaf_drops, "leaf drop ran once");
+    assert_eq_i64(101, drops, "total drop count matches branch + leaf");
+    assert_eq_i64(42, branch_observed_right, "branch drop observed live right child");
+
+    // 2. Child overwrite drops old child, not branch
+    drops = 0;
+    branch_drops = 0;
+    leaf_drops = 0;
+    branch_observed_right = 0;
+    {
+        Wrapper w;
+        w.branch.right = make_leaf(10);
+        w.branch.right = make_leaf(20);
+        assert_eq_i64(0, branch_drops, "child overwrite does not prematurely drop branch");
+        assert_eq_i64(1, leaf_drops, "child overwrite drops old leaf");
+    }
+    assert_eq_i64(1, branch_drops, "branch dropped once at scope exit");
+    assert_eq_i64(2, leaf_drops, "replacement leaf dropped at scope exit");
+    assert_eq_i64(20, branch_observed_right, "branch observed replacement leaf value");
+
+    return 42;
+}
