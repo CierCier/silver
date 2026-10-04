@@ -1124,7 +1124,8 @@ bool typecheck_reject_partial_drop_move(AstPool* pool, TypeTable* types, SymbolT
 
 bool typecheck_method_parameter_is_value(SyntaxNode* root, TypeTable* types,
                                          u32 receiver_type, str method_name,
-                                         i64 parameter_index) {
+                                         i64 param_count, i64 parameter_index,
+                                         u32 arg_type) {
     u32 resolved = types.resolve_subst(receiver_type);
     TypeEntry* receiver_entry = types.get(resolved);
     while (receiver_entry.kind == TypeKind.Pointer || receiver_entry.kind == TypeKind.Reference) {
@@ -1179,14 +1180,17 @@ bool typecheck_method_parameter_is_value(SyntaxNode* root, TypeTable* types,
                         && strcmp(name.text, method_name) == 0) {
                         Vec<Binding> params = Vec<Binding>.new();
                         collect_parameter_bindings(params_node, &params);
-                        bool value_parameter = false;
-                        if (parameter_index >= 0 && parameter_index < params.len()) {
-                            Binding* parameter = params.get_ptr(parameter_index);
-                            value_parameter = parameter.declared_type.kind != ProjectionTypeKind.Pointer
-                                && parameter.declared_type.kind != ProjectionTypeKind.Reference;
+                        if (param_count == 0 || params.len() == param_count) {
+                            bool value_parameter = false;
+                            if (parameter_index >= 0 && parameter_index < params.len()) {
+                                Binding* parameter = params.get_ptr(parameter_index);
+                                value_parameter = parameter.declared_type.kind != ProjectionTypeKind.Pointer
+                                    && parameter.declared_type.kind != ProjectionTypeKind.Reference;
+                            }
+                            params.drop();
+                            return value_parameter;
                         }
                         params.drop();
-                        return value_parameter;
                     }
                     member = body != (SyntaxNode*)0 ? body.next_sibling
                         : (scan != (SyntaxNode*)0 && scan.kind == NodeKind.Token
@@ -1196,13 +1200,15 @@ bool typecheck_method_parameter_is_value(SyntaxNode* root, TypeTable* types,
         }
         item = item.next_sibling;
     }
-    return types.method_param_is_value(owner_name, method_name, parameter_index);
+    return types.method_param_is_value(owner_name, method_name, param_count, parameter_index, arg_type);
 }
 
 bool typecheck_method_has_value_receiver(SyntaxNode* root, TypeTable* types,
-                                         u32 receiver_type, str method_name) {
+                                         u32 receiver_type, str method_name,
+                                         i64 param_count) {
     return typecheck_method_parameter_is_value(root, types, receiver_type,
-                                               method_name, 0);
+                                               method_name, param_count, 0,
+                                               receiver_type);
 }
 
 u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode* root,
@@ -1792,20 +1798,22 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
             receiver_type = typecheck_place_type(pool, types, symbols, root, env, expr.inner0);
         }
         str method_name = symbols.names.get(expr.aux);
+        u32 arg_count = expr.inner1 < (u32)pool.args.len() ? pool.args.get((i64)expr.inner1) : 0;
+        i64 total_param_count = (i64)arg_count + 1;
         if ((strcmp(method_name, "drop") == 0
-             || typecheck_method_has_value_receiver(root, types, receiver_type, method_name))
+             || typecheck_method_has_value_receiver(root, types, receiver_type, method_name, total_param_count))
             && receiver.kind != ExprKind.Move) {
             typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
                                                expr.inner0, diagnostics, ok);
         }
         if (expr.inner1 < (u32)pool.args.len()) {
-            u32 arg_count = pool.args.get((i64)expr.inner1);
             i64 arg_index = 0;
             while (arg_index < (i64)arg_count) {
+                u32 arg_id = pool.args.get((i64)expr.inner1 + 1 + arg_index);
+                u32 arg_type = infer_expr(pool, types, symbols, root, env, arg_id, diagnostics, ok);
                 if (typecheck_method_parameter_is_value(root, types, receiver_type,
-                                                       method_name, arg_index + 1)) {
-                    u32 arg_id = pool.args.get((i64)expr.inner1 + 1 + arg_index);
-                    infer_expr(pool, types, symbols, root, env, arg_id, diagnostics, ok);
+                                                       method_name, total_param_count,
+                                                       arg_index + 1, arg_type)) {
                     if (pool.get_expr(arg_id).kind != ExprKind.Move) {
                         typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
                                                            arg_id, diagnostics, ok);

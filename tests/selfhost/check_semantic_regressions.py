@@ -141,11 +141,11 @@ i32 main() {
                         f"{label} diagnostic missing {fragment!r}:\n{output}"
                     )
 
-        emitted = subprocess.run(
-            [str(stage0), "--no-cache", "--emit=module", str(module_source)],
-            cwd=work, capture_output=True, text=True, check=False,
-        )
         artifact = work / "drop_ancestor_owners.agm"
+        emitted = subprocess.run(
+            [str(stage0), "--no-cache", "--emit=module", "-o", str(artifact), str(module_source)],
+            cwd=root, capture_output=True, text=True, check=False,
+        )
         if emitted.returncode != 0 or not artifact.is_file():
             raise AssertionError(
                 "failed to emit custom-Drop ownership module: "
@@ -253,11 +253,11 @@ i32 main() {
             if good_res.returncode != 0:
                 raise AssertionError(f"{label} rejected copyable enum move: {good_res.stderr}")
 
-        emitted = subprocess.run(
-            [str(stage0), "--no-cache", "--emit=module", str(module_source)],
-            cwd=work, capture_output=True, text=True, check=False,
-        )
         artifact = work / "drop_ancestor_enums.agm"
+        emitted = subprocess.run(
+            [str(stage0), "--no-cache", "--emit=module", "-o", str(artifact), str(module_source)],
+            cwd=root, capture_output=True, text=True, check=False,
+        )
         if emitted.returncode != 0 or not artifact.is_file():
             raise AssertionError(f"failed to emit enum module: {emitted.stdout}\n{emitted.stderr}")
         module_source.unlink()
@@ -290,6 +290,8 @@ struct Worker {}
 impl Worker {
     void consume(Worker* self, Leaf item) {}
     void inspect(Worker* self, &Leaf item) {}
+    void process(Worker* self, Leaf item) {}
+    void process(Worker* self, &Leaf item, i64 count) {}
 }
 """
     consumer_rejected_text = """\
@@ -299,6 +301,16 @@ i32 main() {
     Worker w;
     Managed m;
     w.consume(m.item);
+    return 0;
+}
+"""
+    consumer_rejected_overload_text = """\
+import drop_ancestor_methods;
+
+i32 main() {
+    Worker w;
+    Managed m;
+    w.process(m.item);
     return 0;
 }
 """
@@ -312,16 +324,30 @@ i32 main() {
     return 0;
 }
 """
+    consumer_accepted_overload_text = """\
+import drop_ancestor_methods;
+
+i32 main() {
+    Worker w;
+    Managed m;
+    w.process(&m.item, 1);
+    return 0;
+}
+"""
     stage1_env = os.environ.copy()
     stage1_env["SILVER_STAGE0"] = "/nonexistent"
     with tempfile.TemporaryDirectory(prefix="silver-drop-ancestor-method-import-") as name:
         work = pathlib.Path(name)
         module_source = work / "drop_ancestor_methods.ag"
         consumer_bad = work / "consumer_bad.ag"
+        consumer_bad_overload = work / "consumer_bad_overload.ag"
         consumer_good = work / "consumer_good.ag"
+        consumer_good_overload = work / "consumer_good_overload.ag"
         module_source.write_text(module_source_text, encoding="utf-8")
         consumer_bad.write_text(consumer_rejected_text, encoding="utf-8")
+        consumer_bad_overload.write_text(consumer_rejected_overload_text, encoding="utf-8")
         consumer_good.write_text(consumer_accepted_text, encoding="utf-8")
+        consumer_good_overload.write_text(consumer_accepted_overload_text, encoding="utf-8")
 
         def run_check(label: str, target: pathlib.Path):
             if "stage0" in label:
@@ -335,37 +361,41 @@ i32 main() {
             )
 
         for label in ("source import stage0", "source import stage1"):
-            bad_res = run_check(label, consumer_bad)
-            output = bad_res.stdout + bad_res.stderr
-            if bad_res.returncode == 0:
-                raise AssertionError(f"{label} accepted method move through custom Drop")
-            for fragment in DROP_DIAGNOSTIC:
-                if fragment not in output:
-                    raise AssertionError(f"{label} diagnostic missing {fragment!r}:\n{output}")
-            good_res = run_check(label, consumer_good)
-            if good_res.returncode != 0:
-                raise AssertionError(f"{label} rejected method borrow: {good_res.stderr}")
+            for bad in (consumer_bad, consumer_bad_overload):
+                bad_res = run_check(label, bad)
+                output = bad_res.stdout + bad_res.stderr
+                if bad_res.returncode == 0:
+                    raise AssertionError(f"{label} ({bad.name}) accepted method move through custom Drop")
+                for fragment in DROP_DIAGNOSTIC:
+                    if fragment not in output:
+                        raise AssertionError(f"{label} ({bad.name}) diagnostic missing {fragment!r}:\n{output}")
+            for good in (consumer_good, consumer_good_overload):
+                good_res = run_check(label, good)
+                if good_res.returncode != 0:
+                    raise AssertionError(f"{label} ({good.name}) rejected method borrow: {good_res.stderr}")
 
-        emitted = subprocess.run(
-            [str(stage0), "--no-cache", "--emit=module", str(module_source)],
-            cwd=work, capture_output=True, text=True, check=False,
-        )
         artifact = work / "drop_ancestor_methods.agm"
+        emitted = subprocess.run(
+            [str(stage0), "--no-cache", "--emit=module", "-o", str(artifact), str(module_source)],
+            cwd=root, capture_output=True, text=True, check=False,
+        )
         if emitted.returncode != 0 or not artifact.is_file():
             raise AssertionError(f"failed to emit method module: {emitted.stdout}\n{emitted.stderr}")
         module_source.unlink()
 
         for label in ("compiled AGM import stage0", "compiled AGM import stage1"):
-            bad_res = run_check(label, consumer_bad)
-            output = bad_res.stdout + bad_res.stderr
-            if bad_res.returncode == 0:
-                raise AssertionError(f"{label} accepted method move through custom Drop")
-            for fragment in DROP_DIAGNOSTIC:
-                if fragment not in output:
-                    raise AssertionError(f"{label} diagnostic missing {fragment!r}:\n{output}")
-            good_res = run_check(label, consumer_good)
-            if good_res.returncode != 0:
-                raise AssertionError(f"{label} rejected method borrow: {good_res.stderr}")
+            for bad in (consumer_bad, consumer_bad_overload):
+                bad_res = run_check(label, bad)
+                output = bad_res.stdout + bad_res.stderr
+                if bad_res.returncode == 0:
+                    raise AssertionError(f"{label} ({bad.name}) accepted method move through custom Drop")
+                for fragment in DROP_DIAGNOSTIC:
+                    if fragment not in output:
+                        raise AssertionError(f"{label} ({bad.name}) diagnostic missing {fragment!r}:\n{output}")
+            for good in (consumer_good, consumer_good_overload):
+                good_res = run_check(label, good)
+                if good_res.returncode != 0:
+                    raise AssertionError(f"{label} ({good.name}) rejected method borrow: {good_res.stderr}")
     return 4
 
 

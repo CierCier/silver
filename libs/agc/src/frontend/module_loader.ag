@@ -383,10 +383,11 @@ void module_register_artifact_method_params(TypeTable* types, ArtifactExport* ex
         return;
     }
 
+    Vec<bool> is_vals = Vec<bool>.new();
+    Vec<u32> param_types = Vec<u32>.new();
     i64 param_start = 3;
     i64 angle_depth = 0;
     i64 paren_depth = 0;
-    i64 param_index = 0;
     i = 3;
     while (i <= close_paren) {
         bool at_end = i == close_paren;
@@ -413,14 +414,28 @@ void module_register_artifact_method_params(TypeTable* types, ArtifactExport* ex
                         k += 1;
                     }
                 }
-                bool is_val = !is_view;
-                types.register_method_param(owner.to_str(), method.to_str(), param_index, is_val);
-                param_index += 1;
+                String p_text = String.new();
+                i64 pi = ps;
+                while (pi < pe) { p_text.push(sig[pi]); pi += 1; }
+                u32 param_type = types.parse_type_name(p_text.to_str());
+                p_text.drop();
+                is_vals.push(!is_view);
+                param_types.push(param_type);
             }
             param_start = i + 1;
         }
         i += 1;
     }
+    i64 param_count = is_vals.len();
+    i64 idx = 0;
+    while (idx < param_count) {
+        types.register_method_param(owner.to_str(), method.to_str(),
+                                    param_count, idx, param_types.get(idx),
+                                    is_vals.get(idx));
+        idx += 1;
+    }
+    is_vals.drop();
+    param_types.drop();
 
     owner.drop();
     method.drop();
@@ -742,12 +757,23 @@ void module_register_source_impl(TypeTable* types, SyntaxNode* item) {
         if (body != (SyntaxNode*)0 && name != (SyntaxNode*)0 && params_node != (SyntaxNode*)0) {
             Vec<Binding> params = Vec<Binding>.new();
             collect_parameter_bindings(params_node, &params);
+            i64 param_count = params.len();
             i64 pi = 0;
-            while (pi < params.len()) {
+            while (pi < param_count) {
                 Binding* p = params.get_ptr(pi);
                 bool is_val = p.declared_type.kind != ProjectionTypeKind.Pointer
                     && p.declared_type.kind != ProjectionTypeKind.Reference;
-                types.register_method_param(owner_name, name.text, pi, is_val);
+                String dtext = binding_parameter_type_text(p);
+                u32 param_type = types.parse_type_name(dtext.to_str());
+                if (!binding_has_function_type(p)) {
+                    if (p.declared_type.kind == ProjectionTypeKind.Pointer) {
+                        param_type = types.get_pointer(param_type, true);
+                    } else if (p.declared_type.kind == ProjectionTypeKind.Reference) {
+                        param_type = types.get_reference(param_type, p.declared_type.is_mutable);
+                    }
+                }
+                dtext.drop();
+                types.register_method_param(owner_name, name.text, param_count, pi, param_type, is_val);
                 pi += 1;
             }
             params.drop();
