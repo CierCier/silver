@@ -7,6 +7,7 @@ import std.string;
 import frontend.ast;
 import frontend.ast_expr;
 import frontend.items;
+import frontend.diagnostics;
 import frontend.place;
 import frontend.symbols;
 import frontend.types;
@@ -92,6 +93,7 @@ struct LlvmContext {
     Vec<ScrutineeMove> scrutinee_moves;
     Vec<LlvmTypeBinding> type_subst;
     i64 unresolved_calls;
+    DiagnosticBag* ownership_diagnostics;
     i64 mono_count;
     Vec<MonoRequest> mono_queue;
     Vec<u32> mono_queue_args;
@@ -126,6 +128,7 @@ impl LlvmContext {
         c.scrutinee_moves = Vec<ScrutineeMove>.new();
         c.type_subst = Vec<LlvmTypeBinding>.new();
         c.unresolved_calls = 0;
+        c.ownership_diagnostics = (DiagnosticBag*)0;
         c.mono_count = 0;
         c.mono_queue = Vec<MonoRequest>.new();
         c.mono_queue_args = Vec<u32>.new();

@@ -821,6 +821,12 @@ i64 y = x;             // copy — LSP shows `copy` before `x`, `x` stays live
 
 Moves are field-granular via `Place {local, projections}` with `is_prefix_of`/`overlaps`:
 
+An owned field cannot be consumed while any containing value has its own
+`Drop` implementation. This includes explicit moves, implicit transfers,
+by-value calls, returns, and explicit field drops. The containing destructor
+must retain its owned fields. Move the whole containing value instead, or
+borrow the field. Copy fields can still be copied from a value with `Drop`.
+
 ```silver
 struct Zoo { String cage; String keeper; }
 Zoo zoo;

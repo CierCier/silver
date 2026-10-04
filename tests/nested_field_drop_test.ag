@@ -3,7 +3,6 @@ import std.test;
 
 i64 drops = 0;
 i64 dropped_values = 0;
-i64 parent_drops = 0;
 
 struct Leaf {
     i64 value;
@@ -25,22 +24,6 @@ struct Outer<T> {
     T extra;
 }
 
-struct ManagedBranch {
-    Leaf left;
-    Leaf right;
-}
-impl Drop for ManagedBranch {
-    void drop(ManagedBranch* self) {
-        parent_drops = parent_drops + 1;
-        self.right.value = self.right.value + 100;
-    }
-}
-
-struct ManagedWrapper {
-    ManagedBranch branch;
-    Leaf extra;
-}
-
 Leaf make_leaf(i64 value) {
     Leaf leaf = { .value = value };
     return move leaf;
@@ -48,13 +31,6 @@ Leaf make_leaf(i64 value) {
 
 Branch<Leaf> make_branch(i64 left, i64 right) {
     Branch<Leaf> branch;
-    branch.left = make_leaf(left);
-    branch.right = make_leaf(right);
-    return move branch;
-}
-
-ManagedBranch make_managed_branch(i64 left, i64 right) {
-    ManagedBranch branch;
     branch.left = make_leaf(left);
     branch.right = make_leaf(right);
     return move branch;
@@ -97,21 +73,6 @@ i32 main() {
     }
     assert_eq_i64(3, drops, "nested siblings each drop once");
     assert_eq_i64(36, dropped_values, "nested move preserves all leaf values");
-
-    // A nested custom destructor mutates its live child before wrapper cleanup.
-    drops = 0;
-    dropped_values = 0;
-    parent_drops = 0;
-    {
-        ManagedWrapper wrapper;
-        wrapper.branch = make_managed_branch(21, 22);
-        wrapper.extra = make_leaf(23);
-        consume_leaf(move wrapper.branch.left);
-        assert_eq_i64(1, drops, "moved child already dropped");
-    }
-    assert_eq_i64(1, parent_drops, "nested custom-drop intermediate remains live");
-    assert_eq_i64(3, drops, "nested sibling and wrapper extra cascade once");
-    assert_eq_i64(166, dropped_values, "nested parent mutation reaches both live cleanups");
 
     // Returning a nested subtree transfers both initialized leaves; the source
     // outer sibling is cleaned up in the callee.

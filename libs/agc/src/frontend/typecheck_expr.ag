@@ -686,6 +686,525 @@ u32 resolve_generic_member_type(TypeTable* types, SyntaxNode* root, u32 composit
     return resolved;
 }
 
+u32 typecheck_struct_field_type(TypeTable* types, SyntaxNode* root,
+                                u32 composite_type_id, str field_name) {
+    u32 owner_type = types.resolve_subst(composite_type_id);
+    TypeEntry* owner_entry = types.get(owner_type);
+    while (owner_entry.kind == TypeKind.Pointer || owner_entry.kind == TypeKind.Reference) {
+        owner_type = owner_entry.inner;
+        owner_entry = types.get(owner_type);
+    }
+    if (owner_entry.kind != TypeKind.Named) { return TYPE_UNKNOWN; }
+    u32 owner_name_id = owner_entry.name_id;
+    u32 owner_args_start = owner_entry.inner;
+    i64 owner_arg_count = owner_entry.count;
+    str owner_name = types.names.get(owner_name_id);
+    SyntaxNode* item = find_item_by_name(root, NodeKind.Struct, owner_name);
+    if (item == (SyntaxNode*)0) {
+        i64 definition_index = 0;
+        while (definition_index < types.struct_properties.len()) {
+            TypeStructProperties* definition = types.struct_properties.get_ptr(definition_index);
+            if (definition.name_id == owner_name_id && definition.field_name_count > 0) {
+                u32 field_type_start = definition.field_start;
+                u32 field_name_start = definition.field_name_start;
+                u32 field_name_count = definition.field_name_count;
+                u32 type_param_start = definition.type_param_start;
+                u32 type_param_count = definition.type_param_count;
+                if ((i64)field_name_count != (i64)definition.field_count) { return TYPE_UNKNOWN; }
+                u32 field_name_id = types.names.intern(field_name);
+                i64 field_index = 0;
+                while (field_index < (i64)field_name_count) {
+                    if (types.struct_field_names.get(field_name_start + (u32)field_index)
+                        == field_name_id) {
+                        u32 member_type = types.struct_fields.get(field_type_start + (u32)field_index);
+                        if (type_param_count != (u32)owner_arg_count) { return TYPE_UNKNOWN; }
+                        i64 param_index = 0;
+                        while (param_index < (i64)type_param_count) {
+                            types.push_subst(types.struct_type_params.get(type_param_start + (u32)param_index),
+                                             types.type_args.get(owner_args_start + (u32)param_index));
+                            param_index += 1;
+                        }
+                        u32 resolved_member = types.resolve_subst(member_type);
+                        types.pop_subst(type_param_count);
+                        return resolved_member;
+                    }
+                    field_index += 1;
+                }
+            }
+            definition_index += 1;
+        }
+        return TYPE_UNKNOWN;
+    }
+    SyntaxNode* body = item.first_child;
+    while (body != (SyntaxNode*)0 && body.kind != NodeKind.Block) {
+        body = body.next_sibling;
+    }
+    if (body == (SyntaxNode*)0) { return TYPE_UNKNOWN; }
+
+    Vec<SyntaxNode*> tokens = Vec<SyntaxNode*>.new();
+    typecheck_expr_collect_tokens(body, &tokens);
+    u32 result = TYPE_UNKNOWN;
+    i64 start = 0;
+    while (start < tokens.len()) {
+        i64 end = start;
+        while (end < tokens.len() && tokens.get(end).token_kind != TokenKind.Semicolon) {
+            end += 1;
+        }
+        i64 name_index = end - 1;
+        while (name_index >= start && tokens.get(name_index).token_kind != TokenKind.Identifier) {
+            name_index -= 1;
+        }
+        if (name_index >= start && strcmp(tokens.get(name_index).text, field_name) == 0) {
+            String field_type_text = String.new();
+            i64 i = start;
+            while (i < name_index) {
+                field_type_text.push_str(tokens.get(i).text);
+                i += 1;
+            }
+            i = name_index + 1;
+            while (i < end) {
+                field_type_text.push_str(tokens.get(i).text);
+                i += 1;
+            }
+            u32 member_type = type_id_from_text(types, field_type_text.to_str());
+            result = resolve_generic_member_type(types, root, owner_type, member_type);
+            field_type_text.drop();
+            break;
+        }
+        start = end + 1;
+    }
+    tokens.drop();
+    return result;
+}
+
+bool typecheck_type_has_drop_impl(SyntaxNode* root, TypeTable* types, u32 type_id) {
+    u32 resolved = types.resolve_subst(type_id);
+    TypeEntry* entry = types.get(resolved);
+    while (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) {
+        resolved = entry.inner;
+        entry = types.get(resolved);
+    }
+    if (entry.kind != TypeKind.Named) { return false; }
+    str owner_name = types.names.get(entry.name_id);
+    SyntaxNode* item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Impl) {
+            bool saw_drop = false;
+            bool saw_for_after_drop = false;
+            SyntaxNode* child = item.first_child;
+            while (child != (SyntaxNode*)0 && child.kind != NodeKind.Block) {
+                if (child.kind == NodeKind.Token && strcmp(child.text, "Drop") == 0) {
+                    saw_drop = true;
+                } else if (saw_drop && child.kind == NodeKind.Token
+                           && (child.token_kind == TokenKind.For || strcmp(child.text, "for") == 0)) {
+                    saw_for_after_drop = true;
+                    break;
+                }
+                child = child.next_sibling;
+            }
+            if (saw_for_after_drop) {
+                SyntaxNode* target = impl_target_identifier(item);
+                if (target != (SyntaxNode*)0 && strcmp(target.text, owner_name) == 0) {
+                    return true;
+                }
+            }
+        }
+        item = item.next_sibling;
+    }
+    i64 definition_index = 0;
+    while (definition_index < types.struct_properties.len()) {
+        TypeStructProperties* definition = types.struct_properties.get_ptr(definition_index);
+        if (definition.name_id == entry.name_id && definition.needs_drop) {
+            return true;
+        }
+        definition_index += 1;
+    }
+    return false;
+}
+
+bool typecheck_type_is_copy_inner(SyntaxNode* root, TypeTable* types, u32 type_id, u32 depth) {
+    if (depth >= MAX_TYPE_CHECK_DEPTH) { return false; }
+    u32 resolved = types.resolve_subst(type_id);
+    if (resolved == TYPE_UNKNOWN || resolved == 0) { return false; }
+    TypeEntry* entry = types.get(resolved);
+    TypeKind kind = entry.kind;
+    u32 inner = entry.inner;
+    u32 name_id = entry.name_id;
+    i64 count = entry.count;
+    if (kind == TypeKind.Pointer || kind == TypeKind.Reference
+        || kind == TypeKind.Function || kind == TypeKind.Slice || kind == TypeKind.Str
+        || (resolved >= TYPE_BOOL && resolved <= TYPE_C80) || resolved == TYPE_CHAR) {
+        return true;
+    }
+    if (kind == TypeKind.Array) {
+        return typecheck_type_is_copy_inner(root, types, inner, depth + 1);
+    }
+    if (kind == TypeKind.TypeParam || kind == TypeKind.Unknown || kind == TypeKind.Void) {
+        return false;
+    }
+    if (kind != TypeKind.Named) { return false; }
+    str type_name = types.names.get(name_id);
+    if (typecheck_type_has_drop_impl(root, types, resolved)
+        || type_name_needs_drop(type_name) || type_name_is_move_only(type_name)) {
+        return false;
+    }
+    SyntaxNode* enum_item = find_enum_item(root, type_name);
+    if (enum_item != (SyntaxNode*)0) {
+        Vec<SyntaxNode*> variants = Vec<SyntaxNode*>.new();
+        Vec<i64> tags = Vec<i64>.new();
+        Vec<i64> arities = Vec<i64>.new();
+        enum_each_variant(enum_item, &variants, &tags, &arities);
+        i64 vi = 0;
+        while (vi < variants.len()) {
+            Vec<u32> payload_types = Vec<u32>.new();
+            i64 pi = 0;
+            while (pi < arities.get(vi)) {
+                String payload_text = String.new();
+                if (!enum_payload_type_text(root, types.names.get(name_id),
+                                            variants.get(vi).text, pi, &payload_text)) {
+                    payload_text.drop();
+                    payload_types.drop();
+                    variants.drop();
+                    tags.drop();
+                    arities.drop();
+                    return false;
+                }
+                u32 payload_type = type_id_from_text(types, payload_text.to_str());
+                payload_text.drop();
+                payload_type = resolve_generic_member_type(types, root, resolved, payload_type);
+                payload_types.push(payload_type);
+                pi += 1;
+            }
+            pi = 0;
+            while (pi < payload_types.len()) {
+                if (!typecheck_type_is_copy_inner(root, types, payload_types.get(pi), depth + 1)) {
+                    payload_types.drop();
+                    variants.drop();
+                    tags.drop();
+                    arities.drop();
+                    return false;
+                }
+                pi += 1;
+            }
+            payload_types.drop();
+            vi += 1;
+        }
+        variants.drop();
+        tags.drop();
+        arities.drop();
+        return true;
+    }
+    if (find_item_by_name(root, NodeKind.Struct, type_name) != (SyntaxNode*)0) {
+        SyntaxNode* item = find_item_by_name(root, NodeKind.Struct, type_name);
+        SyntaxNode* body = item.first_child;
+        while (body != (SyntaxNode*)0 && body.kind != NodeKind.Block) {
+            body = body.next_sibling;
+        }
+        if (body == (SyntaxNode*)0) { return false; }
+        Vec<SyntaxNode*> tokens = Vec<SyntaxNode*>.new();
+        typecheck_expr_collect_tokens(body, &tokens);
+        i64 start = 0;
+        while (start < tokens.len()) {
+            i64 end = start;
+            while (end < tokens.len() && tokens.get(end).token_kind != TokenKind.Semicolon) {
+                end += 1;
+            }
+            i64 name_index = end - 1;
+            while (name_index >= start && tokens.get(name_index).token_kind != TokenKind.Identifier) {
+                name_index -= 1;
+            }
+            if (name_index >= start) {
+                String field_type_text = String.new();
+                i64 i = start;
+                while (i < name_index) {
+                    field_type_text.push_str(tokens.get(i).text);
+                    i += 1;
+                }
+                i = name_index + 1;
+                while (i < end) {
+                    field_type_text.push_str(tokens.get(i).text);
+                    i += 1;
+                }
+                u32 field_type = type_id_from_text(types, field_type_text.to_str());
+                field_type = resolve_generic_member_type(types, root, resolved, field_type);
+                bool field_copy = typecheck_type_is_copy_inner(root, types, field_type, depth + 1);
+                field_type_text.drop();
+                if (!field_copy) {
+                    tokens.drop();
+                    return false;
+                }
+            }
+            start = end + 1;
+        }
+        tokens.drop();
+        return true;
+    }
+    i64 imported_index = 0;
+    while (imported_index < types.struct_properties.len()) {
+        TypeStructProperties* definition = types.struct_properties.get_ptr(imported_index);
+        if (definition.name_id == name_id) {
+            u32 field_start = definition.field_start;
+            u32 field_count = definition.field_count;
+            u32 type_param_start = definition.type_param_start;
+            u32 type_param_count = definition.type_param_count;
+            TypeEntry* instance_entry = types.get(resolved);
+            i64 arg_count = instance_entry.count;
+            u32 args_start = instance_entry.inner;
+            if (type_param_count != (u32)arg_count) { return false; }
+            i64 param_index = 0;
+            while (param_index < (i64)type_param_count) {
+                types.push_subst(types.struct_type_params.get(type_param_start + (u32)param_index),
+                                 types.type_args.get(args_start + (u32)param_index));
+                param_index += 1;
+            }
+            u32 field_index = 0;
+            while (field_index < field_count) {
+                u32 field_type = types.resolve_subst(types.struct_fields.get(field_start + field_index));
+                if (!typecheck_type_is_copy_inner(root, types, field_type, depth + 1)) {
+                    types.pop_subst(type_param_count);
+                    return false;
+                }
+                field_index += 1;
+            }
+            types.pop_subst(type_param_count);
+            return true;
+        }
+        imported_index += 1;
+    }
+    i64 i = 0;
+    while (i < count) {
+        if (!typecheck_type_is_copy_inner(root, types,
+                types.type_args.get(inner + (u32)i), depth + 1)) {
+            return false;
+        }
+        i += 1;
+    }
+    return types.is_copy(resolved);
+}
+
+bool typecheck_type_is_copy(SyntaxNode* root, TypeTable* types, u32 type_id) {
+    return typecheck_type_is_copy_inner(root, types, type_id, 0);
+}
+
+u32 typecheck_collect_place(AstPool* pool, u32 expr_id, Vec<u32>* fields) {
+    if (expr_id == 0) { return 0; }
+    AstExpr* expr = pool.get_expr(expr_id);
+    if (expr.kind == ExprKind.Var) { return expr.aux; }
+    if (expr.kind == ExprKind.Move) {
+        return typecheck_collect_place(pool, expr.inner0, fields);
+    }
+    if (expr.kind != ExprKind.Field || expr.inner0 == 0) { return 0; }
+    u32 root_name = typecheck_collect_place(pool, expr.inner0, fields);
+    if (root_name != 0) { fields.push(expr.aux); }
+    return root_name;
+}
+
+u32 typecheck_place_type(AstPool* pool, TypeTable* types, SymbolTable* symbols,
+                         SyntaxNode* root, TypeEnv* env, u32 place_id) {
+    Vec<u32> fields = Vec<u32>.new();
+    u32 root_name = typecheck_collect_place(pool, place_id, &fields);
+    if (root_name == 0) {
+        fields.drop();
+        return TYPE_UNKNOWN;
+    }
+    AstExpr* root_expr = pool.get_expr(place_id);
+    while (root_expr.kind == ExprKind.Field || root_expr.kind == ExprKind.Move) {
+        root_expr = pool.get_expr(root_expr.inner0);
+    }
+    if (root_expr.kind != ExprKind.Var) {
+        fields.drop();
+        return TYPE_UNKNOWN;
+    }
+    u32 place_type = env.lookup(root_expr.aux);
+    if (place_type == TYPE_UNKNOWN) {
+        place_type = symbols.get_type(symbols.names.get(root_expr.aux));
+    }
+    i64 i = 0;
+    while (place_type != TYPE_UNKNOWN && i < fields.len()) {
+        place_type = typecheck_struct_field_type(types, root, place_type,
+                                                 symbols.names.get(fields.get(i)));
+        i += 1;
+    }
+    fields.drop();
+    return place_type;
+}
+
+bool typecheck_reject_partial_drop_move(AstPool* pool, TypeTable* types, SymbolTable* symbols,
+                                        SyntaxNode* root, TypeEnv* env, u32 place_id,
+                                        DiagnosticBag* diagnostics, bool* ok) {
+    Vec<u32> fields = Vec<u32>.new();
+    u32 root_name = typecheck_collect_place(pool, place_id, &fields);
+    if (root_name == 0 || fields.len() == 0) {
+        fields.drop();
+        return false;
+    }
+    AstExpr* root_expr = pool.get_expr(place_id);
+    while (root_expr.kind == ExprKind.Field || root_expr.kind == ExprKind.Move) {
+        root_expr = pool.get_expr(root_expr.inner0);
+    }
+    if (root_expr.kind != ExprKind.Var) {
+        fields.drop();
+        return false;
+    }
+    u32 owner_type = env.lookup(root_expr.aux);
+    if (owner_type == TYPE_UNKNOWN) {
+        owner_type = symbols.get_type(symbols.names.get(root_expr.aux));
+    }
+    if (owner_type == TYPE_UNKNOWN) {
+        fields.drop();
+        return false;
+    }
+    owner_type = types.resolve_subst(owner_type);
+    TypeEntry* root_owner_entry = types.get(owner_type);
+    if (root_owner_entry.kind == TypeKind.Pointer || root_owner_entry.kind == TypeKind.Reference) {
+        fields.drop();
+        return false;
+    }
+    String place_text = String.from_str(symbols.names.get(root_expr.aux));
+    String owner_text = String.from_str(symbols.names.get(root_expr.aux));
+    i64 path_index = 0;
+    while (path_index < fields.len()) {
+        place_text.push('.');
+        place_text.push_str(symbols.names.get(fields.get(path_index)));
+        path_index += 1;
+    }
+    u32 probe_type = owner_type;
+    i64 i = 0;
+    while (i < fields.len()) {
+        TypeEntry* probe_entry = types.get(types.resolve_subst(probe_type));
+        if (probe_entry.kind == TypeKind.Pointer || probe_entry.kind == TypeKind.Reference) {
+            place_text.drop();
+            owner_text.drop();
+            fields.drop();
+            return false;
+        }
+        u32 field_type = typecheck_struct_field_type(types, root, probe_type,
+                                                    symbols.names.get(fields.get(i)));
+        if (field_type == TYPE_UNKNOWN) {
+            place_text.drop();
+            owner_text.drop();
+            fields.drop();
+            return false;
+        }
+        probe_type = field_type;
+        i += 1;
+    }
+    if (probe_type == TYPE_UNKNOWN || typecheck_type_is_copy(root, types, probe_type)) {
+        place_text.drop();
+        owner_text.drop();
+        fields.drop();
+        return false;
+    }
+    i = 0;
+    while (i < fields.len()) {
+        if (typecheck_type_has_drop_impl(root, types, owner_type)) {
+            String message = cannot_move_field_out_of_drop_type(place_text.to_str(), owner_text.to_str());
+            diagnostics.error(pool.get_expr(place_id).span, move message);
+            *ok = false;
+            place_text.drop();
+            owner_text.drop();
+            fields.drop();
+            return true;
+        }
+        u32 field_id = fields.get(i);
+        owner_type = typecheck_struct_field_type(types, root, owner_type,
+                                                 symbols.names.get(field_id));
+        if (owner_type == TYPE_UNKNOWN) { break; }
+        if (i + 1 < fields.len()) {
+            owner_text.push('.');
+            owner_text.push_str(symbols.names.get(field_id));
+        }
+        i += 1;
+    }
+    place_text.drop();
+    owner_text.drop();
+    fields.drop();
+    return false;
+}
+
+bool typecheck_method_parameter_is_value(SyntaxNode* root, TypeTable* types,
+                                         u32 receiver_type, str method_name,
+                                         i64 parameter_index) {
+    u32 resolved = types.resolve_subst(receiver_type);
+    TypeEntry* receiver_entry = types.get(resolved);
+    while (receiver_entry.kind == TypeKind.Pointer || receiver_entry.kind == TypeKind.Reference) {
+        resolved = receiver_entry.inner;
+        receiver_entry = types.get(resolved);
+    }
+    if (receiver_entry.kind != TypeKind.Named) { return false; }
+    str owner_name = types.names.get(receiver_entry.name_id);
+    SyntaxNode* item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Impl) {
+            SyntaxNode* target = impl_target_identifier(item);
+            if (target != (SyntaxNode*)0 && strcmp(target.text, owner_name) == 0) {
+                SyntaxNode* block = item.first_child;
+                while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+                    block = block.next_sibling;
+                }
+                SyntaxNode* member = block == (SyntaxNode*)0 ? (SyntaxNode*)0 : block.first_child;
+                while (member != (SyntaxNode*)0) {
+                    if (member.kind == NodeKind.Token && member.token_kind == TokenKind.Semicolon) {
+                        member = member.next_sibling;
+                        continue;
+                    }
+                    SyntaxNode* name = (SyntaxNode*)0;
+                    SyntaxNode* params_node = (SyntaxNode*)0;
+                    SyntaxNode* body = (SyntaxNode*)0;
+                    SyntaxNode* scan = member;
+                    while (scan != (SyntaxNode*)0) {
+                        if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Semicolon) {
+                            break;
+                        }
+                        if (scan.kind == NodeKind.Block) {
+                            body = scan;
+                            break;
+                        }
+                        if (scan.kind == NodeKind.Parenthesized) {
+                            params_node = scan;
+                            if (scan.next_sibling != (SyntaxNode*)0
+                                && scan.next_sibling.kind == NodeKind.Block) {
+                                body = scan.next_sibling;
+                                break;
+                            }
+                        }
+                        if (scan.kind == NodeKind.Token
+                            && scan.token_kind == TokenKind.Identifier) {
+                            name = scan;
+                        }
+                        scan = scan.next_sibling;
+                    }
+                    if (body != (SyntaxNode*)0 && name != (SyntaxNode*)0
+                        && params_node != (SyntaxNode*)0
+                        && strcmp(name.text, method_name) == 0) {
+                        Vec<Binding> params = Vec<Binding>.new();
+                        collect_parameter_bindings(params_node, &params);
+                        bool value_parameter = false;
+                        if (parameter_index >= 0 && parameter_index < params.len()) {
+                            Binding* parameter = params.get_ptr(parameter_index);
+                            value_parameter = parameter.declared_type.kind != ProjectionTypeKind.Pointer
+                                && parameter.declared_type.kind != ProjectionTypeKind.Reference;
+                        }
+                        params.drop();
+                        return value_parameter;
+                    }
+                    member = body != (SyntaxNode*)0 ? body.next_sibling
+                        : (scan != (SyntaxNode*)0 && scan.kind == NodeKind.Token
+                           && scan.token_kind == TokenKind.Semicolon ? scan.next_sibling : scan);
+                }
+            }
+        }
+        item = item.next_sibling;
+    }
+    return false;
+}
+
+bool typecheck_method_has_value_receiver(SyntaxNode* root, TypeTable* types,
+                                         u32 receiver_type, str method_name) {
+    return typecheck_method_parameter_is_value(root, types, receiver_type,
+                                               method_name, 0);
+}
+
 u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode* root,
                TypeEnv* env, u32 expr_id, DiagnosticBag* diagnostics, bool* ok) {
     if (expr_id == 0) { return TYPE_UNKNOWN; }
@@ -729,6 +1248,8 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
     } else if (expr.kind == ExprKind.Move) {
         if (expr.inner0 != 0) {
             inferred = infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
+            typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
+                                               expr.inner0, diagnostics, ok);
         } else {
             inferred = env.lookup(expr.aux);
         }
@@ -770,6 +1291,10 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         while (field_index < (i64)expr.aux) {
             u32 val_id = pool.args.get((i64)expr.inner1 + field_index * 2 + 1);
             infer_expr(pool, types, symbols, root, env, val_id, diagnostics, ok);
+            if (pool.get_expr(val_id).kind != ExprKind.Move) {
+                typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
+                                                   val_id, diagnostics, ok);
+            }
             field_index += 1;
         }
         inferred = types.get_named(symbols.names.get(expr.inner0));
@@ -1017,6 +1542,35 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         inferred = result_type;
     } else if (expr.kind == ExprKind.Call) {
         AstExpr* callee = pool.get_expr(expr.inner0);
+        u32 callable_type = infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
+        TypeEntry* callable_entry = types.get(callable_type);
+        while (callable_entry.kind == TypeKind.Pointer || callable_entry.kind == TypeKind.Reference) {
+            callable_type = callable_entry.inner;
+            callable_entry = types.get(callable_type);
+        }
+        TypeKind callable_kind = callable_entry.kind;
+        u32 callable_inner = callable_entry.inner;
+        i64 callable_count = callable_entry.count;
+        bool named_function = callee.kind == ExprKind.Var
+            && find_function_by_name(root, symbols.names.get(callee.aux)) != (SyntaxNode*)0;
+        if (callable_kind == TypeKind.Function && !named_function) {
+            u32 arg_count = expr.aux;
+            i64 i = 0;
+            while (i < (i64)arg_count && i < callable_count) {
+                u32 parameter_type = types.type_args.get(callable_inner + 1 + (u32)i);
+                TypeEntry* parameter_entry = types.get(parameter_type);
+                TypeKind parameter_kind = parameter_entry.kind;
+                u32 arg_id = pool.args.get((i64)expr.inner1 + i);
+                infer_expr(pool, types, symbols, root, env, arg_id, diagnostics, ok);
+                if (parameter_kind != TypeKind.Pointer
+                    && parameter_kind != TypeKind.Reference
+                    && pool.get_expr(arg_id).kind != ExprKind.Move) {
+                    typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
+                                                       arg_id, diagnostics, ok);
+                }
+                i += 1;
+            }
+        }
         if (callee.kind == ExprKind.Var) {
             str callee_name = symbols.names.get(callee.aux);
             if (typecheck_str_starts_with(callee_name, "__atomic_")) {
@@ -1063,7 +1617,8 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 Vec<Binding> params = Vec<Binding>.new();
                 collect_parameter_bindings(binding_function_parameters(callee_fn), &params);
                 u32 args_count = expr.aux;
-                if ((i64)args_count != params.len()) {
+                bool valid_arity = (i64)args_count == params.len();
+                if (!valid_arity) {
                     String message = String.from_str("argument count mismatch: expected ");
                     append_i64(&message, params.len());
                     message.push_str(", found ");
@@ -1077,6 +1632,13 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                         u32 expected_arg_type = typecheck_parameter_type_id(types, param);
                         u32 arg_expr_id = pool.args.get((i64)expr.inner1 + i);
                         u32 actual_arg_type = infer_expr(pool, types, symbols, root, env, arg_expr_id, diagnostics, ok);
+                        TypeEntry* expected_entry = types.get(expected_arg_type);
+                        if (expected_entry.kind != TypeKind.Pointer
+                            && expected_entry.kind != TypeKind.Reference
+                            && pool.get_expr(arg_expr_id).kind != ExprKind.Move) {
+                            typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
+                                                               arg_expr_id, diagnostics, ok);
+                        }
                         if (!types_match_value(types, expected_arg_type, actual_arg_type, expr_is_literal(pool, arg_expr_id))
                             && !has_user_cast(root, types, actual_arg_type, expected_arg_type)) {
                             String message = String.from_str("type mismatch: expected ");
@@ -1090,6 +1652,11 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                     }
                 }
                 params.drop();
+                if (valid_arity && typecheck_is_generic_function(callee_fn)) {
+                    typecheck_generic_call_drop_ownership(
+                        pool, types, symbols, root, env, callee_fn,
+                        expr_id, diagnostics, ok);
+                }
             } else if (overloaded) {
                 inferred = TYPE_UNKNOWN;
             } else if (strlen(callee_name) > 0 && callee_name[0] >= (u8)65 && callee_name[0] <= (u8)90) {
@@ -1219,6 +1786,33 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         }
     } else if (expr.kind == ExprKind.MethodCall) {
         AstExpr* receiver = pool.get_expr(expr.inner0);
+        u32 receiver_type = infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
+        if (receiver_type == TYPE_UNKNOWN) {
+            receiver_type = typecheck_place_type(pool, types, symbols, root, env, expr.inner0);
+        }
+        str method_name = symbols.names.get(expr.aux);
+        if ((strcmp(method_name, "drop") == 0
+             || typecheck_method_has_value_receiver(root, types, receiver_type, method_name))
+            && receiver.kind != ExprKind.Move) {
+            typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
+                                               expr.inner0, diagnostics, ok);
+        }
+        if (expr.inner1 < (u32)pool.args.len()) {
+            u32 arg_count = pool.args.get((i64)expr.inner1);
+            i64 arg_index = 0;
+            while (arg_index < (i64)arg_count) {
+                if (typecheck_method_parameter_is_value(root, types, receiver_type,
+                                                       method_name, arg_index + 1)) {
+                    u32 arg_id = pool.args.get((i64)expr.inner1 + 1 + arg_index);
+                    infer_expr(pool, types, symbols, root, env, arg_id, diagnostics, ok);
+                    if (pool.get_expr(arg_id).kind != ExprKind.Move) {
+                        typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
+                                                           arg_id, diagnostics, ok);
+                    }
+                }
+                arg_index += 1;
+            }
+        }
         if (receiver.kind != ExprKind.Var) {
             // Infer non-Var receivers (e.g. synthetic Format nodes from
             // @println desugar) so the backend can resolve the method's
@@ -1325,6 +1919,10 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
         u32 var_name = stmt.aux;
         if (init_id != 0) {
             u32 actual_type = infer_expr(pool, types, symbols, root, env, init_id, diagnostics, ok);
+            if (pool.get_expr(init_id).kind != ExprKind.Move) {
+                typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
+                                                   init_id, diagnostics, ok);
+            }
             bool array_initializer = false;
             if (declared_type != TYPE_UNKNOWN) {
                 TypeEntry* expected = types.get(declared_type);
@@ -1378,6 +1976,10 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
     } else if (stmt.kind == StmtKind.Assign) {
         u32 target_type = infer_expr(pool, types, symbols, root, env, stmt.inner0, diagnostics, ok);
         u32 val_type = infer_expr(pool, types, symbols, root, env, stmt.inner1, diagnostics, ok);
+        if (pool.get_expr(stmt.inner1).kind != ExprKind.Move) {
+            typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
+                                               stmt.inner1, diagnostics, ok);
+        }
         if (target_type != TYPE_UNKNOWN && val_type != TYPE_UNKNOWN
             && !types_match_value(types, target_type, val_type, expr_is_literal(pool, stmt.inner1))
             && !has_user_cast(root, types, val_type, target_type)) {
@@ -1392,6 +1994,12 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
         u32 expr_id = stmt.inner0;
         if (expr_id != 0) {
             u32 actual_type = infer_expr(pool, types, symbols, root, env, expr_id, diagnostics, ok);
+            TypeEntry* return_entry = types.get(expected_return);
+            if (return_entry.kind != TypeKind.Pointer && return_entry.kind != TypeKind.Reference
+                && pool.get_expr(expr_id).kind != ExprKind.Move) {
+                typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
+                                                   expr_id, diagnostics, ok);
+            }
             if (expected_return != TYPE_UNKNOWN && actual_type != TYPE_UNKNOWN
                 && !types_match_value(types, expected_return, actual_type, expr_is_literal(pool, expr_id))
                 && !has_user_cast(root, types, actual_type, expected_return)) {
@@ -1430,6 +2038,117 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
             typecheck_statement(pool, types, symbols, root, env, expected_return, s_id, diagnostics, ok);
             i += 1;
         }
+    }
+}
+
+bool typecheck_is_drop_ancestor_error(str message) {
+    str prefix = "cannot move '";
+    str suffix = "' because it implements Drop";
+    i64 message_len = strlen(message);
+    i64 prefix_len = strlen(prefix);
+    i64 suffix_len = strlen(suffix);
+    if (message_len < prefix_len + suffix_len
+        || !typecheck_str_starts_with(message, prefix)) {
+        return false;
+    }
+    i64 i = 0;
+    while (i < suffix_len) {
+        if (message[message_len - suffix_len + i] != suffix[i]) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+void typecheck_generic_call_drop_ownership(
+    AstPool* caller_pool, TypeTable* types, SymbolTable* symbols, SyntaxNode* root,
+    TypeEnv* caller_env, SyntaxNode* function, u32 call_id,
+    DiagnosticBag* diagnostics, bool* ok) {
+    if (caller_env.expression_depth >= MAX_TYPE_CHECK_DEPTH) { return; }
+    SyntaxNode* body = find_function_body(function);
+    if (body == (SyntaxNode*)0) { return; }
+
+    AstExpr* call_ptr = caller_pool.get_expr(call_id);
+    AstExpr call = *call_ptr;
+    Vec<Binding> params = Vec<Binding>.new();
+    collect_parameter_bindings(binding_function_parameters(function), &params);
+    if (params.len() != (i64)call.aux) {
+        params.drop();
+        return;
+    }
+
+    TypeEnv callee_env = TypeEnv.new();
+    callee_env.expression_depth = caller_env.expression_depth;
+    bool concrete_args = true;
+    i64 i = 0;
+    while (i < params.len()) {
+        Binding* param = params.get_ptr(i);
+        u32 arg_id = caller_pool.args.get((i64)call.inner1 + i);
+        u32 arg_type = caller_pool.get_expr(arg_id).inferred_type;
+        if (arg_type == TYPE_UNKNOWN) {
+            arg_type = infer_expr(caller_pool, types, symbols, root, caller_env,
+                                  arg_id, diagnostics, ok);
+        }
+        if (arg_type == TYPE_UNKNOWN) {
+            arg_type = typecheck_place_type(caller_pool, types, symbols, root,
+                                            caller_env, arg_id);
+        }
+        arg_type = types.resolve_subst(arg_type);
+        TypeEntry* arg_entry = types.get(arg_type);
+        if (arg_type == TYPE_UNKNOWN || arg_entry.kind == TypeKind.TypeParam
+            || arg_entry.kind == TypeKind.Unknown) {
+            concrete_args = false;
+            break;
+        }
+        bool actual_is_view = arg_entry.kind == TypeKind.Pointer
+            || arg_entry.kind == TypeKind.Reference;
+        u32 declared_type = typecheck_parameter_type_id(types, param);
+        TypeEntry* declared_entry = types.get(types.resolve_subst(declared_type));
+        bool parameter_is_pointer = param.declared_type.kind == ProjectionTypeKind.Pointer
+            || declared_entry.kind == TypeKind.Pointer;
+        bool parameter_is_reference = param.declared_type.kind == ProjectionTypeKind.Reference
+            || declared_entry.kind == TypeKind.Reference;
+        if (!actual_is_view && parameter_is_pointer) {
+            arg_type = types.get_pointer(arg_type, param.declared_type.is_mutable);
+        } else if (!actual_is_view && parameter_is_reference) {
+            arg_type = types.get_reference(arg_type, param.declared_type.is_mutable);
+        }
+        callee_env.insert(symbols.names.intern(param.name), arg_type);
+        i += 1;
+    }
+    params.drop();
+    if (!concrete_args) { return; }
+
+    AstPool probe_pool = AstPool.new();
+    ExprLowerer lowerer = ExprLowerer.new(&probe_pool, types, &symbols.names);
+    lowerer.unit_root = root;
+    Vec<u32> stmt_ids = Vec<u32>.new();
+    lowerer.lower_block(body, &stmt_ids);
+    if (lowerer.unsupported) {
+        stmt_ids.drop();
+        return;
+    }
+
+    DiagnosticBag probe_diagnostics = DiagnosticBag.new();
+    bool probe_ok = true;
+    u32 expected_return = function_return_type_id(types, function);
+    i = 0;
+    while (i < stmt_ids.len()) {
+        typecheck_statement(&probe_pool, types, symbols, root, &callee_env,
+                            expected_return, stmt_ids.get(i), &probe_diagnostics,
+                            &probe_ok);
+        i += 1;
+    }
+    stmt_ids.drop();
+
+    i = 0;
+    while (i < probe_diagnostics.len()) {
+        Diagnostic* diagnostic = probe_diagnostics.get(i);
+        if (diagnostic.severity == Severity.Error
+            && typecheck_is_drop_ancestor_error(diagnostic.message.to_str())) {
+            diagnostics.error(diagnostic.span, diagnostic.message.clone());
+            *ok = false;
+        }
+        i += 1;
     }
 }
 
@@ -1500,15 +2219,14 @@ bool typecheck_expressions_scoped(AstPool* pool, SymbolTable* symbols, SyntaxTre
                     i64 diagnostic_index = 0;
                     while (diagnostic_index < function_diagnostics.len()) {
                         Diagnostic* diagnostic = function_diagnostics.get(diagnostic_index);
-                        // Expression inference is still incomplete. Only report the
-                        // checks this pass can establish reliably: overload
-                        // ambiguity, unwrap-or operand/type errors, and the
-                        // dangling-`?` shape error. Everything else stays
-                        // deferred with FE-010.
+                        // Expression inference is still incomplete. Also report
+                        // ownership violations when the projected source and
+                        // destructor ancestor are both resolved.
                         str diagnostic_text = diagnostic.message.to_str();
                         if (typecheck_str_starts_with(diagnostic_text,
                                                      "call to overloaded function '")
                             || typecheck_str_starts_with(diagnostic_text, "unwrap-or ")
+                            || typecheck_str_starts_with(diagnostic_text, "cannot move '")
                             || strcmp(diagnostic_text, "expected expression") == 0) {
                             diagnostics.error(diagnostic.span, diagnostic.message.clone());
                             ok = false;

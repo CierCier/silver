@@ -949,6 +949,31 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
     LlvmGenerator gen = LlvmGenerator.new("silver_native");
     bool compile_ok = gen.compile(&tree, &ast_pool, &symbols.types, &symbols.names, &symbols,
                                   &source_paths, cfg.contains("debug"));
+
+    if (!gen.ownership_diagnostics.is_empty()) {
+        i64 i = 0;
+        while (i < gen.ownership_diagnostics.len()) {
+            Diagnostic* diagnostic = gen.ownership_diagnostics.get(i);
+            str diagnostic_path = source_path;
+            String diagnostic_source = source_copy.clone();
+            if (diagnostic.span.file > 1 && diagnostic.span.file <= source_paths.len()) {
+                diagnostic_path = source_paths.get_ptr(diagnostic.span.file - 1).to_str();
+                Result<String, Error> imported_source = String.from_file(diagnostic_path);
+                diagnostic_source.drop();
+                diagnostic_source = imported_source.is_ok() ? imported_source.unwrap() : String.new();
+            }
+            String rendered = render_diagnostic(diagnostic, diagnostic_path, &diagnostic_source);
+            STDERR.write_str(rendered.to_str());
+            i += 1;
+        }
+        gen.destroy();
+        source_paths.drop();
+        native_destroy_units(&pools, &streams);
+        pool.destroy();
+        output.drop();
+        *result = 2;
+        return true;
+    }
     source_paths.drop();
 
     Optional<String> dump_ir = var("SILVER_DUMP_IR");

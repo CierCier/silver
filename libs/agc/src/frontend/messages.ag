@@ -53,6 +53,15 @@ String type_mismatch(str expected, str found) {
     return move s;
 }
 
+String cannot_move_field_out_of_drop_type(str place, str owner) {
+    String s = String.from_str("cannot move '");
+    s.push_str(place);
+    s.push_str("' out of '");
+    s.push_str(owner);
+    s.push_str("' because it implements Drop");
+    return move s;
+}
+
 String return_type_mismatch(str expected, str found) {
     String s = String.from_str("return type mismatch: expected ");
     s.push_str(expected);

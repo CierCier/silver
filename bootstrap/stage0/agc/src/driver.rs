@@ -1787,6 +1787,31 @@ pub fn run(cli: Cli) {
                 }
                 profiler::end_phase("type check");
 
+                profiler::begin_phase("monomorph");
+                profiler::begin_phase("append_monomorphs fixpoint");
+                let new_items = semantic::monomorph::append_monomorphs(
+                    &mut ast,
+                    &monomorphs,
+                    &imported_modules,
+                );
+                profiler::end_phase("append_monomorphs fixpoint");
+                if !new_items.is_empty() {
+                    profiler::begin_phase("post-monomorph typeck");
+                    let temp_prog = ast::Program {
+                        attributes: Vec::new(),
+                        items: new_items,
+                        comments: Vec::new(),
+                        span: ast.span,
+                    };
+                    let _ = checker.check_program_with_table(&temp_prog, &mut symbol_table);
+                    let post_bare = checker.take_bare_constructors();
+                    if !post_bare.is_empty() {
+                        crate::semantic::typeck::rewrite_bare_constructors(&mut ast, &post_bare);
+                    }
+                    profiler::end_phase("post-monomorph typeck");
+                }
+                profiler::end_phase("monomorph");
+
                 profiler::begin_phase("safety");
                 // Move-out checker: use-after-move of non-copyable values is
                 // a use-after-free, reported alongside type errors.
@@ -1805,7 +1830,10 @@ pub fn run(cli: Cli) {
                     std::process::exit(2);
                 }
 
-                let move_errors = crate::semantic::move_check::check_program(&ast);
+                let move_errors = crate::semantic::move_check::check_program_with_imports(
+                    &ast,
+                    &imported_modules,
+                );
                 if !move_errors.is_empty() {
                     for error in &move_errors {
                         eprintln!(
@@ -1906,25 +1934,6 @@ pub fn run(cli: Cli) {
                     }
                 }
 
-                profiler::begin_phase("monomorph");
-                profiler::begin_phase("append_monomorphs fixpoint");
-                let new_items = semantic::monomorph::append_monomorphs(&mut ast, &monomorphs, &imported_modules);
-                profiler::end_phase("append_monomorphs fixpoint");
-                if !new_items.is_empty() {
-                    profiler::begin_phase("post-monomorph typeck");
-                    let temp_prog = ast::Program {
-                        attributes: Vec::new(),
-                        items: new_items,
-                        comments: Vec::new(),
-                        span: ast.span,
-                    };
-                    let _ = checker.check_program_with_table(&temp_prog, &mut symbol_table);
-                    let post_bare = checker.take_bare_constructors();
-                    if !post_bare.is_empty() {
-                        crate::semantic::typeck::rewrite_bare_constructors(&mut ast, &post_bare);
-                    }
-                    profiler::end_phase("post-monomorph typeck");
-                }
                 // Module emits: monomorphized instances of the library's own
                 // generic functions/impls (e.g. identity__i64_i64) must be
                 // externally linkable — consumers reference the mangled
@@ -1958,7 +1967,6 @@ pub fn run(cli: Cli) {
                         }
                     }
                 }
-                profiler::end_phase("monomorph");
                 symbol_table.touch_phase(
                     CompilerPhase::Monomorphize,
                     format!("monomorph requests applied: {}", monomorphs.len()),

@@ -3,6 +3,7 @@
 //! distinguishes implicit Copy from ownership-transferring Move.
 use crate::diagnostics::messages as msg;
 use crate::lexer::Span;
+use crate::module_artifact::{ExportKind, ModuleArtifact};
 use crate::parser::ast;
 use crate::semantic::init;
 use crate::semantic::move_path::{InitState, MovePathTree};
@@ -442,58 +443,256 @@ struct Facts {
     value_receivers: FxHashSet<(String, String)>,
     /// (function/method name, param index) pairs with a value (non-view) param.
     value_args: FxHashSet<(String, usize)>,
+    /// (owner, method, explicit argument index) pairs with value parameters.
+    value_method_args: FxHashSet<(String, String, usize)>,
     /// Struct field names and types for known struct types.
-    struct_fields: FxHashMap<String, Vec<(String, ast::Type)>>,
+    struct_fields: FxHashMap<String, StructInfo>,
+}
+
+struct StructInfo {
+    generic_params: Vec<String>,
+    fields: Vec<(String, ast::Type)>,
 }
 
 impl Facts {
-    fn build(program: &ast::Program) -> Facts {
+    fn build(program: &ast::Program, imported_modules: &[ModuleArtifact]) -> Facts {
         let mut facts = Facts::default();
+        for module in imported_modules {
+            facts.add_module(module);
+        }
         for item in &program.items {
-            match &item.kind {
-                ast::ItemKind::Struct(strct) => {
-                    let fields = strct
-                        .fields
-                        .iter()
-                        .map(|f| (f.name.name.clone(), f.field_type.clone()))
-                        .collect();
-                    facts.struct_fields.insert(strct.name.name.clone(), fields);
+            facts.add_item(item);
+        }
+        facts
+    }
+
+    fn add_item(&mut self, item: &ast::Item) {
+        match &item.kind {
+            ast::ItemKind::Struct(strct) => {
+                let fields = strct
+                    .fields
+                    .iter()
+                    .map(|f| (f.name.name.clone(), f.field_type.clone()))
+                    .collect();
+                let generic_params = strct
+                    .generics
+                    .as_ref()
+                    .map(|generics| {
+                        generics
+                            .params
+                            .iter()
+                            .filter_map(|param| match param {
+                                ast::GenericParam::Type(param) => Some(param.name.name.clone()),
+                                ast::GenericParam::Lifetime(_) => None,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.struct_fields.insert(
+                    strct.name.name.clone(),
+                    StructInfo {
+                        generic_params,
+                        fields,
+                    },
+                );
+            }
+            ast::ItemKind::Enum(enumeration) => {
+                let fields = enumeration
+                    .variants
+                    .iter()
+                    .flat_map(|variant| match &variant.data {
+                        ast::EnumVariantData::Unit => Vec::new(),
+                        ast::EnumVariantData::Tuple(types) => types
+                            .iter()
+                            .enumerate()
+                            .map(|(i, ty)| (i.to_string(), ty.clone()))
+                            .collect(),
+                        ast::EnumVariantData::Struct(fields) => fields
+                            .iter()
+                            .map(|field| (field.name.name.clone(), field.field_type.clone()))
+                            .collect(),
+                    })
+                    .collect();
+                let generic_params = enumeration
+                    .generics
+                    .as_ref()
+                    .map(|generics| {
+                        generics
+                            .params
+                            .iter()
+                            .filter_map(|param| match param {
+                                ast::GenericParam::Type(param) => Some(param.name.name.clone()),
+                                ast::GenericParam::Lifetime(_) => None,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.struct_fields.insert(
+                    enumeration.name.name.clone(),
+                    StructInfo {
+                        generic_params,
+                        fields,
+                    },
+                );
+            }
+            ast::ItemKind::Impl(imp) => {
+                let owner = Self::owner_key(&imp.self_type);
+                if imp
+                    .trait_ref
+                    .as_ref()
+                    .is_some_and(|t| t.path.last().is_some_and(|seg| seg.name == "Drop"))
+                {
+                    self.drop_owners.insert(owner.clone());
                 }
-                ast::ItemKind::Impl(imp) => {
-                    let owner = Self::owner_key(&imp.self_type);
-                    if imp
-                        .trait_ref
-                        .as_ref()
-                        .is_some_and(|t| t.path.last().is_some_and(|seg| seg.name == "Drop"))
-                    {
-                        facts.drop_owners.insert(owner.clone());
-                    }
-                    for member in &imp.items {
-                        if let ast::ImplItemKind::Function(func) = member {
-                            if func.method_kind == ast::MethodKind::InstanceValue {
-                                facts
-                                    .value_receivers
-                                    .insert((owner.clone(), func.name.name.clone()));
-                            }
-                            for (i, param) in func.parameters.iter().enumerate() {
-                                if !Self::is_view_type(&param.param_type) {
-                                    facts.value_args.insert((func.name.name.clone(), i));
-                                }
+                for member in &imp.items {
+                    if let ast::ImplItemKind::Function(func) = member {
+                        if func.method_kind == ast::MethodKind::InstanceValue {
+                            self.value_receivers
+                                .insert((owner.clone(), func.name.name.clone()));
+                        }
+                        let first_arg = usize::from(func.method_kind != ast::MethodKind::Static);
+                        for (i, param) in func.parameters.iter().enumerate().skip(first_arg) {
+                            if !Self::is_view_type(&param.param_type) {
+                                let argument_index = i - first_arg;
+                                self.value_args
+                                    .insert((func.name.name.clone(), argument_index));
+                                self.value_method_args.insert((
+                                    owner.clone(),
+                                    func.name.name.clone(),
+                                    argument_index,
+                                ));
                             }
                         }
                     }
                 }
-                ast::ItemKind::Function(func) => {
-                    for (i, param) in func.parameters.iter().enumerate() {
-                        if !Self::is_view_type(&param.param_type) {
-                            facts.value_args.insert((func.name.name.clone(), i));
+            }
+            ast::ItemKind::Function(func) => {
+                for (i, param) in func.parameters.iter().enumerate() {
+                    if !Self::is_view_type(&param.param_type) {
+                        self.value_args.insert((func.name.name.clone(), i));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn add_module(&mut self, module: &ModuleArtifact) {
+        for export in &module.exports {
+            match export.kind {
+                ExportKind::Struct => {
+                    let fields = export
+                        .fields
+                        .iter()
+                        .filter_map(|field| {
+                            crate::module_artifact::ast_type_from_canonical_key(&field.type_key)
+                                .ok()
+                                .map(|ty| (field.name.clone(), ty))
+                        })
+                        .collect();
+                    self.struct_fields.insert(
+                        export.name.clone(),
+                        StructInfo {
+                            generic_params: export.type_params.clone(),
+                            fields,
+                        },
+                    );
+                }
+                ExportKind::Enum => {
+                    let fields = export
+                        .enum_variants
+                        .iter()
+                        .flat_map(|variant| {
+                            variant
+                                .payload_types
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(i, key)| {
+                                    crate::module_artifact::ast_type_from_canonical_key(key)
+                                        .ok()
+                                        .map(|ty| (i.to_string(), ty))
+                                })
+                                .chain(variant.payload_fields.iter().filter_map(|field| {
+                                    crate::module_artifact::ast_type_from_canonical_key(
+                                        &field.type_key,
+                                    )
+                                    .ok()
+                                    .map(|ty| (field.name.clone(), ty))
+                                }))
+                                .collect::<Vec<_>>()
+                        })
+                        .collect();
+                    self.struct_fields.insert(
+                        export.name.clone(),
+                        StructInfo {
+                            generic_params: export.type_params.clone(),
+                            fields,
+                        },
+                    );
+                }
+                ExportKind::Function => {
+                    if export.impl_trait.as_deref() == Some("Drop") {
+                        if let Some(owner) = export.name.split_once("::").map(|(owner, _)| owner) {
+                            self.drop_owners
+                                .insert(owner.split('<').next().unwrap_or(owner).to_string());
+                        }
+                    }
+                    let Ok(ty) = crate::types::Type::from_canonical_key(&export.signature) else {
+                        continue;
+                    };
+                    let ast::TypeKind::Function(function) = ty.to_ast().kind.as_ref().clone()
+                    else {
+                        continue;
+                    };
+                    if let Some((owner, method)) = export.name.split_once("::") {
+                        if function
+                            .parameters
+                            .first()
+                            .is_some_and(|receiver| !Self::is_view_type(receiver))
+                        {
+                            self.value_receivers.insert((
+                                owner.split('<').next().unwrap_or(owner).to_string(),
+                                method.to_string(),
+                            ));
+                        }
+                        for (i, param) in function.parameters.iter().enumerate().skip(1) {
+                            if !Self::is_view_type(param) {
+                                self.value_args.insert((method.to_string(), i - 1));
+                                self.value_method_args.insert((
+                                    owner.split('<').next().unwrap_or(owner).to_string(),
+                                    method.to_string(),
+                                    i - 1,
+                                ));
+                            }
+                        }
+                    } else {
+                        for (i, param) in function.parameters.iter().enumerate() {
+                            if !Self::is_view_type(param) {
+                                self.value_args.insert((export.name.clone(), i));
+                            }
                         }
                     }
                 }
                 _ => {}
             }
         }
-        facts
+
+        // Generic impl exports are represented by source templates because a
+        // method signature alone cannot identify their generic owner.
+        for template in &module.generic_templates {
+            let file_id = crate::lexer::register_source(&module.source_path, template);
+            let Ok(tokens) = crate::lexer::lex_with_source(template, file_id) else {
+                continue;
+            };
+            let mut parser =
+                crate::parser::Parser::new_with_source(tokens, module.source_path.clone());
+            let (program, errors) = parser.parse_program();
+            if errors.is_empty() {
+                for item in &program.items {
+                    self.add_item(item);
+                }
+            }
+        }
     }
 
     /// Pointer/reference types are views and are never consumed by value.
@@ -574,7 +773,14 @@ fn expression_terminates(expr: &ast::Expression) -> bool {
 }
 
 pub fn check_program(program: &ast::Program) -> Vec<MoveError> {
-    let facts = Facts::build(program);
+    check_program_with_imports(program, &[])
+}
+
+pub fn check_program_with_imports(
+    program: &ast::Program,
+    imported_modules: &[ModuleArtifact],
+) -> Vec<MoveError> {
+    let facts = Facts::build(program, imported_modules);
     let mut checker = MoveChecker {
         facts,
         errors: Vec::new(),
@@ -609,6 +815,26 @@ struct MoveChecker {
 }
 
 impl MoveChecker {
+    fn reject_partial_move_from_drop_ancestor(
+        &mut self,
+        root_name: &str,
+        path: &str,
+        span: Span,
+        var_types: &FxHashMap<String, ast::Type>,
+    ) -> bool {
+        let Some((place, owner)) = self.partial_move_from_drop_ancestor(root_name, path, var_types)
+        else {
+            return false;
+        };
+        self.errors.push(MoveError {
+            message: msg::cannot_move_field_out_of_drop_type(&place, &owner),
+            span,
+            note_span: None,
+            note_message: None,
+        });
+        true
+    }
+
     fn consuming_receiver(
         &self,
         receiver: &ast::Expression,
@@ -624,6 +850,90 @@ impl MoveChecker {
         self.facts
             .value_receivers
             .contains(&(Facts::owner_key(&ty), method.to_string()))
+    }
+
+    fn is_value_call_argument(
+        &self,
+        function: &ast::Expression,
+        function_name: Option<&str>,
+        index: usize,
+        var_types: &FxHashMap<String, ast::Type>,
+    ) -> bool {
+        if let ast::ExpressionKind::Identifier(ident) = function.kind.as_ref()
+            && let Some(ty) = var_types.get(&ident.name)
+        {
+            let function_type = match ty.kind.as_ref() {
+                ast::TypeKind::Function(function) => Some(function),
+                ast::TypeKind::Pointer(pointer) => match pointer.inner.kind.as_ref() {
+                    ast::TypeKind::Function(function) => Some(function),
+                    _ => None,
+                },
+                _ => None,
+            };
+            return function_type
+                .and_then(|function| function.parameters.get(index))
+                .is_some_and(|parameter| !Facts::is_view_type(parameter));
+        }
+        function_name.is_some_and(|name| self.facts.value_args.contains(&(name.to_string(), index)))
+    }
+
+    fn method_has_value_argument(
+        &self,
+        receiver: &ast::Expression,
+        method: &str,
+        index: usize,
+        var_types: &FxHashMap<String, ast::Type>,
+    ) -> bool {
+        let Some((root, path)) = expr_root_and_path(receiver) else {
+            return false;
+        };
+        self.get_field_type(&root, &path, var_types)
+            .is_some_and(|ty| {
+                self.facts.value_method_args.contains(&(
+                    Facts::owner_key(&ty),
+                    method.to_string(),
+                    index,
+                ))
+            })
+    }
+
+    fn move_value_argument(
+        &mut self,
+        argument: &ast::Expression,
+        reason: &'static str,
+        state: &mut State,
+        scopes: &mut Vec<Vec<ScopeEntry>>,
+        var_types: &mut FxHashMap<String, ast::Type>,
+    ) {
+        if let Some((root, path)) = expr_root_and_path(argument)
+            && state.contains_key(&root)
+            && self.is_path_tracked(&root, &path, var_types)
+        {
+            self.check_expr(argument, state, scopes, var_types);
+            if !path.is_empty()
+                && self.reject_partial_move_from_drop_ancestor(
+                    &root,
+                    &path,
+                    argument.span,
+                    var_types,
+                )
+            {
+                return;
+            }
+            if let Some(var) = state.get_mut(&root) {
+                if path.is_empty() {
+                    var.mark_moved(argument.span, reason);
+                } else {
+                    var.mark_place_moved(
+                        &place_from_root_and_path(&root, &path),
+                        argument.span,
+                        reason,
+                    );
+                }
+            }
+        } else {
+            self.check_expr(argument, state, scopes, var_types);
+        }
     }
 
     /// Check expressions evaluated to compute indexed/dereferenced places.
@@ -693,11 +1003,12 @@ impl MoveChecker {
                 let owner = Facts::owner_key(ty);
                 (named.path.len() == 1 && named.path[0].name == "Task")
                     || self.facts.drop_owners.contains(&owner)
-                    || self
-                        .facts
-                        .struct_fields
-                        .get(&owner)
-                        .is_some_and(|fields| fields.iter().any(|(_, fty)| self.is_tracked(fty)))
+                    || self.facts.struct_fields.get(&owner).is_some_and(|info| {
+                        let substitutions = Self::generic_substitutions(ty, info);
+                        info.fields.iter().any(|(_, fty)| {
+                            self.is_tracked(&Self::substitute_type(fty, &substitutions))
+                        })
+                    })
             }
             _ => self.facts.drop_owners.contains(&Facts::owner_key(ty)),
         }
@@ -715,11 +1026,104 @@ impl MoveChecker {
         }
         for segment in path.split('.') {
             let owner = Facts::owner_key(&curr_ty);
-            let fields = self.facts.struct_fields.get(&owner)?;
-            let (_, next_ty) = fields.iter().find(|(name, _)| name == segment)?;
-            curr_ty = next_ty.clone();
+            let info = self.facts.struct_fields.get(&owner)?;
+            let (_, field_ty) = info.fields.iter().find(|(name, _)| name == segment)?;
+            let substitutions = Self::generic_substitutions(&curr_ty, info);
+            curr_ty = Self::substitute_type(field_ty, &substitutions);
         }
         Some(curr_ty)
+    }
+
+    fn generic_substitutions(ty: &ast::Type, info: &StructInfo) -> FxHashMap<String, ast::Type> {
+        let args = match ty.kind.as_ref() {
+            ast::TypeKind::Named(named) => named.generics.as_deref().unwrap_or_default(),
+            _ => &[],
+        };
+        info.generic_params
+            .iter()
+            .cloned()
+            .zip(args.iter().cloned())
+            .collect()
+    }
+
+    fn substitute_type(ty: &ast::Type, substitutions: &FxHashMap<String, ast::Type>) -> ast::Type {
+        let mut ty = ty.clone();
+        ty.kind = Box::new(match ty.kind.as_ref() {
+            ast::TypeKind::Generic(generic) if generic.args.is_empty() => {
+                return substitutions.get(&generic.name.name).cloned().unwrap_or(ty);
+            }
+            ast::TypeKind::Named(named) => {
+                if named.path.len() == 1
+                    && named.generics.as_ref().is_none_or(Vec::is_empty)
+                    && let Some(substituted) = substitutions.get(&named.path[0].name)
+                {
+                    return substituted.clone();
+                }
+                let mut named = named.clone();
+                named.generics = named.generics.map(|args| {
+                    args.iter()
+                        .map(|arg| Self::substitute_type(arg, substitutions))
+                        .collect()
+                });
+                ast::TypeKind::Named(named)
+            }
+            ast::TypeKind::Pointer(pointer) => {
+                let mut pointer = pointer.clone();
+                pointer.inner = Box::new(Self::substitute_type(&pointer.inner, substitutions));
+                ast::TypeKind::Pointer(pointer)
+            }
+            ast::TypeKind::Reference(reference) => {
+                let mut reference = reference.clone();
+                reference.inner = Box::new(Self::substitute_type(&reference.inner, substitutions));
+                ast::TypeKind::Reference(reference)
+            }
+            ast::TypeKind::Array(array) => {
+                let mut array = array.as_ref().clone();
+                array.element_type =
+                    Box::new(Self::substitute_type(&array.element_type, substitutions));
+                ast::TypeKind::Array(Box::new(array))
+            }
+            ast::TypeKind::Optional(inner) => {
+                ast::TypeKind::Optional(Box::new(Self::substitute_type(inner, substitutions)))
+            }
+            ast::TypeKind::Tuple(types) => ast::TypeKind::Tuple(
+                types
+                    .iter()
+                    .map(|inner| Self::substitute_type(inner, substitutions))
+                    .collect(),
+            ),
+            other => other.clone(),
+        });
+        ty
+    }
+
+    /// A non-Copy field cannot be detached from any enclosing value whose own
+    /// destructor must observe the complete value.
+    fn partial_move_from_drop_ancestor(
+        &self,
+        root_name: &str,
+        path: &str,
+        var_types: &FxHashMap<String, ast::Type>,
+    ) -> Option<(String, String)> {
+        let target = self.get_field_type(root_name, path, var_types)?;
+        if !self.is_tracked(&target) {
+            return None;
+        }
+        let mut owner_ty = var_types.get(root_name)?.clone();
+        let mut owner_path = root_name.to_string();
+        for segment in path.split('.').filter(|segment| !segment.is_empty()) {
+            let owner = Facts::owner_key(&owner_ty);
+            if self.facts.drop_owners.contains(&owner) {
+                return Some((format!("{root_name}.{path}"), owner_path));
+            }
+            let info = self.facts.struct_fields.get(&owner)?;
+            let (_, field_ty) = info.fields.iter().find(|(name, _)| name == segment)?;
+            owner_ty =
+                Self::substitute_type(field_ty, &Self::generic_substitutions(&owner_ty, info));
+            owner_path.push('.');
+            owner_path.push_str(segment);
+        }
+        None
     }
 
     fn is_path_tracked(
@@ -746,13 +1150,13 @@ impl MoveChecker {
         scopes: &mut [Vec<ScopeEntry>],
         var_types: &mut FxHashMap<String, ast::Type>,
     ) {
-        if ty.is_some_and(|t| self.is_tracked(t)) {
+        if let Some(ty) = ty {
             let old_state = state.get(name).cloned();
             let old_type = var_types.get(name).cloned();
-            state.insert(name.to_string(), VarState::new_live());
-            if let Some(t) = ty {
-                var_types.insert(name.to_string(), t.clone());
+            if self.is_tracked(ty) {
+                state.insert(name.to_string(), VarState::new_live());
             }
+            var_types.insert(name.to_string(), ty.clone());
             scopes.last_mut().expect("scope stack is non-empty").push((
                 name.to_string(),
                 old_state,
@@ -869,7 +1273,27 @@ impl MoveChecker {
             }
             ast::StatementKind::Let(let_stmt) => {
                 if let Some(init) = &let_stmt.initializer {
-                    self.check_expr(init, state, scopes, var_types);
+                    if let Some((root_name, path)) = expr_root_and_path(init)
+                        && !path.is_empty()
+                        && state.contains_key(&root_name)
+                        && self.is_path_tracked(&root_name, &path, var_types)
+                    {
+                        // Preserve the ordinary read check before recording the
+                        // implicit transfer. This catches a field moved earlier.
+                        self.check_expr(init, state, scopes, var_types);
+                        if !self.reject_partial_move_from_drop_ancestor(
+                            &root_name, &path, init.span, var_types,
+                        ) && let Some(var) = state.get_mut(&root_name)
+                        {
+                            var.mark_place_moved(
+                                &place_from_root_and_path(&root_name, &path),
+                                init.span,
+                                msg::note_value_moved_here(),
+                            );
+                        }
+                    } else {
+                        self.check_expr(init, state, scopes, var_types);
+                    }
                 }
                 self.declare_pattern(
                     &let_stmt.pattern,
@@ -892,7 +1316,29 @@ impl MoveChecker {
                             var.mark_moved(expr.span, msg::note_value_moved_by_return());
                         }
                     }
-                    _ => self.check_expr(expr, state, scopes, var_types),
+                    _ => {
+                        if let Some((root_name, path)) = expr_root_and_path(expr)
+                            && !path.is_empty()
+                            && state.contains_key(&root_name)
+                            && self.is_path_tracked(&root_name, &path, var_types)
+                        {
+                            self.check_expr(expr, state, scopes, var_types);
+                            if self.reject_partial_move_from_drop_ancestor(
+                                &root_name, &path, expr.span, var_types,
+                            ) {
+                                return;
+                            }
+                            if let Some(var) = state.get_mut(&root_name) {
+                                var.mark_place_moved(
+                                    &place_from_root_and_path(&root_name, &path),
+                                    expr.span,
+                                    msg::note_value_moved_by_return(),
+                                );
+                            }
+                        } else {
+                            self.check_expr(expr, state, scopes, var_types);
+                        }
+                    }
                 }
             }
             ast::StatementKind::Return(None)
@@ -1038,6 +1484,11 @@ impl MoveChecker {
                         }
                     } else {
                         // `move x.field` (partial field move) — now via `MovePathTree` + `Place::is_prefix_of`
+                        if self.reject_partial_move_from_drop_ancestor(
+                            &root_name, &path, inner.span, var_types,
+                        ) {
+                            return;
+                        }
                         if let Some(var) = state.get_mut(&root_name) {
                             let place = place_from_root_and_path(&root_name, &path);
                             // Distinguish Copy vs Move: `Copy` types use `copy_from` (read-only).
@@ -1088,24 +1539,46 @@ impl MoveChecker {
                         && state.contains_key(&root_name)
                         && self.is_path_tracked(&root_name, &path, var_types)
                     {
-                        if path.is_empty() {
-                            if let Some(var) = state.get_mut(&root_name) {
-                                var.mark_moved(receiver.span, msg::note_value_consumed_by_method());
-                            }
-                        } else if let Some(var) = state.get_mut(&root_name) {
-                            let place = place_from_root_and_path(&root_name, &path);
-                            var.mark_place_moved(
-                                &place,
+                        let blocked = !path.is_empty()
+                            && self.reject_partial_move_from_drop_ancestor(
+                                &root_name,
+                                &path,
                                 receiver.span,
-                                msg::note_value_consumed_by_method(),
+                                var_types,
                             );
+                        if !blocked {
+                            if path.is_empty() {
+                                if let Some(var) = state.get_mut(&root_name) {
+                                    var.mark_moved(
+                                        receiver.span,
+                                        msg::note_value_consumed_by_method(),
+                                    );
+                                }
+                            } else if let Some(var) = state.get_mut(&root_name) {
+                                let place = place_from_root_and_path(&root_name, &path);
+                                var.mark_place_moved(
+                                    &place,
+                                    receiver.span,
+                                    msg::note_value_consumed_by_method(),
+                                );
+                            }
                         }
                     }
                 } else {
                     self.check_expr(receiver, state, scopes, var_types);
                 }
-                for arg in arguments {
-                    self.check_expr(arg, state, scopes, var_types);
+                for (i, arg) in arguments.iter().enumerate() {
+                    if self.method_has_value_argument(receiver, &method.name, i, var_types) {
+                        self.move_value_argument(
+                            arg,
+                            msg::note_value_moved_into_param(),
+                            state,
+                            scopes,
+                            var_types,
+                        );
+                    } else {
+                        self.check_expr(arg, state, scopes, var_types);
+                    }
                 }
             }
             ast::ExpressionKind::Call {
@@ -1117,26 +1590,19 @@ impl MoveChecker {
                     _ => None,
                 };
                 for (i, arg) in arguments.iter().enumerate() {
-                    let is_val_arg = fn_name
-                        .as_ref()
-                        .is_some_and(|name| self.facts.value_args.contains(&(name.clone(), i)));
-                    if is_val_arg
-                        && let Some((root_name, path)) = expr_root_and_path(arg)
-                        && state.contains_key(&root_name)
-                        && self.is_path_tracked(&root_name, &path, var_types)
-                    {
-                        if path.is_empty() {
-                            if let Some(var) = state.get_mut(&root_name) {
-                                var.mark_moved(arg.span, msg::note_value_moved_into_param());
-                            }
-                        } else if let Some(var) = state.get_mut(&root_name) {
-                            let place = place_from_root_and_path(&root_name, &path);
-                            var.mark_place_moved(
-                                &place,
-                                arg.span,
-                                msg::note_value_moved_into_param(),
-                            );
-                        }
+                    if self.is_value_call_argument(
+                        function,
+                        fn_name.as_deref(),
+                        i,
+                        var_types,
+                    ) {
+                        self.move_value_argument(
+                            arg,
+                            msg::note_value_moved_into_param(),
+                            state,
+                            scopes,
+                            var_types,
+                        );
                     } else {
                         self.check_expr(arg, state, scopes, var_types);
                     }
@@ -1175,6 +1641,13 @@ impl MoveChecker {
                                         );
                                     }
                                 } else {
+                                    if !path.is_empty()
+                                        && self.reject_partial_move_from_drop_ancestor(
+                                            &root_name, &path, arg.span, var_types,
+                                        )
+                                    {
+                                        continue;
+                                    }
                                     let place = place_from_root_and_path(&root_name, &path);
                                     if let Some(var) = state.get(&root_name)
                                         && let Some((move_span, reason)) =
@@ -1344,7 +1817,25 @@ impl MoveChecker {
             } => {
                 if *operator == ast::BinaryOperator::Assign {
                     // Evaluate RHS first (in case it uses or moves resources).
-                    self.check_expr(right, state, scopes, var_types);
+                    if let Some((root_name, path)) = expr_root_and_path(right)
+                        && !path.is_empty()
+                        && state.contains_key(&root_name)
+                        && self.is_path_tracked(&root_name, &path, var_types)
+                    {
+                        self.check_expr(right, state, scopes, var_types);
+                        if !self.reject_partial_move_from_drop_ancestor(
+                            &root_name, &path, right.span, var_types,
+                        ) && let Some(var) = state.get_mut(&root_name)
+                        {
+                            var.mark_place_moved(
+                                &place_from_root_and_path(&root_name, &path),
+                                right.span,
+                                msg::note_value_moved_here(),
+                            );
+                        }
+                    } else {
+                        self.check_expr(right, state, scopes, var_types);
+                    }
                     self.check_place_operands(left, state, scopes, var_types);
 
                     // Re-initialization handling — now via `MovePathTree` + `Place::is_prefix_of`
@@ -1746,6 +2237,48 @@ mod tests {
     }
 
     #[test]
+    fn partial_field_argument_to_method_respects_drop_ancestor() {
+        let rejected = errors(
+            "struct Owner { T item; }\n\
+             impl Drop<Owner> for Owner { void drop(Owner* self) {} }\n\
+             impl Sink { void take(Sink* self, T value) {} }\
+             void f() { Owner owner; Sink sink; sink.take(owner.item); }",
+        );
+        assert!(
+            rejected.iter().any(|message| message.contains("cannot move 'owner.item'")),
+            "method by-value argument must reject a field move below Drop owner: {rejected:?}"
+        );
+
+        let borrowed = errors(
+            "struct Owner { T item; }\n\
+             impl Drop<Owner> for Owner { void drop(Owner* self) {} }\n\
+             impl Sink { void peek(Sink* self, T* value) {} }\
+             void f() { Owner owner; Sink sink; sink.peek(&owner.item); }",
+        );
+        assert!(borrowed.is_empty(), "borrowed method argument remains valid: {borrowed:?}");
+    }
+
+    #[test]
+    fn partial_field_argument_to_typed_function_pointer_respects_drop_ancestor() {
+        let rejected = errors(
+            "struct Owner { T item; }\n\
+             impl Drop<Owner> for Owner { void drop(Owner* self) {} }\n\
+             void f() { Owner owner; void(T) callback; callback(owner.item); }",
+        );
+        assert!(
+            rejected.iter().any(|message| message.contains("cannot move 'owner.item'")),
+            "function pointer by-value argument must reject field move below Drop owner: {rejected:?}"
+        );
+
+        let borrowed = errors(
+            "struct Owner { T item; }\n\
+             impl Drop<Owner> for Owner { void drop(Owner* self) {} }\n\
+             void f() { Owner owner; void(T*) callback; callback(&owner.item); }",
+        );
+        assert!(borrowed.is_empty(), "borrowed function pointer argument remains valid: {borrowed:?}");
+    }
+
+    #[test]
     fn pointer_receiver_does_not_move() {
         let errs = errors(
             "impl T { void peek(T* self) { } }\n\
@@ -2016,5 +2549,225 @@ mod tests {
             ok2.is_empty(),
             "after x.a = make_string() reinit, both String fields should be readable via initialize, got {ok2:?}"
         );
+    }
+
+    #[test]
+    fn partial_move_is_rejected_below_custom_drop_ancestors() {
+        let errs = errors(
+            "impl Drop<String> for String { void drop(String* self) {} }\n\
+             struct Inner { String value; }\n\
+             impl Drop<Inner> for Inner { void drop(Inner* self) {} }\n\
+             struct Outer { Inner inner; }\n\
+             void take(String value) {}\n\
+             void f() { Outer outer; take(move outer.inner.value); }",
+        );
+        assert_eq!(
+            errs.len(),
+            1,
+            "expected one custom-Drop ancestor error: {errs:?}"
+        );
+        assert!(
+            errs[0].contains("cannot move 'outer.inner.value' out of 'outer'")
+                || errs[0].contains("cannot move 'outer.inner.value' out of 'outer.inner'"),
+            "unexpected diagnostic: {errs:?}"
+        );
+
+        let allowed = errors(
+            "impl Drop<String> for String { void drop(String* self) {} }\n\
+             struct Inner { String value; }\n\
+             struct Outer { Inner inner; }\n\
+             void take(String value) {}\n\
+             void f() { Outer outer; take(move outer.inner.value); }",
+        );
+        assert!(
+            allowed.is_empty(),
+            "wrapper without own Drop should allow move: {allowed:?}"
+        );
+
+        let copy = errors(
+            "impl Drop<String> for String { void drop(String* self) {} }\n\
+             struct Owner { i32 count; String value; }\n\
+             impl Drop<Owner> for Owner { void drop(Owner* self) {} }\n\
+             void f() { Owner owner; i32 count = move owner.count; }",
+        );
+        assert!(copy.is_empty(), "Copy fields remain readable: {copy:?}");
+    }
+
+    #[test]
+    fn generic_drop_owner_field_type_is_substituted() {
+        let errs = errors(
+            "impl Drop<String> for String { void drop(String* self) {} }\n\
+             struct Boxed<T> { T value; }\n\
+             impl<T> Drop<Boxed<T>> for Boxed<T> { void drop(Boxed<T>* self) {} }\n\
+             void f() { Boxed<String> boxed; String value = move boxed.value; }",
+        );
+        assert!(
+            errs.iter()
+                .any(|message| message.contains("cannot move 'boxed.value'")),
+            "generic Drop owner must reject its owned field move: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn all_partial_value_transfers_check_drop_ancestors() {
+        let cases = [
+            "void take(String value) {} void f() { Owner owner; take(owner.value); }",
+            "void f() { Owner owner; String value = owner.value; }",
+            "String get(Owner owner) { return owner.value; }",
+            "void f() { Owner owner; owner.value.drop(); }",
+        ];
+        for body in cases {
+            let source = format!(
+                "impl Drop<String> for String {{ void drop(String* self) {{}} }}\n\
+                 struct Owner {{ String value; }}\n\
+                 impl Drop<Owner> for Owner {{ void drop(Owner* self) {{}} }}\n\
+                 {body}"
+            );
+            let errs = errors(&source);
+            assert!(
+                errs.iter()
+                    .any(|message| message.contains("because it implements Drop")),
+                "expected Drop ancestor rejection for {body:?}, got {errs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn implicit_field_transfers_still_check_for_prior_moves() {
+        let cases = [
+            "String f() { Wrapper wrapper; String first = move wrapper.value; return wrapper.value; }",
+            "void f() { Wrapper wrapper; String first = move wrapper.value; String second = wrapper.value; }",
+            "void f() { Wrapper wrapper; String first = move wrapper.value; wrapper.other = wrapper.value; }",
+        ];
+        for body in cases {
+            let source = format!(
+                "impl Drop<String> for String {{ void drop(String* self) {{}} }}\n\
+                 struct Wrapper {{ String value; String other; }}\n{body}"
+            );
+            let errs = errors(&source);
+            assert!(
+                errs.iter().any(|message| message.contains("use of moved field")),
+                "implicit transfer must diagnose prior field moves for {body:?}: {errs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn imported_drop_and_field_facts_reject_partial_moves() {
+        let exported_struct = |name: &str, fields: Vec<crate::module_artifact::ModuleField>| {
+            crate::module_artifact::ModuleExport {
+                kind: ExportKind::Struct,
+                name: name.to_string(),
+                signature: "struct".to_string(),
+                type_params: Vec::new(),
+                link_name: None,
+                abi: None,
+                is_variadic: false,
+                type_key: Some(name.to_string()),
+                fields,
+                layout: None,
+                enum_backing_type: None,
+                enum_variants: Vec::new(),
+                trait_items: Vec::new(),
+                const_value: None,
+                is_mutable: false,
+                impl_trait: None,
+            }
+        };
+        let exported_drop = |owner: &str| crate::module_artifact::ModuleExport {
+            kind: ExportKind::Function,
+            name: format!("{owner}::drop"),
+            signature: format!("fn(*{owner}) -> unit"),
+            type_params: Vec::new(),
+            link_name: Some(format!("{owner}_drop")),
+            abi: Some(crate::module_artifact::ModuleAbi::Silver),
+            is_variadic: false,
+            type_key: None,
+            fields: Vec::new(),
+            layout: None,
+            enum_backing_type: None,
+            enum_variants: Vec::new(),
+            trait_items: Vec::new(),
+            const_value: None,
+            is_mutable: false,
+            impl_trait: Some("Drop".to_string()),
+        };
+        let imported = ModuleArtifact {
+            module_name: "owners".to_string(),
+            module_path: "owners".to_string(),
+            source_path: "owners.ag".to_string(),
+            source_hash_fnv1a64: 0,
+            compiler_version: String::new(),
+            target_triple: String::new(),
+            code_artifacts: Default::default(),
+            module_deps: Vec::new(),
+            transitive_deps: Vec::new(),
+            exports: vec![
+                exported_struct(
+                    "ImportedOwner",
+                    vec![crate::module_artifact::ModuleField {
+                        name: "value".to_string(),
+                        type_key: "OwnedValue".to_string(),
+                        tags: FxHashMap::default(),
+                    }],
+                ),
+                exported_struct("OwnedValue", Vec::new()),
+                exported_drop("ImportedOwner"),
+                exported_drop("OwnedValue"),
+            ],
+            native_libs: Vec::new(),
+            native_lib_paths: Vec::new(),
+            generic_templates: vec![
+                "struct GenericOwner<T> { T value; } impl<T> Drop<GenericOwner<T>> for GenericOwner<T> { void drop(GenericOwner<T>* self) {} }".to_string(),
+            ],
+            artifact_path: None,
+        };
+        let program =
+            parse("void use(ImportedOwner owner) { OwnedValue value = move owner.value; }");
+        let errs = check_program_with_imports(&program, std::slice::from_ref(&imported));
+        assert!(
+            errs.iter()
+                .any(|error| error.message.contains("cannot move 'owner.value'")),
+            "imported Drop owner must reject its field move: {errs:?}"
+        );
+        let generic_program = parse(
+            "void use(GenericOwner<OwnedValue> owner) { OwnedValue value = move owner.value; }",
+        );
+        let generic_errs =
+            check_program_with_imports(&generic_program, std::slice::from_ref(&imported));
+        assert!(
+            generic_errs
+                .iter()
+                .any(|error| error.message.contains("cannot move 'owner.value'")),
+            "imported generic Drop template must reject its field move: {generic_errs:?}"
+        );
+    }
+
+    #[test]
+    fn enum_and_array_fields_are_non_copy_when_they_own_drop_values() {
+        let enum_errs = errors(
+            "struct Owned { i64 value; }\n\
+             impl Drop<Owned> for Owned { void drop(Owned* self) {} }\n\
+             enum MaybeOwned { HasOwned(Owned); Empty; }\n\
+             struct Owner { MaybeOwned maybe; }\n\
+             impl Drop<Owner> for Owner { void drop(Owner* self) {} }\n\
+             void f() { Owner owner; MaybeOwned maybe = move owner.maybe; }",
+        );
+        assert!(enum_errs
+            .iter()
+            .any(|error| error.contains("because it implements Drop")),
+            "enum payload move must be rejected: {enum_errs:?}");
+
+        let array_errs = errors(
+            "struct Owned { i64 value; }\n\
+             impl Drop<Owned> for Owned { void drop(Owned* self) {} }\n\
+             struct Owner { Owned values[2]; }\n\
+             impl Drop<Owner> for Owner { void drop(Owner* self) {} }\n\
+             void f() { Owner owner; let values = move owner.values; }",
+        );
+        assert!(array_errs
+            .iter()
+            .any(|error| error.contains("because it implements Drop")),
+            "array field move must be rejected: {array_errs:?}");
     }
 }

@@ -100,6 +100,10 @@ struct TypeStructProperties {
     u32 name_id;
     u32 field_start;
     u32 field_count;
+    u32 field_name_start;
+    u32 field_name_count;
+    u32 type_param_start;
+    u32 type_param_count;
     bool needs_drop;
 }
 
@@ -110,6 +114,8 @@ struct TypeTable {
     Vec<u32> type_args;
     Vec<TypeStructProperties> struct_properties;
     Vec<u32> struct_fields;
+    Vec<u32> struct_field_names;
+    Vec<u32> struct_type_params;
 }
 TypeProperties type_properties_at(TypeTable* table, u32 id, u32 depth) {
     TypeProperties properties;
@@ -179,6 +185,8 @@ impl TypeTable {
         table.type_args = Vec<u32>.new();
         table.struct_properties = Vec<TypeStructProperties>.new();
         table.struct_fields = Vec<u32>.new();
+        table.struct_field_names = Vec<u32>.new();
+        table.struct_type_params = Vec<u32>.new();
         // 0: Unknown
         table.add_prim(TypeKind.Unknown, "unknown");
         // 1: Void
@@ -803,8 +811,50 @@ impl TypeTable {
         definition.name_id = name_id;
         definition.field_start = start;
         definition.field_count = (u32)fields.len();
+        definition.field_name_start = 0;
+        definition.field_name_count = 0;
+        definition.type_param_start = 0;
+        definition.type_param_count = 0;
         definition.needs_drop = false;
         self.struct_properties.push(definition);
+    }
+    void register_struct_field_names(TypeTable* self, str name, Vec<u32>* names) {
+        u32 name_id = self.names.intern(name);
+        u32 start = (u32)self.struct_field_names.len();
+        i64 i = 0;
+        while (i < names.len()) {
+            self.struct_field_names.push(names.get(i));
+            i += 1;
+        }
+        i = 0;
+        while (i < self.struct_properties.len()) {
+            TypeStructProperties* definition = self.struct_properties.get_ptr(i);
+            if (definition.name_id == name_id) {
+                definition.field_name_start = start;
+                definition.field_name_count = (u32)names.len();
+                return;
+            }
+            i += 1;
+        }
+    }
+    void register_struct_type_params(TypeTable* self, str name, Vec<u32>* params) {
+        u32 name_id = self.names.intern(name);
+        u32 start = (u32)self.struct_type_params.len();
+        i64 i = 0;
+        while (i < params.len()) {
+            self.struct_type_params.push(params.get(i));
+            i += 1;
+        }
+        i = 0;
+        while (i < self.struct_properties.len()) {
+            TypeStructProperties* definition = self.struct_properties.get_ptr(i);
+            if (definition.name_id == name_id) {
+                definition.type_param_start = start;
+                definition.type_param_count = (u32)params.len();
+                return;
+            }
+            i += 1;
+        }
     }
     void mark_type_needs_drop(TypeTable* self, str name) {
         u32 name_id = self.names.intern(name);
@@ -821,6 +871,10 @@ impl TypeTable {
         definition.name_id = name_id;
         definition.field_start = 0;
         definition.field_count = 0;
+        definition.field_name_start = 0;
+        definition.field_name_count = 0;
+        definition.type_param_start = 0;
+        definition.type_param_count = 0;
         definition.needs_drop = true;
         self.struct_properties.push(definition);
     }

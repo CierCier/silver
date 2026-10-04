@@ -16,6 +16,7 @@ import frontend.artifacts;
 import frontend.ast;
 import frontend.diagnostics;
 import frontend.lexer;
+import frontend.items;
 import frontend.symbols;
 import frontend.cfg;
 
@@ -370,6 +371,161 @@ SymbolKind source_item_symbol_kind(NodeKind kind) {
     };
 }
 
+void module_collect_tokens(SyntaxNode* node, Vec<SyntaxNode*>* tokens) {
+    if (node == (SyntaxNode*)0) { return; }
+    if (node.kind == NodeKind.Token) {
+        tokens.push(node);
+        return;
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        module_collect_tokens(child, tokens);
+        child = child.next_sibling;
+    }
+}
+
+void module_collect_type_params(TypeTable* types, SyntaxNode* name, SyntaxNode* body,
+                                Vec<u32>* generic_params) {
+    SyntaxNode* cursor = name.next_sibling;
+    while (cursor != (SyntaxNode*)0 && cursor != body) {
+        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Less) {
+            cursor = cursor.next_sibling;
+            bool expecting_param = true;
+            i64 angle_depth = 0;
+            while (cursor != (SyntaxNode*)0 && cursor != body) {
+                if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Less) {
+                    angle_depth += 1;
+                } else if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Greater) {
+                    if (angle_depth == 0) { break; }
+                    angle_depth -= 1;
+                } else if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Comma
+                           && angle_depth == 0) {
+                    expecting_param = true;
+                } else if (expecting_param && angle_depth == 0
+                           && cursor.kind == NodeKind.Token
+                           && cursor.token_kind == TokenKind.Identifier) {
+                    generic_params.push(types.names.intern(cursor.text));
+                    expecting_param = false;
+                }
+                cursor = cursor.next_sibling;
+            }
+            break;
+        }
+        cursor = cursor.next_sibling;
+    }
+}
+
+void module_register_source_struct(TypeTable* types, SyntaxNode* item) {
+    SyntaxNode* name = item_identifier(item);
+    if (name == (SyntaxNode*)0) { return; }
+    SyntaxNode* body = item.first_child;
+    while (body != (SyntaxNode*)0 && body.kind != NodeKind.Block) {
+        body = body.next_sibling;
+    }
+    if (body == (SyntaxNode*)0) { return; }
+
+    Vec<u32> generic_params = Vec<u32>.new();
+    module_collect_type_params(types, name, body, &generic_params);
+
+    Vec<SyntaxNode*> tokens = Vec<SyntaxNode*>.new();
+    Vec<u32> fields = Vec<u32>.new();
+    Vec<u32> field_names = Vec<u32>.new();
+    module_collect_tokens(body, &tokens);
+    i64 start = 0;
+    while (start < tokens.len()) {
+        i64 end = start;
+        while (end < tokens.len() && tokens.get(end).token_kind != TokenKind.Semicolon) {
+            end += 1;
+        }
+        i64 name_index = end - 1;
+        while (name_index >= start && tokens.get(name_index).token_kind != TokenKind.Identifier) {
+            name_index -= 1;
+        }
+        if (name_index > start) {
+            String type_text = String.new();
+            i64 i = start;
+            while (i < name_index) {
+                type_text.push_str(tokens.get(i).text);
+                i += 1;
+            }
+            i = name_index + 1;
+            while (i < end) {
+                type_text.push_str(tokens.get(i).text);
+                i += 1;
+            }
+            fields.push(type_id_from_text(types, type_text.to_str()));
+            field_names.push(types.names.intern(tokens.get(name_index).text));
+            type_text.drop();
+        }
+        start = end + 1;
+    }
+    types.register_struct_properties(name.text, &fields);
+    types.register_struct_field_names(name.text, &field_names);
+    types.register_struct_type_params(name.text, &generic_params);
+    field_names.drop();
+    fields.drop();
+    tokens.drop();
+    generic_params.drop();
+}
+
+void module_register_source_enum(TypeTable* types, SyntaxNode* root, SyntaxNode* item) {
+    SyntaxNode* name = item_identifier(item);
+    if (name == (SyntaxNode*)0) { return; }
+    SyntaxNode* body = item.first_child;
+    while (body != (SyntaxNode*)0 && body.kind != NodeKind.Block) {
+        body = body.next_sibling;
+    }
+    if (body == (SyntaxNode*)0) { return; }
+    Vec<u32> generic_params = Vec<u32>.new();
+    module_collect_type_params(types, name, body, &generic_params);
+    Vec<SyntaxNode*> variants = Vec<SyntaxNode*>.new();
+    Vec<i64> tags = Vec<i64>.new();
+    Vec<i64> arities = Vec<i64>.new();
+    Vec<u32> payload_types = Vec<u32>.new();
+    enum_each_variant(item, &variants, &tags, &arities);
+    i64 vi = 0;
+    while (vi < variants.len()) {
+        i64 pi = 0;
+        while (pi < arities.get(vi)) {
+            String payload_text = String.new();
+            if (enum_payload_type_text(root, name.text, variants.get(vi).text, pi, &payload_text)) {
+                payload_types.push(type_id_from_text(types, payload_text.to_str()));
+            }
+            payload_text.drop();
+            pi += 1;
+        }
+        vi += 1;
+    }
+    types.register_struct_properties(name.text, &payload_types);
+    types.register_struct_type_params(name.text, &generic_params);
+    payload_types.drop();
+    variants.drop();
+    tags.drop();
+    arities.drop();
+    generic_params.drop();
+}
+
+void module_register_source_drop_impl(TypeTable* types, SyntaxNode* item) {
+    bool saw_drop = false;
+    bool saw_for_after_drop = false;
+    SyntaxNode* child = item.first_child;
+    while (child != (SyntaxNode*)0 && child.kind != NodeKind.Block) {
+        if (child.kind == NodeKind.Token && strcmp(child.text, "Drop") == 0) {
+            saw_drop = true;
+        } else if (saw_drop && child.kind == NodeKind.Token
+                   && (child.token_kind == TokenKind.For || strcmp(child.text, "for") == 0)) {
+            saw_for_after_drop = true;
+            break;
+        }
+        child = child.next_sibling;
+    }
+    if (!saw_for_after_drop) { return; }
+    SyntaxNode* target = impl_target_identifier(item);
+    if (target != (SyntaxNode*)0) {
+        types.mark_type_needs_drop(target.text);
+    }
+}
+
 void add_visible_source_item(ModuleLoader* loader, SyntaxNode* item) {
     SyntaxNode* name = item_identifier(item);
     if (name == (SyntaxNode*)0) {
@@ -420,6 +576,13 @@ void load_source_module(ModuleLoader* loader, DiagnosticBag* diagnostics, str pa
         SyntaxNode* item = active_items.get(item_index);
         if (item.kind != NodeKind.Import && item.kind != NodeKind.Extern) {
             add_visible_source_item(loader, item);
+            if (item.kind == NodeKind.Struct) {
+                module_register_source_struct(&loader.symbols.types, item);
+            } else if (item.kind == NodeKind.Enum) {
+                module_register_source_enum(&loader.symbols.types, tree.root, item);
+            } else if (item.kind == NodeKind.Impl) {
+                module_register_source_drop_impl(&loader.symbols.types, item);
+            }
         }
         cfg_collect_extern_from_item(item, &extern_names);
         item_index += 1;

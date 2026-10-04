@@ -45,9 +45,6 @@ void early_return() {
 void consume_parent(Parent _parent) {
 }
 
-void consume_child(Child _child) {
-}
-
 i32 main() {
     // The parent's destructor can inspect a live child before cascading fields.
     events = 0;
@@ -88,18 +85,6 @@ i32 main() {
     }
     assert_eq_i64(1, observed_child, "by-value owner sees moved parent's child");
     assert_eq_i64(132, events, "moved parent mutates its child before declaration-order drops");
-
-    // A direct field move leaves the parent and sibling live. Skip the moved child
-    // observation because it no longer belongs to the parent.
-    events = 0;
-    observed_child = 0;
-    inspect_child = false;
-    {
-        Parent parent = make_parent(2, 3);
-        consume_child(move parent.child);
-        assert_eq_i64(3, parent.sibling.value, "sibling remains live after child move");
-    }
-    assert_eq_i64(213, events, "moved child drops before parent and remaining sibling");
 
     return 42;
 }

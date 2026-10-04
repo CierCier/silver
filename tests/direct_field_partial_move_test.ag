@@ -21,8 +21,8 @@ struct Pair {
 }
 
 struct ManagedPair {
-    Tracked left;
-    Tracked right;
+    i64 left;
+    i64 right;
     i64 marker;
 }
 impl Drop for ManagedPair {
@@ -150,23 +150,19 @@ i32 main() {
     assert_eq_i64(4, drops, "untaken path drops both initialized fields");
     assert_eq_i64(286, dropped_values, "untaken path preserves both payloads");
 
-    drops = 0;
-    dropped_values = 0;
     parent_drops = 0;
     {
         ManagedPair pair;
-        pair.left = make_tracked(81);
-        pair.right = make_tracked(82);
+        pair.left = 81;
+        pair.right = 82;
         pair.marker = 83;
         i64 marker = move pair.marker;
         assert_eq_i64(83, marker, "moving an untracked field preserves its value");
-        consume(move pair.left);
-        assert_eq_i64(1, drops, "owned field moves independently of parent destructor");
-        assert_eq_i64(82, pair.right.value, "custom-Drop parent retains its live sibling");
+        i64 left = move pair.left;
+        assert_eq_i64(81, left, "Copy field moves from a custom-Drop parent");
+        assert_eq_i64(82, pair.right, "custom-Drop parent retains its live sibling");
     }
     assert_eq_i64(1, parent_drops, "partial field move leaves parent destructor live");
-    assert_eq_i64(2, drops, "untracked field move preserves owned sibling flags");
-    assert_eq_i64(163, dropped_values, "custom-Drop parent fields each drop once");
 
     return 42;
 }

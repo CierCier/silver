@@ -15,6 +15,8 @@ import frontend.items;
 import frontend.place;
 import frontend.symbols;
 import frontend.types;
+import frontend.typecheck_expr;
+import frontend.messages;
 import backend.llvm.context;
 import backend.llvm.types;
 import backend.llvm.mono;
@@ -597,6 +599,47 @@ u32 llvm_collect_drop_field_path(LlvmContext* ctx, u32 expr_id,
     return root_name;
 }
 
+bool llvm_validate_drop_field_transfer(LlvmContext* ctx, LlvmLocal* local,
+                                      Vec<Projection>* path, u32 expr_id) {
+    u32 value_type = llvm_expr_type(ctx, expr_id);
+    if (value_type == TYPE_UNKNOWN || value_type == 0
+        || typecheck_type_is_copy(ctx.root, ctx.types, value_type)) { return true; }
+    u32 current_type = ctx.types.resolve_subst(local.type_id);
+    if (current_type == TYPE_UNKNOWN || current_type == 0) { return true; }
+    TypeEntry* root_entry = ctx.types.get(current_type);
+    if (root_entry.kind == TypeKind.Pointer || root_entry.kind == TypeKind.Reference) {
+        return true;
+    }
+    String place = String.from_str(ctx.names.get(local.name_id));
+    i64 i = 0;
+    while (i < path.len()) {
+        place.push_str(".");
+        place.push_str(ctx.names.get(path.get_ptr(i).field_name_id));
+        i += 1;
+    }
+    bool valid = true;
+    i = 0;
+    while (i < path.len()) {
+        TypeEntry* ancestor_entry = ctx.types.get(current_type);
+        if (ancestor_entry.kind == TypeKind.Pointer || ancestor_entry.kind == TypeKind.Reference) {
+            break;
+        }
+        if (typecheck_type_has_drop_impl(ctx.root, ctx.types, current_type)) {
+            String message = cannot_move_field_out_of_drop_type(
+                place.to_str(), ctx.types.type_name(current_type));
+            ctx.ownership_diagnostics.error(ctx.pool.get_expr(expr_id).span, move message);
+            valid = false;
+            break;
+        }
+        current_type = typecheck_struct_field_type(ctx.types, ctx.root, current_type,
+                                                   ctx.names.get(path.get_ptr(i).field_name_id));
+        if (current_type == TYPE_UNKNOWN || current_type == 0) { break; }
+        i += 1;
+    }
+    place.drop();
+    return valid;
+}
+
 // Field transfers clear the selected subtree; indexed places retain the
 // conservative whole-root fallback because no per-element state exists.
 void llvm_clear_place_drops(LlvmContext* ctx, u32 expr_id) {
@@ -610,6 +653,10 @@ void llvm_clear_place_drops(LlvmContext* ctx, u32 expr_id) {
     if (root_name != 0 && path.len() > 0) {
         LlvmLocal* local = ctx.find_local(root_name);
         if (local != (LlvmLocal*)0) {
+            if (!llvm_validate_drop_field_transfer(ctx, local, &path, expr_id)) {
+                path.drop();
+                return;
+            }
             u32 root_ty = ctx.types.resolve_subst(local.type_id);
             if (root_ty != TYPE_UNKNOWN && root_ty != 0) {
                 TypeEntry* root_entry = ctx.types.get(root_ty);

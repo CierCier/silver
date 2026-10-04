@@ -195,6 +195,8 @@ The Silver compiler implements a lightweight deterministic memory and resource c
 1. **Automatic Field Cleanups**:
    - The compiler automatically drops struct fields after the struct's own `drop` method returns.
    - Struct `drop` methods do NOT need to explicitly call `drop()` on fields — the compiler handles this.
+   - Consuming an owned field beneath a value with its own `Drop` is rejected,
+     including nested fields. Whole-value moves and Copy field reads are allowed.
    - The `drop` method is for cleaning up non-field resources (e.g., freeing pointers, closing fds).
      ```silver
      void drop(HasInner* self) {

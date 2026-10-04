@@ -229,6 +229,10 @@ pub fn use_of_moved_field(place: &str) -> String {
     format!("use of moved value '{place}'")
 }
 
+pub fn cannot_move_field_out_of_drop_type(place: &str, owner: &str) -> String {
+    format!("cannot move '{place}' out of '{owner}' because it implements Drop")
+}
+
 /// Overlapping-borrow note that shows the previous loan's `Place` path.
 /// Additive refinement of `note_previous_borrow_here` — shows
 /// `previous shared borrow of 'x.a' occurs here` via `Place::overlaps`.

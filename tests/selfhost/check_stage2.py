@@ -34,6 +34,22 @@ def main() -> int:
                 )
             return result
 
+        def expect_rejected(source: pathlib.Path, label: str) -> None:
+            result = subprocess.run(
+                [str(stage2), "build", str(source), "--no-cache", "-o",
+                 str(work / f"rejected-{label}")],
+                cwd=root, env=env, capture_output=True, text=True,
+                timeout=300, check=False,
+            )
+            output = result.stdout + result.stderr
+            if result.returncode == 0:
+                raise AssertionError(f"stage2 unexpectedly built {label}")
+            for fragment in ("cannot move", "because it implements Drop"):
+                if fragment not in output:
+                    raise AssertionError(
+                        f"stage2 {label} diagnostic missing {fragment!r}:\n{output}"
+                    )
+
         invoke(args.stage1.resolve(), ["build", str(root / "silver.toml"),
                                       "--bin", "agc", "--no-cache", "-o", str(stage2)])
         invoke(stage2, ["--version"])
@@ -119,6 +135,12 @@ i32 main() {
         programs["nested-field-drop"] = (
             root / "tests/nested_field_drop_test.ag"
         ).read_text(encoding="utf-8")
+        programs["drop-ancestor-generic-copy"] = (
+            root / "tests/drop_ancestor_generic_copy_test.ag"
+        ).read_text(encoding="utf-8")
+        programs["drop-ancestor-generic-borrow"] = (
+            root / "tests/drop_ancestor_generic_borrow_test.ag"
+        ).read_text(encoding="utf-8")
         for name, contents in programs.items():
             program_source = work / f"{name}.ag"
             program_source.write_text(contents, encoding="utf-8")
@@ -129,7 +151,25 @@ i32 main() {
                 raise AssertionError(
                     f"stage2-compiled {name} program returned {executed.returncode}, expected 42"
                 )
-    print("native stage2 frontend commands and thirteen runtime programs passed without stage0")
+        for fixture in (
+            "drop_ancestor_direct_error_test.ag",
+            "drop_ancestor_nested_error_test.ag",
+            "drop_ancestor_implicit_transfer_error_test.ag",
+            "drop_ancestor_by_value_error_test.ag",
+            "drop_ancestor_return_error_test.ag",
+            "drop_ancestor_manual_leaf_drop_error_test.ag",
+            "drop_ancestor_generic_error_test.ag",
+            "drop_ancestor_receiver_error_test.ag",
+            "drop_ancestor_enum_payload_error_test.ag",
+            "drop_ancestor_generic_function_error_test.ag",
+            "drop_ancestor_method_argument_error_test.ag",
+            "drop_ancestor_function_pointer_argument_error_test.ag",
+        ):
+            expect_rejected(root / "tests" / fixture, fixture.removesuffix(".ag"))
+    print(
+        "native stage2 frontend commands, runtime programs, and Drop-ancestor "
+        "rejection builds passed without stage0"
+    )
     return 0
 
 

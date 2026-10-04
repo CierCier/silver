@@ -478,6 +478,7 @@ struct LlvmGenerator {
     LLVMOpaqueTargetMachine* target_machine;
     LLVMTargetDataRef* target_data;
     i64 unresolved_calls;
+    DiagnosticBag ownership_diagnostics;
 }
 
 impl LlvmGenerator {
@@ -524,6 +525,8 @@ impl LlvmGenerator {
         g.builder = builder;
         g.target_machine = target_machine;
         g.target_data = target_data;
+        g.unresolved_calls = 0;
+        g.ownership_diagnostics = DiagnosticBag.new();
         return move g;
     }
 
@@ -544,6 +547,7 @@ impl LlvmGenerator {
                  Vec<String>* source_paths, bool debug_mode) {
         LlvmContext ctx = LlvmContext.new(self.ctx, self.target_data, self.module, self.builder,
                                           types, names, pool, tree.root, source_paths, debug_mode);
+        ctx.ownership_diagnostics = &self.ownership_diagnostics;
         if (self.target_data == (LLVMTargetDataRef*)0) {
             ctx.note_unresolved("target-layout", "native target initialization failed");
             self.unresolved_calls = ctx.unresolved_calls;
@@ -1473,7 +1477,7 @@ impl LlvmGenerator {
         mono_define_generic_layouts(&ctx);
 
         self.unresolved_calls = ctx.unresolved_calls;
-        return ctx.unresolved_calls == 0;
+        return ctx.unresolved_calls == 0 && self.ownership_diagnostics.is_empty();
     }
 
     bool verify(LlvmGenerator* self, String* out_error) {
