@@ -85,6 +85,16 @@ bool type_is_numeric_or_char(u32 id) {
     return type_is_numeric(id) || id == TYPE_CHAR;
 }
 
+i64 typecheck_literal_index(str text) {
+    i64 value = 0;
+    i64 i = 0;
+    while (text[i] >= (u8)'0' && text[i] <= (u8)'9') {
+        value = value * 10 + ((i64)text[i] - 48);
+        i += 1;
+    }
+    return i > 0 && text[i] == 0 ? value : -1;
+}
+
 bool types_match(TypeTable* types, u32 expected, u32 actual) {
     if (expected == TYPE_UNKNOWN || actual == TYPE_UNKNOWN) {
         return true;
@@ -1211,6 +1221,98 @@ bool typecheck_method_has_value_receiver(SyntaxNode* root, TypeTable* types,
                                                receiver_type);
 }
 
+u32 typecheck_method_return_type(SyntaxNode* root, TypeTable* types,
+                                 u32 receiver_type, str method_name,
+                                 i64 param_count) {
+    u32 resolved_receiver = types.resolve_subst(receiver_type);
+    TypeEntry* receiver = types.get(resolved_receiver);
+    while (receiver.kind == TypeKind.Pointer || receiver.kind == TypeKind.Reference) {
+        resolved_receiver = receiver.inner;
+        receiver = types.get(resolved_receiver);
+    }
+    if (receiver.kind != TypeKind.Named) { return TYPE_UNKNOWN; }
+    str owner_name = types.names.get(receiver.name_id);
+    SyntaxNode* item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Impl) {
+            SyntaxNode* target = impl_target_identifier(item);
+            if (target != (SyntaxNode*)0 && strcmp(target.text, owner_name) == 0) {
+                SyntaxNode* block = item.first_child;
+                while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+                    block = block.next_sibling;
+                }
+                SyntaxNode* member = block == (SyntaxNode*)0 ? (SyntaxNode*)0 : block.first_child;
+                while (member != (SyntaxNode*)0) {
+                    if (member.kind == NodeKind.Token && member.token_kind == TokenKind.Semicolon) {
+                        member = member.next_sibling;
+                        continue;
+                    }
+                    SyntaxNode* name = (SyntaxNode*)0;
+                    SyntaxNode* params_node = (SyntaxNode*)0;
+                    SyntaxNode* body = (SyntaxNode*)0;
+                    SyntaxNode* scan = member;
+                    while (scan != (SyntaxNode*)0) {
+                        if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Semicolon) {
+                            break;
+                        }
+                        if (scan.kind == NodeKind.Block) {
+                            body = scan;
+                            break;
+                        }
+                        if (scan.kind == NodeKind.Parenthesized) {
+                            params_node = scan;
+                            if (scan.next_sibling != (SyntaxNode*)0
+                                && scan.next_sibling.kind == NodeKind.Block) {
+                                body = scan.next_sibling;
+                                break;
+                            }
+                        }
+                        if (scan.kind == NodeKind.Token
+                            && scan.token_kind == TokenKind.Identifier) {
+                            name = scan;
+                        }
+                        scan = scan.next_sibling;
+                    }
+                    if (body != (SyntaxNode*)0 && name != (SyntaxNode*)0
+                        && params_node != (SyntaxNode*)0
+                        && strcmp(name.text, method_name) == 0) {
+                        Vec<Binding> params = Vec<Binding>.new();
+                        collect_parameter_bindings(params_node, &params);
+                        bool matches_arity = params.len() == param_count;
+                        params.drop();
+                        if (matches_arity) {
+                            String return_text = String.new();
+                            SyntaxNode* signature = member;
+                            while (signature != name) {
+                                if (signature.kind == NodeKind.Token
+                                    && strcmp(signature.text, "pub") != 0
+                                    && strcmp(signature.text, "static") != 0
+                                    && strcmp(signature.text, "extern") != 0
+                                    && strcmp(signature.text, "#") != 0) {
+                                    return_text.push_str(signature.text);
+                                }
+                                signature = signature.next_sibling;
+                            }
+                            u32 return_type = strcmp(return_text.to_str(), "Self") == 0
+                                ? resolved_receiver
+                                : type_id_from_text(types, return_text.to_str());
+                            return_text.drop();
+                            return resolve_generic_member_type(types, root,
+                                                               resolved_receiver,
+                                                               return_type);
+                        }
+                    }
+                    member = body != (SyntaxNode*)0 ? body.next_sibling
+                        : (scan != (SyntaxNode*)0 && scan.kind == NodeKind.Token
+                           && scan.token_kind == TokenKind.Semicolon ? scan.next_sibling : scan);
+                }
+            }
+        }
+        item = item.next_sibling;
+    }
+    return TYPE_UNKNOWN;
+}
+
 u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode* root,
                TypeEnv* env, u32 expr_id, DiagnosticBag* diagnostics, bool* ok) {
     if (expr_id == 0) { return TYPE_UNKNOWN; }
@@ -1826,6 +1928,8 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 arg_index += 1;
             }
         }
+        inferred = typecheck_method_return_type(root, types, receiver_type,
+                                                method_name, total_param_count);
         if (receiver.kind != ExprKind.Var) {
             // Infer non-Var receivers (e.g. synthetic Format nodes from
             // @println desugar) so the backend can resolve the method's
@@ -1906,6 +2010,14 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
             TypeEntry* entry = types.get(target_type);
             if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference || entry.kind == TypeKind.Array) {
                 inferred = types.resolve_subst(entry.inner);
+            } else if (entry.kind == TypeKind.Tuple) {
+                AstExpr* index_expr = pool.get_expr(expr.inner1);
+                if (index_expr.kind == ExprKind.Literal) {
+                    i64 index = typecheck_literal_index(symbols.names.get(index_expr.inner0));
+                    if (index >= 0 && index < entry.count) {
+                        inferred = types.resolve_subst(types.type_args.get(entry.inner + (u32)index));
+                    }
+                }
             } else if (entry.kind == TypeKind.Str) {
                 inferred = TYPE_U8;
             } else if (entry.kind == TypeKind.Named && entry.count > 0) {
@@ -1913,6 +2025,9 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 if (strcmp(base, "Vec") == 0 || strcmp(base, "Slice") == 0) {
                     inferred = types.resolve_subst(types.type_args.get(entry.inner));
                 }
+            } else if (entry.kind == TypeKind.Named) {
+                inferred = typecheck_method_return_type(root, types, target_type,
+                                                        "__index_get", 2);
             }
         }
     }

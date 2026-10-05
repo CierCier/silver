@@ -55,6 +55,7 @@ enum TypeKind {
     Named;
     TypeParam;
     Function;
+    Tuple;
 }
 
 struct TypeProperties {
@@ -148,6 +149,17 @@ TypeProperties type_properties_at(TypeTable* table, u32 id, u32 depth) {
             element.is_copy = true;
         }
         return element;
+    }
+    if (entry.kind == TypeKind.Tuple) {
+        properties.is_copy = true;
+        i64 i = 0;
+        while (i < entry.count) {
+            TypeProperties element = type_properties_at(table, table.type_args.get(entry.inner + (u32)i), depth + 1);
+            if (!element.is_copy) { properties.is_copy = false; }
+            if (element.needs_drop) { properties.needs_drop = true; }
+            i += 1;
+        }
+        return properties;
     }
     if (entry.kind == TypeKind.Named) {
         str name = table.names.get(entry.name_id);
@@ -308,6 +320,39 @@ impl TypeTable {
         return (u32)(self.types.len() - 1);
     }
 
+    u32 get_tuple(TypeTable* self, Vec<u32>* elements) {
+        i64 i = (i64)(TYPE_PRIMITIVE_MAX + 1);
+        while (i < self.types.len()) {
+            TypeEntry* cur = self.types.get_ptr(i);
+            if (cur.kind == TypeKind.Tuple && cur.count == elements.len()) {
+                bool same = true;
+                i64 element = 0;
+                while (element < cur.count) {
+                    if (self.type_args.get(cur.inner + (u32)element) != elements.get(element)) {
+                        same = false;
+                        break;
+                    }
+                    element += 1;
+                }
+                if (same) { return (u32)i; }
+            }
+            i += 1;
+        }
+        TypeEntry entry;
+        entry.kind = TypeKind.Tuple;
+        entry.inner = (u32)self.type_args.len();
+        entry.name_id = 0;
+        entry.count = elements.len();
+        entry.is_mut = false;
+        i = 0;
+        while (i < elements.len()) {
+            self.type_args.push(elements.get(i));
+            i += 1;
+        }
+        self.types.push(move entry);
+        return (u32)(self.types.len() - 1);
+    }
+
     u32 get_function(TypeTable* self, u32 result_type, Vec<u32>* parameters) {
         String signature = String.from_str(self.type_name(result_type));
         signature.push((u8)'(');
@@ -394,6 +439,24 @@ impl TypeTable {
         if (kind == TypeKind.Array) {
             u32 inner = self.resolve_subst(inner_id);
             return inner == inner_id ? id : self.get_array(inner, count);
+        }
+        if (kind == TypeKind.Tuple) {
+            Vec<u32> elements = Vec<u32>.new();
+            bool changed = false;
+            i64 i = 0;
+            while (i < count) {
+                u32 old_element = self.type_args.get(inner_id + (u32)i);
+                u32 element = self.resolve_subst(old_element);
+                if (element != old_element) { changed = true; }
+                elements.push(element);
+                i += 1;
+            }
+            if (changed) {
+                u32 result = self.get_tuple(&elements);
+                elements.drop();
+                return result;
+            }
+            elements.drop();
         }
         if (kind == TypeKind.Function) {
             u32 result_type = self.resolve_subst(self.type_args.get(inner_id));
@@ -657,7 +720,7 @@ impl TypeTable {
         if (name[len - 1] == (u8)93) {
             i64 open = len - 2;
             while (open >= start && name[open] != (u8)91) { open -= 1; }
-            if (open > start) {
+            if (open >= start) {
                 i64 count = 0;
                 bool digits = false;
                 i64 d = open + 1;
@@ -666,13 +729,56 @@ impl TypeTable {
                     count = count * 10 + ((i64)name[d] - 48);
                     d += 1;
                 }
-                if (digits && d == len - 1 && count > 0) {
+                if (open > start && digits && d == len - 1 && count > 0) {
                     String base = String.new();
                     i64 i = start;
                     while (i < open) { base.push(name[i]); i += 1; }
                     u32 inner = self.parse_type_name(base.to_str());
                     base.drop();
                     return self.get_array(inner, count);
+                }
+                i64 comma = open + 1;
+                while (comma < len - 1 && name[comma] != (u8)',') { comma += 1; }
+                if (comma < len - 1) {
+                    Vec<u32> elements = Vec<u32>.new();
+                    i64 part_start = open + 1;
+                    i64 square_depth = 0;
+                    i64 angle_depth = 0;
+                    i64 paren_depth = 0;
+                    i64 part = part_start;
+                    bool valid = true;
+                    while (part <= len - 1) {
+                        bool separator = part == len - 1;
+                        if (!separator) {
+                            if (name[part] == (u8)'[') { square_depth += 1; }
+                            else if (name[part] == (u8)']') { square_depth -= 1; }
+                            else if (name[part] == (u8)'<') { angle_depth += 1; }
+                            else if (name[part] == (u8)'>') { angle_depth -= 1; }
+                            else if (name[part] == (u8)'(') { paren_depth += 1; }
+                            else if (name[part] == (u8)')') { paren_depth -= 1; }
+                            else if (name[part] == (u8)',' && square_depth == 0 && angle_depth == 0 && paren_depth == 0) {
+                                separator = true;
+                            }
+                        }
+                        if (separator) {
+                            if (part == part_start) { valid = false; break; }
+                            String element_text = String.new();
+                            i64 j = part_start;
+                            while (j < part) { element_text.push(name[j]); j += 1; }
+                            u32 element_id = self.parse_type_name(element_text.to_str());
+                            element_text.drop();
+                            if (element_id == TYPE_UNKNOWN) { valid = false; break; }
+                            elements.push(element_id);
+                            part_start = part + 1;
+                        }
+                        part += 1;
+                    }
+                    if (valid && elements.len() > 1) {
+                        u32 tuple_id = self.get_tuple(&elements);
+                        elements.drop();
+                        return tuple_id;
+                    }
+                    elements.drop();
                 }
             }
         }
@@ -844,6 +950,20 @@ impl TypeTable {
             }
             formatted.push_str(digits.to_str());
             digits.drop();
+            formatted.push((u8)']');
+            u32 cached_id = self.names.intern(formatted.to_str());
+            formatted.drop();
+            self.types.get_ptr((i64)id).name_id = cached_id;
+            return self.names.get(cached_id);
+        }
+        if (kind == TypeKind.Tuple) {
+            String formatted = String.from_str("[");
+            i64 i = 0;
+            while (i < count) {
+                if (i > 0) { formatted.push_str(", "); }
+                formatted.push_str(self.type_name(self.type_args.get(inner + (u32)i)));
+                i += 1;
+            }
             formatted.push((u8)']');
             u32 cached_id = self.names.intern(formatted.to_str());
             formatted.drop();

@@ -533,6 +533,15 @@ bool llvm_type_has_unresolved(LlvmContext* ctx, u32 type_id, i64 depth) {
     if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference || entry.kind == TypeKind.Array) {
         return llvm_type_has_unresolved(ctx, entry.inner, depth + 1);
     }
+    if (entry.kind == TypeKind.Tuple) {
+        i64 i = 0;
+        while (i < entry.count) {
+            if (llvm_type_has_unresolved(ctx, ctx.types.type_args.get(entry.inner + (u32)i), depth + 1)) {
+                return true;
+            }
+            i += 1;
+        }
+    }
     if (entry.kind == TypeKind.Named) {
         i64 i = 0;
         while (i < entry.count) {
@@ -812,7 +821,24 @@ LLVMOpaqueValue* llvm_emit_lvalue(LlvmContext* ctx, u32 expr_id) {
     }
     if (expr.kind == ExprKind.Index) {
         u32 target_type = llvm_expr_type(ctx, expr.inner0);
+        target_type = ctx.types.resolve_subst(target_type);
         TypeEntry* target_entry = ctx.types.get(target_type);
+        if (target_entry.kind == TypeKind.Tuple) {
+            AstExpr* index_expr = ctx.pool.get_expr(expr.inner1);
+            if (index_expr.kind != ExprKind.Literal) { return (LLVMOpaqueValue*)0; }
+            i64 index = parse_int_literal(ctx.names.get(index_expr.inner0));
+            if (index < 0 || index >= target_entry.count) { return (LLVMOpaqueValue*)0; }
+            LLVMOpaqueValue* tuple_ptr = llvm_emit_lvalue(ctx, expr.inner0);
+            if (tuple_ptr == (LLVMOpaqueValue*)0) {
+                LLVMOpaqueValue* tuple = llvm_emit_expr(ctx, expr.inner0);
+                if (tuple == (LLVMOpaqueValue*)0) { return (LLVMOpaqueValue*)0; }
+                LLVMOpaqueType* tuple_ty = llvm_lower_type(ctx.ctx, ctx.types, target_type);
+                tuple_ptr = LLVMBuildAlloca(ctx.builder, tuple_ty, "tuple_tmp");
+                LLVMBuildStore(ctx.builder, tuple, tuple_ptr);
+            }
+            LLVMOpaqueType* tuple_ty = llvm_lower_type(ctx.ctx, ctx.types, target_type);
+            return LLVMBuildStructGEP2(ctx.builder, tuple_ty, tuple_ptr, (u32)index, "tuple_field");
+        }
         // Str is a pointer at runtime (u8*); indexing must GEP the loaded
         // pointer, not the local slot. Previously fell into lvalue and read
         // stack bytes (s[0] on a str local returned garbage).
@@ -847,6 +873,18 @@ u32 llvm_index_elem_type(LlvmContext* ctx, u32 target_expr_id) {
     TypeEntry* entry = ctx.types.get(target_type);
     if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference || entry.kind == TypeKind.Array) {
         return ctx.types.resolve_subst(entry.inner);
+    }
+    if (entry.kind == TypeKind.Tuple) {
+        AstExpr* target = ctx.pool.get_expr(target_expr_id);
+        if (target.kind == ExprKind.Index) {
+            AstExpr* index_expr = ctx.pool.get_expr(target.inner1);
+            if (index_expr.kind == ExprKind.Literal) {
+                i64 index = parse_int_literal(ctx.names.get(index_expr.inner0));
+                if (index >= 0 && index < entry.count) {
+                    return ctx.types.resolve_subst(ctx.types.type_args.get(entry.inner + (u32)index));
+                }
+            }
+        }
     }
     if (entry.kind == TypeKind.Named && entry.count > 0) {
         str base = ctx.types.names.get(entry.name_id);
@@ -3052,6 +3090,24 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
     }
 
     if (expr.kind == ExprKind.Index) {
+        u32 target_type = ctx.types.resolve_subst(llvm_expr_type(ctx, expr.inner0));
+        TypeEntry* target_entry = ctx.types.get(target_type);
+        if (target_entry.kind == TypeKind.Named) {
+            AstExpr method_call;
+            method_call.kind = ExprKind.MethodCall;
+            method_call.inner0 = expr.inner0;
+            method_call.inner1 = (u32)ctx.pool.args.len();
+            method_call.aux = ctx.names.intern("__index_get");
+            method_call.span = expr.span;
+            method_call.inferred_type = expr.inferred_type;
+            method_call.generic_args_start = 0;
+            method_call.generic_args_count = 0;
+            method_call.resolved_callee_id = 0;
+            ctx.pool.args.push((u32)1);
+            ctx.pool.args.push(expr.inner1);
+            ctx.pool.exprs.push(move method_call);
+            return llvm_emit_expr(ctx, (u32)(ctx.pool.exprs.len() - 1));
+        }
         LLVMOpaqueValue* elem_ptr = llvm_emit_lvalue(ctx, expr_id);
         if (elem_ptr != (LLVMOpaqueValue*)0) {
             if (LLVMGetTypeKind(LLVMTypeOf(elem_ptr)) != (u32)12) {
@@ -3067,6 +3123,33 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
     }
 
     if (expr.kind == ExprKind.ArrayLit) {
+        u32 expected_type = ctx.types.resolve_subst(ctx.expected_type_id);
+        TypeEntry* expected_entry = ctx.types.get(expected_type);
+        u32 element_count = expr.aux;
+        if (expected_entry.kind == TypeKind.Tuple && expected_entry.count == (i64)element_count) {
+            LLVMOpaqueType* tuple_ty = llvm_lower_type(ctx.ctx, ctx.types, expected_type);
+            LLVMOpaqueValue* tuple_slot = LLVMBuildAlloca(ctx.builder, tuple_ty, "tuple_lit");
+            LLVMBuildStore(ctx.builder, LLVMConstNull(tuple_ty), tuple_slot);
+            u32 elems_start = expr.inner1;
+            i64 i = 0;
+            while (i < (i64)element_count) {
+                u32 elem_id = ctx.pool.args.get((i64)elems_start + 1 + i);
+                u32 elem_type = ctx.types.type_args.get(expected_entry.inner + (u32)i);
+                u32 saved_expected = ctx.expected_type_id;
+                ctx.expected_type_id = elem_type;
+                LLVMOpaqueValue* elem_val = llvm_emit_expr(ctx, elem_id);
+                ctx.expected_type_id = saved_expected;
+                if (elem_val == (LLVMOpaqueValue*)0) {
+                    ctx.note_unresolved("tuple-element", "literal");
+                    return (LLVMOpaqueValue*)0;
+                }
+                elem_val = llvm_compat_value(ctx, elem_val, llvm_expr_type(ctx, elem_id), elem_type);
+                LLVMOpaqueValue* field = LLVMBuildStructGEP2(ctx.builder, tuple_ty, tuple_slot, (u32)i, "tuple_field");
+                LLVMBuildStore(ctx.builder, elem_val, field);
+                i += 1;
+            }
+            return LLVMBuildLoad2(ctx.builder, tuple_ty, tuple_slot, "tuple_value");
+        }
         u32 arr_type = llvm_expr_type(ctx, expr_id);
         TypeEntry* entry = ctx.types.get(arr_type);
         u32 elem_type = entry.inner;
@@ -3074,7 +3157,6 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             elem_type = TYPE_I64;
         }
         LLVMOpaqueType* elem_ty = llvm_lower_type(ctx.ctx, ctx.types, elem_type);
-        u32 element_count = expr.aux;
         u32 array_count = entry.kind == TypeKind.Array ? (u32)entry.count : element_count;
         LLVMOpaqueType* arr_ty = LLVMArrayType(elem_ty, array_count);
         LLVMOpaqueValue* slot = LLVMBuildAlloca(ctx.builder, arr_ty, "arr_lit");

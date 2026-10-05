@@ -124,6 +124,42 @@ i32 main() {
         assert_eq_i64(6, g_drops, "HashSet dropped 6 keys");
     }
 
+    test_start("HashSet for-in drops yielded and remaining keys once");
+    {
+        g_drops = 0;
+        HashSet<DropSpy> s = HashSet<DropSpy>.new();
+        i64 i = 0;
+        while (i < 3) {
+            DropSpy d;
+            d.val = i + 1;
+            s.insert(move d);
+            i = i + 1;
+        }
+        i64 sum = 0;
+        for item in s {
+            sum = sum + item.val;
+        }
+        assert_eq_i64(6, sum, "for-in yields all keys");
+        assert_eq_i64(3, g_drops, "iterator and loop drop every key once");
+    }
+
+    test_start("HashSet for-in break drops remaining keys once");
+    {
+        g_drops = 0;
+        HashSet<DropSpy> s = HashSet<DropSpy>.new();
+        i64 i = 0;
+        while (i < 3) {
+            DropSpy d;
+            d.val = i + 1;
+            s.insert(move d);
+            i = i + 1;
+        }
+        for _item in s {
+            break;
+        }
+        assert_eq_i64(3, g_drops, "break drops current and remaining keys once");
+    }
+
     // 5. BinaryHeap<DropSpy>
     test_start("BinaryHeap drops elements");
     {

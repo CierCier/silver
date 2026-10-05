@@ -244,6 +244,14 @@ bool record_item(SymbolTable* table, DiagnosticBag* diagnostics, SyntaxNode* ite
     if (kind == SymbolKind.Struct || kind == SymbolKind.Enum || kind == SymbolKind.Trait || kind == SymbolKind.TypeAlias) {
         type_id = table.types.get_named(name.text);
     }
+    i64 previous_index = table.find(name.text);
+    if (previous_index >= 0) {
+        Symbol* previous = table.get(previous_index);
+        // Native stage1 merges imported units after the entry source. Keep
+        // entry-module declarations visible when an imported module exports
+        // the same short name; same-file duplicates remain errors.
+        if (previous.span.file == 1 && name.span.file != 1) { return true; }
+    }
     if (!table.declare_typed(name_id, kind, name.span, item, type_id)) {
         String message = String.from_str("duplicate symbol '");
         message.push_str(name.text);

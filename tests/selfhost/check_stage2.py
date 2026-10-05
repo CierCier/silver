@@ -154,6 +154,25 @@ i32 main() {
                 raise AssertionError(
                     f"stage2-compiled {name} program returned {executed.returncode}, expected 42"
                 )
+        tuple_source = root / "tests/map_tuple_test.ag"
+        tuple_program = work / "map-tuple"
+        invoke(stage2, ["build", str(tuple_source), "--no-cache", "-o", str(tuple_program)])
+        executed = subprocess.run([str(tuple_program)], timeout=30, check=False)
+        if executed.returncode != 0:
+            raise AssertionError(
+                "stage2-compiled map_tuple_test returned "
+                f"{executed.returncode}, expected 0"
+            )
+        collection_test = root / "tests/collection_drop_glue_test.ag"
+        collection_program = work / "collection-drop-glue"
+        invoke(stage2, ["build", str(collection_test), "--no-cache",
+                        "-o", str(collection_program)])
+        executed = subprocess.run([str(collection_program)], timeout=30, check=False)
+        if executed.returncode != 0:
+            raise AssertionError(
+                "stage2-compiled collection_drop_glue_test returned "
+                f"{executed.returncode}, expected 0"
+            )
         for fixture in (
             "drop_ancestor_direct_error_test.ag",
             "drop_ancestor_nested_error_test.ag",

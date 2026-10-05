@@ -170,6 +170,29 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
     }
 
     if (stmt.kind == StmtKind.Assign) {
+        AstExpr* target_expr = ctx.pool.get_expr(stmt.inner0);
+        if (target_expr.kind == ExprKind.Index) {
+            u32 target_type = ctx.types.resolve_subst(llvm_expr_type(ctx, target_expr.inner0));
+            TypeEntry* target_entry = ctx.types.get(target_type);
+            if (target_entry.kind == TypeKind.Named) {
+                AstExpr method_call;
+                method_call.kind = ExprKind.MethodCall;
+                method_call.inner0 = target_expr.inner0;
+                method_call.inner1 = (u32)ctx.pool.args.len();
+                method_call.aux = ctx.names.intern("__index_set");
+                method_call.span = stmt.span;
+                method_call.inferred_type = TYPE_VOID;
+                method_call.generic_args_start = 0;
+                method_call.generic_args_count = 0;
+                method_call.resolved_callee_id = 0;
+                ctx.pool.args.push((u32)2);
+                ctx.pool.args.push(target_expr.inner1);
+                ctx.pool.args.push(stmt.inner1);
+                ctx.pool.exprs.push(move method_call);
+                llvm_emit_expr(ctx, (u32)(ctx.pool.exprs.len() - 1));
+                return;
+            }
+        }
         LLVMOpaqueValue* target_ptr = llvm_emit_lvalue(ctx, stmt.inner0);
         u32 saved_expected = ctx.expected_type_id;
         ctx.expected_type_id = llvm_lvalue_type(ctx, stmt.inner0);

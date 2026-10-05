@@ -152,6 +152,15 @@ bool llvm_layout_type_resolved(LlvmContext* ctx, u32 type_id, i64 depth) {
     if (entry.kind == TypeKind.Array) {
         return llvm_layout_type_resolved(ctx, entry.inner, depth + 1);
     }
+    if (entry.kind == TypeKind.Tuple) {
+        i64 i = 0;
+        while (i < entry.count) {
+            if (!llvm_layout_type_resolved(ctx, ctx.types.type_args.get(entry.inner + (u32)i), depth + 1)) {
+                return false;
+            }
+            i += 1;
+        }
+    }
     if (entry.kind == TypeKind.Named) {
         str name = ctx.types.names.get(entry.name_id);
         if (find_item_by_name(ctx.root, NodeKind.Struct, name) == (SyntaxNode*)0
@@ -330,6 +339,17 @@ LLVMOpaqueType* llvm_lower_type(LLVMOpaqueContext* ctx, TypeTable* types, u32 ty
     if (entry.kind == TypeKind.Array) {
         LLVMOpaqueType* elem = llvm_lower_type(ctx, types, entry.inner);
         return LLVMArrayType(elem, (u32)entry.count);
+    }
+    if (entry.kind == TypeKind.Tuple) {
+        Vec<LLVMOpaqueType*> fields = Vec<LLVMOpaqueType*>.new();
+        i64 i = 0;
+        while (i < entry.count) {
+            fields.push(llvm_lower_type(ctx, types, types.type_args.get(entry.inner + (u32)i)));
+            i += 1;
+        }
+        LLVMOpaqueType* tuple = LLVMStructTypeInContext(ctx, fields.data, (u32)fields.len(), 0);
+        fields.drop();
+        return tuple;
     }
     if (entry.kind == TypeKind.Named) {
         str base_name = types.names.get(entry.name_id);

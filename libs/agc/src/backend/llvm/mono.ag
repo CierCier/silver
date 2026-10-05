@@ -38,6 +38,16 @@ bool mono_type_is_concrete(LLVMOpaqueContext* raw_ctx, TypeTable* types, u32 id,
         return entry.count > 0
             && mono_type_is_concrete(raw_ctx, types, entry.inner, depth + 1);
     }
+    if (entry.kind == TypeKind.Tuple) {
+        i64 i = 0;
+        while (i < entry.count) {
+            if (!mono_type_is_concrete(raw_ctx, types, types.type_args.get(entry.inner + (u32)i), depth + 1)) {
+                return false;
+            }
+            i += 1;
+        }
+        return true;
+    }
     if (entry.kind == TypeKind.Named && entry.name_id != 0) {
         i64 i = 0;
         while (i < entry.count) {
@@ -718,6 +728,14 @@ void mono_ensure_child_layouts(LlvmContext* ctx, u32 type_id, Vec<u32>* layout_i
         || entry.kind == TypeKind.Array) {
         u32 inner = entry.inner;
         mono_ensure_type_layout(ctx, inner, layout_ids);
+        return;
+    }
+    if (entry.kind == TypeKind.Tuple) {
+        i64 i = 0;
+        while (i < entry.count) {
+            mono_ensure_child_layouts(ctx, ctx.types.type_args.get(entry.inner + (u32)i), layout_ids);
+            i += 1;
+        }
         return;
     }
     if (entry.kind == TypeKind.Named && entry.count > 0) {

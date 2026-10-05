@@ -1615,6 +1615,61 @@ impl ExprLowerer {
         }
 
         if (assign_node != (SyntaxNode*)0) {
+            if (start.kind == NodeKind.Token && start.token_kind == TokenKind.Let
+                && start.next_sibling != (SyntaxNode*)0
+                && start.next_sibling.kind == NodeKind.Bracket) {
+                SyntaxNode* pattern = start.next_sibling;
+                String temp_text = String.from_str("__tuple_binding_");
+                String digits = String.new();
+                i64 unique = start.span.start;
+                if (unique == 0) { digits.push((u8)'0'); }
+                while (unique > 0) {
+                    digits.push((u8)('0' + (unique % 10)));
+                    unique = unique / 10;
+                }
+                i64 digit = digits.len() - 1;
+                while (digit >= 0) {
+                    temp_text.push(digits.data[digit]);
+                    digit -= 1;
+                }
+                digits.drop();
+                u32 temp_name = self.names.intern(temp_text.to_str());
+                temp_text.drop();
+                u32 init = self.lower_sequence(assign_node.next_sibling, end);
+                stmt_ids.push(self.pool.add_stmt_let(temp_name, TYPE_UNKNOWN, init, start.span));
+                u32 tuple_index = 0;
+                SyntaxNode* binding = pattern.first_child;
+                while (binding != (SyntaxNode*)0) {
+                    if (node_is_identifier(binding)) {
+                        u32 target = self.pool.add_var(temp_name, binding.span);
+                        String index_text = String.new();
+                        u32 number = tuple_index;
+                        if (number == 0) { index_text.push((u8)'0'); }
+                        while (number > 0) {
+                            index_text.push((u8)('0' + (number % 10)));
+                            number = number / 10;
+                        }
+                        i64 left = 0;
+                        i64 right = index_text.len() - 1;
+                        while (left < right) {
+                            u8 swap = index_text.data[left];
+                            index_text.data[left] = index_text.data[right];
+                            index_text.data[right] = swap;
+                            left += 1;
+                            right -= 1;
+                        }
+                        u32 index_value = self.names.intern(index_text.to_str());
+                        index_text.drop();
+                        u32 index_expr = self.pool.add_literal_val(TYPE_I64, index_value, binding.span);
+                        u32 field = self.pool.add_index(target, index_expr, binding.span);
+                        u32 binding_name = self.names.intern(binding.text);
+                        stmt_ids.push(self.pool.add_stmt_let(binding_name, TYPE_UNKNOWN, field, binding.span));
+                        tuple_index += 1;
+                    }
+                    binding = binding.next_sibling;
+                }
+                return;
+            }
             if (self.is_decl_lhs(start, assign_node)) {
                 SyntaxNode* var_node = self.find_decl_var_node(start, assign_node);
                 if (var_node != (SyntaxNode*)0) {
@@ -1871,21 +1926,37 @@ impl ExprLowerer {
             outer_stmts.push(self.pool.add_stmt_let(next_name, TYPE_UNKNOWN, next_call, for_node.span));
 
             Vec<u32> loop_stmts = Vec<u32>.new();
+            SyntaxNode* optional_struct_item = find_item_by_name(
+                self.unit_root, NodeKind.Struct, "Optional");
+            bool optional_struct = optional_struct_item != (SyntaxNode*)0
+                && optional_struct_item.span.file == 1;
             u32 option_receiver = self.pool.add_var(next_name, for_node.span);
-            u32 none_args = (u32)self.pool.args.len();
-            self.pool.args.push(0);
-            u32 is_none = self.pool.add_method_call(option_receiver,
-                self.names.intern("is_none"), none_args, for_node.span);
+            u32 is_none = 0;
+            u32 item_value = 0;
+            if (optional_struct) {
+                u32 present = self.pool.add_field(option_receiver,
+                    self.names.intern("present"), for_node.span);
+                is_none = self.pool.add_unary(TokenKind.Not, present, for_node.span);
+                u32 payload_receiver = self.pool.add_var(next_name, for_node.span);
+                u32 payload = self.pool.add_field(payload_receiver,
+                    self.names.intern("thing"), for_node.span);
+                item_value = self.pool.add_move(payload, for_node.span);
+            } else {
+                u32 none_args = (u32)self.pool.args.len();
+                self.pool.args.push(0);
+                is_none = self.pool.add_method_call(option_receiver,
+                    self.names.intern("is_none"), none_args, for_node.span);
+                u32 unwrap_receiver = self.pool.add_var(next_name, for_node.span);
+                u32 unwrap_args = (u32)self.pool.args.len();
+                self.pool.args.push(0);
+                item_value = self.pool.add_method_call(unwrap_receiver,
+                    self.names.intern("unwrap"), unwrap_args, for_node.span);
+            }
             u32 break_stmt = self.pool.add_stmt_break(for_node.span);
             u32 none_if = self.pool.add_stmt_if(is_none, break_stmt, 0, for_node.span);
             loop_stmts.push(none_if);
 
-            u32 unwrap_receiver = self.pool.add_var(next_name, for_node.span);
-            u32 unwrap_args = (u32)self.pool.args.len();
-            self.pool.args.push(0);
-            u32 unwrap = self.pool.add_method_call(unwrap_receiver,
-                self.names.intern("unwrap"), unwrap_args, for_node.span);
-            loop_stmts.push(self.pool.add_stmt_let(binding_name, TYPE_UNKNOWN, unwrap, binding.span));
+            loop_stmts.push(self.pool.add_stmt_let(binding_name, TYPE_UNKNOWN, item_value, binding.span));
             loop_stmts.push(self.lower_block_stmt(body_node));
             u32 loop_body = self.lower_stmt_list_block(&loop_stmts, body_node.span);
             loop_stmts.drop();
