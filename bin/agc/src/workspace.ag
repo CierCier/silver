@@ -928,18 +928,6 @@ bool workspace_is_terminal_option(str value) {
         || workspace_str_starts_with(value, "--cache-prune=");
 }
 
-bool workspace_has_later_input(Vec<String>* arguments, i64 after_index) {
-    i64 i = after_index + 1;
-    while (i < arguments.len()) {
-        String* arg = arguments.get_ptr(i);
-        if (!arg.starts_with("-") && !workspace_is_command(arg.to_str())) {
-            return true;
-        }
-        i += 1;
-    }
-    return false;
-}
-
 bool workspace_selector_consumes_value(Vec<String>* arguments, i64 index) {
     String* selector = arguments.get_ptr(index);
     if (strcmp(selector.to_str(), "--bin") != 0
@@ -971,6 +959,22 @@ bool workspace_option_consumes_value(Vec<String>* arguments, i64 index) {
         || strcmp(option.to_str(), "--cfg") == 0 || strcmp(option.to_str(), "--cache-dir") == 0
         || strcmp(option.to_str(), "-j") == 0 || strcmp(option.to_str(), "--jobs") == 0
         || strcmp(option.to_str(), "--emit") == 0 || strcmp(option.to_str(), "--run-arg") == 0;
+}
+
+bool workspace_has_later_input(Vec<String>* arguments, i64 after_index) {
+    i64 i = after_index + 1;
+    while (i < arguments.len()) {
+        String* arg = arguments.get_ptr(i);
+        if (arg.equals("--")) { return false; }
+        if (arg.starts_with("-")) {
+            if (workspace_option_consumes_value(arguments, i)) { i += 2; }
+            else { i += 1; }
+            continue;
+        }
+        if (!workspace_is_command(arg.to_str())) { return true; }
+        i += 1;
+    }
+    return false;
 }
 
 i64 workspace_command_index(Vec<String>* arguments) {

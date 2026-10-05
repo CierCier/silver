@@ -16,28 +16,22 @@ bool stage0_available(str path) {
 
 Optional<String> resolve_stage0() {
     Optional<String> configured = var("SILVER_STAGE0");
-    if (configured.is_some()) {
-        // An explicit override is authoritative; do not silently use another backend.
-        String path = configured.unwrap();
-        if (stage0_available(path.to_str())) {
-            return Optional<String>.some(move path);
-        }
-        path.drop();
-        return Optional<String>.none();
-    }
+    if (!configured.is_some()) { return Optional<String>.none(); }
 
-    String fallback = String.from_str("target/debug/agc");
-    if (stage0_available(fallback.to_str())) {
-        return Optional<String>.some(move fallback);
+    // Only execute a backend the caller explicitly selected. A working-directory
+    // fallback could run an untrusted checkout's target/debug/agc as the user.
+    String path = configured.unwrap();
+    if (stage0_available(path.to_str())) {
+        return Optional<String>.some(move path);
     }
-    fallback.drop();
+    path.drop();
     return Optional<String>.none();
 }
 
 i32 run_stage0_backend(Vec<String>* arguments) {
     Optional<String> resolved = resolve_stage0();
     if (resolved.is_none()) {
-        STDERR.write_str("agc: error: stage0 backend unavailable; set SILVER_STAGE0 to an executable or build target/debug/agc\n");
+        STDERR.write_str("agc: error: stage0 backend unavailable; set SILVER_STAGE0 to a trusted executable\n");
         return 2;
     }
 

@@ -987,7 +987,7 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
 
     // Fail closed: any unresolved call/method means the emitted code would be
     // silently wrong (uninitialized stack slots, skipped calls). Refuse to
-    // emit instead — the caller falls back to the verified stage0 bridge.
+    // emit instead — the caller may use the explicitly configured stage0 bridge.
     if (gen.unresolved_calls > 0) {
         STDERR.write_str("agc: ");
         STDERR.write_str("native backend left unresolved symbols; falling back\n");

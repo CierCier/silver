@@ -84,6 +84,23 @@ def main() -> int:
         if missing.returncode == 0 or "stage0 backend unavailable" not in missing.stderr:
             raise AssertionError("missing backend did not fail closed")
 
+        untrusted_cwd = temp / "untrusted-checkout"
+        fallback = untrusted_cwd / "target" / "debug" / "agc"
+        fallback.parent.mkdir(parents=True)
+        fallback_marker = temp / "fallback-executed"
+        fallback.write_text(
+            "#!/usr/bin/env python3\n"
+            "from pathlib import Path\n"
+            f"Path({str(fallback_marker)!r}).write_text('executed')\n",
+            encoding="utf-8",
+        )
+        fallback.chmod(0o755)
+        implicit = run(stage1, [], untrusted_cwd, env)
+        if implicit.returncode == 0 or "stage0 backend unavailable" not in implicit.stderr:
+            raise AssertionError("unset SILVER_STAGE0 accepted a working-directory fallback")
+        if fallback_marker.exists():
+            raise AssertionError("unset SILVER_STAGE0 executed the working-directory fallback")
+
     print("native bridge boundary passed: local commands, argv, signals, and fail-closed lookup")
     return 0
 

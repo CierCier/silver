@@ -171,6 +171,22 @@ def main() -> int:
         if str(manifest) not in forwarded:
             raise AssertionError(f"manifest was not forwarded to backend: {forwarded}")
 
+        output_args = root / "output-args"
+        output_env = base_env.copy()
+        output_env["SILVER_FAKE_ARGS"] = str(output_args)
+        output_path = root / "application"
+        require(
+            run(
+                stage1,
+                ["build", "--bin", str(manifest), "-o", str(output_path)],
+                output_env,
+            ),
+            0,
+        )
+        forwarded_output = output_args.read_text().splitlines()
+        if str(manifest) not in forwarded_output or str(output_path) not in forwarded_output:
+            raise AssertionError(f"output path confused package selection: {forwarded_output}")
+
         nested_backend_args = root / "nested-backend-args"
         nested_env = base_env.copy()
         nested_env["SILVER_FAKE_ARGS"] = str(nested_backend_args)
