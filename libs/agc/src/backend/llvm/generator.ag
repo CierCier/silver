@@ -567,6 +567,8 @@ impl LlvmGenerator {
                     LlvmStructDef def;
                     def.name_id = struct_name_id;
                     def.llvm_type = struct_ty;
+                    def.packed = item_has_attribute(item, "packed")
+                        || types.struct_is_packed(struct_name);
                     def.fields = Vec<LlvmFieldInfo>.new();
 
                     SyntaxNode* block = item.first_child;
@@ -632,7 +634,8 @@ impl LlvmGenerator {
                 field_tys.push(llvm_lower_type(self.ctx, types, fi.type_id));
                 f += 1;
             }
-            LLVMStructSetBody(def.llvm_type, field_tys.data, (u32)field_tys.len(), 0);
+            LLVMStructSetBody(def.llvm_type, field_tys.data, (u32)field_tys.len(),
+                              (u32)(def.packed ? 1 : 0));
             field_tys.drop();
             s_idx += 1;
         }

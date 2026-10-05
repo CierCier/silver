@@ -489,6 +489,9 @@ void load_artifact_module(ModuleLoader* loader, DiagnosticBag* diagnostics, str 
                 loader.symbols.types.register_struct_properties(export.name.to_str(), &fields);
                 loader.symbols.types.register_struct_field_names(export.name.to_str(), &field_names);
                 loader.symbols.types.register_struct_type_params(export.name.to_str(), &type_params);
+                if (export.layout_present && export.layout_packed) {
+                    loader.symbols.types.mark_struct_packed(export.name.to_str());
+                }
                 type_params.drop();
                 field_names.drop();
                 fields.drop();
@@ -647,6 +650,9 @@ void module_register_source_struct(TypeTable* types, SyntaxNode* item) {
     types.register_struct_properties(name.text, &fields);
     types.register_struct_field_names(name.text, &field_names);
     types.register_struct_type_params(name.text, &generic_params);
+    if (item_has_attribute(item, "packed")) {
+        types.mark_struct_packed(name.text);
+    }
     field_names.drop();
     fields.drop();
     tokens.drop();

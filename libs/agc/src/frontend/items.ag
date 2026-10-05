@@ -29,6 +29,29 @@ SyntaxNode* find_enum_item(SyntaxNode* root, str name) {
     return find_item_by_name(root, NodeKind.Enum, name);
 }
 
+bool item_has_attribute(SyntaxNode* item, str name) {
+    if (item == (SyntaxNode*)0) { return false; }
+    SyntaxNode* child = item.first_child;
+    while (child != (SyntaxNode*)0
+        && !(child.kind == NodeKind.Token
+             && (child.token_kind == TokenKind.Struct || child.token_kind == TokenKind.Enum
+                 || child.token_kind == TokenKind.Type))) {
+        if (child.kind == NodeKind.Token && child.text == "#") {
+            SyntaxNode* bracket = child.next_sibling;
+            if (bracket != (SyntaxNode*)0 && bracket.kind == NodeKind.Bracket) {
+                SyntaxNode* attribute = bracket.first_child;
+                if (attribute != (SyntaxNode*)0 && attribute.kind == NodeKind.Token
+                    && strcmp(attribute.text, name) == 0) {
+                    return true;
+                }
+                child = bracket;
+            }
+        }
+        child = child.next_sibling;
+    }
+    return false;
+}
+
 i64 items_parse_int(str text) {
     if (text == (str)0) {
         return 0;

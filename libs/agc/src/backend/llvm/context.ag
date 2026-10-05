@@ -46,6 +46,7 @@ struct LlvmFieldInfo {
 struct LlvmStructDef {
     u32 name_id;
     LLVMOpaqueType* llvm_type;
+    bool packed;
     Vec<LlvmFieldInfo> fields;
 }
 

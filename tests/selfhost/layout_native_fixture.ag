@@ -18,6 +18,12 @@ struct GenericLayout<T> {
     u8 tail;
 }
 
+#[packed]
+struct PackedGenericLayout<T> {
+    u8 tag;
+    T value;
+}
+
 i32 main() {
     if (@size(i128) != 16) { return 1; }
     if (@size(WideLayout) != 32) { return 2; }
@@ -25,5 +31,6 @@ i32 main() {
     if (@size(WideLayout[2]) != 64) { return 4; }
     if (@size(ArrayLayout) != 64) { return 5; }
     if (@size(GenericLayout<i128>) != 32) { return 6; }
+    if (@size(PackedGenericLayout<u32>) != 5) { return 7; }
     return 0;
 }

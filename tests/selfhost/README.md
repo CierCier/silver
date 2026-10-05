@@ -60,11 +60,11 @@ gate. It points `SILVER_STAGE0` at a missing path, sets
 `SILVER_STAGE1_NATIVE=1`, runs the native backend and stage2 checks, then runs
 focused ownership, loop-stack, and runtime fixtures. The broad no-stage0 corpus
 remains exploratory while unsupported native features are tracked. Its current
-249-fixture local run has 152 passed, 95 failed, and 2 skipped. The allocator,
-consuming-for-in, reference-reborrow, and SHA-256 regressions now pass. The
-remaining failures are tracked in the unsupported-feature and runtime-
-correctness backlog. This gate is not currently wired into CI while native
-support is changing rapidly.
+249-fixture local run has 153 passed, 94 failed, and 2 skipped. The allocator,
+consuming-for-in, reference-reborrow, SHA-256, unsigned-widening, and packed-
+layout regressions now pass. The remaining failures are tracked in the
+unsupported-feature and runtime-correctness backlog. This gate is not currently
+wired into CI while native support is changing rapidly.
 
 `check_native_enum_layout.py` disables the stage0 bridge and checks small and
 String payloads in `Optional` and both `Result` variants. It also checks empty
@@ -80,10 +80,10 @@ also exercises ownership analysis after initializing its move-origin storage.
 This proves those stage2 paths. It does not cover the full native corpus or
 stage3 self-compilation.
 
-`check_native_layout.py` checks target ABI sizes for i128, nested and generic
-structs, and arrays. `check_generic_function_native.py` exercises concrete free
-function calls, nested generic arguments, and allocation and reallocation.
-Both gates disable stage0 fallback.
+`check_native_layout.py` checks target ABI sizes for i128, nested, generic, and
+packed generic structs, and arrays. `check_generic_function_native.py` exercises
+concrete free function calls, nested generic arguments, and allocation and
+reallocation. Both gates disable stage0 fallback.
 
 The frontend gate compares token kind, raw text, byte span, and line/column
 span. `check_hir.py` covers the retained HIR's first typed declaration,

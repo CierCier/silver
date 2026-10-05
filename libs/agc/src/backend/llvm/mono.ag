@@ -833,7 +833,9 @@ void mono_ensure_type_layout(LlvmContext* ctx, u32 type_id, Vec<u32>* layout_ids
     }
     if (fields_valid && field_types.len() == field_count) {
         LLVMOpaqueType* llvm_type = llvm_lower_type(ctx.ctx, ctx.types, type_id);
-        LLVMStructSetBody(llvm_type, field_types.data, (u32)field_types.len(), 0);
+        bool packed = item_has_attribute(item, "packed") || ctx.types.struct_is_packed(base);
+        LLVMStructSetBody(llvm_type, field_types.data, (u32)field_types.len(),
+                          (u32)(packed ? 1 : 0));
     } else {
         ctx.note_unresolved("monomorph-layout", base);
     }

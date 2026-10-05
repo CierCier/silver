@@ -125,6 +125,7 @@ struct TypeTable {
     Vec<u32> struct_fields;
     Vec<u32> struct_field_names;
     Vec<u32> struct_type_params;
+    Vec<u32> packed_structs;
     Vec<TypeMethodParam> method_params;
 }
 TypeProperties type_properties_at(TypeTable* table, u32 id, u32 depth) {
@@ -204,6 +205,7 @@ impl TypeTable {
         table.struct_fields = Vec<u32>.new();
         table.struct_field_names = Vec<u32>.new();
         table.struct_type_params = Vec<u32>.new();
+        table.packed_structs = Vec<u32>.new();
         table.method_params = Vec<TypeMethodParam>.new();
         // 0: Unknown
         table.add_prim(TypeKind.Unknown, "unknown");
@@ -903,6 +905,26 @@ impl TypeTable {
         definition.type_param_count = 0;
         definition.needs_drop = false;
         self.struct_properties.push(definition);
+    }
+
+    void mark_struct_packed(TypeTable* self, str name) {
+        u32 name_id = self.names.intern(name);
+        i64 i = 0;
+        while (i < self.packed_structs.len()) {
+            if (self.packed_structs.get(i) == name_id) { return; }
+            i += 1;
+        }
+        self.packed_structs.push(name_id);
+    }
+
+    bool struct_is_packed(TypeTable* self, str name) {
+        u32 name_id = self.names.intern(name);
+        i64 i = 0;
+        while (i < self.packed_structs.len()) {
+            if (self.packed_structs.get(i) == name_id) { return true; }
+            i += 1;
+        }
+        return false;
     }
     void register_struct_field_names(TypeTable* self, str name, Vec<u32>* names) {
         u32 name_id = self.names.intern(name);

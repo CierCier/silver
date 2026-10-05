@@ -33,6 +33,6 @@ python3 "$root/tests/run_tests.py" --no-tui --jobs 4 --compiler "$stage1" \
     cascade_drop_test field_predrop_test intermediate_drop_activation_test \
     for_in_consume_test nested_field_drop_test native_for_in_continue_test \
     partial_move_test reborrow_passthrough_test sha256_test \
-    unsigned_narrow_shift_test \
+    unsigned_narrow_shift_test packed_layout_test \
     direct_field_partial_move_test drop_ancestor_direct_error_test \
     drop_ancestor_nested_error_test
