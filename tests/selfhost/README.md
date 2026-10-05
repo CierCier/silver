@@ -42,8 +42,10 @@ binary, exports `SILVER_STAGE0`, checks the bridge boundary, runs the opt-in
 stage1 native smoke and linker-contract gates, checks native cache behavior,
 and runs the integration runner through `--compiler "$stage1"`. During the
 backend migration, stage1 keeps `lex`, `parse`, and `check` local and delegates
-native build/run/package/cache operations to the verified stage0 backend
-through an explicit compatibility seam. The `SILVER_STAGE1_NATIVE=1` path
+native build/run/package/cache operations to the configured stage0 backend
+through an explicit compatibility seam. The bridge runs only the executable
+selected by `SILVER_STAGE0`; it never discovers a compiler from the current
+working directory. The `SILVER_STAGE1_NATIVE=1` path
 tests direct, package, and run invocations plus cfg selection, raw argc/argv,
 literal comptime casts, generic `Vec<String>` methods and chained receivers,
 formatting, concrete generic enum payload round trips, and fail-closed fallback
@@ -52,6 +54,17 @@ backend, not the complete native compiler. Inputs outside the backend's current
 scope fail closed to the explicit stage0 bridge instead of producing
 unverified output. Stage0 root-object caching is enabled, and source imports
 inlined during lowering are included in dependency keys.
+
+`run_native_no_stage0.sh /path/to/agc-stage1` is the direct native correctness
+gate. It points `SILVER_STAGE0` at a missing path, sets
+`SILVER_STAGE1_NATIVE=1`, runs the native backend and stage2 checks, then runs
+focused ownership, loop-stack, and runtime fixtures. The broad no-stage0 corpus
+remains exploratory while unsupported native features are tracked. Its current
+248-fixture local run has 150 passed, 96 failed, and 2 skipped. The allocator,
+consuming-for-in, and reference-reborrow regressions now pass. The other 96
+failures remain in the unsupported-feature and runtime-correctness backlog.
+This gate is not currently wired into CI while native support is changing
+rapidly.
 
 `check_native_enum_layout.py` disables the stage0 bridge and checks small and
 String payloads in `Optional` and both `Result` variants. It also checks empty
