@@ -2032,6 +2032,8 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
 
         LLVMOpaqueType* lty = LLVMTypeOf(lhs);
         LLVMOpaqueType* rty = LLVMTypeOf(rhs);
+        u32 l_type_id = llvm_expr_type(ctx, expr.inner0);
+        u32 r_type_id = llvm_expr_type(ctx, expr.inner1);
         // Pointer arithmetic is GEP, not add: the inttoptr normalization
         // below produced `add ptr, inttoptr 1`, which fails verify.
         // Element type comes from the Silver pointer type (opaque LLVM
@@ -2069,9 +2071,17 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 u32 l_width = LLVMGetIntTypeWidth(lty);
                 u32 r_width = LLVMGetIntTypeWidth(rty);
                 if (l_width < r_width) {
-                    lhs = LLVMBuildIntCast(ctx.builder, lhs, rty, "cast_l");
+                    if (llvm_type_is_signed(ctx.types, l_type_id)) {
+                        lhs = LLVMBuildSExt(ctx.builder, lhs, rty, "cast_l_sext");
+                    } else {
+                        lhs = LLVMBuildZExt(ctx.builder, lhs, rty, "cast_l_zext");
+                    }
                 } else if (r_width < l_width) {
-                    rhs = LLVMBuildIntCast(ctx.builder, rhs, lty, "cast_r");
+                    if (llvm_type_is_signed(ctx.types, r_type_id)) {
+                        rhs = LLVMBuildSExt(ctx.builder, rhs, lty, "cast_r_sext");
+                    } else {
+                        rhs = LLVMBuildZExt(ctx.builder, rhs, lty, "cast_r_zext");
+                    }
                 }
             } else if (l_kind == (u32)12 && r_kind == (u32)8) {
                 rhs = LLVMBuildIntToPtr(ctx.builder, rhs, lty, "cast_r_ptr");
@@ -2080,11 +2090,10 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             }
         }
 
-        u32 op_ty_id = llvm_expr_type(ctx, expr.inner0);
+        u32 op_ty_id = l_type_id;
         bool is_unsigned = (l_kind == (u32)12 || r_kind == (u32)12 || llvm_type_is_unsigned(ctx.types, op_ty_id));
         if (!is_unsigned) {
-            u32 r_ty_id = llvm_expr_type(ctx, expr.inner1);
-            is_unsigned = llvm_type_is_unsigned(ctx.types, r_ty_id);
+            is_unsigned = llvm_type_is_unsigned(ctx.types, r_type_id);
         }
 
         if (op == (u32)TokenKind.Plus) { return LLVMBuildAdd(ctx.builder, lhs, rhs, "add"); }

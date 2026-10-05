@@ -1,0 +1,22 @@
+import std.test;
+
+i32 main() {
+    test_start("unsigned narrow values widen without sign extension");
+
+    u8 byte = (u8)0xe3;
+    i64 high_nibble = (i64)(byte >> 4);
+    assert_eq_i64(14, high_nibble, "u8 right shift preserves zero extension");
+
+    u8 wide_rhs = (u8)0xff;
+    i64 widened = (i64)wide_rhs + 1;
+    assert_eq_i64(256, widened, "mixed-width addition widens u8 as unsigned");
+    i64 baseline = 1;
+    assert_eq_i64(256, baseline + wide_rhs, "right-hand u8 operand widens as unsigned");
+
+    i8 signed_byte = -16;
+    i64 signed_shift = (i64)(signed_byte >> 2);
+    assert_eq_i64(-4, signed_shift, "i8 right shift preserves sign extension");
+    assert_eq_i64(-15, baseline + signed_byte, "right-hand i8 operand widens as signed");
+
+    return done();
+}
