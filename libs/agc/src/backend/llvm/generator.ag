@@ -1237,9 +1237,13 @@ impl LlvmGenerator {
                         if (param_type_id == TYPE_UNKNOWN) {
                             param_type_id = types.parse_type_name(type_str);
                         }
-                        if (!exact_function_type
-                            && (param.declared_type.kind == ProjectionTypeKind.Pointer
-                                || param.declared_type.kind == ProjectionTypeKind.Reference || param_type_id == TYPE_VOID)) {
+                        if (!exact_function_type && param.declared_type.kind == ProjectionTypeKind.Pointer) {
+                            param_type_id = types.get_pointer(param_type_id, true);
+                        } else if (!exact_function_type
+                            && param.declared_type.kind == ProjectionTypeKind.Reference) {
+                            param_type_id = types.get_reference(param_type_id,
+                                                                param.declared_type.is_mutable);
+                        } else if (!exact_function_type && param_type_id == TYPE_VOID) {
                             param_type_id = types.get_pointer(param_type_id, true);
                         }
                         LLVMOpaqueType* param_llvm_type = llvm_lower_type(self.ctx, types, param_type_id);

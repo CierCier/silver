@@ -1800,6 +1800,11 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
 
     if (expr.kind == ExprKind.Unary) {
         if (expr.aux == (u32)TokenKind.BitwiseAnd) {
+            u32 inner_type = llvm_lvalue_type(ctx, expr.inner0);
+            TypeEntry* inner_entry = ctx.types.get(inner_type);
+            if (inner_entry.kind == TypeKind.Reference) {
+                return llvm_emit_expr(ctx, expr.inner0);
+            }
             return llvm_emit_lvalue(ctx, expr.inner0);
         }
         if (expr.aux == (u32)TokenKind.Star) {
