@@ -4,6 +4,7 @@ import std.test;
 i64 drops = 0;
 i64 branch_drops = 0;
 i64 leaf_drops = 0;
+i64 branch_observed_left = 0;
 i64 branch_observed_right = 0;
 
 struct Leaf {
@@ -26,6 +27,7 @@ impl Drop for Branch {
     void drop(Branch* self) {
         drops = drops + 100;
         branch_drops = branch_drops + 1;
+        branch_observed_left = self.left.value;
         branch_observed_right = self.right.value;
     }
 }
@@ -44,6 +46,7 @@ i64 main() {
     drops = 0;
     branch_drops = 0;
     leaf_drops = 0;
+    branch_observed_left = 0;
     branch_observed_right = 0;
     {
         Wrapper w;
@@ -52,6 +55,7 @@ i64 main() {
     assert_eq_i64(1, branch_drops, "intermediate branch drop ran once");
     assert_eq_i64(1, leaf_drops, "leaf drop ran once");
     assert_eq_i64(101, drops, "total drop count matches branch + leaf");
+    assert_eq_i64(0, branch_observed_left, "branch drop observes zero-default sibling");
     assert_eq_i64(42, branch_observed_right, "branch drop observed live right child");
 
     // 2. Child overwrite drops old child, not branch
