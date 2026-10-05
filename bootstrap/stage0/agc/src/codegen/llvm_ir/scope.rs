@@ -691,10 +691,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         None
     }
 
-    /// Emit a tag-switched drop of an enum's payload: load the i16 tag and
-    /// drop the active variant's Drop-typed payload values (enums without a
-    /// Drop impl of their own). Zero-initialized enums carry tag 0; their
-    /// payload is zeroed, so null-guarded drops are no-ops.
+    /// Emit a tag-switched drop of the active payload for an enum without its
+    /// own Drop impl. Payload values cascade through structs and nested enums.
     fn emit_enum_payload_drop(
         &mut self,
         enum_type: &ast::Type,
@@ -751,7 +749,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         for (variant_name, tag_value) in &variants {
             let types = payload_types.get(variant_name).cloned().unwrap_or_default();
             // Compute the payload field drops for this variant (by byte offset).
-            let mut drops: Vec<(u32, String)> = Vec::new();
+            let mut drops: Vec<(u32, ast::Type)> = Vec::new();
             let mut offset: u32 = 0;
             for pt in &types {
                 let concrete_pt = if substitutions.is_empty() {
@@ -760,8 +758,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     Self::substitute_generic_type(pt, &substitutions)
                 };
                 let llvm_ty = self.lower_basic_type(&concrete_pt)?;
-                if let Some(drop_fn) = self.get_drop_function_name(&concrete_pt)? {
-                    drops.push((offset, drop_fn));
+                if self.type_needs_drop_glue(&concrete_pt, &mut Vec::new())? {
+                    drops.push((offset, concrete_pt.clone()));
                 }
                 offset += target_data.get_abi_size(&llvm_ty) as u32;
             }
@@ -786,7 +784,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .build_conditional_branch(cond, run_bb, after_bb)
                 .map_err(|e| CodegenError::new(format!("enum payload branch: {e}")))?;
             self.builder.position_at_end(run_bb);
-            for (byte_offset, drop_fn) in drops {
+            for (byte_offset, payload_ty) in drops {
                 let field_ptr = if byte_offset == 0 {
                     data_ptr
                 } else {
@@ -800,12 +798,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     }
                     .map_err(|e| CodegenError::new(format!("enum payload field GEP: {e}")))?
                 };
-                if let Some(func) = self.module.get_function(&drop_fn) {
-                    let args = vec![BasicMetadataValueEnum::from(field_ptr)];
-                    self.builder
-                        .build_call(func, &args, "epd.drop")
-                        .map_err(|e| CodegenError::new(format!("enum payload drop call: {e}")))?;
-                }
+                self.emit_drop_glue_at_pointer(&payload_ty, field_ptr)?;
             }
             self.builder
                 .build_unconditional_branch(after_bb)
@@ -814,6 +807,166 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
         if any {
             self.builder.position_at_end(after_bb);
+        }
+        Ok(())
+    }
+
+    fn type_needs_drop_glue(
+        &mut self,
+        ty: &ast::Type,
+        active: &mut Vec<String>,
+    ) -> CodegenResult<bool> {
+        match ty.kind.as_ref() {
+            ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_) => Ok(false),
+            ast::TypeKind::Tuple(types) => {
+                for field_ty in types {
+                    if self.type_needs_drop_glue(field_ty, active)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            ast::TypeKind::Array(array) => self.type_needs_drop_glue(&array.element_type, active),
+            ast::TypeKind::Named(named) => {
+                if self.get_drop_function_name(ty)?.is_some() {
+                    return Ok(true);
+                }
+                let key = Self::named_type_key(named);
+                if active.contains(&key) {
+                    return Ok(false);
+                }
+                active.push(key);
+                let base = Self::named_type_name(named);
+                let substitutions: HashMap<String, ast::Type> = if let Some(params) =
+                    self.struct_generics.get(&base)
+                    && let Some(args) = &named.generics
+                    && params.len() == args.len()
+                {
+                    params.iter().cloned().zip(args.iter().cloned()).collect()
+                } else {
+                    HashMap::default()
+                };
+                let payload_types = self
+                    .enum_variant_payload_types
+                    .get(&base)
+                    .map(|variants| variants.values().flatten().cloned().collect::<Vec<_>>());
+                let field_types = self
+                    .struct_fields
+                    .get(&base)
+                    .map(|fields| fields.iter().map(|(_, ty)| ty.clone()).collect::<Vec<_>>());
+                let children = payload_types.or(field_types).unwrap_or_default();
+                for child in children {
+                    let child = if substitutions.is_empty() {
+                        child
+                    } else {
+                        Self::substitute_generic_type(&child, &substitutions)
+                    };
+                    if self.type_needs_drop_glue(&child, active)? {
+                        active.pop();
+                        return Ok(true);
+                    }
+                }
+                active.pop();
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn emit_drop_glue_at_pointer(
+        &mut self,
+        ty: &ast::Type,
+        value_ptr: PointerValue<'ctx>,
+    ) -> CodegenResult<()> {
+        if Self::is_pointer_or_reference(ty) {
+            return Ok(());
+        }
+        let drop_fn = self.get_drop_function_name(ty)?;
+        if let Some(drop_fn) = &drop_fn
+            && let Some(function) = self.module.get_function(drop_fn)
+        {
+            self.builder
+                .build_call(
+                    function,
+                    &[BasicMetadataValueEnum::from(value_ptr)],
+                    "drop.glue",
+                )
+                .map_err(|e| CodegenError::new(format!("drop glue call: {e}")))?;
+        }
+
+        if let Some(named) = Self::extract_named_type(ty).cloned() {
+            let base = Self::named_type_name(&named);
+            if self.enum_payload_layouts.contains_key(&base) {
+                if drop_fn.is_none() {
+                    self.emit_enum_payload_drop(ty, value_ptr)?;
+                }
+                return Ok(());
+            }
+            if base == "Task" {
+                return Ok(());
+            }
+            let Some(fields) = self.struct_fields.get(&base).cloned() else {
+                return Ok(());
+            };
+            let struct_ty = self.ensure_named_struct_type(&named)?;
+            let substitutions: HashMap<String, ast::Type> = if let Some(params) =
+                self.struct_generics.get(&base)
+                && let Some(args) = &named.generics
+                && params.len() == args.len()
+            {
+                params.iter().cloned().zip(args.iter().cloned()).collect()
+            } else {
+                HashMap::default()
+            };
+            for (index, (_, field_ty)) in fields.iter().enumerate() {
+                let field_ptr = self
+                    .builder
+                    .build_struct_gep(struct_ty, value_ptr, index as u32, "drop.glue.field")
+                    .map_err(|e| CodegenError::new(format!("drop glue field GEP: {e}")))?;
+                let field_ty = if substitutions.is_empty() {
+                    field_ty.clone()
+                } else {
+                    Self::substitute_generic_type(field_ty, &substitutions)
+                };
+                self.emit_drop_glue_at_pointer(&field_ty, field_ptr)?;
+            }
+            return Ok(());
+        }
+
+        match ty.kind.as_ref() {
+            ast::TypeKind::Tuple(types) => {
+                let field_types = types
+                    .iter()
+                    .map(|field| self.lower_basic_type(field))
+                    .collect::<CodegenResult<Vec<_>>>()?;
+                let tuple_ty = self.context.struct_type(&field_types, false);
+                for (index, field_ty) in types.iter().enumerate() {
+                    let field_ptr = self
+                        .builder
+                        .build_struct_gep(tuple_ty, value_ptr, index as u32, "drop.glue.tuple")
+                        .map_err(|e| CodegenError::new(format!("drop glue tuple GEP: {e}")))?;
+                    self.emit_drop_glue_at_pointer(field_ty, field_ptr)?;
+                }
+            }
+            ast::TypeKind::Array(array) => {
+                let array_ty = self.lower_basic_type(ty)?;
+                for index in 0..array.size {
+                    let field_ptr = unsafe {
+                        self.builder.build_in_bounds_gep(
+                            array_ty,
+                            value_ptr,
+                            &[
+                                self.context.i64_type().const_zero(),
+                                self.context.i64_type().const_int(index as u64, false),
+                            ],
+                            "drop.glue.array",
+                        )
+                    }
+                    .map_err(|e| CodegenError::new(format!("drop glue array GEP: {e}")))?;
+                    self.emit_drop_glue_at_pointer(&array.element_type, field_ptr)?;
+                }
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -861,24 +1014,24 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             HashMap::default()
         };
 
-        // Only enums whose payloads can carry Drop values need the cascade.
+        // Any nested payload with owned fields needs the tag-guarded cascade.
         let payload_types = self.enum_variant_payload_types.get(enum_name).cloned();
-        let has_drop_payload = payload_types
-            .map(|m| {
-                m.values().any(|types| {
-                    types.iter().any(|pt| {
-                        let concrete_pt = if substitutions.is_empty() {
-                            pt.clone()
-                        } else {
-                            Self::substitute_generic_type(pt, &substitutions)
-                        };
-                        self.get_drop_function_name(&concrete_pt)
-                            .unwrap_or(None)
-                            .is_some()
-                    })
-                })
-            })
-            .unwrap_or(false);
+        let mut has_drop_payload = false;
+        if let Some(variants) = payload_types {
+            'variants: for types in variants.values() {
+                for payload_ty in types {
+                    let payload_ty = if substitutions.is_empty() {
+                        payload_ty.clone()
+                    } else {
+                        Self::substitute_generic_type(&payload_ty, &substitutions)
+                    };
+                    if self.type_needs_drop_glue(&payload_ty, &mut Vec::new())? {
+                        has_drop_payload = true;
+                        break 'variants;
+                    }
+                }
+            }
+        }
         if !has_drop_payload {
             return Ok(());
         }

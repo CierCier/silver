@@ -998,10 +998,67 @@ impl ExprLowerer {
                 && name_node.token_kind == TokenKind.Identifier
                 && strcmp(name_node.text, "drop_in_place") == 0) {
                 SyntaxNode* paren = name_node.next_sibling;
-                if (paren != (SyntaxNode*)0 && paren.kind == NodeKind.Parenthesized) {
-                    *next_out = paren.next_sibling;
-                    return self.pool.add_literal(TYPE_I64, node.span);
+                if (paren == (SyntaxNode*)0 || paren.kind != NodeKind.Parenthesized
+                    || paren.first_child == (SyntaxNode*)0) {
+                    self.unsupported = true;
+                    *next_out = (SyntaxNode*)0;
+                    return 0;
                 }
+                i64 comma_count = 0;
+                i64 generic_depth = 0;
+                SyntaxNode* scan = paren.first_child;
+                SyntaxNode* first_comma = (SyntaxNode*)0;
+                SyntaxNode* second_comma = (SyntaxNode*)0;
+                while (scan != (SyntaxNode*)0) {
+                    if (scan.kind == NodeKind.Token) {
+                        if (scan.token_kind == TokenKind.Less) { generic_depth += 1; }
+                        else if (scan.token_kind == TokenKind.Greater && generic_depth > 0) {
+                            generic_depth -= 1;
+                        } else if (scan.token_kind == TokenKind.Comma && generic_depth == 0) {
+                            comma_count += 1;
+                            if (comma_count == 1) { first_comma = scan; }
+                            else if (comma_count == 2) { second_comma = scan; }
+                        }
+                    }
+                    scan = scan.next_sibling;
+                }
+                if (comma_count < 1 || comma_count > 2) {
+                    self.unsupported = true;
+                    *next_out = (SyntaxNode*)0;
+                    return 0;
+                }
+
+                u32 elem_type = TYPE_UNKNOWN;
+                SyntaxNode* pointer_start = paren.first_child;
+                if (comma_count == 2) {
+                    String type_text = String.new();
+                    scan = paren.first_child;
+                    while (scan != first_comma) {
+                        append_node_tokens(scan, &type_text);
+                        scan = scan.next_sibling;
+                    }
+                    elem_type = type_id_from_text(self.types, type_text.to_str());
+                    if (elem_type == TYPE_UNKNOWN) {
+                        elem_type = self.types.parse_type_name(type_text.to_str());
+                    }
+                    if (elem_type == TYPE_UNKNOWN) {
+                        elem_type = self.types.get_named(type_text.to_str());
+                    }
+                    type_text.drop();
+                    pointer_start = first_comma.next_sibling;
+                }
+                SyntaxNode* pointer_end = (comma_count == 2) ? second_comma : first_comma;
+                SyntaxNode* count_start = pointer_end.next_sibling;
+                SyntaxNode* after_pointer = (SyntaxNode*)0;
+                u32 pointer_id = self.lower_sequence(pointer_start, pointer_end);
+                u32 count_id = self.lower_sequence_until_comma(count_start, &after_pointer);
+                if (pointer_id == 0 || count_id == 0 || after_pointer != (SyntaxNode*)0) {
+                    self.unsupported = true;
+                    *next_out = (SyntaxNode*)0;
+                    return 0;
+                }
+                *next_out = paren.next_sibling;
+                return self.pool.add_drop_in_place(elem_type, pointer_id, count_id, node.span);
             }
             if (name_node != (SyntaxNode*)0 && name_node.kind == NodeKind.Token
                 && name_node.token_kind == TokenKind.Identifier

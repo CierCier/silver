@@ -1292,6 +1292,10 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
     } else if (expr.kind == ExprKind.Hash) {
         infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
         inferred = TYPE_I64;
+    } else if (expr.kind == ExprKind.DropInPlace) {
+        infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
+        infer_expr(pool, types, symbols, root, env, expr.inner1, diagnostics, ok);
+        inferred = TYPE_I64;
     } else if (expr.kind == ExprKind.StructLit) {
         i64 field_index = 0;
         while (field_index < (i64)expr.aux) {

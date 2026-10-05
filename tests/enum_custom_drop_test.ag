@@ -1,4 +1,5 @@
 // expected_exit: 42
+// flags: --no-cache
 import std.test;
 
 i64 custom_drops = 0;
@@ -27,6 +28,15 @@ impl<T> Drop for Managed<T> {
 
 enum Cascading {
     Item(Payload);
+    Empty;
+}
+
+struct PayloadWrapper {
+    Payload payload;
+}
+
+enum NestedCascading {
+    Item(PayloadWrapper);
     Empty;
 }
 
@@ -93,5 +103,16 @@ i32 main() {
     assert_eq_i64(0, custom_drops, "plain enum has no custom destructor");
     assert_eq_i64(1, payload_drops, "plain enum cascades its payload exactly once");
     assert_eq_i64(23, dropped_values, "plain enum preserves payload value through drop");
+
+    // Payload tracking must see a destructor nested inside an ordinary wrapper.
+    payload_drops = 0;
+    dropped_values = 0;
+    {
+        Payload payload = { .value = 29 };
+        PayloadWrapper wrapper = { .payload = move payload };
+        NestedCascading _value = NestedCascading.Item(move wrapper);
+    }
+    assert_eq_i64(1, payload_drops, "plain enum cascades nested wrapper fields");
+    assert_eq_i64(29, dropped_values, "nested enum payload preserves field value");
     return 42;
 }

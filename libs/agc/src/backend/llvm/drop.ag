@@ -312,8 +312,8 @@ bool llvm_drop_projection_place(LlvmContext* ctx, LLVMOpaqueValue* local_ptr,
 }
 
 // Tag-dispatched payload drops for an enum value whose whole flag fired:
-// the value is completely live, so present payloads drop. Each payload
-// position gets its own tag check; only its own `drop` runs here.
+// the value is completely live, so present payloads cascade through their
+// own destructors and owned fields.
 void llvm_emit_enum_payload_drop(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 type_id,
                                  str enum_name) {
     LLVMOpaqueType* enum_ty = llvm_lower_type(ctx.ctx, ctx.types, type_id);
@@ -347,7 +347,7 @@ void llvm_emit_enum_payload_drop(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 typ
         i64 di = 0;
         while (di < payload_types.len()) {
             u32 payload_ty = payload_types.get(di);
-            if (llvm_can_resolve_drop_fn(ctx, payload_ty)) {
+            if (llvm_type_needs_tracking(ctx, payload_ty)) {
                 LLVMOpaqueValue* expected = LLVMConstInt(LLVMInt16TypeInContext(ctx.ctx), (u64)tag, 0);
                 LLVMOpaqueValue* same = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntEQ,
                                                       tag_val, expected, "drop_tag_eq");
@@ -363,16 +363,7 @@ void llvm_emit_enum_payload_drop(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 typ
                 LLVMOpaqueValue* field_byte_ptr = LLVMBuildGEP2(ctx.builder, LLVMInt8TypeInContext(ctx.ctx),
                                                                 slot_bytes, &field_index, 1, "drop_enum_field");
                 LLVMOpaqueValue* field_ptr = LLVMBuildBitCast(ctx.builder, field_byte_ptr, ptr_ty, "drop_enum_ptr");
-                if (llvm_can_resolve_drop_fn(ctx, payload_ty)) {
-                    LLVMOpaqueValue* payload_fn = llvm_drop_fn_for_type(ctx, payload_ty);
-                    if (payload_fn != (LLVMOpaqueValue*)0) {
-                        LLVMOpaqueType* fn_ty = LLVMGlobalGetValueType(payload_fn);
-                        Vec<LLVMOpaqueValue*> args = Vec<LLVMOpaqueValue*>.new();
-                        args.push(field_ptr);
-                        LLVMBuildCall2(ctx.builder, fn_ty, payload_fn, args.data, 1, "");
-                        args.drop();
-                    }
-                }
+                llvm_emit_value_drop_at_ptr(ctx, field_ptr, payload_ty);
                 LLVMBuildBr(ctx.builder, merge_bb);
                 LLVMPositionBuilderAtEnd(ctx.builder, next_bb);
             }
@@ -388,8 +379,106 @@ void llvm_emit_enum_payload_drop(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 typ
     LLVMPositionBuilderAtEnd(ctx.builder, merge_bb);
 }
 
-// Does an enum type have any droppable payload that slice 1 can lower
-// (a resolvable own `drop` for the payload)?
+void llvm_emit_value_drop_at_ptr(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 type_id) {
+    u32 resolved = ctx.types.resolve_subst(type_id);
+    if (resolved == TYPE_UNKNOWN || resolved == 0) { return; }
+    TypeEntry* entry = ctx.types.get(resolved);
+    if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) { return; }
+    if (entry.kind != TypeKind.Named) { return; }
+
+    str name = ctx.types.names.get(entry.name_id);
+    SyntaxNode* enum_item = find_enum_item(ctx.root, name);
+    bool own_drop = llvm_can_resolve_drop_fn(ctx, resolved);
+    if (own_drop) {
+        LLVMOpaqueValue* fn = llvm_drop_fn_for_type(ctx, resolved);
+        if (fn != (LLVMOpaqueValue*)0) {
+            Vec<LLVMOpaqueValue*> args = Vec<LLVMOpaqueValue*>.new();
+            args.push(ptr);
+            LLVMBuildCall2(ctx.builder, LLVMGlobalGetValueType(fn), fn, args.data, 1, "");
+            args.drop();
+        }
+    }
+    if (enum_item != (SyntaxNode*)0) {
+        if (!own_drop && llvm_enum_needs_payload_drop(ctx, resolved, name)) {
+            llvm_emit_enum_payload_drop(ctx, ptr, resolved, name);
+        }
+        return;
+    }
+
+    LlvmStructDef* def = ctx.find_struct_by_str(name);
+    if (def == (LlvmStructDef*)0) { return; }
+    mono_ensure_type_layout(ctx, resolved, &ctx.generic_layout_ids);
+    LLVMOpaqueType* struct_ty = llvm_lower_type(ctx.ctx, ctx.types, resolved);
+    i64 i = 0;
+    while (i < def.fields.len()) {
+        LlvmFieldInfo* field = def.fields.get_ptr(i);
+        u32 field_ty = mono_resolve_struct_field_type(ctx, resolved, field.type_id);
+        if (field_ty != TYPE_UNKNOWN && field_ty != 0
+            && llvm_type_needs_tracking(ctx, field_ty)) {
+            LLVMOpaqueValue* field_ptr = LLVMBuildStructGEP2(ctx.builder, struct_ty, ptr,
+                                                              (u32)i, "drop_field");
+            llvm_emit_value_drop_at_ptr(ctx, field_ptr, field_ty);
+        }
+        i += 1;
+    }
+}
+
+LLVMOpaqueValue* llvm_emit_drop_in_place(LlvmContext* ctx, u32 elem_type,
+                                          LLVMOpaqueValue* ptr, LLVMOpaqueValue* count) {
+    if (!llvm_type_needs_tracking(ctx, elem_type)) {
+        return LLVMConstInt(LLVMInt64TypeInContext(ctx.ctx), 0, 0);
+    }
+    if (ctx.current_fn == (LLVMOpaqueValue*)0 || ptr == (LLVMOpaqueValue*)0
+        || count == (LLVMOpaqueValue*)0 || LLVMGetTypeKind(LLVMTypeOf(ptr)) != (u32)12
+        || LLVMGetTypeKind(LLVMTypeOf(count)) != (u32)8) {
+        ctx.note_unresolved("drop-in-place", "arguments");
+        return (LLVMOpaqueValue*)0;
+    }
+    LLVMOpaqueType* i64_ty = LLVMInt64TypeInContext(ctx.ctx);
+    if (LLVMTypeOf(count) != i64_ty) {
+        count = LLVMBuildIntCast(ctx.builder, count, i64_ty, "drop_count_cast");
+    }
+    LLVMOpaqueType* ptr_ty = LLVMPointerTypeInContext(ctx.ctx, (u32)0);
+    LLVMOpaqueValue* non_null = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntNE,
+                                               ptr, LLVMConstNull(ptr_ty), "drop_non_null");
+    LLVMOpaqueValue* has_items = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntSGT,
+                                               count, LLVMConstInt(i64_ty, 0, 0), "drop_has_items");
+    LLVMOpaqueValue* should_drop = LLVMBuildAnd(ctx.builder, non_null, has_items, "drop_enter");
+    LLVMOpaqueBasicBlock* preheader = LLVMGetInsertBlock(ctx.builder);
+    LLVMOpaqueBasicBlock* loop_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn,
+                                                                   "drop_in_place_loop");
+    LLVMOpaqueBasicBlock* done_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn,
+                                                                   "drop_in_place_done");
+    LLVMBuildCondBr(ctx.builder, should_drop, loop_bb, done_bb);
+
+    LLVMPositionBuilderAtEnd(ctx.builder, loop_bb);
+    LLVMOpaqueValue* index = LLVMBuildPhi(ctx.builder, i64_ty, "drop_index");
+    LLVMOpaqueValue* zero = LLVMConstInt(i64_ty, 0, 0);
+    LLVMOpaqueType* elem_ty = llvm_lower_type(ctx.ctx, ctx.types, elem_type);
+    LLVMOpaqueValue* elem_ptr = LLVMBuildGEP2(ctx.builder, elem_ty, ptr, &index, 1,
+                                              "drop_elem_ptr");
+    llvm_emit_value_drop_at_ptr(ctx, elem_ptr, elem_type);
+    LLVMOpaqueBasicBlock* latch = LLVMGetInsertBlock(ctx.builder);
+    LLVMOpaqueValue* next = LLVMBuildAdd(ctx.builder, index, LLVMConstInt(i64_ty, 1, 0),
+                                         "drop_index_next");
+    LLVMOpaqueValue* more = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntSLT,
+                                           next, count, "drop_more");
+    LLVMBuildCondBr(ctx.builder, more, loop_bb, done_bb);
+
+    Vec<LLVMOpaqueValue*> incoming_values = Vec<LLVMOpaqueValue*>.new();
+    incoming_values.push(zero);
+    incoming_values.push(next);
+    Vec<LLVMOpaqueBasicBlock*> incoming_blocks = Vec<LLVMOpaqueBasicBlock*>.new();
+    incoming_blocks.push(preheader);
+    incoming_blocks.push(latch);
+    LLVMAddIncoming(index, incoming_values.data, incoming_blocks.data, (u32)2);
+    incoming_blocks.drop();
+    incoming_values.drop();
+    LLVMPositionBuilderAtEnd(ctx.builder, done_bb);
+    return LLVMConstInt(i64_ty, 0, 0);
+}
+
+// Does any enum payload contain a value that needs drop tracking?
 bool llvm_enum_needs_payload_drop(LlvmContext* ctx, u32 type_id, str enum_name) {
     Vec<SyntaxNode*> variant_names = Vec<SyntaxNode*>.new();
     Vec<i64> variant_tags = Vec<i64>.new();
@@ -411,7 +500,7 @@ bool llvm_enum_needs_payload_drop(LlvmContext* ctx, u32 type_id, str enum_name) 
         while (pi < payload_types.len() && !needed) {
             u32 payload_ty = mono_resolve_struct_field_type(ctx, type_id, payload_types.get(pi));
             if (payload_ty != TYPE_UNKNOWN && payload_ty != 0
-                && llvm_can_resolve_drop_fn(ctx, payload_ty)) {
+                && llvm_type_needs_tracking(ctx, payload_ty)) {
                 needed = true;
             }
             pi += 1;

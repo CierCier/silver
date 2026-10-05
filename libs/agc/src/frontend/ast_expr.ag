@@ -26,6 +26,7 @@ enum ExprKind {
     ArrayLit;      // inner1 = elems_start, aux = elem_count (pool.args[start] = count, then ids)
     Format;        // inner0 = format string literal id, inner1 = args_start, aux = args_count
     Hash;          // inner0 = arg expr id (builtin @hash, always i64)
+    DropInPlace;   // inner0 = pointer expr, inner1 = count expr, aux = element type (optional)
     Assert;        // inner0 = condition, inner1 = message, aux = enabled (debug cfg)
     StructLit;     // inner0 = struct name id, inner1 = fields_start, aux = field count (pool.args: name,expr pairs)
 }
@@ -411,6 +412,22 @@ impl AstPool {
         expr.inferred_type = TYPE_I64;
         expr.generic_args_start = 0;
         expr.generic_args_count = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_drop_in_place(AstPool* self, u32 elem_type, u32 pointer_id,
+                          u32 count_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.DropInPlace;
+        expr.inner0 = pointer_id;
+        expr.inner1 = count_id;
+        expr.aux = elem_type;
+        expr.span = span;
+        expr.inferred_type = TYPE_I64;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        expr.resolved_callee_id = 0;
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
     }

@@ -189,6 +189,8 @@ extern "C" {
     LLVMOpaqueBasicBlock* LLVMAppendBasicBlockInContext(LLVMOpaqueContext* p0, LLVMOpaqueValue* p1, i8* p2);
     u32 LLVMCountBasicBlocks(LLVMOpaqueValue* p0);
     void LLVMPositionBuilderAtEnd(LLVMOpaqueBuilder* p0, LLVMOpaqueBasicBlock* p1);
+    LLVMOpaqueValue* LLVMBuildPhi(LLVMOpaqueBuilder* p0, LLVMOpaqueType* p1, i8* p2);
+    void LLVMAddIncoming(LLVMOpaqueValue* p0, LLVMOpaqueValue** p1, LLVMOpaqueBasicBlock** p2, u32 p3);
     void LLVMSetCurrentDebugLocation2(LLVMOpaqueBuilder* p0, LLVMOpaqueMetadata* p1);
 
     LLVMOpaqueBasicBlock* LLVMGetInsertBlock(LLVMOpaqueBuilder* p0);

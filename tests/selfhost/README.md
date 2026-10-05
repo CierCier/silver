@@ -60,11 +60,14 @@ gate. It points `SILVER_STAGE0` at a missing path, sets
 `SILVER_STAGE1_NATIVE=1`, runs the native backend and stage2 checks, then runs
 focused ownership, loop-stack, and runtime fixtures. The broad no-stage0 corpus
 remains exploratory while unsupported native features are tracked. Its current
-249-fixture local run has 153 passed, 94 failed, and 2 skipped. The allocator,
-consuming-for-in, reference-reborrow, SHA-256, unsigned-widening, and packed-
-layout regressions now pass. The remaining failures are tracked in the
-unsupported-feature and runtime-correctness backlog. This gate is not currently
-wired into CI while native support is changing rapidly.
+249-fixture local run has 154 passed, 93 failed, and 2 skipped. The allocator,
+consuming-for-in, reference-reborrow, SHA-256, unsigned-widening, packed-layout,
+collection-drop, and nested enum-payload regressions now pass. The nested
+enum-payload case verifies stage0 and native stage1 both cascade through wrapper
+payload fields. The native corpus improves from 153/94/2 to 154/93/2 with no
+new failures. The remaining failures are tracked in the unsupported-feature
+and runtime-correctness backlog. This gate is not currently wired into CI while
+native support is changing rapidly.
 
 `check_native_enum_layout.py` disables the stage0 bridge and checks small and
 String payloads in `Optional` and both `Result` variants. It also checks empty
