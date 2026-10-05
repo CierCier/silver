@@ -257,25 +257,38 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
 
         // Emit condition block
         LLVMPositionBuilderAtEnd(ctx.builder, cond_bb);
+        ctx.push_scope();
+        i64 cond_drop_mark = llvm_current_drop_mark(ctx);
+        LLVMOpaqueValue* cond_stack_save = ctx.save_stack();
         LLVMOpaqueValue* cond_val = llvm_emit_expr(ctx, stmt.inner0);
         if (cond_val != (LLVMOpaqueValue*)0) {
             if (LLVMTypeOf(cond_val) != LLVMInt1TypeInContext(ctx.ctx)) {
                 cond_val = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntNE, cond_val, LLVMConstNull(LLVMTypeOf(cond_val)), "while_cond_bool");
             }
+            llvm_emit_drops_above(ctx, cond_drop_mark);
+            ctx.restore_stack(cond_stack_save);
             LLVMBuildCondBr(ctx.builder, cond_val, body_bb, exit_bb);
         } else {
             ctx.note_unresolved("while-condition", "expression");
+            llvm_emit_drops_above(ctx, cond_drop_mark);
+            ctx.restore_stack(cond_stack_save);
             LLVMBuildBr(ctx.builder, exit_bb);
         }
+        ctx.pop_scope();
 
         // Emit body block
         LLVMPositionBuilderAtEnd(ctx.builder, body_bb);
-        ctx.push_loop(exit_bb, step_bb);
+        // Loop-local allocas execute on each pass; reclaim them after drops
+        // so iteration storage stays valid through cleanup without growing
+        // the native stack for the life of the loop.
+        LLVMOpaqueValue* body_stack_save = ctx.save_stack();
+        ctx.push_loop(exit_bb, step_bb, body_stack_save);
         ctx.push_scope();
         i64 body_drop_mark = llvm_current_drop_mark(ctx);
         llvm_emit_stmt(ctx, stmt.inner1);
         if (!ctx.is_terminated()) {
             llvm_emit_drops_above(ctx, body_drop_mark);
+            ctx.restore_stack(body_stack_save);
         }
         ctx.pop_scope();
         ctx.pop_loop();
@@ -285,10 +298,15 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
 
         if (stmt.aux != 0) {
             LLVMPositionBuilderAtEnd(ctx.builder, step_bb);
+            ctx.push_scope();
+            i64 step_drop_mark = llvm_current_drop_mark(ctx);
             llvm_emit_stmt(ctx, stmt.aux);
             if (!ctx.is_terminated()) {
+                llvm_emit_drops_above(ctx, step_drop_mark);
+                ctx.restore_stack(body_stack_save);
                 LLVMBuildBr(ctx.builder, cond_bb);
             }
+            ctx.pop_scope();
         }
 
         LLVMPositionBuilderAtEnd(ctx.builder, exit_bb);
@@ -300,6 +318,10 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
         if (break_target != (LLVMOpaqueBasicBlock*)0) {
             if (ctx.loop_drop_marks.len() > 0) {
                 llvm_emit_drops_above(ctx, ctx.loop_drop_marks.get(ctx.loop_drop_marks.len() - 1));
+            }
+            LLVMOpaqueValue* stack_save = ctx.current_loop_stack_save();
+            if (stack_save != (LLVMOpaqueValue*)0) {
+                ctx.restore_stack(stack_save);
             }
             LLVMBuildBr(ctx.builder, break_target);
         } else {
@@ -313,6 +335,10 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
         if (cont_target != (LLVMOpaqueBasicBlock*)0) {
             if (ctx.loop_drop_marks.len() > 0) {
                 llvm_emit_drops_above(ctx, ctx.loop_drop_marks.get(ctx.loop_drop_marks.len() - 1));
+            }
+            LLVMOpaqueValue* stack_save = ctx.current_loop_stack_save();
+            if (stack_save != (LLVMOpaqueValue*)0) {
+                ctx.restore_stack(stack_save);
             }
             LLVMBuildBr(ctx.builder, cont_target);
         } else {

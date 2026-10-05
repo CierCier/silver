@@ -90,6 +90,7 @@ struct LlvmContext {
     Vec<LLVMOpaqueBasicBlock*> loop_breaks;
     Vec<LLVMOpaqueBasicBlock*> loop_continues;
     Vec<i64> loop_drop_marks;
+    Vec<LLVMOpaqueValue*> loop_stack_saves;
     Vec<ScrutineeMove> scrutinee_moves;
     Vec<LlvmTypeBinding> type_subst;
     i64 unresolved_calls;
@@ -125,6 +126,7 @@ impl LlvmContext {
         c.loop_breaks = Vec<LLVMOpaqueBasicBlock*>.new();
         c.loop_continues = Vec<LLVMOpaqueBasicBlock*>.new();
         c.loop_drop_marks = Vec<i64>.new();
+        c.loop_stack_saves = Vec<LLVMOpaqueValue*>.new();
         c.scrutinee_moves = Vec<ScrutineeMove>.new();
         c.type_subst = Vec<LlvmTypeBinding>.new();
         c.unresolved_calls = 0;
@@ -390,10 +392,35 @@ impl LlvmContext {
         self.locals.push(move local);
     }
 
-    void push_loop(LlvmContext* self, LLVMOpaqueBasicBlock* break_bb, LLVMOpaqueBasicBlock* cont_bb) {
+    LLVMOpaqueValue* save_stack(LlvmContext* self) {
+        LLVMOpaqueType* ptr_ty = LLVMPointerTypeInContext(self.ctx, 0);
+        LLVMOpaqueType* fn_ty = LLVMFunctionType(ptr_ty, (LLVMOpaqueType**)0, 0, 0);
+        LLVMOpaqueValue* fn = LLVMGetNamedFunction(self.module, "llvm.stacksave.p0");
+        if (fn == (LLVMOpaqueValue*)0) {
+            fn = LLVMAddFunction(self.module, "llvm.stacksave.p0", fn_ty);
+        }
+        return LLVMBuildCall2(self.builder, fn_ty, fn, (LLVMOpaqueValue**)0, 0, "loop.stack.save");
+    }
+
+    void restore_stack(LlvmContext* self, LLVMOpaqueValue* saved) {
+        LLVMOpaqueType* ptr_ty = LLVMPointerTypeInContext(self.ctx, 0);
+        LLVMOpaqueType* fn_ty = LLVMFunctionType(LLVMVoidTypeInContext(self.ctx), &ptr_ty, 1, 0);
+        LLVMOpaqueValue* fn = LLVMGetNamedFunction(self.module, "llvm.stackrestore.p0");
+        if (fn == (LLVMOpaqueValue*)0) {
+            fn = LLVMAddFunction(self.module, "llvm.stackrestore.p0", fn_ty);
+        }
+        Vec<LLVMOpaqueValue*> args = Vec<LLVMOpaqueValue*>.new();
+        args.push(saved);
+        LLVMBuildCall2(self.builder, fn_ty, fn, args.data, 1, "");
+        args.drop();
+    }
+
+    void push_loop(LlvmContext* self, LLVMOpaqueBasicBlock* break_bb,
+                   LLVMOpaqueBasicBlock* cont_bb, LLVMOpaqueValue* stack_save) {
         self.loop_breaks.push(break_bb);
         self.loop_continues.push(cont_bb);
         self.loop_drop_marks.push((i64)self.locals.len());
+        self.loop_stack_saves.push(stack_save);
     }
 
     void pop_loop(LlvmContext* self) {
@@ -403,6 +430,9 @@ impl LlvmContext {
         }
         if (self.loop_drop_marks.len() > 0) {
             self.loop_drop_marks.pop();
+        }
+        if (self.loop_stack_saves.len() > 0) {
+            self.loop_stack_saves.pop();
         }
     }
 
@@ -418,6 +448,13 @@ impl LlvmContext {
             return (LLVMOpaqueBasicBlock*)0;
         }
         return self.loop_continues.get(self.loop_continues.len() - 1);
+    }
+
+    LLVMOpaqueValue* current_loop_stack_save(LlvmContext* self) {
+        if (self.loop_stack_saves.len() == 0) {
+            return (LLVMOpaqueValue*)0;
+        }
+        return self.loop_stack_saves.get(self.loop_stack_saves.len() - 1);
     }
 
     bool is_terminated(LlvmContext* self) {
