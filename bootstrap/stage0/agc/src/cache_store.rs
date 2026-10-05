@@ -642,11 +642,44 @@ impl CacheStore {
         self.root_dir.join("tmp")
     }
 
+    fn lock_dir(&self) -> PathBuf {
+        self.root_dir.join("locks")
+    }
+
     pub fn ensure_dirs(&self) -> io::Result<()> {
         fs::create_dir_all(self.agm_dir())?;
         fs::create_dir_all(self.obj_dir())?;
         fs::create_dir_all(self.tmp_dir())?;
+        fs::create_dir_all(self.lock_dir())?;
         Ok(())
+    }
+
+    fn open_lock(&self, name: &str) -> io::Result<fs::File> {
+        fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.lock_dir().join(name))
+    }
+
+    // Acquire the store lock before any key lock. Shared store locks allow
+    // unrelated keys to proceed while exclusive maintenance waits for all I/O.
+    fn lock_store(&self, exclusive: bool) -> io::Result<fs::File> {
+        fs::create_dir_all(self.lock_dir())?;
+        let lock = self.open_lock("store.lock")?;
+        if exclusive {
+            lock.lock()?;
+        } else {
+            lock.lock_shared()?;
+        }
+        Ok(lock)
+    }
+
+    fn lock_key(&self, key: &CacheKey) -> io::Result<fs::File> {
+        let lock = self.open_lock(&format!("{}.lock", key.hash_hex))?;
+        lock.lock()?;
+        Ok(lock)
     }
 
     fn remove_file_if_exists(path: &Path) -> io::Result<()> {
@@ -693,6 +726,8 @@ impl CacheStore {
     /// Missing, incomplete, unreadable, or malformed entries are discarded so
     /// the caller recompiles the module from source.
     pub fn get(&self, key: &CacheKey) -> Option<CachedModule> {
+        let _store_lock = self.lock_store(false).ok()?;
+        let _key_lock = self.lock_key(key).ok()?;
         let agm_path = self.agm_path(key);
         let obj_path = self.obj_path(key);
         let valid = Self::artifact_is_valid(&agm_path, agm_bytes_are_well_formed)
@@ -727,11 +762,24 @@ impl CacheStore {
             return Err(invalid_artifact_error("object"));
         }
 
+        let _store_lock = self.lock_store(false)?;
         self.ensure_dirs()?;
-        let mut staged_agm = StagedFile::create(self.staging_path(key, "agm"), agm_bytes)?;
-        let mut staged_obj = StagedFile::create(self.staging_path(key, "o"), obj_bytes)?;
+        let _key_lock = self.lock_key(key)?;
         let final_agm = self.agm_path(key);
         let final_obj = self.obj_path(key);
+
+        if Self::artifact_is_valid(&final_agm, agm_bytes_are_well_formed)
+            && Self::artifact_is_valid(&final_obj, object_bytes_are_well_formed)
+        {
+            return Ok(CachedModule {
+                key: key.clone(),
+                agm_path: final_agm,
+                obj_path: final_obj,
+            });
+        }
+
+        let mut staged_agm = StagedFile::create(self.staging_path(key, "agm"), agm_bytes)?;
+        let mut staged_obj = StagedFile::create(self.staging_path(key, "o"), obj_bytes)?;
 
         Self::remove_file_if_exists(&final_agm)?;
         Self::remove_file_if_exists(&final_obj)?;
@@ -754,6 +802,7 @@ impl CacheStore {
 
     /// Cleans temporary staging files left behind by interrupted runs.
     pub fn clean_tmp(&self) -> io::Result<usize> {
+        let _store_lock = self.lock_store(true)?;
         let mut count = 0;
         if let Ok(entries) = fs::read_dir(self.tmp_dir()) {
             for entry in entries.flatten() {
@@ -769,6 +818,8 @@ impl CacheStore {
 
     /// Checks for a cached standalone object artifact.
     pub fn get_obj(&self, key: &CacheKey) -> Option<PathBuf> {
+        let _store_lock = self.lock_store(false).ok()?;
+        let _key_lock = self.lock_key(key).ok()?;
         let path = self.obj_path(key);
         if Self::artifact_is_valid(&path, object_bytes_are_well_formed) {
             Some(path)
@@ -784,9 +835,16 @@ impl CacheStore {
             return Err(invalid_artifact_error("object"));
         }
 
+        let _store_lock = self.lock_store(false)?;
         self.ensure_dirs()?;
-        let mut staged_obj = StagedFile::create(self.staging_path(key, "o"), obj_bytes)?;
+        let _key_lock = self.lock_key(key)?;
         let final_obj = self.obj_path(key);
+
+        if Self::artifact_is_valid(&final_obj, object_bytes_are_well_formed) {
+            return Ok(final_obj);
+        }
+
+        let mut staged_obj = StagedFile::create(self.staging_path(key, "o"), obj_bytes)?;
         Self::remove_file_if_exists(&final_obj)?;
         staged_obj.publish(&final_obj)?;
         Ok(final_obj)
@@ -794,6 +852,7 @@ impl CacheStore {
 
     /// Compute summary statistics of the cache store.
     pub fn stats(&self) -> io::Result<CacheStats> {
+        let _store_lock = self.lock_store(false)?;
         let mut stats = CacheStats {
             root_dir: self.root_dir.clone(),
             ..Default::default()
@@ -846,6 +905,7 @@ impl CacheStore {
     /// Evicts the oldest files first based on modification time (mtime).
     /// Returns the number of files deleted and total bytes freed.
     pub fn prune_to_max_size(&self, max_bytes: u64) -> io::Result<(usize, u64)> {
+        let _store_lock = self.lock_store(true)?;
         let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
         let mut total_bytes: u64 = 0;
 
@@ -889,6 +949,7 @@ impl CacheStore {
 
     /// Prune cache entries older than `max_age`.
     pub fn prune_older_than(&self, max_age: std::time::Duration) -> io::Result<(usize, u64)> {
+        let _store_lock = self.lock_store(true)?;
         let now = std::time::SystemTime::now();
         let mut deleted_count = 0;
         let mut freed_bytes = 0;
@@ -920,7 +981,15 @@ impl CacheStore {
 
     /// Delete all cache content and recreate empty directory structure.
     pub fn clean_all(&self) -> io::Result<()> {
-        let _ = fs::remove_dir_all(&self.root_dir);
+        let _store_lock = self.lock_store(true)?;
+        // Keep lock inodes stable for processes that open them after this call.
+        for directory in [self.agm_dir(), self.obj_dir(), self.tmp_dir()] {
+            match fs::remove_dir_all(&directory) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
         self.ensure_dirs()
     }
 }
@@ -972,6 +1041,8 @@ pub fn parse_size_to_bytes(s: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -1095,6 +1166,78 @@ mod tests {
         let fetched = store.get(&key).expect("cache hit");
         assert_eq!(fs::read(&fetched.agm_path).unwrap(), agm_data);
         assert_eq!(fs::read(&fetched.obj_path).unwrap(), obj_data);
+
+        let _ = fs::remove_dir_all(&tmp_root);
+    }
+
+    #[test]
+    fn concurrent_put_and_get_preserve_shared_entry() {
+        const WORKERS: usize = 8;
+        const ITERATIONS: usize = 32;
+
+        let (tmp_root, store) = test_store("concurrent-put-get");
+        let key = test_key(9);
+        let agm_data = valid_agm_bytes("test.module", 9);
+        let obj_data = valid_object_bytes(b"shared object code");
+        let barrier = Arc::new(Barrier::new(WORKERS));
+        let workers: Vec<_> = (0..WORKERS)
+            .map(|_| {
+                let store = store.clone();
+                let key = key.clone();
+                let agm_data = agm_data.clone();
+                let obj_data = obj_data.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    for _ in 0..ITERATIONS {
+                        store
+                            .put(&key, &agm_data, &obj_data)
+                            .expect("publish cache entry");
+                        assert!(
+                            store.get(&key).is_some(),
+                            "published entry remains available"
+                        );
+                    }
+                })
+            })
+            .collect();
+
+        for worker in workers {
+            worker.join().expect("cache worker completes");
+        }
+        assert!(
+            store.get(&key).is_some(),
+            "entry survives all concurrent writers"
+        );
+
+        let _ = fs::remove_dir_all(&tmp_root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn put_preserves_existing_valid_artifacts() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (tmp_root, store) = test_store("put-preserves-valid-artifacts");
+        let key = test_key(10);
+        let agm_data = valid_agm_bytes("test.module", 10);
+        let obj_data = valid_object_bytes(b"original object code");
+        let cached = store
+            .put(&key, &agm_data, &obj_data)
+            .expect("publish cache entry");
+        let agm_inode = fs::metadata(&cached.agm_path).unwrap().ino();
+        let obj_inode = fs::metadata(&cached.obj_path).unwrap().ino();
+
+        let republished = store
+            .put(&key, &agm_data, &valid_object_bytes(b"replacement object code"))
+            .expect("preserve complete cache entry");
+        assert_eq!(fs::metadata(&republished.agm_path).unwrap().ino(), agm_inode);
+        assert_eq!(fs::metadata(&republished.obj_path).unwrap().ino(), obj_inode);
+
+        let standalone = store
+            .put_obj(&key, &valid_object_bytes(b"standalone replacement"))
+            .expect("preserve complete object entry");
+        assert_eq!(fs::metadata(&standalone).unwrap().ino(), obj_inode);
 
         let _ = fs::remove_dir_all(&tmp_root);
     }
