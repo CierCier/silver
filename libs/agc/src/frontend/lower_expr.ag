@@ -1799,6 +1799,12 @@ impl ExprLowerer {
             u32 into_iter = self.pool.add_method_call(iterable_expr,
                 self.names.intern("into_iter"), iter_args, for_node.span);
             outer_stmts.push(self.pool.add_stmt_let(iter_name, TYPE_UNKNOWN, into_iter, for_node.span));
+            // A by-value into_iter consumes a direct local. Keep the moved-from
+            // binding valid under Silver's zero-initialized local contract.
+            AstExpr* iterable = self.pool.get_expr(iterable_expr);
+            if (iterable.kind == ExprKind.Var) {
+                outer_stmts.push(self.pool.add_stmt_reset_local(iterable.aux, for_node.span));
+            }
 
             u32 next_receiver = self.pool.add_var(iter_name, for_node.span);
             u32 next_args = (u32)self.pool.args.len();

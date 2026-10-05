@@ -44,6 +44,7 @@ struct AstExpr {
 
 enum StmtKind {
     Let;           // aux = var_name_id, inner0 = type_id, inner1 = init_expr_id
+    ResetLocal;    // aux = var_name_id; restore a consumed local to zero
     Assign;        // inner0 = target_expr_id, inner1 = val_expr_id
     Expr;          // inner0 = expr_id
     Return;        // inner0 = expr_id
@@ -556,6 +557,17 @@ impl AstPool {
         stmt.inner0 = target_expr_id;
         stmt.inner1 = val_expr_id;
         stmt.aux = 0;
+        stmt.span = span;
+        self.stmts.push(move stmt);
+        return (u32)(self.stmts.len() - 1);
+    }
+
+    u32 add_stmt_reset_local(AstPool* self, u32 var_name_id, Span span) {
+        AstStmt stmt;
+        stmt.kind = StmtKind.ResetLocal;
+        stmt.inner0 = 0;
+        stmt.inner1 = 0;
+        stmt.aux = var_name_id;
         stmt.span = span;
         self.stmts.push(move stmt);
         return (u32)(self.stmts.len() - 1);

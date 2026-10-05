@@ -157,6 +157,18 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
         return;
     }
 
+    if (stmt.kind == StmtKind.ResetLocal) {
+        LlvmLocal* local = ctx.find_local(stmt.aux);
+        if (local == (LlvmLocal*)0) {
+            ctx.note_unresolved("reset-local", ctx.names.get(stmt.aux));
+            return;
+        }
+        LLVMOpaqueType* value_ty = llvm_lower_type(ctx.ctx, ctx.types, local.type_id);
+        LLVMBuildStore(ctx.builder, LLVMConstNull(value_ty), local.ptr);
+        llvm_clear_local_drops(ctx, stmt.aux);
+        return;
+    }
+
     if (stmt.kind == StmtKind.Assign) {
         LLVMOpaqueValue* target_ptr = llvm_emit_lvalue(ctx, stmt.inner0);
         u32 saved_expected = ctx.expected_type_id;
