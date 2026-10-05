@@ -73,6 +73,7 @@ bool parse_did_change_params(str json, String* uri_out, String* text_out, i64* v
     uri_out.clear();
     text_out.clear();
     *ver_out = 0;
+    bool has_text = false;
     JsonReader r = JsonReader.new(json);
     if (!r.begin_object()) {
         return false;
@@ -130,6 +131,7 @@ bool parse_did_change_params(str json, String* uri_out, String* text_out, i64* v
                                 String s = r.read_string();
                                 text_out.push_str(s.to_str());
                                 s.drop();
+                                has_text = true;
                             } else {
                                 r.skip_value();
                             }
@@ -156,7 +158,7 @@ bool parse_did_change_params(str json, String* uri_out, String* text_out, i64* v
         if (!skip_comma_if_present(&r)) { break; }
     }
     r.end_object();
-    return uri_out.len() > 0 && text_out.len() > 0;
+    return uri_out.len() > 0 && has_text;
 }
 
 bool parse_position_params(str json, String* uri_out, i64* line_out, i64* col_out) {

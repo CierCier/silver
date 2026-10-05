@@ -42,7 +42,7 @@ def main():
         # 1. Test initialize
         proc.stdin.write(make_msg({
             "jsonrpc": "2.0",
-            "id": 1,
+            "id": "initialize-1",
             "method": "initialize",
             "params": {}
         }))
@@ -50,7 +50,7 @@ def main():
 
         resp = read_msg(proc)
         print("1. Initialize response:", resp)
-        assert resp["id"] == 1
+        assert resp["id"] == "initialize-1"
         assert "capabilities" in resp["result"]
         caps = resp["result"]["capabilities"]
         assert caps["hoverProvider"] is True
@@ -204,19 +204,81 @@ def main():
         print("   -> Caught error:", err_msg)
         assert "UnknownType" in err_msg
 
-        # 9. Test shutdown
+        # 9. An empty full-document change is still a real document update.
         proc.stdin.write(make_msg({
             "jsonrpc": "2.0",
-            "id": 7,
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {"uri": "file:///test.ag", "version": 3},
+                "contentChanges": [{"text": ""}]
+            }
+        }))
+        proc.stdin.write(make_msg({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "textDocument/documentSymbol",
+            "params": {"textDocument": {"uri": "file:///test.ag"}}
+        }))
+        proc.stdin.flush()
+
+        empty_diag = read_msg(proc)
+        assert empty_diag["method"] == "textDocument/publishDiagnostics"
+        assert empty_diag["params"]["uri"] == "file:///test.ag"
+        assert empty_diag["params"]["diagnostics"] == []
+        empty_symbols = read_msg(proc)
+        assert empty_symbols["id"] == 8
+        assert empty_symbols["result"] == []
+        print("9. Empty document change and diagnostics verified.")
+
+        # 10. Closing a document clears diagnostics already shown by the client.
+        proc.stdin.write(make_msg({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didClose",
+            "params": {"textDocument": {"uri": "file:///test.ag"}}
+        }))
+        proc.stdin.write(make_msg({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "textDocument/documentSymbol",
+            "params": {"textDocument": {"uri": "file:///test.ag"}}
+        }))
+        proc.stdin.flush()
+
+        closed_diag = read_msg(proc)
+        assert closed_diag["method"] == "textDocument/publishDiagnostics"
+        assert closed_diag["params"]["uri"] == "file:///test.ag"
+        assert closed_diag["params"]["diagnostics"] == []
+        closed_symbols = read_msg(proc)
+        assert closed_symbols["id"] == 9
+        assert closed_symbols["result"] == []
+        print("10. Close clears diagnostics and removes the document.")
+
+        # 11. Errors must echo string request IDs too.
+        proc.stdin.write(make_msg({
+            "jsonrpc": "2.0",
+            "id": "unknown-method",
+            "method": "not/a/method",
+            "params": {}
+        }))
+        proc.stdin.flush()
+        error_resp = read_msg(proc)
+        assert error_resp["id"] == "unknown-method"
+        assert error_resp["error"]["code"] == -32601
+        print("11. String request ID is preserved in error response.")
+
+        # 12. Test shutdown
+        proc.stdin.write(make_msg({
+            "jsonrpc": "2.0",
+            "id": 10,
             "method": "shutdown",
             "params": {}
         }))
         proc.stdin.flush()
         shut_resp = read_msg(proc)
-        print("9. Shutdown response:", shut_resp)
-        assert shut_resp["id"] == 7
+        print("12. Shutdown response:", shut_resp)
+        assert shut_resp["id"] == 10
 
-        # 10. Test exit
+        # 13. Test exit
         proc.stdin.write(make_msg({
             "jsonrpc": "2.0",
             "method": "exit",
@@ -224,7 +286,7 @@ def main():
         }))
         proc.stdin.flush()
         proc.wait(timeout=2)
-        print("10. Server exited cleanly with code:", proc.returncode)
+        print("13. Server exited cleanly with code:", proc.returncode)
         assert proc.returncode == 0
 
         print("\nAll aglsp protocol tests PASSED successfully!")

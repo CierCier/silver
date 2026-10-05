@@ -4,6 +4,14 @@ import std.string;
 import agc;
 import json_rpc;
 
+void publish_empty_diagnostics(str uri) {
+    String params = String.from_str("{\"uri\":\"");
+    json_escape(uri, &params);
+    params.push_str("\",\"diagnostics\":[]}");
+    send_notification("textDocument/publishDiagnostics", params.to_str());
+    params.drop();
+}
+
 void publish_file_diagnostics(str uri, str text) {
     TokenStream stream = TokenStream.new();
     DiagnosticBag diagnostics = DiagnosticBag.new();

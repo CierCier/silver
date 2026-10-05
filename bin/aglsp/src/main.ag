@@ -30,7 +30,7 @@ i32 main() {
 
         if (strcmp(method, "initialize") == 0) {
             str caps = "{\"capabilities\":{\"textDocumentSync\":1,\"hoverProvider\":true,\"documentSymbolProvider\":true,\"definitionProvider\":true,\"documentFormattingProvider\":true,\"completionProvider\":{\"triggerCharacters\":[\".\",\":\"]}},\"serverInfo\":{\"name\":\"aglsp\",\"version\":\"0.1.0\"}}";
-            send_response(msg.id, caps);
+            send_response(msg.id_raw.to_str(), caps);
         } else if (strcmp(method, "initialized") == 0) {
             // Notification no-op
         } else if (strcmp(method, "textDocument/didOpen") == 0) {
@@ -57,6 +57,7 @@ i32 main() {
             String uri = String.new();
             if (parse_document_uri_param(msg.params_json.to_str(), &uri)) {
                 store.remove(uri.to_str());
+                publish_empty_diagnostics(uri.to_str());
             }
             uri.drop();
         } else if (strcmp(method, "textDocument/hover") == 0) {
@@ -67,13 +68,13 @@ i32 main() {
                 Document* doc = store.get(uri.to_str());
                 if (doc != (Document*)0) {
                     String hover_res = compute_hover(doc.text.to_str(), line, col);
-                    send_response(msg.id, hover_res.to_str());
+                    send_response(msg.id_raw.to_str(), hover_res.to_str());
                     hover_res.drop();
                 } else {
-                    send_response(msg.id, "null");
+                    send_response(msg.id_raw.to_str(), "null");
                 }
             } else {
-                send_response(msg.id, "null");
+                send_response(msg.id_raw.to_str(), "null");
             }
             uri.drop();
         } else if (strcmp(method, "textDocument/definition") == 0) {
@@ -84,13 +85,13 @@ i32 main() {
                 Document* doc = store.get(uri.to_str());
                 if (doc != (Document*)0) {
                     String def_res = compute_definition(doc.text.to_str(), uri.to_str(), line, col);
-                    send_response(msg.id, def_res.to_str());
+                    send_response(msg.id_raw.to_str(), def_res.to_str());
                     def_res.drop();
                 } else {
-                    send_response(msg.id, "null");
+                    send_response(msg.id_raw.to_str(), "null");
                 }
             } else {
-                send_response(msg.id, "null");
+                send_response(msg.id_raw.to_str(), "null");
             }
             uri.drop();
         } else if (strcmp(method, "textDocument/formatting") == 0) {
@@ -99,13 +100,13 @@ i32 main() {
                 Document* doc = store.get(uri.to_str());
                 if (doc != (Document*)0) {
                     String format_res = compute_formatting(doc.text.to_str());
-                    send_response(msg.id, format_res.to_str());
+                    send_response(msg.id_raw.to_str(), format_res.to_str());
                     format_res.drop();
                 } else {
-                    send_response(msg.id, "[]");
+                    send_response(msg.id_raw.to_str(), "[]");
                 }
             } else {
-                send_response(msg.id, "[]");
+                send_response(msg.id_raw.to_str(), "[]");
             }
             uri.drop();
         } else if (strcmp(method, "textDocument/completion") == 0) {
@@ -116,13 +117,13 @@ i32 main() {
                 Document* doc = store.get(uri.to_str());
                 if (doc != (Document*)0) {
                     String comp_res = compute_completion(doc.text.to_str(), line, col);
-                    send_response(msg.id, comp_res.to_str());
+                    send_response(msg.id_raw.to_str(), comp_res.to_str());
                     comp_res.drop();
                 } else {
-                    send_response(msg.id, "{\"isIncomplete\":false,\"items\":[]}");
+                    send_response(msg.id_raw.to_str(), "{\"isIncomplete\":false,\"items\":[]}");
                 }
             } else {
-                send_response(msg.id, "{\"isIncomplete\":false,\"items\":[]}");
+                send_response(msg.id_raw.to_str(), "{\"isIncomplete\":false,\"items\":[]}");
             }
             uri.drop();
         } else if (strcmp(method, "textDocument/documentSymbol") == 0) {
@@ -131,22 +132,22 @@ i32 main() {
                 Document* doc = store.get(uri.to_str());
                 if (doc != (Document*)0) {
                     String syms = compute_document_symbols(doc.text.to_str());
-                    send_response(msg.id, syms.to_str());
+                    send_response(msg.id_raw.to_str(), syms.to_str());
                     syms.drop();
                 } else {
-                    send_response(msg.id, "[]");
+                    send_response(msg.id_raw.to_str(), "[]");
                 }
             } else {
-                send_response(msg.id, "[]");
+                send_response(msg.id_raw.to_str(), "[]");
             }
             uri.drop();
         } else if (strcmp(method, "shutdown") == 0) {
-            send_response(msg.id, "null");
+            send_response(msg.id_raw.to_str(), "null");
         } else if (strcmp(method, "exit") == 0) {
             break;
         } else {
             if (msg.has_id) {
-                send_error(msg.id, -32601, "Method not found");
+                send_error(msg.id_raw.to_str(), -32601, "Method not found");
             }
         }
     }
