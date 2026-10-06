@@ -113,6 +113,20 @@ bool llvm_type_needs_tracking_inner(LlvmContext* ctx, u32 type_id, Vec<u32>* act
     u32 name_id = entry.name_id;
     if (kind == TypeKind.Pointer || kind == TypeKind.Reference) { return false; }
     if (llvm_can_resolve_drop_fn(ctx, resolved)) { return true; }
+    if (kind == TypeKind.Array) {
+        return llvm_type_needs_tracking_inner(ctx, entry.inner, active);
+    }
+    if (kind == TypeKind.Tuple) {
+        i64 i = 0;
+        while (i < entry.count) {
+            if (llvm_type_needs_tracking_inner(ctx,
+                    ctx.types.type_args.get(entry.inner + (u32)i), active)) {
+                return true;
+            }
+            i += 1;
+        }
+        return false;
+    }
     if (kind == TypeKind.Named && active.len() > 0) {
         str nested_name = ctx.types.names.get(name_id);
         if (find_enum_item(ctx.root, nested_name) != (SyntaxNode*)0) { return false; }
@@ -208,7 +222,7 @@ bool llvm_drop_path_matches(LlvmLocal* local, LlvmFieldFlag* entry,
         Projection* stored = local.drop_projections.get_ptr((i64)entry.projections_start + i);
         Projection* requested = path.get_ptr(i);
         if (stored.kind != requested.kind
-            || (stored.kind == ProjectionKind.Field
+            || ((stored.kind == ProjectionKind.Field || stored.kind == ProjectionKind.Index)
                 && stored.field_name_id != requested.field_name_id)) { return false; }
         i += 1;
     }
@@ -226,7 +240,7 @@ bool llvm_drop_path_is_proper_prefix(LlvmLocal* local, LlvmFieldFlag* entry,
         Projection* stored = local.drop_projections.get_ptr((i64)entry.projections_start + i);
         Projection* requested = path.get_ptr(i);
         if (stored.kind != requested.kind
-            || (stored.kind == ProjectionKind.Field
+            || ((stored.kind == ProjectionKind.Field || stored.kind == ProjectionKind.Index)
                 && stored.field_name_id != requested.field_name_id)) { return false; }
         i += 1;
     }
@@ -241,8 +255,45 @@ void llvm_register_struct_drop_paths(LlvmContext* ctx, LlvmLocal* local,
     u32 resolved = ctx.types.resolve_subst(type_id);
     if (resolved == TYPE_UNKNOWN || resolved == 0) { return; }
     TypeEntry* entry = ctx.types.get(resolved);
-    if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference
-        || entry.kind != TypeKind.Named) { return; }
+    if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) { return; }
+    if (entry.kind == TypeKind.Tuple) {
+        i64 ai = 0;
+        while (ai < active.len()) {
+            if (active.get(ai) == resolved) { return; }
+            ai += 1;
+        }
+        active.push(resolved);
+        i64 i = 0;
+        while (i < entry.count) {
+            u32 element_ty = ctx.types.resolve_subst(
+                ctx.types.type_args.get(entry.inner + (u32)i));
+            if (element_ty != TYPE_UNKNOWN && element_ty != 0) {
+                Projection projection;
+                projection.kind = ProjectionKind.Index;
+                projection.field_name_id = (u32)i;
+                path.push(move projection);
+                if (llvm_can_resolve_drop_fn(ctx, element_ty)) {
+                    LlvmFieldFlag flag;
+                    flag.projections_start = (u32)local.drop_projections.len();
+                    flag.projections_count = (u32)path.len();
+                    flag.flag = llvm_alloca_drop_flag(ctx, "drop_tuple_flag", initialized);
+                    i64 pi = 0;
+                    while (pi < path.len()) {
+                        local.drop_projections.push(path.get(pi));
+                        pi += 1;
+                    }
+                    local.field_flags.push(move flag);
+                }
+                llvm_register_struct_drop_paths(ctx, local, element_ty,
+                                                initialized, path, active);
+                path.pop();
+            }
+            i += 1;
+        }
+        active.pop();
+        return;
+    }
+    if (entry.kind != TypeKind.Named) { return; }
     str type_name = ctx.types.names.get(entry.name_id);
     if (find_enum_item(ctx.root, type_name) != (SyntaxNode*)0) { return; }
     i64 ai = 0;
@@ -295,11 +346,30 @@ bool llvm_drop_projection_place(LlvmContext* ctx, LLVMOpaqueValue* local_ptr,
     while (i < entry.projections_count) {
         Projection* projection = local.drop_projections.get_ptr(
             (i64)entry.projections_start + (i64)i);
-        if (projection.kind != ProjectionKind.Field) { return false; }
         LLVMOpaqueValue* next_ptr = (LLVMOpaqueValue*)0;
         u32 next_type = 0;
-        if (!llvm_drop_field_place(ctx, ptr, current_type, projection.field_name_id,
-                                   &next_ptr, &next_type)) {
+        if (projection.kind == ProjectionKind.Field) {
+            if (!llvm_drop_field_place(ctx, ptr, current_type, projection.field_name_id,
+                                       &next_ptr, &next_type)) {
+                return false;
+            }
+        } else if (projection.kind == ProjectionKind.Index) {
+            u32 resolved = ctx.types.resolve_subst(current_type);
+            TypeEntry* tuple = ctx.types.get(resolved);
+            if (tuple.kind != TypeKind.Tuple || projection.field_name_id >= (u32)tuple.count) {
+                return false;
+            }
+            mono_ensure_child_layouts(ctx, resolved, &ctx.generic_layout_ids);
+            LLVMOpaqueType* tuple_ty = llvm_lower_type(ctx.ctx, ctx.types, resolved);
+            if (LLVMGetTypeKind(LLVMTypeOf(ptr)) != (u32)12) {
+                ptr = LLVMBuildIntToPtr(ctx.builder, ptr,
+                                        LLVMPointerTypeInContext(ctx.ctx, 0), "drop_tuple_cast");
+            }
+            next_ptr = LLVMBuildStructGEP2(ctx.builder, tuple_ty, ptr,
+                                            projection.field_name_id, "drop_tuple_element");
+            next_type = ctx.types.resolve_subst(ctx.types.type_args.get(
+                tuple.inner + projection.field_name_id));
+        } else {
             return false;
         }
         ptr = next_ptr;
@@ -554,9 +624,6 @@ void llvm_register_local_drops(LlvmContext* ctx, u32 name_id, LLVMOpaqueValue* p
     // something: the type's own `drop`, or tag-dispatched payload drops for
     // enums without their own `drop`.
     bool whole_needed = llvm_can_resolve_drop_fn(ctx, resolved);
-    if (!whole_needed && ctx.types.get(resolved).kind == TypeKind.Tuple) {
-        whole_needed = llvm_type_needs_tracking(ctx, resolved);
-    }
     if (!whole_needed && is_enum) {
         whole_needed = llvm_enum_needs_payload_drop(ctx, resolved, type_name);
     }
@@ -725,12 +792,36 @@ u32 llvm_collect_drop_field_path(LlvmContext* ctx, u32 expr_id,
     if (expr.kind == ExprKind.Move) {
         return llvm_collect_drop_field_path(ctx, expr.inner0, path);
     }
-    if (expr.kind != ExprKind.Field || expr.inner0 == 0) { return 0; }
+    if ((expr.kind != ExprKind.Field && expr.kind != ExprKind.Index) || expr.inner0 == 0) {
+        return 0;
+    }
+    i64 old_len = path.len();
     u32 root_name = llvm_collect_drop_field_path(ctx, expr.inner0, path);
     if (root_name == 0) { return 0; }
     Projection projection;
-    projection.kind = ProjectionKind.Field;
-    projection.field_name_id = expr.aux;
+    if (expr.kind == ExprKind.Field) {
+        projection.kind = ProjectionKind.Field;
+        projection.field_name_id = expr.aux;
+    } else {
+        u32 target_type = ctx.types.resolve_subst(llvm_expr_type(ctx, expr.inner0));
+        TypeEntry* target = ctx.types.get(target_type);
+        while (target.kind == TypeKind.Pointer || target.kind == TypeKind.Reference) {
+            target_type = target.inner;
+            target = ctx.types.get(target_type);
+        }
+        AstExpr* index_expr = ctx.pool.get_expr(expr.inner1);
+        if (target.kind != TypeKind.Tuple || index_expr.kind != ExprKind.Literal) {
+            while (path.len() > old_len) { path.pop(); }
+            return 0;
+        }
+        i64 index = parse_int_literal(ctx.names.get(index_expr.inner0));
+        if (index < 0 || index >= target.count) {
+            while (path.len() > old_len) { path.pop(); }
+            return 0;
+        }
+        projection.kind = ProjectionKind.Index;
+        projection.field_name_id = (u32)index;
+    }
     path.push(move projection);
     return root_name;
 }
@@ -767,8 +858,20 @@ bool llvm_validate_drop_field_transfer(LlvmContext* ctx, LlvmLocal* local,
             valid = false;
             break;
         }
-        current_type = typecheck_struct_field_type(ctx.types, ctx.root, current_type,
-                                                   ctx.names.get(path.get_ptr(i).field_name_id));
+        Projection* projection = path.get_ptr(i);
+        if (projection.kind == ProjectionKind.Field) {
+            current_type = typecheck_struct_field_type(ctx.types, ctx.root, current_type,
+                                                       ctx.names.get(projection.field_name_id));
+        } else if (projection.kind == ProjectionKind.Index) {
+            TypeEntry* tuple = ctx.types.get(ctx.types.resolve_subst(current_type));
+            if (tuple.kind != TypeKind.Tuple || projection.field_name_id >= (u32)tuple.count) {
+                break;
+            }
+            current_type = ctx.types.resolve_subst(ctx.types.type_args.get(
+                tuple.inner + projection.field_name_id));
+        } else {
+            break;
+        }
         if (current_type == TYPE_UNKNOWN || current_type == 0) { break; }
         i += 1;
     }
@@ -840,18 +943,6 @@ void llvm_emit_local_whole_drop(LlvmContext* ctx, LlvmLocal* local) {
     if (own_fn == (LLVMOpaqueValue*)0 && !payloads) { return; }
     if (own_fn != (LLVMOpaqueValue*)0) {
         llvm_emit_guarded_drop_call(ctx, local.drop_flag, own_fn, local.ptr);
-    }
-    if (own_fn == (LLVMOpaqueValue*)0 && !is_enum
-        && ctx.types.get(local_ty).kind == TypeKind.Tuple) {
-        LLVMOpaqueBasicBlock* run_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "drop_run");
-        LLVMOpaqueBasicBlock* after_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "drop_after");
-        LLVMOpaqueValue* live = LLVMBuildLoad2(ctx.builder, LLVMInt1TypeInContext(ctx.ctx),
-                                                local.drop_flag, "drop_flag");
-        LLVMBuildCondBr(ctx.builder, live, run_bb, after_bb);
-        LLVMPositionBuilderAtEnd(ctx.builder, run_bb);
-        llvm_emit_value_drop_at_ptr(ctx, local.ptr, local.type_id);
-        LLVMBuildBr(ctx.builder, after_bb);
-        LLVMPositionBuilderAtEnd(ctx.builder, after_bb);
     }
     if (payloads) {
         llvm_emit_guarded_enum_payload_drop(ctx, local.drop_flag, local.ptr,
