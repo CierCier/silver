@@ -15,6 +15,7 @@ enum ExprKind {
     MethodCall;    // inner0 = receiver_id, aux = method_name_id, inner1 = args_start
     Field;         // inner0 = target_id, aux = field_name_id
     Index;         // inner0 = target_id, inner1 = index_id
+    Slice;         // inner0 = target_id, inner1 = optional start expr, aux = optional end expr
     Cast;          // inner0 = expr_id, aux = target_type_id
     Move;          // aux = var_name_id
     Ternary;       // inner0 = cond_id, inner1 = then_id, aux = else_id
@@ -494,6 +495,20 @@ impl AstPool {
         expr.inner0 = target;
         expr.inner1 = index_expr;
         expr.aux = 0;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_slice(AstPool* self, u32 target, u32 start_expr, u32 end_expr, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Slice;
+        expr.inner0 = target;
+        expr.inner1 = start_expr;
+        expr.aux = end_expr;
         expr.span = span;
         expr.inferred_type = TYPE_UNKNOWN;
         expr.generic_args_start = 0;

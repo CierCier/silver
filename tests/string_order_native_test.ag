@@ -1,0 +1,14 @@
+import std.test;
+import std.string;
+
+i32 main() {
+    String alpha = String.from_str("alpha");
+    String beta = String.from_str("beta");
+    assert_true(alpha < beta, "String less-than uses lexicographic order");
+    assert_true(beta > alpha, "String greater-than uses lexicographic order");
+    assert_true(alpha <= alpha, "String less-or-equal includes equality");
+    assert_true(beta >= alpha, "String greater-or-equal uses lexicographic order");
+    alpha.drop();
+    beta.drop();
+    return done();
+}

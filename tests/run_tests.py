@@ -41,6 +41,7 @@ LEAK_CHECK_TESTS = {
     "memory_pentest",
     "alloc_validity_test",
     "string_test",
+    "string_split_once_drop_test",
     "vec_test",
     "bytes_test",
     "collections_set_test",

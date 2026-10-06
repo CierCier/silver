@@ -865,6 +865,12 @@ impl IndexedAccess for String {
 // Both take the by-value receiver as their first parameter.
 impl Add<String> for String {
     String __add(self, String other) {
+        return self.concat(move other);
+    }
+}
+
+impl String {
+    String concat(self, String other) {
         i64 total = self.len + other.len;
         String result = String.with_capacity(total + 1); // +1 for NUL
         result.len = total;

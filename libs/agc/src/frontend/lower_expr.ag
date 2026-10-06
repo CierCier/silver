@@ -1368,9 +1368,26 @@ impl ExprLowerer {
             }
 
             if (cursor.kind == NodeKind.Bracket) {
-                // Index access: expr[index]
-                u32 index_id = self.lower_sequence(cursor.first_child, (SyntaxNode*)0);
-                expr = self.pool.add_index(expr, index_id, cursor.span);
+                SyntaxNode* colon = cursor.first_child;
+                while (colon != (SyntaxNode*)0
+                    && !(colon.kind == NodeKind.Token && colon.token_kind == TokenKind.Colon)) {
+                    colon = colon.next_sibling;
+                }
+                if (colon != (SyntaxNode*)0) {
+                    u32 start_id = 0;
+                    if (colon != cursor.first_child) {
+                        start_id = self.lower_sequence(cursor.first_child, colon);
+                    }
+                    u32 end_id = 0;
+                    if (colon.next_sibling != (SyntaxNode*)0) {
+                        end_id = self.lower_sequence(colon.next_sibling, (SyntaxNode*)0);
+                    }
+                    expr = self.pool.add_slice(expr, start_id, end_id, cursor.span);
+                } else {
+                    // Index access: expr[index]
+                    u32 index_id = self.lower_sequence(cursor.first_child, (SyntaxNode*)0);
+                    expr = self.pool.add_index(expr, index_id, cursor.span);
+                }
                 cursor = cursor.next_sibling;
                 continue;
             }
@@ -1519,6 +1536,13 @@ impl ExprLowerer {
         if (start.kind == NodeKind.Token && start.token_kind == TokenKind.Let) {
             return true;
         }
+        if (start.kind == NodeKind.Bracket) {
+            SyntaxNode* name = start.next_sibling;
+            if (name != (SyntaxNode*)0 && name != limit && node_is_identifier(name)
+                && name.next_sibling == limit) {
+                return true;
+            }
+        }
         // Leading qualifiers only occur in declaration position at statement
         // start (const u8* want = ...). Without this the statement falls
         // into the assignment path and silently vanishes (stage2
@@ -1662,6 +1686,7 @@ impl ExprLowerer {
                         index_text.drop();
                         u32 index_expr = self.pool.add_literal_val(TYPE_I64, index_value, binding.span);
                         u32 field = self.pool.add_index(target, index_expr, binding.span);
+                        field = self.pool.add_move(field, binding.span);
                         u32 binding_name = self.names.intern(binding.text);
                         stmt_ids.push(self.pool.add_stmt_let(binding_name, TYPE_UNKNOWN, field, binding.span));
                         tuple_index += 1;

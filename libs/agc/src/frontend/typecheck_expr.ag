@@ -302,21 +302,22 @@ u32 function_return_type_id(TypeTable* types, SyntaxNode* function) {
     String ret_text = String.new();
     SyntaxNode* child = function.first_child;
     while (child != (SyntaxNode*)0 && child != name && child != parameters) {
-        if (child.kind == NodeKind.Token) {
-            // Skip attributes (`#` + [bracket]) like pub/static/extern:
-            // otherwise "#void" parses to a bogus named type and falls
-            // back to i32 (broke every #[link_name] void function).
-            if (strcmp(child.text, "#") == 0) {
+        if (child.kind == NodeKind.Token && strcmp(child.text, "#") == 0) {
+            // Skip attributes (`#` + [bracket]) like pub/static/extern.
+            // Otherwise an attribute can be mistaken for part of the return type.
+            child = child.next_sibling;
+            if (child != (SyntaxNode*)0 && child.kind == NodeKind.Bracket) {
                 child = child.next_sibling;
-                if (child != (SyntaxNode*)0 && child.kind == NodeKind.Bracket) {
-                    child = child.next_sibling;
-                }
-                continue;
             }
-            if (strcmp(child.text, "pub") != 0 && strcmp(child.text, "static") != 0 && strcmp(child.text, "extern") != 0) {
-                ret_text.push_str(child.text);
-            }
+            continue;
         }
+        if (child.kind == NodeKind.Token
+            && (strcmp(child.text, "pub") == 0 || strcmp(child.text, "static") == 0
+                || strcmp(child.text, "extern") == 0)) {
+            child = child.next_sibling;
+            continue;
+        }
+        append_node_tokens(child, &ret_text);
         child = child.next_sibling;
     }
     u32 ret_type = type_id_from_text(types, ret_text.to_str());
@@ -1313,6 +1314,29 @@ u32 typecheck_method_return_type(SyntaxNode* root, TypeTable* types,
     return TYPE_UNKNOWN;
 }
 
+u32 typecheck_slice_result_type(TypeTable* types, SyntaxNode* root, u32 target_type) {
+    TypeEntry* target = types.get(types.resolve_subst(target_type));
+    while (target.kind == TypeKind.Pointer || target.kind == TypeKind.Reference) {
+        target_type = target.inner;
+        target = types.get(types.resolve_subst(target_type));
+    }
+    if (target.kind == TypeKind.Array) {
+        Vec<u32> args = Vec<u32>.new();
+        args.push(types.resolve_subst(target.inner));
+        u32 result = types.get_named_args("Slice", &args);
+        args.drop();
+        return result;
+    }
+    if (target.kind == TypeKind.Str) {
+        Vec<u32> args = Vec<u32>.new();
+        args.push(TYPE_U8);
+        u32 result = types.get_named_args("Slice", &args);
+        args.drop();
+        return result;
+    }
+    return typecheck_method_return_type(root, types, target_type, "__slice_get", 3);
+}
+
 u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode* root,
                TypeEnv* env, u32 expr_id, DiagnosticBag* diagnostics, bool* ok) {
     if (expr_id == 0) { return TYPE_UNKNOWN; }
@@ -1992,17 +2016,28 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         }
     } else if (expr.kind == ExprKind.ArrayLit) {
         u32 elem_count = expr.aux;
-        u32 elem_type = TYPE_UNKNOWN;
+        Vec<u32> element_types = Vec<u32>.new();
+        bool tuple_literal = false;
         i64 i = 0;
         while (i < (i64)elem_count) {
             u32 elem_id = pool.args.get((i64)expr.inner1 + 1 + i);
-            u32 t = infer_expr(pool, types, symbols, root, env, elem_id, diagnostics, ok);
-            if (i == 0) {
-                elem_type = t;
+            u32 element_type = infer_expr(pool, types, symbols, root, env, elem_id, diagnostics, ok);
+            element_types.push(element_type);
+            if (i > 0 && element_type != element_types.get(0)) {
+                tuple_literal = true;
             }
             i += 1;
         }
-        inferred = types.get_array(elem_type, (i64)elem_count);
+        if (tuple_literal) {
+            inferred = types.get_tuple(&element_types);
+        } else {
+            u32 elem_type = TYPE_UNKNOWN;
+            if (element_types.len() > 0) {
+                elem_type = element_types.get(0);
+            }
+            inferred = types.get_array(elem_type, (i64)elem_count);
+        }
+        element_types.drop();
     } else if (expr.kind == ExprKind.Index) {
         u32 target_type = infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
         infer_expr(pool, types, symbols, root, env, expr.inner1, diagnostics, ok);
@@ -2030,6 +2065,15 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                                                         "__index_get", 2);
             }
         }
+    } else if (expr.kind == ExprKind.Slice) {
+        u32 target_type = infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
+        if (expr.inner1 != 0) {
+            infer_expr(pool, types, symbols, root, env, expr.inner1, diagnostics, ok);
+        }
+        if (expr.aux != 0) {
+            infer_expr(pool, types, symbols, root, env, expr.aux, diagnostics, ok);
+        }
+        inferred = typecheck_slice_result_type(types, root, target_type);
     }
 
     expr.inferred_type = inferred;
@@ -2055,6 +2099,14 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
             if (declared_type != TYPE_UNKNOWN) {
                 TypeEntry* expected = types.get(declared_type);
                 AstExpr* initializer = pool.get_expr(init_id);
+                if (declared_type == TYPE_STR && initializer.kind == ExprKind.Slice
+                    && initializer.aux == 0
+                    && infer_expr(pool, types, symbols, root, env, initializer.inner0,
+                                  diagnostics, ok) == TYPE_STR) {
+                    // A suffix of a NUL-terminated str remains NUL-terminated.
+                    initializer.inferred_type = TYPE_STR;
+                    actual_type = TYPE_STR;
+                }
                 if (expected.kind == TypeKind.Array && initializer.kind == ExprKind.ArrayLit) {
                     array_initializer = true;
                     if ((i64)initializer.aux > expected.count) {

@@ -240,6 +240,7 @@ extern "C" {
     LLVMOpaqueValue* LLVMBuildFPExt(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueType* p2, i8* p3);
     LLVMOpaqueValue* LLVMBuildFPTrunc(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueType* p2, i8* p3);
     LLVMOpaqueValue* LLVMBuildICmp(LLVMOpaqueBuilder* p0, LLVMIntPredicate p1, LLVMOpaqueValue* p2, LLVMOpaqueValue* p3, i8* p4);
+    LLVMOpaqueValue* LLVMBuildSelect(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueValue* p2, LLVMOpaqueValue* p3, i8* p4);
     LLVMOpaqueValue* LLVMBuildFCmp(LLVMOpaqueBuilder* p0, LLVMRealPredicate p1, LLVMOpaqueValue* p2, LLVMOpaqueValue* p3, i8* p4);
     LLVMOpaqueValue* LLVMBuildCall2(LLVMOpaqueBuilder* p0, LLVMOpaqueType* p1, LLVMOpaqueValue* p2, LLVMOpaqueValue** p3, u32 p4, i8* p5);
     LLVMOpaqueValue* LLVMBuildExtractValue(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, u32 p2, i8* p3);

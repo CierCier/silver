@@ -1,3 +1,4 @@
+// compile_flags: --no-cache
 // tests/destructure_let_test.ag
 // Test suite verifying square bracket tuple syntax: types, literals, return types, and let destructuring
 

@@ -417,11 +417,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// function exit: a non-pointer/reference type with a Drop impl, cascaded
     /// struct field drops, or an enum payload cascade.
     pub(crate) fn param_type_drops_on_exit(&mut self, ty: &ast::Type) -> CodegenResult<bool> {
-        if matches!(
-            ty.kind.as_ref(),
-            ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)
-        ) {
-            return Ok(false);
+        match ty.kind.as_ref() {
+            ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_) => return Ok(false),
+            ast::TypeKind::Tuple(elements) => {
+                for element in elements {
+                    if self.param_type_drops_on_exit(element)? {
+                        return Ok(true);
+                    }
+                }
+                return Ok(false);
+            }
+            ast::TypeKind::Array(array) => {
+                return self.param_type_drops_on_exit(&array.element_type);
+            }
+            _ => {}
         }
         if self
             .get_drop_function_name(ty)
@@ -514,7 +523,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 } else {
                     Self::substitute_generic_type(pt, &substitutions)
                 };
-                if self.get_drop_function_name(&concrete_pt)?.is_some() {
+                if self.param_type_drops_on_exit(&concrete_pt)? {
                     has_drop = true;
                 }
             }

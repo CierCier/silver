@@ -384,6 +384,21 @@ void llvm_emit_value_drop_at_ptr(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 typ
     if (resolved == TYPE_UNKNOWN || resolved == 0) { return; }
     TypeEntry* entry = ctx.types.get(resolved);
     if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) { return; }
+    if (entry.kind == TypeKind.Tuple) {
+        LLVMOpaqueType* tuple_ty = llvm_lower_type(ctx.ctx, ctx.types, resolved);
+        i64 i = 0;
+        while (i < entry.count) {
+            u32 element_ty = ctx.types.resolve_subst(ctx.types.type_args.get(entry.inner + (u32)i));
+            if (element_ty != TYPE_UNKNOWN && element_ty != 0
+                && llvm_type_needs_tracking(ctx, element_ty)) {
+                LLVMOpaqueValue* element_ptr = LLVMBuildStructGEP2(ctx.builder, tuple_ty, ptr,
+                                                                   (u32)i, "drop_tuple_field");
+                llvm_emit_value_drop_at_ptr(ctx, element_ptr, element_ty);
+            }
+            i += 1;
+        }
+        return;
+    }
     if (entry.kind != TypeKind.Named) { return; }
 
     str name = ctx.types.names.get(entry.name_id);
@@ -539,6 +554,9 @@ void llvm_register_local_drops(LlvmContext* ctx, u32 name_id, LLVMOpaqueValue* p
     // something: the type's own `drop`, or tag-dispatched payload drops for
     // enums without their own `drop`.
     bool whole_needed = llvm_can_resolve_drop_fn(ctx, resolved);
+    if (!whole_needed && ctx.types.get(resolved).kind == TypeKind.Tuple) {
+        whole_needed = llvm_type_needs_tracking(ctx, resolved);
+    }
     if (!whole_needed && is_enum) {
         whole_needed = llvm_enum_needs_payload_drop(ctx, resolved, type_name);
     }
@@ -822,6 +840,18 @@ void llvm_emit_local_whole_drop(LlvmContext* ctx, LlvmLocal* local) {
     if (own_fn == (LLVMOpaqueValue*)0 && !payloads) { return; }
     if (own_fn != (LLVMOpaqueValue*)0) {
         llvm_emit_guarded_drop_call(ctx, local.drop_flag, own_fn, local.ptr);
+    }
+    if (own_fn == (LLVMOpaqueValue*)0 && !is_enum
+        && ctx.types.get(local_ty).kind == TypeKind.Tuple) {
+        LLVMOpaqueBasicBlock* run_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "drop_run");
+        LLVMOpaqueBasicBlock* after_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "drop_after");
+        LLVMOpaqueValue* live = LLVMBuildLoad2(ctx.builder, LLVMInt1TypeInContext(ctx.ctx),
+                                                local.drop_flag, "drop_flag");
+        LLVMBuildCondBr(ctx.builder, live, run_bb, after_bb);
+        LLVMPositionBuilderAtEnd(ctx.builder, run_bb);
+        llvm_emit_value_drop_at_ptr(ctx, local.ptr, local.type_id);
+        LLVMBuildBr(ctx.builder, after_bb);
+        LLVMPositionBuilderAtEnd(ctx.builder, after_bb);
     }
     if (payloads) {
         llvm_emit_guarded_enum_payload_drop(ctx, local.drop_flag, local.ptr,

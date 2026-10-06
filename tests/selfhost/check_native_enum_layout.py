@@ -35,23 +35,38 @@ def main() -> int:
                 f"native enum round trip failed: rc={executed.returncode}, "
                 f"stdout={executed.stdout!r}, stderr={executed.stderr!r}"
             )
-        unsupported = pathlib.Path(temporary) / "unsupported.ag"
-        unsupported.write_text(
+        tuple_method = pathlib.Path(temporary) / "tuple-method.ag"
+        tuple_method.write_text(
             'import std.string;\n'
             'i32 main() {\n'
-            '    String text = String.from_str("a:b");\n'
-            '    text.split_once(":");\n'
-            '    return 0;\n'
+            '    String text = String.from_str("left:right");\n'
+            '    Optional<[String, String]> parts = text.split_once(":");\n'
+            '    if (!parts.is_some()) { return 1; }\n'
+            '    let [left, right] = parts.unwrap();\n'
+            '    bool ok = left == "left" && right == "right";\n'
+            '    left.drop(); right.drop(); text.drop();\n'
+            '    if (ok) { return 42; }\n'
+            '    return 2;\n'
             '}\n', encoding="utf-8",
         )
-        rejected = subprocess.run(
-            [str(args.stage1.resolve()), "build", str(unsupported), "--no-cache", "-o", str(output)],
+        built_tuple_method = subprocess.run(
+            [str(args.stage1.resolve()), "build", str(tuple_method), "--no-cache", "-o", str(output)],
             env=env, capture_output=True, text=True, timeout=120, check=False,
         )
-        if rejected.returncode != 2 or "stage0 backend unavailable" not in rejected.stderr:
+        if built_tuple_method.returncode != 0:
             raise AssertionError(
-                f"unsupported tuple method did not fail closed: rc={rejected.returncode}\n"
-                f"{rejected.stderr}"
+                "native tuple-returning method build failed: "
+                f"rc={built_tuple_method.returncode}\n{built_tuple_method.stderr}"
+            )
+        executed_tuple_method = subprocess.run(
+            [str(output)], capture_output=True, text=True, timeout=30, check=False,
+        )
+        if executed_tuple_method.returncode != 42 or executed_tuple_method.stdout or executed_tuple_method.stderr:
+            raise AssertionError(
+                "native tuple-returning method result was incorrect: "
+                f"rc={executed_tuple_method.returncode}, "
+                f"stdout={executed_tuple_method.stdout!r}, "
+                f"stderr={executed_tuple_method.stderr!r}"
             )
     print("stage1 native generic enum layouts passed")
     return 0

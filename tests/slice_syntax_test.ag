@@ -1,3 +1,4 @@
+// compile_flags: --no-cache
 import std.test;
 import std.slice;
 import std.mem.vec;
