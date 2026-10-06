@@ -2101,6 +2101,63 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                                  LLVMConstInt(LLVMTypeOf(ordering), 0, 0), "string_order");
         }
         u32 rhs_type = ctx.types.resolve_subst(llvm_expr_type(ctx, rhs_id));
+        TypeEntry* rhs_entry = ctx.types.get(rhs_type);
+        bool is_equality = op == (u32)TokenKind.Equal || op == (u32)TokenKind.NotEqual;
+        bool lhs_slice_u8 = lhs_entry.kind == TypeKind.Named
+            && strcmp(ctx.types.names.get(lhs_entry.name_id), "Slice") == 0
+            && lhs_entry.count == 1
+            && ctx.types.resolve_subst(ctx.types.type_args.get(lhs_entry.inner)) == TYPE_U8;
+        bool rhs_slice_u8 = rhs_entry.kind == TypeKind.Named
+            && strcmp(ctx.types.names.get(rhs_entry.name_id), "Slice") == 0
+            && rhs_entry.count == 1
+            && ctx.types.resolve_subst(ctx.types.type_args.get(rhs_entry.inner)) == TYPE_U8;
+        bool lhs_string = lhs_entry.kind == TypeKind.Named
+            && strcmp(ctx.types.names.get(lhs_entry.name_id), "String") == 0;
+        bool rhs_string = rhs_entry.kind == TypeKind.Named
+            && strcmp(ctx.types.names.get(rhs_entry.name_id), "String") == 0;
+        str content_equality_method = "";
+        bool content_equality_borrow_arg = false;
+        if (is_equality && lhs_slice_u8 && rhs_slice_u8) {
+            content_equality_method = "equals_slice";
+        } else if (is_equality && lhs_slice_u8 && rhs_string) {
+            content_equality_method = "equals_string";
+            content_equality_borrow_arg = true;
+        } else if (is_equality && lhs_string && rhs_slice_u8) {
+            content_equality_method = "equals_slice";
+        }
+        if (strlen(content_equality_method) > 0) {
+            u32 argument_id = rhs_id;
+            if (content_equality_borrow_arg) {
+                AstExpr other_ref;
+                other_ref.kind = ExprKind.Unary;
+                other_ref.inner0 = rhs_id;
+                other_ref.inner1 = 0;
+                other_ref.aux = (u32)TokenKind.BitwiseAnd;
+                other_ref.span = expr.span;
+                other_ref.inferred_type = ctx.types.get_pointer(rhs_type, false);
+                other_ref.generic_args_start = 0;
+                other_ref.generic_args_count = 0;
+                other_ref.resolved_callee_id = 0;
+                ctx.pool.exprs.push(move other_ref);
+                argument_id = (u32)(ctx.pool.exprs.len() - 1);
+            }
+            AstExpr equals_call;
+            equals_call.kind = ExprKind.MethodCall;
+            equals_call.inner0 = lhs_id;
+            equals_call.inner1 = (u32)ctx.pool.args.len();
+            equals_call.aux = ctx.names.intern(content_equality_method);
+            equals_call.span = expr.span;
+            equals_call.inferred_type = TYPE_BOOL;
+            equals_call.generic_args_start = 0;
+            equals_call.generic_args_count = 0;
+            equals_call.resolved_callee_id = 0;
+            ctx.pool.args.push((u32)1);
+            ctx.pool.args.push(argument_id);
+            ctx.pool.exprs.push(move equals_call);
+            LLVMOpaqueValue* equal = llvm_emit_expr(ctx, (u32)(ctx.pool.exprs.len() - 1));
+            if (equal == (LLVMOpaqueValue*)0 || op == (u32)TokenKind.Equal) { return equal; }
+            return LLVMBuildNot(ctx.builder, equal, "slice_ne");
+        }
         bool string_concat = op == (u32)TokenKind.Plus
             && lhs_entry.kind == TypeKind.Named
             && strcmp(ctx.types.type_name(lhs_type), "String") == 0

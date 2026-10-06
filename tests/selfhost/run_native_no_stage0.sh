@@ -33,7 +33,8 @@ python3 "$root/tests/run_tests.py" --no-tui --jobs 4 --compiler "$stage1" \
     cascade_drop_test field_predrop_test intermediate_drop_activation_test \
     collections_set_test for_in_consume_test nested_field_drop_test native_for_in_continue_test \
     string_split_once_drop_test string_order_native_test tuple_local_destructure_native_test \
-    slice_syntax_test destructure_let_test \
+    tuple_partial_index_drop_test \
+    slice_syntax_test test_slice_u8_ops destructure_let_test \
     partial_move_test reborrow_passthrough_test sha256_test \
     unsigned_narrow_shift_test packed_layout_test \
     collection_drop_glue_test enum_custom_drop_test map_tuple_test map_test \

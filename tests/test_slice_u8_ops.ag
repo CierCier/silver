@@ -18,6 +18,7 @@ i32 main() {
 
         Slice<u8> s2 = msg[0:5];
         assert_true(s == s2, "s == s2");
+        assert_false(s != s2, "s != s2");
 
         Slice<u8> s3 = msg[6:11];
         assert_false(s == s3, "s != s3");
