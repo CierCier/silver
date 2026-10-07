@@ -9,6 +9,7 @@ import std.mem.vec;
 import std.mem.box;
 import std.optional;
 import std.sys.entry;
+import std.map;
 
 struct Point {
     i64 x;
@@ -26,6 +27,9 @@ i64 worker_agg(i64 a, str s, Vec<i64> v, Point p, Optional<i64> o, Box<i64> b) {
     return a + vsum + p.x + p.y + o.unwrap() + bval;
 }
 
+void worker_map(HashMap<i64, i64> _map) {
+}
+
 i64 main() {
     Vec<i64> v = Vec<i64>.new();
     v.push(1);
@@ -39,5 +43,9 @@ i64 main() {
     i64 r = wait t;
     // 100 + (1+2+3) + 10 + 20 + 42 + 7 = 185
     if (r != 185) { return 1; }
+
+    HashMap<i64, i64> map = HashMap<i64, i64>.new();
+    Task<void> map_task = launch worker_map(move map);
+    wait map_task;
     return 0;
 }

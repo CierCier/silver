@@ -13,6 +13,18 @@ import tempfile
 CASES = {
     "nested_generic.ag": (True, True, ""),
     "nested_unknown.ag": (False, False, "unknown type 'Missing'"),
+    "defer_return.ag": (
+        False, False, "return statement is not allowed inside a defer block"
+    ),
+    "defer_break.ag": (
+        False, False, "break statement is not allowed inside a defer block"
+    ),
+    "defer_continue.ag": (
+        False, False, "continue statement is not allowed inside a defer block"
+    ),
+    "defer_match_return.ag": (
+        False, False, "return statement is not allowed inside a defer block"
+    ),
     "scalar_alias_return.ag": (True, True, ""),
     "indexed_holder.ag": (True, True, ""),
     "imported_global_return.ag": (True, True, ""),

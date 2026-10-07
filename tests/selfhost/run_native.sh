@@ -50,6 +50,7 @@ cached_rebuild="$work/agc-stage1-cached-rebuild"
 "$cached_stage1" build "$root/silver.toml" -o "$cached_rebuild"
 "$cached_rebuild" --version
 python3 "$root/tests/selfhost/check_native_backend.py" --stage1 "$stage1"
+python3 "$root/tests/selfhost/check_send_gate.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_native_link_contract.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_native_format.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_native_assert.py" --stage1 "$stage1"

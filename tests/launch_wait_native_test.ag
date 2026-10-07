@@ -1,0 +1,26 @@
+import std.atomic;
+import std.sys.entry;
+import std.thread;
+
+i64 g_value;
+
+void add_to_global(i64 value) {
+    __atomic_fetch_add_i64(&g_value, value, ATOMIC_RELEASE);
+}
+
+i64 add_pair(i64 left, i64 right) {
+    return left + right;
+}
+
+i32 main() {
+    Task<void> void_task = launch add_to_global(10);
+    wait void_task;
+    if (__atomic_load_i64(&g_value, ATOMIC_ACQUIRE) != 10) { return 1; }
+
+    Task<i64> result_task = launch add_pair(40, 2);
+    i64 result = wait result_task;
+    if (result != 42) { return 2; }
+
+    Task<void> detached_task = launch add_to_global(1);
+    return 0;
+}

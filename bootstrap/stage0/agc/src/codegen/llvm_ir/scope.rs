@@ -360,7 +360,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let start = total.saturating_sub(levels);
         // Clone scopes to avoid borrow conflicts, emit without draining
         let scopes: Vec<Vec<DeferredEntry<'ctx>>> = self.defers[start..].to_vec();
-        for mut scope in scopes.into_iter() {
+        for mut scope in scopes.into_iter().rev() {
             for entry in scope.iter_mut().rev() {
                 let function = self.current_fn.ok_or_else(|| {
                     CodegenError::new("no active function for defer emission".to_string())

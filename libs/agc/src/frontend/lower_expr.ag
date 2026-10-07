@@ -66,6 +66,63 @@ bool int_literal_fits_i32(str text) {
     return val <= 2147483647;
 }
 
+SyntaxNode* lower_find_item_in_file(SyntaxNode* root, NodeKind kind, str name,
+                                   i64 file_id) {
+    if (root == (SyntaxNode*)0) { return (SyntaxNode*)0; }
+    SyntaxNode* child = root.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == kind && child.span.file == file_id) {
+            SyntaxNode* id = item_identifier(child);
+            if (id != (SyntaxNode*)0 && strcmp(id.text, name) == 0) {
+                return child;
+            }
+        }
+        child = child.next_sibling;
+    }
+    return (SyntaxNode*)0;
+}
+
+SyntaxNode* lower_find_generic_call_close(SyntaxNode* less) {
+    if (less == (SyntaxNode*)0 || less.kind != NodeKind.Token
+        || less.token_kind != TokenKind.Less) {
+        return (SyntaxNode*)0;
+    }
+    SyntaxNode* scan = less.next_sibling;
+    i64 depth = 1;
+    while (scan != (SyntaxNode*)0) {
+        if (scan.kind == NodeKind.Block
+            || (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Semicolon)) {
+            return (SyntaxNode*)0;
+        }
+        if (scan.kind == NodeKind.Token) {
+            TokenKind kind = scan.token_kind;
+            if (kind == TokenKind.Less) {
+                depth += 1;
+            } else if (kind == TokenKind.Greater) {
+                depth -= 1;
+            } else if (kind == TokenKind.RightShift) {
+                depth -= 2;
+            } else if (kind == TokenKind.And || kind == TokenKind.Or
+                || kind == TokenKind.Equal || kind == TokenKind.NotEqual
+                || kind == TokenKind.Plus || kind == TokenKind.Minus
+                || kind == TokenKind.Slash || kind == TokenKind.Assign
+                || kind == TokenKind.If || kind == TokenKind.While
+                || kind == TokenKind.Return || kind == TokenKind.Let) {
+                return (SyntaxNode*)0;
+            }
+            if (depth <= 0) {
+                if (scan.next_sibling != (SyntaxNode*)0
+                    && scan.next_sibling.kind == NodeKind.Parenthesized) {
+                    return scan;
+                }
+                return (SyntaxNode*)0;
+            }
+        }
+        scan = scan.next_sibling;
+    }
+    return (SyntaxNode*)0;
+}
+
 struct ExprLowerer {
     AstPool* pool;
     TypeTable* types;
@@ -1000,6 +1057,27 @@ impl ExprLowerer {
             return 0;
         }
 
+        if (node.kind == NodeKind.Token
+            && (node.token_kind == TokenKind.Launch || node.token_kind == TokenKind.Wait)) {
+            SyntaxNode* after_operand = (SyntaxNode*)0;
+            u32 operand_id = self.lower_postfix(node.next_sibling, &after_operand);
+            *next_out = after_operand;
+            if (operand_id == 0) {
+                self.unsupported = true;
+                return 0;
+            }
+            if (node.token_kind == TokenKind.Wait) {
+                return self.pool.add_wait(operand_id, node.span);
+            }
+            AstExpr* operand = self.pool.get_expr(operand_id);
+            if (operand.kind != ExprKind.Call
+                || self.pool.get_expr(operand.inner0).kind != ExprKind.Var) {
+                self.unsupported = true;
+                return 0;
+            }
+            return self.pool.add_launch(operand_id, node.span);
+        }
+
         if (node.kind == NodeKind.Token && node.token_kind == TokenKind.Match) {
             return self.lower_match(node, next_out);
         }
@@ -1288,8 +1366,34 @@ impl ExprLowerer {
             return self.pool.add_cast(operand_id, cast_type, node.span);
         }
 
-        u32 expr = self.lower_primary(node);
+        u32 expr = 0;
         SyntaxNode* cursor = node.next_sibling;
+        if (node.kind == NodeKind.Token
+            && node.token_kind == TokenKind.StringLiteral
+            && cursor != (SyntaxNode*)0 && cursor.kind == NodeKind.Token
+            && cursor.token_kind == TokenKind.StringLiteral) {
+            String combined = String.new();
+            combined.push((u8)'"');
+            SyntaxNode* literal = node;
+            SyntaxNode* last_literal = node;
+            while (literal != (SyntaxNode*)0 && literal.kind == NodeKind.Token
+                && literal.token_kind == TokenKind.StringLiteral) {
+                i64 length = strlen(literal.text);
+                if (length >= 2) {
+                    combined.push_bytes((u8*)literal.text + 1, length - 2);
+                }
+                last_literal = literal;
+                literal = literal.next_sibling;
+            }
+            combined.push((u8)'"');
+            u32 value_id = self.names.intern(combined.to_str());
+            expr = self.pool.add_literal_val(
+                TYPE_STR, value_id, span_between(node.span, last_literal.span));
+            combined.drop();
+            cursor = literal;
+        } else {
+            expr = self.lower_primary(node);
+        }
 
         // Generic free-function call: name<Args>(expr, ...). Without this the
         // `<` misparses as a comparison and the call vanishes. Lower as a call
@@ -1297,38 +1401,8 @@ impl ExprLowerer {
         if (expr != 0 && self.pool.get_expr(expr).kind == ExprKind.Var
             && cursor != (SyntaxNode*)0 && cursor.kind == NodeKind.Token
             && cursor.token_kind == TokenKind.Less) {
-            SyntaxNode* scan = cursor.next_sibling;
-            i64 gdepth = 1;
-            SyntaxNode* greater = (SyntaxNode*)0;
-            bool valid_type_args = true;
-            while (scan != (SyntaxNode*)0) {
-                if (scan.kind == NodeKind.Block
-                    || (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Semicolon)) {
-                    valid_type_args = false;
-                    break;
-                }
-                if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Less) {
-                    gdepth += 1;
-                } else if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Greater) {
-                    gdepth -= 1;
-                    if (gdepth == 0) {
-                        greater = scan;
-                        break;
-                    }
-                } else if (scan.kind == NodeKind.Token) {
-                    TokenKind tk = scan.token_kind;
-                    if (tk == TokenKind.And || tk == TokenKind.Or || tk == TokenKind.Equal
-                        || tk == TokenKind.NotEqual || tk == TokenKind.Plus || tk == TokenKind.Minus
-                        || tk == TokenKind.Slash || tk == TokenKind.Assign || tk == TokenKind.If
-                        || tk == TokenKind.While || tk == TokenKind.Return || tk == TokenKind.Let) {
-                        valid_type_args = false;
-                        break;
-                    }
-                }
-                scan = scan.next_sibling;
-            }
-            if (valid_type_args && greater != (SyntaxNode*)0 && greater.next_sibling != (SyntaxNode*)0
-                && greater.next_sibling.kind == NodeKind.Parenthesized) {
+            SyntaxNode* greater = lower_find_generic_call_close(cursor);
+            if (greater != (SyntaxNode*)0) {
                 SyntaxNode* paren = greater.next_sibling;
                 Vec<u32> generic_ids = Vec<u32>.new();
                 SyntaxNode* type_start = cursor.next_sibling;
@@ -1350,6 +1424,9 @@ impl ExprLowerer {
                         angle_depth += 1;
                     } else if (type_scan.kind == NodeKind.Token && type_scan.token_kind == TokenKind.Greater) {
                         angle_depth -= 1;
+                    } else if (type_scan.kind == NodeKind.Token
+                        && type_scan.token_kind == TokenKind.RightShift) {
+                        angle_depth -= 2;
                     }
                     type_scan = type_scan.next_sibling;
                 }
@@ -1358,6 +1435,10 @@ impl ExprLowerer {
                 while (type_part != (SyntaxNode*)0 && type_part != greater) {
                     append_node_tokens(type_part, &last_type_text);
                     type_part = type_part.next_sibling;
+                }
+                if (greater.kind == NodeKind.Token
+                    && greater.token_kind == TokenKind.RightShift) {
+                    last_type_text.push((u8)'>');
                 }
                 if (last_type_text.len() > 0) {
                     generic_ids.push(self.types.parse_type_name(last_type_text.to_str()));
@@ -1694,7 +1775,24 @@ impl ExprLowerer {
 
     u32 lower_sequence_until_comma(ExprLowerer* self, SyntaxNode* start, SyntaxNode** next_out) {
         SyntaxNode* cursor = start;
-        while (cursor != (SyntaxNode*)0 && (cursor.kind != NodeKind.Token || cursor.token_kind != TokenKind.Comma)) {
+        i64 generic_depth = 0;
+        while (cursor != (SyntaxNode*)0) {
+            if (cursor.kind == NodeKind.Token) {
+                if (cursor.token_kind == TokenKind.Less) {
+                    if (generic_depth > 0) {
+                        generic_depth += 1;
+                    } else if (lower_find_generic_call_close(cursor) != (SyntaxNode*)0) {
+                        generic_depth = 1;
+                    }
+                } else if (generic_depth > 0 && cursor.token_kind == TokenKind.Greater) {
+                    generic_depth -= 1;
+                } else if (generic_depth > 0 && cursor.token_kind == TokenKind.RightShift) {
+                    generic_depth -= 2;
+                    if (generic_depth < 0) { generic_depth = 0; }
+                } else if (cursor.token_kind == TokenKind.Comma && generic_depth == 0) {
+                    break;
+                }
+            }
             cursor = cursor.next_sibling;
         }
         *next_out = cursor;
@@ -1824,6 +1922,14 @@ impl ExprLowerer {
             }
             u32 id = self.pool.add_stmt_return(expr_id, start.span);
             stmt_ids.push(id);
+            return;
+        }
+        if (start.kind == NodeKind.Token && start.token_kind == TokenKind.Break) {
+            stmt_ids.push(self.pool.add_stmt_break(start.span));
+            return;
+        }
+        if (start.kind == NodeKind.Token && start.token_kind == TokenKind.Continue) {
+            stmt_ids.push(self.pool.add_stmt_continue(start.span));
             return;
         }
 
@@ -2269,13 +2375,9 @@ impl ExprLowerer {
             outer_stmts.push(self.pool.add_stmt_let(next_name, TYPE_UNKNOWN, next_call, for_node.span));
 
             Vec<u32> loop_stmts = Vec<u32>.new();
-            SyntaxNode* optional_enum_item = find_item_by_name(
-                self.unit_root, NodeKind.Enum, "Optional");
-            SyntaxNode* optional_struct_item = find_item_by_name(
-                self.unit_root, NodeKind.Struct, "Optional");
-            bool optional_struct = optional_enum_item == (SyntaxNode*)0
-                && optional_struct_item != (SyntaxNode*)0
-                && optional_struct_item.span.file == 1
+            SyntaxNode* optional_struct_item = lower_find_item_in_file(
+                self.unit_root, NodeKind.Struct, "Optional", for_node.span.file);
+            bool optional_struct = optional_struct_item != (SyntaxNode*)0
                 && self.local_iterator_returns_struct_optional(
                     self.for_in_local_variable_type(for_node, iterable_expr));
             u32 option_receiver = self.pool.add_var(next_name, for_node.span);
@@ -2419,6 +2521,38 @@ impl ExprLowerer {
         while (cursor != (SyntaxNode*)0) {
             if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
                 cursor = cursor.next_sibling;
+                continue;
+            }
+
+            if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Defer) {
+                SyntaxNode* deferred_start = cursor.next_sibling;
+                Vec<u32> deferred_stmts = Vec<u32>.new();
+                SyntaxNode* after_defer = (SyntaxNode*)0;
+                if (deferred_start != (SyntaxNode*)0 && deferred_start.kind == NodeKind.Block) {
+                    deferred_stmts.push(self.lower_block_stmt(deferred_start));
+                    after_defer = deferred_start.next_sibling;
+                } else if (deferred_start != (SyntaxNode*)0) {
+                    SyntaxNode* deferred_end = deferred_start;
+                    while (deferred_end != (SyntaxNode*)0
+                           && (deferred_end.kind != NodeKind.Token
+                               || deferred_end.token_kind != TokenKind.Semicolon)) {
+                        deferred_end = deferred_end.next_sibling;
+                    }
+                    self.lower_statement(deferred_start, deferred_end, &deferred_stmts);
+                    after_defer = deferred_end != (SyntaxNode*)0
+                        ? deferred_end.next_sibling : (SyntaxNode*)0;
+                }
+                if (deferred_stmts.len() == 1 && deferred_stmts.get(0) != 0) {
+                    stmt_ids.push(self.pool.add_stmt_defer(deferred_stmts.get(0), cursor.span));
+                } else {
+                    self.unsupported = true;
+                }
+                deferred_stmts.drop();
+                cursor = after_defer;
+                if (cursor != (SyntaxNode*)0 && cursor.kind == NodeKind.Token
+                    && cursor.token_kind == TokenKind.Semicolon) {
+                    cursor = cursor.next_sibling;
+                }
                 continue;
             }
 

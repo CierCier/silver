@@ -163,6 +163,9 @@ bool llvm_layout_type_resolved(LlvmContext* ctx, u32 type_id, i64 depth) {
     }
     if (entry.kind == TypeKind.Named) {
         str name = ctx.types.names.get(entry.name_id);
+        if (strcmp(name, "Task") == 0) {
+            return entry.count == 1;
+        }
         if (find_item_by_name(ctx.root, NodeKind.Struct, name) == (SyntaxNode*)0
             && find_item_by_name(ctx.root, NodeKind.Enum, name) == (SyntaxNode*)0) {
             return false;
@@ -353,6 +356,9 @@ LLVMOpaqueType* llvm_lower_type(LLVMOpaqueContext* ctx, TypeTable* types, u32 ty
     }
     if (entry.kind == TypeKind.Named) {
         str base_name = types.names.get(entry.name_id);
+        if (strcmp(base_name, "Task") == 0) {
+            return LLVMInt64TypeInContext(ctx);
+        }
         // Generic enums need distinct layouts for different payload sizes.
         str name = entry.count > 0 ? llvm_concrete_type_name(types, type_id)
                                    : base_name;

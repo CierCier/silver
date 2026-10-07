@@ -1822,6 +1822,27 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         } else {
             inferred = env.lookup(expr.aux);
         }
+    } else if (expr.kind == ExprKind.Launch) {
+        u32 result_type = infer_expr(pool, types, symbols, root, env,
+                                     expr.inner0, diagnostics, ok);
+        if (result_type != TYPE_UNKNOWN) {
+            Vec<u32> task_args = Vec<u32>.new();
+            task_args.push(result_type);
+            inferred = types.get_named_args("Task", &task_args);
+            task_args.drop();
+        }
+    } else if (expr.kind == ExprKind.Wait) {
+        u32 task_type = infer_expr(pool, types, symbols, root, env,
+                                   expr.inner0, diagnostics, ok);
+        TypeEntry* task_entry = types.get(task_type);
+        if (task_entry.kind == TypeKind.Named
+            && strcmp(types.names.get(task_entry.name_id), "Task") == 0
+            && task_entry.count == 1) {
+            inferred = types.type_args.get(task_entry.inner);
+        } else if (task_type != TYPE_UNKNOWN) {
+            diagnostics.error(expr.span, String.from_str("wait operand must have type Task<T>"));
+            *ok = false;
+        }
     } else if (expr.kind == ExprKind.SizeOf) {
         inferred = TYPE_I64;
     } else if (expr.kind == ExprKind.AlignOf) {
@@ -2625,6 +2646,124 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
     return inferred;
 }
 
+void typecheck_reject_defer_control(AstPool* pool, u32 node_id, bool is_stmt,
+                                    DiagnosticBag* diagnostics, bool* ok) {
+    if (node_id == 0) { return; }
+    if (is_stmt) {
+        AstStmt* stmt = pool.get_stmt(node_id);
+        if (stmt.kind == StmtKind.Return) {
+            diagnostics.error(stmt.span, String.from_str(return_not_allowed_in_defer()));
+            *ok = false;
+            typecheck_reject_defer_control(pool, stmt.inner0, false, diagnostics, ok);
+        } else if (stmt.kind == StmtKind.Break) {
+            diagnostics.error(stmt.span, String.from_str(break_not_allowed_in_defer()));
+            *ok = false;
+        } else if (stmt.kind == StmtKind.Continue) {
+            diagnostics.error(stmt.span, String.from_str(continue_not_allowed_in_defer()));
+            *ok = false;
+        } else if (stmt.kind == StmtKind.Let || stmt.kind == StmtKind.Expr) {
+            typecheck_reject_defer_control(pool,
+                stmt.kind == StmtKind.Let ? stmt.inner1 : stmt.inner0,
+                false, diagnostics, ok);
+        } else if (stmt.kind == StmtKind.Assign) {
+            typecheck_reject_defer_control(pool, stmt.inner0, false, diagnostics, ok);
+            typecheck_reject_defer_control(pool, stmt.inner1, false, diagnostics, ok);
+        } else if (stmt.kind == StmtKind.If || stmt.kind == StmtKind.While) {
+            typecheck_reject_defer_control(pool, stmt.inner0, false, diagnostics, ok);
+            typecheck_reject_defer_control(pool, stmt.inner1, true, diagnostics, ok);
+            typecheck_reject_defer_control(pool, stmt.aux, true, diagnostics, ok);
+        } else if (stmt.kind == StmtKind.Block) {
+            i64 i = 0;
+            while (i < (i64)stmt.aux) {
+                typecheck_reject_defer_control(pool,
+                    pool.block_stmts.get((i64)stmt.inner0 + i),
+                    true, diagnostics, ok);
+                i += 1;
+            }
+        }
+    } else {
+        AstExpr* expr = pool.get_expr(node_id);
+        if (expr.kind == ExprKind.Match) {
+            typecheck_reject_defer_control(pool, expr.inner0, false, diagnostics, ok);
+            i64 i = 0;
+            while (i < (i64)expr.aux) {
+                MatchArm* arm = pool.get_arm(expr.inner1 + (u32)i);
+                typecheck_reject_defer_control(pool, arm.guard_id, false, diagnostics, ok);
+                typecheck_reject_defer_control(pool, arm.value_id, false, diagnostics, ok);
+                typecheck_reject_defer_control(pool, arm.body_stmt_id, true, diagnostics, ok);
+                i += 1;
+            }
+        } else if (expr.kind == ExprKind.Binary || expr.kind == ExprKind.Index
+            || expr.kind == ExprKind.UnwrapOr || expr.kind == ExprKind.DropInPlace
+            || expr.kind == ExprKind.Assert || expr.kind == ExprKind.Fprint) {
+            typecheck_reject_defer_control(pool, expr.inner0, false, diagnostics, ok);
+            typecheck_reject_defer_control(pool, expr.inner1, false, diagnostics, ok);
+        } else if (expr.kind == ExprKind.Ternary || expr.kind == ExprKind.Slice) {
+            typecheck_reject_defer_control(pool, expr.inner0, false, diagnostics, ok);
+            typecheck_reject_defer_control(pool, expr.inner1, false, diagnostics, ok);
+            typecheck_reject_defer_control(pool, expr.aux, false, diagnostics, ok);
+        } else if (expr.kind == ExprKind.Unary || expr.kind == ExprKind.Field
+            || expr.kind == ExprKind.Cast || expr.kind == ExprKind.Move
+            || expr.kind == ExprKind.Hash || expr.kind == ExprKind.Launch
+            || expr.kind == ExprKind.Wait || expr.kind == ExprKind.SizeOf
+            || expr.kind == ExprKind.AlignOf) {
+            typecheck_reject_defer_control(pool, expr.inner0, false, diagnostics, ok);
+        } else if (expr.kind == ExprKind.Call) {
+            typecheck_reject_defer_control(pool, expr.inner0, false, diagnostics, ok);
+            i64 i = 0;
+            while (i < (i64)expr.aux) {
+                typecheck_reject_defer_control(pool,
+                    pool.args.get((i64)expr.inner1 + i), false, diagnostics, ok);
+                i += 1;
+            }
+        } else if (expr.kind == ExprKind.MethodCall) {
+            typecheck_reject_defer_control(pool, expr.inner0, false, diagnostics, ok);
+            if ((i64)expr.inner1 < pool.args.len()) {
+                i64 count = pool.args.get((i64)expr.inner1);
+                i64 i = 0;
+                while (i < count) {
+                    typecheck_reject_defer_control(pool,
+                        pool.args.get((i64)expr.inner1 + 1 + i),
+                        false, diagnostics, ok);
+                    i += 1;
+                }
+            }
+        } else if (expr.kind == ExprKind.ArrayLit || expr.kind == ExprKind.Format) {
+            if (expr.kind == ExprKind.Format) {
+                typecheck_reject_defer_control(pool, expr.inner0, false, diagnostics, ok);
+            }
+            i64 i = 0;
+            while (i < (i64)expr.aux) {
+                typecheck_reject_defer_control(pool,
+                    pool.args.get((i64)expr.inner1 + i), false, diagnostics, ok);
+                i += 1;
+            }
+        } else if (expr.kind == ExprKind.StructLit) {
+            i64 i = 0;
+            while (i < (i64)expr.aux) {
+                typecheck_reject_defer_control(pool,
+                    pool.args.get((i64)expr.inner1 + i * 2 + 1), false, diagnostics, ok);
+                i += 1;
+            }
+        } else if (expr.kind == ExprKind.MemoryBuiltin) {
+            i64 i = 0;
+            while (i < 3 && (i64)expr.inner0 + i < pool.args.len()) {
+                typecheck_reject_defer_control(pool,
+                    pool.args.get((i64)expr.inner0 + i), false, diagnostics, ok);
+                i += 1;
+            }
+        } else if (expr.kind == ExprKind.Asm && (i64)expr.aux < pool.asms.len()) {
+            AstAsm* asm_item = pool.asms.get_ptr((i64)expr.aux);
+            i64 i = 0;
+            while (i < (i64)asm_item.args_count) {
+                typecheck_reject_defer_control(pool,
+                    pool.args.get((i64)asm_item.args_start + i), false, diagnostics, ok);
+                i += 1;
+            }
+        }
+    }
+}
+
 void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
                          SyntaxNode* root, TypeEnv* env, u32 expected_return,
                          u32 stmt_id, DiagnosticBag* diagnostics, bool* ok) {
@@ -2762,6 +2901,10 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
         if (stmt.aux != 0) {
             typecheck_statement(pool, types, symbols, root, env, expected_return, stmt.aux, diagnostics, ok);
         }
+    } else if (stmt.kind == StmtKind.Defer) {
+        typecheck_reject_defer_control(pool, stmt.inner0, true, diagnostics, ok);
+        typecheck_statement(pool, types, symbols, root, env, expected_return,
+                            stmt.inner0, diagnostics, ok);
     } else if (stmt.kind == StmtKind.Block) {
         u32 start = stmt.inner0;
         u32 count = stmt.aux;
@@ -2962,6 +3105,12 @@ bool typecheck_expressions_scoped(AstPool* pool, SymbolTable* symbols, SyntaxTre
                                                      "call to overloaded function '")
                             || typecheck_str_starts_with(diagnostic_text, "unwrap-or ")
                             || typecheck_str_starts_with(diagnostic_text, "cannot move '")
+                            || typecheck_str_starts_with(diagnostic_text,
+                                "return statement is not allowed inside a defer block")
+                            || typecheck_str_starts_with(diagnostic_text,
+                                "break statement is not allowed inside a defer block")
+                            || typecheck_str_starts_with(diagnostic_text,
+                                "continue statement is not allowed inside a defer block")
                             || strcmp(diagnostic_text, "expected expression") == 0) {
                             diagnostics.error(diagnostic.span, diagnostic.message.clone());
                             ok = false;

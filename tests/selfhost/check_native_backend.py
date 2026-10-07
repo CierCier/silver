@@ -426,14 +426,51 @@ def main() -> int:
                 f"stdout:\n{rejected_parameter.stdout}\nstderr:\n{rejected_parameter.stderr}"
             )
 
-        unsupported = root / "unsupported.ag"
-        unsupported.write_text(
+        invalid_defer = root / "invalid-defer-control.ag"
+        invalid_defer.write_text(
             "i32 main() {\n"
-            "    defer { }\n"
+            "    defer { return 1; }\n"
             "    return 0;\n"
             "}\n"
         )
-        failed = run(stage1, ["build", str(unsupported), "-o", str(root / "unsupported")], env, root)
+        rejected_defer = run(
+            stage1,
+            ["build", str(invalid_defer), "--no-cache", "-o", str(root / "invalid-defer-control")],
+            env,
+            root,
+        )
+        if (
+            rejected_defer.returncode == 0
+            or not any(
+                message in rejected_defer.stderr
+                for message in (
+                    "not allowed inside a defer block",
+                    "defer-control 'return statement'",
+                )
+            )
+        ):
+            raise AssertionError(
+                "return from a deferred body was not rejected safely\n"
+                f"return code: {rejected_defer.returncode}\n"
+                f"stdout:\n{rejected_defer.stdout}\nstderr:\n{rejected_defer.stderr}"
+            )
+
+        unsupported = root / "unsupported.ag"
+        unsupported.write_text(
+            "import std.mem.vec;\n"
+            "i32 main() {\n"
+            "    Vec<i32> items = Vec<i32>.new();\n"
+            "    for &item in items { }\n"
+            "    items.drop();\n"
+            "    return 0;\n"
+            "}\n"
+        )
+        failed = run(
+            stage1,
+            ["build", str(unsupported), "-I", str(repository), "-o", str(root / "unsupported")],
+            env,
+            root,
+        )
         if failed.returncode == 0 or "stage0 backend unavailable" not in failed.stderr:
             raise AssertionError("unsupported input did not fall back to the explicit bridge")
 

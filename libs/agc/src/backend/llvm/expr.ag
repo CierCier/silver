@@ -1,5 +1,6 @@
 // libs/agc/src/backend/llvm/expr.ag — LLVM expression lowering.
 import vendor.llvm.llvm;
+import std.fmt;
 import std.intern;
 import std.mem.vec;
 import std.string;
@@ -2375,9 +2376,345 @@ LLVMOpaqueValue* llvm_emit_primitive_compare(LlvmContext* ctx, u32 receiver_expr
     return LLVMBuildSelect(ctx.builder, less, negative_one, nonnegative, "compare_result");
 }
 
+str llvm_expr_kind_name(ExprKind kind) {
+    if (kind == ExprKind.Literal) { return "literal"; }
+    if (kind == ExprKind.Var) { return "variable"; }
+    if (kind == ExprKind.Unary) { return "unary"; }
+    if (kind == ExprKind.Binary) { return "binary"; }
+    if (kind == ExprKind.Call) { return "call"; }
+    if (kind == ExprKind.Launch) { return "launch"; }
+    if (kind == ExprKind.Wait) { return "wait"; }
+    if (kind == ExprKind.MethodCall) { return "method call"; }
+    if (kind == ExprKind.Field) { return "field"; }
+    if (kind == ExprKind.Index) { return "index"; }
+    if (kind == ExprKind.Slice) { return "slice"; }
+    if (kind == ExprKind.Cast) { return "cast"; }
+    if (kind == ExprKind.Move) { return "move"; }
+    if (kind == ExprKind.Ternary) { return "ternary"; }
+    if (kind == ExprKind.UnwrapOr) { return "unwrap-or"; }
+    if (kind == ExprKind.Match) { return "match"; }
+    if (kind == ExprKind.Asm) { return "asm"; }
+    if (kind == ExprKind.SizeOf) { return "sizeof"; }
+    if (kind == ExprKind.AlignOf) { return "alignof"; }
+    if (kind == ExprKind.ArrayLit) { return "array literal"; }
+    if (kind == ExprKind.Format) { return "format"; }
+    if (kind == ExprKind.Fprint) { return "fprint"; }
+    if (kind == ExprKind.MemoryBuiltin) { return "memory builtin"; }
+    if (kind == ExprKind.Hash) { return "hash"; }
+    if (kind == ExprKind.DropInPlace) { return "drop-in-place"; }
+    if (kind == ExprKind.Assert) { return "assert"; }
+    if (kind == ExprKind.StructLit) { return "struct literal"; }
+    return "unknown";
+}
+
+LLVMOpaqueValue* llvm_launch_callee(LlvmContext* ctx, AstExpr* call, AstExpr* callee) {
+    if (callee.kind != ExprKind.Var) {
+        ctx.note_unresolved("launch-callee", "must be a named function");
+        return (LLVMOpaqueValue*)0;
+    }
+    str name = ctx.names.get(callee.aux);
+    LLVMOpaqueValue* fn = (LLVMOpaqueValue*)0;
+    if (call.generic_args_count > 0) {
+        Vec<u32> generic_ids = Vec<u32>.new();
+        i64 i = 0;
+        while (i < (i64)call.generic_args_count) {
+            generic_ids.push(ctx.types.resolve_subst(
+                ctx.pool.generic_type_args.get((i64)call.generic_args_start + i)));
+            i += 1;
+        }
+        fn = mono_ensure_free_function(ctx, name, &generic_ids, call.aux);
+        generic_ids.drop();
+    } else {
+        Vec<u32> actual_types = Vec<u32>.new();
+        Vec<bool> numeric_literals = Vec<bool>.new();
+        Vec<u32> inferred_ids = Vec<u32>.new();
+        i64 i = 0;
+        while (i < (i64)call.aux) {
+            u32 arg_id = ctx.pool.args.get((i64)call.inner1 + i);
+            u32 arg_type = llvm_expr_type(ctx, arg_id);
+            actual_types.push(arg_type);
+            numeric_literals.push(ctx.pool.get_expr(arg_id).kind == ExprKind.Literal
+                && type_is_numeric(arg_type));
+            i += 1;
+        }
+        if (mono_infer_free_function_args(ctx, name, call.aux,
+                &actual_types, &numeric_literals, &inferred_ids)) {
+            fn = mono_ensure_free_function(ctx, name, &inferred_ids, call.aux);
+        }
+        inferred_ids.drop();
+        numeric_literals.drop();
+        actual_types.drop();
+    }
+    if (fn == (LLVMOpaqueValue*)0 && call.resolved_callee_id != 0) {
+        fn = LLVMGetNamedFunction(ctx.module,
+            ctx.names.get(call.resolved_callee_id - 1));
+    }
+    if (fn == (LLVMOpaqueValue*)0) {
+        String link_name = item_extern_link_name(ctx.root, name);
+        if (link_name.len() > 0) {
+            fn = LLVMGetNamedFunction(ctx.module, link_name.to_str());
+        }
+        link_name.drop();
+    }
+    if (fn == (LLVMOpaqueValue*)0) {
+        SyntaxNode* declaration = find_function_by_name_and_arity(ctx.root, name, (i64)call.aux);
+        if (declaration != (SyntaxNode*)0
+            && typecheck_has_free_overloads(ctx.types, ctx.root, name)) {
+            String symbol = typecheck_overloaded_free_symbol(ctx.types, name, declaration);
+            fn = LLVMGetNamedFunction(ctx.module, symbol.to_str());
+            symbol.drop();
+        } else {
+            fn = LLVMGetNamedFunction(ctx.module, name);
+        }
+    }
+    if (fn == (LLVMOpaqueValue*)0) {
+        ctx.note_unresolved("launch-function", name);
+    }
+    return fn;
+}
+
+LLVMOpaqueValue* llvm_emit_launch(LlvmContext* ctx, u32 expr_id) {
+    AstExpr* launch_expr = ctx.pool.get_expr(expr_id);
+    AstExpr* call = ctx.pool.get_expr(launch_expr.inner0);
+    if (call.kind != ExprKind.Call) {
+        ctx.note_unresolved("launch-operand", "expected a function call");
+        return (LLVMOpaqueValue*)0;
+    }
+    AstExpr* callee_expr = ctx.pool.get_expr(call.inner0);
+    LLVMOpaqueValue* callee = llvm_launch_callee(ctx, call, callee_expr);
+    if (callee == (LLVMOpaqueValue*)0) {
+        return (LLVMOpaqueValue*)0;
+    }
+    LLVMOpaqueType* fn_type = LLVMGlobalGetValueType(callee);
+    u32 param_count = LLVMCountParamTypes(fn_type);
+    if (param_count != call.aux) {
+        ctx.note_unresolved("launch-arity", ctx.names.get(callee_expr.aux));
+        return (LLVMOpaqueValue*)0;
+    }
+    Vec<LLVMOpaqueType*> param_types = Vec<LLVMOpaqueType*>.new();
+    u32 param_index = 0;
+    while (param_index < param_count) {
+        param_types.push(LLVMTypeOf(LLVMGetParam(callee, param_index)));
+        param_index += 1;
+    }
+
+    u32 task_type = ctx.types.resolve_subst(launch_expr.inferred_type);
+    TypeEntry* task_entry = ctx.types.get(task_type);
+    if (task_entry.kind != TypeKind.Named
+        || strcmp(ctx.types.names.get(task_entry.name_id), "Task") != 0
+        || task_entry.count != 1) {
+        ctx.note_unresolved("launch-result", "expected Task<T>");
+        param_types.drop();
+        return (LLVMOpaqueValue*)0;
+    }
+    u32 result_type = ctx.types.resolve_subst(ctx.types.type_args.get(task_entry.inner));
+    bool has_result = result_type != TYPE_VOID;
+    u32 arg_base = has_result ? 1 : 0;
+    Vec<LLVMOpaqueType*> pack_fields = Vec<LLVMOpaqueType*>.new();
+    if (has_result) {
+        pack_fields.push(llvm_lower_type(ctx.ctx, ctx.types, result_type));
+    }
+    i64 i = 0;
+    while (i < (i64)param_count) {
+        pack_fields.push(param_types.get(i));
+        i += 1;
+    }
+    LLVMOpaqueType* pack_type = LLVMStructTypeInContext(
+        ctx.ctx, pack_fields.data, (u32)pack_fields.len(), 0);
+    pack_fields.drop();
+
+    LLVMOpaqueValue* alloc_fn = LLVMGetNamedFunction(ctx.module, "mem_alloc_raw_impl");
+    LLVMOpaqueValue* launch_fn = LLVMGetNamedFunction(ctx.module, "__silver_launch");
+    if (alloc_fn == (LLVMOpaqueValue*)0 || launch_fn == (LLVMOpaqueValue*)0) {
+        ctx.note_unresolved("launch-runtime",
+            alloc_fn == (LLVMOpaqueValue*)0 ? "mem_alloc_raw_impl" : "__silver_launch");
+        param_types.drop();
+        return (LLVMOpaqueValue*)0;
+    }
+    u64 pack_size = LLVMABISizeOfType(ctx.target_data, pack_type);
+    Vec<LLVMOpaqueValue*> alloc_args = Vec<LLVMOpaqueValue*>.new();
+    alloc_args.push(LLVMConstInt(LLVMInt64TypeInContext(ctx.ctx), pack_size, 0));
+    alloc_args.push(LLVMConstInt(LLVMInt64TypeInContext(ctx.ctx), 16, 0));
+    LLVMOpaqueValue* raw_pack = LLVMBuildCall2(ctx.builder,
+        LLVMGlobalGetValueType(alloc_fn), alloc_fn, alloc_args.data,
+        (u32)alloc_args.len(), "task.pack.alloc");
+    alloc_args.drop();
+    LLVMOpaqueType* ptr_type = LLVMPointerTypeInContext(ctx.ctx, (u32)0);
+    LLVMOpaqueValue* pack_ptr = LLVMBuildBitCast(ctx.builder, raw_pack, ptr_type, "task.pack");
+
+    Vec<LLVMOpaqueValue*> args = Vec<LLVMOpaqueValue*>.new();
+    Vec<u32> arg_types = Vec<u32>.new();
+    Vec<u32> target_types = Vec<u32>.new();
+    i = 0;
+    while (i < (i64)call.aux) {
+        u32 arg_id = ctx.pool.args.get((i64)call.inner1 + i);
+        LLVMOpaqueValue* value = llvm_emit_expr(ctx, arg_id);
+        if (value == (LLVMOpaqueValue*)0) {
+            ctx.note_unresolved("launch-argument", "expression");
+            value = LLVMConstNull(param_types.get(i));
+        }
+        args.push(value);
+        arg_types.push(llvm_expr_type(ctx, arg_id));
+        target_types.push(TYPE_UNKNOWN);
+        i += 1;
+    }
+    llvm_prepare_call_args(ctx, fn_type, &args, &arg_types, &target_types,
+                           ctx.names.get(callee_expr.aux));
+    i = 0;
+    while (i < (i64)call.aux) {
+        LLVMOpaqueValue* slot = LLVMBuildStructGEP2(ctx.builder, pack_type, pack_ptr,
+            arg_base + (u32)i, "task.pack.arg");
+        LLVMBuildStore(ctx.builder, args.get(i), slot);
+        llvm_clear_transferred_arg(ctx, fn_type, i, ctx.pool.args.get((i64)call.inner1 + i));
+        i += 1;
+    }
+    args.drop();
+    arg_types.drop();
+    target_types.drop();
+
+    LLVMOpaqueBasicBlock* parent_block = LLVMGetInsertBlock(ctx.builder);
+    String trampoline_name = String.from_str("__silver_launch_tramp_");
+    u8 id_buffer[24];
+    i64 id_length = itoa(ctx.launch_trampoline_count, &id_buffer[0]);
+    trampoline_name.push_bytes(&id_buffer[0], id_length);
+    ctx.launch_trampoline_count += 1;
+    Vec<LLVMOpaqueType*> trampoline_args = Vec<LLVMOpaqueType*>.new();
+    trampoline_args.push(LLVMInt64TypeInContext(ctx.ctx));
+    LLVMOpaqueType* trampoline_type = LLVMFunctionType(
+        LLVMVoidTypeInContext(ctx.ctx), trampoline_args.data,
+        (u32)trampoline_args.len(), 0);
+    trampoline_args.drop();
+    LLVMOpaqueValue* trampoline = LLVMAddFunction(
+        ctx.module, trampoline_name.to_str(), trampoline_type);
+    trampoline_name.drop();
+    LLVMOpaqueBasicBlock* trampoline_block = LLVMAppendBasicBlockInContext(
+        ctx.ctx, trampoline, "entry");
+    LLVMPositionBuilderAtEnd(ctx.builder, trampoline_block);
+    LLVMOpaqueValue* packed_i64 = LLVMGetParam(trampoline, 0);
+    LLVMOpaqueValue* packed = LLVMBuildIntToPtr(ctx.builder, packed_i64, ptr_type,
+                                               "task.pack.ptr");
+    Vec<LLVMOpaqueValue*> trampoline_values = Vec<LLVMOpaqueValue*>.new();
+    i = 0;
+    while (i < (i64)param_count) {
+        LLVMOpaqueValue* slot = LLVMBuildStructGEP2(ctx.builder, pack_type, packed,
+            arg_base + (u32)i, "task.trampoline.arg");
+        trampoline_values.push(LLVMBuildLoad2(ctx.builder, param_types.get(i), slot,
+                                              "task.trampoline.value"));
+        i += 1;
+    }
+    LLVMOpaqueValue* result = LLVMBuildCall2(ctx.builder, fn_type, callee,
+        trampoline_values.data, (u32)trampoline_values.len(),
+        has_result ? "task.result" : "");
+    if (has_result) {
+        LLVMOpaqueValue* result_slot = LLVMBuildStructGEP2(
+            ctx.builder, pack_type, packed, 0, "task.result.slot");
+        LLVMBuildStore(ctx.builder, result, result_slot);
+    }
+    LLVMBuildRetVoid(ctx.builder);
+    trampoline_values.drop();
+    LLVMPositionBuilderAtEnd(ctx.builder, parent_block);
+
+    Vec<LLVMOpaqueValue*> launch_args = Vec<LLVMOpaqueValue*>.new();
+    launch_args.push(trampoline);
+    launch_args.push(pack_ptr);
+    LLVMOpaqueValue* handle = LLVMBuildCall2(ctx.builder,
+        LLVMGlobalGetValueType(launch_fn), launch_fn, launch_args.data,
+        (u32)launch_args.len(), "task.handle");
+    launch_args.drop();
+    param_types.drop();
+    return handle;
+}
+
+LLVMOpaqueValue* llvm_emit_wait(LlvmContext* ctx, u32 expr_id) {
+    AstExpr* wait_expr = ctx.pool.get_expr(expr_id);
+    u32 task_type = ctx.types.resolve_subst(llvm_expr_type(ctx, wait_expr.inner0));
+    TypeEntry* task_entry = ctx.types.get(task_type);
+    if (task_entry.kind != TypeKind.Named
+        || strcmp(ctx.types.names.get(task_entry.name_id), "Task") != 0
+        || task_entry.count != 1) {
+        ctx.note_unresolved("wait-type", "expected Task<T>");
+        return (LLVMOpaqueValue*)0;
+    }
+    u32 result_type = ctx.types.resolve_subst(ctx.types.type_args.get(task_entry.inner));
+    LLVMOpaqueValue* handle = llvm_emit_expr(ctx, wait_expr.inner0);
+    LLVMOpaqueValue* wait_fn = LLVMGetNamedFunction(ctx.module, "__silver_wait_done");
+    LLVMOpaqueValue* free_fn = LLVMGetNamedFunction(ctx.module, "mem_free_raw_impl");
+    if (handle == (LLVMOpaqueValue*)0 || wait_fn == (LLVMOpaqueValue*)0
+        || free_fn == (LLVMOpaqueValue*)0) {
+        ctx.note_unresolved("wait-runtime", wait_fn == (LLVMOpaqueValue*)0
+            ? "__silver_wait_done" : "mem_free_raw_impl");
+        return (LLVMOpaqueValue*)0;
+    }
+    LLVMOpaqueValue* zero = LLVMConstInt(LLVMInt64TypeInContext(ctx.ctx), 0, 0);
+    LLVMOpaqueValue* is_null = LLVMBuildICmp(ctx.builder,
+        LLVMIntPredicate.LLVMIntEQ, handle, zero, "task.null");
+    LLVMOpaqueBasicBlock* null_block = LLVMAppendBasicBlockInContext(
+        ctx.ctx, ctx.current_fn, "task.wait.null");
+    LLVMOpaqueBasicBlock* join_block = LLVMAppendBasicBlockInContext(
+        ctx.ctx, ctx.current_fn, "task.wait.join");
+    LLVMOpaqueBasicBlock* after_block = LLVMAppendBasicBlockInContext(
+        ctx.ctx, ctx.current_fn, "task.wait.after");
+    LLVMBuildCondBr(ctx.builder, is_null, null_block, join_block);
+
+    LLVMPositionBuilderAtEnd(ctx.builder, null_block);
+    LLVMOpaqueType* result_llvm_type = result_type == TYPE_VOID
+        ? LLVMVoidTypeInContext(ctx.ctx)
+        : llvm_lower_type(ctx.ctx, ctx.types, result_type);
+    LLVMOpaqueValue* null_result = result_type == TYPE_VOID
+        ? (LLVMOpaqueValue*)0 : LLVMConstNull(result_llvm_type);
+    LLVMBuildBr(ctx.builder, after_block);
+
+    LLVMPositionBuilderAtEnd(ctx.builder, join_block);
+    LLVMOpaqueType* ptr_type = LLVMPointerTypeInContext(ctx.ctx, (u32)0);
+    Vec<LLVMOpaqueValue*> wait_args = Vec<LLVMOpaqueValue*>.new();
+    wait_args.push(handle);
+    LLVMOpaqueValue* pack = LLVMBuildCall2(ctx.builder,
+        LLVMGlobalGetValueType(wait_fn), wait_fn, wait_args.data,
+        (u32)wait_args.len(), "task.result.pack");
+    wait_args.drop();
+    LLVMOpaqueValue* joined_result = (LLVMOpaqueValue*)0;
+    if (result_type != TYPE_VOID) {
+        Vec<LLVMOpaqueType*> result_fields = Vec<LLVMOpaqueType*>.new();
+        result_fields.push(result_llvm_type);
+        LLVMOpaqueType* result_pack_type = LLVMStructTypeInContext(
+            ctx.ctx, result_fields.data, (u32)result_fields.len(), 0);
+        result_fields.drop();
+        LLVMOpaqueValue* result_pack = LLVMBuildBitCast(ctx.builder, pack, ptr_type,
+                                                        "task.result.ptr");
+        LLVMOpaqueValue* result_slot = LLVMBuildStructGEP2(ctx.builder,
+            result_pack_type, result_pack, 0, "task.result.slot");
+        joined_result = LLVMBuildLoad2(ctx.builder, result_llvm_type, result_slot,
+                                       "task.result.value");
+    }
+    Vec<LLVMOpaqueValue*> free_args = Vec<LLVMOpaqueValue*>.new();
+    free_args.push(pack);
+    LLVMBuildCall2(ctx.builder, LLVMGlobalGetValueType(free_fn), free_fn,
+                   free_args.data, (u32)free_args.len(), "");
+    free_args.drop();
+    LLVMBuildBr(ctx.builder, after_block);
+    LLVMPositionBuilderAtEnd(ctx.builder, after_block);
+    if (result_type == TYPE_VOID) {
+        return (LLVMOpaqueValue*)0;
+    }
+    LLVMOpaqueValue* phi = LLVMBuildPhi(ctx.builder, result_llvm_type, "task.wait.result");
+    Vec<LLVMOpaqueValue*> incoming_values = Vec<LLVMOpaqueValue*>.new();
+    incoming_values.push(null_result);
+    incoming_values.push(joined_result);
+    Vec<LLVMOpaqueBasicBlock*> incoming_blocks = Vec<LLVMOpaqueBasicBlock*>.new();
+    incoming_blocks.push(null_block);
+    incoming_blocks.push(join_block);
+    LLVMAddIncoming(phi, incoming_values.data, incoming_blocks.data,
+                    (u32)incoming_values.len());
+    incoming_values.drop();
+    incoming_blocks.drop();
+    return phi;
+}
+
 LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
     if (expr_id == 0) { return (LLVMOpaqueValue*)0; }
     AstExpr* expr = ctx.pool.get_expr(expr_id);
+    if (expr.kind == ExprKind.Launch) { return llvm_emit_launch(ctx, expr_id); }
+    if (expr.kind == ExprKind.Wait) { return llvm_emit_wait(ctx, expr_id); }
     if (expr.kind == ExprKind.Assert) {
         if (expr.aux == 0) {
             return (LLVMOpaqueValue*)0;
@@ -3704,7 +4041,24 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             u32 arg_id = ctx.pool.args.get((i64)args_start + i);
             LLVMOpaqueValue* a_val = llvm_emit_expr(ctx, arg_id);
             if (a_val == (LLVMOpaqueValue*)0) {
-                ctx.note_unresolved("call-arg", "arg");
+                AstExpr* arg_expr = ctx.pool.get_expr(arg_id);
+                String detail = String.from_str(llvm_expr_kind_name(arg_expr.kind));
+                if (arg_expr.kind == ExprKind.Var) {
+                    detail.drop();
+                    detail = String.from_str(ctx.names.get(arg_expr.aux));
+                } else if (arg_expr.kind == ExprKind.Binary) {
+                    str operation = llvm_binary_operator_method(arg_expr.aux);
+                    if (strlen(operation) > 0) {
+                        detail.push_str(" ");
+                        detail.push_str(operation);
+                    }
+                }
+                detail.push_str(" at line ");
+                u8 line_buffer[24];
+                i64 line_length = itoa(arg_expr.span.start_line, &line_buffer[0]);
+                detail.push_bytes(&line_buffer[0], line_length);
+                ctx.note_unresolved("call-arg", detail.to_str());
+                detail.drop();
                 u32 a_type = ctx.pool.get_expr(arg_id).inferred_type;
                 if (a_type == TYPE_UNKNOWN) { a_type = TYPE_I64; }
                 LLVMOpaqueType* a_llvm_ty = llvm_lower_type(ctx.ctx, ctx.types, a_type);

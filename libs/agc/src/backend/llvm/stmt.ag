@@ -14,12 +14,37 @@ import backend.llvm.expr;
 import backend.llvm.types;
 import backend.llvm.mono;
 
+void llvm_emit_defers_above(LlvmContext* ctx, i64 mark) {
+    i64 i = ctx.deferred_statements.len() - 1;
+    while (i >= mark && !ctx.is_terminated()) {
+        u32 deferred_stmt = ctx.deferred_statements.get(i);
+        Vec<u32> hidden_defers = Vec<u32>.new();
+        while (ctx.deferred_statements.len() > i) {
+            hidden_defers.push(ctx.deferred_statements.pop());
+        }
+        ctx.defer_emission_depth += 1;
+        llvm_emit_stmt(ctx, deferred_stmt);
+        ctx.defer_emission_depth -= 1;
+        while (hidden_defers.len() > 0) {
+            ctx.deferred_statements.push(hidden_defers.pop());
+        }
+        hidden_defers.drop();
+        i -= 1;
+    }
+}
+
 void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
     if (stmt_id == 0 || ctx.is_terminated()) { return; }
     AstStmt* stmt = ctx.pool.get_stmt(stmt_id);
 
     if (stmt.kind == StmtKind.Return) {
+        if (ctx.defer_emission_depth > 0) {
+            ctx.note_unresolved("defer-control", "return statement");
+            return;
+        }
         if (ctx.current_return_type == TYPE_VOID) {
+            llvm_emit_defers_above(ctx, 0);
+            if (ctx.is_terminated()) { return; }
             llvm_emit_drops_above(ctx, (i64)0);
             LLVMBuildRetVoid(ctx.builder);
             return;
@@ -84,12 +109,19 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
         // the root live.
         if (stmt.inner0 != 0) {
             u32 ret_val_ty = llvm_expr_type(ctx, stmt.inner0);
-            if (llvm_type_needs_tracking(ctx, ret_val_ty)) {
-                llvm_clear_place_drops(ctx, stmt.inner0);
-            }
+        if (llvm_type_needs_tracking(ctx, ret_val_ty)) {
+            llvm_clear_place_drops(ctx, stmt.inner0);
         }
+        }
+        llvm_emit_defers_above(ctx, 0);
+        if (ctx.is_terminated()) { return; }
         llvm_emit_drops_above(ctx, (i64)0);
         LLVMBuildRet(ctx.builder, val);
+        return;
+    }
+
+    if (stmt.kind == StmtKind.Defer) {
+        ctx.deferred_statements.push(stmt.inner0);
         return;
     }
 
@@ -266,8 +298,10 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
         LLVMPositionBuilderAtEnd(ctx.builder, then_bb);
         ctx.push_scope();
         i64 then_drop_mark = llvm_current_drop_mark(ctx);
+        i64 then_defer_mark = ctx.deferred_statements.len();
         llvm_emit_stmt(ctx, stmt.inner1);
         if (!ctx.is_terminated()) {
+            llvm_emit_defers_above(ctx, then_defer_mark);
             llvm_emit_drops_above(ctx, then_drop_mark);
         }
         ctx.pop_scope();
@@ -279,8 +313,10 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
             LLVMPositionBuilderAtEnd(ctx.builder, else_bb);
             ctx.push_scope();
             i64 else_drop_mark = llvm_current_drop_mark(ctx);
+            i64 else_defer_mark = ctx.deferred_statements.len();
             llvm_emit_stmt(ctx, stmt.aux);
             if (!ctx.is_terminated()) {
+                llvm_emit_defers_above(ctx, else_defer_mark);
                 llvm_emit_drops_above(ctx, else_drop_mark);
             }
             ctx.pop_scope();
@@ -307,17 +343,20 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
         LLVMPositionBuilderAtEnd(ctx.builder, cond_bb);
         ctx.push_scope();
         i64 cond_drop_mark = llvm_current_drop_mark(ctx);
+        i64 cond_defer_mark = ctx.deferred_statements.len();
         LLVMOpaqueValue* cond_stack_save = ctx.save_stack();
         LLVMOpaqueValue* cond_val = llvm_emit_expr(ctx, stmt.inner0);
         if (cond_val != (LLVMOpaqueValue*)0) {
             if (LLVMTypeOf(cond_val) != LLVMInt1TypeInContext(ctx.ctx)) {
                 cond_val = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntNE, cond_val, LLVMConstNull(LLVMTypeOf(cond_val)), "while_cond_bool");
             }
+            llvm_emit_defers_above(ctx, cond_defer_mark);
             llvm_emit_drops_above(ctx, cond_drop_mark);
             ctx.restore_stack(cond_stack_save);
             LLVMBuildCondBr(ctx.builder, cond_val, body_bb, exit_bb);
         } else {
             ctx.note_unresolved("while-condition", "expression");
+            llvm_emit_defers_above(ctx, cond_defer_mark);
             llvm_emit_drops_above(ctx, cond_drop_mark);
             ctx.restore_stack(cond_stack_save);
             LLVMBuildBr(ctx.builder, exit_bb);
@@ -333,8 +372,10 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
         ctx.push_loop(exit_bb, step_bb, body_stack_save);
         ctx.push_scope();
         i64 body_drop_mark = llvm_current_drop_mark(ctx);
+        i64 body_defer_mark = ctx.deferred_statements.len();
         llvm_emit_stmt(ctx, stmt.inner1);
         if (!ctx.is_terminated()) {
+            llvm_emit_defers_above(ctx, body_defer_mark);
             llvm_emit_drops_above(ctx, body_drop_mark);
             ctx.restore_stack(body_stack_save);
         }
@@ -348,8 +389,10 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
             LLVMPositionBuilderAtEnd(ctx.builder, step_bb);
             ctx.push_scope();
             i64 step_drop_mark = llvm_current_drop_mark(ctx);
+            i64 step_defer_mark = ctx.deferred_statements.len();
             llvm_emit_stmt(ctx, stmt.aux);
             if (!ctx.is_terminated()) {
+                llvm_emit_defers_above(ctx, step_defer_mark);
                 llvm_emit_drops_above(ctx, step_drop_mark);
                 ctx.restore_stack(body_stack_save);
                 LLVMBuildBr(ctx.builder, cond_bb);
@@ -362,8 +405,16 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
     }
 
     if (stmt.kind == StmtKind.Break) {
+        if (ctx.defer_emission_depth > 0) {
+            ctx.note_unresolved("defer-control", "break statement");
+            return;
+        }
         LLVMOpaqueBasicBlock* break_target = ctx.current_break();
         if (break_target != (LLVMOpaqueBasicBlock*)0) {
+            if (ctx.loop_defer_marks.len() > 0) {
+                llvm_emit_defers_above(ctx,
+                    ctx.loop_defer_marks.get(ctx.loop_defer_marks.len() - 1));
+            }
             if (ctx.loop_drop_marks.len() > 0) {
                 llvm_emit_drops_above(ctx, ctx.loop_drop_marks.get(ctx.loop_drop_marks.len() - 1));
             }
@@ -379,8 +430,16 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
     }
 
     if (stmt.kind == StmtKind.Continue) {
+        if (ctx.defer_emission_depth > 0) {
+            ctx.note_unresolved("defer-control", "continue statement");
+            return;
+        }
         LLVMOpaqueBasicBlock* cont_target = ctx.current_continue();
         if (cont_target != (LLVMOpaqueBasicBlock*)0) {
+            if (ctx.loop_defer_marks.len() > 0) {
+                llvm_emit_defers_above(ctx,
+                    ctx.loop_defer_marks.get(ctx.loop_defer_marks.len() - 1));
+            }
             if (ctx.loop_drop_marks.len() > 0) {
                 llvm_emit_drops_above(ctx, ctx.loop_drop_marks.get(ctx.loop_drop_marks.len() - 1));
             }
@@ -400,6 +459,7 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
         u32 count = stmt.aux;
         ctx.push_scope();
         i64 block_drop_mark = llvm_current_drop_mark(ctx);
+        i64 block_defer_mark = ctx.deferred_statements.len();
         i64 i = 0;
         while (i < (i64)count) {
             u32 s_id = ctx.pool.block_stmts.get((i64)start + i);
@@ -408,6 +468,7 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
             i += 1;
         }
         if (!ctx.is_terminated()) {
+            llvm_emit_defers_above(ctx, block_defer_mark);
             llvm_emit_drops_above(ctx, block_drop_mark);
         }
         ctx.pop_scope();

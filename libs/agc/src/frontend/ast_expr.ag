@@ -32,6 +32,8 @@ enum ExprKind {
     DropInPlace;   // inner0 = pointer expr, inner1 = count expr, aux = element type (optional)
     Assert;        // inner0 = condition, inner1 = message, aux = enabled (debug cfg)
     StructLit;     // inner0 = struct name id, inner1 = fields_start, aux = field count (pool.args: name,expr pairs)
+    Launch;        // inner0 = direct Call expression
+    Wait;          // inner0 = Task expression
 }
 
 struct AstExpr {
@@ -56,7 +58,7 @@ enum StmtKind {
     While;         // inner0 = cond, inner1 = body block, aux = optional step stmt
     Break;
     Continue;
-    Defer;         // inner0 = block_id
+    Defer;         // inner0 = deferred statement id
     Block;         // inner0 = block_stmts_start, aux = block_stmts_count
 }
 
@@ -311,6 +313,36 @@ impl AstPool {
         expr.inferred_type = TYPE_UNKNOWN;
         expr.generic_args_start = 0;
         expr.generic_args_count = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_launch(AstPool* self, u32 call_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Launch;
+        expr.inner0 = call_id;
+        expr.inner1 = 0;
+        expr.aux = 0;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        expr.resolved_callee_id = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_wait(AstPool* self, u32 task_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Wait;
+        expr.inner0 = task_id;
+        expr.inner1 = 0;
+        expr.aux = 0;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        expr.resolved_callee_id = 0;
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
     }
@@ -733,6 +765,17 @@ impl AstPool {
         AstStmt stmt;
         stmt.kind = StmtKind.Continue;
         stmt.inner0 = 0;
+        stmt.inner1 = 0;
+        stmt.aux = 0;
+        stmt.span = span;
+        self.stmts.push(move stmt);
+        return (u32)(self.stmts.len() - 1);
+    }
+
+    u32 add_stmt_defer(AstPool* self, u32 deferred_stmt_id, Span span) {
+        AstStmt stmt;
+        stmt.kind = StmtKind.Defer;
+        stmt.inner0 = deferred_stmt_id;
         stmt.inner1 = 0;
         stmt.aux = 0;
         stmt.span = span;

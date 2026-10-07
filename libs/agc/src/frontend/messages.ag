@@ -82,6 +82,10 @@ str break_not_allowed_in_defer() {
     return "break statement is not allowed inside a defer block";
 }
 
+str continue_not_allowed_in_defer() {
+    return "continue statement is not allowed inside a defer block";
+}
+
 String use_of_moved_value(str name) {
     String s = String.from_str("use of moved value '");
     s.push_str(name);

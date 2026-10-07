@@ -85,16 +85,21 @@ struct LlvmContext {
     LLVMOpaqueValue* current_fn;
     u32 current_return_type;
     u32 expected_type_id;
+    i64 defer_emission_depth;
     Vec<LlvmLocal> locals;
     Vec<LlvmStructDef> struct_defs;
     Vec<i64> scope_markers;
+    Vec<u32> deferred_statements;
+    Vec<i64> defer_scope_markers;
     Vec<LLVMOpaqueBasicBlock*> loop_breaks;
     Vec<LLVMOpaqueBasicBlock*> loop_continues;
     Vec<i64> loop_drop_marks;
+    Vec<i64> loop_defer_marks;
     Vec<LLVMOpaqueValue*> loop_stack_saves;
     Vec<ScrutineeMove> scrutinee_moves;
     Vec<LlvmTypeBinding> type_subst;
     i64 unresolved_calls;
+    i64 launch_trampoline_count;
     DiagnosticBag* ownership_diagnostics;
     i64 mono_count;
     Vec<MonoRequest> mono_queue;
@@ -121,16 +126,21 @@ impl LlvmContext {
         c.current_fn = (LLVMOpaqueValue*)0;
         c.current_return_type = TYPE_VOID;
         c.expected_type_id = 0;
+        c.defer_emission_depth = 0;
         c.locals = Vec<LlvmLocal>.new();
         c.struct_defs = Vec<LlvmStructDef>.new();
         c.scope_markers = Vec<i64>.new();
+        c.deferred_statements = Vec<u32>.new();
+        c.defer_scope_markers = Vec<i64>.new();
         c.loop_breaks = Vec<LLVMOpaqueBasicBlock*>.new();
         c.loop_continues = Vec<LLVMOpaqueBasicBlock*>.new();
         c.loop_drop_marks = Vec<i64>.new();
+        c.loop_defer_marks = Vec<i64>.new();
         c.loop_stack_saves = Vec<LLVMOpaqueValue*>.new();
         c.scrutinee_moves = Vec<ScrutineeMove>.new();
         c.type_subst = Vec<LlvmTypeBinding>.new();
         c.unresolved_calls = 0;
+        c.launch_trampoline_count = 0;
         c.ownership_diagnostics = (DiagnosticBag*)0;
         c.mono_count = 0;
         c.mono_queue = Vec<MonoRequest>.new();
@@ -358,9 +368,16 @@ impl LlvmContext {
 
     void push_scope(LlvmContext* self) {
         self.scope_markers.push(self.locals.len());
+        self.defer_scope_markers.push(self.deferred_statements.len());
     }
 
     void pop_scope(LlvmContext* self) {
+        if (self.defer_scope_markers.len() > 0) {
+            i64 defer_mark = self.defer_scope_markers.pop();
+            while (self.deferred_statements.len() > defer_mark) {
+                self.deferred_statements.pop();
+            }
+        }
         if (self.scope_markers.len() > 0) {
             i64 mark = self.scope_markers.pop();
             while (self.locals.len() > mark) {
@@ -421,6 +438,7 @@ impl LlvmContext {
         self.loop_breaks.push(break_bb);
         self.loop_continues.push(cont_bb);
         self.loop_drop_marks.push((i64)self.locals.len());
+        self.loop_defer_marks.push(self.deferred_statements.len());
         self.loop_stack_saves.push(stack_save);
     }
 
@@ -431,6 +449,9 @@ impl LlvmContext {
         }
         if (self.loop_drop_marks.len() > 0) {
             self.loop_drop_marks.pop();
+        }
+        if (self.loop_defer_marks.len() > 0) {
+            self.loop_defer_marks.pop();
         }
         if (self.loop_stack_saves.len() > 0) {
             self.loop_stack_saves.pop();

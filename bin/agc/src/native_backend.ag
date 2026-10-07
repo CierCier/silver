@@ -837,12 +837,6 @@ bool native_tree_supported(SyntaxNode* node) {
         return true;
     }
     if (node.kind == NodeKind.Token) {
-        if (node.token_kind == TokenKind.Defer) {
-            return false;
-        }
-        if (node.token_kind == TokenKind.Launch) {
-            return false;
-        }
         if (node.token_kind == TokenKind.For) {
             SyntaxNode* binding = node.next_sibling;
             if (binding != (SyntaxNode*)0 && binding.kind == NodeKind.Token

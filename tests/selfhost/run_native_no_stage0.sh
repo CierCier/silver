@@ -20,6 +20,7 @@ fi
 
 "$stage1" --version
 python3 "$root/tests/selfhost/check_native_backend.py" --stage1 "$stage1"
+python3 "$root/tests/selfhost/check_send_gate.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_native_link_contract.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_native_format.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_native_assert.py" --stage1 "$stage1"
@@ -32,6 +33,9 @@ python3 "$root/tests/run_tests.py" --no-tui --jobs 2 --compiler "$stage1" \
     allocator_threads_test loop_stack_restore_test aggregate_init_drop_test \
     cascade_drop_test field_predrop_test intermediate_drop_activation_test \
     collections_set_test for_in_consume_test nested_field_drop_test native_for_in_continue_test \
+    adjacent_string_literal_test \
+    defer_test launch_wait_test launch_wait_error_test launch_wait_native_test \
+    launch_send_test launch_send_error_test \
     string_split_once_drop_test string_order_native_test tuple_local_destructure_native_test \
     tuple_partial_index_drop_test \
     slice_syntax_test test_slice_u8_ops destructure_let_test \
@@ -43,7 +47,7 @@ python3 "$root/tests/run_tests.py" --no-tui --jobs 2 --compiler "$stage1" \
     generic_tuple_return_test global_array_string_init_test map_test \
     generic_reference_deref_test optional_unwrap_abort_test \
     nested_match_payload_test \
-    for_in_generic_test str_key_map_test \
+    for_in_generic_test iter_suite_test nested_generic_call_test str_key_map_test \
     direct_field_partial_move_test drop_ancestor_direct_error_test \
     drop_ancestor_nested_error_test builtin_mem_test \
     bytes_test borrow_conflict_test compound_bitwise_test \
