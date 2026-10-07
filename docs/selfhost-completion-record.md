@@ -1,6 +1,6 @@
 # Self-host completion record
 
-Updated: 2026-09-24
+Updated: 2026-10-07
 
 ## Definition of done
 
@@ -18,7 +18,7 @@ command bridge is a temporary compatibility seam, not the final self-host
 backend: it preserves the already-tested stage0 backend while the typed
 semantic and code-generation layers move into Silver.
 
-## Verified baseline
+## Historical verified baseline (2026-09-24)
 
 - `python3 tests/run_tests.py --no-tui`: 200 passed, 1 intentional skip.
 - `bash tests/selfhost/run_stage.sh --include-std`: token parity and parser
@@ -27,7 +27,7 @@ semantic and code-generation layers move into Silver.
 - `bash tests/selfhost/run_stage.sh --include-std`: token/parse/semantic parity for 348 files, typed Send, and seven-version AGM checks pass.
 - `cargo test -p agc --lib`: 562 passing tests after the cache-key and cache-integrity slices.
 
-## Current completion state
+## Completion state at the historical baseline
 
 | Surface | State | Evidence / next action |
 | --- | --- | --- |
@@ -40,9 +40,9 @@ semantic and code-generation layers move into Silver.
 | Diagnostics & Messages | green | centralized catalog in `messages.ag`, Levenshtein fuzzy typo suggestions |
 | Native build/run | transitional | explicit stage0 bridge is covered by `check_bridge.py` and `run_native.sh` (200 passed, 1 intentional skip) |
 | Cache | transitional | dependency entries validated/staged, cyclic-module tested |
-| Stage2 fixpoint | deferred (committed path); experimental attempt crashes (see handoff.md §§3-4, P0-001..003) | committed stage1 cannot self-compile (smoke backend only); uncommitted full-backend stage2 links but segfaults on argv/generics — fix P0-001..003 before promoting |
+| Stage2 fixpoint | deferred | Native code generation was not yet part of the committed stage1 path. |
 
-## Frontend completion summary
+## Frontend completion summary at the historical baseline
 
 The frontend migration is complete across all slices:
 - Canonical type table with integer `TypeId`s and $O(1)$ property queries.
@@ -50,4 +50,19 @@ The frontend migration is complete across all slices:
 - Place and projection model with field-disjointness and $O(1)$ `BitSet` local variable tracking.
 - Monomorphization request collector with generation limits and mangling.
 - Centralized user-facing diagnostic messages catalog with fuzzy typo suggestions.
-- All gates passing green: 348/348 files in `run_stage.sh --include-std`, 200 passed + 1 intentional skip in `run_native.sh --jobs 4`.
+- Historical gates passed: 348 files in `run_stage.sh --include-std`, 200 passed + 1 intentional skip in `run_native.sh --jobs 4`.
+
+## Current status (2026-10-07)
+
+- The opt-in stage1 Linux LLVM backend is tracked in this branch. Unsupported
+  constructs fail closed; the explicit stage0 bridge remains the default for
+  native commands.
+- Frontend parity checks passed for 411 token files, 411 AST-span files, 415
+  semantic-status files, 29 semantic fixtures, and 12 source/AGM import checks.
+- With stage0 fallback disabled, the focused native gate passed all 65 selected
+  tests, including the stage2 checks. This does not establish full native
+  corpus parity or a stage2 fixed point.
+- 1:1 native code-generation and runtime parity remains open. Diagnostic
+  rendering, normalized LLVM IR, and production artifact/cache-key parity are
+  deferred; keep those limits distinct from frontend parity and focused native
+  coverage.
