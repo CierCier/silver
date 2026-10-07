@@ -121,6 +121,7 @@ WASM_SKIP = {
     "launch_send_declarations_test": "launch requires the thread runtime (unsupported on wasm)",
     "launch_send_test": "launch requires the thread runtime (unsupported on wasm)",
     "launch_wait_test": "launch requires the thread runtime (unsupported on wasm)",
+    "launch_wait_native_test": "native launch backend fixture uses the thread runtime (unsupported on wasm)",
     "launch_send_error_test": "launch requires the thread runtime (unsupported on wasm)",
     "launch_wait_error_test": "launch requires the thread runtime (unsupported on wasm)",
     "guard_test": "guarded counter across launched tasks (launch is a compile error on wasm)",
