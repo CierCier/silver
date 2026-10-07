@@ -7,6 +7,7 @@ import frontend.ast_expr;
 import frontend.cfg;
 import frontend.items;
 import frontend.lexer;
+import frontend.names;
 import frontend.symbols;
 import frontend.types;
 
@@ -2168,7 +2169,7 @@ impl ExprLowerer {
                             }
                             str text = return_type.to_str();
                             bool is_optional = strcmp(text, "Optional") == 0
-                                || str_starts_with(text, "Optional<");
+                                || name_starts_with(text, "Optional<");
                             return_type.drop();
                             if (is_optional) { return true; }
                         }

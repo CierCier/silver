@@ -118,11 +118,13 @@ WASM_SKIP = {
     "condvar_test": "depends on threads/atomics (WASI threading pending)",
     "rwlock_test": "depends on threads/atomics (WASI threading pending)",
     "select_test": "depends on threads/atomics (WASI threading pending)",
+    "launch_send_declarations_test": "launch requires the thread runtime (unsupported on wasm)",
     "launch_send_test": "launch requires the thread runtime (unsupported on wasm)",
     "launch_wait_test": "launch requires the thread runtime (unsupported on wasm)",
     "launch_send_error_test": "launch requires the thread runtime (unsupported on wasm)",
     "launch_wait_error_test": "launch requires the thread runtime (unsupported on wasm)",
     "guard_test": "guarded counter across launched tasks (launch is a compile error on wasm)",
+    "native_futex_wake_test": "Linux thread creation and futex wake-up",
     "rust_ffi_test": "links a native-arch Rust staticlib (no wasm FFI artifact in v1)",
     # process / sockets / pty / kernel interfaces (std modules empty on wasm)
     "process_test": "fork/exec via Linux process syscalls",
@@ -487,12 +489,14 @@ def run_single_test(
         # COFF has no linkonce dedup: cached .agm artifacts and the app unit
         # would define the same std symbols twice. Single-unit linking until
         # artifact dedup/import-libs land (docs/windows-port.md §4.3).
-        extra_flags += ["--no-cache"]
+        if "--no-cache" not in extra_flags:
+            extra_flags += ["--no-cache"]
     if target_is_wasm(target):
         # Same hazard as the COFF path, plus the std.cpu artifact cache can
         # hold native-cfg definitions that are wrong for wasm. The portable
         # core is small enough that single-unit linking is not a bottleneck.
-        extra_flags += ["--no-cache"]
+        if "--no-cache" not in extra_flags:
+            extra_flags += ["--no-cache"]
     for libdir in libdirs or []:
         extra_flags += ["-L", *libdir]
 
