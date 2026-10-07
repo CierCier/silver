@@ -127,6 +127,28 @@ def main() -> int:
                 f"exit code {executed.returncode}, expected 0"
             )
 
+        string_equality_fixture = pathlib.Path(__file__).with_name(
+            "string_slice_temp_equality_fixture.ag"
+        )
+        string_equality_output = root / "string-slice-temp-equality"
+        string_equality_build = run(
+            stage1,
+            ["build", str(string_equality_fixture), "--no-cache", "-o", str(string_equality_output)],
+            env,
+            root,
+        )
+        if string_equality_build.returncode != 0:
+            raise AssertionError(
+                "native Slice<u8>/temporary String equality build failed: "
+                f"{string_equality_build.returncode}\n{string_equality_build.stderr}"
+            )
+        executed = subprocess.run([str(string_equality_output)], check=False)
+        if executed.returncode != 0:
+            raise AssertionError(
+                "native Slice<u8>/temporary String equality returned "
+                f"{executed.returncode}, expected 0"
+            )
+
         enum_array_fixture = pathlib.Path(__file__).with_name(
             "enum_array_drop_fixture.ag"
         )
