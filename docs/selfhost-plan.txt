@@ -349,7 +349,7 @@ PARITY GATE (the one rule that makes this safe)
  multithreaded stage1.
 
 ===============================================================================
-  CURRENT EXECUTION RECORD (2026-09-24)
+  HISTORICAL EXECUTION RECORD (2026-09-24)
 ===============================================================================
 
   The Linux compatibility boundary is executable:
@@ -371,3 +371,18 @@ PARITY GATE (the one rule that makes this safe)
   package/submodule execution, stage1-owned cache, and stage1-on-stage1
   fixpoint.
 ===============================================================================
+
+Current continuation (2026-10-07)
+-------------------------------
+The record above is historical. Current verification and completion limits
+are maintained in docs/selfhost-completion-record.md.
+
+PR #30 head 91a0aff has an opt-in native LLVM backend and selected genuine
+stage2 execution. A fresh stage1 independently passes seven selected fixtures,
+including net_udp_test, with stage0 unavailable. Full native corpus parity and
+a stage2 fixed point remain open. Earlier full-corpus counts describe earlier
+local trees and must not be presented as a current-head measurement.
+
+Next, require Send-safe launch result types and drop transferred arguments on
+spawn failure. Verify each correction against stage0 and native stage1, then
+rerun the selected gate and measure the complete no-stage0 corpus locally.

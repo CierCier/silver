@@ -57,11 +57,29 @@ The frontend migration is complete across all slices:
 - The opt-in stage1 Linux LLVM backend is tracked in this branch. Unsupported
   constructs fail closed; the explicit stage0 bridge remains the default for
   native commands.
-- Frontend parity checks passed for 411 token files, 411 AST-span files, 415
-  semantic-status files, 29 semantic fixtures, and 12 source/AGM import checks.
+- The PR verification record reports frontend parity passing for 411 token
+  files, 411 AST-span files, 415 semantic-status files, 29 semantic fixtures,
+  and 12 source/AGM import checks. This review did not rerun that gate.
 - With stage0 fallback disabled, the focused native gate passed all 65 selected
-  tests, including the stage2 checks. This does not establish full native
-  corpus parity or a stage2 fixed point.
+  tests, including the stage2 checks, according to the PR verification record.
+  This does not establish full native corpus parity or a stage2 fixed point.
+- A fresh stage1 built from PR #30 head `91a0aff` independently passed seven
+  selected integration fixtures with `SILVER_STAGE1_NATIVE=1` and
+  `SILVER_STAGE0=/nonexistent`: `defer_test`, `launch_wait_native_test`,
+  `launch_send_test`, `launch_send_error_test`, `adjacent_string_literal_test`,
+  `nested_generic_call_test`, and `net_udp_test`. The separate
+  `check_send_gate.py` check also passed. The UDP fixture passed in 1.97 seconds
+  with no failures or skips.
+- The latest recorded broad native run from an earlier local tree was 172
+  passed, 82 failed, and 1 skipped across 255 fixtures, before a subsequent
+  shared runtime repair. The previous 254-fixture baseline was 170/83/1.
+  Neither is a full-corpus measurement of `91a0aff`; that head has not had a
+  fresh broad native run in this review.
+- Two launch correctness gaps remain open: launch result types are not checked
+  for Send safety, and failed spawning frees the raw argument pack without
+  dropping owned values transferred into it. A `Task<Rc<i64>>` launch was
+  accepted by both stage0 and stage1 checking. Close these gaps with regression
+  tests, then rerun the selected native gate and measure the full native corpus.
 - 1:1 native code-generation and runtime parity remains open. Diagnostic
   rendering, normalized LLVM IR, and production artifact/cache-key parity are
   deferred; keep those limits distinct from frontend parity and focused native
