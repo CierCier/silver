@@ -2648,7 +2648,7 @@ LLVMOpaqueValue* llvm_emit_launch(LlvmContext* ctx, u32 expr_id) {
         Vec<LLVMOpaqueValue*> free_args = Vec<LLVMOpaqueValue*>.new();
         free_args.push(raw_pack);
         LLVMBuildCall2(ctx.builder, LLVMGlobalGetValueType(free_fn), free_fn,
-            free_args.data, (u32)free_args.len(), "task.failed.pack.free");
+            free_args.data, (u32)free_args.len(), "");
         free_args.drop();
     }
     LLVMBuildBr(ctx.builder, ready_block);
