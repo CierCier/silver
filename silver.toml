@@ -10,12 +10,10 @@
 #
 # P0 goal: 1:1 linux/x86_64 frontend parity between bootstrap/stage0/agc
 # (Rust) and bin/agc (Silver). The reusable frontend lives in libs/agc.
-# Native stage1 commands use the explicit SILVER_STAGE0 compatibility seam.
-# The committed stage1-owned backend is a smoke path only (single
-# `i32 main()` via SILVER_STAGE1_NATIVE=1; see bin/agc/src/native_backend.ag
-# and tests/selfhost/check_native_backend.py). The full Silver LLVM backend
-# (libs/agc/src/backend/llvm/, vendor/llvm/llvm.ag) is experimental,
-# untracked work in progress — see handoff.md — not the committed build path.
+# Native stage1 commands use the explicit SILVER_STAGE0 compatibility seam
+# by default. SILVER_STAGE1_NATIVE=1 opts into the tracked Linux LLVM backend
+# in libs/agc/src/backend/llvm/ and vendor/llvm/llvm.ag for supported programs;
+# unsupported constructs fail closed. This does not establish full stage0 parity.
 
 name = "silver"
 version = "0.2.6"
@@ -33,7 +31,8 @@ default_target = "agc"
 # Stage1 frontend binary. Its target manifest lives in bin/agc; stage0
 # builds this entry point with the commands in tests/selfhost/run_stage.sh.
 # It owns lex, parse, ast, and check locally; native build/run/package/cache
-# go through the stage0 bridge except for the i32-main() smoke path.
+# use the stage0 bridge by default, with the opt-in stage1 backend for its
+# supported Linux subset.
 [bin."agc"]
 manifest = "./bin/agc"
 

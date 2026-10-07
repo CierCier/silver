@@ -48,28 +48,20 @@ selected by `SILVER_STAGE0`; it never discovers a compiler from the current
 working directory. The `SILVER_STAGE1_NATIVE=1` path
 tests direct, package, and run invocations plus cfg selection, raw argc/argv,
 literal comptime casts, generic `Vec<String>` methods and chained receivers,
-formatting, concrete generic enum payload round trips, and fail-closed fallback
-for `defer`; it is a smoke
-backend, not the complete native compiler. Inputs outside the backend's current
-scope fail closed to the explicit stage0 bridge instead of producing
-unverified output. Stage0 root-object caching is enabled, and source imports
-inlined during lowering are included in dependency keys.
+formatting, concrete generic enum payload round trips, Launch/Wait, and defer.
+This set of checks is not the complete native compiler. Inputs outside the
+backend's supported scope fail closed instead of producing unverified output.
+Stage0 root-object caching is enabled, and source imports inlined during
+lowering are included in dependency keys.
 
 `run_native_no_stage0.sh /path/to/agc-stage1` is the direct native correctness
 gate. It points `SILVER_STAGE0` at a missing path, sets
 `SILVER_STAGE1_NATIVE=1`, runs the native backend and stage2 checks, then runs
-focused ownership, loop-stack, and runtime fixtures. The gate currently passes
-56 focused fixtures and builds/runs stage2 with stage0 unavailable. The broad
-no-stage0 corpus remains exploratory: the latest Linux run had 216 passed,
-40 failed, and 3 skipped (259 results). A fresh stage0 baseline had 255 passed,
-1 failed, and 3 skipped; its only failure was IPv6 UDP bind. Native failures
-include unsupported defer/launch, macro/reflection, variadic, nested-array,
-binary-artifact, and volatile paths, plus remaining import cases, runtime
-mismatches, and local networking timeouts. Native stage1 is not yet at 1:1
-behavioral parity. Cyclic imports, selected free-function aliases, nested
-enum-payloads, and scalar matches verify specific supported paths, but do not
-imply full corpus parity. This gate is not currently wired into CI while native
-support is changing rapidly.
+focused ownership, loop-stack, and runtime fixtures. The latest focused run
+passed all 65 fixtures and builds/runs stage2 with stage0 unavailable. The
+complete no-stage0 integration corpus has not been established as passing, so
+this gate does not claim full native parity. `run_native.sh` is wired into CI;
+this larger direct no-stage0 gate remains separate while native support expands.
 
 `check_native_enum_layout.py` disables the stage0 bridge and checks small and
 String payloads in `Optional` and both `Result` variants. It also checks empty

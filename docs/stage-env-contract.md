@@ -1,12 +1,12 @@
 # Silver stage env contract (BE-005/BE-006)
 
 All `SILVER_*` environment variables, who reads them, and what they mean.
-Authoritative 2026-09-28 (branch `bootstrap-migration`).
+Authoritative 2026-10-07 (branch `bootstrap-migration`).
 
 | Variable | Read by | Values | Meaning |
 | --- | --- | --- | --- |
 | `SILVER_STAGE0` | `bin/agc/src/backend_bridge.ag:17-27` | path to stage0 `agc`, or nonexistent | Explicit compatibility seam: stage1 delegates native build/run/package/cache to this binary. Point at a missing path + `SILVER_STAGE1_NATIVE=1` to force the stage1-owned backend. |
-| `SILVER_STAGE1_NATIVE` | `bin/agc/src/native_backend.ag:21-28` | `1`/`true`/`yes` | Opt in to the stage1-owned smoke backend (single `i32 main()` only; everything else fails closed to the bridge). |
+| `SILVER_STAGE1_NATIVE` | `bin/agc/src/native_backend.ag:21-28` | `1`/`true`/`yes` | Opt in to the tracked stage1-owned Linux LLVM backend for supported programs. Unsupported constructs fail closed; this does not enable complete stage0 parity. |
 | `SILVER_STAGE1_CC` | `bin/agc/src/native_backend.ag` | path to `cc` | C driver fallback if no direct stage1 linker is available. |
 | `SILVER_STAGE1_LLD` | `bin/agc/src/native_backend.ag` | path to `ld.lld` or `lld` | Optional direct GNU linker override used after `SILVER_USE_MOLD` selection. |
 | `SILVER_STAGE1_MOLD` | `bin/agc/src/native_backend.ag` | path to `mold` | Optional mold executable override; used only when `SILVER_USE_MOLD=1`. |
@@ -24,9 +24,9 @@ Notes:
   `SILVER_DUMP_IR`, `SILVER_DYNAMIC_LINKER`) is implemented solely in Silver;
   stage0 `driver.rs`/`link.rs` know nothing about it (BE-006).
 - `check_native_link_contract.py --stage1 <agc>` gates the BE-005 stage1 Linux linker choice, emitted link arguments/output, static-link handling, and runtime `--run-arg` forwarding; it is opt-in and is not part of `run_stage.sh`.
-- The stage1-owned backend remains the Linux smoke backend stated at `bin/agc/src/native_backend.ag:1-6`: it accepts only a single `i32 main()` and falls back to stage0 for other programs. Stage0 routes targets through GNU/COFF/Wasm/unsupported-MinGW flavors at `bootstrap/stage0/agc/src/link.rs:396-412`; its COFF and Wasm flags, CRT discovery, and MinGW error behavior therefore do not apply to this Linux-only stage1 linker.
-- Stage0's Linux cc path also derives compiler library directories and dependency-object directories and forwards target, sysroot, debug-info, and dependency paths (`bootstrap/stage0/agc/src/link.rs:655-713`). Stage1's current smoke path emits one object (`bin/agc/src/native_backend.ag`) and has no target/sysroot/dependency graph inputs; those stage0 details are intentionally inapplicable. Stage1 forwards `-L`/`-l`, AST `#[link]` names, `NIX_LDFLAGS` `-L` dirs, static selection, rpaths, and `--run-arg`.
-- Stage0 Linux does not consult `SILVER_LINKER`: `link_exe_with_ld_lld()` selects mold/ld.lld/lld and falls back to cc (`bootstrap/stage0/agc/src/link.rs:578-653`, with dispatch fallback at `:387-413`); `SILVER_LINKER` is read only by the COFF `find_lld_link()` implementation (`:57-77`). Stage1 supports the explicit direct-linker override on its Linux smoke path as a stage1-specific extension.
+- The stage1-owned backend is an opt-in Linux backend with a tested supported subset, not a single-`i32 main()` path. `tests/selfhost/run_native_no_stage0.sh` exercises 65 focused native fixtures with stage0 unavailable; it does not establish full native parity. Unsupported constructs fail closed, with the explicit stage0 bridge available when configured. Stage0 routes targets through GNU/COFF/Wasm/unsupported-MinGW flavors at `bootstrap/stage0/agc/src/link.rs:396-412`; its COFF and Wasm flags, CRT discovery, and MinGW error behavior do not apply to this Linux-only stage1 linker.
+- Stage0's Linux cc path also derives compiler library directories and dependency-object directories and forwards target, sysroot, debug-info, and dependency paths (`bootstrap/stage0/agc/src/link.rs:655-713`). Stage1 has no target/sysroot/dependency-graph inputs; those stage0 details are intentionally inapplicable. Stage1 forwards `-L`/`-l`, AST `#[link]` names, `NIX_LDFLAGS` `-L` dirs, static selection, rpaths, and `--run-arg`.
+- Stage0 Linux does not consult `SILVER_LINKER`: `link_exe_with_ld_lld()` selects mold/ld.lld/lld and falls back to cc (`bootstrap/stage0/agc/src/link.rs:578-653`, with dispatch fallback at `:387-413`); `SILVER_LINKER` is read only by the COFF `find_lld_link()` implementation (`:57-77`). Stage1 supports the explicit direct-linker override on its Linux backend as a stage1-specific extension.
 - `ROOT_OBJECT_CACHE_ENABLED=false` (`driver.rs:35`) forces root recompilation
   until implicit imports enter the dependency key — second half of BE-006,
   still open.
