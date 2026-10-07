@@ -35,6 +35,7 @@ python3 "$root/tests/run_tests.py" --no-tui --jobs 2 --compiler "$stage1" \
     collections_set_test for_in_consume_test nested_field_drop_test native_for_in_continue_test \
     adjacent_string_literal_test \
     defer_test launch_wait_test launch_wait_error_test launch_wait_native_test \
+    launch_failure_drop_test \
     launch_send_test launch_send_error_test \
     string_split_once_drop_test string_order_native_test tuple_local_destructure_native_test \
     tuple_partial_index_drop_test \

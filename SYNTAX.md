@@ -880,6 +880,10 @@ defer wait t;            // join on every exit path of the scope
 
 A second `wait` on the same handle is a move error.
 
+The result type `T` need not be `Send`: `wait` joins the worker before exposing
+the result to the caller. Launch arguments still must be `Send` because they
+are accessed concurrently with the launching thread.
+
 ### Send gate
 
 Because launch arguments are moved across the thread boundary, every

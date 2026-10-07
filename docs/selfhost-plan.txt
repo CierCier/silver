@@ -383,6 +383,7 @@ including net_udp_test, with stage0 unavailable. Full native corpus parity and
 a stage2 fixed point remain open. Earlier full-corpus counts describe earlier
 local trees and must not be presented as a current-head measurement.
 
-Next, require Send-safe launch result types and drop transferred arguments on
-spawn failure. Verify each correction against stage0 and native stage1, then
-rerun the selected gate and measure the complete no-stage0 corpus locally.
+Task results are intentionally allowed to be non-Send because `wait` joins
+before exposing them. The current review adds destructor cleanup for transferred
+arguments when spawn fails; verify it in stage0 and native stage1, then measure
+the complete no-stage0 corpus locally.

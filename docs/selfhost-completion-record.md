@@ -75,11 +75,12 @@ The frontend migration is complete across all slices:
   shared runtime repair. The previous 254-fixture baseline was 170/83/1.
   Neither is a full-corpus measurement of `91a0aff`; that head has not had a
   fresh broad native run in this review.
-- Two launch correctness gaps remain open: launch result types are not checked
-  for Send safety, and failed spawning frees the raw argument pack without
-  dropping owned values transferred into it. A `Task<Rc<i64>>` launch was
-  accepted by both stage0 and stage1 checking. Close these gaps with regression
-  tests, then rerun the selected native gate and measure the full native corpus.
+- `Task<T>` results are intentionally not required to be `Send`: both stage0
+  and stage1 read them only after `wait` joins the worker. The launch runtime
+  previously freed transferred argument packs on spawn failure without
+  running their destructors; this review adds cleanup in both native codegens
+  and a registry-exhaustion regression test. Full native corpus parity remains
+  unmeasured on the current head.
 - 1:1 native code-generation and runtime parity remains open. Diagnostic
   rendering, normalized LLVM IR, and production artifact/cache-key parity are
   deferred; keep those limits distinct from frontend parity and focused native

@@ -253,7 +253,54 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .ok_or_else(|| {
                 CodegenError::with_span("launch: __silver_launch returned void", expr.span)
             })?;
-        Ok(rec)
+        let rec = rec.into_int_value();
+        let is_null = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                rec,
+                self.context.i64_type().const_zero(),
+                "task.spawn.failed",
+            )
+            .map_err(|e| {
+                CodegenError::with_span(format!("launch: null check failed: {e}"), expr.span)
+            })?;
+        let parent = self.current_fn.ok_or_else(|| {
+            CodegenError::with_span("launch: no enclosing function for cleanup", expr.span)
+        })?;
+        let failed_bb = self.context.append_basic_block(parent, "task.spawn.cleanup");
+        let ready_bb = self.context.append_basic_block(parent, "task.spawn.ready");
+        self.builder
+            .build_conditional_branch(is_null, failed_bb, ready_bb)
+            .map_err(|e| {
+                CodegenError::with_span(format!("launch: cleanup branch failed: {e}"), expr.span)
+            })?;
+
+        self.builder.position_at_end(failed_bb);
+        for (index, param_ty) in signature.params.iter().enumerate() {
+            let slot = self
+                .builder
+                .build_struct_gep(pack_struct, pack_ptr, arg_base + index as u32, "task.failed.arg")
+                .map_err(|e| {
+                    CodegenError::with_span(format!("launch: cleanup arg GEP failed: {e}"), expr.span)
+                })?;
+            self.emit_drop_glue_at_pointer(param_ty, slot)?;
+        }
+        let free_fn = self.module.get_function("mem_free_raw_impl").ok_or_else(|| {
+            CodegenError::with_span("launch failure cleanup requires `mem_free_raw_impl`", expr.span)
+        })?;
+        self.builder
+            .build_call(free_fn, &[pack_u8.into()], "task.failed.pack.free")
+            .map_err(|e| {
+                CodegenError::with_span(format!("launch: cleanup pack free failed: {e}"), expr.span)
+            })?;
+        self.builder
+            .build_unconditional_branch(ready_bb)
+            .map_err(|e| {
+                CodegenError::with_span(format!("launch: cleanup merge failed: {e}"), expr.span)
+            })?;
+        self.builder.position_at_end(ready_bb);
+        Ok(rec.into())
     }
 
     pub(crate) fn emit_wait_expression(

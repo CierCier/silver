@@ -2569,7 +2569,6 @@ LLVMOpaqueValue* llvm_emit_launch(LlvmContext* ctx, u32 expr_id) {
         i += 1;
     }
     args.drop();
-    arg_types.drop();
     target_types.drop();
 
     LLVMOpaqueBasicBlock* parent_block = LLVMGetInsertBlock(ctx.builder);
@@ -2621,7 +2620,42 @@ LLVMOpaqueValue* llvm_emit_launch(LlvmContext* ctx, u32 expr_id) {
         LLVMGlobalGetValueType(launch_fn), launch_fn, launch_args.data,
         (u32)launch_args.len(), "task.handle");
     launch_args.drop();
+
+    LLVMOpaqueValue* spawn_failed = LLVMBuildICmp(ctx.builder,
+        LLVMIntPredicate.LLVMIntEQ, handle,
+        LLVMConstInt(LLVMInt64TypeInContext(ctx.ctx), 0, 0), "task.spawn.failed");
+    LLVMOpaqueBasicBlock* failed_block = LLVMAppendBasicBlockInContext(
+        ctx.ctx, ctx.current_fn, "task.spawn.cleanup");
+    LLVMOpaqueBasicBlock* ready_block = LLVMAppendBasicBlockInContext(
+        ctx.ctx, ctx.current_fn, "task.spawn.ready");
+    LLVMBuildCondBr(ctx.builder, spawn_failed, failed_block, ready_block);
+
+    LLVMPositionBuilderAtEnd(ctx.builder, failed_block);
+    i = 0;
+    while (i < (i64)call.aux) {
+        u32 arg_type = ctx.types.resolve_subst(arg_types.get(i));
+        if (llvm_type_needs_tracking(ctx, arg_type)) {
+            LLVMOpaqueValue* slot = LLVMBuildStructGEP2(ctx.builder, pack_type,
+                pack_ptr, arg_base + (u32)i, "task.failed.arg");
+            llvm_emit_value_drop_at_ptr(ctx, slot, arg_type);
+        }
+        i += 1;
+    }
+    LLVMOpaqueValue* free_fn = LLVMGetNamedFunction(ctx.module, "mem_free_raw_impl");
+    if (free_fn == (LLVMOpaqueValue*)0) {
+        ctx.note_unresolved("launch-runtime", "mem_free_raw_impl");
+    } else {
+        Vec<LLVMOpaqueValue*> free_args = Vec<LLVMOpaqueValue*>.new();
+        free_args.push(raw_pack);
+        LLVMBuildCall2(ctx.builder, LLVMGlobalGetValueType(free_fn), free_fn,
+            free_args.data, (u32)free_args.len(), "task.failed.pack.free");
+        free_args.drop();
+    }
+    LLVMBuildBr(ctx.builder, ready_block);
+    LLVMPositionBuilderAtEnd(ctx.builder, ready_block);
+
     param_types.drop();
+    arg_types.drop();
     return handle;
 }
 

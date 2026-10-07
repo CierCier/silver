@@ -879,7 +879,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
-    fn emit_drop_glue_at_pointer(
+    pub(crate) fn emit_drop_glue_at_pointer(
         &mut self,
         ty: &ast::Type,
         value_ptr: PointerValue<'ctx>,
