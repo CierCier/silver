@@ -121,6 +121,7 @@ WASM_SKIP = {
     "select_test": "depends on threads/atomics (WASI threading pending)",
     "launch_send_declarations_test": "launch requires the thread runtime (unsupported on wasm)",
     "launch_send_test": "launch requires the thread runtime (unsupported on wasm)",
+    "launch_failure_drop_test": "launch requires the thread runtime (unsupported on wasm)",
     "launch_wait_test": "launch requires the thread runtime (unsupported on wasm)",
     "launch_wait_native_test": "native launch backend fixture uses the thread runtime (unsupported on wasm)",
     "launch_send_error_test": "launch requires the thread runtime (unsupported on wasm)",
