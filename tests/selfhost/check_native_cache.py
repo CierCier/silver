@@ -80,8 +80,8 @@ def run(
     )
 
 
-def exercise(binary: pathlib.Path, root: pathlib.Path, stage0: pathlib.Path) -> dict[str, object]:
-    work = root / "work"
+def exercise(binary: pathlib.Path, temp_root: pathlib.Path, stage0: pathlib.Path) -> dict[str, object]:
+    work = temp_root / "work"
     cache = work / "cache"
     source = work / "main.ag"
     output = work / "app"
@@ -92,17 +92,17 @@ def exercise(binary: pathlib.Path, root: pathlib.Path, stage0: pathlib.Path) -> 
     env = os.environ.copy()
     env["SILVER_STAGE0"] = str(stage0)
     base = [str(source), "--cache-dir", str(cache), "--no-progress"]
-    first = run(binary, [*base, "-o", str(output)], root, env)
+    first = run(binary, [*base, "-o", str(output)], REPO_ROOT, env)
     first_cache = snapshot(cache)
-    second = run(binary, [*base, "-o", str(output)], root, env)
+    second = run(binary, [*base, "-o", str(output)], REPO_ROOT, env)
     second_cache = snapshot(cache)
     uncached = run(
         binary,
         [str(source), "--cache-dir", str(cache), "--no-cache", "--no-progress", "-o", str(uncached_output)],
-        root,
+        REPO_ROOT,
         env,
     )
-    info = run(binary, ["--cache-dir", str(cache), "--cache-info"], root, env)
+    info = run(binary, ["--cache-dir", str(cache), "--cache-info"], REPO_ROOT, env)
     cycle_cache = work / "cycle-cache"
     cycle_output = work / "cycle-app"
     cycle = run(
@@ -115,7 +115,7 @@ def exercise(binary: pathlib.Path, root: pathlib.Path, stage0: pathlib.Path) -> 
             "-o",
             str(cycle_output),
         ],
-        root,
+        REPO_ROOT,
         env,
     )
 

@@ -684,6 +684,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
                 let cond_bb = self.context.append_basic_block(function, "forin.cond");
                 let body_bb = self.context.append_basic_block(function, "forin.body");
+                let advance_bb = self.context.append_basic_block(function, "forin.next");
                 let end_bb = self.context.append_basic_block(function, "forin.end");
 
                 self.builder
@@ -704,12 +705,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .builder
                     .build_extract_value(opt_sv, 0, "forin.present")
                     .map_err(|e| CodegenError::new(format!("failed to extract present: {e}")))?;
+                let is_present = self.emit_as_bool(&is_present, span)?;
 
                 self.builder
-                    .build_conditional_branch(is_present.into_int_value(), body_bb, end_bb)
+                    .build_conditional_branch(is_present, body_bb, end_bb)
                     .map_err(|e| CodegenError::new(format!("failed for-in branch: {e}")))?;
 
-                self.loop_stack.push((end_bb, cond_bb));
+                self.loop_stack.push((end_bb, advance_bb));
                 self.loop_defers_base.push(self.defers.len());
                 self.builder.position_at_end(body_bb);
 
@@ -781,13 +783,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
                 self.generate_block(body)?;
 
-                let next_val2 = self
-                    .emit_method_call_expression(&iter_expr, &next_ident, &[], false, span)?
-                    .ok_or_else(|| CodegenError::new("next() must return Optional<T>"))?;
-                self.builder
-                    .build_store(next_ptr, next_val2)
-                    .map_err(|e| CodegenError::new(format!("failed to store next result: {e}")))?;
-
                 let body_terminated = self
                     .builder
                     .get_insert_block()
@@ -795,9 +790,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .is_some();
                 if !body_terminated {
                     self.builder
-                        .build_unconditional_branch(cond_bb)
-                        .map_err(|e| CodegenError::new(format!("failed to loop for-in: {e}")))?;
+                        .build_unconditional_branch(advance_bb)
+                        .map_err(|e| CodegenError::new(format!("failed to advance for-in: {e}")))?;
                 }
+
+                self.builder.position_at_end(advance_bb);
+                let next_val2 = self
+                    .emit_method_call_expression(&iter_expr, &next_ident, &[], false, span)?
+                    .ok_or_else(|| CodegenError::new("next() must return Optional<T>"))?;
+                self.builder
+                    .build_store(next_ptr, next_val2)
+                    .map_err(|e| CodegenError::new(format!("failed to store next result: {e}")))?;
+                self.builder
+                    .build_unconditional_branch(cond_bb)
+                    .map_err(|e| CodegenError::new(format!("failed to loop for-in: {e}")))?;
                 self.loop_defers_base.pop();
                 self.loop_stack.pop();
 

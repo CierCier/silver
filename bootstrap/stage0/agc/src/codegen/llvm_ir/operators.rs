@@ -1891,10 +1891,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 return Ok(coerced);
             }
         }
-        if matches!(
-            target_type.kind.as_ref(),
-            ast::TypeKind::Primitive(ast::PrimitiveType::U128)
-        ) && matches!(value, BasicValueEnum::FloatValue(_)) {
+        if type_is_unsigned(target_type) && matches!(value, BasicValueEnum::FloatValue(_)) {
             return self.cast_unsigned_value_to_ast_type(value, target_type, span);
         }
         if source_expr.is_some_and(|expr| self.expression_is_unsigned(expr)) {
@@ -2391,6 +2388,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             (BasicValueEnum::IntValue(int_val), BasicTypeEnum::FloatType(float_ty)) => {
                 self.builder
                     .build_unsigned_int_to_float(int_val, float_ty, "cast.u2f")
+                    .map(|v| v.as_basic_value_enum())
+                    .map_err(|e| {
+                        CodegenError::with_span(format!("unsigned float cast failed: {e}"), *span)
+                    })
+            }
+            (BasicValueEnum::FloatValue(float_val), BasicTypeEnum::IntType(int_ty))
+                if int_ty.get_bit_width() < 128 =>
+            {
+                self.builder
+                    .build_float_to_unsigned_int(float_val, int_ty, "cast.f2u")
                     .map(|v| v.as_basic_value_enum())
                     .map_err(|e| {
                         CodegenError::with_span(format!("unsigned float cast failed: {e}"), *span)

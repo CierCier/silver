@@ -724,6 +724,31 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         };
         let target_data =
             TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
+        let mut drop_variants = Vec::new();
+        for (variant_name, tag_value) in &variants {
+            let types = payload_types.get(variant_name).cloned().unwrap_or_default();
+            let mut drops: Vec<(u32, ast::Type)> = Vec::new();
+            let mut offset: u32 = 0;
+            for pt in &types {
+                let concrete_pt = if substitutions.is_empty() {
+                    pt.clone()
+                } else {
+                    Self::substitute_generic_type(pt, &substitutions)
+                };
+                let llvm_ty = self.lower_basic_type(&concrete_pt)?;
+                if self.type_needs_drop_glue(&concrete_pt, &mut Vec::new())? {
+                    drops.push((offset, concrete_pt.clone()));
+                }
+                offset += target_data.get_abi_size(&llvm_ty) as u32;
+            }
+            if !drops.is_empty() {
+                drop_variants.push((*tag_value, drops));
+            }
+        }
+        if drop_variants.is_empty() {
+            return Ok(());
+        }
+
         let function = self
             .current_fn
             .ok_or_else(|| CodegenError::new("no active function for enum payload drop"))?;
@@ -739,37 +764,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .builder
             .build_struct_gep(struct_ty, var_ptr, 1, "epd.data")
             .map_err(|e| CodegenError::new(format!("enum payload data GEP: {e}")))?;
-        let mut cond_bb = self
+        let mut check_bb = self
             .builder
             .get_insert_block()
             .ok_or_else(|| CodegenError::new("builder is not positioned in a basic block"))?;
         let after_bb = self.context.append_basic_block(function, "epd.after");
-        let mut any = false;
-        // Variants are compared by their stored tag values.
-        for (variant_name, tag_value) in &variants {
-            let types = payload_types.get(variant_name).cloned().unwrap_or_default();
-            // Compute the payload field drops for this variant (by byte offset).
-            let mut drops: Vec<(u32, ast::Type)> = Vec::new();
-            let mut offset: u32 = 0;
-            for pt in &types {
-                let concrete_pt = if substitutions.is_empty() {
-                    pt.clone()
-                } else {
-                    Self::substitute_generic_type(pt, &substitutions)
-                };
-                let llvm_ty = self.lower_basic_type(&concrete_pt)?;
-                if self.type_needs_drop_glue(&concrete_pt, &mut Vec::new())? {
-                    drops.push((offset, concrete_pt.clone()));
-                }
-                offset += target_data.get_abi_size(&llvm_ty) as u32;
-            }
-            if drops.is_empty() {
-                continue;
-            }
-            any = true;
-            // tag == tag_value -> run this variant's drops.
-            let expected = self.context.i16_type().const_int(*tag_value as u64, false);
-            self.builder.position_at_end(cond_bb);
+        let variant_count = drop_variants.len();
+        for (index, (tag_value, drops)) in drop_variants.into_iter().enumerate() {
+            let next_check_bb = if index + 1 == variant_count {
+                after_bb
+            } else {
+                self.context.append_basic_block(function, "epd.check")
+            };
+            let expected = self.context.i16_type().const_int(tag_value as u64, false);
+            self.builder.position_at_end(check_bb);
             let cond = self
                 .builder
                 .build_int_compare(
@@ -781,7 +789,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .map_err(|e| CodegenError::new(format!("enum payload tag compare: {e}")))?;
             let run_bb = self.context.append_basic_block(function, "epd.run");
             self.builder
-                .build_conditional_branch(cond, run_bb, after_bb)
+                .build_conditional_branch(cond, run_bb, next_check_bb)
                 .map_err(|e| CodegenError::new(format!("enum payload branch: {e}")))?;
             self.builder.position_at_end(run_bb);
             for (byte_offset, payload_ty) in drops {
@@ -803,11 +811,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             self.builder
                 .build_unconditional_branch(after_bb)
                 .map_err(|e| CodegenError::new(format!("enum payload join: {e}")))?;
-            cond_bb = after_bb;
+            check_bb = next_check_bb;
         }
-        if any {
-            self.builder.position_at_end(after_bb);
-        }
+        self.builder.position_at_end(after_bb);
         Ok(())
     }
 
