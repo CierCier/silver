@@ -1006,7 +1006,13 @@ impl ExprLowerer {
                 continue;
             }
             SyntaxNode* next_element = (SyntaxNode*)0;
-            u32 element_id = self.lower_sequence_until_comma(element, &next_element);
+            u32 element_id = 0;
+            if (element.kind == NodeKind.Block) {
+                element_id = self.lower_array_initializer(element);
+                next_element = element.next_sibling;
+            } else {
+                element_id = self.lower_sequence_until_comma(element, &next_element);
+            }
             if (element_id == 0) {
                 elements.drop();
                 self.unsupported = true;
@@ -1828,7 +1834,8 @@ impl ExprLowerer {
         // into the assignment path and silently vanishes (stage2
         // map_find_slot_str_u32's `const u8* want`).
         if (start.kind == NodeKind.Token
-            && (start.token_kind == TokenKind.Const || start.token_kind == TokenKind.Mut)) {
+            && (start.token_kind == TokenKind.Const || start.token_kind == TokenKind.Mut
+                || start.token_kind == TokenKind.Volatile)) {
             return true;
         }
         if (start.kind == NodeKind.Token && types_is_primitive_name(start.text)) {
@@ -2011,24 +2018,15 @@ impl ExprLowerer {
                         while (tcur != (SyntaxNode*)0 && tcur != var_node) {
                             if (tcur.kind != NodeKind.Token
                                 || (tcur.token_kind != TokenKind.Const
-                                    && tcur.token_kind != TokenKind.Mut)) {
+                                    && tcur.token_kind != TokenKind.Mut
+                                    && tcur.token_kind != TokenKind.Volatile)) {
                                 append_node_tokens(tcur, &type_text);
                             }
                             tcur = tcur.next_sibling;
                         }
                         SyntaxNode* ext = var_node.next_sibling;
-                        if (ext != (SyntaxNode*)0 && ext != assign_node && ext.kind == NodeKind.Bracket) {
-                            type_text.push((u8)91);
-                            SyntaxNode* digit = ext.first_child;
-                            while (digit != (SyntaxNode*)0) {
-                                if (digit.kind == NodeKind.Token) {
-                                    type_text.push_str(digit.text);
-                                }
-                                digit = digit.next_sibling;
-                            }
-                            type_text.push((u8)93);
-                        }
-                        type_id = type_id_from_text(self.types, type_text.to_str());
+                        type_id = type_id_from_declarator(self.types,
+                            type_text.to_str(), ext);
                         type_text.drop();
                     }
                     SyntaxNode* init_start = assign_node.next_sibling;
@@ -2111,24 +2109,15 @@ impl ExprLowerer {
                     while (tcur != (SyntaxNode*)0 && tcur != var_node) {
                         if (tcur.kind != NodeKind.Token
                             || (tcur.token_kind != TokenKind.Const
-                                && tcur.token_kind != TokenKind.Mut)) {
+                                && tcur.token_kind != TokenKind.Mut
+                                && tcur.token_kind != TokenKind.Volatile)) {
                             append_node_tokens(tcur, &type_text);
                         }
                         tcur = tcur.next_sibling;
                     }
                     SyntaxNode* ext = var_node.next_sibling;
-                    if (ext != (SyntaxNode*)0 && ext != end && ext.kind == NodeKind.Bracket) {
-                        type_text.push((u8)91);
-                        SyntaxNode* digit = ext.first_child;
-                        while (digit != (SyntaxNode*)0) {
-                            if (digit.kind == NodeKind.Token) {
-                                type_text.push_str(digit.text);
-                            }
-                            digit = digit.next_sibling;
-                        }
-                        type_text.push((u8)93);
-                    }
-                    type_id = type_id_from_text(self.types, type_text.to_str());
+                    type_id = type_id_from_declarator(self.types,
+                        type_text.to_str(), ext);
                     type_text.drop();
                 }
                 u32 id = self.pool.add_stmt_let(var_name, type_id, 0, start.span);

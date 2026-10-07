@@ -549,6 +549,92 @@ LLVMOpaqueValue* llvm_const_literal_value(LLVMOpaqueContext* raw_ctx,
     return (LLVMOpaqueValue*)0;
 }
 
+void llvm_const_skip_initializer_value(SyntaxNode** cursor) {
+    SyntaxNode* current = *cursor;
+    if (current == (SyntaxNode*)0) { return; }
+    SyntaxNode* next = current.next_sibling;
+    if (current.kind == NodeKind.Token && current.token_kind == TokenKind.Minus
+        && next != (SyntaxNode*)0 && next.kind == NodeKind.Token
+        && next.token_kind == TokenKind.IntLiteral) {
+        next = next.next_sibling;
+    } else if (current.kind == NodeKind.Parenthesized
+        && next != (SyntaxNode*)0 && next.kind == NodeKind.Token
+        && (next.token_kind == TokenKind.IntLiteral || next.token_kind == TokenKind.FloatLiteral
+            || next.token_kind == TokenKind.CharLiteral || next.token_kind == TokenKind.StringLiteral
+            || next.token_kind == TokenKind.True || next.token_kind == TokenKind.False)) {
+        next = next.next_sibling;
+    }
+    *cursor = next;
+}
+
+LLVMOpaqueValue* llvm_const_array_from_initializer(LLVMOpaqueContext* raw_ctx,
+    LLVMOpaqueModule* module, TypeTable* types, u32 array_type_id,
+    str global_prefix, SyntaxNode** cursor, bool bounded) {
+    TypeEntry* array_entry = types.get(array_type_id);
+    if (array_entry.kind != TypeKind.Array || array_entry.count < 0) {
+        return (LLVMOpaqueValue*)0;
+    }
+    u32 elem_type_id = array_entry.inner;
+    i64 elem_count = array_entry.count;
+    LLVMOpaqueType* elem_ty = llvm_lower_type(raw_ctx, types, elem_type_id);
+    Vec<LLVMOpaqueValue*> values = Vec<LLVMOpaqueValue*>.with_capacity(elem_count);
+    bool const_ok = true;
+    i64 index = 0;
+    while (index < elem_count && const_ok) {
+        while (*cursor != (SyntaxNode*)0 && (*cursor).kind == NodeKind.Token
+            && (*cursor).token_kind == TokenKind.Comma) {
+            *cursor = (*cursor).next_sibling;
+        }
+        if (*cursor == (SyntaxNode*)0) {
+            values.push(LLVMConstNull(elem_ty));
+            index += 1;
+            continue;
+        }
+
+        String element_prefix = llvm_const_global_literal_prefix(global_prefix, "array", index);
+        TypeEntry* elem_entry = types.get(elem_type_id);
+        LLVMOpaqueValue* value = (LLVMOpaqueValue*)0;
+        if (elem_entry.kind == TypeKind.Array) {
+            if ((*cursor).kind == NodeKind.Block) {
+                SyntaxNode* block = *cursor;
+                SyntaxNode* nested_cursor = block.first_child;
+                value = llvm_const_array_from_initializer(raw_ctx, module, types,
+                    elem_type_id, element_prefix.to_str(), &nested_cursor, true);
+                *cursor = block.next_sibling;
+            } else {
+                value = llvm_const_array_from_initializer(raw_ctx, module, types,
+                    elem_type_id, element_prefix.to_str(), cursor, false);
+            }
+        } else {
+            value = llvm_const_literal_value(raw_ctx, module, types, elem_type_id,
+                element_prefix.to_str(), *cursor);
+            llvm_const_skip_initializer_value(cursor);
+        }
+        element_prefix.drop();
+        if (value == (LLVMOpaqueValue*)0) {
+            const_ok = false;
+        } else {
+            values.push(value);
+        }
+        index += 1;
+    }
+    while (*cursor != (SyntaxNode*)0 && (*cursor).kind == NodeKind.Token
+        && (*cursor).token_kind == TokenKind.Comma) {
+        *cursor = (*cursor).next_sibling;
+    }
+    if (bounded && *cursor != (SyntaxNode*)0) { const_ok = false; }
+
+    LLVMOpaqueValue* result = (LLVMOpaqueValue*)0;
+    if (const_ok) {
+        while (values.len() < elem_count) {
+            values.push(LLVMConstNull(elem_ty));
+        }
+        result = LLVMConstArray2(elem_ty, values.data, (u64)elem_count);
+    }
+    values.drop();
+    return result;
+}
+
 struct LlvmGenerator {
     LLVMOpaqueContext* ctx;
     LLVMOpaqueModule* module;
@@ -678,10 +764,8 @@ impl LlvmGenerator {
                                     scan = scan.next_sibling;
                                 }
                                 SyntaxNode* ext = last_ident.next_sibling;
-                                if (ext != (SyntaxNode*)0 && ext.kind == NodeKind.Bracket) {
-                                    append_node_tokens(ext, &field_type_text);
-                                }
-                                u32 field_type_id = type_id_from_text(types, field_type_text.to_str());
+                                u32 field_type_id = type_id_from_declarator(types,
+                                    field_type_text.to_str(), ext);
                                 field_type_text.drop();
                                 LlvmFieldInfo f_info;
                                 f_info.name_id = field_name_id;
@@ -1005,18 +1089,8 @@ impl LlvmGenerator {
                                 g_scan = g_scan.next_sibling;
                             }
                             SyntaxNode* ext = fn_name_node.next_sibling;
-                            if (ext != (SyntaxNode*)0 && ext.kind == NodeKind.Bracket) {
-                                g_text.push((u8)91);
-                                SyntaxNode* digit = ext.first_child;
-                                while (digit != (SyntaxNode*)0) {
-                                    if (digit.kind == NodeKind.Token) {
-                                        g_text.push_str(digit.text);
-                                    }
-                                    digit = digit.next_sibling;
-                                }
-                                g_text.push((u8)93);
-                            }
-                            u32 g_type_id = type_id_from_text(types, g_text.to_str());
+                            u32 g_type_id = type_id_from_declarator(types,
+                                g_text.to_str(), ext);
                             g_text.drop();
                             LLVMOpaqueType* g_llvm_type = llvm_lower_type(self.ctx, types, g_type_id);
                             if (LLVMGetNamedGlobal(self.module, g_name) == (LLVMOpaqueValue*)0) {
@@ -1047,24 +1121,16 @@ impl LlvmGenerator {
                             }
                             continue;
                         }
-                        if (g_scan.kind == NodeKind.Token && g_scan.text != "pub" && g_scan.text != "static" && g_scan.text != "const") {
+                        if (g_scan.kind == NodeKind.Token && g_scan.text != "pub"
+                            && g_scan.text != "static" && g_scan.text != "const"
+                            && g_scan.text != "volatile") {
                             g_text.push_str(g_scan.text);
                         }
                         g_scan = g_scan.next_sibling;
                     }
                     SyntaxNode* ext = id_node.next_sibling;
-                    if (ext != (SyntaxNode*)0 && ext.kind == NodeKind.Bracket) {
-                        g_text.push((u8)91);
-                        SyntaxNode* digit = ext.first_child;
-                        while (digit != (SyntaxNode*)0) {
-                            if (digit.kind == NodeKind.Token) {
-                                g_text.push_str(digit.text);
-                            }
-                            digit = digit.next_sibling;
-                        }
-                        g_text.push((u8)93);
-                    }
-                    u32 g_type_id = type_id_from_text(types, g_text.to_str());
+                    u32 g_type_id = type_id_from_declarator(types,
+                        g_text.to_str(), ext);
                     g_text.drop();
                     if (g_type_id == TYPE_UNKNOWN) { g_type_id = TYPE_I64; }
                     LLVMOpaqueType* g_llvm_type = llvm_lower_type(self.ctx, types, g_type_id);
@@ -1177,57 +1243,12 @@ impl LlvmGenerator {
                                     ctx.note_unresolved("global-init", g_name);
                                 }
                             } else if (g_entry.kind == TypeKind.Array) {
-                                u32 elem_type_id = g_entry.inner;
-                                i64 elem_count = g_entry.count;
-                                LLVMOpaqueType* elem_ty = llvm_lower_type(self.ctx, types, elem_type_id);
-                                Vec<LLVMOpaqueValue*> elem_vals = Vec<LLVMOpaqueValue*>.new();
-                                bool const_ok = true;
-                                SyntaxNode* cur = init_node.first_child;
-                                while (cur != (SyntaxNode*)0 && const_ok) {
-                                    if (cur.kind == NodeKind.Token && cur.token_kind == TokenKind.Comma) {
-                                        cur = cur.next_sibling;
-                                        continue;
-                                    }
-                                    String element_prefix = llvm_const_global_literal_prefix(g_name,
-                                        "array", elem_vals.len());
-                                    LLVMOpaqueValue* elem_val = llvm_const_literal_value(self.ctx, self.module,
-                                        types, elem_type_id, element_prefix.to_str(), cur);
-                                    element_prefix.drop();
-                                    if (elem_val == (LLVMOpaqueValue*)0) {
-                                        const_ok = false;
-                                    } else {
-                                        elem_vals.push(elem_val);
-                                        // Minus+literal and cast+literal forms each
-                                        // span two sibling nodes; skip the
-                                        // literal already consumed.
-                                        SyntaxNode* after = cur.next_sibling;
-                                        bool cast_literal = after != (SyntaxNode*)0
-                                            && after.kind == NodeKind.Token
-                                            && (after.token_kind == TokenKind.IntLiteral
-                                                || after.token_kind == TokenKind.FloatLiteral
-                                                || after.token_kind == TokenKind.CharLiteral
-                                                || after.token_kind == TokenKind.StringLiteral
-                                                || after.token_kind == TokenKind.True
-                                                || after.token_kind == TokenKind.False);
-                                        bool two_node = cast_literal
-                                            && ((cur.kind == NodeKind.Token && cur.token_kind == TokenKind.Minus
-                                                    && after.token_kind == TokenKind.IntLiteral)
-                                                || cur.kind == NodeKind.Parenthesized);
-                                        if (two_node) {
-                                            cur = after;
-                                        }
-                                    }
-                                    cur = cur.next_sibling;
-                                }
-                                if (const_ok && elem_vals.len() <= elem_count) {
-                                    while (elem_vals.len() < elem_count) {
-                                        elem_vals.push(LLVMConstNull(elem_ty));
-                                    }
-                                    g_init = LLVMConstArray2(elem_ty, elem_vals.data, (u64)elem_count);
-                                } else {
+                                SyntaxNode* value_cursor = init_node.first_child;
+                                g_init = llvm_const_array_from_initializer(self.ctx, self.module,
+                                    types, g_type_id, g_name, &value_cursor, true);
+                                if (g_init == (LLVMOpaqueValue*)0) {
                                     ctx.note_unresolved("global-init", g_name);
                                 }
-                                elem_vals.drop();
                             } else {
                                 ctx.note_unresolved("global-init", g_name);
                             }

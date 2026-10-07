@@ -4496,31 +4496,87 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             }
             return LLVMBuildLoad2(ctx.builder, tuple_ty, tuple_slot, "tuple_value");
         }
-        u32 arr_type = llvm_expr_type(ctx, expr_id);
+        u32 arr_type = expected_entry.kind == TypeKind.Array
+            ? expected_type : llvm_expr_type(ctx, expr_id);
         TypeEntry* entry = ctx.types.get(arr_type);
+        if (entry.kind != TypeKind.Array) { return (LLVMOpaqueValue*)0; }
         u32 elem_type = entry.inner;
         if (elem_type == 0 || elem_type == TYPE_UNKNOWN) {
-            elem_type = TYPE_I64;
+            ctx.note_unresolved("array-elem", "unknown element type");
+            return (LLVMOpaqueValue*)0;
         }
+        LLVMOpaqueType* arr_ty = llvm_lower_type(ctx.ctx, ctx.types, arr_type);
         LLVMOpaqueType* elem_ty = llvm_lower_type(ctx.ctx, ctx.types, elem_type);
-        u32 array_count = entry.kind == TypeKind.Array ? (u32)entry.count : element_count;
-        LLVMOpaqueType* arr_ty = LLVMArrayType(elem_ty, array_count);
         LLVMOpaqueValue* slot = LLVMBuildAlloca(ctx.builder, arr_ty, "arr_lit");
         LLVMBuildStore(ctx.builder, LLVMConstNull(arr_ty), slot);
         LLVMOpaqueValue* base = LLVMBuildBitCast(ctx.builder, slot, LLVMPointerTypeInContext(ctx.ctx, (u32)0), "arr_lit_ptr");
+        u32 scalar_type = arr_type;
+        i64 scalar_capacity = 1;
+        while (ctx.types.get(scalar_type).kind == TypeKind.Array) {
+            TypeEntry* dimension = ctx.types.get(scalar_type);
+            scalar_capacity = scalar_capacity * dimension.count;
+            scalar_type = dimension.inner;
+        }
+        LLVMOpaqueType* scalar_ty = llvm_lower_type(ctx.ctx, ctx.types, scalar_type);
+        LLVMOpaqueValue* scalar_base = LLVMBuildBitCast(ctx.builder, slot,
+            LLVMPointerTypeInContext(ctx.ctx, (u32)0), "arr_lit_scalar_ptr");
+        i64 scalar_per_element = scalar_capacity / entry.count;
         u32 elems_start = expr.inner1;
         i64 i = 0;
+        i64 flat_index = 0;
         while (i < (i64)element_count) {
             u32 elem_id = ctx.pool.args.get((i64)elems_start + 1 + i);
-            LLVMOpaqueValue* elem_val = llvm_emit_expr(ctx, elem_id);
-            if (elem_val == (LLVMOpaqueValue*)0) {
-                ctx.note_unresolved("array-elem", "literal");
-                return (LLVMOpaqueValue*)0;
+            AstExpr* element = ctx.pool.get_expr(elem_id);
+            TypeEntry* expected_element = ctx.types.get(elem_type);
+            if (expected_element.kind == TypeKind.Array
+                && element.kind == ExprKind.ArrayLit) {
+                i64 nested_index = flat_index / scalar_per_element;
+                if (flat_index % scalar_per_element != 0) {
+                    nested_index += 1;
+                }
+                if (nested_index >= entry.count) {
+                    ctx.note_unresolved("array-elem", "too many initializers");
+                    return (LLVMOpaqueValue*)0;
+                }
+                u32 saved_expected = ctx.expected_type_id;
+                ctx.expected_type_id = elem_type;
+                LLVMOpaqueValue* nested_ptr = llvm_emit_expr(ctx, elem_id);
+                ctx.expected_type_id = saved_expected;
+                if (nested_ptr == (LLVMOpaqueValue*)0) {
+                    ctx.note_unresolved("array-elem", "nested literal");
+                    return (LLVMOpaqueValue*)0;
+                }
+                LLVMOpaqueType* nested_ty = llvm_lower_type(ctx.ctx, ctx.types, elem_type);
+                LLVMOpaqueValue* nested_val = LLVMBuildLoad2(ctx.builder, nested_ty,
+                    nested_ptr, "nested_array_value");
+                LLVMOpaqueValue* idx = LLVMConstInt(LLVMInt64TypeInContext(ctx.ctx),
+                    (u64)nested_index, 0);
+                LLVMOpaqueValue* elem_ptr = LLVMBuildGEP2(ctx.builder, elem_ty,
+                    base, &idx, 1, "nested_array_gep");
+                LLVMBuildStore(ctx.builder, nested_val, elem_ptr);
+                flat_index = (nested_index + 1) * scalar_per_element;
+            } else {
+                if (flat_index >= scalar_capacity) {
+                    ctx.note_unresolved("array-elem", "too many initializers");
+                    return (LLVMOpaqueValue*)0;
+                }
+                u32 saved_expected = ctx.expected_type_id;
+                ctx.expected_type_id = scalar_type;
+                LLVMOpaqueValue* elem_val = llvm_emit_expr(ctx, elem_id);
+                ctx.expected_type_id = saved_expected;
+                if (elem_val == (LLVMOpaqueValue*)0) {
+                    ctx.note_unresolved("array-elem", "literal");
+                    return (LLVMOpaqueValue*)0;
+                }
+                elem_val = llvm_compat_value(ctx, elem_val,
+                    llvm_expr_type(ctx, elem_id), scalar_type);
+                LLVMOpaqueValue* idx = LLVMConstInt(LLVMInt64TypeInContext(ctx.ctx),
+                    (u64)flat_index, 0);
+                LLVMOpaqueValue* elem_ptr = LLVMBuildGEP2(ctx.builder, scalar_ty,
+                    scalar_base, &idx, 1, "arr_lit_gep");
+                LLVMBuildStore(ctx.builder, elem_val, elem_ptr);
+                flat_index += 1;
             }
-            elem_val = llvm_compat_value(ctx, elem_val, llvm_expr_type(ctx, elem_id), elem_type);
-            LLVMOpaqueValue* idx = LLVMConstInt(LLVMInt64TypeInContext(ctx.ctx), (u64)i, 0);
-            LLVMOpaqueValue* elem_ptr = LLVMBuildGEP2(ctx.builder, elem_ty, base, &idx, 1, "arr_lit_gep");
-            LLVMBuildStore(ctx.builder, elem_val, elem_ptr);
             i += 1;
         }
         return base;

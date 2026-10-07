@@ -444,6 +444,26 @@ u32 type_id_from_text(TypeTable* types, str text) {
     return result;
 }
 
+u32 type_id_from_declarator(TypeTable* types, str base_type, SyntaxNode* suffix) {
+    Vec<SyntaxNode*> dimensions = Vec<SyntaxNode*>.new();
+    SyntaxNode* cursor = suffix;
+    while (cursor != (SyntaxNode*)0 && cursor.kind == NodeKind.Bracket) {
+        dimensions.push(cursor);
+        cursor = cursor.next_sibling;
+    }
+
+    String type_text = String.from_str(base_type);
+    i64 i = dimensions.len();
+    while (i > 0) {
+        i -= 1;
+        append_node_tokens(dimensions.get(i), &type_text);
+    }
+    u32 result = type_id_from_text(types, type_text.to_str());
+    type_text.drop();
+    dimensions.drop();
+    return result;
+}
+
 bool enum_payload_type_text(SyntaxNode* root, str enum_name, str variant_name,
                             i64 field_index, String* out) {
     SyntaxNode* item = find_enum_item(root, enum_name);

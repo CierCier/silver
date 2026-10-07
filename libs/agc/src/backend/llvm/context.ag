@@ -204,25 +204,17 @@ impl LlvmContext {
                             }
                             continue;
                         }
-                        if (g_scan.kind == NodeKind.Token && g_scan.text != "pub" && g_scan.text != "static" && g_scan.text != "const") {
+                        if (g_scan.kind == NodeKind.Token && g_scan.text != "pub"
+                            && g_scan.text != "static" && g_scan.text != "const"
+                            && g_scan.text != "volatile") {
                             g_text.push_str(g_scan.text);
                         }
                         g_scan = g_scan.next_sibling;
                     }
                     SyntaxNode* ext = id_node.next_sibling;
-                    if (ext != (SyntaxNode*)0 && ext.kind == NodeKind.Bracket) {
-                        g_text.push((u8)91);
-                        SyntaxNode* digit = ext.first_child;
-                        while (digit != (SyntaxNode*)0) {
-                            if (digit.kind == NodeKind.Token) {
-                                g_text.push_str(digit.text);
-                            }
-                            digit = digit.next_sibling;
-                        }
-                        g_text.push((u8)93);
-                    }
                     info.is_global = true;
-                    info.type_id = type_id_from_text(self.types, g_text.to_str());
+                    info.type_id = type_id_from_declarator(self.types,
+                        g_text.to_str(), ext);
                     g_text.drop();
                     return info;
                 }
@@ -263,19 +255,9 @@ impl LlvmContext {
                                     g_scan = g_scan.next_sibling;
                                 }
                                 SyntaxNode* ext = fn_name_node.next_sibling;
-                                if (ext != (SyntaxNode*)0 && ext.kind == NodeKind.Bracket) {
-                                    g_text.push((u8)91);
-                                    SyntaxNode* digit = ext.first_child;
-                                    while (digit != (SyntaxNode*)0) {
-                                        if (digit.kind == NodeKind.Token) {
-                                            g_text.push_str(digit.text);
-                                        }
-                                        digit = digit.next_sibling;
-                                    }
-                                    g_text.push((u8)93);
-                                }
                                 info.is_global = true;
-                                info.type_id = type_id_from_text(self.types, g_text.to_str());
+                                info.type_id = type_id_from_declarator(self.types,
+                                    g_text.to_str(), ext);
                                 g_text.drop();
                                 return info;
                             }
