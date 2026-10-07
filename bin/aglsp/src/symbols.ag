@@ -232,4 +232,3 @@ String compute_definition(str text, str uri, i64 line, i64 character) {
     pool.destroy();
     return move resp;
 }
-

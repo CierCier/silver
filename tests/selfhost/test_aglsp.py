@@ -17,7 +17,7 @@ def read_msg(proc: subprocess.Popen) -> dict:
         if not chunk:
             raise EOFError("server closed stdout")
         header += chunk
-    
+
     # parse Content-Length
     lines = header.decode("utf-8").split("\r\n")
     length = 0
@@ -25,7 +25,7 @@ def read_msg(proc: subprocess.Popen) -> dict:
         if line.startswith("Content-Length:"):
             length = int(line.split(":")[1].strip())
             break
-    
+
     body = proc.stdout.read(length)
     return json.loads(body.decode("utf-8"))
 

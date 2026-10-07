@@ -34,4 +34,3 @@ those fields must continue to use stage0-produced artifacts.
 publication commands write `compiler_version="foreign"` and
 `target_triple="unknown"`. Stage0 treats these as portable markers, skipping
 compiler/source freshness and target-triple rejection for stage1 projections.
-

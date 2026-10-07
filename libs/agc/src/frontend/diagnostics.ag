@@ -228,4 +228,3 @@ String render_diagnostic_span(Severity severity, Span span, str message, str pat
     out.push_str("\n");
     return out;
 }
-
