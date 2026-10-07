@@ -4463,7 +4463,8 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
     if (expr.kind == ExprKind.ArrayLit) {
         u32 expected_type = ctx.types.resolve_subst(ctx.expected_type_id);
         TypeEntry* expected_entry = ctx.types.get(expected_type);
-        if (expected_entry.kind != TypeKind.Tuple && expr.inferred_type != TYPE_UNKNOWN) {
+        if (expected_entry.kind != TypeKind.Tuple && expected_entry.kind != TypeKind.Array
+            && expr.inferred_type != TYPE_UNKNOWN) {
             u32 inferred_type = ctx.types.resolve_subst(expr.inferred_type);
             TypeEntry* inferred_entry = ctx.types.get(inferred_type);
             if (inferred_entry.kind == TypeKind.Tuple) {
