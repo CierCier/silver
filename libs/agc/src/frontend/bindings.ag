@@ -92,6 +92,54 @@ bool binding_has_function_type(Binding* binding) {
 }
 
 String binding_parameter_type_text(Binding* binding) {
+    if (!binding_has_function_type(binding)
+        && binding != (Binding*)0
+        && binding.type_start != (SyntaxNode*)0
+        && binding.type_end != (SyntaxNode*)0) {
+        Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+        SyntaxNode* cursor = binding.type_start;
+        while (cursor != (SyntaxNode*)0 && cursor != binding.type_end) {
+            binding_collect_leaves(cursor, &leaves);
+            cursor = cursor.next_sibling;
+        }
+
+        i64 start = 0;
+        i64 end = leaves.len();
+        while (start < end && projection_is_qualifier(leaves.get(start))) {
+            start += 1;
+        }
+        if (binding.declared_type.kind == ProjectionTypeKind.Pointer) {
+            SyntaxNode* last = end > start ? leaves.get(end - 1) : (SyntaxNode*)0;
+            if (last != (SyntaxNode*)0 && last.token_kind == TokenKind.Star) {
+                end -= 1;
+            }
+        } else if (binding.declared_type.kind == ProjectionTypeKind.Reference) {
+            if (start < end && leaves.get(start).token_kind == TokenKind.BitwiseAnd) {
+                start += 1;
+                if (start < end && leaves.get(start).token_kind == TokenKind.Mut) {
+                    start += 1;
+                }
+                while (start < end && projection_is_qualifier(leaves.get(start))) {
+                    start += 1;
+                }
+            } else if (end > start && leaves.get(end - 1).token_kind == TokenKind.BitwiseAnd) {
+                end -= 1;
+            }
+        }
+
+        String text = String.new();
+        i64 i = start;
+        while (i < end) {
+            text.push_str(leaves.get(i).text);
+            i += 1;
+        }
+        leaves.drop();
+        if (text.len() > 0) {
+            return move text;
+        }
+        text.drop();
+        return binding_declared_type_text(&binding.declared_type);
+    }
     if (!binding_has_function_type(binding)) {
         return binding_declared_type_text(&binding.declared_type);
     }

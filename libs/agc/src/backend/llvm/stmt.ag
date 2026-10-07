@@ -117,13 +117,23 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
         // Zero-initialize every local, mirroring stage0: partially assigned
         // values must read as zero/null so promoted whole-flag drops never
         // free garbage siblings (unassigned fields are never destructed).
-        LLVMBuildStore(ctx.builder, LLVMConstNull(llvm_ty), ptr);
+        TypeEntry* local_entry = ctx.types.get(type_id);
+        if (local_entry.kind == TypeKind.Array) {
+            LLVMOpaqueType* byte_ty = LLVMInt8TypeInContext(ctx.ctx);
+            LLVMOpaqueType* size_ty = LLVMInt64TypeInContext(ctx.ctx);
+            u64 size = llvm_target_type_size(ctx, type_id);
+            u32 align = (u32)llvm_target_type_align(ctx, type_id);
+            LLVMBuildMemSet(ctx.builder, ptr, LLVMConstInt(byte_ty, 0, 0),
+                            LLVMConstInt(size_ty, size, 0), align);
+        } else {
+            LLVMBuildStore(ctx.builder, LLVMConstNull(llvm_ty), ptr);
+        }
         // A copy initializer transfers drop ownership to the new local: the
         // bits stay readable from the source, but only the destination
         // drops. Clearing runs before add_local so a shadowing `let x = x`
         // resolves to the outer source. Temps and untracked sources are
         // unaffected.
-        llvm_clear_copy_source(ctx, stmt.inner1);
+        llvm_clear_copy_source(ctx, stmt.inner1, true);
         ctx.add_local(var_name_id, ptr, type_id, true);
 
         if (stmt.inner1 != 0) {
@@ -218,7 +228,7 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
             // evaluated above, which keeps self-assignment sound. A copied
             // RHS transfers ownership to the target; the source stays
             // readable but no longer drops.
-            llvm_clear_copy_source(ctx, stmt.inner1);
+            llvm_clear_copy_source(ctx, stmt.inner1, true);
             llvm_emit_assign_predrop(ctx, stmt.inner0, stmt.inner1);
             LLVMBuildStore(ctx.builder, val, target_ptr);
             llvm_mark_assign_live(ctx, stmt.inner0);

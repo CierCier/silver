@@ -47,11 +47,20 @@ def main() -> int:
         executed = subprocess.run(
             [str(output)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
         )
-        expected = "escaped {}: -12 | 34 | 1.25 | true | x\n"
-        if executed.returncode != 0 or executed.stdout != expected:
+        expected = (
+            "escaped {}: -12 | 34 | 1.25 | true | x\n"
+            "label: 73\nstatus: Ready\nprint:7|println:8\n"
+        )
+        expected_stderr = "eprint:9|eprintln:10\n"
+        if (
+            executed.returncode != 0
+            or executed.stdout != expected
+            or executed.stderr != expected_stderr
+        ):
             raise AssertionError(
                 f"native @format output mismatch: rc={executed.returncode}, "
-                f"stdout={executed.stdout!r}, stderr={executed.stderr!r}, expected={expected!r}"
+                f"stdout={executed.stdout!r}, expected_stdout={expected!r}, "
+                f"stderr={executed.stderr!r}, expected_stderr={expected_stderr!r}"
             )
     return 0
 

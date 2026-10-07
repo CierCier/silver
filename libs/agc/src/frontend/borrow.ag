@@ -402,6 +402,59 @@ Place borrow_place(BorrowAnalyzer* analyzer, Vec<SyntaxNode*>* leaves, i64 root_
     return Place.with_projections(local_id, projections_start, projections_count);
 }
 
+bool borrow_receiver_contains_call(Vec<SyntaxNode*>* leaves, i64 root_index, i64 method_index) {
+    i64 i = root_index + 1;
+    while (i + 1 < method_index) {
+        SyntaxNode* candidate = leaves.get(i);
+        if (candidate.kind == NodeKind.Token && candidate.token_kind == TokenKind.Identifier
+            && leaves.get(i - 1).token_kind == TokenKind.Dot
+            && candidate.next_sibling != (SyntaxNode*)0
+            && candidate.next_sibling.kind == NodeKind.Parenthesized) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+bool borrow_method_args_call_same_receiver(Vec<SyntaxNode*>* leaves,
+                                          i64 receiver_root, i64 method_index) {
+    SyntaxNode* args = leaves.get(method_index).next_sibling;
+    if (args == (SyntaxNode*)0 || args.kind != NodeKind.Parenthesized) {
+        return false;
+    }
+    i64 args_end = -1;
+    i64 i = method_index + 1;
+    while (i < leaves.len()) {
+        SyntaxNode* candidate = leaves.get(i);
+        if (candidate.span.start >= args.span.start && candidate.span.end <= args.span.end) {
+            args_end = i;
+        }
+        i += 1;
+    }
+    i = method_index + 1;
+    while (i <= args_end) {
+        SyntaxNode* candidate = leaves.get(i);
+        if (candidate.token_kind == TokenKind.Identifier && i >= 2
+            && leaves.get(i - 1).token_kind == TokenKind.Dot
+            && candidate.next_sibling != (SyntaxNode*)0
+            && candidate.next_sibling.kind == NodeKind.Parenthesized) {
+            i64 nested_root = i - 2;
+            while (nested_root >= 2
+                && leaves.get(nested_root - 1).token_kind == TokenKind.Dot
+                && leaves.get(nested_root - 2).token_kind == TokenKind.Identifier) {
+                nested_root -= 2;
+            }
+            if (borrow_text_equals(leaves.get(nested_root).text,
+                                   leaves.get(receiver_root).text)) {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    return false;
+}
+
 i64 borrow_method_receiver_kind_in(SyntaxNode* node, str method) {
     if (node == (SyntaxNode*)0) {
         return -1;
@@ -490,7 +543,11 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
                 receiver_root -= 2;
             }
             i64 receiver_mode = borrow_method_receiver_kind(tree, node.text);
-            if (receiver_mode >= 1) {
+            bool shared_call_argument = receiver_mode == 2
+                && borrow_method_args_call_same_receiver(&leaves, receiver_root, i);
+            if (receiver_mode >= 1
+                && !borrow_receiver_contains_call(&leaves, receiver_root, i)
+                && !shared_call_argument) {
                 Place receiver = borrow_place(analyzer, &leaves, receiver_root, i - 1);
                 LoanKind receiver_kind = receiver_mode == 2 ? LoanKind.Mutable : LoanKind.Shared;
                 analyzer.add(move receiver, leaves.get(receiver_root).text, leaves.get(receiver_root).span,

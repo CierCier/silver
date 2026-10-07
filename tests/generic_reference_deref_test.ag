@@ -1,0 +1,14 @@
+import std.test;
+
+bool matches_reference<T>(T value, &T reference) {
+    return value == *reference;
+}
+
+i32 main() {
+    i32 values[2];
+    values[0] = 42;
+    values[1] = 1;
+    assert_true(matches_reference(values[0], &values[0]),
+                "generic reference dereference uses the pointee width");
+    return done();
+}

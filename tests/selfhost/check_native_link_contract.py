@@ -35,7 +35,14 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="silver-native-link-contract-") as temporary:
         root = pathlib.Path(temporary)
         source = root / "main.ag"
-        source.write_text("i32 main() { return 0; }\n")
+        source.write_text(
+            '#[link("LLVM-22")]\n'
+            'extern "C" { void LLVMContextDispose(i8* context); }\n'
+            "i32 main() { return 0; }\n"
+        )
+        llvm_prefix = root / "llvm"
+        llvm_lib_dir = llvm_prefix / "lib"
+        llvm_lib_dir.mkdir(parents=True)
         capture = root / "link.json"
         runtime = root / "runtime.json"
         linker = root / "fake-linker"
@@ -71,6 +78,7 @@ def main() -> int:
             "SILVER_USE_MOLD": "1",
             "SILVER_DYNAMIC_LINKER": "/test/ld-linux.so",
             "SILVER_STAGE1_CC": str(linker_query),
+            "LLVM_SYS_221_PREFIX": str(llvm_prefix),
             "LINK_CAPTURE": str(capture),
             "RUNTIME_CAPTURE": str(runtime),
         })
@@ -90,7 +98,8 @@ def main() -> int:
         if invocation["executable"] != str(linker):
             raise AssertionError(f"SILVER_LINKER executable was not selected: {invocation!r}")
         argv = invocation["args"]
-        required = ["-o", str(output), "-L", str(root), "-rpath", str(root), "-l", "sample",
+        required = ["-o", str(output), "-L", str(root), "-rpath", str(root),
+                    "-L", str(llvm_lib_dir), "-rpath", str(llvm_lib_dir), "-l", "sample",
                     "--allow-shlib-undefined", "--dynamic-linker", "/test/ld-linux.so"]
         for item in required:
             if item not in argv:

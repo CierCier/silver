@@ -58,16 +58,18 @@ inlined during lowering are included in dependency keys.
 `run_native_no_stage0.sh /path/to/agc-stage1` is the direct native correctness
 gate. It points `SILVER_STAGE0` at a missing path, sets
 `SILVER_STAGE1_NATIVE=1`, runs the native backend and stage2 checks, then runs
-focused ownership, loop-stack, and runtime fixtures. The broad no-stage0 corpus
-remains exploratory while unsupported native features are tracked. Its current
-249-fixture local run has 154 passed, 93 failed, and 2 skipped. The allocator,
-consuming-for-in, reference-reborrow, SHA-256, unsigned-widening, packed-layout,
-collection-drop, and nested enum-payload regressions now pass. The nested
-enum-payload case verifies stage0 and native stage1 both cascade through wrapper
-payload fields. The native corpus improves from 153/94/2 to 154/93/2 with no
-new failures. The remaining failures are tracked in the unsupported-feature
-and runtime-correctness backlog. This gate is not currently wired into CI while
-native support is changing rapidly.
+focused ownership, loop-stack, and runtime fixtures. The gate currently passes
+56 focused fixtures and builds/runs stage2 with stage0 unavailable. The broad
+no-stage0 corpus remains exploratory: the latest Linux run had 216 passed,
+40 failed, and 3 skipped (259 results). A fresh stage0 baseline had 255 passed,
+1 failed, and 3 skipped; its only failure was IPv6 UDP bind. Native failures
+include unsupported defer/launch, macro/reflection, variadic, nested-array,
+binary-artifact, and volatile paths, plus remaining import cases, runtime
+mismatches, and local networking timeouts. Native stage1 is not yet at 1:1
+behavioral parity. Cyclic imports, selected free-function aliases, nested
+enum-payloads, and scalar matches verify specific supported paths, but do not
+imply full corpus parity. This gate is not currently wired into CI while native
+support is changing rapidly.
 
 `check_native_enum_layout.py` disables the stage0 bridge and checks small and
 String payloads in `Optional` and both `Result` variants. It also checks empty
@@ -76,12 +78,12 @@ not prove native ownership cleanup or a working stage2 compiler.
 
 `check_stage2.py` builds stage2 with the native stage1 backend while stage0 is
 unavailable. It then runs stage2's help, version, lexer, parser, and checker on
-an input exceeding 128 tokens, and builds and executes six programs with stage2.
-These cover arithmetic and control flow, generic free functions, function
-pointers, struct arrays, and nested aggregate layouts. The nested-layout case
-also exercises ownership analysis after initializing its move-origin storage.
-This proves those stage2 paths. It does not cover the full native corpus or
-stage3 self-compilation.
+an input exceeding 128 tokens. It builds and executes stage2 programs covering
+arithmetic and control flow, generic calls and returns, function pointers,
+aggregate layouts and ownership, reference dereferences, pointer outputs, and
+scalar and enum matches; it also checks that invalid Drop-ancestor moves are
+rejected. This proves those stage2 paths. It does not cover the full native
+corpus or stage3 self-compilation.
 
 `check_native_layout.py` checks target ABI sizes for i128, nested, generic, and
 packed generic structs, and arrays. `check_generic_function_native.py` exercises

@@ -151,15 +151,22 @@ impl ExprLowerer {
             self.unsupported = true;
             return 0;
         }
-        // Literal patterns: single int/bool/char literal.
+        // Literal patterns: a single scalar literal.
         if (start.kind == NodeKind.Token && start.next_sibling == end
             && (start.token_kind == TokenKind.IntLiteral || start.token_kind == TokenKind.True
-                || start.token_kind == TokenKind.False || start.token_kind == TokenKind.CharLiteral)) {
+                || start.token_kind == TokenKind.False || start.token_kind == TokenKind.CharLiteral
+                || start.token_kind == TokenKind.FloatLiteral || start.token_kind == TokenKind.StringLiteral)) {
             *kind_out = MatchPatternKind.Literal;
             if (start.token_kind == TokenKind.IntLiteral) {
                 u32 val_id = self.names.intern(start.text);
                 u32 lit_type = int_literal_fits_i32(start.text) ? TYPE_I32 : TYPE_I64;
                 *literal_out = self.pool.add_literal_val(lit_type, val_id, start.span);
+            } else if (start.token_kind == TokenKind.FloatLiteral) {
+                u32 val_id = self.names.intern(start.text);
+                *literal_out = self.pool.add_literal_val(TYPE_F64, val_id, start.span);
+            } else if (start.token_kind == TokenKind.StringLiteral) {
+                u32 val_id = self.names.intern(start.text);
+                *literal_out = self.pool.add_literal_val(TYPE_STR, val_id, start.span);
             } else if (start.token_kind == TokenKind.True) {
                 u32 val_id = self.names.intern("true");
                 *literal_out = self.pool.add_literal_val(TYPE_BOOL, val_id, start.span);
@@ -261,6 +268,30 @@ impl ExprLowerer {
         }
         u32 scrutinee = self.lower_sequence(match_token.next_sibling, block);
         u32 arms_start = (u32)self.pool.arms.len();
+        u32 total_arms = 0;
+        SyntaxNode* count_cursor = block.first_child;
+        while (count_cursor != (SyntaxNode*)0) {
+            while (count_cursor != (SyntaxNode*)0
+                && count_cursor.kind == NodeKind.Token
+                && (count_cursor.token_kind == TokenKind.Comma
+                    || count_cursor.token_kind == TokenKind.Semicolon)) {
+                count_cursor = count_cursor.next_sibling;
+            }
+            if (count_cursor == (SyntaxNode*)0) { break; }
+            total_arms += 1;
+            while (count_cursor != (SyntaxNode*)0
+                && !(count_cursor.kind == NodeKind.Token
+                     && (count_cursor.token_kind == TokenKind.Comma
+                         || count_cursor.token_kind == TokenKind.Semicolon))) {
+                count_cursor = count_cursor.next_sibling;
+            }
+        }
+        u32 reserved_arm = 0;
+        while (reserved_arm < total_arms) {
+            self.pool.add_match_arm(MatchPatternKind.Wildcard, 0, 0, 0, 0,
+                                    0, 0, 0, 0, match_token.span);
+            reserved_arm += 1;
+        }
         u32 arms_count = 0;
         SyntaxNode* cursor = block.first_child;
         while (cursor != (SyntaxNode*)0) {
@@ -345,8 +376,17 @@ impl ExprLowerer {
                     }
                 }
             }
-            self.pool.add_match_arm(pattern_kind, 0, variant_id, bindings_start, bindings_count,
-                                    literal_id, guard_id, value_id, body_stmt_id, cursor.span);
+            MatchArm* lowered_arm = self.pool.get_arm(arms_start + arms_count);
+            lowered_arm.pattern = pattern_kind;
+            lowered_arm.enum_name_id = 0;
+            lowered_arm.variant_name_id = variant_id;
+            lowered_arm.bindings_start = bindings_start;
+            lowered_arm.bindings_count = bindings_count;
+            lowered_arm.literal_id = literal_id;
+            lowered_arm.guard_id = guard_id;
+            lowered_arm.value_id = value_id;
+            lowered_arm.body_stmt_id = body_stmt_id;
+            lowered_arm.span = cursor.span;
             arms_count += 1;
             cursor = value_end;
             if (cursor != (SyntaxNode*)0) {
@@ -634,21 +674,15 @@ impl ExprLowerer {
         return true;
     }
 
-    u32 lower_format(ExprLowerer* self, SyntaxNode* name_node, SyntaxNode** next_out) {
-        SyntaxNode* paren = name_node.next_sibling;
-        *next_out = (SyntaxNode*)0;
-        if (paren == (SyntaxNode*)0 || paren.kind != NodeKind.Parenthesized) {
-            self.unsupported = true;
-            return 0;
-        }
-        SyntaxNode* format_node = paren.first_child;
+    u32 lower_format_values(ExprLowerer* self, SyntaxNode* format_node,
+                            SyntaxNode* first_arg, Span span) {
         if (format_node == (SyntaxNode*)0 || format_node.kind != NodeKind.Token
             || format_node.token_kind != TokenKind.StringLiteral) {
             self.unsupported = true;
             return 0;
         }
         Vec<u32> temp_args = Vec<u32>.new();
-        SyntaxNode* arg = format_node.next_sibling;
+        SyntaxNode* arg = first_arg;
         if (arg != (SyntaxNode*)0 && arg.kind == NodeKind.Token
             && arg.token_kind == TokenKind.Comma) {
             arg = arg.next_sibling;
@@ -703,8 +737,122 @@ impl ExprLowerer {
         }
         temp_args.drop();
         u32 format_id = self.names.intern(format_node.text);
+        return self.pool.add_format(format_id, args_start, (u32)placeholders, span);
+    }
+
+    u32 lower_format(ExprLowerer* self, SyntaxNode* name_node, SyntaxNode** next_out) {
+        SyntaxNode* paren = name_node.next_sibling;
+        *next_out = (SyntaxNode*)0;
+        if (paren == (SyntaxNode*)0 || paren.kind != NodeKind.Parenthesized) {
+            self.unsupported = true;
+            return 0;
+        }
+        SyntaxNode* format_node = paren.first_child;
+        u32 format_id = self.lower_format_values(format_node,
+            format_node == (SyntaxNode*)0 ? (SyntaxNode*)0 : format_node.next_sibling,
+            name_node.span);
+        if (format_id == 0) {
+            return 0;
+        }
         *next_out = paren.next_sibling;
-        return self.pool.add_format(format_id, args_start, (u32)placeholders, name_node.span);
+        return format_id;
+    }
+
+    void lower_format_append_newline(ExprLowerer* self, u32 format_id) {
+        AstExpr* format_expr = self.pool.get_expr(format_id);
+        str raw_format = self.names.get(format_expr.inner0);
+        i64 raw_len = strlen(raw_format);
+        if (raw_len < 2) {
+            self.unsupported = true;
+            return;
+        }
+        String newline_format = String.new();
+        i64 i = 0;
+        while (i < raw_len - 1) {
+            newline_format.push(raw_format[i]);
+            i += 1;
+        }
+        newline_format.push((u8)'\\');
+        newline_format.push((u8)'n');
+        newline_format.push((u8)'"');
+        format_expr.inner0 = self.names.intern(newline_format.to_str());
+        newline_format.drop();
+    }
+
+    u32 lower_fprint(ExprLowerer* self, SyntaxNode* name_node, SyntaxNode** next_out) {
+        SyntaxNode* paren = name_node.next_sibling;
+        *next_out = (SyntaxNode*)0;
+        if (paren == (SyntaxNode*)0 || paren.kind != NodeKind.Parenthesized
+            || paren.first_child == (SyntaxNode*)0) {
+            self.unsupported = true;
+            return 0;
+        }
+        SyntaxNode* writer_end = (SyntaxNode*)0;
+        u32 writer_id = self.lower_sequence_until_comma(paren.first_child, &writer_end);
+        if (writer_id == 0 || writer_end == (SyntaxNode*)0
+            || writer_end.kind != NodeKind.Token || writer_end.token_kind != TokenKind.Comma) {
+            self.unsupported = true;
+            return 0;
+        }
+        SyntaxNode* format_node = writer_end.next_sibling;
+        u32 format_id = self.lower_format_values(format_node,
+            format_node == (SyntaxNode*)0 ? (SyntaxNode*)0 : format_node.next_sibling,
+            name_node.span);
+        if (format_id == 0) {
+            return 0;
+        }
+        *next_out = paren.next_sibling;
+        return self.pool.add_fprint(writer_id, format_id, name_node.span);
+    }
+
+    u32 lower_memory_builtin(ExprLowerer* self, SyntaxNode* name_node,
+                             SyntaxNode** next_out) {
+        SyntaxNode* paren = name_node.next_sibling;
+        *next_out = (SyntaxNode*)0;
+        if (paren == (SyntaxNode*)0 || paren.kind != NodeKind.Parenthesized) {
+            self.unsupported = true;
+            return 0;
+        }
+
+        Vec<u32> temp_args = Vec<u32>.new();
+        SyntaxNode* arg = paren.first_child;
+        while (arg != (SyntaxNode*)0) {
+            if (arg.kind == NodeKind.Token && arg.token_kind == TokenKind.Comma) {
+                arg = arg.next_sibling;
+                continue;
+            }
+            SyntaxNode* next_arg = (SyntaxNode*)0;
+            u32 arg_id = self.lower_sequence_until_comma(arg, &next_arg);
+            if (arg_id == 0 || temp_args.len() >= 3) {
+                temp_args.drop();
+                self.unsupported = true;
+                return 0;
+            }
+            temp_args.push(arg_id);
+            arg = next_arg;
+        }
+        if (temp_args.len() != 3) {
+            temp_args.drop();
+            self.unsupported = true;
+            return 0;
+        }
+
+        u32 args_start = (u32)self.pool.args.len();
+        i64 i = 0;
+        while (i < temp_args.len()) {
+            self.pool.args.push(temp_args.get(i));
+            i += 1;
+        }
+        temp_args.drop();
+
+        MemoryBuiltinKind kind = MemoryBuiltinKind.Memcpy;
+        if (strcmp(name_node.text, "memmove") == 0) {
+            kind = MemoryBuiltinKind.Memmove;
+        } else if (strcmp(name_node.text, "memset") == 0) {
+            kind = MemoryBuiltinKind.Memset;
+        }
+        *next_out = paren.next_sibling;
+        return self.pool.add_memory_builtin(kind, args_start, name_node.span);
     }
 
     u32 lower_assert(ExprLowerer* self, SyntaxNode* at_node, SyntaxNode* name_node,
@@ -784,7 +932,10 @@ impl ExprLowerer {
             pi += 1;
         }
         pairs.drop();
-        u32 name_id = self.names.intern(struct_name);
+        u32 name_id = 0;
+        if (struct_name != (str)0) {
+            name_id = self.names.intern(struct_name);
+        }
         return self.pool.add_struct_lit(name_id, fields_start, field_count, block.span);
     }
 
@@ -906,6 +1057,18 @@ impl ExprLowerer {
                 && strcmp(name_node.text, "format") == 0) {
                 return self.lower_format(name_node, next_out);
             }
+            if (name_node != (SyntaxNode*)0 && name_node.kind == NodeKind.Token
+                && name_node.token_kind == TokenKind.Identifier
+                && strcmp(name_node.text, "fprint") == 0) {
+                return self.lower_fprint(name_node, next_out);
+            }
+            if (name_node != (SyntaxNode*)0 && name_node.kind == NodeKind.Token
+                && name_node.token_kind == TokenKind.Identifier
+                && (strcmp(name_node.text, "memcpy") == 0
+                    || strcmp(name_node.text, "memmove") == 0
+                    || strcmp(name_node.text, "memset") == 0)) {
+                return self.lower_memory_builtin(name_node, next_out);
+            }
             // Builtin @hash(x): hash a value to i64 (backend emits
             // hash_str/hash_bytes from std.hash). Exactly one argument.
             if (name_node != (SyntaxNode*)0 && name_node.kind == NodeKind.Token
@@ -930,21 +1093,31 @@ impl ExprLowerer {
             }
             if (name_node != (SyntaxNode*)0 && name_node.kind == NodeKind.Token
                 && name_node.token_kind == TokenKind.Identifier
-                && strcmp(name_node.text, "println") == 0) {
+                && (strcmp(name_node.text, "print") == 0
+                    || strcmp(name_node.text, "println") == 0
+                    || strcmp(name_node.text, "eprint") == 0
+                    || strcmp(name_node.text, "eprintln") == 0)) {
                 SyntaxNode* dummy_next = (SyntaxNode*)0;
                 u32 fmt_id = self.lower_format(name_node, &dummy_next);
                 if (fmt_id == 0) {
                     *next_out = (SyntaxNode*)0;
                     return 0;
                 }
-                u32 to_str_args = (u32)self.pool.args.len();
-                self.pool.args.push((u32)0);
-                u32 str_call = self.pool.add_method_call(fmt_id, self.names.intern("to_str"), to_str_args, name_node.span);
-                u32 println_var = self.pool.add_var(self.names.intern("println"), name_node.span);
-                u32 call_args = (u32)self.pool.args.len();
-                self.pool.args.push(str_call);
+                bool newline = strcmp(name_node.text, "println") == 0
+                    || strcmp(name_node.text, "eprintln") == 0;
+                if (newline) {
+                    self.lower_format_append_newline(fmt_id);
+                    if (self.unsupported) {
+                        *next_out = (SyntaxNode*)0;
+                        return 0;
+                    }
+                }
+                str writer_name = strcmp(name_node.text, "eprint") == 0
+                    || strcmp(name_node.text, "eprintln") == 0
+                    ? "STDERR" : "STDOUT";
+                u32 writer_id = self.pool.add_var(self.names.intern(writer_name), name_node.span);
                 *next_out = dummy_next;
-                return self.pool.add_call(println_var, call_args, 1, name_node.span);
+                return self.pool.add_fprint(writer_id, fmt_id, name_node.span);
             }
             if (name_node != (SyntaxNode*)0 && name_node.kind == NodeKind.Token
                 && name_node.token_kind == TokenKind.Identifier
@@ -1255,9 +1428,7 @@ impl ExprLowerer {
                 String full = String.new();
                 SyntaxNode* part = node;
                 while (part != (SyntaxNode*)0 && part != greater.next_sibling) {
-                    if (part.kind == NodeKind.Token) {
-                        full.push_str(part.text);
-                    }
+                    append_node_tokens(part, &full);
                     part = part.next_sibling;
                 }
                 u32 receiver_id = self.pool.add_var(self.names.intern(full.to_str()), node.span);
@@ -1561,8 +1732,17 @@ impl ExprLowerer {
         i64 ident_count = 0;
         bool has_dot = false;
         bool has_angle = false;
+        bool has_pointer_or_ref = start.kind == NodeKind.Token
+            && (start.token_kind == TokenKind.BitwiseAnd || start.token_kind == TokenKind.Star);
+        bool has_primitive_type = false;
         while (cursor != limit && cursor != (SyntaxNode*)0) {
             if (cursor.kind == NodeKind.Token) {
+                if (cursor.token_kind == TokenKind.Question) {
+                    return false;
+                }
+                if (types_is_primitive_name(cursor.text)) {
+                    has_primitive_type = true;
+                }
                 if (cursor.token_kind == TokenKind.Dot) {
                     has_dot = true;
                 }
@@ -1572,10 +1752,20 @@ impl ExprLowerer {
                 if (cursor.token_kind == TokenKind.Less || strcmp(cursor.text, "<") == 0) {
                     has_angle = true;
                 }
+                if (cursor.token_kind == TokenKind.Greater
+                    && cursor.next_sibling != limit
+                    && cursor.next_sibling != (SyntaxNode*)0
+                    && cursor.next_sibling.kind == NodeKind.Parenthesized) {
+                    SyntaxNode* function_name = cursor.next_sibling.next_sibling;
+                    if (function_name == limit || !node_is_identifier(function_name)) {
+                        return false;
+                    }
+                }
             }
             cursor = cursor.next_sibling;
         }
-        return !has_dot && (ident_count >= 2 || (has_angle && ident_count >= 1));
+        return !has_dot && (ident_count >= 2 || (has_angle && ident_count >= 1)
+            || (has_pointer_or_ref && has_primitive_type && ident_count >= 1));
     }
 
     SyntaxNode* find_decl_var_node(ExprLowerer* self, SyntaxNode* start, SyntaxNode* limit) {
@@ -1599,10 +1789,6 @@ impl ExprLowerer {
             || kind == TokenKind.RightShiftAssign;
     }
 
-    bool lower_is_shift_assign(ExprLowerer* self, TokenKind kind) {
-        return kind == TokenKind.LeftShiftAssign || kind == TokenKind.RightShiftAssign;
-    }
-
     TokenKind lower_compound_base_op(ExprLowerer* self, TokenKind kind) {
         if (kind == TokenKind.PlusAssign) { return TokenKind.Plus; }
         if (kind == TokenKind.MinusAssign) { return TokenKind.Minus; }
@@ -1612,6 +1798,8 @@ impl ExprLowerer {
         if (kind == TokenKind.BitwiseAndAssign) { return TokenKind.BitwiseAnd; }
         if (kind == TokenKind.BitwiseOrAssign) { return TokenKind.BitwiseOr; }
         if (kind == TokenKind.BitwiseXorAssign) { return TokenKind.BitwiseXor; }
+        if (kind == TokenKind.LeftShiftAssign) { return TokenKind.LeftShift; }
+        if (kind == TokenKind.RightShiftAssign) { return TokenKind.RightShift; }
         return TokenKind.Assign;
     }
 
@@ -1767,15 +1955,15 @@ impl ExprLowerer {
             } else {
                 TokenKind base_op = self.lower_compound_base_op(assign_node.token_kind);
                 if (base_op == TokenKind.Assign) {
-                    if (self.lower_is_shift_assign(assign_node.token_kind)) {
-                        // No bare shift operator exists in the language; fail
-                        // closed (bridge) instead of silently dropping the op.
-                        // Nothing in std/libs/bin uses <<= or >>= today.
-                        self.unsupported = true;
-                        return;
-                    }
                     u32 target_id = self.lower_sequence(start, assign_node);
-                    u32 val_id = self.lower_sequence(assign_node.next_sibling, end);
+                    SyntaxNode* rhs_start = assign_node.next_sibling;
+                    u32 val_id = 0;
+                    if (rhs_start != end && rhs_start.kind == NodeKind.Block
+                        && rhs_start.next_sibling == end) {
+                        val_id = self.lower_struct_lit((str)0, rhs_start);
+                    } else {
+                        val_id = self.lower_sequence(rhs_start, end);
+                    }
                     u32 id = self.pool.add_stmt_assign(target_id, val_id, start.span);
                     stmt_ids.push(id);
                     return;

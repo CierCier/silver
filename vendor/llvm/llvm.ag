@@ -223,6 +223,9 @@ extern "C" {
     LLVMOpaqueValue* LLVMBuildAlloca(LLVMOpaqueBuilder* p0, LLVMOpaqueType* p1, i8* p2);
     LLVMOpaqueValue* LLVMBuildLoad2(LLVMOpaqueBuilder* p0, LLVMOpaqueType* p1, LLVMOpaqueValue* p2, i8* p3);
     LLVMOpaqueValue* LLVMBuildStore(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueValue* p2);
+    LLVMOpaqueValue* LLVMBuildMemSet(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueValue* p2, LLVMOpaqueValue* p3, u32 p4);
+    LLVMOpaqueValue* LLVMBuildMemCpy(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, u32 p2, LLVMOpaqueValue* p3, u32 p4, LLVMOpaqueValue* p5);
+    LLVMOpaqueValue* LLVMBuildMemMove(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, u32 p2, LLVMOpaqueValue* p3, u32 p4, LLVMOpaqueValue* p5);
     LLVMOpaqueValue* LLVMBuildGEP2(LLVMOpaqueBuilder* p0, LLVMOpaqueType* p1, LLVMOpaqueValue* p2, LLVMOpaqueValue** p3, u32 p4, i8* p5);
     LLVMOpaqueValue* LLVMBuildStructGEP2(LLVMOpaqueBuilder* p0, LLVMOpaqueType* p1, LLVMOpaqueValue* p2, u32 p3, i8* p4);
     LLVMOpaqueValue* LLVMBuildGlobalStringPtr(LLVMOpaqueBuilder* p0, i8* p1, i8* p2);
@@ -244,12 +247,14 @@ extern "C" {
     LLVMOpaqueValue* LLVMBuildFCmp(LLVMOpaqueBuilder* p0, LLVMRealPredicate p1, LLVMOpaqueValue* p2, LLVMOpaqueValue* p3, i8* p4);
     LLVMOpaqueValue* LLVMBuildCall2(LLVMOpaqueBuilder* p0, LLVMOpaqueType* p1, LLVMOpaqueValue* p2, LLVMOpaqueValue** p3, u32 p4, i8* p5);
     LLVMOpaqueValue* LLVMBuildExtractValue(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, u32 p2, i8* p3);
+    LLVMOpaqueValue* LLVMBuildInsertValue(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueValue* p2, u32 p3, i8* p4);
     void LLVMSetOrdering(LLVMOpaqueValue* p0, i32 p1);
     void LLVMSetAlignment(LLVMOpaqueValue* p0, u32 p1);
     LLVMOpaqueValue* LLVMBuildFence(LLVMOpaqueBuilder* p0, i32 p1, i32 p2, i8* p3);
     LLVMOpaqueValue* LLVMBuildAtomicRMW(LLVMOpaqueBuilder* p0, i32 p1, LLVMOpaqueValue* p2, LLVMOpaqueValue* p3, i32 p4, i32 p5);
     LLVMOpaqueValue* LLVMBuildAtomicCmpXchg(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueValue* p2, LLVMOpaqueValue* p3, i32 p4, i32 p5, i32 p6);
     LLVMOpaqueValue* LLVMConstInt(LLVMOpaqueType* p0, u64 p1, i32 p2);
+    LLVMOpaqueValue* LLVMConstIntOfString(LLVMOpaqueType* p0, i8* p1, u8 p2);
     LLVMOpaqueValue* LLVMConstNull(LLVMOpaqueType* p0);
     LLVMOpaqueValue* LLVMConstRealOfString(LLVMOpaqueType* p0, i8* p1);
     i8* LLVMPrintModuleToString(LLVMOpaqueModule* p0);

@@ -404,6 +404,24 @@ impl Lexer {
         return -1;
     }
 
+    void append_utf8(String* out, u32 codepoint) {
+        if (codepoint < (u32)0x80) {
+            out.push((u8)codepoint);
+        } else if (codepoint < (u32)0x800) {
+            out.push((u8)(0xC0 | (codepoint >> (u32)6)));
+            out.push((u8)(0x80 | (codepoint & (u32)0x3F)));
+        } else if (codepoint < (u32)0x10000) {
+            out.push((u8)(0xE0 | (codepoint >> (u32)12)));
+            out.push((u8)(0x80 | ((codepoint >> (u32)6) & (u32)0x3F)));
+            out.push((u8)(0x80 | (codepoint & (u32)0x3F)));
+        } else if (codepoint <= (u32)0x10FFFF) {
+            out.push((u8)(0xF0 | (codepoint >> (u32)18)));
+            out.push((u8)(0x80 | ((codepoint >> (u32)12) & (u32)0x3F)));
+            out.push((u8)(0x80 | ((codepoint >> (u32)6) & (u32)0x3F)));
+            out.push((u8)(0x80 | (codepoint & (u32)0x3F)));
+        }
+    }
+
     i128 parse_integer(u8* data, i64 start, i64 end, i64 radix) {
         i128 value = (i128)0;
         i128 base = (i128)radix;
@@ -484,22 +502,106 @@ impl Lexer {
     }
 
     void consume_string(Lexer* self, i64 start, i64 start_line, i64 start_col) {
-        bool escaped = false;
+        String decoded = String.new();
+        str error = (str)0;
         while (!self.is_at_end()) {
             u8 ch = self.advance();
-            if (ch == (u8)'\\' && !escaped) {
-                escaped = true;
-                continue;
-            }
-            if (ch == (u8)'"' && !escaped) {
+            if (ch == (u8)'"') {
+                if (decoded.len > 0 && !decoded.is_valid_utf8()) {
+                    error = "invalid string literal: string literal contains bytes that are not valid UTF-8; use \\u{} escapes or literal characters for text";
+                }
+                if (error != (str)0) {
+                    decoded.drop();
+                    Span span = self.span_from(start, start_line, start_col);
+                    self.report(span, String.from_str(error));
+                    return;
+                }
                 String text = Lexer.copy_text(self.source.data, start, self.position - start);
                 self.push_token(TokenKind.StringLiteral, start, start_line, start_col, move text);
+                decoded.drop();
                 return;
             }
-            escaped = false;
+            if (ch != (u8)'\\') {
+                decoded.push(ch);
+                continue;
+            }
+            if (self.is_at_end()) {
+                error = "invalid string literal: Unterminated string literal";
+                break;
+            }
+            u8 escaped = self.advance();
+            if (escaped == (u8)'n') { decoded.push((u8)10); }
+            else if (escaped == (u8)'t') { decoded.push((u8)9); }
+            else if (escaped == (u8)'r') { decoded.push((u8)13); }
+            else if (escaped == (u8)'\\') { decoded.push((u8)'\\'); }
+            else if (escaped == (u8)'"') { decoded.push((u8)'"'); }
+            else if (escaped == (u8)'\'') { decoded.push((u8)'\''); }
+            else if (escaped == (u8)'0') { decoded.push((u8)0); }
+            else if (escaped == (u8)'x') {
+                if (self.is_at_end()) {
+                    error = "invalid string literal: Invalid hex escape";
+                    break;
+                }
+                u8 high_char = self.advance();
+                if (self.is_at_end()) {
+                    error = "invalid string literal: Invalid hex escape";
+                    break;
+                }
+                u8 low_char = self.advance();
+                i64 high = Lexer.hex_value(high_char);
+                i64 low = Lexer.hex_value(low_char);
+                if (high < 0 || low < 0) {
+                    error = "invalid string literal: Invalid hex escape";
+                    break;
+                }
+                decoded.push((u8)(high * 16 + low));
+            } else if (escaped == (u8)'u') {
+                if (!self.match_char((u8)'{')) {
+                    error = "invalid string literal: Expected `{` after \\u";
+                    break;
+                }
+                u32 codepoint = 0;
+                i64 digits = 0;
+                bool invalid_digit = false;
+                while (!self.is_at_end() && self.peek() != (u8)'}' && digits < 6) {
+                    i64 digit = Lexer.hex_value(self.advance());
+                    if (digit < 0) {
+                        invalid_digit = true;
+                        break;
+                    }
+                    codepoint = codepoint * (u32)16 + (u32)digit;
+                    digits += 1;
+                }
+                if (invalid_digit) {
+                    error = "invalid string literal: Invalid hex digit in \\u escape";
+                    break;
+                }
+                if (digits == 0) {
+                    error = "invalid string literal: Empty \\u{} escape";
+                    break;
+                }
+                if (self.is_at_end() || self.peek() != (u8)'}') {
+                    error = "invalid string literal: Unclosed \\u{ escape";
+                    break;
+                }
+                self.advance();
+                if (codepoint > (u32)0x10FFFF
+                    || codepoint >= (u32)0xD800 && codepoint <= (u32)0xDFFF) {
+                    error = "invalid string literal: Invalid Unicode scalar";
+                    break;
+                }
+                Lexer.append_utf8(&decoded, codepoint);
+            } else {
+                error = "invalid string literal: Invalid escape sequence";
+                break;
+            }
         }
+        decoded.drop();
         Span span = self.span_from(start, start_line, start_col);
-        self.report(span, String.from_str("invalid string literal: Unterminated string literal"));
+        if (error == (str)0) {
+            error = "invalid string literal: Unterminated string literal";
+        }
+        self.report(span, String.from_str(error));
     }
 
     void consume_character(Lexer* self, i64 start, i64 start_line, i64 start_col) {

@@ -11,6 +11,7 @@ import frontend.items;
 import frontend.lower_expr;
 import frontend.symbols;
 import frontend.types;
+import frontend.typecheck_expr;
 import frontend.monomorph;
 import backend.llvm.context;
 import backend.llvm.types;
@@ -174,6 +175,45 @@ bool mono_find_function_template(SyntaxNode* root, TypeTable* types, str base,
     return false;
 }
 
+u32 mono_function_value_type(LlvmContext* ctx, str name) {
+    SyntaxNode* function = (SyntaxNode*)0;
+    SyntaxNode* item = ctx.root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Function) {
+            SyntaxNode* id = function_identifier(item);
+            SyntaxNode* generic = id == (SyntaxNode*)0 ? (SyntaxNode*)0 : id.next_sibling;
+            bool is_generic = generic != (SyntaxNode*)0 && generic.kind == NodeKind.Token
+                && generic.token_kind == TokenKind.Less;
+            if (!is_generic && id != (SyntaxNode*)0 && strcmp(id.text, name) == 0) {
+                if (function != (SyntaxNode*)0) { return TYPE_UNKNOWN; }
+                function = item;
+            }
+        }
+        item = item.next_sibling;
+    }
+    if (function == (SyntaxNode*)0) { return TYPE_UNKNOWN; }
+
+    Vec<Binding> params = Vec<Binding>.new();
+    collect_parameter_bindings(binding_function_parameters(function), &params);
+    Vec<u32> param_types = Vec<u32>.new();
+    i64 i = 0;
+    while (i < params.len()) {
+        u32 param_type = typecheck_parameter_type_id(ctx.types, params.get_ptr(i));
+        if (param_type == TYPE_UNKNOWN) {
+            params.drop();
+            param_types.drop();
+            return TYPE_UNKNOWN;
+        }
+        param_types.push(param_type);
+        i += 1;
+    }
+    u32 function_type = ctx.types.get_function(function_return_type_id(ctx.types, function),
+        &param_types);
+    params.drop();
+    param_types.drop();
+    return function_type;
+}
+
 bool mono_unify_free_parameter(TypeTable* types, u32 formal_id, u32 actual_id,
                                Vec<u32>* param_ids, Vec<u32>* inferred,
                                bool numeric_literal) {
@@ -195,6 +235,18 @@ bool mono_unify_free_parameter(TypeTable* types, u32 formal_id, u32 actual_id,
             i += 1;
         }
     }
+    if (formal.kind == TypeKind.Function
+        && (actual.kind == TypeKind.Pointer || actual.kind == TypeKind.Reference)
+        && types.get(actual.inner).kind == TypeKind.Function) {
+        return mono_unify_free_parameter(types, formal_id, actual.inner, param_ids,
+            inferred, numeric_literal);
+    }
+    if ((formal.kind == TypeKind.Pointer || formal.kind == TypeKind.Reference)
+        && types.get(formal.inner).kind == TypeKind.Function
+        && actual.kind == TypeKind.Function) {
+        return mono_unify_free_parameter(types, formal.inner, actual_id, param_ids,
+            inferred, numeric_literal);
+    }
     if ((formal.kind == TypeKind.Reference && actual.kind == TypeKind.Pointer)
         || (formal.kind == TypeKind.Pointer && actual.kind == TypeKind.Reference)) {
         return mono_unify_free_parameter(types, formal.inner, actual.inner, param_ids, inferred,
@@ -209,6 +261,24 @@ bool mono_unify_free_parameter(TypeTable* types, u32 formal_id, u32 actual_id,
         return formal.count == actual.count
             && mono_unify_free_parameter(types, formal.inner, actual.inner, param_ids, inferred,
                 numeric_literal);
+    }
+    if (formal.kind == TypeKind.Function) {
+        if (formal.count != actual.count
+            || !mono_unify_free_parameter(types, types.type_args.get(formal.inner),
+                types.type_args.get(actual.inner), param_ids, inferred, numeric_literal)) {
+            return false;
+        }
+        i64 i = 0;
+        while (i < formal.count) {
+            if (!mono_unify_free_parameter(types,
+                    types.type_args.get(formal.inner + 1 + (u32)i),
+                    types.type_args.get(actual.inner + 1 + (u32)i),
+                    param_ids, inferred, numeric_literal)) {
+                return false;
+            }
+            i += 1;
+        }
+        return true;
     }
     if (formal.kind == TypeKind.Named) {
         if (formal.name_id != actual.name_id || formal.count != actual.count) { return false; }

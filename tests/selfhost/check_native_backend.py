@@ -86,6 +86,25 @@ def main() -> int:
         executed = subprocess.run([str(direct_output)], check=False)
         if executed.returncode != 42:
             raise AssertionError(f"direct native program returned {executed.returncode}, expected 42")
+
+        array_fixture = pathlib.Path(__file__).with_name("large_array_native_fixture.ag")
+        array_output = root / "large-array"
+        array_build = run(
+            stage1,
+            ["build", str(array_fixture), "--no-cache", "-o", str(array_output)],
+            env,
+            root,
+        )
+        if array_build.returncode != 0:
+            raise AssertionError(
+                f"native 64 KiB array build failed: {array_build.returncode}\n{array_build.stderr}"
+            )
+        executed = subprocess.run([str(array_output)], check=False)
+        if executed.returncode != 0:
+            raise AssertionError(
+                f"native 64 KiB array program returned {executed.returncode}, expected 0"
+            )
+
         cfg_source = root / "cfg.ag"
         cfg_source.write_text(
             "i32 main() {\n"
@@ -104,6 +123,37 @@ def main() -> int:
         executed = subprocess.run([str(cfg_output)], check=False)
         if executed.returncode != 42:
             raise AssertionError(f"native cfg program returned {executed.returncode}, expected 42")
+
+        ternary_source = root / "cfg-ternary.ag"
+        ternary_source.write_text(
+            "#[cfg(never_set)]\n"
+            "i32 ghost() { return 99; }\n"
+            "i32 seen = 0;\n"
+            "i32 mark_yes() { seen = 42; return 0; }\n"
+            "i32 mark_no() { seen = 1; return 0; }\n"
+            "i32 main() {\n"
+            "    i64 left = 5;\n"
+            "    i64 right = 3;\n"
+            "    i32 gated = @cfg(never_set) ? ghost() : 7;\n"
+            "    left > right ? mark_yes() : mark_no();\n"
+            "    return seen + gated;\n"
+            "}\n"
+        )
+        ternary_output = root / "cfg-ternary"
+        ternary_build = run(
+            stage1,
+            ["build", str(ternary_source), "--no-cache", "-o", str(ternary_output)], env, root
+        )
+        if ternary_build.returncode != 0:
+            raise AssertionError(
+                f"native cfg ternary build failed: {ternary_build.returncode}\n"
+                f"{ternary_build.stderr}"
+            )
+        executed = subprocess.run([str(ternary_output)], check=False)
+        if executed.returncode != 49:
+            raise AssertionError(
+                f"native cfg ternaries returned {executed.returncode}, expected 49"
+            )
 
         argv_source = root / "argv.ag"
         argv_source.write_text(

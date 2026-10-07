@@ -1,5 +1,15 @@
 import std.string;
 import std.io.file;
+import std.display;
+
+struct NativeLabel { i64 value; }
+enum NativeStatus { Pending; Ready; }
+
+impl Display for NativeLabel {
+    void fmt(*self, BufWriter* out) {
+        @fprint(out, "{}", self.value);
+    }
+}
 
 i32 main() {
     bool flag = true;
@@ -8,5 +18,15 @@ i32 main() {
     f64 fraction = 1.25;
     String rendered = @format("escaped {{}}: {} | {} | {} | {} | {}", negative, positive, fraction, flag, 'x');
     @println("{}", rendered);
+    NativeLabel label = { .value = 73 };
+    String custom = @format("label: {}", label);
+    @println("{}", custom);
+    NativeStatus status = NativeStatus.Ready;
+    String enum_name = @format("status: {}", status);
+    @println("{}", enum_name);
+    @print("print:{}|", 7);
+    @println("println:{}", 8);
+    @eprint("eprint:{}|", 9);
+    @eprintln("eprintln:{}", 10);
     return 0;
 }

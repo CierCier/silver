@@ -28,7 +28,7 @@ python3 "$root/tests/selfhost/check_native_enum_layout.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_native_layout.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_generic_function_native.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_stage2.py" --stage1 "$stage1"
-python3 "$root/tests/run_tests.py" --no-tui --jobs 4 --compiler "$stage1" \
+python3 "$root/tests/run_tests.py" --no-tui --jobs 2 --compiler "$stage1" \
     allocator_threads_test loop_stack_restore_test aggregate_init_drop_test \
     cascade_drop_test field_predrop_test intermediate_drop_activation_test \
     collections_set_test for_in_consume_test nested_field_drop_test native_for_in_continue_test \
@@ -36,8 +36,17 @@ python3 "$root/tests/run_tests.py" --no-tui --jobs 4 --compiler "$stage1" \
     tuple_partial_index_drop_test \
     slice_syntax_test test_slice_u8_ops destructure_let_test \
     partial_move_test reborrow_passthrough_test sha256_test \
+    i128_literal_test ternary_test \
     unsigned_narrow_shift_test packed_layout_test \
-    collection_drop_glue_test enum_custom_drop_test map_tuple_test map_test \
+    collection_drop_glue_test enum_custom_drop_test map_tuple_test \
+    native_function_pointer_test hpack_test pointer_output_param_test \
+    generic_tuple_return_test global_array_string_init_test map_test \
+    generic_reference_deref_test optional_unwrap_abort_test \
+    nested_match_payload_test \
     for_in_generic_test str_key_map_test \
     direct_field_partial_move_test drop_ancestor_direct_error_test \
-    drop_ancestor_nested_error_test
+    drop_ancestor_nested_error_test builtin_mem_test \
+    bytes_test borrow_conflict_test compound_bitwise_test \
+    string_utf8_test path_test text_test term_ansi_test term_keys_test \
+    libc_test compare_trait_test match_value_test cyclic_test \
+    selective_import_test source_import_alias_test

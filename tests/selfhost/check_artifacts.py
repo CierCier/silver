@@ -41,10 +41,15 @@ def optional(value: str | None) -> bytes:
     return b"\x00" if value is None else b"\x01" + string(value)
 
 
-def artifact(version: int, export_kind: int = 1) -> bytes:
+def artifact(
+    version: int,
+    export_kind: int = 1,
+    module_name: str = "probe",
+    export_name: str = "probe",
+) -> bytes:
     data = bytearray(b"AGM\x00\x00" + bytes([version]))
-    data += string("probe")
-    data += string("artifact_probe")
+    data += string(module_name)
+    data += string(f"artifact_{module_name}")
     data += string("")
     data += bytes(8)
     data += string("foreign")
@@ -55,10 +60,10 @@ def artifact(version: int, export_kind: int = 1) -> bytes:
     data += u32(1)  # exports
 
     data += bytes((export_kind,))  # export kind
-    data += string("probe")
+    data += string(export_name)
     data += string("fn() -> i32")
     data += u32(0)  # type parameters
-    data += optional("probe")
+    data += optional(export_name)
     data += b"\x01\x02"  # ABI: optional, Silver
     data += b"\x00"  # variadic
     data += optional(None)  # type key
@@ -142,8 +147,19 @@ def main() -> int:
             "i32 main() { return 0; }\n",
             encoding="utf-8",
         )
+        vendor_dir = directory / "vendor/gfx"
+        vendor_dir.mkdir(parents=True)
+        for module_name in ("raylib", "rlgl"):
+            (vendor_dir / f"{module_name}.agm").write_bytes(
+                artifact(
+                    9,
+                    module_name=module_name,
+                    export_name=f"{module_name}_fixture",
+                )
+                + bytes(4)
+            )
         vendor_result = subprocess.run(
-            [str(stage1), "check", str(vendor_consumer), "-I", str(root)],
+            [str(stage1), "check", str(vendor_consumer), "-I", str(directory)],
             cwd=root,
             capture_output=True,
             text=True,
@@ -152,7 +168,7 @@ def main() -> int:
         )
         if vendor_result.returncode != 0:
             failures.append(
-                f"stage1 rejected vendored v9 AGM files: {vendor_result.stderr}"
+                f"stage1 rejected synthetic v9 graphics AGM files: {vendor_result.stderr}"
             )
 
         valid = artifact(11)

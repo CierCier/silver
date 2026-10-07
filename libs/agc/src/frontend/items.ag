@@ -4,6 +4,7 @@
 import std.mem.vec;
 import std.string;
 import frontend.ast;
+import frontend.ast_expr;
 import frontend.lexer;
 import frontend.symbols;
 import frontend.types;
@@ -50,6 +51,95 @@ bool item_has_attribute(SyntaxNode* item, str name) {
         child = child.next_sibling;
     }
     return false;
+}
+
+String item_attribute_string(SyntaxNode* start, SyntaxNode* end, str name) {
+    SyntaxNode* cursor = start;
+    while (cursor != (SyntaxNode*)0 && cursor != end) {
+        SyntaxNode* bracket = (SyntaxNode*)0;
+        if (cursor.kind == NodeKind.Attribute) {
+            bracket = cursor;
+        } else if (cursor.kind == NodeKind.Token && cursor.text == "#") {
+            bracket = cursor.next_sibling;
+        }
+        if (bracket != (SyntaxNode*)0
+            && (bracket.kind == NodeKind.Attribute || bracket.kind == NodeKind.Bracket)) {
+            SyntaxNode* attribute = bracket.first_child;
+            if (attribute != (SyntaxNode*)0 && attribute.kind == NodeKind.Token
+                && strcmp(attribute.text, name) == 0) {
+                SyntaxNode* value = attribute.next_sibling;
+                while (value != (SyntaxNode*)0) {
+                    if (value.kind == NodeKind.Token && strlen(value.text) >= 2
+                        && value.text[0] == '"'
+                        && value.text[strlen(value.text) - 1] == '"') {
+                        return unescape_string_literal(value.text);
+                    }
+                    SyntaxNode* child = value.first_child;
+                    while (child != (SyntaxNode*)0) {
+                        if (child.kind == NodeKind.Token && strlen(child.text) >= 2
+                            && child.text[0] == '"'
+                            && child.text[strlen(child.text) - 1] == '"') {
+                            return unescape_string_literal(child.text);
+                        }
+                        child = child.next_sibling;
+                    }
+                    value = value.next_sibling;
+                }
+            }
+            if (bracket != cursor) { cursor = bracket; }
+        }
+        cursor = cursor.next_sibling;
+    }
+    return String.new();
+}
+
+String item_extern_link_name(SyntaxNode* root, str function_name) {
+    SyntaxNode* item = root == (SyntaxNode*)0 ? (SyntaxNode*)0 : root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Extern) {
+            SyntaxNode* block = item.first_child;
+            while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+                block = block.next_sibling;
+            }
+            SyntaxNode* cursor = block == (SyntaxNode*)0 ? (SyntaxNode*)0 : block.first_child;
+            while (cursor != (SyntaxNode*)0) {
+                if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
+                    cursor = cursor.next_sibling;
+                    continue;
+                }
+                SyntaxNode* declaration = cursor;
+                SyntaxNode* name = (SyntaxNode*)0;
+                SyntaxNode* parameters = (SyntaxNode*)0;
+                SyntaxNode* scan = cursor;
+                while (scan != (SyntaxNode*)0
+                    && !(scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Semicolon)) {
+                    if (scan.kind == NodeKind.Parenthesized) {
+                        parameters = scan;
+                        break;
+                    }
+                    if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Identifier) {
+                        name = scan;
+                    }
+                    scan = scan.next_sibling;
+                }
+                if (name != (SyntaxNode*)0 && parameters != (SyntaxNode*)0
+                    && strcmp(name.text, function_name) == 0) {
+                    return item_attribute_string(declaration, name, "link_name");
+                }
+                if (parameters != (SyntaxNode*)0) {
+                    cursor = parameters.next_sibling;
+                    if (cursor != (SyntaxNode*)0 && cursor.kind == NodeKind.Token
+                        && cursor.token_kind == TokenKind.Semicolon) {
+                        cursor = cursor.next_sibling;
+                    }
+                } else {
+                    cursor = cursor.next_sibling;
+                }
+            }
+        }
+        item = item.next_sibling;
+    }
+    return String.new();
 }
 
 i64 items_parse_int(str text) {
@@ -404,32 +494,83 @@ bool enum_payload_type_text(SyntaxNode* root, str enum_name, str variant_name,
 }
 
 bool method_matches_variant(str method_name, str variant_name) {
-    if (method_name == (str)0 || variant_name == (str)0) {
-        return false;
-    }
-    if (strcmp(method_name, variant_name) == 0) {
-        return true;
-    }
-    i64 method_len = strlen(method_name);
-    i64 variant_len = strlen(variant_name);
-    if (method_len != variant_len || method_len == 0) {
-        return false;
-    }
-    u8 first = (u8)method_name[0];
-    if (first >= (u8)97 && first <= (u8)122) {
-        first = first - 32;
-    }
-    if (first != (u8)variant_name[0]) {
-        return false;
-    }
-    i64 i = 1;
-    while (i < method_len) {
-        if (method_name[i] != variant_name[i]) {
-            return false;
+    return method_name != (str)0 && variant_name != (str)0
+        && strcmp(method_name, variant_name) == 0;
+}
+
+bool item_first_parameter_is_self(SyntaxNode* parameters) {
+    if (parameters == (SyntaxNode*)0) { return false; }
+    SyntaxNode* cursor = parameters.first_child;
+    SyntaxNode* last_identifier = (SyntaxNode*)0;
+    i64 angle_depth = 0;
+    while (cursor != (SyntaxNode*)0) {
+        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Comma && angle_depth == 0) {
+            break;
         }
-        i += 1;
+        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Identifier) {
+            last_identifier = cursor;
+        }
+        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Less) {
+            angle_depth += 1;
+        } else if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Greater) {
+            angle_depth -= 1;
+        }
+        cursor = cursor.next_sibling;
     }
-    return true;
+    return last_identifier != (SyntaxNode*)0 && strcmp(last_identifier.text, "self") == 0;
+}
+
+bool impl_has_static_method(SyntaxNode* root, str owner_name, str method_name) {
+    if (root == (SyntaxNode*)0 || owner_name == (str)0 || method_name == (str)0) {
+        return false;
+    }
+    SyntaxNode* item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Impl) {
+            SyntaxNode* target = impl_target_identifier(item);
+            if (target != (SyntaxNode*)0 && strcmp(target.text, owner_name) == 0) {
+                SyntaxNode* block = item.first_child;
+                while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+                    block = block.next_sibling;
+                }
+                SyntaxNode* member = block == (SyntaxNode*)0 ? (SyntaxNode*)0 : block.first_child;
+                while (member != (SyntaxNode*)0) {
+                    if (member.kind == NodeKind.Token && member.token_kind == TokenKind.Semicolon) {
+                        member = member.next_sibling;
+                        continue;
+                    }
+                    SyntaxNode* name = (SyntaxNode*)0;
+                    SyntaxNode* parameters = (SyntaxNode*)0;
+                    SyntaxNode* scan = member;
+                    while (scan != (SyntaxNode*)0
+                        && scan.kind != NodeKind.Block
+                        && !(scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Semicolon)) {
+                        if (scan.kind == NodeKind.Parenthesized) {
+                            parameters = scan;
+                            break;
+                        }
+                        if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Identifier) {
+                            name = scan;
+                        }
+                        scan = scan.next_sibling;
+                    }
+                    if (name != (SyntaxNode*)0 && parameters != (SyntaxNode*)0
+                        && strcmp(name.text, method_name) == 0
+                        && !item_first_parameter_is_self(parameters)) {
+                        return true;
+                    }
+                    while (scan != (SyntaxNode*)0
+                        && scan.kind != NodeKind.Block
+                        && !(scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Semicolon)) {
+                        scan = scan.next_sibling;
+                    }
+                    member = scan == (SyntaxNode*)0 ? scan : scan.next_sibling;
+                }
+            }
+        }
+        item = item.next_sibling;
+    }
+    return false;
 }
 
 i64 enum_variant_count(SyntaxNode* root, str enum_name) {

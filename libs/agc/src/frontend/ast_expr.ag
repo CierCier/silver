@@ -26,6 +26,8 @@ enum ExprKind {
     AlignOf;       // aux = type_id
     ArrayLit;      // inner1 = elems_start, aux = elem_count (pool.args[start] = count, then ids)
     Format;        // inner0 = format string literal id, inner1 = args_start, aux = args_count
+    Fprint;        // inner0 = writer expression, inner1 = Format expression
+    MemoryBuiltin; // inner0 = three argument IDs in pool.args, aux = builtin kind
     Hash;          // inner0 = arg expr id (builtin @hash, always i64)
     DropInPlace;   // inner0 = pointer expr, inner1 = count expr, aux = element type (optional)
     Assert;        // inner0 = condition, inner1 = message, aux = enabled (debug cfg)
@@ -56,6 +58,12 @@ enum StmtKind {
     Continue;
     Defer;         // inner0 = block_id
     Block;         // inner0 = block_stmts_start, aux = block_stmts_count
+}
+
+enum MemoryBuiltinKind {
+    Memcpy;
+    Memmove;
+    Memset;
 }
 
 struct AstStmt {
@@ -114,6 +122,35 @@ String unescape_string_literal(str text) {
             else if (next == (u8)'0') { out.push((u8)0); }
             else if (next == (u8)'\\') { out.push((u8)'\\'); }
             else if (next == (u8)'"') { out.push((u8)'"'); }
+            else if (next == (u8)'x' && i + 2 < end) {
+                i64 high = Lexer.hex_value((u8)text[i + 1]);
+                i64 low = Lexer.hex_value((u8)text[i + 2]);
+                if (high >= 0 && low >= 0) {
+                    out.push((u8)(high * 16 + low));
+                    i += 2;
+                } else {
+                    out.push(next);
+                }
+            } else if (next == (u8)'u' && i + 1 < end
+                && text[i + 1] == (u8)'{') {
+                i += 2;
+                u32 codepoint = 0;
+                i64 digits = 0;
+                while (i < end && text[i] != (u8)'}' && digits < 6) {
+                    i64 digit = Lexer.hex_value((u8)text[i]);
+                    if (digit < 0) { break; }
+                    codepoint = codepoint * (u32)16 + (u32)digit;
+                    digits += 1;
+                    i += 1;
+                }
+                if (digits > 0 && i < end && text[i] == (u8)'}'
+                    && codepoint <= (u32)0x10FFFF
+                    && (codepoint < (u32)0xD800 || codepoint > (u32)0xDFFF)) {
+                    Lexer.append_utf8(&out, codepoint);
+                } else {
+                    out.push(next);
+                }
+            }
             else { out.push(next); }
         } else {
             out.push((u8)text[i]);
@@ -403,6 +440,21 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    u32 add_fprint(AstPool* self, u32 writer_id, u32 format_expr_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Fprint;
+        expr.inner0 = writer_id;
+        expr.inner1 = format_expr_id;
+        expr.aux = 0;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        expr.resolved_callee_id = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
     u32 add_hash(AstPool* self, u32 arg_id, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.Hash;
@@ -426,6 +478,22 @@ impl AstPool {
         expr.aux = elem_type;
         expr.span = span;
         expr.inferred_type = TYPE_I64;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        expr.resolved_callee_id = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_memory_builtin(AstPool* self, MemoryBuiltinKind kind,
+                           u32 args_start, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.MemoryBuiltin;
+        expr.inner0 = args_start;
+        expr.inner1 = 0;
+        expr.aux = (u32)kind;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
         expr.generic_args_start = 0;
         expr.generic_args_count = 0;
         expr.resolved_callee_id = 0;

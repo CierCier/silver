@@ -761,15 +761,19 @@ void llvm_clear_scrutinee_source(LlvmContext* ctx, u32 moved_expr_id) {
     }
 }
 
-// After copying a value out of another place (plain `let`/`assign` from a
-// local, aggregate built from locals), release the source side: the bits
-// stay readable, but drop ownership transfers to the destination so the
-// value frees exactly once. Clearing an unflagged or non-place source is a
-// no-op, as is clearing a source that was already moved out.
-void llvm_clear_copy_source(LlvmContext* ctx, u32 src_id) {
+// Direct Copy+Drop places can retain ownership in local bindings; aggregate
+// construction still transfers their nested drop flags to the new value.
+void llvm_clear_copy_source(LlvmContext* ctx, u32 src_id,
+                            bool preserve_direct_copy_drop) {
     if (src_id == 0) { return; }
     u32 src_ty = llvm_expr_type(ctx, src_id);
     if (!llvm_type_needs_tracking(ctx, src_ty)) { return; }
+    AstExpr* source = ctx.pool.get_expr(src_id);
+    bool source_is_place = source.kind == ExprKind.Var || source.kind == ExprKind.Field
+        || source.kind == ExprKind.Index;
+    if (preserve_direct_copy_drop && source_is_place
+        && ctx.types.is_copy(ctx.types.resolve_subst(src_ty))
+        && llvm_can_resolve_drop_fn(ctx, src_ty)) { return; }
     llvm_clear_place_drops(ctx, src_id);
 }
 
@@ -779,7 +783,7 @@ void llvm_clear_copy_source(LlvmContext* ctx, u32 src_id) {
 void llvm_clear_aggregate_sources(LlvmContext* ctx, u32 args_start, u32 args_count) {
     i64 i = 0;
     while (i < (i64)args_count) {
-        llvm_clear_copy_source(ctx, ctx.pool.args.get((i64)args_start + i));
+        llvm_clear_copy_source(ctx, ctx.pool.args.get((i64)args_start + i), false);
         i += 1;
     }
 }

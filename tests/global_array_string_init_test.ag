@@ -1,0 +1,12 @@
+import std.test;
+
+str labels[3] = { "alpha", "beta", "gamma" };
+u8 protocol[3] = { (u8)2, (u8)'h', (u8)'2' };
+
+i32 main() {
+    assert_eq_str(labels[1], "beta", "global string array initializer");
+    assert_eq_i32((i32)protocol[0], 2, "cast integer array initializer");
+    assert_eq_i32((i32)protocol[1], 104, "cast character array initializer");
+    assert_eq_i32((i32)protocol[2], 50, "cast character array initializer");
+    return done();
+}

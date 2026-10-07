@@ -89,7 +89,12 @@ fn item_parity_over_corpus() {
                 };
 
                 let graph = parse_ag(&source);
-                if graph.has_errors() || name.ends_with("destructure_let_test.ag") {
+                if graph.has_errors()
+                    || name.ends_with("destructure_let_test.ag")
+                    // The production grammar accepts generic tuple return types;
+                    // the legacy parser misclassifies `[T, T] name<T>(...)`.
+                    || name.ends_with("generic_tuple_return_test.ag")
+                {
                     skipped += 1;
                     continue;
                 }

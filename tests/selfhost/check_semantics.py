@@ -41,11 +41,52 @@ i32 ProgressBar(Rectangle r, const i8* _left, const i8* _right, f32* _value, f32
 void Panel(Rectangle r, const i8* _text) { }
 """
 
+RAYLIB_STUB = """\
+struct Color {
+    u8 r;
+    u8 g;
+    u8 b;
+    u8 a;
+}
 
-def emit_module(stage0: pathlib.Path, root: pathlib.Path, source: pathlib.Path, output_dir: pathlib.Path) -> pathlib.Path:
+struct Rectangle {
+    f32 x;
+    f32 y;
+    f32 width;
+    f32 height;
+}
+
+void InitWindow(i32 width, i32 height, const i8* title) { }
+void SetTargetFPS(i32 fps) { }
+bool WindowShouldClose() { return false; }
+void BeginDrawing() { }
+void ClearBackground(Color color) { }
+void DrawRectangle(i32 x, i32 y, i32 width, i32 height, Color color) { }
+void DrawRectangleLines(i32 x, i32 y, i32 width, i32 height, Color color) { }
+void DrawCircleLines(i32 x, i32 y, f32 radius, Color color) { }
+void DrawCircle(i32 x, i32 y, f32 radius, Color color) { }
+void DrawText(const i8* text, i32 x, i32 y, i32 size, Color color) { }
+void EndDrawing() { }
+void CloseWindow() { }
+"""
+
+RLGL_STUB = "void rlgl_fixture() { }\n"
+
+
+def emit_module(
+    stage0: pathlib.Path,
+    root: pathlib.Path,
+    source: pathlib.Path,
+    output_dir: pathlib.Path,
+    include_roots: list[pathlib.Path] | None = None,
+) -> pathlib.Path:
     output_dir.mkdir(parents=True, exist_ok=True)
+    command = [str(stage0), "--no-cache", "--emit=module", "-I", str(root)]
+    for include_root in include_roots or []:
+        command.extend(["-I", str(include_root)])
+    command.append(str(source))
     result = subprocess.run(
-        [str(stage0), "--no-cache", "--emit=module", "-I", str(root), str(source)],
+        command,
         cwd=output_dir,
         capture_output=True,
         text=True,
@@ -64,15 +105,15 @@ def prepare_artifacts(stage0: pathlib.Path, root: pathlib.Path, temp: pathlib.Pa
 
     mirror = temp / "mirror"
     (mirror / "vendor/gfx").mkdir(parents=True, exist_ok=True)
-    for relative in ("vendor/gfx/raylib.agm", "vendor/gfx/rlgl.agm"):
-        source = root / relative
-        target = mirror / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
+    for name, contents in (("raylib", RAYLIB_STUB), ("rlgl", RLGL_STUB)):
+        stub_source = temp / f"{name}.ag"
+        stub_source.write_text(contents, encoding="utf-8")
+        emitted = emit_module(stage0, root, stub_source, temp / f"{name}-build")
+        shutil.copy2(emitted, mirror / "vendor/gfx" / f"{name}.agm")
 
     stub_source = temp / "raygui.ag"
     stub_source.write_text(RAYGUI_STUB, encoding="utf-8")
-    emitted = emit_module(stage0, root, stub_source, temp / "raygui-build")
+    emitted = emit_module(stage0, root, stub_source, temp / "raygui-build", [mirror])
     shutil.copy2(emitted, mirror / "vendor/gfx/raygui.agm")
     return module_dir, mirror
 

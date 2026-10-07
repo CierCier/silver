@@ -86,6 +86,14 @@ i32 main() {
     return (i32)first + second;
 }
 """,
+            "generic-static-optional": """import std.optional;
+
+i32 main() {
+    Optional<i32> value = Optional.none();
+    if (value.is_none()) { return 42; }
+    return 0;
+}
+""",
             "function-pointer": """i32 add_one(i32 value) {
     return value + 1;
 }
@@ -163,6 +171,46 @@ i32 main() {
                 "stage2-compiled map_tuple_test returned "
                 f"{executed.returncode}, expected 0"
             )
+        tuple_return_source = root / "tests/generic_tuple_return_test.ag"
+        tuple_return_program = work / "generic-tuple-return"
+        invoke(stage2, ["build", str(tuple_return_source), "--no-cache",
+                        "-o", str(tuple_return_program)])
+        executed = subprocess.run([str(tuple_return_program)], timeout=30, check=False)
+        if executed.returncode != 0:
+            raise AssertionError(
+                "stage2-compiled generic_tuple_return_test returned "
+                f"{executed.returncode}, expected 0"
+            )
+        global_array_source = root / "tests/global_array_string_init_test.ag"
+        global_array_program = work / "global-array-string-init"
+        invoke(stage2, ["build", str(global_array_source), "--no-cache",
+                        "-o", str(global_array_program)])
+        executed = subprocess.run([str(global_array_program)], timeout=30, check=False)
+        if executed.returncode != 0:
+            raise AssertionError(
+                "stage2-compiled global_array_string_init_test returned "
+                f"{executed.returncode}, expected 0"
+            )
+        deref_source = root / "tests/generic_reference_deref_test.ag"
+        deref_program = work / "generic-reference-deref"
+        invoke(stage2, ["build", str(deref_source), "--no-cache",
+                        "-o", str(deref_program)])
+        executed = subprocess.run([str(deref_program)], timeout=30, check=False)
+        if executed.returncode != 0:
+            raise AssertionError(
+                "stage2-compiled generic_reference_deref_test returned "
+                f"{executed.returncode}, expected 0"
+            )
+        pointer_output_source = root / "tests/pointer_output_param_test.ag"
+        pointer_output_program = work / "pointer-output-param"
+        invoke(stage2, ["build", str(pointer_output_source), "--no-cache",
+                        "-o", str(pointer_output_program)])
+        executed = subprocess.run([str(pointer_output_program)], timeout=30, check=False)
+        if executed.returncode != 0:
+            raise AssertionError(
+                "stage2-compiled pointer_output_param_test returned "
+                f"{executed.returncode}, expected 0"
+            )
         collection_test = root / "tests/collection_drop_glue_test.ag"
         collection_program = work / "collection-drop-glue"
         invoke(stage2, ["build", str(collection_test), "--no-cache",
@@ -173,6 +221,50 @@ i32 main() {
                 "stage2-compiled collection_drop_glue_test returned "
                 f"{executed.returncode}, expected 0"
             )
+        nested_match_test = root / "tests/nested_match_payload_test.ag"
+        nested_match_program = work / "nested-match-payload"
+        invoke(stage2, ["build", str(nested_match_test), "--no-cache",
+                        "-o", str(nested_match_program)])
+        executed = subprocess.run([str(nested_match_program)], timeout=30, check=False)
+        if executed.returncode != 0:
+            raise AssertionError(
+                "stage2-compiled nested_match_payload_test returned "
+                f"{executed.returncode}, expected 0"
+            )
+        scalar_match_test = root / "tests/match_value_test.ag"
+        scalar_match_program = work / "scalar-match"
+        invoke(stage2, ["build", str(scalar_match_test), "--no-cache",
+                        "-o", str(scalar_match_program)])
+        executed = subprocess.run([str(scalar_match_program)], timeout=30, check=False)
+        if executed.returncode != 0:
+            raise AssertionError(
+                "stage2-compiled match_value_test returned "
+                f"{executed.returncode}, expected 0"
+            )
+        cyclic_test = root / "tests/cyclic_test.ag"
+        cyclic_program = work / "cyclic-import"
+        invoke(stage2, ["build", str(cyclic_test), "--no-cache",
+                        "-o", str(cyclic_program)])
+        executed = subprocess.run([str(cyclic_program)], timeout=30, check=False)
+        if executed.returncode != 0:
+            raise AssertionError(
+                "stage2-compiled cyclic_test returned "
+                f"{executed.returncode}, expected 0"
+            )
+        for test_name, extra_args in (
+            ("selective_import_test", []),
+            ("source_import_alias_test", ["-I", str(root / "tests/modules")]),
+        ):
+            import_source = root / "tests" / f"{test_name}.ag"
+            import_program = work / test_name
+            invoke(stage2, ["build", str(import_source), *extra_args,
+                            "--no-cache", "-o", str(import_program)])
+            executed = subprocess.run([str(import_program)], timeout=30, check=False)
+            if executed.returncode != 0:
+                raise AssertionError(
+                    f"stage2-compiled {test_name} returned "
+                    f"{executed.returncode}, expected 0"
+                )
         for fixture in (
             "drop_ancestor_direct_error_test.ag",
             "drop_ancestor_nested_error_test.ag",

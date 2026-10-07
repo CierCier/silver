@@ -369,6 +369,26 @@ SyntaxNode* native_load_unit(str path, u32 file_id, Vec<NodePool>* pools, Vec<To
     return unit_tree.root;
 }
 
+void native_strip_import_nodes(SyntaxNode* parent) {
+    if (parent == (SyntaxNode*)0) { return; }
+    SyntaxNode* previous = (SyntaxNode*)0;
+    SyntaxNode* child = parent.first_child;
+    while (child != (SyntaxNode*)0) {
+        SyntaxNode* next = child.next_sibling;
+        if (child.kind == NodeKind.Import) {
+            if (previous == (SyntaxNode*)0) { parent.first_child = next; }
+            else { previous.next_sibling = next; }
+            if (parent.last_child == child) { parent.last_child = previous; }
+            child.parent = (SyntaxNode*)0;
+            child.next_sibling = (SyntaxNode*)0;
+        } else {
+            native_strip_import_nodes(child);
+            previous = child;
+        }
+        child = next;
+    }
+}
+
 void native_merge_unit(SyntaxNode* root, SyntaxNode* other) {
     if (root == (SyntaxNode*)0 || other == (SyntaxNode*)0) {
         return;
@@ -376,9 +396,64 @@ void native_merge_unit(SyntaxNode* root, SyntaxNode* other) {
     SyntaxNode* child = other.first_child;
     while (child != (SyntaxNode*)0) {
         SyntaxNode* next = child.next_sibling;
-        append_child(root, child);
+        if (child.kind != NodeKind.Import) {
+            // The closure is already loaded by source path; nested imports
+            // must not be re-resolved relative to the entry module.
+            native_strip_import_nodes(child);
+            append_child(root, child);
+        }
         child = next;
     }
+}
+
+SyntaxNode* native_clone_syntax(NodePool* pool, SyntaxNode* source) {
+    if (source == (SyntaxNode*)0) { return (SyntaxNode*)0; }
+    SyntaxNode* clone = pool.create(source.kind, source.span, source.text);
+    if (clone == (SyntaxNode*)0) { return (SyntaxNode*)0; }
+    clone.token_kind = source.token_kind;
+    SyntaxNode* child = source.first_child;
+    while (child != (SyntaxNode*)0) {
+        SyntaxNode* child_clone = native_clone_syntax(pool, child);
+        if (child_clone == (SyntaxNode*)0) { return (SyntaxNode*)0; }
+        append_child(clone, child_clone);
+        child = child.next_sibling;
+    }
+    return clone;
+}
+
+void native_add_function_import_aliases(SyntaxNode* root, CfgSet* cfg, NodePool* pool) {
+    Vec<CfgImportBinding> bindings = Vec<CfgImportBinding>.new();
+    cfg_collect_import_bindings(root, cfg, &bindings);
+    i64 binding_index = 0;
+    while (binding_index < bindings.len()) {
+        CfgImportBinding* binding = bindings.get_ptr(binding_index);
+        SyntaxNode* target = (SyntaxNode*)0;
+        bool alias_exists = false;
+        SyntaxNode* item = root.first_child;
+        while (item != (SyntaxNode*)0) {
+            SyntaxNode* name = item_identifier(item);
+            if (name != (SyntaxNode*)0) {
+                if (strcmp(name.text, binding.alias) == 0) { alias_exists = true; }
+                if (target == (SyntaxNode*)0 && item.kind == NodeKind.Function
+                    && strcmp(name.text, binding.original) == 0) {
+                    target = item;
+                }
+            }
+            item = item.next_sibling;
+        }
+        if (!alias_exists && target != (SyntaxNode*)0) {
+            SyntaxNode* alias = native_clone_syntax(pool, target);
+            if (alias != (SyntaxNode*)0) {
+                SyntaxNode* name = item_identifier(alias);
+                if (name != (SyntaxNode*)0) {
+                    name.text = binding.alias;
+                    append_child(root, alias);
+                }
+            }
+        }
+        binding_index += 1;
+    }
+    bindings.drop();
 }
 
 SyntaxNode* native_append_expanded_cfg(SyntaxNode* root, SyntaxNode* first_token, CfgSet* cfg, NodePool* pool) {
@@ -706,8 +781,11 @@ void native_collect_link_libs(SyntaxNode* node, Vec<String>* libs) {
                 if (paren != (SyntaxNode*)0 && paren.kind == NodeKind.Parenthesized) {
                     SyntaxNode* str_node = paren.first_child;
                     if (str_node != (SyntaxNode*)0 && str_node.kind == NodeKind.Token
-                        && str_node.token_kind == TokenKind.StringLiteral) {
-                        String unesc = unescape_string_literal(str_node.text);
+                        && (str_node.token_kind == TokenKind.StringLiteral
+                            || str_node.token_kind == TokenKind.Identifier)) {
+                        String unesc = str_node.token_kind == TokenKind.StringLiteral
+                            ? unescape_string_literal(str_node.text)
+                            : String.from_str(str_node.text);
                         bool seen = false;
                         i64 i = 0;
                         while (i < libs.len()) {
@@ -884,6 +962,22 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
         arg_idx += 1;
     }
 
+    check_hir(&tree, &cfg, &diagnostics);
+    if (!diagnostics.is_empty()) {
+        i64 i = 0;
+        while (i < diagnostics.len()) {
+            Diagnostic* diagnostic = diagnostics.get(i);
+            String rendered = render_diagnostic(diagnostic, source_path, &source_copy);
+            STDERR.write_str(rendered.to_str());
+            i += 1;
+        }
+        includes.drop();
+        pool.destroy();
+        output.drop();
+        *result = 2;
+        return true;
+    }
+
     Vec<NodePool> pools = Vec<NodePool>.new();
     Vec<TokenStream> streams = Vec<TokenStream>.new();
     Vec<String> source_paths = Vec<String>.new();
@@ -896,31 +990,30 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
         return false;
     }
     native_expand_cfg_blocks(tree.root, &cfg, &pool);
-    if (!native_fold_cfg_exprs(tree.root, &cfg)) {
-        native_destroy_units(&pools, &streams);
-        source_paths.drop();
-        includes.drop();
-        pool.destroy();
-        output.drop();
-        return false;
-    }
-    if (!native_tree_supported(tree.root)) {
-        native_destroy_units(&pools, &streams);
-        source_paths.drop();
-        includes.drop();
-        pool.destroy();
-        output.drop();
-        return false;
-    }
+    native_add_function_import_aliases(tree.root, &cfg, &pool);
 
     SymbolTable symbols = SymbolTable.new();
-    collect_symbols(&symbols, &diagnostics, &tree, &cfg);
-    resolve_names(&symbols, &diagnostics, &tree, source_path, &cfg, &includes);
+    if (diagnostics.is_empty()) {
+        collect_symbols(&symbols, &diagnostics, &tree, &cfg);
+    }
+    if (diagnostics.is_empty()) {
+        resolve_names(&symbols, &diagnostics, &tree, source_path, &cfg, &includes);
+    }
+    if (diagnostics.is_empty()) {
+        check_declared_types(&symbols, &tree, &cfg, &diagnostics);
+    }
     if (diagnostics.is_empty()) {
         check_borrows(&tree, &symbols, &diagnostics, &cfg);
     }
     if (diagnostics.is_empty()) {
+        check_send(&tree, &diagnostics, &cfg);
+    }
+    if (diagnostics.is_empty()) {
         check_ownership(&tree, &diagnostics, &cfg);
+    }
+    if (diagnostics.is_empty()) {
+        AstPool check_pool = AstPool.new();
+        typecheck_expressions_scoped(&check_pool, &symbols, &tree, &cfg, &diagnostics, 1);
     }
     includes.drop();
 
@@ -938,6 +1031,23 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
         output.drop();
         *result = 2;
         return true;
+    }
+
+    // Keep @cfg syntax intact during cfg-aware semantic scans so dead
+    // ternary branches stay invisible; lowering folds the selected branch.
+    if (!native_fold_cfg_exprs(tree.root, &cfg)) {
+        native_destroy_units(&pools, &streams);
+        source_paths.drop();
+        pool.destroy();
+        output.drop();
+        return false;
+    }
+    if (!native_tree_supported(tree.root)) {
+        native_destroy_units(&pools, &streams);
+        source_paths.drop();
+        pool.destroy();
+        output.drop();
+        return false;
     }
 
     // Single lowering: LlvmGenerator lowers each function body once and runs
@@ -1216,6 +1326,29 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
             }
         }
         nld.drop();
+    }
+
+    bool needs_llvm = false;
+    i64 llvm_lib_index = 0;
+    while (llvm_lib_index < link_libs.len()) {
+        if (link_libs.get_ptr(llvm_lib_index).equals("LLVM-22")) {
+            needs_llvm = true;
+            break;
+        }
+        llvm_lib_index += 1;
+    }
+    if (needs_llvm) {
+        Optional<String> llvm_prefix = var("LLVM_SYS_221_PREFIX");
+        if (llvm_prefix.is_some()) {
+            String prefix = llvm_prefix.unwrap();
+            if (prefix.len() > 0) {
+                String lib_dir = String.from_str(prefix.to_str());
+                lib_dir.push_str("/lib");
+                native_add_search_path(&cc_command, direct_linker, lib_dir.to_str());
+                lib_dir.drop();
+            }
+            prefix.drop();
+        }
     }
 
     // Pass link libraries collected from AST (e.g. #[link("LLVM-22")])

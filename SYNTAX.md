@@ -97,6 +97,12 @@ bool disabled = false;
 > **Note**: Octal (`0o755`) and binary (`0b101010`) integer literals are **not**
 > supported.  The lexer has no token paths for them.
 
+String escapes include newline, carriage return, tab, NUL, backslash, quotation
+mark, apostrophe, two-digit hexadecimal bytes (`\xNN`), and Unicode scalar
+values (`\u{...}`). Hex escapes contribute raw bytes, so the complete string
+must remain valid UTF-8. Character literals support the single-character
+escapes, but not the string-only hexadecimal or Unicode forms.
+
 ---
 
 ## 2. Type System & Type Expressions
