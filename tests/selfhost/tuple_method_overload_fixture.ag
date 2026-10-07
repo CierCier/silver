@@ -1,0 +1,17 @@
+struct TupleSelector {}
+
+impl TupleSelector {
+    i32 choose(TupleSelector* self, [str, str] _value) {
+        return 0;
+    }
+
+    bool choose(TupleSelector* self, [i64, i64] _value) {
+        return true;
+    }
+}
+
+i32 main() {
+    TupleSelector selector;
+    bool selected = selector.choose([1, 2]);
+    return selected ? 0 : 1;
+}

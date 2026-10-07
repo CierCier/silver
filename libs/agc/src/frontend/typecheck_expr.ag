@@ -372,6 +372,20 @@ String typecheck_canonical_type(TypeTable* types, u32 type_id, u32 depth) {
         inner.drop();
         return move result;
     }
+    if (entry.kind == TypeKind.Tuple) {
+        String result = String.from_str("[");
+        i64 i = 0;
+        while (i < entry.count) {
+            if (i > 0) { result.push_str(", "); }
+            String element = typecheck_canonical_type(
+                types, types.type_args.get(entry.inner + (u32)i), depth + 1);
+            result.push_str(element.to_str());
+            element.drop();
+            i += 1;
+        }
+        result.push(']');
+        return move result;
+    }
     if (entry.kind == TypeKind.Named && entry.count > 0) {
         String result = String.from_str(types.names.get(entry.name_id));
         result.push('<');
@@ -1224,6 +1238,279 @@ bool typecheck_method_has_value_receiver(SyntaxNode* root, TypeTable* types,
                                                receiver_type);
 }
 
+bool typecheck_method_argument_score(AstPool* pool, TypeTable* types,
+                                     SyntaxNode* root, u32 receiver_type,
+                                     u32 arg_id, u32 expected_type,
+                                     i64* score) {
+    u32 expected = types.resolve_subst(resolve_generic_member_type(
+        types, root, receiver_type, expected_type));
+    TypeEntry* expected_entry = types.get(expected);
+    AstExpr* argument = pool.get_expr(arg_id);
+    if (argument.kind == ExprKind.ArrayLit && expected_entry.kind == TypeKind.Tuple) {
+        if (expected_entry.count != (i64)argument.aux) { return false; }
+        i64 i = 0;
+        while (i < expected_entry.count) {
+            u32 element_id = pool.args.get((i64)argument.inner1 + 1 + i);
+            u32 element_type = types.type_args.get(expected_entry.inner + (u32)i);
+            if (!typecheck_method_argument_score(pool, types, root, receiver_type,
+                                                element_id, element_type, score)) {
+                return false;
+            }
+            i += 1;
+        }
+        return true;
+    }
+
+    u32 actual = types.resolve_subst(argument.inferred_type);
+    if (actual == TYPE_UNKNOWN || expected == TYPE_UNKNOWN) { return true; }
+    if (types_match(types, expected, actual)) {
+        *score = *score + 2;
+        return true;
+    }
+    if (types_match_value(types, expected, actual, expr_is_literal(pool, arg_id))) {
+        *score = *score + 1;
+        return true;
+    }
+    return false;
+}
+
+u32 typecheck_method_decl_return_type(TypeTable* types, SyntaxNode* ret_start,
+                                      SyntaxNode* method_name_node) {
+    String return_text = String.new();
+    SyntaxNode* scan = ret_start;
+    while (scan != (SyntaxNode*)0 && scan != method_name_node) {
+        if (scan.kind == NodeKind.Token && scan.text == "#") {
+            scan = scan.next_sibling;
+            if (scan != (SyntaxNode*)0 && scan.kind == NodeKind.Bracket) {
+                scan = scan.next_sibling;
+            }
+            continue;
+        }
+        if (scan.kind == NodeKind.Token && (scan.text == "pub" || scan.text == "static")) {
+            scan = scan.next_sibling;
+            continue;
+        }
+        break;
+    }
+    while (scan != (SyntaxNode*)0 && scan != method_name_node) {
+        append_node_tokens(scan, &return_text);
+        scan = scan.next_sibling;
+    }
+    u32 return_type = types.parse_type_name(return_text.to_str());
+    return_text.drop();
+    return return_type;
+}
+
+bool typecheck_method_has_overloads(SyntaxNode* method_name_node,
+                                    str method_name) {
+    i64 method_count = 0;
+    SyntaxNode* block = method_name_node == (SyntaxNode*)0
+        ? (SyntaxNode*)0 : method_name_node.parent;
+    while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+        block = block.parent;
+    }
+    SyntaxNode* member = block == (SyntaxNode*)0
+        ? (SyntaxNode*)0 : block.first_child;
+    while (member != (SyntaxNode*)0 && method_count < 2) {
+        if (member.kind == NodeKind.Token
+            && member.token_kind == TokenKind.Semicolon) {
+            member = member.next_sibling;
+            continue;
+        }
+        SyntaxNode* name = (SyntaxNode*)0;
+        SyntaxNode* params_node = (SyntaxNode*)0;
+        SyntaxNode* body = (SyntaxNode*)0;
+        SyntaxNode* scan = member;
+        while (scan != (SyntaxNode*)0) {
+            if (scan.kind == NodeKind.Token
+                && scan.token_kind == TokenKind.Semicolon) { break; }
+            if (scan.kind == NodeKind.Block) { body = scan; break; }
+            if (scan.kind == NodeKind.Parenthesized) {
+                params_node = scan;
+                if (scan.next_sibling != (SyntaxNode*)0
+                    && scan.next_sibling.kind == NodeKind.Block) {
+                    body = scan.next_sibling;
+                    break;
+                }
+            }
+            if (scan.kind == NodeKind.Token
+                && scan.token_kind == TokenKind.Identifier) {
+                name = scan;
+            }
+            scan = scan.next_sibling;
+        }
+        if (body != (SyntaxNode*)0 && params_node != (SyntaxNode*)0
+            && name != (SyntaxNode*)0
+            && strcmp(name.text, method_name) == 0) {
+            method_count += 1;
+        }
+        member = body != (SyntaxNode*)0 ? body.next_sibling
+            : (scan != (SyntaxNode*)0 && scan.kind == NodeKind.Token
+               && scan.token_kind == TokenKind.Semicolon
+               ? scan.next_sibling : scan);
+    }
+    return method_count > 1;
+}
+
+String typecheck_method_symbol(TypeTable* types, str owner_name,
+                               str method_name,
+                               SyntaxNode* ret_start,
+                               SyntaxNode* method_name_node,
+                               SyntaxNode* params_node) {
+    String symbol = String.from_str(owner_name);
+    symbol.push_str("__");
+    symbol.push_str(method_name);
+    if (!typecheck_method_has_overloads(method_name_node, method_name)) {
+        return move symbol;
+    }
+
+    Vec<Binding> params = Vec<Binding>.new();
+    collect_parameter_bindings(params_node, &params);
+    String key = String.from_str(owner_name);
+    key.push_str("__");
+    key.push_str(method_name);
+    key.push('(');
+    i64 i = 0;
+    while (i < params.len()) {
+        if (i > 0) { key.push(','); }
+        u32 param_type = types.resolve_subst(
+            typecheck_parameter_type_id(types, params.get_ptr(i)));
+        String canonical = typecheck_canonical_type(types, param_type, 0);
+        key.push_str(canonical.to_str());
+        canonical.drop();
+        i += 1;
+    }
+    key.push_str(")->");
+    u32 return_type = typecheck_method_decl_return_type(types, ret_start,
+                                                        method_name_node);
+    String canonical_return = typecheck_canonical_type(types, return_type, 0);
+    key.push_str(canonical_return.to_str());
+    canonical_return.drop();
+    u64 hash = typecheck_fnv1a64(key.to_str());
+    key.drop();
+    params.drop();
+
+    symbol.push_str("__");
+    i64 shift = 60;
+    while (shift >= 0) {
+        u8 digit = (u8)((hash >> (u64)shift) & (u64)15);
+        u8 rendered = (u8)0;
+        if (digit < 10) { rendered = (u8)'0' + digit; }
+        else { rendered = (u8)'a' + digit - (u8)10; }
+        symbol.push(rendered);
+        shift -= 4;
+    }
+    return move symbol;
+}
+
+String typecheck_method_symbol_for_call(AstPool* pool, SyntaxNode* root,
+                                        TypeTable* types, u32 receiver_type,
+                                        str method_name, u32 args_start,
+                                        bool static_method) {
+    u32 resolved_receiver = types.resolve_subst(receiver_type);
+    TypeEntry* receiver = types.get(resolved_receiver);
+    while (receiver.kind == TypeKind.Pointer || receiver.kind == TypeKind.Reference) {
+        resolved_receiver = receiver.inner;
+        receiver = types.get(resolved_receiver);
+    }
+    if (receiver.kind != TypeKind.Named) {
+        String fallback = String.from_str(types.type_name(resolved_receiver));
+        fallback.push_str("__");
+        fallback.push_str(method_name);
+        return move fallback;
+    }
+    str owner_name = types.names.get(receiver.name_id);
+    u32 arg_count = pool.args.get((i64)args_start);
+    i64 parameter_offset = static_method ? 0 : 1;
+    i64 best_score = -1;
+    SyntaxNode* best_ret_start = (SyntaxNode*)0;
+    SyntaxNode* best_name = (SyntaxNode*)0;
+    SyntaxNode* best_params = (SyntaxNode*)0;
+    SyntaxNode* item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Impl) {
+            SyntaxNode* target = impl_target_identifier(item);
+            if (target != (SyntaxNode*)0 && strcmp(target.text, owner_name) == 0) {
+                SyntaxNode* block = item.first_child;
+                while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+                    block = block.next_sibling;
+                }
+                SyntaxNode* member = block == (SyntaxNode*)0
+                    ? (SyntaxNode*)0 : block.first_child;
+                while (member != (SyntaxNode*)0) {
+                    if (member.kind == NodeKind.Token
+                        && member.token_kind == TokenKind.Semicolon) {
+                        member = member.next_sibling;
+                        continue;
+                    }
+                    SyntaxNode* name = (SyntaxNode*)0;
+                    SyntaxNode* params_node = (SyntaxNode*)0;
+                    SyntaxNode* body = (SyntaxNode*)0;
+                    SyntaxNode* scan = member;
+                    while (scan != (SyntaxNode*)0) {
+                        if (scan.kind == NodeKind.Token
+                            && scan.token_kind == TokenKind.Semicolon) { break; }
+                        if (scan.kind == NodeKind.Block) { body = scan; break; }
+                        if (scan.kind == NodeKind.Parenthesized) {
+                            params_node = scan;
+                            if (scan.next_sibling != (SyntaxNode*)0
+                                && scan.next_sibling.kind == NodeKind.Block) {
+                                body = scan.next_sibling;
+                                break;
+                            }
+                        }
+                        if (scan.kind == NodeKind.Token
+                            && scan.token_kind == TokenKind.Identifier) {
+                            name = scan;
+                        }
+                        scan = scan.next_sibling;
+                    }
+                    if (body != (SyntaxNode*)0 && params_node != (SyntaxNode*)0
+                        && name != (SyntaxNode*)0
+                        && strcmp(name.text, method_name) == 0) {
+                        Vec<Binding> params = Vec<Binding>.new();
+                        collect_parameter_bindings(params_node, &params);
+                        if (params.len() == (i64)arg_count + parameter_offset) {
+                            bool matches = true;
+                            i64 score = 0;
+                            i64 arg_index = 0;
+                            while (matches && arg_index < (i64)arg_count) {
+                                u32 arg_id = pool.args.get((i64)args_start + 1 + arg_index);
+                                u32 expected = typecheck_parameter_type_id(
+                                    types, params.get_ptr(parameter_offset + arg_index));
+                                matches = typecheck_method_argument_score(
+                                    pool, types, root, resolved_receiver,
+                                    arg_id, expected, &score);
+                                arg_index += 1;
+                            }
+                            if (matches && score > best_score) {
+                                best_score = score;
+                                best_ret_start = member;
+                                best_name = name;
+                                best_params = params_node;
+                            }
+                        }
+                        params.drop();
+                    }
+                    member = body != (SyntaxNode*)0 ? body.next_sibling
+                        : (scan != (SyntaxNode*)0 && scan.kind == NodeKind.Token
+                           && scan.token_kind == TokenKind.Semicolon
+                           ? scan.next_sibling : scan);
+                }
+            }
+        }
+        item = item.next_sibling;
+    }
+    if (best_params == (SyntaxNode*)0) {
+        String fallback = String.from_str(owner_name);
+        fallback.push_str("__");
+        fallback.push_str(method_name);
+        return move fallback;
+    }
+    return typecheck_method_symbol(types, owner_name, method_name,
+                                   best_ret_start, best_name, best_params);
+}
+
 u32 typecheck_method_return_type_for_call(AstPool* pool, SyntaxNode* root,
                                           TypeTable* types, u32 receiver_type,
                                           str method_name, i64 param_count,
@@ -1296,21 +1583,13 @@ u32 typecheck_method_return_type_for_call(AstPool* pool, SyntaxNode* root,
                             i64 ai = 0;
                             while (matches_arguments && ai < (i64)arg_count) {
                                 u32 arg_id = pool.args.get((i64)args_start + 1 + ai);
-                                u32 actual = types.resolve_subst(pool.get_expr(arg_id).inferred_type);
                                 u32 parameter_index = (u32)(parameter_offset + ai);
                                 u32 expected = types.resolve_subst(typecheck_parameter_type_id(
                                     types, params.get_ptr(parameter_index)));
-                                if (actual != TYPE_UNKNOWN && expected != TYPE_UNKNOWN) {
-                                    expected = resolve_generic_member_type(
-                                        types, root, resolved_receiver, expected);
-                                    if (types_match(types, expected, actual)) {
-                                        score += 2;
-                                    } else if (types_match_value(types, expected, actual,
-                                                                expr_is_literal(pool, arg_id))) {
-                                        score += 1;
-                                    } else {
-                                        matches_arguments = false;
-                                    }
+                                if (!typecheck_method_argument_score(
+                                        pool, types, root, resolved_receiver, arg_id,
+                                        expected, &score)) {
+                                    matches_arguments = false;
                                 }
                                 ai += 1;
                             }
@@ -1359,9 +1638,11 @@ u32 typecheck_method_return_type(SyntaxNode* root, TypeTable* types,
         receiver_type, method_name, param_count, 0, false);
 }
 
-u32 typecheck_method_parameter_type(SyntaxNode* root, TypeTable* types,
-                                    u32 receiver_type, str method_name,
-                                    i64 param_count, i64 parameter_index) {
+u32 typecheck_method_parameter_type_for_call(AstPool* pool, SyntaxNode* root,
+                                             TypeTable* types, u32 receiver_type,
+                                             str method_name, i64 param_count,
+                                             u32 args_start, bool static_method,
+                                             i64 parameter_index) {
     u32 resolved_receiver = types.resolve_subst(receiver_type);
     TypeEntry* receiver = types.get(resolved_receiver);
     while (receiver.kind == TypeKind.Pointer || receiver.kind == TypeKind.Reference) {
@@ -1370,6 +1651,9 @@ u32 typecheck_method_parameter_type(SyntaxNode* root, TypeTable* types,
     }
     if (receiver.kind != TypeKind.Named) { return TYPE_UNKNOWN; }
     str owner_name = types.names.get(receiver.name_id);
+    u32 best_parameter_type = TYPE_UNKNOWN;
+    u32 fallback_parameter_type = TYPE_UNKNOWN;
+    i64 best_score = -1;
     SyntaxNode* item = root.first_child;
     while (item != (SyntaxNode*)0) {
         if (item.kind == NodeKind.Impl) {
@@ -1418,14 +1702,42 @@ u32 typecheck_method_parameter_type(SyntaxNode* root, TypeTable* types,
                         collect_parameter_bindings(params_node, &params);
                         if (params.len() == param_count
                             && parameter_index >= 0 && parameter_index < params.len()) {
-                            u32 parameter_type = typecheck_parameter_type_id(
-                                types, params.get_ptr(parameter_index));
+                            u32 parameter_type = resolve_generic_member_type(
+                                types, root, resolved_receiver,
+                                typecheck_parameter_type_id(
+                                    types, params.get_ptr(parameter_index)));
+                            if (fallback_parameter_type == TYPE_UNKNOWN) {
+                                fallback_parameter_type = parameter_type;
+                            }
+                            bool matches_arguments = true;
+                            i64 score = 0;
+                            if (pool != (AstPool*)0) {
+                                u32 arg_count = pool.args.get((i64)args_start);
+                                i64 parameter_offset = static_method ? 0 : 1;
+                                if ((i64)arg_count + parameter_offset != params.len()) {
+                                    matches_arguments = false;
+                                }
+                                i64 ai = 0;
+                                while (matches_arguments && ai < (i64)arg_count) {
+                                    u32 arg_id = pool.args.get((i64)args_start + 1 + ai);
+                                    u32 expected = typecheck_parameter_type_id(
+                                        types, params.get_ptr(parameter_offset + ai));
+                                    if (!typecheck_method_argument_score(
+                                            pool, types, root, resolved_receiver,
+                                            arg_id, expected, &score)) {
+                                        matches_arguments = false;
+                                    }
+                                    ai += 1;
+                                }
+                            }
+                            if (matches_arguments && score > best_score) {
+                                best_score = score;
+                                best_parameter_type = parameter_type;
+                            }
                             params.drop();
-                            return resolve_generic_member_type(types, root,
-                                                               resolved_receiver,
-                                                               parameter_type);
+                        } else {
+                            params.drop();
                         }
-                        params.drop();
                     }
                     member = body != (SyntaxNode*)0 ? body.next_sibling
                         : (scan != (SyntaxNode*)0 && scan.kind == NodeKind.Token
@@ -1435,7 +1747,8 @@ u32 typecheck_method_parameter_type(SyntaxNode* root, TypeTable* types,
         }
         item = item.next_sibling;
     }
-    return TYPE_UNKNOWN;
+    return best_parameter_type != TYPE_UNKNOWN
+        ? best_parameter_type : fallback_parameter_type;
 }
 
 u32 typecheck_slice_result_type(TypeTable* types, SyntaxNode* root, u32 target_type) {
@@ -2123,14 +2436,20 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                                                expr.inner0, diagnostics, ok);
         }
         if (expr.inner1 < (u32)pool.args.len()) {
+            i64 infer_index = 0;
+            while (infer_index < (i64)arg_count) {
+                u32 arg_id = pool.args.get((i64)expr.inner1 + 1 + infer_index);
+                infer_expr(pool, types, symbols, root, env, arg_id, diagnostics, ok);
+                infer_index += 1;
+            }
             i64 arg_index = 0;
             while (arg_index < (i64)arg_count) {
                 u32 arg_id = pool.args.get((i64)expr.inner1 + 1 + arg_index);
                 i64 parameter_index = arg_index + (static_method ? 0 : 1);
-                u32 expected_arg_type = typecheck_method_parameter_type(
-                    root, types, receiver_type, method_name, total_param_count,
-                    parameter_index);
-                u32 arg_type = infer_expr(pool, types, symbols, root, env, arg_id, diagnostics, ok);
+                u32 expected_arg_type = typecheck_method_parameter_type_for_call(
+                    pool, root, types, receiver_type, method_name, total_param_count,
+                    expr.inner1, static_method, parameter_index);
+                u32 arg_type = pool.get_expr(arg_id).inferred_type;
                 AstExpr* argument = pool.get_expr(arg_id);
                 TypeEntry* expected_entry = types.get(types.resolve_subst(expected_arg_type));
                 if (argument.kind == ExprKind.ArrayLit

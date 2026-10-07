@@ -885,6 +885,14 @@ impl LlvmGenerator {
                                     }
                                     u32 ret_type_id = type_id_from_text(types, ret_str.to_str());
                                     ret_str.drop();
+                                    if (!is_cast) {
+                                        String method_symbol = typecheck_method_symbol(
+                                            types, struct_name,
+                                            method_name_node.text, ret_start,
+                                            method_name_node, params_node);
+                                        mangled.drop();
+                                        mangled = move method_symbol;
+                                    }
                                     // Keep unsupported signatures undeclared. An actual
                                     // call fails closed through method resolution.
                                     if (!mono_type_is_concrete(self.ctx, types, ret_type_id, 0)) {
@@ -1500,6 +1508,14 @@ impl LlvmGenerator {
                                     }
                                     u32 ret_type_id = type_id_from_text(types, ret_str.to_str());
                                     ret_str.drop();
+                                    if (!is_cast) {
+                                        String method_symbol = typecheck_method_symbol(
+                                            types, struct_name,
+                                            method_name_node.text, ret_start,
+                                            method_name_node, params_node);
+                                        mangled.drop();
+                                        mangled = move method_symbol;
+                                    }
                                     LLVMOpaqueValue* fn_val = LLVMGetNamedFunction(self.module, mangled.to_str());
                                     mangled.drop();
                                     if (fn_val != (LLVMOpaqueValue*)0 && LLVMCountBasicBlocks(fn_val) == 0) {

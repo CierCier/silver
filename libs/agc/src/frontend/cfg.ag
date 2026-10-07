@@ -18,6 +18,7 @@ struct CfgImportBinding {
     str original;
     str alias;
     Span span;
+    SyntaxNode* import_node;
 }
 
 struct CfgSet {
@@ -764,6 +765,7 @@ void cfg_collect_import_bindings_at(SyntaxNode* parent, CfgSet* cfg, Vec<CfgImpo
                             binding.original = item.text;
                             binding.alias = alias.text;
                             binding.span = alias.span;
+                            binding.import_node = child;
                             bindings.push(move binding);
                             item = alias.next_sibling;
                             continue;

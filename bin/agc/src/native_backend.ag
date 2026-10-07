@@ -421,20 +421,37 @@ SyntaxNode* native_clone_syntax(NodePool* pool, SyntaxNode* source) {
     return clone;
 }
 
-void native_add_function_import_aliases(SyntaxNode* root, CfgSet* cfg, NodePool* pool) {
+void native_add_function_import_aliases(SyntaxNode* root, CfgSet* cfg, NodePool* pool,
+                                       str source_path, Vec<String>* includes,
+                                       Vec<String>* source_paths) {
     Vec<CfgImportBinding> bindings = Vec<CfgImportBinding>.new();
     cfg_collect_import_bindings(root, cfg, &bindings);
+    String root_dir = module_root(source_path);
     i64 binding_index = 0;
     while (binding_index < bindings.len()) {
         CfgImportBinding* binding = bindings.get_ptr(binding_index);
         SyntaxNode* target = (SyntaxNode*)0;
         bool alias_exists = false;
+        String module_name = cfg_import_name_from_item(binding.import_node);
+        String module_path = resolve_module_path(source_path, root_dir.to_str(),
+                                                  module_name.to_str(), includes);
+        i64 module_file_id = 0;
+        i64 path_index = 0;
+        while (path_index < source_paths.len()) {
+            String* path = source_paths.get_ptr(path_index);
+            if (strcmp(path.to_str(), module_path.to_str()) == 0) {
+                module_file_id = path_index + 1;
+                break;
+            }
+            path_index += 1;
+        }
         SyntaxNode* item = root.first_child;
         while (item != (SyntaxNode*)0) {
             SyntaxNode* name = item_identifier(item);
             if (name != (SyntaxNode*)0) {
                 if (strcmp(name.text, binding.alias) == 0) { alias_exists = true; }
-                if (target == (SyntaxNode*)0 && item.kind == NodeKind.Function
+                if (module_file_id != 0 && target == (SyntaxNode*)0
+                    && item.kind == NodeKind.Function && item.span.file == module_file_id
                     && strcmp(name.text, binding.original) == 0) {
                     target = item;
                 }
@@ -451,8 +468,11 @@ void native_add_function_import_aliases(SyntaxNode* root, CfgSet* cfg, NodePool*
                 }
             }
         }
+        module_name.drop();
+        module_path.drop();
         binding_index += 1;
     }
+    root_dir.drop();
     bindings.drop();
 }
 
@@ -990,7 +1010,8 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
         return false;
     }
     native_expand_cfg_blocks(tree.root, &cfg, &pool);
-    native_add_function_import_aliases(tree.root, &cfg, &pool);
+    native_add_function_import_aliases(tree.root, &cfg, &pool, source_path,
+                                       &includes, &source_paths);
 
     SymbolTable symbols = SymbolTable.new();
     if (diagnostics.is_empty()) {

@@ -3,10 +3,27 @@ import std.io.file;
 import std.display;
 
 struct NativeLabel { i64 value; }
+struct NativeTemporaryLabel { i64 value; }
 enum NativeStatus { Pending; Ready; }
+i64 temporary_label_calls = 0;
+i64 displayed_temporary_label = 0;
+
+NativeTemporaryLabel make_temporary_label() {
+    temporary_label_calls = temporary_label_calls + 1;
+    NativeTemporaryLabel label;
+    label.value = temporary_label_calls;
+    return label;
+}
 
 impl Display for NativeLabel {
     void fmt(*self, BufWriter* out) {
+        @fprint(out, "{}", self.value);
+    }
+}
+
+impl Display for NativeTemporaryLabel {
+    void fmt(*self, BufWriter* out) {
+        displayed_temporary_label = self.value;
         @fprint(out, "{}", self.value);
     }
 }
@@ -21,6 +38,9 @@ i32 main() {
     NativeLabel label = { .value = 73 };
     String custom = @format("label: {}", label);
     @println("{}", custom);
+    String temporary_custom = @format("temporary: {}", make_temporary_label());
+    if (temporary_label_calls != 1) { return 11; }
+    if (displayed_temporary_label != 1) { return 12; }
     NativeStatus status = NativeStatus.Ready;
     String enum_name = @format("status: {}", status);
     @println("{}", enum_name);

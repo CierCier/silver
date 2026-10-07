@@ -1781,10 +1781,17 @@ LLVMOpaqueValue* llvm_emit_format_to(LlvmContext* ctx, AstExpr* expr,
             && format.data[pos + 1] == (u8)'}') {
             u32 arg_id = ctx.pool.args.get((i64)expr.inner1 + (i64)arg_index);
             u32 arg_type = llvm_expr_type(ctx, arg_id);
-            LLVMOpaqueValue* arg_val = llvm_emit_expr(ctx, arg_id);
-            if (arg_val == (LLVMOpaqueValue*)0) {
-                format.drop();
-                return (LLVMOpaqueValue*)0;
+            LLVMOpaqueValue* arg_val = (LLVMOpaqueValue*)0;
+            bool needs_value = arg_type == TYPE_STR || arg_type == TYPE_BOOL
+                || type_is_integer(arg_type) || arg_type == TYPE_F32
+                || arg_type == TYPE_F64 || arg_type == TYPE_CHAR
+                || strcmp(ctx.types.type_name(arg_type), "String") == 0;
+            if (needs_value) {
+                arg_val = llvm_emit_expr(ctx, arg_id);
+                if (arg_val == (LLVMOpaqueValue*)0) {
+                    format.drop();
+                    return (LLVMOpaqueValue*)0;
+                }
             }
             if (arg_type == TYPE_STR) {
                 if (!llvm_emit_format_write_str(ctx, string_slot, output_writer, arg_val)) {
@@ -4293,13 +4300,11 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 base_name.push(struct_name[bn]);
                 bn += 1;
             }
-            str mangled_base = struct_name;
-            if (base_name.len() > 0) {
-                mangled_base = base_name.to_str();
-            }
-            mangled.push_str(mangled_base);
-            mangled.push_str("__");
-            mangled.push_str(method_name);
+            String method_symbol = typecheck_method_symbol_for_call(
+                ctx.pool, ctx.root, ctx.types, receiver_type_id, method_name,
+                expr.inner1, !is_instance);
+            mangled.push_str(method_symbol.to_str());
+            method_symbol.drop();
             fn_val = LLVMGetNamedFunction(ctx.module, mangled.to_str());
 
             if (fn_val == (LLVMOpaqueValue*)0) {
@@ -4389,9 +4394,10 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             u32 param_index = (is_instance ? (u32)1 : (u32)0) + (u32)i;
             u32 arg_type = ctx.types.resolve_subst(llvm_expr_type(ctx, arg_id));
             AstExpr* argument = ctx.pool.get_expr(arg_id);
-            u32 expected_arg_type = typecheck_method_parameter_type(
-                ctx.root, ctx.types, receiver_type_id, method_name,
-                (i64)args_count + (is_instance ? 1 : 0), (i64)param_index);
+            u32 expected_arg_type = typecheck_method_parameter_type_for_call(
+                ctx.pool, ctx.root, ctx.types, receiver_type_id, method_name,
+                (i64)args_count + (is_instance ? 1 : 0), args_start,
+                !is_instance, (i64)param_index);
             bool tuple_arg = false;
             if (expected_arg_type != TYPE_UNKNOWN) {
                 expected_arg_type = ctx.types.resolve_subst(expected_arg_type);

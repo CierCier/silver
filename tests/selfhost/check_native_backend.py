@@ -34,6 +34,7 @@ def main() -> int:
     cc = (args.cc or shutil.which("cc"))
     if cc is None or not pathlib.Path(cc).is_file():
         raise SystemExit("cc is required for the stage1 native smoke gate")
+    repository = pathlib.Path(__file__).resolve().parents[2]
 
     with tempfile.TemporaryDirectory(prefix="silver-native-backend-") as temporary:
         root = pathlib.Path(temporary)
@@ -86,6 +87,58 @@ def main() -> int:
         executed = subprocess.run([str(direct_output)], check=False)
         if executed.returncode != 42:
             raise AssertionError(f"direct native program returned {executed.returncode}, expected 42")
+
+        alias_fixture = pathlib.Path(__file__).with_name(
+            "native_import_alias_collision_fixture.ag"
+        )
+        alias_output = root / "import-alias-collision"
+        alias_build = run(
+            stage1,
+            [
+                "build",
+                str(alias_fixture),
+                "--no-cache",
+                "-I",
+                str(repository / "tests/modules"),
+                "-o",
+                str(alias_output),
+            ],
+            env,
+            root,
+        )
+        if alias_build.returncode != 0:
+            raise AssertionError(
+                "native imported alias collision build failed: "
+                f"{alias_build.returncode}\n{alias_build.stderr}"
+            )
+        executed = subprocess.run([str(alias_output)], check=False)
+        if executed.returncode != 0:
+            raise AssertionError(
+                "native imported alias selected the entry function: "
+                f"exit code {executed.returncode}, expected 0"
+            )
+
+        tuple_overload_fixture = pathlib.Path(__file__).with_name(
+            "tuple_method_overload_fixture.ag"
+        )
+        tuple_overload_output = root / "tuple-method-overload"
+        tuple_overload_build = run(
+            stage1,
+            ["build", str(tuple_overload_fixture), "--no-cache", "-o", str(tuple_overload_output)],
+            env,
+            root,
+        )
+        if tuple_overload_build.returncode != 0:
+            raise AssertionError(
+                "native tuple method overload build failed: "
+                f"{tuple_overload_build.returncode}\n{tuple_overload_build.stderr}"
+            )
+        executed = subprocess.run([str(tuple_overload_output)], check=False)
+        if executed.returncode != 0:
+            raise AssertionError(
+                "native tuple method overload selected the wrong candidate: "
+                f"exit code {executed.returncode}, expected 0"
+            )
 
         array_fixture = pathlib.Path(__file__).with_name("large_array_native_fixture.ag")
         array_output = root / "large-array"

@@ -96,6 +96,31 @@ String binding_parameter_type_text(Binding* binding) {
         && binding != (Binding*)0
         && binding.type_start != (SyntaxNode*)0
         && binding.type_end != (SyntaxNode*)0) {
+        SyntaxNode* tuple_type = binding.type_start;
+        while (tuple_type != binding.type_end && tuple_type.kind == NodeKind.Token
+            && projection_is_qualifier(tuple_type)) {
+            tuple_type = tuple_type.next_sibling;
+        }
+        if (tuple_type != binding.type_end && tuple_type.kind == NodeKind.Bracket) {
+            bool has_tuple_separator = false;
+            SyntaxNode* part = tuple_type.first_child;
+            while (part != (SyntaxNode*)0) {
+                if (part.kind == NodeKind.Token
+                    && part.token_kind == TokenKind.Comma) {
+                    has_tuple_separator = true;
+                    break;
+                }
+                part = part.next_sibling;
+            }
+            if (has_tuple_separator) {
+                String tuple_text = String.new();
+                while (tuple_type != binding.type_end) {
+                    append_node_tokens(tuple_type, &tuple_text);
+                    tuple_type = tuple_type.next_sibling;
+                }
+                return move tuple_text;
+            }
+        }
         Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
         SyntaxNode* cursor = binding.type_start;
         while (cursor != (SyntaxNode*)0 && cursor != binding.type_end) {
