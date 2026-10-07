@@ -2,6 +2,10 @@ import std.test;
 import std.slice;
 import std.string;
 
+String make_slice_comparison_string() {
+    return String.from_str("hello");
+}
+
 i32 main() {
     test_start("Slice<u8> string comparisons");
     {
@@ -26,6 +30,7 @@ i32 main() {
         String str_obj = String.from_str("hello");
         assert_true(s == str_obj, "s == String");
         assert_true(str_obj == s, "String == s");
+        assert_true(s == make_slice_comparison_string(), "slice compares with temporary String");
     }
 
     test_start("Slice<u8> starts_with, ends_with, contains");

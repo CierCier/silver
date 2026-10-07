@@ -230,7 +230,10 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
             // readable but no longer drops.
             llvm_clear_copy_source(ctx, stmt.inner1, true);
             llvm_emit_assign_predrop(ctx, stmt.inner0, stmt.inner1);
-            LLVMBuildStore(ctx.builder, val, target_ptr);
+            LLVMOpaqueValue* store = LLVMBuildStore(ctx.builder, val, target_ptr);
+            if (llvm_expr_may_be_unaligned(ctx, stmt.inner0)) {
+                LLVMSetAlignment(store, 1);
+            }
             llvm_mark_assign_live(ctx, stmt.inner0);
         }
         return;

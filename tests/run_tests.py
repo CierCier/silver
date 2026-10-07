@@ -247,7 +247,7 @@ def prime_wasm_runner_shim(agc_bin: Path) -> None:
     try:
         src = prime_dir / "prime.ag"
         src.write_text("i32 main() {\n    return 0;\n}\n")
-        subprocess.run(
+        result = subprocess.run(
             [str(agc_bin), "run", "--target", "wasm32-wasip1", str(src)],
             capture_output=True,
             timeout=120,
@@ -255,10 +255,12 @@ def prime_wasm_runner_shim(agc_bin: Path) -> None:
     finally:
         shutil.rmtree(prime_dir, ignore_errors=True)
     if not os.path.exists(wasm_runner_shim_path()):
+        detail = (result.stderr or result.stdout).decode(errors="replace").strip()
         print(
             f"{C_RED}error: the wasm runner shim was not created at "
             f"{wasm_runner_shim_path()}; run `agc run --target wasm32-wasip1 <file>` "
-            f"once to generate it, or set SILVER_TEST_RUNNER{C_RESET}"
+            f"once to generate it, or set SILVER_TEST_RUNNER. "
+            f"Priming command exited {result.returncode}: {detail}{C_RESET}"
         )
         sys.exit(1)
 

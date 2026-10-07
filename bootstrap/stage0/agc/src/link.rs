@@ -426,6 +426,8 @@ pub(crate) fn link_exe_with_wasm_ld(
 ) -> Result<(), String> {
     let lld_name = if command_exists("wasm-ld") {
         "wasm-ld"
+    } else if command_exists("wasm-ld-22") {
+        "wasm-ld-22"
     } else if command_exists("ld.lld") {
         // Unified lld: `-flavor wasm` selects the wasm driver.
         "lld"

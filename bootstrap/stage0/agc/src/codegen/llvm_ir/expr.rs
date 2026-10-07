@@ -1622,6 +1622,77 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
+    fn cast_slice_bound_to_i64(
+        &mut self,
+        expr: &ast::Expression,
+        value: inkwell::values::IntValue<'ctx>,
+        span: Span,
+        name: &str,
+    ) -> CodegenResult<inkwell::values::IntValue<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let source_ty = value.get_type();
+        let width = source_ty.get_bit_width();
+        let is_unsigned = self.expression_is_unsigned(expr);
+
+        if width < 64 {
+            return if is_unsigned {
+                self.builder
+                    .build_int_z_extend_or_bit_cast(value, i64_ty, name)
+            } else {
+                self.builder
+                    .build_int_s_extend_or_bit_cast(value, i64_ty, name)
+            }
+            .map_err(|e| CodegenError::with_span(e.to_string(), span));
+        }
+
+        if width == 64 {
+            if !is_unsigned {
+                return Ok(value);
+            }
+            let max_i64 = i64_ty.const_int(i64::MAX as u64, false);
+            let above = self
+                .builder
+                .build_int_compare(inkwell::IntPredicate::UGT, value, max_i64, "slice.bound.above_i64")
+                .map_err(|e| CodegenError::with_span(e.to_string(), span))?;
+            return self
+                .builder
+                .build_select(above, max_i64, value, name)
+                .map(|value| value.into_int_value())
+                .map_err(|e| CodegenError::with_span(e.to_string(), span));
+        }
+
+        let max_i64 = source_ty.const_int(i64::MAX as u64, false);
+        let high_predicate = if is_unsigned {
+            inkwell::IntPredicate::UGT
+        } else {
+            inkwell::IntPredicate::SGT
+        };
+        let above = self
+            .builder
+            .build_int_compare(high_predicate, value, max_i64, "slice.bound.above_i64")
+            .map_err(|e| CodegenError::with_span(e.to_string(), span))?;
+        let mut clamped = self
+            .builder
+            .build_select(above, max_i64, value, "slice.bound.clamp_high")
+            .map(|value| value.into_int_value())
+            .map_err(|e| CodegenError::with_span(e.to_string(), span))?;
+        if !is_unsigned {
+            let min_i64 = source_ty.const_int(0x8000_0000_0000_0000, true);
+            let below = self
+                .builder
+                .build_int_compare(inkwell::IntPredicate::SLT, clamped, min_i64, "slice.bound.below_i64")
+                .map_err(|e| CodegenError::with_span(e.to_string(), span))?;
+            clamped = self
+                .builder
+                .build_select(below, min_i64, clamped, "slice.bound.clamp_low")
+                .map(|value| value.into_int_value())
+                .map_err(|e| CodegenError::with_span(e.to_string(), span))?;
+        }
+        self.builder
+            .build_int_truncate(clamped, i64_ty, name)
+            .map_err(|e| CodegenError::with_span(e.to_string(), span))
+    }
+
     fn emit_slice_construct(
         &mut self,
         base_ptr: inkwell::values::PointerValue<'ctx>,
@@ -1637,14 +1708,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         let start_val = if let Some(s) = start {
             let v = self.emit_expression_value(s)?.into_int_value();
-            self.builder.build_int_cast(v, i64_ty, "slice.start.cast").unwrap_or(v)
+            self.cast_slice_bound_to_i64(s, v, span, "slice.start.cast")?
         } else {
             i64_zero
         };
 
         let end_val = if let Some(e) = end {
             let v = self.emit_expression_value(e)?.into_int_value();
-            self.builder.build_int_cast(v, i64_ty, "slice.end.cast").unwrap_or(v)
+            self.cast_slice_bound_to_i64(e, v, span, "slice.end.cast")?
         } else {
             len_val
         };

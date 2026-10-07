@@ -1,3 +1,4 @@
+// compile_flags: -O2
 // Packed structs must keep their layout across cached build units:
 // size, field offsets, and by-value calls all follow `#[packed]`.
 import std.test;

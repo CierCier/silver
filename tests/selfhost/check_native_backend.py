@@ -105,6 +105,50 @@ def main() -> int:
                 f"native 64 KiB array program returned {executed.returncode}, expected 0"
             )
 
+        borrowed_temp_fixture = pathlib.Path(__file__).with_name(
+            "borrowed_operator_temp_fixture.ag"
+        )
+        borrowed_temp_output = root / "borrowed-temp"
+        borrowed_temp_build = run(
+            stage1,
+            ["build", str(borrowed_temp_fixture), "--no-cache", "-o", str(borrowed_temp_output)],
+            env,
+            root,
+        )
+        if borrowed_temp_build.returncode != 0:
+            raise AssertionError(
+                "native borrowed operator temporary build failed: "
+                f"{borrowed_temp_build.returncode}\n{borrowed_temp_build.stderr}"
+            )
+        executed = subprocess.run([str(borrowed_temp_output)], check=False)
+        if executed.returncode != 0:
+            raise AssertionError(
+                "native borrowed operator temporary did not drop after the call: "
+                f"exit code {executed.returncode}, expected 0"
+            )
+
+        enum_array_fixture = pathlib.Path(__file__).with_name(
+            "enum_array_drop_fixture.ag"
+        )
+        enum_array_output = root / "enum-array-drop"
+        enum_array_build = run(
+            stage1,
+            ["build", str(enum_array_fixture), "--no-cache", "-o", str(enum_array_output)],
+            env,
+            root,
+        )
+        if enum_array_build.returncode != 0:
+            raise AssertionError(
+                f"native enum array drop build failed: {enum_array_build.returncode}\n"
+                f"{enum_array_build.stderr}"
+            )
+        executed = subprocess.run([str(enum_array_output)], check=False)
+        if executed.returncode != 0:
+            raise AssertionError(
+                "native enum array drop regression returned "
+                f"{executed.returncode}, expected 0"
+            )
+
         cfg_source = root / "cfg.ag"
         cfg_source.write_text(
             "i32 main() {\n"

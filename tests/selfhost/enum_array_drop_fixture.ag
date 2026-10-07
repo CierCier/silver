@@ -1,0 +1,59 @@
+i64 drop_count = 0;
+i64 drop_sum = 0;
+
+struct DropProbe {
+    i64 value;
+}
+
+impl Drop for DropProbe {
+    void drop(DropProbe* self) {
+        drop_count = drop_count + 1;
+        drop_sum = drop_sum + self.value;
+    }
+}
+
+struct ProbeArray {
+    DropProbe items[2];
+}
+
+enum PayloadPair {
+    Values(DropProbe, DropProbe);
+    Array(ProbeArray);
+    Empty;
+}
+
+DropProbe global_items[2];
+
+i32 main() {
+    {
+        DropProbe first;
+        first.value = 3;
+        DropProbe second;
+        second.value = 5;
+        PayloadPair payload = PayloadPair.Values(move first, move second);
+        [PayloadPair, i64] _tuple = [move payload, 0];
+    }
+    if (drop_count != 2) { return (i32)(10 + drop_count); }
+    if (drop_sum != 8) { return 2; }
+
+    {
+        DropProbe first;
+        first.value = 7;
+        DropProbe second;
+        second.value = 11;
+        ProbeArray array;
+        array.items[0] = move first;
+        array.items[1] = move second;
+        PayloadPair payload = PayloadPair.Array(move array);
+        [PayloadPair, i64] _tuple = [move payload, 0];
+    }
+    if (drop_count != 4) { return 3; }
+    if (drop_sum != 26) { return 4; }
+
+    global_items[0].value = 13;
+    global_items[1].value = 17;
+    @drop_in_place(DropProbe[2], &global_items, 1);
+    if (drop_count != 6) { return 5; }
+    if (drop_sum != 56) { return 6; }
+    return 0;
+}

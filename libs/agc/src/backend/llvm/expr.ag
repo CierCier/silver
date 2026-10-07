@@ -922,6 +922,26 @@ LLVMOpaqueValue* llvm_emit_lvalue(LlvmContext* ctx, u32 expr_id) {
     return (LLVMOpaqueValue*)0;
 }
 
+bool llvm_expr_may_be_unaligned(LlvmContext* ctx, u32 expr_id) {
+    if (expr_id == 0) { return false; }
+    AstExpr* expr = ctx.pool.get_expr(expr_id);
+    if (expr.kind == ExprKind.Field) {
+        u32 target_type = ctx.types.resolve_subst(llvm_expr_type(ctx, expr.inner0));
+        TypeEntry* target = ctx.types.get(target_type);
+        while (target.kind == TypeKind.Pointer || target.kind == TypeKind.Reference) {
+            target_type = ctx.types.resolve_subst(target.inner);
+            target = ctx.types.get(target_type);
+        }
+        LlvmStructDef* def = ctx.find_struct_by_str(ctx.types.type_name(target_type));
+        return (def != (LlvmStructDef*)0 && def.packed)
+            || llvm_expr_may_be_unaligned(ctx, expr.inner0);
+    }
+    if (expr.kind == ExprKind.Index) {
+        return llvm_expr_may_be_unaligned(ctx, expr.inner0);
+    }
+    return false;
+}
+
 u32 llvm_index_elem_type(LlvmContext* ctx, u32 target_expr_id, u32 index_expr_id) {
     u32 target_type = llvm_expr_type(ctx, target_expr_id);
     TypeEntry* entry = ctx.types.get(target_type);
@@ -2066,7 +2086,8 @@ LLVMOpaqueValue* llvm_emit_struct_lit(LlvmContext* ctx, AstExpr* expr) {
         }
         val = llvm_compat_value(ctx, val, llvm_expr_type(ctx, val_id), field_type);
         LLVMOpaqueValue* field_ptr = LLVMBuildStructGEP2(ctx.builder, def.llvm_type, slot, (u32)field_idx, "struct.lit.field");
-        LLVMBuildStore(ctx.builder, val, field_ptr);
+        LLVMOpaqueValue* store = LLVMBuildStore(ctx.builder, val, field_ptr);
+        if (def.packed) { LLVMSetAlignment(store, 1); }
         fi += 1;
     }
     // Field values copied out of tracked locals transfer ownership to the
@@ -2078,6 +2099,53 @@ LLVMOpaqueValue* llvm_emit_struct_lit(LlvmContext* ctx, AstExpr* expr) {
         cleared_index += 1;
     }
     return LLVMBuildLoad2(ctx.builder, def.llvm_type, slot, "struct.lit.val");
+}
+
+LLVMOpaqueValue* llvm_slice_bound_i64(LlvmContext* ctx, u32 expr_id,
+                                      LLVMOpaqueValue* value, str name) {
+    u32 source_type = llvm_expr_type(ctx, expr_id);
+    if (LLVMGetTypeKind(LLVMTypeOf(value)) != (u32)8) {
+        ctx.note_unresolved("slice-bound", name);
+        return (LLVMOpaqueValue*)0;
+    }
+    u32 width = LLVMGetIntTypeWidth(LLVMTypeOf(value));
+    LLVMOpaqueType* i64_type = LLVMInt64TypeInContext(ctx.ctx);
+    if (width < 64) {
+        LLVMOpaqueValue* extended = (LLVMOpaqueValue*)0;
+        if (llvm_type_is_signed(ctx.types, source_type)) {
+            extended = LLVMBuildSExt(ctx.builder, value, i64_type, name);
+        } else {
+            extended = LLVMBuildZExt(ctx.builder, value, i64_type, name);
+        }
+        return extended;
+    }
+
+    bool is_signed = llvm_type_is_signed(ctx.types, source_type);
+    if (width == 64) {
+        if (is_signed) { return value; }
+        LLVMOpaqueValue* max_i64 = LLVMConstInt(i64_type,
+            (u64)0x7FFFFFFFFFFFFFFF, 0);
+        LLVMOpaqueValue* above = LLVMBuildICmp(ctx.builder,
+            LLVMIntPredicate.LLVMIntUGT, value, max_i64, "slice.bound.above_i64");
+        return LLVMBuildSelect(ctx.builder, above, max_i64, value,
+                               "slice.bound.clamp_high");
+    }
+    LLVMOpaqueType* source_llvm_type = LLVMTypeOf(value);
+    LLVMOpaqueValue* max_i64 = LLVMConstInt(source_llvm_type,
+        (u64)0x7FFFFFFFFFFFFFFF, 0);
+    LLVMOpaqueValue* above = LLVMBuildICmp(ctx.builder,
+        is_signed ? LLVMIntPredicate.LLVMIntSGT : LLVMIntPredicate.LLVMIntUGT,
+        value, max_i64, "slice.bound.above_i64");
+    value = LLVMBuildSelect(ctx.builder, above, max_i64, value, "slice.bound.clamp_high");
+    if (is_signed) {
+        LLVMOpaqueValue* min_i64 = LLVMConstInt(source_llvm_type,
+            (u64)0x8000000000000000, 1);
+        LLVMOpaqueValue* below = LLVMBuildICmp(ctx.builder,
+            LLVMIntPredicate.LLVMIntSLT, value, min_i64, "slice.bound.below_i64");
+        value = LLVMBuildSelect(ctx.builder, below, min_i64, value,
+                                "slice.bound.clamp_low");
+    }
+    return LLVMBuildTrunc(ctx.builder, value, i64_type, name);
 }
 
 LLVMOpaqueValue* llvm_emit_slice(LlvmContext* ctx, u32 expr_id) {
@@ -2133,12 +2201,8 @@ LLVMOpaqueValue* llvm_emit_slice(LlvmContext* ctx, u32 expr_id) {
     if (target.kind == TypeKind.Array) {
         base_ptr = llvm_emit_lvalue(ctx, target_id);
         if (base_ptr == (LLVMOpaqueValue*)0) {
-            LLVMOpaqueValue* array_value = llvm_emit_expr(ctx, target_id);
-            LLVMOpaqueType* array_type = llvm_lower_type(ctx.ctx, ctx.types, target_type);
-            if (array_value != (LLVMOpaqueValue*)0) {
-                base_ptr = LLVMBuildAlloca(ctx.builder, array_type, "slice.array.tmp");
-                LLVMBuildStore(ctx.builder, array_value, base_ptr);
-            }
+            ctx.note_unresolved("slice-source", "temporary array");
+            return (LLVMOpaqueValue*)0;
         }
         length = LLVMConstInt(i64_type, (u64)target.count, 0);
     } else {
@@ -2169,23 +2233,25 @@ LLVMOpaqueValue* llvm_emit_slice(LlvmContext* ctx, u32 expr_id) {
     if (start_id == 0) {
         start = LLVMConstInt(i64_type, 0, 0);
     } else {
-        start = llvm_emit_expr(ctx, start_id);
+        LLVMOpaqueValue* start_value = llvm_emit_expr(ctx, start_id);
+        if (start_value != (LLVMOpaqueValue*)0) {
+            start = llvm_slice_bound_i64(ctx, start_id, start_value,
+                                         "slice.start.i64");
+        }
     }
     LLVMOpaqueValue* end = (LLVMOpaqueValue*)0;
     if (end_id == 0) {
         end = length;
     } else {
-        end = llvm_emit_expr(ctx, end_id);
+        LLVMOpaqueValue* end_value = llvm_emit_expr(ctx, end_id);
+        if (end_value != (LLVMOpaqueValue*)0) {
+            end = llvm_slice_bound_i64(ctx, end_id, end_value,
+                                       "slice.end.i64");
+        }
     }
     if (start == (LLVMOpaqueValue*)0 || end == (LLVMOpaqueValue*)0) {
         ctx.note_unresolved("slice-bound", "expression");
         return (LLVMOpaqueValue*)0;
-    }
-    if (LLVMTypeOf(start) != i64_type) {
-        start = llvm_compat_value(ctx, start, llvm_expr_type(ctx, start_id), TYPE_I64);
-    }
-    if (LLVMTypeOf(end) != i64_type) {
-        end = llvm_compat_value(ctx, end, llvm_expr_type(ctx, end_id), TYPE_I64);
     }
 
     LLVMOpaqueValue* zero = LLVMConstInt(i64_type, 0, 0);
@@ -3950,7 +4016,12 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             }
             if (field_type != TYPE_UNKNOWN && field_type != 0) {
                 LLVMOpaqueType* field_ty = llvm_lower_type(ctx.ctx, ctx.types, field_type);
-                return LLVMBuildLoad2(ctx.builder, field_ty, field_ptr, "load_field");
+                LLVMOpaqueValue* load = LLVMBuildLoad2(ctx.builder, field_ty, field_ptr,
+                                                        "load_field");
+                if (llvm_expr_may_be_unaligned(ctx, expr_id)) {
+                    LLVMSetAlignment(load, 1);
+                }
+                return load;
             }
         }
         return (LLVMOpaqueValue*)0;
@@ -3984,7 +4055,12 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             LLVMOpaqueType* elem_ty = (elem_type != 0 && elem_type != TYPE_UNKNOWN && elem_type != TYPE_VOID)
                 ? llvm_lower_type(ctx.ctx, ctx.types, elem_type)
                 : LLVMInt8TypeInContext(ctx.ctx);
-            return LLVMBuildLoad2(ctx.builder, elem_ty, elem_ptr, "load_elem");
+            LLVMOpaqueValue* load = LLVMBuildLoad2(ctx.builder, elem_ty, elem_ptr,
+                                                    "load_elem");
+            if (llvm_expr_may_be_unaligned(ctx, expr_id)) {
+                LLVMSetAlignment(load, 1);
+            }
+            return load;
         }
         return (LLVMOpaqueValue*)0;
     }
@@ -4239,6 +4315,8 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         Vec<LLVMOpaqueValue*> call_args = Vec<LLVMOpaqueValue*>.new();
         Vec<u32> call_arg_types = Vec<u32>.new();
         Vec<u32> call_target_types = Vec<u32>.new();
+        Vec<LLVMOpaqueValue*> borrowed_temp_ptrs = Vec<LLVMOpaqueValue*>.new();
+        Vec<u32> borrowed_temp_types = Vec<u32>.new();
         bool rx_moved = false;
         if (is_instance) {
             u32 rx_type = llvm_expr_type(ctx, expr.inner0);
@@ -4310,6 +4388,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             u32 arg_id = ctx.pool.args.get((i64)args_start + 1 + i);
             u32 param_index = (is_instance ? (u32)1 : (u32)0) + (u32)i;
             u32 arg_type = ctx.types.resolve_subst(llvm_expr_type(ctx, arg_id));
+            AstExpr* argument = ctx.pool.get_expr(arg_id);
             u32 expected_arg_type = typecheck_method_parameter_type(
                 ctx.root, ctx.types, receiver_type_id, method_name,
                 (i64)args_count + (is_instance ? 1 : 0), (i64)param_index);
@@ -4317,7 +4396,6 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             if (expected_arg_type != TYPE_UNKNOWN) {
                 expected_arg_type = ctx.types.resolve_subst(expected_arg_type);
                 TypeEntry* expected_entry = ctx.types.get(expected_arg_type);
-                AstExpr* argument = ctx.pool.get_expr(arg_id);
                 tuple_arg = argument.kind == ExprKind.ArrayLit
                     && expected_entry.kind == TypeKind.Tuple
                     && expected_entry.count == (i64)argument.aux;
@@ -4335,16 +4413,26 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             if (tuple_arg) {
                 ctx.expected_type_id = expected_arg_type;
             }
-            if (operator_method && expects_reference && !arg_is_indirect && arg_type != TYPE_STR) {
-                a_val = llvm_emit_lvalue(ctx, arg_id);
+            bool explicit_borrow = argument.kind == ExprKind.Unary
+                && argument.aux == (u32)TokenKind.BitwiseAnd;
+            bool borrow_temporary = expects_reference
+                && ((operator_method && !arg_is_indirect && arg_type != TYPE_STR)
+                    || (arg_is_indirect && explicit_borrow));
+            if (borrow_temporary) {
+                u32 borrowed_expr_id = explicit_borrow ? argument.inner0 : arg_id;
+                a_val = llvm_emit_lvalue(ctx, borrowed_expr_id);
                 if (a_val == (LLVMOpaqueValue*)0) {
-                    ctx.expected_type_id = saved_expected;
-                    ctx.note_unresolved("method-reference-arg", method_name);
-                    param_types.drop();
-                    call_target_types.drop();
-                    call_arg_types.drop();
-                    call_args.drop();
-                    return (LLVMOpaqueValue*)0;
+                    u32 borrowed_type = llvm_expr_type(ctx, borrowed_expr_id);
+                    LLVMOpaqueValue* value = llvm_emit_expr(ctx, borrowed_expr_id);
+                    if (value != (LLVMOpaqueValue*)0) {
+                        LLVMOpaqueType* value_type = llvm_lower_type(
+                            ctx.ctx, ctx.types, borrowed_type);
+                        a_val = LLVMBuildAlloca(ctx.builder, value_type,
+                                                "method_arg_tmp");
+                        LLVMBuildStore(ctx.builder, value, a_val);
+                        borrowed_temp_ptrs.push(a_val);
+                        borrowed_temp_types.push(borrowed_type);
+                    }
                 }
             } else {
                 a_val = llvm_emit_expr(ctx, arg_id);
@@ -4367,6 +4455,12 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         llvm_prepare_call_args(ctx, fn_type, &call_args, &call_arg_types,
                               &call_target_types, method_name);
         LLVMOpaqueValue* res = LLVMBuildCall2(ctx.builder, fn_type, fn_val, call_args.data, (u32)call_args.len(), "");
+        i64 temp_index = 0;
+        while (temp_index < borrowed_temp_ptrs.len()) {
+            llvm_emit_value_drop_at_ptr(ctx, borrowed_temp_ptrs.get(temp_index),
+                                        borrowed_temp_types.get(temp_index));
+            temp_index += 1;
+        }
         // Ownership transfer: a by-value receiver moves into the callee, as
         // does any by-value argument (proven by the callee parameter kind).
         // Borrowed positions keep the caller side live. An explicit `drop`
@@ -4387,6 +4481,8 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         call_target_types.drop();
         call_arg_types.drop();
         call_args.drop();
+        borrowed_temp_types.drop();
+        borrowed_temp_ptrs.drop();
         param_types.drop();
         return res;
     }

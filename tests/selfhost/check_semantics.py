@@ -81,9 +81,10 @@ def emit_module(
     include_roots: list[pathlib.Path] | None = None,
 ) -> pathlib.Path:
     output_dir.mkdir(parents=True, exist_ok=True)
-    command = [str(stage0), "--no-cache", "--emit=module", "-I", str(root)]
+    command = [str(stage0), "--no-cache", "--emit=module"]
     for include_root in include_roots or []:
         command.extend(["-I", str(include_root)])
+    command.extend(["-I", str(root)])
     command.append(str(source))
     result = subprocess.run(
         command,
@@ -226,6 +227,25 @@ def main() -> int:
                 )
             )
 
+        optional_shadow = root / "tests/selfhost/optional_shadow_iterator_fixture.ag"
+        optional_check = subprocess.run(
+            [str(stage1), "check", str(optional_shadow)],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=args.timeout,
+            check=False,
+        )
+        if optional_check.returncode != 0:
+            failures.append(
+                (
+                    "optional-shadow-iterator-fixture",
+                    f"stage1={optional_check.returncode}",
+                    optional_check.stderr[:500],
+                    "stage0 duplicate-name rejection is expected for this stage1-only case",
+                )
+            )
+
     if failures:
         for relative, summary, stage1_error, stage0_error in failures[:25]:
             print(f"{relative}: {summary}", file=sys.stderr)
@@ -238,7 +258,10 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    print(f"semantic status parity passed: {compared} file(s), 0 deferred-boundary skips")
+    print(
+        f"semantic status parity passed: {compared} file(s); "
+        "stage1 Optional-shadow regression passed"
+    )
     return 0
 
 
