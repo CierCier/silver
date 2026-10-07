@@ -239,6 +239,9 @@ bool llvm_define_method_instance(LlvmContext* ctx, TypeTable* types, Interner* n
     }
     stmt_ids.drop();
     if (!ctx.is_terminated()) {
+        llvm_emit_defers_above(ctx, (i64)0);
+    }
+    if (!ctx.is_terminated()) {
         llvm_emit_drops_above(ctx, (i64)0);
         if (ret_type_id == TYPE_VOID) {
             LLVMBuildRetVoid(ctx.builder);
@@ -320,6 +323,9 @@ bool llvm_define_free_function_instance(LlvmContext* ctx, TypeTable* types,
         i += 1;
     }
     statements.drop();
+    if (!ctx.is_terminated()) {
+        llvm_emit_defers_above(ctx, (i64)0);
+    }
     if (!ctx.is_terminated()) {
         llvm_emit_drops_above(ctx, (i64)0);
         if (ret_id == TYPE_VOID) {
@@ -1407,6 +1413,9 @@ impl LlvmGenerator {
                     }
 
                     if (!ctx.is_terminated()) {
+                        llvm_emit_defers_above(&ctx, (i64)0);
+                    }
+                    if (!ctx.is_terminated()) {
                         llvm_emit_drops_above(&ctx, (i64)0);
                         if (ret_type_id == TYPE_VOID) {
                             LLVMBuildRetVoid(self.builder);
@@ -1578,6 +1587,9 @@ impl LlvmGenerator {
                                         }
                                         stmt_ids.drop();
 
+                                        if (!ctx.is_terminated()) {
+                                            llvm_emit_defers_above(&ctx, (i64)0);
+                                        }
                                         if (!ctx.is_terminated()) {
                                             llvm_emit_drops_above(&ctx, (i64)0);
                                             if (ret_type_id == TYPE_VOID) {

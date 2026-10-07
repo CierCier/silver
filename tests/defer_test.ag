@@ -8,6 +8,10 @@ void decrement() {
     global_counter = global_counter - 1;
 }
 
+void fallthrough_with_defer() {
+    defer { global_counter = global_counter + 7; }
+}
+
 void return_with_defers() {
     defer { global_counter = global_counter * 10 + 1; }
     {
@@ -18,6 +22,10 @@ void return_with_defers() {
 
 i32 main() {
     global_counter = 0;
+    fallthrough_with_defer();
+    @assert(!(global_counter != 7), "function-scope defer did not run on fallthrough");
+    global_counter = 0;
+
     return_with_defers();
     @assert(!(global_counter != 21), "return did not run nested defers in LIFO order");
     global_counter = 0;
