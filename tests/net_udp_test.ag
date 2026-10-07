@@ -62,7 +62,7 @@ i32 main() {
         SocketAddr v6_addr = v6_res.unwrap();
         // Address parsing succeeds even when the host has IPv6 loopback off.
         i64 probe_fd = sys_socket((i64)AddressFamily.INET6,
-            (i64)SocketType.DGRAM, SOCK_CLOEXEC);
+            (i64)SocketType.DGRAM | SOCK_CLOEXEC, 0);
         if (probe_fd >= 0) {
             SockAddrIn6 probe_addr = SockAddrIn6.v6((u16)0, "::1");
             bool host_supports_v6 = sys_bind(probe_fd, (i64)&probe_addr, 28) == 0;
