@@ -17,5 +17,6 @@ i32 main() {
     values.push(4);
     values.push(5);
     if (box.count(values) != 2) { return 2; }
+    if (values.get(0) != 4) { return 3; }
     return 0;
 }

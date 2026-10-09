@@ -5471,6 +5471,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         Vec<u32> call_target_types = Vec<u32>.new();
         Vec<LLVMOpaqueValue*> borrowed_temp_ptrs = Vec<LLVMOpaqueValue*>.new();
         Vec<u32> borrowed_temp_types = Vec<u32>.new();
+        Vec<u8> slice_coerced_args = Vec<u8>.new();
         bool rx_moved = false;
         if (is_instance) {
             u32 rx_type = llvm_expr_type(ctx, expr.inner0);
@@ -5587,6 +5588,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 && expected_arg_type != arg_type
                 && typecheck_slice_argument_coercion(
                     ctx.types, expected_arg_type, arg_type);
+            slice_coerced_args.push((u8)(slice_coercion ? 1 : 0));
             TypeEntry* arg_entry = ctx.types.get(arg_type);
             bool arg_is_indirect = arg_entry.kind == TypeKind.Pointer
                 || arg_entry.kind == TypeKind.Reference;
@@ -5683,7 +5685,9 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         while (cleared < (i64)args_count) {
             u32 cleared_arg_id = ctx.pool.args.get((i64)args_start + 1 + cleared);
             i64 cleared_param = is_instance ? cleared + 1 : cleared;
-            llvm_clear_transferred_arg(ctx, fn_type, cleared_param, cleared_arg_id);
+            if (slice_coerced_args.get(cleared) == 0) {
+                llvm_clear_transferred_arg(ctx, fn_type, cleared_param, cleared_arg_id);
+            }
             cleared += 1;
         }
         call_target_types.drop();
@@ -5691,6 +5695,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         call_args.drop();
         borrowed_temp_types.drop();
         borrowed_temp_ptrs.drop();
+        slice_coerced_args.drop();
         param_types.drop();
         return res;
     }

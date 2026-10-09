@@ -8,10 +8,39 @@ struct UnrelatedArrayStruct {
     i32 values[2];
 }
 
+struct JsonChild {
+    i32 value;
+}
+
+struct JsonParent {
+    JsonChild child;
+}
+
+struct JsonFactoryValue {
+    i32 value;
+}
+
+JsonFactoryValue make_json_factory_value() {
+    JsonFactoryValue value;
+    value.value = 31;
+    return value;
+}
+
 i32 main() {
     JsonTarget value;
     value.value = 17;
     str encoded = @json(value);
     if (encoded != "{\"value\":17}") { return 1; }
+
+    str returned = @json(make_json_factory_value());
+    if (returned != "{\"value\":31}") { return 2; }
+
+    JsonParent parent;
+    parent.child.value = 23;
+    str nested = @json(parent);
+    if (nested != "{\"child\":{\"value\":23}}") { return 3; }
+    Result<JsonParent, JsonError> decoded = @from_json(JsonParent, nested);
+    if (decoded.failed()) { return 4; }
+    if (decoded.unwrap().child.value != 23) { return 5; }
     return 0;
 }

@@ -10,6 +10,8 @@ struct JsonSynthesisField {
     String type_name;
     String json_name;
     bool ignored;
+    SyntaxNode* type_start;
+    SyntaxNode* type_end;
 }
 
 String json_synthesis_tag(str raw) {
@@ -66,6 +68,8 @@ void json_synthesis_collect_fields(SyntaxNode* item, Vec<JsonSynthesisField>* fi
             JsonSynthesisField field;
             field.name = String.from_str(field_name.text);
             field.type_name = String.new();
+            field.type_start = start;
+            field.type_end = field_name;
             SyntaxNode* cursor = start;
             while (cursor != field_name && cursor != (SyntaxNode*)0) {
                 field.type_name.push_str(cursor.text);
@@ -124,6 +128,11 @@ bool json_synthesis_macro_targets_type(SyntaxNode* node, SyntaxNode* root,
                 if (strcmp(macro_name, "json") == 0
                     && json_synthesis_declares_value_as(
                         root, first.text, type_name)) {
+                    return true;
+                }
+                if (strcmp(macro_name, "json") == 0
+                    && json_synthesis_call_returns_type(root, first,
+                                                        type_name)) {
                     return true;
                 }
                 if (strcmp(macro_name, "from_json") == 0) {
@@ -185,6 +194,49 @@ bool json_synthesis_generic_struct(SyntaxNode* item) {
         cursor = cursor.next_sibling;
     }
     return false;
+}
+
+bool json_synthesis_function_returns_type(SyntaxNode* root, str function_name,
+                                          str type_name) {
+    SyntaxNode* item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Function) {
+            SyntaxNode* name = (SyntaxNode*)0;
+            SyntaxNode* cursor = item.first_child;
+            while (cursor != (SyntaxNode*)0
+                && cursor.kind != NodeKind.Parenthesized) {
+                if (cursor.kind == NodeKind.Token
+                    && cursor.token_kind == TokenKind.Identifier) {
+                    name = cursor;
+                }
+                cursor = cursor.next_sibling;
+            }
+            SyntaxNode* return_type = item.first_child;
+            if (name != (SyntaxNode*)0
+                && strcmp(name.text, function_name) == 0
+                && return_type != name
+                && return_type.kind == NodeKind.Token
+                && return_type.token_kind == TokenKind.Identifier
+                && strcmp(return_type.text, type_name) == 0
+                && return_type.next_sibling == name) {
+                return true;
+            }
+        }
+        item = item.next_sibling;
+    }
+    return false;
+}
+
+bool json_synthesis_call_returns_type(SyntaxNode* root, SyntaxNode* expression,
+                                      str type_name) {
+    if (expression == (SyntaxNode*)0 || expression.kind != NodeKind.Token
+        || expression.token_kind != TokenKind.Identifier
+        || expression.next_sibling == (SyntaxNode*)0
+        || expression.next_sibling.kind != NodeKind.Parenthesized) {
+        return false;
+    }
+    return json_synthesis_function_returns_type(
+        root, expression.text, type_name);
 }
 
 void json_synthesis_append_string_literal(String* output, str value) {
@@ -327,9 +379,71 @@ void json_synthesis_append_dispose(String* output, str type_name,
     output.push_str("} }\n");
 }
 
+bool json_synthesis_type_selected(Vec<str>* selected, str type_name) {
+    i64 index = 0;
+    while (index < selected.len()) {
+        if (strcmp(selected.get(index), type_name) == 0) { return true; }
+        index += 1;
+    }
+    return false;
+}
+
+bool json_synthesis_add_field_dependencies(SyntaxNode* root,
+                                           SyntaxNode* item,
+                                           Vec<str>* selected) {
+    Vec<JsonSynthesisField> fields = Vec<JsonSynthesisField>.new();
+    json_synthesis_collect_fields(item, &fields);
+    bool added = false;
+    i64 field_index = 0;
+    while (field_index < fields.len()) {
+        JsonSynthesisField* field = fields.get_ptr(field_index);
+        SyntaxNode* cursor = field.type_start;
+        while (cursor != (SyntaxNode*)0 && cursor != field.type_end) {
+            if (cursor.kind == NodeKind.Token
+                && cursor.token_kind == TokenKind.Identifier) {
+                SyntaxNode* dependency = find_item_by_name(
+                    root, NodeKind.Struct, cursor.text);
+                if (dependency != (SyntaxNode*)0
+                    && !json_synthesis_generic_struct(dependency)
+                    && !json_synthesis_type_selected(selected, cursor.text)) {
+                    selected.push(cursor.text);
+                    added = true;
+                }
+            }
+            cursor = cursor.next_sibling;
+        }
+        field_index += 1;
+    }
+    fields.drop();
+    return added;
+}
+
+void json_synthesis_collect_dependencies(SyntaxNode* root,
+                                         Vec<str>* selected) {
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        SyntaxNode* item = root.first_child;
+        while (item != (SyntaxNode*)0) {
+            if (item.kind == NodeKind.Struct
+                && !json_synthesis_generic_struct(item)) {
+                SyntaxNode* name = item_identifier(item);
+                if (name != (SyntaxNode*)0
+                    && json_synthesis_type_selected(selected, name.text)
+                    && json_synthesis_add_field_dependencies(
+                        root, item, selected)) {
+                    changed = true;
+                }
+            }
+            item = item.next_sibling;
+        }
+    }
+}
+
 String serialize_synthesize_json(SyntaxNode* root) {
     String generated = String.new();
     if (root == (SyntaxNode*)0) { return generated; }
+    Vec<str> selected = Vec<str>.new();
     SyntaxNode* item = root.first_child;
     while (item != (SyntaxNode*)0) {
         if (item.kind == NodeKind.Struct && !json_synthesis_generic_struct(item)
@@ -339,7 +453,20 @@ String serialize_synthesize_json(SyntaxNode* root) {
                     && json_synthesis_macro_targets_type(
                         root, root, item_identifier(item).text)))) {
             SyntaxNode* name = item_identifier(item);
-            if (name != (SyntaxNode*)0) {
+            if (name != (SyntaxNode*)0
+                && !json_synthesis_type_selected(&selected, name.text)) {
+                selected.push(name.text);
+            }
+        }
+        item = item.next_sibling;
+    }
+    json_synthesis_collect_dependencies(root, &selected);
+    item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Struct && !json_synthesis_generic_struct(item)) {
+            SyntaxNode* name = item_identifier(item);
+            if (name != (SyntaxNode*)0
+                && json_synthesis_type_selected(&selected, name.text)) {
                 Vec<JsonSynthesisField> fields = Vec<JsonSynthesisField>.new();
                 json_synthesis_collect_fields(item, &fields);
                 if (!json_synthesis_has_impl(root, "ToJson", name.text)) {
@@ -359,5 +486,6 @@ String serialize_synthesize_json(SyntaxNode* root) {
         }
         item = item.next_sibling;
     }
+    selected.drop();
     return generated;
 }

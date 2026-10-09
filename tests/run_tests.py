@@ -44,6 +44,7 @@ LEAK_CHECK_TESTS = {
     "string_split_once_drop_test",
     "launch_failure_drop_test",
     "vec_test",
+    "method_slice_coercion_test",
     "bytes_test",
     "collections_set_test",
     "mem_test",
@@ -357,7 +358,8 @@ class BackgroundServices:
             if res.returncode != 0:
                 raise RuntimeError("failed to emit source-independent module artifact")
             artifact = self.modlib_dir / "module_no_source_lib.agm"
-            object_file = self.modlib_dir / "module_no_source_lib.o"
+            object_suffix = ".o.wasm" if target_is_wasm(eff_target) else ".o"
+            object_file = self.modlib_dir / f"module_no_source_lib{object_suffix}"
             if not artifact.is_file() or not object_file.is_file():
                 raise RuntimeError("source-independent module artifact outputs are missing")
             if mod_src.exists():
@@ -380,7 +382,8 @@ class BackgroundServices:
             if res.returncode != 0:
                 raise RuntimeError("failed to emit unsupported-signature module artifact")
             artifact = self.modlib_dir / "module_no_source_pointer_lib.agm"
-            object_file = self.modlib_dir / "module_no_source_pointer_lib.o"
+            object_suffix = ".o.wasm" if target_is_wasm(eff_target) else ".o"
+            object_file = self.modlib_dir / f"module_no_source_pointer_lib{object_suffix}"
             if not artifact.is_file() or not object_file.is_file():
                 raise RuntimeError("unsupported-signature module artifact outputs are missing")
             if mod_src.exists():
