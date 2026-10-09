@@ -369,7 +369,9 @@ impl Checker {
                 target_type,
             } if matches!(
                 target_type.kind.as_ref(),
-                ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)
+                ast::TypeKind::Pointer(_)
+                    | ast::TypeKind::Reference(_)
+                    | ast::TypeKind::Primitive(ast::PrimitiveType::Str)
             ) => {
                 self.reference_source(expression, scopes, ref_sources, ptr_locals, ref_params)
             }
@@ -927,6 +929,16 @@ mod tests {
     fn integer_cast_of_local_borrow_is_not_a_reference_escape() {
         let errs = errors("u64 address_tag() { i64 x = 1; return (u64)&x; }");
         assert!(errs.is_empty(), "unexpected escape errors: {errs:?}");
+    }
+
+    #[test]
+    fn string_cast_preserves_local_borrow_for_escape_check() {
+        let errs = errors("str f() { u8 c = 0; return (str)&c; }");
+        assert!(
+            errs.iter()
+                .any(|m| m.contains("does not outlive the function")),
+            "expected casted local string escape error, got {errs:?}"
+        );
     }
 
     #[test]
