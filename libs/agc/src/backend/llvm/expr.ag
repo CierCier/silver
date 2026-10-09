@@ -3257,8 +3257,92 @@ LLVMOpaqueValue* llvm_emit_wait(LlvmContext* ctx, u32 expr_id) {
     return phi;
 }
 
+bool llvm_expr_references_block_local(LlvmContext* ctx, u32 expr_id,
+                                      i64 drop_mark) {
+    if (expr_id == 0) { return false; }
+    AstExpr* expr = ctx.pool.get_expr(expr_id);
+    if (expr.kind == ExprKind.Var || expr.kind == ExprKind.Move) {
+        i64 i = drop_mark;
+        while (i < ctx.locals.len()) {
+            if (ctx.locals.get_ptr(i).name_id == expr.aux) { return true; }
+            i += 1;
+        }
+        return false;
+    }
+    if (expr.kind == ExprKind.Unary || expr.kind == ExprKind.Cast
+        || expr.kind == ExprKind.Field || expr.kind == ExprKind.Index
+        || expr.kind == ExprKind.Slice) {
+        return llvm_expr_references_block_local(ctx, expr.inner0, drop_mark);
+    }
+    if (expr.kind == ExprKind.Binary) {
+        return llvm_expr_references_block_local(ctx, expr.inner0, drop_mark)
+            || llvm_expr_references_block_local(ctx, expr.inner1, drop_mark);
+    }
+    if (expr.kind == ExprKind.Ternary || expr.kind == ExprKind.UnwrapOr) {
+        return llvm_expr_references_block_local(ctx, expr.inner0, drop_mark)
+            || llvm_expr_references_block_local(ctx, expr.inner1, drop_mark)
+            || llvm_expr_references_block_local(ctx, expr.aux, drop_mark);
+    }
+    if (expr.kind == ExprKind.Block) {
+        return llvm_expr_references_block_local(ctx, expr.aux, drop_mark);
+    }
+    if (expr.kind == ExprKind.Call) {
+        i64 i = 0;
+        while (i < (i64)expr.aux) {
+            if (llvm_expr_references_block_local(ctx,
+                    ctx.pool.args.get((i64)expr.inner1 + i), drop_mark)) {
+                return true;
+            }
+            i += 1;
+        }
+        return false;
+    }
+    if (expr.kind == ExprKind.MethodCall) {
+        if (llvm_expr_references_block_local(ctx, expr.inner0, drop_mark)) {
+            return true;
+        }
+        u32 count = ctx.pool.args.get((i64)expr.inner1);
+        i64 i = 0;
+        while (i < (i64)count) {
+            if (llvm_expr_references_block_local(ctx,
+                    ctx.pool.args.get((i64)expr.inner1 + 1 + i), drop_mark)) {
+                return true;
+            }
+            i += 1;
+        }
+        return false;
+    }
+    if (expr.kind == ExprKind.Match) {
+        if (llvm_expr_references_block_local(ctx, expr.inner0, drop_mark)) {
+            return true;
+        }
+        i64 i = 0;
+        while (i < (i64)expr.aux) {
+            MatchArm* arm = ctx.pool.arms.get_ptr((i64)expr.inner1 + i);
+            if (llvm_expr_references_block_local(ctx, arm.guard_id, drop_mark)
+                || llvm_expr_references_block_local(ctx, arm.value_id, drop_mark)) {
+                return true;
+            }
+            i += 1;
+        }
+        return false;
+    }
+    if (expr.kind == ExprKind.StructLit) {
+        i64 i = 0;
+        while (i < (i64)expr.aux) {
+            if (llvm_expr_references_block_local(ctx,
+                    ctx.pool.args.get((i64)expr.inner1 + i * 2 + 1), drop_mark)) {
+                return true;
+            }
+            i += 1;
+        }
+    }
+    return false;
+}
+
 bool llvm_block_result_aliases_local(LlvmContext* ctx, LLVMOpaqueValue* value,
-                                     u32 result_type, i64 drop_mark) {
+                                     u32 expr_id, u32 result_type,
+                                     i64 drop_mark) {
     if (value == (LLVMOpaqueValue*)0) { return false; }
     TypeEntry* entry = ctx.types.get(ctx.types.resolve_subst(result_type));
     if (entry == (TypeEntry*)0
@@ -3266,6 +3350,8 @@ bool llvm_block_result_aliases_local(LlvmContext* ctx, LLVMOpaqueValue* value,
             && entry.kind != TypeKind.Str)) {
         return false;
     }
+    // LLVM values lose the source provenance needed to catch borrowed method results.
+    if (llvm_expr_references_block_local(ctx, expr_id, drop_mark)) { return true; }
     i64 i = drop_mark;
     while (i < ctx.locals.len()) {
         LlvmLocal* local = ctx.locals.get_ptr(i);
@@ -3301,7 +3387,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 ctx.note_unresolved("block-expression", "result");
             }
             bool borrowed_local = llvm_block_result_aliases_local(
-                ctx, value, result_type, drop_mark);
+                ctx, value, result_expr, result_type, drop_mark);
             if (borrowed_local) {
                 ctx.note_unresolved("block-result-borrow",
                     "result aliases block-local storage");

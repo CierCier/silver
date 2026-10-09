@@ -113,7 +113,7 @@ run and should be refreshed after material changes.
 
 | Feature | Current status | Remaining work |
 | --- | --- | --- |
-| Borrow origins and reference escape checking | [~] | Selected accepted/rejected escape regressions and Send boundaries pass. Analysis is not yet complete typed-CFG parity. |
+| Borrow origins and reference escape checking | [~] | Selected accepted/rejected escape regressions and Send boundaries pass. Native lowering rejects borrowed block results traced to local storage, including method-derived `str` results in `tests/selfhost/fixtures/macro_str_borrow_error_test.ag`. Analysis is not yet complete typed-CFG parity. |
 | Move analysis and use-after-move rejection | [~] | Native compilation invokes ownership analysis and selected negative fixtures pass. Branches, partial initialization, indexed places, temporaries, and reinitialization need broader typed analysis. |
 | Copy/type properties and partial initialization | [ ] | Full property propagation and partially initialized aggregate behavior are not established. |
 | Destructors, field cascades, overwrite cleanup, temporaries, and scope-exit drops | [~] | Slice 1 native drop elaboration runs guarded drops on scope/return/loop exits with move-aware clearing, overwrite predrop, and zero-initialized locals; guard destruction, drop counters, cascades, and field predrops pass focused gates. Nested field paths, index drops, and temporaries remain open. |

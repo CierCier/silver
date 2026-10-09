@@ -20,6 +20,7 @@ python3 "$root/tests/selfhost/check_native_args.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_native_enum_layout.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_native_layout.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_generic_function_native.py" --stage1 "$stage1"
+python3 "$root/tests/selfhost/check_macro_borrow_escape.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_stage2.py" --stage1 "$stage1"
 python3 "$root/tests/run_tests.py" --no-tui --jobs 1 --compiler "$stage1" \
     allocator_threads_test loop_stack_restore_test aggregate_init_drop_test \
