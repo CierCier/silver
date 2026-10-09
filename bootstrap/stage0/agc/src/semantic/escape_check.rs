@@ -364,7 +364,13 @@ impl Checker {
             ast::ExpressionKind::Reference { expression, .. } => {
                 Some(self.classify(expression, scopes, ref_sources, ptr_locals, ref_params))
             }
-            ast::ExpressionKind::Cast { expression, .. } => {
+            ast::ExpressionKind::Cast {
+                expression,
+                target_type,
+            } if matches!(
+                target_type.kind.as_ref(),
+                ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)
+            ) => {
                 self.reference_source(expression, scopes, ref_sources, ptr_locals, ref_params)
             }
             ast::ExpressionKind::Identifier(ident) => ref_sources.get(&ident.name).cloned(),
@@ -915,6 +921,12 @@ mod tests {
                 .any(|m| m.contains("does not outlive the function")),
             "expected casted local borrow escape error, got {errs:?}"
         );
+    }
+
+    #[test]
+    fn integer_cast_of_local_borrow_is_not_a_reference_escape() {
+        let errs = errors("u64 address_tag() { i64 x = 1; return (u64)&x; }");
+        assert!(errs.is_empty(), "unexpected escape errors: {errs:?}");
     }
 
     #[test]
