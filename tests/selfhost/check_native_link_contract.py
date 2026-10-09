@@ -72,8 +72,6 @@ def main() -> int:
         linker.chmod(0o755)
         env = os.environ.copy()
         env.update({
-            "SILVER_STAGE0": str(root / "missing-stage0"),
-            "SILVER_STAGE1_NATIVE": "1",
             "SILVER_LINKER": str(linker),
             "SILVER_USE_MOLD": "1",
             "SILVER_DYNAMIC_LINKER": "/test/ld-linux.so",

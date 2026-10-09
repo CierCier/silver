@@ -1,11 +1,16 @@
 import std.optional;
 import std.result;
 import std.string;
+import std.mem.vec;
 import std.io.file;
 
 enum PairValue<T, U> {
     Empty;
     Pair(T, U);
+}
+
+struct NestedVector {
+    Vec<u32> values;
 }
 
 Optional<String> text_value() {
@@ -45,5 +50,14 @@ i32 main() {
     Result<u32, String> failure = Result<u32, String>.err(String.from_str("error payload"));
     String error_text = failure.unwrap_err();
     println(error_text.to_str());
+    Vec<u32> values = Vec<u32>.new();
+    values.push((u32)9);
+    NestedVector nested;
+    nested.values = move values;
+    Result<NestedVector, u32> wrapped = Result<NestedVector, u32>.ok(move nested);
+    NestedVector unwrapped = wrapped.unwrap();
+    bool nested_ok = unwrapped.values.len() == 1 && unwrapped.values.get(0) == (u32)9;
+    unwrapped.values.drop();
+    if (!nested_ok) { return 6; }
     return 42;
 }

@@ -10,6 +10,7 @@ struct LLVMOpaqueTargetMachine {}
 struct LLVMTargetDataRef {}
 struct LLVMTarget {}
 struct LLVMOpaqueMetadata {}
+struct LLVMOpaqueAttributeRef {}
 struct LLVMOpaqueDIBuilder {}
 struct LLVMOpaqueDbgRecord {}
 
@@ -255,6 +256,10 @@ extern "C" {
     LLVMOpaqueValue* LLVMBuildAtomicCmpXchg(LLVMOpaqueBuilder* p0, LLVMOpaqueValue* p1, LLVMOpaqueValue* p2, LLVMOpaqueValue* p3, i32 p4, i32 p5, i32 p6);
     LLVMOpaqueValue* LLVMConstInt(LLVMOpaqueType* p0, u64 p1, i32 p2);
     LLVMOpaqueValue* LLVMConstIntOfString(LLVMOpaqueType* p0, i8* p1, u8 p2);
+    LLVMOpaqueValue* LLVMConstIntToPtr(LLVMOpaqueValue* p0, LLVMOpaqueType* p1);
+    LLVMOpaqueValue* LLVMConstPtrToInt(LLVMOpaqueValue* p0, LLVMOpaqueType* p1);
+    LLVMOpaqueValue* LLVMConstOr(LLVMOpaqueValue* p0, LLVMOpaqueValue* p1);
+    LLVMOpaqueValue* LLVMConstStructInContext(LLVMOpaqueContext* p0, LLVMOpaqueValue** p1, u32 p2, i32 p3);
     LLVMOpaqueValue* LLVMConstNull(LLVMOpaqueType* p0);
     LLVMOpaqueValue* LLVMConstRealOfString(LLVMOpaqueType* p0, i8* p1);
     i8* LLVMPrintModuleToString(LLVMOpaqueModule* p0);
@@ -311,6 +316,8 @@ extern "C" {
     i32 LLVMTypeIsSized(LLVMOpaqueType* p0);
     i32 LLVMTargetMachineEmitToFile(LLVMOpaqueTargetMachine* p0, LLVMOpaqueModule* p1, i8* p2, LLVMCodeGenFileType p3, i8** p4);
     LLVMOpaqueValue* LLVMGetInlineAsm(LLVMOpaqueType* p0, i8* p1, u64 p2, i8* p3, u64 p4, i32 p5, i32 p6, i32 p7, i32 p8);
+    LLVMOpaqueAttributeRef* LLVMCreateStringAttribute(LLVMOpaqueContext* p0, i8* p1, u32 p2, i8* p3, u32 p4);
+    void LLVMAddAttributeAtIndex(LLVMOpaqueValue* p0, u32 p1, LLVMOpaqueAttributeRef* p2);
 }
 
 void LLVMInitializeAllTargetInfos() {

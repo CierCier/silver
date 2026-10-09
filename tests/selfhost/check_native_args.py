@@ -42,8 +42,6 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="silver-native-args-") as temporary:
         output = pathlib.Path(temporary) / "args-native"
         env = os.environ.copy()
-        env["SILVER_STAGE0"] = str(pathlib.Path(temporary) / "missing-stage0")
-        env["SILVER_STAGE1_NATIVE"] = "1"
         env["SILVER_STAGE1_CC"] = str(pathlib.Path(cc).resolve())
 
         built = run(stage1, ["build", str(fixture), "--no-cache", "-o", str(output)], env)

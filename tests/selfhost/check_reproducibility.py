@@ -3,8 +3,7 @@
 Builds a multi-module fixture twice without cache, twice cached serially, and
 twice cached with parallel module compilation. Cache/no-cache equality is
 reported separately because those paths may legitimately emit different bytes.
-For stage1, pass --stage0 to test the compiler's bridge path; the native backend
-has a separate smoke gate and does not support multi-module builds.
+Stage1 runs its native backend directly, without a stage0 runtime dependency.
 """
 
 from __future__ import annotations
@@ -36,8 +35,6 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--agc", required=True, type=pathlib.Path,
                         help="compiler binary to test (stage0 or stage1)")
-    parser.add_argument("--stage0", type=pathlib.Path,
-                        help="stage0 compiler used by a stage1 compiler's bridge")
     args = parser.parse_args()
     agc = args.agc.resolve()
 
@@ -50,9 +47,6 @@ def main() -> int:
         (root / "alpha.ag").write_text("i32 alpha_value() { return 20; }\n")
         (root / "beta.ag").write_text("i32 beta_value() { return 22; }\n")
         env = os.environ.copy()
-        if args.stage0 is not None:
-            env["SILVER_STAGE0"] = str(args.stage0.resolve())
-            env.pop("SILVER_STAGE1_NATIVE", None)
         builds = (
             ("no-cache", True, 1),
             ("no-cache", True, 1),

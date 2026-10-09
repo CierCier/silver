@@ -65,7 +65,7 @@ i32 main() {
     }
 
     // 7. Initializer struct literal contextual type inference
-    User u = { 0, "cier", @vec() };
+    User u = { .id = 0, .name = "cier", .tags = @vec() };
     if (!u.tags.is_empty()) {
         return 13;
     }

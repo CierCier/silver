@@ -2,8 +2,8 @@
 """GATE-003 parity checks for stage1 frontend surfaces that are implemented.
 
 LLVM IR, production AGM publication, and observable cache keys are not exposed
-by stage1's frontend driver yet; those comparisons are intentionally reported
-as deferred rather than inferred from the stage0 backend bridge.
+by stage1's current driver; those comparisons are intentionally reported as
+deferred until stage1 provides those interfaces.
 """
 
 from __future__ import annotations

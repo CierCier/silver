@@ -14,6 +14,33 @@ import backend.llvm.expr;
 import backend.llvm.types;
 import backend.llvm.mono;
 
+String llvm_static_local_symbol(LlvmContext* ctx, u32 var_name_id, Span span,
+                                str prefix) {
+    String symbol = String.from_str(prefix);
+    str function_name = LLVMGetValueName(ctx.current_fn);
+    if (function_name != (str)0) {
+        symbol.push_str(function_name);
+    }
+    symbol.push((u8)'_');
+    symbol.push_str(ctx.names.get(var_name_id));
+    symbol.push((u8)'_');
+
+    String digits = String.new();
+    i64 offset = span.start;
+    if (offset == 0) { digits.push((u8)'0'); }
+    while (offset > 0) {
+        digits.push((u8)('0' + (offset % 10)));
+        offset = offset / 10;
+    }
+    i64 index = digits.len() - 1;
+    while (index >= 0) {
+        symbol.push(digits.data[index]);
+        index -= 1;
+    }
+    digits.drop();
+    return move symbol;
+}
+
 void llvm_emit_defers_above(LlvmContext* ctx, i64 mark) {
     i64 i = ctx.deferred_statements.len() - 1;
     while (i >= mark && !ctx.is_terminated()) {
@@ -145,6 +172,70 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
         mono_ensure_child_layouts(ctx, type_id, &ctx.generic_layout_ids);
         LLVMOpaqueType* llvm_ty = llvm_lower_type(ctx.ctx, ctx.types, type_id);
         str var_name = ctx.names.get(var_name_id);
+        if (stmt.is_static) {
+            if (llvm_type_needs_tracking(ctx, type_id)) {
+                ctx.note_unresolved("static-local-drop", var_name);
+                return;
+            }
+            String storage_name = llvm_static_local_symbol(ctx, var_name_id,
+                stmt.span, "__silver_static_");
+            LLVMOpaqueValue* ptr = LLVMAddGlobal(ctx.module, llvm_ty, storage_name.to_str());
+            LLVMSetLinkage(ptr, LLVMLinkage.LLVMPrivateLinkage);
+            LLVMSetInitializer(ptr, LLVMConstNull(llvm_ty));
+            storage_name.drop();
+
+            llvm_clear_copy_source(ctx, stmt.inner1, true);
+            ctx.add_local(var_name_id, ptr, type_id, true);
+            if (stmt.inner1 != 0) {
+                LLVMOpaqueType* flag_ty = LLVMInt1TypeInContext(ctx.ctx);
+                String flag_name = llvm_static_local_symbol(ctx, var_name_id,
+                    stmt.span, "__silver_static_initialized_");
+                LLVMOpaqueValue* flag = LLVMAddGlobal(ctx.module, flag_ty, flag_name.to_str());
+                LLVMSetLinkage(flag, LLVMLinkage.LLVMPrivateLinkage);
+                LLVMSetInitializer(flag, LLVMConstNull(flag_ty));
+                flag_name.drop();
+
+                LLVMOpaqueValue* initialized = LLVMBuildLoad2(ctx.builder, flag_ty,
+                    flag, "static.initialized");
+                LLVMOpaqueBasicBlock* init_bb = LLVMAppendBasicBlockInContext(ctx.ctx,
+                    ctx.current_fn, "static.init");
+                LLVMOpaqueBasicBlock* done_bb = LLVMAppendBasicBlockInContext(ctx.ctx,
+                    ctx.current_fn, "static.done");
+                LLVMBuildCondBr(ctx.builder, initialized, done_bb, init_bb);
+                LLVMPositionBuilderAtEnd(ctx.builder, init_bb);
+
+                u32 saved_expected = ctx.expected_type_id;
+                ctx.expected_type_id = type_id;
+                LLVMOpaqueValue* init_val = llvm_emit_expr(ctx, stmt.inner1);
+                ctx.expected_type_id = saved_expected;
+                if (init_val != (LLVMOpaqueValue*)0) {
+                    u32 from_type = llvm_expr_type(ctx, stmt.inner1);
+                    LLVMOpaqueValue* user_cast = llvm_try_apply_user_cast(ctx,
+                        init_val, from_type, type_id);
+                    if (user_cast != (LLVMOpaqueValue*)0) {
+                        init_val = user_cast;
+                    } else {
+                        AstExpr* initializer = ctx.pool.get_expr(stmt.inner1);
+                        TypeEntry* declared = ctx.types.get(type_id);
+                        if (initializer.kind == ExprKind.ArrayLit
+                            && declared.kind == TypeKind.Array) {
+                            init_val = LLVMBuildLoad2(ctx.builder, llvm_ty, init_val,
+                                "static.array.init");
+                        } else {
+                            init_val = llvm_compat_value(ctx, init_val,
+                                llvm_expr_type(ctx, stmt.inner1), type_id);
+                        }
+                    }
+                    LLVMBuildStore(ctx.builder, init_val, ptr);
+                } else {
+                    ctx.note_unresolved("local-initializer", var_name);
+                }
+                LLVMBuildStore(ctx.builder, LLVMConstInt(flag_ty, 1, 0), flag);
+                if (!ctx.is_terminated()) { LLVMBuildBr(ctx.builder, done_bb); }
+                LLVMPositionBuilderAtEnd(ctx.builder, done_bb);
+            }
+            return;
+        }
         LLVMOpaqueValue* ptr = LLVMBuildAlloca(ctx.builder, llvm_ty, var_name);
         // Zero-initialize every local, mirroring stage0: partially assigned
         // values must read as zero/null so promoted whole-flag drops never
@@ -278,7 +369,8 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
     if (stmt.kind == StmtKind.If) {
         LLVMOpaqueValue* cond_val = llvm_emit_expr(ctx, stmt.inner0);
         if (cond_val == (LLVMOpaqueValue*)0) {
-            ctx.note_unresolved("if-condition", "expression");
+            AstExpr* condition_expr = ctx.pool.get_expr(stmt.inner0);
+            ctx.note_unresolved("if-condition", llvm_expr_kind_name(condition_expr.kind));
             return;
         }
         if (LLVMTypeOf(cond_val) != LLVMInt1TypeInContext(ctx.ctx)) {

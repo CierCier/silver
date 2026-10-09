@@ -808,8 +808,57 @@ void mono_ensure_child_layouts(LlvmContext* ctx, u32 type_id, Vec<u32>* layout_i
         }
         return;
     }
-    if (entry.kind == TypeKind.Named && entry.count > 0) {
-        mono_ensure_type_layout(ctx, type_id, layout_ids);
+    if (entry.kind != TypeKind.Named) {
+        return;
+    }
+    str base = ctx.types.names.get(entry.name_id);
+    if (entry.count > 0) {
+        if (strcmp(base, "Task") != 0 && strcmp(base, "Slice") != 0) {
+            mono_ensure_type_layout(ctx, type_id, layout_ids);
+        }
+        return;
+    }
+    if (mono_layout_seen(layout_ids, type_id)) {
+        return;
+    }
+    SyntaxNode* struct_item = find_item_by_name(ctx.root, NodeKind.Struct, base);
+    if (struct_item != (SyntaxNode*)0) {
+        layout_ids.push(type_id);
+        i64 field_count = llvm_struct_field_count(ctx.root, base);
+        i64 i = 0;
+        while (i < field_count) {
+            u32 field_type = llvm_struct_field_type(ctx.root, base, i, ctx.types);
+            if (field_type != TYPE_UNKNOWN) {
+                mono_ensure_child_layouts(ctx, ctx.types.resolve_subst(field_type), layout_ids);
+            }
+            i += 1;
+        }
+        return;
+    }
+    SyntaxNode* enum_item = find_item_by_name(ctx.root, NodeKind.Enum, base);
+    if (enum_item != (SyntaxNode*)0) {
+        layout_ids.push(type_id);
+        Vec<SyntaxNode*> variant_names = Vec<SyntaxNode*>.new();
+        Vec<i64> variant_tags = Vec<i64>.new();
+        Vec<i64> variant_arities = Vec<i64>.new();
+        enum_each_variant(enum_item, &variant_names, &variant_tags, &variant_arities);
+        i64 variant_index = 0;
+        while (variant_index < variant_names.len()) {
+            Vec<u32> payloads = Vec<u32>.new();
+            llvm_enum_payload_types(ctx.types, ctx.root, base,
+                                   variant_names.get(variant_index).text, &payloads);
+            i64 payload_index = 0;
+            while (payload_index < payloads.len()) {
+                u32 payload_type = ctx.types.resolve_subst(payloads.get(payload_index));
+                mono_ensure_child_layouts(ctx, payload_type, layout_ids);
+                payload_index += 1;
+            }
+            payloads.drop();
+            variant_index += 1;
+        }
+        variant_names.drop();
+        variant_tags.drop();
+        variant_arities.drop();
     }
 }
 

@@ -19,6 +19,7 @@ enum ExprKind {
     Cast;          // inner0 = expr_id, aux = target_type_id
     Move;          // aux = var_name_id
     Ternary;       // inner0 = cond_id, inner1 = then_id, aux = else_id
+    Block;         // inner0 = block_stmts start, inner1 = count, aux = result expr
     UnwrapOr;      // inner0 = value_id, inner1 = fallback_id
     Match;         // inner0 = scrutinee_id, inner1 = arms_start, aux = arms_count
     Asm;           // inner0 = code_text_id, inner1 = args_start, aux = args_count
@@ -31,6 +32,7 @@ enum ExprKind {
     Hash;          // inner0 = arg expr id (builtin @hash, always i64)
     DropInPlace;   // inner0 = pointer expr, inner1 = count expr, aux = element type (optional)
     Assert;        // inner0 = condition, inner1 = message, aux = enabled (debug cfg)
+    SourceLocation; // aux = line/column/file selector
     StructLit;     // inner0 = struct name id, inner1 = fields_start, aux = field count (pool.args: name,expr pairs)
     Launch;        // inner0 = direct Call expression
     Wait;          // inner0 = Task expression
@@ -73,6 +75,7 @@ struct AstStmt {
     u32 inner0;
     u32 inner1;
     u32 aux;
+    bool is_static;
     Span span;
 }
 
@@ -223,6 +226,7 @@ impl AstPool {
         null_stmt.inner0 = 0;
         null_stmt.inner1 = 0;
         null_stmt.aux = 0;
+        null_stmt.is_static = false;
         null_stmt.span = Span.synthetic();
         pool.stmts.push(move null_stmt);
 
@@ -243,6 +247,21 @@ impl AstPool {
         expr.inferred_type = type_id;
         expr.generic_args_start = 0;
         expr.generic_args_count = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_source_location(AstPool* self, u32 kind, u32 type_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.SourceLocation;
+        expr.inner0 = 0;
+        expr.inner1 = 0;
+        expr.aux = kind;
+        expr.span = span;
+        expr.inferred_type = type_id;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        expr.resolved_callee_id = 0;
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
     }
@@ -299,6 +318,21 @@ impl AstPool {
         expr.inferred_type = TYPE_UNKNOWN;
         expr.generic_args_start = 0;
         expr.generic_args_count = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_expr_block(AstPool* self, u32 start, u32 count, u32 result_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Block;
+        expr.inner0 = start;
+        expr.inner1 = count;
+        expr.aux = result_id;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        expr.resolved_callee_id = 0;
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
     }
@@ -667,6 +701,7 @@ impl AstPool {
         stmt.inner0 = expr_id;
         stmt.inner1 = 0;
         stmt.aux = 0;
+        stmt.is_static = false;
         stmt.span = span;
         self.stmts.push(move stmt);
         return (u32)(self.stmts.len() - 1);
@@ -678,6 +713,19 @@ impl AstPool {
         stmt.inner0 = type_id;
         stmt.inner1 = init_expr_id;
         stmt.aux = var_name_id;
+        stmt.is_static = false;
+        stmt.span = span;
+        self.stmts.push(move stmt);
+        return (u32)(self.stmts.len() - 1);
+    }
+
+    u32 add_stmt_static_let(AstPool* self, u32 var_name_id, u32 type_id, u32 init_expr_id, Span span) {
+        AstStmt stmt;
+        stmt.kind = StmtKind.Let;
+        stmt.inner0 = type_id;
+        stmt.inner1 = init_expr_id;
+        stmt.aux = var_name_id;
+        stmt.is_static = true;
         stmt.span = span;
         self.stmts.push(move stmt);
         return (u32)(self.stmts.len() - 1);
@@ -689,6 +737,7 @@ impl AstPool {
         stmt.inner0 = target_expr_id;
         stmt.inner1 = val_expr_id;
         stmt.aux = 0;
+        stmt.is_static = false;
         stmt.span = span;
         self.stmts.push(move stmt);
         return (u32)(self.stmts.len() - 1);
@@ -700,6 +749,7 @@ impl AstPool {
         stmt.inner0 = 0;
         stmt.inner1 = 0;
         stmt.aux = var_name_id;
+        stmt.is_static = false;
         stmt.span = span;
         self.stmts.push(move stmt);
         return (u32)(self.stmts.len() - 1);
@@ -711,6 +761,7 @@ impl AstPool {
         stmt.inner0 = expr_id;
         stmt.inner1 = 0;
         stmt.aux = 0;
+        stmt.is_static = false;
         stmt.span = span;
         self.stmts.push(move stmt);
         return (u32)(self.stmts.len() - 1);
@@ -722,6 +773,7 @@ impl AstPool {
         stmt.inner0 = cond_id;
         stmt.inner1 = then_stmt_id;
         stmt.aux = else_stmt_id;
+        stmt.is_static = false;
         stmt.span = span;
         self.stmts.push(move stmt);
         return (u32)(self.stmts.len() - 1);
@@ -733,6 +785,7 @@ impl AstPool {
         stmt.inner0 = cond_id;
         stmt.inner1 = body_stmt_id;
         stmt.aux = 0;
+        stmt.is_static = false;
         stmt.span = span;
         self.stmts.push(move stmt);
         return (u32)(self.stmts.len() - 1);
@@ -745,6 +798,7 @@ impl AstPool {
         stmt.inner0 = cond_id;
         stmt.inner1 = body_stmt_id;
         stmt.aux = step_stmt_id;
+        stmt.is_static = false;
         stmt.span = span;
         self.stmts.push(move stmt);
         return (u32)(self.stmts.len() - 1);
@@ -756,6 +810,7 @@ impl AstPool {
         stmt.inner0 = 0;
         stmt.inner1 = 0;
         stmt.aux = 0;
+        stmt.is_static = false;
         stmt.span = span;
         self.stmts.push(move stmt);
         return (u32)(self.stmts.len() - 1);
@@ -767,6 +822,7 @@ impl AstPool {
         stmt.inner0 = 0;
         stmt.inner1 = 0;
         stmt.aux = 0;
+        stmt.is_static = false;
         stmt.span = span;
         self.stmts.push(move stmt);
         return (u32)(self.stmts.len() - 1);
@@ -778,6 +834,7 @@ impl AstPool {
         stmt.inner0 = deferred_stmt_id;
         stmt.inner1 = 0;
         stmt.aux = 0;
+        stmt.is_static = false;
         stmt.span = span;
         self.stmts.push(move stmt);
         return (u32)(self.stmts.len() - 1);
@@ -789,6 +846,7 @@ impl AstPool {
         stmt.inner0 = start;
         stmt.inner1 = 0;
         stmt.aux = count;
+        stmt.is_static = false;
         stmt.span = span;
         self.stmts.push(move stmt);
         return (u32)(self.stmts.len() - 1);

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exercise the supported native stage1 boundary without allowing stage0 fallback.
+# Exercise the supported native stage1 boundary with no stage0 runtime path.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -8,15 +8,7 @@ if [[ $# -lt 1 || ! -x "$1" ]]; then
     exit 2
 fi
 stage1=$(realpath "$1")
-work=$(mktemp -d "${TMPDIR:-/tmp}/silver-no-stage0.XXXXXX")
-trap 'rm -rf "$work"' EXIT
-
-export SILVER_STAGE0="$work/stage0-unavailable"
-export SILVER_STAGE1_NATIVE=1
-if [[ -e "$SILVER_STAGE0" ]]; then
-    echo "run_native_no_stage0.sh: stage0 path unexpectedly exists" >&2
-    exit 2
-fi
+unset SILVER_STAGE0 SILVER_STAGE1_NATIVE
 
 "$stage1" --version
 python3 "$root/tests/selfhost/check_native_backend.py" --stage1 "$stage1"
@@ -29,7 +21,7 @@ python3 "$root/tests/selfhost/check_native_enum_layout.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_native_layout.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_generic_function_native.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_stage2.py" --stage1 "$stage1"
-python3 "$root/tests/run_tests.py" --no-tui --jobs 2 --compiler "$stage1" \
+python3 "$root/tests/run_tests.py" --no-tui --jobs 1 --compiler "$stage1" \
     allocator_threads_test loop_stack_restore_test aggregate_init_drop_test \
     cascade_drop_test field_predrop_test intermediate_drop_activation_test \
     collections_set_test for_in_consume_test nested_field_drop_test native_for_in_continue_test \
@@ -54,4 +46,5 @@ python3 "$root/tests/run_tests.py" --no-tui --jobs 2 --compiler "$stage1" \
     bytes_test borrow_conflict_test compound_bitwise_test \
     string_utf8_test path_test text_test term_ansi_test term_keys_test \
     libc_test compare_trait_test match_value_test cyclic_test \
-    selective_import_test source_import_alias_test
+    selective_import_test source_import_alias_test \
+    module_import_test module_artifact_no_source_test module_artifact_unsupported_test

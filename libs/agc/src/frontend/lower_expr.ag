@@ -130,6 +130,794 @@ struct ExprLowerer {
     SyntaxNode* unit_root;
     bool unsupported;
     bool debug_mode;
+    u32 macro_depth;
+    u32 expected_type_id;
+}
+
+struct LowerMacroArgument {
+    SyntaxNode* start;
+    SyntaxNode* end;
+}
+
+struct LowerMacroBinding {
+    str name;
+    u32 arguments_start;
+    u32 arguments_count;
+    bool is_variadic;
+    bool is_type;
+    bool has_type_replacement;
+    str type_replacement;
+}
+
+void lower_append_syntax_source_range(String* output, SyntaxNode* start, SyntaxNode* end) {
+    SyntaxNode* cursor = start;
+    while (cursor != end && cursor != (SyntaxNode*)0) {
+        if (cursor.kind == NodeKind.Token) {
+            if (cursor.token_kind != TokenKind.Comment) {
+                output.push_str(cursor.text);
+                output.push((u8)' ');
+            }
+        } else {
+            if (cursor.kind == NodeKind.Parenthesized) { output.push((u8)'('); }
+            else if (cursor.kind == NodeKind.Bracket) { output.push((u8)'['); }
+            else if (cursor.kind == NodeKind.Block) { output.push((u8)'{'); }
+            lower_append_syntax_source_range(output, cursor.first_child, (SyntaxNode*)0);
+            if (cursor.kind == NodeKind.Parenthesized) { output.push((u8)')'); }
+            else if (cursor.kind == NodeKind.Bracket) { output.push((u8)']'); }
+            else if (cursor.kind == NodeKind.Block) { output.push((u8)'}'); }
+        }
+        cursor = cursor.next_sibling;
+    }
+}
+
+void lower_append_macro_count(String* output, i64 count) {
+    if (count == 0) {
+        output.push((u8)'0');
+        return;
+    }
+    String digits = String.new();
+    while (count > 0) {
+        digits.push((u8)('0' + (count % 10)));
+        count = count / 10;
+    }
+    i64 i = digits.len() - 1;
+    while (i >= 0) {
+        output.push(digits.data[i]);
+        i -= 1;
+    }
+    digits.drop();
+}
+
+bool lower_macro_index_value(SyntaxNode* bracket, i64* value_out) {
+    if (bracket == (SyntaxNode*)0 || bracket.kind != NodeKind.Bracket) { return false; }
+    SyntaxNode* literal = bracket.first_child;
+    if (literal == (SyntaxNode*)0 || literal.kind != NodeKind.Token
+        || literal.token_kind != TokenKind.IntLiteral
+        || literal.next_sibling != (SyntaxNode*)0) {
+        return false;
+    }
+    i64 value = 0;
+    i64 i = 0;
+    i64 len = strlen(literal.text);
+    if (len == 0) { return false; }
+    while (i < len) {
+        u8 c = (u8)literal.text[i];
+        if (c == (u8)'_') {
+            i += 1;
+            continue;
+        }
+        if (c < (u8)'0' || c > (u8)'9') { return false; }
+        i64 digit = (i64)(c - (u8)'0');
+        if (value > (2147483647 - digit) / 10) { return false; }
+        value = value * 10 + digit;
+        i += 1;
+    }
+    *value_out = value;
+    return true;
+}
+
+void lower_append_macro_source_range(String* output, SyntaxNode* start, SyntaxNode* end,
+                                    Vec<LowerMacroBinding>* bindings,
+                                    Vec<LowerMacroArgument>* arguments,
+                                    bool* supported) {
+    SyntaxNode* cursor = start;
+    while (cursor != end && cursor != (SyntaxNode*)0) {
+        if (!*supported) { return; }
+        bool substituted = false;
+        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.For) {
+            SyntaxNode* loop_variable = cursor.next_sibling;
+            SyntaxNode* in_token = loop_variable != (SyntaxNode*)0
+                ? loop_variable.next_sibling : (SyntaxNode*)0;
+            SyntaxNode* iterable = in_token != (SyntaxNode*)0
+                ? in_token.next_sibling : (SyntaxNode*)0;
+            SyntaxNode* loop_body = iterable != (SyntaxNode*)0
+                ? iterable.next_sibling : (SyntaxNode*)0;
+            i64 variadic_index = 0;
+            while (variadic_index < bindings.len()) {
+                LowerMacroBinding* candidate = bindings.get_ptr(variadic_index);
+                if (candidate.is_variadic && iterable != (SyntaxNode*)0
+                    && iterable.kind == NodeKind.Token && node_is_identifier(iterable)
+                    && strcmp(candidate.name, iterable.text) == 0) {
+                    break;
+                }
+                variadic_index += 1;
+            }
+            if (loop_variable != (SyntaxNode*)0
+                && loop_variable.kind == NodeKind.Token
+                && node_is_identifier(loop_variable)
+                && in_token != (SyntaxNode*)0 && in_token.kind == NodeKind.Token
+                && in_token.token_kind == TokenKind.In
+                && iterable != (SyntaxNode*)0 && iterable.kind == NodeKind.Token
+                && node_is_identifier(iterable) && loop_body != (SyntaxNode*)0
+                && loop_body.kind == NodeKind.Block
+                && iterable.next_sibling == loop_body
+                && variadic_index < bindings.len()) {
+                LowerMacroBinding* variadic = bindings.get_ptr(variadic_index);
+                u32 argument_offset = 0;
+                while (argument_offset < variadic.arguments_count && *supported) {
+                    Vec<LowerMacroBinding> scoped_bindings = Vec<LowerMacroBinding>.new();
+                    LowerMacroBinding iteration_binding;
+                    iteration_binding.name = loop_variable.text;
+                    iteration_binding.arguments_start = variadic.arguments_start
+                        + argument_offset;
+                    iteration_binding.arguments_count = 1;
+                    iteration_binding.is_variadic = false;
+                    iteration_binding.is_type = false;
+                    iteration_binding.has_type_replacement = false;
+                    iteration_binding.type_replacement = "";
+                    scoped_bindings.push(iteration_binding);
+                    i64 binding_index = 0;
+                    while (binding_index < bindings.len()) {
+                        LowerMacroBinding* binding = bindings.get_ptr(binding_index);
+                        LowerMacroBinding copy;
+                        copy.name = binding.name;
+                        copy.arguments_start = binding.arguments_start;
+                        copy.arguments_count = binding.arguments_count;
+                        copy.is_variadic = binding.is_variadic;
+                        copy.is_type = binding.is_type;
+                        copy.has_type_replacement = binding.has_type_replacement;
+                        copy.type_replacement = binding.type_replacement;
+                        scoped_bindings.push(copy);
+                        binding_index += 1;
+                    }
+                    output.push((u8)'{');
+                    lower_append_macro_source_range(output, loop_body.first_child,
+                                                    (SyntaxNode*)0, &scoped_bindings,
+                                                    arguments, supported);
+                    output.push((u8)'}');
+                    scoped_bindings.drop();
+                    argument_offset += 1;
+                }
+                cursor = loop_body;
+                substituted = true;
+            }
+        }
+        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Identifier) {
+            i64 i = 0;
+            while (!substituted && i < bindings.len()) {
+                LowerMacroBinding* binding = bindings.get_ptr(i);
+                if (strcmp(cursor.text, binding.name) == 0) {
+                    if (binding.is_type) {
+                        if (!binding.has_type_replacement) {
+                            *supported = false;
+                            return;
+                        }
+                        output.push_str(binding.type_replacement);
+                    } else if (binding.is_variadic) {
+                        SyntaxNode* access = cursor.next_sibling;
+                        if (access != (SyntaxNode*)0 && access.kind == NodeKind.Token
+                            && access.token_kind == TokenKind.Dot
+                            && access.next_sibling != (SyntaxNode*)0
+                            && access.next_sibling.kind == NodeKind.Token
+                            && strcmp(access.next_sibling.text, "len") == 0) {
+                            lower_append_macro_count(output, (i64)binding.arguments_count);
+                            cursor = access.next_sibling;
+                        } else if (access != (SyntaxNode*)0
+                            && access.kind == NodeKind.Bracket) {
+                            i64 index = 0;
+                            if (!lower_macro_index_value(access, &index)
+                                || index >= (i64)binding.arguments_count) {
+                                *supported = false;
+                                return;
+                            }
+                            LowerMacroArgument* argument = arguments.get_ptr(
+                                (i64)binding.arguments_start + index);
+                            output.push((u8)'(');
+                            lower_append_syntax_source_range(output, argument.start,
+                                                             argument.end);
+                            output.push((u8)')');
+                            cursor = access;
+                        } else {
+                            *supported = false;
+                            return;
+                        }
+                    } else {
+                        LowerMacroArgument* argument = arguments.get_ptr(
+                            (i64)binding.arguments_start);
+                        output.push((u8)'(');
+                        lower_append_syntax_source_range(output, argument.start,
+                                                         argument.end);
+                        output.push((u8)')');
+                    }
+                    substituted = true;
+                    break;
+                }
+                i += 1;
+            }
+        }
+        if (!substituted) {
+            if (cursor.kind == NodeKind.Token) {
+                if (cursor.token_kind != TokenKind.Comment) {
+                    output.push_str(cursor.text);
+                    output.push((u8)' ');
+                }
+            } else {
+                if (cursor.kind == NodeKind.Parenthesized) { output.push((u8)'('); }
+                else if (cursor.kind == NodeKind.Bracket) { output.push((u8)'['); }
+                else if (cursor.kind == NodeKind.Block) { output.push((u8)'{'); }
+                lower_append_macro_source_range(output, cursor.first_child,
+                                                (SyntaxNode*)0, bindings, arguments,
+                                                supported);
+                if (cursor.kind == NodeKind.Parenthesized) { output.push((u8)')'); }
+                else if (cursor.kind == NodeKind.Bracket) { output.push((u8)']'); }
+                else if (cursor.kind == NodeKind.Block) { output.push((u8)'}'); }
+            }
+        }
+        cursor = cursor.next_sibling;
+    }
+}
+
+SyntaxNode* lower_find_user_macro(SyntaxNode* root, str name) {
+    if (root == (SyntaxNode*)0) { return (SyntaxNode*)0; }
+    SyntaxNode* item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Macro) {
+            SyntaxNode* part = item.first_child;
+            while (part != (SyntaxNode*)0 && part.kind != NodeKind.Parenthesized) {
+                if (part.kind == NodeKind.Token
+                    && part.token_kind == TokenKind.Identifier
+                    && strcmp(part.text, name) == 0) {
+                    return item;
+                }
+                part = part.next_sibling;
+            }
+        }
+        item = item.next_sibling;
+    }
+    return (SyntaxNode*)0;
+}
+
+bool lower_collect_macro_arguments(SyntaxNode* list, Vec<LowerMacroArgument>* arguments) {
+    if (list == (SyntaxNode*)0 || list.kind != NodeKind.Parenthesized) { return false; }
+    SyntaxNode* start = list.first_child;
+    if (start == (SyntaxNode*)0) { return true; }
+    SyntaxNode* cursor = start;
+    while (cursor != (SyntaxNode*)0) {
+        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Comma) {
+            LowerMacroArgument argument;
+            argument.start = start;
+            argument.end = cursor;
+            arguments.push(argument);
+            start = cursor.next_sibling;
+        }
+        cursor = cursor.next_sibling;
+    }
+    if (start != (SyntaxNode*)0) {
+        LowerMacroArgument argument;
+        argument.start = start;
+        argument.end = (SyntaxNode*)0;
+        arguments.push(argument);
+    }
+    return true;
+}
+
+SyntaxNode* lower_macro_parameter_list(SyntaxNode* definition) {
+    SyntaxNode* child = definition.first_child;
+    while (child != (SyntaxNode*)0 && child.kind != NodeKind.Parenthesized) {
+        child = child.next_sibling;
+    }
+    return child;
+}
+
+SyntaxNode* lower_macro_body(SyntaxNode* definition) {
+    SyntaxNode* child = definition.first_child;
+    while (child != (SyntaxNode*)0 && child.kind != NodeKind.Block) {
+        child = child.next_sibling;
+    }
+    return child;
+}
+
+SyntaxNode* lower_macro_return_expression_in_block(SyntaxNode* body,
+                                                    SyntaxNode** end_out) {
+    *end_out = (SyntaxNode*)0;
+    if (body == (SyntaxNode*)0 || body.kind != NodeKind.Block) {
+        return (SyntaxNode*)0;
+    }
+    SyntaxNode* returned = body.first_child;
+    if (returned == (SyntaxNode*)0 || returned.kind != NodeKind.Token
+        || returned.token_kind != TokenKind.Return) {
+        return (SyntaxNode*)0;
+    }
+    SyntaxNode* expression = returned.next_sibling;
+    if (expression == (SyntaxNode*)0
+        || (expression.kind == NodeKind.Token
+            && expression.token_kind == TokenKind.Semicolon)) {
+        return (SyntaxNode*)0;
+    }
+    SyntaxNode* cursor = expression;
+    while (cursor != (SyntaxNode*)0) {
+        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
+            if (cursor.next_sibling != (SyntaxNode*)0) { return (SyntaxNode*)0; }
+            *end_out = cursor;
+            return expression;
+        }
+        cursor = cursor.next_sibling;
+    }
+    return (SyntaxNode*)0;
+}
+
+SyntaxNode* lower_macro_return_expression(SyntaxNode* definition, SyntaxNode** end_out) {
+    return lower_macro_return_expression_in_block(lower_macro_body(definition), end_out);
+}
+
+bool lower_macro_if_return_parts(SyntaxNode* body, SyntaxNode** condition_start,
+                                 SyntaxNode** then_expression, SyntaxNode** then_end,
+                                 SyntaxNode** else_expression, SyntaxNode** else_end) {
+    *condition_start = (SyntaxNode*)0;
+    *then_expression = (SyntaxNode*)0;
+    *then_end = (SyntaxNode*)0;
+    *else_expression = (SyntaxNode*)0;
+    *else_end = (SyntaxNode*)0;
+    if (body == (SyntaxNode*)0 || body.kind != NodeKind.Block) { return false; }
+
+    SyntaxNode* if_token = body.first_child;
+    SyntaxNode* condition = if_token != (SyntaxNode*)0 ? if_token.next_sibling : (SyntaxNode*)0;
+    SyntaxNode* then_block = condition != (SyntaxNode*)0 ? condition.next_sibling : (SyntaxNode*)0;
+    SyntaxNode* else_token = then_block != (SyntaxNode*)0 ? then_block.next_sibling : (SyntaxNode*)0;
+    SyntaxNode* else_block = else_token != (SyntaxNode*)0 ? else_token.next_sibling : (SyntaxNode*)0;
+    if (if_token == (SyntaxNode*)0 || if_token.kind != NodeKind.Token
+        || if_token.token_kind != TokenKind.If
+        || condition == (SyntaxNode*)0 || condition.kind != NodeKind.Parenthesized
+        || then_block == (SyntaxNode*)0 || then_block.kind != NodeKind.Block
+        || else_token == (SyntaxNode*)0 || else_token.kind != NodeKind.Token
+        || else_token.token_kind != TokenKind.Else
+        || else_block == (SyntaxNode*)0 || else_block.kind != NodeKind.Block
+        || else_block.next_sibling != (SyntaxNode*)0) {
+        return false;
+    }
+
+    *then_expression = lower_macro_return_expression_in_block(then_block, then_end);
+    *else_expression = lower_macro_return_expression_in_block(else_block, else_end);
+    if (*then_expression == (SyntaxNode*)0 || *else_expression == (SyntaxNode*)0) {
+        return false;
+    }
+    *condition_start = condition.first_child;
+    return *condition_start != (SyntaxNode*)0;
+}
+
+void lower_append_macro_if_return_expression(String* output, SyntaxNode* condition_start,
+                                             SyntaxNode* then_expression,
+                                             SyntaxNode* then_end,
+                                             SyntaxNode* else_expression,
+                                             SyntaxNode* else_end,
+                                             Vec<LowerMacroBinding>* bindings,
+                                             Vec<LowerMacroArgument>* arguments,
+                                             bool* supported) {
+    output.push((u8)'(');
+    lower_append_macro_source_range(output, condition_start, (SyntaxNode*)0,
+                                    bindings, arguments, supported);
+    output.push((u8)')');
+    output.push((u8)'?');
+    output.push((u8)'(');
+    lower_append_macro_source_range(output, then_expression, then_end,
+                                    bindings, arguments, supported);
+    output.push((u8)')');
+    output.push((u8)':');
+    output.push((u8)'(');
+    lower_append_macro_source_range(output, else_expression, else_end,
+                                    bindings, arguments, supported);
+    output.push((u8)')');
+}
+
+bool lower_collect_macro_bindings(SyntaxNode* definition, SyntaxNode* call_args,
+                                 Vec<LowerMacroBinding>* bindings,
+                                 Vec<LowerMacroArgument>* arguments) {
+    if (!lower_collect_macro_arguments(call_args, arguments)) { return false; }
+
+    SyntaxNode* parameter_list = lower_macro_parameter_list(definition);
+    bool supported = parameter_list != (SyntaxNode*)0;
+    SyntaxNode* param_start = supported ? parameter_list.first_child : (SyntaxNode*)0;
+    i64 argument_index = 0;
+    while (supported && param_start != (SyntaxNode*)0) {
+        SyntaxNode* param_end = param_start;
+        while (param_end != (SyntaxNode*)0
+            && !(param_end.kind == NodeKind.Token
+                 && param_end.token_kind == TokenKind.Comma)) {
+            param_end = param_end.next_sibling;
+        }
+        SyntaxNode* cursor = param_start;
+        SyntaxNode* param_name = (SyntaxNode*)0;
+        bool is_variadic = false;
+        while (cursor != param_end && cursor != (SyntaxNode*)0) {
+            if (cursor.kind == NodeKind.Token && node_is_identifier(cursor)) {
+                param_name = cursor;
+            }
+            if (cursor.kind == NodeKind.Token && strcmp(cursor.text, "...") == 0) {
+                is_variadic = true;
+            }
+            cursor = cursor.next_sibling;
+        }
+        if (param_name == (SyntaxNode*)0
+            || (!is_variadic && argument_index >= arguments.len())
+            || (is_variadic && param_end != (SyntaxNode*)0
+                && param_end.next_sibling != (SyntaxNode*)0)) {
+            supported = false;
+            break;
+        }
+        LowerMacroBinding binding;
+        binding.name = param_name.text;
+        binding.arguments_start = (u32)argument_index;
+        binding.is_variadic = is_variadic;
+        binding.is_type = false;
+        binding.has_type_replacement = false;
+        binding.type_replacement = "";
+        if (is_variadic) {
+            binding.arguments_count = (u32)(arguments.len() - argument_index);
+            argument_index = arguments.len();
+        } else {
+            binding.arguments_count = 1;
+            argument_index += 1;
+        }
+        bindings.push(binding);
+        if (is_variadic) { break; }
+        param_start = param_end == (SyntaxNode*)0 ? (SyntaxNode*)0 : param_end.next_sibling;
+    }
+    if (argument_index != arguments.len()) { supported = false; }
+    return supported;
+}
+
+SyntaxNode* lower_macro_generic_parameter_list(SyntaxNode* definition) {
+    SyntaxNode* child = definition.first_child;
+    while (child != (SyntaxNode*)0 && child.kind != NodeKind.Parenthesized) {
+        if (child.kind == NodeKind.Bracket) { return child; }
+        child = child.next_sibling;
+    }
+    return (SyntaxNode*)0;
+}
+
+bool lower_collect_macro_type_bindings(SyntaxNode* definition,
+                                       Vec<LowerMacroBinding>* bindings) {
+    SyntaxNode* parameters = lower_macro_generic_parameter_list(definition);
+    if (parameters == (SyntaxNode*)0) { return true; }
+    SyntaxNode* cursor = parameters.first_child;
+    while (cursor != (SyntaxNode*)0) {
+        if (cursor.kind == NodeKind.Token && node_is_identifier(cursor)) {
+            LowerMacroBinding binding;
+            binding.name = cursor.text;
+            binding.arguments_start = 0;
+            binding.arguments_count = 0;
+            binding.is_variadic = false;
+            binding.is_type = true;
+            binding.has_type_replacement = false;
+            binding.type_replacement = "";
+            bindings.push(binding);
+        }
+        cursor = cursor.next_sibling;
+    }
+    return true;
+}
+
+u32 lower_macro_return_type(ExprLowerer* self, SyntaxNode* definition) {
+    SyntaxNode* parameter_list = lower_macro_parameter_list(definition);
+    if (parameter_list == (SyntaxNode*)0) { return TYPE_UNKNOWN; }
+    SyntaxNode* macro_name = definition.first_child;
+    SyntaxNode* previous = (SyntaxNode*)0;
+    while (macro_name != (SyntaxNode*)0 && macro_name != parameter_list) {
+        previous = macro_name;
+        macro_name = macro_name.next_sibling;
+    }
+    if (previous == (SyntaxNode*)0) { return TYPE_UNKNOWN; }
+    SyntaxNode* type_start = definition.first_child;
+    if (type_start != (SyntaxNode*)0) { type_start = type_start.next_sibling; }
+    SyntaxNode* generic_parameters = lower_macro_generic_parameter_list(definition);
+    if (generic_parameters != (SyntaxNode*)0) {
+        type_start = generic_parameters.next_sibling;
+    }
+    if (type_start == (SyntaxNode*)0 || type_start == previous) { return TYPE_UNKNOWN; }
+    String type_text = String.new();
+    SyntaxNode* cursor = type_start;
+    while (cursor != previous && cursor != (SyntaxNode*)0) {
+        append_node_tokens(cursor, &type_text);
+        cursor = cursor.next_sibling;
+    }
+    u32 type_id = self.types.parse_type_name(type_text.to_str());
+    type_text.drop();
+    return type_id;
+}
+
+bool lower_bind_macro_expected_type(TypeTable* types, u32 pattern_id,
+                                    u32 actual_id,
+                                    Vec<LowerMacroBinding>* bindings) {
+    if (pattern_id == TYPE_UNKNOWN || actual_id == TYPE_UNKNOWN) { return false; }
+    TypeEntry* pattern = types.get(pattern_id);
+    TypeEntry* actual = types.get(actual_id);
+    if ((pattern.kind == TypeKind.Named || pattern.kind == TypeKind.TypeParam)
+        && pattern.count == 0) {
+        str pattern_name = types.names.get(pattern.name_id);
+        i64 i = 0;
+        while (i < bindings.len()) {
+            LowerMacroBinding* binding = bindings.get_ptr(i);
+            if (binding.is_type && strcmp(pattern_name, binding.name) == 0) {
+                if (binding.has_type_replacement) {
+                    return types.parse_type_name(binding.type_replacement) == actual_id;
+                }
+                binding.type_replacement = types.type_name(actual_id);
+                binding.has_type_replacement = true;
+                return true;
+            }
+            i += 1;
+        }
+    }
+    if (pattern.kind != actual.kind) { return false; }
+    if (pattern.kind == TypeKind.Named) {
+        if (strcmp(types.names.get(pattern.name_id),
+                   types.names.get(actual.name_id)) != 0
+            || pattern.count != actual.count) {
+            return false;
+        }
+        i64 i = 0;
+        while (i < pattern.count) {
+            if (!lower_bind_macro_expected_type(types,
+                    types.type_args.get((i64)pattern.inner + i),
+                    types.type_args.get((i64)actual.inner + i), bindings)) {
+                return false;
+            }
+            i += 1;
+        }
+        return true;
+    }
+    if (pattern.kind == TypeKind.Pointer || pattern.kind == TypeKind.Reference) {
+        return lower_bind_macro_expected_type(types, pattern.inner, actual.inner,
+                                              bindings);
+    }
+    if (pattern.kind == TypeKind.Array) {
+        return pattern.count == actual.count
+            && lower_bind_macro_expected_type(types, pattern.inner, actual.inner,
+                                              bindings);
+    }
+    return pattern_id == actual_id;
+}
+
+u32 lower_macro_argument_type(SyntaxNode* start, SyntaxNode* end) {
+    if (start == (SyntaxNode*)0 || start == end) { return TYPE_UNKNOWN; }
+    if (start.kind == NodeKind.Parenthesized && start.next_sibling == end) {
+        return lower_macro_argument_type(start.first_child, (SyntaxNode*)0);
+    }
+    if (start.kind != NodeKind.Token || start.next_sibling != end) {
+        return TYPE_UNKNOWN;
+    }
+    if (start.token_kind == TokenKind.IntLiteral) {
+        return int_literal_fits_i32(start.text) ? TYPE_I32 : TYPE_I64;
+    }
+    if (start.token_kind == TokenKind.FloatLiteral) { return TYPE_F64; }
+    if (start.token_kind == TokenKind.StringLiteral) { return TYPE_STR; }
+    if (start.token_kind == TokenKind.CharLiteral) { return TYPE_CHAR; }
+    if (start.token_kind == TokenKind.True || start.token_kind == TokenKind.False) {
+        return TYPE_BOOL;
+    }
+    return TYPE_UNKNOWN;
+}
+
+void lower_infer_macro_type_arguments(ExprLowerer* self, SyntaxNode* definition,
+                                      Vec<LowerMacroBinding>* bindings,
+                                      Vec<LowerMacroArgument>* arguments) {
+    SyntaxNode* parameters = lower_macro_parameter_list(definition);
+    SyntaxNode* parameter = parameters != (SyntaxNode*)0
+        ? parameters.first_child : (SyntaxNode*)0;
+    while (parameter != (SyntaxNode*)0) {
+        SyntaxNode* parameter_end = parameter;
+        while (parameter_end != (SyntaxNode*)0
+            && !(parameter_end.kind == NodeKind.Token
+                 && parameter_end.token_kind == TokenKind.Comma)) {
+            parameter_end = parameter_end.next_sibling;
+        }
+        SyntaxNode* value_name = (SyntaxNode*)0;
+        SyntaxNode* cursor = parameter;
+        while (cursor != parameter_end && cursor != (SyntaxNode*)0) {
+            if (cursor.kind == NodeKind.Token && node_is_identifier(cursor)) {
+                value_name = cursor;
+            }
+            cursor = cursor.next_sibling;
+        }
+        i64 binding_index = 0;
+        while (binding_index < bindings.len()) {
+            LowerMacroBinding* generic = bindings.get_ptr(binding_index);
+            if (generic.is_type && !generic.has_type_replacement) {
+                bool used_as_parameter_type = false;
+                cursor = parameter;
+                while (cursor != parameter_end && cursor != (SyntaxNode*)0
+                    && cursor != value_name) {
+                    if (cursor.kind == NodeKind.Token && node_is_identifier(cursor)
+                        && strcmp(cursor.text, generic.name) == 0) {
+                        used_as_parameter_type = true;
+                    }
+                    cursor = cursor.next_sibling;
+                }
+                if (used_as_parameter_type && value_name != (SyntaxNode*)0) {
+                    i64 value_index = 0;
+                    while (value_index < bindings.len()) {
+                        LowerMacroBinding* value = bindings.get_ptr(value_index);
+                        if (!value.is_type && strcmp(value.name, value_name.text) == 0
+                            && value.arguments_count > 0) {
+                            LowerMacroArgument* argument = arguments.get_ptr(
+                                value.arguments_start);
+                            u32 argument_type = lower_macro_argument_type(
+                                argument.start, argument.end);
+                            if (argument_type != TYPE_UNKNOWN) {
+                                generic.type_replacement = self.types.type_name(argument_type);
+                                generic.has_type_replacement = true;
+                            }
+                            break;
+                        }
+                        value_index += 1;
+                    }
+                }
+            }
+            binding_index += 1;
+        }
+        if (parameter_end == (SyntaxNode*)0) { break; }
+        parameter = parameter_end.next_sibling;
+    }
+}
+
+bool lower_bind_macro_type_arguments(ExprLowerer* self, SyntaxNode* definition,
+                                     SyntaxNode* less, SyntaxNode* greater,
+                                     Vec<LowerMacroBinding>* bindings,
+                                     Vec<LowerMacroArgument>* arguments) {
+    lower_collect_macro_type_bindings(definition, bindings);
+    Vec<u32> explicit_types = Vec<u32>.new();
+    if (less != (SyntaxNode*)0) {
+        if (greater == (SyntaxNode*)0) {
+            explicit_types.drop();
+            return false;
+        }
+        SyntaxNode* type_start = less.next_sibling;
+        SyntaxNode* scan = type_start;
+        i64 angle_depth = 0;
+        while (scan != greater) {
+            if (scan == (SyntaxNode*)0) {
+                explicit_types.drop();
+                return false;
+            }
+            if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Comma
+                && angle_depth == 0) {
+                String type_text = String.new();
+                SyntaxNode* part = type_start;
+                while (part != scan) {
+                    append_node_tokens(part, &type_text);
+                    part = part.next_sibling;
+                }
+                u32 type_id = self.types.parse_type_name(type_text.to_str());
+                type_text.drop();
+                if (type_id == TYPE_UNKNOWN) {
+                    explicit_types.drop();
+                    return false;
+                }
+                explicit_types.push(type_id);
+                type_start = scan.next_sibling;
+            } else if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Less) {
+                angle_depth += 1;
+            } else if (scan.kind == NodeKind.Token
+                && scan.token_kind == TokenKind.Greater) {
+                angle_depth -= 1;
+            } else if (scan.kind == NodeKind.Token
+                && scan.token_kind == TokenKind.RightShift) {
+                angle_depth -= 2;
+            }
+            scan = scan.next_sibling;
+        }
+        String last_type_text = String.new();
+        SyntaxNode* part = type_start;
+        while (part != greater) {
+            append_node_tokens(part, &last_type_text);
+            part = part.next_sibling;
+        }
+        if (greater.kind == NodeKind.Token
+            && greater.token_kind == TokenKind.RightShift) {
+            last_type_text.push((u8)'>');
+        }
+        u32 last_type = self.types.parse_type_name(last_type_text.to_str());
+        last_type_text.drop();
+        if (last_type == TYPE_UNKNOWN) {
+            explicit_types.drop();
+            return false;
+        }
+        explicit_types.push(last_type);
+    }
+
+    i64 generic_count = 0;
+    i64 i = 0;
+    while (i < bindings.len()) {
+        if (bindings.get_ptr(i).is_type) { generic_count += 1; }
+        i += 1;
+    }
+    if (less != (SyntaxNode*)0 && explicit_types.len() != generic_count) {
+        explicit_types.drop();
+        return false;
+    }
+    if (less != (SyntaxNode*)0) {
+        i64 type_index = 0;
+        i = 0;
+        while (i < bindings.len()) {
+            LowerMacroBinding* binding = bindings.get_ptr(i);
+            if (binding.is_type) {
+                binding.type_replacement = self.types.type_name(
+                    explicit_types.get(type_index));
+                binding.has_type_replacement = true;
+                type_index += 1;
+            }
+            i += 1;
+        }
+    } else if (generic_count > 0) {
+        if (self.expected_type_id != TYPE_UNKNOWN) {
+            u32 return_type = lower_macro_return_type(self, definition);
+            lower_bind_macro_expected_type(self.types, return_type,
+                                            self.expected_type_id, bindings);
+        }
+        lower_infer_macro_type_arguments(self, definition, bindings, arguments);
+    }
+    explicit_types.drop();
+    return true;
+}
+
+bool lower_syntax_range_has_return(SyntaxNode* start, SyntaxNode* end) {
+    SyntaxNode* cursor = start;
+    while (cursor != end && cursor != (SyntaxNode*)0) {
+        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Return) {
+            return true;
+        }
+        if (cursor.kind != NodeKind.Token
+            && lower_syntax_range_has_return(cursor.first_child, (SyntaxNode*)0)) {
+            return true;
+        }
+        cursor = cursor.next_sibling;
+    }
+    return false;
+}
+
+bool lower_macro_final_return_parts(SyntaxNode* body, SyntaxNode** expression,
+                                   SyntaxNode** expression_end) {
+    *expression = (SyntaxNode*)0;
+    *expression_end = (SyntaxNode*)0;
+    if (body == (SyntaxNode*)0 || body.kind != NodeKind.Block) { return false; }
+
+    SyntaxNode* returned = body.first_child;
+    while (returned != (SyntaxNode*)0
+        && !(returned.kind == NodeKind.Token && returned.token_kind == TokenKind.Return)) {
+        returned = returned.next_sibling;
+    }
+    if (returned == (SyntaxNode*)0
+        || lower_syntax_range_has_return(body.first_child, returned)) {
+        return false;
+    }
+
+    SyntaxNode* value = returned.next_sibling;
+    if (value == (SyntaxNode*)0
+        || (value.kind == NodeKind.Token && value.token_kind == TokenKind.Semicolon)) {
+        return false;
+    }
+    SyntaxNode* semicolon = value;
+    while (semicolon != (SyntaxNode*)0
+        && !(semicolon.kind == NodeKind.Token
+             && semicolon.token_kind == TokenKind.Semicolon)) {
+        semicolon = semicolon.next_sibling;
+    }
+    if (semicolon == (SyntaxNode*)0 || semicolon.next_sibling != (SyntaxNode*)0) {
+        return false;
+    }
+    *expression = value;
+    *expression_end = semicolon;
+    return true;
 }
 
 impl ExprLowerer {
@@ -141,7 +929,370 @@ impl ExprLowerer {
         lowerer.unit_root = (SyntaxNode*)0;
         lowerer.unsupported = false;
         lowerer.debug_mode = true;
+        lowerer.macro_depth = 0;
+        lowerer.expected_type_id = TYPE_UNKNOWN;
         return move lowerer;
+    }
+
+    u32 lower_macro_expansion_source(ExprLowerer* self, String expanded_source,
+                                     bool has_block_expression) {
+        TokenStream expanded_tokens = TokenStream.new();
+        DiagnosticBag expanded_diagnostics = DiagnosticBag.new();
+        lex(move expanded_source, &expanded_tokens, &expanded_diagnostics);
+        NodePool expanded_pool = NodePool.new();
+        SyntaxTree expanded_tree;
+        SyntaxNode* generated_body = (SyntaxNode*)0;
+        bool parsed = expanded_diagnostics.is_empty();
+        if (parsed) {
+            parse(&expanded_tokens, &expanded_diagnostics, &expanded_pool, &expanded_tree);
+            parsed = expanded_diagnostics.is_empty() && expanded_tree.root != (SyntaxNode*)0;
+        }
+        SyntaxNode* generated_return_statement = (SyntaxNode*)0;
+        SyntaxNode* generated_return = (SyntaxNode*)0;
+        SyntaxNode* generated_end = (SyntaxNode*)0;
+        if (parsed) {
+            SyntaxNode* generated_function = expanded_tree.root.first_child;
+            generated_body = generated_function != (SyntaxNode*)0
+                ? generated_function.first_child : (SyntaxNode*)0;
+            while (generated_body != (SyntaxNode*)0 && generated_body.kind != NodeKind.Block) {
+                generated_body = generated_body.next_sibling;
+            }
+            generated_return_statement = generated_body != (SyntaxNode*)0
+                ? generated_body.first_child : (SyntaxNode*)0;
+            while (generated_return_statement != (SyntaxNode*)0
+                && !(generated_return_statement.kind == NodeKind.Token
+                     && generated_return_statement.token_kind == TokenKind.Return)) {
+                generated_return_statement = generated_return_statement.next_sibling;
+            }
+            if (generated_return_statement != (SyntaxNode*)0) {
+                generated_return = generated_return_statement.next_sibling;
+                generated_end = generated_return;
+                while (generated_end != (SyntaxNode*)0
+                    && !(generated_end.kind == NodeKind.Token
+                         && generated_end.token_kind == TokenKind.Semicolon)) {
+                    generated_end = generated_end.next_sibling;
+                }
+            }
+        }
+
+        u32 result = 0;
+        if (generated_return != (SyntaxNode*)0 && generated_end != (SyntaxNode*)0) {
+            self.macro_depth += 1;
+            Vec<u32> block_stmt_ids = Vec<u32>.new();
+            if (has_block_expression && generated_body != (SyntaxNode*)0) {
+                self.lower_block_range(generated_body.first_child,
+                                       generated_return_statement,
+                                       &block_stmt_ids);
+            }
+            u32 block_start = (u32)self.pool.block_stmts.len();
+            i64 block_index = 0;
+            while (block_index < block_stmt_ids.len()) {
+                self.pool.block_stmts.push(block_stmt_ids.get(block_index));
+                block_index += 1;
+            }
+            u32 block_count = (u32)block_stmt_ids.len();
+            block_stmt_ids.drop();
+            result = self.lower_sequence(generated_return, generated_end);
+            if (has_block_expression && result != 0) {
+                result = self.pool.add_expr_block(block_start, block_count,
+                                                  result, generated_body.span);
+            }
+            self.macro_depth -= 1;
+        } else {
+            self.unsupported = true;
+        }
+        expanded_pool.destroy();
+        expanded_tokens.tokens.drop();
+        expanded_diagnostics.items.drop();
+        return result;
+    }
+
+    u32 lower_json_macro_expression(ExprLowerer* self, SyntaxNode* name_node,
+                                    SyntaxNode** next_out) {
+        *next_out = (SyntaxNode*)0;
+        SyntaxNode* call_args = name_node.next_sibling;
+        while (call_args != (SyntaxNode*)0 && call_args.kind != NodeKind.Parenthesized) {
+            call_args = call_args.next_sibling;
+        }
+        if (call_args == (SyntaxNode*)0) {
+            self.unsupported = true;
+            return 0;
+        }
+        *next_out = call_args.next_sibling;
+
+        Vec<LowerMacroArgument> arguments = Vec<LowerMacroArgument>.new();
+        Vec<LowerMacroBinding> bindings = Vec<LowerMacroBinding>.new();
+        bool supported = lower_collect_macro_arguments(call_args, &arguments);
+        bool is_json = strcmp(name_node.text, "json") == 0;
+        supported = supported && (is_json
+            ? (arguments.len() == 1 || arguments.len() == 2)
+            : arguments.len() == 2);
+        if (!supported) {
+            bindings.drop();
+            arguments.drop();
+            self.unsupported = true;
+            return 0;
+        }
+
+        String expanded_source = String.from_str("i64 __silver_macro_expr() { ");
+        bool substitution_supported = true;
+        if (is_json) {
+            expanded_source.push_str("JsonWriter __silver_json_writer = JsonWriter.new(); ");
+            if (arguments.len() == 2) {
+                LowerMacroArgument* prefix = arguments.get_ptr(1);
+                expanded_source.push_str("__silver_json_writer.write_raw(");
+                lower_append_macro_source_range(&expanded_source, prefix.start, prefix.end,
+                                                &bindings, &arguments,
+                                                &substitution_supported);
+                expanded_source.push_str("); ");
+            }
+            LowerMacroArgument* value = arguments.get_ptr(0);
+            expanded_source.push((u8)'(');
+            lower_append_macro_source_range(&expanded_source, value.start, value.end,
+                                            &bindings, &arguments,
+                                            &substitution_supported);
+            expanded_source.push_str(").to_json(&__silver_json_writer); ");
+            expanded_source.push_str("return __silver_json_writer.finish(); }");
+        } else {
+            LowerMacroArgument* target = arguments.get_ptr(0);
+            LowerMacroArgument* input = arguments.get_ptr(1);
+            expanded_source.push_str("JsonReader __silver_json_reader = JsonReader.new(");
+            lower_append_macro_source_range(&expanded_source, input.start, input.end,
+                                            &bindings, &arguments,
+                                            &substitution_supported);
+            expanded_source.push_str("); return ");
+            lower_append_macro_source_range(&expanded_source, target.start, target.end,
+                                            &bindings, &arguments,
+                                            &substitution_supported);
+            expanded_source.push_str(".from_json(&__silver_json_reader); }");
+        }
+        bindings.drop();
+        arguments.drop();
+        if (!substitution_supported) {
+            expanded_source.drop();
+            self.unsupported = true;
+            return 0;
+        }
+        return self.lower_macro_expansion_source(move expanded_source, true);
+    }
+
+    u32 lower_user_macro_expression(ExprLowerer* self, SyntaxNode* name_node,
+                                   SyntaxNode** next_out) {
+        *next_out = (SyntaxNode*)0;
+        if (self.macro_depth >= 64 || self.unit_root == (SyntaxNode*)0) {
+            self.unsupported = true;
+            return 0;
+        }
+        if (strcmp(name_node.text, "json") == 0
+            || strcmp(name_node.text, "from_json") == 0) {
+            return self.lower_json_macro_expression(name_node, next_out);
+        }
+        SyntaxNode* generic_less = (SyntaxNode*)0;
+        SyntaxNode* generic_greater = (SyntaxNode*)0;
+        SyntaxNode* call_args = name_node.next_sibling;
+        if (call_args != (SyntaxNode*)0 && call_args.kind == NodeKind.Token
+            && call_args.token_kind == TokenKind.Less) {
+            generic_less = call_args;
+            generic_greater = lower_find_generic_call_close(generic_less);
+            call_args = generic_greater != (SyntaxNode*)0
+                ? generic_greater.next_sibling : (SyntaxNode*)0;
+        }
+        while (call_args != (SyntaxNode*)0 && call_args.kind != NodeKind.Parenthesized) {
+            call_args = call_args.next_sibling;
+        }
+        if (call_args == (SyntaxNode*)0) {
+            self.unsupported = true;
+            return 0;
+        }
+        *next_out = call_args.next_sibling;
+
+        SyntaxNode* definition = lower_find_user_macro(self.unit_root, name_node.text);
+        if (definition == (SyntaxNode*)0) {
+            self.unsupported = true;
+            return 0;
+        }
+        Vec<LowerMacroArgument> arguments = Vec<LowerMacroArgument>.new();
+        Vec<LowerMacroBinding> bindings = Vec<LowerMacroBinding>.new();
+        bool supported = lower_collect_macro_bindings(definition, call_args,
+                                                      &bindings, &arguments);
+        if (supported) {
+            supported = lower_bind_macro_type_arguments(self, definition,
+                generic_less, generic_greater, &bindings, &arguments);
+        }
+
+        SyntaxNode* expression_end = (SyntaxNode*)0;
+        SyntaxNode* expression = supported
+            ? lower_macro_return_expression(definition, &expression_end)
+            : (SyntaxNode*)0;
+        SyntaxNode* condition_start = (SyntaxNode*)0;
+        SyntaxNode* then_expression = (SyntaxNode*)0;
+        SyntaxNode* then_end = (SyntaxNode*)0;
+        SyntaxNode* else_expression = (SyntaxNode*)0;
+        SyntaxNode* else_end = (SyntaxNode*)0;
+        bool if_return = expression == (SyntaxNode*)0 && supported
+            && lower_macro_if_return_parts(lower_macro_body(definition), &condition_start,
+                                           &then_expression, &then_end,
+                                           &else_expression, &else_end);
+        SyntaxNode* block_expression = (SyntaxNode*)0;
+        SyntaxNode* block_expression_end = (SyntaxNode*)0;
+        bool has_block_expression = expression == (SyntaxNode*)0 && !if_return && supported
+            && lower_macro_final_return_parts(lower_macro_body(definition),
+                                              &block_expression, &block_expression_end);
+        if (expression == (SyntaxNode*)0 && !if_return && !has_block_expression) {
+            supported = false;
+        }
+
+        if (!supported) {
+            bindings.drop();
+            arguments.drop();
+            self.unsupported = true;
+            return 0;
+        }
+
+        String expanded_source = String.from_str("i64 __silver_macro_expr() {");
+        bool substitution_supported = true;
+        if (has_block_expression) {
+            SyntaxNode* body = lower_macro_body(definition);
+            lower_append_macro_source_range(&expanded_source, body.first_child,
+                                            (SyntaxNode*)0, &bindings, &arguments,
+                                            &substitution_supported);
+        } else if (if_return) {
+            expanded_source.push_str(" return ");
+            lower_append_macro_if_return_expression(&expanded_source, condition_start,
+                                                    then_expression, then_end,
+                                                    else_expression, else_end,
+                                                    &bindings, &arguments,
+                                                    &substitution_supported);
+        } else {
+            expanded_source.push_str(" return ");
+            lower_append_macro_source_range(&expanded_source, expression, expression_end,
+                                            &bindings, &arguments,
+                                            &substitution_supported);
+        }
+        if (!substitution_supported) {
+            expanded_source.drop();
+            bindings.drop();
+            arguments.drop();
+            self.unsupported = true;
+            return 0;
+        }
+        if (has_block_expression) {
+            expanded_source.push((u8)'}');
+        } else {
+            expanded_source.push_str("; }");
+        }
+        bindings.drop();
+        arguments.drop();
+        return self.lower_macro_expansion_source(move expanded_source,
+                                                 has_block_expression);
+    }
+
+    bool lower_user_macro_statement(ExprLowerer* self, SyntaxNode* name_node,
+                                    Vec<u32>* stmt_ids, SyntaxNode** next_out) {
+        *next_out = (SyntaxNode*)0;
+        if (self.unit_root == (SyntaxNode*)0) { return false; }
+        SyntaxNode* generic_less = (SyntaxNode*)0;
+        SyntaxNode* generic_greater = (SyntaxNode*)0;
+        SyntaxNode* call_args = name_node.next_sibling;
+        if (call_args != (SyntaxNode*)0 && call_args.kind == NodeKind.Token
+            && call_args.token_kind == TokenKind.Less) {
+            generic_less = call_args;
+            generic_greater = lower_find_generic_call_close(generic_less);
+            call_args = generic_greater != (SyntaxNode*)0
+                ? generic_greater.next_sibling : (SyntaxNode*)0;
+        }
+        while (call_args != (SyntaxNode*)0 && call_args.kind != NodeKind.Parenthesized) {
+            call_args = call_args.next_sibling;
+        }
+        if (call_args == (SyntaxNode*)0) { return false; }
+        SyntaxNode* semicolon = call_args.next_sibling;
+        if (semicolon == (SyntaxNode*)0 || semicolon.kind != NodeKind.Token
+            || semicolon.token_kind != TokenKind.Semicolon) {
+            return false;
+        }
+        *next_out = semicolon.next_sibling;
+
+        SyntaxNode* definition = lower_find_user_macro(self.unit_root, name_node.text);
+        if (definition == (SyntaxNode*)0) { return false; }
+        SyntaxNode* body = definition.first_child;
+        while (body != (SyntaxNode*)0 && body.kind != NodeKind.Block) {
+            body = body.next_sibling;
+        }
+        if (body == (SyntaxNode*)0
+            || lower_syntax_range_has_return(body.first_child, (SyntaxNode*)0)) {
+            return false;
+        }
+        if (self.macro_depth >= 64) {
+            self.unsupported = true;
+            return true;
+        }
+
+        Vec<LowerMacroArgument> arguments = Vec<LowerMacroArgument>.new();
+        Vec<LowerMacroBinding> bindings = Vec<LowerMacroBinding>.new();
+        if (!lower_collect_macro_bindings(definition, call_args,
+                                          &bindings, &arguments)) {
+            bindings.drop();
+            arguments.drop();
+            self.unsupported = true;
+            return true;
+        }
+        if (!lower_bind_macro_type_arguments(self, definition, generic_less,
+                                             generic_greater, &bindings,
+                                             &arguments)) {
+            bindings.drop();
+            arguments.drop();
+            self.unsupported = true;
+            return true;
+        }
+        String expanded_source = String.from_str("void __silver_macro_stmt() {");
+        bool substitution_supported = true;
+        lower_append_macro_source_range(&expanded_source, body.first_child,
+                                        (SyntaxNode*)0, &bindings, &arguments,
+                                        &substitution_supported);
+        if (!substitution_supported) {
+            expanded_source.drop();
+            bindings.drop();
+            arguments.drop();
+            self.unsupported = true;
+            return true;
+        }
+        expanded_source.push((u8)'}');
+        bindings.drop();
+        arguments.drop();
+
+        TokenStream expanded_tokens = TokenStream.new();
+        DiagnosticBag expanded_diagnostics = DiagnosticBag.new();
+        lex(move expanded_source, &expanded_tokens, &expanded_diagnostics);
+        NodePool expanded_pool = NodePool.new();
+        SyntaxTree expanded_tree;
+        bool parsed = expanded_diagnostics.is_empty();
+        if (parsed) {
+            parse(&expanded_tokens, &expanded_diagnostics, &expanded_pool, &expanded_tree);
+            parsed = expanded_diagnostics.is_empty() && expanded_tree.root != (SyntaxNode*)0;
+        }
+        SyntaxNode* generated_body = (SyntaxNode*)0;
+        if (parsed) {
+            SyntaxNode* function = expanded_tree.root.first_child;
+            while (function != (SyntaxNode*)0 && generated_body == (SyntaxNode*)0) {
+                SyntaxNode* child = function.first_child;
+                while (child != (SyntaxNode*)0 && child.kind != NodeKind.Block) {
+                    child = child.next_sibling;
+                }
+                generated_body = child;
+                function = function.next_sibling;
+            }
+        }
+        if (generated_body != (SyntaxNode*)0) {
+            self.macro_depth += 1;
+            self.lower_block(generated_body, stmt_ids);
+            self.macro_depth -= 1;
+        } else {
+            self.unsupported = true;
+        }
+        expanded_pool.destroy();
+        expanded_tokens.tokens.drop();
+        expanded_diagnostics.items.drop();
+        return true;
     }
 
     u32 lower_primary(ExprLowerer* self, SyntaxNode* node) {
@@ -678,7 +1829,8 @@ impl ExprLowerer {
         while (cur != (SyntaxNode*)0) {
             if (cur.kind == NodeKind.Token) {
                 TokenKind tk = cur.token_kind;
-                if (tk == TokenKind.Star || tk == TokenKind.BitwiseAnd || tk == TokenKind.Const || tk == TokenKind.Mut) {
+                if (tk == TokenKind.Star || tk == TokenKind.BitwiseAnd || tk == TokenKind.Const
+                    || tk == TokenKind.Mut || tk == TokenKind.Volatile) {
                     has_pointer_or_ref = true;
                 } else if (types_is_primitive_name(cur.text) || tk == TokenKind.Identifier) {
                     has_type_tokens = true;
@@ -707,7 +1859,8 @@ impl ExprLowerer {
         cur = first;
         while (cur != (SyntaxNode*)0) {
             if (cur.kind == NodeKind.Token) {
-                if (cur.token_kind != TokenKind.Const) {
+                if (cur.token_kind != TokenKind.Const && cur.token_kind != TokenKind.Mut
+                    && cur.token_kind != TokenKind.Volatile) {
                     type_str.push_str(cur.text);
                 }
             } else if (cur.kind == NodeKind.Parenthesized) {
@@ -949,6 +2102,68 @@ impl ExprLowerer {
         return self.pool.add_assert(condition_id, message_id, self.debug_mode, at_node.span);
     }
 
+    u32 struct_field_type(ExprLowerer* self, str struct_name,
+                          str field_name) {
+        if (struct_name == (str)0) { return TYPE_UNKNOWN; }
+        i64 definition_index = 0;
+        while (definition_index < self.types.struct_properties.len()) {
+            TypeStructProperties* definition = self.types.struct_properties.get_ptr(definition_index);
+            if (strcmp(self.types.names.get(definition.name_id), struct_name) == 0
+                && definition.field_name_count == definition.field_count) {
+                i64 field_index = 0;
+                while (field_index < (i64)definition.field_name_count) {
+                    u32 name_id = self.types.struct_field_names.get(
+                        definition.field_name_start + (u32)field_index);
+                    if (strcmp(self.types.names.get(name_id), field_name) == 0) {
+                        return self.types.struct_fields.get(
+                            definition.field_start + (u32)field_index);
+                    }
+                    field_index += 1;
+                }
+            }
+            definition_index += 1;
+        }
+
+        SyntaxNode* item = find_item_by_name(self.unit_root, NodeKind.Struct, struct_name);
+        if (item == (SyntaxNode*)0) { return TYPE_UNKNOWN; }
+        SyntaxNode* body = item.first_child;
+        while (body != (SyntaxNode*)0 && body.kind != NodeKind.Block) {
+            body = body.next_sibling;
+        }
+        if (body == (SyntaxNode*)0) { return TYPE_UNKNOWN; }
+
+        SyntaxNode* cursor = body.first_child;
+        while (cursor != (SyntaxNode*)0) {
+            if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
+                cursor = cursor.next_sibling;
+                continue;
+            }
+            SyntaxNode* start = cursor;
+            SyntaxNode* last_ident = (SyntaxNode*)0;
+            while (cursor != (SyntaxNode*)0
+                && !(cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon)) {
+                if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Identifier) {
+                    last_ident = cursor;
+                }
+                cursor = cursor.next_sibling;
+            }
+            if (last_ident != (SyntaxNode*)0 && strcmp(last_ident.text, field_name) == 0) {
+                String type_text = String.new();
+                SyntaxNode* scan = start;
+                while (scan != last_ident && scan != (SyntaxNode*)0) {
+                    append_node_tokens(scan, &type_text);
+                    scan = scan.next_sibling;
+                }
+                u32 type_id = type_id_from_declarator(self.types,
+                    type_text.to_str(), last_ident.next_sibling);
+                type_text.drop();
+                return type_id;
+            }
+            if (cursor != (SyntaxNode*)0) { cursor = cursor.next_sibling; }
+        }
+        return TYPE_UNKNOWN;
+    }
+
     u32 lower_struct_lit(ExprLowerer* self, str struct_name, SyntaxNode* block) {
         // Lower `{ .field = value, ... }` designators into name/expr pairs.
         // Caller verified the struct exists. Malformed entries fail closed.
@@ -971,8 +2186,23 @@ impl ExprLowerer {
                 self.unsupported = true;
                 return 0;
             }
+            SyntaxNode* value_start = eq.next_sibling;
             SyntaxNode* after = (SyntaxNode*)0;
-            u32 val_id = self.lower_sequence_until_comma(eq.next_sibling, &after);
+            u32 val_id = 0;
+            if (value_start != (SyntaxNode*)0 && value_start.kind == NodeKind.Block) {
+                u32 field_type = self.struct_field_type(struct_name, name_node.text);
+                TypeEntry* field_entry = self.types.get(field_type);
+                if (field_entry.kind == TypeKind.Named) {
+                    val_id = self.lower_struct_lit(
+                        self.types.names.get(field_entry.name_id), value_start);
+                    after = value_start.next_sibling;
+                }
+            } else {
+                u32 saved_expected_type = self.expected_type_id;
+                self.expected_type_id = self.struct_field_type(struct_name, name_node.text);
+                val_id = self.lower_sequence_until_comma(value_start, &after);
+                self.expected_type_id = saved_expected_type;
+            }
             if (val_id == 0) {
                 pairs.drop();
                 self.unsupported = true;
@@ -1132,6 +2362,41 @@ impl ExprLowerer {
         // Builtin @format(fmt, ...): lower a literal format string and its values.
         if (node.kind == NodeKind.Token && node.token_kind == TokenKind.At) {
             SyntaxNode* name_node = node.next_sibling;
+            if (name_node != (SyntaxNode*)0 && name_node.kind == NodeKind.Token
+                && name_node.token_kind == TokenKind.Identifier) {
+                SyntaxNode* paren = name_node.next_sibling;
+                if (paren != (SyntaxNode*)0 && paren.kind == NodeKind.Parenthesized
+                    && paren.first_child == (SyntaxNode*)0) {
+                    u32 location_kind = 0;
+                    u32 location_type = TYPE_UNKNOWN;
+                    if (strcmp(name_node.text, "line") == 0) {
+                        location_kind = 1;
+                        location_type = TYPE_U32;
+                    } else if (strcmp(name_node.text, "column") == 0) {
+                        location_kind = 2;
+                        location_type = TYPE_U32;
+                    } else if (strcmp(name_node.text, "file") == 0) {
+                        location_kind = 3;
+                        location_type = TYPE_STR;
+                    }
+                    if (location_kind != 0) {
+                        *next_out = paren.next_sibling;
+                        return self.pool.add_source_location(location_kind,
+                            location_type, name_node.span);
+                    }
+                }
+                if (strcmp(name_node.text, "dbg") == 0
+                    && paren != (SyntaxNode*)0 && paren.kind == NodeKind.Parenthesized
+                    && paren.first_child != (SyntaxNode*)0) {
+                    SyntaxNode* after_arg = (SyntaxNode*)0;
+                    u32 arg_id = self.lower_sequence_until_comma(paren.first_child,
+                        &after_arg);
+                    if (arg_id != 0 && after_arg == (SyntaxNode*)0) {
+                        *next_out = paren.next_sibling;
+                        return arg_id;
+                    }
+                }
+            }
             if (name_node != (SyntaxNode*)0 && name_node.kind == NodeKind.Token
                 && name_node.token_kind == TokenKind.Identifier
                 && strcmp(name_node.text, "assert") == 0) {
@@ -1334,6 +2599,8 @@ impl ExprLowerer {
                     return self.pool.add_literal_val(TYPE_BOOL, val_id, node.span);
                 }
             }
+            u32 expanded_macro = self.lower_user_macro_expression(name_node, next_out);
+            if (expanded_macro != 0) { return expanded_macro; }
             self.unsupported = true;
             *next_out = (SyntaxNode*)0;
             return 0;
@@ -1398,7 +2665,20 @@ impl ExprLowerer {
             combined.drop();
             cursor = literal;
         } else {
-            expr = self.lower_primary(node);
+            bool primitive_static_receiver = node.kind == NodeKind.Token
+                && is_primitive_type_token(node.token_kind)
+                && cursor != (SyntaxNode*)0 && cursor.kind == NodeKind.Token
+                && cursor.token_kind == TokenKind.Dot
+                && cursor.next_sibling != (SyntaxNode*)0
+                && cursor.next_sibling.kind == NodeKind.Token
+                && cursor.next_sibling.token_kind == TokenKind.Identifier
+                && cursor.next_sibling.next_sibling != (SyntaxNode*)0
+                && cursor.next_sibling.next_sibling.kind == NodeKind.Parenthesized;
+            if (primitive_static_receiver) {
+                expr = self.pool.add_var(self.names.intern(node.text), node.span);
+            } else {
+                expr = self.lower_primary(node);
+            }
         }
 
         // Generic free-function call: name<Args>(expr, ...). Without this the
@@ -1408,7 +2688,8 @@ impl ExprLowerer {
             && cursor != (SyntaxNode*)0 && cursor.kind == NodeKind.Token
             && cursor.token_kind == TokenKind.Less) {
             SyntaxNode* greater = lower_find_generic_call_close(cursor);
-            if (greater != (SyntaxNode*)0) {
+            if (greater != (SyntaxNode*)0 && greater.next_sibling != (SyntaxNode*)0
+                && greater.next_sibling.kind == NodeKind.Parenthesized) {
                 SyntaxNode* paren = greater.next_sibling;
                 Vec<u32> generic_ids = Vec<u32>.new();
                 SyntaxNode* type_start = cursor.next_sibling;
@@ -1549,6 +2830,9 @@ impl ExprLowerer {
                     temp_args.drop();
                     expr = self.pool.add_method_call(receiver_id, self.names.intern(method_node.text), args_start, paren.span);
                     cursor = paren.next_sibling;
+                } else {
+                    expr = self.pool.add_field(receiver_id, self.names.intern(method_node.text), method_node.span);
+                    cursor = method_node.next_sibling;
                 }
             }
         }
@@ -1657,6 +2941,14 @@ impl ExprLowerer {
                     u32 index_id = self.lower_sequence(cursor.first_child, (SyntaxNode*)0);
                     expr = self.pool.add_index(expr, index_id, cursor.span);
                 }
+                cursor = cursor.next_sibling;
+                continue;
+            }
+
+            if (cursor.kind == NodeKind.Token
+                && (cursor.token_kind == TokenKind.Increment
+                    || cursor.token_kind == TokenKind.Decrement)) {
+                expr = self.pool.add_unary(cursor.token_kind, expr, cursor.span);
                 cursor = cursor.next_sibling;
                 continue;
             }
@@ -1835,7 +3127,7 @@ impl ExprLowerer {
         // map_find_slot_str_u32's `const u8* want`).
         if (start.kind == NodeKind.Token
             && (start.token_kind == TokenKind.Const || start.token_kind == TokenKind.Mut
-                || start.token_kind == TokenKind.Volatile)) {
+                || start.token_kind == TokenKind.Volatile || start.token_kind == TokenKind.Static)) {
             return true;
         }
         if (start.kind == NodeKind.Token && types_is_primitive_name(start.text)) {
@@ -1894,6 +3186,17 @@ impl ExprLowerer {
             cursor = cursor.next_sibling;
         }
         return last_ident;
+    }
+
+    bool declaration_is_static(ExprLowerer* self, SyntaxNode* start, SyntaxNode* variable) {
+        SyntaxNode* cursor = start;
+        while (cursor != variable && cursor != (SyntaxNode*)0) {
+            if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Static) {
+                return true;
+            }
+            cursor = cursor.next_sibling;
+        }
+        return false;
     }
 
     bool lower_is_assign_op(ExprLowerer* self, TokenKind kind) {
@@ -2010,6 +3313,7 @@ impl ExprLowerer {
             if (self.is_decl_lhs(start, assign_node)) {
                 SyntaxNode* var_node = self.find_decl_var_node(start, assign_node);
                 if (var_node != (SyntaxNode*)0) {
+                    bool static_storage = self.declaration_is_static(start, var_node);
                     u32 var_name = self.names.intern(var_node.text);
                     u32 type_id = TYPE_UNKNOWN;
                     if (start.token_kind != TokenKind.Let) {
@@ -2019,7 +3323,8 @@ impl ExprLowerer {
                             if (tcur.kind != NodeKind.Token
                                 || (tcur.token_kind != TokenKind.Const
                                     && tcur.token_kind != TokenKind.Mut
-                                    && tcur.token_kind != TokenKind.Volatile)) {
+                                    && tcur.token_kind != TokenKind.Volatile
+                                    && tcur.token_kind != TokenKind.Static)) {
                                 append_node_tokens(tcur, &type_text);
                             }
                             tcur = tcur.next_sibling;
@@ -2037,8 +3342,13 @@ impl ExprLowerer {
                     if (value_type.kind == TypeKind.Named
                         && init_start != (SyntaxNode*)0 && init_start.kind == NodeKind.Block
                         && init_start.next_sibling == end) {
-                        u32 aggregate_id = self.lower_struct_lit(self.names.get(value_type.name_id), init_start);
+                        u32 aggregate_id = self.lower_struct_lit(self.types.names.get(value_type.name_id), init_start);
                         if (aggregate_id == 0) { return; }
+                        if (static_storage) {
+                            stmt_ids.push(self.pool.add_stmt_static_let(var_name, type_id,
+                                aggregate_id, start.span));
+                            return;
+                        }
                         AstExpr* aggregate = self.pool.get_expr(aggregate_id);
                         u32 fields_start = aggregate.inner1;
                         u32 field_count = aggregate.aux;
@@ -2061,9 +3371,14 @@ impl ExprLowerer {
                     if (array_initializer) {
                         init_id = self.lower_array_initializer(init_start);
                     } else {
+                        u32 saved_expected_type = self.expected_type_id;
+                        self.expected_type_id = type_id;
                         init_id = self.lower_sequence(init_start, end);
+                        self.expected_type_id = saved_expected_type;
                     }
-                    u32 id = self.pool.add_stmt_let(var_name, type_id, init_id, start.span);
+                    u32 id = static_storage
+                        ? self.pool.add_stmt_static_let(var_name, type_id, init_id, start.span)
+                        : self.pool.add_stmt_let(var_name, type_id, init_id, start.span);
                     stmt_ids.push(id);
                     return;
                 }
@@ -2101,6 +3416,7 @@ impl ExprLowerer {
         if (self.is_decl_lhs(start, end)) {
             SyntaxNode* var_node = self.find_decl_var_node(start, end);
             if (var_node != (SyntaxNode*)0) {
+                bool static_storage = self.declaration_is_static(start, var_node);
                 u32 var_name = self.names.intern(var_node.text);
                 u32 type_id = TYPE_UNKNOWN;
                 if (start.token_kind != TokenKind.Let) {
@@ -2110,7 +3426,8 @@ impl ExprLowerer {
                         if (tcur.kind != NodeKind.Token
                             || (tcur.token_kind != TokenKind.Const
                                 && tcur.token_kind != TokenKind.Mut
-                                && tcur.token_kind != TokenKind.Volatile)) {
+                                && tcur.token_kind != TokenKind.Volatile
+                                && tcur.token_kind != TokenKind.Static)) {
                             append_node_tokens(tcur, &type_text);
                         }
                         tcur = tcur.next_sibling;
@@ -2120,7 +3437,9 @@ impl ExprLowerer {
                         type_text.to_str(), ext);
                     type_text.drop();
                 }
-                u32 id = self.pool.add_stmt_let(var_name, type_id, 0, start.span);
+                u32 id = static_storage
+                    ? self.pool.add_stmt_static_let(var_name, type_id, 0, start.span)
+                    : self.pool.add_stmt_let(var_name, type_id, 0, start.span);
                 stmt_ids.push(id);
                 return;
             }
@@ -2504,13 +3823,24 @@ impl ExprLowerer {
         return self.pool.add_stmt_if(cond_id, then_stmt, else_stmt, span);
     }
 
-    void lower_block(ExprLowerer* self, SyntaxNode* block, Vec<u32>* stmt_ids) {
-        if (block == (SyntaxNode*)0) { return; }
-        SyntaxNode* cursor = block.first_child;
-        while (cursor != (SyntaxNode*)0) {
+    void lower_block_range(ExprLowerer* self, SyntaxNode* cursor, SyntaxNode* end,
+                           Vec<u32>* stmt_ids) {
+        while (cursor != end && cursor != (SyntaxNode*)0) {
             if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
                 cursor = cursor.next_sibling;
                 continue;
+            }
+
+            if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.At) {
+                SyntaxNode* name_node = cursor.next_sibling;
+                if (name_node != (SyntaxNode*)0 && name_node.kind == NodeKind.Token
+                    && name_node.token_kind == TokenKind.Identifier) {
+                    SyntaxNode* after_macro = (SyntaxNode*)0;
+                    if (self.lower_user_macro_statement(name_node, stmt_ids, &after_macro)) {
+                        cursor = after_macro;
+                        continue;
+                    }
+                }
             }
 
             if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Defer) {
@@ -2655,6 +3985,12 @@ impl ExprLowerer {
             }
             self.lower_statement(stmt_start, stmt_end, stmt_ids);
             cursor = (stmt_end != (SyntaxNode*)0) ? stmt_end.next_sibling : (SyntaxNode*)0;
+        }
+    }
+
+    void lower_block(ExprLowerer* self, SyntaxNode* block, Vec<u32>* stmt_ids) {
+        if (block != (SyntaxNode*)0) {
+            self.lower_block_range(block.first_child, (SyntaxNode*)0, stmt_ids);
         }
     }
 }

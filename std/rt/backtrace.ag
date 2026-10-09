@@ -56,12 +56,10 @@ extern "C" {
     BtFnArgs* __silver_bt_args;
 }
 
-/// Read the current frame pointer (rbp). The asm emitter returns rax.
-/// Only the Linux printer and the Linux leak-check origin walker use this
-/// (wasm has no rbp chain).
+/// Return the caller's frame pointer so it remains valid after this helper returns.
 if (@cfg(os.linux)) {
 i64 bt_read_rbp() {
-    return asm("movq %rbp, %rax", [], []);
+    return asm("movq (%rbp), %rax", [], []);
 }
 }
 
@@ -453,8 +451,15 @@ void bt_print_args(i64 fd, i64 callee_rbp, i64 fn_addr) {
             bt_write_cstr(fd, a.name);
             bt_write_cstr(fd, (u8*)"=");
             // Assemble the little-endian slot into an unsigned value.
-            u8* slot = (u8*)(callee_rbp + a.fbreg);
+            i64 fbreg = a.fbreg;
             i64 nbytes = a.size;
+            if (nbytes < 0) {
+                // Stage1 marks runtime-computed frame offsets in the size sign bit.
+                i64* offset_ptr = (i64*)fbreg;
+                fbreg = *offset_ptr;
+                nbytes = nbytes & (i64)0x7FFFFFFFFFFFFFFF;
+            }
+            u8* slot = (u8*)(callee_rbp + fbreg);
             if (nbytes > 8) { nbytes = 8; }
             if (nbytes < 1) { nbytes = 1; }
             i64 value = 0;

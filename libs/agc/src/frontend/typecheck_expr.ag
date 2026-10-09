@@ -227,6 +227,44 @@ bool types_match_value(TypeTable* types, u32 expected, u32 actual, bool actual_i
     return false;
 }
 
+bool typecheck_slice_argument_coercion(TypeTable* types, u32 expected, u32 actual) {
+    expected = types.resolve_subst(expected);
+    actual = types.resolve_subst(actual);
+    TypeEntry* expected_entry = types.get(expected);
+    if (expected_entry.kind != TypeKind.Named || expected_entry.count != 1
+        || strcmp(types.names.get(expected_entry.name_id), "Slice") != 0) {
+        return false;
+    }
+    u32 element_type = types.resolve_subst(
+        types.type_args.get(expected_entry.inner));
+    TypeEntry* actual_entry = types.get(actual);
+    while (actual_entry.kind == TypeKind.Pointer
+        || actual_entry.kind == TypeKind.Reference) {
+        actual = types.resolve_subst(actual_entry.inner);
+        actual_entry = types.get(actual);
+    }
+    if (actual_entry.kind == TypeKind.Array) {
+        return types.resolve_subst(actual_entry.inner) == element_type;
+    }
+    if (actual == TYPE_STR) {
+        return element_type == TYPE_U8;
+    }
+    if (actual_entry.kind == TypeKind.Named
+        && actual_entry.count == 1
+        && (strcmp(types.names.get(actual_entry.name_id), "Vec") == 0
+            || strcmp(types.names.get(actual_entry.name_id), "Slice") == 0)) {
+        return types.resolve_subst(types.type_args.get(actual_entry.inner))
+            == element_type;
+    }
+    return false;
+}
+
+bool typecheck_call_argument_matches(TypeTable* types, u32 expected, u32 actual,
+                                     bool actual_is_literal) {
+    return types_match_value(types, expected, actual, actual_is_literal)
+        || typecheck_slice_argument_coercion(types, expected, actual);
+}
+
 bool expr_is_literal(AstPool* pool, u32 expr_id) {
     if (expr_id == 0) {
         return false;
@@ -278,8 +316,9 @@ SyntaxNode* find_function_by_name_and_arity(SyntaxNode* root, str name, i64 arit
                 Vec<Binding> params = Vec<Binding>.new();
                 collect_parameter_bindings(binding_function_parameters(child), &params);
                 i64 p_len = params.len();
+                bool accepts_arity = binding_parameters_accept_arity(&params, arity);
                 params.drop();
-                if (p_len == arity) {
+                if (p_len == arity || accepts_arity) {
                     return child;
                 }
                 if (fallback == (SyntaxNode*)0) {
@@ -425,13 +464,7 @@ String typecheck_free_signature_key(TypeTable* types, str name, SyntaxNode* func
         Binding* param = params.get_ptr(i);
         u32 type_id = types.resolve_subst(typecheck_parameter_type_id(types, param));
         String param_type = typecheck_canonical_type(types, type_id, 0);
-        if (typecheck_function_is_variadic(function) && i == params.len() - 1) {
-            key.push_str("Slice<");
-            key.push_str(param_type.to_str());
-            key.push('>');
-        } else {
-            key.push_str(param_type.to_str());
-        }
+        key.push_str(param_type.to_str());
         param_type.drop();
         i += 1;
     }
@@ -500,7 +533,17 @@ bool typecheck_has_free_overloads(TypeTable* types, SyntaxNode* root, str name) 
     return false;
 }
 
-u32 typecheck_parameter_type_id(TypeTable* types, Binding* param) {
+u32 typecheck_parameter_base_type_id(TypeTable* types, Binding* param) {
+    if (param.declared_type.kind == ProjectionTypeKind.Array) {
+        String element = binding_declared_type_text(&param.declared_type);
+        String slice = String.from_str("Slice<");
+        slice.push_str(element.to_str());
+        slice.push('>');
+        u32 type_id = types.parse_type_name(slice.to_str());
+        element.drop();
+        slice.drop();
+        return type_id;
+    }
     bool exact_function_type = binding_has_function_type(param);
     String declared = binding_parameter_type_text(param);
     u32 type_id = types.parse_type_name(declared.to_str());
@@ -513,6 +556,21 @@ u32 typecheck_parameter_type_id(TypeTable* types, Binding* param) {
     }
     declared.drop();
     return type_id;
+}
+
+u32 typecheck_parameter_type_id(TypeTable* types, Binding* param) {
+    u32 type_id = typecheck_parameter_base_type_id(types, param);
+    if (!binding_is_variadic_parameter(param) || type_id == TYPE_UNKNOWN) {
+        return type_id;
+    }
+    String element_type = typecheck_canonical_type(types, type_id, 0);
+    String slice_type = String.from_str("Slice<");
+    slice_type.push_str(element_type.to_str());
+    slice_type.push('>');
+    u32 slice_id = types.parse_type_name(slice_type.to_str());
+    element_type.drop();
+    slice_type.drop();
+    return slice_id;
 }
 
 u32 typecheck_overload_symbol_id(TypeTable* types, Interner* names, str name,
@@ -563,16 +621,24 @@ SyntaxNode* typecheck_resolve_free_function(AstPool* pool, TypeTable* types,
         }
         Vec<Binding> params = Vec<Binding>.new();
         collect_parameter_bindings(binding_function_parameters(item), &params);
-        if (params.len() == actual_types.len()) {
+        if (binding_parameters_accept_arity(&params, actual_types.len())) {
             saw_arity = true;
             bool matches = true;
             i64 score = 0;
             i64 p = 0;
-            while (p < params.len()) {
-                u32 expected = typecheck_parameter_type_id(types, params.get_ptr(p));
+            bool variadic = params.len() > 0
+                && binding_is_variadic_parameter(params.get_ptr(params.len() - 1));
+            i64 fixed_count = params.len() - (variadic ? 1 : 0);
+            while (p < actual_types.len()) {
+                i64 parameter_index = p < fixed_count ? p : params.len() - 1;
+                Binding* parameter = params.get_ptr(parameter_index);
+                u32 expected = variadic && p >= fixed_count
+                    ? typecheck_parameter_base_type_id(types, parameter)
+                    : typecheck_parameter_type_id(types, parameter);
                 u32 actual = actual_types.get(p);
                 u32 arg_id = pool.args.get((i64)call.inner1 + p);
-                if (!types_match_value(types, expected, actual, expr_is_literal(pool, arg_id))) {
+                if (!typecheck_call_argument_matches(
+                        types, expected, actual, expr_is_literal(pool, arg_id))) {
                     matches = false;
                     break;
                 }
@@ -1267,6 +1333,10 @@ bool typecheck_method_argument_score(AstPool* pool, TypeTable* types,
         *score = *score + 2;
         return true;
     }
+    if (typecheck_slice_argument_coercion(types, expected, actual)) {
+        *score = *score + 1;
+        return true;
+    }
     if (types_match_value(types, expected, actual, expr_is_literal(pool, arg_id))) {
         *score = *score + 1;
         return true;
@@ -1470,14 +1540,24 @@ String typecheck_method_symbol_for_call(AstPool* pool, SyntaxNode* root,
                         && strcmp(name.text, method_name) == 0) {
                         Vec<Binding> params = Vec<Binding>.new();
                         collect_parameter_bindings(params_node, &params);
-                        if (params.len() == (i64)arg_count + parameter_offset) {
+                        if (binding_parameters_accept_arity(
+                                &params, (i64)arg_count + parameter_offset)) {
+                            bool variadic = params.len() > 0
+                                && binding_is_variadic_parameter(
+                                    params.get_ptr(params.len() - 1));
+                            i64 fixed_count = params.len() - (variadic ? 1 : 0);
                             bool matches = true;
                             i64 score = 0;
                             i64 arg_index = 0;
                             while (matches && arg_index < (i64)arg_count) {
                                 u32 arg_id = pool.args.get((i64)args_start + 1 + arg_index);
-                                u32 expected = typecheck_parameter_type_id(
-                                    types, params.get_ptr(parameter_offset + arg_index));
+                                i64 parameter_index = parameter_offset + arg_index;
+                                Binding* parameter = params.get_ptr(
+                                    parameter_index < fixed_count
+                                        ? parameter_index : (i64)(params.len() - 1));
+                                u32 expected = variadic && parameter_index >= fixed_count
+                                    ? typecheck_parameter_base_type_id(types, parameter)
+                                    : typecheck_parameter_type_id(types, parameter);
                                 matches = typecheck_method_argument_score(
                                     pool, types, root, resolved_receiver,
                                     arg_id, expected, &score);
@@ -1571,21 +1651,32 @@ u32 typecheck_method_return_type_for_call(AstPool* pool, SyntaxNode* root,
                         && strcmp(name.text, method_name) == 0) {
                         Vec<Binding> params = Vec<Binding>.new();
                         collect_parameter_bindings(params_node, &params);
-                        bool matches_arity = params.len() == param_count;
+                        bool matches_arity = binding_parameters_accept_arity(
+                            &params, param_count);
                         bool matches_arguments = true;
                         i64 score = 0;
                         if (matches_arity && pool != (AstPool*)0) {
                             u32 arg_count = pool.args.get((i64)args_start);
                             i64 parameter_offset = static_method ? 0 : 1;
-                            if ((i64)arg_count + parameter_offset != params.len()) {
+                            if (!binding_parameters_accept_arity(
+                                    &params, (i64)arg_count + parameter_offset)) {
                                 matches_arguments = false;
                             }
+                            bool variadic = params.len() > 0
+                                && binding_is_variadic_parameter(
+                                    params.get_ptr(params.len() - 1));
+                            i64 fixed_count = params.len() - (variadic ? 1 : 0);
                             i64 ai = 0;
                             while (matches_arguments && ai < (i64)arg_count) {
                                 u32 arg_id = pool.args.get((i64)args_start + 1 + ai);
-                                u32 parameter_index = (u32)(parameter_offset + ai);
-                                u32 expected = types.resolve_subst(typecheck_parameter_type_id(
-                                    types, params.get_ptr(parameter_index)));
+                                i64 parameter_index = parameter_offset + ai;
+                                Binding* parameter = params.get_ptr(
+                                    parameter_index < fixed_count
+                                        ? parameter_index : (i64)(params.len() - 1));
+                                u32 expected = variadic && parameter_index >= fixed_count
+                                    ? typecheck_parameter_base_type_id(types, parameter)
+                                    : typecheck_parameter_type_id(types, parameter);
+                                expected = types.resolve_subst(expected);
                                 if (!typecheck_method_argument_score(
                                         pool, types, root, resolved_receiver, arg_id,
                                         expected, &score)) {
@@ -1642,7 +1733,9 @@ u32 typecheck_method_parameter_type_for_call(AstPool* pool, SyntaxNode* root,
                                              TypeTable* types, u32 receiver_type,
                                              str method_name, i64 param_count,
                                              u32 args_start, bool static_method,
-                                             i64 parameter_index) {
+                                             i64 parameter_index,
+                                             bool* out_variadic) {
+    if (out_variadic != (bool*)0) { *out_variadic = false; }
     u32 resolved_receiver = types.resolve_subst(receiver_type);
     TypeEntry* receiver = types.get(resolved_receiver);
     while (receiver.kind == TypeKind.Pointer || receiver.kind == TypeKind.Reference) {
@@ -1653,6 +1746,8 @@ u32 typecheck_method_parameter_type_for_call(AstPool* pool, SyntaxNode* root,
     str owner_name = types.names.get(receiver.name_id);
     u32 best_parameter_type = TYPE_UNKNOWN;
     u32 fallback_parameter_type = TYPE_UNKNOWN;
+    bool best_variadic = false;
+    bool fallback_variadic = false;
     i64 best_score = -1;
     SyntaxNode* item = root.first_child;
     while (item != (SyntaxNode*)0) {
@@ -1700,28 +1795,52 @@ u32 typecheck_method_parameter_type_for_call(AstPool* pool, SyntaxNode* root,
                         && strcmp(name.text, method_name) == 0) {
                         Vec<Binding> params = Vec<Binding>.new();
                         collect_parameter_bindings(params_node, &params);
-                        if (params.len() == param_count
-                            && parameter_index >= 0 && parameter_index < params.len()) {
+                        bool variadic = params.len() > 0
+                            && binding_is_variadic_parameter(
+                                params.get_ptr(params.len() - 1));
+                        i64 fixed_count = params.len() - (variadic ? 1 : 0);
+                        bool accepts_arity = binding_parameters_accept_arity(
+                            &params, param_count);
+                        i64 resolved_parameter_index = parameter_index;
+                        bool variadic_argument = variadic
+                            && resolved_parameter_index >= fixed_count;
+                        if (variadic_argument) {
+                            resolved_parameter_index = params.len() - 1;
+                        }
+                        if (accepts_arity && resolved_parameter_index >= 0
+                            && resolved_parameter_index < params.len()) {
+                            Binding* parameter = params.get_ptr(resolved_parameter_index);
+                            u32 raw_parameter_type = variadic_argument
+                                ? typecheck_parameter_base_type_id(types, parameter)
+                                : typecheck_parameter_type_id(types, parameter);
                             u32 parameter_type = resolve_generic_member_type(
                                 types, root, resolved_receiver,
-                                typecheck_parameter_type_id(
-                                    types, params.get_ptr(parameter_index)));
+                                raw_parameter_type);
                             if (fallback_parameter_type == TYPE_UNKNOWN) {
                                 fallback_parameter_type = parameter_type;
+                                fallback_variadic = variadic;
                             }
                             bool matches_arguments = true;
                             i64 score = 0;
                             if (pool != (AstPool*)0) {
                                 u32 arg_count = pool.args.get((i64)args_start);
                                 i64 parameter_offset = static_method ? 0 : 1;
-                                if ((i64)arg_count + parameter_offset != params.len()) {
+                                if (!binding_parameters_accept_arity(
+                                        &params,
+                                        (i64)arg_count + parameter_offset)) {
                                     matches_arguments = false;
                                 }
                                 i64 ai = 0;
                                 while (matches_arguments && ai < (i64)arg_count) {
                                     u32 arg_id = pool.args.get((i64)args_start + 1 + ai);
-                                    u32 expected = typecheck_parameter_type_id(
-                                        types, params.get_ptr(parameter_offset + ai));
+                                    i64 arg_parameter_index = parameter_offset + ai;
+                                    Binding* arg_parameter = params.get_ptr(
+                                        arg_parameter_index < fixed_count
+                                            ? arg_parameter_index : (i64)(params.len() - 1));
+                                    u32 expected = variadic
+                                        && arg_parameter_index >= fixed_count
+                                        ? typecheck_parameter_base_type_id(types, arg_parameter)
+                                        : typecheck_parameter_type_id(types, arg_parameter);
                                     if (!typecheck_method_argument_score(
                                             pool, types, root, resolved_receiver,
                                             arg_id, expected, &score)) {
@@ -1733,6 +1852,7 @@ u32 typecheck_method_parameter_type_for_call(AstPool* pool, SyntaxNode* root,
                             if (matches_arguments && score > best_score) {
                                 best_score = score;
                                 best_parameter_type = parameter_type;
+                                best_variadic = variadic;
                             }
                             params.drop();
                         } else {
@@ -1746,6 +1866,10 @@ u32 typecheck_method_parameter_type_for_call(AstPool* pool, SyntaxNode* root,
             }
         }
         item = item.next_sibling;
+    }
+    if (out_variadic != (bool*)0) {
+        *out_variadic = best_parameter_type != TYPE_UNKNOWN
+            ? best_variadic : fallback_variadic;
     }
     return best_parameter_type != TYPE_UNKNOWN
         ? best_parameter_type : fallback_parameter_type;
@@ -1954,6 +2078,30 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         } else {
             inferred = common_numeric_type(lhs, rhs);
         }
+    } else if (expr.kind == ExprKind.Block) {
+        u32 block_start = expr.inner0;
+        u32 block_count = expr.inner1;
+        u32 result_expr = expr.aux;
+        TypeEnv block_env = TypeEnv.new();
+        block_env.expression_depth = env.expression_depth;
+        block_env.expected_return = env.expected_return;
+        i64 local_index = 0;
+        while (local_index < env.locals.len()) {
+            block_env.locals.push(env.locals.get(local_index));
+            local_index += 1;
+        }
+        i64 stmt_index = 0;
+        while (stmt_index < (i64)block_count) {
+            u32 stmt_id = pool.block_stmts.get((i64)block_start + stmt_index);
+            typecheck_statement(pool, types, symbols, root, &block_env,
+                                block_env.expected_return, stmt_id, diagnostics, ok);
+            stmt_index += 1;
+        }
+        inferred = infer_expr(pool, types, symbols, root, &block_env,
+                              result_expr, diagnostics, ok);
+        typecheck_reject_partial_drop_move(pool, types, symbols, root, &block_env,
+                                           result_expr, diagnostics, ok);
+        block_env.locals.drop();
     } else if (expr.kind == ExprKind.Ternary) {
         u32 cond_type = infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
         u32 then_type = infer_expr(pool, types, symbols, root, env, expr.inner1, diagnostics, ok);
@@ -2255,19 +2403,27 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 Vec<Binding> params = Vec<Binding>.new();
                 collect_parameter_bindings(binding_function_parameters(callee_fn), &params);
                 u32 args_count = expr.aux;
-                bool valid_arity = (i64)args_count == params.len();
+                bool variadic = params.len() > 0
+                    && binding_is_variadic_parameter(params.get_ptr(params.len() - 1));
+                i64 fixed_count = params.len() - (variadic ? 1 : 0);
+                bool valid_arity = binding_parameters_accept_arity(&params, (i64)args_count);
                 if (!valid_arity) {
-                    String message = String.from_str("argument count mismatch: expected ");
-                    append_i64(&message, params.len());
+                    String message = variadic
+                        ? String.from_str("argument count mismatch: expected at least ")
+                        : String.from_str("argument count mismatch: expected ");
+                    append_i64(&message, variadic ? fixed_count : params.len());
                     message.push_str(", found ");
                     append_i64(&message, (i64)args_count);
                     diagnostics.error(expr.span, move message);
                     *ok = false;
                 } else {
                     i64 i = 0;
-                    while (i < params.len()) {
-                        Binding* param = params.get_ptr(i);
-                        u32 expected_arg_type = typecheck_parameter_type_id(types, param);
+                    while (i < (i64)args_count) {
+                        i64 parameter_index = i < fixed_count ? i : params.len() - 1;
+                        Binding* param = params.get_ptr(parameter_index);
+                        u32 expected_arg_type = variadic && i >= fixed_count
+                            ? typecheck_parameter_base_type_id(types, param)
+                            : typecheck_parameter_type_id(types, param);
                         u32 arg_expr_id = pool.args.get((i64)expr.inner1 + i);
                         u32 actual_arg_type = infer_expr(pool, types, symbols, root, env, arg_expr_id, diagnostics, ok);
                         TypeEntry* expected_entry = types.get(expected_arg_type);
@@ -2277,7 +2433,9 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                             typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
                                                                arg_expr_id, diagnostics, ok);
                         }
-                        if (!types_match_value(types, expected_arg_type, actual_arg_type, expr_is_literal(pool, arg_expr_id))
+                        if (!typecheck_call_argument_matches(
+                                types, expected_arg_type, actual_arg_type,
+                                expr_is_literal(pool, arg_expr_id))
                             && !has_user_cast(root, types, actual_arg_type, expected_arg_type)) {
                             String message = String.from_str("type mismatch: expected ");
                             message.push_str(types.type_name(expected_arg_type));
@@ -2290,7 +2448,7 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                     }
                 }
                 params.drop();
-                if (valid_arity && typecheck_is_generic_function(callee_fn)) {
+                if (valid_arity && !variadic && typecheck_is_generic_function(callee_fn)) {
                     typecheck_generic_call_drop_ownership(
                         pool, types, symbols, root, env, callee_fn,
                         expr_id, diagnostics, ok);
@@ -2469,7 +2627,7 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 i64 parameter_index = arg_index + (static_method ? 0 : 1);
                 u32 expected_arg_type = typecheck_method_parameter_type_for_call(
                     pool, root, types, receiver_type, method_name, total_param_count,
-                    expr.inner1, static_method, parameter_index);
+                    expr.inner1, static_method, parameter_index, (bool*)0);
                 u32 arg_type = pool.get_expr(arg_id).inferred_type;
                 AstExpr* argument = pool.get_expr(arg_id);
                 TypeEntry* expected_entry = types.get(types.resolve_subst(expected_arg_type));
@@ -2608,7 +2766,13 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         infer_expr(pool, types, symbols, root, env, expr.inner1, diagnostics, ok);
         if (target_type != TYPE_UNKNOWN) {
             TypeEntry* entry = types.get(target_type);
-            if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference || entry.kind == TypeKind.Array) {
+            if (entry.kind == TypeKind.Reference
+                && types.get(types.resolve_subst(entry.inner)).kind == TypeKind.Str) {
+                inferred = TYPE_U8;
+            } else if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) {
+                TypeEntry* inner_entry = types.get(types.resolve_subst(entry.inner));
+                inferred = types.resolve_subst(entry.inner);
+            } else if (entry.kind == TypeKind.Array) {
                 inferred = types.resolve_subst(entry.inner);
             } else if (entry.kind == TypeKind.Tuple) {
                 AstExpr* index_expr = pool.get_expr(expr.inner1);
@@ -2683,7 +2847,15 @@ void typecheck_reject_defer_control(AstPool* pool, u32 node_id, bool is_stmt,
         }
     } else {
         AstExpr* expr = pool.get_expr(node_id);
-        if (expr.kind == ExprKind.Match) {
+        if (expr.kind == ExprKind.Block) {
+            i64 i = 0;
+            while (i < (i64)expr.inner1) {
+                typecheck_reject_defer_control(pool,
+                    pool.block_stmts.get((i64)expr.inner0 + i), true, diagnostics, ok);
+                i += 1;
+            }
+            typecheck_reject_defer_control(pool, expr.aux, false, diagnostics, ok);
+        } else if (expr.kind == ExprKind.Match) {
             typecheck_reject_defer_control(pool, expr.inner0, false, diagnostics, ok);
             i64 i = 0;
             while (i < (i64)expr.aux) {

@@ -48,8 +48,6 @@ def main() -> int:
         (package / "main.ag").write_text(source.read_text())
 
         env = os.environ.copy()
-        env["SILVER_STAGE0"] = str(root / "missing-stage0")
-        env["SILVER_STAGE1_NATIVE"] = "1"
         env["SILVER_STAGE1_CC"] = str(pathlib.Path(cc).resolve())
 
         lint_source = root / "lint-shadow.ag"
@@ -471,8 +469,16 @@ def main() -> int:
             env,
             root,
         )
-        if failed.returncode == 0 or "stage0 backend unavailable" not in failed.stderr:
-            raise AssertionError("unsupported input did not fall back to the explicit bridge")
+        if (
+            failed.returncode == 0
+            or "stage1 backend could not handle" not in failed.stderr
+            or "stage0" in failed.stderr
+        ):
+            raise AssertionError(
+                "unsupported input did not fail locally without stage0 delegation\n"
+                f"return code: {failed.returncode}\n"
+                f"stdout:\n{failed.stdout}\nstderr:\n{failed.stderr}"
+            )
 
     print("stage1 native smoke backend passed")
     return 0

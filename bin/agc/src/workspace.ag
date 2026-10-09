@@ -1115,8 +1115,11 @@ bool workspace_package_arguments(Vec<String>* arguments, WorkspacePlan* plan, bo
     i64 command_index = workspace_command_index(arguments);
     if (command_index >= 0) {
         String* command = arguments.get_ptr(command_index);
-        if (command.equals("init") || command.equals("clean")
-            || command.equals("test") || command.equals("t")) {
+        if (command.equals("init") || command.equals("clean")) {
+            return true;
+        }
+        if (command.equals("test") || command.equals("t")) {
+            *has_package = true;
             return true;
         }
         if (!workspace_is_command(command.to_str())) { return true; }

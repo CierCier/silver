@@ -372,7 +372,7 @@ PARITY GATE (the one rule that makes this safe)
   fixpoint.
 ===============================================================================
 
-Current continuation (2026-10-07)
+Historical continuation (2026-10-07; before bridge removal)
 -------------------------------
 The record above is historical. Current verification and completion limits
 are maintained in docs/selfhost-completion-record.md.

@@ -36,8 +36,6 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="silver-native-format-") as temporary:
         output = pathlib.Path(temporary) / "format-native"
         env = os.environ.copy()
-        env["SILVER_STAGE0"] = str(pathlib.Path(temporary) / "missing-stage0")
-        env["SILVER_STAGE1_NATIVE"] = "1"
         env["SILVER_STAGE1_CC"] = str(pathlib.Path(cc).resolve())
 
         built = run(stage1, ["build", str(fixture), "--no-cache", "-o", str(output)], env)
@@ -49,7 +47,9 @@ def main() -> int:
         )
         expected = (
             "escaped {}: -12 | 34 | 1.25 | true | x\n"
-            "label: 73\nstatus: Ready\nprint:7|println:8\n"
+            "label: 73\n"
+            "point: NativePoint { x: 1, y: 2 } | line: NativeLine { point: NativePoint { x: 3, y: 4 }, tag: seg, status: Ready }\n"
+            "status: Ready\nprint:7|println:8\n"
         )
         expected_stderr = "eprint:9|eprintln:10\n"
         if (

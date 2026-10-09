@@ -249,7 +249,9 @@ u64 llvm_target_payload_field_offset(LlvmContext* ctx, Vec<u32>* payloads, i64 f
     if (LLVMTypeIsSized(payload_type) != 0 && ctx.target_data != (LLVMTargetDataRef*)0) {
         offset = LLVMOffsetOfElement(ctx.target_data, payload_type, (u32)field_index);
     } else {
-        ctx.note_unresolved("unsized-enum-payload", "field offset");
+        i8* payload_text = LLVMPrintTypeToString(payload_type);
+        ctx.note_unresolved("unsized-enum-payload", payload_text);
+        LLVMDisposeMessage(payload_text);
     }
     field_types.drop();
     return offset;
@@ -273,7 +275,9 @@ u64 llvm_target_payload_size(LlvmContext* ctx, Vec<u32>* payloads) {
     if (LLVMTypeIsSized(payload_type) != 0 && ctx.target_data != (LLVMTargetDataRef*)0) {
         size = LLVMABISizeOfType(ctx.target_data, payload_type);
     } else {
-        ctx.note_unresolved("unsized-enum-payload", "payload size");
+        i8* payload_text = LLVMPrintTypeToString(payload_type);
+        ctx.note_unresolved("unsized-enum-payload", payload_text);
+        LLVMDisposeMessage(payload_text);
     }
     field_types.drop();
     return size;
@@ -367,7 +371,16 @@ LLVMOpaqueType* llvm_lower_type(LLVMOpaqueContext* ctx, TypeTable* types, u32 ty
             return named_ty;
         }
         if (entry.count > 0) {
-            return LLVMStructCreateNamed(ctx, name);
+            named_ty = LLVMStructCreateNamed(ctx, name);
+            if (strcmp(base_name, "Slice") == 0 && entry.count == 1) {
+                // Variadic Slice<T> has this ABI even when std.slice is not imported.
+                Vec<LLVMOpaqueType*> fields = Vec<LLVMOpaqueType*>.new();
+                fields.push(LLVMPointerTypeInContext(ctx, 0));
+                fields.push(LLVMInt64TypeInContext(ctx));
+                LLVMStructSetBody(named_ty, fields.data, (u32)fields.len(), 0);
+                fields.drop();
+            }
+            return named_ty;
         }
         return LLVMInt32TypeInContext(ctx);
     }

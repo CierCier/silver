@@ -73,8 +73,6 @@ jobs:
         run: python3 tests/run_tests.py --release
 
       - name: Run native command-surface parity through stage1
-        env:
-          SILVER_STAGE0: ${{ github.workspace }}/target/release/agc
         run: tests/selfhost/run_native.sh --release --no-tui --jobs 4
 
   wasm:

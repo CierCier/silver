@@ -19,8 +19,6 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="silver-native-generic-fn-") as temporary:
         output = pathlib.Path(temporary) / "generic-function"
         env = os.environ.copy()
-        env["SILVER_STAGE0"] = str(pathlib.Path(temporary) / "missing-stage0")
-        env["SILVER_STAGE1_NATIVE"] = "1"
         built = subprocess.run(
             [str(stage1), "build", str(fixture), "--no-cache", "-o", str(output)],
             env=env, capture_output=True, text=True, timeout=120, check=False,

@@ -1,15 +1,14 @@
-// Stage1 command-line frontend. Lex/parse/ast/check stay local while native
-// commands are forwarded through the transitional stage0 backend bridge.
+// Stage1 command-line frontend. Native commands are handled by stage1.
 import std.args;
 import std.error;
 import std.fmt;
 import std.io;
 import std.mem.vec;
+import std.path;
 import std.result;
 import std.string;
 import agc;
 import frontend.artifacts;
-import backend_bridge;
 import native_backend;
 import workspace;
 import frontend.ownership;
@@ -484,6 +483,10 @@ i32 run_workspace_native(Vec<String>* arguments, WorkspacePlan* plan) {
         if (command.equals("check") || command.equals("c")) {
             return run_workspace_check(arguments, plan);
         }
+        if (command.equals("test") || command.equals("t")) {
+            STDERR.write_str("agc: error: stage1 does not support the workspace test command yet\n");
+            return 2;
+        }
     }
 
     i32 check_result = run_workspace_check(arguments, plan);
@@ -494,21 +497,31 @@ i32 run_workspace_native(Vec<String>* arguments, WorkspacePlan* plan) {
     Vec<String> workspace_roots = Vec<String>.new();
     workspace_collect_roots(plan, &workspace_roots);
     i32 native_result = 0;
-    bool native_handled = native_backend_try(arguments, plan.entry.to_str(), plan.target_name.to_str(), &workspace_roots, &native_result);
+    bool native_handled = native_backend_try(arguments, plan.entry.to_str(), plan.target_name.to_str(), &workspace_roots, false, &native_result);
     workspace_roots.drop();
     if (native_handled) {
         return native_result;
     }
 
-    // Keep the manifest in the transitional backend request. Stage1 has
-    // already selected and checked the target above; stage0 still needs the
-    // package graph to perform its existing native link/runtime setup.
-    return run_stage0_backend(arguments);
+    STDERR.write_str("agc: error: stage1 backend could not handle this workspace request\n");
+    return 2;
 }
 
 bool is_frontend_command(String* command) {
     return command.equals("lex") || command.equals("parse")
         || command.equals("ast") || command.equals("check");
+}
+
+void remove_no_cache_option(Vec<String>* arguments) {
+    i64 option = 1;
+    while (option < arguments.len()) {
+        if (arguments.get_ptr(option).equals("--no-cache")) {
+            String removed = arguments.take(option);
+            removed.drop();
+        } else {
+            option += 1;
+        }
+    }
 }
 
 ArtifactExport artifact_fixture_function(str name) {
@@ -649,7 +662,93 @@ i32 emit_artifact_fixture(str output_path) {
     return 0;
 }
 
-i32 emit_source_artifact(str source_path, str output_path) {
+bool stage1_module_emit_requested(Vec<String>* arguments) {
+    i64 i = 1;
+    while (i < arguments.len()) {
+        String* argument = arguments.get_ptr(i);
+        if (argument.equals("--emit=module")) { return true; }
+        if (argument.equals("--emit") && i + 1 < arguments.len()
+            && arguments.get_ptr(i + 1).equals("module")) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+String stage1_module_artifact_path(Vec<String>* arguments, str source_path) {
+    i64 i = 1;
+    while (i < arguments.len()) {
+        String* argument = arguments.get_ptr(i);
+        if ((argument.equals("-o") || argument.equals("--output"))
+            && i + 1 < arguments.len()) {
+            return String.from_str(arguments.get_ptr(i + 1).to_str());
+        }
+        if (argument.starts_with("-o") && argument.len() > 2) {
+            return argument.strip_prefix("-o");
+        }
+        i += 1;
+    }
+    String base = path_basename(source_path);
+    String stem = base.strip_suffix(".ag");
+    String output = move stem;
+    output.push_str(".agm");
+    base.drop();
+    return output;
+}
+
+String stage1_module_object_path(str artifact_path) {
+    String stem = String.from_str(artifact_path);
+    if (stem.ends_with(".agm")) {
+        String without_extension = stem.strip_suffix(".agm");
+        stem.drop();
+        stem = move without_extension;
+    }
+    stem.push_str(".o");
+    return stem;
+}
+
+void stage1_module_object_arguments(Vec<String>* arguments, str object_path) {
+    bool found_output = false;
+    i64 i = 1;
+    while (i < arguments.len()) {
+        String* argument = arguments.get_ptr(i);
+        if (argument.equals("--emit") && i + 1 < arguments.len()) {
+            arguments.get_ptr(i + 1).clear();
+            arguments.get_ptr(i + 1).push_str("object");
+            i += 2;
+            continue;
+        }
+        if (argument.equals("--emit=module")) {
+            argument.clear();
+            argument.push_str("--emit=object");
+            i += 1;
+            continue;
+        }
+        if (argument.equals("-o") || argument.equals("--output")) {
+            if (i + 1 < arguments.len()) {
+                arguments.get_ptr(i + 1).clear();
+                arguments.get_ptr(i + 1).push_str(object_path);
+            }
+            found_output = true;
+            i += 2;
+            continue;
+        }
+        if (argument.starts_with("-o") && argument.len() > 2) {
+            argument.clear();
+            argument.push_str("-o");
+            argument.push_str(object_path);
+            found_output = true;
+        }
+        i += 1;
+    }
+    if (!found_output) {
+        arguments.push(String.from_str("-o"));
+        arguments.push(String.from_str(object_path));
+    }
+}
+
+i32 emit_source_artifact(str source_path, str output_path, bool require_complete_exports) {
     Result<String, Error> loaded = String.from_file(source_path);
     if (loaded.is_err()) {
         STDERR.write_str("agc: error: failed to read artifact source\n");
@@ -684,17 +783,13 @@ i32 emit_source_artifact(str source_path, str output_path) {
         if (item.kind == NodeKind.Function) {
             ArtifactExport export = ArtifactExport.new();
             if (!artifact_source_function(item, &export)) {
+                if (require_complete_exports) { supported = false; }
                 artifact_drop_export(&export);
-                supported = false;
-                break;
+                item = item.next_sibling;
+                continue;
             }
             artifact.exports.push(move export);
         } else if (item.kind == NodeKind.Item || item.kind == NodeKind.Attribute) {
-        } else if (item.kind == NodeKind.Struct || item.kind == NodeKind.Enum
-            || item.kind == NodeKind.Trait || item.kind == NodeKind.Global
-            || item.kind == NodeKind.TypeAlias || item.kind == NodeKind.Import) {
-            supported = false;
-            break;
         }
         item = item.next_sibling;
     }
@@ -711,6 +806,7 @@ i32 emit_source_artifact(str source_path, str output_path) {
 
 i32 run_frontend() {
     Vec<String> arguments = args();
+    remove_no_cache_option(&arguments);
     if (arguments.len() == 2) {
         String* option = arguments.get_ptr(1);
         if (option.equals("--version") || option.equals("-V")) {
@@ -746,7 +842,7 @@ i32 run_frontend() {
     workspace_plan_drop(&workspace);
     if (arguments.len() == 4 && arguments.get_ptr(1).equals("artifact-source")) {
         i32 result = emit_source_artifact(
-            arguments.get_ptr(2).to_str(), arguments.get_ptr(3).to_str()
+            arguments.get_ptr(2).to_str(), arguments.get_ptr(3).to_str(), true
         );
         arguments.drop();
         return result;
@@ -757,15 +853,43 @@ i32 run_frontend() {
         return result;
     }
     if (arguments.len() < 2) {
-        return run_stage0_backend(&arguments);
+        STDERR.write_str("usage: agc [OPTIONS] <FILE>... [-o <OUT>]\n");
+        arguments.drop();
+        return 2;
     }
     String* command = arguments.get_ptr(1);
     if (!is_frontend_command(command)) {
         String native_source = String.new();
         if (native_source_path(&arguments, &native_source)) {
+            if (stage1_module_emit_requested(&arguments)) {
+                String artifact_path = stage1_module_artifact_path(&arguments, native_source.to_str());
+                String object_path = stage1_module_object_path(artifact_path.to_str());
+                i32 artifact_result = emit_source_artifact(
+                    native_source.to_str(), artifact_path.to_str(), false
+                );
+                if (artifact_result != 0) {
+                    artifact_path.drop();
+                    object_path.drop();
+                    native_source.drop();
+                    arguments.drop();
+                    return artifact_result;
+                }
+                stage1_module_object_arguments(&arguments, object_path.to_str());
+                i32 object_result = 0;
+                Vec<String> empty_includes = Vec<String>.new();
+                bool handled = native_backend_try(&arguments, native_source.to_str(), object_path.to_str(), &empty_includes, true, &object_result);
+                empty_includes.drop();
+                artifact_path.drop();
+                object_path.drop();
+                native_source.drop();
+                arguments.drop();
+                if (handled) { return object_result; }
+                STDERR.write_str("agc: error: stage1 backend could not emit this module\n");
+                return 2;
+            }
             i32 native_result = 0;
             Vec<String> empty_includes = Vec<String>.new();
-            bool handled = native_backend_try(&arguments, native_source.to_str(), "", &empty_includes, &native_result);
+            bool handled = native_backend_try(&arguments, native_source.to_str(), "", &empty_includes, false, &native_result);
             empty_includes.drop();
             if (handled) {
                 native_source.drop();
@@ -773,17 +897,19 @@ i32 run_frontend() {
             }
         }
         native_source.drop();
-        return run_stage0_backend(&arguments);
+        STDERR.write_str("agc: error: stage1 backend could not handle this command or source\n");
+        arguments.drop();
+        return 2;
     }
     if (arguments.len() < 3) {
         STDERR.write_str("usage: agc <lex|parse|check> <source.ag> [--cfg key=value,...] [-I dir] [-O2]\n");
         return 2;
     }
-    String* input = arguments.get_ptr(2);
     CfgSet cfg = linux_defaults();
     Vec<String> include_dirs = Vec<String>.new();
     LintConfig lint_config = lint_config_default();
-    i64 option = 3;
+    i64 input_index = 0;
+    i64 option = 2;
     while (option < arguments.len()) {
         String* argument = arguments.get_ptr(option);
         lint_config_flag(&lint_config, argument.to_str());
@@ -845,8 +971,17 @@ i32 run_frontend() {
             option += 1;
             continue;
         }
+        if (!argument.starts_with("-") && input_index == 0) {
+            input_index = option;
+        }
         option += 1;
     }
+    if (input_index == 0) {
+        STDERR.write_str("usage: agc <lex|parse|check> <source.ag> [--cfg key=value,...] [-I dir] [-O2]\n");
+        include_dirs.drop();
+        return 2;
+    }
+    String* input = arguments.get_ptr(input_index);
     i32 result = 2;
     if (command.equals("lex")) {
         result = emit_tokens(input.to_str());

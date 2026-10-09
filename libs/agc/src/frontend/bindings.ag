@@ -91,7 +91,51 @@ bool binding_has_function_type(Binding* binding) {
     return false;
 }
 
+bool binding_is_variadic_parameter(Binding* binding) {
+    if (binding == (Binding*)0 || binding.type_start == (SyntaxNode*)0) {
+        return false;
+    }
+    SyntaxNode* cursor = binding.type_start;
+    while (cursor != (SyntaxNode*)0 && cursor != binding.type_end) {
+        if (cursor.kind == NodeKind.Token
+            && cursor.token_kind == TokenKind.DotDotDot) {
+            return true;
+        }
+        cursor = cursor.next_sibling;
+    }
+    return false;
+}
+
+bool binding_bracket_has_tuple_separator(SyntaxNode* bracket) {
+    i64 angle_depth = 0;
+    SyntaxNode* part = bracket.first_child;
+    while (part != (SyntaxNode*)0) {
+        if (part.kind == NodeKind.Token
+            && (part.token_kind == TokenKind.Less || strcmp(part.text, "<") == 0)) {
+            angle_depth += 1;
+        } else if (part.kind == NodeKind.Token
+            && (part.token_kind == TokenKind.Greater || strcmp(part.text, ">") == 0)) {
+            angle_depth -= 1;
+        } else if (part.kind == NodeKind.Token
+            && part.token_kind == TokenKind.Comma && angle_depth == 0) {
+            return true;
+        }
+        part = part.next_sibling;
+    }
+    return false;
+}
+
 String binding_parameter_type_text(Binding* binding) {
+    if (binding != (Binding*)0 && !binding_has_function_type(binding)
+        && binding.declared_type.kind == ProjectionTypeKind.Array) {
+        String element = binding_declared_type_text(&binding.declared_type);
+        String text = String.new();
+        text.push((u8)'[');
+        text.push_str(element.to_str());
+        text.push((u8)']');
+        element.drop();
+        return move text;
+    }
     if (!binding_has_function_type(binding)
         && binding != (Binding*)0
         && binding.type_start != (SyntaxNode*)0
@@ -102,17 +146,7 @@ String binding_parameter_type_text(Binding* binding) {
             tuple_type = tuple_type.next_sibling;
         }
         if (tuple_type != binding.type_end && tuple_type.kind == NodeKind.Bracket) {
-            bool has_tuple_separator = false;
-            SyntaxNode* part = tuple_type.first_child;
-            while (part != (SyntaxNode*)0) {
-                if (part.kind == NodeKind.Token
-                    && part.token_kind == TokenKind.Comma) {
-                    has_tuple_separator = true;
-                    break;
-                }
-                part = part.next_sibling;
-            }
-            if (has_tuple_separator) {
+            if (binding_bracket_has_tuple_separator(tuple_type)) {
                 String tuple_text = String.new();
                 while (tuple_type != binding.type_end) {
                     append_node_tokens(tuple_type, &tuple_text);
@@ -155,7 +189,9 @@ String binding_parameter_type_text(Binding* binding) {
         String text = String.new();
         i64 i = start;
         while (i < end) {
-            text.push_str(leaves.get(i).text);
+            if (leaves.get(i).token_kind != TokenKind.DotDotDot) {
+                text.push_str(leaves.get(i).text);
+            }
             i += 1;
         }
         leaves.drop();
@@ -367,6 +403,10 @@ void collect_parameter_bindings(SyntaxNode* parameters, Vec<Binding>* bindings) 
             }
             if (name_index > 0) {
                 declared_type = projection_parse_type(&segment, 0, name_index);
+                if (start.kind == NodeKind.Bracket
+                    && !binding_bracket_has_tuple_separator(start)) {
+                    declared_type.kind = ProjectionTypeKind.Array;
+                }
             }
         }
         if (last_identifier != (SyntaxNode*)0 && strcmp(last_identifier.text, "self") == 0 && strlen(declared_type.name) == 0) {
@@ -385,6 +425,17 @@ void collect_parameter_bindings(SyntaxNode* parameters, Vec<Binding>* bindings) 
         }
         start = cursor.next_sibling;
     }
+}
+
+bool binding_parameters_accept_arity(Vec<Binding>* bindings, i64 count) {
+    i64 parameter_count = bindings.len();
+    if (count == parameter_count) {
+        return true;
+    }
+    if (parameter_count == 0 || count < parameter_count - 1) {
+        return false;
+    }
+    return binding_is_variadic_parameter(bindings.get_ptr(parameter_count - 1));
 }
 
 bool binding_lowercase_type_start(SyntaxNode* child) {

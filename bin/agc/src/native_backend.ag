@@ -1,5 +1,4 @@
-// Stage1-owned Linux build/run backend. Unsupported programs return false so
-// the stage0 bridge remains available for constructs this backend cannot lower.
+// Stage1-owned Linux build/run backend. Unsupported programs fail closed.
 import std.env;
 import std.error;
 import std.fmt;
@@ -14,15 +13,7 @@ import std.string;
 import std.sys.os;
 import std.sys.errno;
 import agc;
-
-bool native_backend_enabled() {
-    Optional<String> requested = var("SILVER_STAGE1_NATIVE");
-    if (requested.is_none()) { return false; }
-    String value = requested.unwrap();
-    bool enabled = value.equals("1") || value.equals("true") || value.equals("yes");
-    value.drop();
-    return enabled;
-}
+import frontend.serialize;
 
 bool native_is_executable(str path) {
     return is_file(path) && sys_access((i64)path, 1) == 0;
@@ -197,6 +188,20 @@ bool native_is_run(Vec<String>* arguments) {
         String* argument = arguments.get_ptr(i);
         if (argument.equals("--")) { return false; }
         if (argument.equals("run") || argument.equals("r")) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+bool native_emit_object_requested(Vec<String>* arguments) {
+    i64 i = 1;
+    while (i < arguments.len()) {
+        String* argument = arguments.get_ptr(i);
+        if (argument.equals("--emit=object")) { return true; }
+        if (argument.equals("--emit") && i + 1 < arguments.len()
+            && arguments.get_ptr(i + 1).equals("object")) {
+            return true;
+        }
         i += 1;
     }
     return false;
@@ -404,6 +409,167 @@ void native_merge_unit(SyntaxNode* root, SyntaxNode* other) {
         }
         child = next;
     }
+}
+
+bool native_artifact_identifier(str name) {
+    i64 i = 0;
+    if (name[i] == 0) { return false; }
+    while (name[i] != 0) {
+        u8 ch = name[i];
+        if (!((ch >= (u8)'a' && ch <= (u8)'z')
+              || (ch >= (u8)'A' && ch <= (u8)'Z')
+              || ch == (u8)'_' || (i > 0 && ch >= (u8)'0' && ch <= (u8)'9'))) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+bool native_artifact_scalar_type(String* name, bool allow_unit) {
+    return name.equals("i8") || name.equals("i16") || name.equals("i32")
+        || name.equals("i64") || name.equals("u8") || name.equals("u16")
+        || name.equals("u32") || name.equals("u64") || name.equals("f32")
+        || name.equals("f64") || name.equals("bool") || name.equals("char")
+        || (allow_unit && name.equals("unit"));
+}
+
+void native_append_index(String* out, i64 value) {
+    Vec<u8> digits = Vec<u8>.new();
+    i64 remaining = value;
+    if (remaining == 0) { digits.push((u8)'0'); }
+    while (remaining > 0) {
+        digits.push((u8)('0' + remaining % 10));
+        remaining /= 10;
+    }
+    i64 i = digits.len() - 1;
+    while (i >= 0) {
+        out.push(digits.get(i));
+        i -= 1;
+    }
+    digits.drop();
+}
+
+bool native_artifact_extern(ArtifactExport* export, String* out) {
+    if (export.kind != ArtifactExportKind.Function
+        || (export.abi_present && export.abi != (u8)2)
+        || !native_artifact_identifier(export.name.to_str())
+        || (export.link_name_present && !export.link_name.equals(export.name.to_str()))) {
+        return false;
+    }
+    str signature = export.signature.to_str();
+    i64 len = strlen(signature);
+    if (len < 9 || signature[0] != (u8)'f' || signature[1] != (u8)'n'
+        || signature[2] != (u8)'(') { return false; }
+
+    i64 close = 3;
+    while (close < len && signature[close] != (u8)')') { close += 1; }
+    if (close >= len || close + 4 > len || signature[close + 1] != (u8)' '
+        || signature[close + 2] != (u8)'-' || signature[close + 3] != (u8)'>'
+        || signature[close + 4] != (u8)' ') { return false; }
+
+    String result_type = String.new();
+    i64 result_start = close + 5;
+    while (result_start < len && (signature[result_start] == (u8)' ' || signature[result_start] == (u8)'\t')) {
+        result_start += 1;
+    }
+    i64 result_end = len;
+    while (result_end > result_start && (signature[result_end - 1] == (u8)' ' || signature[result_end - 1] == (u8)'\t')) {
+        result_end -= 1;
+    }
+    i64 ri = result_start;
+    while (ri < result_end) { result_type.push(signature[ri]); ri += 1; }
+    if (!native_artifact_scalar_type(&result_type, true)) {
+        result_type.drop();
+        return false;
+    }
+
+    String declaration = String.from_str("    ");
+    if (result_type.equals("unit")) { declaration.push_str("void"); }
+    else { declaration.push_str(result_type.to_str()); }
+    declaration.push((u8)' ');
+    declaration.push_str(export.name.to_str());
+    declaration.push((u8)'(');
+    result_type.drop();
+
+    i64 arg_start = 3;
+    i64 arg_index = 0;
+    i64 pos = 3;
+    while (pos <= close) {
+        bool at_end = pos == close;
+        if (!at_end && signature[pos] != (u8)',') {
+            pos += 1;
+            continue;
+        }
+        i64 first = arg_start;
+        i64 last = pos;
+        while (first < last && (signature[first] == (u8)' ' || signature[first] == (u8)'\t')) { first += 1; }
+        while (last > first && (signature[last - 1] == (u8)' ' || signature[last - 1] == (u8)'\t')) { last -= 1; }
+        if (last > first) {
+            String arg_type = String.new();
+            i64 ai = first;
+            while (ai < last) { arg_type.push(signature[ai]); ai += 1; }
+            if (!native_artifact_scalar_type(&arg_type, false)) {
+                arg_type.drop();
+                declaration.drop();
+                return false;
+            }
+            if (arg_index > 0) { declaration.push_str(", "); }
+            declaration.push_str(arg_type.to_str());
+            declaration.push_str(" arg");
+            native_append_index(&declaration, arg_index);
+            arg_type.drop();
+            arg_index += 1;
+        }
+        arg_start = pos + 1;
+        pos += 1;
+    }
+    declaration.push_str(");\n");
+    out.push_str(declaration.to_str());
+    declaration.drop();
+    return true;
+}
+
+String native_artifact_object_path(str artifact_path) {
+    String path = String.from_str(artifact_path);
+    String stem = path.strip_suffix(".agm");
+    path.drop();
+    if (stem.len() == 0) { return stem; }
+    stem.push_str(".o");
+    return stem;
+}
+
+bool native_append_artifact_externs(Artifact* artifact, SyntaxTree* tree,
+                                    Vec<NodePool>* pools, Vec<TokenStream>* streams) {
+    String source = String.from_str("extern \"C\" {\n");
+    i64 count = 0;
+    i64 i = 0;
+    while (i < artifact.exports.len()) {
+        ArtifactExport* export = artifact.exports.get_ptr(i);
+        if (native_artifact_extern(export, &source)) { count += 1; }
+        i += 1;
+    }
+    if (count == 0) {
+        source.drop();
+        return true;
+    }
+    source.push_str("}\n");
+    TokenStream stream = TokenStream.new();
+    DiagnosticBag diagnostics = DiagnosticBag.new();
+    lex(move source, &stream, &diagnostics);
+    if (!diagnostics.is_empty()) { return false; }
+    NodePool unit_pool = NodePool.new();
+    SyntaxTree unit_tree;
+    parse(&stream, &diagnostics, &unit_pool, &unit_tree);
+    if (!diagnostics.is_empty() || unit_tree.root == (SyntaxNode*)0) {
+        unit_pool.destroy();
+        return false;
+    }
+    native_set_source_file(unit_tree.root, 1);
+    pools.push(move unit_pool);
+    streams.push(move stream);
+    native_merge_unit(tree.root, unit_tree.root);
+    return true;
 }
 
 SyntaxNode* native_clone_syntax(NodePool* pool, SyntaxNode* source) {
@@ -713,11 +879,13 @@ void native_queue_imports(SyntaxNode* unit, str owner, str root_dir, CfgSet* cfg
 }
 
 // Load the full source import closure and merge it into the root tree, so the
-// backend compiles real multi-file programs. Returns false when the program
-// needs the bridge (binary artifacts, unloadable units, resolution failures).
+// backend compiles real multi-file programs. AGM imports are compiled from the
+// source path recorded in their metadata.
 bool native_load_closure(str source_path, SyntaxTree* tree, CfgSet* cfg,
                          Vec<String>* includes, Vec<String>* source_paths,
-                         Vec<NodePool>* pools, Vec<TokenStream>* streams) {
+                         Vec<String>* link_objects,
+                         Vec<NodePool>* pools, Vec<TokenStream>* streams,
+                         bool module_object) {
     String root_dir = module_root(source_path);
     Vec<String> visited = Vec<String>.new();
     Vec<String> pending = Vec<String>.new();
@@ -726,12 +894,14 @@ bool native_load_closure(str source_path, SyntaxTree* tree, CfgSet* cfg,
     visited.push(String.from_str(source_path));
     native_queue_imports(tree.root, source_path, root_dir.to_str(), cfg, includes, &visited, &pending);
 
-    String entry_resolved = resolve_module_path(source_path, root_dir.to_str(), "std.sys.entry", includes);
-    if (entry_resolved.len() > 0 && !native_path_seen(&visited, entry_resolved.to_str())
-        && !native_path_seen(&pending, entry_resolved.to_str())) {
-        pending.push(move entry_resolved);
-    } else {
-        entry_resolved.drop();
+    if (!module_object) {
+        String entry_resolved = resolve_module_path(source_path, root_dir.to_str(), "std.sys.entry", includes);
+        if (entry_resolved.len() > 0 && !native_path_seen(&visited, entry_resolved.to_str())
+            && !native_path_seen(&pending, entry_resolved.to_str())) {
+            pending.push(move entry_resolved);
+        } else {
+            entry_resolved.drop();
+        }
     }
 
     i64 cursor = 0;
@@ -749,23 +919,63 @@ bool native_load_closure(str source_path, SyntaxTree* tree, CfgSet* cfg,
         }
         String owned = String.from_str(file.to_str());
         visited.push(move owned);
+        String source_file = String.new();
         if (module_path_is_artifact(file.to_str())) {
-            root_dir.drop();
-            visited.drop();
-            pending.drop();
-            return false;
+            Artifact artifact = Artifact.new();
+            bool read_ok = read_artifact(file.to_str(), &artifact);
+            if (read_ok) { source_file = artifact.source_path.clone(); }
+            if (!read_ok) {
+                artifact_drop(&artifact);
+                source_file.drop();
+                root_dir.drop();
+                visited.drop();
+                pending.drop();
+                return false;
+            }
+            if (source_file.len() == 0 || !is_file(source_file.to_str())) {
+                String object_path = native_artifact_object_path(file.to_str());
+                bool object_available = object_path.len() > 0 && is_file(object_path.to_str());
+                bool declarations_ok = object_available
+                    && native_append_artifact_externs(&artifact, tree, pools, streams);
+                artifact_drop(&artifact);
+                source_file.drop();
+                if (!object_available || !declarations_ok) {
+                    object_path.drop();
+                    root_dir.drop();
+                    visited.drop();
+                    pending.drop();
+                    return false;
+                }
+                if (!native_path_seen(link_objects, object_path.to_str())) {
+                    link_objects.push(move object_path);
+                } else {
+                    object_path.drop();
+                }
+                continue;
+            }
+            artifact_drop(&artifact);
+            if (native_path_seen(&visited, source_file.to_str())) {
+                source_file.drop();
+                continue;
+            }
+            String source_visited = String.from_str(source_file.to_str());
+            visited.push(move source_visited);
+        } else {
+            source_file = String.from_str(file.to_str());
         }
         u32 file_id = (u32)source_paths.len() + (u32)1;
-        SyntaxNode* unit = native_load_unit(file.to_str(), file_id, pools, streams);
+        SyntaxNode* unit = native_load_unit(source_file.to_str(), file_id, pools, streams);
         if (unit == (SyntaxNode*)0) {
+            source_file.drop();
             root_dir.drop();
             visited.drop();
             pending.drop();
             return false;
         }
-        source_paths.push(String.from_str(file.to_str()));
-        native_queue_imports(unit, file.to_str(), root_dir.to_str(), cfg, includes, &visited, &pending);
+        source_paths.push(String.from_str(source_file.to_str()));
+        native_queue_imports(unit, source_file.to_str(), root_dir.to_str(), cfg, includes, &visited, &pending);
         native_merge_unit(tree.root, unit);
+        source_file.drop();
     }
     root_dir.drop();
     visited.drop();
@@ -883,10 +1093,9 @@ void native_add_search_path(Command* command, bool direct_linker, str dir) {
     native_add_rpath(command, direct_linker, dir);
 }
 
-bool native_backend_try(Vec<String>* arguments, str source_path, str default_name, Vec<String>* extra_includes, i32* result) {
-    if (!native_backend_enabled()) {
-        return false;
-    }
+bool native_backend_try(Vec<String>* arguments, str source_path, str default_name,
+                        Vec<String>* extra_includes, bool module_object, i32* result) {
+    bool emit_object = native_emit_object_requested(arguments);
     String output = String.new();
     if (!native_output_path(arguments, default_name, &output)) {
         output.drop();
@@ -931,6 +1140,54 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
         output.drop();
         *result = 2;
         return true;
+    }
+
+    String synthesized_json = serialize_synthesize_json(tree.root);
+    if (synthesized_json.len() > 0) {
+        String augmented_source = source_copy.clone();
+        augmented_source.push_str("\n");
+        augmented_source.push_str(synthesized_json.to_str());
+        synthesized_json.drop();
+
+        TokenStream augmented_stream = TokenStream.new();
+        DiagnosticBag augmented_diagnostics = DiagnosticBag.new();
+        String parse_source = augmented_source.clone();
+        lex(move parse_source, &augmented_stream, &augmented_diagnostics);
+        NodePool augmented_pool = NodePool.new();
+        SyntaxTree augmented_tree;
+        if (augmented_diagnostics.is_empty()) {
+            parse(&augmented_stream, &augmented_diagnostics, &augmented_pool,
+                  &augmented_tree);
+        }
+        if (!augmented_diagnostics.is_empty() || augmented_tree.root == (SyntaxNode*)0) {
+            i64 i = 0;
+            while (i < augmented_diagnostics.len()) {
+                Diagnostic* diagnostic = augmented_diagnostics.get(i);
+                String rendered = render_diagnostic(diagnostic, source_path,
+                                                    &augmented_source);
+                STDERR.write_str(rendered.to_str());
+                i += 1;
+            }
+            augmented_diagnostics.items.drop();
+            augmented_pool.destroy();
+            augmented_stream.tokens.drop();
+            augmented_source.drop();
+            pool.destroy();
+            stream.tokens.drop();
+            output.drop();
+            *result = 2;
+            return true;
+        }
+        augmented_diagnostics.items.drop();
+        pool.destroy();
+        stream.tokens.drop();
+        pool = move augmented_pool;
+        stream = move augmented_stream;
+        tree = augmented_tree;
+        source_copy.drop();
+        source_copy = move augmented_source;
+    } else {
+        synthesized_json.drop();
     }
 
     CfgSet cfg = linux_defaults();
@@ -995,9 +1252,12 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
     Vec<NodePool> pools = Vec<NodePool>.new();
     Vec<TokenStream> streams = Vec<TokenStream>.new();
     Vec<String> source_paths = Vec<String>.new();
-    if (!native_load_closure(source_path, &tree, &cfg, &includes, &source_paths, &pools, &streams)) {
+    Vec<String> link_objects = Vec<String>.new();
+    if (!native_load_closure(source_path, &tree, &cfg, &includes, &source_paths,
+                             &link_objects, &pools, &streams, module_object)) {
         native_destroy_units(&pools, &streams);
         source_paths.drop();
+        link_objects.drop();
         includes.drop();
         pool.destroy();
         output.drop();
@@ -1042,6 +1302,7 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
         }
         native_destroy_units(&pools, &streams);
         source_paths.drop();
+        link_objects.drop();
         pool.destroy();
         output.drop();
         *result = 2;
@@ -1053,6 +1314,7 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
     if (!native_fold_cfg_exprs(tree.root, &cfg)) {
         native_destroy_units(&pools, &streams);
         source_paths.drop();
+        link_objects.drop();
         pool.destroy();
         output.drop();
         return false;
@@ -1060,6 +1322,7 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
     if (!native_tree_supported(tree.root)) {
         native_destroy_units(&pools, &streams);
         source_paths.drop();
+        link_objects.drop();
         pool.destroy();
         output.drop();
         return false;
@@ -1073,7 +1336,7 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
 
     LlvmGenerator gen = LlvmGenerator.new("silver_native");
     bool compile_ok = gen.compile(&tree, &ast_pool, &symbols.types, &symbols.names, &symbols,
-                                  &source_paths, cfg.contains("debug"));
+                                  &source_paths, cfg.contains("debug"), module_object);
 
     if (!gen.ownership_diagnostics.is_empty()) {
         i64 i = 0;
@@ -1093,6 +1356,7 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
         }
         gen.destroy();
         source_paths.drop();
+        link_objects.drop();
         native_destroy_units(&pools, &streams);
         pool.destroy();
         output.drop();
@@ -1110,14 +1374,12 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
         dump_val.drop();
     }
 
-    // Fail closed: any unresolved call/method means the emitted code would be
-    // silently wrong (uninitialized stack slots, skipped calls). Refuse to
-    // emit instead — the caller may use the explicitly configured stage0 bridge.
+    // Unresolved calls can leave uninitialized values or skip side effects.
     if (gen.unresolved_calls > 0) {
-        STDERR.write_str("agc: ");
-        STDERR.write_str("native backend left unresolved symbols; falling back\n");
+        STDERR.write_str("agc: error: native backend cannot emit code with unresolved symbols\n");
         gen.destroy();
         native_destroy_units(&pools, &streams);
+        link_objects.drop();
         pool.destroy();
         output.drop();
         return false;
@@ -1126,6 +1388,7 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
     if (!compile_ok) {
         gen.destroy();
         native_destroy_units(&pools, &streams);
+        link_objects.drop();
         pool.destroy();
         output.drop();
         return false;
@@ -1142,6 +1405,7 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
         verify_err.drop();
         gen.destroy();
         link_libs.drop();
+        link_objects.drop();
         native_destroy_units(&pools, &streams);
         pool.destroy();
         output.drop();
@@ -1151,7 +1415,7 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
     verify_err.drop();
 
     i64 pid = getpid();
-    String object_path = native_temp_path(".o", pid);
+    String object_path = emit_object ? output.clone() : native_temp_path(".o", pid);
     String emit_err = String.new();
     bool emitted = gen.emit_object_file(object_path.to_str(), &emit_err);
 
@@ -1163,6 +1427,7 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
         object_path.drop();
         gen.destroy();
         link_libs.drop();
+        link_objects.drop();
         native_destroy_units(&pools, &streams);
         pool.destroy();
         output.drop();
@@ -1173,6 +1438,15 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
     gen.destroy();
     native_destroy_units(&pools, &streams);
     pool.destroy();
+
+    if (emit_object) {
+        object_path.drop();
+        link_libs.drop();
+        link_objects.drop();
+        output.drop();
+        *result = 0;
+        return true;
+    }
 
     String linker = String.new();
     bool direct_linker = false;
@@ -1227,7 +1501,8 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
     }
     Command cc_command = Command.new(linker.to_str());
     bool static_link = native_static_link_requested(arguments);
-    bool has_link_inputs = native_has_link_inputs(arguments) || link_libs.len() > 0;
+    bool has_link_inputs = native_has_link_inputs(arguments) || link_libs.len() > 0
+        || link_objects.len() > 0;
     if (direct_linker && (linker.equals("lld") || linker.ends_with("/lld"))) {
         cc_command.arg("-flavor");
         cc_command.arg("gnu");
@@ -1243,6 +1518,12 @@ bool native_backend_try(Vec<String>* arguments, str source_path, str default_nam
         cc_command.arg("-nostdlib");
         cc_command.arg("-no-pie");
     }
+    i64 object_index = 0;
+    while (object_index < link_objects.len()) {
+        cc_command.arg(link_objects.get_ptr(object_index).to_str());
+        object_index += 1;
+    }
+    link_objects.drop();
     if (static_link) {
         cc_command.arg("-static");
     } else if (direct_linker) {

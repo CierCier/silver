@@ -18,8 +18,6 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="silver-stage2-") as temporary:
         work = pathlib.Path(temporary)
         env = os.environ.copy()
-        env["SILVER_STAGE0"] = str(work / "missing-stage0")
-        env["SILVER_STAGE1_NATIVE"] = "1"
         stage2 = work / "agc-stage2"
 
         def invoke(binary: pathlib.Path, arguments: list[str]) -> subprocess.CompletedProcess[str]:

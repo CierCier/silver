@@ -166,12 +166,19 @@ if (@cfg(os.linux)) {
         __silver_argv: .zero 8
         __silver_envp: .zero 8
         .text
+        test %rbp, %rbp
+        jz 1f
+        lea 8(%rbp), %r11
+        jmp 2f
+        1:
+        mov %rsp, %r11
+        2:
         xor %ebp, %ebp
-        mov (%rsp), %rdi
-        lea 8(%rsp), %rsi
+        mov (%r11), %rdi
+        lea 8(%r11), %rsi
         mov %edi, __silver_argc(%rip)
         mov %rsi, __silver_argv(%rip)
-        lea 16(%rsp,%rdi,8), %rdx
+        lea 16(%r11,%rdi,8), %rdx
         mov %rdx, __silver_envp(%rip)
         and $$-16, %rsp
         call __silver_cpu_init

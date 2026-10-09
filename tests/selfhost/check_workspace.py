@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise stage1-owned workspace planning without a native backend."""
+"""Exercise stage1 workspace planning and trap any attempted stage0 launch."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ def run(stage1: Path, args: list[str], env: dict[str, str]) -> subprocess.Comple
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
+        cwd=Path(env["SILVER_STAGE0"]).parent,
         check=False,
     )
 
@@ -64,15 +65,14 @@ def main() -> int:
         backend_marker = root / "backend-called"
         fake_backend = root / "fake-backend"
         fake_backend.write_text(
-            "#!/usr/bin/env bash\n"
-            f"touch {backend_marker!s}\n"
-            "printf '%s\\n' \"$@\" > \"$SILVER_FAKE_ARGS\"\n"
-            "exit 0\n"
+            "#!/usr/bin/env python3\n"
+            "from pathlib import Path\n"
+            f"Path({str(backend_marker)!r}).touch()\n"
+            "raise SystemExit(97)\n"
         )
         fake_backend.chmod(0o755)
         base_env = os.environ.copy()
         base_env["SILVER_STAGE0"] = str(fake_backend)
-        base_env["SILVER_FAKE_ARGS"] = str(root / "backend-args")
 
         # Direct source and manifest checks stay entirely in stage1.
         require(run(stage1, ["check", str(source)], base_env), 0, "")
@@ -163,59 +163,40 @@ def main() -> int:
             "selected package target has no source entry",
         )
 
-        # Native commands retain the manifest for the transitional bridge.
-        require(run(stage1, ["build", str(manifest), "--no-cache"], base_env), 0)
-        if not backend_marker.exists():
-            raise AssertionError("build did not invoke the native backend")
-        forwarded = (root / "backend-args").read_text().splitlines()
-        if str(manifest) not in forwarded:
-            raise AssertionError(f"manifest was not forwarded to backend: {forwarded}")
-
-        output_args = root / "output-args"
-        output_env = base_env.copy()
-        output_env["SILVER_FAKE_ARGS"] = str(output_args)
         output_path = root / "application"
         require(
             run(
                 stage1,
-                ["build", "--bin", str(manifest), "-o", str(output_path)],
-                output_env,
+                ["build", "--bin", "app0", str(manifest), "--no-cache", "-o", str(output_path)],
+                base_env,
             ),
             0,
         )
-        forwarded_output = output_args.read_text().splitlines()
-        if str(manifest) not in forwarded_output or str(output_path) not in forwarded_output:
-            raise AssertionError(f"output path confused package selection: {forwarded_output}")
+        if not output_path.is_file() or not os.access(output_path, os.X_OK):
+            raise AssertionError("stage1 build did not produce an executable")
 
-        nested_backend_args = root / "nested-backend-args"
-        nested_env = base_env.copy()
-        nested_env["SILVER_FAKE_ARGS"] = str(nested_backend_args)
-        require(run(stage1, ["build", str(nested_root_manifest), "--no-cache"], nested_env), 0)
-        nested_forwarded = nested_backend_args.read_text().splitlines()
-        if str(nested_root_manifest) not in nested_forwarded:
-            raise AssertionError(f"nested manifest was not forwarded to backend: {nested_forwarded}")
+        nested_output = root / "nested-application"
+        require(
+            run(stage1, ["build", "--bin", "agc", str(nested_root_manifest), "-o", str(nested_output)], base_env),
+            0,
+        )
+        if not nested_output.is_file() or not os.access(nested_output, os.X_OK):
+            raise AssertionError("stage1 did not build the selected nested package target")
 
-        # The native test command is still delegated as a whole until stage1
-        # owns test discovery and execution; it must not be reduced to one
-        # guessed target by the package planner.
-        test_marker = root / "test-args"
-        test_env = base_env.copy()
-        test_env["SILVER_FAKE_ARGS"] = str(test_marker)
-        (manifest.parent / "tests").mkdir()
-        (manifest.parent / "tests" / "basic.ag").write_text("i32 main() { return 0; }\n")
-        require(run(stage1, ["test", str(manifest)], test_env), 0)
-        forwarded_test = test_marker.read_text().splitlines()
-        if str(manifest) not in forwarded_test:
-            raise AssertionError(f"test manifest was not forwarded: {forwarded_test}")
+        require(
+            run(stage1, ["test", str(manifest)], base_env),
+            2,
+            "stage1 does not support the workspace test command yet",
+        )
+        require(
+            run(stage1, ["t", str(manifest)], base_env),
+            2,
+            "stage1 does not support the workspace test command yet",
+        )
 
-        # Arguments after -- belong to the target program, not the package input.
-        run_marker = root / "run-args"
-        run_env = base_env.copy()
-        run_env["SILVER_FAKE_ARGS"] = str(run_marker)
-        require(run(stage1, ["run", str(manifest), "--", "--flag"], run_env), 0)
-        forwarded_run = run_marker.read_text().splitlines()
-        if "--flag" not in forwarded_run or str(manifest) not in forwarded_run:
-            raise AssertionError(f"run arguments were not preserved: {forwarded_run}")
+        require(run(stage1, ["run", str(manifest), "--", "--flag"], base_env), 0)
+        if backend_marker.exists():
+            raise AssertionError("legacy SILVER_STAGE0 executable was launched")
 
     print("workspace checks passed")
     return 0

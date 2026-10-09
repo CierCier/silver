@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check concrete generic enum layouts with the stage0 bridge unavailable."""
+"""Check concrete generic enum layouts through stage1's native backend."""
 
 from __future__ import annotations
 
@@ -18,8 +18,6 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="silver-native-enum-") as temporary:
         output = pathlib.Path(temporary) / "enum-layout"
         env = os.environ.copy()
-        env["SILVER_STAGE0"] = str(pathlib.Path(temporary) / "missing-stage0")
-        env["SILVER_STAGE1_NATIVE"] = "1"
         built = subprocess.run(
             [str(args.stage1.resolve()), "build", str(fixture), "--no-cache", "-o", str(output)],
             env=env, capture_output=True, text=True, timeout=120, check=False,

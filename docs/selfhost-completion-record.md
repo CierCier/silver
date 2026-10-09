@@ -52,7 +52,7 @@ The frontend migration is complete across all slices:
 - Centralized user-facing diagnostic messages catalog with fuzzy typo suggestions.
 - Historical gates passed: 348 files in `run_stage.sh --include-std`, 200 passed + 1 intentional skip in `run_native.sh --jobs 4`.
 
-## Current status (2026-10-07)
+## PR #30 status at head 91a0aff (2026-10-07; before bridge removal)
 
 - The opt-in stage1 Linux LLVM backend is tracked in this branch. Unsupported
   constructs fail closed; the explicit stage0 bridge remains the default for

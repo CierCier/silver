@@ -78,10 +78,14 @@ Vec<LLVMOpaqueType*> llvm_param_types(LlvmContext* ctx, TypeTable* types, Vec<Bi
             type_str = self_type_name;
         }
         u32 param_type_id = types.parse_type_name(type_str);
+        if (binding_is_variadic_parameter(param)
+            || param.declared_type.kind == ProjectionTypeKind.Array) {
+            param_type_id = types.resolve_subst(typecheck_parameter_type_id(types, param));
+        }
         if (param_type_id == TYPE_UNKNOWN) {
             ctx.note_unresolved("parameter-type", param.name);
             param_type_id = TYPE_I64;
-        } else if (!exact_function_type
+        } else if (!binding_is_variadic_parameter(param) && !exact_function_type
             && (param.declared_type.kind == ProjectionTypeKind.Pointer
                 || param.declared_type.kind == ProjectionTypeKind.Reference || param_type_id == TYPE_VOID)) {
             param_type_id = types.get_pointer(param_type_id, true);
@@ -118,12 +122,19 @@ void llvm_emit_entry_point(LLVMOpaqueContext* ctx, LLVMOpaqueModule* module, LLV
         __silver_envp: .zero 8
         .text
         .globl _start
+        test %rbp, %rbp
+        jz 1f
+        lea 8(%rbp), %r11
+        jmp 2f
+        1:
+        mov %rsp, %r11
+        2:
         xor %ebp, %ebp
-        mov (%rsp), %rdi
-        lea 8(%rsp), %rsi
+        mov (%r11), %rdi
+        lea 8(%r11), %rsi
         mov %edi, __silver_argc(%rip)
         mov %rsi, __silver_argv(%rip)
-        lea 16(%rsp,%rdi,8), %rdx
+        lea 16(%r11,%rdi,8), %rdx
         mov %rdx, __silver_envp(%rip)
         and $$-16, %rsp
         call main
@@ -206,9 +217,20 @@ bool llvm_define_method_instance(LlvmContext* ctx, TypeTable* types, Interner* n
             if (param_type_id == TYPE_UNKNOWN) {
                 param_type_id = types.parse_type_name(type_str);
             }
+                        if (binding_is_variadic_parameter(param)
+                            || param.declared_type.kind == ProjectionTypeKind.Array) {
+                            u32 element_type_id = typecheck_parameter_base_type_id(types, param);
+                String element = typecheck_canonical_type(types, element_type_id, 0);
+                String slice = String.from_str("Slice<");
+                slice.push_str(element.to_str());
+                slice.push('>');
+                param_type_id = types.resolve_subst(types.parse_type_name(slice.to_str()));
+                element.drop();
+                slice.drop();
+            }
             param_type_id = types.resolve_subst(param_type_id);
         }
-        if (!exact_function_type
+        if (!binding_is_variadic_parameter(param) && !exact_function_type
             && (param.declared_type.kind == ProjectionTypeKind.Pointer
                 || param.declared_type.kind == ProjectionTypeKind.Reference || param_type_id == TYPE_VOID)) {
             param_type_id = types.get_pointer(param_type_id, true);
@@ -293,10 +315,13 @@ bool llvm_define_free_function_instance(LlvmContext* ctx, TypeTable* types,
     i64 i = 0;
     while (i < params.len()) {
         Binding* param = params.get_ptr(i);
-        bool exact_function_type = binding_has_function_type(param);
         String text = binding_parameter_type_text(param);
-        u32 type_id = types.resolve_subst(types.parse_type_name(text.to_str()));
-        if (!exact_function_type
+        bool exact_function_type = binding_has_function_type(param);
+        u32 type_id = types.parse_type_name(text.to_str());
+        if (binding_is_variadic_parameter(param)
+            || param.declared_type.kind == ProjectionTypeKind.Array) {
+            type_id = types.resolve_subst(typecheck_parameter_type_id(types, param));
+        } else if (!exact_function_type
             && (param.declared_type.kind == ProjectionTypeKind.Pointer
                 || param.declared_type.kind == ProjectionTypeKind.Reference || type_id == TYPE_VOID)) {
             type_id = types.get_pointer(type_id, true);
@@ -434,12 +459,11 @@ String llvm_const_global_literal_prefix(str global_name, str kind, i64 index) {
     return move prefix;
 }
 
-LLVMOpaqueValue* llvm_const_string_global(LLVMOpaqueContext* raw_ctx,
-    LLVMOpaqueModule* module, str literal_text, str global_prefix) {
-    String decoded = unescape_string_literal(literal_text);
+LLVMOpaqueValue* llvm_const_bytes_global(LLVMOpaqueContext* raw_ctx,
+    LLVMOpaqueModule* module, i8* bytes, u64 length, str global_prefix,
+    i32 null_terminate) {
     LLVMOpaqueValue* literal = LLVMConstStringInContext2(raw_ctx,
-        (i8*)decoded.data, (u64)decoded.len(), 0);
-    decoded.drop();
+        bytes, length, null_terminate);
     String literal_name = String.from_str(global_prefix);
     literal_name.push_str(".literal");
     LLVMOpaqueValue* global = LLVMAddGlobal(module, LLVMTypeOf(literal), literal_name.to_str());
@@ -448,6 +472,23 @@ LLVMOpaqueValue* llvm_const_string_global(LLVMOpaqueContext* raw_ctx,
     LLVMSetGlobalConstant(global, 1);
     LLVMSetLinkage(global, LLVMLinkage.LLVMPrivateLinkage);
     return global;
+}
+
+LLVMOpaqueValue* llvm_const_string_global(LLVMOpaqueContext* raw_ctx,
+    LLVMOpaqueModule* module, str literal_text, str global_prefix) {
+    String decoded = unescape_string_literal(literal_text);
+    LLVMOpaqueValue* global = llvm_const_bytes_global(raw_ctx, module,
+        (i8*)decoded.data, (u64)decoded.len(), global_prefix, 0);
+    decoded.drop();
+    return global;
+}
+
+LLVMOpaqueValue* llvm_const_pointer_literal(LLVMOpaqueContext* raw_ctx,
+    LLVMOpaqueType* pointer_type, i64 value) {
+    if (value == 0) { return LLVMConstNull(pointer_type); }
+    LLVMOpaqueType* integer_type = LLVMInt64TypeInContext(raw_ctx);
+    LLVMOpaqueValue* integer = LLVMConstInt(integer_type, (u64)value, 1);
+    return LLVMConstIntToPtr(integer, pointer_type);
 }
 
 // Lower one aggregate field or array element to a constant. Returns null when
@@ -469,6 +510,7 @@ LLVMOpaqueValue* llvm_const_literal_value(LLVMOpaqueContext* raw_ctx,
             return llvm_const_int_literal(field_ty, val.next_sibling.text, true);
         }
         i64 n = -parse_int_literal(val.next_sibling.text);
+        if (is_ptr) { return llvm_const_pointer_literal(raw_ctx, field_ty, n); }
         return LLVMConstInt(field_ty, (u64)n, 1);
     }
     if (val.kind == NodeKind.Token && val.token_kind == TokenKind.IntLiteral) {
@@ -479,6 +521,7 @@ LLVMOpaqueValue* llvm_const_literal_value(LLVMOpaqueContext* raw_ctx,
         if (n == 0 && is_ptr) {
             return LLVMConstNull(field_ty);
         }
+        if (is_ptr) { return llvm_const_pointer_literal(raw_ctx, field_ty, n); }
         return LLVMConstInt(field_ty, (u64)n, 1);
     }
     if (val.kind == NodeKind.Token && val.token_kind == TokenKind.True) {
@@ -495,7 +538,7 @@ LLVMOpaqueValue* llvm_const_literal_value(LLVMOpaqueContext* raw_ctx,
         return llvm_const_string_global(raw_ctx, module, val.text, global_prefix);
     }
     if (val.kind == NodeKind.Token && val.token_kind == TokenKind.FloatLiteral) {
-        return LLVMConstRealOfString(field_ty, val.text);
+        return llvm_const_real_literal(field_ty, val.text);
     }
     if (val.kind == NodeKind.Parenthesized) {
         // Cast form: `(T*)0` parses as Parenthesized[type *] followed by a
@@ -511,6 +554,7 @@ LLVMOpaqueValue* llvm_const_literal_value(LLVMOpaqueContext* raw_ctx,
                 return llvm_const_int_literal(field_ty, after.next_sibling.text, true);
             }
             i64 n = -parse_int_literal(after.next_sibling.text);
+            if (is_ptr) { return llvm_const_pointer_literal(raw_ctx, field_ty, n); }
             return LLVMConstInt(field_ty, (u64)n, 1);
         }
         if (after != (SyntaxNode*)0 && after.kind == NodeKind.Token
@@ -522,11 +566,12 @@ LLVMOpaqueValue* llvm_const_literal_value(LLVMOpaqueContext* raw_ctx,
             if (n == 0 && is_ptr) {
                 return LLVMConstNull(field_ty);
             }
+            if (is_ptr) { return llvm_const_pointer_literal(raw_ctx, field_ty, n); }
             return LLVMConstInt(field_ty, (u64)n, 1);
         }
         if (after != (SyntaxNode*)0 && after.kind == NodeKind.Token
             && after.token_kind == TokenKind.FloatLiteral) {
-            return LLVMConstRealOfString(field_ty, after.text);
+            return llvm_const_real_literal(field_ty, after.text);
         }
         if (after != (SyntaxNode*)0 && after.kind == NodeKind.Token
             && after.token_kind == TokenKind.CharLiteral) {
@@ -635,6 +680,191 @@ LLVMOpaqueValue* llvm_const_array_from_initializer(LLVMOpaqueContext* raw_ctx,
     return result;
 }
 
+void llvm_bt_set_frame_pointer(LLVMOpaqueContext* ctx, LLVMOpaqueValue* function) {
+    LLVMOpaqueAttributeRef* attr = LLVMCreateStringAttribute(
+        ctx, (i8*)"frame-pointer", 13, (i8*)"all", 3);
+    LLVMAddAttributeAtIndex(function, 0xFFFFFFFF, attr);
+}
+
+LLVMOpaqueValue* llvm_bt_read_frame_pointer(LLVMOpaqueContext* ctx, LLVMOpaqueBuilder* builder) {
+    LLVMOpaqueType* i64_type = LLVMInt64TypeInContext(ctx);
+    LLVMOpaqueType* fn_type = LLVMFunctionType(i64_type, (LLVMOpaqueType**)0, 0, 0);
+    str asm_text = "movq %rbp, $0";
+    str constraints = "=r";
+    LLVMOpaqueValue* inline_asm = LLVMGetInlineAsm(
+        fn_type, (i8*)asm_text, (u64)strlen(asm_text),
+        (i8*)constraints, (u64)strlen(constraints), 1, 0, 0, 0);
+    return LLVMBuildCall2(
+        builder, fn_type, inline_asm, (LLVMOpaqueValue**)0, 0, "bt.frame");
+}
+
+LLVMOpaqueValue* llvm_bt_string_global(LLVMOpaqueContext* ctx, LLVMOpaqueModule* module,
+                                       str suffix, str text) {
+    String global_name = String.from_str("__silver_bt_string.");
+    global_name.push_str(suffix);
+    LLVMOpaqueValue* initializer = LLVMConstStringInContext2(
+        ctx, (i8*)text, (u64)strlen(text), 0);
+    LLVMOpaqueValue* global = LLVMAddGlobal(
+        module, LLVMTypeOf(initializer), global_name.to_str());
+    LLVMSetInitializer(global, initializer);
+    LLVMSetGlobalConstant(global, 1);
+    LLVMSetLinkage(global, LLVMLinkage.LLVMPrivateLinkage);
+    global_name.drop();
+    return global;
+}
+
+void llvm_bt_record_function(LLVMOpaqueContext* ctx, LLVMOpaqueModule* module,
+                             LLVMOpaqueValue* function, str function_name,
+                             Span span, Vec<String>* source_paths,
+                             Vec<LLVMOpaqueValue*>* records) {
+    String file_name = String.new();
+    if (span.file > 0 && span.file <= source_paths.len()) {
+        String* path = source_paths.get_ptr((u32)(span.file - 1));
+        file_name.push_str(path.to_str());
+    } else {
+        file_name.push_str("unknown.ag");
+    }
+
+    String name_suffix = String.from_str("name.");
+    name_suffix.push_str(function_name);
+    String file_suffix = String.from_str("file.");
+    file_suffix.push_str(function_name);
+    LLVMOpaqueValue* name_global = llvm_bt_string_global(
+        ctx, module, name_suffix.to_str(), function_name);
+    LLVMOpaqueValue* file_global = llvm_bt_string_global(
+        ctx, module, file_suffix.to_str(), file_name.to_str());
+
+    LLVMOpaqueType* i64_type = LLVMInt64TypeInContext(ctx);
+    Vec<LLVMOpaqueValue*> fields = Vec<LLVMOpaqueValue*>.new();
+    fields.push(LLVMConstPtrToInt(function, i64_type));
+    fields.push(name_global);
+    fields.push(file_global);
+    i64 line = span.start_line > 0 ? span.start_line : 1;
+    fields.push(LLVMConstInt(i64_type, (u64)line, 0));
+    records.push(LLVMConstStructInContext(ctx, fields.data, (u32)fields.len(), 0));
+    fields.drop();
+    name_suffix.drop();
+    file_suffix.drop();
+    file_name.drop();
+}
+
+LLVMOpaqueValue* llvm_bt_make_arg_record(LLVMOpaqueContext* ctx, LLVMOpaqueModule* module,
+                                         LLVMOpaqueBuilder* builder, LLVMTargetDataRef* target_data,
+                                         str function_name, str param_name,
+                                         LLVMOpaqueType* param_type, LLVMOpaqueValue* param_slot,
+                                         LLVMOpaqueValue* frame_pointer) {
+    LLVMOpaqueType* i64_type = LLVMInt64TypeInContext(ctx);
+    String offset_suffix = String.from_str("offset.");
+    offset_suffix.push_str(function_name);
+    offset_suffix.push_str(".");
+    offset_suffix.push_str(param_name);
+    String offset_name = String.from_str("__silver_bt_");
+    offset_name.push_str(offset_suffix.to_str());
+    LLVMOpaqueValue* offset_global = LLVMAddGlobal(
+        module, i64_type, offset_name.to_str());
+    LLVMSetInitializer(offset_global, LLVMConstInt(i64_type, 0, 0));
+    LLVMSetLinkage(offset_global, LLVMLinkage.LLVMInternalLinkage);
+    LLVMOpaqueValue* param_address = LLVMBuildPtrToInt(
+        builder, param_slot, i64_type, "bt.arg.address");
+    LLVMOpaqueValue* relative_offset = LLVMBuildSub(
+        builder, param_address, frame_pointer, "bt.arg.offset");
+    LLVMBuildStore(builder, relative_offset, offset_global);
+
+    LLVMOpaqueValue* encoded_offset = LLVMConstPtrToInt(offset_global, i64_type);
+    String name_suffix = String.from_str("arg.");
+    name_suffix.push_str(function_name);
+    name_suffix.push_str(".");
+    name_suffix.push_str(param_name);
+    LLVMOpaqueValue* name_global = llvm_bt_string_global(
+        ctx, module, name_suffix.to_str(), param_name);
+
+    u64 abi_size = LLVMABISizeOfType(target_data, param_type);
+    if (abi_size > 8) { abi_size = 8; }
+    if (abi_size == 0) { abi_size = 1; }
+    u64 encoded_size = 0x8000000000000000 | abi_size;
+    Vec<LLVMOpaqueValue*> fields = Vec<LLVMOpaqueValue*>.new();
+    fields.push(name_global);
+    fields.push(encoded_offset);
+    fields.push(LLVMConstInt(i64_type, encoded_size, 0));
+    LLVMOpaqueValue* record = LLVMConstStructInContext(ctx, fields.data, (u32)fields.len(), 0);
+    fields.drop();
+    offset_suffix.drop();
+    offset_name.drop();
+    name_suffix.drop();
+    return record;
+}
+
+void llvm_bt_record_args(LLVMOpaqueContext* ctx, LLVMOpaqueModule* module,
+                         LLVMOpaqueValue* function, Vec<LLVMOpaqueValue*>* arg_records,
+                         Vec<LLVMOpaqueValue*>* records) {
+    if (arg_records.len() == 0) { return; }
+    LLVMOpaqueType* i64_type = LLVMInt64TypeInContext(ctx);
+    LLVMOpaqueType* arg_type = LLVMTypeOf(arg_records.get(0));
+    LLVMOpaqueType* array_type = LLVMArrayType(arg_type, (u32)arg_records.len());
+    LLVMOpaqueValue* array_value = LLVMConstArray2(
+        arg_type, arg_records.data, (u64)arg_records.len());
+    LLVMOpaqueValue* array_global = LLVMAddGlobal(module, array_type, "__silver_bt_args_data");
+    LLVMSetInitializer(array_global, array_value);
+    LLVMSetGlobalConstant(array_global, 1);
+    LLVMSetLinkage(array_global, LLVMLinkage.LLVMPrivateLinkage);
+
+    Vec<LLVMOpaqueValue*> fields = Vec<LLVMOpaqueValue*>.new();
+    fields.push(LLVMConstPtrToInt(function, i64_type));
+    fields.push(LLVMConstInt(i64_type, (u64)arg_records.len(), 0));
+    fields.push(array_global);
+    records.push(LLVMConstStructInContext(ctx, fields.data, (u32)fields.len(), 0));
+    fields.drop();
+}
+
+void llvm_bt_emit_tables(LLVMOpaqueContext* ctx, LLVMOpaqueModule* module,
+                         Vec<LLVMOpaqueValue*>* function_records,
+                         Vec<LLVMOpaqueValue*>* arg_function_records) {
+    LLVMOpaqueType* ptr_type = LLVMPointerTypeInContext(ctx, 0);
+    LLVMOpaqueType* i64_type = LLVMInt64TypeInContext(ctx);
+    LLVMOpaqueValue* entries_global = LLVMGetNamedGlobal(module, "__silver_bt_entries");
+    LLVMOpaqueValue* count_global = LLVMGetNamedGlobal(module, "__silver_bt_count");
+
+    if (function_records.len() > 0) {
+        LLVMOpaqueType* record_type = LLVMTypeOf(function_records.get(0));
+        LLVMOpaqueType* array_type = LLVMArrayType(record_type, (u32)function_records.len());
+        LLVMOpaqueValue* array_value = LLVMConstArray2(
+            record_type, function_records.data, (u64)function_records.len());
+        LLVMOpaqueValue* data_global = LLVMAddGlobal(module, array_type, "__silver_bt_data");
+        LLVMSetInitializer(data_global, array_value);
+        LLVMSetGlobalConstant(data_global, 1);
+        LLVMSetLinkage(data_global, LLVMLinkage.LLVMPrivateLinkage);
+        if (entries_global == (LLVMOpaqueValue*)0) {
+            entries_global = LLVMAddGlobal(module, ptr_type, "__silver_bt_entries");
+        }
+        LLVMSetInitializer(entries_global, data_global);
+        if (count_global == (LLVMOpaqueValue*)0) {
+            count_global = LLVMAddGlobal(module, i64_type, "__silver_bt_count");
+        }
+        LLVMSetInitializer(count_global, LLVMConstInt(i64_type, (u64)function_records.len(), 0));
+    }
+
+    LLVMOpaqueValue* args_global = LLVMGetNamedGlobal(module, "__silver_bt_args");
+    LLVMOpaqueValue* args_count_global = LLVMGetNamedGlobal(module, "__silver_bt_args_count");
+    if (arg_function_records.len() > 0) {
+        LLVMOpaqueType* record_type = LLVMTypeOf(arg_function_records.get(0));
+        LLVMOpaqueType* array_type = LLVMArrayType(record_type, (u32)arg_function_records.len());
+        LLVMOpaqueValue* array_value = LLVMConstArray2(
+            record_type, arg_function_records.data, (u64)arg_function_records.len());
+        LLVMOpaqueValue* data_global = LLVMAddGlobal(module, array_type, "__silver_bt_args_functions");
+        LLVMSetInitializer(data_global, array_value);
+        LLVMSetGlobalConstant(data_global, 1);
+        LLVMSetLinkage(data_global, LLVMLinkage.LLVMPrivateLinkage);
+        if (args_global == (LLVMOpaqueValue*)0) {
+            args_global = LLVMAddGlobal(module, ptr_type, "__silver_bt_args");
+        }
+        LLVMSetInitializer(args_global, data_global);
+        if (args_count_global == (LLVMOpaqueValue*)0) {
+            args_count_global = LLVMAddGlobal(module, i64_type, "__silver_bt_args_count");
+        }
+        LLVMSetInitializer(args_count_global, LLVMConstInt(i64_type, (u64)arg_function_records.len(), 0));
+    }
+}
+
 struct LlvmGenerator {
     LLVMOpaqueContext* ctx;
     LLVMOpaqueModule* module;
@@ -708,7 +938,7 @@ impl LlvmGenerator {
 
     bool compile(LlvmGenerator* self, SyntaxTree* tree, AstPool* pool,
                  TypeTable* types, Interner* names, SymbolTable* symbols,
-                 Vec<String>* source_paths, bool debug_mode) {
+                 Vec<String>* source_paths, bool debug_mode, bool module_object) {
         LlvmContext ctx = LlvmContext.new(self.ctx, self.target_data, self.module, self.builder,
                                           types, names, pool, tree.root, source_paths, debug_mode);
         ctx.ownership_diagnostics = &self.ownership_diagnostics;
@@ -1142,7 +1372,35 @@ impl LlvmGenerator {
                     }
                     if (eq_node != (SyntaxNode*)0) {
                         SyntaxNode* init_node = eq_node.next_sibling;
-                        if (init_node != (SyntaxNode*)0 && init_node.kind == NodeKind.Parenthesized) {
+                        if (init_node != (SyntaxNode*)0 && init_node.kind == NodeKind.Token
+                            && init_node.token_kind == TokenKind.At
+                            && init_node.next_sibling != (SyntaxNode*)0
+                            && init_node.next_sibling.kind == NodeKind.Token
+                            && init_node.next_sibling.token_kind == TokenKind.Identifier) {
+                            SyntaxNode* builtin = init_node.next_sibling;
+                            SyntaxNode* args = builtin.next_sibling;
+                            if (args != (SyntaxNode*)0 && args.kind == NodeKind.Parenthesized
+                                && args.first_child == (SyntaxNode*)0
+                                && strcmp(builtin.text, "line") == 0) {
+                                g_init = LLVMConstInt(g_llvm_type,
+                                    (u64)builtin.span.start_line, 0);
+                            } else if (args != (SyntaxNode*)0
+                                && args.kind == NodeKind.Parenthesized
+                                && args.first_child == (SyntaxNode*)0
+                                && strcmp(builtin.text, "file") == 0
+                                && builtin.span.file > 0
+                                && builtin.span.file <= source_paths.len()) {
+                                String* source_path = source_paths.get_ptr(
+                                    builtin.span.file - 1);
+                                str path = source_path.to_str();
+                                g_init = llvm_const_bytes_global(self.ctx,
+                                    self.module, (i8*)path, (u64)strlen(path),
+                                    g_name, 1);
+                            }
+                            if (g_init == (LLVMOpaqueValue*)0) {
+                                ctx.note_unresolved("global-init", g_name);
+                            }
+                        } else if (init_node != (SyntaxNode*)0 && init_node.kind == NodeKind.Parenthesized) {
                             // Cast or grouped literal: `(i8**)0`, `(u64)1`,
                             // `(5)`. The old code skipped the parens and read
                             // the raw literal, producing `ptr 0` for pointer
@@ -1160,14 +1418,26 @@ impl LlvmGenerator {
                                     g_init = llvm_const_int_literal(g_llvm_type, init_node.next_sibling.text, true);
                                 } else {
                                     i64 n = -parse_int_literal(init_node.next_sibling.text);
-                                    g_init = LLVMConstInt(g_llvm_type, (u64)n, 1);
+                                    TypeEntry* global_entry = types.get(g_type_id);
+                                    if (global_entry.kind == TypeKind.Pointer
+                                        || global_entry.kind == TypeKind.Reference) {
+                                        g_init = llvm_const_pointer_literal(self.ctx, g_llvm_type, n);
+                                    } else {
+                                        g_init = LLVMConstInt(g_llvm_type, (u64)n, 1);
+                                    }
                                 }
                             } else if (init_node.token_kind == TokenKind.IntLiteral) {
                                 if (type_is_integer(g_type_id)) {
                                     g_init = llvm_const_int_literal(g_llvm_type, init_node.text, false);
                                 } else {
                                     i64 n = parse_int_literal(init_node.text);
-                                    g_init = LLVMConstInt(g_llvm_type, (u64)n, 1);
+                                    TypeEntry* global_entry = types.get(g_type_id);
+                                    if (global_entry.kind == TypeKind.Pointer
+                                        || global_entry.kind == TypeKind.Reference) {
+                                        g_init = llvm_const_pointer_literal(self.ctx, g_llvm_type, n);
+                                    } else {
+                                        g_init = LLVMConstInt(g_llvm_type, (u64)n, 1);
+                                    }
                                 }
                             } else if (init_node.token_kind == TokenKind.True) {
                                 g_init = LLVMConstInt(g_llvm_type, 1, 0);
@@ -1176,7 +1446,7 @@ impl LlvmGenerator {
                             } else if (init_node.token_kind == TokenKind.CharLiteral) {
                                 g_init = LLVMConstInt(g_llvm_type, (u64)parse_char_literal(init_node.text), 0);
                             } else if (init_node.token_kind == TokenKind.FloatLiteral) {
-                                g_init = LLVMConstRealOfString(g_llvm_type, init_node.text);
+                                g_init = llvm_const_real_literal(g_llvm_type, init_node.text);
                             } else if (init_node.token_kind == TokenKind.StringLiteral
                                 && g_type_id == TYPE_STR) {
                                 g_init = llvm_const_string_global(self.ctx, self.module,
@@ -1278,43 +1548,43 @@ impl LlvmGenerator {
         if (g_leak == (LLVMOpaqueValue*)0) {
             g_leak = LLVMAddGlobal(self.module, i1_type, "__silver_leak_check_enabled");
         }
-        LLVMSetInitializer(g_leak, LLVMConstInt(i1_type, 0, 0));
+        if (!module_object) { LLVMSetInitializer(g_leak, LLVMConstInt(i1_type, 0, 0)); }
 
         LLVMOpaqueValue* g_bt_entries = LLVMGetNamedGlobal(self.module, "__silver_bt_entries");
         if (g_bt_entries == (LLVMOpaqueValue*)0) {
             g_bt_entries = LLVMAddGlobal(self.module, ptr_type, "__silver_bt_entries");
         }
-        LLVMSetInitializer(g_bt_entries, LLVMConstNull(ptr_type));
+        if (!module_object) { LLVMSetInitializer(g_bt_entries, LLVMConstNull(ptr_type)); }
 
         LLVMOpaqueValue* g_bt_count = LLVMGetNamedGlobal(self.module, "__silver_bt_count");
         if (g_bt_count == (LLVMOpaqueValue*)0) {
             g_bt_count = LLVMAddGlobal(self.module, i64_type, "__silver_bt_count");
         }
-        LLVMSetInitializer(g_bt_count, LLVMConstInt(i64_type, 0, 0));
+        if (!module_object) { LLVMSetInitializer(g_bt_count, LLVMConstInt(i64_type, 0, 0)); }
 
         LLVMOpaqueValue* g_bt_lines = LLVMGetNamedGlobal(self.module, "__silver_bt_lines");
         if (g_bt_lines == (LLVMOpaqueValue*)0) {
             g_bt_lines = LLVMAddGlobal(self.module, ptr_type, "__silver_bt_lines");
         }
-        LLVMSetInitializer(g_bt_lines, LLVMConstNull(ptr_type));
+        if (!module_object) { LLVMSetInitializer(g_bt_lines, LLVMConstNull(ptr_type)); }
 
         LLVMOpaqueValue* g_bt_lines_count = LLVMGetNamedGlobal(self.module, "__silver_bt_lines_count");
         if (g_bt_lines_count == (LLVMOpaqueValue*)0) {
             g_bt_lines_count = LLVMAddGlobal(self.module, i64_type, "__silver_bt_lines_count");
         }
-        LLVMSetInitializer(g_bt_lines_count, LLVMConstInt(i64_type, 0, 0));
+        if (!module_object) { LLVMSetInitializer(g_bt_lines_count, LLVMConstInt(i64_type, 0, 0)); }
 
         LLVMOpaqueValue* g_bt_args = LLVMGetNamedGlobal(self.module, "__silver_bt_args");
         if (g_bt_args == (LLVMOpaqueValue*)0) {
             g_bt_args = LLVMAddGlobal(self.module, ptr_type, "__silver_bt_args");
         }
-        LLVMSetInitializer(g_bt_args, LLVMConstNull(ptr_type));
+        if (!module_object) { LLVMSetInitializer(g_bt_args, LLVMConstNull(ptr_type)); }
 
         LLVMOpaqueValue* g_bt_args_count = LLVMGetNamedGlobal(self.module, "__silver_bt_args_count");
         if (g_bt_args_count == (LLVMOpaqueValue*)0) {
             g_bt_args_count = LLVMAddGlobal(self.module, i64_type, "__silver_bt_args_count");
         }
-        LLVMSetInitializer(g_bt_args_count, LLVMConstInt(i64_type, 0, 0));
+        if (!module_object) { LLVMSetInitializer(g_bt_args_count, LLVMConstInt(i64_type, 0, 0)); }
 
         LLVMOpaqueType* i32_type = LLVMInt32TypeInContext(self.ctx);
         // P0-001: these MUST stay bare declarations (no initializer). The
@@ -1337,6 +1607,9 @@ impl LlvmGenerator {
         if (LLVMGetNamedGlobal(self.module, "__silver_envp") == (LLVMOpaqueValue*)0) {
             LLVMAddGlobal(self.module, ptr_type, "__silver_envp");
         }
+
+        Vec<LLVMOpaqueValue*> bt_function_records = Vec<LLVMOpaqueValue*>.new();
+        Vec<LLVMOpaqueValue*> bt_arg_function_records = Vec<LLVMOpaqueValue*>.new();
 
         // Pass 2: Lower function and method bodies
         item = tree.root.first_child;
@@ -1361,6 +1634,9 @@ impl LlvmGenerator {
                         continue;
                     }
                     u32 ret_type_id = function_return_type_id(types, item);
+                    llvm_bt_set_frame_pointer(self.ctx, fn_val);
+                    llvm_bt_record_function(self.ctx, self.module, fn_val,
+                        fn_name.to_str(), item.span, source_paths, &bt_function_records);
                     ctx.current_fn = fn_val;
                     ctx.current_return_type = ret_type_id;
 
@@ -1370,6 +1646,11 @@ impl LlvmGenerator {
 
                     Vec<Binding> params = Vec<Binding>.new();
                     collect_parameter_bindings(binding_function_parameters(item), &params);
+                    Vec<LLVMOpaqueValue*> bt_arg_records = Vec<LLVMOpaqueValue*>.new();
+                    LLVMOpaqueValue* frame_pointer = (LLVMOpaqueValue*)0;
+                    if (params.len() > 0) {
+                        frame_pointer = llvm_bt_read_frame_pointer(self.ctx, self.builder);
+                    }
                     TypeEnv infer_env = TypeEnv.new();
                     i64 p = 0;
                     while (p < params.len()) {
@@ -1382,7 +1663,11 @@ impl LlvmGenerator {
                         if (param_type_id == TYPE_UNKNOWN) {
                             param_type_id = types.parse_type_name(type_str);
                         }
-                        if (!exact_function_type && param.declared_type.kind == ProjectionTypeKind.Pointer) {
+                        if (binding_is_variadic_parameter(param)
+                            || param.declared_type.kind == ProjectionTypeKind.Array) {
+                            param_type_id = types.resolve_subst(
+                                typecheck_parameter_type_id(types, param));
+                        } else if (!exact_function_type && param.declared_type.kind == ProjectionTypeKind.Pointer) {
                             param_type_id = types.get_pointer(param_type_id, true);
                         } else if (!exact_function_type
                             && param.declared_type.kind == ProjectionTypeKind.Reference) {
@@ -1395,12 +1680,19 @@ impl LlvmGenerator {
                         LLVMOpaqueValue* alloca_ptr = LLVMBuildAlloca(self.builder, param_llvm_type, param.name);
                         LLVMOpaqueValue* param_val = LLVMGetParam(fn_val, (u32)p);
                         LLVMBuildStore(self.builder, param_val, alloca_ptr);
+                        bt_arg_records.push(llvm_bt_make_arg_record(
+                            self.ctx, self.module, self.builder, self.target_data,
+                            fn_name.to_str(), param.name, param_llvm_type,
+                            alloca_ptr, frame_pointer));
                         ctx.add_local(param_name_id, alloca_ptr, param_type_id, true);
                         llvm_register_local_drops(&ctx, param_name_id, alloca_ptr, param_type_id, true);
                         infer_env.insert(param_name_id, param_type_id);
                         dec_str.drop();
                         p += 1;
                     }
+                    llvm_bt_record_args(self.ctx, self.module, fn_val,
+                        &bt_arg_records, &bt_arg_function_records);
+                    bt_arg_records.drop();
                     params.drop();
 
                     ExprLowerer lowerer = ExprLowerer.new(pool, types, names);
@@ -1549,6 +1841,10 @@ impl LlvmGenerator {
                                     LLVMOpaqueValue* fn_val = LLVMGetNamedFunction(self.module, mangled.to_str());
                                     mangled.drop();
                                     if (fn_val != (LLVMOpaqueValue*)0 && LLVMCountBasicBlocks(fn_val) == 0) {
+                                        llvm_bt_set_frame_pointer(self.ctx, fn_val);
+                                        str emitted_name = LLVMGetValueName(fn_val);
+                                        llvm_bt_record_function(self.ctx, self.module, fn_val,
+                                            emitted_name, cursor.span, source_paths, &bt_function_records);
                                         ctx.current_fn = fn_val;
                                         ctx.current_return_type = ret_type_id;
 
@@ -1558,6 +1854,11 @@ impl LlvmGenerator {
 
                                         Vec<Binding> params = Vec<Binding>.new();
                                         collect_parameter_bindings(params_node, &params);
+                                        Vec<LLVMOpaqueValue*> bt_arg_records = Vec<LLVMOpaqueValue*>.new();
+                                        LLVMOpaqueValue* frame_pointer = (LLVMOpaqueValue*)0;
+                                        if (params.len() > 0) {
+                                            frame_pointer = llvm_bt_read_frame_pointer(self.ctx, self.builder);
+                                        }
                                         i64 p = 0;
                                         while (p < params.len()) {
                                             Binding* param = params.get_ptr(p);
@@ -1572,7 +1873,11 @@ impl LlvmGenerator {
                                             if (param_type_id == TYPE_UNKNOWN) {
                                                 param_type_id = types.parse_type_name(type_str);
                                             }
-                                            if (!exact_function_type
+                                            if (binding_is_variadic_parameter(param)
+                                                || param.declared_type.kind == ProjectionTypeKind.Array) {
+                                                param_type_id = types.resolve_subst(
+                                                    typecheck_parameter_type_id(types, param));
+                                            } else if (!exact_function_type
                                                 && (param.declared_type.kind == ProjectionTypeKind.Pointer
                                                     || param.declared_type.kind == ProjectionTypeKind.Reference || param_type_id == TYPE_VOID)) {
                                                 param_type_id = types.get_pointer(param_type_id, true);
@@ -1581,11 +1886,18 @@ impl LlvmGenerator {
                                             LLVMOpaqueValue* alloca_ptr = LLVMBuildAlloca(self.builder, param_llvm_type, param.name);
                                             LLVMOpaqueValue* param_val = LLVMGetParam(fn_val, (u32)p);
                                             LLVMBuildStore(self.builder, param_val, alloca_ptr);
+                                            bt_arg_records.push(llvm_bt_make_arg_record(
+                                                self.ctx, self.module, self.builder, self.target_data,
+                                                emitted_name, param.name, param_llvm_type,
+                                                alloca_ptr, frame_pointer));
                                             ctx.add_local(param_name_id, alloca_ptr, param_type_id, true);
                                             llvm_register_local_drops(&ctx, param_name_id, alloca_ptr, param_type_id, true);
                                             dec_str.drop();
                                             p += 1;
                                         }
+                                        llvm_bt_record_args(self.ctx, self.module, fn_val,
+                                            &bt_arg_records, &bt_arg_function_records);
+                                        bt_arg_records.drop();
                                         // Cast receivers are borrowed views, not owned values:
                                         // the caller retains ownership, so the by-value
                                         // receiver must not run the destructor on exit.
@@ -1638,6 +1950,12 @@ impl LlvmGenerator {
 
         llvm_drain_mono_queue(&ctx, types, names, pool);
         mono_define_generic_layouts(&ctx);
+        if (!module_object) {
+            llvm_bt_emit_tables(self.ctx, self.module,
+                &bt_function_records, &bt_arg_function_records);
+        }
+        bt_function_records.drop();
+        bt_arg_function_records.drop();
 
         self.unresolved_calls = ctx.unresolved_calls;
         return ctx.unresolved_calls == 0 && self.ownership_diagnostics.is_empty();

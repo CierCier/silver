@@ -51,8 +51,6 @@ def main() -> int:
     env = os.environ.copy()
     with tempfile.TemporaryDirectory(prefix="silver-native-assert-") as temporary:
         temp = pathlib.Path(temporary)
-        env["SILVER_STAGE0"] = str(temp / "missing-stage0")
-        env["SILVER_STAGE1_NATIVE"] = "1"
         env["SILVER_STAGE1_CC"] = str(pathlib.Path(cc).resolve())
 
         root_fixture = here / "assert_native_root_fixture.ag"

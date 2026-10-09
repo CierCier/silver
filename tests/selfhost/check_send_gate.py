@@ -11,8 +11,6 @@ import tempfile
 def check(stage1: pathlib.Path, fixture: pathlib.Path, expected: bool,
           expected_types: tuple[str, ...] = ()) -> None:
     env = os.environ.copy()
-    env["SILVER_STAGE0"] = "/nonexistent/silver-stage0"
-    env["SILVER_STAGE1_NATIVE"] = "1"
     result = subprocess.run(
         [str(stage1), "check", str(fixture)],
         cwd=fixture.parents[1],
@@ -55,8 +53,6 @@ def main() -> None:
     stage1 = args.stage1.resolve()
     fixture = fixtures / "launch_send_test.ag"
     env = os.environ.copy()
-    env["SILVER_STAGE0"] = "/nonexistent/silver-stage0"
-    env["SILVER_STAGE1_NATIVE"] = "1"
     with tempfile.TemporaryDirectory(prefix="silver-send-build-") as temporary:
         output = pathlib.Path(temporary) / "send-test"
         result = subprocess.run(

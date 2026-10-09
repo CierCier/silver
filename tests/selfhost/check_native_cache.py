@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Prove native stage0/stage1 cache and artifact parity on Linux.
+"""Compare native stage0/stage1 cache and artifact behavior on Linux.
 
 This gate builds the same source through both command surfaces, repeats each
 build, checks an uncached build, and compares executable bytes plus the
-content-addressed cache tree. During the backend migration stage1 delegates
-native work to stage0, so this is a regression gate for that compatibility
-boundary, not a claim that the Silver cache implementation is complete.
+content-addressed cache tree. Stage0 is the comparison baseline; stage1 runs its
+own backend. This gate does not claim that the full Silver cache contract is
+complete.
 """
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ def run(
     )
 
 
-def exercise(binary: pathlib.Path, temp_root: pathlib.Path, stage0: pathlib.Path) -> dict[str, object]:
+def exercise(binary: pathlib.Path, temp_root: pathlib.Path) -> dict[str, object]:
     work = temp_root / "work"
     cache = work / "cache"
     source = work / "main.ag"
@@ -90,7 +90,6 @@ def exercise(binary: pathlib.Path, temp_root: pathlib.Path, stage0: pathlib.Path
     source.write_text("i32 main() {\n    return 0;\n}\n", encoding="utf-8")
 
     env = os.environ.copy()
-    env["SILVER_STAGE0"] = str(stage0)
     base = [str(source), "--cache-dir", str(cache), "--no-progress"]
     first = run(binary, [*base, "-o", str(output)], REPO_ROOT, env)
     first_cache = snapshot(cache)
@@ -163,9 +162,9 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="silver-cache-parity-") as temp:
         temp_root = pathlib.Path(temp)
-        old = exercise(stage0, temp_root, stage0)
+        old = exercise(stage0, temp_root)
         shutil.rmtree(temp_root / "work")
-        new = exercise(stage1, temp_root, stage0)
+        new = exercise(stage1, temp_root)
 
         failures: list[str] = []
         for label, result in (("stage0", old), ("stage1", new)):

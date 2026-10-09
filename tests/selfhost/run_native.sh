@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# Build the Silver stage1 binary, then run the native integration corpus
-# through its Linux command surface. During the backend migration stage1 keeps
-# its verified frontend commands and delegates native compilation to stage0;
-# this script makes that boundary executable and reproducible.
+# Bootstrap stage1, then exercise its Linux native backend without a stage0
+# runtime bridge.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -21,7 +19,7 @@ for argument in "$@"; do
         break
     fi
 done
-stage0=${SILVER_STAGE0:-"$root/target/$profile/agc"}
+stage0="$root/target/$profile/agc"
 if [[ ! -x "$stage0" ]]; then
     if [[ "$profile" == "release" ]]; then
         cargo build --manifest-path "$root/Cargo.toml" -p agc --release
@@ -40,11 +38,7 @@ stage1="$work/agc-stage1"
 cached_stage1="$work/agc-stage1-cached"
 "$stage0" build "$root/silver.toml" -o "$cached_stage1"
 
-# The bridge resolves this explicitly, rather than depending on the caller's
-# working directory or a PATH lookup.
-export SILVER_STAGE0="$stage0"
-python3 "$root/tests/selfhost/check_bridge.py" --stage1 "$stage1"
-python3 "$root/tests/selfhost/check_bridge.py" --stage1 "$cached_stage1"
+unset SILVER_STAGE0 SILVER_STAGE1_NATIVE
 
 cached_rebuild="$work/agc-stage1-cached-rebuild"
 "$cached_stage1" build "$root/silver.toml" -o "$cached_rebuild"

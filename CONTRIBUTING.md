@@ -28,7 +28,7 @@ cargo run -p agc -- build silver.toml --bin agc -o /tmp/agc-stage1
 ```
 
 An executable produced by stage0 is not evidence that stage1 can compile itself.
-Verify which commands run locally and which delegate to stage0 before making a
+Verify stage1 command behavior with stage0 unavailable before making a
 self-hosting claim. See [the self-host gates](tests/selfhost/README.md).
 
 ## Make one coherent change

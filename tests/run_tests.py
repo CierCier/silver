@@ -171,6 +171,8 @@ WASM_SKIP = {
     "cfg_global_block_test": "native-gated global block semantics",
     # module artifact test precompiles a .agm with native defaults
     "module_import_test": "precompiled .agm artifact workflow is native-only in v1",
+    "module_artifact_no_source_test": "precompiled native object workflow is unavailable on wasm",
+    "module_artifact_unsupported_test": "source-less native object artifact workflow is unavailable on wasm",
     # benches / long-running
     "memcpy_bench": "performance benchmark, not a correctness test",
     "memory_stress": "large memory footprint (wasm linear memory cap)",
@@ -337,6 +339,52 @@ class BackgroundServices:
                 )
                 if res.returncode != 0:
                     print(f"{C_YELLOW}warning: failed to emit module_lib for module_import_test{C_RESET}")
+        if "module_artifact_no_source_test" in test_names:
+            self.modlib_dir.mkdir(parents=True, exist_ok=True)
+            fixture = self.root / "tests/modules/module_no_source_lib.ag"
+            mod_src = self.modlib_dir / "module_no_source_lib.ag"
+            shutil.copyfile(fixture, mod_src)
+            cmd = [str(agc_bin), "--emit=module", str(mod_src)]
+            eff_target = target or self.target
+            if eff_target:
+                cmd.extend(["--target", eff_target])
+            res = subprocess.run(
+                cmd,
+                cwd=str(self.modlib_dir),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if res.returncode != 0:
+                raise RuntimeError("failed to emit source-independent module artifact")
+            artifact = self.modlib_dir / "module_no_source_lib.agm"
+            object_file = self.modlib_dir / "module_no_source_lib.o"
+            if not artifact.is_file() or not object_file.is_file():
+                raise RuntimeError("source-independent module artifact outputs are missing")
+            if mod_src.exists():
+                mod_src.unlink()
+        if "module_artifact_unsupported_test" in test_names:
+            self.modlib_dir.mkdir(parents=True, exist_ok=True)
+            fixture = self.root / "tests/modules/module_no_source_pointer_lib.ag"
+            mod_src = self.modlib_dir / fixture.name
+            shutil.copyfile(fixture, mod_src)
+            cmd = [str(agc_bin), "--emit=module", str(mod_src)]
+            eff_target = target or self.target
+            if eff_target:
+                cmd.extend(["--target", eff_target])
+            res = subprocess.run(
+                cmd,
+                cwd=str(self.modlib_dir),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if res.returncode != 0:
+                raise RuntimeError("failed to emit unsupported-signature module artifact")
+            artifact = self.modlib_dir / "module_no_source_pointer_lib.agm"
+            object_file = self.modlib_dir / "module_no_source_pointer_lib.o"
+            if not artifact.is_file() or not object_file.is_file():
+                raise RuntimeError("unsupported-signature module artifact outputs are missing")
+            if mod_src.exists():
+                mod_src.unlink()
         # Node TLS server
         if ("tls_test" in test_names or "https_server_test" in test_names) and self.has_node and self.openssl_lib:
             self._spawn_daemon(["node", "tests/tls_server.js"], "TLS_NODE_READY", "tls_node.log")
@@ -441,7 +489,7 @@ def get_extra_flags(name: str, content: str, services: BackgroundServices) -> Li
         flags.extend(["-L", services.openssl_lib])
     if name == "rust_ffi_test" and services.ffi_dir:
         flags.extend(["-L", services.ffi_dir])
-    if name == "module_import_test":
+    if name in ("module_import_test", "module_artifact_no_source_test", "module_artifact_unsupported_test"):
         flags.extend(["-I", str(services.modlib_dir)])
     if name == "cfg_test":
         flags.extend(["--cfg", "cfg_test_flag=1,cpu.sse41=1,cpu.avx2=1,cpu.avx512f=1"])
@@ -619,15 +667,19 @@ def run_single_test(
                 pass
 
     if name == "backtrace_test":
-        needed_frames = [
-            "level3 at backtrace_test.ag:",
-            "level2 at backtrace_test.ag:",
-            "level1 at backtrace_test.ag:",
-            "main at backtrace_test.ag:",
-            "__silver_assert_failed",
-            "args: x=",
+        frame_lines = run_output.splitlines()
+        user_frames = ["level3", "level2", "level1", "main"]
+        missing = [
+            f"{frame} at backtrace_test.ag:"
+            for frame in user_frames
+            if not any(
+                f"{frame} at " in line and re.search(r"\bbacktrace_test\.ag:\d+", line)
+                for line in frame_lines
+            )
         ]
-        missing = [f for f in needed_frames if f not in run_output]
+        for expected in ("__silver_assert_failed", "args: x="):
+            if expected not in run_output:
+                missing.append(expected)
         if missing:
             return TestResult(name, "FAIL", f"backtrace missing frames: {', '.join(missing)}", compile_ms, run_ms, run_output=run_output)
 

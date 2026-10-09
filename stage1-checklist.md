@@ -1,6 +1,6 @@
 # Stage1 feature and migration checklist
 
-Updated: 2026-10-02. This is a status inventory of the self-host migration, not
+Updated: 2026-10-08. This is a status inventory of the self-host migration, not
 a promise that every feature described by the language syntax is implemented
 end to end in stage1. A feature may parse or pass a semantic-status comparison
 while still lacking type checking, native lowering, or runtime parity.
@@ -19,14 +19,26 @@ while still lacking type checking, native lowering, or runtime parity.
 - [x] Stage0 verification passes: 592 Cargo tests; complete fresh-cache integration run has 224 passed, 0 failed, and 2 skipped. The range-continue regression passes after repairing the bootstrap increment target. Stage0 now checks `else-if` chains iteratively instead of nesting one frame per arm, so long Silver dispatch chains no longer exhaust its 32-deep budget.
 - [x] Expanded frontend checks compare 373 source files for token/span and AST/CST-span behavior, and 377 files for semantic acceptance status; current evidence reports zero mismatches and zero deferred-boundary skips.
 - [x] Eleven focused semantic regression fixtures pass, including generic type and borrow-escape cases.
-- [~] Selected direct-native stage1 gates pass with stage0 disabled: smoke builds/runs, formatting, linker behavior, assertions, raw argv, enum/layout and target ABI cases, generic free calls, cache behavior, and the selected stage2 gate.
+- [~] The maintained native no-stage0 gate passes all 66 focused integration tests, along with smoke builds/runs, formatting, linker behavior, assertions, raw argv, enum/layout and target ABI cases, generic free calls, cache behavior, and the selected stage2 gate.
 - [~] Stage1 builds stage2 with stage0 unavailable; stage2 handles help/version, lex/parse/check on input over 128 tokens, and builds/runs six programs covering control flow, generic calls, function pointers, and aggregate layouts. This is selected stage2 evidence, not full stage2 or stage3 parity.
-- [ ] The latest full integration corpus with direct native stage1 and stage0 unavailable has 121 passed, 103 failed, and 2 skipped out of 226. Nine drop-behavior fixtures pass that failed before (condvar, rwlock, assignment/return/shadow/receiver drops, cascades, field predrop, reinit-after-move); `guard_test` still needs `launch` syntax and `memory_pentest` still needs missing native lowering. Native parity is incomplete.
+- [ ] The last complete 270-test serial corpus run used the pre-loop-unrolling stage1 binary with `SILVER_STAGE0=/bin/false`: 258 passed, 9 failed, and 3 skipped. Its failures were `json_containers_test`, `json_robust_test`, `json_tcp_test`, `json_test`, `macro_test`, `module_import_test`, `serialize_auto_test`, `serialize_containers_test`, and `vec_macro_test`; derive behavior and the stage0-style AGM workflow remain open. Five focused macro fixtures now pass with stage0 blocked, including the subsequently added variadic statement-loop case. The broader `macro_test` still fails because expression macros with local statements and a final `return` are unsupported; `vec_macro_test` also remains unsupported. Skips: `http_perf_test`, `mem_growth_watch`, and `rust_ffi_test`. Rerun the now 271-case corpus after the loop-unrolling change; native parity is incomplete.
 - [ ] Full stage0-independent package/build/run/test behavior, complete stage2 coverage, stage3 self-compilation, native ownership/leak parity, and full runtime parity are not established.
 
 Primary evidence: [self-host gate definitions](tests/selfhost/README.md) and
 the runtime fixtures linked below. Test totals are from the latest recorded
 run and should be refreshed after material changes.
+
+## Completion work plan
+
+1. Extend the limited stage1 macro expansion with `@vec`, hygienic names, and
+   broader control flow, and implement `#[serialize]`/JSON
+   derive behavior without a stage0 execution path.
+2. Close the AGM gap by aligning module publication, import metadata, native
+   object generation, and the module integration fixture around stage1-owned
+   contracts; retain local errors for unsupported artifact forms.
+3. Rebuild stage1, rerun the full integration corpus and no-stage0 gates, then
+   audit the driver, scripts, and docs for any stage0 runtime launch. Stage0
+   remains permitted only for bootstrapping stage1 and verification.
 
 ## CLI, workspace, and build lifecycle
 
@@ -37,14 +49,14 @@ run and should be refreshed after material changes.
 | `parse` lossless CST dump | [~] | Span boundaries and parser acceptance are compared; identical AST/CST trees or serialization are not expected or proven. |
 | `check` command | [~] | Local frontend and selected overload diagnostics work; full typed checking and rendered diagnostic parity remain open. |
 | `ast` command | [~] | Command exists in the driver; complete stage0-compatible behavior and parity need a focused gate. |
-| `build`, `run`, `test`, package operations | [~] | Selected source builds/runs use the native backend; unsupported programs and normal package paths can delegate through the explicit stage0 bridge. Full native command coverage fails. |
+| `build`, `run`, `test`, package operations | [~] | Supported source and workspace build/run requests use stage1; unsupported requests fail locally. Several integration fixtures still expose native-backend gaps. |
 | Manifest parsing and target selection | [x] | Stage1 plans supported workspace targets and target selection. Expand compatibility coverage against stage0. |
 | Workspace dependencies | [~] | Local/workspace resolution is present. Git package dependencies and targets are explicitly unsupported by the stage1 resolver. |
 | Package manifest and target keys | [~] | A supported subset is parsed; unknown keys fail with an error. Full manifest compatibility is unproven. |
 | Clean/init commands | [~] | Recognized by workspace command planning; end-to-end parity is not established by the current no-stage0 corpus. |
 | Native compiler cache | [~] | Cache behavior parity has a focused passing gate. Reproducible compiler artifact digests and the full cache contract remain open. |
-| Stage0 bridge | [x] | Explicit compatibility bridge exists and is used for paths not handled by the native backend. |
-| Bridge-free operation | [ ] | The complete command and integration surface must work with stage0 unavailable. |
+| Stage0 runtime delegation | [x] | Stage1 has no stage0 dispatch path; the workspace gate traps attempts to launch a supplied fake stage0 executable. |
+| Native integration parity | [ ] | The full integration corpus must pass using stage1 alone; current failing fixtures remain open. |
 
 ## Lexing, parsing, and source representation
 

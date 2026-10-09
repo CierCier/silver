@@ -79,8 +79,6 @@ def check(
     compiler: pathlib.Path, source: pathlib.Path, *, stage1: bool, cwd: pathlib.Path
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
-    if stage1:
-        env["SILVER_STAGE0"] = "/nonexistent"
     return subprocess.run(
         ([str(compiler), "check", str(source), "--no-cache"] if stage1 else
          [str(compiler), "--no-cache", "check", str(source)]),
@@ -116,7 +114,6 @@ i32 main() {
 }
 """
     stage1_env = os.environ.copy()
-    stage1_env["SILVER_STAGE0"] = "/nonexistent"
     with tempfile.TemporaryDirectory(prefix="silver-drop-ancestor-import-") as name:
         work = pathlib.Path(name)
         module_source = work / "drop_ancestor_owners.ag"
@@ -232,7 +229,6 @@ i32 main() {
 }
 """
     stage1_env = os.environ.copy()
-    stage1_env["SILVER_STAGE0"] = "/nonexistent"
     with tempfile.TemporaryDirectory(prefix="silver-drop-ancestor-enum-import-") as name:
         work = pathlib.Path(name)
         module_source = work / "drop_ancestor_enums.ag"
@@ -347,7 +343,6 @@ i32 main() {
 }
 """
     stage1_env = os.environ.copy()
-    stage1_env["SILVER_STAGE0"] = "/nonexistent"
     with tempfile.TemporaryDirectory(prefix="silver-drop-ancestor-method-import-") as name:
         work = pathlib.Path(name)
         module_source = work / "drop_ancestor_methods.ag"

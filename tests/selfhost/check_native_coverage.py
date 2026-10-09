@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""Measure how much of the integration corpus the stage1-owned native backend
-can compile and run WITHOUT the stage0 bridge.
-
-Sets SILVER_STAGE0 to a missing binary so any fallback to the bridge fails.
-Reports per-test pass/fail through the stage1 backend only. This is the
-coverage gate for removing the bridge: it is green when every test that
-passes through the bridge also passes through the stage1 backend.
-"""
+"""Measure how much of the integration corpus stage1 can compile and run."""
 
 from __future__ import annotations
 
@@ -29,8 +22,6 @@ def main() -> int:
     root = pathlib.Path(__file__).parents[2]
 
     env = os.environ.copy()
-    env["SILVER_STAGE0"] = "/nonexistent-stage0-agc"
-    env["SILVER_STAGE1_NATIVE"] = "1"
     # Server tests bind ports and never exit on their own; the integration
     # harness drives them specially, so they are out of scope here.
     skip = {"http_server_test", "http2_server_test", "https_server_test",
@@ -77,9 +68,7 @@ def main() -> int:
     print(f"stage1-backend coverage: {len(passed)} passed, {len(failed)} failed")
     for name, reason in failed:
         print(f"  FAIL {name}: {reason}")
-    # GATE-002: real gate, not informational. Green means every bridge-passing
-    # test also passes through the stage1 backend (the removal condition for
-    # the bridge). Use --expect-fail to triage known gaps without going red.
+    # Use --expect-fail to triage known backend gaps without going red.
     if failed and not args.expect_fail:
         return 1
     return 0

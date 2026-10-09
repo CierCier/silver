@@ -23,9 +23,6 @@ if [[ ! -x "$stage0" ]]; then
     cargo build --manifest-path "$root/Cargo.toml" -p agc
 fi
 stage0="$root/target/debug/agc"
-# Self-host parity checks may intentionally cross the compatibility bridge;
-# select this repository's freshly built stage0 explicitly.
-export SILVER_STAGE0="$stage0"
 python3 "$root/tests/selfhost/check_float_format.py" --stage0 "$stage0"
 
 stage1="$work/agc-stage1"

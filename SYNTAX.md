@@ -408,9 +408,17 @@ likewise skips resolution when rejected.
 
 ### Macro Definitions
 
-Macro definitions parse but are **not expanded** — only built-in compiler macros
-(`@print`, `@println`, `@eprint`, `@eprintln`, `@fprint`, `@sprint`, `@format`,
-`@size`, `@align`, `@hash`, `@json`, `@from_json`, `@memcpy`, `@memset`, `@memmove`) work.
+Stage1 currently expands positional user macros, including a final variadic
+parameter. A variadic binding supports `.len` and constant nonnegative integer
+indexing. Statement macros may also use `for item in values { ... }` to unroll
+their body once per argument in a final variadic binding; an empty binding
+produces no iterations. This is not general iteration or variadic splicing.
+Expression macros support a direct `return` expression or an `if`/`else` whose
+branches each return an expression; statement macros must not contain `return`.
+Nested calls are supported. Hygienic local names and broader control-flow
+expression macros are not implemented yet. Built-in compiler macros include `@print`, `@println`,
+`@eprint`, `@eprintln`, `@fprint`, `@sprint`, `@format`, `@size`, `@align`,
+`@hash`, `@json`, `@from_json`, `@memcpy`, `@memset`, and `@memmove`.
 
 ```silver
 macro swap(a, b) {

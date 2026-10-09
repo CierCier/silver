@@ -540,7 +540,8 @@ bool item_first_parameter_is_self(SyntaxNode* parameters) {
     return last_identifier != (SyntaxNode*)0 && strcmp(last_identifier.text, "self") == 0;
 }
 
-bool impl_has_static_method(SyntaxNode* root, str owner_name, str method_name) {
+bool impl_has_method(SyntaxNode* root, str owner_name, str method_name,
+                    bool instance_method) {
     if (root == (SyntaxNode*)0 || owner_name == (str)0 || method_name == (str)0) {
         return false;
     }
@@ -576,7 +577,7 @@ bool impl_has_static_method(SyntaxNode* root, str owner_name, str method_name) {
                     }
                     if (name != (SyntaxNode*)0 && parameters != (SyntaxNode*)0
                         && strcmp(name.text, method_name) == 0
-                        && !item_first_parameter_is_self(parameters)) {
+                        && item_first_parameter_is_self(parameters) == instance_method) {
                         return true;
                     }
                     while (scan != (SyntaxNode*)0
@@ -591,6 +592,14 @@ bool impl_has_static_method(SyntaxNode* root, str owner_name, str method_name) {
         item = item.next_sibling;
     }
     return false;
+}
+
+bool impl_has_static_method(SyntaxNode* root, str owner_name, str method_name) {
+    return impl_has_method(root, owner_name, method_name, false);
+}
+
+bool impl_has_instance_method(SyntaxNode* root, str owner_name, str method_name) {
+    return impl_has_method(root, owner_name, method_name, true);
 }
 
 i64 enum_variant_count(SyntaxNode* root, str enum_name) {
@@ -626,7 +635,9 @@ SyntaxNode* impl_target_identifier(SyntaxNode* impl_item) {
                 angle_depth += 1;
             } else if ((child.token_kind == TokenKind.Greater || strcmp(child.text, ">") == 0) && angle_depth > 0) {
                 angle_depth -= 1;
-            } else if ((node_is_identifier(child) || strcmp(child.text, "Vec") == 0 || strcmp(child.text, "Optional") == 0) && angle_depth == 0) {
+            } else if ((node_is_identifier(child) || is_primitive_type_token(child.token_kind)
+                || strcmp(child.text, "Vec") == 0 || strcmp(child.text, "Optional") == 0)
+                && angle_depth == 0) {
                 if (saw_for && after_for_ident == (SyntaxNode*)0) {
                     after_for_ident = child;
                 } else if (saw_impl && first_ident == (SyntaxNode*)0) {

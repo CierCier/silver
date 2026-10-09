@@ -789,6 +789,22 @@ impl TypeTable {
                     }
                     elements.drop();
                 }
+                if (open == start) {
+                    String element_text = String.new();
+                    i64 i = open + 1;
+                    while (i < len - 1) {
+                        element_text.push(name[i]);
+                        i += 1;
+                    }
+                    u32 element_id = self.parse_type_name(element_text.to_str());
+                    element_text.drop();
+                    if (element_id == TYPE_UNKNOWN) { return TYPE_UNKNOWN; }
+                    Vec<u32> args = Vec<u32>.new();
+                    args.push(element_id);
+                    u32 result = self.get_named_args("Slice", &args);
+                    args.drop();
+                    return result;
+                }
             }
         }
         if (name[len - 1] == (u8)42 || name[len - 1] == (u8)38) {

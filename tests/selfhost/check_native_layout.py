@@ -19,8 +19,6 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="silver-native-layout-") as temporary:
         output = pathlib.Path(temporary) / "layout"
         env = os.environ.copy()
-        env["SILVER_STAGE0"] = str(pathlib.Path(temporary) / "missing-stage0")
-        env["SILVER_STAGE1_NATIVE"] = "1"
         built = subprocess.run(
             [str(args.stage1.resolve()), "build", str(fixture), "--no-cache", "-o", str(output)],
             cwd=root, env=env, capture_output=True, text=True, timeout=180, check=False,
