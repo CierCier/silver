@@ -1,0 +1,14 @@
+import std.string;
+
+macro str borrow_after_pointer_write() {
+    String owner = String.from_str("short-lived");
+    str local = "static-data";
+    str* alias = &local;
+    *alias = owner.to_str();
+    return local;
+}
+
+i32 main() {
+    str borrowed = @borrow_after_pointer_write();
+    return borrowed[0] == (u8)'s' ? 0 : 1;
+}

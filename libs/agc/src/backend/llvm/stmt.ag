@@ -376,6 +376,18 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
                 if (local != (LlvmLocal*)0) {
                     local.is_string_literal_backed = false;
                 }
+            } else {
+                TypeEntry* target_entry = ctx.types.get(
+                    ctx.types.resolve_subst(target_type));
+                if (target_entry != (TypeEntry*)0
+                    && target_entry.kind == TypeKind.Str) {
+                    // An indirect string write may alias any live local.
+                    i64 local_index = 0;
+                    while (local_index < ctx.locals.len()) {
+                        ctx.locals.get_ptr(local_index).is_string_literal_backed = false;
+                        local_index += 1;
+                    }
+                }
             }
         }
         return;

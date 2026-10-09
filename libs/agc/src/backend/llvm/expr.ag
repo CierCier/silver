@@ -3343,6 +3343,80 @@ bool llvm_expr_references_block_local(LlvmContext* ctx, u32 expr_id,
     return false;
 }
 
+bool llvm_source_is_std_json(LlvmContext* ctx, i64 file_id) {
+    if (file_id <= 0 || file_id > ctx.source_paths.len()) { return false; }
+    String* source_path = ctx.source_paths.get_ptr((u32)(file_id - 1));
+    str path = source_path.to_str();
+    str suffix = "std/json.ag";
+    i64 path_len = strlen(path);
+    i64 suffix_len = strlen(suffix);
+    if (path_len < suffix_len) { return false; }
+    i64 start = path_len - suffix_len;
+    i64 i = 0;
+    while (i < suffix_len) {
+        if (path[start + i] != suffix[i]) { return false; }
+        i += 1;
+    }
+    return start == 0 || path[start - 1] == (u8)'/';
+}
+
+bool llvm_std_json_writer_finish_is_detached(LlvmContext* ctx) {
+    i64 writer_count = 0;
+    i64 finish_count = 0;
+    SyntaxNode* item = ctx.root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Struct) {
+            SyntaxNode* name = item_identifier(item);
+            if (name != (SyntaxNode*)0 && strcmp(name.text, "JsonWriter") == 0) {
+                writer_count += 1;
+                if (!llvm_source_is_std_json(ctx, item.span.file)) { return false; }
+            }
+        } else if (item.kind == NodeKind.Impl) {
+            SyntaxNode* target = impl_target_identifier(item);
+            if (target != (SyntaxNode*)0 && strcmp(target.text, "JsonWriter") == 0) {
+                SyntaxNode* block = item.first_child;
+                while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+                    block = block.next_sibling;
+                }
+                SyntaxNode* member = block == (SyntaxNode*)0
+                    ? (SyntaxNode*)0 : block.first_child;
+                while (member != (SyntaxNode*)0) {
+                    if (member.kind == NodeKind.Token
+                        && member.token_kind == TokenKind.Semicolon) {
+                        member = member.next_sibling;
+                        continue;
+                    }
+                    SyntaxNode* name = (SyntaxNode*)0;
+                    SyntaxNode* body = (SyntaxNode*)0;
+                    SyntaxNode* scan = member;
+                    while (scan != (SyntaxNode*)0) {
+                        if (scan.kind == NodeKind.Token
+                            && scan.token_kind == TokenKind.Semicolon) { break; }
+                        if (scan.kind == NodeKind.Block) { body = scan; break; }
+                        if (scan.kind == NodeKind.Token
+                            && scan.token_kind == TokenKind.Identifier) {
+                            name = scan;
+                        }
+                        scan = scan.next_sibling;
+                    }
+                    if (body != (SyntaxNode*)0 && name != (SyntaxNode*)0
+                        && strcmp(name.text, "finish") == 0) {
+                        finish_count += 1;
+                        // Only std/json's finish drains the writer before returning its buffer.
+                        if (!llvm_source_is_std_json(ctx, member.span.file)) {
+                            return false;
+                        }
+                    }
+                    member = body != (SyntaxNode*)0
+                        ? body.next_sibling : member.next_sibling;
+                }
+            }
+        }
+        item = item.next_sibling;
+    }
+    return writer_count == 1 && finish_count == 1;
+}
+
 bool llvm_block_result_is_detached_json_buffer(LlvmContext* ctx, u32 expr_id,
                                                 u32 result_type) {
     TypeEntry* result_entry = ctx.types.get(ctx.types.resolve_subst(result_type));
@@ -3359,7 +3433,8 @@ bool llvm_block_result_is_detached_json_buffer(LlvmContext* ctx, u32 expr_id,
     TypeEntry* receiver_entry = ctx.types.get(receiver_type);
     return receiver_entry != (TypeEntry*)0
         && receiver_entry.kind == TypeKind.Named
-        && strcmp(ctx.types.names.get(receiver_entry.name_id), "JsonWriter") == 0;
+        && strcmp(ctx.types.names.get(receiver_entry.name_id), "JsonWriter") == 0
+        && llvm_std_json_writer_finish_is_detached(ctx);
 }
 
 bool llvm_block_result_aliases_local(LlvmContext* ctx, LLVMOpaqueValue* value,
@@ -3635,6 +3710,13 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
 
     if (expr.kind == ExprKind.Unary) {
         if (expr.aux == (u32)TokenKind.BitwiseAnd) {
+            AstExpr* borrowed_expr = ctx.pool.get_expr(expr.inner0);
+            if (borrowed_expr.kind == ExprKind.Var) {
+                LlvmLocal* local = ctx.find_local(borrowed_expr.aux);
+                if (local != (LlvmLocal*)0) {
+                    local.is_string_literal_backed = false;
+                }
+            }
             u32 inner_type = llvm_lvalue_type(ctx, expr.inner0);
             TypeEntry* inner_entry = ctx.types.get(inner_type);
             if (inner_entry.kind == TypeKind.Reference) {
