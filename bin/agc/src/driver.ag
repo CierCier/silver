@@ -515,7 +515,11 @@ bool is_frontend_command(String* command) {
 void remove_no_cache_option(Vec<String>* arguments) {
     i64 option = 1;
     while (option < arguments.len()) {
-        if (arguments.get_ptr(option).equals("--no-cache")) {
+        String* current = arguments.get_ptr(option);
+        if (current.equals("--")) { return; }
+        if (native_argument_consumes_value(arguments, option)) {
+            option += 2;
+        } else if (current.equals("--no-cache")) {
             String removed = arguments.take(option);
             removed.drop();
         } else {

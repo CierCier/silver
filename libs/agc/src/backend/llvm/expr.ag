@@ -3257,6 +3257,24 @@ LLVMOpaqueValue* llvm_emit_wait(LlvmContext* ctx, u32 expr_id) {
     return phi;
 }
 
+bool llvm_block_result_aliases_local(LlvmContext* ctx, LLVMOpaqueValue* value,
+                                     u32 result_type, i64 drop_mark) {
+    if (value == (LLVMOpaqueValue*)0) { return false; }
+    TypeEntry* entry = ctx.types.get(ctx.types.resolve_subst(result_type));
+    if (entry == (TypeEntry*)0
+        || (entry.kind != TypeKind.Pointer && entry.kind != TypeKind.Reference
+            && entry.kind != TypeKind.Str)) {
+        return false;
+    }
+    i64 i = drop_mark;
+    while (i < ctx.locals.len()) {
+        LlvmLocal* local = ctx.locals.get_ptr(i);
+        if (local.ptr == value) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
 LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
     if (expr_id == 0) { return (LLVMOpaqueValue*)0; }
     AstExpr* expr = ctx.pool.get_expr(expr_id);
@@ -3282,12 +3300,19 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             if (value == (LLVMOpaqueValue*)0) {
                 ctx.note_unresolved("block-expression", "result");
             }
-            if (llvm_type_needs_tracking(ctx, result_type)) {
-                llvm_clear_place_drops(ctx, result_expr);
-            }
-            llvm_emit_defers_above(ctx, defer_mark);
-            if (!ctx.is_terminated()) {
-                llvm_emit_drops_above(ctx, drop_mark);
+            bool borrowed_local = llvm_block_result_aliases_local(
+                ctx, value, result_type, drop_mark);
+            if (borrowed_local) {
+                ctx.note_unresolved("block-result-borrow",
+                    "result aliases block-local storage");
+            } else {
+                if (llvm_type_needs_tracking(ctx, result_type)) {
+                    llvm_clear_place_drops(ctx, result_expr);
+                }
+                llvm_emit_defers_above(ctx, defer_mark);
+                if (!ctx.is_terminated()) {
+                    llvm_emit_drops_above(ctx, drop_mark);
+                }
             }
         }
         ctx.pop_scope();
@@ -3520,12 +3545,19 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             LLVMOpaqueType* value_llvm_type = llvm_lower_type(ctx.ctx, ctx.types, value_type);
             LLVMOpaqueValue* previous = LLVMBuildLoad2(ctx.builder, value_llvm_type,
                 ptr, "postfix.load");
-            LLVMOpaqueValue* one = LLVMConstInt(value_llvm_type, 1, 0);
+            bool floating = type_is_float(value_type);
+            LLVMOpaqueValue* one = floating
+                ? LLVMConstRealOfString(value_llvm_type, "1.0")
+                : LLVMConstInt(value_llvm_type, 1, 0);
             LLVMOpaqueValue* updated = (LLVMOpaqueValue*)0;
             if (expr.aux == (u32)TokenKind.Increment) {
-                updated = LLVMBuildAdd(ctx.builder, previous, one, "postfix.increment");
+                updated = floating
+                    ? LLVMBuildFAdd(ctx.builder, previous, one, "postfix.increment")
+                    : LLVMBuildAdd(ctx.builder, previous, one, "postfix.increment");
             } else {
-                updated = LLVMBuildSub(ctx.builder, previous, one, "postfix.decrement");
+                updated = floating
+                    ? LLVMBuildFSub(ctx.builder, previous, one, "postfix.decrement")
+                    : LLVMBuildSub(ctx.builder, previous, one, "postfix.decrement");
             }
             LLVMBuildStore(ctx.builder, updated, ptr);
             return previous;
@@ -5551,6 +5583,10 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                     arg_type = expected_arg_type;
                 }
             }
+            bool slice_coercion = expected_arg_type != TYPE_UNKNOWN
+                && expected_arg_type != arg_type
+                && typecheck_slice_argument_coercion(
+                    ctx.types, expected_arg_type, arg_type);
             TypeEntry* arg_entry = ctx.types.get(arg_type);
             bool arg_is_indirect = arg_entry.kind == TypeKind.Pointer
                 || arg_entry.kind == TypeKind.Reference;
@@ -5568,6 +5604,21 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                     || (arg_is_indirect && explicit_borrow));
             if (str_prefix_as_slice) {
                 a_val = llvm_emit_str_as_slice_value(ctx, arg_id);
+                arg_type = expected_arg_type;
+            } else if (slice_coercion) {
+                LLVMOpaqueValue* slice_temp_ptr = (LLVMOpaqueValue*)0;
+                u32 slice_temp_type = TYPE_UNKNOWN;
+                a_val = llvm_emit_slice_argument(ctx, arg_id, expected_arg_type,
+                    &slice_temp_ptr, &slice_temp_type);
+                if (slice_temp_ptr != (LLVMOpaqueValue*)0) {
+                    borrowed_temp_ptrs.push(slice_temp_ptr);
+                    borrowed_temp_types.push(slice_temp_type);
+                }
+                if (a_val == (LLVMOpaqueValue*)0) {
+                    ctx.note_unresolved("slice-argument", method_name);
+                    a_val = LLVMConstNull(llvm_lower_type(
+                        ctx.ctx, ctx.types, expected_arg_type));
+                }
                 arg_type = expected_arg_type;
             } else if (borrow_temporary) {
                 u32 borrowed_expr_id = explicit_borrow ? argument.inner0 : arg_id;

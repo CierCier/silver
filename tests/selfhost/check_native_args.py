@@ -17,9 +17,15 @@ import subprocess
 import tempfile
 
 
-def run(stage1: pathlib.Path, args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def run(
+    stage1: pathlib.Path,
+    args: list[str],
+    env: dict[str, str],
+    cwd: pathlib.Path | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [str(stage1), *args],
+        cwd=cwd,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -60,6 +66,39 @@ def main() -> int:
             raise AssertionError(
                 f"native argv output mismatch: rc={executed.returncode}, "
                 f"stdout={executed.stdout!r}, stderr={executed.stderr!r}, expected={expected!r}"
+            )
+
+        forwarded = run(
+            stage1,
+            [
+                "run",
+                str(fixture),
+                "--run-arg",
+                "--no-cache",
+                "--run-arg",
+                "beta",
+            ],
+            env,
+        )
+        expected_forwarded = "--no-cache\nbeta\n"
+        if forwarded.returncode != 42 or forwarded.stdout != expected_forwarded:
+            raise AssertionError(
+                f"program arguments after -- changed: rc={forwarded.returncode}, "
+                f"stdout={forwarded.stdout!r}, stderr={forwarded.stderr!r}"
+            )
+
+        output_directory = pathlib.Path(temporary) / "output-option"
+        output_directory.mkdir()
+        output_value = run(
+            stage1,
+            ["build", str(fixture), "-o", "--no-cache"],
+            env,
+            cwd=output_directory,
+        )
+        if output_value.returncode != 0 or not (output_directory / "--no-cache").is_file():
+            raise AssertionError(
+                f"--no-cache was removed as an -o value: rc={output_value.returncode}, "
+                f"stderr={output_value.stderr!r}"
             )
     print("stage1 native argv passed")
     return 0

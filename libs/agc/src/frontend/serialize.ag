@@ -88,17 +88,63 @@ void json_synthesis_collect_fields(SyntaxNode* item, Vec<JsonSynthesisField>* fi
     }
 }
 
-bool json_synthesis_has_macro(SyntaxNode* node) {
+bool json_synthesis_declares_value_as(SyntaxNode* node, str value_name,
+                                      str type_name) {
+    if (node == (SyntaxNode*)0) { return false; }
+    SyntaxNode* cursor = node.first_child;
+    while (cursor != (SyntaxNode*)0) {
+        if (cursor.kind == NodeKind.Token
+            && strcmp(cursor.text, type_name) == 0
+            && cursor.next_sibling != (SyntaxNode*)0
+            && strcmp(cursor.next_sibling.text, value_name) == 0) {
+            return true;
+        }
+        if (json_synthesis_declares_value_as(cursor, value_name, type_name)) {
+            return true;
+        }
+        cursor = cursor.next_sibling;
+    }
+    return false;
+}
+
+bool json_synthesis_macro_targets_type(SyntaxNode* node, SyntaxNode* root,
+                                       str type_name) {
     if (node == (SyntaxNode*)0) { return false; }
     if (node.kind == NodeKind.Token && node.token_kind == TokenKind.At
         && node.next_sibling != (SyntaxNode*)0
-        && (strcmp(node.next_sibling.text, "json") == 0
-            || strcmp(node.next_sibling.text, "from_json") == 0)) {
-        return true;
+        && node.next_sibling.next_sibling != (SyntaxNode*)0) {
+        str macro_name = node.next_sibling.text;
+        SyntaxNode* args = node.next_sibling.next_sibling;
+        if ((strcmp(macro_name, "json") == 0
+                || strcmp(macro_name, "from_json") == 0)
+            && args.kind == NodeKind.Parenthesized) {
+            SyntaxNode* first = args.first_child;
+            if (first != (SyntaxNode*)0) {
+                if (strcmp(first.text, type_name) == 0) { return true; }
+                if (strcmp(macro_name, "json") == 0
+                    && json_synthesis_declares_value_as(
+                        root, first.text, type_name)) {
+                    return true;
+                }
+                if (strcmp(macro_name, "from_json") == 0) {
+                    SyntaxNode* type_part = first;
+                    while (type_part != (SyntaxNode*)0
+                        && !(type_part.kind == NodeKind.Token
+                            && type_part.token_kind == TokenKind.Comma)) {
+                        if (strcmp(type_part.text, type_name) == 0) {
+                            return true;
+                        }
+                        type_part = type_part.next_sibling;
+                    }
+                }
+            }
+        }
     }
     SyntaxNode* child = node.first_child;
     while (child != (SyntaxNode*)0) {
-        if (json_synthesis_has_macro(child)) { return true; }
+        if (json_synthesis_macro_targets_type(child, root, type_name)) {
+            return true;
+        }
         child = child.next_sibling;
     }
     return false;
@@ -284,12 +330,14 @@ void json_synthesis_append_dispose(String* output, str type_name,
 String serialize_synthesize_json(SyntaxNode* root) {
     String generated = String.new();
     if (root == (SyntaxNode*)0) { return generated; }
-    bool has_macro = json_synthesis_has_macro(root);
     SyntaxNode* item = root.first_child;
     while (item != (SyntaxNode*)0) {
         if (item.kind == NodeKind.Struct && !json_synthesis_generic_struct(item)
-            && (has_macro || item_has_attribute(item, "serialize")
-                || item_has_attribute(item, "serialise"))) {
+            && (item_has_attribute(item, "serialize")
+                || item_has_attribute(item, "serialise")
+                || (item_identifier(item) != (SyntaxNode*)0
+                    && json_synthesis_macro_targets_type(
+                        root, root, item_identifier(item).text)))) {
             SyntaxNode* name = item_identifier(item);
             if (name != (SyntaxNode*)0) {
                 Vec<JsonSynthesisField> fields = Vec<JsonSynthesisField>.new();

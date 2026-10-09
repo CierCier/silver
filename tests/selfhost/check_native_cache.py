@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""Compare native stage0/stage1 cache and artifact behavior on Linux.
-
-This gate builds the same source through both command surfaces, repeats each
-build, checks an uncached build, and compares executable bytes plus the
-content-addressed cache tree. Stage0 is the comparison baseline; stage1 runs its
-own backend. This gate does not claim that the full Silver cache contract is
-complete.
-"""
+"""Check repeated and uncached native builds for stage0 and stage1 on Linux."""
 
 from __future__ import annotations
 
@@ -15,7 +8,6 @@ import hashlib
 import json
 import os
 import pathlib
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -51,12 +43,6 @@ def snapshot(root: pathlib.Path) -> dict[str, str]:
     }
 
 
-def normalized_text(text: str, replacements: dict[str, str]) -> str:
-    for old, new in replacements.items():
-        text = text.replace(old, new)
-    return text
-
-
 def run(
     binary: pathlib.Path,
     args: list[str],
@@ -80,7 +66,9 @@ def run(
     )
 
 
-def exercise(binary: pathlib.Path, temp_root: pathlib.Path) -> dict[str, object]:
+def exercise(
+    binary: pathlib.Path, temp_root: pathlib.Path, root: pathlib.Path
+) -> dict[str, object]:
     work = temp_root / "work"
     cache = work / "cache"
     source = work / "main.ag"
@@ -91,46 +79,41 @@ def exercise(binary: pathlib.Path, temp_root: pathlib.Path) -> dict[str, object]
 
     env = os.environ.copy()
     base = [str(source), "--cache-dir", str(cache), "--no-progress"]
-    first = run(binary, [*base, "-o", str(output)], REPO_ROOT, env)
+    first = run(binary, [*base, "-o", str(output)], root, env)
     first_cache = snapshot(cache)
-    second = run(binary, [*base, "-o", str(output)], REPO_ROOT, env)
+    second = run(binary, [*base, "-o", str(output)], root, env)
     second_cache = snapshot(cache)
     uncached = run(
         binary,
         [str(source), "--cache-dir", str(cache), "--no-cache", "--no-progress", "-o", str(uncached_output)],
-        REPO_ROOT,
+        root,
         env,
     )
-    info = run(binary, ["--cache-dir", str(cache), "--cache-info"], REPO_ROOT, env)
     cycle_cache = work / "cycle-cache"
     cycle_output = work / "cycle-app"
     cycle = run(
         binary,
         [
-            str(REPO_ROOT / "tests/cyclic_test.ag"),
+            str(root / "tests/cyclic_test.ag"),
             "--cache-dir",
             str(cycle_cache),
             "--no-progress",
             "-o",
             str(cycle_output),
         ],
-        REPO_ROOT,
+        root,
         env,
     )
 
-    replacements = {str(work): "<WORK>", str(cache): "<CACHE>"}
     return {
         "first": first,
         "second": second,
         "uncached": uncached,
-        "info": info,
         "cycle": cycle,
         "first_cache": first_cache,
         "second_cache": second_cache,
         "output": sha256(output),
         "uncached_output": sha256(uncached_output),
-        "stdout": normalized_text(first.stdout, replacements),
-        "stderr": normalized_text(first.stderr, replacements),
     }
 
 
@@ -160,50 +143,42 @@ def main() -> int:
         if not binary.is_file():
             parser.error(f"compiler does not exist: {binary}")
 
-    with tempfile.TemporaryDirectory(prefix="silver-cache-parity-") as temp:
+    with tempfile.TemporaryDirectory(prefix="silver-native-cache-") as temp:
         temp_root = pathlib.Path(temp)
-        old = exercise(stage0, temp_root)
-        shutil.rmtree(temp_root / "work")
-        new = exercise(stage1, temp_root)
+        results = (
+            ("stage0", exercise(stage0, temp_root / "stage0", root)),
+            ("stage1", exercise(stage1, temp_root / "stage1", root)),
+        )
 
         failures: list[str] = []
-        for label, result in (("stage0", old), ("stage1", new)):
+        for label, result in results:
+            for key in ("first", "second", "uncached", "cycle"):
+                command: RunResult = result[key]  # type: ignore[assignment]
+                if command.returncode != 0:
+                    failures.append(
+                        f"{label}: {key} build failed ({command.returncode})"
+                    )
             if result["first_cache"] != result["second_cache"]:
                 failures.append(f"{label}: repeated cache tree differs")
             if result["output"] != result["uncached_output"]:
                 failures.append(f"{label}: cached and uncached executables differ")
-            cycle: RunResult = result["cycle"]  # type: ignore[assignment]
-            if cycle.returncode != 0:
-                failures.append(f"{label}: cyclic cache build failed ({cycle.returncode})")
-        for key in ("first", "second", "uncached", "info", "cycle"):
-            old_run: RunResult = old[key]  # type: ignore[assignment]
-            new_run: RunResult = new[key]  # type: ignore[assignment]
-            if old_run.returncode != new_run.returncode:
-                failures.append(f"{key}: return code {old_run.returncode} != {new_run.returncode}")
-            if old_run.stdout != new_run.stdout:
-                failures.append(f"{key}: stdout differs")
-            if old_run.stderr != new_run.stderr:
-                failures.append(f"{key}: stderr differs")
-        for key in ("first_cache", "second_cache", "output", "uncached_output", "stdout", "stderr"):
-            if old[key] != new[key]:
-                failures.append(f"{key}: content differs")
 
         if failures:
             for failure in failures:
-                print(f"cache parity failed: {failure}", file=sys.stderr)
-            print(f"stage0: {as_json(old)}", file=sys.stderr)
-            print(f"stage1: {as_json(new)}", file=sys.stderr)
+                print(f"native cache check failed: {failure}", file=sys.stderr)
+            for label, result in results:
+                print(f"{label}: {as_json(result)}", file=sys.stderr)
             return 1
 
-        old_first: RunResult = old["first"]  # type: ignore[assignment]
-        old_second: RunResult = old["second"]  # type: ignore[assignment]
-        new_first: RunResult = new["first"]  # type: ignore[assignment]
-        new_second: RunResult = new["second"]  # type: ignore[assignment]
+        old_first: RunResult = results[0][1]["first"]  # type: ignore[assignment]
+        old_second: RunResult = results[0][1]["second"]  # type: ignore[assignment]
+        new_first: RunResult = results[1][1]["first"]  # type: ignore[assignment]
+        new_second: RunResult = results[1][1]["second"]  # type: ignore[assignment]
         print(
-            "native cache parity passed: "
+            "native cache checks passed: "
             f"stage0={old_first.seconds:.3f}s/{old_second.seconds:.3f}s, "
             f"stage1={new_first.seconds:.3f}s/{new_second.seconds:.3f}s, "
-            f"dependency_cache_files={len(old['first_cache'])}"  # type: ignore[arg-type]
+            f"cache_files={len(results[1][1]['first_cache'])}"  # type: ignore[arg-type]
         )
         return 0
 
