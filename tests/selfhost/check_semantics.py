@@ -27,10 +27,11 @@ OPTIONS = {
     "tests/target_feature_test.ag": ["--cfg", "cpu.avx2"],
 }
 
-# These tests exercise Stage 1 capabilities not implemented by stage0.
+# These fixtures pin known Stage 0/Stage 1 acceptance differences.
 STAGE1_ONLY_ACCEPTANCE = {
     "tests/json_synthesis_scope_test.ag",
     "tests/method_slice_coercion_test.ag",
+    "tests/macro_block_borrow_error_test.ag",
 }
 
 

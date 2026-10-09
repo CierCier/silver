@@ -389,16 +389,36 @@ impl Checker {
                                 &mut block_sources,
                             );
                         }
-                        ast::StatementKind::Expression(value)
-                            if index + 1 == block.statements.len() =>
-                        {
-                            return self.reference_source(
-                                value,
-                                &block_scopes,
-                                &block_sources,
-                                &block_ptrs,
-                                ref_params,
-                            );
+                        ast::StatementKind::Expression(value) => {
+                            if index + 1 == block.statements.len() {
+                                return self.reference_source(
+                                    value,
+                                    &block_scopes,
+                                    &block_sources,
+                                    &block_ptrs,
+                                    ref_params,
+                                );
+                            }
+                            if let ast::ExpressionKind::Binary {
+                                left,
+                                operator,
+                                right,
+                            } = value.kind.as_ref()
+                                && *operator == ast::BinaryOperator::Assign
+                                && let ast::ExpressionKind::Identifier(target) = left.kind.as_ref()
+                                && block_sources.contains_key(&target.name)
+                            {
+                                let source = self
+                                    .reference_source(
+                                        right,
+                                        &block_scopes,
+                                        &block_sources,
+                                        &block_ptrs,
+                                        ref_params,
+                                    )
+                                    .unwrap_or(Source::Opaque);
+                                block_sources.insert(target.name.clone(), source);
+                            }
                         }
                         _ => {}
                     }
@@ -859,6 +879,21 @@ mod tests {
             errs.iter().any(|m| m.contains("escapes its scope")),
             "expected escape error, got {errs:?}"
         );
+    }
+
+    #[test]
+    fn block_reference_reassignment_uses_the_current_source() {
+        let mut program = parse(
+            "i64 global_value = 1;\
+             macro i64* stable_ptr() { i64 x = 1; i64* p = &x; p = &global_value; return p; }\
+             i64* f() { return @stable_ptr(); }",
+        );
+        crate::semantic::macro_expand::expand_macros_in_program(&mut program);
+        let errs = check_program(&program)
+            .into_iter()
+            .map(|e| e.message)
+            .collect::<Vec<_>>();
+        assert!(errs.is_empty(), "unexpected escape errors: {errs:?}");
     }
 
     #[test]
