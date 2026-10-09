@@ -364,6 +364,9 @@ impl Checker {
             ast::ExpressionKind::Reference { expression, .. } => {
                 Some(self.classify(expression, scopes, ref_sources, ptr_locals, ref_params))
             }
+            ast::ExpressionKind::Cast { expression, .. } => {
+                self.reference_source(expression, scopes, ref_sources, ptr_locals, ref_params)
+            }
             ast::ExpressionKind::Identifier(ident) => ref_sources.get(&ident.name).cloned(),
             ast::ExpressionKind::Block(block) => {
                 let mut block_scopes = scopes.to_vec();
@@ -894,6 +897,24 @@ mod tests {
             .map(|e| e.message)
             .collect::<Vec<_>>();
         assert!(errs.is_empty(), "unexpected escape errors: {errs:?}");
+    }
+
+    #[test]
+    fn pointer_cast_does_not_hide_local_borrow_from_macro_escape() {
+        let mut program = parse(
+            "macro i64* dangling() { i64 x = 1; i64* p = &x; p = (i64*)&x; return p; }\
+             i64* f() { return @dangling(); }",
+        );
+        crate::semantic::macro_expand::expand_macros_in_program(&mut program);
+        let errs = check_program(&program)
+            .into_iter()
+            .map(|e| e.message)
+            .collect::<Vec<_>>();
+        assert!(
+            errs.iter()
+                .any(|m| m.contains("does not outlive the function")),
+            "expected casted local borrow escape error, got {errs:?}"
+        );
     }
 
     #[test]
