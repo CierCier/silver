@@ -28,8 +28,8 @@ Silver is a statically typed, LLVM-backed systems programming language exploring
 silver/
 ├── silver.toml                  # Silver workspace manifest (self-host root)
 ├── bin/agc/                     # Stage1 Silver compiler driver
+│   └── src/agsm.ag               # AGSM command integrated into agc
 ├── bin/aglsp/                   # Silver language-server package
-├── bin/agsm/                    # Silver module-tool package
 ├── libs/agc/                    # Reusable Stage1 Silver compiler library
 ├── bootstrap/                   # Rust bootstrap (stage0) — the pre-self-host toolchain
 │   ├── stage0/
@@ -51,7 +51,7 @@ silver/
 │   │   │   │   ├── diagnostics/     # Centralized message catalog and error visualizer
 │   │   │   │   └── profiler.rs      # Phase timing instrumenter
 │   │   │   └── Cargo.toml
-│   │   ├── agsm/                # Source maps and module artifact generator
+│   │   ├── agsm/                # Bootstrap source maps/module artifact generator
 │   │   └── ffi-rust/            # Optional Rust implementation behind Silver's versioned C ABI
 │   └── aglsp/                   # Language Server Protocol server (Rust, driven by stage0)
 ├── target/                      # Default Rust build output (cargo)

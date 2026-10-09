@@ -387,3 +387,25 @@ Task results are intentionally allowed to be non-Send because `wait` joins
 before exposing them. The current review adds destructor cleanup for transferred
 arguments when spawn fails; verify it in stage0 and native stage1, then measure
 the complete no-stage0 corpus locally.
+
+Current continuation (2026-10-09)
+---------------------------------
+Evidence: https://github.com/CierCier/silver/actions/runs/37908849775
+
+PR #30 head `ab73fef` removes stage0 runtime delegation for supported stage1
+commands. Current CI passes stage1's full default Linux integration run at
+277/0/1 across 278 fixtures. Stage0 passes 275/0/3; its extra two skips are
+stage1-only regressions. The prior nine stage1 failures are historical and are
+not present on this head.
+
+Token and AST-span parity passes on 425 files; semantic status passes on 429.
+The current focused no-stage0 script lists 69 fixtures. Launch result policy and
+failed-spawn argument cleanup are resolved and covered in both stages. Continue
+with broader stage2 execution, stage3 self-compilation, diagnostics, artifacts,
+cache parity, and typed ownership analysis. Full self-host parity is not yet
+complete.
+
+The uncommitted runtime-boundary cleanup removes stage1 compiler and Rust AGSM
+lookups. Prebuilt `.agm` imports remain supported; `.submodule.toml` generation
+fails locally. Fresh stage0/stage1 builds and focused workspace, backend, Send,
+and four module-import checks pass. The full suite and CI were not rerun.

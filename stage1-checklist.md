@@ -1,6 +1,6 @@
 # Stage1 feature and migration checklist
 
-Updated: 2026-10-08. This is a status inventory of the self-host migration, not
+Updated: 2026-10-09. This is a status inventory of the self-host migration, not
 a promise that every feature described by the language syntax is implemented
 end to end in stage1. A feature may parse or pass a semantic-status comparison
 while still lacking type checking, native lowering, or runtime parity.
@@ -16,12 +16,12 @@ while still lacking type checking, native lowering, or runtime parity.
 
 - [x] Stage1 is built by stage0 from the Silver workspace and has its own CLI.
 - [x] Stage1-owned `lex`, `parse`, and `check` commands run locally.
-- [x] Stage0 verification passes: 592 Cargo tests; complete fresh-cache integration run has 224 passed, 0 failed, and 2 skipped. The range-continue regression passes after repairing the bootstrap increment target. Stage0 now checks `else-if` chains iteratively instead of nesting one frame per arm, so long Silver dispatch chains no longer exhaust its 32-deep budget.
-- [x] Expanded frontend checks compare 373 source files for token/span and AST/CST-span behavior, and 377 files for semantic acceptance status; current evidence reports zero mismatches and zero deferred-boundary skips.
-- [x] Eleven focused semantic regression fixtures pass, including generic type and borrow-escape cases.
-- [~] The maintained native no-stage0 gate passes all 66 focused integration tests, along with smoke builds/runs, formatting, linker behavior, assertions, raw argv, enum/layout and target ABI cases, generic free calls, cache behavior, and the selected stage2 gate.
-- [~] Stage1 builds stage2 with stage0 unavailable; stage2 handles help/version, lex/parse/check on input over 128 tokens, and builds/runs six programs covering control flow, generic calls, function pointers, and aggregate layouts. This is selected stage2 evidence, not full stage2 or stage3 parity.
-- [ ] The last complete 270-test serial corpus run used the pre-loop-unrolling stage1 binary with `SILVER_STAGE0=/bin/false`: 258 passed, 9 failed, and 3 skipped. Its failures were `json_containers_test`, `json_robust_test`, `json_tcp_test`, `json_test`, `macro_test`, `module_import_test`, `serialize_auto_test`, `serialize_containers_test`, and `vec_macro_test`; derive behavior and the stage0-style AGM workflow remain open. Five focused macro fixtures now pass with stage0 blocked, including the subsequently added variadic statement-loop case. The broader `macro_test` still fails because expression macros with local statements and a final `return` are unsupported; `vec_macro_test` also remains unsupported. Skips: `http_perf_test`, `mem_growth_watch`, and `rust_ffi_test`. Rerun the now 271-case corpus after the loop-unrolling change; native parity is incomplete.
+- [x] Current PR CI on `ab73fef` passes all Cargo test groups and the stage0 integration suite: 275 passed, 0 failed, and 3 skipped across 278 fixtures. Two skips are stage1-only regressions; `mem_growth_watch` is the default benchmark skip.
+- [x] Expanded frontend checks pass: token and AST-span parity on 425 files, semantic status parity on 429 files, GATE-003 projection, and AGM reader/cross-stage checks.
+- [x] Current PR CI runs the full default integration corpus directly through stage1: 277 passed, 0 failed, and 1 skipped (`mem_growth_watch`) across 278 fixtures. The previous nine-failure report is historical and superseded.
+- [~] The maintained `run_native_no_stage0.sh` currently lists 69 focused integration fixtures, along with smoke builds/runs, formatting, linker behavior, assertions, raw argv, enum/layout and target ABI cases, generic free calls, macro borrow checks, and the selected stage2 gate. The full direct-stage1 corpus passes in CI.
+- [~] Stage1 builds stage2 with stage0 unavailable; stage2 handles help/version, lex/parse/check on input over 128 tokens, and builds/runs selected programs covering control flow, generic calls, function pointers, aggregate layouts, and ownership/drop behavior. This is selected stage2 evidence, not full stage2 or stage3 parity.
+- [x] Full default Linux integration corpus through direct native stage1 passes on the current PR head. Earlier reports of `json_containers_test`, `json_robust_test`, `json_tcp_test`, `json_test`, `macro_test`, `module_import_test`, `serialize_auto_test`, `serialize_containers_test`, and `vec_macro_test` failing came from an older binary; current CI reports zero failures. One benchmark fixture is skipped by default.
 - [ ] Full stage0-independent package/build/run/test behavior, complete stage2 coverage, stage3 self-compilation, native ownership/leak parity, and full runtime parity are not established.
 
 Primary evidence: [self-host gate definitions](tests/selfhost/README.md) and
@@ -30,15 +30,15 @@ run and should be refreshed after material changes.
 
 ## Completion work plan
 
-1. Extend the limited stage1 macro expansion with `@vec`, hygienic names, and
-   broader control flow, and implement `#[serialize]`/JSON
-   derive behavior without a stage0 execution path.
+1. Broaden macro/derive coverage beyond the current passing `macro_test`,
+   `vec_macro_test`, JSON, and serialization fixtures. Keep generated string
+   borrowing checks covered as macro forms expand.
 2. Close the AGM gap by aligning module publication, import metadata, native
    object generation, and the module integration fixture around stage1-owned
    contracts; retain local errors for unsupported artifact forms.
-3. Rebuild stage1, rerun the full integration corpus and no-stage0 gates, then
-   audit the driver, scripts, and docs for any stage0 runtime launch. Stage0
-   remains permitted only for bootstrapping stage1 and verification.
+3. The driver audit and direct-stage1 full integration gate now pass on
+   `ab73fef`. Expand stage2 coverage and check for a stage1-to-stage2 fixed
+   point. Stage0 remains limited to bootstrapping and comparison.
 
 ## CLI, workspace, and build lifecycle
 
@@ -55,8 +55,8 @@ run and should be refreshed after material changes.
 | Package manifest and target keys | [~] | A supported subset is parsed; unknown keys fail with an error. Full manifest compatibility is unproven. |
 | Clean/init commands | [~] | Recognized by workspace command planning; end-to-end parity is not established by the current no-stage0 corpus. |
 | Native compiler cache | [~] | Cache behavior parity has a focused passing gate. Reproducible compiler artifact digests and the full cache contract remain open. |
-| Stage0 runtime delegation | [x] | Stage1 has no stage0 dispatch path; the workspace gate traps attempts to launch a supplied fake stage0 executable. |
-| Native integration parity | [ ] | The full integration corpus must pass using stage1 alone; current failing fixtures remain open. |
+| Stage0 runtime delegation | [x] | Stage1 has no compiler or module-generator dispatch path; the workspace gate traps both old cwd-relative fallback locations. |
+| Native integration parity | [x] | The default Linux integration corpus passes using stage1 alone: 277 passed, 0 failed, and 1 benchmark skip in CI. Unsupported behavior outside the corpus and full semantic/codegen parity remain open. |
 
 ## Lexing, parsing, and source representation
 
@@ -66,7 +66,7 @@ run and should be refreshed after material changes.
 | Byte and line/column source locations | [x] | Token spans and AST/CST span-boundary projection are gated. |
 | Parser acceptance over repository, example, and optional standard-library corpus | [x] | This proves acceptance parity, not identical trees or all downstream semantics. |
 | Lossless CST and AST-span projection | [~] | Retained source structure is a CST projection; full stage0 AST equivalence is not a goal of the span gate and typed HIR coverage is only a selected slice. |
-| Imports and module loading | [~] | Source/module projection and selected workspace/artifact cases pass; broad visibility, re-export, and package behavior remain open. |
+| Imports and module loading | [~] | Source imports and prebuilt `.agm` artifacts work on selected paths. Stage1 does not build `.submodule.toml` inputs; broad visibility, re-export, and package behavior remain open. |
 | Selective imports and import aliases | [ ] | The syntax reference marks these as unimplemented. |
 | Complex number type support | [ ] | Complex literal token support exists, while type-level support is incomplete. |
 | Octal and binary integer literals | [ ] | Not supported by the current syntax/lexer contract. |
@@ -79,7 +79,7 @@ run and should be refreshed after material changes.
 | Primitive integer, float, bool, char, string, void, pointer, and reference syntax | [~] | Syntax and frontend acceptance are broad; native operations and ABI cases vary by type and need full parity coverage. |
 | Structs, fields, arrays, globals, constants, and type aliases | [~] | Selected aggregate/global/array paths work natively. String globals now emit constant bytes, including escaped and empty strings. Globals take precedence over unqualified enum variants; [collision regression](tests/native_global_variant_collision_test.ag) covers these cases. Aggregate expressions and layout coverage remain incomplete. |
 | Enums and payload variants | [~] | Selected unit, small-payload, String-payload, assignment, and generic multi-field layout cases pass; broad enum operations, ownership, and payload combinations remain open. |
-| Function declarations, calls, parameters, and returns | [~] | Direct concrete calls and selected return/argument cases work. Many unresolved free functions, methods, and expression contexts remain in the native corpus. |
+| Function declarations, calls, parameters, and returns | [~] | All current integration fixtures pass. Broader free-function, method, coercion, and expression contexts outside that corpus remain unestablished. |
 | Declared function pointers | [~] | [Native signature tests](tests/native_function_pointer_test.ag) cover callback parameters, zero-argument wide returns, numeric argument/result conversion, and void callbacks stored in struct fields. Function-valued returns and inferred callback declarations remain unsupported; global function-pointer initializers must fail closed. |
 | Overload declaration identity and selection | [~] | Canonical free-function signature identity and selected ambiguity diagnostics are covered. Complete overload resolution and method overload parity are unproven. |
 | Generic free functions | [~] | Explicit specialization and inferred nested free calls over named, array, pointer, and reference shapes pass selected tests. Numeric literals can match a numeric type already inferred from an earlier argument, covered by [literal inference](tests/generic_method_literal_inference_test.ag). Broader numeric coercion, multiple-argument, and nested aggregate inference remain open. |
@@ -120,8 +120,8 @@ run and should be refreshed after material changes.
 | `defer` and cleanup order on early exits | [ ] | Full native LIFO cleanup and return/break/continue coverage is not established. |
 | Allocation and reallocation | [~] | Selected generic allocation/reallocation and layout paths pass; complete allocator and resource cleanup parity remains open. |
 | Runtime panic/assertion behavior | [~] | Selected `@assert` failure reporting is covered; panic/unwind behavior and cleanup interactions remain open. |
-| Threads, `launch`/`wait`, channels, condition variables, and locks | [~] | [Futex wake](tests/native_futex_wake_test.ag) passes after globals take precedence over colliding unqualified enum variants. Channel payload assertions pass with unwrap-or lowering; condition-variable and RwLock fixtures pass with guard destruction (each in ~1s, previously 120s timeouts). `launch` syntax and full concurrency behavior remain open. |
-| Standard library behavior | [~] | Frontend status includes 121 stdlib files in the expanded history and current stdlib-inclusive semantic comparison; many stdlib-heavy programs still fail in the native backend. This does not certify every library API. |
+| Threads, `launch`/`wait`, channels, condition variables, and locks | [~] | The full integration corpus covers launch/wait and failed-spawn cleanup; futex, channel, condition-variable, and RwLock fixtures pass. Broader concurrent workloads and race/ownership analysis remain open. |
+| Standard library behavior | [~] | The full default integration corpus passes, including its stdlib-heavy fixtures. This does not certify every library API or every call context. |
 
 ## Diagnostics, artifacts, and compatibility
 
@@ -135,18 +135,18 @@ run and should be refreshed after material changes.
 | AGM artifact reader | [x] | Reader supports v2 and v6-v11 layouts with malformed-input and cross-stage tests. |
 | Stage1 artifact publication | [~] | Frontend metadata projection is published and cross-read; rich layout, ABI, and native-library metadata remains stage0-produced. |
 | Artifact imports and cache dependency keys | [~] | Selected round trips and imported-source dependency cache behavior pass; full artifact/native cache parity is open. |
-| AGLSP/AGSM package checks | [x] | Wired into the frontend gate; this is not complete package-build or native migration coverage. |
+| AGLSP/AGSM package checks | [x] | Stage1 builds and protocol-tests AGLSP; AGSM CLI is integrated into `agc`. Foreign `.submodule.toml` generation remains unsupported and missing artifacts fail locally. |
 
 ## Remaining completion gates
 
-- [ ] Make the full 226-case integration corpus pass through direct native stage1 with stage0 unavailable; explain intentional skips and eliminate the condition-variable/RwLock timeouts.
-- [ ] Close native failure clusters in unresolved calls/methods/arguments, aggregate and stdlib-heavy expressions, ownership/drop behavior, and runtime state mutation.
+- [x] Make the full default integration corpus pass through direct native stage1 with stage0 unavailable: current CI reports 277 passed, 0 failed, and 1 default benchmark skip across 278 fixtures.
+- [ ] Expand coverage beyond the passing integration corpus for unsupported calls/methods/arguments, aggregate expressions, stdlib contexts, ownership/drop behavior, and runtime state mutation.
 - [ ] Complete generic inference across multiple arguments, nested aggregates, methods, and receiver contexts.
 - [ ] Complete typed CFG-based borrow, move, type-property, partial-init, and drop analysis, then verify cleanup with ownership/leak-focused tests.
 - [ ] Expand `check` to general expression typing and compare full rendered diagnostics.
 - [ ] Complete native artifact publication, ABI/layout metadata, module visibility/re-export behavior, and cache/reproducibility contracts.
-- [ ] Run the broader native corpus with stage2 and stage0 disabled, then attempt stage3 self-compilation. Six compiled runtime programs do not establish full stage2 parity.
-- [ ] Re-run compiler tests, the full integration suite, `memory_pentest`/`cascade_drop_test`, frontend parity, and the relevant self-host gates after compiler changes. Report pass, fail, skip, and unrun results separately.
+- [ ] Run the full integration corpus through stage2 with stage0 disabled, then attempt stage3 self-compilation. Selected stage2 runtime programs do not establish full stage2 parity.
+- [ ] Re-run compiler tests, the full integration suite, `memory_pentest`/`cascade_drop_test`, frontend parity, and relevant self-host gates after future compiler changes. Report pass, fail, skip, and unrun results separately.
 
 ## Scope notes
 

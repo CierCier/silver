@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the opt-in stage1 Linux native smoke backend without stage0."""
+"""Verify the stage1 Linux native backend and local failure behavior."""
 
 from __future__ import annotations
 
@@ -472,10 +472,9 @@ def main() -> int:
         if (
             failed.returncode == 0
             or "stage1 backend could not handle" not in failed.stderr
-            or "stage0" in failed.stderr
         ):
             raise AssertionError(
-                "unsupported input did not fail locally without stage0 delegation\n"
+                "unsupported input did not fail locally in stage1\n"
                 f"return code: {failed.returncode}\n"
                 f"stdout:\n{failed.stdout}\nstderr:\n{failed.stderr}"
             )

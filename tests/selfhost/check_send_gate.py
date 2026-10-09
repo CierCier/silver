@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise stage1's launch Send classification without invoking stage0."""
+"""Exercise stage1's launch Send classification and native execution."""
 
 import argparse
 import os
@@ -70,16 +70,15 @@ def main() -> None:
                 "native import-closure Send check rejected the positive fixture:\n"
                 f"{diagnostics}"
             )
-        if result.returncode != 0 and "stage0 backend unavailable" not in diagnostics:
+        if result.returncode != 0:
             raise AssertionError(
-                f"native Send build failed before the Launch fallback:\n{diagnostics}"
+                f"native Send build failed:\n{diagnostics}"
             )
-        if result.returncode == 0:
-            executed = subprocess.run([str(output)], timeout=60, check=False)
-            if executed.returncode != 0:
-                raise AssertionError(
-                    f"native launch fixture returned {executed.returncode}, expected 0"
-                )
+        executed = subprocess.run([str(output)], timeout=60, check=False)
+        if executed.returncode != 0:
+            raise AssertionError(
+                f"native launch fixture returned {executed.returncode}, expected 0"
+            )
     print("stage1 native Send gate passed")
 
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build stage0, compile the Silver stage1 compiler with it, and run the
-# frontend parity gate. The LLVM backend is intentionally not built here.
+# frontend parity gate. Stage1 also builds and exercises AGLSP natively.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -29,12 +29,10 @@ stage1="$work/agc-stage1"
 "$stage0" --no-cache build "$root/silver.toml" --bin agc -o "$stage1"
 
 aglsp="$work/aglsp-stage1"
-"$stage0" --no-cache build "$root/silver.toml" --bin aglsp -o "$aglsp"
+"$stage1" --no-cache build "$root/silver.toml" --bin aglsp -o "$aglsp"
 python3 "$root/tests/selfhost/test_aglsp.py" "$aglsp"
 
-agsm="$work/agsm-stage1"
-"$stage0" --no-cache build "$root/silver.toml" --bin agsm -o "$agsm"
-"$agsm" --help > /dev/null
+"$stage1" agsm --help > /dev/null
 
 python3 "$root/tests/selfhost/check_workspace.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_hir.py" --stage0 "$stage0" --stage1 "$stage1"

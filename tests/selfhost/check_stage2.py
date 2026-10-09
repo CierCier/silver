@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build stage2 natively, then exercise its frontend and compiler without stage0."""
+"""Build stage2 with stage1, then exercise its frontend and compiler."""
 
 from __future__ import annotations
 
@@ -280,7 +280,7 @@ i32 main() {
             expect_rejected(root / "tests" / fixture, fixture.removesuffix(".ag"))
     print(
         "native stage2 frontend commands, runtime programs, and Drop-ancestor "
-        "rejection builds passed without stage0"
+        "rejection builds passed"
     )
     return 0
 

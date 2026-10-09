@@ -38,8 +38,6 @@ stage1="$work/agc-stage1"
 cached_stage1="$work/agc-stage1-cached"
 "$stage0" build "$root/silver.toml" -o "$cached_stage1"
 
-unset SILVER_STAGE0 SILVER_STAGE1_NATIVE
-
 cached_rebuild="$work/agc-stage1-cached-rebuild"
 "$cached_stage1" build "$root/silver.toml" -o "$cached_rebuild"
 "$cached_rebuild" --version

@@ -34,6 +34,13 @@ STAGE1_ONLY_ACCEPTANCE = {
     "tests/macro_block_borrow_error_test.ag",
 }
 
+# These examples depend on generated foreign-module AGM files. Stage1 does not
+# invoke a module generator; absent prebuilt artifacts must fail locally.
+STAGE1_UNAVAILABLE_SUBMODULES = {
+    "examples/gfx_raylib.ag",
+    "examples/net_curl.ag",
+}
+
 
 RAYGUI_STUB = """\
 import vendor.gfx.raylib;
@@ -198,6 +205,21 @@ def main() -> int:
                         )
                     )
                 continue
+            if relative in STAGE1_UNAVAILABLE_SUBMODULES:
+                if (
+                    old.returncode != 0
+                    or new.returncode == 0
+                    or "could not be resolved" not in new.stderr
+                ):
+                    failures.append(
+                        (
+                            relative,
+                            f"expected missing foreign AGM to fail locally; stage0={old.returncode}, stage1={new.returncode}",
+                            new.stderr[:500],
+                            old.stderr[:500],
+                        )
+                    )
+                continue
             if (old.returncode == 0) != (new.returncode == 0):
                 failures.append(
                     (
@@ -278,6 +300,7 @@ def main() -> int:
         return 1
     print(
         f"semantic status parity passed: {compared} file(s); "
+        f"{len(STAGE1_UNAVAILABLE_SUBMODULES)} absent foreign AGM cases fail locally; "
         "stage1 Optional-shadow regression passed"
     )
     return 0

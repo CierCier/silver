@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run structural free-function specializations without a stage0 fallback."""
+"""Run structural free-function specializations with the native backend."""
 
 from __future__ import annotations
 

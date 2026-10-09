@@ -129,7 +129,7 @@ bash tests/selfhost/run_native.sh --no-tui --jobs 4
 - `bootstrap/aglsp/`: Rust Language Server Protocol server
 - `bin/agc/`: Stage1 self-hosting compiler driver (Silver); see `docs/selfhost-plan.txt`
 - `bin/aglsp/`: Silver language-server binary package
-- `bin/agsm/`: Silver module-tool binary package
+- `bin/agc/src/agsm.ag`: AGSM command integrated into the stage1 compiler driver
 - `libs/agc/`: Reusable stage1 compiler frontend library (Silver)
 - `silver.toml`: Silver workspace manifest for the self-host root
 - `std/`: Standard library (allocators, collections, I/O, networking, runtime)

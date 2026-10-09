@@ -13,6 +13,7 @@ import native_backend;
 import workspace;
 import frontend.ownership;
 import frontend.send;
+import agsm;
 
 str token_kind_name(TokenKind kind) {
     return match kind {
@@ -811,6 +812,11 @@ i32 emit_source_artifact(str source_path, str output_path, bool require_complete
 i32 run_frontend() {
     Vec<String> arguments = args();
     remove_no_cache_option(&arguments);
+    if (arguments.len() > 1 && arguments.get_ptr(1).equals("agsm")) {
+        i32 result = run_agsm(&arguments);
+        arguments.drop();
+        return result;
+    }
     if (arguments.len() == 2) {
         String* option = arguments.get_ptr(1);
         if (option.equals("--version") || option.equals("-V")) {
@@ -819,7 +825,7 @@ i32 run_frontend() {
             return 0;
         }
         if (option.equals("--help") || option.equals("-h")) {
-            STDOUT.write_str("Silver compiler\n\nusage: agc [OPTIONS] <FILE>... [-o <OUT>]\n       agc [OPTIONS] <COMMAND>\n\ncommands:\n  lex, parse, ast, check <source.ag>\n  build <silver.toml> [--bin name] [-o output]\n  run <source.ag> [-- arguments...]\n\noptions:\n  -I <dir>       Add an import directory\n  -O2            Optimize generated code\n  --no-cache     Disable the module cache\n  -h, --help     Show help\n  -V, --version  Show version\n");
+            STDOUT.write_str("Silver compiler\n\nusage: agc [OPTIONS] <FILE>... [-o <OUT>]\n       agc [OPTIONS] <COMMAND>\n\ncommands:\n  lex, parse, ast, check <source.ag>\n  build <silver.toml> [--bin name] [-o output]\n  run <source.ag> [-- arguments...]\n  agsm <COMMAND>  Foreign sourcemap module tools\n\noptions:\n  -I <dir>       Add an import directory\n  -O2            Optimize generated code\n  --no-cache     Disable the module cache\n  -h, --help     Show help\n  -V, --version  Show version\n");
             arguments.drop();
             return 0;
         }

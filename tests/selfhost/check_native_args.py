@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Exercise native argv passthrough plus generic Vec<String> methods.
 
-Builds args_native_fixture.ag with the stage1 native backend (no stage0
-fallback), runs it with two arguments, and checks stdout plus exit code.
+Builds args_native_fixture.ag with the stage1 native backend, runs it with two
+arguments, and checks stdout plus exit code.
 This covers std.args:args(), Vec<String>::len/get monomorphization, and
 chained .to_str() calls on rvalue receivers.
 """

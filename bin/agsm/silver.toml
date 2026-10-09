@@ -1,8 +1,0 @@
-name = "agsm"
-version = "0.2.6"
-
-[bin."agsm"]
-entry = "src/main.ag"
-
-[dependencies.agc]
-manifest = "../../libs/agc"

@@ -8,8 +8,6 @@ if [[ $# -lt 1 || ! -x "$1" ]]; then
     exit 2
 fi
 stage1=$(realpath "$1")
-unset SILVER_STAGE0 SILVER_STAGE1_NATIVE
-
 "$stage1" --version
 python3 "$root/tests/selfhost/check_native_backend.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_send_gate.py" --stage1 "$stage1"
