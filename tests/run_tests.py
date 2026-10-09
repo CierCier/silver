@@ -85,6 +85,12 @@ DEFAULT_SKIP = {
     "mem_growth_watch",  # manual 30-sec memory growth benchmark
 }
 
+# These regressions are exercised by run_native.sh with the stage1 compiler.
+STAGE1_ONLY_TESTS = {
+    "json_synthesis_scope_test": "stage1 JSON method synthesis",
+    "method_slice_coercion_test": "stage1 borrowed-slice coercion",
+}
+
 IS_WINDOWS = os.name == "nt"
 
 
@@ -913,6 +919,8 @@ def main():
                 skip_reason = "requires Go compiler"
             elif name == "rust_ffi_test" and not services.ffi_dir:
                 skip_reason = "requires built Rust FFI library (build bootstrap/stage0/ffi-rust)"
+            elif compiler is None and name in STAGE1_ONLY_TESTS:
+                skip_reason = STAGE1_ONLY_TESTS[name]
             elif IS_WINDOWS and name in WINDOWS_SKIP:
                 skip_reason = WINDOWS_SKIP[name]
             elif target and target_is_windows_name(target) and name in WINDOWS_SKIP:
