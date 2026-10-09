@@ -3262,10 +3262,13 @@ bool llvm_expr_references_block_local(LlvmContext* ctx, u32 expr_id,
     if (expr_id == 0) { return false; }
     AstExpr* expr = ctx.pool.get_expr(expr_id);
     if (expr.kind == ExprKind.Var || expr.kind == ExprKind.Move) {
-        i64 i = drop_mark;
-        while (i < ctx.locals.len()) {
-            if (ctx.locals.get_ptr(i).name_id == expr.aux) { return true; }
-            i += 1;
+        i64 i = ctx.locals.len();
+        while (i > drop_mark) {
+            i -= 1;
+            LlvmLocal* local = ctx.locals.get_ptr(i);
+            if (local.name_id == expr.aux) {
+                return true;
+            }
         }
         return false;
     }
@@ -3340,6 +3343,25 @@ bool llvm_expr_references_block_local(LlvmContext* ctx, u32 expr_id,
     return false;
 }
 
+bool llvm_block_result_is_detached_json_buffer(LlvmContext* ctx, u32 expr_id,
+                                                u32 result_type) {
+    TypeEntry* result_entry = ctx.types.get(ctx.types.resolve_subst(result_type));
+    if (result_entry == (TypeEntry*)0 || result_entry.kind != TypeKind.Str
+        || expr_id == 0) {
+        return false;
+    }
+    AstExpr* result = ctx.pool.get_expr(expr_id);
+    if (result.kind != ExprKind.MethodCall
+        || strcmp(ctx.names.get(result.aux), "finish") != 0) {
+        return false;
+    }
+    u32 receiver_type = ctx.types.resolve_subst(llvm_expr_type(ctx, result.inner0));
+    TypeEntry* receiver_entry = ctx.types.get(receiver_type);
+    return receiver_entry != (TypeEntry*)0
+        && receiver_entry.kind == TypeKind.Named
+        && strcmp(ctx.types.names.get(receiver_entry.name_id), "JsonWriter") == 0;
+}
+
 bool llvm_block_result_aliases_local(LlvmContext* ctx, LLVMOpaqueValue* value,
                                      u32 expr_id, u32 result_type,
                                      i64 drop_mark) {
@@ -3350,8 +3372,27 @@ bool llvm_block_result_aliases_local(LlvmContext* ctx, LLVMOpaqueValue* value,
             && entry.kind != TypeKind.Str)) {
         return false;
     }
+    // JsonWriter.finish detaches its heap buffer before the local writer drops.
+    bool detached_json_buffer = llvm_block_result_is_detached_json_buffer(
+        ctx, expr_id, result_type);
+    bool literal_backed_str_result = false;
+    if (entry.kind == TypeKind.Str && expr_id != 0) {
+        AstExpr* result = ctx.pool.get_expr(expr_id);
+        if (result.kind == ExprKind.Var || result.kind == ExprKind.Move) {
+            i64 i = ctx.locals.len();
+            while (i > drop_mark) {
+                i -= 1;
+                LlvmLocal* local = ctx.locals.get_ptr(i);
+                if (local.name_id == result.aux) {
+                    literal_backed_str_result = local.is_string_literal_backed;
+                    break;
+                }
+            }
+        }
+    }
     // LLVM values lose the source provenance needed to catch borrowed method results.
-    if (llvm_expr_references_block_local(ctx, expr_id, drop_mark)) { return true; }
+    if (llvm_expr_references_block_local(ctx, expr_id, drop_mark)
+        && !literal_backed_str_result && !detached_json_buffer) { return true; }
     i64 i = drop_mark;
     while (i < ctx.locals.len()) {
         LlvmLocal* local = ctx.locals.get_ptr(i);

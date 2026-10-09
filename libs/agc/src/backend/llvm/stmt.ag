@@ -186,6 +186,12 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
 
             llvm_clear_copy_source(ctx, stmt.inner1, true);
             ctx.add_local(var_name_id, ptr, type_id, true);
+            LlvmLocal* local = ctx.find_local(var_name_id);
+            if (stmt.inner1 != 0) {
+                AstExpr* initializer = ctx.pool.get_expr(stmt.inner1);
+                local.is_string_literal_backed = initializer.kind == ExprKind.Literal
+                    && initializer.inferred_type == TYPE_STR;
+            }
             if (stmt.inner1 != 0) {
                 LLVMOpaqueType* flag_ty = LLVMInt1TypeInContext(ctx.ctx);
                 String flag_name = llvm_static_local_symbol(ctx, var_name_id,
@@ -258,6 +264,12 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
         // unaffected.
         llvm_clear_copy_source(ctx, stmt.inner1, true);
         ctx.add_local(var_name_id, ptr, type_id, true);
+        LlvmLocal* local = ctx.find_local(var_name_id);
+        if (stmt.inner1 != 0) {
+            AstExpr* initializer = ctx.pool.get_expr(stmt.inner1);
+            local.is_string_literal_backed = initializer.kind == ExprKind.Literal
+                && initializer.inferred_type == TYPE_STR;
+        }
 
         if (stmt.inner1 != 0) {
             // Generic enum constructors need the declared local type.
@@ -298,6 +310,7 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
         }
         LLVMOpaqueType* value_ty = llvm_lower_type(ctx.ctx, ctx.types, local.type_id);
         LLVMBuildStore(ctx.builder, LLVMConstNull(value_ty), local.ptr);
+        local.is_string_literal_backed = false;
         llvm_clear_local_drops(ctx, stmt.aux);
         return;
     }
@@ -358,6 +371,12 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
                 LLVMSetAlignment(store, 1);
             }
             llvm_mark_assign_live(ctx, stmt.inner0);
+            if (target_expr.kind == ExprKind.Var) {
+                LlvmLocal* local = ctx.find_local(target_expr.aux);
+                if (local != (LlvmLocal*)0) {
+                    local.is_string_literal_backed = false;
+                }
+            }
         }
         return;
     }
