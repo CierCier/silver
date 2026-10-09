@@ -109,17 +109,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 }
             }
             ast::UnaryOperator::Dereference => {
-                let (operand_ptr, operand_ty) = self.resolve_lvalue_ptr(operand)?;
-                let ptr_llvm_ty = self.lower_basic_type(&operand_ty)?;
-                let loaded_ptr = self
-                    .builder
-                    .build_load(ptr_llvm_ty, operand_ptr, "deref.ptr")
-                    .map_err(|e| {
-                        CodegenError::with_span(
-                            format!("failed to load dereference operand: {e}"),
-                            whole_expr.span,
-                        )
-                    })?;
+                let operand_ty = self.resolve_argument_type(operand).ok_or_else(|| {
+                    CodegenError::with_span(
+                        "cannot determine dereference operand type",
+                        operand.span,
+                    )
+                })?;
                 let inner_ty = match operand_ty.kind.as_ref() {
                     ast::TypeKind::Pointer(pointer) => &pointer.inner,
                     ast::TypeKind::Reference(reference) => &reference.inner,
@@ -130,7 +125,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         ));
                     }
                 };
-                let BasicValueEnum::PointerValue(ptr_value) = loaded_ptr else {
+                let pointer_value = self.emit_expression_value(operand)?;
+                let BasicValueEnum::PointerValue(ptr_value) = pointer_value else {
                     return Err(CodegenError::with_span(
                         "dereference operand did not lower to a pointer",
                         whole_expr.span,

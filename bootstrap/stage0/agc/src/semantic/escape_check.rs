@@ -58,7 +58,9 @@ pub struct EscapeReport {
 /// tied to those borrow params and the caller must keep them alive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Source {
-    Local,
+    Local {
+        depth: usize,
+    },
     Escapable {
         origins: FxHashSet<String>,
     },
@@ -217,7 +219,7 @@ impl Checker {
                 match old {
                     Some(source) => {
                         ref_sources.insert(name.clone(), source.clone());
-                        if !matches!(source, Source::Local) {
+                        if !matches!(source, Source::Local { .. }) {
                             ptr_locals.insert(name);
                         }
                     }
@@ -259,7 +261,7 @@ impl Checker {
                     }
                 } else if let Some(source) = ref_sources.get(&ident.name) {
                     source.clone()
-                } else if self.is_local(ident, scopes) {
+                } else if let Some(depth) = self.local_scope(ident, scopes) {
                     // Access through a pointer-typed local (`&p.x`, `&self.data[i]`)
                     // reaches the pointee (heap/owned, independent), which outlives
                     // the frame; a bare or value-local root borrows the local's own
@@ -269,7 +271,7 @@ impl Checker {
                             origins: FxHashSet::default(),
                         }
                     } else {
-                        Source::Local
+                        Source::Local { depth }
                     }
                 } else if self.globals.contains(&ident.name) {
                     // A known global is independent of caller-owned borrows.
@@ -339,11 +341,13 @@ impl Checker {
         }
     }
 
-    fn is_local(&self, ident: &ast::Identifier, scopes: &[Vec<ScopeEntry>]) -> bool {
-        scopes
-            .iter()
-            .rev()
-            .any(|scope| scope.iter().any(|(name, _)| name == &ident.name))
+    fn local_scope(&self, ident: &ast::Identifier, scopes: &[Vec<ScopeEntry>]) -> Option<usize> {
+        scopes.iter().enumerate().rev().find_map(|(depth, scope)| {
+            scope
+                .iter()
+                .any(|(name, _)| name == &ident.name)
+                .then_some(depth)
+        })
     }
 
     /// The source of a returned/stored reference expression (or None if the
@@ -361,6 +365,46 @@ impl Checker {
                 Some(self.classify(expression, scopes, ref_sources, ptr_locals, ref_params))
             }
             ast::ExpressionKind::Identifier(ident) => ref_sources.get(&ident.name).cloned(),
+            ast::ExpressionKind::Block(block) => {
+                let mut block_scopes = scopes.to_vec();
+                let mut block_sources = ref_sources.clone();
+                let block_ptrs = ptr_locals.clone();
+                block_scopes.push(Vec::new());
+                for (index, statement) in block.statements.iter().enumerate() {
+                    match &statement.kind {
+                        ast::StatementKind::Let(let_stmt) => {
+                            let source = let_stmt.initializer.as_ref().and_then(|init| {
+                                self.reference_source(
+                                    init,
+                                    &block_scopes,
+                                    &block_sources,
+                                    &block_ptrs,
+                                    ref_params,
+                                )
+                            });
+                            Self::record_pattern_refs(
+                                &let_stmt.pattern,
+                                source,
+                                &mut block_scopes,
+                                &mut block_sources,
+                            );
+                        }
+                        ast::StatementKind::Expression(value)
+                            if index + 1 == block.statements.len() =>
+                        {
+                            return self.reference_source(
+                                value,
+                                &block_scopes,
+                                &block_sources,
+                                &block_ptrs,
+                                ref_params,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }
             _ => None,
         }
     }
@@ -408,13 +452,23 @@ impl Checker {
                     // even if its declared type is a raw pointer.
                     declared_source =
                         self.reference_source(init, scopes, ref_sources, ptr_locals, ref_params);
-                    if declared_source.is_none() && !is_ref_var {
+                    if (declared_source.is_none() && !is_ref_var)
+                        || matches!(init.kind.as_ref(), ast::ExpressionKind::Block(_))
+                    {
                         self.check_expr(init, scopes, ref_sources, ptr_locals, ref_params);
                     }
                 } else if is_ref_var {
                     // Uninitialized reference — conservatively Local so a
                     // later assignment to &x is caught on escape.
-                    declared_source = Some(Source::Local);
+                    declared_source = Some(Source::Local {
+                        depth: scopes.len() - 1,
+                    });
+                }
+                if let (Some(Source::Local { depth }), Some(init)) =
+                    (&declared_source, &let_stmt.initializer)
+                    && *depth >= scopes.len()
+                {
+                    self.error(msg::reference_escapes_scope(), init.span);
                 }
                 Self::record_pattern_refs(&let_stmt.pattern, declared_source, scopes, ref_sources);
             }
@@ -426,7 +480,7 @@ impl Checker {
                     self.reference_source(expr, scopes, ref_sources, ptr_locals, ref_params)
                 {
                     match source {
-                        Source::Local => {
+                        Source::Local { .. } => {
                             self.error(msg::returned_reference_escapes(), expr.span);
                         }
                         Source::Escapable { origins } => {
@@ -516,23 +570,7 @@ impl Checker {
                 right,
             } => {
                 if *operator == ast::BinaryOperator::Assign {
-                    // Global store of a local borrow: `g = &x;` / `g = r;`.
                     if let ast::ExpressionKind::Identifier(target) = left.kind.as_ref()
-                        && !self.is_local(target, scopes)
-                        && let Some(source) = self.reference_source(
-                            right,
-                            scopes,
-                            ref_sources,
-                            ptr_locals,
-                            ref_params,
-                        )
-                        && source == Source::Local
-                    {
-                        self.error(msg::reference_stored_into_global(&target.name), right.span);
-                    }
-                    // Propagate reference sources through variable assignment.
-                    if let ast::ExpressionKind::Identifier(target) = left.kind.as_ref()
-                        && ref_sources.contains_key(&target.name)
                         && let Some(source) = self.reference_source(
                             right,
                             scopes,
@@ -541,7 +579,17 @@ impl Checker {
                             ref_params,
                         )
                     {
-                        ref_sources.insert(target.name.clone(), source);
+                        if self.local_scope(target, scopes).is_none()
+                            && matches!(source, Source::Local { .. })
+                        {
+                            self.error(msg::reference_stored_into_global(&target.name), right.span);
+                        }
+                        if ref_sources.contains_key(&target.name) {
+                            if matches!(source, Source::Local { depth } if depth >= scopes.len()) {
+                                self.error(msg::reference_escapes_scope(), right.span);
+                            }
+                            ref_sources.insert(target.name.clone(), source);
+                        }
                     }
                     self.check_expr(right, scopes, ref_sources, ptr_locals, ref_params);
                 } else {
@@ -775,6 +823,40 @@ mod tests {
         assert!(
             errs.iter()
                 .any(|m| m.contains("does not outlive the function")),
+            "expected escape error, got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn block_local_borrow_cannot_escape_into_outer_binding() {
+        let mut program = parse(
+            "macro i64* borrow_local() { i64 x = 1; return &x; }\
+             i64 f() { i64* p = @borrow_local(); return 0; }",
+        );
+        crate::semantic::macro_expand::expand_macros_in_program(&mut program);
+        let errs = check_program(&program)
+            .into_iter()
+            .map(|e| e.message)
+            .collect::<Vec<_>>();
+        assert!(
+            errs.iter().any(|m| m.contains("escapes its scope")),
+            "expected escape error, got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn block_local_borrow_cannot_escape_through_assignment() {
+        let mut program = parse(
+            "macro i64* borrow_local() { i64 y = 2; return &y; }\
+             i64 f() { i64 x = 1; i64* p = &x; p = @borrow_local(); return 0; }",
+        );
+        crate::semantic::macro_expand::expand_macros_in_program(&mut program);
+        let errs = check_program(&program)
+            .into_iter()
+            .map(|e| e.message)
+            .collect::<Vec<_>>();
+        assert!(
+            errs.iter().any(|m| m.contains("escapes its scope")),
             "expected escape error, got {errs:?}"
         );
     }

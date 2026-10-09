@@ -1057,6 +1057,21 @@ impl<'a> ParallelGraphExecutor<'a> {
             crate::semantic::typeck::rewrite_bare_constructors(&mut ast, &post_bare);
         }
 
+        let escape_errors = crate::semantic::escape_check::check_program(&ast);
+        if !escape_errors.is_empty() {
+            for error in &escape_errors {
+                eprintln!(
+                    "{}",
+                    crate::diagnostics::render(
+                        error.span,
+                        &error.message,
+                        crate::diagnostics::Severity::Error,
+                    )
+                );
+            }
+            return Err(format!("escape errors in {}", node.source_path.display()));
+        }
+
         // Mark library items public and inlined non-library items private
         let lib_file = file_id;
         for item in &mut ast.items {

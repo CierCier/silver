@@ -3738,20 +3738,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 operator: ast::UnaryOperator::Dereference,
                 operand,
             } => {
-                let (operand_ptr, operand_ty) = self.resolve_lvalue_ptr(operand)?;
-                let ptr_llvm_ty = self.lower_basic_type(&operand_ty)?;
-                let loaded_ptr = self
-                    .builder
-                    .build_load(ptr_llvm_ty, operand_ptr, "deref.lvalue.ptr")
-                    .map_err(|e| {
-                        CodegenError::with_span(
-                            format!("failed to load dereference operand for lvalue: {e}"),
-                            expr.span,
-                        )
-                    })?;
+                let operand_ty = self.resolve_argument_type(operand).ok_or_else(|| {
+                    CodegenError::with_span(
+                        "cannot determine dereference operand type",
+                        operand.span,
+                    )
+                })?;
+                let loaded_ptr = self.emit_expression_value(operand)?;
                 let BasicValueEnum::PointerValue(ptr) = loaded_ptr else {
                     return Err(CodegenError::with_span(
-                        "dereference operand must be a pointer value",
+                        "dereference operand must be a pointer or reference value",
                         expr.span,
                     ));
                 };

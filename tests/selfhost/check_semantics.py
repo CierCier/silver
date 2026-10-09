@@ -27,6 +27,12 @@ OPTIONS = {
     "tests/target_feature_test.ag": ["--cfg", "cpu.avx2"],
 }
 
+# These tests exercise Stage 1 capabilities not implemented by stage0.
+STAGE1_ONLY_ACCEPTANCE = {
+    "tests/json_synthesis_scope_test.ag",
+    "tests/method_slice_coercion_test.ag",
+}
+
 
 RAYGUI_STUB = """\
 import vendor.gfx.raylib;
@@ -180,6 +186,17 @@ def main() -> int:
                 failures.append((relative, "timeout", str(error), ""))
                 continue
             compared += 1
+            if relative in STAGE1_ONLY_ACCEPTANCE:
+                if old.returncode == 0 or new.returncode != 0:
+                    failures.append(
+                        (
+                            relative,
+                            f"expected stage0 rejection and stage1 acceptance; stage0={old.returncode}, stage1={new.returncode}",
+                            new.stderr[:500],
+                            old.stderr[:500],
+                        )
+                    )
+                continue
             if (old.returncode == 0) != (new.returncode == 0):
                 failures.append(
                     (

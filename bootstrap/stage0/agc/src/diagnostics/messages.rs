@@ -288,6 +288,10 @@ pub fn returned_reference_escapes() -> &'static str {
     "returned reference does not outlive the function (it borrows a local value; return a reference to a global or a reference parameter instead)"
 }
 
+pub fn reference_escapes_scope() -> &'static str {
+    "reference to a block-local value escapes its scope"
+}
+
 pub fn reference_stored_into_global(name: &str) -> String {
     format!(
         "reference to a local value stored into global '{name}' — it would dangle after the function returns"
