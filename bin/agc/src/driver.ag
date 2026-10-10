@@ -14,6 +14,7 @@ import workspace;
 import frontend.ownership;
 import frontend.send;
 import agsm;
+import cli;
 
 str token_kind_name(TokenKind kind) {
     return match kind {
@@ -477,7 +478,7 @@ i32 run_workspace_check(Vec<String>* arguments, WorkspacePlan* plan) {
     return result;
 }
 
-i32 run_workspace_native(Vec<String>* arguments, WorkspacePlan* plan) {
+i32 run_workspace_native(Vec<String>* arguments, WorkspacePlan* plan, CliMatches* cli) {
     i64 command_index = workspace_command_index(arguments);
     if (command_index >= 0) {
         String* command = arguments.get_ptr(command_index);
@@ -498,7 +499,7 @@ i32 run_workspace_native(Vec<String>* arguments, WorkspacePlan* plan) {
     Vec<String> workspace_roots = Vec<String>.new();
     workspace_collect_roots(plan, &workspace_roots);
     i32 native_result = 0;
-    bool native_handled = native_backend_try(arguments, plan.entry.to_str(), plan.target_name.to_str(), &workspace_roots, false, &native_result);
+    bool native_handled = native_backend_try(arguments, cli, plan.entry.to_str(), plan.target_name.to_str(), &workspace_roots, false, &native_result);
     workspace_roots.drop();
     if (native_handled) {
         return native_result;
@@ -511,22 +512,6 @@ i32 run_workspace_native(Vec<String>* arguments, WorkspacePlan* plan) {
 bool is_frontend_command(String* command) {
     return command.equals("lex") || command.equals("parse")
         || command.equals("ast") || command.equals("check");
-}
-
-void remove_no_cache_option(Vec<String>* arguments) {
-    i64 option = 1;
-    while (option < arguments.len()) {
-        String* current = arguments.get_ptr(option);
-        if (current.equals("--")) { return; }
-        if (native_argument_consumes_value(arguments, option)) {
-            option += 2;
-        } else if (current.equals("--no-cache")) {
-            String removed = arguments.take(option);
-            removed.drop();
-        } else {
-            option += 1;
-        }
-    }
 }
 
 ArtifactExport artifact_fixture_function(str name) {
@@ -811,29 +796,45 @@ i32 emit_source_artifact(str source_path, str output_path, bool require_complete
 
 i32 run_frontend() {
     Vec<String> arguments = args();
-    remove_no_cache_option(&arguments);
-    if (arguments.len() > 1 && arguments.get_ptr(1).equals("agsm")) {
+    CliParser parser = agc_cli_parser();
+    Result<CliMatches, CliError> cli_result = parser.parse(&arguments);
+    if (cli_result.is_err()) {
+        CliError error = cli_result.unwrap_err();
+        String message = error.message();
+        cli_write_styled(&STDERR, "agc: error:", CliStyle.Error, parser.color);
+        STDERR.write_str(" ");
+        STDERR.write_str(message.to_str());
+        STDERR.write_str("\n");
+        return 2;
+    }
+    CliMatches cli = cli_result.unwrap();
+    if (cli.command.equals("agsm")) {
         i32 result = run_agsm(&arguments);
         arguments.drop();
         return result;
     }
-    if (arguments.len() == 2) {
-        String* option = arguments.get_ptr(1);
-        if (option.equals("--version") || option.equals("-V")) {
-            STDOUT.write_str("agc 0.2.6\n");
-            arguments.drop();
-            return 0;
-        }
-        if (option.equals("--help") || option.equals("-h")) {
-            STDOUT.write_str("Silver compiler\n\nusage: agc [OPTIONS] <FILE>... [-o <OUT>]\n       agc [OPTIONS] <COMMAND>\n\ncommands:\n  lex, parse, ast, check <source.ag>\n  build <silver.toml> [--bin name] [-o output]\n  run <source.ag> [-- arguments...]\n  agsm <COMMAND>  Foreign sourcemap module tools\n\noptions:\n  -I <dir>       Add an import directory\n  -O2            Optimize generated code\n  --no-cache     Disable the module cache\n  -h, --help     Show help\n  -V, --version  Show version\n");
-            arguments.drop();
-            return 0;
-        }
+    if (cli.has("version")) {
+        STDOUT.write_str("agc 0.2.6\n");
+        arguments.drop();
+        return 0;
+    }
+    if (cli.has("help")) {
+        String help_text = parser.help();
+        STDOUT.write_str(help_text.to_str());
+        help_text.drop();
+        arguments.drop();
+        return 0;
+    }
+    if (cli.command.equals("cache") || cli.command.equals("clean")
+        || cli.has("clean") || cli.has("cache-info") || cli.has("cache-prune")) {
+        i32 result = native_cache_command(&cli, parser.color);
+        arguments.drop();
+        return result;
     }
     WorkspacePlan workspace = workspace_plan_empty();
     String workspace_error = String.new();
     bool has_workspace = false;
-    if (!workspace_package_arguments(&arguments, &workspace, &has_workspace, &workspace_error)) {
+    if (!workspace_package_arguments(&arguments, &cli, &workspace, &has_workspace, &workspace_error)) {
         STDERR.write_str("agc: error: ");
         STDERR.write_str(workspace_error.to_str());
         STDERR.write_str("\n");
@@ -844,7 +845,7 @@ i32 run_frontend() {
     }
     workspace_error.drop();
     if (has_workspace) {
-        i32 result = run_workspace_native(&arguments, &workspace);
+        i32 result = run_workspace_native(&arguments, &workspace, &cli);
         workspace_plan_drop(&workspace);
         arguments.drop();
         return result;
@@ -863,7 +864,9 @@ i32 run_frontend() {
         return result;
     }
     if (arguments.len() < 2) {
-        STDERR.write_str("usage: agc [OPTIONS] <FILE>... [-o <OUT>]\n");
+        String short_help = parser.short_help();
+        STDERR.write_str(short_help.to_str());
+        short_help.drop();
         arguments.drop();
         return 2;
     }
@@ -887,7 +890,7 @@ i32 run_frontend() {
                 stage1_module_object_arguments(&arguments, object_path.to_str());
                 i32 object_result = 0;
                 Vec<String> empty_includes = Vec<String>.new();
-                bool handled = native_backend_try(&arguments, native_source.to_str(), object_path.to_str(), &empty_includes, true, &object_result);
+                bool handled = native_backend_try(&arguments, &cli, native_source.to_str(), object_path.to_str(), &empty_includes, true, &object_result);
                 empty_includes.drop();
                 artifact_path.drop();
                 object_path.drop();
@@ -899,7 +902,7 @@ i32 run_frontend() {
             }
             i32 native_result = 0;
             Vec<String> empty_includes = Vec<String>.new();
-            bool handled = native_backend_try(&arguments, native_source.to_str(), "", &empty_includes, false, &native_result);
+            bool handled = native_backend_try(&arguments, &cli, native_source.to_str(), "", &empty_includes, false, &native_result);
             empty_includes.drop();
             if (handled) {
                 native_source.drop();

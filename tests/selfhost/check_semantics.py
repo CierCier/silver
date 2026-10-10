@@ -209,7 +209,8 @@ def main() -> int:
                 if (
                     old.returncode != 0
                     or new.returncode == 0
-                    or "could not be resolved" not in new.stderr
+                    or "has submodule config" not in new.stderr
+                    or "prebuilt .agm artifact" not in new.stderr
                 ):
                     failures.append(
                         (

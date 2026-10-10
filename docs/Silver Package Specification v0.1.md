@@ -151,12 +151,16 @@ Package-aware forms are integrated into the existing driver:
 ```text
 agc                         # default binary target in ./silver.toml
 agc init [TARGET_DIR]       # initialize a package in CWD or TARGET_DIR
-agc build [--bin NAME]     # build a binary target
+agc build [--manifest PATH] [--bin NAME] # build a binary target
 agc check [--bin NAME]     # check a binary target
 agc run [--bin NAME]       # build and execute a binary target
 agc --lib [NAME]           # emit/check a library target as an .agm module
 agc build --lib [NAME]     # explicit library build
 ```
+
+`agc build` reads `./silver.toml` by default. Select another package manifest
+with `--manifest PATH`; positional manifest paths are rejected. Direct `.ag`
+source builds remain available as `agc build path/to/source.ag`.
 
 `--bin` and `--lib` are mutually exclusive and may omit the target name when
 the default-selection rules are sufficient. `run --lib` is rejected because a

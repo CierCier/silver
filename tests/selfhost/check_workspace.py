@@ -79,6 +79,27 @@ def main() -> int:
         fallback_compiler.chmod(0o755)
         base_env = os.environ.copy()
 
+        help_dir = root / "help"
+        help_dir.mkdir()
+        short_help = run(stage1, [], base_env, help_dir)
+        require(short_help, 2, "Use 'agc --help'")
+        if "Options:" in short_help.stderr or "Commands:" in short_help.stderr:
+            raise AssertionError(f"default help was not compact:\n{short_help.stderr}")
+        if "\x1b[" not in short_help.stderr:
+            raise AssertionError("default short help omitted ANSI styling")
+        full_help = run(stage1, ["--help"], base_env, help_dir)
+        require(full_help, 0, "Add an import search directory")
+        require(full_help, 0, "--manifest <PATH>")
+        require(full_help, 0, "Build a source file or the package in ./silver.toml")
+        if "Examples" not in full_help.stdout or "\x1b[" not in full_help.stdout:
+            raise AssertionError("full help omitted examples or ANSI styling")
+        bad_option = run(stage1, ["--not-a-real-option"], base_env, help_dir)
+        require(bad_option, 2, "unknown option")
+        if "\x1b[1;31m" not in bad_option.stderr:
+            raise AssertionError("CLI errors omitted the shared red style")
+        missing_default = run(stage1, ["build"], base_env, help_dir)
+        require(missing_default, 2, "no ./silver.toml found; pass `--manifest PATH`")
+
         # Direct source and manifest checks stay entirely in stage1.
         require(run(stage1, ["check", str(source)], base_env, root), 0, "")
         require(run(stage1, ["check", str(manifest)], base_env, root), 0, "")
@@ -98,6 +119,15 @@ def main() -> int:
         )
         if submodule_result.returncode == 0:
             raise AssertionError("stage1 accepted a submodule with no built artifact")
+        if (
+            "broken_build.submodule.toml" not in submodule_result.stderr
+            or "broken_build.agm" not in submodule_result.stderr
+            or "prebuilt .agm artifact" not in submodule_result.stderr
+        ):
+            raise AssertionError(
+                "stage1 did not explain the missing submodule artifact\n"
+                f"stdout:\n{submodule_result.stdout}\nstderr:\n{submodule_result.stderr}"
+            )
         agsm_help = run(stage1, ["agsm", "--help"], base_env, root)
         require(agsm_help, 0, "Usage: agc agsm")
         agsm_result = run(stage1, ["agsm", "build"], base_env, root)
@@ -199,30 +229,70 @@ def main() -> int:
         )
 
         output_path = root / "application"
-        require(
-            run(
-                stage1,
-                ["build", "--bin", "app0", str(manifest), "--no-cache", "-o", str(output_path)],
-                base_env,
-                root,
-            ),
-            0,
+        progress_env = base_env.copy()
+        progress_env["XDG_CACHE_HOME"] = str(root / "progress-cache")
+        output_path_result = run(
+            stage1,
+            ["build", "--bin", "app0", "--progress", "-o", str(output_path)],
+            progress_env,
+            manifest.parent,
         )
+        require(output_path_result, 0)
         if not output_path.is_file() or not os.access(output_path, os.X_OK):
-            raise AssertionError("stage1 build did not produce an executable")
+            raise AssertionError("stage1 build did not use cwd silver.toml")
+        for progress_line in (
+            "[ 1/2]  50% compiled",
+            "[ 2/2] 100% linking app0",
+            "Build finished in ",
+            "1 compilation unit, 1 source files,",
+            "0 cached, 1 compiled",
+        ):
+            if progress_line not in output_path_result.stderr:
+                raise AssertionError(
+                    f"forced build progress omitted {progress_line!r}:\n"
+                    f"{output_path_result.stderr}"
+                )
+
+        cached_output = root / "cached-application"
+        cached_build = run(
+            stage1,
+            ["build", "--bin", "app0", "--progress", "-o", str(cached_output)],
+            progress_env,
+            manifest.parent,
+        )
+        require(cached_build, 0)
+        if "[ 1/2]  50% [cached] app0" not in cached_build.stderr:
+            raise AssertionError(f"cached build progress was missing:\n{cached_build.stderr}")
+        if "compiling app0" in cached_build.stderr:
+            raise AssertionError("cached build progress claimed the object was compiling")
+
+        positional_manifest = run(
+            stage1,
+            ["build", str(manifest), "-o", str(root / "positional-application")],
+            base_env,
+            root,
+        )
+        require(positional_manifest, 2, "--manifest PATH")
+        missing_manifest = run(
+            stage1,
+            ["build", "--manifest", str(root / "absent.toml")],
+            base_env,
+            root,
+        )
+        require(missing_manifest, 2, "build manifest not found")
 
         nested_output = root / "nested-application"
-        require(
-            run(
-                stage1,
-                ["build", "--bin", "agc", str(nested_root_manifest), "-o", str(nested_output)],
-                base_env,
-                root,
-            ),
-            0,
+        nested_build = run(
+            stage1,
+            ["build", "--manifest", str(nested_root_manifest), "--bin", "agc", "--no-cache", "--no-progress", "-o", str(nested_output)],
+            base_env,
+            root,
         )
+        require(nested_build, 0)
         if not nested_output.is_file() or not os.access(nested_output, os.X_OK):
             raise AssertionError("stage1 did not build the selected nested package target")
+        if "agc: progress:" in nested_build.stderr:
+            raise AssertionError("--no-progress did not suppress build progress")
 
         require(
             run(stage1, ["test", str(manifest)], base_env, root),

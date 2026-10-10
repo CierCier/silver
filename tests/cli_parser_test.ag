@@ -1,0 +1,100 @@
+import std.cli;
+import std.test;
+import std.mem.vec;
+import std.optional;
+import std.result;
+import std.string;
+
+void push_arg(&mut Vec<String> arguments, str value) {
+    arguments.push(String.from_str(value));
+}
+
+CliParser test_parser() {
+    CliParser parser = CliParser.new("tool");
+    parser.describe("A test command-line application");
+    parser.add_flag("verbose", "v", "Print extra details", false);
+    parser.add_alias("verbose", "--loud");
+    parser.add_value("include", "I", "DIR", "Add an import directory", true);
+    parser.add_optional_value("opt", "O", "LEVEL", "Set optimization level", false);
+    parser.add_command("build", "b", "Build the project");
+    parser.add_example("tool build -I src");
+    return move parser;
+}
+
+i32 main() {
+    test_start("std.cli: aliases, repeated values, inline values, command and trailing args");
+    CliParser parser = test_parser();
+    String help = parser.help();
+    assert_true(help.contains("build, b"), "help lists command aliases");
+    assert_true(help.contains("Build the project"), "help shows command descriptions");
+    assert_true(help.contains("-I, --include <DIR>..."), "help shows option arity and repeatability");
+    assert_true(help.contains("--verbose, --loud"), "help lists option aliases");
+    assert_true(help.contains("Add an import directory"), "help shows option descriptions");
+    assert_true(help.contains("tool build -I src"), "help lists examples");
+    assert_true(help.contains("\x1b["), "help uses ANSI colors by default");
+    assert_true(strcmp(cli_style_code(CliStyle.Error), "1;31") == 0, "error style maps to red ANSI");
+    parser.set_color(false);
+    String plain_help = parser.help();
+    assert_true(!plain_help.contains("\x1b["), "help can disable ANSI colors");
+    String compact_help = parser.short_help();
+    assert_true(compact_help.contains("Use 'tool --help'"), "short help points to detailed help");
+    assert_true(!compact_help.contains("Options:"), "short help stays compact");
+    parser.set_color(true);
+    Vec<String> argv = Vec<String>.new();
+    push_arg(&mut argv, "tool");
+    push_arg(&mut argv, "--loud");
+    push_arg(&mut argv, "b");
+    push_arg(&mut argv, "-Iinc1");
+    push_arg(&mut argv, "--include=inc2");
+    push_arg(&mut argv, "-O3");
+    push_arg(&mut argv, "source.ag");
+    push_arg(&mut argv, "--");
+    push_arg(&mut argv, "--verbose");
+    Result<CliMatches, CliError> result = parser.parse(&argv);
+    assert_true(result.is_ok(), "valid CLI parses");
+    CliMatches matches = result.unwrap();
+    assert_true(matches.command.equals("build"), "command alias resolves to canonical name");
+    assert_true(matches.has("verbose"), "flag is set");
+    Vec<String> includes = matches.values("include");
+    assert_eq_i64(2, includes.len(), "repeatable values are retained");
+    assert_true(includes.get_ptr(0).equals("inc1"), "short attached value is parsed");
+    assert_true(includes.get_ptr(1).equals("inc2"), "long inline value is parsed");
+    Optional<String> optimization = matches.value("opt");
+    assert_true(optimization.is_some(), "attached optional value is parsed");
+    String level = optimization.unwrap();
+    assert_true(level.equals("3"), "optional value contents are retained");
+    assert_eq_i64(1, matches.positional_count(), "positional argument is retained");
+    assert_eq_i64(1, matches.trailing_count(), "arguments after -- are separated");
+    Optional<String> trailing = matches.trailing_arg(0);
+    assert_true(trailing.is_some(), "trailing value is present");
+    String trailing_value = trailing.unwrap();
+    assert_true(trailing_value.equals("--verbose"), "option-looking trailing value stays positional");
+
+    test_start("std.cli: missing required option value is structured");
+    Vec<String> missing_argv = Vec<String>.new();
+    push_arg(&mut missing_argv, "tool");
+    push_arg(&mut missing_argv, "--include");
+    Result<CliMatches, CliError> missing = parser.parse(&missing_argv);
+    assert_true(missing.is_err(), "missing required value fails");
+    CliError missing_error = missing.unwrap_err();
+    assert_true(match missing_error { MissingValue(name) : name.equals("--include"), _ : false }, "missing value error identifies option");
+
+    test_start("std.cli: unknown option and duplicate nonrepeatable option fail");
+    Vec<String> unknown_argv = Vec<String>.new();
+    push_arg(&mut unknown_argv, "tool");
+    push_arg(&mut unknown_argv, "--wat");
+    Result<CliMatches, CliError> unknown = parser.parse(&unknown_argv);
+    assert_true(unknown.is_err(), "unknown option fails");
+    CliError unknown_error = unknown.unwrap_err();
+    assert_true(match unknown_error { UnknownOption(name) : name.equals("--wat"), _ : false }, "unknown option error identifies token");
+
+    Vec<String> duplicate_argv = Vec<String>.new();
+    push_arg(&mut duplicate_argv, "tool");
+    push_arg(&mut duplicate_argv, "--verbose");
+    push_arg(&mut duplicate_argv, "-v");
+    Result<CliMatches, CliError> duplicate = parser.parse(&duplicate_argv);
+    assert_true(duplicate.is_err(), "duplicate nonrepeatable flag fails");
+    CliError duplicate_error = duplicate.unwrap_err();
+    assert_true(match duplicate_error { RepeatedOption(name) : name.equals("-v"), _ : false }, "duplicate error identifies second occurrence");
+    return done();
+}

@@ -17,6 +17,7 @@ import frontend.items;
 import frontend.symbols;
 import frontend.cfg;
 import frontend.bindings;
+import frontend.messages;
 
 struct ModuleLoader {
     SymbolTable* symbols;
@@ -77,9 +78,22 @@ void report_unresolved_import(ModuleLoader* loader, DiagnosticBag* diagnostics, 
     if (diagnostics == (DiagnosticBag*)0) {
         return;
     }
-    String message = String.from_str("import `");
-    message.push_str(module_name);
-    message.push_str("` could not be resolved");
+    String message = unresolved_import(module_name);
+    diagnostics.error(Span.synthetic(), move message);
+}
+
+void report_submodule_artifact_missing(
+    ModuleLoader* loader,
+    DiagnosticBag* diagnostics,
+    str module_name,
+    str config_path,
+    str artifact_path
+) {
+    loader.failed = true;
+    if (diagnostics == (DiagnosticBag*)0) {
+        return;
+    }
+    String message = missing_submodule_artifact(module_name, config_path, artifact_path);
     diagnostics.error(Span.synthetic(), move message);
 }
 
@@ -171,7 +185,7 @@ String module_candidate(str base_path, str relative_path, str extension) {
     return move candidate;
 }
 
-String resolve_from_base(str base, str relative) {
+String resolve_from_base(str base, str relative, String* submodule_config) {
     String source = module_candidate(base, relative, ".ag");
     if (file_exists(source.to_str())) {
         return source;
@@ -182,13 +196,28 @@ String resolve_from_base(str base, str relative) {
         return artifact;
     }
     artifact.drop();
+    if (submodule_config.len() == 0) {
+        String config = module_candidate(base, relative, ".submodule.toml");
+        if (file_exists(config.to_str())) {
+            *submodule_config = move config;
+        } else {
+            config.drop();
+        }
+    }
     return String.new();
 }
 
-String resolve_module_path(str owner_path, str root_path, str module_name, Vec<String>* include_dirs) {
+String resolve_module_path_with_config(
+    str owner_path,
+    str root_path,
+    str module_name,
+    Vec<String>* include_dirs,
+    String* submodule_config
+) {
     String module_text = String.from_str(module_name);
     String relative = module_text.replace(".", "/");
     module_text.drop();
+    String config = String.new();
     String base = String.from_str(root_path);
     bool is_std = module_text_equals(module_name, "std") || module_text_starts_with(module_name, "std.");
     if (!is_std) {
@@ -196,25 +225,28 @@ String resolve_module_path(str owner_path, str root_path, str module_name, Vec<S
         base = path_dirname(owner_path);
     }
 
-    String resolved = resolve_from_base(base.to_str(), relative.to_str());
+    String resolved = resolve_from_base(base.to_str(), relative.to_str(), &config);
     base.drop();
     if (resolved.len() > 0) {
+        config.drop();
         relative.drop();
         return resolved;
     }
     resolved.drop();
 
     String local_base = path_dirname(owner_path);
-    resolved = resolve_from_base(local_base.to_str(), relative.to_str());
+    resolved = resolve_from_base(local_base.to_str(), relative.to_str(), &config);
     local_base.drop();
     if (resolved.len() > 0) {
+        config.drop();
         relative.drop();
         return resolved;
     }
     resolved.drop();
 
-    resolved = resolve_from_base(root_path, relative.to_str());
+    resolved = resolve_from_base(root_path, relative.to_str(), &config);
     if (resolved.len() > 0) {
+        config.drop();
         relative.drop();
         return resolved;
     }
@@ -223,17 +255,45 @@ String resolve_module_path(str owner_path, str root_path, str module_name, Vec<S
     i64 include_index = 0;
     while (include_index < include_dirs.len()) {
         String include_base = String.from_str(include_dirs.get_ptr(include_index).to_str());
-        resolved = resolve_from_base(include_base.to_str(), relative.to_str());
+        resolved = resolve_from_base(include_base.to_str(), relative.to_str(), &config);
         include_base.drop();
         if (resolved.len() > 0) {
+            config.drop();
             relative.drop();
             return resolved;
         }
         resolved.drop();
         include_index += 1;
     }
+    *submodule_config = move config;
     relative.drop();
     return String.new();
+}
+
+String resolve_module_path(str owner_path, str root_path, str module_name, Vec<String>* include_dirs) {
+    String config = String.new();
+    String resolved = resolve_module_path_with_config(
+        owner_path, root_path, module_name, include_dirs, &config
+    );
+    config.drop();
+    return resolved;
+}
+
+void report_missing_import(
+    ModuleLoader* loader,
+    DiagnosticBag* diagnostics,
+    str module_name,
+    String* config
+) {
+    if (config.len() == 0) {
+        report_unresolved_import(loader, diagnostics, module_name);
+        return;
+    }
+    String artifact = config.replace(".submodule.toml", ".agm");
+    report_submodule_artifact_missing(
+        loader, diagnostics, module_name, config.to_str(), artifact.to_str()
+    );
+    artifact.drop();
 }
 
 SymbolKind artifact_symbol_kind(ArtifactExportKind kind) {
@@ -797,12 +857,16 @@ void load_source_module(ModuleLoader* loader, DiagnosticBag* diagnostics, str pa
     while (i < imports.len()) {
         String* module_name = imports.get_ptr(i);
         if (module_name.len() > 0) {
-            String resolved = resolve_module_path(path, root_path, module_name.to_str(), include_dirs);
+            String config = String.new();
+            String resolved = resolve_module_path_with_config(
+                path, root_path, module_name.to_str(), include_dirs, &config
+            );
             if (resolved.len() > 0) {
                 enqueue_module(loader, resolved.to_str());
             } else {
-                report_unresolved_import(loader, diagnostics, module_name.to_str());
+                report_missing_import(loader, diagnostics, module_name.to_str(), &config);
             }
+            config.drop();
             resolved.drop();
         }
         i += 1;
@@ -828,12 +892,16 @@ bool load_imported_declarations(SymbolTable* symbols, DiagnosticBag* diagnostics
     while (i < imports.len()) {
         String* module_name = imports.get_ptr(i);
         if (module_name.len() > 0) {
-            String resolved = resolve_module_path(owner_path, root.to_str(), module_name.to_str(), include_dirs);
+            String config = String.new();
+            String resolved = resolve_module_path_with_config(
+                owner_path, root.to_str(), module_name.to_str(), include_dirs, &config
+            );
             if (resolved.len() > 0) {
                 enqueue_module(&loader, resolved.to_str());
             } else {
-                report_unresolved_import(&loader, diagnostics, module_name.to_str());
+                report_missing_import(&loader, diagnostics, module_name.to_str(), &config);
             }
+            config.drop();
             resolved.drop();
         }
         i += 1;

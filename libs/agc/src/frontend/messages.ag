@@ -45,6 +45,24 @@ String duplicate_symbol(str name) {
     return move s;
 }
 
+String unresolved_import(str name) {
+    String message = String.from_str("import `");
+    message.push_str(name);
+    message.push_str("` could not be resolved");
+    return move message;
+}
+
+String missing_submodule_artifact(str name, str config_path, str artifact_path) {
+    String message = String.from_str("import `");
+    message.push_str(name);
+    message.push_str("` has submodule config `");
+    message.push_str(config_path);
+    message.push_str("`, but prebuilt artifact `");
+    message.push_str(artifact_path);
+    message.push_str("` is missing; stage1 requires a prebuilt .agm artifact");
+    return move message;
+}
+
 String type_mismatch(str expected, str found) {
     String s = String.from_str("type mismatch: expected ");
     s.push_str(expected);

@@ -162,8 +162,11 @@ if (@cfg(os.linux)) {
     void _start() {
         asm("
         .section .bss
+        .globl __silver_argc
         __silver_argc: .zero 4
+        .globl __silver_argv
         __silver_argv: .zero 8
+        .globl __silver_envp
         __silver_envp: .zero 8
         .text
         test %rbp, %rbp
@@ -249,8 +252,11 @@ if (@cfg(os.linux)) {
         // entry blob's section directives). Runs once, before anything reads them.
         asm("
         .section .bss
+        .globl __silver_argc
         __silver_argc: .zero 4
+        .globl __silver_argv
         __silver_argv: .zero 8
+        .globl __silver_envp
         __silver_envp: .zero 8
         .text
     ");

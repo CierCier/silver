@@ -36,7 +36,8 @@ The semantic regression checks compare focused generic and borrow-escape cases
 against stage0. The diagnostic gate checks primary error ordering. The AGM
 gates cover supported reader versions, malformed input, and cross-stage
 roundtrips; stage1 artifact publication remains a frontend metadata projection.
-Stage1 imports prebuilt `.agm` files and does not build `.submodule.toml` inputs.
+Stage1 imports prebuilt `.agm` files and reports the expected artifact path when
+a matching `.submodule.toml` exists without one; it does not build those inputs.
 
 All reported stage0 use above is bootstrap or comparison-only. Stage1 runtime
 commands have no stage0 delegation path.

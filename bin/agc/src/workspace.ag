@@ -13,6 +13,7 @@ import std.path;
 import std.result;
 import std.string;
 import std.env;
+import std.cli;
 
 enum TargetKind {
     Bin;
@@ -957,6 +958,7 @@ bool workspace_option_consumes_value(Vec<String>* arguments, i64 index) {
         || strcmp(option.to_str(), "-l") == 0 || strcmp(option.to_str(), "-W") == 0
         || strcmp(option.to_str(), "--target") == 0 || strcmp(option.to_str(), "--sysroot") == 0
         || strcmp(option.to_str(), "--cfg") == 0 || strcmp(option.to_str(), "--cache-dir") == 0
+        || strcmp(option.to_str(), "--manifest") == 0
         || strcmp(option.to_str(), "-j") == 0 || strcmp(option.to_str(), "--jobs") == 0
         || strcmp(option.to_str(), "--emit") == 0 || strcmp(option.to_str(), "--run-arg") == 0;
 }
@@ -1110,7 +1112,7 @@ bool workspace_has_grammar_emit(Vec<String>* arguments) {
     return false;
 }
 
-bool workspace_package_arguments(Vec<String>* arguments, WorkspacePlan* plan, bool* has_package, String* error) {
+bool workspace_package_arguments(Vec<String>* arguments, CliMatches* cli, WorkspacePlan* plan, bool* has_package, String* error) {
     *has_package = false;
     i64 command_index = workspace_command_index(arguments);
     if (command_index >= 0) {
@@ -1134,8 +1136,46 @@ bool workspace_package_arguments(Vec<String>* arguments, WorkspacePlan* plan, bo
         }
     }
     String input = String.new();
-    bool found = workspace_find_package_input(arguments, command_index, &input);
+    bool found = false;
+    if (cli.command.equals("build")) {
+        if (cli.positional_count() > 0) {
+            Optional<String> first_positional = cli.positional(0);
+            if (!cli.has("manifest") && first_positional.is_some()) {
+                String source = first_positional.unwrap();
+                bool is_source = source.ends_with(".ag");
+                source.drop();
+                if (is_source) {
+                    input.drop();
+                    return true;
+                }
+            }
+            workspace_error(error, "build manifests must be selected with `--manifest PATH`");
+            input.drop();
+            return false;
+        }
+        Optional<String> manifest_option = cli.value("manifest");
+        if (manifest_option.is_some()) {
+            String manifest_path = manifest_option.unwrap();
+            found = workspace_manifest_input(manifest_path.to_str(), &input);
+            if (!found) {
+                workspace_error_value(error, "build manifest not found: `", manifest_path.to_str(), "`");
+                manifest_path.drop();
+                input.drop();
+                return false;
+            }
+            manifest_path.drop();
+        } else {
+            found = workspace_default_manifest(&input);
+        }
+    } else {
+        found = workspace_find_package_input(arguments, command_index, &input);
+    }
     if (!found) {
+        if (cli.command.equals("build")) {
+            workspace_error(error, "no ./silver.toml found; pass `--manifest PATH`");
+            input.drop();
+            return false;
+        }
         if (command_index < 0 || workspace_has_positional_input(arguments, command_index)
             || workspace_has_grammar_emit(arguments)) {
             return true;

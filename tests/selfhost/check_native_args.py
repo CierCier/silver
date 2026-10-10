@@ -87,6 +87,14 @@ def main() -> int:
                 f"stdout={forwarded.stdout!r}, stderr={forwarded.stderr!r}"
             )
 
+        separated = run(stage1, ["run", str(fixture), "--", "alpha", "--no-cache"], env)
+        expected_separated = "alpha\n--no-cache\n"
+        if separated.returncode != 42 or separated.stdout != expected_separated:
+            raise AssertionError(
+                f"arguments after -- were not forwarded: rc={separated.returncode}, "
+                f"stdout={separated.stdout!r}, stderr={separated.stderr!r}"
+            )
+
         output_directory = pathlib.Path(temporary) / "output-option"
         output_directory.mkdir()
         output_value = run(
