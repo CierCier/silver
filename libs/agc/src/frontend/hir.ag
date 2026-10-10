@@ -1,0 +1,821 @@
+// Retained typed projection over the lossless syntax tree.
+//
+// This is the first HIR slice: declarations and expression nodes are lowered
+// once, while types are interned by TypeId. The HIR is intentionally small and
+// deterministic; it is not yet the complete type checker.
+import std.mem.alloc;
+import std.mem.vec;
+import std.string;
+import std.intern;
+import frontend.ast;
+import frontend.bindings;
+import frontend.cfg;
+import frontend.diagnostics;
+import frontend.expressions;
+import frontend.lexer;
+import frontend.symbols;
+import frontend.types;
+
+enum HirTypeKind {
+    Invalid;
+    Void;
+    Bool;
+    Integer;
+    Float;
+    String;
+    Character;
+    Named;
+    Pointer;
+    Reference;
+    Array;
+}
+
+struct HirType {
+    HirTypeKind kind;
+    str name;
+    u32 element;
+    u32 pointee;
+    bool is_mutable;
+}
+
+struct HirTypeTable {
+    Interner names;
+    Vec<HirType> types;
+}
+
+impl HirTypeTable {
+    HirTypeTable new() {
+        HirTypeTable table;
+        table.names = Interner.new();
+        table.types = Vec<HirType>.new();
+        HirType invalid;
+        invalid.kind = HirTypeKind.Invalid;
+        invalid.name = table.names.get(table.names.intern("<invalid>"));
+        invalid.element = 0;
+        invalid.pointee = 0;
+        invalid.is_mutable = false;
+        table.types.push(invalid);
+        return table;
+    }
+
+    u32 add_primitive(HirTypeTable* self, HirTypeKind kind, str name) {
+        i64 i = 0;
+        while (i < self.types.len()) {
+            HirType* current = self.types.get_ptr(i);
+            if (current.kind == kind && strcmp(current.name, name) == 0) {
+                return (u32)i;
+            }
+            i += 1;
+        }
+        HirType result;
+        result.kind = kind;
+        result.name = self.names.get(self.names.intern(name));
+        result.element = 0;
+        result.pointee = 0;
+        result.is_mutable = false;
+        self.types.push(result);
+        return (u32)(self.types.len() - 1);
+    }
+
+    u32 add_named(HirTypeTable* self, str name) {
+        if (strlen(name) == 0) {
+            return 0;
+        }
+        return self.add_primitive(HirTypeKind.Named, name);
+    }
+
+    u32 add_pointer(HirTypeTable* self, u32 pointee, bool is_mutable) {
+        HirType result;
+        result.kind = HirTypeKind.Pointer;
+        result.name = self.names.get(self.names.intern("*"));
+        result.element = 0;
+        result.pointee = pointee;
+        result.is_mutable = is_mutable;
+        self.types.push(result);
+        return (u32)(self.types.len() - 1);
+    }
+
+    u32 add_reference(HirTypeTable* self, u32 pointee, bool is_mutable) {
+        HirType result;
+        result.kind = HirTypeKind.Reference;
+        result.name = self.names.get(self.names.intern("&"));
+        result.element = 0;
+        result.pointee = pointee;
+        result.is_mutable = is_mutable;
+        self.types.push(result);
+        return (u32)(self.types.len() - 1);
+    }
+
+    u32 add_array(HirTypeTable* self, u32 element) {
+        HirType result;
+        result.kind = HirTypeKind.Array;
+        result.name = self.names.get(self.names.intern("[]"));
+        result.element = element;
+        result.pointee = 0;
+        result.is_mutable = false;
+        self.types.push(result);
+        return (u32)(self.types.len() - 1);
+    }
+
+    HirType* get(HirTypeTable* self, u32 id) {
+        if ((i64)id >= self.types.len()) {
+            return self.types.get_ptr(0);
+        }
+        return self.types.get_ptr((i64)id);
+    }
+}
+
+u32 hir_type_from_projection(HirTypeTable* table, TypeProjection* projection) {
+    if (projection == (TypeProjection*)0) {
+        return 0;
+    }
+    if (projection.kind == ProjectionTypeKind.Primitive) {
+        HirTypeKind kind = HirTypeKind.Named;
+        if (strcmp(projection.name, "bool") == 0) { kind = HirTypeKind.Bool; }
+        else if (strcmp(projection.name, "str") == 0 || strcmp(projection.name, "String") == 0) { kind = HirTypeKind.String; }
+        else if (strcmp(projection.name, "char") == 0) { kind = HirTypeKind.Character; }
+        else if (strcmp(projection.name, "void") == 0) { kind = HirTypeKind.Void; }
+        else if (types_is_primitive_name(projection.name)) {
+            if (projection.name[0] == (u8)'f' || projection.name[0] == (u8)'c') {
+                kind = HirTypeKind.Float;
+            } else {
+                kind = HirTypeKind.Integer;
+            }
+        }
+        return table.add_primitive(kind, projection.name);
+    }
+    if (projection.kind == ProjectionTypeKind.Named) {
+        return table.add_named(projection.name);
+    }
+    if (projection.kind == ProjectionTypeKind.Pointer) {
+        TypeProjection inner_projection = projection_type_empty();
+        inner_projection.kind = ProjectionTypeKind.Named;
+        inner_projection.name = projection.name;
+        u32 inner = hir_type_from_projection(table, &inner_projection);
+        return table.add_pointer(inner, true);
+    }
+    if (projection.kind == ProjectionTypeKind.Reference) {
+        u32 inner = table.add_named(projection.name);
+        return table.add_reference(inner, projection.is_mutable);
+    }
+    if (projection.kind == ProjectionTypeKind.Array) {
+        return table.add_array(table.add_named(projection.name));
+    }
+    return 0;
+}
+
+enum HirNodeKind {
+    Function;
+    Parameter;
+    Block;
+    Return;
+    Expression;
+    Identifier;
+    Literal;
+    Token;
+}
+
+struct HirNode {
+    HirNodeKind kind;
+    TokenKind token_kind;
+    Span span;
+    u32 type_id;
+    str text;
+    HirNode* parent;
+    HirNode* first_child;
+    HirNode* last_child;
+    HirNode* next_sibling;
+    HirNode* pool_next;
+}
+
+struct HirNodePool {
+    HirNode* head;
+}
+
+struct HirContext {
+    HirTypeTable types;
+    HirNodePool nodes;
+    Interner strings;
+}
+
+struct HirFunction {
+    str name;
+    Span span;
+    u32 return_type;
+    SyntaxNode* syntax;
+    bool arity_unreliable; // generic commas are not parameter separators in this CST slice
+    HirNode* root;
+    Vec<HirNode*> parameters;
+}
+
+struct HirModule {
+    Vec<HirFunction> functions;
+}
+
+impl HirNodePool {
+    HirNodePool new() {
+        HirNodePool pool;
+        pool.head = (HirNode*)0;
+        return pool;
+    }
+
+    HirNode* create(HirNodePool* self, HirNodeKind kind, Span span, str text) {
+        HirNode* node = (HirNode*)alloc<HirNode>();
+        if (node == (HirNode*)0) {
+            return (HirNode*)0;
+        }
+        node.kind = kind;
+        node.token_kind = TokenKind.Eof;
+        node.span = span;
+        node.type_id = 0;
+        node.text = text;
+        node.parent = (HirNode*)0;
+        node.first_child = (HirNode*)0;
+        node.last_child = (HirNode*)0;
+        node.next_sibling = (HirNode*)0;
+        node.pool_next = self.head;
+        self.head = node;
+        return node;
+    }
+
+    void destroy(HirNodePool* self) {
+        HirNode* node = self.head;
+        while (node != (HirNode*)0) {
+            HirNode* next = node.pool_next;
+            free(node);
+            node = next;
+        }
+        self.head = (HirNode*)0;
+    }
+}
+
+impl HirContext {
+    HirContext new() {
+        HirContext context;
+        context.types = HirTypeTable.new();
+        context.nodes = HirNodePool.new();
+        context.strings = Interner.new();
+        return context;
+    }
+
+    str intern(HirContext* self, str text) {
+        return self.strings.get(self.strings.intern(text));
+    }
+}
+
+void hir_append(HirNode* parent, HirNode* child) {
+    if (parent == (HirNode*)0 || child == (HirNode*)0) {
+        return;
+    }
+    child.parent = parent;
+    child.next_sibling = (HirNode*)0;
+    if (parent.first_child == (HirNode*)0) {
+        parent.first_child = child;
+        parent.last_child = child;
+    } else {
+        parent.last_child.next_sibling = child;
+        parent.last_child = child;
+    }
+}
+
+HirNode* hir_lower_node(HirContext* context, SyntaxNode* syntax) {
+    if (syntax == (SyntaxNode*)0) {
+        return (HirNode*)0;
+    }
+    HirNodeKind kind = HirNodeKind.Token;
+    if (syntax.kind == NodeKind.Block) { kind = HirNodeKind.Block; }
+    else if (syntax.kind == NodeKind.Function) { kind = HirNodeKind.Function; }
+    else if (syntax.kind == NodeKind.Parameter) { kind = HirNodeKind.Parameter; }
+    else if (syntax.kind == NodeKind.Return
+        || (syntax.kind == NodeKind.Token && syntax.token_kind == TokenKind.Return)) {
+        kind = HirNodeKind.Return;
+    }
+    else if (syntax.kind == NodeKind.Expression) { kind = HirNodeKind.Expression; }
+    else if (syntax.kind == NodeKind.Token) {
+        if (syntax.token_kind == TokenKind.Identifier) { kind = HirNodeKind.Identifier; }
+        else if (syntax.token_kind == TokenKind.IntLiteral || syntax.token_kind == TokenKind.FloatLiteral
+            || syntax.token_kind == TokenKind.ComplexLiteral || syntax.token_kind == TokenKind.StringLiteral
+            || syntax.token_kind == TokenKind.CharLiteral || syntax.token_kind == TokenKind.BoolLiteral) {
+            kind = HirNodeKind.Literal;
+        }
+    }
+    HirNode* node = context.nodes.create(kind, syntax.span, context.intern(syntax.text));
+    if (node == (HirNode*)0) {
+        return node;
+    }
+    if (syntax.kind == NodeKind.Token) {
+        node.token_kind = syntax.token_kind;
+    }
+    SyntaxNode* child = syntax.first_child;
+    while (child != (SyntaxNode*)0) {
+        HirNode* lowered = hir_lower_node(context, child);
+        hir_append(node, lowered);
+        child = child.next_sibling;
+    }
+    return node;
+}
+
+u32 hir_literal_type(HirContext* context, TokenKind kind) {
+    if (kind == TokenKind.BoolLiteral) { return context.types.add_primitive(HirTypeKind.Bool, "bool"); }
+    if (kind == TokenKind.StringLiteral) { return context.types.add_primitive(HirTypeKind.String, "str"); }
+    if (kind == TokenKind.CharLiteral) { return context.types.add_primitive(HirTypeKind.Character, "char"); }
+    if (kind == TokenKind.FloatLiteral || kind == TokenKind.ComplexLiteral) {
+        return context.types.add_primitive(HirTypeKind.Float, "f64");
+    }
+    if (kind == TokenKind.IntLiteral) { return context.types.add_primitive(HirTypeKind.Integer, "i32"); }
+    return 0;
+}
+
+void hir_infer_literals(HirNode* node, HirContext* context) {
+    if (node == (HirNode*)0) { return; }
+    if (node.kind == HirNodeKind.Literal) {
+        node.type_id = hir_literal_type(context, node.token_kind);
+    }
+    HirNode* child = node.first_child;
+    while (child != (HirNode*)0) {
+        hir_infer_literals(child, context);
+        child = child.next_sibling;
+    }
+}
+
+void hir_collect_leaves(SyntaxNode* node, Vec<SyntaxNode*>* leaves) {
+    if (node == (SyntaxNode*)0) { return; }
+    if (node.kind == NodeKind.Token) {
+        leaves.push(node);
+        return;
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        hir_collect_leaves(child, leaves);
+        child = child.next_sibling;
+    }
+}
+
+u32 hir_function_return_type(HirContext* context, SyntaxNode* function, SyntaxNode* name) {
+    SyntaxNode* parameters = binding_function_parameters(function);
+    Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+    SyntaxNode* child = function.first_child;
+    while (child != (SyntaxNode*)0 && child != parameters) {
+        if (child != name) {
+            hir_collect_leaves(child, &leaves);
+        }
+        child = child.next_sibling;
+    }
+    u32 result = 0;
+    if (leaves.len() > 0) {
+        TypeProjection projection = projection_parse_type(&leaves, 0, leaves.len());
+        result = hir_type_from_projection(&context.types, &projection);
+    }
+    leaves.drop();
+    return result;
+}
+
+HirFunction hir_lower_function(HirContext* context, SyntaxNode* function) {
+    HirFunction result;
+    result.name = "";
+    result.span = function.span;
+    result.return_type = 0;
+    result.syntax = function;
+    result.arity_unreliable = false;
+    result.root = (HirNode*)0;
+    result.parameters = Vec<HirNode*>.new();
+    SyntaxNode* name = function_identifier(function);
+    if (name != (SyntaxNode*)0) {
+        result.name = context.intern(name.text);
+    }
+    Vec<SyntaxNode*> parameter_leaves = Vec<SyntaxNode*>.new();
+    hir_collect_leaves(binding_function_parameters(function), &parameter_leaves);
+    i64 parameter_index = 0;
+    while (parameter_index < parameter_leaves.len()) {
+        if (parameter_leaves.get(parameter_index).token_kind == TokenKind.DotDotDot
+            || parameter_leaves.get(parameter_index).token_kind == TokenKind.Less
+            || parameter_leaves.get(parameter_index).token_kind == TokenKind.Greater) {
+            result.arity_unreliable = true;
+        }
+        parameter_index += 1;
+    }
+    parameter_leaves.drop();
+    result.return_type = hir_function_return_type(context, function, name);
+    result.root = hir_lower_node(context, function);
+    hir_infer_literals(result.root, context);
+    Vec<Binding> bindings = Vec<Binding>.new();
+    collect_parameter_bindings(binding_function_parameters(function), &bindings);
+    i64 i = 0;
+    while (i < bindings.len()) {
+        Binding* binding = bindings.get_ptr(i);
+        u32 type_id = hir_type_from_projection(&context.types, &binding.declared_type);
+        HirNode* parameter = context.nodes.create(HirNodeKind.Parameter, binding.span, context.intern(binding.name));
+        parameter.type_id = type_id;
+        result.parameters.push(parameter);
+        i += 1;
+    }
+    bindings.drop();
+    return result;
+}
+
+HirModule hir_build(SyntaxTree* tree, CfgSet* cfg, DiagnosticBag* diagnostics, HirContext* context) {
+    HirModule module;
+    module.functions = Vec<HirFunction>.new();
+    Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
+    cfg_collect_items(tree.root, cfg, diagnostics, &items);
+    i64 i = 0;
+    while (i < items.len()) {
+        SyntaxNode* item = items.get(i);
+        if (item.kind == NodeKind.Function) {
+            HirFunction function = hir_lower_function(context, item);
+            module.functions.push(move function);
+        }
+        i += 1;
+    }
+    items.drop();
+    return module;
+}
+
+void hir_module_drop(HirModule* module) {
+    i64 i = 0;
+    while (i < module.functions.len()) {
+        module.functions.get_ptr(i).parameters.drop();
+        i += 1;
+    }
+    module.functions.drop();
+}
+
+HirType* hir_type_at(HirContext* context, u32 id) {
+    return context.types.get(id);
+}
+
+void hir_append_type(String* out, HirContext* context, u32 id) {
+    HirType* ty = hir_type_at(context, id);
+    if (id == 0 || ty.kind == HirTypeKind.Invalid) {
+        out.push_str("<unknown>");
+        return;
+    }
+    if (ty.kind == HirTypeKind.Pointer) {
+        out.push_str("*");
+        hir_append_type(out, context, ty.pointee);
+        return;
+    }
+    if (ty.kind == HirTypeKind.Reference) {
+        out.push_str("&");
+        hir_append_type(out, context, ty.pointee);
+        return;
+    }
+    if (ty.kind == HirTypeKind.Array) {
+        out.push_str("[]");
+        hir_append_type(out, context, ty.element);
+        return;
+    }
+    out.push_str(ty.name);
+}
+
+bool hir_types_conflict(HirContext* context, u32 expected_id, u32 actual_id) {
+    if (expected_id == 0 || actual_id == 0) { return false; }
+    HirType* expected = hir_type_at(context, expected_id);
+    HirType* actual = hir_type_at(context, actual_id);
+    if (actual.kind == HirTypeKind.String) {
+        return expected.kind != HirTypeKind.String
+            && expected.kind != HirTypeKind.Reference
+            && expected.kind != HirTypeKind.Pointer
+            && expected.kind != HirTypeKind.Named;
+    }
+    if (expected.kind == HirTypeKind.String) {
+        return actual.kind != HirTypeKind.String
+            && actual.kind != HirTypeKind.Reference
+            && actual.kind != HirTypeKind.Pointer;
+    }
+    return false;
+}
+
+u32 hir_syntax_literal_type(SyntaxNode* node, HirContext* context) {
+    if (node == (SyntaxNode*)0 || node.kind != NodeKind.Token) { return 0; }
+    return hir_literal_type(context, node.token_kind);
+}
+
+HirFunction* hir_find_function(HirModule* module, str name) {
+    HirFunction* result = (HirFunction*)0;
+    i64 i = 0;
+    while (i < module.functions.len()) {
+        HirFunction* function = module.functions.get_ptr(i);
+        if (strcmp(function.name, name) == 0) {
+            if (result != (HirFunction*)0) {
+                return (HirFunction*)0;
+            }
+            result = function;
+        }
+        i += 1;
+    }
+    return result;
+}
+
+u32 hir_find_function_return(HirModule* module, str name) {
+    HirFunction* function = hir_find_function(module, name);
+    if (function == (HirFunction*)0) { return 0; }
+    return function.return_type;
+}
+
+SyntaxNode* hir_return_expression_node(SyntaxNode* return_token) {
+    SyntaxNode* cursor = return_token.next_sibling;
+    if (cursor == (SyntaxNode*)0) { return (SyntaxNode*)0; }
+    if (cursor.kind == NodeKind.Token) { return cursor; }
+    Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+    hir_collect_leaves(cursor, &leaves);
+    SyntaxNode* result = leaves.len() == 1 ? leaves.get(0) : cursor;
+    leaves.drop();
+    return result;
+}
+
+u32 hir_local_type(SyntaxNode* function, str name, HirContext* context) {
+    if (function == (SyntaxNode*)0 || strlen(name) == 0) { return 0; }
+    Vec<Binding> bindings = Vec<Binding>.new();
+    collect_function_bindings(function, &bindings);
+    u32 result = 0;
+    i64 i = 0;
+    while (i < bindings.len()) {
+        Binding* binding = bindings.get_ptr(i);
+        if (strcmp(binding.name, name) == 0) {
+            result = hir_type_from_projection(&context.types, &binding.declared_type);
+        }
+        i += 1;
+    }
+    bindings.drop();
+    return result;
+}
+
+u32 hir_return_expression_type(SyntaxNode* function, SyntaxNode* return_token, HirContext* context, HirModule* module) {
+    SyntaxNode* cursor = return_token.next_sibling;
+    while (cursor != (SyntaxNode*)0) {
+        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) { return 0; }
+        if (cursor.kind == NodeKind.Token) {
+            if (cursor.token_kind == TokenKind.Identifier
+                && cursor.next_sibling != (SyntaxNode*)0
+                && cursor.next_sibling.kind == NodeKind.Parenthesized) {
+                return hir_find_function_return(module, cursor.text);
+            }
+            if (cursor.token_kind == TokenKind.Identifier) {
+                if (cursor.next_sibling != (SyntaxNode*)0
+                    && cursor.next_sibling.kind == NodeKind.Token
+                    && cursor.next_sibling.token_kind == TokenKind.Dot) {
+                    return 0;
+                }
+                return hir_local_type(function, cursor.text, context);
+            }
+            return hir_syntax_literal_type(cursor, context);
+        }
+        Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+        hir_collect_leaves(cursor, &leaves);
+        u32 result = 0;
+        if (leaves.len() == 1) {
+            result = hir_syntax_literal_type(leaves.get(0), context);
+        }
+        leaves.drop();
+        return result;
+    }
+    return 0;
+}
+
+void hir_check_returns(SyntaxNode* function, SyntaxNode* node, HirContext* context, HirModule* module, u32 expected, DiagnosticBag* diagnostics, bool* ok) {
+    if (node == (SyntaxNode*)0) { return; }
+    if (node.kind == NodeKind.Token && node.token_kind == TokenKind.Return) {
+        u32 actual = hir_return_expression_type(function, node, context, module);
+        if (hir_types_conflict(context, expected, actual)) {
+            String message = String.from_str("type mismatch: expected ");
+            hir_append_type(&message, context, expected);
+            message.push_str(", found ");
+            hir_append_type(&message, context, actual);
+            SyntaxNode* expression = hir_return_expression_node(node);
+            diagnostics.error(expression == (SyntaxNode*)0 ? node.span : expression.span, move message);
+            *ok = false;
+        }
+        return;
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        hir_check_returns(function, child, context, module, expected, diagnostics, ok);
+        child = child.next_sibling;
+    }
+}
+
+bool hir_is_declaration_start(SyntaxNode* node) {
+    if (node == (SyntaxNode*)0 || node.kind != NodeKind.Token) { return false; }
+    if (is_primitive_type_token(node.token_kind)) { return true; }
+    return node.token_kind == TokenKind.Identifier
+        && strlen(node.text) > 0
+        && node.text[0] >= (u8)'A'
+        && node.text[0] <= (u8)'Z';
+}
+
+SyntaxNode* hir_declaration_name(SyntaxNode* first) {
+    if (first == (SyntaxNode*)0) { return (SyntaxNode*)0; }
+    SyntaxNode* cursor = first;
+    if (cursor.kind == NodeKind.Token
+        && (cursor.token_kind == TokenKind.Let || cursor.token_kind == TokenKind.Const)) {
+        cursor = cursor.next_sibling;
+    }
+    while (cursor != (SyntaxNode*)0 && cursor.kind == NodeKind.Token
+        && (cursor.token_kind == TokenKind.Mut || cursor.token_kind == TokenKind.Static
+            || cursor.token_kind == TokenKind.Volatile)) {
+        cursor = cursor.next_sibling;
+    }
+    if (!hir_is_declaration_start(cursor)) {
+        if (cursor == (SyntaxNode*)0 || cursor.kind != NodeKind.Token
+            || cursor.token_kind != TokenKind.Identifier) {
+            return (SyntaxNode*)0;
+        }
+    }
+    cursor = cursor.next_sibling;
+    while (cursor != (SyntaxNode*)0 && cursor.kind == NodeKind.Token
+        && (cursor.token_kind == TokenKind.Mut || cursor.token_kind == TokenKind.Static
+            || cursor.token_kind == TokenKind.Volatile)) {
+        cursor = cursor.next_sibling;
+    }
+    if (cursor != (SyntaxNode*)0 && cursor.kind == NodeKind.Token
+        && cursor.token_kind == TokenKind.Identifier && cursor.text != "_") {
+        return cursor;
+    }
+    return (SyntaxNode*)0;
+}
+
+SyntaxNode* hir_declaration_assign(SyntaxNode* name) {
+    SyntaxNode* cursor = name;
+    while (cursor != (SyntaxNode*)0) {
+        cursor = cursor.next_sibling;
+        if (cursor == (SyntaxNode*)0) { break; }
+        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Assign) { return cursor; }
+        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) { return (SyntaxNode*)0; }
+        if (cursor.kind != NodeKind.Token) { return (SyntaxNode*)0; }
+    }
+    return (SyntaxNode*)0;
+}
+
+u32 hir_declaration_type(SyntaxNode* first, SyntaxNode* name, HirContext* context) {
+    Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+    SyntaxNode* cursor = first;
+    while (cursor != (SyntaxNode*)0 && cursor != name) {
+        hir_collect_leaves(cursor, &leaves);
+        cursor = cursor.next_sibling;
+    }
+    u32 result = 0;
+    if (leaves.len() > 0) {
+        TypeProjection projection = projection_parse_type(&leaves, 0, leaves.len());
+        result = hir_type_from_projection(&context.types, &projection);
+    }
+    leaves.drop();
+    return result;
+}
+
+u32 hir_initializer_type(SyntaxNode* initializer, HirContext* context, HirModule* module) {
+    if (initializer == (SyntaxNode*)0) { return 0; }
+    if (initializer.kind == NodeKind.Token) {
+        if (initializer.token_kind == TokenKind.Identifier
+            && initializer.next_sibling != (SyntaxNode*)0
+            && initializer.next_sibling.kind == NodeKind.Parenthesized) {
+            return hir_find_function_return(module, initializer.text);
+        }
+        if (initializer.token_kind == TokenKind.Identifier
+            && initializer.next_sibling != (SyntaxNode*)0
+            && initializer.next_sibling.kind == NodeKind.Token
+            && initializer.next_sibling.token_kind == TokenKind.Dot) {
+            return 0;
+        }
+        return hir_syntax_literal_type(initializer, context);
+    }
+    Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+    hir_collect_leaves(initializer, &leaves);
+    u32 result = 0;
+    if (leaves.len() == 1) { result = hir_syntax_literal_type(leaves.get(0), context); }
+    leaves.drop();
+    return result;
+}
+
+void hir_check_call_group(SyntaxNode* group, HirFunction* callee, HirContext* context, DiagnosticBag* diagnostics, bool* ok) {
+    if (group == (SyntaxNode*)0 || callee == (HirFunction*)0) { return; }
+    SyntaxNode* child = group.first_child;
+    i64 argument = 0;
+    i64 argument_count = 0;
+    while (child != (SyntaxNode*)0) {
+        Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+        while (child != (SyntaxNode*)0
+            && !(child.kind == NodeKind.Token && child.token_kind == TokenKind.Comma)) {
+            hir_collect_leaves(child, &leaves);
+            child = child.next_sibling;
+        }
+        if (!callee.arity_unreliable && argument < callee.parameters.len() && leaves.len() == 1) {
+            HirNode* parameter = callee.parameters.get(argument);
+            u32 actual = hir_syntax_literal_type(leaves.get(0), context);
+            if (hir_types_conflict(context, parameter.type_id, actual)) {
+                String message = String.from_str("type mismatch in argument ");
+                append_i64(&message, argument + 1);
+                message.push_str(": expected ");
+                hir_append_type(&message, context, parameter.type_id);
+                message.push_str(", found ");
+                hir_append_type(&message, context, actual);
+                diagnostics.error(leaves.get(0).span, move message);
+                *ok = false;
+            }
+        }
+        leaves.drop();
+        argument += 1;
+        argument_count += 1;
+        if (child != (SyntaxNode*)0) { child = child.next_sibling; }
+    }
+    if (!callee.arity_unreliable && argument_count != callee.parameters.len()) {
+        String message = String.from_str("argument count mismatch: expected ");
+        append_i64(&message, callee.parameters.len());
+        message.push_str(", found ");
+        append_i64(&message, argument_count);
+        diagnostics.error(group.span, move message);
+        *ok = false;
+    }
+}
+
+void hir_check_calls(SyntaxNode* node, HirContext* context, HirModule* module, DiagnosticBag* diagnostics, bool* ok) {
+    if (node == (SyntaxNode*)0) { return; }
+    if (node.kind == NodeKind.Token && node.token_kind == TokenKind.Identifier) {
+        if (strlen(node.text) > 0 && node.text[0] >= (u8)'A' && node.text[0] <= (u8)'Z') {
+            return;
+        }
+        SyntaxNode* group = node.next_sibling;
+        SyntaxNode* previous = (SyntaxNode*)0;
+        if (node.parent != (SyntaxNode*)0) {
+            SyntaxNode* sibling = node.parent.first_child;
+            while (sibling != (SyntaxNode*)0 && sibling != node) {
+                previous = sibling;
+                sibling = sibling.next_sibling;
+            }
+        }
+        bool declaration_name = node.parent != (SyntaxNode*)0
+            && node.parent.kind == NodeKind.Function;
+        if (!declaration_name && previous != (SyntaxNode*)0 && previous.kind == NodeKind.Token) {
+            declaration_name = is_primitive_type_token(previous.token_kind)
+                || (previous.token_kind == TokenKind.Identifier
+                    && strlen(previous.text) > 0
+                    && previous.text[0] >= (u8)'A'
+                    && previous.text[0] <= (u8)'Z');
+        }
+        if (!declaration_name && group != (SyntaxNode*)0 && group.kind == NodeKind.Parenthesized
+            && (previous == (SyntaxNode*)0 || previous.kind != NodeKind.Token
+                || (previous.token_kind != TokenKind.Dot
+                    && previous.token_kind != TokenKind.DoubleColon))) {
+            HirFunction* callee = hir_find_function(module, node.text);
+            hir_check_call_group(group, callee, context, diagnostics, ok);
+        }
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        hir_check_calls(child, context, module, diagnostics, ok);
+        child = child.next_sibling;
+    }
+}
+
+void hir_check_declarations(SyntaxNode* node, HirContext* context, HirModule* module, DiagnosticBag* diagnostics, bool* ok) {
+    if (node == (SyntaxNode*)0) { return; }
+    if (node.kind == NodeKind.Program || node.kind == NodeKind.Block) {
+        SyntaxNode* child = node.first_child;
+        while (child != (SyntaxNode*)0) {
+            if (node.kind == NodeKind.Block) {
+                SyntaxNode* name = hir_declaration_name(child);
+                if (name != (SyntaxNode*)0) {
+                    SyntaxNode* assign = hir_declaration_assign(name);
+                    if (assign != (SyntaxNode*)0) {
+                        u32 expected = hir_declaration_type(child, name, context);
+                        u32 actual = hir_initializer_type(assign.next_sibling, context, module);
+                        if (hir_types_conflict(context, expected, actual)) {
+                            SyntaxNode* initializer = assign.next_sibling;
+                            Span span = initializer == (SyntaxNode*)0 ? name.span : initializer.span;
+                            String message = String.from_str("type mismatch: expected ");
+                            hir_append_type(&message, context, expected);
+                            message.push_str(", found ");
+                            hir_append_type(&message, context, actual);
+                            diagnostics.error(span, move message);
+                            *ok = false;
+                        }
+                    }
+                }
+            }
+            child = child.next_sibling;
+        }
+        hir_check_declarations(node.first_child, context, module, diagnostics, ok);
+        return;
+    }
+    hir_check_declarations(node.first_child, context, module, diagnostics, ok);
+    hir_check_declarations(node.next_sibling, context, module, diagnostics, ok);
+}
+
+bool check_hir(SyntaxTree* tree, CfgSet* cfg, DiagnosticBag* diagnostics) {
+    HirContext context = HirContext.new();
+    HirModule module = hir_build(tree, cfg, diagnostics, &context);
+    bool ok = true;
+    hir_check_declarations(tree.root, &context, &module, diagnostics, &ok);
+    hir_check_calls(tree.root, &context, &module, diagnostics, &ok);
+    i64 i = 0;
+    while (i < module.functions.len()) {
+        HirFunction* function = module.functions.get_ptr(i);
+        if (function.syntax != (SyntaxNode*)0) {
+            hir_check_returns(function.syntax, function.syntax, &context, &module, function.return_type, diagnostics, &ok);
+        }
+        i += 1;
+    }
+    hir_module_drop(&module);
+    context.nodes.destroy();
+    return ok;
+}

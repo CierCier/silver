@@ -1,0 +1,10 @@
+i32 main() {
+    f32 up = 1.5;
+    f32 old_up = up++;
+    if (old_up != (f32)1.5 || up != (f32)2.5) { return 1; }
+
+    f64 down = 8.0;
+    f64 old_down = down--;
+    if (old_down != 8.0 || down != 7.0) { return 2; }
+    return 0;
+}

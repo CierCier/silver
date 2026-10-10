@@ -1,0 +1,17 @@
+// expected_compile_failure
+struct Leaf { i64 value; }
+impl Drop for Leaf { void drop(Leaf* self) {} }
+enum Payload { Item(Leaf); Empty; }
+struct Managed { Payload item; Payload sibling; }
+impl Drop for Managed { void drop(Managed* self) {} }
+
+void consume(Payload item) {}
+
+i32 main() {
+    Leaf leaf = { .value = 1 };
+    Payload item = Payload.Item(move leaf);
+    Payload sibling = Payload.Empty;
+    Managed value = { .item = move item, .sibling = move sibling };
+    consume(move value.item);
+    return 0;
+}

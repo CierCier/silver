@@ -1,0 +1,72 @@
+import std.test;
+
+i32 recorded = 0;
+
+i32 double_value(i32 value) { return value * 2; }
+i64 wide_value() { return (i64)4294967296; }
+f64 half_value(f64 value) { return value / 2.0; }
+u64 unsigned_value(f64 value) { return (u64)value; }
+void record_value(i32 value) { recorded = value; }
+i32 apply_callback(i32(i32) callback, i32 value) { return callback(value); }
+f64 apply_float_callback(f64(f64) callback, f64 value) { return callback(value); }
+i64 apply_zero_argument_callback(i64() callback) { return callback(); }
+
+struct CallbackSlot {
+    void(i32) callback;
+}
+
+struct Point {
+    i32 x;
+    i32 y;
+}
+
+i32 read_point(&Point point) {
+    return point.x + point.y;
+}
+
+void bump_point(&mut Point point) {
+    point.x += 1;
+    point.y += 2;
+}
+
+i32 apply_ref_callback(i32(&Point) callback, &Point point) {
+    return callback(point);
+}
+
+void apply_mut_callback(void(&mut Point) callback, &mut Point point) {
+    callback(point);
+}
+
+i32 main() {
+    test_start("native function pointer signatures");
+    i32(i32) callback = &double_value;
+    assert_eq_i32(42, callback(21), "integer callback");
+    assert_eq_i32(42, apply_callback(&double_value, 21), "callback parameter");
+    i64() wide = &wide_value;
+    assert_eq_i64((i64)4294967296, wide(), "zero-argument wide return");
+    assert_eq_i64((i64)4294967296, apply_zero_argument_callback(&wide_value), "zero-argument callback parameter");
+    f64(f64) half = &half_value;
+    assert_true(half(84) == 42.0, "declared float parameter converts integer argument");
+    assert_true(apply_float_callback(half, 84.0) == 42.0, "float callback parameter preserves its signature");
+    u64(f64) convert = &unsigned_value;
+    assert_eq_u64((u64)9223372036854775808, convert(9223372036854775808.0), "unsigned callback result");
+    CallbackSlot slot;
+    slot.callback = &record_value;
+    void(i32) stored = slot.callback;
+    stored(42);
+    assert_eq_i32(42, recorded, "void callback loaded from field");
+
+    Point pt = { .x = 20, .y = 22 };
+    i32(&Point) ref_callback = &read_point;
+    assert_eq_i32(42, ref_callback(&pt), "reference callback parameter");
+    assert_eq_i32(42, apply_ref_callback(&read_point, &pt), "higher-order reference callback");
+
+    void(&mut Point) mut_callback = &bump_point;
+    mut_callback(&mut pt);
+    assert_eq_i32(21, pt.x, "mutable reference callback updates field x");
+    assert_eq_i32(24, pt.y, "mutable reference callback updates field y");
+    apply_mut_callback(&bump_point, &mut pt);
+    assert_eq_i32(22, pt.x, "higher-order mutable callback updates field x");
+    assert_eq_i32(26, pt.y, "higher-order mutable callback updates field y");
+    return done();
+}

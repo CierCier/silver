@@ -1,0 +1,11 @@
+// bin/agc/src/main.ag — stage1 self-hosting compiler entry point.
+//
+// Stage1 owns its command-line frontend and Linux LLVM backend. Stage0 is used
+// only to bootstrap this binary; stage1 never launches it for compilation.
+import std.io;
+import std.sys.entry;
+import driver;
+
+i32 main() {
+    return run_frontend();
+}

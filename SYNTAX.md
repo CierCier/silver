@@ -97,6 +97,12 @@ bool disabled = false;
 > **Note**: Octal (`0o755`) and binary (`0b101010`) integer literals are **not**
 > supported.  The lexer has no token paths for them.
 
+String escapes include newline, carriage return, tab, NUL, backslash, quotation
+mark, apostrophe, two-digit hexadecimal bytes (`\xNN`), and Unicode scalar
+values (`\u{...}`). Hex escapes contribute raw bytes, so the complete string
+must remain valid UTF-8. Character literals support the single-character
+escapes, but not the string-only hexadecimal or Unicode forms.
+
 ---
 
 ## 2. Type System & Type Expressions
@@ -402,9 +408,17 @@ likewise skips resolution when rejected.
 
 ### Macro Definitions
 
-Macro definitions parse but are **not expanded** — only built-in compiler macros
-(`@print`, `@println`, `@eprint`, `@eprintln`, `@fprint`, `@sprint`, `@format`,
-`@size`, `@align`, `@hash`, `@json`, `@from_json`, `@memcpy`, `@memset`, `@memmove`) work.
+Stage1 currently expands positional user macros, including a final variadic
+parameter. A variadic binding supports `.len` and constant nonnegative integer
+indexing. Statement macros may also use `for item in values { ... }` to unroll
+their body once per argument in a final variadic binding; an empty binding
+produces no iterations. This is not general iteration or variadic splicing.
+Expression macros support a direct `return` expression or an `if`/`else` whose
+branches each return an expression; statement macros must not contain `return`.
+Nested calls are supported. Hygienic local names and broader control-flow
+expression macros are not implemented yet. Built-in compiler macros include `@print`, `@println`,
+`@eprint`, `@eprintln`, `@fprint`, `@sprint`, `@format`, `@size`, `@align`,
+`@hash`, `@json`, `@from_json`, `@memcpy`, `@memset`, and `@memmove`.
 
 ```silver
 macro swap(a, b) {
@@ -821,6 +835,12 @@ i64 y = x;             // copy — LSP shows `copy` before `x`, `x` stays live
 
 Moves are field-granular via `Place {local, projections}` with `is_prefix_of`/`overlaps`:
 
+An owned field cannot be consumed while any containing value has its own
+`Drop` implementation. This includes explicit moves, implicit transfers,
+by-value calls, returns, and explicit field drops. The containing destructor
+must retain its owned fields. Move the whole containing value instead, or
+borrow the field. Copy fields can still be copied from a value with `Drop`.
+
 ```silver
 struct Zoo { String cage; String keeper; }
 Zoo zoo;
@@ -867,6 +887,10 @@ defer wait t;            // join on every exit path of the scope
 ```
 
 A second `wait` on the same handle is a move error.
+
+The result type `T` need not be `Send`: `wait` joins the worker before exposing
+the result to the caller. Launch arguments still must be `Send` because they
+are accessed concurrently with the launching thread.
 
 ### Send gate
 

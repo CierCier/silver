@@ -1,0 +1,168 @@
+// expected_exit: 42
+import std.test;
+
+i64 drops = 0;
+i64 dropped_values = 0;
+i64 parent_drops = 0;
+
+struct Tracked {
+    i64 value;
+}
+impl Drop for Tracked {
+    void drop(Tracked* self) {
+        drops = drops + 1;
+        dropped_values = dropped_values + self.value;
+    }
+}
+
+struct Pair {
+    Tracked left;
+    Tracked right;
+}
+
+struct ManagedPair {
+    i64 left;
+    i64 right;
+    i64 marker;
+}
+impl Drop for ManagedPair {
+    void drop(ManagedPair* self) {
+        parent_drops = parent_drops + 1;
+    }
+}
+
+Tracked make_tracked(i64 value) {
+    Tracked item = { .value = value };
+    return move item;
+}
+
+Pair make_pair(i64 left, i64 right) {
+    Pair pair;
+    pair.left = make_tracked(left);
+    pair.right = make_tracked(right);
+    return move pair;
+}
+
+void consume(Tracked _value) {
+}
+
+Tracked return_left(Pair pair) {
+    return move pair.left;
+}
+
+void conditional_left(bool take) {
+    Pair pair = make_pair(71, 72);
+    if (take) {
+        consume(move pair.left);
+    }
+    assert_eq_i64(72, pair.right.value, "right sibling remains readable after conditional move");
+}
+
+i32 main() {
+    // Moving one direct field transfers it to the callee and keeps its sibling live.
+    drops = 0;
+    dropped_values = 0;
+    {
+        Pair pair = make_pair(11, 12);
+        consume(move pair.left);
+        assert_eq_i64(1, drops, "callee drops moved left field");
+        assert_eq_i64(11, dropped_values, "callee receives left field value");
+        assert_eq_i64(12, pair.right.value, "right sibling remains readable");
+    }
+    assert_eq_i64(2, drops, "live sibling drops at scope exit");
+    assert_eq_i64(23, dropped_values, "both direct field values drop once");
+
+    // Reinitializing a moved field does not pre-drop its former value.
+    drops = 0;
+    dropped_values = 0;
+    {
+        Pair pair = make_pair(21, 22);
+        consume(move pair.left);
+        pair.left = make_tracked(23);
+        assert_eq_i64(1, drops, "reinitializing moved field does not drop an empty slot");
+        assert_eq_i64(22, pair.right.value, "reinitialization preserves sibling");
+    }
+    assert_eq_i64(3, drops, "reinitialized field and sibling drop at scope exit");
+    assert_eq_i64(66, dropped_values, "reinitialized field keeps its new value");
+
+    // Overwriting a live sibling releases its previous value immediately.
+    drops = 0;
+    dropped_values = 0;
+    {
+        Pair pair = make_pair(31, 32);
+        pair.right = make_tracked(33);
+        assert_eq_i64(1, drops, "overwritten sibling drops at assignment");
+        assert_eq_i64(32, dropped_values, "assignment drops the old sibling value");
+        assert_eq_i64(31, pair.left.value, "left field remains readable after sibling overwrite");
+    }
+    assert_eq_i64(3, drops, "remaining direct fields drop at scope exit");
+    assert_eq_i64(96, dropped_values, "overwrite retains and drops the new sibling value");
+
+    // Returning one field transfers it while the other field drops in the callee.
+    drops = 0;
+    dropped_values = 0;
+    {
+        Pair pair = make_pair(41, 42);
+        Tracked returned = return_left(move pair);
+        assert_eq_i64(1, drops, "unreturned sibling drops while returning the field");
+        assert_eq_i64(42, dropped_values, "return path drops only the sibling");
+        consume(move returned);
+    }
+    assert_eq_i64(2, drops, "returned field drops once in its consumer");
+    assert_eq_i64(83, dropped_values, "returned field retains its payload");
+
+    // Explicitly dropping one field consumes only that field.
+    drops = 0;
+    dropped_values = 0;
+    {
+        Pair pair = make_pair(51, 52);
+        pair.left.drop();
+        assert_eq_i64(1, drops, "manual left drop runs once");
+        assert_eq_i64(51, dropped_values, "manual drop sees the left payload");
+        assert_eq_i64(52, pair.right.value, "manual left drop preserves the right sibling");
+    }
+    assert_eq_i64(2, drops, "manual drop does not repeat at scope exit");
+    assert_eq_i64(103, dropped_values, "only the still-live sibling drops at scope exit");
+
+    // Shadowed wrappers keep independent field ownership.
+    drops = 0;
+    dropped_values = 0;
+    {
+        Pair pair = make_pair(61, 62);
+        {
+            Pair pair = make_pair(63, 64);
+            consume(move pair.left);
+            assert_eq_i64(1, drops, "inner moved field reaches its consumer");
+        }
+        assert_eq_i64(2, drops, "inner sibling drops without affecting outer wrapper");
+        consume(move pair.left);
+    }
+    assert_eq_i64(4, drops, "both shadowed wrappers drop their remaining fields once");
+    assert_eq_i64(250, dropped_values, "shadowed wrappers preserve distinct field values");
+
+    // A conditional move leaves the sibling live on both paths.
+    drops = 0;
+    dropped_values = 0;
+    conditional_left(true);
+    assert_eq_i64(2, drops, "taken path drops moved field and live sibling");
+    assert_eq_i64(143, dropped_values, "taken path preserves both payloads");
+    conditional_left(false);
+    assert_eq_i64(4, drops, "untaken path drops both initialized fields");
+    assert_eq_i64(286, dropped_values, "untaken path preserves both payloads");
+
+    parent_drops = 0;
+    {
+        ManagedPair pair;
+        pair.left = 81;
+        pair.right = 82;
+        pair.marker = 83;
+        i64 marker = move pair.marker;
+        assert_eq_i64(83, marker, "moving an untracked field preserves its value");
+        i64 left = move pair.left;
+        assert_eq_i64(81, left, "Copy field moves from a custom-Drop parent");
+        assert_eq_i64(82, pair.right, "custom-Drop parent retains its live sibling");
+    }
+    assert_eq_i64(1, parent_drops, "partial field move leaves parent destructor live");
+
+    return 42;
+}

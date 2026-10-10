@@ -1,0 +1,118 @@
+// expected_exit: 42
+// flags: --no-cache
+import std.test;
+
+i64 custom_drops = 0;
+i64 payload_drops = 0;
+i64 dropped_values = 0;
+
+struct Payload {
+    i64 value;
+}
+impl Drop for Payload {
+    void drop(Payload* self) {
+        payload_drops = payload_drops + 1;
+        dropped_values = dropped_values + self.value;
+    }
+}
+
+enum Managed<T> {
+    Item(T);
+    Empty;
+}
+impl<T> Drop for Managed<T> {
+    void drop(Managed<T>* self) {
+        custom_drops = custom_drops + 1;
+    }
+}
+
+enum Cascading {
+    Item(Payload);
+    Empty;
+}
+
+struct PayloadWrapper {
+    Payload payload;
+}
+
+enum NestedCascading {
+    Item(PayloadWrapper);
+    Empty;
+}
+
+void return_early() {
+    Payload payload = { .value = 17 };
+    Managed<Payload> _value = Managed<Payload>.Item(move payload);
+    return;
+}
+
+i32 main() {
+    // A custom enum destructor owns the policy for its payload.
+    custom_drops = 0;
+    payload_drops = 0;
+    dropped_values = 0;
+    {
+        Payload payload = { .value = 11 };
+        Managed<Payload> _value = Managed<Payload>.Item(move payload);
+    }
+    assert_eq_i64(1, custom_drops, "custom enum destructor runs at scope exit");
+    assert_eq_i64(0, payload_drops, "custom enum suppresses implicit payload cascade");
+
+    // Overwrite and scope exit each invoke only the custom destructor.
+    custom_drops = 0;
+    payload_drops = 0;
+    dropped_values = 0;
+    {
+        Payload old_payload = { .value = 13 };
+        Managed<Payload> value = Managed<Payload>.Item(move old_payload);
+        Payload new_payload = { .value = 15 };
+        Managed<Payload> replacement = Managed<Payload>.Item(move new_payload);
+        value = move replacement;
+        assert_eq_i64(1, custom_drops, "whole overwrite runs old custom destructor");
+        assert_eq_i64(0, payload_drops, "whole overwrite skips old payload cascade");
+    }
+    assert_eq_i64(2, custom_drops, "replacement custom destructor runs at scope exit");
+    assert_eq_i64(0, payload_drops, "custom enum never cascades on whole overwrite");
+
+    // Moving the enum transfers responsibility for its custom destructor.
+    custom_drops = 0;
+    payload_drops = 0;
+    {
+        Payload payload = { .value = 19 };
+        Managed<Payload> source = Managed<Payload>.Item(move payload);
+        Managed<Payload> _target = move source;
+    }
+    assert_eq_i64(1, custom_drops, "whole move leaves one custom enum owner");
+    assert_eq_i64(0, payload_drops, "whole move does not cascade the payload");
+
+    // Return cleanup must follow the same policy as ordinary scope exit.
+    custom_drops = 0;
+    payload_drops = 0;
+    return_early();
+    assert_eq_i64(1, custom_drops, "early return runs custom enum destructor");
+    assert_eq_i64(0, payload_drops, "early return suppresses payload cascade");
+
+    // Enums without their own Drop still cascade the active owned payload once.
+    custom_drops = 0;
+    payload_drops = 0;
+    dropped_values = 0;
+    {
+        Payload payload = { .value = 23 };
+        Cascading _value = Cascading.Item(move payload);
+    }
+    assert_eq_i64(0, custom_drops, "plain enum has no custom destructor");
+    assert_eq_i64(1, payload_drops, "plain enum cascades its payload exactly once");
+    assert_eq_i64(23, dropped_values, "plain enum preserves payload value through drop");
+
+    // Payload tracking must see a destructor nested inside an ordinary wrapper.
+    payload_drops = 0;
+    dropped_values = 0;
+    {
+        Payload payload = { .value = 29 };
+        PayloadWrapper wrapper = { .payload = move payload };
+        NestedCascading _value = NestedCascading.Item(move wrapper);
+    }
+    assert_eq_i64(1, payload_drops, "plain enum cascades nested wrapper fields");
+    assert_eq_i64(29, dropped_values, "nested enum payload preserves field value");
+    return 42;
+}

@@ -1,0 +1,7 @@
+struct Field { u8* p; }
+
+i64 store_pointer(str source, Field* out) {
+    i64 count = 0;
+    out[count].p = &source[0];
+    return count;
+}

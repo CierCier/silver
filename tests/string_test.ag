@@ -3,6 +3,7 @@ import std.test;
 import std.string;
 import std.mem.vec;
 import std.hash;
+import std.fs;
 
 void drop_vec_strings(Vec<String>* v) {
     v.drop();
@@ -525,7 +526,7 @@ i32 main(){
             assert_true(line1.equals("beta"), "line 1 is beta");
             assert_true(line2.equals("gamma"), "line 2 is gamma");
             drop_vec_strings(&mut lns);
-            raw_sys_unlink((i64)tmp_path);
+            remove_file(tmp_path);
         }
     }
 

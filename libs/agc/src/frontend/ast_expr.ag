@@ -1,0 +1,875 @@
+// libs/agc/src/frontend/ast_expr.ag — Lowered typed expression and statement representations.
+import std.intern;
+import std.mem.vec;
+import std.string;
+import frontend.ast;
+import frontend.lexer;
+import frontend.types;
+
+enum ExprKind {
+    Literal;       // aux = literal type_id
+    Var;           // aux = name_id
+    Unary;         // aux = op token kind, inner0 = operand
+    Binary;        // aux = op token kind, inner0 = lhs, inner1 = rhs
+    Call;          // inner0 = callee_id, inner1 = args_start, aux = args_count
+    MethodCall;    // inner0 = receiver_id, aux = method_name_id, inner1 = args_start
+    Field;         // inner0 = target_id, aux = field_name_id
+    Index;         // inner0 = target_id, inner1 = index_id
+    Slice;         // inner0 = target_id, inner1 = optional start expr, aux = optional end expr
+    Cast;          // inner0 = expr_id, aux = target_type_id
+    Move;          // aux = var_name_id
+    Ternary;       // inner0 = cond_id, inner1 = then_id, aux = else_id
+    Block;         // inner0 = block_stmts start, inner1 = count, aux = result expr
+    UnwrapOr;      // inner0 = value_id, inner1 = fallback_id
+    Match;         // inner0 = scrutinee_id, inner1 = arms_start, aux = arms_count
+    Asm;           // inner0 = code_text_id, inner1 = args_start, aux = args_count
+    SizeOf;        // aux = type_id
+    AlignOf;       // aux = type_id
+    ArrayLit;      // inner1 = elems_start, aux = elem_count (pool.args[start] = count, then ids)
+    Format;        // inner0 = format string literal id, inner1 = args_start, aux = args_count
+    Fprint;        // inner0 = writer expression, inner1 = Format expression
+    MemoryBuiltin; // inner0 = three argument IDs in pool.args, aux = builtin kind
+    Hash;          // inner0 = arg expr id (builtin @hash, always i64)
+    DropInPlace;   // inner0 = pointer expr, inner1 = count expr, aux = element type (optional)
+    Assert;        // inner0 = condition, inner1 = message, aux = enabled (debug cfg)
+    SourceLocation; // aux = line/column/file selector
+    StructLit;     // inner0 = struct name id, inner1 = fields_start, aux = field count (pool.args: name,expr pairs)
+    Launch;        // inner0 = direct Call expression
+    Wait;          // inner0 = Task expression
+}
+
+struct AstExpr {
+    ExprKind kind;
+    u32 inner0;
+    u32 inner1;
+    u32 aux;
+    Span span;
+    u32 inferred_type;
+    u32 generic_args_start;
+    u32 generic_args_count;
+    u32 resolved_callee_id; // interned name ID plus one; zero means unresolved
+}
+
+enum StmtKind {
+    Let;           // aux = var_name_id, inner0 = type_id, inner1 = init_expr_id
+    ResetLocal;    // aux = var_name_id; restore a consumed local to zero
+    Assign;        // inner0 = target_expr_id, inner1 = val_expr_id
+    Expr;          // inner0 = expr_id
+    Return;        // inner0 = expr_id
+    If;            // inner0 = cond_expr_id, inner1 = then_block_id, aux = else_block_id
+    While;         // inner0 = cond, inner1 = body block, aux = optional step stmt
+    Break;
+    Continue;
+    Defer;         // inner0 = deferred statement id
+    Block;         // inner0 = block_stmts_start, aux = block_stmts_count
+}
+
+enum MemoryBuiltinKind {
+    Memcpy;
+    Memmove;
+    Memset;
+}
+
+struct AstStmt {
+    StmtKind kind;
+    u32 inner0;
+    u32 inner1;
+    u32 aux;
+    bool is_static;
+    Span span;
+}
+
+enum MatchPatternKind {
+    Wildcard;
+    Variant;
+    Binding;
+    Literal;
+}
+
+struct MatchArm {
+    MatchPatternKind pattern;
+    u32 enum_name_id;
+    u32 variant_name_id;
+    u32 bindings_start;
+    u32 bindings_count;
+    u32 literal_id;
+    u32 guard_id;
+    u32 value_id;
+    u32 body_stmt_id;
+    Span span;
+}
+
+struct AstAsm {
+    u32 code_id;
+    u32 constraints_id;
+    u32 args_start;
+    u32 args_count;
+}
+
+String unescape_string_literal(str text) {
+    String out = String.new();
+    if (text == (str)0) { return move out; }
+    i64 len = strlen(text);
+    i64 start = 0;
+    i64 end = len;
+    if (len >= 2 && text[0] == '"' && text[len - 1] == '"') {
+        start = 1;
+        end = len - 1;
+    }
+    i64 i = start;
+    while (i < end) {
+        if (text[i] == '\\' && i + 1 < end) {
+            i += 1;
+            u8 next = (u8)text[i];
+            if (next == (u8)'n') { out.push((u8)10); }
+            else if (next == (u8)'r') { out.push((u8)13); }
+            else if (next == (u8)'t') { out.push((u8)9); }
+            else if (next == (u8)'0') { out.push((u8)0); }
+            else if (next == (u8)'\\') { out.push((u8)'\\'); }
+            else if (next == (u8)'"') { out.push((u8)'"'); }
+            else if (next == (u8)'x' && i + 2 < end) {
+                i64 high = Lexer.hex_value((u8)text[i + 1]);
+                i64 low = Lexer.hex_value((u8)text[i + 2]);
+                if (high >= 0 && low >= 0) {
+                    out.push((u8)(high * 16 + low));
+                    i += 2;
+                } else {
+                    out.push(next);
+                }
+            } else if (next == (u8)'u' && i + 1 < end
+                && text[i + 1] == (u8)'{') {
+                i += 2;
+                u32 codepoint = 0;
+                i64 digits = 0;
+                while (i < end && text[i] != (u8)'}' && digits < 6) {
+                    i64 digit = Lexer.hex_value((u8)text[i]);
+                    if (digit < 0) { break; }
+                    codepoint = codepoint * (u32)16 + (u32)digit;
+                    digits += 1;
+                    i += 1;
+                }
+                if (digits > 0 && i < end && text[i] == (u8)'}'
+                    && codepoint <= (u32)0x10FFFF
+                    && (codepoint < (u32)0xD800 || codepoint > (u32)0xDFFF)) {
+                    Lexer.append_utf8(&out, codepoint);
+                } else {
+                    out.push(next);
+                }
+            }
+            else { out.push(next); }
+        } else {
+            out.push((u8)text[i]);
+        }
+        i += 1;
+    }
+    return move out;
+}
+
+struct AstPool {
+    Vec<AstExpr> exprs;
+    Vec<AstStmt> stmts;
+    Vec<u32> args;
+    Vec<u32> generic_type_args;
+    Vec<u32> block_stmts;
+    Vec<MatchArm> arms;
+    Vec<u32> arm_bindings;
+    Vec<AstAsm> asms;
+}
+
+impl AstPool {
+    AstPool new() {
+        AstPool pool;
+        pool.exprs = Vec<AstExpr>.new();
+        pool.stmts = Vec<AstStmt>.new();
+        pool.args = Vec<u32>.new();
+        pool.generic_type_args = Vec<u32>.new();
+        pool.block_stmts = Vec<u32>.new();
+        pool.arms = Vec<MatchArm>.new();
+        pool.arm_bindings = Vec<u32>.new();
+        pool.asms = Vec<AstAsm>.new();
+
+        // 0: Dummy null arm
+        MatchArm null_arm;
+        null_arm.pattern = MatchPatternKind.Wildcard;
+        null_arm.enum_name_id = 0;
+        null_arm.variant_name_id = 0;
+        null_arm.bindings_start = 0;
+        null_arm.bindings_count = 0;
+        null_arm.literal_id = 0;
+        null_arm.guard_id = 0;
+        null_arm.value_id = 0;
+        null_arm.body_stmt_id = 0;
+        null_arm.span = Span.synthetic();
+        pool.arms.push(move null_arm);
+
+        // 0: Dummy null expr
+        AstExpr null_expr;
+        null_expr.kind = ExprKind.Literal;
+        null_expr.inner0 = 0;
+        null_expr.inner1 = 0;
+        null_expr.aux = TYPE_UNKNOWN;
+        null_expr.span = Span.synthetic();
+        null_expr.inferred_type = TYPE_UNKNOWN;
+        null_expr.generic_args_start = 0;
+        null_expr.generic_args_count = 0;
+        null_expr.resolved_callee_id = 0;
+        pool.exprs.push(move null_expr);
+
+        // 0: Dummy null stmt. Statement IDs share the same 0-means-null
+        // convention as expressions (llvm_emit_stmt returns early on 0),
+        // so index 0 must never be a real statement. Previously the
+        // typecheck probe pool accidentally pre-filled the pool and masked
+        // this; single lowering exposed lone-`return 42` mains emitting an
+        // empty body.
+        AstStmt null_stmt;
+        null_stmt.kind = StmtKind.Expr;
+        null_stmt.inner0 = 0;
+        null_stmt.inner1 = 0;
+        null_stmt.aux = 0;
+        null_stmt.is_static = false;
+        null_stmt.span = Span.synthetic();
+        pool.stmts.push(move null_stmt);
+
+        return move pool;
+    }
+
+    u32 add_literal(AstPool* self, u32 type_id, Span span) {
+        return self.add_literal_val(type_id, 0, span);
+    }
+
+    u32 add_literal_val(AstPool* self, u32 type_id, u32 val_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Literal;
+        expr.inner0 = val_id;
+        expr.inner1 = 0;
+        expr.aux = type_id;
+        expr.span = span;
+        expr.inferred_type = type_id;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_source_location(AstPool* self, u32 kind, u32 type_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.SourceLocation;
+        expr.inner0 = 0;
+        expr.inner1 = 0;
+        expr.aux = kind;
+        expr.span = span;
+        expr.inferred_type = type_id;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        expr.resolved_callee_id = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_var(AstPool* self, u32 name_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Var;
+        expr.inner0 = 0;
+        expr.inner1 = 0;
+        expr.aux = name_id;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_binary(AstPool* self, TokenKind op, u32 lhs, u32 rhs, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Binary;
+        expr.inner0 = lhs;
+        expr.inner1 = rhs;
+        expr.aux = (u32)op;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_unary(AstPool* self, TokenKind op, u32 operand, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Unary;
+        expr.inner0 = operand;
+        expr.inner1 = 0;
+        expr.aux = (u32)op;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_ternary(AstPool* self, u32 cond_id, u32 then_id, u32 else_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Ternary;
+        expr.inner0 = cond_id;
+        expr.inner1 = then_id;
+        expr.aux = else_id;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_expr_block(AstPool* self, u32 start, u32 count, u32 result_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Block;
+        expr.inner0 = start;
+        expr.inner1 = count;
+        expr.aux = result_id;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        expr.resolved_callee_id = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_unwrap_or(AstPool* self, u32 value_id, u32 fallback_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.UnwrapOr;
+        expr.inner0 = value_id;
+        expr.inner1 = fallback_id;
+        expr.aux = 0;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_launch(AstPool* self, u32 call_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Launch;
+        expr.inner0 = call_id;
+        expr.inner1 = 0;
+        expr.aux = 0;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        expr.resolved_callee_id = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_wait(AstPool* self, u32 task_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Wait;
+        expr.inner0 = task_id;
+        expr.inner1 = 0;
+        expr.aux = 0;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        expr.resolved_callee_id = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_match_arm(AstPool* self, MatchPatternKind pattern, u32 enum_name_id,
+                      u32 variant_name_id, u32 bindings_start, u32 bindings_count,
+                      u32 literal_id, u32 guard_id, u32 value_id, u32 body_stmt_id, Span span) {
+        MatchArm arm;
+        arm.pattern = pattern;
+        arm.enum_name_id = enum_name_id;
+        arm.variant_name_id = variant_name_id;
+        arm.bindings_start = bindings_start;
+        arm.bindings_count = bindings_count;
+        arm.literal_id = literal_id;
+        arm.guard_id = guard_id;
+        arm.value_id = value_id;
+        arm.body_stmt_id = body_stmt_id;
+        arm.span = span;
+        self.arms.push(move arm);
+        return (u32)(self.arms.len() - 1);
+    }
+
+    u32 add_match(AstPool* self, u32 scrutinee_id, u32 arms_start, u32 arms_count, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Match;
+        expr.inner0 = scrutinee_id;
+        expr.inner1 = arms_start;
+        expr.aux = arms_count;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_move(AstPool* self, u32 operand_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Move;
+        expr.inner0 = operand_id;
+        expr.inner1 = 0;
+        expr.aux = 0;
+        if (operand_id < (u32)self.exprs.len()) {
+            AstExpr* op = self.get_expr(operand_id);
+            if (op.kind == ExprKind.Var) {
+                expr.aux = op.aux;
+            }
+        }
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_asm(AstPool* self, u32 code_id, u32 constraints_id, u32 args_start, u32 args_count, Span span) {
+        AstAsm item;
+        item.code_id = code_id;
+        item.constraints_id = constraints_id;
+        item.args_start = args_start;
+        item.args_count = args_count;
+        self.asms.push(move item);
+        u32 asm_idx = (u32)(self.asms.len() - 1);
+        AstExpr expr;
+        expr.kind = ExprKind.Asm;
+        expr.inner0 = 0;
+        expr.inner1 = 0;
+        expr.aux = asm_idx;
+        expr.span = span;
+        expr.inferred_type = TYPE_I64;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_call(AstPool* self, u32 callee, u32 args_start, u32 args_count, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Call;
+        expr.inner0 = callee;
+        expr.inner1 = args_start;
+        expr.aux = args_count;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        expr.resolved_callee_id = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_generic_call(AstPool* self, u32 callee, u32 args_start, u32 args_count,
+                         u32 generic_start, u32 generic_count, Span span) {
+        u32 call_id = self.add_call(callee, args_start, args_count, span);
+        AstExpr* call = self.exprs.get_ptr((i64)call_id);
+        call.generic_args_start = generic_start;
+        call.generic_args_count = generic_count;
+        return call_id;
+    }
+
+    u32 add_array_lit(AstPool* self, u32 elems_start, u32 elem_count, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.ArrayLit;
+        expr.inner0 = 0;
+        expr.inner1 = elems_start;
+        expr.aux = elem_count;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_format(AstPool* self, u32 format_id, u32 args_start, u32 args_count, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Format;
+        expr.inner0 = format_id;
+        expr.inner1 = args_start;
+        expr.aux = args_count;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_fprint(AstPool* self, u32 writer_id, u32 format_expr_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Fprint;
+        expr.inner0 = writer_id;
+        expr.inner1 = format_expr_id;
+        expr.aux = 0;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        expr.resolved_callee_id = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_hash(AstPool* self, u32 arg_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Hash;
+        expr.inner0 = arg_id;
+        expr.inner1 = 0;
+        expr.aux = 0;
+        expr.span = span;
+        expr.inferred_type = TYPE_I64;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_drop_in_place(AstPool* self, u32 elem_type, u32 pointer_id,
+                          u32 count_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.DropInPlace;
+        expr.inner0 = pointer_id;
+        expr.inner1 = count_id;
+        expr.aux = elem_type;
+        expr.span = span;
+        expr.inferred_type = TYPE_I64;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        expr.resolved_callee_id = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_memory_builtin(AstPool* self, MemoryBuiltinKind kind,
+                           u32 args_start, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.MemoryBuiltin;
+        expr.inner0 = args_start;
+        expr.inner1 = 0;
+        expr.aux = (u32)kind;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        expr.resolved_callee_id = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_assert(AstPool* self, u32 condition_id, u32 message_id, bool enabled, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Assert;
+        expr.inner0 = condition_id;
+        expr.inner1 = message_id;
+        expr.aux = enabled ? (u32)1 : (u32)0;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        expr.resolved_callee_id = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_struct_lit(AstPool* self, u32 struct_name_id, u32 fields_start, u32 field_count, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.StructLit;
+        expr.inner0 = struct_name_id;
+        expr.inner1 = fields_start;
+        expr.aux = field_count;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+    u32 add_method_call(AstPool* self, u32 receiver, u32 method_name_id, u32 args_start, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.MethodCall;
+        expr.inner0 = receiver;
+        expr.inner1 = args_start;
+        expr.aux = method_name_id;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_field(AstPool* self, u32 target, u32 field_name_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Field;
+        expr.inner0 = target;
+        expr.inner1 = 0;
+        expr.aux = field_name_id;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_index(AstPool* self, u32 target, u32 index_expr, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Index;
+        expr.inner0 = target;
+        expr.inner1 = index_expr;
+        expr.aux = 0;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_slice(AstPool* self, u32 target, u32 start_expr, u32 end_expr, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Slice;
+        expr.inner0 = target;
+        expr.inner1 = start_expr;
+        expr.aux = end_expr;
+        expr.span = span;
+        expr.inferred_type = TYPE_UNKNOWN;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_cast(AstPool* self, u32 expr_id, u32 target_type_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.Cast;
+        expr.inner0 = expr_id;
+        expr.inner1 = 0;
+        expr.aux = target_type_id;
+        expr.span = span;
+        expr.inferred_type = target_type_id;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_sizeof(AstPool* self, u32 type_id, u32 expr_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.SizeOf;
+        expr.inner0 = expr_id;
+        expr.inner1 = 0;
+        expr.aux = type_id;
+        expr.span = span;
+        expr.inferred_type = TYPE_I64;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        expr.resolved_callee_id = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_alignof(AstPool* self, u32 type_id, u32 expr_id, Span span) {
+        AstExpr expr;
+        expr.kind = ExprKind.AlignOf;
+        expr.inner0 = expr_id;
+        expr.inner1 = 0;
+        expr.aux = type_id;
+        expr.span = span;
+        expr.inferred_type = TYPE_U64;
+        expr.generic_args_start = 0;
+        expr.generic_args_count = 0;
+        expr.resolved_callee_id = 0;
+        self.exprs.push(move expr);
+        return (u32)(self.exprs.len() - 1);
+    }
+
+    u32 add_stmt_return(AstPool* self, u32 expr_id, Span span) {
+        AstStmt stmt;
+        stmt.kind = StmtKind.Return;
+        stmt.inner0 = expr_id;
+        stmt.inner1 = 0;
+        stmt.aux = 0;
+        stmt.is_static = false;
+        stmt.span = span;
+        self.stmts.push(move stmt);
+        return (u32)(self.stmts.len() - 1);
+    }
+
+    u32 add_stmt_let(AstPool* self, u32 var_name_id, u32 type_id, u32 init_expr_id, Span span) {
+        AstStmt stmt;
+        stmt.kind = StmtKind.Let;
+        stmt.inner0 = type_id;
+        stmt.inner1 = init_expr_id;
+        stmt.aux = var_name_id;
+        stmt.is_static = false;
+        stmt.span = span;
+        self.stmts.push(move stmt);
+        return (u32)(self.stmts.len() - 1);
+    }
+
+    u32 add_stmt_static_let(AstPool* self, u32 var_name_id, u32 type_id, u32 init_expr_id, Span span) {
+        AstStmt stmt;
+        stmt.kind = StmtKind.Let;
+        stmt.inner0 = type_id;
+        stmt.inner1 = init_expr_id;
+        stmt.aux = var_name_id;
+        stmt.is_static = true;
+        stmt.span = span;
+        self.stmts.push(move stmt);
+        return (u32)(self.stmts.len() - 1);
+    }
+
+    u32 add_stmt_assign(AstPool* self, u32 target_expr_id, u32 val_expr_id, Span span) {
+        AstStmt stmt;
+        stmt.kind = StmtKind.Assign;
+        stmt.inner0 = target_expr_id;
+        stmt.inner1 = val_expr_id;
+        stmt.aux = 0;
+        stmt.is_static = false;
+        stmt.span = span;
+        self.stmts.push(move stmt);
+        return (u32)(self.stmts.len() - 1);
+    }
+
+    u32 add_stmt_reset_local(AstPool* self, u32 var_name_id, Span span) {
+        AstStmt stmt;
+        stmt.kind = StmtKind.ResetLocal;
+        stmt.inner0 = 0;
+        stmt.inner1 = 0;
+        stmt.aux = var_name_id;
+        stmt.is_static = false;
+        stmt.span = span;
+        self.stmts.push(move stmt);
+        return (u32)(self.stmts.len() - 1);
+    }
+
+    u32 add_stmt_expr(AstPool* self, u32 expr_id, Span span) {
+        AstStmt stmt;
+        stmt.kind = StmtKind.Expr;
+        stmt.inner0 = expr_id;
+        stmt.inner1 = 0;
+        stmt.aux = 0;
+        stmt.is_static = false;
+        stmt.span = span;
+        self.stmts.push(move stmt);
+        return (u32)(self.stmts.len() - 1);
+    }
+
+    u32 add_stmt_if(AstPool* self, u32 cond_id, u32 then_stmt_id, u32 else_stmt_id, Span span) {
+        AstStmt stmt;
+        stmt.kind = StmtKind.If;
+        stmt.inner0 = cond_id;
+        stmt.inner1 = then_stmt_id;
+        stmt.aux = else_stmt_id;
+        stmt.is_static = false;
+        stmt.span = span;
+        self.stmts.push(move stmt);
+        return (u32)(self.stmts.len() - 1);
+    }
+
+    u32 add_stmt_while(AstPool* self, u32 cond_id, u32 body_stmt_id, Span span) {
+        AstStmt stmt;
+        stmt.kind = StmtKind.While;
+        stmt.inner0 = cond_id;
+        stmt.inner1 = body_stmt_id;
+        stmt.aux = 0;
+        stmt.is_static = false;
+        stmt.span = span;
+        self.stmts.push(move stmt);
+        return (u32)(self.stmts.len() - 1);
+    }
+
+    u32 add_stmt_while_step(AstPool* self, u32 cond_id, u32 body_stmt_id,
+                            u32 step_stmt_id, Span span) {
+        AstStmt stmt;
+        stmt.kind = StmtKind.While;
+        stmt.inner0 = cond_id;
+        stmt.inner1 = body_stmt_id;
+        stmt.aux = step_stmt_id;
+        stmt.is_static = false;
+        stmt.span = span;
+        self.stmts.push(move stmt);
+        return (u32)(self.stmts.len() - 1);
+    }
+
+    u32 add_stmt_break(AstPool* self, Span span) {
+        AstStmt stmt;
+        stmt.kind = StmtKind.Break;
+        stmt.inner0 = 0;
+        stmt.inner1 = 0;
+        stmt.aux = 0;
+        stmt.is_static = false;
+        stmt.span = span;
+        self.stmts.push(move stmt);
+        return (u32)(self.stmts.len() - 1);
+    }
+
+    u32 add_stmt_continue(AstPool* self, Span span) {
+        AstStmt stmt;
+        stmt.kind = StmtKind.Continue;
+        stmt.inner0 = 0;
+        stmt.inner1 = 0;
+        stmt.aux = 0;
+        stmt.is_static = false;
+        stmt.span = span;
+        self.stmts.push(move stmt);
+        return (u32)(self.stmts.len() - 1);
+    }
+
+    u32 add_stmt_defer(AstPool* self, u32 deferred_stmt_id, Span span) {
+        AstStmt stmt;
+        stmt.kind = StmtKind.Defer;
+        stmt.inner0 = deferred_stmt_id;
+        stmt.inner1 = 0;
+        stmt.aux = 0;
+        stmt.is_static = false;
+        stmt.span = span;
+        self.stmts.push(move stmt);
+        return (u32)(self.stmts.len() - 1);
+    }
+
+    u32 add_stmt_block(AstPool* self, u32 start, u32 count, Span span) {
+        AstStmt stmt;
+        stmt.kind = StmtKind.Block;
+        stmt.inner0 = start;
+        stmt.inner1 = 0;
+        stmt.aux = count;
+        stmt.is_static = false;
+        stmt.span = span;
+        self.stmts.push(move stmt);
+        return (u32)(self.stmts.len() - 1);
+    }
+
+    AstExpr* get_expr(AstPool* self, u32 id) {
+        if ((i64)id >= self.exprs.len()) {
+            return self.exprs.get_ptr(0);
+        }
+        return self.exprs.get_ptr((i64)id);
+    }
+
+    AstStmt* get_stmt(AstPool* self, u32 id) {
+        if ((i64)id >= self.stmts.len()) {
+            return self.stmts.get_ptr(0);
+        }
+        return self.stmts.get_ptr((i64)id);
+    }
+
+    MatchArm* get_arm(AstPool* self, u32 id) {
+        if ((i64)id >= self.arms.len()) {
+            return self.arms.get_ptr(0);
+        }
+        return self.arms.get_ptr((i64)id);
+    }
+}

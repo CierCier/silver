@@ -1,0 +1,644 @@
+// tests/adversarial_mem_intrinsics_test.ag — Empirical stress tests for memory intrinsics.
+//
+// Exercises memcpy, memset, memmove, strlen, memchr, and memcmp across:
+// - Exact edge-case sizes: 0, 1, 7, 8, 9, 15, 16, 64, 1024 bytes.
+// - Overlapping buffers in memmove (both forward dst < src and backward dst > src).
+// - Guard canaries to verify absence of buffer overread and overwrite.
+// - Boundary tests: matches/differences at byte 0, middle, byte n-1, and byte n (outside window).
+// - Unsigned character semantics in memcmp (e.g. 0x80 > 0x7F).
+// - Null pointer tolerance where specified.
+
+import std.mem.alloc;
+import std.mem.memory;
+import std.io;
+import std.sys.entry;
+
+const i64 CANARY_LEN = 16;
+const u8 CANARY_VAL = (u8)0xEE;
+
+void fill_canaries(u8* buf, i64 payload_len) {
+    i64 i = 0;
+    while (i < CANARY_LEN) {
+        buf[i] = CANARY_VAL;
+        buf[CANARY_LEN + payload_len + i] = CANARY_VAL;
+        i = i + 1;
+    }
+}
+
+bool check_canaries(u8* buf, i64 payload_len) {
+    i64 i = 0;
+    while (i < CANARY_LEN) {
+        if (buf[i] != CANARY_VAL) { return false; }
+        if (buf[CANARY_LEN + payload_len + i] != CANARY_VAL) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+bool test_memcpy_size(i64 n) {
+    i64 total = CANARY_LEN * 2 + n;
+    u8* dst_buf = (u8*)malloc(total);
+    u8* src_buf = (u8*)malloc(total);
+    if (dst_buf == (u8*)0 || src_buf == (u8*)0) {
+        return false;
+    }
+
+    fill_canaries(dst_buf, n);
+    fill_canaries(src_buf, n);
+
+    u8* dst = (u8*)((i64)dst_buf + CANARY_LEN);
+    u8* src = (u8*)((i64)src_buf + CANARY_LEN);
+
+    i64 i = 0;
+    while (i < n) {
+        dst[i] = (u8)0x55;
+        src[i] = (u8)((i * 37 + 11) % 251);
+        i = i + 1;
+    }
+
+    void* ret = memcpy((void*)dst, (const void*)src, n);
+    if ((u8*)ret != dst) {
+        free(dst_buf);
+        free(src_buf);
+        return false;
+    }
+
+    if (!check_canaries(dst_buf, n) || !check_canaries(src_buf, n)) {
+        free(dst_buf);
+        free(src_buf);
+        return false;
+    }
+
+    i = 0;
+    while (i < n) {
+        if (dst[i] != src[i]) {
+            free(dst_buf);
+            free(src_buf);
+            return false;
+        }
+        i = i + 1;
+    }
+
+    free(dst_buf);
+    free(src_buf);
+    return true;
+}
+
+bool test_memset_size(i64 n) {
+    i64 total = CANARY_LEN * 2 + n;
+    u8* dst_buf = (u8*)malloc(total);
+    if (dst_buf == (u8*)0) {
+        return false;
+    }
+
+    i32 val_idx = 0;
+    while (val_idx < 4) {
+        u8 val = (u8)0;
+        if (val_idx == 0) { val = (u8)0x00; }
+        else if (val_idx == 1) { val = (u8)0xFF; }
+        else if (val_idx == 2) { val = (u8)0x5A; }
+        else { val = (u8)0xA5; }
+
+        fill_canaries(dst_buf, n);
+        u8* dst = (u8*)((i64)dst_buf + CANARY_LEN);
+
+        i64 i = 0;
+        while (i < n) {
+            dst[i] = (u8)(val ^ (u8)0xFF);
+            i = i + 1;
+        }
+
+        void* ret = memset((void*)dst, (i32)val, n);
+        if ((u8*)ret != dst) {
+            free(dst_buf);
+            return false;
+        }
+
+        if (!check_canaries(dst_buf, n)) {
+            free(dst_buf);
+            return false;
+        }
+
+        i = 0;
+        while (i < n) {
+            if (dst[i] != val) {
+                free(dst_buf);
+                return false;
+            }
+            i = i + 1;
+        }
+
+        val_idx = val_idx + 1;
+    }
+
+    free(dst_buf);
+    return true;
+}
+
+bool test_memmove_non_overlap(i64 n) {
+    i64 total = CANARY_LEN * 2 + n;
+    u8* dst_buf = (u8*)malloc(total);
+    u8* src_buf = (u8*)malloc(total);
+    if (dst_buf == (u8*)0 || src_buf == (u8*)0) {
+        return false;
+    }
+
+    fill_canaries(dst_buf, n);
+    fill_canaries(src_buf, n);
+
+    u8* dst = (u8*)((i64)dst_buf + CANARY_LEN);
+    u8* src = (u8*)((i64)src_buf + CANARY_LEN);
+
+    i64 i = 0;
+    while (i < n) {
+        dst[i] = (u8)0x77;
+        src[i] = (u8)((i * 41 + 17) % 251);
+        i = i + 1;
+    }
+
+    void* ret = memmove((void*)dst, (const void*)src, n);
+    if ((u8*)ret != dst) {
+        free(dst_buf);
+        free(src_buf);
+        return false;
+    }
+
+    if (!check_canaries(dst_buf, n) || !check_canaries(src_buf, n)) {
+        free(dst_buf);
+        free(src_buf);
+        return false;
+    }
+
+    i = 0;
+    while (i < n) {
+        if (dst[i] != src[i]) {
+            free(dst_buf);
+            free(src_buf);
+            return false;
+        }
+        i = i + 1;
+    }
+
+    free(dst_buf);
+    free(src_buf);
+    return true;
+}
+
+bool test_memmove_overlap(i64 n, i64 shift, bool forward) {
+    if (n == 0) {
+        return true;
+    }
+    i64 total = CANARY_LEN * 2 + n + shift;
+    u8* buf = (u8*)malloc(total);
+    if (buf == (u8*)0) {
+        return false;
+    }
+
+    i64 i = 0;
+    while (i < CANARY_LEN) {
+        buf[i] = CANARY_VAL;
+        buf[CANARY_LEN + n + shift + i] = CANARY_VAL;
+        i = i + 1;
+    }
+
+    u8* src = (u8*)0;
+    u8* dst = (u8*)0;
+    if (forward) {
+        // dst < src (forward copy)
+        dst = (u8*)((i64)buf + CANARY_LEN);
+        src = (u8*)((i64)buf + CANARY_LEN + shift);
+    } else {
+        // dst > src (backward copy)
+        src = (u8*)((i64)buf + CANARY_LEN);
+        dst = (u8*)((i64)buf + CANARY_LEN + shift);
+    }
+
+    // Populate src payload
+    i = 0;
+    while (i < n) {
+        src[i] = (u8)((i * 23 + 7) % 251);
+        i = i + 1;
+    }
+
+    void* ret = memmove((void*)dst, (const void*)src, n);
+    if ((u8*)ret != dst) {
+        free(buf);
+        return false;
+    }
+
+    // Check canaries
+    i = 0;
+    while (i < CANARY_LEN) {
+        if (buf[i] != CANARY_VAL || buf[CANARY_LEN + n + shift + i] != CANARY_VAL) {
+            free(buf);
+            return false;
+        }
+        i = i + 1;
+    }
+
+    // Verify transferred data
+    i = 0;
+    while (i < n) {
+        u8 expected = (u8)((i * 23 + 7) % 251);
+        if (dst[i] != expected) {
+            free(buf);
+            return false;
+        }
+        i = i + 1;
+    }
+
+    free(buf);
+    return true;
+}
+
+bool test_memmove_identity(i64 n) {
+    if (n == 0) {
+        return true;
+    }
+    i64 total = CANARY_LEN * 2 + n;
+    u8* buf = (u8*)malloc(total);
+    if (buf == (u8*)0) {
+        return false;
+    }
+
+    fill_canaries(buf, n);
+    u8* ptr = (u8*)((i64)buf + CANARY_LEN);
+
+    i64 i = 0;
+    while (i < n) {
+        ptr[i] = (u8)((i * 29 + 13) % 251);
+        i = i + 1;
+    }
+
+    void* ret = memmove((void*)ptr, (const void*)ptr, n);
+    if ((u8*)ret != ptr) {
+        free(buf);
+        return false;
+    }
+
+    if (!check_canaries(buf, n)) {
+        free(buf);
+        return false;
+    }
+
+    i = 0;
+    while (i < n) {
+        u8 expected = (u8)((i * 29 + 13) % 251);
+        if (ptr[i] != expected) {
+            free(buf);
+            return false;
+        }
+        i = i + 1;
+    }
+
+    free(buf);
+    return true;
+}
+
+bool test_strlen_size(i64 n) {
+    i64 offset = 0;
+    while (offset < 16) {
+        i64 total = offset + n + 1 + 16;
+        u8* buf = (u8*)malloc(total);
+        if (buf == (u8*)0) {
+            return false;
+        }
+
+        u8* s = (u8*)((i64)buf + offset);
+        i64 i = 0;
+        while (i < n) {
+            s[i] = (u8)((i % 26) + (i64)'a');
+            i = i + 1;
+        }
+        s[n] = (u8)0;
+        i = 1;
+        while (i < 16) {
+            s[n + i] = (u8)'Z';
+            i = i + 1;
+        }
+
+        i64 len = strlen((const char*)s);
+        if (len != n) {
+            free(buf);
+            return false;
+        }
+
+        i64 rt_len = silver_rt_strlen((const char*)s);
+        if (rt_len != n) {
+            free(buf);
+            return false;
+        }
+
+        free(buf);
+        offset = offset + 1;
+    }
+    return true;
+}
+
+bool test_memchr_size(i64 n) {
+    if (n == 0) {
+        u8 dummy = (u8)0x42;
+        u8* r0 = memchr((const void*)&dummy, (i32)'x', 0);
+        if (r0 != (u8*)0) { return false; }
+        i64 f0 = mem_find_byte(&dummy, (u8)'x', 0);
+        if (f0 != -1) { return false; }
+        return true;
+    }
+
+    i64 total = n + 16;
+    u8* buf = (u8*)malloc(total);
+    if (buf == (u8*)0) {
+        return false;
+    }
+
+    // 1. Absent byte
+    i64 i = 0;
+    while (i < total) {
+        buf[i] = (u8)'a';
+        i = i + 1;
+    }
+    u8* r = memchr((const void*)buf, (i32)'b', n);
+    if (r != (u8*)0) { free(buf); return false; }
+    if (mem_find_byte(buf, (u8)'b', n) != -1) { free(buf); return false; }
+
+    // 2. Target placed only at index n (outside search window)
+    buf[n] = (u8)'b';
+    r = memchr((const void*)buf, (i32)'b', n);
+    if (r != (u8*)0) { free(buf); return false; }
+    if (mem_find_byte(buf, (u8)'b', n) != -1) { free(buf); return false; }
+    buf[n] = (u8)'a';
+
+    // 3. Target at index 0 (first byte)
+    buf[0] = (u8)'b';
+    r = memchr((const void*)buf, (i32)'b', n);
+    if (r != &buf[0]) { free(buf); return false; }
+    if (mem_find_byte(buf, (u8)'b', n) != 0) { free(buf); return false; }
+    buf[0] = (u8)'a';
+
+    // 4. Target at index n - 1 (last byte)
+    buf[n - 1] = (u8)'b';
+    r = memchr((const void*)buf, (i32)'b', n);
+    if (r != &buf[n - 1]) { free(buf); return false; }
+    if (mem_find_byte(buf, (u8)'b', n) != n - 1) { free(buf); return false; }
+    buf[n - 1] = (u8)'a';
+
+    // 5. Target at middle
+    if (n > 2) {
+        i64 mid = n / 2;
+        buf[mid] = (u8)'b';
+        r = memchr((const void*)buf, (i32)'b', n);
+        if (r != &buf[mid]) { free(buf); return false; }
+        if (mem_find_byte(buf, (u8)'b', n) != mid) { free(buf); return false; }
+        buf[mid] = (u8)'a';
+    }
+
+    // 6. Multiple matches: index 0 and index n - 1
+    buf[0] = (u8)'b';
+    buf[n - 1] = (u8)'b';
+    r = memchr((const void*)buf, (i32)'b', n);
+    if (r != &buf[0]) { free(buf); return false; }
+    u8* rr = memrchr((const void*)buf, (i32)'b', n);
+    if (rr != &buf[n - 1]) { free(buf); return false; }
+    if (mem_find_byte_back(buf, (u8)'b', n) != n - 1) { free(buf); return false; }
+
+    // 7. mem_count_byte
+    i64 cnt = mem_count_byte(buf, (u8)'b', n);
+    if (n == 1) {
+        if (cnt != 1) { free(buf); return false; }
+    } else {
+        if (cnt != 2) { free(buf); return false; }
+    }
+
+    free(buf);
+    return true;
+}
+
+bool test_memcmp_size(i64 n) {
+    if (n == 0) {
+        u8 b1 = (u8)1;
+        u8 b2 = (u8)2;
+        if (memcmp((const void*)&b1, (const void*)&b2, 0) != 0) { return false; }
+        return true;
+    }
+
+    i64 total = n + 16;
+    u8* a = (u8*)malloc(total);
+    u8* b = (u8*)malloc(total);
+    if (a == (u8*)0 || b == (u8*)0) {
+        return false;
+    }
+
+    i64 i = 0;
+    while (i < total) {
+        a[i] = (u8)((i * 13 + 7) % 251);
+        b[i] = a[i];
+        i = i + 1;
+    }
+
+    // 1. Equal regions
+    if (memcmp((const void*)a, (const void*)b, n) != 0) {
+        free(a); free(b); return false;
+    }
+
+    // 2. Differing only at byte n (outside comparison window)
+    a[n] = (u8)(a[n] + (u8)1);
+    if (memcmp((const void*)a, (const void*)b, n) != 0) {
+        free(a); free(b); return false;
+    }
+    a[n] = b[n];
+
+    // 3. Difference at index 0
+    a[0] = (u8)10;
+    b[0] = (u8)20;
+    if (memcmp((const void*)a, (const void*)b, n) >= 0) {
+        free(a); free(b); return false;
+    }
+    if (memcmp((const void*)b, (const void*)a, n) <= 0) {
+        free(a); free(b); return false;
+    }
+    a[0] = b[0];
+
+    // 4. Difference at index n - 1
+    a[n - 1] = (u8)30;
+    b[n - 1] = (u8)40;
+    if (memcmp((const void*)a, (const void*)b, n) >= 0) {
+        free(a); free(b); return false;
+    }
+    if (memcmp((const void*)b, (const void*)a, n) <= 0) {
+        free(a); free(b); return false;
+    }
+    a[n - 1] = b[n - 1];
+
+    // 5. Difference at middle
+    if (n > 2) {
+        i64 mid = n / 2;
+        a[mid] = (u8)50;
+        b[mid] = (u8)60;
+        if (memcmp((const void*)a, (const void*)b, n) >= 0) {
+            free(a); free(b); return false;
+        }
+        if (memcmp((const void*)b, (const void*)a, n) <= 0) {
+            free(a); free(b); return false;
+        }
+        a[mid] = b[mid];
+    }
+
+    // 6. Unsigned byte comparison: 0x80 (128) vs 0x7F (127)
+    a[0] = (u8)0x80;
+    b[0] = (u8)0x7F;
+    if (memcmp((const void*)a, (const void*)b, n) <= 0) {
+        free(a); free(b); return false;
+    }
+    if (memcmp((const void*)b, (const void*)a, n) >= 0) {
+        free(a); free(b); return false;
+    }
+    a[0] = b[0];
+
+    free(a);
+    free(b);
+    return true;
+}
+
+bool test_null_pointers() {
+    if ((u8*)memcpy((void*)0, (const void*)0, 0) != (u8*)0) { return false; }
+    if ((u8*)memset((void*)0, 0, 0) != (u8*)0) { return false; }
+    if ((u8*)memmove((void*)0, (const void*)0, 0) != (u8*)0) { return false; }
+    if (strlen((const char*)0) != 0) { return false; }
+    if (silver_rt_strlen((const char*)0) != 0) { return false; }
+    if (memchr((const void*)0, (i32)'a', 0) != (u8*)0) { return false; }
+    if (mem_find_byte((u8*)0, (u8)'a', 0) != -1) { return false; }
+    if (mem_count_byte((u8*)0, (u8)'a', 0) != 0) { return false; }
+    return true;
+}
+
+i32 main() {
+    STDOUT.write_str("Starting adversarial memory intrinsics test suite...\n");
+
+    // Test null pointer tolerance
+    if (!test_null_pointers()) {
+        STDOUT.write_str("FAIL: test_null_pointers\n");
+        return 1;
+    }
+    STDOUT.write_str("PASS: test_null_pointers\n");
+
+    // Test matrix sizes: 0, 1, 7, 8, 9, 15, 16, 64, 1024
+    i64 sizes[9];
+    sizes[0] = 0;
+    sizes[1] = 1;
+    sizes[2] = 7;
+    sizes[3] = 8;
+    sizes[4] = 9;
+    sizes[5] = 15;
+    sizes[6] = 16;
+    sizes[7] = 64;
+    sizes[8] = 1024;
+
+    i64 s_idx = 0;
+    while (s_idx < 9) {
+        i64 n = sizes[s_idx];
+
+        if (!test_memcpy_size(n)) {
+            STDOUT.write_str("FAIL: memcpy size=");
+            STDOUT.write_i64(n);
+            STDOUT.write_str("\n");
+            return 2;
+        }
+
+        if (!test_memset_size(n)) {
+            STDOUT.write_str("FAIL: memset size=");
+            STDOUT.write_i64(n);
+            STDOUT.write_str("\n");
+            return 3;
+        }
+
+        if (!test_memmove_non_overlap(n)) {
+            STDOUT.write_str("FAIL: memmove non-overlap size=");
+            STDOUT.write_i64(n);
+            STDOUT.write_str("\n");
+            return 4;
+        }
+
+        if (!test_memmove_identity(n)) {
+            STDOUT.write_str("FAIL: memmove identity size=");
+            STDOUT.write_i64(n);
+            STDOUT.write_str("\n");
+            return 5;
+        }
+
+        if (!test_strlen_size(n)) {
+            STDOUT.write_str("FAIL: strlen size=");
+            STDOUT.write_i64(n);
+            STDOUT.write_str("\n");
+            return 6;
+        }
+
+        if (!test_memchr_size(n)) {
+            STDOUT.write_str("FAIL: memchr size=");
+            STDOUT.write_i64(n);
+            STDOUT.write_str("\n");
+            return 7;
+        }
+
+        if (!test_memcmp_size(n)) {
+            STDOUT.write_str("FAIL: memcmp size=");
+            STDOUT.write_i64(n);
+            STDOUT.write_str("\n");
+            return 8;
+        }
+
+        s_idx = s_idx + 1;
+    }
+    STDOUT.write_str("PASS: all edge case sizes (0, 1, 7, 8, 9, 15, 16, 64, 1024)\n");
+
+    // Overlapping memmove tests: forward and backward
+    // Test shifts: 1, 2, 3, 7, 8, 9, 15, 16, 31, 32, 63, 64
+    i64 shifts[12];
+    shifts[0] = 1;
+    shifts[1] = 2;
+    shifts[2] = 3;
+    shifts[3] = 7;
+    shifts[4] = 8;
+    shifts[5] = 9;
+    shifts[6] = 15;
+    shifts[7] = 16;
+    shifts[8] = 31;
+    shifts[9] = 32;
+    shifts[10] = 63;
+    shifts[11] = 64;
+
+    s_idx = 0;
+    while (s_idx < 9) {
+        i64 n = sizes[s_idx];
+        i64 sh_idx = 0;
+        while (sh_idx < 12) {
+            i64 shift = shifts[sh_idx];
+
+            // Forward overlap: dst < src
+            if (!test_memmove_overlap(n, shift, true)) {
+                STDOUT.write_str("FAIL: memmove forward overlap n=");
+                STDOUT.write_i64(n);
+                STDOUT.write_str(" shift=");
+                STDOUT.write_i64(shift);
+                STDOUT.write_str("\n");
+                return 9;
+            }
+
+            // Backward overlap: dst > src
+            if (!test_memmove_overlap(n, shift, false)) {
+                STDOUT.write_str("FAIL: memmove backward overlap n=");
+                STDOUT.write_i64(n);
+                STDOUT.write_str(" shift=");
+                STDOUT.write_i64(shift);
+                STDOUT.write_str("\n");
+                return 10;
+            }
+
+            sh_idx = sh_idx + 1;
+        }
+        s_idx = s_idx + 1;
+    }
+    STDOUT.write_str("PASS: memmove all forward and backward overlap configurations\n");
+
+    STDOUT.write_str("ALL ADVERSARIAL INTRINSIC TESTS PASSED SUCCESSFULLY!\n");
+    return 0;
+}

@@ -1,0 +1,17 @@
+// expected_compile_failure
+struct Leaf { i64 value; }
+impl Drop for Leaf { void drop(Leaf* self) {} }
+struct Managed<T> { T item; T sibling; }
+impl<T> Drop for Managed<T> { void drop(Managed<T>* self) {} }
+
+T extract<T>(Managed<T> parent) {
+    return move parent.item;
+}
+
+i32 main() {
+    Leaf first = { .value = 1 };
+    Leaf second = { .value = 2 };
+    Managed<Leaf> parent = { .item = move first, .sibling = move second };
+    Leaf item = extract(move parent);
+    return 0;
+}

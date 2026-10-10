@@ -1,0 +1,6 @@
+# Reusable Silver compiler frontend consumed by bin/agc and future tools.
+name = "agc"
+version = "0.2.6"
+
+[lib."agc"]
+entry = "src/agc.ag"

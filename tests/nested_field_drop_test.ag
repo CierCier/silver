@@ -1,0 +1,157 @@
+// expected_exit: 42
+import std.test;
+
+i64 drops = 0;
+i64 dropped_values = 0;
+
+struct Leaf {
+    i64 value;
+}
+impl Drop for Leaf {
+    void drop(Leaf* self) {
+        drops = drops + 1;
+        dropped_values = dropped_values + self.value;
+    }
+}
+
+struct Branch<T> {
+    T left;
+    T right;
+}
+
+struct Outer<T> {
+    Branch<T> inner;
+    T extra;
+}
+
+Leaf make_leaf(i64 value) {
+    Leaf leaf = { .value = value };
+    return move leaf;
+}
+
+Branch<Leaf> make_branch(i64 left, i64 right) {
+    Branch<Leaf> branch;
+    branch.left = make_leaf(left);
+    branch.right = make_leaf(right);
+    return move branch;
+}
+
+Outer<Leaf> make_outer(i64 left, i64 right, i64 extra) {
+    Outer<Leaf> outer;
+    outer.inner = make_branch(left, right);
+    outer.extra = make_leaf(extra);
+    return move outer;
+}
+
+void consume_leaf(Leaf _leaf) {
+}
+
+void branch_partial(bool take_left) {
+    Outer<Leaf> outer;
+    outer.extra = make_leaf(51);
+    if (take_left) {
+        outer.inner.left = make_leaf(52);
+    } else {
+        outer.inner.right = make_leaf(53);
+    }
+}
+
+Branch<Leaf> return_inner(Outer<Leaf> outer) {
+    return move outer.inner;
+}
+
+i32 main() {
+    // Moving a deep field preserves its siblings at both enclosing levels.
+    drops = 0;
+    dropped_values = 0;
+    {
+        Outer<Leaf> outer = make_outer(11, 12, 13);
+        consume_leaf(move outer.inner.left);
+        assert_eq_i64(12, outer.inner.right.value, "nested right sibling remains live");
+        assert_eq_i64(13, outer.extra.value, "outer sibling remains live");
+        assert_eq_i64(1, drops, "moved nested leaf drops in its consumer");
+    }
+    assert_eq_i64(3, drops, "nested siblings each drop once");
+    assert_eq_i64(36, dropped_values, "nested move preserves all leaf values");
+
+    // Returning a nested subtree transfers both initialized leaves; the source
+    // outer sibling is cleaned up in the callee.
+    drops = 0;
+    dropped_values = 0;
+    {
+        Outer<Leaf> outer = make_outer(31, 32, 33);
+        Branch<Leaf> returned = return_inner(move outer);
+        assert_eq_i64(1, drops, "unreturned outer field drops in the callee");
+        assert_eq_i64(33, dropped_values, "callee drops only the outer sibling");
+        consume_leaf(move returned.left);
+        consume_leaf(move returned.right);
+    }
+    assert_eq_i64(3, drops, "returned nested subtree leaves each drop once");
+    assert_eq_i64(96, dropped_values, "nested return preserves subtree payloads");
+
+    // A live nested overwrite drops the old value; a later reinitialization
+    // fills the moved leaf without disturbing its sibling.
+    drops = 0;
+    dropped_values = 0;
+    {
+        Outer<Leaf> outer = make_outer(41, 42, 43);
+        outer.inner.right = make_leaf(44);
+        assert_eq_i64(1, drops, "nested overwrite drops previous right leaf");
+        consume_leaf(move outer.inner.left);
+        outer.inner.left = make_leaf(45);
+        assert_eq_i64(2, drops, "move and reinitialization do not drop empty slot");
+        assert_eq_i64(44, outer.inner.right.value, "nested overwrite keeps new sibling value");
+    }
+    assert_eq_i64(5, drops, "reinitialized nested fields clean up once");
+    assert_eq_i64(215, dropped_values, "nested overwrite and reinit retain new values");
+
+    // Replacing a whole nested subtree drops its old leaves immediately.
+    drops = 0;
+    dropped_values = 0;
+    {
+        Outer<Leaf> outer = make_outer(81, 82, 83);
+        outer.inner = make_branch(84, 85);
+        assert_eq_i64(2, drops, "whole nested overwrite drops both old leaves");
+        assert_eq_i64(163, dropped_values, "whole nested overwrite drops old subtree values");
+    }
+    assert_eq_i64(5, drops, "replacement subtree and outer extra drop once");
+    assert_eq_i64(415, dropped_values, "whole nested overwrite retains replacement values");
+
+    // Partially initialized nested fields are cleaned up on either branch.
+    drops = 0;
+    dropped_values = 0;
+    branch_partial(true);
+    assert_eq_i64(2, drops, "taken branch drops only initialized fields");
+    assert_eq_i64(103, dropped_values, "taken branch retains live values");
+    branch_partial(false);
+    assert_eq_i64(4, drops, "alternate branch drops only initialized fields");
+    assert_eq_i64(207, dropped_values, "alternate branch retains live values");
+
+    // Shadowed generic wrappers maintain independent nested drop state.
+    drops = 0;
+    dropped_values = 0;
+    {
+        Outer<Leaf> outer = make_outer(61, 62, 63);
+        {
+            Outer<Leaf> outer = make_outer(64, 65, 66);
+            consume_leaf(move outer.inner.left);
+        }
+        consume_leaf(move outer.inner.left);
+    }
+    assert_eq_i64(6, drops, "shadowed nested wrappers drop each leaf once");
+    assert_eq_i64(381, dropped_values, "shadowed wrappers retain separate payloads");
+
+    // Explicitly dropping one leaf consumes only that nested place.
+    drops = 0;
+    dropped_values = 0;
+    {
+        Outer<Leaf> outer = make_outer(71, 72, 73);
+        outer.inner.left.drop();
+        assert_eq_i64(1, drops, "explicit nested leaf drop runs once");
+        assert_eq_i64(72, outer.inner.right.value, "explicit drop preserves nested sibling");
+    }
+    assert_eq_i64(3, drops, "explicit nested drop does not repeat at scope exit");
+    assert_eq_i64(216, dropped_values, "remaining nested fields drop with original values");
+
+    return 42;
+}

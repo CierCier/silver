@@ -1,0 +1,398 @@
+// Lexical name resolution over the lossless CST. This is the first semantic
+// projection; it deliberately keeps declaration order and does not iterate a
+// hash table.
+import std.mem.vec;
+import std.intern;
+import frontend.ast;
+import frontend.diagnostics;
+import frontend.messages;
+import frontend.symbols;
+import frontend.module_loader;
+import frontend.cfg;
+import frontend.bindings;
+
+struct NameResolver {
+    Interner local_names;
+    Vec<u32> locals;
+    Vec<u32> const_locals;
+    Vec<u32> const_globals;
+    SymbolTable* symbols;
+    DiagnosticBag* diagnostics;
+    bool has_imports;
+    bool failed;
+}
+
+impl NameResolver {
+    NameResolver new(SymbolTable* symbols, DiagnosticBag* diagnostics) {
+        NameResolver resolver;
+        resolver.local_names = Interner.new();
+        resolver.locals = Vec<u32>.new();
+        resolver.const_locals = Vec<u32>.new();
+        resolver.diagnostics = diagnostics;
+        resolver.symbols = symbols;
+        resolver.const_globals = Vec<u32>.new();
+        resolver.has_imports = false;
+        resolver.failed = false;
+        return resolver;
+    }
+
+    void add_local(NameResolver* self, str name) {
+        self.locals.push(self.local_names.intern(name));
+    }
+
+    bool has_local(NameResolver* self, str name) {
+        i64 i = 0;
+        while (i < self.locals.len()) {
+            if (self.local_names.get(self.locals.get(i)) == name) {
+                return true;
+            }
+            i += 1;
+        }
+        return false;
+    }
+
+    void mark_const(NameResolver* self, str name) {
+        u32 name_id = self.local_names.intern(name);
+        i64 i = 0;
+        while (i < self.const_locals.len()) {
+            if (self.const_locals.get(i) == name_id) {
+                return;
+            }
+            i += 1;
+        }
+        self.const_locals.push(name_id);
+    }
+
+    bool is_const(NameResolver* self, str name) {
+        u32 name_id = self.local_names.intern(name);
+        i64 i = 0;
+        while (i < self.const_locals.len()) {
+            if (self.const_locals.get(i) == name_id) {
+                return true;
+            }
+            i += 1;
+        }
+        return false;
+    }
+
+    bool is_const_global(NameResolver* self, str name) {
+        u32 name_id = self.local_names.intern(name);
+        i64 i = 0;
+        while (i < self.const_globals.len()) {
+            if (self.const_globals.get(i) == name_id) {
+                return true;
+            }
+            i += 1;
+        }
+        return false;
+    }
+
+    void unknown(NameResolver* self, str name, Span span, bool is_call) {
+        Vec<str> candidates = Vec<str>.new();
+        i64 i = 0;
+        if (is_call) {
+            while (i < self.symbols.symbols.len()) {
+                Symbol* symbol = self.symbols.symbols.get_ptr(i);
+                if (symbol.kind == SymbolKind.Function) {
+                    str candidate = self.symbols.names.get(symbol.name_id);
+                    bool seen = false;
+                    i64 j = 0;
+                    while (j < candidates.len()) {
+                        if (candidates.get(j) == candidate) { seen = true; break; }
+                        j += 1;
+                    }
+                    if (!seen) { candidates.push(candidate); }
+                }
+                i += 1;
+            }
+            str suggestion = fuzzy_suggest(name, &candidates, 2);
+            String message = unknown_function_with_suggestion(name, suggestion);
+            self.diagnostics.error(span, move message);
+        } else {
+            while (i < self.locals.len()) {
+                candidates.push(self.local_names.get(self.locals.get(i)));
+                i += 1;
+            }
+            i = 0;
+            while (i < self.symbols.symbols.len()) {
+                Symbol* symbol = self.symbols.symbols.get_ptr(i);
+                if (symbol.kind == SymbolKind.Global) {
+                    str candidate = self.symbols.names.get(symbol.name_id);
+                    bool seen = false;
+                    i64 j = 0;
+                    while (j < candidates.len()) {
+                        if (candidates.get(j) == candidate) { seen = true; break; }
+                        j += 1;
+                    }
+                    if (!seen) { candidates.push(candidate); }
+                }
+                i += 1;
+            }
+            str suggestion = fuzzy_suggest(name, &candidates, 2);
+            String message = unknown_identifier_with_suggestion(name, suggestion);
+            self.diagnostics.error(span, move message);
+        }
+        candidates.drop();
+        self.failed = true;
+    }
+}
+
+bool const_is_assign_op(SyntaxNode* node) {
+    if (node == (SyntaxNode*)0 || node.kind != NodeKind.Token) {
+        return false;
+    }
+    return node.token_kind == TokenKind.Assign
+        || node.token_kind == TokenKind.PlusAssign
+        || node.token_kind == TokenKind.MinusAssign
+        || node.token_kind == TokenKind.StarAssign
+        || node.token_kind == TokenKind.SlashAssign
+        || node.token_kind == TokenKind.PercentAssign
+        || node.token_kind == TokenKind.BitwiseAndAssign
+        || node.token_kind == TokenKind.BitwiseOrAssign
+        || node.token_kind == TokenKind.BitwiseXorAssign
+        || node.token_kind == TokenKind.LeftShiftAssign
+        || node.token_kind == TokenKind.RightShiftAssign;
+}
+
+bool const_is_delimiter(SyntaxNode* node) {
+    return node != (SyntaxNode*)0 && node.kind == NodeKind.Token
+        && (node.token_kind == TokenKind.Semicolon || node.text == ";" || node.text == ",");
+}
+
+// Check one sibling-run segment for const violations (LANG-004). A segment
+// declares iff a `const` token precedes its first assign-op; the declared name
+// is the identifier immediately before that `=`. Block boundaries keep nested
+// declarations from poisoning this scan.
+void const_check_segment(NameResolver* resolver, Vec<SyntaxNode*>* segment) {
+    i64 const_at = -1;
+    i64 i = 0;
+    while (i < segment.len()) {
+        SyntaxNode* node = segment.get(i);
+        if (node.kind == NodeKind.Token && node.token_kind == TokenKind.Const) {
+            const_at = i;
+            break;
+        }
+        i += 1;
+    }
+    i64 eq_at = -1;
+    i = 0;
+    while (i < segment.len()) {
+        if (const_is_assign_op(segment.get(i))) {
+            eq_at = i;
+            break;
+        }
+        i += 1;
+    }
+    SyntaxNode* declared = (SyntaxNode*)0;
+    if (const_at >= 0 && eq_at >= 0 && const_at < eq_at && eq_at > 0) {
+        SyntaxNode* candidate = segment.get(eq_at - 1);
+        if (candidate.kind == NodeKind.Token && candidate.token_kind == TokenKind.Identifier) {
+            resolver.mark_const(candidate.text);
+            declared = candidate;
+        }
+    }
+    i = 0;
+    while (i < segment.len()) {
+        if (const_is_assign_op(segment.get(i)) && i > 0) {
+            SyntaxNode* target = segment.get(i - 1);
+            SyntaxNode* base = target;
+            bool is_field = false;
+            if (target.kind == NodeKind.Parenthesized) {
+                SyntaxNode* inner = target.first_child;
+                while (inner != (SyntaxNode*)0 && inner.kind != NodeKind.Token) { inner = inner.next_sibling; }
+                if (inner != (SyntaxNode*)0 && inner.next_sibling == (SyntaxNode*)0) { base = inner; }
+            }
+            if (i >= 3 && segment.get(i - 2).kind == NodeKind.Token
+                && segment.get(i - 2).text == ".") {
+                is_field = true;
+                base = segment.get(i - 3);
+            } else if (target.kind == NodeKind.Bracket && i >= 2) {
+                base = segment.get(i - 2);
+            }
+            if (base.kind == NodeKind.Token && base.token_kind == TokenKind.Identifier
+                && base != declared && (resolver.is_const(base.text)
+                || (!resolver.has_local(base.text) && resolver.is_const_global(base.text)))) {
+                if (is_field) {
+                    String message = cannot_assign_const_field(base.text);
+                    resolver.diagnostics.error(base.span, move message);
+                    resolver.failed = true;
+                } else {
+                    String message = cannot_assign_const(base.text);
+                    resolver.diagnostics.error(base.span, move message);
+                    resolver.failed = true;
+                }
+            }
+        }
+        i += 1;
+    }
+}
+
+void const_scan_children(NameResolver* resolver, SyntaxNode* parent) {
+    if (parent == (SyntaxNode*)0) {
+        return;
+    }
+    Vec<SyntaxNode*> segment = Vec<SyntaxNode*>.new();
+    SyntaxNode* child = parent.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Block) {
+            const_check_segment(resolver, &segment);
+            segment.len = 0;
+            const_scan_children(resolver, child);
+        } else if (const_is_delimiter(child)) {
+            const_check_segment(resolver, &segment);
+            segment.len = 0;
+        } else {
+            segment.push(child);
+            if (child.kind == NodeKind.Parenthesized || child.kind == NodeKind.Bracket) {
+                const_scan_children(resolver, child);
+            }
+        }
+        child = child.next_sibling;
+    }
+    const_check_segment(resolver, &segment);
+    segment.drop();
+}
+
+
+SyntaxNode* function_body(SyntaxNode* function) {
+    SyntaxNode* child = function.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Block) {
+            return child;
+        }
+        child = child.next_sibling;
+    }
+    return (SyntaxNode*)0;
+}
+
+bool likely_type_name(Vec<SyntaxNode*>* leaves, i64 index) {
+    if (index + 1 < leaves.len()) {
+        str next = leaves.get(index + 1).text;
+        if (next == "<" || next == "*" || next == "&" || next == "[") {
+            return true;
+        }
+    }
+    if (index > 0) {
+        str previous = leaves.get(index - 1).text;
+        if (previous == "type" || previous == "as" || previous == ":") {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool name_starts_with(str text, str prefix) {
+    i64 text_len = strlen(text);
+    i64 prefix_len = strlen(prefix);
+    if (prefix_len > text_len) {
+        return false;
+    }
+    i64 i = 0;
+    while (i < prefix_len) {
+        if (text[i] != prefix[i]) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+void resolve_function(NameResolver* resolver, SyntaxNode* function, CfgSet* cfg) {
+    SyntaxNode* body = function_body(function);
+    if (body == (SyntaxNode*)0) {
+        return;
+    }
+    // Const-ness is function-scoped: a `const c` in one function must not
+    // poison an unrelated `c` in another. (Plain locals stay flat, matching
+    // the existing conservative projection.)
+    resolver.const_locals.len = 0;
+    const_scan_children(resolver, body);
+    Vec<SyntaxNode*> body_leaves = Vec<SyntaxNode*>.new();
+    cfg_collect_live_leaves(body, cfg, &body_leaves);
+    Vec<Binding> typed_bindings = Vec<Binding>.new();
+    collect_function_bindings(function, &typed_bindings);
+    i64 binding_index = 0;
+    while (binding_index < typed_bindings.len()) {
+        Binding* binding = typed_bindings.get_ptr(binding_index);
+        resolver.add_local(binding.name);
+        binding_index += 1;
+    }
+    typed_bindings.drop();
+
+    i64 i = 0;
+    while (i < body_leaves.len()) {
+        SyntaxNode* node = body_leaves.get(i);
+        if (node.token_kind != TokenKind.Identifier || node.text == "_") {
+            i += 1;
+            continue;
+        }
+        if (i > 0 && body_leaves.get(i - 1).text == ".") {
+            i += 1;
+            continue;
+        }
+        if (i > 0 && body_leaves.get(i - 1).text == "@") {
+            i += 1;
+            continue;
+        }
+        if (resolver.has_local(node.text) || resolver.symbols.find(node.text) >= 0 || likely_type_name(&body_leaves, i)) {
+            i += 1;
+            continue;
+        }
+        if (name_starts_with(node.text, "__atomic_")) {
+            i += 1;
+            continue;
+        }
+        // Uppercase names are commonly imported types or enum constructors;
+        // the typed import/type pass will resolve them precisely.
+        if (strlen(node.text) > 0 && node.text[0] >= (u8)'A' && node.text[0] <= (u8)'Z') {
+            i += 1;
+            continue;
+        }
+        bool is_call = i + 1 < body_leaves.len() && body_leaves.get(i + 1).text == "(";
+        resolver.unknown(node.text, node.span, is_call);
+        i += 1;
+    }
+}
+
+bool resolve_names(SymbolTable* symbols, DiagnosticBag* diagnostics, SyntaxTree* tree, str owner_path, CfgSet* cfg, Vec<String>* include_dirs) {
+    NameResolver resolver = NameResolver.new(symbols, diagnostics);
+    Vec<String> import_names = Vec<String>.new();
+    cfg_collect_import_names(tree.root, cfg, &import_names);
+    resolver.has_imports = import_names.len() > 0;
+    import_names.drop();
+    if (resolver.has_imports
+        && !load_imported_declarations(symbols, diagnostics, tree, owner_path, cfg, include_dirs)) {
+        resolver.failed = true;
+        return false;
+    }
+    Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
+    cfg_collect_items(tree.root, cfg, diagnostics, &items);
+    i64 i = 0;
+    while (i < items.len()) {
+        if (items.get(i).kind == NodeKind.Global) {
+            SyntaxNode* child = items.get(i).first_child;
+            bool has_const = false;
+            SyntaxNode* assigned = (SyntaxNode*)0;
+            while (child != (SyntaxNode*)0) {
+                if (child.kind == NodeKind.Token && child.token_kind == TokenKind.Const) { has_const = true; }
+                if (const_is_assign_op(child)) { break; }
+                if (child.kind == NodeKind.Token && child.token_kind == TokenKind.Identifier) { assigned = child; }
+                child = child.next_sibling;
+            }
+            if (has_const && assigned != (SyntaxNode*)0) {
+                resolver.const_globals.push(resolver.local_names.intern(assigned.text));
+            }
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < items.len()) {
+        if (items.get(i).kind == NodeKind.Function) {
+            resolve_function(&resolver, items.get(i), cfg);
+        }
+        i += 1;
+    }
+    items.drop();
+    resolver.const_globals.drop();
+    return !resolver.failed;
+}

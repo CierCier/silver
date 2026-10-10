@@ -1,0 +1,8 @@
+import std.rt.thread_registry;
+
+TaskRecord* thread_record(i64 slot) {
+    TaskRecord* record = &g_threads[slot];
+    record.tid = -1;
+    record.pack = 0;
+    return record;
+}

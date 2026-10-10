@@ -57,10 +57,10 @@ SILVER_FFI_LIBRARY_DIR="$PWD/target/debug" python3 tests/run_tests.py rust_ffi_t
 
 A test fails when it does not compile, or when the produced binary exits with
 an unexpected status. Most tests are expected to exit `0`; per-test expected
-exit codes are declared in `EXPECTED_EXIT` in `run_tests.py`
-(e.g. the syscall tests intentionally exit `42` via `sys_exit`). Tests that
-must be skipped entirely can be listed in `SKIP_TESTS`, with a comment
-explaining why; the list is currently empty.
+exit codes are read by `get_expected_exit` in `run_tests.py`. A fixture can
+declare one with `// expected_exit: N`; the harness also recognizes several
+named cases, including syscall tests that exit `42`. Tests that must be skipped
+are listed in `DEFAULT_SKIP` or the target-specific skip sets with a reason.
 
 Compiler unit tests live in the `agc` crate and are run separately:
 
@@ -96,12 +96,12 @@ This is legacy — new tests should use `std.test`.
 
 By default, tests return exit code 0 on success and 1 on failure. However, some
 special test cases (like syscall tests) may intentionally exit with a different
-status if configured in the harness's `expected_exit` function.
+status if configured through the harness's `get_expected_exit` function.
 
 ## Adding New Tests
 
 1. Create a new `.ag` file in this directory following the pattern above.
 2. The harness discovers `tests/*.ag` automatically; no registration needed.
-3. If the test intentionally exits with a nonzero status, add its expected
-   exit code to `EXPECTED_EXIT` in `run_tests.py` with a comment.
+3. If the test intentionally exits with a nonzero status, declare the expected
+   exit code with a `// expected_exit: N` comment in the fixture.
 4. Run `python3 tests/run_tests.py <name>` to verify it passes.

@@ -1,0 +1,30 @@
+import std.test;
+
+i32 endpoint_calls = 0;
+i32 range_start() { endpoint_calls = endpoint_calls * 10 + 1; return 1; }
+i32 range_end() { endpoint_calls = endpoint_calls * 10 + 2; return 4; }
+
+i32 main() {
+    i32 sum = 0;
+    for i in 0..5 {
+        if (i == 2) {
+            continue;
+        }
+        sum = sum + i;
+    }
+    assert_eq_i32(sum, 8, "range continue advances and loop exits");
+    assert_true(sum == 8, "post-loop assertion remains outside the loop");
+    sum = 0;
+    for i in range_start()..range_end() {
+        sum = sum + i;
+    }
+    assert_eq_i32(sum, 6, "range endpoints select the expected values");
+    assert_eq_i32(endpoint_calls, 12, "range endpoints evaluate once in source order");
+    sum = 0;
+    for (i32 i = 0; i < 5; i = i + 1) {
+        if (i == 2) { continue; }
+        sum = sum + i;
+    }
+    assert_eq_i32(sum, 8, "C-style continue executes the loop step");
+    return 0;
+}

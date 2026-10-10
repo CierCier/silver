@@ -1,0 +1,90 @@
+// agc's option and help schema for the reusable std.cli parser.
+import std.cli;
+
+CliParser agc_cli_parser() {
+    CliParser parser = CliParser.new("agc");
+    parser.describe("Silver compiler and package driver");
+
+    parser.add_flag("help", "h", "Show commands, options, and examples", false);
+    parser.add_flag("version", "V", "Print the compiler version", false);
+    parser.add_value("output", "o", "FILE", "Write output to FILE", false);
+    parser.add_value("manifest", "", "PATH", "Select the package manifest for build", false);
+    parser.add_flag("compile-only", "c", "Compile and assemble without linking", false);
+    parser.add_flag("emit-asm", "S", "Emit assembly instead of an executable", false);
+    parser.add_flag("emit-llvm", "", "Emit LLVM IR instead of native output", false);
+    parser.add_value("emit", "", "KIND", "Select output kind: exe, check, obj, asm, llvm-ir, tokens, ast, grammar, or module", false);
+    parser.add_optional_value("opt-level", "O", "LEVEL", "Set optimization level: 0, 1, 2, 3, s, z, or fast", false);
+    parser.add_flag("debug-info", "g", "Generate debug information", false);
+    parser.add_flag("g0", "", "Disable debug information", false);
+    parser.add_value("include", "I", "DIR", "Add an import search directory", true);
+    parser.add_value("root", "", "DIR", "Set the primary module root", false);
+    parser.add_optional_value("bin", "", "NAME", "Select a package binary target", false);
+    parser.add_optional_value("lib", "", "NAME", "Select a package library target", false);
+    parser.add_flag("init", "", "Create a Silver package", false);
+    parser.add_value("name", "", "NAME", "Set the package name for init", false);
+    parser.add_value("define", "D", "NAME[=VALUE]", "Define a preprocessor symbol", true);
+    parser.add_value("library-path", "L", "DIR", "Add a library search directory", true);
+    parser.add_value("library", "l", "LIB", "Link with LIB", true);
+    parser.add_value("warning", "W", "WARNING", "Configure a warning", true);
+    parser.add_value("target", "", "TRIPLE", "Compile for target triple TRIPLE", false);
+    parser.add_value("sysroot", "", "DIR", "Use DIR as the target sysroot", false);
+    parser.add_flag("no-std", "", "Do not link the standard library", false);
+    parser.add_flag("static-runtime", "", "Use the static Silver runtime", false);
+    parser.add_flag("static", "", "Link the executable statically", false);
+    parser.add_flag("shared", "", "Prefer shared module artifacts", false);
+    parser.add_flag("verbose", "v", "Print additional build details", false);
+    parser.add_flag("dry-run", "", "Print the build plan without executing it", false);
+    parser.add_flag("profile", "", "Print compile-time and memory profiling", false);
+    parser.add_flag("leak-check", "", "Enable allocator leak and bounds checks", false);
+    parser.add_value("cfg", "", "KEY=VALUE,...", "Set compile-time cfg values", true);
+    parser.add_value("cache-dir", "", "DIR", "Set the compiler cache directory", false);
+    parser.add_flag("check", "", "Check source without generating code", false);
+    parser.add_flag("no-cache", "", "Disable artifact caching", false);
+    parser.add_flag("clean", "", "Remove compiler cache artifacts", false);
+    parser.add_flag("cache-info", "", "Show compiler cache statistics", false);
+    parser.add_optional_value("cache-prune", "", "SIZE", "Prune cache to SIZE, defaulting to 500M", false);
+    parser.add_value("jobs", "j", "N", "Use N parallel compilation jobs", false);
+    parser.add_flag("tree-shake", "", "Remove unused declarations", false);
+    parser.add_flag("no-tree-shake", "", "Keep all declarations", false);
+    parser.add_flag("run", "", "Compile and run the program", false);
+    parser.add_value("run-arg", "", "ARG", "Forward ARG to the running program", true);
+    parser.add_flag("show-graph", "", "Show module and code generation graphs", false);
+    parser.add_flag("progress", "", "Show build progress", false);
+    parser.add_flag("no-progress", "", "Hide build progress", false);
+    parser.add_flag("test", "", "Compile and run tests", false);
+    parser.add_flag("nocapture", "", "Print test output as it is produced", false);
+    parser.add_flag("test-harness", "", "Generate a test harness", false);
+
+    parser.add_command("init", "", "Create a package in the current directory");
+    parser.add_command("build", "b", "Build a source file or the package in ./silver.toml");
+    parser.add_command("run", "r", "Compile and run a source file or package");
+    parser.add_command("check", "c", "Check source without code generation");
+    parser.add_command("clean", "", "Remove compiler cache artifacts");
+    parser.add_command("test", "t", "Build and run package tests");
+    parser.add_command("cache", "", "Inspect, prune, or clear the compiler cache");
+    parser.add_command("lex", "", "Print tokens from a source file");
+    parser.add_command("parse", "", "Parse a source file");
+    parser.add_command("ast", "", "Print the source syntax tree");
+    parser.add_command("agsm", "", "Build foreign sourcemap module artifacts");
+
+    parser.add_alias("g0", "-g0");
+    parser.add_alias("no-cache", "-nc");
+    parser.add_alias("clean", "--clean-cache");
+    parser.add_alias("dry-run", "-###");
+    parser.add_alias("include", "--include-path");
+    parser.add_alias("library-path", "--lib-path");
+    parser.hide_option("static-runtime");
+    parser.hide_option("init");
+    parser.hide_option("check");
+    parser.hide_option("run");
+    parser.hide_option("run-arg");
+    parser.hide_option("test");
+    parser.hide_option("test-harness");
+
+    parser.add_example("agc build --manifest path/to/silver.toml --bin app -o app");
+    parser.add_example("agc check src/main.ag");
+    parser.add_example("agc run src/main.ag -- input.txt");
+    parser.add_example("agc cache info");
+    parser.add_example("agc cache prune 1G");
+    return move parser;
+}

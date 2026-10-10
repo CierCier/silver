@@ -5,14 +5,19 @@
 //   - `std/sys/os_linux.ag`   delegates to the generated raw syscall wrappers
 //                             (std/sys/raw/*) — behavior identical to before.
 //   - `std/sys/os_windows.ag` calls Win32 directly (kernel32 / ucrt; no libc).
+//   - `std/sys/os_wasi.ag`    calls WASI preview1 imports (wasm32-wasip1).
 //
 // The Linux x86_64 `struct stat` BUFFER LAYOUT is part of this seam's
 // contract: sys_stat writes st_size at offset 48 and st_mtim (sec, nsec) at
 // 88/96 into the caller's 144-byte buffer on every platform, because
-// consumers read those fixed offsets (std/io/file.ag).
+// consumers read those fixed offsets (std/io/file.ag). The WASI
+// implementation synthesizes that layout from `fd_filestat_get` just like
+// the Windows one does.
 
 if (@cfg(os.linux)) {
     import std.sys.os_linux;
+} else if (@cfg(os.wasi)) {
+    import std.sys.os_wasi;
 } else {
     import std.sys.os_windows;
 }

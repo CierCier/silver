@@ -1,0 +1,1067 @@
+// Binary module metadata reader and writer for the stage1 frontend.
+import std.error;
+import std.fs;
+import std.io.file;
+import std.mem.vec;
+import std.process;
+import std.result;
+import std.string;
+
+enum ArtifactExportKind {
+    Function;
+    Struct;
+    Enum;
+    Trait;
+    Constant;
+    Global;
+    TypeAlias;
+}
+
+struct ArtifactTag {
+    String name;
+    String value;
+}
+
+struct ArtifactField {
+    String name;
+    String type_key;
+    Vec<ArtifactTag> tags;
+}
+
+struct ArtifactVariant {
+    String name;
+    i128 value;
+    Vec<String> payload_types;
+    Vec<ArtifactField> payload_fields;
+}
+
+struct ArtifactTraitItem {
+    String name;
+    String signature;
+}
+
+struct ArtifactExport {
+    ArtifactExportKind kind;
+    String name;
+    String signature;
+    Vec<String> type_params;
+    bool link_name_present;
+    String link_name;
+    bool abi_present;
+    u8 abi;
+    bool is_variadic;
+    bool type_key_present;
+    String type_key;
+    Vec<ArtifactField> fields;
+    bool layout_present;
+    bool layout_size_present;
+    u64 layout_size;
+    bool layout_align_present;
+    u64 layout_align;
+    bool layout_packed;
+    bool enum_backing_type_present;
+    String enum_backing_type;
+    Vec<ArtifactVariant> variants;
+    Vec<ArtifactTraitItem> trait_items;
+    bool const_value_present;
+    String const_value;
+    bool is_mutable;
+    bool impl_trait_present;
+    String impl_trait;
+}
+
+struct Artifact {
+    u8 version;
+    String module_name;
+    String module_path;
+    String source_path;
+    u64 source_hash;
+    String compiler_version;
+    String target_triple;
+    Vec<String> module_deps;
+    Vec<String> transitive_deps;
+    Vec<ArtifactExport> exports;
+    Vec<String> native_libs;
+    Vec<String> native_lib_paths;
+    Vec<String> generic_templates;
+}
+
+struct ArtifactReader {
+    u8* data;
+    i64 length;
+    i64 cursor;
+    bool failed;
+}
+
+impl Artifact {
+    Artifact new() {
+        Artifact artifact;
+        artifact.version = 0;
+        artifact.module_name = String.new();
+        artifact.module_path = String.new();
+        artifact.source_path = String.new();
+        artifact.source_hash = 0;
+        artifact.compiler_version = String.new();
+        artifact.target_triple = String.new();
+        artifact.module_deps = Vec<String>.new();
+        artifact.transitive_deps = Vec<String>.new();
+        artifact.exports = Vec<ArtifactExport>.new();
+        artifact.native_libs = Vec<String>.new();
+        artifact.native_lib_paths = Vec<String>.new();
+        artifact.generic_templates = Vec<String>.new();
+        return artifact;
+    }
+}
+
+impl ArtifactExport {
+    ArtifactExport new() {
+        ArtifactExport export;
+        export.kind = ArtifactExportKind.Function;
+        export.name = String.new();
+        export.signature = String.new();
+        export.type_params = Vec<String>.new();
+        export.link_name_present = false;
+        export.link_name = String.new();
+        export.abi_present = false;
+        export.abi = 0;
+        export.is_variadic = false;
+        export.type_key_present = false;
+        export.type_key = String.new();
+        export.fields = Vec<ArtifactField>.new();
+        export.layout_present = false;
+        export.layout_size_present = false;
+        export.layout_size = 0;
+        export.layout_align_present = false;
+        export.layout_align = 0;
+        export.layout_packed = false;
+        export.enum_backing_type_present = false;
+        export.enum_backing_type = String.new();
+        export.variants = Vec<ArtifactVariant>.new();
+        export.trait_items = Vec<ArtifactTraitItem>.new();
+        export.const_value_present = false;
+        export.const_value = String.new();
+        export.is_mutable = false;
+        export.impl_trait_present = false;
+        export.impl_trait = String.new();
+        return export;
+    }
+}
+
+impl ArtifactField {
+    ArtifactField new() {
+        ArtifactField field;
+        field.name = String.new();
+        field.type_key = String.new();
+        field.tags = Vec<ArtifactTag>.new();
+        return field;
+    }
+}
+
+impl ArtifactTag {
+    ArtifactTag new() {
+        ArtifactTag tag;
+        tag.name = String.new();
+        tag.value = String.new();
+        return tag;
+    }
+}
+
+impl ArtifactVariant {
+    ArtifactVariant new() {
+        ArtifactVariant variant;
+        variant.name = String.new();
+        variant.value = 0;
+        variant.payload_types = Vec<String>.new();
+        variant.payload_fields = Vec<ArtifactField>.new();
+        return variant;
+    }
+}
+
+impl ArtifactTraitItem {
+    ArtifactTraitItem new() {
+        ArtifactTraitItem item;
+        item.name = String.new();
+        item.signature = String.new();
+        return item;
+    }
+}
+
+void artifact_drop_field(ArtifactField* field) {
+    field.name.drop();
+    field.type_key.drop();
+    i64 i = 0;
+    while (i < field.tags.len()) {
+        ArtifactTag* tag = field.tags.get_ptr(i);
+        tag.name.drop();
+        tag.value.drop();
+        i += 1;
+    }
+    field.tags.drop();
+}
+
+void artifact_drop_fields(Vec<ArtifactField>* fields) {
+    i64 i = 0;
+    while (i < fields.len()) {
+        artifact_drop_field(fields.get_ptr(i));
+        i += 1;
+    }
+    fields.drop();
+}
+
+void artifact_drop_strings(Vec<String>* values) {
+    i64 i = 0;
+    while (i < values.len()) {
+        values.get_ptr(i).drop();
+        i += 1;
+    }
+    values.drop();
+}
+
+void artifact_drop_export(ArtifactExport* export) {
+    export.name.drop();
+    export.signature.drop();
+    artifact_drop_strings(&export.type_params);
+    export.link_name.drop();
+    export.type_key.drop();
+    artifact_drop_fields(&export.fields);
+    export.enum_backing_type.drop();
+    i64 i = 0;
+    while (i < export.variants.len()) {
+        ArtifactVariant* variant = export.variants.get_ptr(i);
+        variant.name.drop();
+        artifact_drop_strings(&variant.payload_types);
+        artifact_drop_fields(&variant.payload_fields);
+        i += 1;
+    }
+    export.variants.drop();
+    i = 0;
+    while (i < export.trait_items.len()) {
+        ArtifactTraitItem* item = export.trait_items.get_ptr(i);
+        item.name.drop();
+        item.signature.drop();
+        i += 1;
+    }
+    export.trait_items.drop();
+    export.const_value.drop();
+    export.impl_trait.drop();
+}
+
+void artifact_drop(Artifact* self) {
+    i64 i = 0;
+    while (i < self.exports.len()) {
+        artifact_drop_export(self.exports.get_ptr(i));
+        i += 1;
+    }
+    self.exports.drop();
+    self.module_name.drop();
+    self.module_path.drop();
+    self.source_path.drop();
+    self.compiler_version.drop();
+    self.target_triple.drop();
+    artifact_drop_strings(&self.module_deps);
+    artifact_drop_strings(&self.transitive_deps);
+    artifact_drop_strings(&self.native_libs);
+    artifact_drop_strings(&self.native_lib_paths);
+    artifact_drop_strings(&self.generic_templates);
+}
+
+
+ArtifactReader artifact_reader(String* bytes) {
+    ArtifactReader reader;
+    reader.data = bytes.data;
+    reader.length = bytes.len;
+    reader.cursor = 0;
+    reader.failed = false;
+    return reader;
+}
+
+bool artifact_reader_has(ArtifactReader* self, i64 count) {
+    if (count < 0 || self.cursor < 0 || self.cursor > self.length
+        || count > self.length - self.cursor) {
+        self.failed = true;
+        return false;
+    }
+    return true;
+}
+
+bool artifact_reader_skip(ArtifactReader* self, i64 count) {
+    if (!artifact_reader_has(self, count)) {
+        return false;
+    }
+    self.cursor += count;
+    return true;
+}
+
+bool artifact_reader_u8(ArtifactReader* self, u8* out) {
+    if (!artifact_reader_has(self, 1)) {
+        return false;
+    }
+    *out = self.data[self.cursor];
+    self.cursor += 1;
+    return true;
+}
+
+bool artifact_reader_u32(ArtifactReader* self, u32* out) {
+    if (!artifact_reader_has(self, 4)) {
+        return false;
+    }
+    u64 value = (u64)self.data[self.cursor];
+    value += (u64)self.data[self.cursor + 1] * (u64)256;
+    value += (u64)self.data[self.cursor + 2] * (u64)65536;
+    value += (u64)self.data[self.cursor + 3] * (u64)16777216;
+    *out = (u32)value;
+    self.cursor += 4;
+    return true;
+}
+
+bool artifact_reader_count(ArtifactReader* self, i64* out) {
+    u32 raw = 0;
+    if (!artifact_reader_u32(self, &raw)) {
+        return false;
+    }
+    i64 count = (i64)raw;
+    // Every count below is followed by at least one byte.  Rejecting an
+    // impossible count here keeps malformed input from becoming a long loop.
+    if (count > self.length - self.cursor) {
+        self.failed = true;
+        return false;
+    }
+    *out = count;
+    return true;
+}
+
+bool artifact_reader_string(ArtifactReader* self, String* out) {
+    i64 count = 0;
+    if (!artifact_reader_count(self, &count)) {
+        return false;
+    }
+    i64 start = self.cursor;
+    if (!artifact_reader_skip(self, count)) {
+        return false;
+    }
+    if (count > 0) {
+        out.push_bytes(&self.data[start], count);
+    }
+    if (count > 0 && !out.is_valid_utf8()) {
+        self.failed = true;
+        return false;
+    }
+    return true;
+}
+
+
+bool artifact_reader_strings(ArtifactReader* self, Vec<String>* out) {
+    i64 count = 0;
+    if (!artifact_reader_count(self, &count)) {
+        return false;
+    }
+    i64 index = 0;
+    while (index < count) {
+        String value = String.new();
+        if (!artifact_reader_string(self, &value)) {
+            value.drop();
+            return false;
+        }
+        out.push(move value);
+        index += 1;
+    }
+    return true;
+}
+
+void artifact_write_strings(String* out, Vec<String>* values) {
+    artifact_write_u32(out, (u32)values.len());
+    i64 i = 0;
+    while (i < values.len()) {
+        artifact_write_string(out, values.get(i).to_str());
+        i += 1;
+    }
+}
+
+
+bool artifact_reader_optional_string(ArtifactReader* self, bool* present, String* out) {
+    u8 tag = 0;
+    if (!artifact_reader_u8(self, &tag)) {
+        return false;
+    }
+    if (tag == 0) {
+        *present = false;
+        return true;
+    }
+    if (tag != 1) {
+        self.failed = true;
+        return false;
+    }
+    *present = true;
+    return artifact_reader_string(self, out);
+}
+
+bool artifact_reader_abi(ArtifactReader* self, bool* present, u8* out) {
+    u8 tag = 0;
+    if (!artifact_reader_u8(self, &tag)) {
+        return false;
+    }
+    if (tag == 0) {
+        *present = false;
+        *out = 0;
+        return true;
+    }
+    if (tag != 1) {
+        self.failed = true;
+        return false;
+    }
+    u8 value = 0;
+    if (!artifact_reader_u8(self, &value)) {
+        return false;
+    }
+    if (value < (u8)1 || value > (u8)7) {
+        self.failed = true;
+        return false;
+    }
+    *present = true;
+    *out = value;
+    return true;
+}
+
+bool artifact_reader_u64(ArtifactReader* self, u64* out) {
+    if (!artifact_reader_has(self, 8)) {
+        return false;
+    }
+    u64 value = 0;
+    i64 i = 0;
+    while (i < 8) {
+        value += (u64)self.data[self.cursor + i] * ((u64)1 << (i * 8));
+        i += 1;
+    }
+    *out = value;
+    self.cursor += 8;
+    return true;
+}
+
+bool artifact_reader_optional_u64(ArtifactReader* self, bool* present, u64* out) {
+    u8 tag = 0;
+    if (!artifact_reader_u8(self, &tag)) {
+        return false;
+    }
+    if (tag == 0) {
+        *present = false;
+        *out = 0;
+        return true;
+    }
+    if (tag != 1) {
+        self.failed = true;
+        return false;
+    }
+    *present = true;
+    return artifact_reader_u64(self, out);
+}
+
+bool artifact_reader_tags(ArtifactReader* self, Vec<ArtifactTag>* out) {
+    i64 count = 0;
+    if (!artifact_reader_count(self, &count)) {
+        return false;
+    }
+    i64 i = 0;
+    while (i < count) {
+        ArtifactTag tag = ArtifactTag.new();
+        if (!artifact_reader_string(self, &tag.name)
+            || !artifact_reader_string(self, &tag.value)) {
+            tag.name.drop();
+            tag.value.drop();
+            return false;
+        }
+        out.push(move tag);
+        i += 1;
+    }
+    return true;
+}
+
+bool artifact_reader_fields(ArtifactReader* self, u8 version, Vec<ArtifactField>* out) {
+    i64 count = 0;
+    if (!artifact_reader_count(self, &count)) {
+        return false;
+    }
+    i64 i = 0;
+    while (i < count) {
+        ArtifactField field = ArtifactField.new();
+        if (!artifact_reader_string(self, &field.name)
+            || !artifact_reader_string(self, &field.type_key)
+            || (artifact_has_field_tags(version)
+                && !artifact_reader_tags(self, &field.tags))) {
+            artifact_drop_field(&field);
+            return false;
+        }
+        out.push(move field);
+        i += 1;
+    }
+    return true;
+}
+
+bool artifact_reader_layout(ArtifactReader* self, u8 version, ArtifactExport* out) {
+    u8 tag = 0;
+    if (!artifact_reader_u8(self, &tag)) {
+        return false;
+    }
+    if (tag == 0) {
+        out.layout_present = false;
+        return true;
+    }
+    if (tag != 1) {
+        self.failed = true;
+        return false;
+    }
+    out.layout_present = true;
+    if (!artifact_reader_optional_u64(self, &out.layout_size_present, &out.layout_size)
+        || !artifact_reader_optional_u64(self, &out.layout_align_present, &out.layout_align)) {
+        return false;
+    }
+    if (artifact_has_packed(version)) {
+        u8 packed = 0;
+        if (!artifact_reader_u8(self, &packed) || packed > (u8)1) {
+            self.failed = true;
+            return false;
+        }
+        out.layout_packed = packed != (u8)0;
+    }
+    return true;
+}
+
+bool artifact_reader_i128(ArtifactReader* self, i128* out) {
+    if (!artifact_reader_has(self, 16)) {
+        return false;
+    }
+    u128 value = 0;
+    i64 i = 0;
+    while (i < 16) {
+        value += (u128)self.data[self.cursor + i] << (i * 8);
+        i += 1;
+    }
+    *out = (i128)value;
+    self.cursor += 16;
+    return true;
+}
+
+bool artifact_reader_variants(ArtifactReader* self, u8 version, Vec<ArtifactVariant>* out) {
+    i64 count = 0;
+    if (!artifact_reader_count(self, &count)) {
+        return false;
+    }
+    i64 i = 0;
+    while (i < count) {
+        ArtifactVariant variant = ArtifactVariant.new();
+        if (!artifact_reader_string(self, &variant.name)
+            || !artifact_reader_i128(self, &variant.value)
+            || !artifact_reader_strings(self, &variant.payload_types)
+            || (artifact_has_field_tags(version)
+                && !artifact_reader_fields(self, version, &variant.payload_fields))) {
+            variant.name.drop();
+            artifact_drop_strings(&variant.payload_types);
+            artifact_drop_fields(&variant.payload_fields);
+            return false;
+        }
+        out.push(move variant);
+        i += 1;
+    }
+    return true;
+}
+
+bool artifact_reader_trait_items(ArtifactReader* self, Vec<ArtifactTraitItem>* out) {
+    i64 count = 0;
+    if (!artifact_reader_count(self, &count)) {
+        return false;
+    }
+    i64 i = 0;
+    while (i < count) {
+        ArtifactTraitItem item = ArtifactTraitItem.new();
+        if (!artifact_reader_string(self, &item.name)
+            || !artifact_reader_string(self, &item.signature)) {
+            item.name.drop();
+            item.signature.drop();
+            return false;
+        }
+        out.push(move item);
+        i += 1;
+    }
+    return true;
+}
+
+bool artifact_supported_version(u8 version) {
+    return version == (u8)2 || version == (u8)6 || version == (u8)7
+        || version == (u8)8 || version == (u8)9 || version == (u8)10
+        || version == (u8)11;
+}
+
+// The format gained fields in separate releases; numeric version order is
+// not a valid shorthand for the record layout.
+bool artifact_has_field_tags(u8 version) {
+    return version == (u8)6 || version == (u8)7 || version == (u8)8
+        || version == (u8)9 || version == (u8)10 || version == (u8)11;
+}
+
+bool artifact_has_packed(u8 version) {
+    return version == (u8)10 || version == (u8)11;
+}
+
+bool artifact_has_constants_and_globals(u8 version) {
+    return version == (u8)8 || version == (u8)9 || version == (u8)11;
+}
+
+bool artifact_has_lib_paths(u8 version) {
+    return version == (u8)7 || version == (u8)8 || version == (u8)9
+        || version == (u8)11;
+}
+
+bool artifact_has_generic_templates(u8 version) {
+    return version == (u8)11;
+}
+
+bool artifact_has_impl_trait(u8 version) {
+    return version == (u8)11;
+}
+
+bool artifact_reader_magic(ArtifactReader* self, u8* version) {
+    if (!artifact_reader_has(self, 6)) {
+        return false;
+    }
+    if (self.data[0] != (u8)65 || self.data[1] != (u8)71
+        || self.data[2] != (u8)77 || self.data[3] != (u8)0
+        || self.data[4] != (u8)0 || !artifact_supported_version(self.data[5])) {
+        self.failed = true;
+        return false;
+    }
+    *version = self.data[5];
+    self.cursor += 6;
+    return true;
+}
+
+bool artifact_export_kind(u8 raw, ArtifactExportKind* out) {
+    if (raw == (u8)1) {
+        *out = ArtifactExportKind.Function;
+        return true;
+    }
+    if (raw == (u8)2) {
+        *out = ArtifactExportKind.Struct;
+        return true;
+    }
+    if (raw == (u8)3) {
+        *out = ArtifactExportKind.Enum;
+        return true;
+    }
+    if (raw == (u8)4) {
+        *out = ArtifactExportKind.Trait;
+        return true;
+    }
+    if (raw == (u8)5) {
+        *out = ArtifactExportKind.Constant;
+        return true;
+    }
+    if (raw == (u8)6) {
+        *out = ArtifactExportKind.Global;
+        return true;
+    }
+    if (raw == (u8)7) {
+        *out = ArtifactExportKind.TypeAlias;
+        return true;
+    }
+    return false;
+}
+
+bool artifact_reader_export(ArtifactReader* self, u8 version, ArtifactExport* out) {
+    u8 raw_kind = 0;
+    if (!artifact_reader_u8(self, &raw_kind)
+        || !artifact_export_kind(raw_kind, &out.kind)) {
+        self.failed = true;
+        return false;
+    }
+    if (!artifact_reader_string(self, &out.name)
+        || !artifact_reader_string(self, &out.signature)
+        || !artifact_reader_strings(self, &out.type_params)
+        || !artifact_reader_optional_string(self, &out.link_name_present, &out.link_name)
+        || !artifact_reader_abi(self, &out.abi_present, &out.abi)) {
+        return false;
+    }
+    u8 variadic = 0;
+    if (!artifact_reader_u8(self, &variadic) || variadic > (u8)1
+        || !artifact_reader_optional_string(self, &out.type_key_present, &out.type_key)
+        || !artifact_reader_fields(self, version, &out.fields)
+        || !artifact_reader_layout(self, version, out)
+        || !artifact_reader_optional_string(self, &out.enum_backing_type_present,
+            &out.enum_backing_type)
+        || !artifact_reader_variants(self, version, &out.variants)
+        || !artifact_reader_trait_items(self, &out.trait_items)) {
+        return false;
+    }
+    out.is_variadic = variadic != (u8)0;
+    if (artifact_has_constants_and_globals(version)) {
+        u8 mutable = 0;
+        if (!artifact_reader_optional_string(self, &out.const_value_present, &out.const_value)
+            || !artifact_reader_u8(self, &mutable) || mutable > (u8)1) {
+            return false;
+        }
+        out.is_mutable = mutable != (u8)0;
+    }
+    if (artifact_has_impl_trait(version)
+        && !artifact_reader_optional_string(self, &out.impl_trait_present, &out.impl_trait)) {
+        return false;
+    }
+    return true;
+}
+
+// Stage0's v9 reader accepts a legacy empty four-byte trailer.
+bool artifact_reader_finish(ArtifactReader* self, u8 version) {
+    if (self.failed) {
+        return false;
+    }
+    if (self.cursor == self.length) {
+        return true;
+    }
+    if (version != (u8)9 || self.length - self.cursor != 4) {
+        return false;
+    }
+    i64 i = 0;
+    while (i < 4) {
+        if (self.data[self.cursor + i] != (u8)0) {
+            return false;
+        }
+        i += 1;
+    }
+    self.cursor += 4;
+    return true;
+}
+
+bool read_artifact(str path, Artifact* out) {
+    out.version = 0;
+    out.module_name = String.new();
+    out.module_path = String.new();
+    out.source_path = String.new();
+    out.source_hash = 0;
+    out.compiler_version = String.new();
+    out.target_triple = String.new();
+    out.module_deps = Vec<String>.new();
+    out.transitive_deps = Vec<String>.new();
+    out.exports = Vec<ArtifactExport>.new();
+    out.native_libs = Vec<String>.new();
+    out.native_lib_paths = Vec<String>.new();
+    out.generic_templates = Vec<String>.new();
+    Result<String, Error> loaded = String.from_file(path);
+    if (loaded.is_err()) {
+        return false;
+    }
+    String bytes = loaded.unwrap();
+    ArtifactReader reader = artifact_reader(&bytes);
+    u8 version = 0;
+    bool ok = artifact_reader_magic(&reader, &version);
+    if (ok) { ok = artifact_reader_string(&reader, &out.module_name); }
+    if (ok) { ok = artifact_reader_string(&reader, &out.module_path); }
+    if (ok) { ok = artifact_reader_string(&reader, &out.source_path); }
+    if (ok) { ok = artifact_reader_u64(&reader, &out.source_hash); }
+    if (ok) { ok = artifact_reader_string(&reader, &out.compiler_version); }
+    if (ok) { ok = artifact_reader_string(&reader, &out.target_triple); }
+    if (ok) {
+        u8 static_library = 0;
+        u8 shared_library = 0;
+        ok = artifact_reader_u8(&reader, &static_library)
+            && artifact_reader_u8(&reader, &shared_library);
+    }
+    if (ok) { ok = artifact_reader_strings(&reader, &out.module_deps); }
+    if (ok) { ok = artifact_reader_strings(&reader, &out.transitive_deps); }
+
+    i64 export_count = 0;
+    if (ok) { ok = artifact_reader_count(&reader, &export_count); }
+    i64 export_index = 0;
+    while (ok && export_index < export_count) {
+        ArtifactExport export = ArtifactExport.new();
+        if (!artifact_reader_export(&reader, version, &export)) {
+            artifact_drop_export(&export);
+            ok = false;
+            break;
+        }
+        out.exports.push(move export);
+        export_index += 1;
+    }
+
+    if (ok) { ok = artifact_reader_strings(&reader, &out.native_libs); }
+    if (ok && artifact_has_lib_paths(version)) {
+        ok = artifact_reader_strings(&reader, &out.native_lib_paths);
+    }
+    if (ok && artifact_has_generic_templates(version)) {
+        ok = artifact_reader_strings(&reader, &out.generic_templates);
+    }
+    bool complete = artifact_reader_finish(&reader, version);
+    bytes.drop();
+    if (!ok || !complete) {
+        artifact_drop(out);
+        return false;
+    }
+    out.version = version;
+    return true;
+}
+u8 artifact_kind_byte(ArtifactExportKind kind) {
+    return match kind {
+        ArtifactExportKind.Function : (u8)1,
+        ArtifactExportKind.Struct : (u8)2,
+        ArtifactExportKind.Enum : (u8)3,
+        ArtifactExportKind.Trait : (u8)4,
+        ArtifactExportKind.Constant : (u8)5,
+        ArtifactExportKind.Global : (u8)6,
+        ArtifactExportKind.TypeAlias : (u8)7,
+    };
+}
+
+void artifact_write_u32(String* out, u32 value) {
+    out.push((u8)value);
+    out.push((u8)(value >> 8));
+    out.push((u8)(value >> 16));
+    out.push((u8)(value >> 24));
+}
+
+
+void artifact_write_string(String* out, str value) {
+    i64 length = strlen(value);
+    artifact_write_u32(out, (u32)length);
+    if (length > 0) {
+        out.push_bytes((u8*)value, length);
+    }
+}
+
+void artifact_write_none(String* out) {
+    out.push((u8)0);
+}
+void artifact_write_u64(String* out, u64 value) {
+    i64 i = 0;
+    while (i < 8) {
+        out.push((u8)(value >> (i * 8)));
+        i += 1;
+    }
+}
+
+void artifact_write_i128(String* out, i128 value) {
+    u128 raw = (u128)value;
+    i64 i = 0;
+    while (i < 16) {
+        out.push((u8)(raw >> (i * 8)));
+        i += 1;
+    }
+}
+
+void artifact_write_optional_string(String* out, bool present, String* value) {
+    if (!present) {
+        artifact_write_none(out);
+        return;
+    }
+    out.push((u8)1);
+    artifact_write_string(out, value.to_str());
+}
+
+void artifact_write_optional_u64(String* out, bool present, u64 value) {
+    if (!present) {
+        artifact_write_none(out);
+        return;
+    }
+    out.push((u8)1);
+    artifact_write_u64(out, value);
+}
+
+void artifact_write_tags(String* out, Vec<ArtifactTag>* tags) {
+    artifact_write_u32(out, (u32)tags.len());
+    i64 i = 0;
+    while (i < tags.len()) {
+        ArtifactTag* tag = tags.get_ptr(i);
+        artifact_write_string(out, tag.name.to_str());
+        artifact_write_string(out, tag.value.to_str());
+        i += 1;
+    }
+}
+
+void artifact_write_fields(String* out, Vec<ArtifactField>* fields) {
+    artifact_write_u32(out, (u32)fields.len());
+    i64 i = 0;
+    while (i < fields.len()) {
+        ArtifactField* field = fields.get_ptr(i);
+        artifact_write_string(out, field.name.to_str());
+        artifact_write_string(out, field.type_key.to_str());
+        artifact_write_tags(out, &field.tags);
+        i += 1;
+    }
+}
+
+void artifact_write_export(String* out, ArtifactExport* export) {
+    out.push(artifact_kind_byte(export.kind));
+    artifact_write_string(out, export.name.to_str());
+    artifact_write_string(out, export.signature.to_str());
+    artifact_write_strings(out, &export.type_params);
+    artifact_write_optional_string(out, export.link_name_present, &export.link_name);
+    if (export.abi_present) {
+        out.push((u8)1);
+        out.push(export.abi);
+    } else {
+        artifact_write_none(out);
+    }
+    out.push((u8)(export.is_variadic ? 1 : 0));
+    artifact_write_optional_string(out, export.type_key_present, &export.type_key);
+    artifact_write_fields(out, &export.fields);
+    if (export.layout_present) {
+        out.push((u8)1);
+        artifact_write_optional_u64(out, export.layout_size_present, export.layout_size);
+        artifact_write_optional_u64(out, export.layout_align_present, export.layout_align);
+        out.push((u8)(export.layout_packed ? 1 : 0));
+    } else {
+        artifact_write_none(out);
+    }
+    artifact_write_optional_string(out, export.enum_backing_type_present,
+        &export.enum_backing_type);
+    artifact_write_u32(out, (u32)export.variants.len());
+    i64 i = 0;
+    while (i < export.variants.len()) {
+        ArtifactVariant* variant = export.variants.get_ptr(i);
+        artifact_write_string(out, variant.name.to_str());
+        artifact_write_i128(out, variant.value);
+        artifact_write_strings(out, &variant.payload_types);
+        artifact_write_fields(out, &variant.payload_fields);
+        i += 1;
+    }
+    artifact_write_u32(out, (u32)export.trait_items.len());
+    i = 0;
+    while (i < export.trait_items.len()) {
+        ArtifactTraitItem* item = export.trait_items.get_ptr(i);
+        artifact_write_string(out, item.name.to_str());
+        artifact_write_string(out, item.signature.to_str());
+        i += 1;
+    }
+    artifact_write_optional_string(out, export.const_value_present, &export.const_value);
+    out.push((u8)(export.is_mutable ? 1 : 0));
+    artifact_write_optional_string(out, export.impl_trait_present, &export.impl_trait);
+}
+
+bool artifact_index_is_ordered_before(Artifact* artifact, i64 left, i64 right) {
+    ArtifactExport* a = artifact.exports.get_ptr(left);
+    ArtifactExport* b = artifact.exports.get_ptr(right);
+    u8 ak = artifact_kind_byte(a.kind);
+    u8 bk = artifact_kind_byte(b.kind);
+    if (ak != bk) { return ak < bk; }
+    i32 names = strcmp(a.name.to_str(), b.name.to_str());
+    if (names != 0) { return names < 0; }
+    return strcmp(a.signature.to_str(), b.signature.to_str()) < 0;
+}
+
+bool artifact_order_contains(Vec<i64>* order, i64 index) {
+    i64 i = 0;
+    while (i < order.len()) {
+        i64 ordered_index = order.get(i);
+        if (ordered_index == index) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+// AGM v11 export metadata is deliberately emitted in stable kind/name/signature
+// order, independent of hash-table or parser traversal order.
+bool artifact_to_bytes(Artifact* artifact, String* out) {
+    Vec<i64> order = Vec<i64>.new();
+    i64 count = artifact.exports.len();
+    if (artifact.version != 0 && artifact.version != (u8)11) {
+        order.drop();
+        return false;
+    }
+    i64 validate_index = 0;
+    while (validate_index < count) {
+        ArtifactExport* export = artifact.exports.get_ptr(validate_index);
+        if ((export.abi_present && (export.abi < (u8)1 || export.abi > (u8)7))
+            || (!export.layout_present
+                && (export.layout_size_present || export.layout_align_present
+                    || export.layout_packed))) {
+            order.drop();
+            return false;
+        }
+        validate_index += 1;
+    }
+    i64 written = 0;
+    while (written < count) {
+        i64 best = -1;
+        i64 candidate = 0;
+        while (candidate < count) {
+            if (!artifact_order_contains(&order, candidate)
+                && (best < 0 || artifact_index_is_ordered_before(artifact, candidate, best))) {
+                best = candidate;
+            }
+            candidate += 1;
+        }
+        if (best < 0) {
+            order.drop();
+            return false;
+        }
+        order.push(best);
+        written += 1;
+    }
+
+    out.push((u8)65);
+    out.push((u8)71);
+    out.push((u8)77);
+    out.push((u8)0);
+    out.push((u8)0);
+    out.push((u8)11);
+    artifact_write_string(out, artifact.module_name.to_str());
+    artifact_write_string(out, artifact.module_path.to_str());
+    artifact_write_string(out, artifact.source_path.to_str());
+    artifact_write_u64(out, artifact.source_hash);
+    artifact_write_string(out, artifact.compiler_version.to_str());
+    artifact_write_string(out, artifact.target_triple.to_str());
+    out.push((u8)0);
+    out.push((u8)0);
+    artifact_write_strings(out, &artifact.module_deps);
+    artifact_write_strings(out, &artifact.transitive_deps);
+    artifact_write_u32(out, (u32)count);
+
+    i64 i = 0;
+    while (i < count) {
+        i64 ordered_index = order.get(i);
+        ArtifactExport* export = artifact.exports.get_ptr(ordered_index);
+        artifact_write_export(out, export);
+        i += 1;
+    }
+    artifact_write_strings(out, &artifact.native_libs);
+    artifact_write_strings(out, &artifact.native_lib_paths);
+    artifact_write_strings(out, &artifact.generic_templates);
+    order.drop();
+    return true;
+}
+
+// Publish through a same-directory temporary file, then atomically replace the
+// target. The caller owns cache-key selection.
+bool publish_artifact(str path, Artifact* artifact) {
+    String bytes = String.new();
+    if (!artifact_to_bytes(artifact, &bytes)) {
+        bytes.drop();
+        return false;
+    }
+    String temporary = String.from_str(path);
+    temporary.push_str(".tmp.");
+    u8 pid_buffer[32];
+    i64 pid_length = itoa(getpid(), &pid_buffer[0]);
+    temporary.push_bytes(&pid_buffer[0], pid_length);
+    File file = File.open_write(temporary.to_str());
+    if (!file.valid()) {
+        temporary.drop();
+        bytes.drop();
+        return false;
+    }
+    i64 i = 0;
+    bool ok = true;
+    while (i < bytes.len) {
+        if (file.write_char((i32)bytes.data[i]) < 0) {
+            ok = false;
+            break;
+        }
+        i += 1;
+    }
+    if (file.flush() < 0) { ok = false; }
+    if (file.close() < 0) { ok = false; }
+    if (ok) {
+        ok = rename(temporary.to_str(), path);
+    }
+    if (!ok) {
+        remove_file(temporary.to_str());
+    }
+    temporary.drop();
+    bytes.drop();
+    return ok;
+}

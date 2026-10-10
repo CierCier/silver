@@ -1,0 +1,8 @@
+// Dotted import paths resolve to nested source modules in both compilers.
+// compile_flags: -I tests/modules
+import nested.leaf;
+import std.sys.entry;
+
+i32 main() {
+    return nested_leaf_value() == 19 ? 0 : 1;
+}

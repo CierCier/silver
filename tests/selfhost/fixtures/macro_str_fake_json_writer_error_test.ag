@@ -1,0 +1,27 @@
+import std.string;
+
+struct JsonWriter {
+    String contents;
+}
+
+impl JsonWriter {
+    JsonWriter new() {
+        JsonWriter writer;
+        writer.contents = String.from_str("short-lived");
+        return move writer;
+    }
+
+    str finish(*self) {
+        return self.contents.to_str();
+    }
+}
+
+macro str borrowed_writer_result() {
+    JsonWriter writer = JsonWriter.new();
+    return writer.finish();
+}
+
+i32 main() {
+    str borrowed = @borrowed_writer_result();
+    return borrowed[0] == (u8)'s' ? 0 : 1;
+}

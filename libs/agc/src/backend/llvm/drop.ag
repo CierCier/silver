@@ -1,0 +1,1107 @@
+// libs/agc/src/backend/llvm/drop.ag — RAII drop elaboration for the native backend.
+//
+// Mirrors stage0's scope/drop-flag design: every live droppable local owns a
+// runtime `i1` drop flag (plus per-field-path flags), and scope exits run
+// guarded drops LIFO. Flags - not static analysis - decide liveness, so
+// conditional moves, partial initialization, and shadowing stay correct.
+// Any case this pass cannot lower is skipped, which leaks exactly as the
+// pre-drop backend did; it never double-drops.
+import vendor.llvm.llvm;
+import std.string;
+import std.mem.vec;
+import frontend.ast;
+import frontend.ast_expr;
+import frontend.items;
+import frontend.place;
+import frontend.symbols;
+import frontend.types;
+import frontend.typecheck_expr;
+import frontend.messages;
+import backend.llvm.context;
+import backend.llvm.types;
+import backend.llvm.mono;
+import backend.llvm.expr;
+
+bool llvm_type_needs_drop(LlvmContext* ctx, u32 type_id) {
+    if (type_id == TYPE_UNKNOWN || type_id == 0) { return false; }
+    TypeProperties props = type_properties_at(ctx.types, type_id, 0);
+    return props.needs_drop;
+}
+
+LLVMOpaqueValue* llvm_alloca_drop_flag(LlvmContext* ctx, str name, bool init) {
+    LLVMOpaqueType* i1_ty = LLVMInt1TypeInContext(ctx.ctx);
+    LLVMOpaqueValue* flag = LLVMBuildAlloca(ctx.builder, i1_ty, name);
+    u64 bit = init ? (u64)1 : (u64)0;
+    LLVMBuildStore(ctx.builder, LLVMConstInt(i1_ty, bit, 0), flag);
+    return flag;
+}
+
+void llvm_store_drop_flag(LlvmContext* ctx, LLVMOpaqueValue* flag, bool value) {
+    if (flag == (LLVMOpaqueValue*)0) { return; }
+    LLVMOpaqueType* i1_ty = LLVMInt1TypeInContext(ctx.ctx);
+    u64 bit = value ? (u64)1 : (u64)0;
+    LLVMBuildStore(ctx.builder, LLVMConstInt(i1_ty, bit, 0), flag);
+}
+
+// Quiet probe: can a `drop` call be emitted for this type? Unlike
+// llvm_drop_fn_for_type this never queues monomorphization and never
+// records unresolved symbols, so scope-exit planning can ask freely.
+bool llvm_can_resolve_drop_fn(LlvmContext* ctx, u32 type_id) {
+    u32 resolved = ctx.types.resolve_subst(type_id);
+    if (resolved == TYPE_UNKNOWN || resolved == 0) { return false; }
+    TypeEntry* entry = ctx.types.get(resolved);
+    if (entry.kind != TypeKind.Named) { return false; }
+    str base = ctx.types.names.get(entry.name_id);
+    if (entry.count > 0) {
+        Vec<u32> arg_ids = Vec<u32>.new();
+        i64 i = 0;
+        while (i < entry.count) {
+            u32 arg_id = ctx.types.type_args.get(entry.inner + (u32)i);
+            if (!mono_type_is_concrete(ctx.ctx, ctx.types, arg_id, 0)) {
+                arg_ids.drop();
+                return false;
+            }
+            arg_ids.push(arg_id);
+            i += 1;
+        }
+        MonoMethodTemplate template;
+        Vec<u32> param_ids = Vec<u32>.new();
+        bool ok = mono_find_method_template(ctx.root, ctx.types, base, "drop",
+                                             &arg_ids, &template, &param_ids);
+        bool usable = ok && (param_ids.len() == arg_ids.len() || param_ids.len() == 0);
+        param_ids.drop();
+        arg_ids.drop();
+        return usable;
+    }
+    String mangled = String.from_str(base);
+    mangled.push_str("__drop");
+    LLVMOpaqueValue* fn_val = LLVMGetNamedFunction(ctx.module, mangled.to_str());
+    mangled.drop();
+    return fn_val != (LLVMOpaqueValue*)0;
+}
+
+// Resolve the `drop` function for a type: generic instantiations go through
+// monomorphization (trait `impl Drop` methods are found by base name like
+// any other method); concrete types use the `Base__drop` symbol. Only call
+// this after llvm_can_resolve_drop_fn said yes, so failure here is a loud
+// internal error rather than a silent leak.
+LLVMOpaqueValue* llvm_drop_fn_for_type(LlvmContext* ctx, u32 type_id) {
+    u32 resolved = ctx.types.resolve_subst(type_id);
+    if (resolved == TYPE_UNKNOWN || resolved == 0) { return (LLVMOpaqueValue*)0; }
+    TypeEntry* entry = ctx.types.get(resolved);
+    if (entry.kind != TypeKind.Named) { return (LLVMOpaqueValue*)0; }
+    str base = ctx.types.names.get(entry.name_id);
+    if (entry.count > 0) {
+        return mono_ensure_specialized(ctx, resolved, "drop");
+    }
+    String mangled = String.from_str(base);
+    mangled.push_str("__drop");
+    LLVMOpaqueValue* fn_val = LLVMGetNamedFunction(ctx.module, mangled.to_str());
+    mangled.drop();
+    return fn_val;
+}
+
+// Should a local of this type be drop-tracked? Either its own `drop` is
+// resolvable (covers user types like `Owned`, which the name-based
+// needs_drop predicate cannot see) or some part of it needs dropping.
+// Tracking a value that later proves unlowerable only leaks, as before.
+bool llvm_type_needs_tracking_inner(LlvmContext* ctx, u32 type_id, Vec<u32>* active) {
+    u32 resolved = ctx.types.resolve_subst(type_id);
+    if (resolved == TYPE_UNKNOWN || resolved == 0) { return false; }
+    TypeEntry* entry = ctx.types.get(resolved);
+    TypeKind kind = entry.kind;
+    u32 name_id = entry.name_id;
+    if (kind == TypeKind.Pointer || kind == TypeKind.Reference) { return false; }
+    if (llvm_can_resolve_drop_fn(ctx, resolved)) { return true; }
+    if (kind == TypeKind.Array) {
+        return llvm_type_needs_tracking_inner(ctx, entry.inner, active);
+    }
+    if (kind == TypeKind.Tuple) {
+        i64 i = 0;
+        while (i < entry.count) {
+            if (llvm_type_needs_tracking_inner(ctx,
+                    ctx.types.type_args.get(entry.inner + (u32)i), active)) {
+                return true;
+            }
+            i += 1;
+        }
+        return false;
+    }
+    if (kind == TypeKind.Named && active.len() > 0) {
+        str nested_name = ctx.types.names.get(name_id);
+        if (find_enum_item(ctx.root, nested_name) != (SyntaxNode*)0) { return false; }
+    }
+    if (llvm_type_needs_drop(ctx, resolved)) { return true; }
+    if (kind != TypeKind.Named) { return false; }
+
+    str type_name = ctx.types.names.get(name_id);
+    if (find_enum_item(ctx.root, type_name) != (SyntaxNode*)0) { return false; }
+    i64 ai = 0;
+    while (ai < active.len()) {
+        if (active.get(ai) == resolved) { return false; }
+        ai += 1;
+    }
+    LlvmStructDef* def = ctx.find_struct_by_str(type_name);
+    if (def == (LlvmStructDef*)0) { return false; }
+    active.push(resolved);
+    i64 i = 0;
+    while (i < def.fields.len()) {
+        LlvmFieldInfo* field = def.fields.get_ptr(i);
+        u32 field_ty = mono_resolve_struct_field_type(ctx, resolved, field.type_id);
+        if (field_ty != TYPE_UNKNOWN && field_ty != 0
+            && llvm_type_needs_tracking_inner(ctx, field_ty, active)) {
+            active.pop();
+            return true;
+        }
+        i += 1;
+    }
+    active.pop();
+    return false;
+}
+
+bool llvm_type_needs_tracking(LlvmContext* ctx, u32 type_id) {
+    Vec<u32> active = Vec<u32>.new();
+    bool needed = llvm_type_needs_tracking_inner(ctx, type_id, &active);
+    active.drop();
+    return needed;
+}
+
+void llvm_emit_guarded_drop_call(LlvmContext* ctx, LLVMOpaqueValue* flag,
+                                 LLVMOpaqueValue* fn_val, LLVMOpaqueValue* ptr) {
+    if (fn_val == (LLVMOpaqueValue*)0 || ptr == (LLVMOpaqueValue*)0) { return; }
+    LLVMOpaqueBasicBlock* run_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "drop_run");
+    LLVMOpaqueBasicBlock* after_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "drop_after");
+    if (flag != (LLVMOpaqueValue*)0) {
+        LLVMOpaqueType* i1_ty = LLVMInt1TypeInContext(ctx.ctx);
+        LLVMOpaqueValue* live = LLVMBuildLoad2(ctx.builder, i1_ty, flag, "drop_flag");
+        LLVMBuildCondBr(ctx.builder, live, run_bb, after_bb);
+    } else {
+        LLVMBuildBr(ctx.builder, run_bb);
+    }
+    LLVMPositionBuilderAtEnd(ctx.builder, run_bb);
+    LLVMOpaqueType* fn_ty = LLVMGlobalGetValueType(fn_val);
+    Vec<LLVMOpaqueValue*> args = Vec<LLVMOpaqueValue*>.new();
+    args.push(ptr);
+    LLVMBuildCall2(ctx.builder, fn_ty, fn_val, args.data, 1, "");
+    args.drop();
+    LLVMBuildBr(ctx.builder, after_bb);
+    LLVMPositionBuilderAtEnd(ctx.builder, after_bb);
+}
+
+// Compute the address and resolved type of a direct field of a local.
+bool llvm_drop_field_place(LlvmContext* ctx, LLVMOpaqueValue* local_ptr, u32 type_id,
+                           u32 field_name_id, LLVMOpaqueValue** ptr_out, u32* type_out) {
+    u32 resolved = ctx.types.resolve_subst(type_id);
+    str type_name = ctx.types.type_name(resolved);
+    if (strlen(type_name) == 0 || strcmp(type_name, "unknown") == 0) { return false; }
+    LlvmStructDef* def = ctx.find_struct_by_str(type_name);
+    if (def == (LlvmStructDef*)0) { return false; }
+    i32 field_idx = ctx.find_field_index(def, field_name_id);
+    if (field_idx < 0) { return false; }
+    u32 raw_field_ty = ctx.find_field_type(def, field_name_id);
+    u32 field_ty = mono_resolve_struct_field_type(ctx, resolved, raw_field_ty);
+    if (field_ty == TYPE_UNKNOWN || field_ty == 0) { return false; }
+    mono_ensure_type_layout(ctx, resolved, &ctx.generic_layout_ids);
+    LLVMOpaqueType* struct_ty = llvm_lower_type(ctx.ctx, ctx.types, resolved);
+    LLVMOpaqueValue* base_ptr = local_ptr;
+    if (LLVMGetTypeKind(LLVMTypeOf(base_ptr)) != (u32)12) {
+        base_ptr = LLVMBuildIntToPtr(ctx.builder, base_ptr,
+                                     LLVMPointerTypeInContext(ctx.ctx, (u32)0), "drop_gep_cast");
+    }
+    *ptr_out = LLVMBuildStructGEP2(ctx.builder, struct_ty, base_ptr, (u32)field_idx, "drop_field");
+    *type_out = field_ty;
+    return true;
+}
+
+bool llvm_drop_path_matches(LlvmLocal* local, LlvmFieldFlag* entry,
+                            Vec<Projection>* path) {
+    if (path.len() == 0 || entry.projections_count == 0) { return false; }
+    if (path.len() > (i64)entry.projections_count) { return false; }
+    i64 i = 0;
+    while (i < path.len()) {
+        Projection* stored = local.drop_projections.get_ptr((i64)entry.projections_start + i);
+        Projection* requested = path.get_ptr(i);
+        if (stored.kind != requested.kind
+            || ((stored.kind == ProjectionKind.Field || stored.kind == ProjectionKind.Index)
+                && stored.field_name_id != requested.field_name_id)) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+// Check whether entry represents a proper prefix of path (i.e. an intermediate ancestor).
+bool llvm_drop_path_is_proper_prefix(LlvmLocal* local, LlvmFieldFlag* entry,
+                                     Vec<Projection>* path) {
+    if (entry.projections_count == 0 || (i64)entry.projections_count >= path.len()) {
+        return false;
+    }
+    i64 i = 0;
+    while (i < (i64)entry.projections_count) {
+        Projection* stored = local.drop_projections.get_ptr((i64)entry.projections_start + i);
+        Projection* requested = path.get_ptr(i);
+        if (stored.kind != requested.kind
+            || ((stored.kind == ProjectionKind.Field || stored.kind == ProjectionKind.Index)
+                && stored.field_name_id != requested.field_name_id)) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+// Register own-destructor flags in preorder. Pointer-like fields and enums
+// stop traversal because their pointees/payloads have separate ownership rules.
+void llvm_register_struct_drop_paths(LlvmContext* ctx, LlvmLocal* local,
+                                    u32 type_id, bool initialized,
+                                    Vec<Projection>* path, Vec<u32>* active) {
+    u32 resolved = ctx.types.resolve_subst(type_id);
+    if (resolved == TYPE_UNKNOWN || resolved == 0) { return; }
+    TypeEntry* entry = ctx.types.get(resolved);
+    if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) { return; }
+    if (entry.kind == TypeKind.Tuple) {
+        i64 ai = 0;
+        while (ai < active.len()) {
+            if (active.get(ai) == resolved) { return; }
+            ai += 1;
+        }
+        active.push(resolved);
+        i64 i = 0;
+        while (i < entry.count) {
+            u32 element_ty = ctx.types.resolve_subst(
+                ctx.types.type_args.get(entry.inner + (u32)i));
+            if (element_ty != TYPE_UNKNOWN && element_ty != 0) {
+                Projection projection;
+                projection.kind = ProjectionKind.Index;
+                projection.field_name_id = (u32)i;
+                path.push(move projection);
+                bool needs_element_flag = llvm_can_resolve_drop_fn(ctx, element_ty);
+                TypeEntry* element_entry = ctx.types.get(element_ty);
+                if (!needs_element_flag && element_entry.kind == TypeKind.Named) {
+                    str element_name = ctx.types.names.get(element_entry.name_id);
+                    if (find_enum_item(ctx.root, element_name) != (SyntaxNode*)0
+                        && llvm_enum_needs_payload_drop(ctx, element_ty, element_name)) {
+                        needs_element_flag = true;
+                    }
+                }
+                if (needs_element_flag) {
+                    LlvmFieldFlag flag;
+                    flag.projections_start = (u32)local.drop_projections.len();
+                    flag.projections_count = (u32)path.len();
+                    flag.flag = llvm_alloca_drop_flag(ctx, "drop_tuple_flag", initialized);
+                    i64 pi = 0;
+                    while (pi < path.len()) {
+                        local.drop_projections.push(path.get(pi));
+                        pi += 1;
+                    }
+                    local.field_flags.push(move flag);
+                }
+                llvm_register_struct_drop_paths(ctx, local, element_ty,
+                                                initialized, path, active);
+                path.pop();
+            }
+            i += 1;
+        }
+        active.pop();
+        return;
+    }
+    if (entry.kind != TypeKind.Named) { return; }
+    str type_name = ctx.types.names.get(entry.name_id);
+    if (find_enum_item(ctx.root, type_name) != (SyntaxNode*)0) { return; }
+    i64 ai = 0;
+    while (ai < active.len()) {
+        if (active.get(ai) == resolved) { return; }
+        ai += 1;
+    }
+    LlvmStructDef* def = ctx.find_struct_by_str(type_name);
+    if (def == (LlvmStructDef*)0) { return; }
+    active.push(resolved);
+    i64 i = 0;
+    while (i < def.fields.len()) {
+        LlvmFieldInfo* field = def.fields.get_ptr(i);
+        u32 field_name_id = field.name_id;
+        u32 raw_field_ty = field.type_id;
+        u32 field_ty = mono_resolve_struct_field_type(ctx, resolved, raw_field_ty);
+        if (field_ty != TYPE_UNKNOWN && field_ty != 0) {
+            Projection projection;
+            projection.kind = ProjectionKind.Field;
+            projection.field_name_id = field_name_id;
+            path.push(move projection);
+            bool needs_field_flag = llvm_can_resolve_drop_fn(ctx, field_ty);
+            TypeEntry* field_entry = ctx.types.get(field_ty);
+            if (!needs_field_flag && field_entry.kind == TypeKind.Named) {
+                str field_type_name = ctx.types.names.get(field_entry.name_id);
+                if (find_enum_item(ctx.root, field_type_name) != (SyntaxNode*)0
+                    && llvm_enum_needs_payload_drop(ctx, field_ty, field_type_name)) {
+                    needs_field_flag = true;
+                }
+            }
+            if (needs_field_flag) {
+                LlvmFieldFlag flag;
+                flag.projections_start = (u32)local.drop_projections.len();
+                flag.projections_count = (u32)path.len();
+                flag.flag = llvm_alloca_drop_flag(ctx, "drop_field_flag", initialized);
+                i64 pi = 0;
+                while (pi < path.len()) {
+                    local.drop_projections.push(path.get(pi));
+                    pi += 1;
+                }
+                local.field_flags.push(move flag);
+            }
+            llvm_register_struct_drop_paths(ctx, local, field_ty, initialized, path, active);
+            path.pop();
+        }
+        i += 1;
+    }
+    active.pop();
+}
+
+// Compute a nested field address by applying the existing typed GEP helper at
+// each projection so generic field types are resolved at each step.
+bool llvm_drop_projection_place(LlvmContext* ctx, LLVMOpaqueValue* local_ptr,
+                                u32 type_id, LlvmLocal* local, LlvmFieldFlag* entry,
+                                LLVMOpaqueValue** ptr_out, u32* type_out) {
+    LLVMOpaqueValue* ptr = local_ptr;
+    u32 current_type = type_id;
+    u32 i = 0;
+    while (i < entry.projections_count) {
+        Projection* projection = local.drop_projections.get_ptr(
+            (i64)entry.projections_start + (i64)i);
+        LLVMOpaqueValue* next_ptr = (LLVMOpaqueValue*)0;
+        u32 next_type = 0;
+        if (projection.kind == ProjectionKind.Field) {
+            if (!llvm_drop_field_place(ctx, ptr, current_type, projection.field_name_id,
+                                       &next_ptr, &next_type)) {
+                return false;
+            }
+        } else if (projection.kind == ProjectionKind.Index) {
+            u32 resolved = ctx.types.resolve_subst(current_type);
+            TypeEntry* tuple = ctx.types.get(resolved);
+            if (tuple.kind != TypeKind.Tuple || projection.field_name_id >= (u32)tuple.count) {
+                return false;
+            }
+            mono_ensure_child_layouts(ctx, resolved, &ctx.generic_layout_ids);
+            LLVMOpaqueType* tuple_ty = llvm_lower_type(ctx.ctx, ctx.types, resolved);
+            if (LLVMGetTypeKind(LLVMTypeOf(ptr)) != (u32)12) {
+                ptr = LLVMBuildIntToPtr(ctx.builder, ptr,
+                                        LLVMPointerTypeInContext(ctx.ctx, 0), "drop_tuple_cast");
+            }
+            next_ptr = LLVMBuildStructGEP2(ctx.builder, tuple_ty, ptr,
+                                            projection.field_name_id, "drop_tuple_element");
+            next_type = ctx.types.resolve_subst(ctx.types.type_args.get(
+                tuple.inner + projection.field_name_id));
+        } else {
+            return false;
+        }
+        ptr = next_ptr;
+        current_type = next_type;
+        i += 1;
+    }
+    *ptr_out = ptr;
+    *type_out = current_type;
+    return true;
+}
+
+// Tag-dispatched payload drops for an enum value whose whole flag fired:
+// the value is completely live, so present payloads cascade through their
+// own destructors and owned fields.
+void llvm_emit_enum_payload_drop(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 type_id,
+                                 str enum_name) {
+    LLVMOpaqueType* enum_ty = llvm_lower_type(ctx.ctx, ctx.types, type_id);
+    LLVMOpaqueValue* tag_ptr = LLVMBuildStructGEP2(ctx.builder, enum_ty, ptr, 0, "drop_tag");
+    LLVMOpaqueValue* tag_val = LLVMBuildLoad2(ctx.builder, LLVMInt16TypeInContext(ctx.ctx),
+                                               tag_ptr, "drop_tag_ld");
+    Vec<SyntaxNode*> variant_names = Vec<SyntaxNode*>.new();
+    Vec<i64> variant_tags = Vec<i64>.new();
+    Vec<i64> variant_arities = Vec<i64>.new();
+    SyntaxNode* enum_item = find_enum_item(ctx.root, enum_name);
+    if (enum_item == (SyntaxNode*)0) {
+        variant_names.drop();
+        variant_tags.drop();
+        variant_arities.drop();
+        return;
+    }
+    enum_each_variant(enum_item, &variant_names, &variant_tags, &variant_arities);
+    LLVMOpaqueBasicBlock* merge_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "drop_enum_merge");
+    i64 vi = 0;
+    while (vi < variant_names.len()) {
+        str variant = variant_names.get(vi).text;
+        i64 tag = variant_tags.get(vi);
+        Vec<u32> payload_types = Vec<u32>.new();
+        llvm_enum_payload_types(ctx.types, ctx.root, enum_name, variant, &payload_types);
+        i64 pi = 0;
+        while (pi < payload_types.len()) {
+            u32 resolved = mono_resolve_struct_field_type(ctx, type_id, payload_types.get(pi));
+            payload_types.set(pi, resolved);
+            pi += 1;
+        }
+        i64 di = 0;
+        while (di < payload_types.len()) {
+            u32 payload_ty = payload_types.get(di);
+            if (llvm_type_needs_tracking(ctx, payload_ty)) {
+                LLVMOpaqueValue* expected = LLVMConstInt(LLVMInt16TypeInContext(ctx.ctx), (u64)tag, 0);
+                LLVMOpaqueValue* same = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntEQ,
+                                                      tag_val, expected, "drop_tag_eq");
+                LLVMOpaqueBasicBlock* arm_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "drop_enum_arm");
+                LLVMOpaqueBasicBlock* next_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "drop_enum_next");
+                LLVMBuildCondBr(ctx.builder, same, arm_bb, next_bb);
+                LLVMPositionBuilderAtEnd(ctx.builder, arm_bb);
+                u64 base_offset = llvm_target_struct_field_offset(ctx, enum_ty, 1);
+                u64 field_offset = base_offset + llvm_target_payload_field_offset(ctx, &payload_types, di);
+                LLVMOpaqueType* ptr_ty = LLVMPointerTypeInContext(ctx.ctx, (u32)0);
+                LLVMOpaqueValue* slot_bytes = LLVMBuildBitCast(ctx.builder, ptr, ptr_ty, "drop_enum_bytes");
+                LLVMOpaqueValue* field_index = LLVMConstInt(LLVMInt64TypeInContext(ctx.ctx), field_offset, 0);
+                LLVMOpaqueValue* field_byte_ptr = LLVMBuildGEP2(ctx.builder, LLVMInt8TypeInContext(ctx.ctx),
+                                                                slot_bytes, &field_index, 1, "drop_enum_field");
+                LLVMOpaqueValue* field_ptr = LLVMBuildBitCast(ctx.builder, field_byte_ptr, ptr_ty, "drop_enum_ptr");
+                llvm_emit_value_drop_at_ptr(ctx, field_ptr, payload_ty);
+                LLVMBuildBr(ctx.builder, next_bb);
+                LLVMPositionBuilderAtEnd(ctx.builder, next_bb);
+            }
+            di += 1;
+        }
+        payload_types.drop();
+        vi += 1;
+    }
+    variant_names.drop();
+    variant_tags.drop();
+    variant_arities.drop();
+    LLVMBuildBr(ctx.builder, merge_bb);
+    LLVMPositionBuilderAtEnd(ctx.builder, merge_bb);
+}
+
+void llvm_emit_value_drop_at_ptr(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 type_id) {
+    u32 resolved = ctx.types.resolve_subst(type_id);
+    if (resolved == TYPE_UNKNOWN || resolved == 0) { return; }
+    TypeEntry* entry = ctx.types.get(resolved);
+    if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) { return; }
+    if (entry.kind == TypeKind.Array) {
+        if (entry.count > 0 && llvm_type_needs_tracking(ctx, entry.inner)) {
+            LLVMOpaqueValue* count = LLVMConstInt(
+                LLVMInt64TypeInContext(ctx.ctx), (u64)entry.count, 0);
+            llvm_emit_drop_in_place(ctx, entry.inner, ptr, count);
+        }
+        return;
+    }
+    if (entry.kind == TypeKind.Tuple) {
+        LLVMOpaqueType* tuple_ty = llvm_lower_type(ctx.ctx, ctx.types, resolved);
+        i64 i = 0;
+        while (i < entry.count) {
+            u32 element_ty = ctx.types.resolve_subst(ctx.types.type_args.get(entry.inner + (u32)i));
+            if (element_ty != TYPE_UNKNOWN && element_ty != 0
+                && llvm_type_needs_tracking(ctx, element_ty)) {
+                LLVMOpaqueValue* element_ptr = LLVMBuildStructGEP2(ctx.builder, tuple_ty, ptr,
+                                                                   (u32)i, "drop_tuple_field");
+                llvm_emit_value_drop_at_ptr(ctx, element_ptr, element_ty);
+            }
+            i += 1;
+        }
+        return;
+    }
+    if (entry.kind != TypeKind.Named) { return; }
+
+    str name = ctx.types.names.get(entry.name_id);
+    SyntaxNode* enum_item = find_enum_item(ctx.root, name);
+    bool own_drop = llvm_can_resolve_drop_fn(ctx, resolved);
+    if (own_drop) {
+        LLVMOpaqueValue* fn = llvm_drop_fn_for_type(ctx, resolved);
+        if (fn != (LLVMOpaqueValue*)0) {
+            Vec<LLVMOpaqueValue*> args = Vec<LLVMOpaqueValue*>.new();
+            args.push(ptr);
+            LLVMBuildCall2(ctx.builder, LLVMGlobalGetValueType(fn), fn, args.data, 1, "");
+            args.drop();
+        }
+    }
+    if (enum_item != (SyntaxNode*)0) {
+        if (!own_drop && llvm_enum_needs_payload_drop(ctx, resolved, name)) {
+            llvm_emit_enum_payload_drop(ctx, ptr, resolved, name);
+        }
+        return;
+    }
+
+    LlvmStructDef* def = ctx.find_struct_by_str(name);
+    if (def == (LlvmStructDef*)0) { return; }
+    mono_ensure_type_layout(ctx, resolved, &ctx.generic_layout_ids);
+    LLVMOpaqueType* struct_ty = llvm_lower_type(ctx.ctx, ctx.types, resolved);
+    i64 i = 0;
+    while (i < def.fields.len()) {
+        LlvmFieldInfo* field = def.fields.get_ptr(i);
+        u32 field_ty = mono_resolve_struct_field_type(ctx, resolved, field.type_id);
+        if (field_ty != TYPE_UNKNOWN && field_ty != 0
+            && llvm_type_needs_tracking(ctx, field_ty)) {
+            LLVMOpaqueValue* field_ptr = LLVMBuildStructGEP2(ctx.builder, struct_ty, ptr,
+                                                              (u32)i, "drop_field");
+            llvm_emit_value_drop_at_ptr(ctx, field_ptr, field_ty);
+        }
+        i += 1;
+    }
+}
+
+LLVMOpaqueValue* llvm_emit_drop_in_place(LlvmContext* ctx, u32 elem_type,
+                                          LLVMOpaqueValue* ptr, LLVMOpaqueValue* count) {
+    if (!llvm_type_needs_tracking(ctx, elem_type)) {
+        return LLVMConstInt(LLVMInt64TypeInContext(ctx.ctx), 0, 0);
+    }
+    if (ctx.current_fn == (LLVMOpaqueValue*)0 || ptr == (LLVMOpaqueValue*)0
+        || count == (LLVMOpaqueValue*)0 || LLVMGetTypeKind(LLVMTypeOf(ptr)) != (u32)12
+        || LLVMGetTypeKind(LLVMTypeOf(count)) != (u32)8) {
+        ctx.note_unresolved("drop-in-place", "arguments");
+        return (LLVMOpaqueValue*)0;
+    }
+    LLVMOpaqueType* i64_ty = LLVMInt64TypeInContext(ctx.ctx);
+    if (LLVMTypeOf(count) != i64_ty) {
+        count = LLVMBuildIntCast(ctx.builder, count, i64_ty, "drop_count_cast");
+    }
+    LLVMOpaqueType* ptr_ty = LLVMPointerTypeInContext(ctx.ctx, (u32)0);
+    LLVMOpaqueValue* non_null = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntNE,
+                                               ptr, LLVMConstNull(ptr_ty), "drop_non_null");
+    LLVMOpaqueValue* has_items = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntSGT,
+                                               count, LLVMConstInt(i64_ty, 0, 0), "drop_has_items");
+    LLVMOpaqueValue* should_drop = LLVMBuildAnd(ctx.builder, non_null, has_items, "drop_enter");
+    LLVMOpaqueBasicBlock* preheader = LLVMGetInsertBlock(ctx.builder);
+    LLVMOpaqueBasicBlock* loop_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn,
+                                                                   "drop_in_place_loop");
+    LLVMOpaqueBasicBlock* done_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn,
+                                                                   "drop_in_place_done");
+    LLVMBuildCondBr(ctx.builder, should_drop, loop_bb, done_bb);
+
+    LLVMPositionBuilderAtEnd(ctx.builder, loop_bb);
+    LLVMOpaqueValue* index = LLVMBuildPhi(ctx.builder, i64_ty, "drop_index");
+    LLVMOpaqueValue* zero = LLVMConstInt(i64_ty, 0, 0);
+    LLVMOpaqueType* elem_ty = llvm_lower_type(ctx.ctx, ctx.types, elem_type);
+    LLVMOpaqueValue* elem_ptr = LLVMBuildGEP2(ctx.builder, elem_ty, ptr, &index, 1,
+                                              "drop_elem_ptr");
+    llvm_emit_value_drop_at_ptr(ctx, elem_ptr, elem_type);
+    LLVMOpaqueBasicBlock* latch = LLVMGetInsertBlock(ctx.builder);
+    LLVMOpaqueValue* next = LLVMBuildAdd(ctx.builder, index, LLVMConstInt(i64_ty, 1, 0),
+                                         "drop_index_next");
+    LLVMOpaqueValue* more = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntSLT,
+                                           next, count, "drop_more");
+    LLVMBuildCondBr(ctx.builder, more, loop_bb, done_bb);
+
+    Vec<LLVMOpaqueValue*> incoming_values = Vec<LLVMOpaqueValue*>.new();
+    incoming_values.push(zero);
+    incoming_values.push(next);
+    Vec<LLVMOpaqueBasicBlock*> incoming_blocks = Vec<LLVMOpaqueBasicBlock*>.new();
+    incoming_blocks.push(preheader);
+    incoming_blocks.push(latch);
+    LLVMAddIncoming(index, incoming_values.data, incoming_blocks.data, (u32)2);
+    incoming_blocks.drop();
+    incoming_values.drop();
+    LLVMPositionBuilderAtEnd(ctx.builder, done_bb);
+    return LLVMConstInt(i64_ty, 0, 0);
+}
+
+// Does any enum payload contain a value that needs drop tracking?
+bool llvm_enum_needs_payload_drop(LlvmContext* ctx, u32 type_id, str enum_name) {
+    Vec<SyntaxNode*> variant_names = Vec<SyntaxNode*>.new();
+    Vec<i64> variant_tags = Vec<i64>.new();
+    Vec<i64> variant_arities = Vec<i64>.new();
+    SyntaxNode* enum_item = find_enum_item(ctx.root, enum_name);
+    if (enum_item == (SyntaxNode*)0) {
+        variant_names.drop();
+        variant_tags.drop();
+        variant_arities.drop();
+        return false;
+    }
+    enum_each_variant(enum_item, &variant_names, &variant_tags, &variant_arities);
+    bool needed = false;
+    i64 vi = 0;
+    while (vi < variant_names.len() && !needed) {
+        Vec<u32> payload_types = Vec<u32>.new();
+        llvm_enum_payload_types(ctx.types, ctx.root, enum_name, variant_names.get(vi).text, &payload_types);
+        i64 pi = 0;
+        while (pi < payload_types.len() && !needed) {
+            u32 payload_ty = mono_resolve_struct_field_type(ctx, type_id, payload_types.get(pi));
+            if (payload_ty != TYPE_UNKNOWN && payload_ty != 0
+                && llvm_type_needs_tracking(ctx, payload_ty)) {
+                needed = true;
+            }
+            pi += 1;
+        }
+        payload_types.drop();
+        vi += 1;
+    }
+    variant_names.drop();
+    variant_tags.drop();
+    variant_arities.drop();
+    return needed;
+}
+
+// Register drop tracking for a freshly stored local. The whole flag starts
+// live exactly when the local was wholly initialized; reachable droppable
+// fields each get a flag starting the same way. A whole flag exists only
+// when the scope-exit whole entry would do something (own `drop` or enum
+// payload dispatch); field flags exist per reachable droppable field.
+// Registration never fails: untracked values simply leak as before.
+void llvm_register_local_drops(LlvmContext* ctx, u32 name_id, LLVMOpaqueValue* ptr,
+                               u32 type_id, bool initialized) {
+    u32 resolved = ctx.types.resolve_subst(type_id);
+    if (resolved == TYPE_UNKNOWN || resolved == 0) { return; }
+    TypeEntry* resolved_entry = ctx.types.get(resolved);
+    str type_name = ctx.types.type_name(resolved);
+    bool named_here = strlen(type_name) > 0 && strcmp(type_name, "unknown") != 0;
+    bool is_tuple = resolved_entry.kind == TypeKind.Tuple;
+    bool is_enum = named_here && find_enum_item(ctx.root, type_name) != (SyntaxNode*)0;
+    bool can_register_paths = is_tuple
+        || (resolved_entry.kind == TypeKind.Named && !is_enum);
+    bool enum_payloads = is_enum
+        && llvm_enum_needs_payload_drop(ctx, resolved, type_name);
+    // Enum payload drops are decided by the payloads, which the
+    // name-based needs_drop predicate cannot see; check them directly.
+    if (!llvm_type_needs_tracking(ctx, resolved)
+        && !enum_payloads && !can_register_paths) {
+        return;
+    }
+    LlvmLocal* local = ctx.find_local(name_id);
+    if (local == (LlvmLocal*)0 || local.ptr != ptr) { return; }
+    // A whole flag exists exactly when the scope-exit whole entry would do
+    // something: the type's own `drop`, or tag-dispatched payload drops for
+    // enums without their own `drop`.
+    bool whole_needed = llvm_can_resolve_drop_fn(ctx, resolved);
+    if (!whole_needed && is_enum) {
+        whole_needed = enum_payloads;
+    }
+    if (whole_needed) {
+        local.drop_flag = llvm_alloca_drop_flag(ctx, "drop_flag", initialized);
+    }
+    if (is_enum || (!named_here && !is_tuple)) { return; }
+    Vec<Projection> path = Vec<Projection>.new();
+    Vec<u32> active = Vec<u32>.new();
+    llvm_register_struct_drop_paths(ctx, local, resolved, initialized, &path, &active);
+    path.drop();
+    active.drop();
+}
+
+void llvm_set_local_drop_live(LlvmContext* ctx, u32 name_id, bool live) {
+    LlvmLocal* local = ctx.find_local(name_id);
+    if (local == (LlvmLocal*)0) { return; }
+    llvm_store_drop_flag(ctx, local.drop_flag, live);
+    i64 i = 0;
+    while (i < local.field_flags.len()) {
+        LlvmFieldFlag* entry = local.field_flags.get_ptr(i);
+        llvm_store_drop_flag(ctx, entry.flag, live);
+        i += 1;
+    }
+}
+
+void llvm_set_path_drop_live(LlvmContext* ctx, LlvmLocal* local,
+                             Vec<Projection>* path, bool live) {
+    if (local == (LlvmLocal*)0) { return; }
+    i64 i = 0;
+    while (i < local.field_flags.len()) {
+        LlvmFieldFlag* entry = local.field_flags.get_ptr(i);
+        if (llvm_drop_path_matches(local, entry, path)) {
+            llvm_store_drop_flag(ctx, entry.flag, live);
+        }
+        i += 1;
+    }
+}
+
+void llvm_set_field_drop_live(LlvmContext* ctx, u32 name_id,
+                              Vec<Projection>* path) {
+    LlvmLocal* local = ctx.find_local(name_id);
+    if (local == (LlvmLocal*)0) { return; }
+    llvm_store_drop_flag(ctx, local.drop_flag, true);
+    llvm_set_path_drop_live(ctx, local, path, true);
+    if (path.len() > 1) {
+        i64 i = 0;
+        while (i < local.field_flags.len()) {
+            LlvmFieldFlag* entry = local.field_flags.get_ptr(i);
+            if (llvm_drop_path_is_proper_prefix(local, entry, path)) {
+                llvm_store_drop_flag(ctx, entry.flag, true);
+            }
+            i += 1;
+        }
+    }
+}
+
+// Clear every drop flag of a local: the value was moved out and must not be
+// dropped at scope exit. Clearing an unflagged local is a no-op.
+void llvm_clear_local_drops(LlvmContext* ctx, u32 name_id) {
+    llvm_set_local_drop_live(ctx, name_id, false);
+}
+
+// After a call completes, clear the drops of any argument that was
+// transferred by value: the callee now owns it (its parameter flags drop
+// it). Transfer is proven by the callee's LLVM parameter kind — opaque
+// pointers borrow, everything else moves — mirroring the receiver
+// normalization in method calls. Unknown or variadic-tail positions are
+// left alone (status-quo leak, never a double drop).
+void llvm_clear_transferred_arg(LlvmContext* ctx, LLVMOpaqueType* fn_type,
+                               i64 param_index, u32 arg_expr_id) {
+    if (fn_type == (LLVMOpaqueType*)0 || arg_expr_id == 0 || param_index < 0) { return; }
+    u32 param_count = LLVMCountParamTypes(fn_type);
+    if (param_index >= (i64)param_count) { return; }
+    Vec<LLVMOpaqueType*> param_tys = Vec<LLVMOpaqueType*>.new();
+    u32 pi = 0;
+    while (pi < param_count) {
+        param_tys.push((LLVMOpaqueType*)0);
+        pi += 1;
+    }
+    LLVMGetParamTypes(fn_type, param_tys.data);
+    LLVMOpaqueType* param_ty = param_tys.get(param_index);
+    param_tys.drop();
+    if (LLVMGetTypeKind(param_ty) == (u32)12) { return; }
+    u32 arg_ty = llvm_expr_type(ctx, arg_expr_id);
+    if (!llvm_type_needs_tracking(ctx, arg_ty)) { return; }
+    llvm_clear_place_drops(ctx, arg_expr_id);
+}
+
+// Root Var name of a place expression, following field/index chains and
+// explicit moves. Returns 0 when the operand has no local root.
+u32 llvm_place_root_name(LlvmContext* ctx, u32 expr_id) {
+    if (expr_id == 0) { return 0; }
+    AstExpr* expr = ctx.pool.get_expr(expr_id);
+    while (expr.kind == ExprKind.Field || expr.kind == ExprKind.Index) {
+        if (expr.inner0 == 0) { return 0; }
+        expr = ctx.pool.get_expr(expr.inner0);
+    }
+    if (expr.kind == ExprKind.Var) { return expr.aux; }
+    if (expr.kind == ExprKind.Move) { return llvm_place_root_name(ctx, expr.inner0); }
+    return 0;
+}
+
+// Record that an arm binding was extracted from a scrutinee expression:
+// moving the binding out releases the scrutinee side as well.
+void llvm_push_scrutinee_move(LlvmContext* ctx, u32 binding_name, u32 scrutinee_expr) {
+    ScrutineeMove entry;
+    entry.binding_name = binding_name;
+    entry.scrutinee_expr = scrutinee_expr;
+    ctx.scrutinee_moves.push(move entry);
+}
+
+void llvm_pop_scrutinee_moves(LlvmContext* ctx, i64 count) {
+    while (count > 0 && ctx.scrutinee_moves.len() > 0) {
+        ctx.scrutinee_moves.pop();
+        count -= 1;
+    }
+}
+
+// After moving a place out, release any match scrutinee it was bound from.
+// Newest entries win so nested matches resolve to the innermost scrutinee.
+// Stale entries only survive on paths where compilation already failed
+// closed, so they can never affect an emitted binary.
+void llvm_clear_scrutinee_source(LlvmContext* ctx, u32 moved_expr_id) {
+    u32 root_name = llvm_place_root_name(ctx, moved_expr_id);
+    if (root_name == 0) { return; }
+    i64 i = ctx.scrutinee_moves.len() - 1;
+    while (i >= 0) {
+        ScrutineeMove* entry = ctx.scrutinee_moves.get_ptr(i);
+        if (entry.binding_name == root_name) {
+            llvm_clear_place_drops(ctx, entry.scrutinee_expr);
+            return;
+        }
+        i -= 1;
+    }
+}
+
+// Direct Copy+Drop places can retain ownership in local bindings; aggregate
+// construction still transfers their nested drop flags to the new value.
+void llvm_clear_copy_source(LlvmContext* ctx, u32 src_id,
+                            bool preserve_direct_copy_drop) {
+    if (src_id == 0) { return; }
+    u32 src_ty = llvm_expr_type(ctx, src_id);
+    if (!llvm_type_needs_tracking(ctx, src_ty)) { return; }
+    AstExpr* source = ctx.pool.get_expr(src_id);
+    bool source_is_place = source.kind == ExprKind.Var || source.kind == ExprKind.Field
+        || source.kind == ExprKind.Index;
+    if (preserve_direct_copy_drop && source_is_place
+        && ctx.types.is_copy(ctx.types.resolve_subst(src_ty))
+        && llvm_can_resolve_drop_fn(ctx, src_ty)) { return; }
+    llvm_clear_place_drops(ctx, src_id);
+}
+
+// After building an aggregate value, release any droppable place operand
+// it was copied from: the aggregate temp owns those bits now (when it is
+// stored into a flagged local). Skips non-places and untracked types.
+void llvm_clear_aggregate_sources(LlvmContext* ctx, u32 args_start, u32 args_count) {
+    i64 i = 0;
+    while (i < (i64)args_count) {
+        llvm_clear_copy_source(ctx, ctx.pool.args.get((i64)args_start + i), false);
+        i += 1;
+    }
+}
+
+u32 llvm_collect_drop_field_path(LlvmContext* ctx, u32 expr_id,
+                                 Vec<Projection>* path) {
+    if (expr_id == 0) { return 0; }
+    AstExpr* expr = ctx.pool.get_expr(expr_id);
+    if (expr.kind == ExprKind.Var) { return expr.aux; }
+    if (expr.kind == ExprKind.Move) {
+        return llvm_collect_drop_field_path(ctx, expr.inner0, path);
+    }
+    if ((expr.kind != ExprKind.Field && expr.kind != ExprKind.Index) || expr.inner0 == 0) {
+        return 0;
+    }
+    i64 old_len = path.len();
+    u32 root_name = llvm_collect_drop_field_path(ctx, expr.inner0, path);
+    if (root_name == 0) { return 0; }
+    Projection projection;
+    if (expr.kind == ExprKind.Field) {
+        projection.kind = ProjectionKind.Field;
+        projection.field_name_id = expr.aux;
+    } else {
+        u32 target_type = ctx.types.resolve_subst(llvm_expr_type(ctx, expr.inner0));
+        TypeEntry* target = ctx.types.get(target_type);
+        while (target.kind == TypeKind.Pointer || target.kind == TypeKind.Reference) {
+            target_type = target.inner;
+            target = ctx.types.get(target_type);
+        }
+        AstExpr* index_expr = ctx.pool.get_expr(expr.inner1);
+        if (target.kind != TypeKind.Tuple || index_expr.kind != ExprKind.Literal) {
+            while (path.len() > old_len) { path.pop(); }
+            return 0;
+        }
+        i64 index = parse_int_literal(ctx.names.get(index_expr.inner0));
+        if (index < 0 || index >= target.count) {
+            while (path.len() > old_len) { path.pop(); }
+            return 0;
+        }
+        projection.kind = ProjectionKind.Index;
+        projection.field_name_id = (u32)index;
+    }
+    path.push(move projection);
+    return root_name;
+}
+
+bool llvm_validate_drop_field_transfer(LlvmContext* ctx, LlvmLocal* local,
+                                      Vec<Projection>* path, u32 expr_id) {
+    u32 value_type = llvm_expr_type(ctx, expr_id);
+    if (value_type == TYPE_UNKNOWN || value_type == 0
+        || typecheck_type_is_copy(ctx.root, ctx.types, value_type)) { return true; }
+    u32 current_type = ctx.types.resolve_subst(local.type_id);
+    if (current_type == TYPE_UNKNOWN || current_type == 0) { return true; }
+    TypeEntry* root_entry = ctx.types.get(current_type);
+    if (root_entry.kind == TypeKind.Pointer || root_entry.kind == TypeKind.Reference) {
+        return true;
+    }
+    String place = String.from_str(ctx.names.get(local.name_id));
+    i64 i = 0;
+    while (i < path.len()) {
+        place.push_str(".");
+        place.push_str(ctx.names.get(path.get_ptr(i).field_name_id));
+        i += 1;
+    }
+    bool valid = true;
+    i = 0;
+    while (i < path.len()) {
+        TypeEntry* ancestor_entry = ctx.types.get(current_type);
+        if (ancestor_entry.kind == TypeKind.Pointer || ancestor_entry.kind == TypeKind.Reference) {
+            break;
+        }
+        if (typecheck_type_has_drop_impl(ctx.root, ctx.types, current_type)) {
+            String message = cannot_move_field_out_of_drop_type(
+                place.to_str(), ctx.types.type_name(current_type));
+            ctx.ownership_diagnostics.error(ctx.pool.get_expr(expr_id).span, move message);
+            valid = false;
+            break;
+        }
+        Projection* projection = path.get_ptr(i);
+        if (projection.kind == ProjectionKind.Field) {
+            current_type = typecheck_struct_field_type(ctx.types, ctx.root, current_type,
+                                                       ctx.names.get(projection.field_name_id));
+        } else if (projection.kind == ProjectionKind.Index) {
+            TypeEntry* tuple = ctx.types.get(ctx.types.resolve_subst(current_type));
+            if (tuple.kind != TypeKind.Tuple || projection.field_name_id >= (u32)tuple.count) {
+                break;
+            }
+            current_type = ctx.types.resolve_subst(ctx.types.type_args.get(
+                tuple.inner + projection.field_name_id));
+        } else {
+            break;
+        }
+        if (current_type == TYPE_UNKNOWN || current_type == 0) { break; }
+        i += 1;
+    }
+    place.drop();
+    return valid;
+}
+
+// Field transfers clear the selected subtree; indexed places retain the
+// conservative whole-root fallback because no per-element state exists.
+void llvm_clear_place_drops(LlvmContext* ctx, u32 expr_id) {
+    if (expr_id == 0) { return; }
+    AstExpr* expr = ctx.pool.get_expr(expr_id);
+    while (expr.kind == ExprKind.Move && expr.inner0 != 0) {
+        expr = ctx.pool.get_expr(expr.inner0);
+    }
+    Vec<Projection> path = Vec<Projection>.new();
+    u32 root_name = llvm_collect_drop_field_path(ctx, expr_id, &path);
+    if (root_name != 0 && path.len() > 0) {
+        LlvmLocal* local = ctx.find_local(root_name);
+        if (local != (LlvmLocal*)0) {
+            if (!llvm_validate_drop_field_transfer(ctx, local, &path, expr_id)) {
+                path.drop();
+                return;
+            }
+            u32 root_ty = ctx.types.resolve_subst(local.type_id);
+            if (root_ty != TYPE_UNKNOWN && root_ty != 0) {
+                TypeEntry* root_entry = ctx.types.get(root_ty);
+                if (root_entry.kind != TypeKind.Pointer
+                    && root_entry.kind != TypeKind.Reference) {
+                    llvm_set_path_drop_live(ctx, local, &path, false);
+                }
+            }
+        }
+        path.drop();
+        return;
+    }
+    path.drop();
+    while (expr.kind == ExprKind.Field || expr.kind == ExprKind.Index) {
+        if (expr.inner0 == 0) { return; }
+        expr = ctx.pool.get_expr(expr.inner0);
+    }
+    if (expr.kind == ExprKind.Var) {
+        llvm_clear_local_drops(ctx, expr.aux);
+    } else if (expr.kind == ExprKind.Move) {
+        llvm_clear_place_drops(ctx, expr.inner0);
+    }
+}
+
+// A custom enum destructor manages its payload; otherwise the tag selects
+// implicit payload cleanup. The whole flag skips moved-out values.
+void llvm_emit_local_whole_drop(LlvmContext* ctx, LlvmLocal* local) {
+    if (local.drop_flag == (LLVMOpaqueValue*)0) { return; }
+    u32 local_ty = ctx.types.resolve_subst(local.type_id);
+    LLVMOpaqueValue* own_fn = (LLVMOpaqueValue*)0;
+    if (llvm_can_resolve_drop_fn(ctx, local.type_id)) {
+        own_fn = llvm_drop_fn_for_type(ctx, local.type_id);
+    }
+    bool is_enum = false;
+    str enum_name = "";
+    if (local_ty != TYPE_UNKNOWN && local_ty != 0) {
+        TypeEntry* local_entry = ctx.types.get(local_ty);
+        if (local_entry.kind == TypeKind.Named) {
+            enum_name = ctx.types.names.get(local_entry.name_id);
+            is_enum = find_enum_item(ctx.root, enum_name) != (SyntaxNode*)0;
+        }
+    }
+    bool payloads = is_enum && own_fn == (LLVMOpaqueValue*)0
+        && llvm_enum_needs_payload_drop(ctx, local_ty, enum_name);
+    if (own_fn == (LLVMOpaqueValue*)0 && !payloads) { return; }
+    if (own_fn != (LLVMOpaqueValue*)0) {
+        llvm_emit_guarded_drop_call(ctx, local.drop_flag, own_fn, local.ptr);
+    }
+    if (payloads) {
+        llvm_emit_guarded_enum_payload_drop(ctx, local.drop_flag, local.ptr,
+                                            local_ty, enum_name);
+    }
+}
+
+// Emit one field-path entry's destructor or recursively owned enum payload.
+void llvm_emit_local_field_drop(LlvmContext* ctx, LlvmLocal* local, LlvmFieldFlag* entry) {
+    LLVMOpaqueValue* field_ptr = (LLVMOpaqueValue*)0;
+    u32 field_ty = 0;
+    if (!llvm_drop_projection_place(ctx, local.ptr, local.type_id, local, entry,
+                                    &field_ptr, &field_ty)) {
+        return;
+    }
+    if (llvm_can_resolve_drop_fn(ctx, field_ty)) {
+        LLVMOpaqueValue* field_fn = llvm_drop_fn_for_type(ctx, field_ty);
+        if (field_fn != (LLVMOpaqueValue*)0) {
+            llvm_emit_guarded_drop_call(ctx, entry.flag, field_fn, field_ptr);
+        }
+        return;
+    }
+    u32 resolved_field_ty = ctx.types.resolve_subst(field_ty);
+    TypeEntry* field_entry = ctx.types.get(resolved_field_ty);
+    if (field_entry.kind == TypeKind.Named) {
+        str enum_name = ctx.types.names.get(field_entry.name_id);
+        if (find_enum_item(ctx.root, enum_name) != (SyntaxNode*)0
+            && llvm_enum_needs_payload_drop(ctx, resolved_field_ty, enum_name)) {
+            llvm_emit_guarded_enum_payload_drop(ctx, entry.flag, field_ptr,
+                                                resolved_field_ty, enum_name);
+        }
+    }
+}
+
+// Capture the current locals depth as a drop mark, right after pushing a
+// scope: llvm_emit_drops_above with this mark later drops exactly the
+// locals declared inside the scope.
+i64 llvm_current_drop_mark(LlvmContext* ctx) {
+    return (i64)ctx.locals.len();
+}
+
+// Emit scope-exit drops for locals at stack positions [mark, len), newest
+// first. A struct's own destructor runs before its live fields, which drop
+// in declaration order. Each place keeps its independent ownership flag.
+void llvm_emit_drops_above(LlvmContext* ctx, i64 mark) {
+    if (ctx.current_fn == (LLVMOpaqueValue*)0) { return; }
+    i64 i = (i64)ctx.locals.len() - 1;
+    while (i >= mark) {
+        LlvmLocal* local = ctx.locals.get_ptr(i);
+        llvm_emit_local_whole_drop(ctx, local);
+        i64 fi = 0;
+        while (fi < local.field_flags.len()) {
+            llvm_emit_local_field_drop(ctx, local, local.field_flags.get_ptr(fi));
+            fi += 1;
+        }
+        i -= 1;
+    }
+}
+
+// Overwrite predrop releases the target subtree in parent-first preorder.
+void llvm_emit_assign_predrop(LlvmContext* ctx, u32 target_id, u32 rhs_id) {
+    if (target_id == 0 || rhs_id == 0 || ctx.current_fn == (LLVMOpaqueValue*)0) { return; }
+    AstExpr* target = ctx.pool.get_expr(target_id);
+    AstExpr* rhs = ctx.pool.get_expr(rhs_id);
+    if (target.kind == ExprKind.Var && rhs.kind == ExprKind.Var && target.aux == rhs.aux) {
+        return;
+    }
+    if (target.kind == ExprKind.Var) {
+        LlvmLocal* local = ctx.find_local(target.aux);
+        if (local == (LlvmLocal*)0) { return; }
+        llvm_emit_local_whole_drop(ctx, local);
+        i64 fi = 0;
+        while (fi < local.field_flags.len()) {
+            llvm_emit_local_field_drop(ctx, local, local.field_flags.get_ptr(fi));
+            fi += 1;
+        }
+        return;
+    }
+    Vec<Projection> path = Vec<Projection>.new();
+    u32 root_name = llvm_collect_drop_field_path(ctx, target_id, &path);
+    if (root_name != 0 && path.len() > 0) {
+        LlvmLocal* local = ctx.find_local(root_name);
+        if (local != (LlvmLocal*)0) {
+            i64 fi = 0;
+            while (fi < local.field_flags.len()) {
+                LlvmFieldFlag* entry = local.field_flags.get_ptr(fi);
+                if (llvm_drop_path_matches(local, entry, &path)) {
+                    llvm_emit_local_field_drop(ctx, local, entry);
+                }
+                fi += 1;
+            }
+        }
+    }
+    path.drop();
+}
+
+// Mark the assigned subtree and its intermediate owning ancestors live,
+// and promote the root flag.
+void llvm_mark_assign_live(LlvmContext* ctx, u32 target_id) {
+    if (target_id == 0) { return; }
+    AstExpr* target = ctx.pool.get_expr(target_id);
+    if (target.kind == ExprKind.Var) {
+        llvm_set_local_drop_live(ctx, target.aux, true);
+        return;
+    }
+    Vec<Projection> path = Vec<Projection>.new();
+    u32 root_name = llvm_collect_drop_field_path(ctx, target_id, &path);
+    if (root_name != 0 && path.len() > 0) {
+        llvm_set_field_drop_live(ctx, root_name, &path);
+    }
+    path.drop();
+}
+
+// Tag-dispatched payload drops guarded by an existing whole-local flag.
+void llvm_emit_guarded_enum_payload_drop(LlvmContext* ctx, LLVMOpaqueValue* flag,
+                                         LLVMOpaqueValue* ptr, u32 type_id, str enum_name) {
+    LLVMOpaqueBasicBlock* run_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "drop_enum_run");
+    LLVMOpaqueBasicBlock* after_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "drop_enum_after");
+    LLVMOpaqueType* i1_ty = LLVMInt1TypeInContext(ctx.ctx);
+    LLVMOpaqueValue* live = LLVMBuildLoad2(ctx.builder, i1_ty, flag, "drop_enum_flag");
+    LLVMBuildCondBr(ctx.builder, live, run_bb, after_bb);
+    LLVMPositionBuilderAtEnd(ctx.builder, run_bb);
+    llvm_emit_enum_payload_drop(ctx, ptr, type_id, enum_name);
+    LLVMBuildBr(ctx.builder, after_bb);
+    LLVMPositionBuilderAtEnd(ctx.builder, after_bb);
+}

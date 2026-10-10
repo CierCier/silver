@@ -17,6 +17,11 @@ import std.sys.os;
 // Maximum concurrently live threads (slots are reclaimed by thread_join).
 const i64 MAX_THREADS = 64;
 
+i64 thread_registry_capacity() {
+    if (@cfg(launch_failure_test)) { return 1; }
+    return MAX_THREADS;
+}
+
 // futex(2) operations (Linux x86_64, syscall 202).
 const i64 FUTEX_OP_WAIT = 0;
 const i64 FUTEX_OP_WAKE = 1;
@@ -193,7 +198,7 @@ u8* __silver_wait_done(i64 rec) {
 
 /// Join every live thread. Called by `_start` before I/O flush / exit.
 void __silver_thread_registry_join_all() {
-    for (i64 i = 0; i < MAX_THREADS; i = i + 1) {
+    for (i64 i = 0; i < thread_registry_capacity(); i = i + 1) {
         // Snapshot tid without taking the lock; a concurrent spawn only ever
         // transitions a slot 0 -> -1 -> tid, and at this stage (process exit)
         // no spawns remain. >0 means a child exists.

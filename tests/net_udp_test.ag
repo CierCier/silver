@@ -5,6 +5,8 @@
 import std.net.socket;
 import std.net.inet;
 import std.sys.socket;
+import std.sys.raw.socket;
+import std.sys.os_linux;
 import std.test;
 
 i32 main() {
@@ -58,9 +60,23 @@ i32 main() {
     Result<SocketAddr, AddrError> v6_res = SocketAddr.v6("::1", (u16)0);
     if (v6_res.success()) {
         SocketAddr v6_addr = v6_res.unwrap();
-        UdpSocket v6_sock = UdpSocket.bind_addr(&v6_addr);
-        assert_true(v6_sock.valid(), "bind_addr on v6 succeeds");
-        v6_sock.close();
+        // Address parsing succeeds even when the host has IPv6 loopback off.
+        i64 probe_fd = sys_socket((i64)AddressFamily.INET6,
+            (i64)SocketType.DGRAM | SOCK_CLOEXEC, 0);
+        if (probe_fd >= 0) {
+            SockAddrIn6 probe_addr = SockAddrIn6.v6((u16)0, "::1");
+            bool host_supports_v6 = sys_bind(probe_fd, (i64)&probe_addr, 28) == 0;
+            sys_close(probe_fd);
+            if (host_supports_v6) {
+                UdpSocket v6_sock = UdpSocket.bind_addr(&v6_addr);
+                assert_true(v6_sock.valid(), "bind_addr on v6 succeeds");
+                v6_sock.close();
+            } else {
+                @println("  [SKIP] IPv6 loopback unavailable on this host");
+            }
+        } else {
+            @println("  [SKIP] IPv6 datagram sockets unavailable on this host");
+        }
     }
 
     return done();

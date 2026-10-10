@@ -1,0 +1,12 @@
+// References to global storage outlive the function and may be returned.
+
+i64 global_value = 42;
+
+i64* get_global_value() {
+    return &global_value;
+}
+
+i64 main() {
+    i64* returned = get_global_value();
+    return returned == &global_value ? 0 : 1;
+}

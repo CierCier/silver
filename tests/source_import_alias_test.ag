@@ -1,0 +1,8 @@
+// Source-module selections preserve imported aliases in both compilers.
+// compile_flags: -I tests/modules
+import alias_source { alias_source_target as imported_alias };
+import std.sys.entry;
+
+i32 main() {
+    return imported_alias() == 23 ? 0 : 1;
+}

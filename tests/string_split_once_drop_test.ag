@@ -1,0 +1,31 @@
+// compile_flags: --no-cache
+import std.test;
+import std.string;
+
+i32 main() {
+    String source = String.from_str("left=right");
+    Optional<[String, String]> parts = source.split_once("=");
+    assert_true(parts.is_some(), "split_once returns both owned parts");
+    let [key, value] = parts.unwrap();
+    assert_true(key == "left", "first part is intact");
+    assert_true(value == "right", "second part is intact");
+    key.drop();
+    value.drop();
+    source.drop();
+    {
+        String indexed_source = String.from_str("left=right");
+        Optional<[String, String]> indexed_parts = indexed_source.split_once("=");
+        assert_true(indexed_parts.is_some(), "indexed split_once returns both owned parts");
+        [String, String] indexed_pair = indexed_parts.unwrap();
+        String indexed_key = move indexed_pair[0];
+        assert_true(indexed_key == "left", "indexed move preserves the selected field");
+        // Scope exit must drop both the moved field and its untouched sibling.
+    }
+    {
+        String retained_source = String.from_str("left=right");
+        Optional<[String, String]> retained_parts = retained_source.split_once("=");
+        assert_true(retained_parts.is_some(), "unextracted tuple remains present");
+        retained_source.drop();
+    }
+    return done();
+}

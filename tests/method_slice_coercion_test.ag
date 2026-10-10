@@ -1,0 +1,22 @@
+import std.mem.vec;
+
+struct SliceMethodBox<T> { }
+
+impl<T> SliceMethodBox<T> {
+    i64 count(SliceMethodBox<T>* self, [T] values) {
+        return values.len;
+    }
+}
+
+i32 main() {
+    SliceMethodBox<i32> box;
+    i32 array[3] = {1, 2, 3};
+    if (box.count(array) != 3) { return 1; }
+
+    Vec<i32> values = Vec.new();
+    values.push(4);
+    values.push(5);
+    if (box.count(values) != 2) { return 2; }
+    if (values.get(0) != 4) { return 3; }
+    return 0;
+}

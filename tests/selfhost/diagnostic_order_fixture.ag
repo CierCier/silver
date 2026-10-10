@@ -1,0 +1,7 @@
+i32 main() {
+    return absent_earlier;
+}
+
+i32 helper() {
+    return absent_later;
+}

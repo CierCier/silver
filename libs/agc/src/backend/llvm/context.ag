@@ -1,0 +1,503 @@
+// libs/agc/src/backend/llvm/context.ag — LLVM codegen context and local symbol tracking.
+import vendor.llvm.llvm;
+import std.intern;
+import std.io;
+import std.mem.vec;
+import std.string;
+import frontend.ast;
+import frontend.ast_expr;
+import frontend.items;
+import frontend.diagnostics;
+import frontend.place;
+import frontend.symbols;
+import frontend.types;
+import backend.llvm.types;
+
+struct LlvmLocal {
+    u32 name_id;
+    LLVMOpaqueValue* ptr;
+    u32 type_id;
+    bool is_mut;
+    bool is_string_literal_backed;
+    LLVMOpaqueValue* drop_flag;
+    Vec<LlvmFieldFlag> field_flags;
+    Vec<Projection> drop_projections;
+}
+
+struct LlvmFieldFlag {
+    u32 projections_start;
+    u32 projections_count;
+    LLVMOpaqueValue* flag;
+}
+
+// One payload binding of a match arm and the scrutinee expression it was
+// extracted from. While the arm emits, moving the binding out also releases
+// the scrutinee side (its payload was moved away).
+struct ScrutineeMove {
+    u32 binding_name;
+    u32 scrutinee_expr;
+}
+
+struct LlvmFieldInfo {
+    u32 name_id;
+    u32 type_id;
+    u32 index;
+}
+
+struct LlvmStructDef {
+    u32 name_id;
+    LLVMOpaqueType* llvm_type;
+    bool packed;
+    Vec<LlvmFieldInfo> fields;
+}
+
+struct LlvmTypeBinding {
+    u32 param_name_id;
+    u32 type_id;
+}
+
+struct LlvmSymbolInfo {
+    bool is_global;
+    u32 type_id;
+}
+
+struct MonoRequest {
+    bool is_free_function;
+    u32 base_id;
+    u32 method_id;
+    u32 mangled_id;
+    u32 args_start;
+    u32 args_count;
+    u32 value_arg_count;
+}
+
+struct LlvmContext {
+    LLVMOpaqueContext* ctx;
+    LLVMTargetDataRef* target_data;
+    LLVMOpaqueContext* ctx_unused;
+    LLVMOpaqueModule* module;
+    LLVMOpaqueBuilder* builder;
+    TypeTable* types;
+    Interner* names;
+    AstPool* pool;
+    SyntaxNode* root;
+    Vec<String>* source_paths;
+    bool debug_mode;
+    LLVMOpaqueValue* current_fn;
+    u32 current_return_type;
+    u32 expected_type_id;
+    i64 defer_emission_depth;
+    Vec<LlvmLocal> locals;
+    Vec<LlvmStructDef> struct_defs;
+    Vec<i64> scope_markers;
+    Vec<u32> deferred_statements;
+    Vec<i64> defer_scope_markers;
+    Vec<LLVMOpaqueBasicBlock*> loop_breaks;
+    Vec<LLVMOpaqueBasicBlock*> loop_continues;
+    Vec<i64> loop_drop_marks;
+    Vec<i64> loop_defer_marks;
+    Vec<LLVMOpaqueValue*> loop_stack_saves;
+    Vec<ScrutineeMove> scrutinee_moves;
+    Vec<LlvmTypeBinding> type_subst;
+    i64 unresolved_calls;
+    i64 launch_trampoline_count;
+    DiagnosticBag* ownership_diagnostics;
+    i64 mono_count;
+    Vec<MonoRequest> mono_queue;
+    Vec<u32> mono_queue_args;
+    Vec<u32> generic_layout_ids;
+}
+
+impl LlvmContext {
+    LlvmContext new(LLVMOpaqueContext* ctx, LLVMTargetDataRef* target_data,
+                    LLVMOpaqueModule* module, LLVMOpaqueBuilder* builder,
+                    TypeTable* types, Interner* names, AstPool* pool, SyntaxNode* root,
+                    Vec<String>* source_paths, bool debug_mode) {
+        LlvmContext c;
+        c.ctx = ctx;
+        c.target_data = target_data;
+        c.module = module;
+        c.builder = builder;
+        c.types = types;
+        c.names = names;
+        c.pool = pool;
+        c.root = root;
+        c.source_paths = source_paths;
+        c.debug_mode = debug_mode;
+        c.current_fn = (LLVMOpaqueValue*)0;
+        c.current_return_type = TYPE_VOID;
+        c.expected_type_id = 0;
+        c.defer_emission_depth = 0;
+        c.locals = Vec<LlvmLocal>.new();
+        c.struct_defs = Vec<LlvmStructDef>.new();
+        c.scope_markers = Vec<i64>.new();
+        c.deferred_statements = Vec<u32>.new();
+        c.defer_scope_markers = Vec<i64>.new();
+        c.loop_breaks = Vec<LLVMOpaqueBasicBlock*>.new();
+        c.loop_continues = Vec<LLVMOpaqueBasicBlock*>.new();
+        c.loop_drop_marks = Vec<i64>.new();
+        c.loop_defer_marks = Vec<i64>.new();
+        c.loop_stack_saves = Vec<LLVMOpaqueValue*>.new();
+        c.scrutinee_moves = Vec<ScrutineeMove>.new();
+        c.type_subst = Vec<LlvmTypeBinding>.new();
+        c.unresolved_calls = 0;
+        c.launch_trampoline_count = 0;
+        c.ownership_diagnostics = (DiagnosticBag*)0;
+        c.mono_count = 0;
+        c.mono_queue = Vec<MonoRequest>.new();
+        c.mono_queue_args = Vec<u32>.new();
+        c.generic_layout_ids = Vec<u32>.new();
+        return move c;
+    }
+
+    void push_type_binding(LlvmContext* self, str param_name, u32 type_id) {
+        LlvmTypeBinding binding;
+        binding.param_name_id = self.names.intern(param_name);
+        binding.type_id = type_id;
+        self.type_subst.push(move binding);
+    }
+
+    void pop_type_bindings(LlvmContext* self, i64 count) {
+        while (count > 0 && self.type_subst.len() > 0) {
+            self.type_subst.pop();
+            count -= 1;
+        }
+    }
+
+    /// Resolve a type text through the active generic substitution stack.
+    /// Returns TYPE_UNKNOWN when no binding applies.
+    u32 subst_type(LlvmContext* self, str type_text) {
+        if (self.type_subst.len() == 0 || strlen(type_text) == 0) {
+            return TYPE_UNKNOWN;
+        }
+        i64 i = self.type_subst.len() - 1;
+        while (i >= 0) {
+            LlvmTypeBinding* binding = self.type_subst.get_ptr(i);
+            if (strcmp(self.names.get(binding.param_name_id), type_text) == 0) {
+                return binding.type_id;
+            }
+            i -= 1;
+        }
+        return TYPE_UNKNOWN;
+    }
+
+    /// Identify a top-level name: global variables report their declared type
+    /// so method-call receivers mangle through the TYPE, not the variable name.
+    LlvmSymbolInfo lookup_symbol(LlvmContext* self, str name) {
+        LlvmSymbolInfo info;
+        info.is_global = false;
+        info.type_id = TYPE_UNKNOWN;
+        if (strlen(name) == 0) {
+            return info;
+        }
+        SyntaxNode* item = self.root.first_child;
+        while (item != (SyntaxNode*)0) {
+            if (item.kind == NodeKind.Global) {
+                SyntaxNode* id_node = item_identifier(item);
+                if (id_node != (SyntaxNode*)0 && strcmp(id_node.text, name) == 0) {
+                    String g_text = String.new();
+                    SyntaxNode* g_scan = item.first_child;
+                    while (g_scan != (SyntaxNode*)0 && g_scan != id_node) {
+                        if (g_scan.kind == NodeKind.Token && g_scan.text == "#") {
+                            g_scan = g_scan.next_sibling;
+                            if (g_scan != (SyntaxNode*)0 && g_scan.kind == NodeKind.Bracket) {
+                                g_scan = g_scan.next_sibling;
+                            }
+                            continue;
+                        }
+                        if (g_scan.kind == NodeKind.Token && g_scan.text != "pub"
+                            && g_scan.text != "static" && g_scan.text != "const"
+                            && g_scan.text != "volatile") {
+                            g_text.push_str(g_scan.text);
+                        }
+                        g_scan = g_scan.next_sibling;
+                    }
+                    SyntaxNode* ext = id_node.next_sibling;
+                    info.is_global = true;
+                    info.type_id = type_id_from_declarator(self.types,
+                        g_text.to_str(), ext);
+                    g_text.drop();
+                    return info;
+                }
+            } else if (item.kind == NodeKind.Extern) {
+                SyntaxNode* block = item.first_child;
+                while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+                    block = block.next_sibling;
+                }
+                if (block != (SyntaxNode*)0) {
+                    SyntaxNode* cursor = block.first_child;
+                    while (cursor != (SyntaxNode*)0) {
+                        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
+                            cursor = cursor.next_sibling;
+                            continue;
+                        }
+                        SyntaxNode* ret_start = cursor;
+                        SyntaxNode* fn_name_node = (SyntaxNode*)0;
+                        SyntaxNode* params_node = (SyntaxNode*)0;
+                        SyntaxNode* scan = cursor;
+                        while (scan != (SyntaxNode*)0 && !(scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Semicolon)) {
+                            if (scan.kind == NodeKind.Parenthesized) {
+                                params_node = scan;
+                                break;
+                            }
+                            if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Identifier) {
+                                fn_name_node = scan;
+                            }
+                            scan = scan.next_sibling;
+                        }
+                        if (fn_name_node != (SyntaxNode*)0 && params_node == (SyntaxNode*)0) {
+                            if (strcmp(fn_name_node.text, name) == 0) {
+                                String g_text = String.new();
+                                SyntaxNode* g_scan = ret_start;
+                                while (g_scan != (SyntaxNode*)0 && g_scan != fn_name_node) {
+                                    if (g_scan.kind == NodeKind.Token) {
+                                        g_text.push_str(g_scan.text);
+                                    }
+                                    g_scan = g_scan.next_sibling;
+                                }
+                                SyntaxNode* ext = fn_name_node.next_sibling;
+                                info.is_global = true;
+                                info.type_id = type_id_from_declarator(self.types,
+                                    g_text.to_str(), ext);
+                                g_text.drop();
+                                return info;
+                            }
+                        }
+                        while (cursor != (SyntaxNode*)0 && !(cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon)) {
+                            cursor = cursor.next_sibling;
+                        }
+                        if (cursor != (SyntaxNode*)0) {
+                            cursor = cursor.next_sibling;
+                        }
+                    }
+                }
+            }
+            item = item.next_sibling;
+        }
+        return info;
+    }
+
+    void note_unresolved(LlvmContext* self, str kind, str name) {
+        self.unresolved_calls += 1;
+        STDERR.write_str("agc: error: native backend cannot resolve ");
+        STDERR.write_str(kind);
+        STDERR.write_str(" '");
+        STDERR.write_str(name);
+        STDERR.write_str("'");
+        if (self.current_fn != (LLVMOpaqueValue*)0) {
+            str fn_name = LLVMGetValueName(self.current_fn);
+            if (fn_name != (str)0 && strlen(fn_name) > 0) {
+                STDERR.write_str(" in ");
+                STDERR.write_str(fn_name);
+            }
+        }
+        STDERR.write_str("\n");
+    }
+
+    LlvmStructDef* find_struct(LlvmContext* self, u32 name_id) {
+        str name = self.names.get(name_id);
+        return self.find_struct_by_str(name);
+    }
+
+    LlvmStructDef* find_struct_by_str(LlvmContext* self, str name) {
+        if (name == (str)0 || strlen(name) == 0) {
+            return (LlvmStructDef*)0;
+        }
+        String base = String.new();
+        i64 b = 0;
+        while (name[b] != (u8)0 && name[b] != (u8)60) {
+            base.push(name[b]);
+            b += 1;
+        }
+        str lookup = (base.len() > 0) ? base.to_str() : name;
+        i64 i = 0;
+        while (i < self.struct_defs.len()) {
+            LlvmStructDef* def = self.struct_defs.get_ptr(i);
+            str def_name = self.names.get(def.name_id);
+            if (strcmp(def_name, lookup) == 0) {
+                base.drop();
+                return def;
+            }
+            i += 1;
+        }
+        base.drop();
+        return (LlvmStructDef*)0;
+    }
+
+    i32 find_field_index(LlvmContext* self, LlvmStructDef* def, u32 field_name_id) {
+        i64 i = 0;
+        while (i < def.fields.len()) {
+            LlvmFieldInfo* f = def.fields.get_ptr(i);
+            if (f.name_id == field_name_id) {
+                return (i32)f.index;
+            }
+            i += 1;
+        }
+        return -1;
+    }
+
+    u32 find_field_type(LlvmContext* self, LlvmStructDef* def, u32 field_name_id) {
+        i64 i = 0;
+        while (i < def.fields.len()) {
+            LlvmFieldInfo* f = def.fields.get_ptr(i);
+            if (f.name_id == field_name_id) {
+                return f.type_id;
+            }
+            i += 1;
+        }
+        return TYPE_UNKNOWN;
+    }
+
+
+    void push_scope(LlvmContext* self) {
+        self.scope_markers.push(self.locals.len());
+        self.defer_scope_markers.push(self.deferred_statements.len());
+    }
+
+    void pop_scope(LlvmContext* self) {
+        if (self.defer_scope_markers.len() > 0) {
+            i64 defer_mark = self.defer_scope_markers.pop();
+            while (self.deferred_statements.len() > defer_mark) {
+                self.deferred_statements.pop();
+            }
+        }
+        if (self.scope_markers.len() > 0) {
+            i64 mark = self.scope_markers.pop();
+            while (self.locals.len() > mark) {
+                LlvmLocal _local = self.locals.pop();
+            }
+        }
+    }
+
+    LlvmLocal* find_local(LlvmContext* self, u32 name_id) {
+        i64 i = self.locals.len() - 1;
+        while (i >= 0) {
+            LlvmLocal* cur = self.locals.get_ptr(i);
+            if (cur.name_id == name_id) {
+                return cur;
+            }
+            i -= 1;
+        }
+        return (LlvmLocal*)0;
+    }
+
+    void add_local(LlvmContext* self, u32 name_id, LLVMOpaqueValue* ptr, u32 type_id, bool is_mut) {
+        LlvmLocal local;
+        local.name_id = name_id;
+        local.ptr = ptr;
+        local.type_id = type_id;
+        local.is_mut = is_mut;
+        local.is_string_literal_backed = false;
+        local.drop_flag = (LLVMOpaqueValue*)0;
+        local.field_flags = Vec<LlvmFieldFlag>.new();
+        local.drop_projections = Vec<Projection>.new();
+        self.locals.push(move local);
+    }
+
+    LLVMOpaqueValue* save_stack(LlvmContext* self) {
+        LLVMOpaqueType* ptr_ty = LLVMPointerTypeInContext(self.ctx, 0);
+        LLVMOpaqueType* fn_ty = LLVMFunctionType(ptr_ty, (LLVMOpaqueType**)0, 0, 0);
+        LLVMOpaqueValue* fn = LLVMGetNamedFunction(self.module, "llvm.stacksave.p0");
+        if (fn == (LLVMOpaqueValue*)0) {
+            fn = LLVMAddFunction(self.module, "llvm.stacksave.p0", fn_ty);
+        }
+        return LLVMBuildCall2(self.builder, fn_ty, fn, (LLVMOpaqueValue**)0, 0, "loop.stack.save");
+    }
+
+    void restore_stack(LlvmContext* self, LLVMOpaqueValue* saved) {
+        LLVMOpaqueType* ptr_ty = LLVMPointerTypeInContext(self.ctx, 0);
+        LLVMOpaqueType* fn_ty = LLVMFunctionType(LLVMVoidTypeInContext(self.ctx), &ptr_ty, 1, 0);
+        LLVMOpaqueValue* fn = LLVMGetNamedFunction(self.module, "llvm.stackrestore.p0");
+        if (fn == (LLVMOpaqueValue*)0) {
+            fn = LLVMAddFunction(self.module, "llvm.stackrestore.p0", fn_ty);
+        }
+        Vec<LLVMOpaqueValue*> args = Vec<LLVMOpaqueValue*>.new();
+        args.push(saved);
+        LLVMBuildCall2(self.builder, fn_ty, fn, args.data, 1, "");
+        args.drop();
+    }
+
+    void push_loop(LlvmContext* self, LLVMOpaqueBasicBlock* break_bb,
+                   LLVMOpaqueBasicBlock* cont_bb, LLVMOpaqueValue* stack_save) {
+        self.loop_breaks.push(break_bb);
+        self.loop_continues.push(cont_bb);
+        self.loop_drop_marks.push((i64)self.locals.len());
+        self.loop_defer_marks.push(self.deferred_statements.len());
+        self.loop_stack_saves.push(stack_save);
+    }
+
+    void pop_loop(LlvmContext* self) {
+        if (self.loop_breaks.len() > 0) {
+            self.loop_breaks.pop();
+            self.loop_continues.pop();
+        }
+        if (self.loop_drop_marks.len() > 0) {
+            self.loop_drop_marks.pop();
+        }
+        if (self.loop_defer_marks.len() > 0) {
+            self.loop_defer_marks.pop();
+        }
+        if (self.loop_stack_saves.len() > 0) {
+            self.loop_stack_saves.pop();
+        }
+    }
+
+    LLVMOpaqueBasicBlock* current_break(LlvmContext* self) {
+        if (self.loop_breaks.len() == 0) {
+            return (LLVMOpaqueBasicBlock*)0;
+        }
+        return self.loop_breaks.get(self.loop_breaks.len() - 1);
+    }
+
+    LLVMOpaqueBasicBlock* current_continue(LlvmContext* self) {
+        if (self.loop_continues.len() == 0) {
+            return (LLVMOpaqueBasicBlock*)0;
+        }
+        return self.loop_continues.get(self.loop_continues.len() - 1);
+    }
+
+    LLVMOpaqueValue* current_loop_stack_save(LlvmContext* self) {
+        if (self.loop_stack_saves.len() == 0) {
+            return (LLVMOpaqueValue*)0;
+        }
+        return self.loop_stack_saves.get(self.loop_stack_saves.len() - 1);
+    }
+
+    bool is_terminated(LlvmContext* self) {
+        LLVMOpaqueBasicBlock* bb = LLVMGetInsertBlock(self.builder);
+        if (bb == (LLVMOpaqueBasicBlock*)0) {
+            return true;
+        }
+        return LLVMGetBasicBlockTerminator(bb) != (LLVMOpaqueValue*)0;
+    }
+}
+
+bool str_starts_with(str s, str prefix) {
+    if (s == (str)0 || prefix == (str)0) { return false; }
+    i64 slen = strlen(s);
+    i64 plen = strlen(prefix);
+    if (slen < plen) { return false; }
+    i64 i = 0;
+    while (i < plen) {
+        if (s[i] != prefix[i]) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+bool str_contains(str s, str sub) {
+    if (s == (str)0 || sub == (str)0) { return false; }
+    i64 slen = strlen(s);
+    i64 sublen = strlen(sub);
+    if (slen < sublen) { return false; }
+    i64 i = 0;
+    while (i <= slen - sublen) {
+        i64 j = 0;
+        while (j < sublen && s[i + j] == sub[j]) {
+            j += 1;
+        }
+        if (j == sublen) { return true; }
+        i += 1;
+    }
+    return false;
+}

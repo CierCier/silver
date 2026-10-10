@@ -1,0 +1,28 @@
+import std.test;
+import std.map;
+
+i32 main() {
+    HashMap<i32, i64> map = HashMap<i32, i64>.new();
+    map.insert(11, (i64)42);
+    Optional<[i32, i64]> removed = map.remove(11);
+    assert_true(removed.is_some(), "remove returns a populated tuple");
+    let [key, value] = removed.unwrap();
+    assert_eq_i32(key, 11, "removed tuple keeps its key");
+    assert_eq_i64(value, 42, "removed tuple keeps its value");
+
+    map.insert(1, (i64)10);
+    map.insert(2, (i64)20);
+    HashMapDrain<i32, i64> drain = map.drain();
+    i64 sum = 0;
+    i64 count = 0;
+    while (true) {
+        Optional<[i32, i64]> item = drain.next();
+        if (item.is_none()) { break; }
+        let [_key, item_value] = item.unwrap();
+        sum = sum + item_value;
+        count = count + 1;
+    }
+    assert_eq_i64(count, 2, "drain yields both tuples");
+    assert_eq_i64(sum, 30, "drained tuple values stay intact");
+    return done();
+}

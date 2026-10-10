@@ -1,0 +1,11 @@
+import std.string;
+
+macro str borrow_local() {
+    String local = String.from_str("short-lived");
+    return local.to_str();
+}
+
+i32 main() {
+    str borrowed = @borrow_local();
+    return borrowed[0] == (u8)'s' ? 0 : 1;
+}

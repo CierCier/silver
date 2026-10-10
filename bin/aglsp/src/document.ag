@@ -1,0 +1,61 @@
+// bin/aglsp/src/document.ag — In-memory document tracking for LSP buffers.
+import std.mem.vec;
+import std.string;
+
+struct Document {
+    String uri;
+    String text;
+    i64 version;
+}
+
+struct DocumentStore {
+    Vec<Document> docs;
+}
+
+impl DocumentStore {
+    DocumentStore new() {
+        DocumentStore store;
+        store.docs = Vec<Document>.new();
+        return move store;
+    }
+
+    Document* get(DocumentStore* self, str uri) {
+        i64 i = 0;
+        while (i < self.docs.len()) {
+            Document* doc = self.docs.get_ptr(i);
+            if (doc.uri.equals(uri)) {
+                return doc;
+            }
+            i += 1;
+        }
+        return (Document*)0;
+    }
+
+    void set(DocumentStore* self, str uri, str text, i64 version) {
+        Document* existing = self.get(uri);
+        if (existing != (Document*)0) {
+            existing.text = String.from_str(text);
+            existing.version = version;
+            return;
+        }
+        Document doc;
+        doc.uri = String.from_str(uri);
+        doc.text = String.from_str(text);
+        doc.version = version;
+        self.docs.push(move doc);
+    }
+
+    void remove(DocumentStore* self, str uri) {
+        i64 i = 0;
+        while (i < self.docs.len()) {
+            Document* doc = self.docs.get_ptr(i);
+            if (doc.uri.equals(uri)) {
+                Document removed = self.docs.swap_remove(i);
+                removed.uri.drop();
+                removed.text.drop();
+                return;
+            }
+            i += 1;
+        }
+    }
+}

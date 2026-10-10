@@ -345,10 +345,8 @@ void http_parse_one_set_cookie(u8* data, i64 start, i64 end, Vec<Cookie>* out) {
                 } else if (http_equal_ci(data, astart, aname_end, "httponly")) {
                     cookie.http_only = true;
                 } else if (http_equal_ci(data, astart, aname_end, "domain") && avalue_start < avalue_end) {
-                    cookie.domain.drop();
                     cookie.domain = http_string_from_bytes(data, avalue_start, avalue_end);
                 } else if (http_equal_ci(data, astart, aname_end, "path") && avalue_start < avalue_end) {
-                    cookie.path.drop();
                     cookie.path = http_string_from_bytes(data, avalue_start, avalue_end);
                 } else if (http_equal_ci(data, astart, aname_end, "max-age") && avalue_start < avalue_end) {
                     // Go: Atoi; leading-zero values are rejected; <= 0
@@ -557,7 +555,6 @@ impl CookieJar {
         bool host_is_ip = inet_pton4(host, &ip4);
         if (incoming.domain.len == 0) {
             // Host-only cookie: its domain is the request host.
-            incoming.domain.drop();
             incoming.domain = String.from_str(host);
         } else if (host_is_ip) {
             // Go's domainAndType: for IP hosts the Domain attribute must
@@ -577,7 +574,6 @@ impl CookieJar {
                 incoming.drop();
                 return;
             }
-            incoming.domain.drop();
             incoming.domain = String.from_str(host);
         } else {
             // Strip a leading dot; the cookie must domain-match the host.
@@ -585,7 +581,6 @@ impl CookieJar {
             i64 dstart = 0;
             if (d[0] == (u8)'.') { dstart = 1; }
             String domain = incoming.domain.substr(dstart, incoming.domain.len - dstart);
-            incoming.domain.drop();
             incoming.domain = move domain;
             if (!http_domain_match(host, (str)incoming.domain.data)) {
                 incoming.drop();
@@ -593,7 +588,6 @@ impl CookieJar {
             }
         }
         if (incoming.path.len == 0) {
-            incoming.path.drop();
             incoming.path = http_default_path(path);
         }
         // Expiry (Go's cookiejar.newEntry): Max-Age < 0 deletes; > 0 sets

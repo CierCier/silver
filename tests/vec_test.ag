@@ -70,7 +70,7 @@ i32 main() {
         v.push(2);
         v.push(3);
 
-        v.set(&v, 1, 99);
+        v.set(1, 99);
         assert_eq_i32(v.get(1), 99, "set updates index 1 to 99");
         assert_eq_i32(v.get(0), 1, "index 0 unchanged after set");
         assert_eq_i32(v.get(2), 3, "index 2 unchanged after set");
@@ -110,7 +110,7 @@ i32 main() {
         v.push(3);
         i64 old_len = v.len();
 
-        v.reserve(&v, 64);
+        v.reserve(64);
         assert_true(v.capacity() >= 64, "capacity >= 64 after reserve(64)");
         assert_eq_i64(v.len(), old_len, "len unchanged after reserve");
         assert_eq_i32(v.get(0), 1, "value at 0 preserved after reserve");

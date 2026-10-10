@@ -1,0 +1,549 @@
+// Stage1 source synthesis for the JSON derives supported by stage0.
+import std.mem.vec;
+import std.string;
+import frontend.ast;
+import frontend.items;
+import frontend.lexer;
+
+struct JsonSynthesisField {
+    String name;
+    String type_name;
+    String json_name;
+    bool ignored;
+    SyntaxNode* type_start;
+    SyntaxNode* type_end;
+}
+
+String json_synthesis_tag(str raw) {
+    String result = String.new();
+    i64 length = strlen(raw);
+    i64 index = 0;
+    while (index + 5 <= length) {
+        if (raw[index] == (u8)'j' && raw[index + 1] == (u8)'s'
+            && raw[index + 2] == (u8)'o' && raw[index + 3] == (u8)'n'
+            && raw[index + 4] == (u8)':') {
+            index += 5;
+            while (index < length && raw[index] != (u8)' '
+                && raw[index] != (u8)'\t' && raw[index] != (u8)',') {
+                result.push(raw[index]);
+                index += 1;
+            }
+            return result;
+        }
+        index += 1;
+    }
+    return result;
+}
+
+bool json_synthesis_string_token(SyntaxNode* node) {
+    return node != (SyntaxNode*)0 && node.kind == NodeKind.Token
+        && strlen(node.text) >= 2 && node.text[0] == '"';
+}
+
+void json_synthesis_collect_fields(SyntaxNode* item, Vec<JsonSynthesisField>* fields) {
+    SyntaxNode* body = item.first_child;
+    while (body != (SyntaxNode*)0 && body.kind != NodeKind.Block) {
+        body = body.next_sibling;
+    }
+    if (body == (SyntaxNode*)0) { return; }
+
+    SyntaxNode* start = body.first_child;
+    while (start != (SyntaxNode*)0) {
+        SyntaxNode* end = start;
+        SyntaxNode* field_name = (SyntaxNode*)0;
+        SyntaxNode* tag = (SyntaxNode*)0;
+        while (end != (SyntaxNode*)0) {
+            if (json_synthesis_string_token(end)) {
+                if (tag == (SyntaxNode*)0) { tag = end; }
+            } else if (tag == (SyntaxNode*)0 && end.kind == NodeKind.Token
+                && end.token_kind == TokenKind.Identifier) {
+                field_name = end;
+            }
+            if (end.kind == NodeKind.Token && end.token_kind == TokenKind.Semicolon) {
+                break;
+            }
+            end = end.next_sibling;
+        }
+        if (field_name != (SyntaxNode*)0) {
+            JsonSynthesisField field;
+            field.name = String.from_str(field_name.text);
+            field.type_name = String.new();
+            field.type_start = start;
+            field.type_end = field_name;
+            SyntaxNode* cursor = start;
+            while (cursor != field_name && cursor != (SyntaxNode*)0) {
+                field.type_name.push_str(cursor.text);
+                cursor = cursor.next_sibling;
+            }
+            field.json_name = String.new();
+            if (tag != (SyntaxNode*)0) {
+                String attribute = unescape_string_literal(tag.text);
+                field.json_name = json_synthesis_tag(attribute.to_str());
+                attribute.drop();
+            }
+            if (field.json_name.len() == 0) {
+                field.json_name = String.from_str(field.name.to_str());
+            }
+            field.ignored = field.json_name.equals("-");
+            fields.push(move field);
+        }
+        if (end == (SyntaxNode*)0) { break; }
+        start = end.next_sibling;
+    }
+}
+
+bool json_synthesis_declares_value_as(SyntaxNode* node, str value_name,
+                                      str type_name) {
+    if (node == (SyntaxNode*)0) { return false; }
+    SyntaxNode* cursor = node.first_child;
+    while (cursor != (SyntaxNode*)0) {
+        if (cursor.kind == NodeKind.Token
+            && strcmp(cursor.text, type_name) == 0
+            && cursor.next_sibling != (SyntaxNode*)0
+            && strcmp(cursor.next_sibling.text, value_name) == 0) {
+            return true;
+        }
+        if (json_synthesis_declares_value_as(cursor, value_name, type_name)) {
+            return true;
+        }
+        cursor = cursor.next_sibling;
+    }
+    return false;
+}
+
+bool json_synthesis_macro_targets_type(SyntaxNode* node, SyntaxNode* root,
+                                       str type_name) {
+    if (node == (SyntaxNode*)0) { return false; }
+    if (node.kind == NodeKind.Token && node.token_kind == TokenKind.At
+        && node.next_sibling != (SyntaxNode*)0
+        && node.next_sibling.next_sibling != (SyntaxNode*)0) {
+        str macro_name = node.next_sibling.text;
+        SyntaxNode* args = node.next_sibling.next_sibling;
+        if ((strcmp(macro_name, "json") == 0
+                || strcmp(macro_name, "from_json") == 0)
+            && args.kind == NodeKind.Parenthesized) {
+            SyntaxNode* first = args.first_child;
+            if (first != (SyntaxNode*)0) {
+                if (strcmp(first.text, type_name) == 0) { return true; }
+                if (strcmp(macro_name, "json") == 0
+                    && json_synthesis_declares_value_as(
+                        root, first.text, type_name)) {
+                    return true;
+                }
+                if (strcmp(macro_name, "json") == 0
+                    && json_synthesis_call_returns_type(root, first,
+                                                        type_name)) {
+                    return true;
+                }
+                if (strcmp(macro_name, "from_json") == 0) {
+                    SyntaxNode* type_part = first;
+                    while (type_part != (SyntaxNode*)0
+                        && !(type_part.kind == NodeKind.Token
+                            && type_part.token_kind == TokenKind.Comma)) {
+                        if (strcmp(type_part.text, type_name) == 0) {
+                            return true;
+                        }
+                        type_part = type_part.next_sibling;
+                    }
+                }
+            }
+        }
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (json_synthesis_macro_targets_type(child, root, type_name)) {
+            return true;
+        }
+        child = child.next_sibling;
+    }
+    return false;
+}
+
+bool json_synthesis_has_impl(SyntaxNode* root, str trait_name, str type_name) {
+    SyntaxNode* item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Impl) {
+            SyntaxNode* cursor = item.first_child;
+            bool found_trait = false;
+            bool found_for = false;
+            while (cursor != (SyntaxNode*)0 && cursor.kind != NodeKind.Block) {
+                if (cursor.kind == NodeKind.Token && strcmp(cursor.text, trait_name) == 0) {
+                    found_trait = true;
+                } else if (found_trait && cursor.kind == NodeKind.Token
+                    && strcmp(cursor.text, "for") == 0) {
+                    found_for = true;
+                } else if (found_for && cursor.kind == NodeKind.Token
+                    && cursor.token_kind == TokenKind.Identifier) {
+                    if (strcmp(cursor.text, type_name) == 0) { return true; }
+                    break;
+                }
+                cursor = cursor.next_sibling;
+            }
+        }
+        item = item.next_sibling;
+    }
+    return false;
+}
+
+bool json_synthesis_generic_struct(SyntaxNode* item) {
+    SyntaxNode* name = item_identifier(item);
+    if (name == (SyntaxNode*)0) { return true; }
+    SyntaxNode* cursor = name.next_sibling;
+    while (cursor != (SyntaxNode*)0 && cursor.kind != NodeKind.Block) {
+        if (cursor.kind == NodeKind.Token && cursor.text == "<") { return true; }
+        cursor = cursor.next_sibling;
+    }
+    return false;
+}
+
+bool json_synthesis_function_returns_type(SyntaxNode* root, str function_name,
+                                          str type_name) {
+    SyntaxNode* item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Function) {
+            SyntaxNode* name = (SyntaxNode*)0;
+            SyntaxNode* cursor = item.first_child;
+            while (cursor != (SyntaxNode*)0
+                && cursor.kind != NodeKind.Parenthesized) {
+                if (cursor.kind == NodeKind.Token
+                    && cursor.token_kind == TokenKind.Identifier) {
+                    name = cursor;
+                }
+                cursor = cursor.next_sibling;
+            }
+            SyntaxNode* return_type = item.first_child;
+            if (name != (SyntaxNode*)0
+                && strcmp(name.text, function_name) == 0
+                && return_type != name
+                && return_type.kind == NodeKind.Token
+                && return_type.token_kind == TokenKind.Identifier
+                && strcmp(return_type.text, type_name) == 0
+                && return_type.next_sibling == name) {
+                return true;
+            }
+        }
+        item = item.next_sibling;
+    }
+    return false;
+}
+
+bool json_synthesis_call_returns_type(SyntaxNode* root, SyntaxNode* expression,
+                                      str type_name) {
+    if (expression == (SyntaxNode*)0 || expression.kind != NodeKind.Token
+        || expression.token_kind != TokenKind.Identifier
+        || expression.next_sibling == (SyntaxNode*)0
+        || expression.next_sibling.kind != NodeKind.Parenthesized) {
+        return false;
+    }
+    return json_synthesis_function_returns_type(
+        root, expression.text, type_name);
+}
+
+void json_synthesis_append_string_literal(String* output, str value) {
+    output.push((u8)'"');
+    i64 index = 0;
+    i64 length = strlen(value);
+    while (index < length) {
+        u8 ch = value[index];
+        if (ch == (u8)'"' || ch == (u8)'\\') {
+            output.push((u8)'\\');
+            output.push(ch);
+        } else if (ch == (u8)'\n') {
+            output.push_str("\\n");
+        } else if (ch == (u8)'\r') {
+            output.push_str("\\r");
+        } else if (ch == (u8)'\t') {
+            output.push_str("\\t");
+        } else {
+            output.push(ch);
+        }
+        index += 1;
+    }
+    output.push((u8)'"');
+}
+
+void json_synthesis_append_error(String* output) {
+    output.push_str("{ JsonError __silver_json_error = JsonError.at_index(input.index); ");
+    output.push_str("return Err(move __silver_json_error); }");
+}
+
+void json_synthesis_append_to_json(String* output, str type_name,
+                                   Vec<JsonSynthesisField>* fields) {
+    output.push_str("impl ToJson for ");
+    output.push_str(type_name);
+    output.push_str(" { void to_json(*self, JsonWriter* out) { out.begin_object(); ");
+    i64 index = 0;
+    while (index < fields.len()) {
+        JsonSynthesisField* field = fields.get_ptr(index);
+        if (!field.ignored) {
+            output.push_str("out.field(");
+            json_synthesis_append_string_literal(output, field.json_name.to_str());
+            output.push_str("); self.");
+            output.push_str(field.name.to_str());
+            output.push_str(".to_json(out); ");
+        }
+        index += 1;
+    }
+    output.push_str("out.end_object(); } }\n");
+}
+
+void json_synthesis_append_from_json(String* output, str type_name,
+                                     Vec<JsonSynthesisField>* fields) {
+    output.push_str("impl FromJson for ");
+    output.push_str(type_name);
+    output.push_str(" { Result<");
+    output.push_str(type_name);
+    output.push_str(", JsonError> from_json(JsonReader* input) { ");
+    output.push_str("if (!input.begin_object()) ");
+    json_synthesis_append_error(output);
+    output.push_str(type_name);
+    output.push_str(" result; ");
+    i64 index = 0;
+    while (index < fields.len()) {
+        JsonSynthesisField* field = fields.get_ptr(index);
+        if (field.type_name.starts_with("Optional<")) {
+            output.push_str("result.");
+            output.push_str(field.name.to_str());
+            output.push_str(" = None; ");
+        }
+        index += 1;
+    }
+    output.push_str("while (!input.at_object_end() && !input.failed) { ");
+    output.push_str("String __silver_json_key = input.read_string(); ");
+    output.push_str("if (input.failed || !input.expect((u8)58)) ");
+    json_synthesis_append_error(output);
+    index = 0;
+    bool has_field_branch = false;
+    while (index < fields.len()) {
+        JsonSynthesisField* field = fields.get_ptr(index);
+        if (!field.ignored) {
+            output.push_str(has_field_branch ? "else if (" : "if (");
+            has_field_branch = true;
+            output.push_str("__silver_json_key.equals(");
+            json_synthesis_append_string_literal(output, field.json_name.to_str());
+            output.push_str(")) { ");
+            if (field.type_name.equals("str")) {
+                output.push_str("String __silver_json_value = input.read_string(); ");
+                output.push_str("if (input.failed) ");
+                json_synthesis_append_error(output);
+                output.push_str("result.");
+                output.push_str(field.name.to_str());
+                output.push_str(" = (str)__silver_json_value.data; __silver_json_value.data = (u8*)0; ");
+            } else {
+                output.push_str(field.type_name.to_str());
+                output.push_str(" __silver_json_slot; Result<");
+                output.push_str(field.type_name.to_str());
+                output.push_str(", JsonError> __silver_json_decoded = __silver_json_slot.json_decode(input); ");
+                output.push_str("if (__silver_json_decoded.is_err()) { JsonError __silver_json_error = __silver_json_decoded.unwrap_err(); return Err(move __silver_json_error); } ");
+                output.push_str("result.");
+                output.push_str(field.name.to_str());
+                output.push_str(" = __silver_json_decoded.unwrap(); ");
+            }
+            output.push_str("} ");
+        }
+        index += 1;
+    }
+    output.push_str(has_field_branch ? "else if (!input.skip_value()) "
+                                     : "if (!input.skip_value()) ");
+    json_synthesis_append_error(output);
+    output.push_str("if (!input.at_object_end() && !input.expect((u8)44)) ");
+    json_synthesis_append_error(output);
+    output.push_str("} if (!input.end_object() || input.failed) ");
+    json_synthesis_append_error(output);
+    output.push_str("return Ok(move result); } }\n");
+}
+
+void json_synthesis_append_decode(String* output, str type_name) {
+    output.push_str("impl JsonDecode for ");
+    output.push_str(type_name);
+    output.push_str(" { Result<");
+    output.push_str(type_name);
+    output.push_str(", JsonError> json_decode(*self, JsonReader* input) { return ");
+    output.push_str(type_name);
+    output.push_str(".from_json(input); } }\n");
+}
+
+void json_synthesis_append_dispose(String* output, str type_name,
+                                   Vec<JsonSynthesisField>* fields) {
+    output.push_str("impl JsonDispose for ");
+    output.push_str(type_name);
+    output.push_str(" { void dispose(*self) { ");
+    i64 index = 0;
+    while (index < fields.len()) {
+        JsonSynthesisField* field = fields.get_ptr(index);
+        output.push_str("self.");
+        output.push_str(field.name.to_str());
+        output.push_str(".dispose(); ");
+        index += 1;
+    }
+    output.push_str("} }\n");
+}
+
+bool json_synthesis_type_selected(Vec<str>* selected, str type_name) {
+    i64 index = 0;
+    while (index < selected.len()) {
+        if (strcmp(selected.get(index), type_name) == 0) { return true; }
+        index += 1;
+    }
+    return false;
+}
+
+bool json_synthesis_add_field_dependencies(SyntaxNode* root,
+                                           SyntaxNode* item,
+                                           Vec<str>* selected) {
+    Vec<JsonSynthesisField> fields = Vec<JsonSynthesisField>.new();
+    json_synthesis_collect_fields(item, &fields);
+    bool added = false;
+    i64 field_index = 0;
+    while (field_index < fields.len()) {
+        JsonSynthesisField* field = fields.get_ptr(field_index);
+        if (!field.ignored) {
+            SyntaxNode* cursor = field.type_start;
+            while (cursor != (SyntaxNode*)0 && cursor != field.type_end) {
+                if (cursor.kind == NodeKind.Token
+                    && cursor.token_kind == TokenKind.Identifier) {
+                    SyntaxNode* dependency = find_item_by_name(
+                        root, NodeKind.Struct, cursor.text);
+                    if (dependency != (SyntaxNode*)0
+                        && !json_synthesis_generic_struct(dependency)
+                        && !json_synthesis_type_selected(selected, cursor.text)) {
+                        selected.push(cursor.text);
+                        added = true;
+                    }
+                }
+                cursor = cursor.next_sibling;
+            }
+        }
+        field_index += 1;
+    }
+    fields.drop();
+    return added;
+}
+
+void json_synthesis_collect_dependencies(SyntaxNode* root,
+                                         Vec<str>* selected) {
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        SyntaxNode* item = root.first_child;
+        while (item != (SyntaxNode*)0) {
+            if (item.kind == NodeKind.Struct
+                && !json_synthesis_generic_struct(item)) {
+                SyntaxNode* name = item_identifier(item);
+                if (name != (SyntaxNode*)0
+                    && json_synthesis_type_selected(selected, name.text)
+                    && json_synthesis_add_field_dependencies(
+                        root, item, selected)) {
+                    changed = true;
+                }
+            }
+            item = item.next_sibling;
+        }
+    }
+}
+
+void json_synthesis_collect_disposal_dependencies(SyntaxNode* root,
+                                                  Vec<str>* selected) {
+    i64 selected_index = 0;
+    while (selected_index < selected.len()) {
+        str selected_name = selected.get(selected_index);
+        if (!json_synthesis_has_impl(root, "JsonDispose", selected_name)) {
+            SyntaxNode* item = find_item_by_name(
+                root, NodeKind.Struct, selected_name);
+            if (item != (SyntaxNode*)0
+                && !json_synthesis_generic_struct(item)) {
+                Vec<JsonSynthesisField> fields = Vec<JsonSynthesisField>.new();
+                json_synthesis_collect_fields(item, &fields);
+                i64 field_index = 0;
+                while (field_index < fields.len()) {
+                    JsonSynthesisField* field = fields.get_ptr(field_index);
+                    SyntaxNode* cursor = field.type_start;
+                    while (cursor != (SyntaxNode*)0
+                        && cursor != field.type_end) {
+                        if (cursor.kind == NodeKind.Token
+                            && cursor.token_kind == TokenKind.Identifier) {
+                            SyntaxNode* dependency = find_item_by_name(
+                                root, NodeKind.Struct, cursor.text);
+                            if (dependency != (SyntaxNode*)0
+                                && !json_synthesis_generic_struct(dependency)
+                                && !json_synthesis_has_impl(
+                                    root, "JsonDispose", cursor.text)
+                                && !json_synthesis_type_selected(
+                                    selected, cursor.text)) {
+                                selected.push(cursor.text);
+                            }
+                        }
+                        cursor = cursor.next_sibling;
+                    }
+                    field_index += 1;
+                }
+                fields.drop();
+            }
+        }
+        selected_index += 1;
+    }
+}
+
+String serialize_synthesize_json(SyntaxNode* root) {
+    String generated = String.new();
+    if (root == (SyntaxNode*)0) { return generated; }
+    Vec<str> selected = Vec<str>.new();
+    SyntaxNode* item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Struct && !json_synthesis_generic_struct(item)
+            && (item_has_attribute(item, "serialize")
+                || item_has_attribute(item, "serialise")
+                || (item_identifier(item) != (SyntaxNode*)0
+                    && json_synthesis_macro_targets_type(
+                        root, root, item_identifier(item).text)))) {
+            SyntaxNode* name = item_identifier(item);
+            if (name != (SyntaxNode*)0
+                && !json_synthesis_type_selected(&selected, name.text)) {
+                selected.push(name.text);
+            }
+        }
+        item = item.next_sibling;
+    }
+    json_synthesis_collect_dependencies(root, &selected);
+    Vec<str> disposal_selected = Vec<str>.new();
+    i64 selected_index = 0;
+    while (selected_index < selected.len()) {
+        disposal_selected.push(selected.get(selected_index));
+        selected_index += 1;
+    }
+    json_synthesis_collect_disposal_dependencies(root, &disposal_selected);
+    item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Struct && !json_synthesis_generic_struct(item)) {
+            SyntaxNode* name = item_identifier(item);
+            bool json_selected = name != (SyntaxNode*)0
+                && json_synthesis_type_selected(&selected, name.text);
+            bool disposal_selected_type = name != (SyntaxNode*)0
+                && json_synthesis_type_selected(&disposal_selected, name.text);
+            if (json_selected || disposal_selected_type) {
+                Vec<JsonSynthesisField> fields = Vec<JsonSynthesisField>.new();
+                json_synthesis_collect_fields(item, &fields);
+                if (json_selected) {
+                    if (!json_synthesis_has_impl(root, "ToJson", name.text)) {
+                        json_synthesis_append_to_json(&generated, name.text, &fields);
+                    }
+                    if (!json_synthesis_has_impl(root, "FromJson", name.text)) {
+                        json_synthesis_append_from_json(&generated, name.text, &fields);
+                    }
+                    if (!json_synthesis_has_impl(root, "JsonDecode", name.text)) {
+                        json_synthesis_append_decode(&generated, name.text);
+                    }
+                }
+                if (disposal_selected_type
+                    && !json_synthesis_has_impl(root, "JsonDispose", name.text)) {
+                    json_synthesis_append_dispose(&generated, name.text, &fields);
+                }
+                fields.drop();
+            }
+        }
+        item = item.next_sibling;
+    }
+    disposal_selected.drop();
+    selected.drop();
+    return generated;
+}

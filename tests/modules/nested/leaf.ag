@@ -1,0 +1,3 @@
+i32 nested_leaf_value() {
+    return 19;
+}

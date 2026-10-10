@@ -1,0 +1,89 @@
+import std.json;
+import std.string;
+
+struct JsonTarget {
+    i32 value;
+}
+
+struct UnrelatedArrayStruct {
+    i32 values[2];
+}
+
+struct JsonChild {
+    i32 value;
+}
+
+struct JsonParent {
+    JsonChild child;
+}
+
+struct JsonDecodeOnlyChild {
+    i32 value;
+}
+
+struct JsonDecodeOnlyParent {
+    JsonDecodeOnlyChild child;
+}
+
+struct JsonFactoryValue {
+    i32 value;
+}
+
+struct JsonIgnoredArrayState {
+    i32 values[2];
+}
+
+impl JsonDispose for JsonIgnoredArrayState {
+    void dispose(*self) {}
+}
+
+struct JsonIgnoredOwnedState {
+    String value;
+}
+
+struct JsonIgnoredFields {
+    i32 value;
+    JsonIgnoredArrayState array_state "json:-";
+    JsonIgnoredOwnedState owned_state "json:-";
+    String secret "json:-";
+}
+
+JsonFactoryValue make_json_factory_value() {
+    JsonFactoryValue value;
+    value.value = 31;
+    return value;
+}
+
+i32 main() {
+    JsonTarget value;
+    value.value = 17;
+    str encoded = @json(value);
+    if (encoded != "{\"value\":17}") { return 1; }
+
+    str returned = @json(make_json_factory_value());
+    if (returned != "{\"value\":31}") { return 2; }
+
+    JsonParent parent;
+    parent.child.value = 23;
+    str nested = @json(parent);
+    if (nested != "{\"child\":{\"value\":23}}") { return 3; }
+    Result<JsonParent, JsonError> decoded = @from_json(JsonParent, nested);
+    if (decoded.failed()) { return 4; }
+    if (decoded.unwrap().child.value != 23) { return 5; }
+
+    Result<JsonDecodeOnlyParent, JsonError> decoded_only = @from_json(
+        JsonDecodeOnlyParent, "{\"child\":{\"value\":37}}");
+    if (decoded_only.failed()) { return 6; }
+    if (decoded_only.unwrap().child.value != 37) { return 7; }
+
+    JsonIgnoredFields ignored;
+    ignored.value = 43;
+    ignored.array_state.values[0] = 1;
+    ignored.array_state.values[1] = 2;
+    ignored.owned_state.value = String.from_str("owned");
+    ignored.secret = String.from_str("secret");
+    str ignored_json = @json(ignored);
+    if (ignored_json != "{\"value\":43}") { return 8; }
+    ignored.dispose();
+    return 0;
+}

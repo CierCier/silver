@@ -1,0 +1,6 @@
+i32 main() {
+    defer {
+        i64 value = match 1 { 1 : { return 1; }, _ : 0 };
+    }
+    return 0;
+}

@@ -8,7 +8,28 @@ void decrement() {
     global_counter = global_counter - 1;
 }
 
+void fallthrough_with_defer() {
+    defer { global_counter = global_counter + 7; }
+}
+
+void return_with_defers() {
+    defer { global_counter = global_counter * 10 + 1; }
+    {
+        defer { global_counter = global_counter * 10 + 2; }
+        return;
+    }
+}
+
 i32 main() {
+    global_counter = 0;
+    fallthrough_with_defer();
+    @assert(!(global_counter != 7), "function-scope defer did not run on fallthrough");
+    global_counter = 0;
+
+    return_with_defers();
+    @assert(!(global_counter != 21), "return did not run nested defers in LIFO order");
+    global_counter = 0;
+
     // Test 1: defer runs at block exit
     {
         defer increment();
@@ -39,6 +60,19 @@ i32 main() {
     }
     // First +3 runs (defer order: reverse), then *10: (0+3)*10 = 30
     @assert(!(global_counter != 30), "global_counter != 30");
+
+    // Defers run on both continue and break paths, once per loop iteration.
+    global_counter = 0;
+    i32 iteration = 0;
+    while (iteration < 4) {
+        iteration = iteration + 1;
+        defer {
+            global_counter = global_counter + iteration;
+        }
+        if (iteration < 3) { continue; }
+        break;
+    }
+    @assert(!(global_counter != 6), "global_counter != 6");
 
     return 0;
 }

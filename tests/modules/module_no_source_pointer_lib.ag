@@ -1,0 +1,3 @@
+i32 artifact_pointer(i32* value) {
+    return 0;
+}

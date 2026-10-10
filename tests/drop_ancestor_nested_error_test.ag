@@ -1,0 +1,16 @@
+// expected_compile_failure
+struct Leaf { i64 value; }
+impl Drop for Leaf { void drop(Leaf* self) {} }
+struct Inner { Leaf item; Leaf sibling; }
+impl Drop for Inner { void drop(Inner* self) {} }
+struct Outer { Inner inner; }
+
+void consume(Leaf item) {}
+
+i32 main() {
+    Outer outer;
+    outer.inner.item.value = 1;
+    outer.inner.sibling.value = 2;
+    consume(move outer.inner.item);
+    return 0;
+}

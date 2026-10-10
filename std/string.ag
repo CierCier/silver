@@ -565,10 +565,21 @@ impl String {
         if (self.data == (u8*)0) { return false; }
         i64 i = 0;
         while (i + 16 <= self.len) {
-            i64 non_ascii = asm("
-                movdqu (%rax), %xmm0
-                pmovmskb %xmm0, %eax
-            ", [&self.data[i]], ["xmm0"]);
+            i64 non_ascii = 0;
+            if (@cfg(os.wasi)) {
+                i64 j = 0;
+                while (j < 16) {
+                    if (self.data[i + j] >= (u8)0x80) {
+                        non_ascii = 1;
+                    }
+                    j = j + 1;
+                }
+            } else {
+                non_ascii = asm("
+                    movdqu (%rax), %xmm0
+                    pmovmskb %xmm0, %eax
+                ", [&self.data[i]], ["xmm0"]);
+            }
             if (non_ascii == 0) {
                 i = i + 16;
             } else {
@@ -854,6 +865,12 @@ impl IndexedAccess for String {
 // Both take the by-value receiver as their first parameter.
 impl Add<String> for String {
     String __add(self, String other) {
+        return self.concat(move other);
+    }
+}
+
+impl String {
+    String concat(self, String other) {
         i64 total = self.len + other.len;
         String result = String.with_capacity(total + 1); // +1 for NUL
         result.len = total;
@@ -1315,25 +1332,33 @@ impl Slice<u8> {
         return move s;
     }
 
-    bool __eq(&self, &String other) {
+    bool equals_string(&self, &String other) {
         if (self.len != other.len) { return false; }
         if (self.len == 0) { return true; }
         return memcmp((const void*)self.data, (const void*)other.data, self.len) == 0;
     }
 
+    bool __eq(&self, &String other) {
+        return self.equals_string(other);
+    }
+
     bool __ne(&self, &String other) {
-        return !self.__eq(other);
+        return !self.equals_string(other);
     }
 }
 
 impl String {
-    bool __eq(&self, Slice<u8> other) {
+    bool equals_slice(&self, Slice<u8> other) {
         if (self.len != other.len) { return false; }
         if (self.len == 0) { return true; }
         return memcmp((const void*)self.data, (const void*)other.data, self.len) == 0;
     }
 
+    bool __eq(&self, Slice<u8> other) {
+        return self.equals_slice(other);
+    }
+
     bool __ne(&self, Slice<u8> other) {
-        return !self.__eq(other);
+        return !self.equals_slice(other);
     }
 }

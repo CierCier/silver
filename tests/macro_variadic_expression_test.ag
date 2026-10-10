@@ -1,0 +1,26 @@
+import std.sys.entry;
+
+macro i32 count(i32... values) {
+    return values.len;
+}
+
+macro i32 first(i32... values) {
+    return values[0];
+}
+
+macro i32 third(i32... values) {
+    return values[2];
+}
+
+macro i32 identity(i32 value) {
+    return value;
+}
+
+i32 main() {
+    if (@count() != 0) { return 1; }
+    if (@count(4, 7, 12) != 3) { return 2; }
+    if (@first(19, 23) != 19) { return 3; }
+    if (@third(5, 8, 13, 21) != 13) { return 4; }
+    if (@identity(@first(31, 37)) != 31) { return 5; }
+    return 0;
+}

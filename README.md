@@ -62,7 +62,7 @@ Prebuilt binaries require LLVM 22 runtime libraries (`libLLVM-22` or `libclang`)
 ### Building from source
 
 Requirements:
-- Rust toolchain with Cargo 1.75+
+- Rust toolchain supporting edition 2024
 - LLVM 22 development headers and libraries (`inkwell` / `llvm-sys`)
 - System C toolchain and linker (`cc`, `clang`, or `ld.lld`)
 
@@ -113,15 +113,26 @@ cargo test -p agc
 
 # Run integration test suite
 python3 tests/run_tests.py --no-tui
+
+# Build stage1 with stage0 and run frontend parity gates
+tests/selfhost/run_stage.sh --include-std
+
+# Exercise the full Linux command surface through stage1's compatibility seam
+bash tests/selfhost/run_native.sh --no-tui --jobs 4
 ```
 
 ## Repository layout
 
-- `bin/agc/`: Compiler driver and LLVM backend, using [Elise](https://github.com/CierCier/elise) for parsing
-- `bin/aglsp/`: Language Server Protocol implementation
-- `bin/agsm/`: Source maps and module artifact generator
+- `bootstrap/stage0/agc/`: Rust bootstrap compiler (stage0): driver, frontend, and LLVM backend, using [Elise](https://github.com/CierCier/elise) for parsing
+- `bootstrap/stage0/agsm/`: Source maps and module artifact generator
+- `bootstrap/stage0/ffi-rust/`: Optional Rust implementation behind Silver's versioned C ABI
+- `bootstrap/aglsp/`: Rust Language Server Protocol server
+- `bin/agc/`: Stage1 self-hosting compiler driver (Silver); see `docs/selfhost-plan.txt`
+- `bin/aglsp/`: Silver language-server binary package
+- `bin/agc/src/agsm.ag`: AGSM command integrated into the stage1 compiler driver
+- `libs/agc/`: Reusable stage1 compiler frontend library (Silver)
+- `silver.toml`: Silver workspace manifest for the self-host root
 - `std/`: Standard library (allocators, collections, I/O, networking, runtime)
-- `ffi/rust/`: Optional Rust implementation behind Silver's versioned C ABI
 - `examples/`: Sample programs
 - `tests/`: Unit, ownership, and integration test suites
 - `docs/`: Language specifications and standard protocol designs
@@ -129,7 +140,10 @@ python3 tests/run_tests.py --no-tui
 ## Documentation
 
 - [Syntax Specification](SYNTAX.md)
-- [Compiler Architecture Guide](AGENTS.md)
+- [Agent Working Guide](AGENTS.md)
+- [Contributing](CONTRIBUTING.md)
+- [Compiler Architecture Reference](docs/compiler-guide.md)
+- [Maintainer Preferences](docs/maintainer-preferences.md)
 - [C ABI and FFI](docs/rust-ffi.md)
 - [Standard Library Protocols](docs/standards/README.md)
 

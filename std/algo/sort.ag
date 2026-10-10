@@ -248,3 +248,45 @@ bool is_sorted_slice<T>(Slice<T> s) {
 bool is_sorted_by_slice<T>(Slice<T> s, i32 (T*, T*) cmp) {
     return is_sorted_by<T>(s.data, s.len, cmp);
 }
+
+/// Stable insertion sort. Unlike the general-purpose heap sort above, equal
+/// elements retain their input order, which is required for deterministic
+/// compiler symbol and diagnostic tables.
+void stable_sort_by<T>(Vec<T>* v, i32 (T*, T*) cmp) {
+    if (v.data == (T*)0 || v.len <= 1) {
+        return;
+    }
+    i64 i = 1;
+    while (i < v.len) {
+        T source = v.data[i];
+        T value = move source;
+        i64 hole = i;
+        while (hole > 0 && cmp(&value, &v.data[hole - 1]) < 0) {
+            T moved = v.data[hole - 1];
+            v.data[hole] = move moved;
+            hole -= 1;
+        }
+        v.data[hole] = move value;
+        i += 1;
+    }
+}
+
+/// Stable natural-order sort for values with `<` defined.
+void stable_sort<T>(Vec<T>* v) {
+    if (v.data == (T*)0 || v.len <= 1) {
+        return;
+    }
+    i64 i = 1;
+    while (i < v.len) {
+        T source = v.data[i];
+        T value = move source;
+        i64 hole = i;
+        while (hole > 0 && value < v.data[hole - 1]) {
+            T moved = v.data[hole - 1];
+            v.data[hole] = move moved;
+            hole -= 1;
+        }
+        v.data[hole] = move value;
+        i += 1;
+    }
+}

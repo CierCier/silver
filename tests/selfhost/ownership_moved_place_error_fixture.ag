@@ -1,0 +1,6 @@
+import std.string;
+
+i64 read_after_move(String value) {
+    String taken = move value;
+    return value.len();
+}

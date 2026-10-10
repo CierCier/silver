@@ -1,0 +1,8 @@
+// Runtime entry ABI declarations for modules linked into an executable.
+// The implementation and initialized storage live only in std.sys.entry.
+extern "C" {
+    i32 silver_argc();
+    i8** silver_argv();
+    i8** silver_envp();
+    void silver_set_envp(i8** value);
+}

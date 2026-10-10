@@ -1,3 +1,4 @@
+// compile_flags: -O2
 // Packed structs must keep their layout across cached build units:
 // size, field offsets, and by-value calls all follow `#[packed]`.
 import std.test;
@@ -15,6 +16,12 @@ i32 main() {
         PackedPair p = make_packed((u8)7, (u32)0xAABBCCDD);
         assert_eq_i64(7, (i64)tag_packed(p), "tag survives");
         assert_eq_i64((i64)0xAABBCCDD, (i64)read_packed(p), "value survives");
+
+        PackedGeneric<u32> generic;
+        generic.tag = 9;
+        generic.value = 0x11223344;
+        assert_eq_i64((i64)0x11223344, (i64)read_packed_generic(generic),
+                      "generic packed value survives by-value call");
     }
 
     return done();

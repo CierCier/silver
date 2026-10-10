@@ -41,7 +41,10 @@ LEAK_CHECK_TESTS = {
     "memory_pentest",
     "alloc_validity_test",
     "string_test",
+    "string_split_once_drop_test",
+    "launch_failure_drop_test",
     "vec_test",
+    "method_slice_coercion_test",
     "bytes_test",
     "collections_set_test",
     "mem_test",
@@ -63,17 +66,29 @@ LEAK_CHECK_TESTS = {
 
 EXPECTED_COMPILE_FAILURES = {
     "borrow_origin_escape_error_test",
+    "borrow_alias_escape_error_test",
+    "borrow_global_escape_error_test",
     "enum_move_in_error_test",
     "launch_wait_error_test",
     "launch_send_error_test",
+    "launch_send_declarations_error_test",
+    "match_guard_move_error_test",
     "borrow_conflict_error_test",
     "struct_borrow_error_test",
     "call_borrow_conflict_error_test",
-    "match_guard_move_error_test",
+    "projected_borrow_conflict_error_test",
+    "index_deref_borrow_conflict_error_test",
+    "receiver_borrow_conflict_error_test",
 }
 
 DEFAULT_SKIP = {
     "mem_growth_watch",  # manual 30-sec memory growth benchmark
+}
+
+# These regressions are exercised by run_native.sh with the stage1 compiler.
+STAGE1_ONLY_TESTS = {
+    "json_synthesis_scope_test": "stage1 JSON method synthesis",
+    "method_slice_coercion_test": "stage1 borrowed-slice coercion",
 }
 
 IS_WINDOWS = os.name == "nt"
@@ -83,6 +98,93 @@ def target_is_windows_name(target: Optional[str]) -> bool:
     return bool(target) and any(
         t in target.lower() for t in ("windows", "win32", "mingw")
     )
+
+
+def target_is_wasm(target: Optional[str]) -> bool:
+    return bool(target) and ("wasm" in target.lower())
+
+
+# Tests that cannot run on the wasm32-wasip1 target. Everything not listed
+# here is expected to work: the WASI seam covers fd I/O, clocks, args, env,
+# and random, and the portable std core (mem/rt/fmt/collections) is
+# target-independent. Groups:
+#   - threads/launch/atomics-backed sync: no WASI threading in v1
+#   - sockets/process/pty/io_uring: std modules are empty on wasm (linux-gated)
+#   - raw syscall/asm tests: x86_64 asm does not exist on wasm
+#   - SIMD probes: cpu.* cfg keys are false on cross targets
+WASM_SKIP = {
+    # raw x86_64 asm / syscalls
+    "syscall_test": "raw Linux syscall asm (x86_64 syscall ABI)",
+    "syscall_wrapper_test": "raw Linux syscall wrappers (std.sys.syscall)",
+    "backtrace_test": "rbp-chain walker + cpuid probes (x86_64 asm)",
+    # threads & launch (no WASI threads in v1)
+    "allocator_threads_test": "raw clone(2) thread creation",
+    "thread_test": "WASI threading pending (threads are a compile error on wasm)",
+    "thread_stress_test": "WASI threading pending (threads are a compile error on wasm)",
+    "channel_test": "depends on threads/atomics (WASI threading pending)",
+    "channel_bounded_test": "depends on threads/atomics (WASI threading pending)",
+    "condvar_test": "depends on threads/atomics (WASI threading pending)",
+    "rwlock_test": "depends on threads/atomics (WASI threading pending)",
+    "select_test": "depends on threads/atomics (WASI threading pending)",
+    "launch_send_declarations_test": "launch requires the thread runtime (unsupported on wasm)",
+    "launch_send_test": "launch requires the thread runtime (unsupported on wasm)",
+    "launch_failure_drop_test": "launch requires the thread runtime (unsupported on wasm)",
+    "launch_wait_test": "launch requires the thread runtime (unsupported on wasm)",
+    "launch_wait_native_test": "native launch backend fixture uses the thread runtime (unsupported on wasm)",
+    "launch_send_error_test": "launch requires the thread runtime (unsupported on wasm)",
+    "launch_wait_error_test": "launch requires the thread runtime (unsupported on wasm)",
+    "guard_test": "guarded counter across launched tasks (launch is a compile error on wasm)",
+    "native_futex_wake_test": "Linux thread creation and futex wake-up",
+    "rust_ffi_test": "links a native-arch Rust staticlib (no wasm FFI artifact in v1)",
+    # process / sockets / pty / kernel interfaces (std modules empty on wasm)
+    "process_test": "fork/exec via Linux process syscalls",
+    "libc_test": "Linux libc interop test",
+    "io_uring_test": "Linux io_uring kernel interface",
+    "net_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "net_udp_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "net_dns_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "socket_addr_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "udp_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "tcp_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "dial_timeout_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "timeout_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "http_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "http_server_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "http2_server_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "http2_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "http2_tls_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "https_server_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "http_bench": "std.net over Linux socket syscalls (empty on wasm)",
+    "http_perf_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "json_tcp_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "server_raw_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "pool_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "sse_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "tls_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "websocket_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "cookie_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "stream_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "display_net_test": "std.net over Linux socket syscalls (empty on wasm)",
+    "term_pty_test": "pty via Linux kernel interfaces (empty on wasm)",
+    "term_raw_test": "raw terminal mode via termios (empty on wasm)",
+    "term_keys_test": "raw terminal mode via termios (empty on wasm)",
+    "term_loop_test": "raw terminal mode via termios (empty on wasm)",
+    # target-specific probes
+    "target_feature_test": "cpu.* cfg probes are false on cross targets",
+    "cfg_derived_test": "asserts native DWARF/section layout in the object",
+    "cfg_test": "cfg matrix expects native os/arch values",
+    "static_link_test": "asserts ELF dynamic-linking properties",
+    "static_volatile_test": "asserts ELF section/codegen layout",
+    "cfg_global_block_test": "native-gated global block semantics",
+    # module artifact test precompiles a .agm with native defaults
+    "module_import_test": "precompiled .agm artifact workflow is native-only in v1",
+    "module_artifact_no_source_test": "precompiled native object workflow is unavailable on wasm",
+    "module_artifact_unsupported_test": "source-less native object artifact workflow is unavailable on wasm",
+    # benches / long-running
+    "memcpy_bench": "performance benchmark, not a correctness test",
+    "memory_stress": "large memory footprint (wasm linear memory cap)",
+    "mem_growth_watch": "manual 30-sec memory growth benchmark",
+}
 
 # Tests that exercise Linux-only mechanisms (raw syscall/clone asm, epoll-
 # adjacent kernel interfaces). These are platform tests by design, not
@@ -134,6 +236,47 @@ class TestResult:
     run_output: str = ""
     exit_code: Optional[int] = None
     expected_exit: int = 0
+
+
+# Path of the node WASI shim. Mirrors driver.rs (wasm_runner_shim_path): the
+# shim is written to the system temp dir and reused; `agc run` on a wasm
+# target keeps it fresh, so the harness just needs to reference the same file.
+def wasm_runner_shim_path() -> str:
+    return os.path.join(tempfile.gettempdir(), "silver-wasm-run.mjs")
+
+
+def prime_wasm_runner_shim(agc_bin: Path) -> None:
+    """Ensure the node WASI shim exists before the harness references it.
+
+    The shim's content lives in driver.rs and is written by the driver's run
+    path only. The harness compiles tests without running them through agc, so
+    on a fresh machine (e.g. CI) nothing would have created the shim yet and
+    every run would die with `Cannot find module .../silver-wasm-run.mjs`.
+    Prime it with a trivial `agc run`, which routes through the driver's own
+    writer and keeps driver.rs the single source of truth for the shim.
+    """
+    if os.path.exists(wasm_runner_shim_path()):
+        return
+    prime_dir = Path(tempfile.mkdtemp(prefix="silver-wasm-shim-"))
+    try:
+        src = prime_dir / "prime.ag"
+        src.write_text("i32 main() {\n    return 0;\n}\n")
+        result = subprocess.run(
+            [str(agc_bin), "run", "--target", "wasm32-wasip1", str(src)],
+            capture_output=True,
+            timeout=120,
+        )
+    finally:
+        shutil.rmtree(prime_dir, ignore_errors=True)
+    if not os.path.exists(wasm_runner_shim_path()):
+        detail = (result.stderr or result.stdout).decode(errors="replace").strip()
+        print(
+            f"{C_RED}error: the wasm runner shim was not created at "
+            f"{wasm_runner_shim_path()}; run `agc run --target wasm32-wasip1 <file>` "
+            f"once to generate it, or set SILVER_TEST_RUNNER. "
+            f"Priming command exited {result.returncode}: {detail}{C_RESET}"
+        )
+        sys.exit(1)
 
 
 class BackgroundServices:
@@ -203,6 +346,54 @@ class BackgroundServices:
                 )
                 if res.returncode != 0:
                     print(f"{C_YELLOW}warning: failed to emit module_lib for module_import_test{C_RESET}")
+        if "module_artifact_no_source_test" in test_names:
+            self.modlib_dir.mkdir(parents=True, exist_ok=True)
+            fixture = self.root / "tests/modules/module_no_source_lib.ag"
+            mod_src = self.modlib_dir / "module_no_source_lib.ag"
+            shutil.copyfile(fixture, mod_src)
+            cmd = [str(agc_bin), "--emit=module", str(mod_src)]
+            eff_target = target or self.target
+            if eff_target:
+                cmd.extend(["--target", eff_target])
+            res = subprocess.run(
+                cmd,
+                cwd=str(self.modlib_dir),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if res.returncode != 0:
+                raise RuntimeError("failed to emit source-independent module artifact")
+            artifact = self.modlib_dir / "module_no_source_lib.agm"
+            object_suffix = ".o.wasm" if target_is_wasm(eff_target) else ".o"
+            object_file = self.modlib_dir / f"module_no_source_lib{object_suffix}"
+            if not artifact.is_file() or not object_file.is_file():
+                raise RuntimeError("source-independent module artifact outputs are missing")
+            if mod_src.exists():
+                mod_src.unlink()
+        if "module_artifact_unsupported_test" in test_names:
+            self.modlib_dir.mkdir(parents=True, exist_ok=True)
+            fixture = self.root / "tests/modules/module_no_source_pointer_lib.ag"
+            mod_src = self.modlib_dir / fixture.name
+            shutil.copyfile(fixture, mod_src)
+            cmd = [str(agc_bin), "--emit=module", str(mod_src)]
+            eff_target = target or self.target
+            if eff_target:
+                cmd.extend(["--target", eff_target])
+            res = subprocess.run(
+                cmd,
+                cwd=str(self.modlib_dir),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if res.returncode != 0:
+                raise RuntimeError("failed to emit unsupported-signature module artifact")
+            artifact = self.modlib_dir / "module_no_source_pointer_lib.agm"
+            object_suffix = ".o.wasm" if target_is_wasm(eff_target) else ".o"
+            object_file = self.modlib_dir / f"module_no_source_pointer_lib{object_suffix}"
+            if not artifact.is_file() or not object_file.is_file():
+                raise RuntimeError("unsupported-signature module artifact outputs are missing")
+            if mod_src.exists():
+                mod_src.unlink()
         # Node TLS server
         if ("tls_test" in test_names or "https_server_test" in test_names) and self.has_node and self.openssl_lib:
             self._spawn_daemon(["node", "tests/tls_server.js"], "TLS_NODE_READY", "tls_node.log")
@@ -297,6 +488,7 @@ def get_extra_flags(name: str, content: str, services: BackgroundServices) -> Li
         "static_link_test",
         "thread_test",
         "launch_wait_test",
+        "launch_failure_drop_test",
         "channel_test",
         "guard_test",
         "launch_send_test",
@@ -306,7 +498,7 @@ def get_extra_flags(name: str, content: str, services: BackgroundServices) -> Li
         flags.extend(["-L", services.openssl_lib])
     if name == "rust_ffi_test" and services.ffi_dir:
         flags.extend(["-L", services.ffi_dir])
-    if name == "module_import_test":
+    if name in ("module_import_test", "module_artifact_no_source_test", "module_artifact_unsupported_test"):
         flags.extend(["-I", str(services.modlib_dir)])
     if name == "cfg_test":
         flags.extend(["--cfg", "cfg_test_flag=1,cpu.sse41=1,cpu.avx2=1,cpu.avx512f=1"])
@@ -358,7 +550,14 @@ def run_single_test(
         # COFF has no linkonce dedup: cached .agm artifacts and the app unit
         # would define the same std symbols twice. Single-unit linking until
         # artifact dedup/import-libs land (docs/windows-port.md §4.3).
-        extra_flags += ["--no-cache"]
+        if "--no-cache" not in extra_flags:
+            extra_flags += ["--no-cache"]
+    if target_is_wasm(target):
+        # Same hazard as the COFF path, plus the std.cpu artifact cache can
+        # hold native-cfg definitions that are wrong for wasm. The portable
+        # core is small enough that single-unit linking is not a bottleneck.
+        if "--no-cache" not in extra_flags:
+            extra_flags += ["--no-cache"]
     for libdir in libdirs or []:
         extra_flags += ["-L", *libdir]
 
@@ -477,15 +676,19 @@ def run_single_test(
                 pass
 
     if name == "backtrace_test":
-        needed_frames = [
-            "level3 at backtrace_test.ag:",
-            "level2 at backtrace_test.ag:",
-            "level1 at backtrace_test.ag:",
-            "main at backtrace_test.ag:",
-            "__silver_assert_failed",
-            "args: x=",
+        frame_lines = run_output.splitlines()
+        user_frames = ["level3", "level2", "level1", "main"]
+        missing = [
+            f"{frame} at backtrace_test.ag:"
+            for frame in user_frames
+            if not any(
+                f"{frame} at " in line and re.search(r"\bbacktrace_test\.ag:\d+", line)
+                for line in frame_lines
+            )
         ]
-        missing = [f for f in needed_frames if f not in run_output]
+        for expected in ("__silver_assert_failed", "args: x="):
+            if expected not in run_output:
+                missing.append(expected)
         if missing:
             return TestResult(name, "FAIL", f"backtrace missing frames: {', '.join(missing)}", compile_ms, run_ms, run_output=run_output)
 
@@ -602,25 +805,33 @@ def main():
     parser.add_argument("--timeout", type=int, default=120, help="Per-test timeout in seconds")
     parser.add_argument("--target", type=str, default="", help="Cross-compile for this target triple (e.g. x86_64-pc-windows-msvc)")
     parser.add_argument("--runner", type=str, default="", help="Prefix command used to execute each test binary (e.g. 'wine' on a posix host)")
+    parser.add_argument("--compiler", type=Path, default=None, help="Use an existing agc-compatible binary instead of building stage0 (for self-host parity runs)")
     parser.add_argument("--libdir", action="append", default=[], help="Library search dir passed as -L to every compile (repeatable; e.g. generated Windows import libs)")
     parser.add_argument("--compare", type=str, default="", help="Compare run time metrics with a baseline file")
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parent.parent
+    compiler = args.compiler.resolve() if args.compiler is not None else None
     os.chdir(root)
 
     mode = "release" if args.release else "debug"
-    agc_bin = root / "target" / mode / ("agc.exe" if IS_WINDOWS else "agc")
+    if compiler is None:
+        # Cargo workspace root is the repo root, so stage0 binaries land in the
+        # root target/ dir even though the crates live under bootstrap/.
+        agc_bin = root / "target" / mode / ("agc.exe" if IS_WINDOWS else "agc")
 
-    # Ensure agc is built
-    print(f"{C_BOLD}== Building agc ({mode}) =={C_RESET}")
-    build_cmd = ["cargo", "build", "-p", "agc"]
-    if args.release:
-        build_cmd.append("--release")
-    res = subprocess.run(build_cmd)
-    if res.returncode != 0:
-        print(f"{C_RED}error: failed to build agc{C_RESET}")
-        sys.exit(1)
+        # Ensure stage0 is built for the ordinary integration path.
+        print(f"{C_BOLD}== Building agc ({mode}) =={C_RESET}")
+        build_cmd = ["cargo", "build", "-p", "agc"]
+        if args.release:
+            build_cmd.append("--release")
+        res = subprocess.run(build_cmd)
+        if res.returncode != 0:
+            print(f"{C_RED}error: failed to build agc{C_RESET}")
+            sys.exit(1)
+    else:
+        agc_bin = compiler
+        print(f"{C_BOLD}== Using compiler {agc_bin} =={C_RESET}")
 
     if not agc_bin.is_file():
         print(f"{C_RED}error: agc binary not found at {agc_bin}{C_RESET}")
@@ -657,6 +868,15 @@ def main():
         env_runner = os.environ.get("SILVER_TEST_RUNNER") or os.environ.get("WINE")
         if env_runner:
             runner = shlex.split(env_runner)
+    if not runner and target_is_wasm(target) and not IS_WINDOWS:
+        # Mirror the driver's runner resolution: SILVER_TEST_RUNNER wins,
+        # then node + the WASI shim the driver also writes to the temp dir.
+        env_runner = os.environ.get("SILVER_TEST_RUNNER")
+        if env_runner:
+            runner = shlex.split(env_runner)
+        elif services.has_node:
+            prime_wasm_runner_shim(agc_bin)
+            runner = ["node", "--no-warnings", wasm_runner_shim_path()]
     # Each --libdir value is already a complete path from the shell/argparse;
     # re-splitting it would break paths containing spaces (e.g. a Windows SDK
     # under "Program Files").
@@ -698,12 +918,16 @@ def main():
             elif name == "http_perf_test" and not services.has_go:
                 skip_reason = "requires Go compiler"
             elif name == "rust_ffi_test" and not services.ffi_dir:
-                skip_reason = "requires built Rust FFI library (build ffi/rust)"
+                skip_reason = "requires built Rust FFI library (build bootstrap/stage0/ffi-rust)"
+            elif compiler is None and name in STAGE1_ONLY_TESTS:
+                skip_reason = STAGE1_ONLY_TESTS[name]
             elif IS_WINDOWS and name in WINDOWS_SKIP:
                 skip_reason = WINDOWS_SKIP[name]
             elif target and target_is_windows_name(target) and name in WINDOWS_SKIP:
                 # Cross-target runs: same skip set as a windows host.
                 skip_reason = WINDOWS_SKIP[name]
+            elif target and target_is_wasm(target) and name in WASM_SKIP:
+                skip_reason = WASM_SKIP[name]
 
             if skip_reason:
                 res = TestResult(name, "SKIP", skip_reason)

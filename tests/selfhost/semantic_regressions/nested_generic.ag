@@ -1,0 +1,11 @@
+import std.mem.vec;
+import std.string;
+import std.result;
+
+Result<Vec<String>, Error> nested_result() {
+    return Result<Vec<String>, Error>.Ok(Vec<String>.new());
+}
+
+Vec<Vec<i64>> nested_vec() {
+    return Vec<Vec<i64>>.new();
+}

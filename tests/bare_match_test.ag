@@ -42,6 +42,14 @@ i32 main() {
     };
     assert_eq_i32(42, v, "generic payload extract");
 
+    // A narrow negative arm must be widened before storing an i64 match value.
+    Box2<i64> empty = Box2<i64>.Empty;
+    i64 empty_value = match empty {
+        Full(val) : val,
+        Empty     : -1,
+    };
+    assert_eq_i64(-1, empty_value, "generic enum negative match arm");
+
     // Wildcard arm catches an unhandled variant
     i32 w = match full {
         Empty : 99,

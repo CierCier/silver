@@ -1,3 +1,4 @@
+// compile_flags: --no-cache
 import std.test;  // assert_true, assert_eq_i64, check, done, STDOUT
 import std.map;
 
@@ -66,9 +67,7 @@ i32 main() {
 
         Optional<[i32, i64]> removed = m.remove(2);
         assert_true(removed.is_some(), "remove(2) returns some");
-        // NOTE: Optional<tuple>.unwrap() + let destructuring has a known
-        // codegen issue with generic tuple returns; value checks skipped
-        // until the underlying bug is fixed.
+        // Tuple payload contents are covered by map_tuple_test.
         assert_eq_i64(m.len(), 2, "len=2 after remove");
         assert_true(!m.contains_key(2), "key 2 gone after remove");
         assert_true(m.contains_key(1), "key 1 still present");
@@ -93,6 +92,8 @@ i32 main() {
         HashMap<i32, i64> m = HashMap<i32, i64>.new();
         m.insert(10, (i64)100);
         m.insert(20, (i64)200);
+        assert_true(m.contains_key(10), "get_mut key is present before pointer lookup");
+        assert_eq_i64(m.get(10), 100, "get_mut value is readable before pointer lookup");
 
         i64* p = m.get_mut(10);
         assert_true((i64)p != 0, "get_mut(10) returns non-null");

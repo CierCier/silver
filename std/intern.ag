@@ -1,0 +1,46 @@
+// Stable string interning for compiler data structures.
+import std.map;
+import std.mem.vec;
+import std.optional;
+import std.string;
+
+struct Interner {
+    Vec<String> values;
+    HashMap<String, u32> ids;
+}
+
+impl Interner {
+    Interner new() {
+        Interner interner;
+        interner.values = Vec<String>.new();
+        interner.ids = HashMap<String, u32>.new();
+        return interner;
+    }
+
+    u32 intern(Interner* self, str text) {
+        // Borrowed-content lookup: no clone on either path (STD-002).
+        Optional<u32> found = map_get_opt_str_u32(&self.ids, text);
+        if (found.is_some()) {
+            return found.unwrap();
+        }
+        u32 id = (u32)self.values.len();
+        self.ids.insert(String.from_str(text), id);
+        self.values.push(String.from_str(text));
+        return id;
+    }
+
+    str get(Interner* self, u32 id) {
+        if ((i64)id >= self.values.len()) {
+            return "";
+        }
+        return self.values.get_ptr((i64)id).to_str();
+    }
+
+    i64 len(&self) {
+        return self.values.len();
+    }
+
+    bool contains(Interner* self, str text) {
+        return map_contains_key_str_u32(&self.ids, text);
+    }
+}
