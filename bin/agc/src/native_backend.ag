@@ -27,6 +27,7 @@ struct NativeBuildProgress {
     i64 completed_steps;
     i64 source_modules;
     i64 codegen_items;
+    i64 current_items;
     i64 cached_count;
     i64 compiled_count;
     Instant started;
@@ -44,10 +45,11 @@ NativeBuildProgress native_build_progress(CliMatches* cli, bool has_link_step) {
     progress.completed_steps = 0;
     progress.source_modules = 0;
     progress.codegen_items = 0;
+    progress.current_items = 0;
     progress.cached_count = 0;
     progress.compiled_count = 0;
     progress.started = now();
-    progress.unit_started = progress.started;
+    progress.unit_started = now();
     return progress;
 }
 
@@ -117,9 +119,7 @@ void native_progress_finish_compile(NativeBuildProgress* progress, str target, b
     STDERR.write_str(" ");
     STDERR.write_str(target);
     STDERR.write_str(" (");
-    STDERR.write_i64(progress.source_modules);
-    STDERR.write_str(" source files, ");
-    STDERR.write_i64(progress.codegen_items);
+    STDERR.write_i64(progress.current_items);
     STDERR.write_str(" items)\n");
     STDERR.flush();
 }
@@ -146,9 +146,9 @@ void native_progress_complete(NativeBuildProgress* progress) {
     cli_write_styled(&STDERR, "Build finished", CliStyle.Heading, progress.terminal);
     STDERR.write_str(" in ");
     native_progress_write_duration(elapsed_ms);
-    STDERR.write_str(" (1 compilation unit, ");
+    STDERR.write_str(" (");
     STDERR.write_i64(progress.source_modules);
-    STDERR.write_str(" source files, ");
+    STDERR.write_str(" modules, ");
     STDERR.write_i64(progress.codegen_items);
     STDERR.write_str(" items, ");
     STDERR.write_i64(progress.cached_count);
@@ -204,6 +204,75 @@ i64 native_codegen_item_count(SyntaxNode* root) {
         item = item.next_sibling;
     }
     return count;
+}
+
+i64 native_codegen_item_count_for_file(SyntaxNode* root, u32 file_id) {
+    i64 count = 0;
+    SyntaxNode* item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.span.file == (i64)file_id && native_codegen_item(item.kind)) {
+            count += 1;
+        } else if (item.span.file == (i64)file_id && item.kind == NodeKind.Impl) {
+            count += native_impl_method_count(item);
+        }
+        item = item.next_sibling;
+    }
+    return count;
+}
+
+String native_module_target(str path) {
+    i64 length = strlen(path);
+    i64 start = -1;
+    i64 i = 0;
+    while (i + 5 <= length && start < 0) {
+        if (path[i] == (u8)'/' && path[i + 1] == (u8)'s'
+            && path[i + 2] == (u8)'r' && path[i + 3] == (u8)'c'
+            && path[i + 4] == (u8)'/') {
+            start = i + 5;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i + 6 <= length && start < 0) {
+        if (path[i] == (u8)'/' && path[i + 1] == (u8)'s'
+            && path[i + 2] == (u8)'t' && path[i + 3] == (u8)'d'
+            && path[i + 4] == (u8)'/') {
+            start = i + 1;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i + 7 <= length && start < 0) {
+        if (path[i] == (u8)'/' && path[i + 1] == (u8)'t'
+            && path[i + 2] == (u8)'e' && path[i + 3] == (u8)'s'
+            && path[i + 4] == (u8)'t' && path[i + 5] == (u8)'s'
+            && path[i + 6] == (u8)'/') {
+            start = i + 1;
+        }
+        i += 1;
+    }
+    if (start < 0 && length > 6 && path[0] == (u8)'t'
+        && path[1] == (u8)'e' && path[2] == (u8)'s'
+        && path[3] == (u8)'t' && path[4] == (u8)'s'
+        && path[5] == (u8)'/') {
+        start = 0;
+    }
+    if (start < 0) {
+        start = length;
+        while (start > 0 && path[start - 1] != (u8)'/') { start -= 1; }
+    }
+    i64 end = length;
+    if (end - start > 3 && path[end - 3] == (u8)'.'
+        && path[end - 2] == (u8)'a' && path[end - 1] == (u8)'g') {
+        end -= 3;
+    }
+    String target = String.new();
+    i = start;
+    while (i < end) {
+        target.push(path[i] == (u8)'/' ? (u8)'.' : path[i]);
+        i += 1;
+    }
+    return target;
 }
 
 bool native_is_executable(str path) {
@@ -490,7 +559,7 @@ bool native_cached_object_valid(str path) {
 String native_object_cache_path(Vec<String>* arguments, CliMatches* cli,
                                 str source_path, Vec<String>* source_paths,
                                 Vec<String>* link_objects, str default_name,
-                                bool module_object) {
+                                bool module_object, u32 source_file_id) {
     if (cli.has("no-cache")) { return String.new(); }
     Optional<String> dump_ir = var("SILVER_DUMP_IR");
     if (dump_ir.is_some()) {
@@ -499,7 +568,7 @@ String native_object_cache_path(Vec<String>* arguments, CliMatches* cli,
         return String.new();
     }
     String identity = String.new();
-    identity.push_str("silver-stage1-native-object-v1");
+    identity.push_str("silver-stage1-native-object-v2");
     identity.push((u8)0);
     identity.push_str(default_name);
     identity.push((u8)0);
@@ -525,6 +594,8 @@ String native_object_cache_path(Vec<String>* arguments, CliMatches* cli,
         i += 1;
     }
     identity.push((u8)(module_object ? 1 : 0));
+    native_append_i64(&identity, (i64)source_file_id);
+    identity.push((u8)0);
     bool skip_next = false;
     i = 1;
     while (i < arguments.len()) {
@@ -959,6 +1030,17 @@ String native_temp_path(str suffix, i64 pid) {
     native_append_i64(&path, pid);
     path.push_str(suffix);
     return path;
+}
+
+void native_dispose_object_paths(Vec<String>* paths, bool remove_files) {
+    if (remove_files) {
+        i64 i = 0;
+        while (i < paths.len()) {
+            remove_file(paths.get_ptr(i).to_str());
+            i += 1;
+        }
+    }
+    paths.drop();
 }
 
 bool native_path_seen(Vec<String>* visited, str path) {
@@ -1796,6 +1878,109 @@ void native_add_search_path(Command* command, bool direct_linker, str dir) {
     native_add_rpath(command, direct_linker, dir);
 }
 
+bool native_compile_module_object(CliMatches* cli,
+                                 SyntaxTree* tree, TypeTable* types, Interner* names,
+                                 SymbolTable* symbols, Vec<String>* source_paths,
+                                 str root_path, String* root_source,
+                                 bool debug_mode, bool module_object,
+                                 u32 source_file_id, str object_path,
+                                 String* cache_path, NativeBuildProgress* progress,
+                                 str progress_target, i32* result) {
+    *result = 0;
+    bool cache_hit = cache_path.len() > 0 && is_file(cache_path.to_str());
+    if (cache_hit && !native_cached_object_valid(cache_path.to_str())) {
+        remove_file(cache_path.to_str());
+        cache_hit = false;
+    }
+    if (cache_hit && !native_copy_binary_atomic(cache_path.to_str(), object_path)) {
+        cache_hit = false;
+    }
+    if (cache_hit && cli.has("verbose")) {
+        STDERR.write_str("agc: reusing cached native object\n");
+    }
+
+    if (!cache_hit) {
+        progress.unit_started = now();
+        native_progress_start(progress, progress_target);
+        AstPool ast_pool = AstPool.new();
+        LlvmGenerator gen = LlvmGenerator.new("silver_native");
+        bool compile_ok = gen.compile(tree, &ast_pool, types, names, symbols,
+            source_paths, debug_mode, module_object, source_file_id);
+
+        if (!gen.ownership_diagnostics.is_empty()) {
+            i64 i = 0;
+            while (i < gen.ownership_diagnostics.len()) {
+                Diagnostic* diagnostic = gen.ownership_diagnostics.get(i);
+                str diagnostic_path = root_path;
+                String diagnostic_source = root_source.clone();
+                if (diagnostic.span.file > 0
+                    && diagnostic.span.file <= source_paths.len()) {
+                    diagnostic_path = source_paths.get_ptr(diagnostic.span.file - 1).to_str();
+                    Result<String, Error> imported_source = String.from_file(diagnostic_path);
+                    diagnostic_source.drop();
+                    diagnostic_source = imported_source.is_ok()
+                        ? imported_source.unwrap() : String.new();
+                }
+                String rendered = render_diagnostic(diagnostic, diagnostic_path,
+                    &diagnostic_source);
+                STDERR.write_str(rendered.to_str());
+                i += 1;
+            }
+            gen.destroy();
+            *result = 2;
+            return true;
+        }
+
+        Optional<String> dump_ir = var("SILVER_DUMP_IR");
+        if (dump_ir.is_some()) {
+            String ir = gen.emit_ir();
+            STDERR.write_str(ir.to_str());
+            ir.drop();
+            String dump_val = dump_ir.unwrap();
+            dump_val.drop();
+        }
+
+        if (gen.unresolved_calls > 0) {
+            STDERR.write_str("agc: error: native backend cannot emit code with unresolved symbols\n");
+            gen.destroy();
+            return false;
+        }
+        if (!compile_ok) {
+            gen.destroy();
+            return false;
+        }
+
+        String verify_err = String.new();
+        if (!gen.verify(&verify_err)) {
+            STDERR.write_str("agc: error: llvm verify failed: ");
+            STDERR.write_str(verify_err.to_str());
+            STDERR.write_str("\n");
+            verify_err.drop();
+            gen.destroy();
+            *result = 2;
+            return true;
+        }
+        verify_err.drop();
+
+        String emit_err = String.new();
+        bool emitted = gen.emit_object_file(object_path, &emit_err);
+        if (!emitted) {
+            STDERR.write_str("agc: error: failed to emit object file: ");
+            STDERR.write_str(emit_err.to_str());
+            STDERR.write_str("\n");
+            emit_err.drop();
+            gen.destroy();
+            *result = 2;
+            return true;
+        }
+        emit_err.drop();
+        gen.destroy();
+        native_store_cached_object(cache_path.to_str(), object_path);
+    }
+    native_progress_finish_compile(progress, progress_target, cache_hit);
+    return true;
+}
+
 bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path, str default_name,
                         Vec<String>* extra_includes, bool module_object, i32* result) {
     bool emit_object = native_emit_object_requested(arguments);
@@ -2035,149 +2220,78 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         return false;
     }
 
-    String cache_path = native_object_cache_path(arguments, cli, source_path,
-        &source_paths, &link_objects, default_name, module_object);
     i64 pid = getpid();
-    String object_path = emit_object ? output.clone() : native_temp_path(".o", pid);
-    bool cache_hit = cache_path.len() > 0 && is_file(cache_path.to_str());
-    if (cache_hit && !native_cached_object_valid(cache_path.to_str())) {
-        remove_file(cache_path.to_str());
-        cache_hit = false;
-    }
-    if (cache_hit && !native_copy_binary_atomic(cache_path.to_str(), object_path.to_str())) {
-        cache_hit = false;
-    }
-    if (cache_hit && cli.has("verbose")) {
-        STDERR.write_str("agc: reusing cached native object\n");
-    }
+    bool split_modules = !emit_object && !module_object;
+    i64 module_count = split_modules ? source_paths.len() : 1;
+    progress.total_steps = module_count + (split_modules ? 1 : 0);
     Vec<String> link_libs = Vec<String>.new();
     native_collect_link_libs(tree.root, &link_libs);
-
-    if (!cache_hit) {
-        // Lower once and emit an object; a content-keyed hit bypasses this work.
-        progress.unit_started = now();
-        native_progress_start(&progress, progress_target);
-        AstPool ast_pool = AstPool.new();
-        LlvmGenerator gen = LlvmGenerator.new("silver_native");
-        bool compile_ok = gen.compile(&tree, &ast_pool, &symbols.types, &symbols.names, &symbols,
-                                      &source_paths, cfg.contains("debug"), module_object);
-
-        if (!gen.ownership_diagnostics.is_empty()) {
+    Vec<String> object_paths = Vec<String>.new();
+    bool modules_ok = true;
+    i64 module_index = 0;
+    while (module_index < module_count) {
+        u32 source_file_id = split_modules ? (u32)(module_index + 1) : 0;
+        str module_path = source_file_id > 0
+            ? source_paths.get_ptr(source_file_id - 1).to_str() : source_path;
+        String module_name = split_modules
+            ? native_module_target(module_path) : String.from_str(progress_target);
+        progress.current_items = split_modules
+            ? native_codegen_item_count_for_file(tree.root, source_file_id)
+            : progress.codegen_items;
+        String object_path;
+        if (emit_object) {
+            object_path = output.clone();
+        } else {
+            String suffix = String.from_str(".");
+            native_append_i64(&suffix, (i64)source_file_id);
+            suffix.push_str(".o");
+            object_path = native_temp_path(suffix.to_str(), pid);
+            suffix.drop();
+        }
+        String cache_path = native_object_cache_path(arguments, cli, source_path,
+            &source_paths, &link_objects, default_name, module_object, source_file_id);
+        i32 module_result = 0;
+        bool compiled = native_compile_module_object(cli, &tree, &symbols.types,
+            &symbols.names, &symbols, &source_paths, source_path, &source_copy,
+            cfg.contains("debug"), module_object, source_file_id,
+            object_path.to_str(), &cache_path, &progress, module_name.to_str(),
+            &module_result);
+        cache_path.drop();
+        module_name.drop();
+        if (!compiled || module_result != 0) {
+            if (module_result != 0) { *result = module_result; }
+            object_path.drop();
+            modules_ok = false;
+            break;
+        }
+        object_paths.push(move object_path);
+        module_index += 1;
+    }
+    if (!modules_ok) {
+        if (!emit_object) {
             i64 i = 0;
-            while (i < gen.ownership_diagnostics.len()) {
-                Diagnostic* diagnostic = gen.ownership_diagnostics.get(i);
-                str diagnostic_path = source_path;
-                String diagnostic_source = source_copy.clone();
-                if (diagnostic.span.file > 1 && diagnostic.span.file <= source_paths.len()) {
-                    diagnostic_path = source_paths.get_ptr(diagnostic.span.file - 1).to_str();
-                    Result<String, Error> imported_source = String.from_file(diagnostic_path);
-                    diagnostic_source.drop();
-                    diagnostic_source = imported_source.is_ok() ? imported_source.unwrap() : String.new();
-                }
-                String rendered = render_diagnostic(diagnostic, diagnostic_path, &diagnostic_source);
-                STDERR.write_str(rendered.to_str());
+            while (i < object_paths.len()) {
+                remove_file(object_paths.get_ptr(i).to_str());
                 i += 1;
             }
-            gen.destroy();
-            source_paths.drop();
-            object_path.drop();
-            cache_path.drop();
-            link_libs.drop();
-            link_objects.drop();
-            native_destroy_units(&pools, &streams);
-            pool.destroy();
-            output.drop();
-            *result = 2;
-            return true;
         }
-
-        Optional<String> dump_ir = var("SILVER_DUMP_IR");
-        if (dump_ir.is_some()) {
-            String ir = gen.emit_ir();
-            STDERR.write_str(ir.to_str());
-            ir.drop();
-            String dump_val = dump_ir.unwrap();
-            dump_val.drop();
-        }
-
-        if (gen.unresolved_calls > 0) {
-            STDERR.write_str("agc: error: native backend cannot emit code with unresolved symbols\n");
-            gen.destroy();
-            source_paths.drop();
-            object_path.drop();
-            cache_path.drop();
-            link_libs.drop();
-            native_destroy_units(&pools, &streams);
-            link_objects.drop();
-            pool.destroy();
-            output.drop();
-            return false;
-        }
-        if (!compile_ok) {
-            gen.destroy();
-            source_paths.drop();
-            object_path.drop();
-            cache_path.drop();
-            link_libs.drop();
-            native_destroy_units(&pools, &streams);
-            link_objects.drop();
-            pool.destroy();
-            output.drop();
-            return false;
-        }
-
-        String verify_err = String.new();
-        if (!gen.verify(&verify_err)) {
-            STDERR.write_str("agc: error: llvm verify failed: ");
-            STDERR.write_str(verify_err.to_str());
-            STDERR.write_str("\n");
-            verify_err.drop();
-            gen.destroy();
-            source_paths.drop();
-            object_path.drop();
-            cache_path.drop();
-            link_libs.drop();
-            link_objects.drop();
-            native_destroy_units(&pools, &streams);
-            pool.destroy();
-            output.drop();
-            *result = 2;
-            return true;
-        }
-        verify_err.drop();
-
-        String emit_err = String.new();
-        bool emitted = gen.emit_object_file(object_path.to_str(), &emit_err);
-        if (!emitted) {
-            STDERR.write_str("agc: error: failed to emit object file: ");
-            STDERR.write_str(emit_err.to_str());
-            STDERR.write_str("\n");
-            emit_err.drop();
-            gen.destroy();
-            source_paths.drop();
-            object_path.drop();
-            cache_path.drop();
-            link_libs.drop();
-            link_objects.drop();
-            native_destroy_units(&pools, &streams);
-            pool.destroy();
-            output.drop();
-            *result = 2;
-            return true;
-        }
-        emit_err.drop();
-        gen.destroy();
-        native_store_cached_object(cache_path.to_str(), object_path.to_str());
+        object_paths.drop();
+        link_libs.drop();
+        source_paths.drop();
+        native_destroy_units(&pools, &streams);
+        link_objects.drop();
+        pool.destroy();
+        output.drop();
+        if (*result == 0) { return false; }
+        return true;
     }
-    native_progress_finish_compile(&progress, progress_target, cache_hit);
     source_paths.drop();
     native_destroy_units(&pools, &streams);
     pool.destroy();
 
     if (emit_object) {
         native_progress_complete(&progress);
-        object_path.drop();
-        cache_path.drop();
+        object_paths.drop();
         link_libs.drop();
         link_objects.drop();
         output.drop();
@@ -2246,13 +2360,16 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     if (direct_linker) {
         cc_command.arg("-o");
         cc_command.arg(output.to_str());
-        cc_command.arg(object_path.to_str());
     } else {
-        cc_command.arg(object_path.to_str());
         cc_command.arg("-o");
         cc_command.arg(output.to_str());
         cc_command.arg("-nostdlib");
         cc_command.arg("-no-pie");
+    }
+    i64 generated_index = 0;
+    while (generated_index < object_paths.len()) {
+        cc_command.arg(object_paths.get_ptr(generated_index).to_str());
+        generated_index += 1;
     }
     i64 object_index = 0;
     while (object_index < link_objects.len()) {
@@ -2279,7 +2396,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
             STDERR.write_str("agc: error: could not discover the dynamic linker; set SILVER_DYNAMIC_LINKER\n");
             dl.drop();
             linker.drop();
-            object_path.drop();
+            native_dispose_object_paths(&object_paths, true);
             link_libs.drop();
             output.drop();
             *result = 2;
@@ -2402,7 +2519,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     native_progress_link(&progress, progress_target);
     Result<ExitStatus, i64> cc_result = cc_command.status();
     linker.drop();
-    object_path.drop();
+    native_dispose_object_paths(&object_paths, true);
     if (cc_result.is_err() || !cc_result.unwrap().success()) {
         STDERR.write_str("agc: error: linking failed\n");
         output.drop();

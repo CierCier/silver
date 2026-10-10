@@ -66,6 +66,28 @@ String llvm_free_function_symbol(TypeTable* types, SyntaxNode* root, SyntaxNode*
     return typecheck_overloaded_free_symbol(types, id_node.text, function);
 }
 
+bool llvm_has_prior_function_body(TypeTable* types, SyntaxNode* root,
+                                  SyntaxNode* function, str symbol) {
+    SyntaxNode* function_id = function_identifier(function);
+    if (function_id == (SyntaxNode*)0) { return false; }
+    SyntaxNode* item = root.first_child;
+    while (item != (SyntaxNode*)0 && item != function) {
+        if (item.kind == NodeKind.Function && !llvm_item_is_generic_fn(item)
+            && find_function_body(item) != (SyntaxNode*)0) {
+            SyntaxNode* id_node = function_identifier(item);
+            if (id_node != (SyntaxNode*)0
+                && strcmp(id_node.text, function_id.text) == 0) {
+                String prior_symbol = llvm_free_function_symbol(types, root, item);
+                bool duplicate = strcmp(prior_symbol.to_str(), symbol) == 0;
+                prior_symbol.drop();
+                if (duplicate) { return true; }
+            }
+        }
+        item = item.next_sibling;
+    }
+    return false;
+}
+
 Vec<LLVMOpaqueType*> llvm_param_types(LlvmContext* ctx, TypeTable* types, Vec<Binding>* params, str self_type_name) {
     Vec<LLVMOpaqueType*> param_types = Vec<LLVMOpaqueType*>.new();
     i64 p = 0;
@@ -391,6 +413,9 @@ void llvm_drain_mono_queue(LlvmContext* ctx, TypeTable* types, Interner* names, 
         if (LLVMCountBasicBlocks(fn_val) > 0) {
             continue;
         }
+        // Different source objects may instantiate the same specialization.
+        // ODR linkage lets the native linker coalesce those identical bodies.
+        LLVMSetLinkage(fn_val, LLVMLinkage.LLVMWeakODRLinkage);
         ctx.mono_count = ctx.mono_count + 1;
         if (ctx.mono_count > 4096) {
             ctx.note_unresolved("monomorph-cap", mangled);
@@ -762,7 +787,7 @@ LLVMOpaqueValue* llvm_bt_make_arg_record(LLVMOpaqueContext* ctx, LLVMOpaqueModul
     LLVMOpaqueValue* offset_global = LLVMAddGlobal(
         module, i64_type, offset_name.to_str());
     LLVMSetInitializer(offset_global, LLVMConstInt(i64_type, 0, 0));
-    LLVMSetLinkage(offset_global, LLVMLinkage.LLVMInternalLinkage);
+    LLVMSetLinkage(offset_global, LLVMLinkage.LLVMExternalLinkage);
     LLVMOpaqueValue* param_address = LLVMBuildPtrToInt(
         builder, param_slot, i64_type, "bt.arg.address");
     LLVMOpaqueValue* relative_offset = LLVMBuildSub(
@@ -813,6 +838,157 @@ void llvm_bt_record_args(LLVMOpaqueContext* ctx, LLVMOpaqueModule* module,
     fields.push(array_global);
     records.push(LLVMConstStructInContext(ctx, fields.data, (u32)fields.len(), 0));
     fields.drop();
+}
+
+void llvm_bt_record_external_function(LlvmContext* ctx, TypeTable* types,
+                                      LLVMTargetDataRef* target_data,
+                                      Span span, SyntaxNode* params_node,
+                                      str self_type_name,
+                                      LLVMOpaqueValue* fn_val, str function_name,
+                                      Vec<String>* source_paths,
+                                      Vec<LLVMOpaqueValue*>* function_records,
+                                      Vec<LLVMOpaqueValue*>* arg_function_records) {
+    llvm_bt_record_function(ctx.ctx, ctx.module, fn_val, function_name,
+        span, source_paths, function_records);
+
+    Vec<Binding> params = Vec<Binding>.new();
+    collect_parameter_bindings(params_node, &params);
+    Vec<LLVMOpaqueType*> param_types = llvm_param_types(ctx, types, &params, self_type_name);
+    Vec<LLVMOpaqueValue*> arg_records = Vec<LLVMOpaqueValue*>.new();
+    LLVMOpaqueType* i64_type = LLVMInt64TypeInContext(ctx.ctx);
+    i64 i = 0;
+    while (i < params.len()) {
+        Binding* param = params.get_ptr(i);
+        String offset_name = String.from_str("__silver_bt_offset.");
+        offset_name.push_str(function_name);
+        offset_name.push((u8)'.');
+        offset_name.push_str(param.name);
+        LLVMOpaqueValue* offset_global = LLVMGetNamedGlobal(ctx.module,
+            offset_name.to_str());
+        if (offset_global == (LLVMOpaqueValue*)0) {
+            offset_global = LLVMAddGlobal(ctx.module, i64_type,
+                offset_name.to_str());
+        }
+
+        String name_suffix = String.from_str("arg.");
+        name_suffix.push_str(function_name);
+        name_suffix.push((u8)'.');
+        name_suffix.push_str(param.name);
+        LLVMOpaqueValue* name_global = llvm_bt_string_global(ctx.ctx,
+            ctx.module, name_suffix.to_str(), param.name);
+        u64 abi_size = LLVMABISizeOfType(target_data, param_types.get(i));
+        if (abi_size > 8) { abi_size = 8; }
+        if (abi_size == 0) { abi_size = 1; }
+        u64 encoded_size = 0x8000000000000000 | abi_size;
+        Vec<LLVMOpaqueValue*> fields = Vec<LLVMOpaqueValue*>.new();
+        fields.push(name_global);
+        fields.push(LLVMConstPtrToInt(offset_global, i64_type));
+        fields.push(LLVMConstInt(i64_type, encoded_size, 0));
+        arg_records.push(LLVMConstStructInContext(ctx.ctx, fields.data,
+            (u32)fields.len(), 0));
+        fields.drop();
+        offset_name.drop();
+        name_suffix.drop();
+        i += 1;
+    }
+    llvm_bt_record_args(ctx.ctx, ctx.module, fn_val, &arg_records,
+        arg_function_records);
+    arg_records.drop();
+    param_types.drop();
+    params.drop();
+}
+
+void llvm_bt_record_imported_methods(LlvmContext* ctx, TypeTable* types,
+                                    LLVMTargetDataRef* target_data,
+                                    SyntaxNode* impl_item,
+                                    Vec<String>* source_paths,
+                                    Vec<LLVMOpaqueValue*>* function_records,
+                                    Vec<LLVMOpaqueValue*>* arg_function_records) {
+    if (llvm_item_is_generic_impl(impl_item)) { return; }
+    SyntaxNode* struct_ident = impl_target_identifier(impl_item);
+    if (struct_ident == (SyntaxNode*)0) { return; }
+    str struct_name = struct_ident.text;
+    SyntaxNode* block = impl_item.first_child;
+    while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+        block = block.next_sibling;
+    }
+    if (block == (SyntaxNode*)0) { return; }
+
+    SyntaxNode* cursor = block.first_child;
+    while (cursor != (SyntaxNode*)0) {
+        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
+            cursor = cursor.next_sibling;
+            continue;
+        }
+        bool is_cast = cursor.kind == NodeKind.Token
+            && (cursor.token_kind == TokenKind.Cast || strcmp(cursor.text, "cast") == 0);
+        SyntaxNode* ret_start = cursor;
+        SyntaxNode* method_name_node = (SyntaxNode*)0;
+        SyntaxNode* params_node = (SyntaxNode*)0;
+        SyntaxNode* body_node = (SyntaxNode*)0;
+        SyntaxNode* scan = cursor;
+        SyntaxNode* semi_node = (SyntaxNode*)0;
+        while (scan != (SyntaxNode*)0) {
+            if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Semicolon) {
+                semi_node = scan;
+                break;
+            }
+            if (scan.kind == NodeKind.Block) {
+                body_node = scan;
+                break;
+            }
+            if (scan.kind == NodeKind.Parenthesized) {
+                params_node = scan;
+                if (scan.next_sibling != (SyntaxNode*)0
+                    && scan.next_sibling.kind == NodeKind.Block) {
+                    body_node = scan.next_sibling;
+                    break;
+                }
+            }
+            if (!is_cast && scan.kind == NodeKind.Token
+                && scan.token_kind == TokenKind.Identifier) {
+                method_name_node = scan;
+            }
+            scan = scan.next_sibling;
+        }
+        if (semi_node != (SyntaxNode*)0) {
+            cursor = semi_node.next_sibling;
+            continue;
+        }
+        if (body_node != (SyntaxNode*)0 && params_node != (SyntaxNode*)0
+            && (is_cast || method_name_node != (SyntaxNode*)0)
+            && !llvm_item_is_generic_fn(cursor)) {
+            String emitted_name = String.from_str(struct_name);
+            emitted_name.push_str("__");
+            if (is_cast) {
+                String ret_str = String.new();
+                SyntaxNode* rscan = cursor.next_sibling;
+                while (rscan != (SyntaxNode*)0 && rscan != params_node) {
+                    append_node_tokens(rscan, &ret_str);
+                    rscan = rscan.next_sibling;
+                }
+                emitted_name.push_str("cast_");
+                emitted_name.push_str(ret_str.to_str());
+                ret_str.drop();
+            } else {
+                String method_symbol = typecheck_method_symbol(types, struct_name,
+                    method_name_node.text, ret_start, method_name_node, params_node);
+                emitted_name.drop();
+                emitted_name = move method_symbol;
+            }
+            LLVMOpaqueValue* fn_val = LLVMGetNamedFunction(ctx.module,
+                emitted_name.to_str());
+            if (fn_val != (LLVMOpaqueValue*)0) {
+                llvm_bt_record_external_function(ctx, types, target_data,
+                    cursor.span, params_node, struct_name, fn_val,
+                    emitted_name.to_str(), source_paths, function_records,
+                    arg_function_records);
+            }
+            emitted_name.drop();
+        }
+        cursor = body_node != (SyntaxNode*)0 ? body_node.next_sibling
+            : cursor.next_sibling;
+    }
 }
 
 void llvm_bt_emit_tables(LLVMOpaqueContext* ctx, LLVMOpaqueModule* module,
@@ -937,7 +1113,8 @@ impl LlvmGenerator {
 
     bool compile(LlvmGenerator* self, SyntaxTree* tree, AstPool* pool,
                  TypeTable* types, Interner* names, SymbolTable* symbols,
-                 Vec<String>* source_paths, bool debug_mode, bool module_object) {
+                 Vec<String>* source_paths, bool debug_mode, bool module_object,
+                 u32 source_file_id) {
         LlvmContext ctx = LlvmContext.new(self.ctx, self.target_data, self.module, self.builder,
                                           types, names, pool, tree.root, source_paths, debug_mode);
         ctx.ownership_diagnostics = &self.ownership_diagnostics;
@@ -1091,6 +1268,8 @@ impl LlvmGenerator {
         }
 
         // Pass 1: Declare top-level functions, methods, and externs
+        Vec<LLVMOpaqueValue*> bt_function_records = Vec<LLVMOpaqueValue*>.new();
+        Vec<LLVMOpaqueValue*> bt_arg_function_records = Vec<LLVMOpaqueValue*>.new();
         item = tree.root.first_child;
         while (item != (SyntaxNode*)0) {
             if (item.kind == NodeKind.Function) {
@@ -1364,7 +1543,10 @@ impl LlvmGenerator {
                     if (g_type_id == TYPE_UNKNOWN) { g_type_id = TYPE_I64; }
                     LLVMOpaqueType* g_llvm_type = llvm_lower_type(self.ctx, types, g_type_id);
 
+                    bool owns_global = source_file_id == 0
+                        || item.span.file == (i64)source_file_id;
                     LLVMOpaqueValue* g_init = (LLVMOpaqueValue*)0;
+                    if (owns_global) {
                     SyntaxNode* eq_node = item.first_child;
                     while (eq_node != (SyntaxNode*)0 && !(eq_node.kind == NodeKind.Token && (eq_node.token_kind == TokenKind.Assign || strcmp(eq_node.text, "=") == 0))) {
                         eq_node = eq_node.next_sibling;
@@ -1526,12 +1708,15 @@ impl LlvmGenerator {
                     if (g_init == (LLVMOpaqueValue*)0) {
                         g_init = LLVMConstNull(g_llvm_type);
                     }
+                    }
 
                     LLVMOpaqueValue* g_val = LLVMGetNamedGlobal(self.module, g_name);
                     if (g_val == (LLVMOpaqueValue*)0) {
                         g_val = LLVMAddGlobal(self.module, g_llvm_type, g_name);
                     }
-                    LLVMSetInitializer(g_val, g_init);
+                    if (owns_global) {
+                        LLVMSetInitializer(g_val, g_init);
+                    }
                 }
             }
             item = item.next_sibling;
@@ -1542,48 +1727,49 @@ impl LlvmGenerator {
         LLVMOpaqueType* ptr_type = LLVMPointerTypeInContext(self.ctx, 0);
         LLVMOpaqueType* i64_type = LLVMInt64TypeInContext(self.ctx);
         LLVMOpaqueType* i1_type = LLVMInt1TypeInContext(self.ctx);
+        bool primary_source = source_file_id == 0 || source_file_id == 1;
 
         LLVMOpaqueValue* g_leak = LLVMGetNamedGlobal(self.module, "__silver_leak_check_enabled");
         if (g_leak == (LLVMOpaqueValue*)0) {
             g_leak = LLVMAddGlobal(self.module, i1_type, "__silver_leak_check_enabled");
         }
-        if (!module_object) { LLVMSetInitializer(g_leak, LLVMConstInt(i1_type, 0, 0)); }
+        if (!module_object && primary_source) { LLVMSetInitializer(g_leak, LLVMConstInt(i1_type, 0, 0)); }
 
         LLVMOpaqueValue* g_bt_entries = LLVMGetNamedGlobal(self.module, "__silver_bt_entries");
         if (g_bt_entries == (LLVMOpaqueValue*)0) {
             g_bt_entries = LLVMAddGlobal(self.module, ptr_type, "__silver_bt_entries");
         }
-        if (!module_object) { LLVMSetInitializer(g_bt_entries, LLVMConstNull(ptr_type)); }
+        if (!module_object && primary_source) { LLVMSetInitializer(g_bt_entries, LLVMConstNull(ptr_type)); }
 
         LLVMOpaqueValue* g_bt_count = LLVMGetNamedGlobal(self.module, "__silver_bt_count");
         if (g_bt_count == (LLVMOpaqueValue*)0) {
             g_bt_count = LLVMAddGlobal(self.module, i64_type, "__silver_bt_count");
         }
-        if (!module_object) { LLVMSetInitializer(g_bt_count, LLVMConstInt(i64_type, 0, 0)); }
+        if (!module_object && primary_source) { LLVMSetInitializer(g_bt_count, LLVMConstInt(i64_type, 0, 0)); }
 
         LLVMOpaqueValue* g_bt_lines = LLVMGetNamedGlobal(self.module, "__silver_bt_lines");
         if (g_bt_lines == (LLVMOpaqueValue*)0) {
             g_bt_lines = LLVMAddGlobal(self.module, ptr_type, "__silver_bt_lines");
         }
-        if (!module_object) { LLVMSetInitializer(g_bt_lines, LLVMConstNull(ptr_type)); }
+        if (!module_object && primary_source) { LLVMSetInitializer(g_bt_lines, LLVMConstNull(ptr_type)); }
 
         LLVMOpaqueValue* g_bt_lines_count = LLVMGetNamedGlobal(self.module, "__silver_bt_lines_count");
         if (g_bt_lines_count == (LLVMOpaqueValue*)0) {
             g_bt_lines_count = LLVMAddGlobal(self.module, i64_type, "__silver_bt_lines_count");
         }
-        if (!module_object) { LLVMSetInitializer(g_bt_lines_count, LLVMConstInt(i64_type, 0, 0)); }
+        if (!module_object && primary_source) { LLVMSetInitializer(g_bt_lines_count, LLVMConstInt(i64_type, 0, 0)); }
 
         LLVMOpaqueValue* g_bt_args = LLVMGetNamedGlobal(self.module, "__silver_bt_args");
         if (g_bt_args == (LLVMOpaqueValue*)0) {
             g_bt_args = LLVMAddGlobal(self.module, ptr_type, "__silver_bt_args");
         }
-        if (!module_object) { LLVMSetInitializer(g_bt_args, LLVMConstNull(ptr_type)); }
+        if (!module_object && primary_source) { LLVMSetInitializer(g_bt_args, LLVMConstNull(ptr_type)); }
 
         LLVMOpaqueValue* g_bt_args_count = LLVMGetNamedGlobal(self.module, "__silver_bt_args_count");
         if (g_bt_args_count == (LLVMOpaqueValue*)0) {
             g_bt_args_count = LLVMAddGlobal(self.module, i64_type, "__silver_bt_args_count");
         }
-        if (!module_object) { LLVMSetInitializer(g_bt_args_count, LLVMConstInt(i64_type, 0, 0)); }
+        if (!module_object && primary_source) { LLVMSetInitializer(g_bt_args_count, LLVMConstInt(i64_type, 0, 0)); }
 
         LLVMOpaqueType* i32_type = LLVMInt32TypeInContext(self.ctx);
         // P0-001: these MUST stay bare declarations (no initializer). The
@@ -1607,13 +1793,36 @@ impl LlvmGenerator {
             LLVMAddGlobal(self.module, ptr_type, "__silver_envp");
         }
 
-        Vec<LLVMOpaqueValue*> bt_function_records = Vec<LLVMOpaqueValue*>.new();
-        Vec<LLVMOpaqueValue*> bt_arg_function_records = Vec<LLVMOpaqueValue*>.new();
-
         // Pass 2: Lower function and method bodies
         item = tree.root.first_child;
         while (item != (SyntaxNode*)0) {
             if (item.kind == NodeKind.Function) {
+                if (source_file_id != 0 && item.span.file != (i64)source_file_id) {
+                    if (source_file_id == 1 && !llvm_item_is_generic_fn(item)
+                        && find_function_body(item) != (SyntaxNode*)0) {
+                        SyntaxNode* id_node = function_identifier(item);
+                        if (id_node != (SyntaxNode*)0) {
+                            String fn_name = llvm_free_function_symbol(types,
+                                tree.root, item);
+                            if (!llvm_has_prior_function_body(types, tree.root,
+                                item, fn_name.to_str())) {
+                                LLVMOpaqueValue* fn_val = LLVMGetNamedFunction(
+                                    self.module, fn_name.to_str());
+                                if (fn_val != (LLVMOpaqueValue*)0) {
+                                    llvm_bt_record_external_function(&ctx, types,
+                                        self.target_data, item.span,
+                                        binding_function_parameters(item), (str)0, fn_val,
+                                        fn_name.to_str(), source_paths,
+                                        &bt_function_records,
+                                        &bt_arg_function_records);
+                                }
+                            }
+                            fn_name.drop();
+                        }
+                    }
+                    item = item.next_sibling;
+                    continue;
+                }
                 if (llvm_item_is_generic_fn(item)) {
                     item = item.next_sibling;
                     continue;
@@ -1626,6 +1835,13 @@ impl LlvmGenerator {
                         continue;
                     }
                     String fn_name = llvm_free_function_symbol(types, tree.root, item);
+                    if (source_file_id != 0
+                        && llvm_has_prior_function_body(types, tree.root, item,
+                            fn_name.to_str())) {
+                        fn_name.drop();
+                        item = item.next_sibling;
+                        continue;
+                    }
                     LLVMOpaqueValue* fn_val = LLVMGetNamedFunction(self.module, fn_name.to_str());
                     if (fn_val == (LLVMOpaqueValue*)0 || LLVMCountBasicBlocks(fn_val) > 0) {
                         fn_name.drop();
@@ -1740,6 +1956,15 @@ impl LlvmGenerator {
                     fn_name.drop();
                 }
             } else if (item.kind == NodeKind.Impl) {
+                if (source_file_id != 0 && item.span.file != (i64)source_file_id) {
+                    if (source_file_id == 1) {
+                        llvm_bt_record_imported_methods(&ctx, types,
+                            self.target_data, item, source_paths,
+                            &bt_function_records, &bt_arg_function_records);
+                    }
+                    item = item.next_sibling;
+                    continue;
+                }
                 if (llvm_item_is_generic_impl(item)) {
                     item = item.next_sibling;
                     continue;
@@ -1945,11 +2170,13 @@ impl LlvmGenerator {
             item = item.next_sibling;
         }
 
-        llvm_emit_entry_point(self.ctx, self.module, self.builder);
+        if (primary_source) {
+            llvm_emit_entry_point(self.ctx, self.module, self.builder);
+        }
 
         llvm_drain_mono_queue(&ctx, types, names, pool);
         mono_define_generic_layouts(&ctx);
-        if (!module_object) {
+        if (!module_object && primary_source) {
             llvm_bt_emit_tables(self.ctx, self.module,
                 &bt_function_records, &bt_arg_function_records);
         }
