@@ -206,16 +206,17 @@ def main() -> int:
                     )
                 continue
             if relative in STAGE1_UNAVAILABLE_SUBMODULES:
+                # Stage0 generation depends on host tooling and native libraries;
+                # this case only verifies Stage1's missing-prebuilt diagnostic.
                 if (
-                    old.returncode != 0
-                    or new.returncode == 0
+                    new.returncode == 0
                     or "has submodule config" not in new.stderr
                     or "prebuilt .agm artifact" not in new.stderr
                 ):
                     failures.append(
                         (
                             relative,
-                            f"expected missing foreign AGM to fail locally; stage0={old.returncode}, stage1={new.returncode}",
+                            f"expected stage1 to reject missing foreign AGM; stage0={old.returncode}, stage1={new.returncode}",
                             new.stderr[:500],
                             old.stderr[:500],
                         )

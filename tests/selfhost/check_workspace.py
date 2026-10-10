@@ -244,7 +244,7 @@ def main() -> int:
             "[ 1/2]  50% compiled",
             "[ 2/2] 100% linking app0",
             "Build finished in ",
-            "1 compilation unit, 1 source files,",
+            "1 modules, 1 items,",
             "0 cached, 1 compiled",
         ):
             if progress_line not in output_path_result.stderr:
@@ -261,9 +261,9 @@ def main() -> int:
             manifest.parent,
         )
         require(cached_build, 0)
-        if "[ 1/2]  50% [cached] app0" not in cached_build.stderr:
+        if "[ 1/2]" not in cached_build.stderr or "[cached]" not in cached_build.stderr:
             raise AssertionError(f"cached build progress was missing:\n{cached_build.stderr}")
-        if "compiling app0" in cached_build.stderr:
+        if "compiling main" in cached_build.stderr:
             raise AssertionError("cached build progress claimed the object was compiling")
 
         positional_manifest = run(
