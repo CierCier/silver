@@ -870,7 +870,7 @@ i32 run_frontend() {
         arguments.drop();
         return 2;
     }
-    String* command = arguments.get_ptr(1);
+    String* command = &cli.command;
     if (!is_frontend_command(command)) {
         String native_source = String.new();
         if (native_source_path(&arguments, &native_source)) {
@@ -914,15 +914,14 @@ i32 run_frontend() {
         arguments.drop();
         return 2;
     }
-    if (arguments.len() < 3) {
+    if (cli.positionals.len() == 0) {
         STDERR.write_str("usage: agc <lex|parse|check> <source.ag> [--cfg key=value,...] [-I dir] [-O2]\n");
         return 2;
     }
     CfgSet cfg = linux_defaults();
     Vec<String> include_dirs = Vec<String>.new();
     LintConfig lint_config = lint_config_default();
-    i64 input_index = 0;
-    i64 option = 2;
+    i64 option = 1;
     while (option < arguments.len()) {
         String* argument = arguments.get_ptr(option);
         lint_config_flag(&lint_config, argument.to_str());
@@ -984,17 +983,14 @@ i32 run_frontend() {
             option += 1;
             continue;
         }
-        if (!argument.starts_with("-") && input_index == 0) {
-            input_index = option;
-        }
         option += 1;
     }
-    if (input_index == 0) {
+    if (cli.positionals.len() == 0) {
         STDERR.write_str("usage: agc <lex|parse|check> <source.ag> [--cfg key=value,...] [-I dir] [-O2]\n");
         include_dirs.drop();
         return 2;
     }
-    String* input = arguments.get_ptr(input_index);
+    String* input = cli.positionals.get_ptr(0);
     i32 result = 2;
     if (command.equals("lex")) {
         result = emit_tokens(input.to_str());

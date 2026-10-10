@@ -29,7 +29,7 @@ stage1="$work/agc-stage1"
 "$stage0" --no-cache build "$root/silver.toml" --bin agc -o "$stage1"
 
 aglsp="$work/aglsp-stage1"
-"$stage1" --no-cache build "$root/silver.toml" --bin aglsp -o "$aglsp"
+"$stage1" --no-cache build --manifest "$root/silver.toml" --bin aglsp -o "$aglsp"
 python3 "$root/tests/selfhost/test_aglsp.py" "$aglsp"
 
 "$stage1" agsm --help > /dev/null
