@@ -346,6 +346,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok(lowered);
         }
 
+        // C enums use at least the width of `int` on the supported C ABIs.
+        // Keep Silver's compact enum storage and promote only at this boundary.
+        if matches!(lowered, BasicTypeEnum::IntType(_))
+            && self.c_narrow_unit_enum_is_signed(ty).is_some()
+        {
+            return Ok(self.context.i32_type().as_basic_type_enum());
+        }
+
         if let BasicTypeEnum::StructType(struct_ty) = lowered {
             let target_data =
                 TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
@@ -372,6 +380,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let abi_ty = self.lower_abi_type(ty, linkage)?;
         if abi_ty == value.get_type() {
             return Ok(value);
+        }
+
+        if let (Some(is_signed), BasicValueEnum::IntValue(value), BasicTypeEnum::IntType(abi_ty)) =
+            (self.c_narrow_unit_enum_is_signed(ty), value, abi_ty)
+        {
+            let promoted = if is_signed {
+                self.builder
+                    .build_int_s_extend_or_bit_cast(value, abi_ty, "abi.enum.sext")
+            } else {
+                self.builder
+                    .build_int_z_extend_or_bit_cast(value, abi_ty, "abi.enum.zext")
+            }
+            .map_err(|e| CodegenError::new(format!("failed to promote C enum argument: {e}")))?;
+            return Ok(promoted.as_basic_value_enum());
         }
 
         let function = self
@@ -430,6 +452,17 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok(value);
         }
 
+        if self.c_narrow_unit_enum_is_signed(ty).is_some()
+            && let (BasicValueEnum::IntValue(value), BasicTypeEnum::IntType(native_ty)) =
+                (value, native_ty)
+        {
+            let narrowed = self
+                .builder
+                .build_int_truncate(value, native_ty, "abi.enum.trunc")
+                .map_err(|e| CodegenError::new(format!("failed to narrow C enum return: {e}")))?;
+            return Ok(narrowed.as_basic_value_enum());
+        }
+
         let function = self
             .current_fn
             .ok_or_else(|| CodegenError::new("no active function for ABI uncoercion"))?;
@@ -483,6 +516,24 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .map_err(|e| CodegenError::new(format!("failed to load uncoerced value: {e}")))?;
 
         Ok(uncoerced)
+    }
+
+    fn c_narrow_unit_enum_is_signed(&self, ty: &ast::Type) -> Option<bool> {
+        let ast::TypeKind::Named(named) = ty.kind.as_ref() else {
+            return None;
+        };
+        if named.path.len() != 1 {
+            return None;
+        }
+        let enum_name = &named.path[0].name;
+        if self.enum_variant_payload_types.contains_key(enum_name) {
+            return None;
+        }
+        match self.enum_backing_type_for_named(named)? {
+            ast::PrimitiveType::I8 | ast::PrimitiveType::I16 => Some(true),
+            ast::PrimitiveType::U8 | ast::PrimitiveType::U16 => Some(false),
+            _ => None,
+        }
     }
 
     /// Emits a call to the llvm.memcpy intrinsic.

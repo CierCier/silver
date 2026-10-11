@@ -13,8 +13,33 @@
 // the T1 `Task<T>` message layer and channels build on.
 
 import std.sys.os;
+import std.sys.raw.thread;
 import std.rt.thread_registry;
 import std.mem.alloc;
+
+/// Number of logical CPUs available to the current process. Linux uses the
+/// calling thread's affinity mask so pools respect cpusets and containers.
+i64 thread_available_parallelism() {
+    i64 count = 1;
+    if (@cfg(os.linux)) {
+        u8 mask[1024];
+        i64 bytes = sys_sched_getaffinity(0, 1024, (i64)&mask[0]);
+        if (bytes > 0) {
+            count = 0;
+            i64 i = 0;
+            while (i < bytes) {
+                u8 bits = mask[i];
+                while (bits != 0) {
+                    count += (i64)(bits & (u8)1);
+                    bits = bits >> 1;
+                }
+                i += 1;
+            }
+            if (count == 0) { count = 1; }
+        }
+    }
+    return count;
+}
 
 // Raw clone flags for a thread that shares the process address space:
 // CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID.

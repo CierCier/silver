@@ -10,6 +10,8 @@ import shutil
 import subprocess
 import tempfile
 
+from enum_ffi_probe import run_enum_ffi_probe
+
 
 def run(
     stage1: pathlib.Path, args: list[str], env: dict[str, str], cwd: pathlib.Path
@@ -28,6 +30,7 @@ def run(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--stage1", required=True, type=pathlib.Path)
+    parser.add_argument("--stage0", type=pathlib.Path)
     parser.add_argument("--cc", type=pathlib.Path)
     args = parser.parse_args()
     stage1 = args.stage1.resolve()
@@ -45,10 +48,24 @@ def main() -> int:
         (package / "silver.toml").write_text(
             'name = "native-smoke"\nversion = "0.1.0"\n\n[bin."app"]\nentry = "main.ag"\n'
         )
-        (package / "main.ag").write_text(source.read_text())
+        (package / "main.ag").write_text(
+            "i32 main() {\n"
+            "    let unused = 7;\n"
+            "    return 42;\n"
+            "}\n"
+        )
 
         env = os.environ.copy()
         env["SILVER_STAGE1_CC"] = str(pathlib.Path(cc).resolve())
+
+        if args.stage0 is not None:
+            run_enum_ffi_probe(
+                args.stage0.resolve(), pathlib.Path(cc).resolve(), repository,
+                root, "stage0", env,
+            )
+        run_enum_ffi_probe(
+            stage1, pathlib.Path(cc).resolve(), repository, root, "stage1", env
+        )
 
         lint_source = root / "lint-shadow.ag"
         lint_source.write_text(
@@ -85,6 +102,71 @@ def main() -> int:
         executed = subprocess.run([str(direct_output)], check=False)
         if executed.returncode != 42:
             raise AssertionError(f"direct native program returned {executed.returncode}, expected 42")
+
+        entry_package = root / "nested-entry"
+        entry_package.mkdir()
+        (entry_package / "main.ag").write_text(
+            "import dep;\n"
+            "i32 main() { return dep_value(); }\n"
+        )
+        (entry_package / "dep.ag").write_text(
+            "import std.sys.entry;\n"
+            "i32 dep_value() { return 42; }\n"
+        )
+        entry_output = root / "nested-entry-output"
+        entry_build = run(
+            stage1,
+            [
+                "build", str(entry_package / "main.ag"), "--no-cache",
+                "-I", str(repository), "-o", str(entry_output),
+            ],
+            env,
+            root,
+        )
+        if entry_build.returncode != 0:
+            raise AssertionError(
+                "native dependency importing std.sys.entry failed to build: "
+                f"{entry_build.returncode}\n{entry_build.stderr}"
+            )
+        executed = subprocess.run([str(entry_output)], check=False)
+        if executed.returncode != 42:
+            raise AssertionError(
+                "native dependency importing std.sys.entry returned "
+                f"{executed.returncode}, expected 42"
+            )
+
+        args_package = root / "module-args"
+        args_package.mkdir()
+        (args_package / "main.ag").write_text(
+            "import std.env;\n"
+            "import dep;\n"
+            "i32 main() { return (i32)module_arg_count(); }\n"
+        )
+        (args_package / "dep.ag").write_text(
+            "import std.args;\n"
+            "i64 module_arg_count() { return args().len(); }\n"
+        )
+        args_output = root / "module-args-output"
+        args_build = run(
+            stage1,
+            [
+                "build", str(args_package / "main.ag"), "--no-cache",
+                "-I", str(repository), "-o", str(args_output),
+            ],
+            env,
+            root,
+        )
+        if args_build.returncode != 0:
+            raise AssertionError(
+                "native std.env root with std.args dependency failed to build: "
+                f"{args_build.returncode}\n{args_build.stderr}"
+            )
+        executed = subprocess.run([str(args_output), "one"], check=False)
+        if executed.returncode != 2:
+            raise AssertionError(
+                "native std.args dependency observed the wrong argv count: "
+                f"{executed.returncode}, expected 2"
+            )
 
         alias_fixture = pathlib.Path(__file__).with_name(
             "native_import_alias_collision_fixture.ag"
@@ -298,7 +380,8 @@ def main() -> int:
         package_output = root / "package-output"
         package_result = run(
             stage1,
-            ["build", str(package / "silver.toml"), "--no-cache", "-o", str(package_output)],
+            ["build", "--manifest", str(package / "silver.toml"),
+             "--no-cache", "-o", str(package_output)],
             env,
             root,
         )
@@ -306,9 +389,124 @@ def main() -> int:
             raise AssertionError(
                 f"package native build failed: {package_result.returncode}\n{package_result.stderr}"
             )
+        if "check ok:" in package_result.stdout:
+            raise AssertionError(
+                "package build printed a standalone check summary before native output\n"
+                f"stdout:\n{package_result.stdout}\nstderr:\n{package_result.stderr}"
+            )
+        if package_result.stderr.count("unused variable 'unused'") != 1:
+            raise AssertionError(
+                "package build did not report the entry-file lint exactly once\n"
+                f"stdout:\n{package_result.stdout}\nstderr:\n{package_result.stderr}"
+            )
         executed = subprocess.run([str(package_output)], check=False)
         if executed.returncode != 42:
             raise AssertionError(f"package native program returned {executed.returncode}, expected 42")
+
+        intern_package = root / "intern-api-package"
+        intern_package.mkdir()
+        (intern_package / "silver.toml").write_text(
+            'name = "native-intern-api"\nversion = "0.1.0"\n\n'
+            '[bin."app"]\nentry = "main.ag"\n'
+        )
+        (intern_package / "interner_api.ag").write_text(
+            "import std.intern;\n"
+            "Interner make_interner() { return Interner.new(); }\n"
+        )
+        (intern_package / "main.ag").write_text(
+            "import interner_api;\n"
+            "i32 main() {\n"
+            "    Interner symbols = make_interner();\n"
+            "    u32 first = symbols.intern(\"module\");\n"
+            "    u32 repeated = symbols.intern(\"module\");\n"
+            "    if (first != repeated || symbols.len() != 1) { return 1; }\n"
+            "    if (symbols.get(first) != \"module\" || !symbols.contains(\"module\")) { return 2; }\n"
+            "    return 42;\n"
+            "}\n"
+        )
+        intern_output = root / "intern-api-package-output"
+        intern_build = run(
+            stage1,
+            [
+                "build", "--manifest", str(intern_package / "silver.toml"),
+                "--no-cache", "-I", str(repository), "-o", str(intern_output),
+            ],
+            env,
+            root,
+        )
+        if intern_build.returncode != 0:
+            raise AssertionError(
+                "native package API backed by std.intern failed to build: "
+                f"{intern_build.returncode}\n{intern_build.stderr}"
+            )
+        executed = subprocess.run([str(intern_output)], check=False)
+        if executed.returncode != 42:
+            raise AssertionError(
+                "native package API backed by std.intern returned "
+                f"{executed.returncode}, expected 42"
+            )
+
+        package_werror_output = root / "package-werror-output"
+        package_werror = run(
+            stage1,
+            ["build", "--manifest", str(package / "silver.toml"), "--no-cache",
+             "-Werror", "-o", str(package_werror_output)],
+            env,
+            root,
+        )
+        if (
+            package_werror.returncode == 0
+            or "error:" not in package_werror.stderr
+            or package_werror_output.exists()
+        ):
+            raise AssertionError(
+                "package -Werror build did not reject the entry-file warning before output\n"
+                f"exit: {package_werror.returncode}\n"
+                f"stdout:\n{package_werror.stdout}\nstderr:\n{package_werror.stderr}"
+            )
+
+        target_package = root / "target-package"
+        target_package.mkdir()
+        (target_package / "silver.toml").write_text(
+            'name = "native-target-cfg"\nversion = "0.1.0"\n\n'
+            '[bin."app"]\nentry = "main.ag"\n'
+        )
+        (target_package / "lint_dependency.ag").write_text(
+            "i32 target_cfg_dependency() {\n"
+            "    let imported_unused = 7;\n"
+            "    return 0;\n"
+            "}\n"
+        )
+        (target_package / "main.ag").write_text(
+            "import lint_dependency;\n"
+            "#[cfg(os.windows)]\n"
+            "i32 disabled(i32 unused) { return 0; }\n"
+            "i32 main() {\n"
+            "    if (@cfg(os.linux) && @cfg(arch.x86_64) && @cfg(build.feature)) {\n"
+            "        return 51 + target_cfg_dependency();\n"
+            "    }\n"
+            "    return 0;\n"
+            "}\n"
+        )
+        target_output = root / "target-cfg-output"
+        target_build = run(
+            stage1,
+            ["build", "--manifest", str(target_package / "silver.toml"), "--no-cache",
+             "--target", "x86_64-unknown-linux-gnu", "--cfg", "build.feature=1",
+             "-Werror", "-o", str(target_output)],
+            env,
+            root,
+        )
+        if target_build.returncode != 0:
+            raise AssertionError(
+                f"native host-target/custom cfg build failed: {target_build.returncode}\n"
+                f"{target_build.stderr}"
+            )
+        executed = subprocess.run([str(target_output)], check=False)
+        if executed.returncode != 51:
+            raise AssertionError(
+                f"native host-target/custom cfg program returned {executed.returncode}, expected 51"
+            )
 
         run_output = root / "run-output"
         run_result = run(

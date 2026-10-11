@@ -193,6 +193,55 @@ mod tests {
     }
 
     #[test]
+    fn lowers_narrow_unit_enums_to_c_int_abi() {
+        let ir = lower_to_llvm(
+            "enum SignedMode { Negative = -1; Ready = 8; }
+            enum UnsignedMode { Empty = 0; Full = 255; }
+            extern \"C\" {
+                void accept_signed(SignedMode mode);
+                void accept_unsigned(UnsignedMode mode);
+                SignedMode next_signed();
+                UnsignedMode next_unsigned();
+            }
+            i32 main() {
+                SignedMode signed = next_signed();
+                UnsignedMode unsigned = next_unsigned();
+                accept_signed(signed);
+                accept_unsigned(unsigned);
+                return 0;
+            }",
+        );
+
+        for declaration in [
+            "declare void @accept_signed(i32)",
+            "declare void @accept_unsigned(i32)",
+            "declare i32 @next_signed()",
+            "declare i32 @next_unsigned()",
+            "call void @accept_signed(i32",
+            "call void @accept_unsigned(i32",
+            "call i32 @next_signed()",
+            "call i32 @next_unsigned()",
+        ] {
+            assert!(
+                ir.contains(declaration),
+                "expected `{declaration}` in IR:\n{ir}"
+            );
+        }
+        assert!(
+            ir.contains("sext i8") && ir.contains("to i32"),
+            "expected signed enum argument extension:\n{ir}"
+        );
+        assert!(
+            ir.contains("zext i8") && ir.contains("to i32"),
+            "expected unsigned enum argument extension:\n{ir}"
+        );
+        assert!(
+            ir.contains("trunc i32") && ir.contains("to i8"),
+            "expected C enum return narrowing:\n{ir}"
+        );
+    }
+
+    #[test]
     fn lowers_nested_initializer_expressions() {
         let ir = lower_to_llvm(
             "struct Point { i32 x; i32 y; } struct Rect { Point min; Point max; } i32 main() { Rect r = { .min = { .x = 1, .y = 2 }, .max = { .x = 3, .y = 4 } }; return r.max.y; }",

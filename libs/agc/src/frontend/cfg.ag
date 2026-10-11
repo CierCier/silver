@@ -696,10 +696,8 @@ void cfg_collect_extern_from_item(SyntaxNode* item, Vec<CfgVisibleName>* names) 
     while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
         block = block.next_sibling;
     }
-    if (block == (SyntaxNode*)0) {
-        return;
-    }
-    SyntaxNode* declaration = block.first_child;
+    SyntaxNode* declaration = block == (SyntaxNode*)0
+        ? item.first_child : block.first_child;
     SyntaxNode* candidate = (SyntaxNode*)0;
     while (declaration != (SyntaxNode*)0) {
         if (declaration.kind == NodeKind.Token && declaration.token_kind == TokenKind.Identifier) {

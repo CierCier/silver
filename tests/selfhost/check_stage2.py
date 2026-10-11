@@ -6,8 +6,11 @@ from __future__ import annotations
 import argparse
 import os
 import pathlib
+import shutil
 import subprocess
 import tempfile
+
+from enum_ffi_probe import run_enum_ffi_probe
 
 
 def main() -> int:
@@ -15,6 +18,9 @@ def main() -> int:
     parser.add_argument("--stage1", required=True, type=pathlib.Path)
     args = parser.parse_args()
     root = pathlib.Path(__file__).parents[2]
+    cc = shutil.which("cc")
+    if cc is None:
+        raise SystemExit("cc is required for the stage2 enum C ABI regression")
     with tempfile.TemporaryDirectory(prefix="silver-stage2-") as temporary:
         work = pathlib.Path(temporary)
         env = os.environ.copy()
@@ -48,8 +54,11 @@ def main() -> int:
                         f"stage2 {label} diagnostic missing {fragment!r}:\n{output}"
                     )
 
-        invoke(args.stage1.resolve(), ["build", str(root / "silver.toml"),
+        invoke(args.stage1.resolve(), ["build", "--manifest", str(root / "silver.toml"),
                                       "--bin", "agc", "--no-cache", "-o", str(stage2)])
+        run_enum_ffi_probe(
+            stage2, pathlib.Path(cc).resolve(), root, work, "stage2", env
+        )
         invoke(stage2, ["--version"])
         invoke(stage2, ["--help"])
         source = work / "main.ag"

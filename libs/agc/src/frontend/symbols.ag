@@ -40,6 +40,19 @@ impl SymbolTable {
         return move table;
     }
 
+    SymbolTable clone(&self) {
+        SymbolTable copy;
+        copy.names = self.names.clone();
+        copy.symbols = Vec<Symbol>.with_capacity(self.symbols.len());
+        i64 i = 0;
+        while (i < self.symbols.len()) {
+            copy.symbols.push(self.symbols.get(i));
+            i += 1;
+        }
+        copy.types = self.types.clone();
+        return move copy;
+    }
+
     i64 len(&self) {
         return self.symbols.len();
     }

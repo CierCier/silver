@@ -93,6 +93,56 @@ String item_attribute_string(SyntaxNode* start, SyntaxNode* end, str name) {
     return String.new();
 }
 
+String item_function_link_name(SyntaxNode* function) {
+    SyntaxNode* id_node = function_identifier(function);
+    SyntaxNode* cursor = function.first_child;
+    while (cursor != (SyntaxNode*)0 && cursor != id_node) {
+        if (cursor.kind == NodeKind.Token && cursor.text == "#") {
+            SyntaxNode* bracket = cursor.next_sibling;
+            if (bracket != (SyntaxNode*)0 && bracket.kind == NodeKind.Bracket) {
+                SyntaxNode* attribute = bracket.first_child;
+                if (attribute != (SyntaxNode*)0 && attribute.kind == NodeKind.Token
+                    && strcmp(attribute.text, "link_name") == 0) {
+                    SyntaxNode* value = attribute.next_sibling;
+                    while (value != (SyntaxNode*)0) {
+                        SyntaxNode* literal = value.kind == NodeKind.Token
+                            ? value : value.first_child;
+                        while (literal != (SyntaxNode*)0) {
+                            if (literal.kind == NodeKind.Token
+                                && strlen(literal.text) >= 2
+                                && literal.text[0] == '"'
+                                && literal.text[strlen(literal.text) - 1] == '"') {
+                                return unescape_string_literal(literal.text);
+                            }
+                            literal = literal.next_sibling;
+                        }
+                        value = value.next_sibling;
+                    }
+                }
+                cursor = bracket;
+            }
+        }
+        cursor = cursor.next_sibling;
+    }
+    return String.new();
+}
+
+String item_function_link_name_by_name(SyntaxNode* root, str function_name) {
+    SyntaxNode* item = root == (SyntaxNode*)0 ? (SyntaxNode*)0 : root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Function) {
+            SyntaxNode* id_node = function_identifier(item);
+            if (id_node != (SyntaxNode*)0 && strcmp(id_node.text, function_name) == 0) {
+                String link_name = item_function_link_name(item);
+                if (link_name.len() > 0) { return link_name; }
+                link_name.drop();
+            }
+        }
+        item = item.next_sibling;
+    }
+    return String.new();
+}
+
 String item_extern_link_name(SyntaxNode* root, str function_name) {
     SyntaxNode* item = root == (SyntaxNode*)0 ? (SyntaxNode*)0 : root.first_child;
     while (item != (SyntaxNode*)0) {
@@ -101,7 +151,7 @@ String item_extern_link_name(SyntaxNode* root, str function_name) {
             while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
                 block = block.next_sibling;
             }
-            SyntaxNode* cursor = block == (SyntaxNode*)0 ? (SyntaxNode*)0 : block.first_child;
+            SyntaxNode* cursor = block == (SyntaxNode*)0 ? item.first_child : block.first_child;
             while (cursor != (SyntaxNode*)0) {
                 if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
                     cursor = cursor.next_sibling;
@@ -113,6 +163,10 @@ String item_extern_link_name(SyntaxNode* root, str function_name) {
                 SyntaxNode* scan = cursor;
                 while (scan != (SyntaxNode*)0
                     && !(scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Semicolon)) {
+                    if (scan.kind == NodeKind.Attribute) {
+                        scan = scan.next_sibling;
+                        continue;
+                    }
                     if (scan.kind == NodeKind.Parenthesized) {
                         parameters = scan;
                         break;
@@ -140,6 +194,165 @@ String item_extern_link_name(SyntaxNode* root, str function_name) {
         item = item.next_sibling;
     }
     return String.new();
+}
+
+bool item_extern_uses_c_abi(SyntaxNode* item) {
+    if (item == (SyntaxNode*)0 || item.kind != NodeKind.Extern) { return false; }
+    SyntaxNode* child = item.first_child;
+    bool saw_extern = false;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Token && child.token_kind == TokenKind.Extern) {
+            saw_extern = true;
+        } else if (saw_extern && child.kind == NodeKind.Token
+            && child.token_kind == TokenKind.StringLiteral) {
+            return strcmp(child.text, "\"C\"") == 0;
+        }
+        if (child.kind == NodeKind.Block) { break; }
+        child = child.next_sibling;
+    }
+    return false;
+}
+
+SyntaxNode* item_c_extern_function_parameters(SyntaxNode* root, str function_name) {
+    SyntaxNode* item = root == (SyntaxNode*)0 ? (SyntaxNode*)0 : root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item_extern_uses_c_abi(item)) {
+            SyntaxNode* block = item.first_child;
+            while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+                block = block.next_sibling;
+            }
+            SyntaxNode* cursor = block == (SyntaxNode*)0 ? item.first_child : block.first_child;
+            while (cursor != (SyntaxNode*)0) {
+                if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
+                    cursor = cursor.next_sibling;
+                    continue;
+                }
+                SyntaxNode* name = (SyntaxNode*)0;
+                SyntaxNode* parameters = (SyntaxNode*)0;
+                SyntaxNode* scan = cursor;
+                while (scan != (SyntaxNode*)0
+                    && !(scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Semicolon)) {
+                    if (scan.kind == NodeKind.Attribute) {
+                        scan = scan.next_sibling;
+                        continue;
+                    }
+                    if (scan.kind == NodeKind.Parenthesized) {
+                        parameters = scan;
+                        break;
+                    }
+                    if (scan.kind == NodeKind.Token && scan.text == "#") {
+                        SyntaxNode* attribute = scan.next_sibling;
+                        if (attribute != (SyntaxNode*)0 && attribute.kind == NodeKind.Bracket) {
+                            scan = attribute.next_sibling;
+                            continue;
+                        }
+                    }
+                    if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Identifier) {
+                        name = scan;
+                    }
+                    scan = scan.next_sibling;
+                }
+                if (name != (SyntaxNode*)0 && parameters != (SyntaxNode*)0
+                    && strcmp(name.text, function_name) == 0) {
+                    return parameters;
+                }
+                cursor = parameters != (SyntaxNode*)0 ? parameters.next_sibling : cursor.next_sibling;
+            }
+        }
+        item = item.next_sibling;
+    }
+    return (SyntaxNode*)0;
+}
+
+u32 item_c_extern_function_return_type_id(TypeTable* types, SyntaxNode* root,
+                                          str function_name) {
+    SyntaxNode* item = root == (SyntaxNode*)0 ? (SyntaxNode*)0 : root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item_extern_uses_c_abi(item)) {
+            SyntaxNode* block = item.first_child;
+            while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+                block = block.next_sibling;
+            }
+            SyntaxNode* cursor = block != (SyntaxNode*)0
+                ? block.first_child : item.first_child;
+            if (block == (SyntaxNode*)0) {
+                while (cursor != (SyntaxNode*)0
+                    && !(cursor.kind == NodeKind.Token
+                        && cursor.token_kind == TokenKind.Extern)) {
+                    cursor = cursor.next_sibling;
+                }
+                while (cursor != (SyntaxNode*)0
+                    && !(cursor.kind == NodeKind.Token
+                        && cursor.token_kind == TokenKind.StringLiteral)) {
+                    cursor = cursor.next_sibling;
+                }
+                cursor = cursor == (SyntaxNode*)0 ? (SyntaxNode*)0 : cursor.next_sibling;
+            }
+            while (cursor != (SyntaxNode*)0) {
+                if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
+                    cursor = cursor.next_sibling;
+                    continue;
+                }
+                SyntaxNode* declaration_start = cursor;
+                SyntaxNode* name = (SyntaxNode*)0;
+                SyntaxNode* parameters = (SyntaxNode*)0;
+                SyntaxNode* scan = cursor;
+                while (scan != (SyntaxNode*)0
+                    && !(scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Semicolon)) {
+                    if (scan.kind == NodeKind.Attribute) {
+                        scan = scan.next_sibling;
+                        continue;
+                    }
+                    if (scan.kind == NodeKind.Token && scan.text == "#") {
+                        SyntaxNode* attribute = scan.next_sibling;
+                        if (attribute != (SyntaxNode*)0 && attribute.kind == NodeKind.Bracket) {
+                            scan = attribute.next_sibling;
+                            continue;
+                        }
+                    }
+                    if (scan.kind == NodeKind.Parenthesized) {
+                        parameters = scan;
+                        break;
+                    }
+                    if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Identifier) {
+                        name = scan;
+                    }
+                    scan = scan.next_sibling;
+                }
+                if (name != (SyntaxNode*)0 && parameters != (SyntaxNode*)0
+                    && strcmp(name.text, function_name) == 0) {
+                    String return_text = String.new();
+                    SyntaxNode* part = declaration_start;
+                    while (part != (SyntaxNode*)0 && part != name) {
+                        if (part.kind == NodeKind.Attribute) {
+                            part = part.next_sibling;
+                            continue;
+                        }
+                        if (part.kind == NodeKind.Token && part.text == "#") {
+                            SyntaxNode* attribute = part.next_sibling;
+                            if (attribute != (SyntaxNode*)0 && attribute.kind == NodeKind.Bracket) {
+                                part = attribute.next_sibling;
+                                continue;
+                            }
+                        }
+                        append_node_tokens(part, &return_text);
+                        part = part.next_sibling;
+                    }
+                    u32 result = type_id_from_text(types, return_text.to_str());
+                    return_text.drop();
+                    return result;
+                }
+                cursor = parameters != (SyntaxNode*)0
+                    ? parameters.next_sibling : cursor.next_sibling;
+            }
+        }
+        item = item.next_sibling;
+    }
+    return TYPE_UNKNOWN;
+}
+
+bool item_is_c_extern_function(SyntaxNode* root, str function_name) {
+    return item_c_extern_function_parameters(root, function_name) != (SyntaxNode*)0;
 }
 
 i64 items_parse_int(str text) {

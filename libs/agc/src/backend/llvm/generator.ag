@@ -12,6 +12,8 @@ import frontend.diagnostics;
 import frontend.items;
 import frontend.lower_expr;
 import frontend.symbols;
+import std.atomic;
+import std.cpu;
 import frontend.typecheck_expr;
 import frontend.types;
 import backend.llvm.context;
@@ -58,8 +60,31 @@ bool llvm_item_is_generic_fn(SyntaxNode* fn_item) {
     return false;
 }
 
+bool llvm_job_owns_source(Vec<u32>* owned_source_ids, u32 source_file_id) {
+    i64 i = 0;
+    while (i < owned_source_ids.len()) {
+        if (owned_source_ids.get(i) == source_file_id) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+bool llvm_source_is_standalone(Vec<u32>* standalone_source_ids, u32 source_file_id) {
+    i64 i = 0;
+    while (i < standalone_source_ids.len()) {
+        if (standalone_source_ids.get(i) == source_file_id) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
 String llvm_free_function_symbol(TypeTable* types, SyntaxNode* root, SyntaxNode* function) {
     SyntaxNode* id_node = function_identifier(function);
+    String link_name = item_function_link_name(function);
+    if (link_name.len() > 0) {
+        return link_name;
+    }
+    link_name.drop();
     if (!typecheck_has_free_overloads(types, root, id_node.text)) {
         return String.from_str(id_node.text);
     }
@@ -67,12 +92,25 @@ String llvm_free_function_symbol(TypeTable* types, SyntaxNode* root, SyntaxNode*
 }
 
 bool llvm_has_prior_function_body(TypeTable* types, SyntaxNode* root,
-                                  SyntaxNode* function, str symbol) {
+                                  SyntaxNode* function, str symbol,
+                                  Vec<u32>* owned_source_ids,
+                                  Vec<u32>* standalone_source_ids,
+                                  u32 source_file_id,
+                                  bool include_all_sources) {
     SyntaxNode* function_id = function_identifier(function);
     if (function_id == (SyntaxNode*)0) { return false; }
     SyntaxNode* item = root.first_child;
+    bool current_is_external = source_file_id > 0
+        && (u32)function.span.file == source_file_id;
     while (item != (SyntaxNode*)0 && item != function) {
+        u32 prior_file_id = (u32)item.span.file;
+        bool prior_is_external = prior_file_id == 1
+            || llvm_source_is_standalone(standalone_source_ids, prior_file_id);
+        bool prior_can_suppress = include_all_sources
+            || llvm_job_owns_source(owned_source_ids, prior_file_id)
+            || (current_is_external && prior_is_external);
         if (item.kind == NodeKind.Function && !llvm_item_is_generic_fn(item)
+            && prior_can_suppress
             && find_function_body(item) != (SyntaxNode*)0) {
             SyntaxNode* id_node = function_identifier(item);
             if (id_node != (SyntaxNode*)0
@@ -88,7 +126,9 @@ bool llvm_has_prior_function_body(TypeTable* types, SyntaxNode* root,
     return false;
 }
 
-Vec<LLVMOpaqueType*> llvm_param_types(LlvmContext* ctx, TypeTable* types, Vec<Binding>* params, str self_type_name) {
+Vec<LLVMOpaqueType*> llvm_param_types(LlvmContext* ctx, TypeTable* types,
+                                      Vec<Binding>* params, str self_type_name,
+                                      bool c_abi) {
     Vec<LLVMOpaqueType*> param_types = Vec<LLVMOpaqueType*>.new();
     i64 p = 0;
     while (p < params.len()) {
@@ -112,7 +152,9 @@ Vec<LLVMOpaqueType*> llvm_param_types(LlvmContext* ctx, TypeTable* types, Vec<Bi
                 || param.declared_type.kind == ProjectionTypeKind.Reference || param_type_id == TYPE_VOID)) {
             param_type_id = types.get_pointer(param_type_id, true);
         }
-        param_types.push(llvm_lower_type(ctx.ctx, types, param_type_id));
+        param_types.push(c_abi
+            ? llvm_lower_c_abi_type(ctx.ctx, types, ctx.root, param_type_id)
+            : llvm_lower_type(ctx.ctx, types, param_type_id));
         dec_str.drop();
         p += 1;
     }
@@ -776,7 +818,8 @@ LLVMOpaqueValue* llvm_bt_make_arg_record(LLVMOpaqueContext* ctx, LLVMOpaqueModul
                                          LLVMOpaqueBuilder* builder, LLVMTargetDataRef* target_data,
                                          str function_name, str param_name,
                                          LLVMOpaqueType* param_type, LLVMOpaqueValue* param_slot,
-                                         LLVMOpaqueValue* frame_pointer) {
+                                         LLVMOpaqueValue* frame_pointer,
+                                         bool externally_visible) {
     LLVMOpaqueType* i64_type = LLVMInt64TypeInContext(ctx);
     String offset_suffix = String.from_str("offset.");
     offset_suffix.push_str(function_name);
@@ -787,7 +830,9 @@ LLVMOpaqueValue* llvm_bt_make_arg_record(LLVMOpaqueContext* ctx, LLVMOpaqueModul
     LLVMOpaqueValue* offset_global = LLVMAddGlobal(
         module, i64_type, offset_name.to_str());
     LLVMSetInitializer(offset_global, LLVMConstInt(i64_type, 0, 0));
-    LLVMSetLinkage(offset_global, LLVMLinkage.LLVMExternalLinkage);
+    LLVMSetLinkage(offset_global, externally_visible
+        ? LLVMLinkage.LLVMExternalLinkage
+        : LLVMLinkage.LLVMInternalLinkage);
     LLVMOpaqueValue* param_address = LLVMBuildPtrToInt(
         builder, param_slot, i64_type, "bt.arg.address");
     LLVMOpaqueValue* relative_offset = LLVMBuildSub(
@@ -853,7 +898,8 @@ void llvm_bt_record_external_function(LlvmContext* ctx, TypeTable* types,
 
     Vec<Binding> params = Vec<Binding>.new();
     collect_parameter_bindings(params_node, &params);
-    Vec<LLVMOpaqueType*> param_types = llvm_param_types(ctx, types, &params, self_type_name);
+    Vec<LLVMOpaqueType*> param_types = llvm_param_types(
+        ctx, types, &params, self_type_name, false);
     Vec<LLVMOpaqueValue*> arg_records = Vec<LLVMOpaqueValue*>.new();
     LLVMOpaqueType* i64_type = LLVMInt64TypeInContext(ctx.ctx);
     i64 i = 0;
@@ -1050,13 +1096,31 @@ struct LlvmGenerator {
     DiagnosticBag ownership_diagnostics;
 }
 
-impl LlvmGenerator {
-    LlvmGenerator new(str module_name) {
+i32 g_llvm_target_init_state;
+
+void llvm_initialize_targets() {
+    if (__atomic_load_i32(&g_llvm_target_init_state, ATOMIC_ACQUIRE) == 2) {
+        return;
+    }
+    bool initialized = __atomic_cmpxchg_i32(&g_llvm_target_init_state,
+        0, 1, ATOMIC_ACQ_REL, ATOMIC_ACQUIRE);
+    if (initialized) {
         LLVMInitializeAllTargetInfos();
         LLVMInitializeAllTargets();
         LLVMInitializeAllTargetMCs();
         LLVMInitializeAllAsmPrinters();
         LLVMInitializeAllAsmParsers();
+        __atomic_store_i32(&g_llvm_target_init_state, 2, ATOMIC_RELEASE);
+        return;
+    }
+    while (__atomic_load_i32(&g_llvm_target_init_state, ATOMIC_ACQUIRE) != 2) {
+        cpu_relax();
+    }
+}
+
+impl LlvmGenerator {
+    LlvmGenerator new(str module_name) {
+        llvm_initialize_targets();
 
         str triple = LLVMGetDefaultTargetTriple();
         LLVMTarget* target = (LLVMTarget*)0;
@@ -1114,7 +1178,8 @@ impl LlvmGenerator {
     bool compile(LlvmGenerator* self, SyntaxTree* tree, AstPool* pool,
                  TypeTable* types, Interner* names, SymbolTable* symbols,
                  Vec<String>* source_paths, bool debug_mode, bool module_object,
-                 u32 source_file_id) {
+                 u32 source_file_id, Vec<u32>* owned_source_ids,
+                 Vec<u32>* standalone_source_ids) {
         LlvmContext ctx = LlvmContext.new(self.ctx, self.target_data, self.module, self.builder,
                                           types, names, pool, tree.root, source_paths, debug_mode);
         ctx.ownership_diagnostics = &self.ownership_diagnostics;
@@ -1284,10 +1349,18 @@ impl LlvmGenerator {
                     LLVMOpaqueType* ret_llvm_type = llvm_lower_type(self.ctx, types, ret_type_id);
                     Vec<Binding> params = Vec<Binding>.new();
                     collect_parameter_bindings(binding_function_parameters(item), &params);
-                    Vec<LLVMOpaqueType*> param_types = llvm_param_types(&ctx, types, &params, (str)0);
+                    Vec<LLVMOpaqueType*> param_types = llvm_param_types(
+                        &ctx, types, &params, (str)0, false);
                     LLVMOpaqueType* fn_type = LLVMFunctionType(ret_llvm_type, param_types.data, (u32)param_types.len(), 0);
                     if (LLVMGetNamedFunction(self.module, fn_name.to_str()) == (LLVMOpaqueValue*)0) {
                         LLVMAddFunction(self.module, fn_name.to_str(), fn_type);
+                    }
+                    u32 item_file_id = (u32)item.span.file;
+                    if (source_file_id > 1 && item_file_id != source_file_id
+                        && llvm_job_owns_source(owned_source_ids, item_file_id)
+                        && find_function_body(item) != (SyntaxNode*)0) {
+                        LLVMSetLinkage(LLVMGetNamedFunction(self.module,
+                            fn_name.to_str()), LLVMLinkage.LLVMInternalLinkage);
                     }
                     param_types.drop();
                     params.drop();
@@ -1403,10 +1476,18 @@ impl LlvmGenerator {
 
                                     Vec<Binding> params = Vec<Binding>.new();
                                     collect_parameter_bindings(params_node, &params);
-                                    Vec<LLVMOpaqueType*> param_types = llvm_param_types(&ctx, types, &params, struct_name);
+                                    Vec<LLVMOpaqueType*> param_types = llvm_param_types(
+                                        &ctx, types, &params, struct_name, false);
                                     LLVMOpaqueType* fn_type = LLVMFunctionType(ret_llvm_type, param_types.data, (u32)param_types.len(), 0);
                                     if (LLVMGetNamedFunction(self.module, mangled.to_str()) == (LLVMOpaqueValue*)0) {
                                         LLVMAddFunction(self.module, mangled.to_str(), fn_type);
+                                    }
+                                    u32 item_file_id = (u32)item.span.file;
+                                    if (source_file_id > 1 && item_file_id != source_file_id
+                                        && llvm_job_owns_source(owned_source_ids, item_file_id)
+                                        && body_node.kind == NodeKind.Block) {
+                                        LLVMSetLinkage(LLVMGetNamedFunction(self.module,
+                                            mangled.to_str()), LLVMLinkage.LLVMInternalLinkage);
                                     }
                                     param_types.drop();
                                     params.drop();
@@ -1424,8 +1505,23 @@ impl LlvmGenerator {
                 while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
                     block = block.next_sibling;
                 }
-                if (block != (SyntaxNode*)0) {
-                    SyntaxNode* cursor = block.first_child;
+                {
+                    bool c_abi = item_extern_uses_c_abi(item);
+                    SyntaxNode* cursor = block != (SyntaxNode*)0
+                        ? block.first_child : item.first_child;
+                    if (block == (SyntaxNode*)0) {
+                        while (cursor != (SyntaxNode*)0
+                            && !(cursor.kind == NodeKind.Token
+                                && cursor.token_kind == TokenKind.Extern)) {
+                            cursor = cursor.next_sibling;
+                        }
+                        while (cursor != (SyntaxNode*)0
+                            && !(cursor.kind == NodeKind.Token
+                                && cursor.token_kind == TokenKind.StringLiteral)) {
+                            cursor = cursor.next_sibling;
+                        }
+                        cursor = cursor == (SyntaxNode*)0 ? (SyntaxNode*)0 : cursor.next_sibling;
+                    }
                     while (cursor != (SyntaxNode*)0) {
                         if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
                             cursor = cursor.next_sibling;
@@ -1470,12 +1566,17 @@ impl LlvmGenerator {
                             }
                             u32 ret_type_id = type_id_from_text(types, ret_text.to_str());
                             ret_text.drop();
-                            LLVMOpaqueType* ret_llvm_type = llvm_lower_type(self.ctx, types, ret_type_id);
+                            LLVMOpaqueType* ret_llvm_type = c_abi
+                                ? llvm_lower_c_abi_type(self.ctx, types, tree.root, ret_type_id)
+                                : llvm_lower_type(self.ctx, types, ret_type_id);
                             Vec<Binding> params = Vec<Binding>.new();
                             collect_parameter_bindings(params_node, &params);
-                            Vec<LLVMOpaqueType*> param_types = llvm_param_types(&ctx, types, &params, (str)0);
+                            Vec<LLVMOpaqueType*> param_types = llvm_param_types(
+                                &ctx, types, &params, (str)0, c_abi);
                             LLVMOpaqueType* fn_type = LLVMFunctionType(ret_llvm_type, param_types.data, (u32)param_types.len(), 0);
-                            String link_name = item_attribute_string(declaration_start, fn_name_node, "link_name");
+                            String link_name = item_attribute_string(
+                                block == (SyntaxNode*)0 ? item.first_child : declaration_start,
+                                fn_name_node, "link_name");
                             str llvm_name = link_name.len() > 0 ? link_name.to_str() : fn_name;
                             if (LLVMGetNamedFunction(self.module, llvm_name) == (LLVMOpaqueValue*)0) {
                                 LLVMAddFunction(self.module, llvm_name, fn_type);
@@ -1543,8 +1644,9 @@ impl LlvmGenerator {
                     if (g_type_id == TYPE_UNKNOWN) { g_type_id = TYPE_I64; }
                     LLVMOpaqueType* g_llvm_type = llvm_lower_type(self.ctx, types, g_type_id);
 
+                    u32 global_file_id = (u32)item.span.file;
                     bool owns_global = source_file_id == 0
-                        || item.span.file == (i64)source_file_id;
+                        || llvm_job_owns_source(owned_source_ids, global_file_id);
                     LLVMOpaqueValue* g_init = (LLVMOpaqueValue*)0;
                     if (owns_global) {
                     SyntaxNode* eq_node = item.first_child;
@@ -1716,6 +1818,9 @@ impl LlvmGenerator {
                     }
                     if (owns_global) {
                         LLVMSetInitializer(g_val, g_init);
+                        if (source_file_id > 1 && global_file_id != source_file_id) {
+                            LLVMSetLinkage(g_val, LLVMLinkage.LLVMInternalLinkage);
+                        }
                     }
                 }
             }
@@ -1772,17 +1877,8 @@ impl LlvmGenerator {
         if (!module_object && primary_source) { LLVMSetInitializer(g_bt_args_count, LLVMConstInt(i64_type, 0, 0)); }
 
         LLVMOpaqueType* i32_type = LLVMInt32TypeInContext(self.ctx);
-        // P0-001: these MUST stay bare declarations (no initializer). The
-        // storage is defined exactly once by the `.section .bss` labels
-        // inside std/sys/entry.ag's `_start` asm blob (lowered as inline
-        // asm); adding an initializer here creates a second definition and
-        // the assembler rejects the object (`symbol '__silver_argc' is
-        // already defined`). Verified by IR dump: `@__silver_argc = global`
-        // + asm `.bss __silver_argc: .zero 4` collide. A proper fix needs
-        // module-level globals AND removal of the .bss lines from the asm
-        // blob (entry.ag edit + stage0-codegen impact review) plus linkage
-        // control (BE-001) for multi-object builds. Until then: declaration
-        // here, definition in the asm blob; single-object only.
+        // The entry asm defines these exported process globals in the root
+        // unit; every object declares them.
         if (LLVMGetNamedGlobal(self.module, "__silver_argc") == (LLVMOpaqueValue*)0) {
             LLVMAddGlobal(self.module, i32_type, "__silver_argc");
         }
@@ -1797,15 +1893,20 @@ impl LlvmGenerator {
         item = tree.root.first_child;
         while (item != (SyntaxNode*)0) {
             if (item.kind == NodeKind.Function) {
-                if (source_file_id != 0 && item.span.file != (i64)source_file_id) {
-                    if (source_file_id == 1 && !llvm_item_is_generic_fn(item)
+                if (source_file_id != 0
+                    && !llvm_job_owns_source(owned_source_ids, (u32)item.span.file)) {
+                    if (source_file_id == 1
+                        && llvm_source_is_standalone(standalone_source_ids,
+                            (u32)item.span.file)
+                        && !llvm_item_is_generic_fn(item)
                         && find_function_body(item) != (SyntaxNode*)0) {
                         SyntaxNode* id_node = function_identifier(item);
                         if (id_node != (SyntaxNode*)0) {
                             String fn_name = llvm_free_function_symbol(types,
                                 tree.root, item);
                             if (!llvm_has_prior_function_body(types, tree.root,
-                                item, fn_name.to_str())) {
+                                item, fn_name.to_str(), owned_source_ids,
+                                standalone_source_ids, source_file_id, true)) {
                                 LLVMOpaqueValue* fn_val = LLVMGetNamedFunction(
                                     self.module, fn_name.to_str());
                                 if (fn_val != (LLVMOpaqueValue*)0) {
@@ -1837,7 +1938,8 @@ impl LlvmGenerator {
                     String fn_name = llvm_free_function_symbol(types, tree.root, item);
                     if (source_file_id != 0
                         && llvm_has_prior_function_body(types, tree.root, item,
-                            fn_name.to_str())) {
+                            fn_name.to_str(), owned_source_ids,
+                            standalone_source_ids, source_file_id, false)) {
                         fn_name.drop();
                         item = item.next_sibling;
                         continue;
@@ -1898,7 +2000,9 @@ impl LlvmGenerator {
                         bt_arg_records.push(llvm_bt_make_arg_record(
                             self.ctx, self.module, self.builder, self.target_data,
                             fn_name.to_str(), param.name, param_llvm_type,
-                            alloca_ptr, frame_pointer));
+                            alloca_ptr, frame_pointer,
+                            source_file_id <= 1
+                                || (u32)item.span.file == source_file_id));
                         ctx.add_local(param_name_id, alloca_ptr, param_type_id, true);
                         llvm_register_local_drops(&ctx, param_name_id, alloca_ptr, param_type_id, true);
                         infer_env.insert(param_name_id, param_type_id);
@@ -1956,8 +2060,11 @@ impl LlvmGenerator {
                     fn_name.drop();
                 }
             } else if (item.kind == NodeKind.Impl) {
-                if (source_file_id != 0 && item.span.file != (i64)source_file_id) {
-                    if (source_file_id == 1) {
+                if (source_file_id != 0
+                    && !llvm_job_owns_source(owned_source_ids, (u32)item.span.file)) {
+                    if (source_file_id == 1
+                        && llvm_source_is_standalone(standalone_source_ids,
+                            (u32)item.span.file)) {
                         llvm_bt_record_imported_methods(&ctx, types,
                             self.target_data, item, source_paths,
                             &bt_function_records, &bt_arg_function_records);
@@ -2113,7 +2220,9 @@ impl LlvmGenerator {
                                             bt_arg_records.push(llvm_bt_make_arg_record(
                                                 self.ctx, self.module, self.builder, self.target_data,
                                                 emitted_name, param.name, param_llvm_type,
-                                                alloca_ptr, frame_pointer));
+                                                alloca_ptr, frame_pointer,
+                                                source_file_id <= 1
+                                                    || (u32)cursor.span.file == source_file_id));
                                             ctx.add_local(param_name_id, alloca_ptr, param_type_id, true);
                                             llvm_register_local_drops(&ctx, param_name_id, alloca_ptr, param_type_id, true);
                                             dec_str.drop();

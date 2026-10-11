@@ -1,0 +1,9 @@
+#[link_name("silver_test_link_name_target")]
+i32 source_function(i32 value) {
+    return value + 1;
+}
+
+i32 main() {
+    if (source_function(41) != 42) { return 1; }
+    return 0;
+}

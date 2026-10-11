@@ -407,3 +407,55 @@ LLVMOpaqueType* llvm_lower_type(LLVMOpaqueContext* ctx, TypeTable* types, u32 ty
         _ : LLVMInt64TypeInContext(ctx),
     };
 }
+
+bool llvm_type_is_unit_enum(SyntaxNode* root, TypeTable* types, u32 type_id) {
+    u32 resolved = types.resolve_subst(type_id);
+    TypeEntry* entry = types.get(resolved);
+    if (entry.kind != TypeKind.Named || entry.count != 0) { return false; }
+    SyntaxNode* item = find_enum_item(root, types.names.get(entry.name_id));
+    if (item == (SyntaxNode*)0) { return false; }
+    Vec<SyntaxNode*> names = Vec<SyntaxNode*>.new();
+    Vec<i64> tags = Vec<i64>.new();
+    Vec<i64> arities = Vec<i64>.new();
+    bool found = enum_each_variant(item, &names, &tags, &arities);
+    bool unit = found;
+    i64 i = 0;
+    while (i < arities.len()) {
+        if (arities.get(i) != 0) { unit = false; }
+        i += 1;
+    }
+    names.drop();
+    tags.drop();
+    arities.drop();
+    return unit;
+}
+
+bool llvm_unit_enum_has_negative_tag(SyntaxNode* root, TypeTable* types, u32 type_id) {
+    u32 resolved = types.resolve_subst(type_id);
+    TypeEntry* entry = types.get(resolved);
+    if (entry.kind != TypeKind.Named || entry.count != 0) { return false; }
+    SyntaxNode* item = find_enum_item(root, types.names.get(entry.name_id));
+    if (item == (SyntaxNode*)0) { return false; }
+    Vec<SyntaxNode*> names = Vec<SyntaxNode*>.new();
+    Vec<i64> tags = Vec<i64>.new();
+    Vec<i64> arities = Vec<i64>.new();
+    enum_each_variant(item, &names, &tags, &arities);
+    bool negative = false;
+    i64 i = 0;
+    while (i < tags.len()) {
+        if (tags.get(i) < 0) { negative = true; }
+        i += 1;
+    }
+    names.drop();
+    tags.drop();
+    arities.drop();
+    return negative;
+}
+
+LLVMOpaqueType* llvm_lower_c_abi_type(LLVMOpaqueContext* ctx, TypeTable* types,
+                                      SyntaxNode* root, u32 type_id) {
+    if (llvm_type_is_unit_enum(root, types, type_id)) {
+        return LLVMInt32TypeInContext(ctx);
+    }
+    return llvm_lower_type(ctx, types, type_id);
+}

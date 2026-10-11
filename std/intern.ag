@@ -17,6 +17,19 @@ impl Interner {
         return interner;
     }
 
+    Interner clone(&self) {
+        Interner copy = Interner.new();
+        i64 i = 0;
+        while (i < self.values.len()) {
+            u32 id = (u32)i;
+            str value = self.values.get_ptr(i).to_str();
+            copy.values.push(String.from_str(value));
+            copy.ids.insert(String.from_str(value), id);
+            i += 1;
+        }
+        return move copy;
+    }
+
     u32 intern(Interner* self, str text) {
         // Borrowed-content lookup: no clone on either path (STD-002).
         Optional<u32> found = map_get_opt_str_u32(&self.ids, text);

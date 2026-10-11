@@ -253,6 +253,39 @@ impl TypeTable {
         return move table;
     }
 
+    TypeTable clone(&self) {
+        TypeTable copy;
+        copy.names = self.names.clone();
+        copy.types = Vec<TypeEntry>.with_capacity(self.types.len());
+        copy.subst = Vec<TypeSubst>.with_capacity(self.subst.len());
+        copy.type_args = Vec<u32>.with_capacity(self.type_args.len());
+        copy.struct_properties = Vec<TypeStructProperties>.with_capacity(self.struct_properties.len());
+        copy.struct_fields = Vec<u32>.with_capacity(self.struct_fields.len());
+        copy.struct_field_names = Vec<u32>.with_capacity(self.struct_field_names.len());
+        copy.struct_type_params = Vec<u32>.with_capacity(self.struct_type_params.len());
+        copy.packed_structs = Vec<u32>.with_capacity(self.packed_structs.len());
+        copy.method_params = Vec<TypeMethodParam>.with_capacity(self.method_params.len());
+        i64 i = 0;
+        while (i < self.types.len()) { copy.types.push(self.types.get(i)); i += 1; }
+        i = 0;
+        while (i < self.subst.len()) { copy.subst.push(self.subst.get(i)); i += 1; }
+        i = 0;
+        while (i < self.type_args.len()) { copy.type_args.push(self.type_args.get(i)); i += 1; }
+        i = 0;
+        while (i < self.struct_properties.len()) { copy.struct_properties.push(self.struct_properties.get(i)); i += 1; }
+        i = 0;
+        while (i < self.struct_fields.len()) { copy.struct_fields.push(self.struct_fields.get(i)); i += 1; }
+        i = 0;
+        while (i < self.struct_field_names.len()) { copy.struct_field_names.push(self.struct_field_names.get(i)); i += 1; }
+        i = 0;
+        while (i < self.struct_type_params.len()) { copy.struct_type_params.push(self.struct_type_params.get(i)); i += 1; }
+        i = 0;
+        while (i < self.packed_structs.len()) { copy.packed_structs.push(self.packed_structs.get(i)); i += 1; }
+        i = 0;
+        while (i < self.method_params.len()) { copy.method_params.push(self.method_params.get(i)); i += 1; }
+        return move copy;
+    }
+
     void add_prim(TypeTable* self, TypeKind kind, str name) {
         TypeEntry entry;
         entry.kind = kind;

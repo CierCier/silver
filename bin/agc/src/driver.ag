@@ -491,11 +491,6 @@ i32 run_workspace_native(Vec<String>* arguments, WorkspacePlan* plan, CliMatches
         }
     }
 
-    i32 check_result = run_workspace_check(arguments, plan);
-    if (check_result != 0) {
-        return check_result;
-    }
-
     Vec<String> workspace_roots = Vec<String>.new();
     workspace_collect_roots(plan, &workspace_roots);
     i32 native_result = 0;

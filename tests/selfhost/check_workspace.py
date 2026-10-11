@@ -5,9 +5,13 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
+
+ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+PROGRESS_ROW = re.compile(r"^\s*\[\s*(\d+)\s*/\s*(\d+)\s*\]\s*(\d+)%\s+(.*)$")
 
 
 def run(
@@ -38,6 +42,47 @@ def require(result: subprocess.CompletedProcess[str], code: int, text: str = "")
         raise AssertionError(
             f"expected {text!r} in stderr\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
         )
+
+
+def progress_rows(stderr: str) -> list[tuple[int, int, int, str]]:
+    rows = []
+    for line in ANSI.sub("", stderr).splitlines():
+        match = PROGRESS_ROW.match(line)
+        if match is not None:
+            rows.append(
+                (
+                    int(match.group(1)),
+                    int(match.group(2)),
+                    int(match.group(3)),
+                    match.group(4),
+                )
+            )
+    return rows
+
+
+def require_build_progress(
+    result: subprocess.CompletedProcess[str], *, cached: bool
+) -> None:
+    rows = progress_rows(result.stderr)
+    expected_status = r"\[cached\]" if cached else r"compiled in \S+"
+    if (
+        len(rows) != 2
+        or rows[0][:3] != (1, 2, 50)
+        or not re.fullmatch(expected_status + r" main \(1 items?\)", rows[0][3])
+        or rows[1] != (2, 2, 100, "linking app0")
+    ):
+        raise AssertionError(
+            "build progress did not report main completion followed by app0 linking:\n"
+            f"{result.stderr}"
+        )
+    cached_count = 1 if cached else 0
+    compiled_count = 0 if cached else 1
+    summary = (
+        rf"Build finished in .* \(1 modules?, 1 items?, {cached_count} cached, "
+        rf"{compiled_count} compiled\)"
+    )
+    if not re.search(summary, ANSI.sub("", result.stderr)):
+        raise AssertionError(f"build progress summary did not report one module and item:\n{result.stderr}")
 
 
 def write_package(root: Path, *, bins: int = 1, libs: int = 0) -> Path:
@@ -240,18 +285,7 @@ def main() -> int:
         require(output_path_result, 0)
         if not output_path.is_file() or not os.access(output_path, os.X_OK):
             raise AssertionError("stage1 build did not use cwd silver.toml")
-        for progress_line in (
-            "[ 1/2]  50% compiled",
-            "[ 2/2] 100% linking app0",
-            "Build finished in ",
-            "1 compilation unit, 1 source files,",
-            "0 cached, 1 compiled",
-        ):
-            if progress_line not in output_path_result.stderr:
-                raise AssertionError(
-                    f"forced build progress omitted {progress_line!r}:\n"
-                    f"{output_path_result.stderr}"
-                )
+        require_build_progress(output_path_result, cached=False)
 
         cached_output = root / "cached-application"
         cached_build = run(
@@ -261,10 +295,7 @@ def main() -> int:
             manifest.parent,
         )
         require(cached_build, 0)
-        if "[ 1/2]  50% [cached] app0" not in cached_build.stderr:
-            raise AssertionError(f"cached build progress was missing:\n{cached_build.stderr}")
-        if "compiling app0" in cached_build.stderr:
-            raise AssertionError("cached build progress claimed the object was compiling")
+        require_build_progress(cached_build, cached=True)
 
         positional_manifest = run(
             stage1,
@@ -291,8 +322,11 @@ def main() -> int:
         require(nested_build, 0)
         if not nested_output.is_file() or not os.access(nested_output, os.X_OK):
             raise AssertionError("stage1 did not build the selected nested package target")
-        if "agc: progress:" in nested_build.stderr:
-            raise AssertionError("--no-progress did not suppress build progress")
+        if progress_rows(nested_build.stderr) or "Build finished in " in nested_build.stderr:
+            raise AssertionError(
+                "--no-progress did not suppress per-module rows and build summary:\n"
+                f"{nested_build.stderr}"
+            )
 
         require(
             run(stage1, ["test", str(manifest)], base_env, root),

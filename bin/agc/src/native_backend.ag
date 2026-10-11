@@ -15,8 +15,18 @@ import std.string;
 import std.sys.os;
 import std.sys.errno;
 import std.time;
+import std.atomic;
+import std.thread;
 import agc;
 import frontend.serialize;
+import frontend.lint;
+
+#[link(c)]
+#[link(pthread)]
+extern "C" {
+    i32 pthread_create(i64* thread, i8* attributes, i64 start_routine, i64 argument);
+    i32 pthread_join(i64 thread, i64* result);
+}
 
 struct NativeBuildProgress {
     bool enabled;
@@ -97,7 +107,8 @@ void native_progress_start(NativeBuildProgress* progress, str target) {
     }
 }
 
-void native_progress_finish_compile(NativeBuildProgress* progress, str target, bool cached) {
+void native_progress_finish_compile(NativeBuildProgress* progress, str target,
+                                    bool cached, i64 elapsed_ms) {
     if (!progress.enabled) { return; }
     progress.completed_steps += 1;
     if (cached) { progress.cached_count += 1; }
@@ -111,8 +122,6 @@ void native_progress_finish_compile(NativeBuildProgress* progress, str target, b
         cli_write_styled(&STDERR, "[cached]", CliStyle.Heading, progress.terminal);
     } else {
         cli_write_styled(&STDERR, "compiled", CliStyle.Heading, progress.terminal);
-        Instant finished = now();
-        i64 elapsed_ms = finished.elapsed_ns(progress.unit_started) / 1000000;
         STDERR.write_str(" in ");
         native_progress_write_duration(elapsed_ms);
     }
@@ -184,10 +193,27 @@ i64 native_impl_method_count(SyntaxNode* item) {
     }
     if (block == (SyntaxNode*)0) { return 0; }
     i64 count = 0;
-    SyntaxNode* method = block.first_child;
-    while (method != (SyntaxNode*)0) {
-        if (method.kind == NodeKind.Function) { count += 1; }
-        method = method.next_sibling;
+    SyntaxNode* member = block.first_child;
+    while (member != (SyntaxNode*)0) {
+        if (member.kind == NodeKind.Token
+            && member.token_kind == TokenKind.Semicolon) {
+            member = member.next_sibling;
+            continue;
+        }
+        if (member.kind == NodeKind.Function || member.kind == NodeKind.TypeAlias) {
+            count += 1;
+            member = member.next_sibling;
+            continue;
+        }
+        count += 1;
+        SyntaxNode* end = member;
+        while (end != (SyntaxNode*)0
+            && !(end.kind == NodeKind.Token
+                && end.token_kind == TokenKind.Semicolon)
+            && end.kind != NodeKind.Block) {
+            end = end.next_sibling;
+        }
+        member = end == (SyntaxNode*)0 ? end : end.next_sibling;
     }
     return count;
 }
@@ -220,59 +246,20 @@ i64 native_codegen_item_count_for_file(SyntaxNode* root, u32 file_id) {
     return count;
 }
 
-String native_module_target(str path) {
-    i64 length = strlen(path);
-    i64 start = -1;
-    i64 i = 0;
-    while (i + 5 <= length && start < 0) {
-        if (path[i] == (u8)'/' && path[i + 1] == (u8)'s'
-            && path[i + 2] == (u8)'r' && path[i + 3] == (u8)'c'
-            && path[i + 4] == (u8)'/') {
-            start = i + 5;
+i64 native_codegen_item_count_for_sources(SyntaxNode* root, Vec<u32>* source_file_ids) {
+    i64 count = 0;
+    SyntaxNode* item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (native_source_id_seen(source_file_ids, (u32)item.span.file)
+            && native_codegen_item(item.kind)) {
+            count += 1;
+        } else if (native_source_id_seen(source_file_ids, (u32)item.span.file)
+            && item.kind == NodeKind.Impl) {
+            count += native_impl_method_count(item);
         }
-        i += 1;
+        item = item.next_sibling;
     }
-    i = 0;
-    while (i + 6 <= length && start < 0) {
-        if (path[i] == (u8)'/' && path[i + 1] == (u8)'s'
-            && path[i + 2] == (u8)'t' && path[i + 3] == (u8)'d'
-            && path[i + 4] == (u8)'/') {
-            start = i + 1;
-        }
-        i += 1;
-    }
-    i = 0;
-    while (i + 7 <= length && start < 0) {
-        if (path[i] == (u8)'/' && path[i + 1] == (u8)'t'
-            && path[i + 2] == (u8)'e' && path[i + 3] == (u8)'s'
-            && path[i + 4] == (u8)'t' && path[i + 5] == (u8)'s'
-            && path[i + 6] == (u8)'/') {
-            start = i + 1;
-        }
-        i += 1;
-    }
-    if (start < 0 && length > 6 && path[0] == (u8)'t'
-        && path[1] == (u8)'e' && path[2] == (u8)'s'
-        && path[3] == (u8)'t' && path[4] == (u8)'s'
-        && path[5] == (u8)'/') {
-        start = 0;
-    }
-    if (start < 0) {
-        start = length;
-        while (start > 0 && path[start - 1] != (u8)'/') { start -= 1; }
-    }
-    i64 end = length;
-    if (end - start > 3 && path[end - 3] == (u8)'.'
-        && path[end - 2] == (u8)'a' && path[end - 1] == (u8)'g') {
-        end -= 3;
-    }
-    String target = String.new();
-    i = start;
-    while (i < end) {
-        target.push(path[i] == (u8)'/' ? (u8)'.' : path[i]);
-        i += 1;
-    }
-    return target;
+    return count;
 }
 
 bool native_is_executable(str path) {
@@ -559,7 +546,8 @@ bool native_cached_object_valid(str path) {
 String native_object_cache_path(Vec<String>* arguments, CliMatches* cli,
                                 str source_path, Vec<String>* source_paths,
                                 Vec<String>* link_objects, str default_name,
-                                bool module_object, u32 source_file_id) {
+                                bool module_object, u32 source_file_id,
+                                Vec<u32>* owned_source_ids) {
     if (cli.has("no-cache")) { return String.new(); }
     Optional<String> dump_ir = var("SILVER_DUMP_IR");
     if (dump_ir.is_some()) {
@@ -568,7 +556,7 @@ String native_object_cache_path(Vec<String>* arguments, CliMatches* cli,
         return String.new();
     }
     String identity = String.new();
-    identity.push_str("silver-stage1-native-object-v2");
+    identity.push_str("silver-stage1-native-object-v3");
     identity.push((u8)0);
     identity.push_str(default_name);
     identity.push((u8)0);
@@ -596,6 +584,20 @@ String native_object_cache_path(Vec<String>* arguments, CliMatches* cli,
     identity.push((u8)(module_object ? 1 : 0));
     native_append_i64(&identity, (i64)source_file_id);
     identity.push((u8)0);
+    i = 0;
+    while (i < owned_source_ids.len()) {
+        u32 owned_id = owned_source_ids.get(i);
+        native_append_i64(&identity, (i64)owned_id);
+        identity.push((u8)':');
+        if (owned_id == 0 || owned_id > source_paths.len()
+            || !native_cache_append_file(&identity,
+                source_paths.get_ptr(owned_id - 1).to_str())) {
+            identity.drop();
+            return String.new();
+        }
+        identity.push((u8)0);
+        i += 1;
+    }
     bool skip_next = false;
     i = 1;
     while (i < arguments.len()) {
@@ -1638,8 +1640,210 @@ bool native_fold_cfg_exprs(SyntaxNode* node, CfgSet* cfg) {
 }
 
 
+struct NativeSourceImport {
+    u32 parent_file_id;
+    String module_name;
+    String path;
+    bool implicit_entry;
+}
+
+struct NativeSourceAlias {
+    String path;
+    u32 source_file_id;
+}
+
+struct NativeUnitPlan {
+    u32 source_file_id;
+    String module_name;
+    Vec<u32> owned_source_ids;
+    i64 raw_item_count;
+}
+
+bool native_source_id_seen(Vec<u32>* ids, u32 source_file_id) {
+    i64 i = 0;
+    while (i < ids.len()) {
+        if (ids.get(i) == source_file_id) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+Vec<u32> native_copy_source_ids(Vec<u32>* source_file_ids) {
+    Vec<u32> copy = Vec<u32>.with_capacity(source_file_ids.len());
+    i64 i = 0;
+    while (i < source_file_ids.len()) {
+        copy.push(source_file_ids.get(i));
+        i += 1;
+    }
+    return move copy;
+}
+
+u32 native_import_source_id(NativeSourceImport* source_import,
+                           Vec<String>* source_paths,
+                           Vec<NativeSourceAlias>* aliases) {
+    i64 i = 0;
+    while (i < source_paths.len()) {
+        if (strcmp(source_paths.get_ptr(i).to_str(), source_import.path.to_str()) == 0) {
+            return (u32)(i + 1);
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < aliases.len()) {
+        NativeSourceAlias* alias = aliases.get_ptr(i);
+        if (strcmp(alias.path.to_str(), source_import.path.to_str()) == 0) {
+            return alias.source_file_id;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+bool native_source_module_inlined(NativeSourceImport* source_import,
+                                 Vec<String>* source_paths,
+                                 Vec<NativeSourceAlias>* aliases) {
+    u32 source_file_id = native_import_source_id(source_import, source_paths, aliases);
+    if (source_file_id == 0 || source_file_id > source_paths.len()) { return false; }
+    str source_path = source_paths.get_ptr(source_file_id - 1).to_str();
+    String normalized = String.new();
+    i64 i = 0;
+    while (source_path[i] != 0) {
+        normalized.push(source_path[i] == (u8)'\\' ? (u8)'/' : source_path[i]);
+        i += 1;
+    }
+    bool has_std_segment = normalized.contains("std/");
+    bool cacheable = normalized.ends_with("std/ops.ag")
+        || normalized.ends_with("std/math.ag")
+        || normalized.ends_with("std/math_int.ag")
+        || normalized.ends_with("std/cpu.ag")
+        || normalized.ends_with("std/hash.ag")
+        || normalized.ends_with("std/bytes.ag")
+        || normalized.ends_with("std/cffi.ag");
+    normalized.drop();
+    return has_std_segment && !cacheable;
+}
+
+String native_source_module_name(str source_path) {
+    String base = path_basename(source_path);
+    i64 stem_length = base.len();
+    i64 i = stem_length;
+    while (i > 0) {
+        i -= 1;
+        if (base.data[i] == (u8)'.') {
+            stem_length = i;
+            break;
+        }
+    }
+    String stem = String.new();
+    stem.push_bytes(base.data, stem_length);
+    base.drop();
+    return move stem;
+}
+
+void native_make_unit_plans(Vec<String>* source_paths,
+                            Vec<NativeSourceImport>* source_imports,
+                            Vec<NativeSourceAlias>* aliases,
+                            str root_name,
+                            Vec<NativeUnitPlan>* plans,
+                            Vec<u32>* standalone_source_ids) {
+    Vec<u32> explicit_source_ids = Vec<u32>.new();
+    explicit_source_ids.push(1);
+    i64 explicit_cursor = 0;
+    while (explicit_cursor < explicit_source_ids.len()) {
+        u32 parent_id = explicit_source_ids.get(explicit_cursor);
+        explicit_cursor += 1;
+        i64 edge_index = 0;
+        while (edge_index < source_imports.len()) {
+            NativeSourceImport* edge = source_imports.get_ptr(edge_index);
+            u32 child_id = native_import_source_id(edge, source_paths, aliases);
+            if (edge.parent_file_id == parent_id && !edge.implicit_entry
+                && child_id > 0
+                && !native_source_id_seen(&explicit_source_ids, child_id)) {
+                explicit_source_ids.push(child_id);
+            }
+            edge_index += 1;
+        }
+    }
+    u32 source_file_id = 1;
+    while (source_file_id <= source_paths.len()) {
+        bool is_boundary = source_file_id == 1;
+        String module_name = source_file_id == 1
+            ? String.from_str(root_name) : String.new();
+        i64 edge_index = 0;
+        while (!is_boundary && edge_index < source_imports.len()) {
+            NativeSourceImport* source_import = source_imports.get_ptr(edge_index);
+            if (native_import_source_id(source_import, source_paths, aliases)
+                    == source_file_id
+                && native_source_id_seen(&explicit_source_ids, source_file_id)
+                && !native_source_module_inlined(source_import,
+                    source_paths, aliases)) {
+                is_boundary = true;
+                module_name.drop();
+                module_name = source_import.module_name.clone();
+            }
+            edge_index += 1;
+        }
+        if (is_boundary) {
+            NativeUnitPlan plan;
+            plan.source_file_id = source_file_id;
+            plan.module_name = move module_name;
+            plan.owned_source_ids = Vec<u32>.new();
+            plan.raw_item_count = 0;
+            plan.owned_source_ids.push(source_file_id);
+            Vec<u32> visited = Vec<u32>.new();
+            visited.push(source_file_id);
+            if (source_file_id == 1) {
+                // Sources reachable only through the implicit entry belong to the root.
+                u32 implicit_id = 2;
+                while (implicit_id <= source_paths.len()) {
+                    if (!native_source_id_seen(&explicit_source_ids, implicit_id)) {
+                        plan.owned_source_ids.push(implicit_id);
+                        visited.push(implicit_id);
+                    }
+                    implicit_id += 1;
+                }
+            }
+            i64 cursor = 0;
+            while (cursor < visited.len()) {
+                u32 parent_id = visited.get(cursor);
+                cursor += 1;
+                edge_index = 0;
+                while (edge_index < source_imports.len()) {
+                    NativeSourceImport* source_import = source_imports.get_ptr(edge_index);
+                    u32 child_id = native_import_source_id(source_import,
+                        source_paths, aliases);
+                    if (source_import.parent_file_id == parent_id && child_id > 0) {
+                        // Artifact closure may contain inline sources below standalone modules.
+                        if (native_source_module_inlined(source_import,
+                            source_paths, aliases)
+                            && !native_source_id_seen(&plan.owned_source_ids, child_id)) {
+                            plan.owned_source_ids.push(child_id);
+                        }
+                        if (!native_source_id_seen(&visited, child_id)) {
+                            visited.push(child_id);
+                        }
+                    }
+                    edge_index += 1;
+                }
+            }
+            visited.drop();
+            if (source_file_id > 1) {
+                standalone_source_ids.push(source_file_id);
+            }
+            plans.push(move plan);
+        } else {
+            module_name.drop();
+        }
+        source_file_id += 1;
+    }
+    explicit_source_ids.drop();
+}
+
 void native_queue_imports(SyntaxNode* unit, str owner, str root_dir, CfgSet* cfg,
-                          Vec<String>* includes, Vec<String>* visited, Vec<String>* pending) {
+                          u32 owner_file_id, Vec<String>* includes,
+                          Vec<String>* visited, Vec<String>* pending,
+                          Vec<NativeSourceImport>* source_imports,
+                          bool module_object) {
     Vec<String> names = Vec<String>.new();
     cfg_collect_import_names(unit, cfg, &names);
     if (native_tree_uses_assert(unit)) {
@@ -1651,13 +1855,29 @@ void native_queue_imports(SyntaxNode* unit, str owner, str root_dir, CfgSet* cfg
     i64 i = 0;
     while (i < names.len()) {
         String* name = names.get_ptr(i);
-        String resolved = resolve_module_path(owner, root_dir, name.to_str(), includes);
+        String effective_name = name.clone();
+        if ((module_object || owner_file_id > 1)
+            && strcmp(name.to_str(), "std.sys.entry") == 0) {
+            effective_name.drop();
+            effective_name = String.from_str("std.sys.entry_api");
+        }
+        String resolved = resolve_module_path(owner, root_dir,
+            effective_name.to_str(), includes);
+        if (resolved.len() > 0) {
+            NativeSourceImport source_import;
+            source_import.parent_file_id = owner_file_id;
+            source_import.module_name = String.from_str(effective_name.to_str());
+            source_import.path = resolved.clone();
+            source_import.implicit_entry = false;
+            source_imports.push(move source_import);
+        }
         if (resolved.len() > 0 && !native_path_seen(visited, resolved.to_str())
             && !native_path_seen(pending, resolved.to_str())) {
             pending.push(move resolved);
         } else {
             resolved.drop();
         }
+        effective_name.drop();
         i += 1;
     }
     names.drop();
@@ -1669,6 +1889,8 @@ void native_queue_imports(SyntaxNode* unit, str owner, str root_dir, CfgSet* cfg
 bool native_load_closure(str source_path, SyntaxTree* tree, CfgSet* cfg,
                          Vec<String>* includes, Vec<String>* source_paths,
                          Vec<String>* link_objects,
+                         Vec<NativeSourceImport>* source_imports,
+                         Vec<NativeSourceAlias>* source_aliases,
                          Vec<NodePool>* pools, Vec<TokenStream>* streams,
                          bool module_object) {
     String root_dir = module_root(source_path);
@@ -1677,12 +1899,19 @@ bool native_load_closure(str source_path, SyntaxTree* tree, CfgSet* cfg,
     source_paths.push(String.from_str(source_path));
     native_set_source_file(tree.root, 1);
     visited.push(String.from_str(source_path));
-    native_queue_imports(tree.root, source_path, root_dir.to_str(), cfg, includes, &visited, &pending);
+    native_queue_imports(tree.root, source_path, root_dir.to_str(), cfg, 1,
+        includes, &visited, &pending, source_imports, module_object);
 
     if (!module_object) {
         String entry_resolved = resolve_module_path(source_path, root_dir.to_str(), "std.sys.entry", includes);
         if (entry_resolved.len() > 0 && !native_path_seen(&visited, entry_resolved.to_str())
             && !native_path_seen(&pending, entry_resolved.to_str())) {
+            NativeSourceImport entry_import;
+            entry_import.parent_file_id = 1;
+            entry_import.module_name = String.from_str("std.sys.entry");
+            entry_import.path = entry_resolved.clone();
+            entry_import.implicit_entry = true;
+            source_imports.push(move entry_import);
             pending.push(move entry_resolved);
         } else {
             entry_resolved.drop();
@@ -1740,6 +1969,22 @@ bool native_load_closure(str source_path, SyntaxTree* tree, CfgSet* cfg,
             }
             artifact_drop(&artifact);
             if (native_path_seen(&visited, source_file.to_str())) {
+                u32 existing_file_id = 0;
+                i64 source_index = 0;
+                while (source_index < source_paths.len()) {
+                    if (strcmp(source_paths.get_ptr(source_index).to_str(),
+                               source_file.to_str()) == 0) {
+                        existing_file_id = (u32)(source_index + 1);
+                        break;
+                    }
+                    source_index += 1;
+                }
+                if (existing_file_id > 0) {
+                    NativeSourceAlias alias;
+                    alias.path = String.from_str(file.to_str());
+                    alias.source_file_id = existing_file_id;
+                    source_aliases.push(move alias);
+                }
                 source_file.drop();
                 continue;
             }
@@ -1749,6 +1994,12 @@ bool native_load_closure(str source_path, SyntaxTree* tree, CfgSet* cfg,
             source_file = String.from_str(file.to_str());
         }
         u32 file_id = (u32)source_paths.len() + (u32)1;
+        if (strcmp(file.to_str(), source_file.to_str()) != 0) {
+            NativeSourceAlias alias;
+            alias.path = String.from_str(file.to_str());
+            alias.source_file_id = file_id;
+            source_aliases.push(move alias);
+        }
         SyntaxNode* unit = native_load_unit(source_file.to_str(), file_id, pools, streams);
         if (unit == (SyntaxNode*)0) {
             source_file.drop();
@@ -1758,7 +2009,8 @@ bool native_load_closure(str source_path, SyntaxTree* tree, CfgSet* cfg,
             return false;
         }
         source_paths.push(String.from_str(source_file.to_str()));
-        native_queue_imports(unit, source_file.to_str(), root_dir.to_str(), cfg, includes, &visited, &pending);
+        native_queue_imports(unit, source_file.to_str(), root_dir.to_str(), cfg,
+            file_id, includes, &visited, &pending, source_imports, module_object);
         native_merge_unit(tree.root, unit);
         source_file.drop();
     }
@@ -1878,14 +2130,14 @@ void native_add_search_path(Command* command, bool direct_linker, str dir) {
     native_add_rpath(command, direct_linker, dir);
 }
 
-bool native_compile_module_object(CliMatches* cli,
-                                 SyntaxTree* tree, TypeTable* types, Interner* names,
+bool native_compile_module_object(SyntaxTree* tree, TypeTable* types, Interner* names,
                                  SymbolTable* symbols, Vec<String>* source_paths,
                                  str root_path, String* root_source,
                                  bool debug_mode, bool module_object,
-                                 u32 source_file_id, str object_path,
+                                 u32 source_file_id, Vec<u32>* owned_source_ids,
+                                 Vec<u32>* standalone_source_ids, str object_path,
                                  String* cache_path, NativeBuildProgress* progress,
-                                 str progress_target, i32* result) {
+                                 str progress_target, bool* was_cached, i32* result) {
     *result = 0;
     bool cache_hit = cache_path.len() > 0 && is_file(cache_path.to_str());
     if (cache_hit && !native_cached_object_valid(cache_path.to_str())) {
@@ -1895,9 +2147,7 @@ bool native_compile_module_object(CliMatches* cli,
     if (cache_hit && !native_copy_binary_atomic(cache_path.to_str(), object_path)) {
         cache_hit = false;
     }
-    if (cache_hit && cli.has("verbose")) {
-        STDERR.write_str("agc: reusing cached native object\n");
-    }
+    *was_cached = cache_hit;
 
     if (!cache_hit) {
         progress.unit_started = now();
@@ -1905,7 +2155,8 @@ bool native_compile_module_object(CliMatches* cli,
         AstPool ast_pool = AstPool.new();
         LlvmGenerator gen = LlvmGenerator.new("silver_native");
         bool compile_ok = gen.compile(tree, &ast_pool, types, names, symbols,
-            source_paths, debug_mode, module_object, source_file_id);
+            source_paths, debug_mode, module_object, source_file_id,
+            owned_source_ids, standalone_source_ids);
 
         if (!gen.ownership_diagnostics.is_empty()) {
             i64 i = 0;
@@ -1977,7 +2228,191 @@ bool native_compile_module_object(CliMatches* cli,
         gen.destroy();
         native_store_cached_object(cache_path.to_str(), object_path);
     }
-    native_progress_finish_compile(progress, progress_target, cache_hit);
+    return true;
+}
+
+struct NativeCompileJob {
+    u32 source_file_id;
+    Vec<u32> owned_source_ids;
+    String object_path;
+    String cache_path;
+    String module_name;
+    i64 item_count;
+}
+
+struct NativeCompileResult {
+    i32 completed;
+    bool compiled;
+    bool cached;
+    bool reported;
+    i32 result;
+    i64 elapsed_ms;
+}
+
+struct NativeCompilePool {
+    i64 next_job;
+    Vec<NativeCompileJob>* jobs;
+    Vec<NativeCompileResult>* results;
+    SyntaxTree* tree;
+    Vec<String>* source_paths;
+    Vec<u32>* standalone_source_ids;
+    str root_path;
+    String* root_source;
+    bool debug_mode;
+    bool module_object;
+}
+
+struct NativeCompileWorker {
+    NativeCompilePool* pool;
+    SymbolTable symbols;
+}
+
+bool native_compile_one(NativeCompileWorker* worker) {
+    NativeCompilePool* pool = worker.pool;
+    i64 job_index = __atomic_fetch_add_i64(&pool.next_job, 1, ATOMIC_SEQ_CST);
+    if (job_index >= pool.jobs.len()) { return false; }
+    NativeCompileJob* job = pool.jobs.get_ptr(job_index);
+    NativeCompileResult* result = pool.results.get_ptr(job_index);
+    NativeBuildProgress quiet;
+    quiet.enabled = false;
+    quiet.terminal = false;
+    quiet.verbose = false;
+    quiet.active_line = false;
+    quiet.total_steps = 0;
+    quiet.completed_steps = 0;
+    quiet.source_modules = 0;
+    quiet.codegen_items = 0;
+    quiet.current_items = job.item_count;
+    quiet.cached_count = 0;
+    quiet.compiled_count = 0;
+    quiet.started = now();
+    quiet.unit_started = quiet.started;
+    Instant started = now();
+    result.compiled = native_compile_module_object(pool.tree,
+        &worker.symbols.types, &worker.symbols.names, &worker.symbols,
+        pool.source_paths, pool.root_path, pool.root_source, pool.debug_mode,
+        pool.module_object, job.source_file_id, &job.owned_source_ids,
+        pool.standalone_source_ids, job.object_path.to_str(),
+        &job.cache_path, &quiet, job.module_name.to_str(), &result.cached,
+        &result.result);
+    result.elapsed_ms = now().elapsed_ns(started) / 1000000;
+    __atomic_store_i32(&result.completed, 1, ATOMIC_RELEASE);
+    return true;
+}
+
+void native_compile_worker(i64 arg) {
+    NativeCompileWorker* worker = (NativeCompileWorker*)arg;
+    while (native_compile_one(worker)) {
+    }
+}
+
+i64 native_compile_worker_entry(i64 arg) {
+    native_compile_worker(arg);
+    return 0;
+}
+
+bool native_compile_jobs(SyntaxTree* tree, SymbolTable* symbols,
+                         Vec<String>* source_paths, str root_path,
+                         Vec<u32>* standalone_source_ids,
+                         String* root_source, NativeBuildProgress* progress,
+                         bool debug_mode, bool module_object,
+                         Vec<NativeCompileJob>* jobs,
+                         Vec<NativeCompileResult>* results) {
+    if (jobs.len() == 0) { return true; }
+
+    NativeCompilePool pool;
+    pool.next_job = 0;
+    pool.jobs = jobs;
+    pool.results = results;
+    pool.tree = tree;
+    pool.source_paths = source_paths;
+    pool.standalone_source_ids = standalone_source_ids;
+    pool.root_path = root_path;
+    pool.root_source = root_source;
+    pool.debug_mode = debug_mode;
+    pool.module_object = module_object;
+
+    i64 worker_count = thread_available_parallelism();
+    if (worker_count > jobs.len()) { worker_count = jobs.len(); }
+    if (worker_count < 1) { worker_count = 1; }
+
+    Vec<NativeCompileWorker> workers = Vec<NativeCompileWorker>.with_capacity(worker_count);
+    Vec<i64> threads = Vec<i64>.with_capacity(worker_count);
+    i64 i = 0;
+    while (i < worker_count) {
+        NativeCompileWorker worker;
+        worker.pool = &pool;
+        worker.symbols = symbols.clone();
+        workers.push(move worker);
+        i += 1;
+    }
+
+    i = 0;
+    while (i < worker_count) {
+        i64 thread = 0;
+        i32 spawn_result = pthread_create(&thread, (i8*)0,
+            (i64)native_compile_worker_entry, (i64)workers.get_ptr(i));
+        if (spawn_result == 0) {
+            threads.push(thread);
+        }
+        i += 1;
+    }
+    if (threads.len() == 0) {
+        native_compile_worker((i64)workers.get_ptr(0));
+        i = 0;
+        while (i < results.len()) {
+            NativeCompileResult* result = results.get_ptr(i);
+            if (result.compiled && result.result == 0) {
+                NativeCompileJob* job = jobs.get_ptr(i);
+                progress.current_items = job.item_count;
+                native_progress_finish_compile(progress, job.module_name.to_str(),
+                    result.cached, result.elapsed_ms);
+            }
+            i += 1;
+        }
+    } else {
+        i64 pending = jobs.len();
+        while (pending > 0) {
+            bool observed_completion = false;
+            i64 job_index = 0;
+            while (job_index < results.len()) {
+                NativeCompileResult* result = results.get_ptr(job_index);
+                if (!result.reported
+                    && __atomic_load_i32(&result.completed, ATOMIC_ACQUIRE) == 1) {
+                    result.reported = true;
+                    pending -= 1;
+                    observed_completion = true;
+                    if (result.compiled && result.result == 0) {
+                        NativeCompileJob* job = jobs.get_ptr(job_index);
+                        progress.current_items = job.item_count;
+                        native_progress_finish_compile(progress,
+                            job.module_name.to_str(), result.cached,
+                            result.elapsed_ms);
+                    }
+                }
+                job_index += 1;
+            }
+            if (!observed_completion) { thread_yield(); }
+        }
+    }
+    i = 0;
+    while (i < threads.len()) {
+        i64 thread_result = 0;
+        pthread_join(threads.get(i), &thread_result);
+        i += 1;
+    }
+    threads.drop();
+    workers.drop();
+
+    i = 0;
+    while (i < results.len()) {
+        if (__atomic_load_i32(&results.get_ptr(i).completed, ATOMIC_ACQUIRE) != 1
+            || !results.get_ptr(i).compiled
+            || results.get_ptr(i).result != 0) {
+            return false;
+        }
+        i += 1;
+    }
     return true;
 }
 
@@ -2090,6 +2525,18 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     i64 arg_idx = 1;
     while (arg_idx < arguments.len()) {
         String* arg = arguments.get_ptr(arg_idx);
+        if (arg.equals("--target") && arg_idx + 1 < arguments.len()) {
+            cfg_apply_target(&cfg, arguments.get_ptr(arg_idx + 1).to_str());
+            arg_idx += 2;
+            continue;
+        }
+        if (arg.starts_with("--target=")) {
+            String target = arg.strip_prefix("--target=");
+            cfg_apply_target(&cfg, target.to_str());
+            target.drop();
+            arg_idx += 1;
+            continue;
+        }
         if (arg.equals("-I") && arg_idx + 1 < arguments.len()) {
             includes.push(String.from_str(arguments.get_ptr(arg_idx + 1).to_str()));
             arg_idx += 2;
@@ -2143,18 +2590,50 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     Vec<TokenStream> streams = Vec<TokenStream>.new();
     Vec<String> source_paths = Vec<String>.new();
     Vec<String> link_objects = Vec<String>.new();
+    Vec<NativeSourceImport> source_imports = Vec<NativeSourceImport>.new();
+    Vec<NativeSourceAlias> source_aliases = Vec<NativeSourceAlias>.new();
     if (!native_load_closure(source_path, &tree, &cfg, &includes, &source_paths,
-                             &link_objects, &pools, &streams, module_object)) {
+                             &link_objects, &source_imports, &source_aliases,
+                             &pools, &streams, module_object)) {
         native_destroy_units(&pools, &streams);
         source_paths.drop();
         link_objects.drop();
+        source_imports.drop();
+        source_aliases.drop();
         includes.drop();
         pool.destroy();
         output.drop();
         return false;
     }
-    progress.source_modules = source_paths.len();
-    progress.codegen_items = native_codegen_item_count(tree.root);
+    Vec<NativeUnitPlan> unit_plans = Vec<NativeUnitPlan>.new();
+    Vec<u32> standalone_source_ids = Vec<u32>.new();
+    String root_module_name = native_source_module_name(source_path);
+    bool split_modules = !emit_object && !module_object;
+    if (split_modules) {
+        native_make_unit_plans(&source_paths, &source_imports, &source_aliases,
+            root_module_name.to_str(), &unit_plans, &standalone_source_ids);
+    } else {
+        NativeUnitPlan single_plan;
+        single_plan.source_file_id = 0;
+        single_plan.module_name = root_module_name.clone();
+        single_plan.owned_source_ids = Vec<u32>.new();
+        single_plan.raw_item_count = 0;
+        unit_plans.push(move single_plan);
+    }
+    source_imports.drop();
+    source_aliases.drop();
+    root_module_name.drop();
+    progress.source_modules = unit_plans.len();
+    progress.codegen_items = 0;
+    i64 plan_index = 0;
+    while (plan_index < unit_plans.len()) {
+        NativeUnitPlan* plan = unit_plans.get_ptr(plan_index);
+        if (plan.source_file_id > 0) {
+            plan.raw_item_count = native_codegen_item_count_for_file(
+                tree.root, plan.source_file_id);
+        }
+        plan_index += 1;
+    }
     native_expand_cfg_blocks(tree.root, &cfg, &pool);
     native_add_function_import_aliases(tree.root, &cfg, &pool, source_path,
                                        &includes, &source_paths);
@@ -2195,11 +2674,43 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         native_destroy_units(&pools, &streams);
         source_paths.drop();
         link_objects.drop();
+        unit_plans.drop();
+        standalone_source_ids.drop();
         pool.destroy();
         output.drop();
         *result = 2;
         return true;
     }
+
+    LintConfig lint_config = lint_config_default();
+    i64 lint_arg = 1;
+    while (lint_arg < arguments.len()) {
+        lint_config_flag(&lint_config, arguments.get_ptr(lint_arg).to_str());
+        lint_arg += 1;
+    }
+    DiagnosticBag lint_diagnostics = DiagnosticBag.new();
+    check_lints_for_file(&tree, &cfg, 1, &lint_diagnostics, &lint_config);
+    lint_config_apply_errors(&lint_config, &lint_diagnostics);
+    i64 lint_index = 0;
+    while (lint_index < lint_diagnostics.len()) {
+        Diagnostic* diagnostic = lint_diagnostics.get(lint_index);
+        String rendered = render_diagnostic(diagnostic, source_path, &source_copy);
+        STDERR.write_str(rendered.to_str());
+        lint_index += 1;
+    }
+    if (lint_has_errors(&lint_diagnostics)) {
+        lint_diagnostics.items.drop();
+        native_destroy_units(&pools, &streams);
+        source_paths.drop();
+        link_objects.drop();
+        unit_plans.drop();
+        standalone_source_ids.drop();
+        pool.destroy();
+        output.drop();
+        *result = 2;
+        return true;
+    }
+    lint_diagnostics.items.drop();
 
     // Keep @cfg syntax intact during cfg-aware semantic scans so dead
     // ternary branches stay invisible; lowering folds the selected branch.
@@ -2207,6 +2718,8 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         native_destroy_units(&pools, &streams);
         source_paths.drop();
         link_objects.drop();
+        unit_plans.drop();
+        standalone_source_ids.drop();
         pool.destroy();
         output.drop();
         return false;
@@ -2215,29 +2728,35 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         native_destroy_units(&pools, &streams);
         source_paths.drop();
         link_objects.drop();
+        unit_plans.drop();
+        standalone_source_ids.drop();
         pool.destroy();
         output.drop();
         return false;
     }
 
     i64 pid = getpid();
-    bool split_modules = !emit_object && !module_object;
-    i64 module_count = split_modules ? source_paths.len() : 1;
+    i64 module_count = unit_plans.len();
     progress.total_steps = module_count + (split_modules ? 1 : 0);
     Vec<String> link_libs = Vec<String>.new();
     native_collect_link_libs(tree.root, &link_libs);
+    Vec<NativeCompileJob> jobs = Vec<NativeCompileJob>.with_capacity(module_count);
+    Vec<NativeCompileResult> results = Vec<NativeCompileResult>.with_capacity(module_count);
     Vec<String> object_paths = Vec<String>.new();
-    bool modules_ok = true;
     i64 module_index = 0;
     while (module_index < module_count) {
-        u32 source_file_id = split_modules ? (u32)(module_index + 1) : 0;
-        str module_path = source_file_id > 0
-            ? source_paths.get_ptr(source_file_id - 1).to_str() : source_path;
-        String module_name = split_modules
-            ? native_module_target(module_path) : String.from_str(progress_target);
-        progress.current_items = split_modules
-            ? native_codegen_item_count_for_file(tree.root, source_file_id)
-            : progress.codegen_items;
+        NativeUnitPlan* plan = unit_plans.get_ptr(module_index);
+        u32 source_file_id = plan.source_file_id;
+        String module_name = plan.module_name.clone();
+        progress.current_items = source_file_id == 1
+            ? native_codegen_item_count_for_sources(tree.root, &plan.owned_source_ids)
+            : source_file_id > 1
+                ? plan.raw_item_count
+                : native_codegen_item_count(tree.root);
+        // The summary mirrors graph-primary source counts; the root row also
+        // reports its expanded inline ownership closure.
+        progress.codegen_items += split_modules
+            ? plan.raw_item_count : progress.current_items;
         String object_path;
         if (emit_object) {
             object_path = output.clone();
@@ -2249,22 +2768,37 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
             suffix.drop();
         }
         String cache_path = native_object_cache_path(arguments, cli, source_path,
-            &source_paths, &link_objects, default_name, module_object, source_file_id);
-        i32 module_result = 0;
-        bool compiled = native_compile_module_object(cli, &tree, &symbols.types,
-            &symbols.names, &symbols, &source_paths, source_path, &source_copy,
-            cfg.contains("debug"), module_object, source_file_id,
-            object_path.to_str(), &cache_path, &progress, module_name.to_str(),
-            &module_result);
-        cache_path.drop();
-        module_name.drop();
-        if (!compiled || module_result != 0) {
-            if (module_result != 0) { *result = module_result; }
-            object_path.drop();
-            modules_ok = false;
-            break;
+            &source_paths, &link_objects, default_name, module_object,
+            source_file_id, &plan.owned_source_ids);
+        NativeCompileJob job;
+        job.source_file_id = source_file_id;
+        job.owned_source_ids = native_copy_source_ids(&plan.owned_source_ids);
+        job.object_path = move object_path;
+        job.cache_path = move cache_path;
+        job.module_name = move module_name;
+        job.item_count = progress.current_items;
+        jobs.push(move job);
+        NativeCompileResult pending;
+        pending.completed = 0;
+        pending.compiled = false;
+        pending.cached = false;
+        pending.reported = false;
+        pending.result = 0;
+        pending.elapsed_ms = 0;
+        results.push(move pending);
+        object_paths.push(jobs.get_ptr(module_index).object_path.clone());
+        module_index += 1;
+    }
+    bool modules_ok = native_compile_jobs(&tree, &symbols, &source_paths,
+        source_path, &standalone_source_ids, &source_copy, &progress,
+        cfg.contains("debug"),
+        module_object, &jobs, &results);
+    module_index = 0;
+    while (module_index < results.len()) {
+        NativeCompileResult* completed = results.get_ptr(module_index);
+        if (completed.result != 0 && *result == 0) {
+            *result = completed.result;
         }
-        object_paths.push(move object_path);
         module_index += 1;
     }
     if (!modules_ok) {
@@ -2276,8 +2810,12 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
             }
         }
         object_paths.drop();
+        jobs.drop();
+        results.drop();
         link_libs.drop();
         source_paths.drop();
+        unit_plans.drop();
+        standalone_source_ids.drop();
         native_destroy_units(&pools, &streams);
         link_objects.drop();
         pool.destroy();
@@ -2285,6 +2823,10 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         if (*result == 0) { return false; }
         return true;
     }
+    jobs.drop();
+    results.drop();
+    unit_plans.drop();
+    standalone_source_ids.drop();
     source_paths.drop();
     native_destroy_units(&pools, &streams);
     pool.destroy();
@@ -2403,6 +2945,27 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
             return true;
         }
         if (direct_linker) {
+            i64 slash = 0;
+            i64 scan = 0;
+            str dl_path = dl.to_str();
+            i64 dl_length = strlen(dl_path);
+            while (scan < dl_length) {
+                if (dl_path[scan] == (u8)'/') { slash = scan; }
+                scan += 1;
+            }
+            if (slash > 0) {
+                String library_dir = String.new();
+                i64 dir_index = 0;
+                while (dir_index < slash) {
+                    library_dir.push(dl_path[dir_index]);
+                    dir_index += 1;
+                }
+                cc_command.arg("-L");
+                cc_command.arg(library_dir.to_str());
+                library_dir.drop();
+            }
+        }
+        if (direct_linker) {
             cc_command.arg("--dynamic-linker");
             cc_command.arg(dl.to_str());
         } else {
@@ -2415,7 +2978,6 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     } else if (dynamic_linker.is_some()) {
         dynamic_linker.unwrap().drop();
     }
-
 
 // Pass library search dirs and link flags from arguments
     i64 carg_idx = 1;

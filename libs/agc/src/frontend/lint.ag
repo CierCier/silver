@@ -256,3 +256,20 @@ void check_lints(SyntaxTree* tree, DiagnosticBag* diagnostics, LintConfig* confi
     lint_functions(tree.root, diagnostics, config.unused_variables, config.unused_parameters);
     lint_unreachable_blocks(tree.root, diagnostics, config.unreachable_code);
 }
+
+void check_lints_for_file(SyntaxTree* tree, CfgSet* cfg, i64 source_file_id,
+                          DiagnosticBag* diagnostics, LintConfig* config) {
+    Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
+    cfg_collect_items(tree.root, cfg, diagnostics, &items);
+    i64 i = 0;
+    while (i < items.len()) {
+        SyntaxNode* item = items.get(i);
+        if (item.span.file == source_file_id) {
+            lint_functions(item, diagnostics, config.unused_variables,
+                           config.unused_parameters);
+            lint_unreachable_blocks(item, diagnostics, config.unreachable_code);
+        }
+        i += 1;
+    }
+    items.drop();
+}

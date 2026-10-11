@@ -8,13 +8,20 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 from dataclasses import asdict, dataclass
 
 REPO_ROOT = pathlib.Path(__file__).parents[2]
+ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+COMPILE_ROW = re.compile(
+    r"^\s*\[\s*\d+\s*/\s*(\d+)\s*\]\s*\d+%\s+"
+    r"(compiled(?:\s+in\s+\S+)?|\[cached\])\s+(.+?)\s+\((\d+) item(?:s)?"
+)
 
 
 @dataclass
@@ -66,6 +73,247 @@ def run(
     )
 
 
+def progress_modules(
+    result: RunResult, source: pathlib.Path
+) -> tuple[int, dict[str, str]]:
+    rows = []
+    for line in ANSI.sub("", result.stderr).splitlines():
+        match = COMPILE_ROW.match(line)
+        if match is None:
+            continue
+        status = "cached" if match.group(2) == "[cached]" else "compiled"
+        target = match.group(3)
+        if target in (str(source), source.name, source.stem):
+            target = "<root>"
+        rows.append((int(match.group(1)), target, status))
+    totals = {total for total, _target, _status in rows}
+    if not rows or len(totals) != 1:
+        raise AssertionError(
+            "native module progress omitted compile completion rows or used "
+            f"inconsistent step totals: {result.stderr}"
+        )
+    modules = {target: status for _total, target, status in rows}
+    if len(modules) != len(rows):
+        raise AssertionError(f"{result.stderr}: duplicate module completion row")
+    total_steps = totals.pop()
+    if total_steps != len(modules) + 1:
+        raise AssertionError(
+            f"progress total {total_steps} does not include one link step after "
+            f"{len(modules)} module completions: {result.stderr}"
+        )
+    return total_steps, modules
+
+
+def progress_item_counts(result: RunResult, source: pathlib.Path) -> dict[str, int]:
+    item_counts = {}
+    for line in ANSI.sub("", result.stderr).splitlines():
+        match = COMPILE_ROW.match(line)
+        if match is None:
+            continue
+        target = match.group(3)
+        if target in (str(source), source.name, source.stem):
+            target = "<root>"
+        if target in item_counts:
+            raise AssertionError(f"{result.stderr}: duplicate module completion row")
+        item_counts[target] = int(match.group(4))
+    if not item_counts:
+        raise AssertionError(f"native progress omitted item counts: {result.stderr}")
+    return item_counts
+
+
+def exercise_module_boundaries(
+    binary: pathlib.Path,
+    temp_root: pathlib.Path,
+    root: pathlib.Path,
+    compiler_label: str,
+    require_all_cached: bool = False,
+) -> dict[str, object]:
+    work = temp_root / "module-boundaries"
+    work.mkdir(parents=True, exist_ok=True)
+    source = work / "main.ag"
+    dependency = work / "dep.ag"
+    source.write_text(
+        textwrap.dedent(
+            """\
+            import std.mem.drop;
+            import std.string;
+            import std.mem.vec;
+            import dep;
+
+            i64 root_drop_count = 0;
+            struct Probe { i64 value; }
+            impl Drop for Probe {
+                void drop(Probe* self) {
+                    root_drop_count = root_drop_count + self.value;
+                }
+            }
+
+            i32 main() {
+                String original = String.from_str("forty two");
+                String received = identity<String>(move original);
+                Vec<String> values = Vec<String>.new();
+                values.push(move received);
+                {
+                    Probe probe;
+                    probe.value = 1;
+                }
+                if (root_drop_count != 1) { return 3; }
+                ModuleValue measured;
+                measured.value = 40;
+                if (measured.increment(2) != 42 || measured.current() != 42) { return 5; }
+                if (read_cfg_value() != 7) { return 6; }
+                bump();
+                if (module_counter != 1) { return 1; }
+                if (!values.get_ptr(0).equals("forty two")) { return 2; }
+                String extracted = values.pop();
+                if (!extracted.equals("forty two")) { return 4; }
+                @println("module-boundary-ok");
+                return 42;
+            }
+            """
+        ),
+        encoding="utf-8",
+    )
+    dependency.write_text(
+        textwrap.dedent(
+            """\
+            import std.string;
+            i64 module_counter = 0;
+            struct ModuleValue { i64 value; }
+            impl ModuleValue {
+                i64 increment(ModuleValue* self, i64 amount) {
+                    self.value = self.value + amount;
+                    return self.value;
+                }
+                i64 current(ModuleValue* self) { return self.value; }
+            }
+            if (@cfg(os.linux)) {
+                i32 cfg_value() { return 7; }
+            } else {
+                i32 cfg_value() { return 8; }
+            }
+            T identity<T>(T value) { return move value; }
+            void bump() { module_counter = module_counter + 1; }
+            i32 read_cfg_value() { return cfg_value(); }
+            """
+        ),
+        encoding="utf-8",
+    )
+    cache = work / "cache" / compiler_label
+    env = os.environ.copy()
+    base = [
+        "build", str(source), "--cache-dir", str(cache),
+        "--progress", "--verbose",
+        "-I", str(root),
+    ]
+    outputs = {
+        "cold": work / f"{compiler_label}-cold-app",
+        "warm": work / f"{compiler_label}-warm-app",
+        "uncached": work / f"{compiler_label}-uncached-app",
+    }
+    cold = run(binary, [*base, "-o", str(outputs["cold"])], root, env)
+    warm = run(binary, [*base, "-o", str(outputs["warm"])], root, env)
+    uncached = run(
+        binary,
+        [
+            "build", str(source), "--no-cache", "--no-progress",
+            "-I", str(root), "-o", str(outputs["uncached"]),
+        ],
+        root,
+        env,
+    )
+    for label, result in (("cold", cold), ("warm", warm), ("uncached", uncached)):
+        if result.returncode != 0:
+            raise AssertionError(
+                f"{binary.name}: {label} module-boundary build failed "
+                f"({result.returncode})\n{result.stdout}\n{result.stderr}"
+            )
+
+    cold_progress = progress_modules(cold, source)
+    warm_progress = progress_modules(warm, source)
+    cold_item_counts = progress_item_counts(cold, source)
+    if (
+        cold_progress[0] != warm_progress[0]
+        or cold_progress[1].keys() != warm_progress[1].keys()
+    ):
+        raise AssertionError(
+            f"{binary.name}: cold and warm module progress differ: "
+            f"{cold_progress!r} vs {warm_progress!r}"
+        )
+    if any(status != "compiled" for status in cold_progress[1].values()):
+        raise AssertionError(f"{binary.name}: cold build did not compile every module")
+    imported_modules = {
+        name for name in cold_progress[1] if name != "<root>"
+    }
+    if "dep" not in imported_modules:
+        raise AssertionError(
+            f"{binary.name}: standalone dep boundary missing from cold progress: "
+            f"{cold_progress!r}"
+        )
+    if "dep" not in cold_item_counts:
+        raise AssertionError(f"{binary.name}: standalone dep item count missing")
+    if any(warm_progress[1][name] != "cached" for name in imported_modules):
+        raise AssertionError(f"{binary.name}: warm build missed imported module caches")
+    if require_all_cached and any(
+        status != "cached" for status in warm_progress[1].values()
+    ):
+        raise AssertionError(f"{binary.name}: warm build did not reuse every module")
+
+    for label, output in outputs.items():
+        executed = subprocess.run(
+            [str(output)], cwd=root, env=env, capture_output=True,
+            text=True, check=False,
+        )
+        if (executed.returncode, executed.stdout, executed.stderr) != (
+            42, "module-boundary-ok\n", ""
+        ):
+            raise AssertionError(
+                f"{binary.name}: {label} module-boundary executable returned "
+                f"{executed.returncode}, stdout={executed.stdout!r}, "
+                f"stderr={executed.stderr!r}"
+            )
+
+    simple_source = work / "simple.ag"
+    simple_source.write_text("i32 main() { return 42; }\n", encoding="utf-8")
+    simple_output = work / f"{compiler_label}-simple-app"
+    simple_cache = work / "simple-cache" / compiler_label
+    simple = run(
+        binary,
+        [
+            "build", str(simple_source), "--cache-dir", str(simple_cache),
+            "--progress", "--verbose", "-o", str(simple_output),
+        ],
+        root,
+        env,
+    )
+    if simple.returncode != 0:
+        raise AssertionError(
+            f"{binary.name}: simple no-import build failed "
+            f"({simple.returncode})\n{simple.stdout}\n{simple.stderr}"
+        )
+    simple_progress = progress_modules(simple, simple_source)
+    if simple_progress != (2, {"<root>": "compiled"}):
+        raise AssertionError(
+            f"{binary.name}: simple program should report only its root compile "
+            f"and link steps, got {simple_progress!r}\n{simple.stderr}"
+        )
+    executed = subprocess.run(
+        [str(simple_output)], cwd=root, env=env, capture_output=True,
+        text=True, check=False,
+    )
+    if (executed.returncode, executed.stdout, executed.stderr) != (42, "", ""):
+        raise AssertionError(
+            f"{binary.name}: simple executable returned {executed.returncode}, "
+            f"stdout={executed.stdout!r}, stderr={executed.stderr!r}"
+        )
+    return {
+        "cold_progress": cold_progress,
+        "warm_progress": warm_progress,
+        "simple_progress": simple_progress,
+        "cold_item_counts": cold_item_counts,
+    }
+
+
 def exercise(
     binary: pathlib.Path, temp_root: pathlib.Path, root: pathlib.Path,
     check_corrupt_entry: bool = False,
@@ -79,7 +327,8 @@ def exercise(
     source.write_text("i32 main() {\n    return 0;\n}\n", encoding="utf-8")
 
     env = os.environ.copy()
-    base = [str(source), "--cache-dir", str(cache), "--no-progress", "--verbose"]
+    progress_args = ["--progress"] if check_corrupt_entry else ["--no-progress"]
+    base = [str(source), "--cache-dir", str(cache), *progress_args, "--verbose"]
     first = run(binary, [*base, "-o", str(output)], root, env)
     first_cache = snapshot(cache)
     second = run(binary, [*base, "-o", str(output)], root, env)
@@ -96,7 +345,8 @@ def exercise(
     if check_corrupt_entry:
         cached_objects = sorted(cache.rglob("*.o"))
         if cached_objects:
-            cached_objects[0].write_bytes(b"not an object")
+            for cached_object in cached_objects:
+                cached_object.write_bytes(b"not an object")
             corrupt_rebuild = run(binary, [*base, "-o", str(output)], root, env)
             corrupt_rebuild_cache = snapshot(cache)
     source.write_text("i32 main() {\n    return 7;\n}\n", encoding="utf-8")
@@ -132,7 +382,7 @@ def exercise(
     )
     dependency_args = [
         str(dependency_main), "--cache-dir", str(dependency_cache),
-        "--no-progress", "--verbose", "-o", str(dependency_output),
+        *progress_args, "--verbose", "-o", str(dependency_output),
     ]
     dependency_first = run(binary, dependency_args, root, env)
     dependency_first_cache = snapshot(dependency_cache)
@@ -197,14 +447,14 @@ def exercise(
         "dependency_first": dependency_first,
         "dependency_second": dependency_second,
         "dependency_changed": dependency_changed,
-        "dependency_cache_hit": "reusing cached native object" in dependency_second.stderr,
+        "dependency_cache_hit": "[cached]" in dependency_second.stderr,
         "dependency_first_cache": dependency_first_cache,
         "dependency_second_cache": dependency_second_cache,
         "dependency_changed_cache": dependency_changed_cache,
         "dependency_exit": dependency_exit,
         "cache_cli": cache_cli,
         "changed": changed,
-        "cache_hit": "reusing cached native object" in second.stderr,
+        "cache_hit": "[cached]" in second.stderr,
         "first_cache": first_cache,
         "second_cache": second_cache,
         "uncached_cache": uncached_cache,
@@ -216,15 +466,16 @@ def exercise(
 
 
 def as_json(value: object) -> str:
-    if isinstance(value, RunResult):
-        return json.dumps(asdict(value), sort_keys=True)
-    if isinstance(value, dict):
-        normalized = {
-            key: asdict(item) if isinstance(item, RunResult) else item
-            for key, item in value.items()
-        }
-        return json.dumps(normalized, sort_keys=True)
-    return json.dumps(value, sort_keys=True)
+    def normalize(item: object) -> object:
+        if isinstance(item, RunResult):
+            return asdict(item)
+        if isinstance(item, dict):
+            return {key: normalize(nested) for key, nested in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [normalize(nested) for nested in item]
+        return item
+
+    return json.dumps(normalize(value), sort_keys=True)
 
 
 def main() -> int:
@@ -249,6 +500,50 @@ def main() -> int:
         )
 
         failures: list[str] = []
+        module_results = []
+        for label, binary in (("stage0", stage0), ("stage1", stage1)):
+            try:
+                module_results.append(
+                    (
+                        label,
+                        exercise_module_boundaries(
+                            binary,
+                            temp_root,
+                            root,
+                            label,
+                            require_all_cached=label == "stage1",
+                        ),
+                    )
+                )
+            except AssertionError as error:
+                failures.append(f"{label}: module-boundary check failed: {error}")
+        if len(module_results) == 2:
+            for phase in ("cold_progress", "warm_progress", "simple_progress"):
+                stage0_progress = module_results[0][1][phase]
+                stage1_progress = module_results[1][1][phase]
+                if (
+                    stage0_progress[0] != stage1_progress[0]
+                    or stage0_progress[1].keys() != stage1_progress[1].keys()
+                ):
+                    stage0_names = set(stage0_progress[1])
+                    stage1_names = set(stage1_progress[1])
+                    failures.append(
+                        f"stage0/stage1 {phase} module-boundary progress differs: "
+                        f"total steps {stage0_progress[0]} vs {stage1_progress[0]}, "
+                        f"module rows {len(stage0_names)} vs {len(stage1_names)}, "
+                        f"only stage0={sorted(stage0_names - stage1_names)!r}, "
+                        f"only stage1={sorted(stage1_names - stage0_names)!r}"
+                    )
+            stage0_counts = module_results[0][1]["cold_item_counts"]
+            stage1_counts = module_results[1][1]["cold_item_counts"]
+            for module_name in ("dep", "std.cpu"):
+                if module_name in stage0_counts and module_name in stage1_counts:
+                    if stage0_counts[module_name] != stage1_counts[module_name]:
+                        failures.append(
+                            f"stage0/stage1 {module_name} progress item count differs: "
+                            f"{stage0_counts[module_name]} vs {stage1_counts[module_name]}"
+                        )
+
         for label, result in results:
             for key in ("first", "second", "uncached", "cycle", "changed"):
                 command: RunResult = result[key]  # type: ignore[assignment]
@@ -292,7 +587,7 @@ def main() -> int:
         if not results[1][1]["dependency_cache_hit"]:
             failures.append("stage1: repeated imported-source build did not report a cache hit")
         corrupt_rebuild = results[1][1]["corrupt_rebuild"]
-        if corrupt_rebuild is None or "reusing cached native object" in corrupt_rebuild.stderr:
+        if corrupt_rebuild is None or "[cached]" in corrupt_rebuild.stderr:
             failures.append("stage1: corrupt object was accepted as a cache hit")
         cache_cli = results[1][1]["cache_cli"]
         for key in (
@@ -332,6 +627,8 @@ def main() -> int:
             "native cache checks passed: "
             f"stage0={old_first.seconds:.3f}s/{old_second.seconds:.3f}s, "
             f"stage1={new_first.seconds:.3f}s/{new_second.seconds:.3f}s, "
+            f"module_steps={module_results[0][1]['cold_progress'][0] if module_results else 'failed'}, "
+            f"module_rows={len(module_results[0][1]['cold_progress'][1]) if module_results else 'failed'}, "
             f"cache_files={len(results[1][1]['first_cache'])}"  # type: ignore[arg-type]
         )
         return 0
