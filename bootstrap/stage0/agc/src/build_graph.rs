@@ -672,6 +672,30 @@ impl BuildProgress {
                 module_name.bold(),
                 summary_text.dimmed()
             );
+            if let Some(next_active) = active.iter().next() {
+                let next_step = (current + 1).min(total);
+                let next_percent = if total > 0 {
+                    (next_step * 100) / total
+                } else {
+                    100
+                };
+                let next_prefix =
+                    format!("[{:>2}/{:<2}] {:>3}%", next_step, total, next_percent.min(100));
+                let active_list = if active.len() > 1 {
+                    let names: Vec<_> = active.iter().cloned().collect();
+                    format!(" [active: {}]", names.join(", "))
+                } else {
+                    String::new()
+                };
+                eprint!(
+                    "\r\x1b[2K{} {} {}{}",
+                    next_prefix.dimmed(),
+                    "compiling".bold().cyan(),
+                    next_active.bold(),
+                    active_list.dimmed()
+                );
+                let _ = std::io::Write::flush(&mut std::io::stderr());
+            }
         } else {
             eprintln!(
                 "{} {} {}{}",

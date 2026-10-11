@@ -5,6 +5,7 @@ import std.fmt;
 import std.io;
 import std.mem.vec;
 import std.path;
+import std.profiler;
 import std.result;
 import std.string;
 import agc;
@@ -343,15 +344,20 @@ i32 emit_ast(str path) {
 }
 
 i32 emit_check(str path, CfgSet* cfg, Vec<String>* include_dirs, LintConfig* lint_config) {
+    profiler_begin_phase("read source");
     Result<String, Error> loaded = String.from_file(path);
     if (loaded.is_err()) {
+        profiler_end_phase("read source");
+        profiler_print_report();
         STDERR.write_str("agc: error: failed to read ");
         STDERR.write_str(path);
         STDERR.write_str("\n");
         return 2;
     }
+    profiler_end_phase("read source");
     String source = loaded.unwrap();
     String source_copy = source.clone();
+    profiler_begin_phase("parse");
     TokenStream stream = TokenStream.new();
     DiagnosticBag diagnostics = DiagnosticBag.new();
     lex(move source, &stream, &diagnostics);
@@ -359,34 +365,45 @@ i32 emit_check(str path, CfgSet* cfg, Vec<String>* include_dirs, LintConfig* lin
         NodePool pool = NodePool.new();
         SyntaxTree tree;
         parse(&stream, &diagnostics, &pool, &tree);
+        profiler_end_phase("parse");
         if (diagnostics.is_empty()) {
+            profiler_begin_phase("hir");
             check_hir(&tree, cfg, &diagnostics);
+            profiler_end_phase("hir");
         }
         if (diagnostics.is_empty()) {
+            profiler_begin_phase("symbol_table");
             SymbolTable symbols = SymbolTable.new();
             collect_symbols(&symbols, &diagnostics, &tree, cfg);
+            profiler_end_phase("symbol_table");
             if (diagnostics.is_empty()) {
+                profiler_begin_phase("semantic");
                 resolve_names(&symbols, &diagnostics, &tree, path, cfg, include_dirs);
+                profiler_end_phase("semantic");
             }
             if (diagnostics.is_empty()) {
+                profiler_begin_phase("type check");
                 check_declared_types(&symbols, &tree, cfg, &diagnostics);
+                if (diagnostics.is_empty()) {
+                    check_borrows(&tree, &symbols, &diagnostics, cfg);
+                }
+                if (diagnostics.is_empty()) {
+                    check_send(&tree, &diagnostics, cfg);
+                }
+                if (diagnostics.is_empty()) {
+                    check_ownership(&tree, &diagnostics, cfg);
+                }
+                if (diagnostics.is_empty()) {
+                    AstPool check_pool = AstPool.new();
+                    typecheck_expressions(&check_pool, &symbols, &tree, cfg, &diagnostics);
+                }
+                profiler_end_phase("type check");
             }
             if (diagnostics.is_empty()) {
-                check_borrows(&tree, &symbols, &diagnostics, cfg);
-            }
-            if (diagnostics.is_empty()) {
-                check_send(&tree, &diagnostics, cfg);
-            }
-            if (diagnostics.is_empty()) {
-                check_ownership(&tree, &diagnostics, cfg);
-            }
-            if (diagnostics.is_empty()) {
-                AstPool check_pool = AstPool.new();
-                typecheck_expressions(&check_pool, &symbols, &tree, cfg, &diagnostics);
-            }
-            if (diagnostics.is_empty()) {
+                profiler_begin_phase("safety");
                 check_lints(&tree, &diagnostics, lint_config);
                 lint_config_apply_errors(lint_config, &diagnostics);
+                profiler_end_phase("safety");
             }
             if (diagnostics.is_empty()) {
                 String summary = String.from_str("check ok: ");
@@ -394,6 +411,7 @@ i32 emit_check(str path, CfgSet* cfg, Vec<String>* include_dirs, LintConfig* lin
                 summary.push_str(" top-level symbols\n");
                 STDOUT.write_str(summary.to_str());
                 pool.destroy();
+                profiler_print_report();
                 return 0;
             }
         }
@@ -405,8 +423,10 @@ i32 emit_check(str path, CfgSet* cfg, Vec<String>* include_dirs, LintConfig* lin
             i += 1;
         }
         pool.destroy();
+        profiler_print_report();
         return lint_has_errors(&diagnostics) ? 2 : 0;
     }
+    profiler_end_phase("parse");
     i64 i = 0;
     while (i < diagnostics.len()) {
         Diagnostic* diagnostic = diagnostics.get(i);
@@ -414,6 +434,7 @@ i32 emit_check(str path, CfgSet* cfg, Vec<String>* include_dirs, LintConfig* lin
         STDERR.write_str(rendered.to_str());
         i += 1;
     }
+    profiler_print_report();
     return 2;
 }
 
@@ -874,6 +895,10 @@ i32 run_frontend() {
         return 2;
     }
     CliMatches cli = cli_result.unwrap();
+    if (cli.has("profile")) {
+        Profiler p = Profiler.new(true, cli.has("verbose"));
+        profiler_install(move p);
+    }
     Vec<String> normalized_arguments = normalize_downstream_arguments(&arguments, &parser);
     arguments.drop();
     arguments = move normalized_arguments;

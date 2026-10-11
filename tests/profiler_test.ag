@@ -1,0 +1,85 @@
+// tests/profiler_test.ag — test suite for std.profiler module.
+
+import std.profiler;
+import std.string;
+import std.test;
+
+i32 main() {
+    test_start("std.profiler: basic phase lifecycle");
+    Profiler p = Profiler.new(true, false);
+    assert_true(p.enabled, "profiler should be enabled");
+    assert_true(!p.verbose, "profiler should not be verbose");
+
+    p.begin_phase("test_phase_1");
+    assert_eq_i64(p.stack.len(), 1, "stack should have 1 active phase");
+    p.end_phase("test_phase_1");
+    assert_eq_i64(p.stack.len(), 0, "stack should be empty after end_phase");
+    assert_eq_i64(p.records.len(), 1, "records should contain 1 completed phase");
+
+    PhaseRecord* rec = p.records.get_ptr(0);
+    assert_true(rec.name.equals("test_phase_1"), "phase name matches");
+    assert_true(rec.elapsed_ms >= 0.0, "elapsed_ms is non-negative");
+    assert_true(!rec.skipped, "phase was not skipped");
+    assert_eq_i64(rec.depth, 0, "top-level phase depth is 0");
+
+    test_start("std.profiler: nested phases and tree reconstruction");
+    p.begin_phase("parent");
+    p.begin_phase("child_1");
+    p.end_phase("child_1");
+    p.begin_phase("child_2");
+    p.begin_phase("grandchild");
+    p.end_phase("grandchild");
+    p.end_phase("child_2");
+    p.skip_phase("skipped_child");
+    p.end_phase("parent");
+
+    assert_eq_i64(p.records.len(), 6, "total records should be 6");
+
+    Vec<TreeNode> tree = p.build_tree();
+    assert_eq_i64(tree.len(), 2, "root level should have 2 nodes");
+    assert_true(tree.get_ptr(0).record.name.equals("test_phase_1"), "first root is test_phase_1");
+    assert_true(tree.get_ptr(1).record.name.equals("parent"), "second root is parent");
+
+    TreeNode* parent_node = tree.get_ptr(1);
+    assert_eq_i64(parent_node.children.len(), 3, "parent should have 3 children");
+    assert_true(parent_node.children.get_ptr(0).record.name.equals("child_1"), "child 1 name");
+    assert_true(parent_node.children.get_ptr(1).record.name.equals("child_2"), "child 2 name");
+    assert_true(parent_node.children.get_ptr(2).record.name.equals("skipped_child"), "child 3 name");
+    assert_true(parent_node.children.get_ptr(2).record.skipped, "skipped_child was skipped");
+
+    TreeNode* child_2 = parent_node.children.get_ptr(1);
+    assert_eq_i64(child_2.children.len(), 1, "child_2 should have 1 child");
+    assert_true(child_2.children.get_ptr(0).record.name.equals("grandchild"), "grandchild name");
+    tree.drop();
+
+    test_start("std.profiler: memory and bytes formatting");
+    i64 rss = read_rss_kb();
+    assert_true(rss > 0, "read_rss_kb returns positive value on Linux");
+
+    String b1 = format_bytes(512);
+    assert_true(b1.equals("512 KB"), "format_bytes KB");
+    b1.drop();
+
+    String b3 = format_bytes(2048 * 1024);
+    assert_true(b3.equals("2.00 GB"), "format_bytes GB");
+    b3.drop();
+
+    assert_eq_i64(utf8_display_width("hello"), 5, "utf8_display_width ASCII");
+    assert_eq_i64(utf8_display_width("└── test"), 8, "utf8_display_width box drawing");
+
+    test_start("std.profiler: process-wide profiler functions");
+    Profiler global_prof = Profiler.new(true, true);
+    profiler_install(move global_prof);
+    assert_true(profiler_enabled(), "profiler_enabled is true");
+    assert_true(profiler_verbose(), "profiler_verbose is true");
+
+    profiler_begin_phase("global_phase");
+    profiler_begin_phase("sub_phase");
+    profiler_skip_phase("skipped_sub");
+    profiler_end_phase("sub_phase");
+    profiler_end_phase("global_phase");
+    profiler_print_report();
+
+    p.drop();
+    return done();
+}

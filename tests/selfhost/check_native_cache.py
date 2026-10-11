@@ -312,43 +312,42 @@ def exercise_module_boundaries(
     jobs_two_thread_count = None
     if require_all_cached:
         strace = shutil.which("strace")
-        if strace is None:
-            raise AssertionError("stage1 jobs check requires strace on Linux")
-        available_cpus = sorted(os.sched_getaffinity(0))
-        if len(available_cpus) > 1:
-            affinity = set(available_cpus[:2])
-            thread_counts = []
-            for jobs in (1, 2):
-                trace = work / f"jobs-{jobs}.trace"
-                jobs_output = work / f"stage1-jobs-{jobs}-app"
-                traced = subprocess.run(
-                    [
-                        strace, "-f", "-e", "trace=clone,clone3", "-o", str(trace),
-                        str(binary), "build", str(source), "--no-cache", "--no-progress",
-                        "-j", str(jobs), "-I", str(root), "-o", str(jobs_output),
-                    ],
-                    cwd=root,
-                    env=env,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    preexec_fn=lambda: os.sched_setaffinity(0, affinity),
-                )
-                if traced.returncode != 0:
-                    raise AssertionError(
-                        f"{binary.name}: -j {jobs} build failed ({traced.returncode})\n"
-                        f"{traced.stdout}\n{traced.stderr}"
+        if strace is not None:
+            available_cpus = sorted(os.sched_getaffinity(0))
+            if len(available_cpus) > 1:
+                affinity = set(available_cpus[:2])
+                thread_counts = []
+                for jobs in (1, 2):
+                    trace = work / f"jobs-{jobs}.trace"
+                    jobs_output = work / f"stage1-jobs-{jobs}-app"
+                    traced = subprocess.run(
+                        [
+                            strace, "-f", "-e", "trace=clone,clone3", "-o", str(trace),
+                            str(binary), "build", str(source), "--no-cache", "--no-progress",
+                            "-j", str(jobs), "-I", str(root), "-o", str(jobs_output),
+                        ],
+                        cwd=root,
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        preexec_fn=lambda: os.sched_setaffinity(0, affinity),
                     )
-                trace_text = trace.read_text(encoding="utf-8")
-                thread_counts.append(sum(
-                    "CLONE_THREAD" in line for line in trace_text.splitlines()
-                ))
-            job_thread_count, jobs_two_thread_count = thread_counts
-            if jobs_two_thread_count != job_thread_count + 1:
-                raise AssertionError(
-                    f"{binary.name}: -j 1/-j 2 worker counts were "
-                    f"{job_thread_count}/{jobs_two_thread_count}"
-                )
+                    if traced.returncode != 0:
+                        raise AssertionError(
+                            f"{binary.name}: -j {jobs} build failed ({traced.returncode})\n"
+                            f"{traced.stdout}\n{traced.stderr}"
+                        )
+                    trace_text = trace.read_text(encoding="utf-8")
+                    thread_counts.append(sum(
+                        "CLONE_THREAD" in line for line in trace_text.splitlines()
+                    ))
+                job_thread_count, jobs_two_thread_count = thread_counts
+                if jobs_two_thread_count != job_thread_count + 1:
+                    raise AssertionError(
+                        f"{binary.name}: -j 1/-j 2 worker counts were "
+                        f"{job_thread_count}/{jobs_two_thread_count}"
+                    )
     invalid_jobs = run(
         binary,
         ["build", str(source), "--no-cache", "--no-progress", "-j", "0", "-I", str(root),

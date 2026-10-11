@@ -10,6 +10,7 @@ import std.crypto.sha256;
 import std.mem.vec;
 import std.path;
 import std.process;
+import std.profiler;
 import std.result;
 import std.string;
 import std.sys.os;
@@ -96,12 +97,22 @@ void native_progress_start(NativeBuildProgress* progress, str target) {
         cli_write_styled(&STDERR, "compiling", CliStyle.Command, true);
         STDERR.write_str(" ");
         STDERR.write_str(target);
+        if (progress.current_items > 0) {
+            STDERR.write_str(" (");
+            STDERR.write_i64(progress.current_items);
+            STDERR.write_str(" items)");
+        }
         STDERR.flush();
         progress.active_line = true;
     } else if (progress.verbose) {
         native_progress_prefix(progress, progress.completed_steps + 1);
         STDERR.write_str("compiling ");
         STDERR.write_str(target);
+        if (progress.current_items > 0) {
+            STDERR.write_str(" (");
+            STDERR.write_i64(progress.current_items);
+            STDERR.write_str(" items)");
+        }
         STDERR.write_str("\n");
         STDERR.flush();
     }
@@ -1262,20 +1273,51 @@ bool native_tree_uses_format(SyntaxNode* node) {
 }
 
 SyntaxNode* native_load_unit(str path, u32 file_id, Vec<NodePool>* pools, Vec<TokenStream>* streams) {
+    bool verbose = profiler_verbose();
+    if (verbose) {
+        String read_label = String.from_str("read ");
+        read_label.push_str(path);
+        profiler_begin_phase(read_label.to_str());
+        read_label.drop();
+    }
     Result<String, Error> loaded = String.from_file(path);
+    if (verbose) {
+        String read_label = String.from_str("read ");
+        read_label.push_str(path);
+        profiler_end_phase(read_label.to_str());
+        read_label.drop();
+    }
     if (loaded.is_err()) {
         return (SyntaxNode*)0;
     }
     String source = loaded.unwrap();
+    if (verbose) {
+        String parse_label = String.from_str("parse ");
+        parse_label.push_str(path);
+        profiler_begin_phase(parse_label.to_str());
+        parse_label.drop();
+    }
     TokenStream stream = TokenStream.new();
     DiagnosticBag local = DiagnosticBag.new();
     lex(move source, &stream, &local);
     if (!local.is_empty()) {
+        if (verbose) {
+            String parse_label = String.from_str("parse ");
+            parse_label.push_str(path);
+            profiler_end_phase(parse_label.to_str());
+            parse_label.drop();
+        }
         return (SyntaxNode*)0;
     }
     NodePool unit_pool = NodePool.new();
     SyntaxTree unit_tree;
     parse(&stream, &local, &unit_pool, &unit_tree);
+    if (verbose) {
+        String parse_label = String.from_str("parse ");
+        parse_label.push_str(path);
+        profiler_end_phase(parse_label.to_str());
+        parse_label.drop();
+    }
     if (!local.is_empty() || unit_tree.root == (SyntaxNode*)0) {
         unit_pool.destroy();
         return (SyntaxNode*)0;
@@ -2054,6 +2096,13 @@ bool native_load_closure(str source_path, SyntaxTree* tree, CfgSet* cfg,
         String* file = pending.get_ptr(cursor);
         cursor += 1;
         if (native_path_seen(&visited, file.to_str())) {
+            if (profiler_verbose()) {
+                String skip_label = String.from_str("import ");
+                skip_label.push_str(file.to_str());
+                skip_label.push_str(" (already imported)");
+                profiler_skip_phase(skip_label.to_str());
+                skip_label.drop();
+            }
             continue;
         }
         String owned = String.from_str(file.to_str());
@@ -2125,7 +2174,16 @@ bool native_load_closure(str source_path, SyntaxTree* tree, CfgSet* cfg,
             alias.source_file_id = file_id;
             source_aliases.push(move alias);
         }
+        String imp_label = String.from_str("import ");
+        imp_label.push_str(source_file.to_str());
+        if (profiler_verbose()) {
+            profiler_begin_phase(imp_label.to_str());
+        }
         SyntaxNode* unit = native_load_unit(source_file.to_str(), file_id, pools, streams);
+        if (profiler_verbose()) {
+            profiler_end_phase(imp_label.to_str());
+        }
+        imp_label.drop();
         if (unit == (SyntaxNode*)0) {
             source_file.drop();
             root_dir.drop();
@@ -2363,6 +2421,7 @@ struct NativeCompileJob {
 
 struct NativeCompileResult {
     i32 completed;
+    i32 started;
     bool compiled;
     bool cached;
     bool reported;
@@ -2394,6 +2453,10 @@ bool native_compile_one(NativeCompileWorker* worker) {
     if (job_index >= pool.jobs.len()) { return false; }
     NativeCompileJob* job = pool.jobs.get_ptr(job_index);
     NativeCompileResult* result = pool.results.get_ptr(job_index);
+    bool will_compile = job.cache_path.len() == 0 || !is_file(job.cache_path.to_str());
+    if (will_compile) {
+        __atomic_store_i32(&result.started, 1, ATOMIC_RELEASE);
+    }
     NativeBuildProgress quiet;
     quiet.enabled = false;
     quiet.terminal = false;
@@ -2482,13 +2545,17 @@ bool native_compile_jobs(SyntaxTree* tree, SymbolTable* symbols,
         i += 1;
     }
     if (threads.len() == 0) {
-        native_compile_worker((i64)workers.get_ptr(0));
         i = 0;
-        while (i < results.len()) {
+        while (i < jobs.len()) {
+            NativeCompileJob* job = jobs.get_ptr(i);
             NativeCompileResult* result = results.get_ptr(i);
+            progress.current_items = job.item_count;
+            bool is_cached = job.cache_path.len() > 0 && is_file(job.cache_path.to_str());
+            if (!is_cached) {
+                native_progress_start(progress, job.module_name.to_str());
+            }
+            native_compile_one(workers.get_ptr(0));
             if (result.compiled && result.result == 0) {
-                NativeCompileJob* job = jobs.get_ptr(i);
-                progress.current_items = job.item_count;
                 native_progress_finish_compile(progress, job.module_name.to_str(),
                     result.cached, result.elapsed_ms);
             }
@@ -2515,6 +2582,20 @@ bool native_compile_jobs(SyntaxTree* tree, SymbolTable* symbols,
                     }
                 }
                 job_index += 1;
+            }
+            if (!progress.active_line && pending > 0) {
+                i64 active_index = 0;
+                while (active_index < results.len()) {
+                    NativeCompileResult* active_res = results.get_ptr(active_index);
+                    if (__atomic_load_i32(&active_res.started, ATOMIC_ACQUIRE) == 1
+                        && __atomic_load_i32(&active_res.completed, ATOMIC_ACQUIRE) == 0) {
+                        NativeCompileJob* active_job = jobs.get_ptr(active_index);
+                        progress.current_items = active_job.item_count;
+                        native_progress_start(progress, active_job.module_name.to_str());
+                        break;
+                    }
+                    active_index += 1;
+                }
             }
             if (!observed_completion) { thread_yield(); }
         }
@@ -2565,18 +2646,24 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         output.drop();
         return false;
     }
+    profiler_begin_phase("read source");
     Result<String, Error> loaded = String.from_file(source_path);
     if (loaded.is_err()) {
+        profiler_end_phase("read source");
+        profiler_print_report();
         output.drop();
         return false;
     }
+    profiler_end_phase("read source");
     String source = loaded.unwrap();
     String source_copy = source.clone();
 
+    profiler_begin_phase("parse");
     TokenStream stream = TokenStream.new();
     DiagnosticBag diagnostics = DiagnosticBag.new();
     lex(move source, &stream, &diagnostics);
     if (!diagnostics.is_empty()) {
+        profiler_end_phase("parse");
         i64 i = 0;
         while (i < diagnostics.len()) {
             Diagnostic* diagnostic = diagnostics.get(i);
@@ -2585,6 +2672,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
             i += 1;
         }
         output.drop();
+        profiler_print_report();
         *result = 2;
         return true;
     }
@@ -2592,6 +2680,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     NodePool pool = NodePool.new();
     SyntaxTree tree;
     parse(&stream, &diagnostics, &pool, &tree);
+    profiler_end_phase("parse");
     if (!diagnostics.is_empty() || tree.root == (SyntaxNode*)0) {
         i64 i = 0;
         while (i < diagnostics.len()) {
@@ -2602,10 +2691,12 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         }
         pool.destroy();
         output.drop();
+        profiler_print_report();
         *result = 2;
         return true;
     }
 
+    profiler_begin_phase("serialize");
     String synthesized_json = serialize_synthesize_json(tree.root);
     if (synthesized_json.len() > 0) {
         String augmented_source = source_copy.clone();
@@ -2639,6 +2730,8 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
             pool.destroy();
             stream.tokens.drop();
             output.drop();
+            profiler_end_phase("serialize");
+            profiler_print_report();
             *result = 2;
             return true;
         }
@@ -2653,6 +2746,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     } else {
         synthesized_json.drop();
     }
+    profiler_end_phase("serialize");
 
     CfgSet cfg = linux_defaults();
     Vec<String> includes = Vec<String>.new();
@@ -2709,7 +2803,9 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         arg_idx += 1;
     }
 
+    profiler_begin_phase("hir");
     check_hir(&tree, &cfg, &diagnostics);
+    profiler_end_phase("hir");
     if (!diagnostics.is_empty()) {
         i64 i = 0;
         while (i < diagnostics.len()) {
@@ -2721,6 +2817,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         includes.drop();
         pool.destroy();
         output.drop();
+        profiler_print_report();
         *result = 2;
         return true;
     }
@@ -2731,9 +2828,12 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     Vec<String> link_objects = Vec<String>.new();
     Vec<NativeSourceImport> source_imports = Vec<NativeSourceImport>.new();
     Vec<NativeSourceAlias> source_aliases = Vec<NativeSourceAlias>.new();
-    if (!native_load_closure(source_path, &tree, &cfg, &includes, &source_paths,
+    profiler_begin_phase("import lowering");
+    bool closure_loaded = native_load_closure(source_path, &tree, &cfg, &includes, &source_paths,
                              &link_objects, &source_imports, &source_aliases,
-                             &pools, &streams, module_object)) {
+                             &pools, &streams, module_object);
+    profiler_end_phase("import lowering");
+    if (!closure_loaded) {
         native_destroy_units(&pools, &streams);
         source_paths.drop();
         link_objects.drop();
@@ -2742,6 +2842,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         includes.drop();
         pool.destroy();
         output.drop();
+        profiler_print_report();
         return false;
     }
     Vec<NativeUnitPlan> unit_plans = Vec<NativeUnitPlan>.new();
@@ -2773,32 +2874,40 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         }
         plan_index += 1;
     }
+    profiler_begin_phase("cfg");
     native_expand_cfg_blocks(tree.root, &cfg, &pool);
     native_add_function_import_aliases(tree.root, &cfg, &pool, source_path,
                                        &includes, &source_paths);
+    profiler_end_phase("cfg");
 
+    profiler_begin_phase("symbol_table");
     SymbolTable symbols = SymbolTable.new();
     if (diagnostics.is_empty()) {
         collect_symbols(&symbols, &diagnostics, &tree, &cfg);
     }
+    profiler_end_phase("symbol_table");
     if (diagnostics.is_empty()) {
+        profiler_begin_phase("semantic");
         resolve_names(&symbols, &diagnostics, &tree, source_path, &cfg, &includes);
+        profiler_end_phase("semantic");
     }
     if (diagnostics.is_empty()) {
+        profiler_begin_phase("type check");
         check_declared_types(&symbols, &tree, &cfg, &diagnostics);
-    }
-    if (diagnostics.is_empty()) {
-        check_borrows(&tree, &symbols, &diagnostics, &cfg);
-    }
-    if (diagnostics.is_empty()) {
-        check_send(&tree, &diagnostics, &cfg);
-    }
-    if (diagnostics.is_empty()) {
-        check_ownership(&tree, &diagnostics, &cfg);
-    }
-    if (diagnostics.is_empty()) {
-        AstPool check_pool = AstPool.new();
-        typecheck_expressions_scoped(&check_pool, &symbols, &tree, &cfg, &diagnostics, 1);
+        if (diagnostics.is_empty()) {
+            check_borrows(&tree, &symbols, &diagnostics, &cfg);
+        }
+        if (diagnostics.is_empty()) {
+            check_send(&tree, &diagnostics, &cfg);
+        }
+        if (diagnostics.is_empty()) {
+            check_ownership(&tree, &diagnostics, &cfg);
+        }
+        if (diagnostics.is_empty()) {
+            AstPool check_pool = AstPool.new();
+            typecheck_expressions_scoped(&check_pool, &symbols, &tree, &cfg, &diagnostics, 1);
+        }
+        profiler_end_phase("type check");
     }
     includes.drop();
 
@@ -2817,10 +2926,12 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         standalone_source_ids.drop();
         pool.destroy();
         output.drop();
+        profiler_print_report();
         *result = 2;
         return true;
     }
 
+    profiler_begin_phase("safety");
     LintConfig lint_config = lint_config_default();
     i64 lint_arg = 1;
     while (lint_arg < arguments.len()) {
@@ -2830,6 +2941,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     DiagnosticBag lint_diagnostics = DiagnosticBag.new();
     check_lints_for_file(&tree, &cfg, 1, &lint_diagnostics, &lint_config);
     lint_config_apply_errors(&lint_config, &lint_diagnostics);
+    profiler_end_phase("safety");
     i64 lint_index = 0;
     while (lint_index < lint_diagnostics.len()) {
         Diagnostic* diagnostic = lint_diagnostics.get(lint_index);
@@ -2846,6 +2958,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         standalone_source_ids.drop();
         pool.destroy();
         output.drop();
+        profiler_print_report();
         *result = 2;
         return true;
     }
@@ -2919,6 +3032,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         jobs.push(move job);
         NativeCompileResult pending;
         pending.completed = 0;
+        pending.started = 0;
         pending.compiled = false;
         pending.cached = false;
         pending.reported = false;
@@ -2928,10 +3042,12 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         object_paths.push(jobs.get_ptr(module_index).object_path.clone());
         module_index += 1;
     }
+    profiler_begin_phase("codegen");
     bool modules_ok = native_compile_jobs(&tree, &symbols, &source_paths,
         source_path, &standalone_source_ids, &source_copy, &progress,
         cfg.contains("debug"),
         module_object, requested_jobs, &jobs, &results);
+    profiler_end_phase("codegen");
     module_index = 0;
     while (module_index < results.len()) {
         NativeCompileResult* completed = results.get_ptr(module_index);
@@ -2959,6 +3075,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         link_objects.drop();
         pool.destroy();
         output.drop();
+        profiler_print_report();
         if (*result == 0) { return false; }
         return true;
     }
@@ -2972,6 +3089,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
 
     if (emit_object) {
         native_progress_complete(&progress);
+        profiler_print_report();
         object_paths.drop();
         link_libs.drop();
         link_objects.drop();
@@ -3218,17 +3336,21 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     link_libs.drop();
 
     native_progress_link(&progress, progress_target);
+    profiler_begin_phase("link");
     Result<ExitStatus, i64> cc_result = cc_command.status();
+    profiler_end_phase("link");
     linker.drop();
     native_dispose_object_paths(&object_paths, true);
     if (cc_result.is_err() || !cc_result.unwrap().success()) {
         STDERR.write_str("agc: error: linking failed\n");
         output.drop();
+        profiler_print_report();
         *result = 2;
         return true;
     }
 
     native_progress_complete(&progress);
+    profiler_print_report();
     i32 exit_code = 0;
     if (native_is_run(arguments)) {
         Command run_command = Command.new(output.to_str());
