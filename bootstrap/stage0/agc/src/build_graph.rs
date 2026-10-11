@@ -1084,7 +1084,7 @@ impl<'a> ParallelGraphExecutor<'a> {
                         }
                     }
                 }
-            } else {
+            } else if !matches!(item.kind, crate::parser::ast::ItemKind::GlobalVariable(_)) {
                 item.visibility = crate::parser::ast::Visibility::Private;
                 if let crate::parser::ast::ItemKind::Impl(impl_item) = &mut item.kind {
                     for member in &mut impl_item.items {
@@ -1136,7 +1136,7 @@ impl<'a> ParallelGraphExecutor<'a> {
 
         let pid = std::process::id();
         let temp_o = std::env::temp_dir().join(format!("par_mod_{pid}_{}.o", key.hash_hex));
-        crate::codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check_and_bt(
+        crate::codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_inline_global_owner(
             &ast,
             &import_lowering.module_artifacts,
             &temp_o,
@@ -1148,7 +1148,9 @@ impl<'a> ParallelGraphExecutor<'a> {
             self.loader.debug_info,
             self.loader.leak_check,
             false,
-        ).map_err(|e| {
+            Some(&node.source_path),
+        )
+        .map_err(|e| {
             eprint!("\r\x1b[2K");
             if let Some(span) = e.span {
                 eprintln!(
@@ -1162,7 +1164,11 @@ impl<'a> ParallelGraphExecutor<'a> {
             } else {
                 eprintln!("error: {}", e.message);
             }
-            format!("LLVM codegen error in {}: {}", node.source_path.display(), e.message)
+            format!(
+                "LLVM codegen error in {}: {}",
+                node.source_path.display(),
+                e.message
+            )
         })?;
 
         let obj_bytes =

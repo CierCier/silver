@@ -343,6 +343,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .push(symbol.to_string());
     }
 
+    pub(crate) fn effective_function_symbol<'a>(&'a self, source: &'a str) -> &'a str {
+        self.imported_function_links
+            .get(source)
+            .map(String::as_str)
+            .unwrap_or(source)
+    }
+
     /// Codegen symbol for `(owner, method)` with the given full signature
     /// (params including the receiver, return, variadic). Every method
     /// symbol carries an FNV-1a-64 hash of its full signature, so distinct

@@ -9,6 +9,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -306,11 +307,66 @@ def exercise_module_boundaries(
             f"{binary.name}: simple executable returned {executed.returncode}, "
             f"stdout={executed.stdout!r}, stderr={executed.stderr!r}"
         )
+
+    job_thread_count = None
+    jobs_two_thread_count = None
+    if require_all_cached:
+        strace = shutil.which("strace")
+        if strace is None:
+            raise AssertionError("stage1 jobs check requires strace on Linux")
+        available_cpus = sorted(os.sched_getaffinity(0))
+        if len(available_cpus) > 1:
+            affinity = set(available_cpus[:2])
+            thread_counts = []
+            for jobs in (1, 2):
+                trace = work / f"jobs-{jobs}.trace"
+                jobs_output = work / f"stage1-jobs-{jobs}-app"
+                traced = subprocess.run(
+                    [
+                        strace, "-f", "-e", "trace=clone,clone3", "-o", str(trace),
+                        str(binary), "build", str(source), "--no-cache", "--no-progress",
+                        "-j", str(jobs), "-I", str(root), "-o", str(jobs_output),
+                    ],
+                    cwd=root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    preexec_fn=lambda: os.sched_setaffinity(0, affinity),
+                )
+                if traced.returncode != 0:
+                    raise AssertionError(
+                        f"{binary.name}: -j {jobs} build failed ({traced.returncode})\n"
+                        f"{traced.stdout}\n{traced.stderr}"
+                    )
+                trace_text = trace.read_text(encoding="utf-8")
+                thread_counts.append(sum(
+                    "CLONE_THREAD" in line for line in trace_text.splitlines()
+                ))
+            job_thread_count, jobs_two_thread_count = thread_counts
+            if jobs_two_thread_count != job_thread_count + 1:
+                raise AssertionError(
+                    f"{binary.name}: -j 1/-j 2 worker counts were "
+                    f"{job_thread_count}/{jobs_two_thread_count}"
+                )
+    invalid_jobs = run(
+        binary,
+        ["build", str(source), "--no-cache", "--no-progress", "-j", "0", "-I", str(root),
+         "-o", str(work / "stage1-jobs-invalid-app")],
+        root,
+        env,
+    ) if require_all_cached else None
+    if invalid_jobs is not None and (
+        invalid_jobs.returncode != 2 or "--jobs must be a positive integer" not in invalid_jobs.stderr
+    ):
+        raise AssertionError(f"{binary.name}: invalid -j 0 was not rejected")
     return {
         "cold_progress": cold_progress,
         "warm_progress": warm_progress,
         "simple_progress": simple_progress,
         "cold_item_counts": cold_item_counts,
+        "jobs_thread_count": job_thread_count,
+        "jobs_two_thread_count": jobs_two_thread_count,
     }
 
 
@@ -346,7 +402,7 @@ def exercise(
         cached_objects = sorted(cache.rglob("*.o"))
         if cached_objects:
             for cached_object in cached_objects:
-                cached_object.write_bytes(b"not an object")
+                cached_object.write_bytes(b"\x7fELF")
             corrupt_rebuild = run(binary, [*base, "-o", str(output)], root, env)
             corrupt_rebuild_cache = snapshot(cache)
     source.write_text("i32 main() {\n    return 7;\n}\n", encoding="utf-8")
@@ -419,6 +475,31 @@ def exercise(
         invalid_prune = run(
             binary, ["cache", "prune", "unknown", "--cache-dir", str(cache)], root, env
         )
+        cache_root = cache / "native-object-v1"
+        cache_root.mkdir(parents=True, exist_ok=True)
+        external = work / "external-cache-target"
+        external.mkdir()
+        external_file = external / "keep.o"
+        external_file.write_bytes(b"must remain untouched")
+        (cache_root / "external-link").symlink_to(external, target_is_directory=True)
+        symlink_clean = run(
+            binary, ["cache", "clean", "--cache-dir", str(cache)], root, env
+        )
+        root_symlink_base = work / "root-symlink-cache"
+        root_symlink_base.mkdir()
+        root_symlink_external = work / "external-root-target"
+        root_symlink_external.mkdir()
+        root_symlink_file = root_symlink_external / "keep.o"
+        root_symlink_file.write_bytes(b"must remain untouched")
+        (root_symlink_base / "native-object-v1").symlink_to(
+            root_symlink_external, target_is_directory=True
+        )
+        root_symlink_clean = run(
+            binary,
+            ["cache", "clean", "--cache-dir", str(root_symlink_base)],
+            root,
+            env,
+        )
         cache_cli = {
             "info": info,
             "prune": prune,
@@ -433,6 +514,10 @@ def exercise(
             "clean_command": clean_command,
             "flag_info": flag_info,
             "invalid_prune": invalid_prune,
+            "symlink_clean": symlink_clean,
+            "symlink_external_exists": external_file.exists(),
+            "root_symlink_clean": root_symlink_clean,
+            "root_symlink_external_exists": root_symlink_file.exists(),
             "pruned_cache": pruned_cache,
             "cleaned_cache": cleaned_cache,
         }
@@ -611,6 +696,14 @@ def main() -> int:
             failures.append("stage1: --clean-cache did not clear entries")
         if cache_cli["invalid_prune"].returncode != 2:  # type: ignore[union-attr]
             failures.append("stage1: invalid cache prune size was accepted")
+        if cache_cli["symlink_clean"].returncode != 0:  # type: ignore[union-attr]
+            failures.append("stage1: cache clean failed with an entry symlink")
+        if not cache_cli["symlink_external_exists"]:
+            failures.append("stage1: cache clean removed a file through an entry symlink")
+        if cache_cli["root_symlink_clean"].returncode == 0:  # type: ignore[union-attr]
+            failures.append("stage1: cache clean accepted a symlink cache root")
+        if not cache_cli["root_symlink_external_exists"]:
+            failures.append("stage1: cache clean removed a file through a root symlink")
 
         if failures:
             for failure in failures:

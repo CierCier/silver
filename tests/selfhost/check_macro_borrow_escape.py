@@ -20,6 +20,7 @@ def main() -> int:
     fake_writer_fixture = root / "tests/selfhost/fixtures/macro_str_fake_json_writer_error_test.ag"
     reference_fixture = root / "tests/selfhost/fixtures/macro_str_literal_ref_error_test.ag"
     literal_fixture = root / "tests/selfhost/fixtures/macro_str_literal_result_test.ag"
+    static_call_fixture = root / "tests/selfhost/fixtures/macro_str_static_call_result_test.ag"
     json_writer_fixture = root / "tests/selfhost/fixtures/macro_str_json_writer_result_test.ag"
 
     with tempfile.TemporaryDirectory(prefix="silver-macro-borrow-") as temp:
@@ -51,6 +52,7 @@ def main() -> int:
 
         for index, (label, fixture) in enumerate((
             ("literal-backed block result", literal_fixture),
+            ("static call with a local scalar argument", static_call_fixture),
             ("detached JsonWriter result", json_writer_fixture),
         )):
             output = pathlib.Path(temp) / f"accepted-result-{index}"

@@ -1,0 +1,34 @@
+// A root and an imported native unit must observe the same std.env state.
+// compile_flags: -I tests/modules
+import env_state_unit;
+import std.env;
+
+bool env_contains(str expected) {
+    i64 expected_len = strlen(expected);
+    i8** current_env = silver_envp();
+    i64 i = 0;
+    while (current_env != (i8**)0 && current_env[i] != (i8*)0) {
+        str entry = (str)current_env[i];
+        if (strlen(entry) == expected_len
+            && memcmp((const void*)entry, (const void*)expected,
+                expected_len) == 0) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+i32 main() {
+    set_var("SILVER_CROSSMODULE_A", "A");
+    i8** root_storage = g_dynamic_envp;
+    env_state_unit_set_b();
+    if (env_state_unit_storage() != root_storage) { return 1; }
+    if (!env_contains("SILVER_CROSSMODULE_B=B")) { return 2; }
+
+    set_var("SILVER_CROSSMODULE_C", "C");
+    if (!env_contains("SILVER_CROSSMODULE_A=A")) { return 3; }
+    if (!env_contains("SILVER_CROSSMODULE_B=B")) { return 4; }
+    if (!env_contains("SILVER_CROSSMODULE_C=C")) { return 5; }
+    return 0;
+}

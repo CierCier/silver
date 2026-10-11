@@ -1,0 +1,9 @@
+import std.env;
+
+void env_state_unit_set_b() {
+    set_var("SILVER_CROSSMODULE_B", "B");
+}
+
+i8** env_state_unit_storage() {
+    return g_dynamic_envp;
+}

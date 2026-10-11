@@ -1646,7 +1646,9 @@ impl LlvmGenerator {
 
                     u32 global_file_id = (u32)item.span.file;
                     bool owns_global = source_file_id == 0
-                        || llvm_job_owns_source(owned_source_ids, global_file_id);
+                        || global_file_id == source_file_id
+                        || (source_file_id == 1
+                            && llvm_job_owns_source(owned_source_ids, global_file_id));
                     LLVMOpaqueValue* g_init = (LLVMOpaqueValue*)0;
                     if (owns_global) {
                     SyntaxNode* eq_node = item.first_child;
@@ -1818,9 +1820,6 @@ impl LlvmGenerator {
                     }
                     if (owns_global) {
                         LLVMSetInitializer(g_val, g_init);
-                        if (source_file_id > 1 && global_file_id != source_file_id) {
-                            LLVMSetLinkage(g_val, LLVMLinkage.LLVMInternalLinkage);
-                        }
                     }
                 }
             }

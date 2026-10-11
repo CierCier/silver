@@ -661,6 +661,77 @@ bool stage1_module_emit_requested(Vec<String>* arguments) {
     return false;
 }
 
+i64 downstream_option_spec(CliParser* parser, String* argument) {
+    i64 alias = parser.find_alias(argument.to_str());
+    if (alias >= 0) { return alias; }
+    if (argument.starts_with("--")) {
+        String name = argument.strip_prefix("--");
+        i64 spec = parser.find_long_option(name.to_str());
+        name.drop();
+        return spec;
+    }
+    if (argument.starts_with("-") && argument.len() == 2) {
+        String name = argument.strip_prefix("-");
+        i64 spec = parser.find_short_option(name.to_str());
+        name.drop();
+        return spec;
+    }
+    return -1;
+}
+
+bool downstream_option_consumes_next(CliParser* parser, Vec<String>* arguments, i64 index) {
+    i64 spec_index = downstream_option_spec(parser, arguments.get_ptr(index));
+    if (spec_index < 0) { return false; }
+    CliOptionSpec* spec = parser.options.get_ptr(spec_index);
+    if (spec.kind == CliValueKind.Required) { return true; }
+    if (spec.kind != CliValueKind.OptionalValue || index + 1 >= arguments.len()) { return false; }
+    String* next = arguments.get_ptr(index + 1);
+    return !next.starts_with("-") && !parser.command_token(next.to_str());
+}
+
+Vec<String> normalize_downstream_arguments(Vec<String>* arguments, CliParser* parser) {
+    Vec<String> normalized = Vec<String>.new();
+    bool after_separator = false;
+    bool option_value = false;
+    i64 i = 0;
+    while (i < arguments.len()) {
+        String* argument = arguments.get_ptr(i);
+        if (i == 0 || after_separator) {
+            normalized.push(argument.clone());
+            i += 1;
+            continue;
+        }
+        if (option_value) {
+            normalized.push(argument.clone());
+            option_value = false;
+            i += 1;
+            continue;
+        }
+        if (argument.equals("--")) {
+            after_separator = true;
+            normalized.push(argument.clone());
+            i += 1;
+            continue;
+        }
+        option_value = downstream_option_consumes_next(parser, arguments, i);
+        if (argument.starts_with("--output=")) {
+            String value = argument.strip_prefix("--output=");
+            normalized.push(String.from_str("--output"));
+            normalized.push(move value);
+        } else if (argument.starts_with("--include=")) {
+            String value = argument.strip_prefix("--include=");
+            normalized.push(String.from_str("-I"));
+            normalized.push(move value);
+        } else if (argument.equals("--include") || argument.equals("--include-path")) {
+            normalized.push(String.from_str("-I"));
+        } else {
+            normalized.push(argument.clone());
+        }
+        i += 1;
+    }
+    return normalized;
+}
+
 String stage1_module_artifact_path(Vec<String>* arguments, str source_path) {
     i64 i = 1;
     while (i < arguments.len()) {
@@ -803,6 +874,9 @@ i32 run_frontend() {
         return 2;
     }
     CliMatches cli = cli_result.unwrap();
+    Vec<String> normalized_arguments = normalize_downstream_arguments(&arguments, &parser);
+    arguments.drop();
+    arguments = move normalized_arguments;
     if (cli.command.equals("agsm")) {
         i32 result = run_agsm(&arguments);
         arguments.drop();

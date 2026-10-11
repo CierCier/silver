@@ -17,6 +17,22 @@ import backend.llvm.mono;
 import backend.llvm.stmt;
 import backend.llvm.types;
 
+LLVMOpaqueValue* llvm_function_value_by_name(LlvmContext* ctx, str name) {
+    LLVMOpaqueValue* function = LLVMGetNamedFunction(ctx.module, name);
+    if (function != (LLVMOpaqueValue*)0) { return function; }
+
+    String link_name = item_function_link_name_by_name(ctx.root, name);
+    if (link_name.len() == 0) {
+        link_name.drop();
+        link_name = item_extern_link_name(ctx.root, name);
+    }
+    if (link_name.len() > 0) {
+        function = LLVMGetNamedFunction(ctx.module, link_name.to_str());
+    }
+    link_name.drop();
+    return function;
+}
+
 i64 parse_int_literal(str text) {
     if (text == (str)0) { return 0; }
     i64 len = strlen(text);
@@ -843,7 +859,7 @@ LLVMOpaqueValue* llvm_emit_lvalue(LlvmContext* ctx, u32 expr_id) {
         str name = ctx.names.get(expr.aux);
         LLVMOpaqueValue* global = LLVMGetNamedGlobal(ctx.module, name);
         if (global != (LLVMOpaqueValue*)0) { return global; }
-        return LLVMGetNamedFunction(ctx.module, name);
+        return llvm_function_value_by_name(ctx, name);
     }
     if (expr.kind == ExprKind.Move) {
         if (expr.inner0 != 0) {
@@ -3153,6 +3169,7 @@ LLVMOpaqueValue* llvm_emit_launch(LlvmContext* ctx, u32 expr_id) {
     trampoline_args.drop();
     LLVMOpaqueValue* trampoline = LLVMAddFunction(
         ctx.module, trampoline_name.to_str(), trampoline_type);
+    LLVMSetLinkage(trampoline, LLVMLinkage.LLVMInternalLinkage);
     trampoline_name.drop();
     LLVMOpaqueBasicBlock* trampoline_block = LLVMAppendBasicBlockInContext(
         ctx.ctx, trampoline, "entry");
@@ -3356,8 +3373,13 @@ bool llvm_expr_references_block_local(LlvmContext* ctx, u32 expr_id,
     if (expr.kind == ExprKind.Call) {
         i64 i = 0;
         while (i < (i64)expr.aux) {
-            if (llvm_expr_references_block_local(ctx,
-                    ctx.pool.args.get((i64)expr.inner1 + i), drop_mark)) {
+            u32 argument = ctx.pool.args.get((i64)expr.inner1 + i);
+            u32 argument_type = ctx.types.resolve_subst(llvm_expr_type(ctx, argument));
+            // Scalar values cannot carry a borrow of the caller's storage.
+            bool may_borrow = argument_type == TYPE_UNKNOWN
+                || argument_type == TYPE_STR || argument_type > TYPE_PRIMITIVE_MAX;
+            if (may_borrow && llvm_expr_references_block_local(ctx,
+                    argument, drop_mark)) {
                 return true;
             }
             i += 1;
@@ -3743,7 +3765,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 }
             }
         }
-        LLVMOpaqueValue* fn_val = LLVMGetNamedFunction(ctx.module, name);
+        LLVMOpaqueValue* fn_val = llvm_function_value_by_name(ctx, name);
         if (fn_val != (LLVMOpaqueValue*)0) {
             return fn_val;
         }

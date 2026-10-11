@@ -162,6 +162,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             imported_function_links: HashMap::default(),
             extern_globals: HashMap::default(),
             global_variables: HashMap::default(),
+            inline_global_owner: None,
             global_const_values: HashMap::default(),
             struct_types: HashMap::default(),
             struct_fields: HashMap::default(),
@@ -316,6 +317,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             imported_function_links: HashMap::default(),
             extern_globals: HashMap::default(),
             global_variables: HashMap::default(),
+            inline_global_owner: None,
             global_const_values: HashMap::default(),
             struct_types: HashMap::default(),
             struct_fields: HashMap::default(),
@@ -440,6 +442,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             false,
             false,
             true,
+            None,
         )
     }
 
@@ -519,6 +522,36 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         leak_check: bool,
         emit_bt_tables: bool,
     ) -> CodegenResult<()> {
+        Self::emit_object_file_with_inline_global_owner(
+            program,
+            imported_modules,
+            path,
+            target_triple,
+            opt_level,
+            table,
+            source_path,
+            source_text,
+            debug_info,
+            leak_check,
+            emit_bt_tables,
+            None,
+        )
+    }
+
+    pub fn emit_object_file_with_inline_global_owner(
+        program: &ast::Program,
+        imported_modules: &[ModuleArtifact],
+        path: &Path,
+        target_triple: Option<&str>,
+        opt_level: Option<&str>,
+        table: &mut CompilerSymbolTable,
+        source_path: Option<&Path>,
+        source_text: Option<&str>,
+        debug_info: bool,
+        leak_check: bool,
+        emit_bt_tables: bool,
+        inline_global_owner: Option<&Path>,
+    ) -> CodegenResult<()> {
         Self::emit_target_file_with_imports(
             program,
             imported_modules,
@@ -532,6 +565,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             debug_info,
             leak_check,
             emit_bt_tables,
+            inline_global_owner,
         )
     }
 
@@ -586,6 +620,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             false,
             false,
             true,
+            None,
         )
     }
 
@@ -646,6 +681,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             debug_info,
             leak_check,
             true,
+            None,
         )
     }
 
@@ -677,6 +713,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             debug_info,
             false,
             true,
+            None,
         )
     }
 
@@ -697,6 +734,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         debug_info: bool,
         leak_check: bool,
         emit_bt_tables: bool,
+        inline_global_owner: Option<&Path>,
     ) -> CodegenResult<()> {
         let context = Context::create();
         let module = context.create_module("silver");
@@ -734,6 +772,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             imported_function_links: HashMap::default(),
             extern_globals: HashMap::default(),
             global_variables: HashMap::default(),
+            inline_global_owner: inline_global_owner.map(Path::to_path_buf),
             global_const_values: HashMap::default(),
             struct_types: HashMap::default(),
             struct_fields: HashMap::default(),

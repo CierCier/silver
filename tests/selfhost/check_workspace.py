@@ -151,6 +151,27 @@ def main() -> int:
         if fallback_marker.exists():
             raise AssertionError("check unexpectedly invoked the cwd compiler fallback")
 
+        include_root = root / "include-root"
+        include_root.mkdir()
+        (include_root / "included.ag").write_text("i32 included() { return 1; }\n")
+        include_source = root / "include-check.ag"
+        include_source.write_text("import included;\ni32 main() { return included(); }\n")
+        for option in ("--include", "--include-path"):
+            include_result = run(
+                stage1,
+                ["check", option, str(include_root), str(include_source)],
+                base_env,
+                root,
+            )
+            require(include_result, 0)
+        include_result = run(
+            stage1,
+            ["check", f"--include={include_root}", str(include_source)],
+            base_env,
+            root,
+        )
+        require(include_result, 0)
+
         submodule_source = root / "submodule-import.ag"
         submodule_source.write_text(
             "import broken_build;\ni32 main() { return 0; }\n"
@@ -278,7 +299,7 @@ def main() -> int:
         progress_env["XDG_CACHE_HOME"] = str(root / "progress-cache")
         output_path_result = run(
             stage1,
-            ["build", "--bin", "app0", "--progress", "-o", str(output_path)],
+            ["build", "--bin", "app0", "--progress", f"--output={output_path}"],
             progress_env,
             manifest.parent,
         )
@@ -340,6 +361,34 @@ def main() -> int:
         )
 
         require(run(stage1, ["run", str(manifest), "--", "--flag"], base_env, root), 0)
+        run_arg_source = root / "run-arg-check.ag"
+        run_arg_source.write_text(
+            'import std.args;\n'
+            'import std.sys.entry;\n'
+            'i32 main() {\n'
+            '    String value = arg(1);\n'
+            '    if (value.equals("--output=hello")) { value.drop(); return 0; }\n'
+            '    value.drop();\n'
+            '    return 1;\n'
+            '}\n'
+        )
+        require(
+            run(
+                stage1,
+                [
+                    "run",
+                    "-I",
+                    str(repository),
+                    str(run_arg_source),
+                    "--run-arg",
+                    "--output=hello",
+                    "--no-cache",
+                ],
+                base_env,
+                root,
+            ),
+            0,
+        )
         if fallback_marker.exists():
             raise AssertionError("stage1 invoked the cwd compiler fallback")
 

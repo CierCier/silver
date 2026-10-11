@@ -14,6 +14,9 @@ import std.fmt;
 import std.mem.alloc;
 import std.mem.drop;
 import std.sys.result;
+if (@cfg(os.linux)) {
+    import std.sys.raw.fs;
+}
 
 const i32 EOF = -1;
 
@@ -890,6 +893,10 @@ impl FileStat {
     bool is_file(&self) {
         return (self.mode & 61440) == 32768; // S_IFREG = 0x8000 = 32768
     }
+
+    bool is_symlink(&self) {
+        return (self.mode & 61440) == 40960; // S_IFLNK = 0xA000 = 40960
+    }
 }
 
 /// Little-endian i64 from a raw buffer (x86-64 stat fields are LE).
@@ -903,9 +910,15 @@ i64 read_le_i64(u8* buf, i64 off) {
     return v;
 }
 
-/// stat(2) for a path; Err carries the errno when it fails. The kernel
-/// writes the x86-64 `struct stat` (144 bytes) into a raw buffer: st_size
-/// lives at offset 48 and st_mtim (seconds, nanoseconds) at 88/96.
+private void file_stat_from_buf(u8* buf, FileStat* st) {
+    st.size = read_le_i64(buf, 48);
+    st.mtime_sec = read_le_i64(buf, 88);
+    st.mtime_nsec = read_le_i64(buf, 96);
+    st.mode = (i32)read_le_i64(buf, 24);
+}
+
+/// stat(2) for a path; Err carries the errno when it fails. The platform
+/// seam writes the x86-64 `struct stat` layout into a raw buffer.
 Result<FileStat, Error> stat_path(str path) {
     u8 buf[144];
     i64 i = 0;
@@ -919,10 +932,29 @@ Result<FileStat, Error> stat_path(str path) {
         return Result<FileStat, Error>.Err(move e);
     }
     FileStat st;
-    st.size = read_le_i64(buf, 48);
-    st.mtime_sec = read_le_i64(buf, 88);
-    st.mtime_nsec = read_le_i64(buf, 96);
-    st.mode = (i32)read_le_i64(buf, 24);
+    file_stat_from_buf(&buf[0], &st);
     return Result<FileStat, Error>.Ok(move st);
+}
+
+/// lstat(2) for Linux paths. Other targets report that no-follow metadata is unavailable.
+Result<FileStat, Error> lstat_path(str path) {
+    if (@cfg(os.linux)) {
+        u8 buf[144];
+        i64 i = 0;
+        while (i < 144) {
+            buf[i] = 0;
+            i += 1;
+        }
+        i64 rc = sys_lstat((i64)path, (i64)&buf[0]);
+        if (rc != 0) {
+            Error e = Error.new(-rc, "lstat failed");
+            return Result<FileStat, Error>.Err(move e);
+        }
+        FileStat st;
+        file_stat_from_buf(&buf[0], &st);
+        return Result<FileStat, Error>.Ok(move st);
+    }
+    Error e = Error.new(95, "no-follow metadata unavailable");
+    return Result<FileStat, Error>.Err(move e);
 }
 

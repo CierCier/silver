@@ -120,6 +120,9 @@ pub struct LlvmIrGenerator<'ctx> {
     pub(crate) imported_function_links: HashMap<String, String>,
     pub(crate) extern_globals: HashMap<String, ast::Type>,
     pub(crate) global_variables: HashMap<String, ast::Type>,
+    /// Source file whose externally linked inline globals this object owns.
+    /// `None` means this is a final, monolithic compilation unit.
+    pub(crate) inline_global_owner: Option<std::path::PathBuf>,
     /// Immutable global constants that hold a single integer literal, keyed by
     /// name; used by `__atomic_*` to fold an ordering argument that names a
     /// constant (e.g. `seq_cst`) into a literal, since LLVM atomic instructions

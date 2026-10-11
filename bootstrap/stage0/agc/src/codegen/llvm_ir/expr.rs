@@ -528,23 +528,33 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .module
             .get_global(&item.name.name)
             .unwrap_or_else(|| self.module.add_global(llvm_ty, None, &item.name.name));
-        global.set_linkage(if Self::is_private(visibility) {
+        let internal = Self::is_private(visibility) || item.is_static;
+        let owns_definition = self.inline_global_owner.as_ref().is_none_or(|owner| {
+            crate::lexer::source_file(item.name.span.file).is_none_or(|source| {
+                let source_path = std::path::Path::new(&source.path);
+                match (
+                    std::fs::canonicalize(source_path),
+                    std::fs::canonicalize(owner),
+                ) {
+                    (Ok(source), Ok(owner)) => source == owner,
+                    _ => source_path == owner,
+                }
+            })
+        });
+        global.set_linkage(if owns_definition && internal {
             Linkage::Internal
         } else {
             Linkage::External
         });
-        if item.is_static {
-            // `static` on a global is the C-style spelling of internal linkage
-            // (the same linkage `private` already provides).
-            global.set_linkage(Linkage::Internal);
-        }
         global.set_constant(!item.is_mutable);
-        let initializer = if let Some(init) = &item.initializer {
-            self.emit_const_value_for_type(init, &item.var_type)?
-        } else {
-            llvm_ty.const_zero()
-        };
-        global.set_initializer(&initializer);
+        if owns_definition {
+            let initializer = if let Some(init) = &item.initializer {
+                self.emit_const_value_for_type(init, &item.var_type)?
+            } else {
+                llvm_ty.const_zero()
+            };
+            global.set_initializer(&initializer);
+        }
         if item.is_volatile {
             self.volatile_globals.insert(item.name.name.clone());
         }
@@ -749,12 +759,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         });
                 }
                 let name = &identifier.name;
-                let mut func = self.module.get_function(name);
-                if func.is_none()
-                    && let Some(mangled) = self.imported_function_links.get(name)
-                {
-                    func = self.module.get_function(mangled);
-                }
+                let llvm_name = self.effective_function_symbol(name);
+                let func = self.module.get_function(llvm_name);
                 if let Some(f) = func {
                     return Ok(f.as_global_value().as_pointer_value().as_basic_value_enum());
                 }
@@ -3493,18 +3499,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     return Ok(storage);
                 }
                 let name = &identifier.name;
-                let mut func = self.module.get_function(name);
-                let mut llvm_name = name.clone();
-                if func.is_none()
-                    && let Some(mangled) = self.imported_function_links.get(name)
-                {
-                    func = self.module.get_function(mangled);
-                    if func.is_some() {
-                        llvm_name = mangled.clone();
-                    }
-                }
+                let llvm_name = self.effective_function_symbol(name);
+                let func = self.module.get_function(llvm_name);
                 if let Some(f) = func {
-                    let sig = self.signature_for_name(&llvm_name);
+                    let sig = self.signature_for_name(llvm_name);
                     let return_type = sig
                         .as_ref()
                         .and_then(|s| s.return_type.clone())

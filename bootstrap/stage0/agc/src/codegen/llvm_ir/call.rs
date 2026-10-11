@@ -678,20 +678,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         arguments: &[ast::Expression],
     ) -> CodegenResult<String> {
         // Overloaded names enumerate their hashed symbols from
-        // source_function_symbols; single-symbol names fall back to the
-        // #[link_name] mapping (for renamed/imported functions), then the
-        // plain name. imported_function_links must NOT short-circuit here:
-        // it is a 1:1 map, so a second overload would overwrite the first.
+        // source_function_symbols. Use the 1:1 effective-symbol mapping only
+        // when no overload set exists.
         let candidates = self
             .source_function_symbols
             .get(name)
             .cloned()
-            .unwrap_or_else(|| {
-                self.imported_function_links
-                    .get(name)
-                    .cloned()
-                    .map_or_else(|| vec![name.to_string()], |linked| vec![linked])
-            });
+            .unwrap_or_else(|| vec![self.effective_function_symbol(name).to_string()]);
         if candidates.len() <= 1 {
             return Ok(candidates
                 .into_iter()

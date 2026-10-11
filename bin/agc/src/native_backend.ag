@@ -520,27 +520,66 @@ bool native_copy_binary(str source, str destination) {
     return ok;
 }
 
-bool native_copy_binary_atomic(str source, str destination) {
+String native_cached_object_digest(str path) {
+    File object = File.open_read(path);
+    if (!object.valid()) { return String.new(); }
+    Sha256 state = Sha256.new();
+    u8 buffer[8192];
+    bool valid = true;
+    while (true) {
+        i64 count = object.read((void*)&buffer[0], 1, 8192);
+        if (count == 0) { break; }
+        if (count < 0) {
+            valid = false;
+            break;
+        }
+        state.update(&buffer[0], count);
+    }
+    valid = valid && !object.had_error;
+    object.close();
+    if (!valid) { return String.new(); }
+    u8 digest[32];
+    state.finish(&digest[0]);
+    str hex_chars = "0123456789abcdef";
+    String value = String.with_capacity(64);
+    i64 i = 0;
+    while (i < 32) {
+        value.push((u8)hex_chars[(i64)(digest[i] >> 4)]);
+        value.push((u8)hex_chars[(i64)(digest[i] & (u8)0x0F)]);
+        i += 1;
+    }
+    return value;
+}
+
+String native_cached_object_digest_path(str path) {
+    String digest_path = String.from_str(path);
+    digest_path.push_str(".sha256");
+    return digest_path;
+}
+
+bool native_copy_cached_object(str source, str destination) {
     String temporary = String.from_str(destination);
-    temporary.push_str(".tmp-");
+    temporary.push_str(".cache-check-");
     native_append_i64(&temporary, getpid());
     bool copied = native_copy_binary(source, temporary.to_str());
-    bool installed = copied && file_rename(temporary.to_str(), destination);
+    String actual = copied ? native_cached_object_digest(temporary.to_str()) : String.new();
+    String digest_path = native_cached_object_digest_path(source);
+    Result<String, Error> expected_result = String.from_file(digest_path.to_str());
+    digest_path.drop();
+    if (expected_result.is_err()) {
+        actual.drop();
+        remove_file(temporary.to_str());
+        temporary.drop();
+        return false;
+    }
+    String expected = expected_result.unwrap();
+    bool valid = actual.equals(expected.to_str());
+    expected.drop();
+    actual.drop();
+    bool installed = valid && file_rename(temporary.to_str(), destination);
     if (!installed) { remove_file(temporary.to_str()); }
     temporary.drop();
     return installed;
-}
-
-bool native_cached_object_valid(str path) {
-    File object = File.open_read(path);
-    if (!object.valid()) { return false; }
-    u8 magic[4];
-    bool valid = object.read((void*)&magic[0], 1, 4) == 4
-        && magic[0] == (u8)0x7F && magic[1] == (u8)'E'
-        && magic[2] == (u8)'L' && magic[3] == (u8)'F'
-        && !object.had_error;
-    object.close();
-    return valid;
 }
 
 String native_object_cache_path(Vec<String>* arguments, CliMatches* cli,
@@ -647,29 +686,68 @@ bool native_store_cached_object(str cache_path, str object_path) {
     temporary.push_str(".tmp-");
     native_append_i64(&temporary, getpid());
     bool copied = native_copy_binary(object_path, temporary.to_str());
-    bool stored = copied && file_rename(temporary.to_str(), cache_path);
-    if (!stored) { remove_file(temporary.to_str()); }
+    String digest = copied ? native_cached_object_digest(temporary.to_str()) : String.new();
+    String digest_path = native_cached_object_digest_path(cache_path);
+    String digest_temporary = String.from_str(digest_path.to_str());
+    digest_temporary.push_str(".tmp-");
+    native_append_i64(&digest_temporary, getpid());
+    File digest_file = File.open_write(digest_temporary.to_str());
+    bool wrote_digest = digest.len() == 64 && digest_file.valid()
+        && digest_file.write_str(digest.to_str()) == 0;
+    if (digest_file.valid()) { digest_file.close(); }
+    bool stored = copied && wrote_digest
+        && file_rename(digest_temporary.to_str(), digest_path.to_str())
+        && file_rename(temporary.to_str(), cache_path);
+    if (!stored) {
+        remove_file(temporary.to_str());
+        remove_file(digest_temporary.to_str());
+    }
+    digest.drop();
+    digest_path.drop();
+    digest_temporary.drop();
     temporary.drop();
     return stored;
 }
 
+// Never recurse into a cache entry that resolves through a symlink.
+i32 native_cache_entry_kind(str path, i64* size, i64* modified) {
+    Result<Metadata, Error> result = symlink_metadata(path);
+    if (result.is_err()) { return 0; }
+    Metadata entry = result.unwrap();
+    *size = entry.size;
+    *modified = entry.mtime_sec * 1000000000 + entry.mtime_nsec;
+    if (entry.is_dir) { return 1; }
+    if (entry.is_symlink) { return 2; }
+    if (entry.is_file) { return 3; }
+    return 0;
+}
+
 bool native_cache_measure(str path, i64* count, i64* bytes) {
+    i64 path_size = 0;
+    i64 path_time = 0;
+    i32 path_kind = native_cache_entry_kind(path, &path_size, &path_time);
+    if (path_kind == 0) { return !exists(path); }
+    if (path_kind != 1) {
+        return false;
+    }
     Result<Vec<String>, Error> result = read_dir(path);
-    if (result.is_err()) { return !is_dir(path); }
+    if (result.is_err()) { return false; }
     Vec<String> entries = result.unwrap();
     i64 i = 0;
     while (i < entries.len()) {
         String child = String.from_str(path);
         if (!child.ends_with("/")) { child.push((u8)'/'); }
         child.push_str(entries.get_ptr(i).to_str());
-        if (is_dir(child.to_str())) {
+        i64 size = 0;
+        i64 modified = 0;
+        i32 kind = native_cache_entry_kind(child.to_str(), &size, &modified);
+        if (kind == 1) {
             if (!native_cache_measure(child.to_str(), count, bytes)) {
                 child.drop();
                 entries.drop();
                 return false;
             }
-        } else {
-            i64 size = file_size(child.to_str());
+        } else if (kind == 2 || kind == 3) {
             if (size < 0) {
                 child.drop();
                 entries.drop();
@@ -677,6 +755,10 @@ bool native_cache_measure(str path, i64* count, i64* bytes) {
             }
             *count += 1;
             *bytes += size;
+        } else {
+            child.drop();
+            entries.drop();
+            return false;
         }
         child.drop();
         i += 1;
@@ -686,37 +768,72 @@ bool native_cache_measure(str path, i64* count, i64* bytes) {
 }
 
 bool native_cache_oldest(str path, String* oldest_path, i64* oldest_time) {
+    i64 path_size = 0;
+    i64 path_time = 0;
+    i32 path_kind = native_cache_entry_kind(path, &path_size, &path_time);
+    if (path_kind == 0) { return !exists(path); }
+    if (path_kind != 1) {
+        return false;
+    }
     Result<Vec<String>, Error> result = read_dir(path);
-    if (result.is_err()) { return !is_dir(path); }
+    if (result.is_err()) { return false; }
     Vec<String> entries = result.unwrap();
     i64 i = 0;
     while (i < entries.len()) {
         String child = String.from_str(path);
         if (!child.ends_with("/")) { child.push((u8)'/'); }
         child.push_str(entries.get_ptr(i).to_str());
-        if (is_dir(child.to_str())) {
+        i64 size = 0;
+        i64 modified = 0;
+        i32 kind = native_cache_entry_kind(child.to_str(), &size, &modified);
+        if (kind == 1) {
             if (!native_cache_oldest(child.to_str(), oldest_path, oldest_time)) {
                 child.drop();
                 entries.drop();
                 return false;
             }
-        } else {
-            Result<Metadata, Error> metadata_result = metadata(child.to_str());
-            if (metadata_result.is_ok()) {
-                Metadata entry = metadata_result.unwrap();
-                i64 modified = entry.mtime_sec * 1000000000 + entry.mtime_nsec;
-                if (oldest_path.len() == 0 || modified < *oldest_time) {
-                    oldest_path.clear();
-                    oldest_path.push_str(child.to_str());
-                    *oldest_time = modified;
-                }
+        } else if (kind == 2 || kind == 3) {
+            if (oldest_path.len() == 0 || modified < *oldest_time) {
+                oldest_path.clear();
+                oldest_path.push_str(child.to_str());
+                *oldest_time = modified;
             }
+        } else {
+            child.drop();
+            entries.drop();
+            return false;
         }
         child.drop();
         i += 1;
     }
     entries.drop();
     return true;
+}
+
+bool native_cache_remove_tree(str path) {
+    i64 path_size = 0;
+    i64 path_time = 0;
+    i32 kind = native_cache_entry_kind(path, &path_size, &path_time);
+    if (kind == 2 || kind == 3) { return remove_file(path); }
+    if (kind != 1) { return false; }
+    Result<Vec<String>, Error> result = read_dir(path);
+    if (result.is_err()) { return false; }
+    Vec<String> entries = result.unwrap();
+    i64 i = 0;
+    while (i < entries.len()) {
+        String child = String.from_str(path);
+        if (!child.ends_with("/")) { child.push((u8)'/'); }
+        child.push_str(entries.get_ptr(i).to_str());
+        bool removed = native_cache_remove_tree(child.to_str());
+        child.drop();
+        if (!removed) {
+            entries.drop();
+            return false;
+        }
+        i += 1;
+    }
+    entries.drop();
+    return remove_dir(path);
 }
 
 bool native_cache_parse_size(str text, i64* bytes) {
@@ -846,7 +963,11 @@ i32 native_cache_command(CliMatches* cli, bool color) {
 
     String directory = native_object_cache_directory(cli);
     if (strcmp(action, "clean") == 0) {
-        bool ok = !is_dir(directory.to_str()) || remove_dir_all(directory.to_str());
+        i64 size = 0;
+        i64 modified = 0;
+        i32 kind = native_cache_entry_kind(directory.to_str(), &size, &modified);
+        bool ok = kind == 0 ? !exists(directory.to_str())
+            : kind == 1 && native_cache_remove_tree(directory.to_str());
         if (ok) {
             cli_write_styled(&STDOUT, "agc: cleared native object cache", CliStyle.Muted, color);
             STDOUT.write_str("\n");
@@ -918,8 +1039,12 @@ i32 native_cache_command(CliMatches* cli, bool color) {
             String oldest = String.new();
             i64 oldest_time = 0;
             ok = native_cache_oldest(directory.to_str(), &oldest, &oldest_time);
-            i64 size = oldest.len() > 0 ? file_size(oldest.to_str()) : -1;
-            if (!ok || oldest.len() == 0 || size < 0 || !remove_file(oldest.to_str())) {
+            i64 size = 0;
+            i64 modified = 0;
+            i32 kind = oldest.len() > 0
+                ? native_cache_entry_kind(oldest.to_str(), &size, &modified) : 0;
+            if (!ok || oldest.len() == 0 || (kind != 2 && kind != 3)
+                || size < 0 || !remove_file(oldest.to_str())) {
                 ok = false;
                 oldest.drop();
                 break;
@@ -2140,11 +2265,7 @@ bool native_compile_module_object(SyntaxTree* tree, TypeTable* types, Interner* 
                                  str progress_target, bool* was_cached, i32* result) {
     *result = 0;
     bool cache_hit = cache_path.len() > 0 && is_file(cache_path.to_str());
-    if (cache_hit && !native_cached_object_valid(cache_path.to_str())) {
-        remove_file(cache_path.to_str());
-        cache_hit = false;
-    }
-    if (cache_hit && !native_copy_binary_atomic(cache_path.to_str(), object_path)) {
+    if (cache_hit && !native_copy_cached_object(cache_path.to_str(), object_path)) {
         cache_hit = false;
     }
     *was_cached = cache_hit;
@@ -2315,7 +2436,7 @@ bool native_compile_jobs(SyntaxTree* tree, SymbolTable* symbols,
                          Vec<String>* source_paths, str root_path,
                          Vec<u32>* standalone_source_ids,
                          String* root_source, NativeBuildProgress* progress,
-                         bool debug_mode, bool module_object,
+                         bool debug_mode, bool module_object, i64 requested_jobs,
                          Vec<NativeCompileJob>* jobs,
                          Vec<NativeCompileResult>* results) {
     if (jobs.len() == 0) { return true; }
@@ -2333,6 +2454,9 @@ bool native_compile_jobs(SyntaxTree* tree, SymbolTable* symbols,
     pool.module_object = module_object;
 
     i64 worker_count = thread_available_parallelism();
+    if (requested_jobs > 0 && requested_jobs < worker_count) {
+        worker_count = requested_jobs;
+    }
     if (worker_count > jobs.len()) { worker_count = jobs.len(); }
     if (worker_count < 1) { worker_count = 1; }
 
@@ -2418,6 +2542,21 @@ bool native_compile_jobs(SyntaxTree* tree, SymbolTable* symbols,
 
 bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path, str default_name,
                         Vec<String>* extra_includes, bool module_object, i32* result) {
+    i64 requested_jobs = 0;
+    Optional<String> jobs_value = cli.value("jobs");
+    if (jobs_value.is_some()) {
+        String value = jobs_value.unwrap();
+        Optional<i64> parsed_jobs = value.parse_i64();
+        bool valid_jobs = parsed_jobs.is_some() && parsed_jobs.unwrap() > 0;
+        if (!valid_jobs) {
+            STDERR.write_str("agc: error: --jobs must be a positive integer\n");
+            value.drop();
+            *result = 2;
+            return true;
+        }
+        requested_jobs = parsed_jobs.unwrap();
+        value.drop();
+    }
     bool emit_object = native_emit_object_requested(arguments);
     NativeBuildProgress progress = native_build_progress(cli, !emit_object && !module_object);
     str progress_target = strlen(default_name) > 0 ? default_name : source_path;
@@ -2792,7 +2931,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     bool modules_ok = native_compile_jobs(&tree, &symbols, &source_paths,
         source_path, &standalone_source_ids, &source_copy, &progress,
         cfg.contains("debug"),
-        module_object, &jobs, &results);
+        module_object, requested_jobs, &jobs, &results);
     module_index = 0;
     while (module_index < results.len()) {
         NativeCompileResult* completed = results.get_ptr(module_index);
