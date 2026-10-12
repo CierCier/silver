@@ -10,6 +10,8 @@ import frontend.ast;
 import frontend.diagnostics;
 import frontend.cfg;
 import frontend.messages;
+import frontend.module_loader;
+import frontend.typecheck_expr;
 const u32 MAX_OWNERSHIP_SCAN_DEPTH = 256;
 
 
@@ -43,9 +45,10 @@ struct OwnershipTypeInfo {
 }
 
 impl OwnershipTypeInfo {
-    OwnershipTypeInfo new() {
+    OwnershipTypeInfo new(TypeTable* types) {
         OwnershipTypeInfo info;
-        info.type_table = TypeTable.new();
+        // Ownership-only Drop marks must not change codegen's copy policy.
+        info.type_table = types.clone();
         info.drop_types = Vec<str>.new();
         info.enum_payloads = Vec<EnumPayload>.new();
         return info;
@@ -149,50 +152,26 @@ impl OwnershipAnalyzer {
     u32 resolve_field_type(OwnershipAnalyzer* self, u32 root_type_id, str place) {
         i64 i = 0;
         while (place[i] != 0 && place[i] != (u8)'.') { i += 1; }
-        if (place[i] != (u8)'.') {
-            return root_type_id;
-        }
-        i += 1;
-        String field_name = String.new();
-        while (place[i] != 0 && place[i] != (u8)'.' && place[i] != (u8)'[') {
-            field_name.push(place[i]);
-            i += 1;
-        }
-        str fname = field_name.to_str();
         u32 target_id = root_type_id;
-        if (target_id == TYPE_STR || strcmp(self.type_table.type_name(target_id), "str") == 0) {
-            if (strcmp(fname, "len") == 0) {
-                field_name.drop();
-                return TYPE_I64;
+        while (place[i] == (u8)'.') {
+            i += 1;
+            String field_name = String.new();
+            while (place[i] != 0 && place[i] != (u8)'.' && place[i] != (u8)'[') {
+                field_name.push(place[i]);
+                i += 1;
             }
-        }
-        str root_name = self.type_table.type_name(target_id);
-        if (strcmp(root_name, "String") == 0 || strcmp(root_name, "Slice") == 0 || strcmp(root_name, "Vec") == 0) {
-            if (strcmp(fname, "len") == 0 || strcmp(fname, "cap") == 0 || strcmp(fname, "idx") == 0) {
-                field_name.drop();
-                return TYPE_I64;
+            if (target_id == TYPE_STR) {
+                if (field_name.equals("len")) { target_id = TYPE_I64; }
+                else if (field_name.equals("data")) { target_id = self.type_table.parse_type_name("u8*"); }
+                else { target_id = TYPE_UNKNOWN; }
+            } else {
+                target_id = typecheck_struct_field_type(self.type_table, (SyntaxNode*)0,
+                                                       target_id, field_name.to_str());
             }
+            field_name.drop();
+            if (target_id == TYPE_UNKNOWN || place[i] == (u8)'[') { return TYPE_UNKNOWN; }
         }
-        u32 fname_id = self.names.intern(fname);
-        i64 pi = 0;
-        while (pi < self.type_table.struct_properties.len()) {
-            TypeStructProperties* prop = self.type_table.struct_properties.get_ptr(pi);
-            if (prop.name_id == self.names.intern(root_name)) {
-                i64 fi = 0;
-                while (fi < (i64)prop.field_name_count) {
-                    if (self.type_table.struct_field_names.get(prop.field_name_start + (u32)fi) == fname_id) {
-                        u32 fty = self.type_table.struct_fields.get(prop.field_start + (u32)fi);
-                        field_name.drop();
-                        return fty;
-                    }
-                    fi += 1;
-                }
-                break;
-            }
-            pi += 1;
-        }
-        field_name.drop();
-        return root_type_id;
+        return target_id;
     }
 
     bool needs_move_tracking(OwnershipAnalyzer* self, str place, Span use_span) {
@@ -204,7 +183,7 @@ impl OwnershipAnalyzer {
         while (place[dot] != 0 && place[dot] != (u8)'.') { dot += 1; }
         if (place[dot] == (u8)'.') {
             u32 field_ty = self.resolve_field_type(variable.type_id, place);
-            if (field_ty != variable.type_id) {
+            if (field_ty != TYPE_UNKNOWN && field_ty != variable.type_id) {
                 TypeProperties fprop = self.type_table.properties(field_ty);
                 if (fprop.is_copy && !fprop.needs_drop) {
                     return false;
@@ -438,37 +417,6 @@ void scan_constructor_group(OwnershipAnalyzer* analyzer, SyntaxNode* node, u32 d
     }
 }
 
-void collect_struct_properties(OwnershipTypeInfo* info, SyntaxNode* item) {
-    if (item.kind != NodeKind.Struct) { return; }
-    str struct_name = "";
-    SyntaxNode* block = (SyntaxNode*)0;
-    SyntaxNode* child = item.first_child;
-    while (child != (SyntaxNode*)0) {
-        if (ownership_text_equals(child.text, "struct")) {
-            child = child.next_sibling;
-            if (child != (SyntaxNode*)0 && child.token_kind == TokenKind.Identifier) {
-                struct_name = child.text;
-            }
-        } else if (child.kind == NodeKind.Block) {
-            block = child;
-        }
-        child = child.next_sibling;
-    }
-    if (strlen(struct_name) == 0 || block == (SyntaxNode*)0) { return; }
-    Vec<u32> fields = Vec<u32>.new();
-    child = block.first_child;
-    while (child != (SyntaxNode*)0) {
-        if (child.token_kind == TokenKind.Identifier && child.next_sibling != (SyntaxNode*)0
-            && child.next_sibling.token_kind == TokenKind.Identifier) {
-            fields.push(info.type_table.parse_type_name(child.text));
-            child = child.next_sibling;
-        }
-        child = child.next_sibling;
-    }
-    info.type_table.register_struct_properties(struct_name, &fields);
-    fields.drop();
-}
-
 void collect_type_information(OwnershipTypeInfo* info, Vec<SyntaxNode*>* items) {
     i64 i = 0;
     while (i < items.len()) {
@@ -478,7 +426,7 @@ void collect_type_information(OwnershipTypeInfo* info, Vec<SyntaxNode*>* items) 
         } else if (item.kind == NodeKind.Enum) {
             collect_enum(info, item);
         } else if (item.kind == NodeKind.Struct) {
-            collect_struct_properties(info, item);
+            module_register_source_struct(&info.type_table, item);
         }
         i += 1;
     }
@@ -856,12 +804,12 @@ SyntaxNode* ownership_function_body(SyntaxNode* function) {
     return (SyntaxNode*)0;
 }
 
-bool check_ownership(SyntaxTree* tree, DiagnosticBag* diagnostics, CfgSet* cfg) {
+bool check_ownership(SyntaxTree* tree, TypeTable* types, DiagnosticBag* diagnostics, CfgSet* cfg) {
     bool ok = true;
     Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
     cfg_collect_items(tree.root, cfg, diagnostics, &items);
 
-    OwnershipTypeInfo type_info = OwnershipTypeInfo.new();
+    OwnershipTypeInfo type_info = OwnershipTypeInfo.new(types);
     collect_type_information(&type_info, &items);
 
     OwnershipAnalyzer analyzer = OwnershipAnalyzer.new(diagnostics, &type_info);

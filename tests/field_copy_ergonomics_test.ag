@@ -47,6 +47,16 @@ struct DeepTree {
     BranchNode branch;
 }
 
+struct GenericMetrics<T> {
+    String label;
+    T value;
+}
+
+struct GenericMetricsWrapper<T> {
+    String label;
+    GenericMetrics<T> metrics;
+}
+
 i64 g_drop_record_count = 0;
 
 struct DropTrackedRecord {
@@ -245,10 +255,32 @@ void test_tier4_drop_semantics_and_expressions() {
     assert_eq_i64(1, g_drop_record_count, "DropTrackedRecord drop destructor executed once");
 }
 
+void test_generic_field_reads() {
+    test_start("generic Copy field projections");
+    GenericMetricsWrapper<i64> wrapper;
+    wrapper.label = String.from_str("wrapper");
+    wrapper.metrics.label = String.from_str("metrics");
+    wrapper.metrics.value = 73;
+    i64 first = wrapper.metrics.value;
+    i64 second = wrapper.metrics.value;
+    assert_eq_i64(73, first, "nested generic field first read");
+    assert_eq_i64(73, second, "nested generic field second read");
+    assert_eq_str("wrapper", wrapper.label.to_str(), "wrapper owner stays live");
+    assert_eq_str("metrics", wrapper.metrics.label.to_str(), "nested owner stays live");
+
+    String label = String.from_str("probe");
+    i64 first_length = label.len;
+    i64 second_length = label.len;
+    assert_eq_i64(5, first_length, "imported String field first read");
+    assert_eq_i64(5, second_length, "imported String field second read");
+    assert_eq_str("probe", label.to_str(), "imported owner stays live");
+}
+
 i32 main() {
     test_tier1_direct_scalar_reads();
     test_tier2_boundary_and_extremes();
     test_tier3_nested_place_projections();
     test_tier4_drop_semantics_and_expressions();
+    test_generic_field_reads();
     return done();
 }
