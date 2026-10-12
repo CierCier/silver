@@ -21,8 +21,8 @@ import std.mem.vec;
 void test_tier1_fs_success() {
     test_start("tier1: std.fs success paths returning Result<T, Error>");
 
-    // Create and read a test file in /tmp
-    str test_file = "/tmp/silver_test_tier1.txt";
+    // Keep successful file operations inside the hermetic test working directory.
+    str test_file = "./__silver_structured_error_test_dir/tier1.txt";
     write_file(test_file, "silver_test_tier1_payload\n");
     Result<String, Error> content_res = read_file(test_file);
     assert_true(content_res.is_ok(), "read_file succeeds");
@@ -41,9 +41,9 @@ void test_tier1_fs_success() {
     remove_file(test_file);
 
     // Read isolated test directory
-    str test_dir = "/tmp/__silver_structured_error_test_dir";
+    str test_dir = "./__silver_structured_error_test_dir/nested";
     create_dir(test_dir);
-    str inner_file = "/tmp/__silver_structured_error_test_dir/inner.txt";
+    str inner_file = "./__silver_structured_error_test_dir/nested/inner.txt";
     write_file(inner_file, "payload");
 
     Result<Vec<String>, Error> dir_res = read_dir(test_dir);
@@ -72,20 +72,20 @@ void test_tier2_fs_errors() {
     test_start("tier2: std.fs failure paths with errno inspection");
 
     // Read non-existent file
-    Result<String, Error> missing_res = read_file("/tmp/silver_nonexistent_file_998877.txt");
+    Result<String, Error> missing_res = read_file("./__silver_structured_error_test_dir/missing.txt");
     assert_true(missing_res.is_err(), "read_file on missing file returns Err");
     Error read_err = missing_res.unwrap_err();
     assert_eq_i64(2, read_err.code, "errno 2 is ENOENT");
     assert_true(strlen(read_err.message) > 0, "error message is non-empty");
 
     // Metadata on non-existent file
-    Result<Metadata, Error> meta_err_res = metadata("/tmp/silver_nonexistent_file_998877.txt");
+    Result<Metadata, Error> meta_err_res = metadata("./__silver_structured_error_test_dir/missing.txt");
     assert_true(meta_err_res.is_err(), "metadata on missing file returns Err");
     Error meta_err = meta_err_res.unwrap_err();
     assert_eq_i64(2, meta_err.code, "metadata errno 2 is ENOENT");
 
     // Read non-existent directory
-    Result<Vec<String>, Error> dir_err_res = read_dir("/tmp/silver_nonexistent_dir_998877/");
+    Result<Vec<String>, Error> dir_err_res = read_dir("./__silver_structured_error_test_dir/missing/");
     assert_true(dir_err_res.is_err(), "read_dir on missing dir returns Err");
     Error dir_err = dir_err_res.unwrap_err();
     assert_eq_i64(2, dir_err.code, "read_dir errno 2 is ENOENT");
@@ -96,13 +96,13 @@ void test_tier3_file_try_open() {
     test_start("tier3: File.try_open structured error handling");
 
     // Missing file returns structured Err(Error) instead of sentinel dummy file
-    Result<File, Error> open_err_res = File.try_open("/tmp/silver_nonexistent_file_998877.txt", "r");
+    Result<File, Error> open_err_res = File.try_open("./__silver_structured_error_test_dir/missing.txt", "r");
     assert_true(open_err_res.is_err(), "File.try_open on missing file returns Err");
     Error open_err = open_err_res.unwrap_err();
     assert_eq_i64(2, open_err.code, "File.try_open error code 2 is ENOENT");
 
     // Create and write to a temporary file via File.try_open
-    str temp_path = "/tmp/silver_structured_error_test_temp.txt";
+    str temp_path = "./__silver_structured_error_test_dir/temp.txt";
     Result<File, Error> write_open_res = File.try_open(temp_path, "w");
     assert_true(write_open_res.is_ok(), "File.try_open write succeeds");
     File write_file = write_open_res.unwrap();
@@ -142,7 +142,7 @@ void test_tier4_syscall_typed_errors() {
     test_start("tier4: low-level std.sys.result typed syscall error mapping");
 
     // try_open missing file -> Err(ENOENT = 2)
-    Result<i64, Error> sys_open_res = try_open("/tmp/silver_nonexistent_file_998877.txt", 0, 0);
+    Result<i64, Error> sys_open_res = try_open("./__silver_structured_error_test_dir/missing.txt", 0, 0);
     assert_true(sys_open_res.is_err(), "try_open missing file returns Err");
     Error sys_open_err = sys_open_res.unwrap_err();
     assert_eq_i64(2, sys_open_err.code, "try_open code is ENOENT (2)");
@@ -168,9 +168,12 @@ void test_tier4_syscall_typed_errors() {
 }
 
 i32 main() {
+    remove_dir_all("./__silver_structured_error_test_dir");
+    create_dir("./__silver_structured_error_test_dir");
     test_tier1_fs_success();
     test_tier2_fs_errors();
     test_tier3_file_try_open();
     test_tier4_syscall_typed_errors();
+    remove_dir_all("./__silver_structured_error_test_dir");
     return done();
 }

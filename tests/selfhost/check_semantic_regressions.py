@@ -11,6 +11,11 @@ import tempfile
 
 
 CASES = {
+    "const_global_out_of_scope_shadow.ag": (
+        True, False, "const_global_out_of_scope_shadow.ag:4:"
+    ),
+    "const_global_local_shadow.ag": (True, True, ""),
+    "mutable_global_after_inner_const.ag": (True, True, ""),
     "nested_generic.ag": (True, True, ""),
     "nested_unknown.ag": (False, False, "unknown type 'Missing'"),
     "defer_return.ag": (

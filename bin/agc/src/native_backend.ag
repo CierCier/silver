@@ -2446,6 +2446,7 @@ struct NativeCompileResult {
     bool compiled;
     bool cached;
     bool reported;
+    bool start_reported;
     i32 result;
     i64 elapsed_ms;
     i64 ir_gen_ms;
@@ -2615,8 +2616,15 @@ bool native_compile_jobs(SyntaxTree* tree, SymbolTable* symbols,
                         && __atomic_load_i32(&active_res.completed, ATOMIC_ACQUIRE) == 0) {
                         NativeCompileJob* active_job = jobs.get_ptr(active_index);
                         progress.current_items = active_job.item_count;
-                        native_progress_start(progress, active_job.module_name.to_str());
-                        break;
+                        if (progress.verbose) {
+                            if (!active_res.start_reported) {
+                                native_progress_start(progress, active_job.module_name.to_str());
+                                active_res.start_reported = true;
+                            }
+                        } else if (!progress.active_line) {
+                            native_progress_start(progress, active_job.module_name.to_str());
+                        }
+                        if (progress.verbose || progress.active_line) { break; }
                     }
                     active_index += 1;
                 }
@@ -3070,6 +3078,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         pending.compiled = false;
         pending.cached = false;
         pending.reported = false;
+        pending.start_reported = false;
         pending.result = 0;
         pending.elapsed_ms = 0;
         pending.ir_gen_ms = 0;

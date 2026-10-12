@@ -506,6 +506,8 @@ impl BorrowChecker {
     }
 
     fn check_block(&mut self, block: &ast::Block) {
+        let prev_var_types = self.var_types.clone();
+        let prev_raw_ptr_vars = self.raw_ptr_vars.clone();
         self.push_scope();
 
         // Precompute the final use statement index for every variable in this block (NLL)
@@ -526,6 +528,8 @@ impl BorrowChecker {
         self.expire_loans_before(block.statements.len());
         self.pop_scope();
         self.block_last_uses.pop();
+        self.var_types = prev_var_types;
+        self.raw_ptr_vars = prev_raw_ptr_vars;
     }
 
     /// Remove loans whose last use was strictly before statement `i`:

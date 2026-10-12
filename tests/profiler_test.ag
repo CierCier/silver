@@ -54,7 +54,11 @@ i32 main() {
 
     test_start("std.profiler: memory and bytes formatting");
     i64 rss = read_rss_kb();
-    assert_true(rss > 0, "read_rss_kb returns positive value on Linux");
+    if (@cfg(os.linux)) {
+        assert_true(rss > 0, "read_rss_kb returns positive value on Linux");
+    } else {
+        assert_true(rss >= 0, "read_rss_kb returns a non-negative value");
+    }
 
     String b1 = format_bytes(512);
     assert_true(b1.equals("512 KB"), "format_bytes KB");

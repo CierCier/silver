@@ -659,14 +659,20 @@ u32 llvm_expr_type(LlvmContext* ctx, u32 expr_id) {
             return ctx.types.resolve_subst(function_type);
         }
     }
-    if (expr.kind == ExprKind.Field && strcmp(ctx.names.get(expr.aux), "len") == 0) {
+    if (expr.kind == ExprKind.Field) {
         u32 target_type = ctx.types.resolve_subst(llvm_expr_type(ctx, expr.inner0));
         TypeEntry* target = ctx.types.get(target_type);
         while (target.kind == TypeKind.Pointer || target.kind == TypeKind.Reference) {
             target_type = ctx.types.resolve_subst(target.inner);
             target = ctx.types.get(target_type);
         }
-        if (target_type == TYPE_STR) { return TYPE_I64; }
+        if (target_type == TYPE_STR) {
+            str field_name = ctx.names.get(expr.aux);
+            if (strcmp(field_name, "len") == 0) { return TYPE_I64; }
+            if (strcmp(field_name, "data") == 0) {
+                return ctx.types.get_pointer(TYPE_U8, false);
+            }
+        }
     }
     if (expr.inferred_type != TYPE_UNKNOWN && expr.inferred_type != 0) {
         u32 inferred = ctx.types.resolve_subst(expr.inferred_type);
@@ -2568,6 +2574,20 @@ LLVMOpaqueValue* llvm_emit_strlen(LlvmContext* ctx, LLVMOpaqueValue* text) {
         LLVMGlobalGetValueType(strlen_fn), strlen_fn, args.data, 1, "str.len");
     args.drop();
     return length;
+}
+
+LLVMOpaqueValue* llvm_emit_str_value(LlvmContext* ctx, u32 expr_id) {
+    u32 value_type = ctx.types.resolve_subst(llvm_expr_type(ctx, expr_id));
+    LLVMOpaqueValue* value = llvm_emit_expr(ctx, expr_id);
+    if (value == (LLVMOpaqueValue*)0) { return (LLVMOpaqueValue*)0; }
+    TypeEntry* entry = ctx.types.get(value_type);
+    while (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) {
+        value_type = ctx.types.resolve_subst(entry.inner);
+        value = LLVMBuildLoad2(ctx.builder,
+            llvm_lower_type(ctx.ctx, ctx.types, value_type), value, "str.value.load");
+        entry = ctx.types.get(value_type);
+    }
+    return entry.kind == TypeKind.Str ? value : (LLVMOpaqueValue*)0;
 }
 
 LLVMOpaqueValue* llvm_emit_str_as_slice_value(LlvmContext* ctx, u32 expr_id) {
@@ -5403,9 +5423,14 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             field_target_type = ctx.types.resolve_subst(field_target.inner);
             field_target = ctx.types.get(field_target_type);
         }
-        if (field_target_type == TYPE_STR
-            && strcmp(ctx.names.get(expr.aux), "len") == 0) {
-            return llvm_emit_strlen(ctx, llvm_emit_expr(ctx, expr.inner0));
+        if (field_target_type == TYPE_STR) {
+            str field_name = ctx.names.get(expr.aux);
+            if (strcmp(field_name, "data") == 0) {
+                return llvm_emit_str_value(ctx, expr.inner0);
+            }
+            if (strcmp(field_name, "len") == 0) {
+                return llvm_emit_strlen(ctx, llvm_emit_str_value(ctx, expr.inner0));
+            }
         }
         AstExpr* rx = ctx.pool.get_expr(expr.inner0);
         if (rx.kind == ExprKind.Var) {

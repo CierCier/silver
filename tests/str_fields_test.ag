@@ -1,0 +1,33 @@
+struct TextHolder {
+    str text;
+}
+
+i64 text_length(str text) {
+    return text.len;
+}
+
+u8* text_data(str text) {
+    return text.data;
+}
+
+i32 main() {
+    if ("literal".len != 7) { return 1; }
+    if (text_length("parameter") != 9) { return 2; }
+
+    str alias = "aliased";
+    u8* alias_data = alias.data;
+    if (alias.len != 7 || alias_data[0] != (u8)'a'
+        || alias_data[6] != (u8)'d') { return 3; }
+    u8* call_data = text_data(alias);
+    if (call_data[1] != (u8)'l') { return 4; }
+
+    TextHolder holder;
+    holder.text = "field";
+    u8* holder_data = holder.text.data;
+    if (holder.text.len != 5 || holder_data[0] != (u8)'f') { return 5; }
+
+    str absent = (str)0;
+    u8* absent_data = absent.data;
+    if (absent_data != (u8*)0) { return 6; }
+    return 0;
+}

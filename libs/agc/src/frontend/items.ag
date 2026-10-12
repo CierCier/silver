@@ -214,12 +214,16 @@ bool item_extern_uses_c_abi(SyntaxNode* item) {
 }
 
 SyntaxNode* item_skip_extern_attribute(SyntaxNode* node) {
-    if (node == (SyntaxNode*)0) { return node; }
-    if (node.kind == NodeKind.Attribute) { return node.next_sibling; }
-    if (node.kind == NodeKind.Token && node.text == "#"
-        && node.next_sibling != (SyntaxNode*)0
-        && node.next_sibling.kind == NodeKind.Bracket) {
-        return node.next_sibling.next_sibling;
+    while (node != (SyntaxNode*)0) {
+        if (node.kind == NodeKind.Attribute) {
+            node = node.next_sibling;
+        } else if (node.kind == NodeKind.Token && strcmp(node.text, "#") == 0
+            && node.next_sibling != (SyntaxNode*)0
+            && node.next_sibling.kind == NodeKind.Bracket) {
+            node = node.next_sibling.next_sibling;
+        } else {
+            break;
+        }
     }
     return node;
 }

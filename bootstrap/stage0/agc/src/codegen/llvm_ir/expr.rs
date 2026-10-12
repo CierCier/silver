@@ -770,6 +770,100 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 ))
             }
             ast::ExpressionKind::FieldAccess { object, field } => {
+                let object_ty = self
+                    .resolve_receiver_type(object)
+                    .or_else(|| self.resolve_argument_type(object));
+                if let Some(object_ty) = object_ty {
+                    let mut string_ty = &object_ty;
+                    loop {
+                        match string_ty.kind.as_ref() {
+                            ast::TypeKind::Pointer(pointer) => {
+                                string_ty = &pointer.inner;
+                            }
+                            ast::TypeKind::Reference(reference) => {
+                                string_ty = &reference.inner;
+                            }
+                            _ => break,
+                        }
+                    }
+                    if matches!(
+                        string_ty.kind.as_ref(),
+                        ast::TypeKind::Primitive(ast::PrimitiveType::Str)
+                    ) {
+                        let mut value_ty = object_ty;
+                        let mut value = self.emit_expression_value(object)?;
+                        loop {
+                            match value_ty.kind.as_ref() {
+                                ast::TypeKind::Pointer(pointer) => {
+                                    let llvm_ty = self.lower_basic_type(&value_ty)?;
+                                    value = self
+                                        .builder
+                                        .build_load(
+                                            llvm_ty,
+                                            value.into_pointer_value(),
+                                            "str.ptr.load",
+                                        )
+                                        .map_err(|e| {
+                                            CodegenError::with_span(
+                                                format!("failed to load string pointer: {e}"),
+                                                object.span,
+                                            )
+                                        })?;
+                                    value_ty = *pointer.inner.clone();
+                                }
+                                ast::TypeKind::Reference(reference) => {
+                                    let llvm_ty = self.lower_basic_type(&value_ty)?;
+                                    value = self
+                                        .builder
+                                        .build_load(
+                                            llvm_ty,
+                                            value.into_pointer_value(),
+                                            "str.ref.load",
+                                        )
+                                        .map_err(|e| {
+                                            CodegenError::with_span(
+                                                format!("failed to load string reference: {e}"),
+                                                object.span,
+                                            )
+                                        })?;
+                                    value_ty = *reference.inner.clone();
+                                }
+                                _ => break,
+                            }
+                        }
+
+                        match field.name.as_str() {
+                            // `str` is already represented as its data pointer.
+                            "data" => return Ok(value),
+                            "len" => {
+                                let pointer_ty = self.context.ptr_type(AddressSpace::default());
+                                let strlen_ty = self
+                                    .context
+                                    .i64_type()
+                                    .fn_type(&[pointer_ty.into()], false);
+                                let strlen_fn = self
+                                    .module
+                                    .get_function("strlen")
+                                    .unwrap_or_else(|| {
+                                        self.module.add_function("strlen", strlen_ty, None)
+                                    });
+                                let length = self
+                                    .builder
+                                    .build_call(strlen_fn, &[value.into()], "str.len")
+                                    .map_err(|e| {
+                                        CodegenError::with_span(e.to_string(), field.span)
+                                    })?
+                                    .try_as_basic_value()
+                                    .basic()
+                                    .ok_or_else(|| {
+                                        CodegenError::with_span("strlen returned void", field.span)
+                                    })?;
+                                return Ok(length);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 // Unit-variant construction without parens: `OptInt.None` or
                 // `Optional.None` (the latter has a TypeName object because
                 // `Optional` lexes as a dedicated type token).

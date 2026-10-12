@@ -35,10 +35,13 @@ STAGE1_ONLY_ACCEPTANCE = {
 }
 
 # These examples depend on generated foreign-module AGM files. Stage1 does not
-# invoke a module generator; absent prebuilt artifacts must fail locally.
-STAGE1_UNAVAILABLE_SUBMODULES = {
-    "examples/gfx_raylib.ag",
-    "examples/net_curl.ag",
+# invoke a module generator, but it can check the examples when artifacts exist.
+SUBMODULE_ARTIFACTS = {
+    "examples/gfx_raylib.ag": (
+        "vendor/gfx/raylib.agm",
+        "vendor/gfx/rlgl.agm",
+    ),
+    "examples/net_curl.ag": ("vendor/net/curl.agm",),
 }
 
 
@@ -154,6 +157,7 @@ def main() -> int:
 
     failures = []
     compared = 0
+    missing_submodule_count = 0
     with tempfile.TemporaryDirectory(prefix="silver-semantic-artifacts-") as temp:
         try:
             module_dir, mirror = prepare_artifacts(stage0, root, pathlib.Path(temp))
@@ -205,14 +209,25 @@ def main() -> int:
                         )
                     )
                 continue
-            if relative in STAGE1_UNAVAILABLE_SUBMODULES:
-                # Stage0 generation depends on host tooling and native libraries;
-                # this case only verifies Stage1's missing-prebuilt diagnostic.
-                if (
-                    new.returncode == 0
+            if relative in SUBMODULE_ARTIFACTS:
+                artifacts = [root / path for path in SUBMODULE_ARTIFACTS[relative]]
+                if all(artifact.is_file() for artifact in artifacts):
+                    if new.returncode != 0:
+                        failures.append(
+                            (
+                                relative,
+                                f"stage1 rejected present foreign artifacts; stage1={new.returncode}",
+                                new.stderr[:500],
+                                old.stderr[:500],
+                            )
+                        )
+                    continue
+                missing_submodule_count += 1
+                # Missing artifacts exercise Stage1's local diagnostic. Stage0
+                # generation depends on host tooling and native libraries.
+                if (new.returncode == 0
                     or "has submodule config" not in new.stderr
-                    or "prebuilt .agm artifact" not in new.stderr
-                ):
+                    or "prebuilt .agm artifact" not in new.stderr):
                     failures.append(
                         (
                             relative,
@@ -302,7 +317,7 @@ def main() -> int:
         return 1
     print(
         f"semantic status parity passed: {compared} file(s); "
-        f"{len(STAGE1_UNAVAILABLE_SUBMODULES)} absent foreign AGM cases fail locally; "
+        f"{missing_submodule_count} foreign AGM cases lacked artifacts; "
         "stage1 Optional-shadow regression passed"
     )
     return 0

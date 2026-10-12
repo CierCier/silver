@@ -29,6 +29,7 @@ python3 "$root/tests/run_tests.py" --no-tui --jobs 1 --compiler "$stage1" \
     launch_failure_drop_test \
     launch_send_test launch_send_error_test \
     string_split_once_drop_test string_order_native_test tuple_local_destructure_native_test \
+    str_fields_test \
     tuple_partial_index_drop_test \
     slice_syntax_test test_slice_u8_ops destructure_let_test \
     partial_move_test reborrow_passthrough_test sha256_test \

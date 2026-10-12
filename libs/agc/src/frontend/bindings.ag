@@ -23,6 +23,8 @@ struct Binding {
     Span span;
     BindingKind kind;
     TypeProjection declared_type;
+    // Borrowed from the caller-owned syntax tree for lexical scope queries.
+    SyntaxNode* name_node;
     // Parameter spans borrow from the caller-owned CST and preserve nested signatures.
     SyntaxNode* type_start;
     SyntaxNode* type_end;
@@ -36,6 +38,7 @@ void add_typed_binding(Vec<Binding>* bindings, SyntaxNode* name, BindingKind kin
     binding.name = name.text;
     binding.span = name.span;
     binding.kind = kind;
+    binding.name_node = name;
     binding.type_start = (SyntaxNode*)0;
     binding.type_end = (SyntaxNode*)0;
     if (declared_type == (TypeProjection*)0) {
@@ -497,6 +500,16 @@ void collect_block_bindings(SyntaxNode* block, Vec<Binding>* bindings) {
             } else {
                 add_binding(bindings, cursor, BindingKind.Let);
             }
+            while (cursor != (SyntaxNode*)0
+                && !(cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon)) {
+                if (cursor.kind == NodeKind.Block) {
+                    collect_block_bindings(cursor, bindings);
+                }
+                cursor = cursor.next_sibling;
+            }
+            if (cursor != (SyntaxNode*)0) {
+                child = cursor;
+            }
         } else if (child.kind == NodeKind.Token && child.token_kind == TokenKind.For) {
             SyntaxNode* cursor = child.next_sibling;
             SyntaxNode* first = cursor;
@@ -538,6 +551,16 @@ void collect_block_bindings(SyntaxNode* block, Vec<Binding>* bindings) {
                     && (cursor.token_kind == TokenKind.Assign || cursor.token_kind == TokenKind.Semicolon)) {
                     TypeProjection declared_type = binding_declared_type(child, candidate);
                     add_typed_binding(bindings, candidate, array ? BindingKind.Array : BindingKind.Variable, &declared_type);
+                    while (cursor != (SyntaxNode*)0
+                        && !(cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon)) {
+                        if (cursor.kind == NodeKind.Block) {
+                            collect_block_bindings(cursor, bindings);
+                        }
+                        cursor = cursor.next_sibling;
+                    }
+                    if (cursor != (SyntaxNode*)0) {
+                        child = cursor;
+                    }
                     break;
                 }
                 if (cursor.kind == NodeKind.Block) {
@@ -576,4 +599,131 @@ SyntaxNode* binding_function_body(SyntaxNode* function) {
 void collect_function_bindings(SyntaxNode* function, Vec<Binding>* bindings) {
     collect_parameter_bindings(binding_function_parameters(function), bindings);
     collect_block_bindings(binding_function_body(function), bindings);
+}
+
+SyntaxNode* binding_visibility_scope(Binding* binding) {
+    SyntaxNode* scope = binding.name_node;
+    if (binding.kind == BindingKind.Parameter) {
+        while (scope != (SyntaxNode*)0 && scope.kind != NodeKind.Function) {
+            scope = scope.parent;
+        }
+        return scope;
+    }
+    if (binding.kind == BindingKind.For) {
+        while (scope != (SyntaxNode*)0 && scope.kind != NodeKind.For) {
+            scope = scope.parent;
+        }
+        if (scope != (SyntaxNode*)0) {
+            return scope;
+        }
+        scope = binding.name_node;
+        while (scope.parent != (SyntaxNode*)0
+            && scope.parent.kind != NodeKind.Block) {
+            scope = scope.parent;
+        }
+        if (scope.parent != (SyntaxNode*)0) {
+            SyntaxNode* sibling = scope.next_sibling;
+            while (sibling != (SyntaxNode*)0 && sibling.kind != NodeKind.Block) {
+                sibling = sibling.next_sibling;
+            }
+            if (sibling != (SyntaxNode*)0) {
+                return sibling;
+            }
+        }
+        scope = binding.name_node;
+    }
+    while (scope != (SyntaxNode*)0 && scope.kind != NodeKind.Block) {
+        scope = scope.parent;
+    }
+    return scope;
+}
+
+i64 binding_scope_depth(SyntaxNode* scope) {
+    i64 depth = 0;
+    while (scope != (SyntaxNode*)0) {
+        if (scope.kind == NodeKind.Block || scope.kind == NodeKind.For) {
+            depth += 1;
+        }
+        scope = scope.parent;
+    }
+    return depth;
+}
+
+bool binding_scope_contains(SyntaxNode* scope, SyntaxNode* use) {
+    SyntaxNode* cursor = use;
+    while (cursor != (SyntaxNode*)0) {
+        if (cursor == scope) {
+            return true;
+        }
+        cursor = cursor.parent;
+    }
+    return false;
+}
+
+/// Return the latest declaration visible at `use`; returned pointers borrow
+/// from `bindings`, whose name nodes borrow from the caller-owned syntax tree.
+Binding* visible_binding(Vec<Binding>* bindings, str name, SyntaxNode* use) {
+    Binding* visible = (Binding*)0;
+    i64 visible_depth = -1;
+    i64 i = 0;
+    while (i < bindings.len()) {
+        Binding* binding = bindings.get_ptr(i);
+        if (strcmp(binding.name, name) == 0
+            && binding.span.start <= use.span.start) {
+            SyntaxNode* scope = binding_visibility_scope(binding);
+            i64 depth = binding_scope_depth(scope);
+            if (scope != (SyntaxNode*)0 && binding_scope_contains(scope, use)
+                && (depth > visible_depth
+                    || (depth == visible_depth && visible != (Binding*)0
+                        && binding.span.start > visible.span.start))) {
+                visible = binding;
+                visible_depth = depth;
+            }
+        }
+        i += 1;
+    }
+    return visible;
+}
+
+bool binding_is_const(Binding* binding) {
+    if (binding == (Binding*)0 || binding.name_node == (SyntaxNode*)0) {
+        return false;
+    }
+    SyntaxNode* statement = binding.name_node;
+    while (statement.parent != (SyntaxNode*)0
+        && statement.parent.kind != NodeKind.Block) {
+        statement = statement.parent;
+    }
+    if (statement.parent == (SyntaxNode*)0) {
+        return false;
+    }
+    bool found_const = false;
+    SyntaxNode* sibling = statement.parent.first_child;
+    while (sibling != (SyntaxNode*)0) {
+        if (sibling.kind == NodeKind.Block) {
+            found_const = false;
+        } else {
+            Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+            binding_collect_leaves(sibling, &leaves);
+            i64 i = 0;
+            while (i < leaves.len()) {
+                SyntaxNode* leaf = leaves.get(i);
+                if (leaf == binding.name_node) {
+                    leaves.drop();
+                    return found_const;
+                }
+                if (leaf.kind == NodeKind.Token
+                    && leaf.token_kind == TokenKind.Semicolon) {
+                    found_const = false;
+                } else if (leaf.kind == NodeKind.Token
+                    && leaf.token_kind == TokenKind.Const) {
+                    found_const = true;
+                }
+                i += 1;
+            }
+            leaves.drop();
+        }
+        sibling = sibling.next_sibling;
+    }
+    return false;
 }

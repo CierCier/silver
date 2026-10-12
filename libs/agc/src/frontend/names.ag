@@ -16,7 +16,6 @@ import frontend.bindings;
 struct NameResolver {
     Interner local_names;
     Vec<u32> locals;
-    Vec<u32> const_locals;
     Vec<u32> const_globals;
     SymbolTable* symbols;
     DiagnosticBag* diagnostics;
@@ -29,7 +28,6 @@ impl NameResolver {
         NameResolver resolver;
         resolver.local_names = Interner.new();
         resolver.locals = Vec<u32>.new();
-        resolver.const_locals = Vec<u32>.new();
         resolver.diagnostics = diagnostics;
         resolver.symbols = symbols;
         resolver.const_globals = Vec<u32>.new();
@@ -50,30 +48,6 @@ impl NameResolver {
         i64 i = 0;
         while (i < self.locals.len()) {
             if (self.locals.get(i) == name_id) {
-                return true;
-            }
-            i += 1;
-        }
-        return false;
-    }
-
-    void mark_const(NameResolver* self, str name) {
-        u32 name_id = self.local_names.intern(name);
-        i64 i = 0;
-        while (i < self.const_locals.len()) {
-            if (self.const_locals.get(i) == name_id) {
-                return;
-            }
-            i += 1;
-        }
-        self.const_locals.push(name_id);
-    }
-
-    bool is_const(NameResolver* self, str name) {
-        u32 name_id = self.local_names.intern(name);
-        i64 i = 0;
-        while (i < self.const_locals.len()) {
-            if (self.const_locals.get(i) == name_id) {
                 return true;
             }
             i += 1;
@@ -169,7 +143,8 @@ bool const_is_delimiter(SyntaxNode* node) {
 // declares iff a `const` token precedes its first assign-op; the declared name
 // is the identifier immediately before that `=`. Block boundaries keep nested
 // declarations from poisoning this scan.
-void const_check_segment(NameResolver* resolver, Vec<SyntaxNode*>* segment) {
+void const_check_segment(NameResolver* resolver, Vec<Binding>* bindings,
+                         Vec<SyntaxNode*>* segment) {
     i64 const_at = -1;
     i64 i = 0;
     while (i < segment.len()) {
@@ -193,7 +168,6 @@ void const_check_segment(NameResolver* resolver, Vec<SyntaxNode*>* segment) {
     if (const_at >= 0 && eq_at >= 0 && const_at < eq_at && eq_at > 0) {
         SyntaxNode* candidate = segment.get(eq_at - 1);
         if (candidate.kind == NodeKind.Token && candidate.token_kind == TokenKind.Identifier) {
-            resolver.mark_const(candidate.text);
             declared = candidate;
         }
     }
@@ -215,9 +189,14 @@ void const_check_segment(NameResolver* resolver, Vec<SyntaxNode*>* segment) {
             } else if (target.kind == NodeKind.Bracket && i >= 2) {
                 base = segment.get(i - 2);
             }
+            Binding* local_binding = base.kind == NodeKind.Token
+                ? visible_binding(bindings, base.text, base)
+                : (Binding*)0;
             if (base.kind == NodeKind.Token && base.token_kind == TokenKind.Identifier
-                && base != declared && (resolver.is_const(base.text)
-                || (!resolver.has_local(base.text) && resolver.is_const_global(base.text)))) {
+                && base != declared
+                && ((local_binding != (Binding*)0 && binding_is_const(local_binding))
+                    || (local_binding == (Binding*)0
+                        && resolver.is_const_global(base.text)))) {
                 if (is_field) {
                     String message = cannot_assign_const_field(base.text);
                     resolver.diagnostics.error(base.span, move message);
@@ -233,7 +212,8 @@ void const_check_segment(NameResolver* resolver, Vec<SyntaxNode*>* segment) {
     }
 }
 
-void const_scan_children(NameResolver* resolver, SyntaxNode* parent) {
+void const_scan_children(NameResolver* resolver, Vec<Binding>* bindings,
+                         SyntaxNode* parent) {
     if (parent == (SyntaxNode*)0) {
         return;
     }
@@ -241,21 +221,21 @@ void const_scan_children(NameResolver* resolver, SyntaxNode* parent) {
     SyntaxNode* child = parent.first_child;
     while (child != (SyntaxNode*)0) {
         if (child.kind == NodeKind.Block) {
-            const_check_segment(resolver, &segment);
+            const_check_segment(resolver, bindings, &segment);
             segment.len = 0;
-            const_scan_children(resolver, child);
+            const_scan_children(resolver, bindings, child);
         } else if (const_is_delimiter(child)) {
-            const_check_segment(resolver, &segment);
+            const_check_segment(resolver, bindings, &segment);
             segment.len = 0;
         } else {
             segment.push(child);
             if (child.kind == NodeKind.Parenthesized || child.kind == NodeKind.Bracket) {
-                const_scan_children(resolver, child);
+                const_scan_children(resolver, bindings, child);
             }
         }
         child = child.next_sibling;
     }
-    const_check_segment(resolver, &segment);
+    const_check_segment(resolver, bindings, &segment);
     segment.drop();
 }
 
@@ -311,7 +291,6 @@ void resolve_function(NameResolver* resolver, SyntaxNode* function, CfgSet* cfg)
     }
     // Const-ness is function-scoped: a `const c` in one function must not
     // poison an unrelated `c` in another.
-    resolver.const_locals.len = 0;
     Vec<Binding> typed_bindings = Vec<Binding>.new();
     collect_function_bindings(function, &typed_bindings);
     i64 binding_index = 0;
@@ -320,8 +299,8 @@ void resolve_function(NameResolver* resolver, SyntaxNode* function, CfgSet* cfg)
         resolver.add_local(binding.name);
         binding_index += 1;
     }
+    const_scan_children(resolver, &typed_bindings, body);
     typed_bindings.drop();
-    const_scan_children(resolver, body);
     Vec<SyntaxNode*> body_leaves = Vec<SyntaxNode*>.new();
     cfg_collect_live_leaves(body, cfg, &body_leaves);
 

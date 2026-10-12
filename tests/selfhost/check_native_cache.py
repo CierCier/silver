@@ -23,6 +23,10 @@ COMPILE_ROW = re.compile(
     r"^\s*\[\s*\d+\s*/\s*(\d+)\s*\]\s*\d+%\s+"
     r"(compiled(?:\s+in\s+\S+)?|\[cached\])\s+(.+?)\s+\((\d+) item(?:s)?"
 )
+COMPILE_START = re.compile(
+    r"^\s*\[\s*\d+\s*/\s*\d+\s*\]\s*\d+%\s+compiling\s+(.+?)"
+    r"(?:\s+\(\d+ items?\))?$"
+)
 
 
 @dataclass
@@ -103,6 +107,19 @@ def progress_modules(
             f"{len(modules)} module completions: {result.stderr}"
         )
     return total_steps, modules
+
+
+def progress_start_counts(result: RunResult, source: pathlib.Path) -> dict[str, int]:
+    starts: dict[str, int] = {}
+    for line in ANSI.sub("", result.stderr).splitlines():
+        match = COMPILE_START.match(line)
+        if match is None:
+            continue
+        target = match.group(1)
+        if target in (str(source), source.name, source.stem):
+            target = "<root>"
+        starts[target] = starts.get(target, 0) + 1
+    return starts
 
 
 def progress_item_counts(result: RunResult, source: pathlib.Path) -> dict[str, int]:
@@ -243,6 +260,18 @@ def exercise_module_boundaries(
         )
     if any(status != "compiled" for status in cold_progress[1].values()):
         raise AssertionError(f"{binary.name}: cold build did not compile every module")
+    if require_all_cached:
+        cold_starts = progress_start_counts(cold, source)
+        if (
+            not cold_starts
+            or any(count != 1 for count in cold_starts.values())
+            or not cold_starts.keys() <= cold_progress[1].keys()
+        ):
+            raise AssertionError(
+                f"{binary.name}: verbose cold build should report at least one "
+                f"compiling module and report each once, got {cold_starts!r}\n"
+                f"{cold.stderr[:4000]}"
+            )
     imported_modules = {
         name for name in cold_progress[1] if name != "<root>"
     }

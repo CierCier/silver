@@ -1,0 +1,80 @@
+struct ReadOnly {
+    i64 value;
+}
+
+struct Mutable {
+    i64 value;
+}
+
+struct Holder<T> {
+    T inner;
+}
+
+enum TupleBox<T> {
+    None;
+    Some(T);
+}
+
+impl ReadOnly {
+    ReadOnly new(i64 value) {
+        ReadOnly result = { .value = value };
+        return move result;
+    }
+
+    i64 read(&ReadOnly self) {
+        return self.value;
+    }
+}
+
+impl Mutable {
+    i64 read(&mut Mutable self) {
+        self.value += 1;
+        return self.value;
+    }
+}
+
+impl<T> TupleBox<T> {
+    bool is_none(&TupleBox<T> self) {
+        return true;
+    }
+}
+
+i64 read_inferred() {
+    let item = ReadOnly.new(7);
+    &ReadOnly alias = &item;
+    return item.read() + alias.value;
+}
+
+ReadOnly make_read_only() {
+    return ReadOnly.new(7);
+}
+
+i64 read_inferred_function() {
+    let item = make_read_only();
+    &ReadOnly alias = &item;
+    return item.read() + alias.value;
+}
+
+i64 read_generic_field() {
+    Holder<ReadOnly> holder = { .inner = ReadOnly.new(7) };
+    &ReadOnly alias = &holder.inner;
+    return holder.inner.read() + alias.value;
+}
+
+i64 read_tuple_generic() {
+    TupleBox<[i64, i64]> wrapped = TupleBox.None;
+    if (wrapped.is_none()) { return 14; }
+    return 0;
+}
+
+i32 main() {
+    ReadOnly item = { .value = 7 };
+    {
+        Mutable item = { .value = 1 };
+        item.read();
+    }
+    &ReadOnly alias = &item;
+    i64 direct = item.read() + alias.value;
+    return direct == 14 && read_inferred() == 14 && read_generic_field() == 14
+        && read_inferred_function() == 14 && read_tuple_generic() == 14 ? 0 : 1;
+}
