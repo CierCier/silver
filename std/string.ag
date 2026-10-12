@@ -860,6 +860,23 @@ impl IndexedAccess for String {
     }
 }
 
+private String string_concat_bytes(String left, u8* right, i64 right_len) {
+    i64 total = left.len + right_len;
+    String result = String.with_capacity(total + 1); // +1 for NUL
+    result.len = total;
+    if (left.len > 0) {
+        memcpy((void*)result.data, (const void*)left.data, left.len);
+    }
+    if (right_len > 0) {
+        memcpy((void*)&result.data[left.len], (const void*)right, right_len);
+    }
+    if (total > 0) {
+        result.data[total] = (u8)0;
+    }
+    // `left` drops here; the returned string owns the copied bytes.
+    return result;
+}
+
 // String+String and String+str are overloads of the same `__add` name; the
 // compiler resolves them by argument type (see codegen overload handling).
 // Both take the by-value receiver as their first parameter.
@@ -871,21 +888,7 @@ impl Add<String> for String {
 
 impl String {
     String concat(self, String other) {
-        i64 total = self.len + other.len;
-        String result = String.with_capacity(total + 1); // +1 for NUL
-        result.len = total;
-        if (self.len > 0) {
-            memcpy((void*)result.data, (const void*)self.data, self.len);
-        }
-        if (other.len > 0) {
-            memcpy((void*)&result.data[self.len], (const void*)other.data, other.len);
-        }
-        if (total > 0) {
-            result.data[total] = (u8)0;
-        }
-        // No null-outs: the by-value params are dropped at callee exit, which
-        // frees their buffers exactly once (nulling them would leak).
-        return result;
+        return string_concat_bytes(move self, other.data, other.len);
     }
 }
 
@@ -893,21 +896,7 @@ impl String {
 impl String {
     String __add(self, str other) {
         i64 other_len = strlen(other);
-        i64 total = self.len + other_len;
-        String result = String.with_capacity(total + 1); // +1 for NUL
-        result.len = total;
-        if (self.len > 0) {
-            memcpy((void*)result.data, (const void*)self.data, self.len);
-        }
-        if (other_len > 0) {
-            memcpy((void*)&result.data[self.len], (const void*)other, other_len);
-        }
-        if (total > 0) {
-            result.data[total] = (u8)0;
-        }
-        // No null-outs: the by-value param is dropped at callee exit, which
-        // frees its buffer exactly once (nulling it would leak).
-        return result;
+        return string_concat_bytes(move self, (u8*)other, other_len);
     }
 }
 impl Eq<String> for String {

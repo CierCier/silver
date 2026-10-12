@@ -333,9 +333,7 @@ i32 main(){
         r.drop();
         s.drop();
     }
-    // String + String and String + str now work: the __add overloads free
-    // their by-value operands at callee exit (no null-out leak) and the
-    // result owns a fresh buffer.
+    // Both overloads consume owned strings and return a fresh buffer.
     test_start("concat String + String");
     {
         String a = String.from_str("hello ");
@@ -351,6 +349,36 @@ i32 main(){
         String c = a + "bar";
         assert_eq_str("foobar", (str)c.to_str(), "String + str concatenates");
         c.drop();
+    }
+
+    test_start("concat preserves embedded NUL bytes");
+    {
+        String a = String.new();
+        a.push((u8)'a');
+        a.push((u8)0);
+        a.push((u8)'b');
+        String b = String.new();
+        b.push((u8)0);
+        b.push((u8)'c');
+        String joined = a + b;
+        assert_eq_i64(5, joined.len, "String + String preserves both explicit byte lengths");
+        assert_true(joined.data[0] == (u8)'a' && joined.data[1] == (u8)0
+            && joined.data[2] == (u8)'b' && joined.data[3] == (u8)0
+            && joined.data[4] == (u8)'c' && joined.data[5] == (u8)0,
+            "String + String preserves embedded NULs and appends a terminator");
+        joined.drop();
+
+        String prefix = String.new();
+        prefix.push((u8)'x');
+        prefix.push((u8)0);
+        prefix.push((u8)'y');
+        String suffix = prefix + "z";
+        assert_eq_i64(4, suffix.len, "String + str retains the String byte length");
+        assert_true(suffix.data[0] == (u8)'x' && suffix.data[1] == (u8)0
+            && suffix.data[2] == (u8)'y' && suffix.data[3] == (u8)'z'
+            && suffix.data[4] == (u8)0,
+            "String + str preserves embedded NULs and appends a terminator");
+        suffix.drop();
     }
 
     // String -> str cast: borrowed NUL-terminated view; the String keeps

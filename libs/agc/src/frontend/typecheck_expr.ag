@@ -344,8 +344,7 @@ u32 function_return_type_id(TypeTable* types, SyntaxNode* function) {
     SyntaxNode* child = function.first_child;
     while (child != (SyntaxNode*)0 && child != name && child != parameters) {
         if (child.kind == NodeKind.Token && strcmp(child.text, "#") == 0) {
-            // Skip attributes (`#` + [bracket]) like pub/static/extern.
-            // Otherwise an attribute can be mistaken for part of the return type.
+            // Skip attributes and declaration qualifiers before the return type.
             child = child.next_sibling;
             if (child != (SyntaxNode*)0 && child.kind == NodeKind.Bracket) {
                 child = child.next_sibling;
@@ -353,7 +352,8 @@ u32 function_return_type_id(TypeTable* types, SyntaxNode* function) {
             continue;
         }
         if (child.kind == NodeKind.Token
-            && (strcmp(child.text, "pub") == 0 || strcmp(child.text, "static") == 0
+            && (child.token_kind == TokenKind.Private || strcmp(child.text, "pub") == 0
+                || strcmp(child.text, "static") == 0
                 || strcmp(child.text, "extern") == 0)) {
             child = child.next_sibling;
             continue;
