@@ -702,6 +702,14 @@ u32 llvm_expr_type(LlvmContext* ctx, u32 expr_id) {
     if (expr.kind == ExprKind.MethodCall) {
         u32 rx_type = llvm_expr_type(ctx, expr.inner0);
         TypeEntry* entry = ctx.types.get(rx_type);
+        if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) {
+            u32 arg_count = ctx.pool.args.get((i64)expr.inner1);
+            u32 return_type = typecheck_method_return_type_for_call(ctx.pool, ctx.root,
+                ctx.types, rx_type, ctx.names.get(expr.aux), (i64)arg_count + 1,
+                expr.inner1, false);
+            if (return_type != TYPE_UNKNOWN) { return return_type; }
+            entry = ctx.types.get(rx_type);
+        }
         while (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) {
             rx_type = entry.inner;
             entry = ctx.types.get(rx_type);
@@ -5775,7 +5783,12 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         TypeEntry* receiver_type = ctx.types.get(receiver_type_id);
         if (receiver_type.kind == TypeKind.Named && receiver_type.count > 0) {
             i64 unresolved_before = ctx.unresolved_calls;
-            fn_val = mono_ensure_specialized(ctx, receiver_type_id, method_name);
+            u32 specialized_receiver_type = is_instance && !str_slice_receiver
+                ? llvm_expr_type(ctx, expr.inner0) : receiver_type_id;
+            if (specialized_receiver_type == TYPE_UNKNOWN) {
+                specialized_receiver_type = receiver_type_id;
+            }
+            fn_val = mono_ensure_specialized(ctx, specialized_receiver_type, method_name);
             if (ctx.unresolved_calls > unresolved_before) {
                 return (LLVMOpaqueValue*)0;
             }

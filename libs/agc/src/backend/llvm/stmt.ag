@@ -308,6 +308,8 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
             ctx.note_unresolved("reset-local", ctx.names.get(stmt.aux));
             return;
         }
+        TypeEntry* local_type = ctx.types.get(ctx.types.resolve_subst(local.type_id));
+        if (local_type.kind == TypeKind.Pointer || local_type.kind == TypeKind.Reference) { return; }
         LLVMOpaqueType* value_ty = llvm_lower_type(ctx.ctx, ctx.types, local.type_id);
         LLVMBuildStore(ctx.builder, LLVMConstNull(value_ty), local.ptr);
         local.is_string_literal_backed = false;

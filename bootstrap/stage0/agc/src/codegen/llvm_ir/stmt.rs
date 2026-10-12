@@ -571,6 +571,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let iterable_ast_ty = self
                     .resolve_receiver_type(iterable)
                     .unwrap_or_else(|| self.infer_ast_type_from_value(&iterable_val, span));
+                let iterable_is_indirect = matches!(
+                    iterable_ast_ty.kind.as_ref(),
+                    ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_)
+                );
                 let iterable_ptr =
                     self.create_entry_alloca(function, iterable_name, iterable_llvm_ty)?;
                 self.builder
@@ -616,13 +620,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     )?
                     .ok_or_else(|| CodegenError::new("into_iter() must not return void"))?;
 
-                // The into_iter call consumed the iterable: the iterator now
-                // owns (and frees) the buffers. Zero the original variable so
-                // it is a valid empty container under the zero-init drop
-                // contract — never a dangling view over freed memory. (A
-                // by-value into_iter cannot null the caller's fields itself:
-                // for Copy containers the receiver is a copy.)
-                if matches!(mode, ast::IterAccessMode::ByValue) {
+                // Consuming containers become empty after transferring their
+                // storage. Pointer receivers copy a borrow and remain usable.
+                if matches!(mode, ast::IterAccessMode::ByValue) && !iterable_is_indirect {
                     if let ast::ExpressionKind::Identifier(ident) = iterable.kind.as_ref() {
                         if let Some(orig_ptr) = self.lookup_variable(&ident.name).map(|v| v.ptr) {
                             let zero = iterable_llvm_ty.const_zero();

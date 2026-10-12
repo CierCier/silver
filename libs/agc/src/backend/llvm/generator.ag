@@ -225,11 +225,16 @@ void llvm_emit_entry_point(LLVMOpaqueContext* ctx, LLVMOpaqueModule* module, LLV
 // Define one specialized generic method instance under an already-declared
 // symbol, with substitution frames active (pushed by the caller). Structural
 // twin of the Pass2 method block below; keep in sync.
-bool llvm_define_method_instance(LlvmContext* ctx, TypeTable* types, Interner* names, AstPool* pool, str struct_name, LLVMOpaqueValue* fn_val, SyntaxNode* ret_start, SyntaxNode* method_name_node, SyntaxNode* params_node, SyntaxNode* body_node, Vec<u32>* arg_ids) {
+bool llvm_define_method_instance(LlvmContext* ctx, TypeTable* types, Interner* names, AstPool* pool, str struct_name, LLVMOpaqueValue* fn_val, SyntaxNode* ret_start, SyntaxNode* method_name_node, SyntaxNode* params_node, SyntaxNode* body_node, Vec<u32>* arg_ids, u32 receiver_depth) {
     if (fn_val == (LLVMOpaqueValue*)0 || LLVMCountBasicBlocks(fn_val) > 0) {
         return false;
     }
     u32 self_instance_id = types.get_named_args(struct_name, arg_ids);
+    u32 receiver_index = 0;
+    while (receiver_index < receiver_depth) {
+        self_instance_id = types.get_pointer(self_instance_id, true);
+        receiver_index += 1;
+    }
     SyntaxNode* rscan = ret_start;
     while (rscan != (SyntaxNode*)0 && rscan != method_name_node) {
         if (rscan.kind == NodeKind.Token && rscan.text == "#") {
@@ -446,6 +451,7 @@ void llvm_drain_mono_queue(LlvmContext* ctx, TypeTable* types, Interner* names, 
         str base = ctx.names.get(base_id);
         str method = req_ptr.is_free_function ? (str)0 : ctx.names.get(method_id);
         bool is_free_function = req_ptr.is_free_function;
+        u32 receiver_depth = req_ptr.receiver_depth;
         str mangled = ctx.names.get(mangled_id);
         LLVMOpaqueValue* fn_val = LLVMGetNamedFunction(ctx.module, mangled);
         if (fn_val == (LLVMOpaqueValue*)0) {
@@ -473,7 +479,8 @@ void llvm_drain_mono_queue(LlvmContext* ctx, TypeTable* types, Interner* names, 
         }
         bool found = is_free_function
             ? mono_find_function_template(ctx.root, types, base, value_arg_count, &template, &param_ids)
-            : mono_find_method_template(ctx.root, types, base, method, &arg_ids, &template, &param_ids);
+            : mono_find_method_template(ctx.root, types, base, method, receiver_depth,
+                                        &arg_ids, &template, &param_ids);
         if (found && (param_ids.len() == arg_ids.len() || param_ids.len() == 0)) {
             i64 b = 0;
             while (b < param_ids.len()) {
@@ -485,7 +492,7 @@ void llvm_drain_mono_queue(LlvmContext* ctx, TypeTable* types, Interner* names, 
             }
             bool defined = is_free_function
                 ? llvm_define_free_function_instance(ctx, types, names, pool, fn_val, template.ret_start, template.name_node, template.params_node, template.body_node)
-                : llvm_define_method_instance(ctx, types, names, pool, base, fn_val, template.ret_start, template.name_node, template.params_node, template.body_node, &arg_ids);
+                : llvm_define_method_instance(ctx, types, names, pool, base, fn_val, template.ret_start, template.name_node, template.params_node, template.body_node, &arg_ids, receiver_depth);
             if (!defined) {
                 ctx.note_unresolved("monomorph-body", mangled);
             }

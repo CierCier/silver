@@ -1597,8 +1597,10 @@ u32 typecheck_method_return_type_for_call(AstPool* pool, SyntaxNode* root,
                                           u32 args_start, bool static_method) {
     u32 resolved_receiver = types.resolve_subst(receiver_type);
     TypeEntry* receiver = types.get(resolved_receiver);
+    u32 receiver_depth = 0;
     while (receiver.kind == TypeKind.Pointer || receiver.kind == TypeKind.Reference) {
         resolved_receiver = receiver.inner;
+        receiver_depth += 1;
         receiver = types.get(resolved_receiver);
     }
     if (receiver.kind != TypeKind.Named) { return TYPE_UNKNOWN; }
@@ -1609,7 +1611,8 @@ u32 typecheck_method_return_type_for_call(AstPool* pool, SyntaxNode* root,
     while (item != (SyntaxNode*)0) {
         if (item.kind == NodeKind.Impl) {
             SyntaxNode* target = impl_target_identifier(item);
-            if (target != (SyntaxNode*)0 && strcmp(target.text, owner_name) == 0) {
+            if (target != (SyntaxNode*)0 && strcmp(target.text, owner_name) == 0
+                && impl_target_pointer_depth(item) == receiver_depth) {
                 SyntaxNode* block = item.first_child;
                 while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
                     block = block.next_sibling;
@@ -1699,7 +1702,7 @@ u32 typecheck_method_return_type_for_call(AstPool* pool, SyntaxNode* root,
                                 signature = signature.next_sibling;
                             }
                             u32 return_type = strcmp(return_text.to_str(), "Self") == 0
-                                ? resolved_receiver
+                                ? types.resolve_subst(receiver_type)
                                 : type_id_from_text(types, return_text.to_str());
                             return_text.drop();
                             u32 resolved_return = resolve_generic_member_type(
@@ -1718,6 +1721,10 @@ u32 typecheck_method_return_type_for_call(AstPool* pool, SyntaxNode* root,
             }
         }
         item = item.next_sibling;
+    }
+    if (best_return_type == TYPE_UNKNOWN && receiver_depth > 0) {
+        return typecheck_method_return_type_for_call(pool, root, types, resolved_receiver,
+            method_name, param_count, args_start, static_method);
     }
     return best_return_type;
 }

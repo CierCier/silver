@@ -372,6 +372,7 @@ LLVMOpaqueValue* mono_ensure_free_function(LlvmContext* ctx, str base, Vec<u32>*
     ctx.types.pop_subst(param_ids.len());
     MonoRequest req;
     req.is_free_function = true;
+    req.receiver_depth = 0;
     req.base_id = ctx.names.intern(base);
     req.method_id = 0;
     req.mangled_id = ctx.names.intern(mangled.to_str());
@@ -392,7 +393,7 @@ LLVMOpaqueValue* mono_ensure_free_function(LlvmContext* ctx, str base, Vec<u32>*
 // Declare (or fetch) a specialized method instance. Pushes substitution
 // frames so the signature resolves concretely; pops before returning on all
 // paths. Mirrors the Pass1 method declaration; keep in sync.
-LLVMOpaqueValue* mono_declare_specialized(LlvmContext* ctx, str base, MonoMethodTemplate* template, Vec<u32>* param_ids, Vec<u32>* arg_ids, str mangled) {
+LLVMOpaqueValue* mono_declare_specialized(LlvmContext* ctx, str base, MonoMethodTemplate* template, Vec<u32>* param_ids, Vec<u32>* arg_ids, str mangled, u32 receiver_depth) {
     i64 b = 0;
     while (b < param_ids.len()) {
         ctx.types.push_subst(param_ids.get(b), arg_ids.get(b));
@@ -420,6 +421,11 @@ LLVMOpaqueValue* mono_declare_specialized(LlvmContext* ctx, str base, MonoMethod
         rscan = rscan.next_sibling;
     }
     u32 self_instance_id = ctx.types.get_named_args(base, arg_ids);
+    u32 receiver_index = 0;
+    while (receiver_index < receiver_depth) {
+        self_instance_id = ctx.types.get_pointer(self_instance_id, true);
+        receiver_index += 1;
+    }
     u32 ret_type_id = TYPE_UNKNOWN;
     if (strcmp(ret_str.to_str(), "Self") == 0) {
         ret_type_id = self_instance_id;
@@ -469,6 +475,12 @@ LLVMOpaqueValue* mono_declare_specialized(LlvmContext* ctx, str base, MonoMethod
 // Type arguments stay structural here; rendering and reparsing loses nesting.
 LLVMOpaqueValue* mono_ensure_specialized(LlvmContext* ctx, u32 receiver_type_id, str method) {
     TypeEntry* receiver = ctx.types.get(receiver_type_id);
+    u32 receiver_depth = 0;
+    while (receiver.kind == TypeKind.Pointer || receiver.kind == TypeKind.Reference) {
+        receiver_type_id = receiver.inner;
+        receiver_depth += 1;
+        receiver = ctx.types.get(receiver_type_id);
+    }
     if (receiver.kind != TypeKind.Named || receiver.count == 0) {
         return (LLVMOpaqueValue*)0;
     }
@@ -487,6 +499,10 @@ LLVMOpaqueValue* mono_ensure_specialized(LlvmContext* ctx, u32 receiver_type_id,
     }
     mono_ensure_type_layout(ctx, receiver_type_id, &ctx.generic_layout_ids);
     String mangled = mono_mangle_method(base, method, &arg_ids);
+    if (receiver_depth > 0) {
+        mangled.push_str("__ptr_");
+        append_u32(&mangled, receiver_depth);
+    }
     LLVMOpaqueValue* found = LLVMGetNamedFunction(ctx.module, mangled.to_str());
     if (found != (LLVMOpaqueValue*)0) {
         mangled.drop();
@@ -495,7 +511,22 @@ LLVMOpaqueValue* mono_ensure_specialized(LlvmContext* ctx, u32 receiver_type_id,
     }
     MonoMethodTemplate template;
     Vec<u32> param_ids = Vec<u32>.new();
-    bool ok = mono_find_method_template(ctx.root, ctx.types, base, method, &arg_ids, &template, &param_ids);
+    bool ok = mono_find_method_template(ctx.root, ctx.types, base, method, receiver_depth,
+                                       &arg_ids, &template, &param_ids);
+    if (!ok && receiver_depth > 0) {
+        receiver_depth = 0;
+        ok = mono_find_method_template(ctx.root, ctx.types, base, method, receiver_depth,
+                                      &arg_ids, &template, &param_ids);
+        mangled.drop();
+        mangled = mono_mangle_method(base, method, &arg_ids);
+        found = LLVMGetNamedFunction(ctx.module, mangled.to_str());
+        if (found != (LLVMOpaqueValue*)0) {
+            param_ids.drop();
+            mangled.drop();
+            arg_ids.drop();
+            return found;
+        }
+    }
     if (!ok || (param_ids.len() != arg_ids.len() && param_ids.len() != 0)) {
         ctx.note_unresolved("monomorph-template", mangled.to_str());
         param_ids.drop();
@@ -503,10 +534,12 @@ LLVMOpaqueValue* mono_ensure_specialized(LlvmContext* ctx, u32 receiver_type_id,
         arg_ids.drop();
         return (LLVMOpaqueValue*)0;
     }
-    LLVMOpaqueValue* fn_val = mono_declare_specialized(ctx, base, &template, &param_ids, &arg_ids, mangled.to_str());
+    LLVMOpaqueValue* fn_val = mono_declare_specialized(ctx, base, &template, &param_ids,
+                                                     &arg_ids, mangled.to_str(), receiver_depth);
     if (fn_val != (LLVMOpaqueValue*)0) {
         MonoRequest req;
         req.is_free_function = false;
+        req.receiver_depth = receiver_depth;
         req.base_id = ctx.names.intern(base);
         req.method_id = ctx.names.intern(method);
         req.mangled_id = ctx.names.intern(mangled.to_str());
@@ -944,7 +977,9 @@ void mono_define_generic_layouts(LlvmContext* ctx) {
 // Find an impl block for `base` defining `method`, matching type arguments `arg_ids`.
 // Collects the impl-level type parameter names (deduped, in order) for substitution.
 // For specialized concrete impls, param_ids will be empty (no substitution needed).
-bool mono_find_method_template(SyntaxNode* root, TypeTable* types, str base, str method, Vec<u32>* arg_ids, MonoMethodTemplate* out, Vec<u32>* param_ids) {
+bool mono_find_method_template(SyntaxNode* root, TypeTable* types, str base, str method,
+                               u32 receiver_depth, Vec<u32>* arg_ids,
+                               MonoMethodTemplate* out, Vec<u32>* param_ids) {
     if (root == (SyntaxNode*)0) {
         return false;
     }
@@ -965,7 +1000,7 @@ bool mono_find_method_template(SyntaxNode* root, TypeTable* types, str base, str
                 }
                 bool is_base = strcmp(target_base.to_str(), base) == 0;
                 target_base.drop();
-                if (is_base) {
+                if (is_base && impl_target_pointer_depth(item) == receiver_depth) {
                     SyntaxNode* block = item.first_child;
                     while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
                         block = block.next_sibling;

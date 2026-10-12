@@ -6,6 +6,7 @@
 // 2. Borrowed container iteration: `for x in &vec` preserves underlying vector.
 // 3. Early break and continue in iterator loops.
 // 4. Nested iterator loops, string element iteration, and empty collections.
+// compile_flags: --no-cache --leak-check
 
 import std.test;
 import std.mem.vec;
@@ -75,6 +76,21 @@ void test_tier2_borrowed_vec_iteration() {
     assert_eq_i64(4, nums.len(), "nums.len() preserved after borrowed iteration");
     assert_eq_i64(1, nums.get(0), "nums[0] intact");
     assert_eq_i64(4, nums.get(3), "nums[3] intact");
+
+    Vec<i64>* borrowed = &nums;
+    i64 borrowed_sum = 0;
+    for x in borrowed { borrowed_sum += x; }
+    assert_eq_i64(10, borrowed_sum, "pointer local uses borrowed iterator");
+    assert_eq_i64(4, borrowed.len(), "Copy pointer remains live after iteration");
+    assert_eq_i64(1, nums.get(0), "pointer iteration preserves first element");
+
+    Vec<i64> consumed = Vec<i64>.new();
+    consumed.push(17);
+    consumed.push(25);
+    i64 consumed_sum = 0;
+    for x in consumed { consumed_sum += x; }
+    assert_eq_i64(42, consumed_sum, "value target still uses consuming iterator");
+    assert_eq_i64(0, consumed.len(), "consumed vector is reset");
 
     nums.drop();
 }

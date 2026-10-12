@@ -865,3 +865,18 @@ SyntaxNode* impl_target_identifier(SyntaxNode* impl_item) {
     }
     return first_ident;
 }
+
+u32 impl_target_pointer_depth(SyntaxNode* impl_item) {
+    SyntaxNode* target = impl_target_identifier(impl_item);
+    if (target == (SyntaxNode*)0) { return 0; }
+    u32 depth = 0;
+    i64 angle_depth = 0;
+    SyntaxNode* cursor = target.next_sibling;
+    while (cursor != (SyntaxNode*)0 && cursor.kind != NodeKind.Block) {
+        if (cursor.token_kind == TokenKind.Less) { angle_depth += 1; }
+        else if (cursor.token_kind == TokenKind.Greater) { angle_depth -= 1; }
+        else if (angle_depth == 0 && cursor.token_kind == TokenKind.Star) { depth += 1; }
+        cursor = cursor.next_sibling;
+    }
+    return depth;
+}

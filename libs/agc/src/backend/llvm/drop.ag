@@ -67,7 +67,7 @@ bool llvm_can_resolve_drop_fn(LlvmContext* ctx, u32 type_id) {
         MonoMethodTemplate template;
         Vec<u32> param_ids = Vec<u32>.new();
         bool ok = mono_find_method_template(ctx.root, ctx.types, base, "drop",
-                                             &arg_ids, &template, &param_ids);
+                                             0, &arg_ids, &template, &param_ids);
         bool usable = ok && (param_ids.len() == arg_ids.len() || param_ids.len() == 0);
         param_ids.drop();
         arg_ids.drop();

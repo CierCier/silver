@@ -768,6 +768,11 @@ blocks or via standard traits from `std/ops.ag`.
 
 `for item in container` lowers to the `IntoIterator` and `Iterator` protocol:
 
+For `Vec<T>`, `for item in values` consumes the vector, while
+`for item in &values` and `for item in values.iter()` borrow its storage.
+Borrowed iteration preserves the vector's contents. A local `Vec<T>*` used
+as the iterable also remains usable after the loop.
+
 ```silver
 struct RangeIter {
     i32 current;

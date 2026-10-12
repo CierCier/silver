@@ -63,6 +63,7 @@ struct LlvmSymbolInfo {
 
 struct MonoRequest {
     bool is_free_function;
+    u32 receiver_depth;
     u32 base_id;
     u32 method_id;
     u32 mangled_id;
