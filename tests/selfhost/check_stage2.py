@@ -8,6 +8,7 @@ import os
 import pathlib
 import shutil
 import subprocess
+import sys
 import tempfile
 
 from enum_ffi_probe import run_enum_ffi_probe
@@ -16,7 +17,15 @@ from enum_ffi_probe import run_enum_ffi_probe
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--stage1", required=True, type=pathlib.Path)
+    parser.add_argument("--full-corpus", action="store_true",
+                        help="Run the complete integration corpus with each generated compiler")
+    parser.add_argument("--stage3", action="store_true",
+                        help="Build stage3 with stage2 and exercise its frontend and runtimes")
+    parser.add_argument("--jobs", type=int, default=4,
+                        help="Integration corpus workers (default: 4)")
     args = parser.parse_args()
+    if args.jobs < 1:
+        parser.error("--jobs must be positive")
     root = pathlib.Path(__file__).parents[2]
     cc = shutil.which("cc")
     if cc is None:
@@ -54,6 +63,15 @@ def main() -> int:
                         f"stage2 {label} diagnostic missing {fragment!r}:\n{output}"
                     )
 
+        def run_corpus(binary: pathlib.Path) -> None:
+            print(f"Running the full integration corpus with {binary.name}", flush=True)
+            subprocess.run(
+                [sys.executable, str(root / "tests/run_tests.py"), "--no-tui",
+                 "--compiler", str(binary), "--jobs", str(args.jobs)],
+                cwd=root, env=env, check=True,
+            )
+
+        print("Building stage2 with stage1", flush=True)
         invoke(args.stage1.resolve(), ["build", "--manifest", str(root / "silver.toml"),
                                       "--bin", "agc", "--no-cache", "-o", str(stage2)])
         run_enum_ffi_probe(
@@ -287,6 +305,38 @@ i32 main() {
             "drop_ancestor_function_pointer_argument_error_test.ag",
         ):
             expect_rejected(root / "tests" / fixture, fixture.removesuffix(".ag"))
+        if args.full_corpus:
+            run_corpus(stage2)
+        if args.stage3:
+            stage3 = work / "agc-stage3"
+            print("Building stage3 with stage2", flush=True)
+            invoke(stage2, ["build", "--manifest", str(root / "silver.toml"),
+                            "--bin", "agc", "--no-cache", "-o", str(stage3)])
+            run_enum_ffi_probe(stage3, pathlib.Path(cc).resolve(), root, work, "stage3", env)
+            invoke(stage3, ["--version"])
+            invoke(stage3, ["--help"])
+            for command in ("lex", "parse", "check"):
+                invoke(stage3, [command, str(source)])
+            invoke(stage3, ["check", "--manifest", str(root / "silver.toml"), "--bin", "agc"])
+            for fixture, expected in (
+                ("aggregate_init_drop_test.ag", 42),
+                ("collection_drop_glue_test.ag", 0),
+                ("field_copy_ergonomics_test.ag", 0),
+                ("iterator_ergonomics_test.ag", 0),
+                ("structured_error_test.ag", 0),
+            ):
+                program = work / f"stage3-{pathlib.Path(fixture).stem}"
+                invoke(stage3, ["build", str(root / "tests" / fixture), "--no-cache",
+                                "-o", str(program)])
+                executed = subprocess.run([str(program)], cwd=root, env=env,
+                                          timeout=30, check=False)
+                if executed.returncode != expected:
+                    raise AssertionError(
+                        f"stage3-compiled {fixture} returned {executed.returncode}, expected {expected}"
+                    )
+            if args.full_corpus:
+                run_corpus(stage3)
+            print("native stage3 self-build, frontend, C enum ABI, and runtime checks passed")
     print(
         "native stage2 frontend commands, runtime programs, and Drop-ancestor "
         "rejection builds passed"

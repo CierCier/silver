@@ -29,8 +29,21 @@ failures identify unsupported backend work and are not silently skipped.
 `check_stage2.py` builds stage2 with the native stage1 backend, then exercises
 stage2 help/version, lexer/parser/checker, and representative compiled
 arithmetic, control-flow, generics, function pointers, aggregate ownership,
-references, pointer outputs, and matches. It does not establish full stage2 or
-stage3 parity.
+references, pointer outputs, and matches. Its default run is a focused gate.
+Use the optional local checks to run the complete corpus with stage2, build
+stage3 through stage2, and run the corpus with stage3:
+
+```bash
+python3 tests/selfhost/check_stage2.py --stage1 /path/to/agc-stage1 \
+    --full-corpus --stage3 --jobs 4
+```
+
+`--stage3` also checks frontend commands, the compiler workspace, the C enum
+ABI, and aggregate/drop, field Copy, iterator, and structured I/O runtimes.
+Both self-builds bypass the object cache. The optional corpus runs use the
+existing integration harness and its normal fixture skips. They establish
+behavior on the tested corpus, not binary identity or complete language parity.
+These options are opt-in so the default CI gate keeps its existing workload.
 
 The semantic regression checks compare focused generic and borrow-escape cases
 against stage0. The diagnostic gate checks primary error ordering. The AGM

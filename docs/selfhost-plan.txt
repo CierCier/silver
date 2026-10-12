@@ -388,7 +388,7 @@ before exposing them. The current review adds destructor cleanup for transferred
 arguments when spawn fails; verify it in stage0 and native stage1, then measure
 the complete no-stage0 corpus locally.
 
-Current continuation (2026-10-09)
+Historical continuation (2026-10-09)
 ---------------------------------
 Evidence: https://github.com/CierCier/silver/actions/runs/37908849775
 
@@ -409,3 +409,21 @@ The uncommitted runtime-boundary cleanup removes stage1 compiler and Rust AGSM
 lookups. Prebuilt `.agm` imports remain supported; `.submodule.toml` generation
 fails locally. Fresh stage0/stage1 builds and focused workspace, backend, Send,
 and four module-import checks pass. The full suite and CI were not rerun.
+
+Local continuation (2026-10-12)
+-------------------------------
+The follow-up from aa8ec54 fixes imported/nested generic Copy field
+tracking and borrowed generic iteration, including pointer reuse after for-in
+in both stages. Ownership snapshots canonical metadata while keeping its Drop
+marks private. Stage0 passes 609 Cargo tests and integration at 283/0/4.
+
+Stage1 builds stage2, then stage2 builds stage3, without object caching.
+Both generated compilers pass the complete 287-fixture corpus at 285/0/2.
+Stage2 and stage3 binaries also match SHA-256 in this local Linux build.
+Fresh stage1 also passes the complete corpus at 285/0/2, focused
+ownership/iterator cases, native backend smoke,
+440-file semantic status parity, 29 semantic regressions/12 import checks,
+and 13 checks on stage1-built AGLSP. CI was not run; the expanded generation
+checks are opt-in. Complete typed ownership, diagnostics, artifact/cache parity,
+and behavior beyond the tested corpus remain open. Detailed evidence and the
+local gate command are in docs/selfhost-completion-record.md.

@@ -1,6 +1,6 @@
 # Self-host completion record
 
-Updated: 2026-10-09
+Updated: 2026-10-12
 
 ## Definition of done
 
@@ -16,6 +16,49 @@ The Linux pipeline is complete when a stage1-built `agc`:
 Stage1 now owns the native backend for supported commands and returns local
 errors for unsupported requests. Stage0 builds stage1 and remains available for
 comparison; stage1 runtime commands do not delegate to it.
+
+## Local generational verification (2026-10-12)
+
+The follow-up from `aa8ec54` repairs native ownership
+field metadata, generic pointer implementation selection, and preservation of
+borrowed pointer bindings after for-in loops. Ownership snapshots the canonical
+type table so its private Drop marks cannot change codegen's Copy policy.
+Existing fixtures cover imported and nested generic Copy fields, borrowed
+iteration, consuming iteration, pointer reuse, and destructor counts.
+
+- Cargo tests: 609 passed. Stage0 integration: 283 passed, 0 failed, 4 skipped.
+- Fresh stage1 passes the complete default corpus at 285 passed, 0 failed,
+  2 skipped, seven focused ownership/iterator fixtures, native backend smoke,
+  29 semantic regressions, 12 source/AGM import checks, and 13 protocol checks
+  on the AGLSP executable built by stage1.
+- Semantic status parity: 440 files; two absent foreign AGM cases fail locally
+  as expected. This compares acceptance status, not complete diagnostic output.
+- Stage1 builds stage2, and stage2 builds stage3, using the root workspace with
+  object caching disabled. Stage2 and stage3 each pass the complete default
+  integration corpus: 285 passed, 0 failed, 2 skipped across 287 fixtures.
+- Stage2 retains the focused frontend, runtime, C enum ABI, and Drop-ancestor
+  rejection checks. Stage3 passes frontend commands, the compiler workspace
+  check, C enum ABI probes, and aggregate/drop, field Copy, iterator, and
+  structured I/O runtimes.
+- Stage2 and stage3 binaries match SHA-256 in this Linux build:
+  `6425b6d55417fd457a4f7325f95848053e4af04d5d767ccdb5da9d2c38380874`.
+  This is one observed build, not a general reproducibility guarantee.
+
+The native corpus skips `mem_growth_watch` by default and `rust_ffi_test`
+because its Rust library is absent. Stage0 also skips two stage1-only fixtures.
+CI was not run. The modified Rust file passes rustfmt; package-wide formatting
+still reports pre-existing differences in other files.
+
+Reproduce the expanded local gate with an up-to-date stage1 binary:
+
+```bash
+python3 tests/selfhost/check_stage2.py --stage1 /tmp/agc-stage1 \
+    --full-corpus --stage3 --jobs 8
+```
+
+The expanded options are opt-in; the default CI workload is unchanged. Complete
+typed ownership/borrow analysis, diagnostic rendering, artifact/cache parity,
+and language behavior beyond this corpus remain open.
 
 ## Historical verified baseline (2026-09-24)
 
@@ -51,7 +94,7 @@ The frontend migration is complete across all slices:
 - Centralized user-facing diagnostic messages catalog with fuzzy typo suggestions.
 - Historical gates passed: 348 files in `run_stage.sh --include-std`, 200 passed + 1 intentional skip in `run_native.sh --jobs 4`.
 
-## Current status at PR #30 head ab73fef (2026-10-09)
+## Historical status at PR #30 head ab73fef (2026-10-09)
 
 - Evidence: [PR #30 workflow run](https://github.com/CierCier/silver/actions/runs/37908849775).
 - Latest PR CI checks pass: Greptile, the native test job, and the WASM job.
