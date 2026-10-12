@@ -95,27 +95,6 @@ fn place_to_path_str(place: &Place) -> String {
         .join(".")
 }
 
-/// Lossless Place display (`x.a`, `x[index]`, `*p`) for diagnostics.
-#[allow(dead_code)]
-fn place_display(place: &Place) -> String {
-    let mut s = place.local.clone();
-    for p in &place.projections {
-        match p {
-            Projection::Field(f) => {
-                s.push('.');
-                s.push_str(f);
-            }
-            Projection::TupleField(i) => {
-                s.push('.');
-                s.push_str(&i.to_string());
-            }
-            Projection::Index => s.push_str("[index]"),
-            Projection::Deref => s = format!("*{s}"),
-        }
-    }
-    s
-}
-
 /// All prefixes of `place` from root to itself (inclusive).
 fn place_prefixes(place: &Place) -> Vec<Place> {
     let mut out = Vec::with_capacity(place.projections.len() + 1);

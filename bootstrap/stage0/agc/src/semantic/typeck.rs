@@ -808,14 +808,6 @@ impl TypeChecker {
             {
                 self.drop_owner_bases.insert(named.path[0].name.clone());
             }
-            // Record the Drop-owner base name for ANY Drop impl (generic
-            // templates included): Vec<String> must count even though
-            // `impl<T> Drop<Vec<T>>` has a non-concrete self type.
-            if name == "Drop"
-                && let ast::TypeKind::Named(named) = impl_item.self_type.kind.as_ref()
-            {
-                self.drop_owner_bases.insert(named.path[0].name.clone());
-            }
         }
     }
 

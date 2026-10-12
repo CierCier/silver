@@ -141,25 +141,15 @@ impl MovePath {
         // Walk/create child by child.
         let depth_self = self.place.projections.len();
         let depth_target = place.projections.len();
-        let mut cur: *mut MovePath = self as *mut _;
+        let mut current = self;
         for len in (depth_self + 1)..=depth_target {
             let prefix = Place {
                 local: place.local.clone(),
                 projections: place.projections[..len].to_vec(),
             };
-            // SAFETY: cur points inside `self` tree; we only hold one `&mut` at a time.
-            let cur_ref = unsafe { &mut *cur };
-            let child_idx = cur_ref.children.iter().position(|c| c.place == prefix);
-            let next: *mut MovePath = if let Some(idx) = child_idx {
-                &mut cur_ref.children[idx] as *mut _
-            } else {
-                cur_ref.children.push(MovePath::new(prefix));
-                let idx = cur_ref.children.len() - 1;
-                &mut cur_ref.children[idx] as *mut _
-            };
-            cur = next;
+            current = current.get_or_create_child(prefix);
         }
-        unsafe { Some(&mut *cur) }
+        Some(current)
     }
 }
 
@@ -220,31 +210,8 @@ impl MovePathTree {
             .roots
             .entry(local.clone())
             .or_insert_with(|| MovePath::new(Place::new(local)));
-        if root.place == place {
-            return root;
-        }
-        // SAFETY: we split the insert walk to avoid double-borrow.
-        // `root.insert(place)` would need ownership; we reuse MovePath::insert logic inline.
-        let depth_target = place.projections.len();
-        let mut cur: *mut MovePath = root as *mut _;
-        for len in 1..=depth_target {
-            let prefix = Place {
-                local: place.local.clone(),
-                projections: place.projections[..len].to_vec(),
-            };
-            let cur_ref = unsafe { &mut *cur };
-            // Skip len == 0 (root) — already handled.
-            let child_idx = cur_ref.children.iter().position(|c| c.place == prefix);
-            let next: *mut MovePath = if let Some(idx) = child_idx {
-                &mut cur_ref.children[idx] as *mut _
-            } else {
-                cur_ref.children.push(MovePath::new(prefix));
-                let idx = cur_ref.children.len() - 1;
-                &mut cur_ref.children[idx] as *mut _
-            };
-            cur = next;
-        }
-        unsafe { &mut *cur }
+        root.insert(place)
+            .expect("tree root and place have the same local")
     }
 
     /// Find by `Place` in forest (exact equality).
