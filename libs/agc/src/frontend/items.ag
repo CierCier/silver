@@ -213,59 +213,43 @@ bool item_extern_uses_c_abi(SyntaxNode* item) {
     return false;
 }
 
-SyntaxNode* item_c_extern_function_parameters(SyntaxNode* root, str function_name) {
-    SyntaxNode* item = root == (SyntaxNode*)0 ? (SyntaxNode*)0 : root.first_child;
-    while (item != (SyntaxNode*)0) {
-        if (item_extern_uses_c_abi(item)) {
-            SyntaxNode* block = item.first_child;
-            while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
-                block = block.next_sibling;
-            }
-            SyntaxNode* cursor = block == (SyntaxNode*)0 ? item.first_child : block.first_child;
-            while (cursor != (SyntaxNode*)0) {
-                if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
-                    cursor = cursor.next_sibling;
-                    continue;
-                }
-                SyntaxNode* name = (SyntaxNode*)0;
-                SyntaxNode* parameters = (SyntaxNode*)0;
-                SyntaxNode* scan = cursor;
-                while (scan != (SyntaxNode*)0
-                    && !(scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Semicolon)) {
-                    if (scan.kind == NodeKind.Attribute) {
-                        scan = scan.next_sibling;
-                        continue;
-                    }
-                    if (scan.kind == NodeKind.Parenthesized) {
-                        parameters = scan;
-                        break;
-                    }
-                    if (scan.kind == NodeKind.Token && scan.text == "#") {
-                        SyntaxNode* attribute = scan.next_sibling;
-                        if (attribute != (SyntaxNode*)0 && attribute.kind == NodeKind.Bracket) {
-                            scan = attribute.next_sibling;
-                            continue;
-                        }
-                    }
-                    if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Identifier) {
-                        name = scan;
-                    }
-                    scan = scan.next_sibling;
-                }
-                if (name != (SyntaxNode*)0 && parameters != (SyntaxNode*)0
-                    && strcmp(name.text, function_name) == 0) {
-                    return parameters;
-                }
-                cursor = parameters != (SyntaxNode*)0 ? parameters.next_sibling : cursor.next_sibling;
-            }
-        }
-        item = item.next_sibling;
+SyntaxNode* item_skip_extern_attribute(SyntaxNode* node) {
+    if (node == (SyntaxNode*)0) { return node; }
+    if (node.kind == NodeKind.Attribute) { return node.next_sibling; }
+    if (node.kind == NodeKind.Token && node.text == "#"
+        && node.next_sibling != (SyntaxNode*)0
+        && node.next_sibling.kind == NodeKind.Bracket) {
+        return node.next_sibling.next_sibling;
     }
-    return (SyntaxNode*)0;
+    return node;
 }
 
-u32 item_c_extern_function_return_type_id(TypeTable* types, SyntaxNode* root,
-                                          str function_name) {
+SyntaxNode* item_extern_single_signature_start(SyntaxNode* item) {
+    SyntaxNode* cursor = item.first_child;
+    while (cursor != (SyntaxNode*)0 && !(cursor.kind == NodeKind.Token
+        && cursor.token_kind == TokenKind.Extern)) {
+        cursor = cursor.next_sibling;
+    }
+    while (cursor != (SyntaxNode*)0 && !(cursor.kind == NodeKind.Token
+        && cursor.token_kind == TokenKind.StringLiteral)) {
+        cursor = cursor.next_sibling;
+    }
+    return cursor == (SyntaxNode*)0 ? cursor : cursor.next_sibling;
+}
+
+struct ExternFunctionSignature {
+    SyntaxNode* signature_start;
+    SyntaxNode* function_name;
+    SyntaxNode* parameter_list;
+}
+
+// C ABI type queries share this walk; requiring parameters excludes extern globals.
+ExternFunctionSignature item_find_c_extern_function(SyntaxNode* root,
+                                                     str function_name) {
+    ExternFunctionSignature result;
+    result.signature_start = (SyntaxNode*)0;
+    result.function_name = (SyntaxNode*)0;
+    result.parameter_list = (SyntaxNode*)0;
     SyntaxNode* item = root == (SyntaxNode*)0 ? (SyntaxNode*)0 : root.first_child;
     while (item != (SyntaxNode*)0) {
         if (item_extern_uses_c_abi(item)) {
@@ -274,81 +258,68 @@ u32 item_c_extern_function_return_type_id(TypeTable* types, SyntaxNode* root,
                 block = block.next_sibling;
             }
             SyntaxNode* cursor = block != (SyntaxNode*)0
-                ? block.first_child : item.first_child;
-            if (block == (SyntaxNode*)0) {
-                while (cursor != (SyntaxNode*)0
-                    && !(cursor.kind == NodeKind.Token
-                        && cursor.token_kind == TokenKind.Extern)) {
-                    cursor = cursor.next_sibling;
-                }
-                while (cursor != (SyntaxNode*)0
-                    && !(cursor.kind == NodeKind.Token
-                        && cursor.token_kind == TokenKind.StringLiteral)) {
-                    cursor = cursor.next_sibling;
-                }
-                cursor = cursor == (SyntaxNode*)0 ? (SyntaxNode*)0 : cursor.next_sibling;
-            }
+                ? block.first_child : item_extern_single_signature_start(item);
             while (cursor != (SyntaxNode*)0) {
                 if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
                     cursor = cursor.next_sibling;
                     continue;
                 }
-                SyntaxNode* declaration_start = cursor;
+                SyntaxNode* signature_start = item_skip_extern_attribute(cursor);
                 SyntaxNode* name = (SyntaxNode*)0;
-                SyntaxNode* parameters = (SyntaxNode*)0;
-                SyntaxNode* scan = cursor;
+                SyntaxNode* scan = signature_start;
                 while (scan != (SyntaxNode*)0
-                    && !(scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Semicolon)) {
-                    if (scan.kind == NodeKind.Attribute) {
-                        scan = scan.next_sibling;
+                    && !(scan.kind == NodeKind.Token
+                        && scan.token_kind == TokenKind.Semicolon)
+                    && scan.kind != NodeKind.Parenthesized) {
+                    SyntaxNode* next = item_skip_extern_attribute(scan);
+                    if (next != scan) {
+                        scan = next;
                         continue;
                     }
-                    if (scan.kind == NodeKind.Token && scan.text == "#") {
-                        SyntaxNode* attribute = scan.next_sibling;
-                        if (attribute != (SyntaxNode*)0 && attribute.kind == NodeKind.Bracket) {
-                            scan = attribute.next_sibling;
-                            continue;
-                        }
-                    }
-                    if (scan.kind == NodeKind.Parenthesized) {
-                        parameters = scan;
-                        break;
-                    }
-                    if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Identifier) {
+                    if (scan.kind == NodeKind.Token
+                        && scan.token_kind == TokenKind.Identifier) {
                         name = scan;
                     }
                     scan = scan.next_sibling;
                 }
-                if (name != (SyntaxNode*)0 && parameters != (SyntaxNode*)0
+                if (name != (SyntaxNode*)0 && scan != (SyntaxNode*)0
+                    && scan.kind == NodeKind.Parenthesized
                     && strcmp(name.text, function_name) == 0) {
-                    String return_text = String.new();
-                    SyntaxNode* part = declaration_start;
-                    while (part != (SyntaxNode*)0 && part != name) {
-                        if (part.kind == NodeKind.Attribute) {
-                            part = part.next_sibling;
-                            continue;
-                        }
-                        if (part.kind == NodeKind.Token && part.text == "#") {
-                            SyntaxNode* attribute = part.next_sibling;
-                            if (attribute != (SyntaxNode*)0 && attribute.kind == NodeKind.Bracket) {
-                                part = attribute.next_sibling;
-                                continue;
-                            }
-                        }
-                        append_node_tokens(part, &return_text);
-                        part = part.next_sibling;
-                    }
-                    u32 result = type_id_from_text(types, return_text.to_str());
-                    return_text.drop();
+                    result.signature_start = signature_start;
+                    result.function_name = name;
+                    result.parameter_list = scan;
                     return result;
                 }
-                cursor = parameters != (SyntaxNode*)0
-                    ? parameters.next_sibling : cursor.next_sibling;
+                cursor = scan == (SyntaxNode*)0 ? cursor.next_sibling
+                                                : scan.next_sibling;
             }
         }
         item = item.next_sibling;
     }
-    return TYPE_UNKNOWN;
+    return result;
+}
+
+SyntaxNode* item_c_extern_function_parameters(SyntaxNode* root, str function_name) {
+    ExternFunctionSignature signature = item_find_c_extern_function(root, function_name);
+    return signature.parameter_list;
+}
+
+u32 item_c_extern_function_return_type_id(TypeTable* types, SyntaxNode* root,
+                                          str function_name) {
+    ExternFunctionSignature signature = item_find_c_extern_function(root, function_name);
+    if (signature.parameter_list == (SyntaxNode*)0) { return TYPE_UNKNOWN; }
+    String return_text = String.new();
+    SyntaxNode* part = signature.signature_start;
+    while (part != (SyntaxNode*)0 && part != signature.function_name) {
+        part = item_skip_extern_attribute(part);
+        if (part != (SyntaxNode*)0 && part != signature.function_name) {
+            append_node_tokens(part, &return_text);
+            part = part.next_sibling;
+        }
+    }
+    u32 result = type_id_from_text(types, return_text.to_str());
+    return_text.drop();
+    return result;
 }
 
 bool item_is_c_extern_function(SyntaxNode* root, str function_name) {
