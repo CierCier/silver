@@ -104,6 +104,7 @@ fn is_copy_primitive(p: &ast::PrimitiveType) -> bool {
             | ast::PrimitiveType::C64
             | ast::PrimitiveType::C80
             | ast::PrimitiveType::Char
+            | ast::PrimitiveType::Str
     )
 }
 

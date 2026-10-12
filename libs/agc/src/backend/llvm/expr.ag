@@ -3913,6 +3913,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         }
         u32 rhs_type = ctx.types.resolve_subst(llvm_expr_type(ctx, rhs_id));
         TypeEntry* rhs_entry = ctx.types.get(rhs_type);
+        lhs_entry = ctx.types.get(lhs_type);
         bool is_equality = op == (u32)TokenKind.Equal || op == (u32)TokenKind.NotEqual;
         bool lhs_slice_u8 = lhs_entry.kind == TypeKind.Named
             && strcmp(ctx.types.names.get(lhs_entry.name_id), "Slice") == 0

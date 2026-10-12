@@ -10,6 +10,7 @@
 import std.atomic;
 import std.cpu;
 import std.error;
+import std.result;
 import std.fmt;
 import std.mem.alloc;
 import std.mem.drop;
@@ -438,6 +439,14 @@ impl File {
             return File.closed();
         }
         return File.from_fd((i32)r.value());
+    }
+
+    Result<File, Error> try_open(str path, str mode) {
+        Result<i64, Error> r = try_open(path, File.mode_flags(mode), 438); // 0o666
+        if (r.is_err()) {
+            return Result<File, Error>.Err(r.unwrap_err());
+        }
+        return Result<File, Error>.Ok(File.from_fd((i32)r.unwrap()));
     }
 
     File open_read(str path) {

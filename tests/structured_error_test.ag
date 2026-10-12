@@ -1,0 +1,176 @@
+// tests/structured_error_test.ag
+// Comprehensive 4-Tier E2E test suite for Structured Error Handling.
+//
+// Verifies:
+// 1. std.fs structured errors: Result<String, Error> read_file, Result<Vec<String>, Error> read_dir, Result<Metadata, Error> metadata.
+// 2. std.io File.try_open: Result<File, Error> on existing and missing files.
+// 3. File read, write, and close operations with structured results.
+// 4. Low-level std.sys.result typed syscall error mapping (try_open, try_read, try_write, try_close).
+
+import std.test;
+import std.fs;
+import std.io.file;
+import std.sys.result;
+import std.sys.os;
+import std.string;
+import std.error;
+import std.result;
+import std.mem.vec;
+
+// Tier 1: Happy Path Structured Results in std.fs
+void test_tier1_fs_success() {
+    test_start("tier1: std.fs success paths returning Result<T, Error>");
+
+    // Create and read a test file in /tmp
+    str test_file = "/tmp/silver_test_tier1.txt";
+    write_file(test_file, "silver_test_tier1_payload\n");
+    Result<String, Error> content_res = read_file(test_file);
+    assert_true(content_res.is_ok(), "read_file succeeds");
+    String content = content_res.unwrap();
+    assert_true(content.len() > 0, "content length > 0");
+    assert_true(content.contains("silver_test_tier1_payload"), "content matches written payload");
+    content.drop();
+
+    // Query metadata on the test file
+    Result<Metadata, Error> meta_res = metadata(test_file);
+    assert_true(meta_res.is_ok(), "metadata succeeds");
+    Metadata meta = meta_res.unwrap();
+    assert_true(meta.is_file, "is_file is true");
+    assert_false(meta.is_dir, "is_dir is false");
+    assert_true(meta.size > 0, "file size > 0");
+    remove_file(test_file);
+
+    // Read isolated test directory
+    str test_dir = "/tmp/__silver_structured_error_test_dir";
+    create_dir(test_dir);
+    str inner_file = "/tmp/__silver_structured_error_test_dir/inner.txt";
+    write_file(inner_file, "payload");
+
+    Result<Vec<String>, Error> dir_res = read_dir(test_dir);
+    assert_true(dir_res.is_ok(), "read_dir on test directory succeeds");
+    Vec<String> entries = dir_res.unwrap();
+    assert_true(entries.len() > 0, "directory has entries");
+
+    // Verify directory entries contain inner.txt
+    bool found_inner = false;
+    i64 i = 0;
+    while (i < entries.len()) {
+        String* name = entries.get_ptr(i);
+        if (strcmp(name.to_str(), "inner.txt") == 0) {
+            found_inner = true;
+        }
+        i += 1;
+    }
+    assert_true(found_inner, "found inner.txt in directory");
+    entries.drop();
+    remove_file(inner_file);
+    remove_dir(test_dir);
+}
+
+// Tier 2: Error Path and Errno Inspection in std.fs
+void test_tier2_fs_errors() {
+    test_start("tier2: std.fs failure paths with errno inspection");
+
+    // Read non-existent file
+    Result<String, Error> missing_res = read_file("/tmp/silver_nonexistent_file_998877.txt");
+    assert_true(missing_res.is_err(), "read_file on missing file returns Err");
+    Error read_err = missing_res.unwrap_err();
+    assert_eq_i64(2, read_err.code, "errno 2 is ENOENT");
+    assert_true(strlen(read_err.message) > 0, "error message is non-empty");
+
+    // Metadata on non-existent file
+    Result<Metadata, Error> meta_err_res = metadata("/tmp/silver_nonexistent_file_998877.txt");
+    assert_true(meta_err_res.is_err(), "metadata on missing file returns Err");
+    Error meta_err = meta_err_res.unwrap_err();
+    assert_eq_i64(2, meta_err.code, "metadata errno 2 is ENOENT");
+
+    // Read non-existent directory
+    Result<Vec<String>, Error> dir_err_res = read_dir("/tmp/silver_nonexistent_dir_998877/");
+    assert_true(dir_err_res.is_err(), "read_dir on missing dir returns Err");
+    Error dir_err = dir_err_res.unwrap_err();
+    assert_eq_i64(2, dir_err.code, "read_dir errno 2 is ENOENT");
+}
+
+// Tier 3: Structured I/O with File.try_open, read, write, and close
+void test_tier3_file_try_open() {
+    test_start("tier3: File.try_open structured error handling");
+
+    // Missing file returns structured Err(Error) instead of sentinel dummy file
+    Result<File, Error> open_err_res = File.try_open("/tmp/silver_nonexistent_file_998877.txt", "r");
+    assert_true(open_err_res.is_err(), "File.try_open on missing file returns Err");
+    Error open_err = open_err_res.unwrap_err();
+    assert_eq_i64(2, open_err.code, "File.try_open error code 2 is ENOENT");
+
+    // Create and write to a temporary file via File.try_open
+    str temp_path = "/tmp/silver_structured_error_test_temp.txt";
+    Result<File, Error> write_open_res = File.try_open(temp_path, "w");
+    assert_true(write_open_res.is_ok(), "File.try_open write succeeds");
+    File write_file = write_open_res.unwrap();
+    assert_true(write_file.valid(), "write_file is valid");
+
+    // Write content
+    str message = "Structured Error Testing Payload\n";
+    i64 msg_len = strlen(message);
+    i64 written = write_file.write((void*)message, 1, msg_len);
+    assert_eq_i64(msg_len, written, "write wrote all bytes");
+
+    // Close file
+    i32 close_res = write_file.close();
+    assert_eq_i32(0, close_res, "close returned 0");
+
+    // Re-open in read mode via File.try_open
+    Result<File, Error> read_open_res = File.try_open(temp_path, "r");
+    assert_true(read_open_res.is_ok(), "File.try_open read succeeds");
+    File read_file = read_open_res.unwrap();
+    assert_true(read_file.valid(), "read_file is valid");
+
+    // Read content back
+    u8 read_buffer[128];
+    i64 read_bytes = read_file.read((void*)&read_buffer[0], 1, 128);
+    assert_eq_i64(msg_len, read_bytes, "read returned expected byte count");
+    read_buffer[read_bytes] = (u8)0;
+    assert_eq_str(message, (str)&read_buffer[0], "read payload matches written payload");
+
+    read_file.close();
+
+    // Clean up temporary file
+    remove_file(temp_path);
+}
+
+// Tier 4: Low-Level Typed Syscall Errors (std.sys.result)
+void test_tier4_syscall_typed_errors() {
+    test_start("tier4: low-level std.sys.result typed syscall error mapping");
+
+    // try_open missing file -> Err(ENOENT = 2)
+    Result<i64, Error> sys_open_res = try_open("/tmp/silver_nonexistent_file_998877.txt", 0, 0);
+    assert_true(sys_open_res.is_err(), "try_open missing file returns Err");
+    Error sys_open_err = sys_open_res.unwrap_err();
+    assert_eq_i64(2, sys_open_err.code, "try_open code is ENOENT (2)");
+
+    // try_close on bad file descriptor (-1) -> Err(EBADF = 9)
+    Result<i64, Error> sys_close_res = try_close(-1);
+    assert_true(sys_close_res.is_err(), "try_close(-1) returns Err");
+    Error sys_close_err = sys_close_res.unwrap_err();
+    assert_eq_i64(9, sys_close_err.code, "try_close(-1) code is EBADF (9)");
+
+    // try_read on bad file descriptor (-1) -> Err(EBADF = 9)
+    u8 dummy_buf[16];
+    Result<i64, Error> sys_read_res = try_read(-1, &dummy_buf[0], 16);
+    assert_true(sys_read_res.is_err(), "try_read(-1) returns Err");
+    Error sys_read_err = sys_read_res.unwrap_err();
+    assert_eq_i64(9, sys_read_err.code, "try_read(-1) code is EBADF (9)");
+
+    // try_write on bad file descriptor (-1) -> Err(EBADF = 9)
+    Result<i64, Error> sys_write_res = try_write(-1, &dummy_buf[0], 16);
+    assert_true(sys_write_res.is_err(), "try_write(-1) returns Err");
+    Error sys_write_err = sys_write_res.unwrap_err();
+    assert_eq_i64(9, sys_write_err.code, "try_write(-1) code is EBADF (9)");
+}
+
+i32 main() {
+    test_tier1_fs_success();
+    test_tier2_fs_errors();
+    test_tier3_file_try_open();
+    test_tier4_syscall_typed_errors();
+    return done();
+}

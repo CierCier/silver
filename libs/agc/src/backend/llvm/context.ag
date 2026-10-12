@@ -74,7 +74,6 @@ struct MonoRequest {
 struct LlvmContext {
     LLVMOpaqueContext* ctx;
     LLVMTargetDataRef* target_data;
-    LLVMOpaqueContext* ctx_unused;
     LLVMOpaqueModule* module;
     LLVMOpaqueBuilder* builder;
     TypeTable* types;

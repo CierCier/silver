@@ -146,10 +146,75 @@ impl OwnershipAnalyzer {
         return selected;
     }
 
+    u32 resolve_field_type(OwnershipAnalyzer* self, u32 root_type_id, str place) {
+        i64 i = 0;
+        while (place[i] != 0 && place[i] != (u8)'.') { i += 1; }
+        if (place[i] != (u8)'.') {
+            return root_type_id;
+        }
+        i += 1;
+        String field_name = String.new();
+        while (place[i] != 0 && place[i] != (u8)'.' && place[i] != (u8)'[') {
+            field_name.push(place[i]);
+            i += 1;
+        }
+        str fname = field_name.to_str();
+        u32 target_id = root_type_id;
+        if (target_id == TYPE_STR || strcmp(self.type_table.type_name(target_id), "str") == 0) {
+            if (strcmp(fname, "len") == 0) {
+                field_name.drop();
+                return TYPE_I64;
+            }
+        }
+        str root_name = self.type_table.type_name(target_id);
+        if (strcmp(root_name, "String") == 0 || strcmp(root_name, "Slice") == 0 || strcmp(root_name, "Vec") == 0) {
+            if (strcmp(fname, "len") == 0 || strcmp(fname, "cap") == 0 || strcmp(fname, "idx") == 0) {
+                field_name.drop();
+                return TYPE_I64;
+            }
+        }
+        u32 fname_id = self.names.intern(fname);
+        i64 pi = 0;
+        while (pi < self.type_table.struct_properties.len()) {
+            TypeStructProperties* prop = self.type_table.struct_properties.get_ptr(pi);
+            if (prop.name_id == self.names.intern(root_name)) {
+                i64 fi = 0;
+                while (fi < (i64)prop.field_name_count) {
+                    if (self.type_table.struct_field_names.get(prop.field_name_start + (u32)fi) == fname_id) {
+                        u32 fty = self.type_table.struct_fields.get(prop.field_start + (u32)fi);
+                        field_name.drop();
+                        return fty;
+                    }
+                    fi += 1;
+                }
+                break;
+            }
+            pi += 1;
+        }
+        field_name.drop();
+        return root_type_id;
+    }
+
     bool needs_move_tracking(OwnershipAnalyzer* self, str place, Span use_span) {
         i64 index = self.variable_index(place, use_span);
         if (index < 0) { return false; }
         OwnershipVar* variable = self.variables.get_ptr(index);
+
+        i64 dot = 0;
+        while (place[dot] != 0 && place[dot] != (u8)'.') { dot += 1; }
+        if (place[dot] == (u8)'.') {
+            u32 field_ty = self.resolve_field_type(variable.type_id, place);
+            if (field_ty != variable.type_id) {
+                TypeProperties fprop = self.type_table.properties(field_ty);
+                if (fprop.is_copy && !fprop.needs_drop) {
+                    return false;
+                }
+                str ftype_name = self.type_table.type_name(field_ty);
+                if (contains_drop_type(self, ftype_name)) { return true; }
+                return !fprop.is_copy;
+            }
+        }
+
         str type_name = self.type_table.type_name(variable.type_id);
         if (contains_drop_type(self, type_name)) { return true; }
         return !self.type_table.properties(variable.type_id).is_copy;

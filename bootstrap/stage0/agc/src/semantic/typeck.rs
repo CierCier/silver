@@ -3946,9 +3946,13 @@ impl TypeChecker {
             // Try owner type inference — but if the receiver type lacks generic args
             // that correspond to method type params, don't fail: those can be
             // inferred from argument types further below.
+            let target_owner = match &candidate.owner {
+                Type::Reference { .. } | Type::Pointer { .. } => receiver_ty,
+                _ => owner_ty,
+            };
             let owner_inferred = self.infer_type_params(
                 &candidate.owner,
-                owner_ty,
+                target_owner,
                 &candidate.type_params,
                 &mut mapping,
             );
@@ -3960,7 +3964,7 @@ impl TypeChecker {
                 if all_type_params.is_empty()
                     || !self.infer_type_params(
                         &candidate.owner,
-                        owner_ty,
+                        target_owner,
                         &all_type_params,
                         &mut mapping,
                     )
@@ -7070,6 +7074,23 @@ impl TypeChecker {
                         is_mutable: true,
                         is_volatile: false,
                         inner: Box::new((**element).clone()),
+                    });
+                }
+                "len" => {
+                    return Some(Type::Primitive(crate::parser::ast::PrimitiveType::I64));
+                }
+                _ => return None,
+            }
+        }
+
+        // Builtin str has pseudo-fields `data: u8*` and `len: i64`.
+        if let Type::Primitive(crate::parser::ast::PrimitiveType::Str) = current {
+            match field_name {
+                "data" => {
+                    return Some(Type::Pointer {
+                        is_mutable: false,
+                        is_volatile: false,
+                        inner: Box::new(Type::Primitive(crate::parser::ast::PrimitiveType::U8)),
                     });
                 }
                 "len" => {

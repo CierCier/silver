@@ -1,0 +1,256 @@
+// tests/stdlib_modernization_test.ag
+// Comprehensive 4-Tier E2E test suite for Standard Library Modernization & Deduplication.
+//
+// Verifies:
+// 1. Deduplicated HashSet operations (insert, contains, remove, len, iter).
+// 2. BinaryHeap backed by Vec (push, pop, peek, from_vec, into_vec).
+// 3. Bytes slice operations, indexing, and iteration.
+// 4. Unified slice algorithms (heapsort, binary_search, lower/upper_bound, reverse).
+// 5. Consolidated string slice algorithms (trim, starts/ends_with, contains, split_once, parse_i64).
+
+import std.test;
+import std.collections.set;
+import std.collections.heap;
+import std.bytes;
+import std.slice;
+import std.algo.sort;
+import std.algo.search;
+import std.algo.reverse;
+import std.string;
+import std.optional;
+
+// Tier 1: HashSet Operations
+void test_tier1_hashset_operations() {
+    test_start("tier1: HashSet operations (insert, contains, remove, len, iter)");
+
+    HashSet<i64> set = HashSet<i64>.new();
+    assert_eq_i64(0, set.len(), "new set is empty");
+    assert_true(set.is_empty(), "set.is_empty() on new");
+
+    // Insert elements
+    assert_true(set.insert(10), "insert 10 returns true");
+    assert_true(set.insert(20), "insert 20 returns true");
+    assert_true(set.insert(30), "insert 30 returns true");
+    assert_false(set.insert(20), "insert duplicate 20 returns false");
+    assert_eq_i64(3, set.len(), "set.len() == 3 after inserts");
+
+    // Contains
+    assert_true(set.contains(10), "contains 10");
+    assert_true(set.contains(20), "contains 20");
+    assert_true(set.contains(30), "contains 30");
+    assert_false(set.contains(999), "does not contain 999");
+    assert_false(set.contains(0), "does not contain 0");
+
+    // Remove
+    assert_true(set.remove(20), "remove existing 20 returns true");
+    assert_eq_i64(2, set.len(), "set.len() == 2 after remove");
+    assert_false(set.contains(20), "20 no longer present after remove");
+    assert_false(set.remove(20), "remove non-existent 20 returns false");
+
+    // Iteration via drain
+    HashSetDrain<i64> dr = set.drain();
+    i64 count = 0;
+    i64 sum = 0;
+    while (true) {
+        Optional<i64> opt = dr.next();
+        if (opt.is_none()) {
+            break;
+        }
+        sum = sum + opt.unwrap();
+        count = count + 1;
+    }
+    assert_eq_i64(2, count, "drain visited 2 items");
+    assert_eq_i64(40, sum, "drain items sum to 10 + 30 = 40");
+    assert_eq_i64(0, set.len(), "set is empty after drain");
+
+    set.drop();
+}
+
+// Tier 2: BinaryHeap Backed by Vec
+void test_tier2_binary_heap_operations() {
+    test_start("tier2: BinaryHeap operations (push, pop, peek, from_vec, into_vec)");
+
+    BinaryHeap<i64> heap = BinaryHeap<i64>.new();
+    assert_eq_i64(0, heap.len(), "new heap has len 0");
+    assert_true(heap.is_empty(), "heap.is_empty()");
+
+    // Push unsorted values
+    heap.push(15);
+    heap.push(40);
+    heap.push(10);
+    heap.push(50);
+    heap.push(20);
+
+    assert_eq_i64(5, heap.len(), "heap.len() == 5");
+    assert_eq_i64(50, heap.peek(), "heap.peek() returns max 50");
+
+    // Pop extracts in descending order
+    assert_eq_i64(50, heap.pop(), "pop 1st max == 50");
+    assert_eq_i64(40, heap.pop(), "pop 2nd max == 40");
+    assert_eq_i64(20, heap.pop(), "pop 3rd max == 20");
+    assert_eq_i64(15, heap.pop(), "pop 4th max == 15");
+    assert_eq_i64(10, heap.pop(), "pop 5th max == 10");
+    assert_true(heap.is_empty(), "heap is empty after all pops");
+
+    heap.drop();
+
+    // from_vec linear-time construction
+    Vec<i64> initial = Vec<i64>.new();
+    initial.push(7);
+    initial.push(2);
+    initial.push(99);
+    initial.push(42);
+    initial.push(1);
+
+    BinaryHeap<i64> from_h = BinaryHeap<i64>.from_vec(move initial);
+    assert_eq_i64(5, from_h.len(), "from_vec preserved 5 elements");
+    assert_eq_i64(99, from_h.peek(), "peek on from_vec heap == 99");
+
+    // into_vec transfer
+    Vec<i64> recovered = from_h.into_vec();
+    assert_eq_i64(5, recovered.len(), "into_vec returned 5 elements");
+
+    recovered.drop();
+}
+
+// Tier 3: Bytes Slice Operations and Iteration
+void test_tier3_bytes_operations() {
+    test_start("tier3: Bytes slice operations, indexing, and iteration");
+
+    Bytes b = Bytes.from_str("Silver Standard");
+    assert_eq_i64(15, b.len(), "Bytes.len() == 15");
+    assert_false(b.is_empty(), "Bytes is not empty");
+
+    // Index access
+    assert_eq_u64((u64)'S', (u64)b.get(0), "b.get(0) == 'S'");
+    assert_eq_u64((u64)'i', (u64)b.get(1), "b.get(1) == 'i'");
+    assert_eq_u64((u64)'d', (u64)b.get(14), "b.get(14) == 'd'");
+
+    // Mutation
+    b.set(0, (u8)'s');
+    assert_eq_u64((u64)'s', (u64)b.get(0), "b.get(0) modified to 's'");
+
+    // Search operations
+    assert_eq_i64(6, b.find((u8)' '), "find space at index 6");
+    assert_eq_i64(-1, b.find((u8)'z'), "find missing byte returns -1");
+    assert_eq_i64(13, b.rfind((u8)'r'), "rfind 'r' at index 13");
+
+    // Slice conversion and sub-slicing
+    Slice<u8> sl = b.as_slice();
+    assert_eq_i64(15, sl.len, "sl.len == 15");
+
+    Slice<u8> sub = b.__slice_get(0, 6);
+    assert_eq_i64(6, sub.len, "sub-slice length == 6");
+    assert_eq_u64((u64)'s', (u64)sub.data[0], "sub[0] == 's'");
+    assert_eq_u64((u64)'r', (u64)sub.data[5], "sub[5] == 'r'");
+
+    // Iteration via BytesIter
+    BytesIter it = b.iter();
+    i64 it_count = 0;
+    while (true) {
+        Optional<u8> opt = it.next();
+        if (opt.is_none()) {
+            break;
+        }
+        it_count += 1;
+    }
+    assert_eq_i64(15, it_count, "BytesIter traversed 15 bytes");
+
+    b.drop();
+}
+
+// Tier 4: Unified Slice Algorithms & String Slice Modernization
+void test_tier4_algorithms_and_string_slices() {
+    test_start("tier4: unified slice sorting/searching and string algorithms");
+
+    // --- Unified Slice Sorting & Searching ---
+    Vec<i64> v = Vec<i64>.new();
+    v.push(42);
+    v.push(17);
+    v.push(99);
+    v.push(-5);
+    v.push(0);
+    v.push(12);
+
+    Slice<i64> s = v.as_mut_slice();
+    assert_false(is_sorted_slice<i64>(s), "initially unsorted");
+
+    // Heapsort on slice
+    sort_slice_ref<i64>(s);
+    assert_true(is_sorted_slice<i64>(s), "sorted after sort_slice_ref");
+    assert_eq_i64(-5, v.get(0), "v[0] == -5");
+    assert_eq_i64(0, v.get(1), "v[1] == 0");
+    assert_eq_i64(12, v.get(2), "v[2] == 12");
+    assert_eq_i64(17, v.get(3), "v[3] == 17");
+    assert_eq_i64(42, v.get(4), "v[4] == 42");
+    assert_eq_i64(99, v.get(5), "v[5] == 99");
+
+    // Binary search on sorted slice
+    assert_true(binary_search_slice<i64>(s, 17), "binary_search found 17");
+    assert_true(binary_search_slice<i64>(s, -5), "binary_search found -5");
+    assert_true(binary_search_slice<i64>(s, 99), "binary_search found 99");
+    assert_false(binary_search_slice<i64>(s, 100), "binary_search not found 100");
+    assert_false(binary_search_slice<i64>(s, -6), "binary_search not found -6");
+
+    // Lower and Upper bounds
+    assert_eq_i64(3, lower_bound_slice<i64>(s, 17), "lower_bound 17 at index 3");
+    assert_eq_i64(4, upper_bound_slice<i64>(s, 17), "upper_bound 17 at index 4");
+
+    // Reverse slice
+    reverse_slice_ref<i64>(s);
+    assert_eq_i64(99, v.get(0), "after reverse v[0] == 99");
+    assert_eq_i64(42, v.get(1), "after reverse v[1] == 42");
+    assert_eq_i64(-5, v.get(5), "after reverse v[5] == -5");
+
+    v.drop();
+
+    // --- Consolidated String Algorithms ---
+    String str_val = String.from_str("  \t  hello, silver world!  \n ");
+    String trimmed = str_val.trim();
+    assert_eq_str("hello, silver world!", trimmed.to_str(), "String.trim() removes whitespace");
+
+    assert_true(trimmed.starts_with("hello"), "starts_with 'hello'");
+    assert_false(trimmed.starts_with("silver"), "not starts_with 'silver'");
+    assert_true(trimmed.ends_with("world!"), "ends_with 'world!'");
+    assert_false(trimmed.ends_with("hello"), "not ends_with 'hello'");
+    assert_true(trimmed.contains("silver"), "contains 'silver'");
+    assert_false(trimmed.contains("rust"), "not contains 'rust'");
+
+    // split_once
+    Optional<[String, String]> parts = trimmed.split_once(",");
+    assert_true(parts.is_some(), "split_once found comma");
+    [String, String] pair = parts.unwrap();
+    assert_eq_str("hello", pair[0].to_str(), "split_once left part");
+    assert_eq_str(" silver world!", pair[1].to_str(), "split_once right part");
+    pair[0].drop();
+    pair[1].drop();
+
+    // parse_i64 on String and Slice
+    String num_pos = String.from_str("123456");
+    Optional<i64> parsed_pos = num_pos.parse_i64();
+    assert_true(parsed_pos.is_some(), "parsed positive i64");
+    assert_eq_i64(123456, parsed_pos.unwrap(), "value == 123456");
+
+    String num_neg = String.from_str("-98765");
+    Optional<i64> parsed_neg = num_neg.parse_i64();
+    assert_true(parsed_neg.is_some(), "parsed negative i64");
+    assert_eq_i64(-98765, parsed_neg.unwrap(), "value == -98765");
+
+    String num_invalid = String.from_str("not_a_number");
+    Optional<i64> parsed_inv = num_invalid.parse_i64();
+    assert_true(parsed_inv.is_none(), "invalid string parse yields None");
+
+    num_pos.drop();
+    num_neg.drop();
+    num_invalid.drop();
+    str_val.drop();
+    trimmed.drop();
+}
+
+i32 main() {
+    test_tier1_hashset_operations();
+    test_tier2_binary_heap_operations();
+    test_tier3_bytes_operations();
+    test_tier4_algorithms_and_string_slices();
+    return done();
+}

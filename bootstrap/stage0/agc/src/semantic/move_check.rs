@@ -1025,6 +1025,46 @@ impl MoveChecker {
             return Some(curr_ty);
         }
         for segment in path.split('.') {
+            if let ast::TypeKind::Slice(elem) = curr_ty.kind.as_ref() {
+                if segment == "len" {
+                    curr_ty = ast::Type {
+                        kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::I64)),
+                        span: curr_ty.span,
+                    };
+                    continue;
+                } else if segment == "data" {
+                    curr_ty = ast::Type {
+                        kind: Box::new(ast::TypeKind::Pointer(ast::PointerType {
+                            is_mutable: true,
+                            is_volatile: false,
+                            inner: elem.element_type.clone(),
+                        })),
+                        span: curr_ty.span,
+                    };
+                    continue;
+                }
+            } else if let ast::TypeKind::Primitive(ast::PrimitiveType::Str) = curr_ty.kind.as_ref() {
+                if segment == "len" {
+                    curr_ty = ast::Type {
+                        kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::I64)),
+                        span: curr_ty.span,
+                    };
+                    continue;
+                } else if segment == "data" {
+                    curr_ty = ast::Type {
+                        kind: Box::new(ast::TypeKind::Pointer(ast::PointerType {
+                            is_mutable: false,
+                            is_volatile: false,
+                            inner: Box::new(ast::Type {
+                                kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::U8)),
+                                span: curr_ty.span,
+                            }),
+                        })),
+                        span: curr_ty.span,
+                    };
+                    continue;
+                }
+            }
             let owner = Facts::owner_key(&curr_ty);
             let info = self.facts.struct_fields.get(&owner)?;
             let (_, field_ty) = info.fields.iter().find(|(name, _)| name == segment)?;

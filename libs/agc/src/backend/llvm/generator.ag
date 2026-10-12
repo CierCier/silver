@@ -504,24 +504,7 @@ String llvm_const_global_literal_prefix(str global_name, str kind, i64 index) {
     prefix.push((u8)'.');
     prefix.push_str(kind);
     prefix.push((u8)'.');
-    String digits = String.new();
-    i64 value = index;
-    if (value == 0) { digits.push((u8)'0'); }
-    while (value > 0) {
-        digits.push((u8)('0' + (value % 10)));
-        value = value / 10;
-    }
-    i64 left = 0;
-    i64 right = digits.len() - 1;
-    while (left < right) {
-        u8 temp = digits.data[left];
-        digits.data[left] = digits.data[right];
-        digits.data[right] = temp;
-        left += 1;
-        right -= 1;
-    }
-    prefix.push_str(digits.to_str());
-    digits.drop();
+    append_u32(&prefix, (u32)index);
     return move prefix;
 }
 

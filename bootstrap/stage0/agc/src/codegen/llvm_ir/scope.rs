@@ -1347,7 +1347,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
     pub(crate) fn extract_named_type_owned(ty: &ast::Type) -> Option<ast::NamedType> {
         match ty.kind.as_ref() {
-            ast::TypeKind::Named(named) => Some(named.clone()),
+            ast::TypeKind::Named(named) => {
+                if named.path.len() == 1
+                    && named.generics.is_none()
+                    && named.path[0].name.contains('<')
+                {
+                    if let Ok(parsed) = Type::from_canonical_key(&named.path[0].name) {
+                        let ast_ty = parsed.to_ast();
+                        if let ast::TypeKind::Named(parsed_named) = *ast_ty.kind {
+                            return Some(parsed_named);
+                        }
+                    }
+                }
+                Some(named.clone())
+            }
             ast::TypeKind::Optional(inner) => Some(ast::NamedType {
                 path: vec![ast::Identifier {
                     name: "Optional".to_string(),

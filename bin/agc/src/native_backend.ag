@@ -720,25 +720,33 @@ bool native_store_cached_object(str cache_path, str object_path) {
     return stored;
 }
 
+enum CacheEntryKind {
+    Missing;
+    Directory;
+    Symlink;
+    File;
+}
+const i64 NANOS_PER_SECOND = 1000000000;
+
 // Never recurse into a cache entry that resolves through a symlink.
-i32 native_cache_entry_kind(str path, i64* size, i64* modified) {
+CacheEntryKind native_cache_entry_kind(str path, i64* size, i64* modified) {
     Result<Metadata, Error> result = symlink_metadata(path);
-    if (result.is_err()) { return 0; }
+    if (result.is_err()) { return CacheEntryKind.Missing; }
     Metadata entry = result.unwrap();
     *size = entry.size;
-    *modified = entry.mtime_sec * 1000000000 + entry.mtime_nsec;
-    if (entry.is_dir) { return 1; }
-    if (entry.is_symlink) { return 2; }
-    if (entry.is_file) { return 3; }
-    return 0;
+    *modified = entry.mtime_sec * NANOS_PER_SECOND + entry.mtime_nsec;
+    if (entry.is_dir) { return CacheEntryKind.Directory; }
+    if (entry.is_symlink) { return CacheEntryKind.Symlink; }
+    if (entry.is_file) { return CacheEntryKind.File; }
+    return CacheEntryKind.Missing;
 }
 
 bool native_cache_measure(str path, i64* count, i64* bytes) {
     i64 path_size = 0;
     i64 path_time = 0;
-    i32 path_kind = native_cache_entry_kind(path, &path_size, &path_time);
-    if (path_kind == 0) { return !exists(path); }
-    if (path_kind != 1) {
+    CacheEntryKind path_kind = native_cache_entry_kind(path, &path_size, &path_time);
+    if (path_kind == CacheEntryKind.Missing) { return !exists(path); }
+    if (path_kind != CacheEntryKind.Directory) {
         return false;
     }
     Result<Vec<String>, Error> result = read_dir(path);
@@ -751,14 +759,14 @@ bool native_cache_measure(str path, i64* count, i64* bytes) {
         child.push_str(entries.get_ptr(i).to_str());
         i64 size = 0;
         i64 modified = 0;
-        i32 kind = native_cache_entry_kind(child.to_str(), &size, &modified);
-        if (kind == 1) {
+        CacheEntryKind kind = native_cache_entry_kind(child.to_str(), &size, &modified);
+        if (kind == CacheEntryKind.Directory) {
             if (!native_cache_measure(child.to_str(), count, bytes)) {
                 child.drop();
                 entries.drop();
                 return false;
             }
-        } else if (kind == 2 || kind == 3) {
+        } else if (kind == CacheEntryKind.Symlink || kind == CacheEntryKind.File) {
             if (size < 0) {
                 child.drop();
                 entries.drop();
@@ -781,9 +789,9 @@ bool native_cache_measure(str path, i64* count, i64* bytes) {
 bool native_cache_oldest(str path, String* oldest_path, i64* oldest_time) {
     i64 path_size = 0;
     i64 path_time = 0;
-    i32 path_kind = native_cache_entry_kind(path, &path_size, &path_time);
-    if (path_kind == 0) { return !exists(path); }
-    if (path_kind != 1) {
+    CacheEntryKind path_kind = native_cache_entry_kind(path, &path_size, &path_time);
+    if (path_kind == CacheEntryKind.Missing) { return !exists(path); }
+    if (path_kind != CacheEntryKind.Directory) {
         return false;
     }
     Result<Vec<String>, Error> result = read_dir(path);
@@ -796,14 +804,14 @@ bool native_cache_oldest(str path, String* oldest_path, i64* oldest_time) {
         child.push_str(entries.get_ptr(i).to_str());
         i64 size = 0;
         i64 modified = 0;
-        i32 kind = native_cache_entry_kind(child.to_str(), &size, &modified);
-        if (kind == 1) {
+        CacheEntryKind kind = native_cache_entry_kind(child.to_str(), &size, &modified);
+        if (kind == CacheEntryKind.Directory) {
             if (!native_cache_oldest(child.to_str(), oldest_path, oldest_time)) {
                 child.drop();
                 entries.drop();
                 return false;
             }
-        } else if (kind == 2 || kind == 3) {
+        } else if (kind == CacheEntryKind.Symlink || kind == CacheEntryKind.File) {
             if (oldest_path.len() == 0 || modified < *oldest_time) {
                 oldest_path.clear();
                 oldest_path.push_str(child.to_str());
@@ -824,9 +832,9 @@ bool native_cache_oldest(str path, String* oldest_path, i64* oldest_time) {
 bool native_cache_remove_tree(str path) {
     i64 path_size = 0;
     i64 path_time = 0;
-    i32 kind = native_cache_entry_kind(path, &path_size, &path_time);
-    if (kind == 2 || kind == 3) { return remove_file(path); }
-    if (kind != 1) { return false; }
+    CacheEntryKind kind = native_cache_entry_kind(path, &path_size, &path_time);
+    if (kind == CacheEntryKind.Symlink || kind == CacheEntryKind.File) { return remove_file(path); }
+    if (kind != CacheEntryKind.Directory) { return false; }
     Result<Vec<String>, Error> result = read_dir(path);
     if (result.is_err()) { return false; }
     Vec<String> entries = result.unwrap();
@@ -976,9 +984,9 @@ i32 native_cache_command(CliMatches* cli, bool color) {
     if (strcmp(action, "clean") == 0) {
         i64 size = 0;
         i64 modified = 0;
-        i32 kind = native_cache_entry_kind(directory.to_str(), &size, &modified);
-        bool ok = kind == 0 ? !exists(directory.to_str())
-            : kind == 1 && native_cache_remove_tree(directory.to_str());
+        CacheEntryKind kind = native_cache_entry_kind(directory.to_str(), &size, &modified);
+        bool ok = kind == CacheEntryKind.Missing ? !exists(directory.to_str())
+            : kind == CacheEntryKind.Directory && native_cache_remove_tree(directory.to_str());
         if (ok) {
             cli_write_styled(&STDOUT, "agc: cleared native object cache", CliStyle.Muted, color);
             STDOUT.write_str("\n");
@@ -1052,9 +1060,9 @@ i32 native_cache_command(CliMatches* cli, bool color) {
             ok = native_cache_oldest(directory.to_str(), &oldest, &oldest_time);
             i64 size = 0;
             i64 modified = 0;
-            i32 kind = oldest.len() > 0
-                ? native_cache_entry_kind(oldest.to_str(), &size, &modified) : 0;
-            if (!ok || oldest.len() == 0 || (kind != 2 && kind != 3)
+            CacheEntryKind kind = oldest.len() > 0
+                ? native_cache_entry_kind(oldest.to_str(), &size, &modified) : CacheEntryKind.Missing;
+            if (!ok || oldest.len() == 0 || (kind != CacheEntryKind.Symlink && kind != CacheEntryKind.File)
                 || size < 0 || !remove_file(oldest.to_str())) {
                 ok = false;
                 oldest.drop();

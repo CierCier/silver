@@ -137,7 +137,8 @@ TypeProperties type_properties_at(TypeTable* table, u32 id, u32 depth) {
         return properties;
     }
     TypeEntry* entry = table.types.get_ptr((i64)id);
-    if ((id >= TYPE_BOOL && id <= TYPE_C80) || id == TYPE_CHAR
+    if ((id >= TYPE_BOOL && id <= TYPE_C80) || id == TYPE_CHAR || id == TYPE_STR
+        || entry.kind == TypeKind.Str
         || entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference
         || entry.kind == TypeKind.Function) {
         properties.is_copy = true;

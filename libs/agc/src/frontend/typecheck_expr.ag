@@ -2770,7 +2770,6 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 && types.get(types.resolve_subst(entry.inner)).kind == TypeKind.Str) {
                 inferred = TYPE_U8;
             } else if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) {
-                TypeEntry* inner_entry = types.get(types.resolve_subst(entry.inner));
                 inferred = types.resolve_subst(entry.inner);
             } else if (entry.kind == TypeKind.Array) {
                 inferred = types.resolve_subst(entry.inner);

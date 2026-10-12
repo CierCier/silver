@@ -305,6 +305,25 @@ u32 llvm_resolve_named(LlvmContext* lctx, TypeTable* types, u32 type_id) {
     return type_id;
 }
 
+void append_u32(String* out, u32 value) {
+    if (value == 0) {
+        out.push((u8)'0');
+        return;
+    }
+    String digits = String.new();
+    u32 temp = value;
+    while (temp > 0) {
+        digits.push((u8)('0' + (temp % 10)));
+        temp = temp / 10;
+    }
+    i64 right = digits.len() - 1;
+    while (right >= 0) {
+        out.push(digits.data[right]);
+        right -= 1;
+    }
+    digits.drop();
+}
+
 str llvm_concrete_type_name(TypeTable* types, u32 type_id) {
     TypeEntry* entry = types.get(type_id);
     if (entry.kind != TypeKind.Named || entry.count == 0) {
@@ -316,24 +335,7 @@ str llvm_concrete_type_name(TypeTable* types, u32 type_id) {
     while (i < entry.count) {
         if (i > 0) { name.push((u8)'_'); }
         u32 arg = types.type_args.get(entry.inner + i);
-        String digits = String.new();
-        u32 value = arg;
-        if (value == 0) { digits.push((u8)'0'); }
-        while (value > 0) {
-            digits.push((u8)('0' + (value % 10)));
-            value = value / 10;
-        }
-        i64 left = 0;
-        i64 right = digits.len() - 1;
-        while (left < right) {
-            u8 temp = digits.data[left];
-            digits.data[left] = digits.data[right];
-            digits.data[right] = temp;
-            left += 1;
-            right -= 1;
-        }
-        name.push_str(digits.to_str());
-        digits.drop();
+        append_u32(&name, arg);
         i += 1;
     }
     u32 name_id = types.names.intern(name.to_str());

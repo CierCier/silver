@@ -72,24 +72,7 @@ String mono_mangle_method(str base, str method, Vec<u32>* arg_ids) {
     i64 i = 0;
     while (i < arg_ids.len()) {
         mangled.push_str("__type_");
-        String digits = String.new();
-        u32 value = arg_ids.get(i);
-        if (value == 0) { digits.push((u8)'0'); }
-        while (value > 0) {
-            digits.push((u8)('0' + (value % 10)));
-            value = value / 10;
-        }
-        i64 left = 0;
-        i64 right = digits.len() - 1;
-        while (left < right) {
-            u8 temp = digits.data[left];
-            digits.data[left] = digits.data[right];
-            digits.data[right] = temp;
-            left += 1;
-            right -= 1;
-        }
-        mangled.push_str(digits.to_str());
-        digits.drop();
+        append_u32(&mangled, arg_ids.get(i));
         i += 1;
     }
     return move mangled;
@@ -98,45 +81,11 @@ String mono_mangle_method(str base, str method, Vec<u32>* arg_ids) {
 String mono_mangle_function(str base, Vec<u32>* arg_ids, u32 value_arg_count) {
     String mangled = String.from_str(base);
     mangled.push_str("__arity_");
-    String arity_digits = String.new();
-    u32 arity = value_arg_count;
-    if (arity == 0) { arity_digits.push((u8)'0'); }
-    while (arity > 0) {
-        arity_digits.push((u8)('0' + (arity % 10)));
-        arity = arity / 10;
-    }
-    i64 arity_left = 0;
-    i64 arity_right = arity_digits.len() - 1;
-    while (arity_left < arity_right) {
-        u8 temp = arity_digits.data[arity_left];
-        arity_digits.data[arity_left] = arity_digits.data[arity_right];
-        arity_digits.data[arity_right] = temp;
-        arity_left += 1;
-        arity_right -= 1;
-    }
-    mangled.push_str(arity_digits.to_str());
-    arity_digits.drop();
+    append_u32(&mangled, value_arg_count);
     i64 i = 0;
     while (i < arg_ids.len()) {
         mangled.push_str("__type_");
-        String digits = String.new();
-        u32 value = arg_ids.get(i);
-        if (value == 0) { digits.push((u8)'0'); }
-        while (value > 0) {
-            digits.push((u8)('0' + (value % 10)));
-            value = value / 10;
-        }
-        i64 left = 0;
-        i64 right = digits.len() - 1;
-        while (left < right) {
-            u8 temp = digits.data[left];
-            digits.data[left] = digits.data[right];
-            digits.data[right] = temp;
-            left += 1;
-            right -= 1;
-        }
-        mangled.push_str(digits.to_str());
-        digits.drop();
+        append_u32(&mangled, arg_ids.get(i));
         i += 1;
     }
     return move mangled;

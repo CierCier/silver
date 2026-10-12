@@ -294,6 +294,22 @@ impl<T> IntoIterator for Vec<T> {
     }
 }
 
+impl<T> IntoIterator for VecIter<T> {
+    type Item = T;
+    type IntoIter = VecIter<T>;
+    VecIter<T> into_iter(self) {
+        return self;
+    }
+}
+
+impl<T> IntoIterator for Vec<T>* {
+    type Item = T;
+    type IntoIter = SliceIter<T>;
+    SliceIter<T> into_iter(self) {
+        return self.iter();
+    }
+}
+
 impl<T> Vec<T> {
     Slice<T> as_slice(&self) {
         Slice<T> s;
