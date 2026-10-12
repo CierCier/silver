@@ -2320,8 +2320,12 @@ bool native_compile_module_object(SyntaxTree* tree, TypeTable* types, Interner* 
                                  u32 source_file_id, Vec<u32>* owned_source_ids,
                                  Vec<u32>* standalone_source_ids, str object_path,
                                  String* cache_path, NativeBuildProgress* progress,
-                                 str progress_target, bool* was_cached, i32* result) {
+                                 str progress_target, bool* was_cached, i32* result,
+                                 i64* ir_gen_ms, i64* verify_ms, i64* emit_obj_ms) {
     *result = 0;
+    *ir_gen_ms = 0;
+    *verify_ms = 0;
+    *emit_obj_ms = 0;
     bool cache_hit = cache_path.len() > 0 && is_file(cache_path.to_str());
     if (cache_hit && !native_copy_cached_object(cache_path.to_str(), object_path)) {
         cache_hit = false;
@@ -2331,11 +2335,14 @@ bool native_compile_module_object(SyntaxTree* tree, TypeTable* types, Interner* 
     if (!cache_hit) {
         progress.unit_started = now();
         native_progress_start(progress, progress_target);
+        Instant t0 = now();
         AstPool ast_pool = AstPool.new();
         LlvmGenerator gen = LlvmGenerator.new("silver_native");
         bool compile_ok = gen.compile(tree, &ast_pool, types, names, symbols,
             source_paths, debug_mode, module_object, source_file_id,
             owned_source_ids, standalone_source_ids);
+        Instant t1 = now();
+        *ir_gen_ms = t1.elapsed_ns(t0) / 1000000;
 
         if (!gen.ownership_diagnostics.is_empty()) {
             i64 i = 0;
@@ -2380,6 +2387,7 @@ bool native_compile_module_object(SyntaxTree* tree, TypeTable* types, Interner* 
             return false;
         }
 
+        Instant t_v0 = now();
         String verify_err = String.new();
         if (!gen.verify(&verify_err)) {
             STDERR.write_str("agc: error: llvm verify failed: ");
@@ -2391,7 +2399,10 @@ bool native_compile_module_object(SyntaxTree* tree, TypeTable* types, Interner* 
             return true;
         }
         verify_err.drop();
+        Instant t_v1 = now();
+        *verify_ms = t_v1.elapsed_ns(t_v0) / 1000000;
 
+        Instant t_e0 = now();
         String emit_err = String.new();
         bool emitted = gen.emit_object_file(object_path, &emit_err);
         if (!emitted) {
@@ -2404,6 +2415,8 @@ bool native_compile_module_object(SyntaxTree* tree, TypeTable* types, Interner* 
             return true;
         }
         emit_err.drop();
+        Instant t_e1 = now();
+        *emit_obj_ms = t_e1.elapsed_ns(t_e0) / 1000000;
         gen.destroy();
         native_store_cached_object(cache_path.to_str(), object_path);
     }
@@ -2427,6 +2440,9 @@ struct NativeCompileResult {
     bool reported;
     i32 result;
     i64 elapsed_ms;
+    i64 ir_gen_ms;
+    i64 verify_ms;
+    i64 emit_obj_ms;
 }
 
 struct NativeCompilePool {
@@ -2478,7 +2494,7 @@ bool native_compile_one(NativeCompileWorker* worker) {
         pool.module_object, job.source_file_id, &job.owned_source_ids,
         pool.standalone_source_ids, job.object_path.to_str(),
         &job.cache_path, &quiet, job.module_name.to_str(), &result.cached,
-        &result.result);
+        &result.result, &result.ir_gen_ms, &result.verify_ms, &result.emit_obj_ms);
     result.elapsed_ms = now().elapsed_ns(started) / 1000000;
     __atomic_store_i32(&result.completed, 1, ATOMIC_RELEASE);
     return true;
@@ -2893,19 +2909,29 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     }
     if (diagnostics.is_empty()) {
         profiler_begin_phase("type check");
+        profiler_begin_phase("check declared types");
         check_declared_types(&symbols, &tree, &cfg, &diagnostics);
+        profiler_end_phase("check declared types");
         if (diagnostics.is_empty()) {
+            profiler_begin_phase("check borrows");
             check_borrows(&tree, &symbols, &diagnostics, &cfg);
+            profiler_end_phase("check borrows");
         }
         if (diagnostics.is_empty()) {
+            profiler_begin_phase("check send");
             check_send(&tree, &diagnostics, &cfg);
+            profiler_end_phase("check send");
         }
         if (diagnostics.is_empty()) {
+            profiler_begin_phase("check ownership");
             check_ownership(&tree, &diagnostics, &cfg);
+            profiler_end_phase("check ownership");
         }
         if (diagnostics.is_empty()) {
+            profiler_begin_phase("typecheck expressions");
             AstPool check_pool = AstPool.new();
             typecheck_expressions_scoped(&check_pool, &symbols, &tree, &cfg, &diagnostics, 1);
+            profiler_end_phase("typecheck expressions");
         }
         profiler_end_phase("type check");
     }
@@ -3038,6 +3064,9 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         pending.reported = false;
         pending.result = 0;
         pending.elapsed_ms = 0;
+        pending.ir_gen_ms = 0;
+        pending.verify_ms = 0;
+        pending.emit_obj_ms = 0;
         results.push(move pending);
         object_paths.push(jobs.get_ptr(module_index).object_path.clone());
         module_index += 1;
@@ -3047,6 +3076,30 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         source_path, &standalone_source_ids, &source_copy, &progress,
         cfg.contains("debug"),
         module_object, requested_jobs, &jobs, &results);
+    if (profiler_verbose()) {
+        i64 total_ir_gen = 0;
+        i64 total_verify = 0;
+        i64 total_emit_obj = 0;
+        i64 j = 0;
+        while (j < results.len()) {
+            NativeCompileResult* res = results.get_ptr(j);
+            total_ir_gen += res.ir_gen_ms;
+            total_verify += res.verify_ms;
+            total_emit_obj += res.emit_obj_ms;
+            j += 1;
+        }
+        i64 rss = read_rss_kb();
+        profiler_record_phase("llvm ir gen (all jobs)", (f64)total_ir_gen, rss, rss, false);
+        profiler_record_phase("llvm verify (all jobs)", (f64)total_verify, rss, rss, false);
+        profiler_record_phase("llvm emit object (all jobs)", (f64)total_emit_obj, rss, rss, false);
+        j = 0;
+        while (j < jobs.len()) {
+            NativeCompileJob* job = jobs.get_ptr(j);
+            NativeCompileResult* res = results.get_ptr(j);
+            profiler_record_phase(job.module_name.to_str(), (f64)res.elapsed_ms, rss, rss, res.cached);
+            j += 1;
+        }
+    }
     profiler_end_phase("codegen");
     module_index = 0;
     while (module_index < results.len()) {

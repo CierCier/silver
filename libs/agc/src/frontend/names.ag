@@ -2,7 +2,9 @@
 // projection; it deliberately keeps declaration order and does not iterate a
 // hash table.
 import std.mem.vec;
+import std.string;
 import std.intern;
+import std.profiler;
 import frontend.ast;
 import frontend.diagnostics;
 import frontend.messages;
@@ -41,9 +43,13 @@ impl NameResolver {
     }
 
     bool has_local(NameResolver* self, str name) {
+        if (!self.local_names.contains(name)) {
+            return false;
+        }
+        u32 name_id = self.local_names.intern(name);
         i64 i = 0;
         while (i < self.locals.len()) {
-            if (self.local_names.get(self.locals.get(i)) == name) {
+            if (self.locals.get(i) == name_id) {
                 return true;
             }
             i += 1;
@@ -98,7 +104,7 @@ impl NameResolver {
                     bool seen = false;
                     i64 j = 0;
                     while (j < candidates.len()) {
-                        if (candidates.get(j) == candidate) { seen = true; break; }
+                        if (strcmp(candidates.get(j), candidate) == 0) { seen = true; break; }
                         j += 1;
                     }
                     if (!seen) { candidates.push(candidate); }
@@ -121,7 +127,7 @@ impl NameResolver {
                     bool seen = false;
                     i64 j = 0;
                     while (j < candidates.len()) {
-                        if (candidates.get(j) == candidate) { seen = true; break; }
+                        if (strcmp(candidates.get(j), candidate) == 0) { seen = true; break; }
                         j += 1;
                     }
                     if (!seen) { candidates.push(candidate); }
@@ -298,17 +304,14 @@ bool name_starts_with(str text, str prefix) {
 }
 
 void resolve_function(NameResolver* resolver, SyntaxNode* function, CfgSet* cfg) {
+    resolver.locals.len = 0;
     SyntaxNode* body = function_body(function);
     if (body == (SyntaxNode*)0) {
         return;
     }
     // Const-ness is function-scoped: a `const c` in one function must not
-    // poison an unrelated `c` in another. (Plain locals stay flat, matching
-    // the existing conservative projection.)
+    // poison an unrelated `c` in another.
     resolver.const_locals.len = 0;
-    const_scan_children(resolver, body);
-    Vec<SyntaxNode*> body_leaves = Vec<SyntaxNode*>.new();
-    cfg_collect_live_leaves(body, cfg, &body_leaves);
     Vec<Binding> typed_bindings = Vec<Binding>.new();
     collect_function_bindings(function, &typed_bindings);
     i64 binding_index = 0;
@@ -318,19 +321,22 @@ void resolve_function(NameResolver* resolver, SyntaxNode* function, CfgSet* cfg)
         binding_index += 1;
     }
     typed_bindings.drop();
+    const_scan_children(resolver, body);
+    Vec<SyntaxNode*> body_leaves = Vec<SyntaxNode*>.new();
+    cfg_collect_live_leaves(body, cfg, &body_leaves);
 
     i64 i = 0;
     while (i < body_leaves.len()) {
         SyntaxNode* node = body_leaves.get(i);
-        if (node.token_kind != TokenKind.Identifier || node.text == "_") {
+        if (node.token_kind != TokenKind.Identifier || strcmp(node.text, "_") == 0) {
             i += 1;
             continue;
         }
-        if (i > 0 && body_leaves.get(i - 1).text == ".") {
+        if (i > 0 && strcmp(body_leaves.get(i - 1).text, ".") == 0) {
             i += 1;
             continue;
         }
-        if (i > 0 && body_leaves.get(i - 1).text == "@") {
+        if (i > 0 && strcmp(body_leaves.get(i - 1).text, "@") == 0) {
             i += 1;
             continue;
         }
@@ -348,10 +354,15 @@ void resolve_function(NameResolver* resolver, SyntaxNode* function, CfgSet* cfg)
             i += 1;
             continue;
         }
-        bool is_call = i + 1 < body_leaves.len() && body_leaves.get(i + 1).text == "(";
+        bool is_call = (node.next_sibling != (SyntaxNode*)0 && node.next_sibling.kind == NodeKind.Parenthesized)
+            || (i + 1 < body_leaves.len()
+                && (body_leaves.get(i + 1).token_kind == TokenKind.LeftParen
+                    || strcmp(body_leaves.get(i + 1).text, "(") == 0));
         resolver.unknown(node.text, node.span, is_call);
         i += 1;
     }
+    body_leaves.drop();
+    resolver.locals.len = 0;
 }
 
 bool resolve_names(SymbolTable* symbols, DiagnosticBag* diagnostics, SyntaxTree* tree, str owner_path, CfgSet* cfg, Vec<String>* include_dirs) {
@@ -360,10 +371,14 @@ bool resolve_names(SymbolTable* symbols, DiagnosticBag* diagnostics, SyntaxTree*
     cfg_collect_import_names(tree.root, cfg, &import_names);
     resolver.has_imports = import_names.len() > 0;
     import_names.drop();
-    if (resolver.has_imports
-        && !load_imported_declarations(symbols, diagnostics, tree, owner_path, cfg, include_dirs)) {
-        resolver.failed = true;
-        return false;
+    if (resolver.has_imports) {
+        profiler_begin_phase("load imported declarations");
+        bool loaded = load_imported_declarations(symbols, diagnostics, tree, owner_path, cfg, include_dirs);
+        profiler_end_phase("load imported declarations");
+        if (!loaded) {
+            resolver.failed = true;
+            return false;
+        }
     }
     Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
     cfg_collect_items(tree.root, cfg, diagnostics, &items);
@@ -385,6 +400,7 @@ bool resolve_names(SymbolTable* symbols, DiagnosticBag* diagnostics, SyntaxTree*
         }
         i += 1;
     }
+    profiler_begin_phase("resolve functions");
     i = 0;
     while (i < items.len()) {
         if (items.get(i).kind == NodeKind.Function) {
@@ -392,6 +408,7 @@ bool resolve_names(SymbolTable* symbols, DiagnosticBag* diagnostics, SyntaxTree*
         }
         i += 1;
     }
+    profiler_end_phase("resolve functions");
     items.drop();
     resolver.const_globals.drop();
     return !resolver.failed;

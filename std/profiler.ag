@@ -181,6 +181,18 @@ impl Profiler {
         self.records.push(move rec);
     }
 
+    void record_phase(*self, str name, f64 elapsed_ms, i64 mem_before_kb, i64 mem_after_kb, bool skipped) {
+        if (!self.enabled) { return; }
+        PhaseRecord rec;
+        rec.name = String.from_str(name);
+        rec.elapsed_ms = elapsed_ms;
+        rec.memory_before_kb = mem_before_kb;
+        rec.memory_after_kb = mem_after_kb;
+        rec.depth = self.stack.len();
+        rec.skipped = skipped;
+        self.records.push(move rec);
+    }
+
     Vec<TreeNode> build_tree(*self) {
         Vec<TreeNode> nodes = Vec<TreeNode>.new();
         i64 r = 0;
@@ -609,6 +621,11 @@ void profiler_end_phase(str name) {
 void profiler_skip_phase(str name) {
     if (!profiler_enabled()) { return; }
     g_profiler.skip_phase(name);
+}
+
+void profiler_record_phase(str name, f64 elapsed_ms, i64 mem_before_kb, i64 mem_after_kb, bool skipped) {
+    if (!profiler_enabled()) { return; }
+    g_profiler.record_phase(name, elapsed_ms, mem_before_kb, mem_after_kb, skipped);
 }
 
 void profiler_print_report() {

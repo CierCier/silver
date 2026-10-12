@@ -36,15 +36,31 @@ struct MoveOrigin {
 }
 
 
+struct OwnershipTypeInfo {
+    TypeTable type_table;
+    Vec<str> drop_types;
+    Vec<EnumPayload> enum_payloads;
+}
+
+impl OwnershipTypeInfo {
+    OwnershipTypeInfo new() {
+        OwnershipTypeInfo info;
+        info.type_table = TypeTable.new();
+        info.drop_types = Vec<str>.new();
+        info.enum_payloads = Vec<EnumPayload>.new();
+        return info;
+    }
+}
+
 struct OwnershipAnalyzer {
     Interner names;
     BitSet moved_set;
     BitSet observed_set;
     Vec<MoveOrigin> move_origins;
-    Vec<str> drop_types;
-    TypeTable type_table;
+    Vec<str>* drop_types;
+    TypeTable* type_table;
     Vec<OwnershipVar> variables;
-    Vec<EnumPayload> enum_payloads;
+    Vec<EnumPayload>* enum_payloads;
     DiagnosticBag* diagnostics;
     bool failed;
     bool depth_error_reported;
@@ -71,20 +87,29 @@ bool ownership_place_is_within(str place, str parent) {
 }
 
 impl OwnershipAnalyzer {
-    OwnershipAnalyzer new(DiagnosticBag* diagnostics) {
+    OwnershipAnalyzer new(DiagnosticBag* diagnostics, OwnershipTypeInfo* type_info) {
         OwnershipAnalyzer analyzer;
         analyzer.names = Interner.new();
         analyzer.moved_set = BitSet.new();
         analyzer.move_origins = Vec<MoveOrigin>.new();
-        analyzer.type_table = TypeTable.new();
+        analyzer.type_table = &type_info.type_table;
         analyzer.variables = Vec<OwnershipVar>.new();
         analyzer.observed_set = BitSet.new();
-        analyzer.drop_types = Vec<str>.new();
-        analyzer.enum_payloads = Vec<EnumPayload>.new();
+        analyzer.drop_types = &type_info.drop_types;
+        analyzer.enum_payloads = &type_info.enum_payloads;
         analyzer.diagnostics = diagnostics;
         analyzer.failed = false;
         analyzer.depth_error_reported = false;
         return analyzer;
+    }
+
+    void reset_for_function(OwnershipAnalyzer* self) {
+        self.variables.len = 0;
+        self.move_origins.len = 0;
+        self.moved_set.clear_all();
+        self.observed_set.clear_all();
+        self.failed = false;
+        self.depth_error_reported = false;
     }
 
     i64 variable_index(OwnershipAnalyzer* self, str place, Span use_span) {
@@ -210,7 +235,7 @@ bool contains_drop_type(OwnershipAnalyzer* analyzer, str name) {
     return false;
 }
 
-void collect_drop_impl(OwnershipAnalyzer* analyzer, SyntaxNode* item) {
+void collect_drop_impl(OwnershipTypeInfo* info, SyntaxNode* item) {
     if (item.kind != NodeKind.Impl) {
         return;
     }
@@ -223,15 +248,15 @@ void collect_drop_impl(OwnershipAnalyzer* analyzer, SyntaxNode* item) {
         } else if (saw_drop && child.kind == NodeKind.Token && ownership_text_equals(child.text, "for")) {
             saw_for = true;
         } else if (saw_for && child.kind == NodeKind.Token && child.token_kind == TokenKind.Identifier) {
-            analyzer.drop_types.push(child.text);
-            analyzer.type_table.mark_type_needs_drop(child.text);
+            info.drop_types.push(child.text);
+            info.type_table.mark_type_needs_drop(child.text);
             return;
         }
         child = child.next_sibling;
     }
 }
 
-void collect_enum(OwnershipAnalyzer* analyzer, SyntaxNode* item) {
+void collect_enum(OwnershipTypeInfo* info, SyntaxNode* item) {
     if (item.kind != NodeKind.Enum) {
         return;
     }
@@ -259,11 +284,11 @@ void collect_enum(OwnershipAnalyzer* analyzer, SyntaxNode* item) {
                     if (payload != (SyntaxNode*)0 && payload.kind == NodeKind.Parenthesized) {
                         SyntaxNode* payload_type = payload.first_child;
                         if (payload_type != (SyntaxNode*)0 && payload_type.kind == NodeKind.Token) {
-                            EnumPayload info;
-                            info.enum_name = enum_name;
-                            info.variant_name = variant.text;
-                            info.type_name = payload_type.text;
-                            analyzer.enum_payloads.push(move info);
+                            EnumPayload payload_info;
+                            payload_info.enum_name = enum_name;
+                            payload_info.variant_name = variant.text;
+                            payload_info.type_name = payload_type.text;
+                            info.enum_payloads.push(move payload_info);
                         }
                     }
                 }
@@ -319,7 +344,7 @@ void scan_constructor_group(OwnershipAnalyzer* analyzer, SyntaxNode* node, u32 d
         }
         if (previous != (SyntaxNode*)0 && before_previous != (SyntaxNode*)0 && before_third != (SyntaxNode*)0
             && previous.kind == NodeKind.Token && previous.token_kind == TokenKind.Identifier
-            && before_previous.text == "."
+            && ownership_text_equals(before_previous.text, ".")
             && before_third.token_kind == TokenKind.Identifier) {
             i64 i = 0;
             while (i < analyzer.enum_payloads.len()) {
@@ -348,7 +373,7 @@ void scan_constructor_group(OwnershipAnalyzer* analyzer, SyntaxNode* node, u32 d
     }
 }
 
-void collect_struct_properties(OwnershipAnalyzer* analyzer, SyntaxNode* item) {
+void collect_struct_properties(OwnershipTypeInfo* info, SyntaxNode* item) {
     if (item.kind != NodeKind.Struct) { return; }
     str struct_name = "";
     SyntaxNode* block = (SyntaxNode*)0;
@@ -370,26 +395,28 @@ void collect_struct_properties(OwnershipAnalyzer* analyzer, SyntaxNode* item) {
     while (child != (SyntaxNode*)0) {
         if (child.token_kind == TokenKind.Identifier && child.next_sibling != (SyntaxNode*)0
             && child.next_sibling.token_kind == TokenKind.Identifier) {
-            fields.push(analyzer.type_table.parse_type_name(child.text));
+            fields.push(info.type_table.parse_type_name(child.text));
             child = child.next_sibling;
         }
         child = child.next_sibling;
     }
-    analyzer.type_table.register_struct_properties(struct_name, &fields);
+    info.type_table.register_struct_properties(struct_name, &fields);
     fields.drop();
 }
 
-void collect_type_information(OwnershipAnalyzer* analyzer, SyntaxTree* tree, CfgSet* cfg) {
-    Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
-    cfg_collect_items(tree.root, cfg, (DiagnosticBag*)0, &items);
+void collect_type_information(OwnershipTypeInfo* info, Vec<SyntaxNode*>* items) {
     i64 i = 0;
     while (i < items.len()) {
-        collect_drop_impl(analyzer, items.get(i));
-        collect_enum(analyzer, items.get(i));
-        collect_struct_properties(analyzer, items.get(i));
+        SyntaxNode* item = items.get(i);
+        if (item.kind == NodeKind.Impl) {
+            collect_drop_impl(info, item);
+        } else if (item.kind == NodeKind.Enum) {
+            collect_enum(info, item);
+        } else if (item.kind == NodeKind.Struct) {
+            collect_struct_properties(info, item);
+        }
         i += 1;
     }
-    items.drop();
 }
 
 void collect_match_ranges(OwnershipAnalyzer* analyzer, SyntaxNode* node, Vec<Span>* ranges, u32 depth) {
@@ -607,9 +634,7 @@ Span ownership_binding_scope(SyntaxNode* name, SyntaxNode* function) {
     return function.span;
 }
 
-void collect_ownership_variables(OwnershipAnalyzer* analyzer, SyntaxNode* function, CfgSet* cfg) {
-    Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
-    cfg_collect_live_leaves(function, cfg, &leaves);
+void collect_ownership_variables(OwnershipAnalyzer* analyzer, SyntaxNode* function, Vec<SyntaxNode*>* leaves) {
     i64 i = 0;
     while (i < leaves.len()) {
         SyntaxNode* type_node = leaves.get(i);
@@ -657,15 +682,14 @@ void collect_ownership_variables(OwnershipAnalyzer* analyzer, SyntaxNode* functi
         type_name.drop();
         i += 1;
     }
-    leaves.drop();
 }
 
 void check_move_sequences(OwnershipAnalyzer* analyzer, SyntaxNode* function, CfgSet* cfg) {
     Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
     cfg_collect_live_leaves(function, cfg, &leaves);
+    collect_ownership_variables(analyzer, function, &leaves);
     Vec<Span> match_ranges = Vec<Span>.new();
-    collect_match_ranges(analyzer, function, &match_ranges, 0);
-    collect_ownership_variables(analyzer, function, cfg);
+    bool match_ranges_loaded = false;
     i64 i = 0;
     while (i < leaves.len()) {
         SyntaxNode* node = leaves.get(i);
@@ -689,10 +713,16 @@ void check_move_sequences(OwnershipAnalyzer* analyzer, SyntaxNode* function, Cfg
             && i + 1 < leaves.len() && leaves.get(i + 1).token_kind == TokenKind.Identifier) {
             i64 end = i + 1;
             String place = ownership_parse_place(&leaves, i + 1, &end);
-            if (ownership_text_equals(node.text, "move") && move_in_match_guard(&leaves, i, &match_ranges)) {
-                String message = String.from_str("cannot move out of payload in a match arm with a guard");
-                analyzer.diagnostics.error(leaves.get(i + 1).span, move message);
-                analyzer.failed = true;
+            if (ownership_text_equals(node.text, "move")) {
+                if (!match_ranges_loaded) {
+                    collect_match_ranges(analyzer, function, &match_ranges, 0);
+                    match_ranges_loaded = true;
+                }
+                if (move_in_match_guard(&leaves, i, &match_ranges)) {
+                    String message = String.from_str("cannot move out of payload in a match arm with a guard");
+                    analyzer.diagnostics.error(leaves.get(i + 1).span, move message);
+                    analyzer.failed = true;
+                }
             }
             bool continues = i == 0 || !ownership_text_equals(leaves.get(i - 1).text, "return");
             SyntaxNode* branch = continues ? ownership_enclosing_block(node) : (SyntaxNode*)0;
@@ -747,19 +777,43 @@ void check_move_sequences(OwnershipAnalyzer* analyzer, SyntaxNode* function, Cfg
     match_ranges.drop();
 }
 
+SyntaxNode* ownership_function_body(SyntaxNode* function) {
+    if (function == (SyntaxNode*)0) {
+        return (SyntaxNode*)0;
+    }
+    SyntaxNode* child = function.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Block) {
+            return child;
+        }
+        child = child.next_sibling;
+    }
+    return (SyntaxNode*)0;
+}
+
 bool check_ownership(SyntaxTree* tree, DiagnosticBag* diagnostics, CfgSet* cfg) {
     bool ok = true;
     Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
     cfg_collect_items(tree.root, cfg, diagnostics, &items);
+
+    OwnershipTypeInfo type_info = OwnershipTypeInfo.new();
+    collect_type_information(&type_info, &items);
+
+    OwnershipAnalyzer analyzer = OwnershipAnalyzer.new(diagnostics, &type_info);
+
     i64 i = 0;
     while (i < items.len()) {
         if (items.get(i).kind == NodeKind.Function) {
-            OwnershipAnalyzer analyzer = OwnershipAnalyzer.new(diagnostics);
-            collect_type_information(&analyzer, tree, cfg);
-            scan_constructor_group(&analyzer, items.get(i), 0);
-            check_move_sequences(&analyzer, items.get(i), cfg);
-            if (analyzer.failed) {
-                ok = false;
+            SyntaxNode* body = ownership_function_body(items.get(i));
+            if (body != (SyntaxNode*)0) {
+                analyzer.reset_for_function();
+                if (type_info.enum_payloads.len() > 0) {
+                    scan_constructor_group(&analyzer, body, 0);
+                }
+                check_move_sequences(&analyzer, items.get(i), cfg);
+                if (analyzer.failed) {
+                    ok = false;
+                }
             }
         }
         i += 1;

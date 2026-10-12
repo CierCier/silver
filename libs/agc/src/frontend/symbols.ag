@@ -3,6 +3,8 @@ import std.mem.vec;
 import std.mem.memory;
 import std.string;
 import std.intern;
+import std.optional;
+import std.map;
 import frontend.ast;
 import frontend.diagnostics;
 import frontend.cfg;
@@ -29,6 +31,7 @@ struct SymbolTable {
     Interner names;
     Vec<Symbol> symbols;
     TypeTable types;
+    Vec<i64> index_by_name_id;
 }
 
 impl SymbolTable {
@@ -37,6 +40,7 @@ impl SymbolTable {
         table.names = Interner.new();
         table.symbols = Vec<Symbol>.new();
         table.types = TypeTable.new();
+        table.index_by_name_id = Vec<i64>.new();
         return move table;
     }
 
@@ -50,6 +54,12 @@ impl SymbolTable {
             i += 1;
         }
         copy.types = self.types.clone();
+        copy.index_by_name_id = Vec<i64>.with_capacity(self.index_by_name_id.len());
+        i = 0;
+        while (i < self.index_by_name_id.len()) {
+            copy.index_by_name_id.push(self.index_by_name_id.get(i));
+            i += 1;
+        }
         return move copy;
     }
 
@@ -61,16 +71,26 @@ impl SymbolTable {
         return self.symbols.get_ptr(index);
     }
 
-    i64 find(SymbolTable* self, str name) {
-        i64 i = 0;
-        while (i < self.symbols.len()) {
-            Symbol* symbol = self.symbols.get_ptr(i);
-            if (strcmp(self.names.get(symbol.name_id), name) == 0) {
-                return i;
-            }
-            i += 1;
+    void set_symbol_index(SymbolTable* self, u32 name_id, i64 symbol_idx) {
+        while (self.index_by_name_id.len() <= (i64)name_id) {
+            self.index_by_name_id.push(-1);
         }
-        return -1;
+        self.index_by_name_id.set((i64)name_id, symbol_idx);
+    }
+
+    i64 find_by_name_id(SymbolTable* self, u32 name_id) {
+        if ((i64)name_id >= self.index_by_name_id.len()) {
+            return -1;
+        }
+        return self.index_by_name_id.get((i64)name_id);
+    }
+
+    i64 find(SymbolTable* self, str name) {
+        Optional<u32> found = map_get_opt_str_u32(&self.names.ids, name);
+        if (!found.is_some()) {
+            return -1;
+        }
+        return self.find_by_name_id(found.unwrap());
     }
 
     bool declare(SymbolTable* self, u32 name_id, SymbolKind kind, Span span, SyntaxNode* declaration) {
@@ -78,7 +98,7 @@ impl SymbolTable {
     }
 
     bool declare_typed(SymbolTable* self, u32 name_id, SymbolKind kind, Span span, SyntaxNode* declaration, u32 type_id) {
-        i64 existing = self.find(self.names.get(name_id));
+        i64 existing = self.find_by_name_id(name_id);
         if (existing >= 0) {
             Symbol* previous = self.symbols.get_ptr(existing);
             // Stage0 permits free-function overloads and cfg-dependent
@@ -92,6 +112,7 @@ impl SymbolTable {
             }
             return false;
         }
+        i64 symbol_idx = self.symbols.len();
         Symbol symbol;
         symbol.name_id = name_id;
         symbol.kind = kind;
@@ -99,6 +120,7 @@ impl SymbolTable {
         symbol.declaration = declaration;
         symbol.type_id = type_id;
         self.symbols.push(move symbol);
+        self.set_symbol_index(name_id, symbol_idx);
         return true;
     }
 
@@ -118,16 +140,19 @@ impl SymbolTable {
     }
 
     void add_visible(SymbolTable* self, str name, Span span, SyntaxNode* declaration) {
-        if (self.find(name) >= 0) {
+        u32 name_id = self.names.intern(name);
+        if (self.find_by_name_id(name_id) >= 0) {
             return;
         }
+        i64 symbol_idx = self.symbols.len();
         Symbol symbol;
-        symbol.name_id = self.names.intern(name);
+        symbol.name_id = name_id;
         symbol.kind = SymbolKind.Global;
         symbol.span = span;
         symbol.declaration = declaration;
         symbol.type_id = 0;
         self.symbols.push(move symbol);
+        self.set_symbol_index(name_id, symbol_idx);
     }
 }
 
