@@ -986,6 +986,29 @@ LLVMOpaqueValue* llvm_emit_lvalue(LlvmContext* ctx, u32 expr_id) {
     return (LLVMOpaqueValue*)0;
 }
 
+// True when a place expression reaches its storage through a pointer,
+// reference, or non-array container, so the source keeps ownership.
+bool llvm_place_reached_through_borrow(LlvmContext* ctx, u32 expr_id) {
+    while (expr_id != 0) {
+        AstExpr* expr = ctx.pool.get_expr(expr_id);
+        if (expr.kind == ExprKind.Move) {
+            expr_id = expr.inner0;
+            continue;
+        }
+        if (expr.kind == ExprKind.Unary) {
+            return expr.aux == (u32)TokenKind.Star;
+        }
+        if (expr.kind != ExprKind.Field && expr.kind != ExprKind.Index) { return false; }
+        u32 base_type = ctx.types.resolve_subst(llvm_expr_type(ctx, expr.inner0));
+        if (base_type == TYPE_UNKNOWN || base_type == 0) { return true; }
+        TypeEntry* base = ctx.types.get(base_type);
+        if (base.kind == TypeKind.Pointer || base.kind == TypeKind.Reference) { return true; }
+        if (expr.kind == ExprKind.Index && base.kind != TypeKind.Array) { return true; }
+        expr_id = expr.inner0;
+    }
+    return false;
+}
+
 bool llvm_expr_may_be_unaligned(LlvmContext* ctx, u32 expr_id) {
     if (expr_id == 0) { return false; }
     AstExpr* expr = ctx.pool.get_expr(expr_id);
@@ -4530,9 +4553,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         // discarded Err payload is dropped on the absent path. Places reached
         // through a borrow stay owned by their source: dropping the copy
         // would free the caller's buffer.
-        AstExpr* scrut_expr = ctx.pool.get_expr(expr.inner0);
-        bool scrut_borrowed = scrut_expr.kind == ExprKind.Field || scrut_expr.kind == ExprKind.Index
-            || (scrut_expr.kind == ExprKind.Unary && scrut_expr.aux == (u32)TokenKind.Star);
+        bool scrut_borrowed = llvm_place_reached_through_borrow(ctx, expr.inner0);
         bool scrut_owned = !scrut_borrowed && llvm_type_needs_tracking(ctx, val_ty_id);
         if (scrut_owned) { llvm_clear_copy_source(ctx, expr.inner0, false); }
         LLVMOpaqueValue* scrut_slot = LLVMBuildAlloca(ctx.builder, scrut_ty, "unwrap_or_scrut");

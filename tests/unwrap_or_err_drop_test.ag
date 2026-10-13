@@ -16,6 +16,10 @@ Result<i32, String> succeeding() {
     return r;
 }
 
+struct Holder {
+    Result<String, i32> value;
+}
+
 i32 choose(Result<i32, String>* p) {
     return (*p) ? 3;
 }
@@ -44,6 +48,13 @@ i32 main() {
         Result<i32, String> r = failing();
         i32 v = choose(&r);
         assert_eq_i64(3, (i64)v, "fallback used through pointer");
+    }
+    test_start("field of a local is consumed, not freed twice");
+    {
+        Holder holder;
+        holder.value = Ok(String.from_str("kept"));
+        String extracted = holder.value ? String.from_str("fallback");
+        assert_eq_i64(4, (i64)extracted.len, "payload extracted from field");
     }
     return done();
 }
