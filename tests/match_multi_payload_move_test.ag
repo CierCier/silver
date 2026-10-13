@@ -51,6 +51,18 @@ i64 take_second(Both value) {
     return picked.id;
 }
 
+void consume(Tok token) {
+    drops += 0;
+}
+
+i64 take_first_after_consuming_second(Both value) {
+    Tok picked = match value {
+        Two(move first, second): { consume(second); first; },
+        Empty: mk(9),
+    };
+    return picked.id;
+}
+
 i64 borrow_only(Both value) {
     match value {
         Two(first, second): { return first.id + second.id; },
@@ -82,5 +94,12 @@ i32 main() {
         assert_eq_i64(3, borrow_only(move value), "payloads read");
     }
     assert_eq_i64(2, drops, "both payloads dropped once");
+    test_start("payload consumed by value is not dropped again");
+    drops = 0;
+    {
+        Both value = make_both();
+        assert_eq_i64(1, take_first_after_consuming_second(move value), "first payload extracted");
+    }
+    assert_eq_i64(2, drops, "consumed and extracted payloads dropped once each");
     return done();
 }

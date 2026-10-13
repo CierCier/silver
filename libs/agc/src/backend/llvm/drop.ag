@@ -787,6 +787,9 @@ void llvm_clear_scrutinee_source(LlvmContext* ctx, u32 moved_expr_id) {
     while (i >= 0) {
         ScrutineeMove* entry = ctx.scrutinee_moves.get_ptr(i);
         if (entry.binding_name == root_name) {
+            // Already transferred; also stops recursion when the binding
+            // shadows its own scrutinee.
+            if (entry.moved) { return; }
             entry.moved = true;
             llvm_clear_place_drops(ctx, entry.scrutinee_expr);
             return;
@@ -963,6 +966,9 @@ bool llvm_validate_drop_field_transfer(LlvmContext* ctx, LlvmLocal* local,
 // conservative whole-root fallback because no per-element state exists.
 void llvm_clear_place_drops(LlvmContext* ctx, u32 expr_id) {
     if (expr_id == 0) { return; }
+    // Any ownership transfer of a match payload binding (explicit move or
+    // implicit by-value use) releases the scrutinee side exactly once.
+    llvm_clear_scrutinee_source(ctx, expr_id);
     AstExpr* expr = ctx.pool.get_expr(expr_id);
     while (expr.kind == ExprKind.Move && expr.inner0 != 0) {
         expr = ctx.pool.get_expr(expr.inner0);
