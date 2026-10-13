@@ -1009,6 +1009,18 @@ bool llvm_place_reached_through_borrow(LlvmContext* ctx, u32 expr_id) {
     return false;
 }
 
+// Array elements carry no per-element drop state, so transferring one out
+// would have to clear the whole root's flags.
+bool llvm_place_indexes_array(LlvmContext* ctx, u32 expr_id) {
+    while (expr_id != 0) {
+        AstExpr* expr = ctx.pool.get_expr(expr_id);
+        if (expr.kind == ExprKind.Index) { return true; }
+        if (expr.kind != ExprKind.Field && expr.kind != ExprKind.Move) { return false; }
+        expr_id = expr.inner0;
+    }
+    return false;
+}
+
 bool llvm_expr_may_be_unaligned(LlvmContext* ctx, u32 expr_id) {
     if (expr_id == 0) { return false; }
     AstExpr* expr = ctx.pool.get_expr(expr_id);
@@ -4555,6 +4567,10 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         // would free the caller's buffer.
         bool scrut_borrowed = llvm_place_reached_through_borrow(ctx, expr.inner0);
         bool scrut_owned = !scrut_borrowed && llvm_type_needs_tracking(ctx, val_ty_id);
+        if (scrut_owned && llvm_place_indexes_array(ctx, expr.inner0)) {
+            ctx.note_unresolved("unwrap-or", "owned array element");
+            return (LLVMOpaqueValue*)0;
+        }
         if (scrut_owned) { llvm_clear_copy_source(ctx, expr.inner0, false); }
         LLVMOpaqueValue* scrut_slot = LLVMBuildAlloca(ctx.builder, scrut_ty, "unwrap_or_scrut");
         LLVMBuildStore(ctx.builder, scrut_val, scrut_slot);

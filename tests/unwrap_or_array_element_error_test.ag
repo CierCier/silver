@@ -1,0 +1,18 @@
+// expected_compile_failure
+import std.result;
+import std.string;
+
+// An owned array element has no per-element drop state, so `?` cannot
+// consume it without leaking or double-freeing its siblings.
+struct Holder {
+    Result<i32, String> values[2];
+    String sibling;
+}
+
+i32 main() {
+    Holder holder;
+    holder.values[0] = Ok(1);
+    holder.sibling = String.from_str("kept");
+    i32 v = holder.values[0] ? 3;
+    return v;
+}
