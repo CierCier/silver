@@ -36,6 +36,7 @@ struct LlvmFieldFlag {
 struct ScrutineeMove {
     u32 binding_name;
     u32 scrutinee_expr;
+    i64 local_index;
     bool moved;
     bool clearing;
 }

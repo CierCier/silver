@@ -72,6 +72,7 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
         if (ctx.current_return_type == TYPE_VOID) {
             llvm_emit_defers_above(ctx, 0);
             if (ctx.is_terminated()) { return; }
+            llvm_drop_active_unmoved_payloads(ctx);
             llvm_emit_drops_above(ctx, (i64)0);
             LLVMBuildRetVoid(ctx.builder);
             return;
@@ -142,6 +143,7 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
         }
         llvm_emit_defers_above(ctx, 0);
         if (ctx.is_terminated()) { return; }
+        llvm_drop_active_unmoved_payloads(ctx);
         llvm_emit_drops_above(ctx, (i64)0);
         LLVMBuildRet(ctx.builder, val);
         return;
@@ -541,7 +543,9 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
                     ctx.loop_defer_marks.get(ctx.loop_defer_marks.len() - 1));
             }
             if (ctx.loop_drop_marks.len() > 0) {
-                llvm_emit_drops_above(ctx, ctx.loop_drop_marks.get(ctx.loop_drop_marks.len() - 1));
+                i64 drop_mark = ctx.loop_drop_marks.get(ctx.loop_drop_marks.len() - 1);
+                llvm_drop_active_unmoved_payloads_above(ctx, drop_mark);
+                llvm_emit_drops_above(ctx, drop_mark);
             }
             LLVMOpaqueValue* stack_save = ctx.current_loop_stack_save();
             if (stack_save != (LLVMOpaqueValue*)0) {
@@ -566,7 +570,9 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
                     ctx.loop_defer_marks.get(ctx.loop_defer_marks.len() - 1));
             }
             if (ctx.loop_drop_marks.len() > 0) {
-                llvm_emit_drops_above(ctx, ctx.loop_drop_marks.get(ctx.loop_drop_marks.len() - 1));
+                i64 drop_mark = ctx.loop_drop_marks.get(ctx.loop_drop_marks.len() - 1);
+                llvm_drop_active_unmoved_payloads_above(ctx, drop_mark);
+                llvm_emit_drops_above(ctx, drop_mark);
             }
             LLVMOpaqueValue* stack_save = ctx.current_loop_stack_save();
             if (stack_save != (LLVMOpaqueValue*)0) {

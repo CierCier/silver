@@ -93,6 +93,60 @@ i64 consume_on_either_path(Single value, bool flag) {
     return -1;
 }
 
+i64 consume_first_then_return(Both value) {
+    match value {
+        Two(first, second): {
+            consume(move first);
+            return 1;
+        },
+        Empty: { return 0; },
+    }
+    return -1;
+}
+
+i64 consume_first_then_break(Both value) {
+    while (true) {
+        match value {
+            Two(first, second): {
+                consume(move first);
+                break;
+            },
+            Empty: { break; },
+        }
+    }
+    return 1;
+}
+
+i64 consume_first_then_continue(Both value) {
+    i64 iterations = 0;
+    while (iterations < 1) {
+        match value {
+            Two(first, second): {
+                consume(move first);
+                iterations += 1;
+                continue;
+            },
+            Empty: { iterations += 1; continue; },
+        }
+    }
+    return 1;
+}
+
+i64 keep_outer_payload_after_inner_break(Both value) {
+    match value {
+        Two(first, second): {
+            while (true) {
+                consume(move first);
+                break;
+            }
+            assert_eq_i64(1, drops, "inner break keeps second payload alive");
+            return second.id;
+        },
+        Empty: { return 0; },
+    }
+    return -1;
+}
+
 i64 borrow_only(Both value) {
     match value {
         Two(first, second): { return first.id + second.id; },
@@ -144,5 +198,33 @@ i32 main() {
         assert_eq_i64(1, consume_on_either_path(move value, true), "first path taken");
     }
     assert_eq_i64(1, drops, "payload dropped once on the first path");
+    test_start("unmoved payload is dropped when arm returns");
+    drops = 0;
+    {
+        Both value = make_both();
+        assert_eq_i64(1, consume_first_then_return(move value), "return from match arm");
+    }
+    assert_eq_i64(2, drops, "both payloads dropped once on return");
+    test_start("unmoved payload is dropped when match arm breaks loop");
+    drops = 0;
+    {
+        Both value = make_both();
+        assert_eq_i64(1, consume_first_then_break(move value), "break from match arm");
+    }
+    assert_eq_i64(2, drops, "both payloads dropped once on break");
+    test_start("unmoved payload is dropped when match arm continues loop");
+    drops = 0;
+    {
+        Both value = make_both();
+        assert_eq_i64(1, consume_first_then_continue(move value), "continue from match arm");
+    }
+    assert_eq_i64(2, drops, "both payloads dropped once on continue");
+    test_start("inner loop break preserves enclosing match payload");
+    drops = 0;
+    {
+        Both value = make_both();
+        assert_eq_i64(2, keep_outer_payload_after_inner_break(move value), "outer payload remains live");
+    }
+    assert_eq_i64(2, drops, "outer payload dropped once after inner break");
     return done();
 }

@@ -765,6 +765,7 @@ void llvm_push_scrutinee_move(LlvmContext* ctx, u32 binding_name, u32 scrutinee_
     ScrutineeMove entry;
     entry.binding_name = binding_name;
     entry.scrutinee_expr = scrutinee_expr;
+    entry.local_index = ctx.locals.len() - 1;
     entry.moved = false;
     entry.clearing = false;
     ctx.scrutinee_moves.push(move entry);
@@ -805,7 +806,8 @@ void llvm_clear_scrutinee_source(LlvmContext* ctx, u32 moved_expr_id) {
 // A moved payload clears the whole enum's drop flag, which would also leak
 // the payloads the arm did not move. At the end of the arm, release those
 // bindings when the move actually cleared the scrutinee local's flag.
-void llvm_drop_unmoved_payloads(LlvmContext* ctx, u32 scrutinee_expr, i64 count) {
+void llvm_drop_unmoved_payloads_at(LlvmContext* ctx, u32 scrutinee_expr,
+                                   i64 base, i64 count) {
     if (count < 2 || scrutinee_expr == 0) { return; }
     AstExpr* scrutinee = ctx.pool.get_expr(scrutinee_expr);
     while (scrutinee.kind == ExprKind.Move && scrutinee.inner0 != 0) {
@@ -814,8 +816,7 @@ void llvm_drop_unmoved_payloads(LlvmContext* ctx, u32 scrutinee_expr, i64 count)
     if (scrutinee.kind != ExprKind.Var) { return; }
     LlvmLocal* source = ctx.find_local(scrutinee.aux);
     if (source == (LlvmLocal*)0 || source.drop_flag == (LLVMOpaqueValue*)0) { return; }
-    i64 base = ctx.scrutinee_moves.len() - count;
-    if (base < 0) { return; }
+    if (base < 0 || base + count > ctx.scrutinee_moves.len()) { return; }
     bool any_moved = false;
     i64 i = 0;
     while (i < count) {
@@ -842,6 +843,42 @@ void llvm_drop_unmoved_payloads(LlvmContext* ctx, u32 scrutinee_expr, i64 count)
     }
     LLVMBuildBr(ctx.builder, after_bb);
     LLVMPositionBuilderAtEnd(ctx.builder, after_bb);
+}
+
+void llvm_drop_unmoved_payloads(LlvmContext* ctx, u32 scrutinee_expr, i64 count) {
+    llvm_drop_unmoved_payloads_at(ctx, scrutinee_expr,
+                                  ctx.scrutinee_moves.len() - count, count);
+}
+
+// Return bypasses match-arm fallthrough, so release active match bindings
+// before the normal scope cleanup drops the now-partially-moved scrutinee.
+void llvm_drop_active_unmoved_payloads_above(LlvmContext* ctx, i64 local_mark) {
+    i64 end = ctx.scrutinee_moves.len();
+    while (end > 0) {
+        i64 start = end - 1;
+        u32 scrutinee_expr = ctx.scrutinee_moves.get_ptr(start).scrutinee_expr;
+        while (start > 0
+               && ctx.scrutinee_moves.get_ptr(start - 1).scrutinee_expr == scrutinee_expr) {
+            start -= 1;
+        }
+        bool exits_scope = false;
+        i64 i = start;
+        while (i < end) {
+            if (ctx.scrutinee_moves.get_ptr(i).local_index >= local_mark) {
+                exits_scope = true;
+                break;
+            }
+            i += 1;
+        }
+        if (exits_scope) {
+            llvm_drop_unmoved_payloads_at(ctx, scrutinee_expr, start, end - start);
+        }
+        end = start;
+    }
+}
+
+void llvm_drop_active_unmoved_payloads(LlvmContext* ctx) {
+    llvm_drop_active_unmoved_payloads_above(ctx, 0);
 }
 
 // Direct Copy+Drop places can retain ownership in local bindings; aggregate
