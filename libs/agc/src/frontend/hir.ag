@@ -554,10 +554,10 @@ u32 hir_return_expression_type(SyntaxNode* function, SyntaxNode* return_token, H
             if (cursor.token_kind == TokenKind.Identifier) {
                 if (cursor.next_sibling != (SyntaxNode*)0
                     && cursor.next_sibling.kind == NodeKind.Token
-                    && cursor.next_sibling.token_kind == TokenKind.Dot) {
-                    return 0;
+                    && cursor.next_sibling.token_kind == TokenKind.Semicolon) {
+                    return hir_local_type(function, cursor.text, context);
                 }
-                return hir_local_type(function, cursor.text, context);
+                return 0;
             }
             return hir_syntax_literal_type(cursor, context);
         }

@@ -47,6 +47,7 @@ CASES = {
         False, False, "call to overloaded function 'g' is ambiguous"
     ),
     "unsigned_float_cast.ag": (True, True, ""),
+    "nested_initializer_block_bindings.ag": (True, True, ""),
 }
 
 DROP_DIAGNOSTIC = ("cannot move", "because it implements Drop")

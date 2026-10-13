@@ -500,9 +500,14 @@ void collect_block_bindings(SyntaxNode* block, Vec<Binding>* bindings) {
             } else {
                 add_binding(bindings, cursor, BindingKind.Let);
             }
+            if (cursor != (SyntaxNode*)0) {
+                cursor = cursor.next_sibling;
+            }
             while (cursor != (SyntaxNode*)0
                 && !(cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon)) {
-                if (cursor.kind == NodeKind.Block) {
+                if (cursor.kind == NodeKind.Block
+                    || cursor.kind == NodeKind.Parenthesized
+                    || cursor.kind == NodeKind.Bracket) {
                     collect_block_bindings(cursor, bindings);
                 }
                 cursor = cursor.next_sibling;
@@ -535,6 +540,7 @@ void collect_block_bindings(SyntaxNode* block, Vec<Binding>* bindings) {
             SyntaxNode* cursor = child;
             SyntaxNode* candidate = (SyntaxNode*)0;
             bool array = false;
+            bool has_dot = false;
             i64 angle_depth = 0;
             while (cursor != (SyntaxNode*)0) {
                 if (cursor.kind == NodeKind.Token && cursor.text == "<") {
@@ -544,16 +550,27 @@ void collect_block_bindings(SyntaxNode* block, Vec<Binding>* bindings) {
                 } else if (cursor.kind == NodeKind.Bracket) {
                     array = true;
                 } else if (angle_depth == 0 && cursor.kind == NodeKind.Token
+                    && cursor.token_kind == TokenKind.Dot) {
+                    has_dot = true;
+                } else if (angle_depth == 0 && cursor.kind == NodeKind.Token
                     && cursor.token_kind == TokenKind.Identifier) {
                     candidate = cursor;
                 }
                 if (cursor.kind == NodeKind.Token
                     && (cursor.token_kind == TokenKind.Assign || cursor.token_kind == TokenKind.Semicolon)) {
+                    if (has_dot
+                        || candidate == (SyntaxNode*)0
+                        || candidate == child
+                        || (candidate.next_sibling != (SyntaxNode*)0 && candidate.next_sibling.kind == NodeKind.Parenthesized)) {
+                        break;
+                    }
                     TypeProjection declared_type = binding_declared_type(child, candidate);
                     add_typed_binding(bindings, candidate, array ? BindingKind.Array : BindingKind.Variable, &declared_type);
                     while (cursor != (SyntaxNode*)0
                         && !(cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon)) {
-                        if (cursor.kind == NodeKind.Block) {
+                        if (cursor.kind == NodeKind.Block
+                            || cursor.kind == NodeKind.Parenthesized
+                            || cursor.kind == NodeKind.Bracket) {
                             collect_block_bindings(cursor, bindings);
                         }
                         cursor = cursor.next_sibling;
