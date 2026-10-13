@@ -1003,6 +1003,8 @@ bool llvm_expr_may_be_unaligned(LlvmContext* ctx, u32 expr_id) {
     if (expr.kind == ExprKind.Index) {
         return llvm_expr_may_be_unaligned(ctx, expr.inner0);
     }
+    // A pointer may address a packed field, so its provenance is unknown.
+    if (expr.kind == ExprKind.Unary && expr.aux == (u32)TokenKind.Star) { return true; }
     return false;
 }
 
@@ -3847,7 +3849,9 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 return (LLVMOpaqueValue*)0;
             }
             LLVMOpaqueType* elem_ty = llvm_lower_type(ctx.ctx, ctx.types, elem_type_id);
-            return LLVMBuildLoad2(ctx.builder, elem_ty, ptr, "load_deref");
+            LLVMOpaqueValue* deref_load = LLVMBuildLoad2(ctx.builder, elem_ty, ptr, "load_deref");
+            LLVMSetAlignment(deref_load, 1);
+            return deref_load;
         }
         if (expr.aux == (u32)TokenKind.Minus) {
             LLVMOpaqueValue* val = llvm_emit_expr(ctx, expr.inner0);
@@ -4522,6 +4526,10 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         payload_types.drop();
         LLVMOpaqueValue* scrut_val = llvm_emit_expr(ctx, expr.inner0);
         if (scrut_val == (LLVMOpaqueValue*)0) { return (LLVMOpaqueValue*)0; }
+        // The value is consumed here, so a discarded Err payload is dropped
+        // on the absent path rather than at scope exit.
+        bool scrut_owned = llvm_type_needs_tracking(ctx, val_ty_id);
+        llvm_clear_copy_source(ctx, expr.inner0, false);
         LLVMOpaqueValue* scrut_slot = LLVMBuildAlloca(ctx.builder, scrut_ty, "unwrap_or_scrut");
         LLVMBuildStore(ctx.builder, scrut_val, scrut_slot);
         LLVMOpaqueValue* tag_ptr = LLVMBuildStructGEP2(ctx.builder, scrut_ty, scrut_slot, 0, "unwrap_or_tag");
@@ -4542,6 +4550,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         LLVMBuildStore(ctx.builder, field_val, slot);
         LLVMBuildBr(ctx.builder, merge_bb);
         LLVMPositionBuilderAtEnd(ctx.builder, absent_bb);
+        if (scrut_owned) { llvm_emit_value_drop_at_ptr(ctx, scrut_slot, val_ty_id); }
         LLVMOpaqueValue* none_fallback = llvm_emit_expr(ctx, expr.inner1);
         if (none_fallback != (LLVMOpaqueValue*)0) {
             u32 none_fallback_ty = llvm_expr_type(ctx, expr.inner1);

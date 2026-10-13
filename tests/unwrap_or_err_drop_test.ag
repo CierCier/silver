@@ -1,0 +1,39 @@
+import std.test;
+import std.result;
+import std.string;
+
+// `value ? fallback` consumes the Result: an owned Err payload discarded for
+// the fallback must be released exactly once; a local scrutinee must not be
+// dropped again at scope exit.
+
+Result<i32, String> failing() {
+    Result<i32, String> r = Err(String.from_str("not found"));
+    return r;
+}
+
+Result<i32, String> succeeding() {
+    Result<i32, String> r = Ok(5);
+    return r;
+}
+
+i32 main() {
+    test_start("discarded Err payload is released");
+    {
+        i32 v = failing() ? 9;
+        assert_eq_i64(9, (i64)v, "fallback used");
+    }
+
+    test_start("Ok path");
+    {
+        i32 v = succeeding() ? 9;
+        assert_eq_i64(5, (i64)v, "ok value used");
+    }
+
+    test_start("local Result consumed once");
+    {
+        Result<i32, String> r = failing();
+        i32 v = r ? 3;
+        assert_eq_i64(3, (i64)v, "fallback used for local");
+    }
+    return done();
+}
