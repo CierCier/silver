@@ -4526,10 +4526,15 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         payload_types.drop();
         LLVMOpaqueValue* scrut_val = llvm_emit_expr(ctx, expr.inner0);
         if (scrut_val == (LLVMOpaqueValue*)0) { return (LLVMOpaqueValue*)0; }
-        // The value is consumed here, so a discarded Err payload is dropped
-        // on the absent path rather than at scope exit.
-        bool scrut_owned = llvm_type_needs_tracking(ctx, val_ty_id);
-        llvm_clear_copy_source(ctx, expr.inner0, false);
+        // An owned scrutinee (local or temporary) is consumed here, so a
+        // discarded Err payload is dropped on the absent path. Places reached
+        // through a borrow stay owned by their source: dropping the copy
+        // would free the caller's buffer.
+        AstExpr* scrut_expr = ctx.pool.get_expr(expr.inner0);
+        bool scrut_borrowed = scrut_expr.kind == ExprKind.Field || scrut_expr.kind == ExprKind.Index
+            || (scrut_expr.kind == ExprKind.Unary && scrut_expr.aux == (u32)TokenKind.Star);
+        bool scrut_owned = !scrut_borrowed && llvm_type_needs_tracking(ctx, val_ty_id);
+        if (scrut_owned) { llvm_clear_copy_source(ctx, expr.inner0, false); }
         LLVMOpaqueValue* scrut_slot = LLVMBuildAlloca(ctx.builder, scrut_ty, "unwrap_or_scrut");
         LLVMBuildStore(ctx.builder, scrut_val, scrut_slot);
         LLVMOpaqueValue* tag_ptr = LLVMBuildStructGEP2(ctx.builder, scrut_ty, scrut_slot, 0, "unwrap_or_tag");
