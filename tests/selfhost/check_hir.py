@@ -93,6 +93,25 @@ i32 bad_local_return() {
     return text;
 }
 """
+    invalid_compound_return = """\
+str bad_compound(i64 x) {
+    return x + 1;
+}
+"""
+    invalid_comparison_return = """\
+str bad_comparison(i64 x) {
+    return x == 1;
+}
+"""
+    valid_compound_return = """\
+i64 add_one(i64 x) {
+    return x + 1;
+}
+
+bool is_one(i64 x) {
+    return x == 1;
+}
+"""
 
     with tempfile.TemporaryDirectory(prefix="silver-hir-") as temporary:
         root = pathlib.Path(temporary)
@@ -104,6 +123,9 @@ i32 bad_local_return() {
             "invalid-declarations": (invalid_declarations, False),
             "invalid-arity": (invalid_arity, False),
             "invalid-local-return": (invalid_local_return, False),
+            "invalid-compound-return": (invalid_compound_return, False),
+            "invalid-comparison-return": (invalid_comparison_return, False),
+            "valid-compound-return": (valid_compound_return, True),
         }
         for name, (content, should_pass) in cases.items():
             source = root / f"{name}.ag"

@@ -541,28 +541,46 @@ u32 hir_local_type(SyntaxNode* function, str name, HirContext* context) {
     return result;
 }
 
-u32 hir_return_expression_type(SyntaxNode* function, SyntaxNode* return_token, HirContext* context, HirModule* module) {
-    SyntaxNode* cursor = return_token.next_sibling;
-    while (cursor != (SyntaxNode*)0) {
-        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) { return 0; }
-        if (cursor.kind == NodeKind.Token) {
-            if (cursor.token_kind == TokenKind.Identifier
-                && cursor.next_sibling != (SyntaxNode*)0
-                && cursor.next_sibling.kind == NodeKind.Parenthesized) {
-                return hir_find_function_return(module, cursor.text);
-            }
-            if (cursor.token_kind == TokenKind.Identifier) {
-                if (cursor.next_sibling != (SyntaxNode*)0
-                    && cursor.next_sibling.kind == NodeKind.Token
-                    && cursor.next_sibling.token_kind == TokenKind.Semicolon) {
-                    return hir_local_type(function, cursor.text, context);
-                }
-                return 0;
-            }
-            return hir_syntax_literal_type(cursor, context);
+bool hir_is_comparison_token(TokenKind kind) {
+    return kind == TokenKind.Equal || kind == TokenKind.NotEqual
+        || kind == TokenKind.LessEqual || kind == TokenKind.GreaterEqual
+        || kind == TokenKind.And || kind == TokenKind.Or;
+}
+
+bool hir_is_arithmetic_token(TokenKind kind) {
+    return kind == TokenKind.Plus || kind == TokenKind.Minus || kind == TokenKind.Star
+        || kind == TokenKind.Slash || kind == TokenKind.Percent
+        || kind == TokenKind.LeftShift || kind == TokenKind.RightShift;
+}
+
+bool hir_is_operand_token(TokenKind kind) {
+    return kind == TokenKind.Identifier || kind == TokenKind.IntLiteral
+        || kind == TokenKind.FloatLiteral || kind == TokenKind.ComplexLiteral
+        || kind == TokenKind.StringLiteral || kind == TokenKind.CharLiteral
+        || kind == TokenKind.BoolLiteral;
+}
+
+u32 hir_operand_type(SyntaxNode* function, SyntaxNode* operand, HirContext* context, HirModule* module) {
+    if (operand.token_kind == TokenKind.Identifier) {
+        SyntaxNode* next = operand.next_sibling;
+        if (next != (SyntaxNode*)0 && next.kind == NodeKind.Parenthesized) {
+            return hir_find_function_return(module, operand.text);
         }
+        return hir_local_type(function, operand.text, context);
+    }
+    return hir_syntax_literal_type(operand, context);
+}
+
+// Types a token-led return expression up to its semicolon. Comparisons yield
+// bool and plain arithmetic yields the first operand's type; anything else
+// (member access, indexing, ternaries, casts) stays unknown.
+u32 hir_return_expression_type(SyntaxNode* function, SyntaxNode* return_token, HirContext* context, HirModule* module) {
+    SyntaxNode* first = return_token.next_sibling;
+    if (first == (SyntaxNode*)0) { return 0; }
+    if (first.kind == NodeKind.Token && first.token_kind == TokenKind.Semicolon) { return 0; }
+    if (first.kind != NodeKind.Token) {
         Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
-        hir_collect_leaves(cursor, &leaves);
+        hir_collect_leaves(first, &leaves);
         u32 result = 0;
         if (leaves.len() == 1) {
             result = hir_syntax_literal_type(leaves.get(0), context);
@@ -570,7 +588,30 @@ u32 hir_return_expression_type(SyntaxNode* function, SyntaxNode* return_token, H
         leaves.drop();
         return result;
     }
-    return 0;
+    bool comparison = false;
+    bool arithmetic = false;
+    bool opaque = false;
+    SyntaxNode* cursor = first.next_sibling;
+    while (cursor != (SyntaxNode*)0
+           && !(cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon)) {
+        if (cursor.kind == NodeKind.Token) {
+            if (hir_is_comparison_token(cursor.token_kind)) { comparison = true; }
+            else if (hir_is_arithmetic_token(cursor.token_kind)) { arithmetic = true; }
+            else if (!hir_is_operand_token(cursor.token_kind)) { opaque = true; }
+        } else if (cursor.kind != NodeKind.Parenthesized) {
+            opaque = true;
+        }
+        if (cursor.kind == NodeKind.Token
+            && (cursor.token_kind == TokenKind.Question || cursor.token_kind == TokenKind.Colon)) {
+            return 0;
+        }
+        cursor = cursor.next_sibling;
+    }
+    if (comparison) {
+        return context.types.add_primitive(HirTypeKind.Bool, "bool");
+    }
+    if (opaque || !hir_is_operand_token(first.token_kind)) { return 0; }
+    return hir_operand_type(function, first, context, module);
 }
 
 void hir_check_returns(SyntaxNode* function, SyntaxNode* node, HirContext* context, HirModule* module, u32 expected, DiagnosticBag* diagnostics, bool* ok) {
