@@ -765,6 +765,7 @@ void llvm_push_scrutinee_move(LlvmContext* ctx, u32 binding_name, u32 scrutinee_
     ScrutineeMove entry;
     entry.binding_name = binding_name;
     entry.scrutinee_expr = scrutinee_expr;
+    entry.moved = false;
     ctx.scrutinee_moves.push(move entry);
 }
 
@@ -786,11 +787,54 @@ void llvm_clear_scrutinee_source(LlvmContext* ctx, u32 moved_expr_id) {
     while (i >= 0) {
         ScrutineeMove* entry = ctx.scrutinee_moves.get_ptr(i);
         if (entry.binding_name == root_name) {
+            entry.moved = true;
             llvm_clear_place_drops(ctx, entry.scrutinee_expr);
             return;
         }
         i -= 1;
     }
+}
+
+// A moved payload clears the whole enum's drop flag, which would also leak
+// the payloads the arm did not move. At the end of the arm, release those
+// bindings when the move actually cleared the scrutinee local's flag.
+void llvm_drop_unmoved_payloads(LlvmContext* ctx, u32 scrutinee_expr, i64 count) {
+    if (count < 2 || scrutinee_expr == 0) { return; }
+    AstExpr* scrutinee = ctx.pool.get_expr(scrutinee_expr);
+    while (scrutinee.kind == ExprKind.Move && scrutinee.inner0 != 0) {
+        scrutinee = ctx.pool.get_expr(scrutinee.inner0);
+    }
+    if (scrutinee.kind != ExprKind.Var) { return; }
+    LlvmLocal* source = ctx.find_local(scrutinee.aux);
+    if (source == (LlvmLocal*)0 || source.drop_flag == (LLVMOpaqueValue*)0) { return; }
+    i64 base = ctx.scrutinee_moves.len() - count;
+    if (base < 0) { return; }
+    bool any_moved = false;
+    i64 i = 0;
+    while (i < count) {
+        if (ctx.scrutinee_moves.get_ptr(base + i).moved) { any_moved = true; }
+        i += 1;
+    }
+    if (!any_moved) { return; }
+    LLVMOpaqueType* i1_ty = LLVMInt1TypeInContext(ctx.ctx);
+    LLVMOpaqueValue* live = LLVMBuildLoad2(ctx.builder, i1_ty, source.drop_flag, "payload_flag");
+    LLVMOpaqueBasicBlock* drop_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "payload_release");
+    LLVMOpaqueBasicBlock* after_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "payload_after");
+    LLVMBuildCondBr(ctx.builder, live, after_bb, drop_bb);
+    LLVMPositionBuilderAtEnd(ctx.builder, drop_bb);
+    i = 0;
+    while (i < count) {
+        ScrutineeMove* entry = ctx.scrutinee_moves.get_ptr(base + i);
+        if (!entry.moved) {
+            LlvmLocal* binding = ctx.find_local(entry.binding_name);
+            if (binding != (LlvmLocal*)0 && llvm_type_needs_tracking(ctx, binding.type_id)) {
+                llvm_emit_value_drop_at_ptr(ctx, binding.ptr, binding.type_id);
+            }
+        }
+        i += 1;
+    }
+    LLVMBuildBr(ctx.builder, after_bb);
+    LLVMPositionBuilderAtEnd(ctx.builder, after_bb);
 }
 
 // Direct Copy+Drop places can retain ownership in local bindings; aggregate

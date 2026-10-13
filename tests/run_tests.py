@@ -90,6 +90,7 @@ DEFAULT_SKIP = {
 STAGE1_ONLY_TESTS = {
     "json_synthesis_scope_test": "stage1 JSON method synthesis",
     "method_slice_coercion_test": "stage1 borrowed-slice coercion",
+    "match_multi_payload_move_test": "stage1 multi-payload move patterns",
     "unwrap_or_array_element_error_test": "stage1 rejects owned array element unwrap-or",
 }
 
