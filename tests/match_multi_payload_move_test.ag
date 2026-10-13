@@ -6,6 +6,7 @@ import std.test;
 // payloads owned by the matched value, so each is destroyed exactly once.
 
 i64 drops = 0;
+i64 shadow_drops = 0;
 
 struct Tok {
     i64 id;
@@ -17,6 +18,16 @@ impl Drop for Tok {
     }
 }
 
+struct ShadowTok {
+    i64 id;
+}
+
+impl Drop for ShadowTok {
+    void drop(ShadowTok* self) {
+        shadow_drops += 1;
+    }
+}
+
 enum Both {
     Two(Tok, Tok);
     Empty;
@@ -24,6 +35,12 @@ enum Both {
 
 Tok mk(i64 id) {
     Tok t;
+    t.id = id;
+    return move t;
+}
+
+ShadowTok mk_shadow(i64 id) {
+    ShadowTok t;
     t.id = id;
     return move t;
 }
@@ -98,6 +115,21 @@ i64 consume_first_then_return(Both value) {
         Two(first, second): {
             consume(move first);
             return 1;
+        },
+        Empty: { return 0; },
+    }
+    return -1;
+}
+
+i64 consume_first_then_return_with_shadow(Both value) {
+    match value {
+        Two(value, second): {
+            consume(move value);
+            {
+                Both value = make_both();
+                ShadowTok second = mk_shadow(3);
+                return 1;
+            }
         },
         Empty: { return 0; },
     }
@@ -205,6 +237,15 @@ i32 main() {
         assert_eq_i64(1, consume_first_then_return(move value), "return from match arm");
     }
     assert_eq_i64(2, drops, "both payloads dropped once on return");
+    test_start("return cleanup uses original shadowed match locals");
+    drops = 0;
+    shadow_drops = 0;
+    {
+        Both value = make_both();
+        assert_eq_i64(1, consume_first_then_return_with_shadow(move value), "return from shadowed match arm");
+    }
+    assert_eq_i64(4, drops, "original payloads and shadowed scrutinee dropped once");
+    assert_eq_i64(1, shadow_drops, "shadowed payload name dropped once");
     test_start("unmoved payload is dropped when match arm breaks loop");
     drops = 0;
     {

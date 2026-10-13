@@ -766,6 +766,30 @@ void llvm_push_scrutinee_move(LlvmContext* ctx, u32 binding_name, u32 scrutinee_
     entry.binding_name = binding_name;
     entry.scrutinee_expr = scrutinee_expr;
     entry.local_index = ctx.locals.len() - 1;
+    entry.scrutinee_local_index = -1;
+    bool source_recorded = false;
+    i64 move_index = ctx.scrutinee_moves.len() - 1;
+    while (move_index >= 0) {
+        ScrutineeMove* previous = ctx.scrutinee_moves.get_ptr(move_index);
+        if (previous.scrutinee_expr == scrutinee_expr) {
+            entry.scrutinee_local_index = previous.scrutinee_local_index;
+            source_recorded = true;
+            break;
+        }
+        move_index -= 1;
+    }
+    if (!source_recorded) {
+        u32 root_name = llvm_place_root_name(ctx, scrutinee_expr);
+        i64 source_index = entry.local_index - 1;
+        while (root_name != 0 && source_index >= 0) {
+            LlvmLocal* source = ctx.locals.get_ptr(source_index);
+            if (source.name_id == root_name) {
+                entry.scrutinee_local_index = source_index;
+                break;
+            }
+            source_index -= 1;
+        }
+    }
     entry.moved = false;
     entry.clearing = false;
     ctx.scrutinee_moves.push(move entry);
@@ -795,7 +819,8 @@ void llvm_clear_scrutinee_source(LlvmContext* ctx, u32 moved_expr_id) {
             if (entry.clearing) { return; }
             entry.moved = true;
             entry.clearing = true;
-            llvm_clear_place_drops(ctx, entry.scrutinee_expr);
+            llvm_clear_place_drops_at_local(ctx, entry.scrutinee_expr,
+                                            entry.scrutinee_local_index);
             ctx.scrutinee_moves.get_ptr(i).clearing = false;
             return;
         }
@@ -809,14 +834,11 @@ void llvm_clear_scrutinee_source(LlvmContext* ctx, u32 moved_expr_id) {
 void llvm_drop_unmoved_payloads_at(LlvmContext* ctx, u32 scrutinee_expr,
                                    i64 base, i64 count) {
     if (count < 2 || scrutinee_expr == 0) { return; }
-    AstExpr* scrutinee = ctx.pool.get_expr(scrutinee_expr);
-    while (scrutinee.kind == ExprKind.Move && scrutinee.inner0 != 0) {
-        scrutinee = ctx.pool.get_expr(scrutinee.inner0);
-    }
-    if (scrutinee.kind != ExprKind.Var) { return; }
-    LlvmLocal* source = ctx.find_local(scrutinee.aux);
-    if (source == (LlvmLocal*)0 || source.drop_flag == (LLVMOpaqueValue*)0) { return; }
     if (base < 0 || base + count > ctx.scrutinee_moves.len()) { return; }
+    i64 source_index = ctx.scrutinee_moves.get_ptr(base).scrutinee_local_index;
+    if (source_index < 0 || source_index >= ctx.locals.len()) { return; }
+    LlvmLocal* source = ctx.locals.get_ptr(source_index);
+    if (source == (LlvmLocal*)0 || source.drop_flag == (LLVMOpaqueValue*)0) { return; }
     bool any_moved = false;
     i64 i = 0;
     while (i < count) {
@@ -833,9 +855,10 @@ void llvm_drop_unmoved_payloads_at(LlvmContext* ctx, u32 scrutinee_expr,
     i = 0;
     while (i < count) {
         ScrutineeMove* entry = ctx.scrutinee_moves.get_ptr(base + i);
-        if (!entry.moved) {
-            LlvmLocal* binding = ctx.find_local(entry.binding_name);
-            if (binding != (LlvmLocal*)0 && llvm_type_needs_tracking(ctx, binding.type_id)) {
+        if (!entry.moved && entry.local_index >= 0
+            && entry.local_index < ctx.locals.len()) {
+            LlvmLocal* binding = ctx.locals.get_ptr(entry.local_index);
+            if (llvm_type_needs_tracking(ctx, binding.type_id)) {
                 llvm_emit_value_drop_at_ptr(ctx, binding.ptr, binding.type_id);
             }
         }
@@ -1005,7 +1028,8 @@ bool llvm_validate_drop_field_transfer(LlvmContext* ctx, LlvmLocal* local,
 
 // Field transfers clear the selected subtree; indexed places retain the
 // conservative whole-root fallback because no per-element state exists.
-void llvm_clear_place_drops(LlvmContext* ctx, u32 expr_id) {
+void llvm_clear_place_drops_at_local(LlvmContext* ctx, u32 expr_id,
+                                     i64 local_index) {
     if (expr_id == 0) { return; }
     // Any ownership transfer of a match payload binding (explicit move or
     // implicit by-value use) releases the scrutinee side exactly once.
@@ -1017,7 +1041,8 @@ void llvm_clear_place_drops(LlvmContext* ctx, u32 expr_id) {
     Vec<Projection> path = Vec<Projection>.new();
     u32 root_name = llvm_collect_drop_field_path(ctx, expr_id, &path);
     if (root_name != 0 && path.len() > 0) {
-        LlvmLocal* local = ctx.find_local(root_name);
+        LlvmLocal* local = local_index >= 0 && local_index < ctx.locals.len()
+            ? ctx.locals.get_ptr(local_index) : ctx.find_local(root_name);
         if (local != (LlvmLocal*)0) {
             if (!llvm_validate_drop_field_transfer(ctx, local, &path, expr_id)) {
                 path.drop();
@@ -1041,10 +1066,23 @@ void llvm_clear_place_drops(LlvmContext* ctx, u32 expr_id) {
         expr = ctx.pool.get_expr(expr.inner0);
     }
     if (expr.kind == ExprKind.Var) {
-        llvm_clear_local_drops(ctx, expr.aux);
+        LlvmLocal* local = local_index >= 0 && local_index < ctx.locals.len()
+            ? ctx.locals.get_ptr(local_index) : ctx.find_local(expr.aux);
+        if (local != (LlvmLocal*)0) {
+            llvm_store_drop_flag(ctx, local.drop_flag, false);
+            i64 i = 0;
+            while (i < local.field_flags.len()) {
+                llvm_store_drop_flag(ctx, local.field_flags.get_ptr(i).flag, false);
+                i += 1;
+            }
+        }
     } else if (expr.kind == ExprKind.Move) {
-        llvm_clear_place_drops(ctx, expr.inner0);
+        llvm_clear_place_drops_at_local(ctx, expr.inner0, local_index);
     }
+}
+
+void llvm_clear_place_drops(LlvmContext* ctx, u32 expr_id) {
+    llvm_clear_place_drops_at_local(ctx, expr_id, -1);
 }
 
 // A custom enum destructor manages its payload; otherwise the tag selects
