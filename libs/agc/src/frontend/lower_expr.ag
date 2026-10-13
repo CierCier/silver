@@ -1587,6 +1587,12 @@ impl ExprLowerer {
                 block_stmt_ids.drop();
                 u32 operand_id = self.lower_sequence(block_result, block_result.next_sibling);
                 if (operand_id != 0) {
+                    if (arm_has_move) {
+                        AstExpr* operand = self.pool.get_expr(operand_id);
+                        if (operand.kind != ExprKind.Move) {
+                            operand_id = self.pool.add_move(operand_id, operand.span);
+                        }
+                    }
                     value_id = self.pool.add_expr_block(block_start, block_count,
                                                         operand_id, value_node.span);
                 } else {

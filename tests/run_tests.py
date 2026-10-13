@@ -57,6 +57,7 @@ LEAK_CHECK_TESTS = {
     "field_predrop_test",
     "temp_operator_test",
     "enum_move_test",
+    "match_block_payload_drop_test",
     "enum_cascade_test",
     "uuid_test",
     "display_test",
