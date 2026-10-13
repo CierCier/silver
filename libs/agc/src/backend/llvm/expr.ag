@@ -674,6 +674,16 @@ u32 llvm_expr_type(LlvmContext* ctx, u32 expr_id) {
             }
         }
     }
+    if (expr.kind == ExprKind.Unary && expr.aux == (u32)TokenKind.BitwiseAnd) {
+        u32 operand_type = llvm_lvalue_type(ctx, expr.inner0);
+        if (operand_type == TYPE_STR) {
+            return ctx.types.get_pointer(TYPE_STR, true);
+        }
+        TypeEntry* operand = ctx.types.get(operand_type);
+        if (operand.kind == TypeKind.Reference && operand.inner == TYPE_STR) {
+            return operand_type;
+        }
+    }
     if (expr.inferred_type != TYPE_UNKNOWN && expr.inferred_type != 0) {
         u32 inferred = ctx.types.resolve_subst(expr.inferred_type);
         bool unresolved_shape = llvm_type_has_unresolved(ctx, inferred, 0);
@@ -771,6 +781,9 @@ u32 llvm_expr_type(LlvmContext* ctx, u32 expr_id) {
                 inner = llvm_expr_type(ctx, expr.inner0);
             }
             if (inner != TYPE_UNKNOWN) {
+                if (ctx.types.get(inner).kind == TypeKind.Reference) {
+                    return inner;
+                }
                 return ctx.types.get_pointer(inner, true);
             }
         }
@@ -1183,6 +1196,13 @@ LLVMOpaqueValue* llvm_compat_value(LlvmContext* ctx, LLVMOpaqueValue* val,
     if (val == (LLVMOpaqueValue*)0 || target_type_id == TYPE_UNKNOWN) {
         return val;
     }
+    TypeEntry* source = ctx.types.get(ctx.types.resolve_subst(source_type_id));
+    TypeEntry* target = ctx.types.get(ctx.types.resolve_subst(target_type_id));
+    if (source.kind == TypeKind.Pointer && source.inner == TYPE_STR
+        && target.kind == TypeKind.Reference && target.inner == TYPE_STR) {
+        return LLVMBuildLoad2(ctx.builder, llvm_lower_type(ctx.ctx, ctx.types, TYPE_STR),
+                              val, "str.borrow.value");
+    }
     LLVMOpaqueType* target_ty = llvm_lower_type(ctx.ctx, ctx.types, target_type_id);
     LLVMOpaqueType* val_ty = LLVMTypeOf(val);
     if (val_ty == target_ty) {
@@ -1260,6 +1280,10 @@ void llvm_prepare_call_args(LlvmContext* ctx, LLVMOpaqueType* fn_type,
             u32 act_kind = LLVMGetTypeKind(act_ty);
             u32 source_type = TYPE_UNKNOWN;
             if (pi < source_types.len()) { source_type = source_types.get(pi); }
+            if (pi < target_types.len() && exp_kind == (u32)12 && act_kind == (u32)12) {
+                arg_v = llvm_compat_value(ctx, arg_v, source_type, target_types.get(pi));
+                call_args.set(pi, arg_v);
+            }
             if (c_abi && exp_kind == (u32)8 && act_kind == (u32)10
                 && llvm_type_is_unit_enum(ctx.root, ctx.types, source_type)) {
                 LLVMOpaqueValue* tag = LLVMBuildExtractValue(
@@ -2618,8 +2642,7 @@ LLVMOpaqueValue* llvm_emit_str_value(LlvmContext* ctx, u32 expr_id) {
     LLVMOpaqueValue* value = llvm_emit_expr(ctx, expr_id);
     if (value == (LLVMOpaqueValue*)0) { return (LLVMOpaqueValue*)0; }
     TypeEntry* entry = ctx.types.get(value_type);
-    // A `&str` borrows the character pointer itself, so only raw `str*`
-    // pointers address a slot that must be loaded.
+    // &str is a borrowed byte view; str* addresses a stored str pointer.
     while (entry.kind == TypeKind.Pointer
            || (entry.kind == TypeKind.Reference && entry.inner != TYPE_STR)) {
         value_type = ctx.types.resolve_subst(entry.inner);

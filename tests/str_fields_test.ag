@@ -1,3 +1,5 @@
+// compile_flags: --no-cache
+
 struct TextHolder {
     str text;
 }
@@ -14,9 +16,25 @@ i64 borrowed_length(&str text) {
     return text.len;
 }
 
+i64 pointed_length(str* text) {
+    return text.len;
+}
+
 i32 main() {
     &str borrowed = "borrowed";
     if (borrowed.len != 8 || borrowed_length(borrowed) != 8) { return 7; }
+
+    str source = "hello";
+    &str local_borrow = &source;
+    u8* local_data = local_borrow.data;
+    if (local_borrow.len != 5 || borrowed_length(local_borrow) != 5
+        || local_data[0] != (u8)'h' || local_data[4] != (u8)'o') { return 8; }
+    &str reborrow = &local_borrow;
+    if (reborrow.len != 5 || borrowed_length(&source) != 5) { return 9; }
+    if (borrowed_length("argument") != 8) { return 10; }
+    if (pointed_length(&source) != 5) { return 11; }
+    u8* literal_data = borrowed.data;
+    if (literal_data[0] != (u8)'b' || literal_data[7] != (u8)'d') { return 12; }
 
     if ("literal".len != 7) { return 1; }
     if (text_length("parameter") != 9) { return 2; }
@@ -32,6 +50,8 @@ i32 main() {
     holder.text = "field";
     u8* holder_data = holder.text.data;
     if (holder.text.len != 5 || holder_data[0] != (u8)'f') { return 5; }
+    &str field_borrow = &holder.text;
+    if (field_borrow.len != 5 || borrowed_length(&holder.text) != 5) { return 13; }
 
     str absent = (str)0;
     u8* absent_data = absent.data;

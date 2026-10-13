@@ -1593,7 +1593,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
     pub(crate) fn try_coerce_to_slice(
         &mut self,
-        value: BasicValueEnum<'ctx>,
+        mut value: BasicValueEnum<'ctx>,
         source_expr: Option<&ast::Expression>,
         target_struct_ty: inkwell::types::StructType<'ctx>,
         span: &Span,
@@ -1639,6 +1639,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 } else if let ast::TypeKind::Pointer(p) = src_ty.kind.as_ref() {
                     is_ref = true;
                     inner_ty = &p.inner;
+                }
+
+                // A borrowed str or slice addresses its stored value, not its bytes.
+                if is_ref
+                    && matches!(
+                        inner_ty.kind.as_ref(),
+                        ast::TypeKind::Primitive(ast::PrimitiveType::Str) | ast::TypeKind::Slice(_)
+                    )
+                {
+                    let inner_llvm_ty = self.lower_basic_type(inner_ty)?;
+                    value = self
+                        .builder
+                        .build_load(inner_llvm_ty, value.into_pointer_value(), "slice.borrow.value")
+                        .map_err(|e| CodegenError::with_span(e.to_string(), *span))?;
                 }
 
                 // Check for String or Vec
