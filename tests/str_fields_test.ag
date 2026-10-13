@@ -10,7 +10,14 @@ u8* text_data(str text) {
     return text.data;
 }
 
+i64 borrowed_length(&str text) {
+    return text.len;
+}
+
 i32 main() {
+    &str borrowed = "borrowed";
+    if (borrowed.len != 8 || borrowed_length(borrowed) != 8) { return 7; }
+
     if ("literal".len != 7) { return 1; }
     if (text_length("parameter") != 9) { return 2; }
 

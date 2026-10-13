@@ -2618,11 +2618,17 @@ LLVMOpaqueValue* llvm_emit_str_value(LlvmContext* ctx, u32 expr_id) {
     LLVMOpaqueValue* value = llvm_emit_expr(ctx, expr_id);
     if (value == (LLVMOpaqueValue*)0) { return (LLVMOpaqueValue*)0; }
     TypeEntry* entry = ctx.types.get(value_type);
-    while (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) {
+    // A `&str` borrows the character pointer itself, so only raw `str*`
+    // pointers address a slot that must be loaded.
+    while (entry.kind == TypeKind.Pointer
+           || (entry.kind == TypeKind.Reference && entry.inner != TYPE_STR)) {
         value_type = ctx.types.resolve_subst(entry.inner);
         value = LLVMBuildLoad2(ctx.builder,
             llvm_lower_type(ctx.ctx, ctx.types, value_type), value, "str.value.load");
         entry = ctx.types.get(value_type);
+    }
+    if (entry.kind == TypeKind.Reference && entry.inner == TYPE_STR) {
+        entry = ctx.types.get(TYPE_STR);
     }
     return entry.kind == TypeKind.Str ? value : (LLVMOpaqueValue*)0;
 }
