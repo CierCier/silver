@@ -11,7 +11,8 @@ struct Holder {
 
 i32 main() {
     Holder holder;
-    holder.values[0] = Ok(1);
+    Result<i32, String> ok = Ok(1);
+    holder.values[0] = ok;
     holder.sibling = String.from_str("kept");
     i32 v = holder.values[0] ? 3;
     return v;

@@ -52,7 +52,8 @@ i32 main() {
     test_start("field of a local is consumed, not freed twice");
     {
         Holder holder;
-        holder.value = Ok(String.from_str("kept"));
+        Result<String, i32> ok = Ok(String.from_str("kept"));
+        holder.value = move ok;
         String extracted = holder.value ? String.from_str("fallback");
         assert_eq_i64(4, (i64)extracted.len, "payload extracted from field");
     }
