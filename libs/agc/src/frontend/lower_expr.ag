@@ -1568,7 +1568,31 @@ impl ExprLowerer {
             u32 value_id = 0;
             u32 body_stmt_id = 0;
             SyntaxNode* value_node = colon.next_sibling;
+            SyntaxNode* block_result = (SyntaxNode*)0;
             if (value_node != (SyntaxNode*)0 && value_node.kind == NodeKind.Block
+                && value_node != value_end) {
+                block_result = block_trailing_operand(value_node);
+            }
+            if (block_result != (SyntaxNode*)0) {
+                // `{ stmts; operand; }` yields the operand as the arm value.
+                Vec<u32> block_stmt_ids = Vec<u32>.new();
+                self.lower_block_range(value_node.first_child, block_result, &block_stmt_ids);
+                u32 block_start = (u32)self.pool.block_stmts.len();
+                i64 block_index = 0;
+                while (block_index < block_stmt_ids.len()) {
+                    self.pool.block_stmts.push(block_stmt_ids.get(block_index));
+                    block_index += 1;
+                }
+                u32 block_count = (u32)block_stmt_ids.len();
+                block_stmt_ids.drop();
+                u32 operand_id = self.lower_sequence(block_result, block_result.next_sibling);
+                if (operand_id != 0) {
+                    value_id = self.pool.add_expr_block(block_start, block_count,
+                                                        operand_id, value_node.span);
+                } else {
+                    body_stmt_id = self.lower_block_stmt(value_node);
+                }
+            } else if (value_node != (SyntaxNode*)0 && value_node.kind == NodeKind.Block
                 && value_node != value_end) {
                 // Block arm body: statements (typically diverging via
                 // return) instead of an expression value.
@@ -3993,6 +4017,35 @@ impl ExprLowerer {
             self.lower_block_range(block.first_child, (SyntaxNode*)0, stmt_ids);
         }
     }
+}
+
+// Returns the lone operand of a block's final `operand;` statement, or null
+// when the block ends differently. Only bare identifiers and literals
+// qualify, so call statements keep their statement semantics.
+SyntaxNode* block_trailing_operand(SyntaxNode* block) {
+    SyntaxNode* previous = (SyntaxNode*)0;
+    SyntaxNode* cursor = block.first_child;
+    while (cursor != (SyntaxNode*)0) {
+        SyntaxNode* next = cursor.next_sibling;
+        bool final_statement = next != (SyntaxNode*)0
+            && next.kind == NodeKind.Token && next.token_kind == TokenKind.Semicolon
+            && next.next_sibling == (SyntaxNode*)0;
+        if (final_statement && cursor.kind == NodeKind.Token
+            && (cursor.token_kind == TokenKind.Identifier
+                || cursor.token_kind == TokenKind.IntLiteral
+                || cursor.token_kind == TokenKind.FloatLiteral
+                || cursor.token_kind == TokenKind.BoolLiteral
+                || cursor.token_kind == TokenKind.CharLiteral
+                || cursor.token_kind == TokenKind.StringLiteral)) {
+            bool boundary = previous == (SyntaxNode*)0
+                || (previous.kind == NodeKind.Token && previous.token_kind == TokenKind.Semicolon)
+                || previous.kind == NodeKind.Block;
+            return boundary ? cursor : (SyntaxNode*)0;
+        }
+        previous = cursor;
+        cursor = next;
+    }
+    return (SyntaxNode*)0;
 }
 
 SyntaxNode* find_function_body(SyntaxNode* function_item) {
