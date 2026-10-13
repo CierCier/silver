@@ -766,6 +766,7 @@ void llvm_push_scrutinee_move(LlvmContext* ctx, u32 binding_name, u32 scrutinee_
     entry.binding_name = binding_name;
     entry.scrutinee_expr = scrutinee_expr;
     entry.moved = false;
+    entry.clearing = false;
     ctx.scrutinee_moves.push(move entry);
 }
 
@@ -787,11 +788,14 @@ void llvm_clear_scrutinee_source(LlvmContext* ctx, u32 moved_expr_id) {
     while (i >= 0) {
         ScrutineeMove* entry = ctx.scrutinee_moves.get_ptr(i);
         if (entry.binding_name == root_name) {
-            // Already transferred; also stops recursion when the binding
+            // `moved` is sticky across paths, but every path needs its own
+            // flag store; `clearing` only stops recursion when the binding
             // shadows its own scrutinee.
-            if (entry.moved) { return; }
+            if (entry.clearing) { return; }
             entry.moved = true;
+            entry.clearing = true;
             llvm_clear_place_drops(ctx, entry.scrutinee_expr);
+            ctx.scrutinee_moves.get_ptr(i).clearing = false;
             return;
         }
         i -= 1;

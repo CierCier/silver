@@ -37,6 +37,7 @@ struct ScrutineeMove {
     u32 binding_name;
     u32 scrutinee_expr;
     bool moved;
+    bool clearing;
 }
 
 struct LlvmFieldInfo {

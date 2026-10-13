@@ -51,8 +51,10 @@ i64 take_second(Both value) {
     return picked.id;
 }
 
+i64 consumed = 0;
+
 void consume(Tok token) {
-    drops += 0;
+    consumed += token.id;
 }
 
 i64 take_first_after_consuming_second(Both value) {
@@ -61,6 +63,34 @@ i64 take_first_after_consuming_second(Both value) {
         Empty: mk(9),
     };
     return picked.id;
+}
+
+enum Single {
+    One(Tok);
+    Nothing;
+}
+
+Single make_single() {
+    Tok a = mk(5);
+    Single result = Single.One(move a);
+    return move result;
+}
+
+// Each path that transfers the payload must clear the matched value's
+// cleanup on its own; the later path must not rely on an earlier one.
+i64 consume_on_either_path(Single value, bool flag) {
+    match value {
+        One(text): {
+            if (flag) {
+                consume(move text);
+                return 1;
+            }
+            consume(move text);
+            return 2;
+        },
+        Nothing: { return 0; },
+    }
+    return -1;
 }
 
 i64 borrow_only(Both value) {
@@ -101,5 +131,18 @@ i32 main() {
         assert_eq_i64(1, take_first_after_consuming_second(move value), "first payload extracted");
     }
     assert_eq_i64(2, drops, "consumed and extracted payloads dropped once each");
+    test_start("payload consumed on either branch is dropped once");
+    drops = 0;
+    {
+        Single value = make_single();
+        assert_eq_i64(2, consume_on_either_path(move value, false), "second path taken");
+    }
+    assert_eq_i64(1, drops, "payload dropped once on the later path");
+    drops = 0;
+    {
+        Single value = make_single();
+        assert_eq_i64(1, consume_on_either_path(move value, true), "first path taken");
+    }
+    assert_eq_i64(1, drops, "payload dropped once on the first path");
     return done();
 }
