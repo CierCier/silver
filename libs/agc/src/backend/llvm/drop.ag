@@ -795,6 +795,74 @@ void llvm_push_scrutinee_move(LlvmContext* ctx, u32 binding_name, u32 scrutinee_
     ctx.scrutinee_moves.push(move entry);
 }
 
+void llvm_set_scrutinee_binding_live(LlvmContext* ctx, i64 local_index, bool live) {
+    if (local_index < 0 || local_index >= ctx.locals.len()) { return; }
+    LlvmLocal* local = ctx.locals.get_ptr(local_index);
+    llvm_store_drop_flag(ctx, local.drop_flag, live);
+    i64 i = 0;
+    while (i < local.field_flags.len()) {
+        llvm_store_drop_flag(ctx, local.field_flags.get_ptr(i).flag, live);
+        i += 1;
+    }
+}
+
+// Payload bindings own their copies only after the source has been consumed.
+void llvm_init_scrutinee_binding_drops(LlvmContext* ctx) {
+    i64 move_index = ctx.scrutinee_moves.len() - 1;
+    if (move_index < 0) { return; }
+    ScrutineeMove* entry = ctx.scrutinee_moves.get_ptr(move_index);
+    i64 source_index = entry.scrutinee_local_index;
+    if (source_index < 0 || source_index >= ctx.locals.len()) { return; }
+    LlvmLocal* source = ctx.locals.get_ptr(source_index);
+    if (source.drop_flag == (LLVMOpaqueValue*)0) { return; }
+    LLVMOpaqueType* i1_ty = LLVMInt1TypeInContext(ctx.ctx);
+    LLVMOpaqueValue* source_live = LLVMBuildLoad2(ctx.builder, i1_ty,
+        source.drop_flag, "match_source_live");
+    LLVMOpaqueValue* binding_live = LLVMBuildXor(ctx.builder, source_live,
+        LLVMConstInt(i1_ty, 1, 0), "match_binding_live");
+    LlvmLocal* binding = ctx.locals.get_ptr(entry.local_index);
+    if (binding.drop_flag != (LLVMOpaqueValue*)0) {
+        LLVMBuildStore(ctx.builder, binding_live, binding.drop_flag);
+    }
+    i64 i = 0;
+    while (i < binding.field_flags.len()) {
+        LLVMBuildStore(ctx.builder, binding_live,
+            binding.field_flags.get_ptr(i).flag);
+        i += 1;
+    }
+}
+
+// When a binding is moved from a still-owned source, the arm bindings become
+// the owners of its remaining payloads. A consumed source stays consumed.
+void llvm_promote_scrutinee_bindings(LlvmContext* ctx, i64 move_index) {
+    if (move_index < 0 || move_index >= ctx.scrutinee_moves.len()) { return; }
+    ScrutineeMove* entry = ctx.scrutinee_moves.get_ptr(move_index);
+    i64 source_index = entry.scrutinee_local_index;
+    if (source_index < 0 || source_index >= ctx.locals.len()) { return; }
+    LlvmLocal* source = ctx.locals.get_ptr(source_index);
+    if (source.drop_flag == (LLVMOpaqueValue*)0) { return; }
+    LLVMOpaqueType* i1_ty = LLVMInt1TypeInContext(ctx.ctx);
+    LLVMOpaqueValue* source_live = LLVMBuildLoad2(ctx.builder, i1_ty,
+        source.drop_flag, "match_source_live");
+    LLVMOpaqueBasicBlock* promote_bb = LLVMAppendBasicBlockInContext(ctx.ctx,
+        ctx.current_fn, "match_promote_bindings");
+    LLVMOpaqueBasicBlock* after_bb = LLVMAppendBasicBlockInContext(ctx.ctx,
+        ctx.current_fn, "match_bindings_promoted");
+    LLVMBuildCondBr(ctx.builder, source_live, promote_bb, after_bb);
+    LLVMPositionBuilderAtEnd(ctx.builder, promote_bb);
+    i64 i = 0;
+    while (i < ctx.scrutinee_moves.len()) {
+        ScrutineeMove* sibling = ctx.scrutinee_moves.get_ptr(i);
+        if (sibling.scrutinee_expr == entry.scrutinee_expr
+            && sibling.scrutinee_local_index == source_index) {
+            llvm_set_scrutinee_binding_live(ctx, sibling.local_index, true);
+        }
+        i += 1;
+    }
+    LLVMBuildBr(ctx.builder, after_bb);
+    LLVMPositionBuilderAtEnd(ctx.builder, after_bb);
+}
+
 void llvm_pop_scrutinee_moves(LlvmContext* ctx, i64 count) {
     while (count > 0 && ctx.scrutinee_moves.len() > 0) {
         ctx.scrutinee_moves.pop();
@@ -819,6 +887,7 @@ void llvm_clear_scrutinee_source(LlvmContext* ctx, u32 moved_expr_id) {
             if (entry.clearing) { return; }
             entry.moved = true;
             entry.clearing = true;
+            llvm_promote_scrutinee_bindings(ctx, i);
             llvm_clear_place_drops_at_local(ctx, entry.scrutinee_expr,
                                             entry.scrutinee_local_index);
             ctx.scrutinee_moves.get_ptr(i).clearing = false;
@@ -836,30 +905,66 @@ void llvm_drop_unmoved_payloads_at(LlvmContext* ctx, u32 scrutinee_expr,
     if (count < 2 || scrutinee_expr == 0) { return; }
     if (base < 0 || base + count > ctx.scrutinee_moves.len()) { return; }
     i64 source_index = ctx.scrutinee_moves.get_ptr(base).scrutinee_local_index;
-    if (source_index < 0 || source_index >= ctx.locals.len()) { return; }
-    LlvmLocal* source = ctx.locals.get_ptr(source_index);
-    if (source == (LlvmLocal*)0 || source.drop_flag == (LLVMOpaqueValue*)0) { return; }
-    bool any_moved = false;
+    bool temporary_scrutinee = source_index < 0
+        && llvm_place_root_name(ctx, scrutinee_expr) == 0;
+    if (!temporary_scrutinee && (source_index < 0 || source_index >= ctx.locals.len())) { return; }
+    LlvmLocal* source = temporary_scrutinee
+        ? (LlvmLocal*)0 : ctx.locals.get_ptr(source_index);
+    if (!temporary_scrutinee
+        && (source == (LlvmLocal*)0 || source.drop_flag == (LLVMOpaqueValue*)0)) { return; }
+    LLVMOpaqueType* i1_ty = LLVMInt1TypeInContext(ctx.ctx);
+    LLVMOpaqueValue* any_moved = LLVMConstInt(i1_ty, 0, 0);
     i64 i = 0;
     while (i < count) {
-        if (ctx.scrutinee_moves.get_ptr(base + i).moved) { any_moved = true; }
+        ScrutineeMove* entry = ctx.scrutinee_moves.get_ptr(base + i);
+        if (entry.local_index >= 0 && entry.local_index < ctx.locals.len()) {
+            LlvmLocal* binding = ctx.locals.get_ptr(entry.local_index);
+            if (binding.drop_flag != (LLVMOpaqueValue*)0) {
+                LLVMOpaqueValue* live = LLVMBuildLoad2(ctx.builder, i1_ty,
+                    binding.drop_flag, "payload_live");
+                LLVMOpaqueValue* moved = LLVMBuildXor(ctx.builder, live,
+                    LLVMConstInt(i1_ty, 1, 0), "payload_moved");
+                any_moved = LLVMBuildOr(ctx.builder, any_moved, moved,
+                    "any_payload_moved");
+            }
+            i64 field_index = 0;
+            while (field_index < binding.field_flags.len()) {
+                LLVMOpaqueValue* live = LLVMBuildLoad2(ctx.builder, i1_ty,
+                    binding.field_flags.get_ptr(field_index).flag, "payload_field_live");
+                LLVMOpaqueValue* moved = LLVMBuildXor(ctx.builder, live,
+                    LLVMConstInt(i1_ty, 1, 0), "payload_field_moved");
+                any_moved = LLVMBuildOr(ctx.builder, any_moved, moved,
+                    "any_payload_moved");
+                field_index += 1;
+            }
+        }
         i += 1;
     }
-    if (!any_moved) { return; }
-    LLVMOpaqueType* i1_ty = LLVMInt1TypeInContext(ctx.ctx);
-    LLVMOpaqueValue* live = LLVMBuildLoad2(ctx.builder, i1_ty, source.drop_flag, "payload_flag");
     LLVMOpaqueBasicBlock* drop_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "payload_release");
     LLVMOpaqueBasicBlock* after_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "payload_after");
-    LLVMBuildCondBr(ctx.builder, live, after_bb, drop_bb);
+    LLVMBuildCondBr(ctx.builder, any_moved, drop_bb, after_bb);
     LLVMPositionBuilderAtEnd(ctx.builder, drop_bb);
     i = 0;
     while (i < count) {
         ScrutineeMove* entry = ctx.scrutinee_moves.get_ptr(base + i);
-        if (!entry.moved && entry.local_index >= 0
+        if (entry.local_index >= 0
             && entry.local_index < ctx.locals.len()) {
             LlvmLocal* binding = ctx.locals.get_ptr(entry.local_index);
             if (llvm_type_needs_tracking(ctx, binding.type_id)) {
-                llvm_emit_value_drop_at_ptr(ctx, binding.ptr, binding.type_id);
+                llvm_emit_local_whole_drop(ctx, binding);
+                i64 field_index = 0;
+                while (field_index < binding.field_flags.len()) {
+                    llvm_emit_local_field_drop(ctx, binding,
+                                               binding.field_flags.get_ptr(field_index));
+                    field_index += 1;
+                }
+                llvm_store_drop_flag(ctx, binding.drop_flag, false);
+                field_index = 0;
+                while (field_index < binding.field_flags.len()) {
+                    llvm_store_drop_flag(ctx,
+                        binding.field_flags.get_ptr(field_index).flag, false);
+                    field_index += 1;
+                }
             }
         }
         i += 1;
@@ -914,7 +1019,20 @@ void llvm_clear_copy_source(LlvmContext* ctx, u32 src_id,
     AstExpr* source = ctx.pool.get_expr(src_id);
     bool source_is_place = source.kind == ExprKind.Var || source.kind == ExprKind.Field
         || source.kind == ExprKind.Index;
+    bool source_is_match_binding = false;
+    if (source_is_place) {
+        u32 root_name = llvm_place_root_name(ctx, src_id);
+        i64 i = ctx.scrutinee_moves.len() - 1;
+        while (i >= 0) {
+            if (ctx.scrutinee_moves.get_ptr(i).binding_name == root_name) {
+                source_is_match_binding = true;
+                break;
+            }
+            i -= 1;
+        }
+    }
     if (preserve_direct_copy_drop && source_is_place
+        && !source_is_match_binding
         && ctx.types.is_copy(ctx.types.resolve_subst(src_ty))
         && llvm_can_resolve_drop_fn(ctx, src_ty)) { return; }
     llvm_clear_place_drops(ctx, src_id);

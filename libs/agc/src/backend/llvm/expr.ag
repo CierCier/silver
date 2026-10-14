@@ -4845,7 +4845,9 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                 LLVMOpaqueValue* scrut_loaded = LLVMBuildLoad2(ctx.builder, scrut_ty, scrut_slot, "match_scrut_ld");
                 LLVMBuildStore(ctx.builder, scrut_loaded, bind_slot);
                 ctx.add_local(binding_name, bind_slot, scrut_ty_id, true);
+                llvm_register_local_drops(ctx, binding_name, bind_slot, scrut_ty_id, true);
                 llvm_push_scrutinee_move(ctx, binding_name, expr.inner0);
+                llvm_init_scrutinee_binding_drops(ctx);
             } else if (arm.pattern == MatchPatternKind.Variant) {
                 str variant = ctx.names.get(arm.variant_name_id);
                 str arm_enum = scrut_enum;
@@ -4887,7 +4889,9 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                     LLVMOpaqueValue* bind_slot = LLVMBuildAlloca(ctx.builder, field_ty, "match_bind");
                     LLVMBuildStore(ctx.builder, field_val, bind_slot);
                     ctx.add_local(binding_name, bind_slot, field_type, true);
+                    llvm_register_local_drops(ctx, binding_name, bind_slot, field_type, true);
                     llvm_push_scrutinee_move(ctx, binding_name, expr.inner0);
+                    llvm_init_scrutinee_binding_drops(ctx);
                     binding_index += 1;
                 }
                 payload_types.drop();
