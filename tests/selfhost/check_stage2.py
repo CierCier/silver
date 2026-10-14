@@ -246,6 +246,19 @@ i32 main() {
                 "stage2-compiled collection_drop_glue_test returned "
                 f"{executed.returncode}, expected 0"
             )
+        for fixture in (
+            "match_block_payload_drop_test",
+            "match_payload_remainder_test",
+            "str_fields_test",
+        ):
+            program = work / fixture
+            invoke(stage2, ["build", str(root / "tests" / f"{fixture}.ag"),
+                            "--no-cache", "--leak-check", "-o", str(program)])
+            executed = subprocess.run([str(program)], timeout=30, check=False)
+            if executed.returncode != 0:
+                raise AssertionError(
+                    f"stage2-compiled {fixture} returned {executed.returncode}, expected 0"
+                )
         nested_match_test = root / "tests/nested_match_payload_test.ag"
         nested_match_program = work / "nested-match-payload"
         invoke(stage2, ["build", str(nested_match_test), "--no-cache",

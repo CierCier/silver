@@ -33,6 +33,7 @@ STAGE1_ONLY_ACCEPTANCE = {
     "tests/method_slice_coercion_test.ag",
     "tests/macro_block_borrow_error_test.ag",
     "tests/match_multi_payload_move_test.ag",
+    "tests/match_payload_remainder_test.ag",
 }
 
 # These examples depend on generated foreign-module AGM files. Stage1 does not

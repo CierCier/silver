@@ -58,6 +58,7 @@ LEAK_CHECK_TESTS = {
     "temp_operator_test",
     "enum_move_test",
     "match_block_payload_drop_test",
+    "match_payload_remainder_test",
     "enum_cascade_test",
     "uuid_test",
     "display_test",
@@ -88,6 +89,7 @@ DEFAULT_SKIP = {
 
 # These regressions are exercised by run_native.sh with the stage1 compiler.
 STAGE1_ONLY_TESTS = {
+    "match_payload_remainder_test": "stage1 mixed move payload bindings",
     "json_synthesis_scope_test": "stage1 JSON method synthesis",
     "method_slice_coercion_test": "stage1 borrowed-slice coercion",
     "match_multi_payload_move_test": "stage1 multi-payload move patterns",

@@ -1,0 +1,119 @@
+// compile_flags: --no-cache
+
+import std.test;
+import std.string;
+
+i64 drops = 0;
+
+struct Payload {
+    String text;
+}
+impl Drop for Payload {
+    void drop(Payload* self) { drops += 1; }
+}
+enum Pair { Both(Payload, Payload); }
+enum Envelope { Wrapped(Pair, Payload); }
+
+Pair make_pair() {
+    Payload first;
+    first.text = String.from_str("first");
+    Payload second;
+    second.text = String.from_str("second");
+    return Pair.Both(move first, move second);
+}
+
+Payload take_first(Pair pair) {
+    match pair { Both(move left, right): { return move left; }, };
+}
+
+i32 main() {
+    test_start("match payload remainder cleanup");
+    {
+        Pair pair = make_pair();
+        Payload extracted = match pair {
+            Both(move left, right): {
+                assert_eq_i64(6, right.text.len, "other payload is readable in arm");
+                left;
+            },
+        };
+        assert_eq_i64(5, extracted.text.len, "selected payload stays live");
+        assert_eq_i64(1, drops, "other payload drops at arm exit");
+    }
+    assert_eq_i64(2, drops, "both payloads drop once");
+    {
+        Pair pair = make_pair();
+        Payload extracted = match pair { Both(move left, _): { left; }, };
+        assert_eq_i64(5, extracted.text.len, "wildcard does not affect result");
+        assert_eq_i64(3, drops, "wildcard payload drops");
+    }
+    assert_eq_i64(4, drops, "wildcard match drops both payloads once");
+    {
+        Payload extracted = match make_pair() { Both(left, move right): right, };
+        assert_eq_i64(6, extracted.text.len, "direct arm returns second payload");
+        assert_eq_i64(5, drops, "temporary first payload drops");
+    }
+    assert_eq_i64(6, drops, "temporary match drops both payloads once");
+    {
+        Pair pair = make_pair();
+        Payload extracted = match pair { Both(move pair, right): { pair; }, };
+        assert_eq_i64(5, extracted.text.len, "binding can shadow the source");
+        assert_eq_i64(7, drops, "shadowed source transfers remaining ownership");
+    }
+    assert_eq_i64(8, drops, "shadowed source drops both payloads once");
+    {
+        Pair pair = make_pair();
+        i32 result = match pair {
+            Both(move left, move right): {
+                Payload first = move left;
+                Payload second = move right;
+                assert_eq_i64(5, first.text.len, "first explicit move stays live");
+                assert_eq_i64(6, second.text.len, "second explicit move stays live");
+                0;
+            },
+        };
+        assert_eq_i64(0, (i64)result, "block result survives payload cleanup");
+        assert_eq_i64(10, drops, "later transfer does not reactivate an earlier move");
+    }
+    assert_eq_i64(10, drops, "source does not drop transferred fields again");
+    {
+        Pair pair = make_pair();
+        Payload extra;
+        extra.text = String.from_str("extra");
+        Envelope envelope = Envelope.Wrapped(move pair, move extra);
+        Payload extracted = match envelope {
+            Wrapped(move inner, other): {
+                Payload selected = match inner { Both(move left, right): { left; }, };
+                assert_eq_i64(11, drops, "inner remainder drops at inner match exit");
+                selected;
+            },
+        };
+        assert_eq_i64(5, extracted.text.len, "nested extraction preserves its result");
+        assert_eq_i64(12, drops, "both nested remainder payloads drop");
+    }
+    assert_eq_i64(13, drops, "nested result drops once");
+    {
+        Payload extracted = take_first(make_pair());
+        assert_eq_i64(5, extracted.text.len, "early return keeps selected payload live");
+        assert_eq_i64(14, drops, "early return cleans up the remaining payload");
+    }
+    assert_eq_i64(15, drops, "early return result drops once");
+    {
+        Pair pair = make_pair();
+        Payload extracted = match pair {
+            Both(move left, right): { right.drop(); left; },
+        };
+        assert_eq_i64(5, extracted.text.len, "selected value survives explicit sibling drop");
+        assert_eq_i64(16, drops, "explicit sibling drop runs once");
+    }
+    assert_eq_i64(17, drops, "later transfer does not reactivate dropped sibling");
+    {
+        Pair pair = make_pair();
+        Payload extracted = match pair {
+            Both(move left, right): { Payload selected = left; selected; },
+        };
+        assert_eq_i64(5, extracted.text.len, "implicit payload transfer preserves the result");
+        assert_eq_i64(18, drops, "implicit transfer retains sibling cleanup");
+    }
+    assert_eq_i64(19, drops, "implicit transfer drops both payloads once");
+    return done();
+}
