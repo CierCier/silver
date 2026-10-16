@@ -75,17 +75,6 @@ bool http_parse_i64(u8* data, i64 start, i64 end, i64* out) {
     return true;
 }
 
-/// Append the decimal form of `value` to `out`.
-void http_append_i64(String* out, i64 value) {
-    u8 digits[32];
-    i64 len = itoa(value, &digits[0]);
-    i64 i = 0;
-    while (i < len) {
-        out.push(digits[i]);
-        i = i + 1;
-    }
-}
-
 // --- Clock ----------------------------------------------------------------
 
 /// Current wall-clock time in unix seconds (CLOCK_REALTIME).
@@ -183,7 +172,7 @@ impl Cookie {
         }
         if (self.max_age > 0) {
             out.push_str("; Max-Age=");
-            http_append_i64(out, self.max_age);
+            out.push_display(&self.max_age);
         } else if (self.max_age < 0) {
             out.push_str("; Max-Age=0");
         }
@@ -488,7 +477,7 @@ bool http_parse_rfc1123(u8* data, i64 start, i64 end, i64* out) {
 /// Append a two-digit (padded) decimal to `out`.
 void http_append_padded2(String* out, i64 v) {
     if (v < 10) { out.push((u8)'0'); }
-    http_append_i64(out, v);
+    out.push_display(&v);
 }
 
 /// Format unix seconds as Go's http.TimeFormat RFC 1123 string.
@@ -522,7 +511,7 @@ void http_format_rfc1123(String* out, i64 unix_seconds) {
     if (year < 1000) { out.push((u8)'0'); }
     if (year < 100) { out.push((u8)'0'); }
     if (year < 10) { out.push((u8)'0'); }
-    http_append_i64(out, year);
+    out.push_display(&year);
     out.push((u8)' ');
     http_append_padded2(out, hour);
     out.push((u8)':');

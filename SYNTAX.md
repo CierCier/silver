@@ -177,10 +177,22 @@ Map<str, f64> scores;
 Optional<str> name;
 ```
 
+### Tuples
+
+Tuple types and values use square brackets. Elements can have different types;
+constant indices select individual elements.
+
+```silver
+[i32, str] pair = [7, "seven"];
+i32 number = pair[0];
+let [value, label] = pair;
+```
+
+Parentheses group expressions; `(i32, str)` and `(7, "seven")` are not tuple syntax.
+
 ### Function Types
 
-Function types use `ReturnType(ParamTypes...)` syntax.  Tuple types `(T1, T2)`
-are **not** supported — parens group a single expression.
+Function types use `ReturnType(ParamTypes...)` syntax.
 
 ```silver
 bool(i32, f64) predicate;   // function pointer: takes i32, f64 → returns bool
@@ -194,12 +206,17 @@ void() callback;             // function pointer: no params → void
 ### Module Imports
 
 ```silver
-// Imports currently bring all public module items into scope.
+// Import a module's public items.
 import std.io;
+
+// Select names and give a function a local alias.
+import std.io.file { println as print_line, STDOUT };
 ```
 
-Selective imports and aliases are planned but are not implemented yet.
 Imports inline `.ag` source modules or ingest `.agm` binary artifacts.
+Named selections are non-restrictive: other public exports remain available.
+Function aliases introduce a local name for an imported function; they do not
+create a module namespace.
 
 ### Type Aliases
 
@@ -449,7 +466,14 @@ let n = compute();    // type inferred from compute()'s return type
 let b = move owned;   // move transfers ownership, as with annotated lets
 ```
 
-Pattern destructuring (`let (a, b) = ...`) is **not** supported.
+Tuple destructuring uses square brackets. Use `_` to ignore an element.
+
+```silver
+let [x, y] = [10, 20];
+let [first, _, last] = [1, 2, 3];
+```
+
+The parenthesized form `let (a, b) = ...` is not supported.
 
 ### Assignments & Compound Assignments
 
@@ -531,10 +555,14 @@ Point p2 = { 10.0, 20.0 };
 
 // Array initializer
 i32[3] arr = { 1, 2, 3 };
+
+// Tuple initializer
+[i32, str] entry = [100, "OK"];
 ```
 
-> **Note**: `[1, 2, 3]` bracket syntax and `(100, "OK")` tuple literals are
-> **not** supported.  Array and struct initialization uses `{ ... }` braces.
+Array and struct initializers use braces. Bracket literals such as `[1, 2, 3]`
+construct tuples, not fixed-size arrays. Parenthesized tuple literals are not
+supported.
 
 ### Binary Expressions
 
@@ -946,14 +974,25 @@ All futex-based primitives are seq_cst by default.
 
 ### Error Handling
 
-Silver uses tagged structs — there is no exception mechanism.
+Silver uses explicit return values for recoverable failures. `Optional<T>` and
+`Result<T, E>` are payload enums; inspect them with `match` or their predicate
+methods before extracting a value. There is no exception mechanism.
 
-| Type | Module | Fields |
+| Type | Module | Representation |
 |---|---|---|
-| `Optional<T>` | `std.optional` | `bool present`, `T thing` |
-| `Result<T, E>` | `std.optional` | `bool ok`, `T value`, `E error` |
-| `SysResult` | `std.sys.result` | `bool ok`, `i64 value`, `i64 errno` |
+| `Optional<T>` | `std.optional` | `None` or `Some(T)` |
+| `Result<T, E>` | `std.result` | `Ok(T)` or `Err(E)` |
+| `Error` | `std.error` | `i64 code`, borrowed `str message` |
 | `TypeResult` | `std.rt.types` | `bool ok`, `TypeId id`, `i32 err`, `String msg` |
+
+Typed syscall wrappers in `std.sys.result` return `Result<i64, Error>`.
+Their error codes are positive errno values. The former `SysResult` type is
+no longer used.
+
+`Optional.is_some()` / `is_none()` and `Result.is_ok()` / `is_err()` borrow the
+container. `unwrap()`, `unwrap_err()`, and `unwrap_or(fallback)` consume it and
+transfer the selected value. `unwrap()` and `unwrap_err()` abort when called
+on the wrong variant.
 
 Unrecoverable errors call `abort()` from `std.mem.memory`.
 
@@ -963,6 +1002,29 @@ Unrecoverable errors call `abort()` from `std.mem.memory`.
 |---|---|
 | `@print`, `@println`, `@eprintln` | Compiler builtin macro with `{}` formatting. Preferred. |
 | `println(str)`, `eprintln(str)` | Plain functions in `std.io`, single NUL-terminated string. |
+
+### Building strings
+
+`String.push_display(&value)` appends the `Display` representation of a borrowed
+value. It calls the formatter once and leaves the source value available to the
+caller. Custom types use the same `Display` implementation as `{}` formatting.
+For signed decimal integers, `String.from_i64(value)` constructs a new string.
+
+```silver
+import std.string;
+
+i32 main() {
+    String message = String.from_str("count=");
+    i64 count = 42;
+    message.push_display(&count);
+    return message.equals("count=42") && count == 42 ? 0 : 1;
+}
+```
+
+The append preserves the bytes emitted by the formatter, including embedded NUL
+bytes. Use `len()` and `as_slice()` for byte content; `to_str()` exposes a
+NUL-terminated view. Formatting may allocate when its output exceeds the scratch
+buffer or the destination's remaining capacity.
 
 ### Memory Allocation
 

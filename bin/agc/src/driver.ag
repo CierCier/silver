@@ -175,21 +175,29 @@ String token_record(Token* token) {
     String out = String.new();
     out.push_str(token_kind_name(token.kind));
     out.push_str("|");
-    append_i64(&out, token.span.start);
+    out.push_display(&token.span.start);
     out.push_str("|");
-    append_i64(&out, token.span.end);
+    out.push_display(&token.span.end);
     out.push_str("|");
-    append_i64(&out, token.span.start_line);
+    out.push_display(&token.span.start_line);
     out.push_str(":");
-    append_i64(&out, token.span.start_col);
+    out.push_display(&token.span.start_col);
     out.push_str("|");
-    append_i64(&out, token.span.end_line);
+    out.push_display(&token.span.end_line);
     out.push_str(":");
-    append_i64(&out, token.span.end_col);
+    out.push_display(&token.span.end_col);
     out.push_str("|");
     append_hex(&out, token.text.to_str());
     out.push_str("\n");
     return out;
+}
+
+private void emit_diagnostics(DiagnosticBag* diagnostics, str path, &String source) {
+    for (i64 i = 0; i < diagnostics.len(); i += 1) {
+        Diagnostic* diagnostic = diagnostics.get(i);
+        String rendered = render_diagnostic(diagnostic, path, source);
+        STDERR.write_str(rendered.to_str());
+    }
 }
 
 i32 emit_tokens(str path) {
@@ -209,13 +217,7 @@ i32 emit_tokens(str path) {
         STDERR.write_str("agc: error: lexer errors in ");
         STDERR.write_str(path);
         STDERR.write_str("\n");
-        i64 i = 0;
-        while (i < diagnostics.len()) {
-            Diagnostic* diagnostic = diagnostics.get(i);
-            String rendered = render_diagnostic(diagnostic, path, &source_copy);
-            STDERR.write_str(rendered.to_str());
-            i += 1;
-        }
+        emit_diagnostics(&diagnostics, path, &source_copy);
         return 2;
     }
     i64 i = 0;
@@ -266,9 +268,9 @@ void render_node(String* out, SyntaxNode* node, str prefix, bool last) {
     }
     out.push_str(node_kind_name(node.kind));
     out.push_str(" [");
-    append_i64(out, node.span.start);
+    out.push_display(&node.span.start);
     out.push_str("..");
-    append_i64(out, node.span.end);
+    out.push_display(&node.span.end);
     out.push_str("]");
     if (node.kind == NodeKind.Token) {
         out.push_str(" ");
@@ -313,13 +315,7 @@ i32 emit_ast(str path) {
     DiagnosticBag diagnostics = DiagnosticBag.new();
     lex(move source, &stream, &diagnostics);
     if (!diagnostics.is_empty()) {
-        i64 i = 0;
-        while (i < diagnostics.len()) {
-            Diagnostic* diagnostic = diagnostics.get(i);
-            String rendered = render_diagnostic(diagnostic, path, &source_copy);
-            STDERR.write_str(rendered.to_str());
-            i += 1;
-        }
+        emit_diagnostics(&diagnostics, path, &source_copy);
         return 2;
     }
 
@@ -327,13 +323,7 @@ i32 emit_ast(str path) {
     SyntaxTree tree;
     parse(&stream, &diagnostics, &pool, &tree);
     if (!diagnostics.is_empty()) {
-        i64 i = 0;
-        while (i < diagnostics.len()) {
-            Diagnostic* diagnostic = diagnostics.get(i);
-            String rendered = render_diagnostic(diagnostic, path, &source_copy);
-            STDERR.write_str(rendered.to_str());
-            i += 1;
-        }
+        emit_diagnostics(&diagnostics, path, &source_copy);
         pool.destroy();
         return 2;
     }
@@ -407,7 +397,8 @@ i32 emit_check(str path, CfgSet* cfg, Vec<String>* include_dirs, LintConfig* lin
             }
             if (diagnostics.is_empty()) {
                 String summary = String.from_str("check ok: ");
-                append_i64(&summary, symbols.len());
+                i64 symbol_count = symbols.len();
+                summary.push_display(&symbol_count);
                 summary.push_str(" top-level symbols\n");
                 STDOUT.write_str(summary.to_str());
                 pool.destroy();
@@ -427,13 +418,7 @@ i32 emit_check(str path, CfgSet* cfg, Vec<String>* include_dirs, LintConfig* lin
         return lint_has_errors(&diagnostics) ? 2 : 0;
     }
     profiler_end_phase("parse");
-    i64 i = 0;
-    while (i < diagnostics.len()) {
-        Diagnostic* diagnostic = diagnostics.get(i);
-        String rendered = render_diagnostic(diagnostic, path, &source_copy);
-        STDERR.write_str(rendered.to_str());
-        i += 1;
-    }
+    emit_diagnostics(&diagnostics, path, &source_copy);
     profiler_print_report();
     return 2;
 }
@@ -967,7 +952,7 @@ i32 run_frontend() {
     String* command = &cli.command;
     if (!is_frontend_command(command)) {
         String native_source = String.new();
-        if (native_source_path(&arguments, &native_source)) {
+        if (native_source_path(&cli, &native_source)) {
             if (stage1_module_emit_requested(&arguments)) {
                 String artifact_path = stage1_module_artifact_path(&arguments, native_source.to_str());
                 String object_path = stage1_module_object_path(artifact_path.to_str());

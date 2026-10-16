@@ -20,9 +20,26 @@ struct String {
     i64 capacity;
 }
 
+private void string_reserve_append(&mut String value, i64 required_capacity) {
+    if (required_capacity <= value.capacity) { return; }
+    // Capacity includes the trailing NUL; geometric growth amortizes appends.
+    i64 new_capacity = value.capacity * 2;
+    if (new_capacity < 16) { new_capacity = 16; }
+    while (new_capacity < required_capacity) { new_capacity *= 2; }
+    value.data = realloc<u8>(value.data, new_capacity);
+    value.capacity = new_capacity;
+}
+
 impl String {
     String new() {
         return String.with_capacity(0);
+    }
+
+    /// Construct a string containing the decimal representation of `value`.
+    String from_i64(i64 value) {
+        String out = String.new();
+        out.push_display(&value);
+        return move out;
     }
 
     String with_capacity(i64 capacity) {
@@ -72,15 +89,8 @@ impl String {
     }
 
     void push(&mut self, u8 ch) {
-        // Need space for the character plus the null terminator
-        if (self.len + 2 > self.capacity) {
-            i64 new_cap = self.capacity * 2;
-            if (new_cap < 16) {
-                new_cap = 16;
-            }
-            self.data = realloc<u8>(self.data, new_cap);
-            self.capacity = new_cap;
-        }
+        i64 required_capacity = self.len + 2;
+        string_reserve_append(self, required_capacity);
         self.data[self.len] = ch;
         self.len = self.len + 1;
         self.data[self.len] = (u8)0;
@@ -90,13 +100,8 @@ impl String {
     #[inline(always)]
     void push_bytes(&mut self, u8* bytes, i64 len) {
         if (len <= 0 || bytes == (u8*)0) { return; }
-        if (self.len + len + 1 > self.capacity) {
-            i64 new_cap = self.capacity * 2;
-            if (new_cap < 16) { new_cap = 16; }
-            while (new_cap < self.len + len + 1) { new_cap = new_cap * 2; }
-            self.data = realloc<u8>(self.data, new_cap);
-            self.capacity = new_cap;
-        }
+        i64 required_capacity = self.len + len + 1;
+        string_reserve_append(self, required_capacity);
         silver_rt_memcpy(&self.data[self.len], bytes, len);
         self.len = self.len + len;
         self.data[self.len] = (u8)0;
@@ -110,18 +115,26 @@ impl String {
         if (text_len == 0) {
             return;
         }
-        if (self.len + text_len + 1 > self.capacity) {
-            // Geometric growth (same as push_bytes): doubling keeps repeated
-            // appends amortized instead of reallocating per call.
-            i64 new_cap = self.capacity * 2;
-            if (new_cap < 16) { new_cap = 16; }
-            while (new_cap < self.len + text_len + 1) { new_cap = new_cap * 2; }
-            self.data = realloc<u8>(self.data, new_cap);
-            self.capacity = new_cap;
-        }
+        i64 required_capacity = self.len + text_len + 1;
+        string_reserve_append(self, required_capacity);
         memcpy((void*)&self.data[self.len], (const void*)text, text_len);
         self.len = self.len + text_len;
         self.data[self.len] = (u8)0;
+    }
+
+    /// Append a value's Display output without consuming the value.
+    /// The formatter runs once; any embedded NUL bytes are preserved.
+    void push_display<T: Display>(&mut self, &T value) {
+        u8 scratch[64];
+        // Negative capacity marks borrowed scratch storage; larger output grows
+        // into an owned buffer that the writer releases after the append.
+        BufWriter writer = {
+            .data = (i64)&scratch[0], .len = 0, .cap = -64, .fd = -1,
+            .list_next = (BufWriter*)0, .list_prev = (BufWriter*)0,
+            .mode = IOMODE_MEMORY
+        };
+        value.fmt(&writer);
+        self.push_bytes((u8*)writer.data, writer.len);
     }
 
     // Clone borrows self by shared reference, creates a deep copy, and returns it.

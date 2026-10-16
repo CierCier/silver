@@ -71,6 +71,23 @@ String type_mismatch(str expected, str found) {
     return move s;
 }
 
+str generic_method_inference_failed() {
+    return "generic method arguments cannot be inferred from the call";
+}
+
+str generic_method_unsupported_bound() {
+    return "generic method bound is not supported by native stage1";
+}
+
+String generic_method_bound_failed(str type_name, str trait_name) {
+    String message = String.from_str("generic method bound requires '");
+    message.push_str(type_name);
+    message.push_str("' to implement '");
+    message.push_str(trait_name);
+    message.push_str("'");
+    return move message;
+}
+
 String cannot_move_field_out_of_drop_type(str place, str owner) {
     String s = String.from_str("cannot move '");
     s.push_str(place);

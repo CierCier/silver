@@ -69,7 +69,6 @@ BufWriter* __buf_writer_list;
 
 // Scratch buffers for number formatting.
 struct __Buf32 { u8 data[32]; }
-struct __Buf64 { u8 data[64]; }
 struct __Buf40 { u8 data[40]; }
 
 impl BufWriter {
@@ -236,7 +235,7 @@ impl BufWriter {
 
     /// Format and buffer an f64 value.
     void write_f64(*self, f64 v) {
-        __Buf64 tmp;
+        FmtPrintBuf tmp;
         u8* p = (u8*)&tmp;
         i64 n = ftoa(v, p);
         self.write(p, n);

@@ -783,7 +783,7 @@ struct FmtDigitsBuf {
 
 // f64 -> text. Matches Rust `{}` Display for f64: shortest round-trip digits,
 // always positional notation, "NaN"/"inf"/"-inf" for specials, "-0" for
-// negative zero. Worst-case output length is 326 bytes (5e-324): size buffers
+// negative zero. Worst-case output length is 327 bytes (-5e-324): size buffers
 // with FTOA_MAX_LEN.
 const i64 FTOA_MAX_LEN = 344;
 

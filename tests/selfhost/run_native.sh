@@ -50,6 +50,7 @@ python3 "$root/tests/selfhost/check_native_args.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_native_enum_layout.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_native_layout.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_generic_function_native.py" --stage1 "$stage1"
+python3 "$root/tests/selfhost/check_generic_method_native.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_stage2.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_native_cache.py" \
     --root "$root" \

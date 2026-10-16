@@ -2,7 +2,7 @@
 import std.optional;
 
 i32 main() {
-    Optional<i32> opt = Optional.none();
+    Optional<i32> opt = Optional<i32>.none();
     i32 _val = opt.unwrap();
     return 0;
 }
