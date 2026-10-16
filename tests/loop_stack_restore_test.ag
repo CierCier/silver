@@ -1,0 +1,30 @@
+// Loop-local storage is reclaimed only after the iteration's owned locals
+// have been dropped, including on continue and break edges.
+import std.test;
+
+i64 drop_count = 0;
+
+struct LoopOwned {
+    i64 value;
+}
+
+impl Drop for LoopOwned {
+    void drop(LoopOwned* self) {
+        drop_count = drop_count + 1;
+    }
+}
+
+i32 main() {
+    drop_count = 0;
+    i64 i = 0;
+    while (i < 200) {
+        LoopOwned item = { .value = i };
+        i = i + 1;
+        if (i < 200) {
+            continue;
+        }
+        break;
+    }
+    assert_eq_i64(drop_count, 200, "each loop edge drops its iteration local");
+    return done();
+}

@@ -1,0 +1,8 @@
+import std.test;
+
+i32 main() {
+    [[i32, i64], i32] nested = [[3, 7], 11];
+    assert_eq_i64(7, nested[0][1], "nested tuple element type resolves");
+    assert_eq_i64(11, nested[1], "outer tuple element type resolves");
+    return done();
+}

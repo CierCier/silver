@@ -1,0 +1,6 @@
+i32 main() {
+    defer {
+        if (true) { return 1; }
+    }
+    return 0;
+}

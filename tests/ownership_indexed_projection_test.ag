@@ -1,0 +1,12 @@
+import std.string;
+import std.sys.entry;
+
+i32 main() {
+    String text = String.from_str("ab");
+    u8 first = text.data[0];
+    text.data[0] = text.data[1];
+    u8 second = text.data[0];
+    text.drop();
+    if (first != (u8)'a' || second != (u8)'b') { return 1; }
+    return 0;
+}

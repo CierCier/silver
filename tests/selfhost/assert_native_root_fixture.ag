@@ -1,0 +1,6 @@
+import std.sys.entry;
+
+i32 main() {
+    @assert(false, "root assert marker");
+    return 0;
+}

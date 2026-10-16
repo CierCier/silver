@@ -1,0 +1,12 @@
+import std.json;
+
+macro str detached_json_writer_result() {
+    JsonWriter writer = JsonWriter.new();
+    writer.write_string("safe");
+    return writer.finish();
+}
+
+i32 main() {
+    str result = @detached_json_writer_result();
+    return result[0] == (u8)'"' ? 0 : 1;
+}

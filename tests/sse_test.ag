@@ -57,6 +57,6 @@ i32 main() {
     body.drop();
     stream.close();
 
-    client.pool.drop();
+    client.drop();
     return done();
 }

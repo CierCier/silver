@@ -1,0 +1,7 @@
+// compile_fail: no-source AGM imports only synthesize scalar C-ABI signatures.
+import module_no_source_pointer_lib;
+import std.sys.entry;
+
+i32 main() {
+    return artifact_pointer();
+}

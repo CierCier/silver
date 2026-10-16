@@ -1,0 +1,16 @@
+import std.test;
+
+void assign_pointer(u8** output, u8* value) {
+    *output = value;
+}
+
+i32 main() {
+    u8 byte = 42;
+    u8* expected = (u8*)&byte;
+    u8* actual = (u8*)0;
+    u8** output = (u8**)&actual;
+    assign_pointer(output, expected);
+    assert_true(actual == expected, "double-pointer output preserves pointer width");
+    assert_eq_i64(42, (i64)(*actual), "double-pointer output points to the assigned value");
+    return done();
+}

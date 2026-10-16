@@ -7,8 +7,10 @@
 import std.thread;
 import std.mem.vec;
 import std.mem.box;
+import std.mem.rc;
 import std.optional;
 import std.sys.entry;
+import std.map;
 
 struct Point {
     i64 x;
@@ -16,7 +18,7 @@ struct Point {
 }
 
 // Sums all payloads to prove every moved value crossed the boundary intact.
-i64 worker_agg(i64 a, str s, Vec<i64> v, Point p, Optional<i64> o, Box<i64> b) {
+i64 worker_agg(i64 a, str _s, Vec<i64> v, Point p, Optional<i64> o, Box<i64> b) {
     i64 vsum = 0;
     for (i64 i = 0; i < v.len(); i = i + 1) {
         vsum = vsum + v.get(i);
@@ -24,6 +26,13 @@ i64 worker_agg(i64 a, str s, Vec<i64> v, Point p, Optional<i64> o, Box<i64> b) {
     i64* bp = b.get();
     i64 bval = *bp;
     return a + vsum + p.x + p.y + o.unwrap() + bval;
+}
+
+void worker_map(HashMap<i64, i64> _map) {
+}
+
+Rc<i64> worker_rc_result() {
+    return Rc<i64>.new(42);
 }
 
 i64 main() {
@@ -39,5 +48,15 @@ i64 main() {
     i64 r = wait t;
     // 100 + (1+2+3) + 10 + 20 + 42 + 7 = 185
     if (r != 185) { return 1; }
+
+    HashMap<i64, i64> map = HashMap<i64, i64>.new();
+    Task<void> map_task = launch worker_map(move map);
+    wait map_task;
+
+    Task<Rc<i64>> rc_task = launch worker_rc_result();
+    Rc<i64> rc_result = wait rc_task;
+    i64* rc_value = rc_result.get();
+    i64 value = *rc_value;
+    if (value != 42) { return 2; }
     return 0;
 }

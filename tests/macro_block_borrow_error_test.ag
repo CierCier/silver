@@ -1,0 +1,12 @@
+// expected_compile_failure
+import std.string;
+
+macro String* borrow_local() {
+    String local = String.from_str("short-lived");
+    return &local;
+}
+
+i32 main() {
+    String* borrowed = @borrow_local();
+    return borrowed == (String*)0 ? 1 : 0;
+}

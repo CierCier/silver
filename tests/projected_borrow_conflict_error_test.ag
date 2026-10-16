@@ -1,0 +1,15 @@
+// Projected places remain distinct for fields but conflict when the same field is borrowed twice.
+
+struct Pair {
+    i64 left;
+    i64 right;
+}
+
+void take_two(&mut i64 first, &i64 second) {
+}
+
+i64 main() {
+    Pair pair;
+    take_two(&mut pair.left, &pair.left);
+    return 0;
+}

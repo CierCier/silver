@@ -1,0 +1,19 @@
+import std.sys.entry;
+
+macro void store(i32* out, i32 value) {
+    *out = value;
+}
+
+macro void increment(value) {
+    value = value + 1;
+}
+
+i32 main() {
+    i32 target = 10;
+    i32* output = &target;
+    @store(output, 40);
+    if (target != 40) { return 1; }
+    @increment(target);
+    if (target != 41) { return 2; }
+    return 0;
+}

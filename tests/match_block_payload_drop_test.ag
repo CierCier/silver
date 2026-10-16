@@ -1,0 +1,48 @@
+// compile_flags: --no-cache
+
+import std.test;
+import std.string;
+
+i64 drops = 0;
+
+struct Payload {
+    String text;
+}
+
+impl Drop for Payload {
+    void drop(Payload* self) {
+        drops += 1;
+    }
+}
+
+enum Message {
+    Data(Payload);
+    Empty;
+}
+
+i32 main() {
+    test_start("match block payload ownership");
+    {
+        Payload original;
+        original.text = String.from_str("kept");
+        Message message = Message.Data(move original);
+        Payload extracted = match message {
+            Data(move text): { text; },
+            Empty: { Payload fallback; fallback.text = String.from_str("fallback"); fallback; },
+        };
+        assert_eq_i64(4, extracted.text.len, "extracted payload remains live");
+        assert_eq_i64(0, drops, "no premature destructor");
+    }
+    assert_eq_i64(1, drops, "extracted payload drops once");
+    {
+        Message message = Message.Empty;
+        Payload extracted = match message {
+            Data(move text): { text; },
+            Empty: { Payload fallback; fallback.text = String.from_str("fallback"); fallback; },
+        };
+        assert_eq_i64(8, extracted.text.len, "fallback block returns its local");
+        assert_eq_i64(1, drops, "fallback remains live until scope exit");
+    }
+    assert_eq_i64(2, drops, "fallback drops once");
+    return done();
+}

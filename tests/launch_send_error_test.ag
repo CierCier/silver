@@ -5,6 +5,9 @@
 
 import std.thread;
 import std.mem.rc;
+import std.mem.vec;
+import std.mem.box;
+import std.map;
 import std.sys.entry;
 
 void worker_rc(Rc<i64> rc) {
@@ -16,6 +19,10 @@ void worker_ptr(i64* p) {
 void worker_ref(&i64 x) {
 }
 
+void worker_vec(Vec<Rc<i64>> value) { }
+void worker_box(Box<Rc<i64>> value) { }
+void worker_map(HashMap<i64, Rc<i64>> value) { }
+
 i64 main() {
     Rc<i64> rc = Rc<i64>.new(1);
     launch worker_rc(rc);   // ERROR: Rc<i64> is not Send (shared non-atomic count)
@@ -24,5 +31,12 @@ i64 main() {
     launch worker_ptr(&x);  // ERROR: raw pointer is not Send
 
     launch worker_ref(&x);  // ERROR: references cannot cross a thread boundary
+
+    Vec<Rc<i64>> nested_vec = Vec<Rc<i64>>.new();
+    Box<Rc<i64>> nested_box = Box<Rc<i64>>.new(Rc<i64>.new(2));
+    HashMap<i64, Rc<i64>> nested_map = HashMap<i64, Rc<i64>>.new();
+    launch worker_vec(move nested_vec);
+    launch worker_box(move nested_box);
+    launch worker_map(move nested_map);
     return 0;
 }

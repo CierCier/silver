@@ -1,0 +1,20 @@
+struct Cell {
+    i64 left;
+    i64 right;
+}
+
+struct Grid {
+    Cell cells[2];
+    i32 marker;
+}
+
+i32 main() {
+    Grid grid;
+    grid.cells[0].left = 7;
+    grid.cells[0].right = 11;
+    grid.cells[1].left = 13;
+    grid.cells[1].right = 17;
+    grid.marker = 5;
+    return (i32)(grid.cells[0].left + grid.cells[0].right
+        + grid.cells[1].left + grid.cells[1].right) + grid.marker - 11;
+}

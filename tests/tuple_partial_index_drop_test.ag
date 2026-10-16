@@ -1,0 +1,55 @@
+// compile_flags: --no-cache
+// expected_exit: 42
+import std.test;
+
+i64 drops = 0;
+i64 dropped_values = 0;
+
+struct Tracked {
+    i64 value;
+}
+
+struct TupleWrapper {
+    [Tracked, Tracked] pair;
+}
+
+impl Drop for Tracked {
+    void drop(Tracked* self) {
+        drops = drops + 1;
+        dropped_values = dropped_values + self.value;
+    }
+}
+
+i32 main() {
+    drops = 0;
+    dropped_values = 0;
+    {
+        Tracked left;
+        left.value = 11;
+        Tracked right;
+        right.value = 31;
+        [Tracked, Tracked] pair = [move left, move right];
+        Tracked first = move pair[0];
+        assert_eq_i64(11, first.value, "indexed move keeps the selected value");
+        assert_eq_i64(0, drops, "tuple fields remain live until scope exit");
+    }
+    assert_eq_i64(42, dropped_values, "both tuple field values reach their destructor");
+    assert_eq_i64(2, drops, "both tuple fields drop once at scope exit");
+
+    drops = 0;
+    dropped_values = 0;
+    {
+        Tracked inner_left;
+        inner_left.value = 5;
+        Tracked inner_right;
+        inner_right.value = 13;
+        [Tracked, Tracked] inner = [move inner_left, move inner_right];
+        TupleWrapper nested;
+        nested.pair = move inner;
+        Tracked selected = move nested.pair[1];
+        assert_eq_i64(13, selected.value, "nested indexed move keeps the selected value");
+    }
+    assert_eq_i64(18, dropped_values, "nested tuple fields all reach their destructor");
+    assert_eq_i64(2, drops, "nested tuple fields drop once");
+    return 42;
+}

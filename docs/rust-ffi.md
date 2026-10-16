@@ -2,7 +2,7 @@
 
 Silver can opt into a small Rust `std` component without changing the
 compiler's existing `extern "C"`, `#[link]`, or `#[link_name]` architecture.
-The bridge is documented and built in [`ffi/rust/README.md`](../ffi/rust/README.md).
+The bridge is documented and built in [`bootstrap/stage0/ffi-rust/README.md`](../bootstrap/stage0/ffi-rust/README.md).
 
 Import the Silver declarations only in programs that need the bridge:
 

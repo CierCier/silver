@@ -66,6 +66,14 @@ impl<T> Iterator for RevIter<T> {
     }
 }
 
+impl<T> IntoIterator for RevIter<T> {
+    type Item = T;
+    type IntoIter = RevIter<T>;
+    RevIter<T> into_iter(self) {
+        return self;
+    }
+}
+
 struct MapIter<I, T, U> {
     I inner;
     U (T) f;

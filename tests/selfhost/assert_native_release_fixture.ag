@@ -1,0 +1,18 @@
+import std.sys.entry;
+
+i64 g_assert_side_effects = 0;
+
+bool assert_condition() {
+    g_assert_side_effects += 1;
+    return true;
+}
+
+str assert_message() {
+    g_assert_side_effects += 10;
+    return "release assert marker";
+}
+
+i32 main() {
+    @assert(assert_condition(), assert_message());
+    return g_assert_side_effects == 0 ? 0 : 1;
+}

@@ -1,0 +1,31 @@
+i64 drop_count = 0;
+
+struct BorrowedOrder {
+    i64 value;
+}
+
+impl Drop for BorrowedOrder {
+    void drop(BorrowedOrder* self) {
+        drop_count = drop_count + 1;
+    }
+}
+
+impl BorrowedOrder {
+    bool __lt(&self, &BorrowedOrder other) {
+        return self.value < other.value;
+    }
+}
+
+BorrowedOrder make_borrowed_order(i64 value) {
+    BorrowedOrder result;
+    result.value = value;
+    return result;
+}
+
+i32 main() {
+    BorrowedOrder low = make_borrowed_order(1);
+    bool compared = low < make_borrowed_order(2);
+    if (!compared) { return 1; }
+    if (drop_count != 1) { return 2; }
+    return 0;
+}

@@ -1,0 +1,17 @@
+enum CollisionCode {
+    WAKE = 454;
+    IDLE = 0;
+}
+
+const i64 WAKE = 1;
+const str WAKE_TEXT = "wake\n";
+const str EMPTY_TEXT = "";
+
+i32 main() {
+    if (WAKE != 1) { return 1; }
+    if ((i64)CollisionCode.WAKE != 454) { return 2; }
+    if ((i64)CollisionCode.IDLE != 0) { return 3; }
+    if (WAKE_TEXT[0] != (u8)'w' || WAKE_TEXT[4] != (u8)10
+        || WAKE_TEXT[5] != (u8)0 || EMPTY_TEXT[0] != (u8)0) { return 4; }
+    return 0;
+}

@@ -1,0 +1,475 @@
+// Structural Send gate for launch arguments over the typed CST projections.
+// It covers the declaration/expression slice needed by the launch tests while
+// leaving the full generic type checker to the next migration stage.
+import std.mem.memory;
+import std.mem.vec;
+import std.string;
+import frontend.ast;
+import frontend.bindings;
+import frontend.cfg;
+import frontend.diagnostics;
+import frontend.items;
+
+struct SendAnalyzer {
+    DiagnosticBag* diagnostics;
+    bool failed;
+}
+
+impl SendAnalyzer {
+    SendAnalyzer new(DiagnosticBag* diagnostics) {
+        SendAnalyzer analyzer;
+        analyzer.diagnostics = diagnostics;
+        analyzer.failed = false;
+        return analyzer;
+    }
+}
+
+bool send_text_equals(str left, str right) {
+    return strcmp(left, right) == 0;
+}
+
+Binding* send_find_binding(Vec<Binding>* bindings, str name) {
+    i64 i = 0;
+    while (i < bindings.len()) {
+        Binding* binding = bindings.get_ptr(i);
+        if (send_text_equals(binding.name, name)) {
+            return binding;
+        }
+        i += 1;
+    }
+    return (Binding*)0;
+}
+
+String send_type_display(TypeProjection* value) {
+    String result = String.from_str(value.name);
+    if (value.kind == ProjectionTypeKind.Reference) {
+        String reference = String.from_str("&");
+        if (value.is_mutable) {
+            reference.push_str("mut ");
+        }
+        reference.push_str(result.to_str());
+        result.drop();
+        return move reference;
+    }
+    if (value.kind == ProjectionTypeKind.Pointer) {
+        result.push((u8)'*');
+        return result;
+    }
+    if (value.kind == ProjectionTypeKind.Array) {
+        String array = String.from_str("Array<");
+        array.push_str(value.name);
+        array.push((u8)'>');
+        result.drop();
+        return move array;
+    }
+    if (value.argument0.len() > 0) {
+        result.push((u8)'<');
+        result.push_str(value.argument0.to_str());
+        if (value.argument1.len() > 0) {
+            result.push_str(", ");
+            result.push_str(value.argument1.to_str());
+        }
+        result.push((u8)'>');
+    }
+    return result;
+}
+
+bool send_type_name_is_send(str name, String* reason) {
+    if (send_text_equals(name, "Rc")) {
+        reason.push_str("Rc<T> carries a shared non-atomic reference count");
+        return false;
+    }
+    if (send_text_equals(name, "Handle")) {
+        reason.push_str("GC heap handles are not Send (the heap is single-threaded)");
+        return false;
+    }
+    if (send_text_equals(name, "Guard")) {
+        reason.push_str("a live Guard holds its Mutex locked; drop it (or move the unlocked Mutex itself), never the guard");
+        return false;
+    }
+    return true;
+}
+
+
+void send_collect_leaves(SyntaxNode* node, Vec<SyntaxNode*>* leaves) {
+    if (node == (SyntaxNode*)0) {
+        return;
+    }
+    if (node.kind == NodeKind.Token) {
+        leaves.push(node);
+        return;
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        send_collect_leaves(child, leaves);
+        child = child.next_sibling;
+    }
+}
+
+bool send_text_is_identifier(str text) {
+    if (text == (str)0 || strlen(text) == 0) {
+        return false;
+    }
+    u8 first = (u8)text[0];
+    return (first >= (u8)'a' && first <= (u8)'z')
+        || (first >= (u8)'A' && first <= (u8)'Z')
+        || first == (u8)'_';
+}
+
+bool send_type_owns_storage(str name) {
+    return send_text_equals(name, "Vec")
+        || send_text_equals(name, "Box")
+        || send_text_equals(name, "String")
+        || send_text_equals(name, "Bytes")
+        || send_text_equals(name, "ByteBuffer")
+        || send_text_equals(name, "HashMap")
+        ;
+}
+
+i64 send_type_parameter_index(SyntaxNode* item, str name) {
+    SyntaxNode* cursor = item.first_child;
+    while (cursor != (SyntaxNode*)0 && cursor.kind != NodeKind.Block) {
+        if (cursor.kind == NodeKind.Token && cursor.text == "<") {
+            cursor = cursor.next_sibling;
+            i64 index = 0;
+            bool parameter_start = true;
+            i64 depth = 1;
+            while (cursor != (SyntaxNode*)0
+                && depth > 0) {
+                if (cursor.kind == NodeKind.Token && cursor.text == "<") {
+                    depth += 1;
+                } else if (cursor.kind == NodeKind.Token && cursor.text == ">") {
+                    depth -= 1;
+                } else if (depth == 1 && cursor.kind == NodeKind.Token
+                           && cursor.token_kind == TokenKind.Comma) {
+                    index += 1;
+                    parameter_start = true;
+                } else if (depth == 1 && parameter_start
+                           && cursor.kind == NodeKind.Token
+                           && cursor.token_kind == TokenKind.Identifier) {
+                    if (send_text_equals(cursor.text, name)) {
+                        return index;
+                    }
+                    parameter_start = false;
+                }
+                cursor = cursor.next_sibling;
+            }
+            return -1;
+        }
+        cursor = cursor.next_sibling;
+    }
+    return -1;
+}
+
+str send_type_argument(TypeProjection* owner, i64 index) {
+    if (index == 0) { return owner.argument0.to_str(); }
+    if (index == 1) { return owner.argument1.to_str(); }
+    return "";
+}
+
+TypeProjection send_parse_node_type(SyntaxNode* first, SyntaxNode* end) {
+    Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+    SyntaxNode* cursor = first;
+    while (cursor != (SyntaxNode*)0 && cursor != end) {
+        send_collect_leaves(cursor, &leaves);
+        cursor = cursor.next_sibling;
+    }
+    TypeProjection result = projection_parse_type(&leaves, 0, leaves.len());
+    leaves.drop();
+    return result;
+}
+
+
+bool send_field_is_send(SyntaxNode* root, SyntaxNode* declaration,
+                        SyntaxNode* first, SyntaxNode* end,
+                        TypeProjection* owner,
+                        Vec<str>* visiting, i64 depth, String* reason) {
+    TypeProjection field = send_parse_node_type(first, end);
+    if (field.kind == ProjectionTypeKind.Pointer && send_type_owns_storage(owner.name)) {
+        i64 parameter_index = send_type_parameter_index(declaration, field.name);
+        str argument = send_type_argument(owner, parameter_index);
+        if (parameter_index >= 0 && strlen(argument) > 0) {
+            field.kind = ProjectionTypeKind.Named;
+            field.name = argument;
+            field.is_mutable = false;
+            field.contains_rc = owner.contains_rc;
+            field.contains_non_send = owner.contains_non_send;
+            field.contains_unknown = owner.contains_unknown;
+            return send_type_is_send_in_declarations(
+                root, &field, visiting, depth + 1, reason);
+        }
+        return true;
+    }
+    if (field.kind == ProjectionTypeKind.Named && send_text_is_identifier(field.name)) {
+        i64 parameter_index = send_type_parameter_index(declaration, field.name);
+        str argument = send_type_argument(owner, parameter_index);
+        if (parameter_index >= 0 && strlen(argument) > 0) {
+            field.name = argument;
+            field.contains_rc = field.contains_rc || owner.contains_rc;
+            field.contains_non_send = field.contains_non_send || owner.contains_non_send;
+            field.contains_unknown = field.contains_unknown || owner.contains_unknown;
+        } else {
+            i64 nested_parameter0 = send_type_parameter_index(
+                declaration, field.argument0.to_str());
+            i64 nested_parameter1 = send_type_parameter_index(
+                declaration, field.argument1.to_str());
+            if (nested_parameter0 >= 0 || nested_parameter1 >= 0) {
+                field.contains_rc = field.contains_rc || owner.contains_rc;
+                field.contains_non_send = field.contains_non_send || owner.contains_non_send;
+                field.contains_unknown = field.contains_unknown || owner.contains_unknown;
+            }
+        }
+    }
+    return send_type_is_send_in_declarations(root, &field, visiting, depth + 1, reason);
+}
+
+bool send_struct_fields_are_send(SyntaxNode* root, SyntaxNode* item,
+                                 TypeProjection* owner,
+                                 Vec<str>* visiting, i64 depth, String* reason) {
+    SyntaxNode* block = item.first_child;
+    while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+        block = block.next_sibling;
+    }
+    if (block == (SyntaxNode*)0) {
+        return true;
+    }
+    SyntaxNode* cursor = block.first_child;
+    while (cursor != (SyntaxNode*)0) {
+        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
+            cursor = cursor.next_sibling;
+            continue;
+        }
+        SyntaxNode* start = cursor;
+        SyntaxNode* name = (SyntaxNode*)0;
+        while (cursor != (SyntaxNode*)0
+            && !(cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon)) {
+            if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Identifier) {
+                name = cursor;
+            }
+            cursor = cursor.next_sibling;
+        }
+        if (name != (SyntaxNode*)0
+            && !send_field_is_send(root, item, start, name, owner,
+                                   visiting, depth, reason)) {
+            return false;
+        }
+        if (cursor != (SyntaxNode*)0) {
+            cursor = cursor.next_sibling;
+        }
+    }
+    return true;
+}
+
+bool send_enum_payloads_are_send(SyntaxNode* root, SyntaxNode* item,
+                                 TypeProjection* owner,
+                                 Vec<str>* visiting, i64 depth, String* reason) {
+    SyntaxNode* block = item.first_child;
+    while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+        block = block.next_sibling;
+    }
+    if (block == (SyntaxNode*)0) {
+        return true;
+    }
+    SyntaxNode* variant = block.first_child;
+    while (variant != (SyntaxNode*)0) {
+        if (variant.kind == NodeKind.Parenthesized) {
+            SyntaxNode* part = variant.first_child;
+            while (part != (SyntaxNode*)0) {
+                SyntaxNode* end = part;
+                while (end != (SyntaxNode*)0
+                    && !(end.kind == NodeKind.Token && end.token_kind == TokenKind.Comma)) {
+                    end = end.next_sibling;
+                }
+                if (!send_field_is_send(root, item, part, end, owner,
+                                        visiting, depth, reason)) {
+                    return false;
+                }
+                part = end == (SyntaxNode*)0 ? end : end.next_sibling;
+            }
+        }
+        variant = variant.next_sibling;
+    }
+    return true;
+}
+
+bool send_type_is_send_in_declarations(SyntaxNode* root, TypeProjection* value,
+                                       Vec<str>* visiting, i64 depth, String* reason) {
+    if (!send_type_is_send(value, reason)) {
+        return false;
+    }
+    if (depth >= 64) {
+        reason.push_str("recursive type structure exceeds the Send analysis limit");
+        return false;
+    }
+    if (value.kind == ProjectionTypeKind.Named) {
+        SyntaxNode* item = find_item_by_name(root, NodeKind.Struct, value.name);
+        bool is_enum = false;
+        if (item == (SyntaxNode*)0) {
+            item = find_item_by_name(root, NodeKind.Enum, value.name);
+            is_enum = item != (SyntaxNode*)0;
+        }
+        if (item != (SyntaxNode*)0) {
+            i64 index = 0;
+            while (index < visiting.len()) {
+                if (send_text_equals(visiting.get(index), value.name)) {
+                    return true;
+                }
+                index += 1;
+            }
+            visiting.push(value.name);
+            bool result = is_enum
+                ? send_enum_payloads_are_send(root, item, value, visiting, depth, reason)
+                : send_struct_fields_are_send(root, item, value, visiting, depth, reason);
+            visiting.pop();
+            return result;
+        }
+    }
+    return true;
+}
+
+
+
+
+bool send_type_is_send(TypeProjection* value, String* reason) {
+    if (value.kind == ProjectionTypeKind.Unknown) {
+        reason.push_str("the type is unknown (a prior type error)");
+        return false;
+    }
+    if (value.kind == ProjectionTypeKind.Primitive) {
+        return true;
+    }
+    if (value.kind == ProjectionTypeKind.Pointer) {
+        reason.push_str("raw pointer types are not Send: move owned values (Box/Vec) or pass a Channel across threads");
+        return false;
+    }
+    if (value.kind == ProjectionTypeKind.Reference) {
+        reason.push_str("references cannot cross a thread boundary in v1 (scoped threads are not implemented yet)");
+        return false;
+    }
+    if (value.kind == ProjectionTypeKind.Array) {
+        if (value.contains_rc) {
+            reason.push_str("Rc<T> carries a shared non-atomic reference count");
+            return false;
+        }
+        if (value.contains_non_send) {
+            reason.push_str("the array contains a non-Send element");
+            return false;
+        }
+        if (value.contains_unknown) {
+            reason.push_str("the type is unknown (a prior type error)");
+            return false;
+        }
+        return true;
+    }
+    if (value.kind != ProjectionTypeKind.Named) {
+        reason.push_str("the type is unknown (a prior type error)");
+        return false;
+    }
+    if (!send_type_name_is_send(value.name, reason)) {
+        return false;
+    }
+    if (value.contains_rc) {
+        reason.push_str("Rc<T> carries a shared non-atomic reference count");
+        return false;
+    }
+    if (value.contains_non_send) {
+        reason.push_str("the type contains a non-Send value");
+        return false;
+    }
+    if (value.contains_unknown) {
+        reason.push_str("the type is unknown (a prior type error)");
+        return false;
+    }
+    if ((send_text_equals(value.name, "Vec")
+            || send_text_equals(value.name, "Box")
+            || send_text_equals(value.name, "Optional")
+            || send_text_equals(value.name, "HashMap"))
+        && value.argument0.len() == 0) {
+        reason.push_str("the type is unknown (a prior type error)");
+        return false;
+    }
+    return true;
+}
+
+void send_report_type(SendAnalyzer* analyzer, Span span, str type_name, str reason) {
+    String message = String.from_str("launch argument of type ");
+    message.push_str(type_name);
+    message.push_str(" is not Send: ");
+    message.push_str(reason);
+    analyzer.diagnostics.error(span, move message);
+    analyzer.failed = true;
+}
+
+void check_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root,
+                           Vec<Binding>* bindings, LaunchArgument* argument) {
+    if ((*argument).kind == ProjectionExpressionKind.Address) {
+        String type_name = String.from_str("unknown");
+        Binding* binding = send_find_binding(bindings, (*argument).name);
+        if (binding != (Binding*)0) {
+            String declared = send_type_display(&(*binding).declared_type);
+            type_name = move declared;
+        }
+        type_name.push((u8)'*');
+        send_report_type(
+            analyzer,
+            (*argument).span,
+            type_name.to_str(),
+            "raw pointer types are not Send: move owned values (Box/Vec) or pass a Channel across threads"
+        );
+        type_name.drop();
+        return;
+    }
+
+    if ((*argument).kind != ProjectionExpressionKind.Identifier
+        && (*argument).kind != ProjectionExpressionKind.Move) {
+        return;
+    }
+    Binding* binding = send_find_binding(bindings, (*argument).name);
+    if (binding == (Binding*)0) {
+        return;
+    }
+    String reason = String.new();
+    Vec<str> visiting = Vec<str>.new();
+    bool is_send = send_type_is_send_in_declarations(root, &(*binding).declared_type, &visiting, 0, &reason);
+    visiting.drop();
+    if (!is_send) {
+        String type_name = send_type_display(&(*binding).declared_type);
+        send_report_type(analyzer, (*argument).span, type_name.to_str(), reason.to_str());
+        type_name.drop();
+    }
+    reason.drop();
+}
+
+bool check_send(SyntaxTree* tree, DiagnosticBag* diagnostics, CfgSet* cfg) {
+    bool ok = true;
+    Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
+    cfg_collect_items(tree.root, cfg, diagnostics, &items);
+    i64 i = 0;
+    while (i < items.len()) {
+        if (items.get(i).kind == NodeKind.Function) {
+            SendAnalyzer analyzer = SendAnalyzer.new(diagnostics);
+            Vec<Binding> bindings = Vec<Binding>.new();
+            collect_function_bindings(items.get(i), &bindings);
+            Vec<LaunchArgument> launch_arguments = Vec<LaunchArgument>.new();
+            project_function_launch_arguments(items.get(i), cfg, &launch_arguments);
+            i64 argument_index = 0;
+            while (argument_index < launch_arguments.len()) {
+                check_launch_argument(
+                    &analyzer,
+                    tree.root,
+                    &bindings,
+                    launch_arguments.get_ptr(argument_index)
+                );
+                argument_index += 1;
+            }
+            launch_arguments.drop();
+            bindings.drop();
+            if (analyzer.failed) {
+                ok = false;
+            }
+        }
+        i += 1;
+    }
+    items.drop();
+    return ok;
+}

@@ -1,0 +1,41 @@
+// A failed launch must destroy owned arguments moved into its launch pack.
+// compile_flags: --cfg launch_failure_test=1
+import std.string;
+import std.sys.entry;
+
+i64 drop_count = 0;
+i64 completed = 0;
+
+struct Tracked {
+    String value;
+}
+
+impl Drop for Tracked {
+    void drop(Tracked* self) {
+        drop_count = drop_count + 1;
+    }
+}
+
+void idle(i64 _value) {
+    __atomic_fetch_add_i64(&completed, 1, ATOMIC_RELEASE);
+}
+
+void consume(Tracked _value) {
+    __atomic_fetch_add_i64(&completed, 1, ATOMIC_RELEASE);
+}
+
+i64 main() {
+    Task<void> _task = launch idle(1);
+    while (__atomic_load_i64(&completed, ATOMIC_ACQUIRE) < 1) {
+    }
+
+    Tracked tracked = {
+        .value = String.from_str("must be dropped on spawn failure"),
+    };
+    Task<void> failed = launch consume(move tracked);
+    wait failed;
+
+    if (__atomic_load_i64(&completed, ATOMIC_ACQUIRE) != 1) { return 1; }
+    if (drop_count != 1) { return 2; }
+    return 0;
+}

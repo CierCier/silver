@@ -1,0 +1,160 @@
+// compile_flags: --no-cache
+import std.test;
+
+i64 identity(i64 x) {
+    return x;
+}
+
+i64 test_typed(i64 input) {
+    i64 result = identity(match input {
+        0: {
+            i64 local = 1;
+            local;
+        },
+        _: 2,
+    });
+    return result;
+}
+
+i64 test_let(i64 input) {
+    let result = identity(match input {
+        0: {
+            let local = 10;
+            local;
+        },
+        _: 20,
+    });
+    return result;
+}
+
+i64 test_deep(i64 input) {
+    i64 result = identity(identity(match input {
+        0: {
+            i64 inner = identity(match input {
+                0: {
+                    i64 deep = 42;
+                    deep;
+                },
+                _: 0,
+            });
+            inner;
+        },
+        _: 2,
+    }));
+    return result;
+}
+
+i64 test_tuple(i64 input) {
+    [i64, i64] tup = [
+        identity(match input {
+            0: {
+                i64 first = 100;
+                first;
+            },
+            _: 200,
+        }),
+        0,
+    ];
+    let [a, _b] = tup;
+    return a;
+}
+
+struct ScopeHolder {}
+impl ScopeHolder {
+    i64 evaluate(i64 x) {
+        return x;
+    }
+}
+
+i64 test_static_call(i64 input) {
+    i64 result = ScopeHolder.evaluate(match input {
+        0: {
+            i64 local = 50;
+            local;
+        },
+        _: 60,
+    });
+    return result;
+}
+
+i64 PascalCall(i64 x) {
+    return x;
+}
+
+i64 test_pascal_call(i64 input) {
+    i64 result = PascalCall(match input {
+        0: {
+            i64 local = 33;
+            local;
+        },
+        _: 44,
+    });
+    return result;
+}
+
+macro i64 mac_identity(i64 val) {
+    return val;
+}
+
+i64 test_macro_call(i64 input) {
+    i64 result = @mac_identity(match input {
+        0: {
+            i64 local = 77;
+            local;
+        },
+        _: 88,
+    });
+    return result;
+}
+
+i64 test_standalone_bracket(i64 input) {
+    i64 side_effect = 0;
+    [identity(match input {
+        0: {
+            i64 local = 99;
+            side_effect = local;
+            local;
+        },
+        _: {
+            side_effect = 100;
+            0;
+        },
+    })];
+    return side_effect;
+}
+
+i64 test_standalone_static_call(i64 input) {
+    i64 side_effect = 0;
+    ScopeHolder.evaluate(match input {
+        0: {
+            i64 local = 111;
+            side_effect = local;
+            local;
+        },
+        _: {
+            side_effect = 222;
+            0;
+        },
+    });
+    return side_effect;
+}
+
+i32 main() {
+    assert_eq_i64(1, test_typed(0), "typed nested match block");
+    assert_eq_i64(2, test_typed(5), "typed wildcard fallback");
+    assert_eq_i64(10, test_let(0), "let nested match block");
+    assert_eq_i64(20, test_let(5), "let wildcard fallback");
+    assert_eq_i64(42, test_deep(0), "deeply nested match block");
+    assert_eq_i64(100, test_tuple(0), "tuple initializer nested match block");
+    assert_eq_i64(50, test_static_call(0), "static method call nested match block");
+    assert_eq_i64(60, test_static_call(3), "static method call wildcard fallback");
+    assert_eq_i64(33, test_pascal_call(0), "PascalCase function call nested match block");
+    assert_eq_i64(44, test_pascal_call(1), "PascalCase function call wildcard fallback");
+    assert_eq_i64(77, test_macro_call(0), "macro call nested match block");
+    assert_eq_i64(88, test_macro_call(1), "macro call wildcard fallback");
+    assert_eq_i64(99, test_standalone_bracket(0), "standalone bracket statement nested match block");
+    assert_eq_i64(100, test_standalone_bracket(1), "standalone bracket statement wildcard fallback");
+    assert_eq_i64(111, test_standalone_static_call(0), "standalone static call nested match block");
+    assert_eq_i64(222, test_standalone_static_call(1), "standalone static call wildcard fallback");
+    return done();
+}

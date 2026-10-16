@@ -1,0 +1,13 @@
+// expected_compile_failure
+struct Leaf { i64 value; }
+impl Drop for Leaf { void drop(Leaf* self) {} }
+struct Parent { Leaf item; Leaf sibling; }
+impl Drop for Parent { void drop(Parent* self) {} }
+
+i32 main() {
+    Parent parent;
+    parent.item.value = 1;
+    parent.sibling.value = 2;
+    Leaf item = parent.item;
+    return 0;
+}

@@ -13,8 +13,33 @@
 // the T1 `Task<T>` message layer and channels build on.
 
 import std.sys.os;
+import std.sys.raw.thread;
 import std.rt.thread_registry;
 import std.mem.alloc;
+
+/// Number of logical CPUs available to the current process. Linux uses the
+/// calling thread's affinity mask so pools respect cpusets and containers.
+i64 thread_available_parallelism() {
+    i64 count = 1;
+    if (@cfg(os.linux)) {
+        u8 mask[1024];
+        i64 bytes = sys_sched_getaffinity(0, 1024, (i64)&mask[0]);
+        if (bytes > 0) {
+            count = 0;
+            i64 i = 0;
+            while (i < bytes) {
+                u8 bits = mask[i];
+                while (bits != 0) {
+                    count += (i64)(bits & (u8)1);
+                    bits = bits >> 1;
+                }
+                i += 1;
+            }
+            if (count == 0) { count = 1; }
+        }
+    }
+    return count;
+}
 
 // Raw clone flags for a thread that shares the process address space:
 // CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID.
@@ -52,7 +77,7 @@ TaskRecord* thread_spawn(void(i64) fn, i64 arg) {
     // Claim a registry slot under the lock.
     thread_lock_acquire();
     i64 slot = -1;
-    for (i64 i = 0; i < MAX_THREADS; i = i + 1) {
+    for (i64 i = 0; i < thread_registry_capacity(); i = i + 1) {
         if (g_threads[i].tid == 0) {
             slot = i;
             break;
@@ -72,7 +97,7 @@ TaskRecord* thread_spawn(void(i64) fn, i64 arg) {
 
     i64 tid = thread_spawn_claimed(rec, (i64)thread_entry);
     if (tid <= 0) {
-        thread_spawn_cleanup(rec, (u8*)0);
+        thread_spawn_cleanup(rec);
         return (TaskRecord*)0;
     }
     rec.tid = tid;
@@ -82,8 +107,8 @@ TaskRecord* thread_spawn(void(i64) fn, i64 arg) {
 /// Launch a `launch` expression's trampoline on a fresh thread (T1). `tramp`
 /// is a per-site `void(i64)` marshaller; `pack` is the compiler-owned
 /// argument/result block. Returns the TaskRecord* (as i64) to `wait` on, or 0
-/// on failure (registry full, stack mmap failure, or clone error) — in which
-/// case `pack` is freed here and a subsequent `wait` yields a zeroed result.
+/// on failure (registry full, stack mmap failure, or clone error). On failure,
+/// ownership of `pack` stays with the caller so it can run argument destructors.
 /// v1: no lazy slot-reap — a slot is reclaimed only by `__silver_wait_done`
 /// or `join_all` at process exit, keeping the returned rec stable.
 i64 __silver_launch(void(i64) tramp, u8* pack) {
@@ -92,7 +117,7 @@ i64 __silver_launch(void(i64) tramp, u8* pack) {
     }
     thread_lock_acquire();
     i64 slot = -1;
-    for (i64 i = 0; i < MAX_THREADS; i = i + 1) {
+    for (i64 i = 0; i < thread_registry_capacity(); i = i + 1) {
         if (g_threads[i].tid == 0) {
             slot = i;
             break;
@@ -100,7 +125,6 @@ i64 __silver_launch(void(i64) tramp, u8* pack) {
     }
     if (slot < 0) {
         thread_lock_release();
-        mem_free_raw_impl(pack);
         return 0;
     }
     TaskRecord* rec = &g_threads[slot];
@@ -113,7 +137,7 @@ i64 __silver_launch(void(i64) tramp, u8* pack) {
 
     i64 tid = thread_spawn_claimed(rec, (i64)thread_entry);
     if (tid <= 0) {
-        thread_spawn_cleanup(rec, pack);
+        thread_spawn_cleanup(rec);
         return 0;
     }
     rec.tid = tid;
@@ -152,9 +176,8 @@ i64 thread_spawn_claimed(TaskRecord* rec, i64 fn) {
     return tid;
 }
 
-/// Rolls a failed spawn back: frees the Linux child stack when present and
-/// the launch pack (which may be null for spawn()).
-void thread_spawn_cleanup(TaskRecord* rec, u8* pack) {
+/// Rolls a failed spawn back without freeing the caller-owned launch pack.
+void thread_spawn_cleanup(TaskRecord* rec) {
     if (rec.stack != (u8*)0) {
         mem_sys_free(rec.stack, THREAD_STACK_SIZE);
         rec.stack = (u8*)0;
@@ -163,7 +186,4 @@ void thread_spawn_cleanup(TaskRecord* rec, u8* pack) {
     rec.tid = 0;
     rec.pack = 0;
     thread_lock_release();
-    if (pack != (u8*)0) {
-        mem_free_raw_impl(pack);
-    }
 }

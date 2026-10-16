@@ -1,0 +1,729 @@
+// std/cli.ag — schema-driven command-line argument parsing.
+import std.mem.vec;
+import std.io.file;
+import std.optional;
+import std.result;
+import std.string;
+
+/// Named ANSI styles used by CLI help and diagnostic output.
+enum CliStyle {
+    Title;
+    Heading;
+    Command;
+    Option;
+    Example;
+    Error;
+    Muted;
+}
+
+enum CliValueKind {
+    Flag;
+    Required;
+    OptionalValue;
+}
+
+/// A command-line syntax error with the offending token attached.
+enum CliError {
+    UnknownOption(String);
+    MissingValue(String);
+    UnexpectedValue(String);
+    RepeatedOption(String);
+}
+
+struct CliOptionSpec {
+    String name;
+    String short_name;
+    String value_name;
+    String help;
+    CliValueKind kind;
+    bool repeatable;
+    bool hidden;
+}
+
+struct CliCommandSpec {
+    String name;
+    String alias;
+    String help;
+}
+
+struct CliOptionAlias {
+    String name;
+    String token;
+}
+
+struct CliOptionValue {
+    String name;
+    String value;
+    bool has_value;
+}
+
+/// Owned result of parsing one command line.
+struct CliMatches {
+    String command;
+    Vec<CliOptionValue> options;
+    Vec<String> positionals;
+    Vec<String> trailing;
+}
+
+/// Option and command definitions used to parse and document an application CLI.
+struct CliParser {
+    String name;
+    String description;
+    Vec<String> examples;
+    Vec<CliOptionSpec> options;
+    Vec<CliOptionAlias> aliases;
+    Vec<CliCommandSpec> commands;
+    bool color;
+}
+
+str cli_style_code(CliStyle style) {
+    return match style {
+        CliStyle.Title : "1;36",
+        CliStyle.Heading : "1;32",
+        CliStyle.Command : "36",
+        CliStyle.Option : "36",
+        CliStyle.Example : "33",
+        CliStyle.Error : "1;31",
+        CliStyle.Muted : "2",
+    };
+}
+
+/// Write styled terminal text. Set `color` to false to emit plain text.
+void cli_write_styled(BufWriter* output, str value, CliStyle style, bool color) {
+    if (color) {
+        output.write_str("\x1b[");
+        output.write_str(cli_style_code(style));
+        output.write_str("m");
+    }
+    output.write_str(value);
+    if (color) { output.write_str("\x1b[0m"); }
+}
+
+void cli_append_styled(&mut String output, str value, CliStyle style, bool color) {
+    if (color) {
+        output.push_str("\x1b[");
+        output.push_str(cli_style_code(style));
+        output.push((u8)'m');
+    }
+    output.push_str(value);
+    if (color) { output.push_str("\x1b[0m"); }
+}
+
+void cli_append_padding(&mut String output, i64 width, i64 current) {
+    i64 spaces = width - current;
+    if (spaces < 2) { spaces = 2; }
+    while (spaces > 0) {
+        output.push((u8)' ');
+        spaces = spaces - 1;
+    }
+}
+
+CliOptionSpec cli_option_spec(str name, str short_name, str value_name, str help,
+    CliValueKind kind, bool repeatable) {
+    CliOptionSpec spec;
+    spec.name = String.from_str(name);
+    spec.short_name = String.from_str(short_name);
+    spec.value_name = String.from_str(value_name);
+    spec.help = String.from_str(help);
+    spec.kind = kind;
+    spec.repeatable = repeatable;
+    spec.hidden = false;
+    return spec;
+}
+
+CliCommandSpec cli_command_spec(str name, str alias, str help) {
+    CliCommandSpec spec;
+    spec.name = String.from_str(name);
+    spec.alias = String.from_str(alias);
+    spec.help = String.from_str(help);
+    return spec;
+}
+
+CliOptionValue cli_option_value(str name, str value, bool has_value) {
+    CliOptionValue result;
+    result.name = String.from_str(name);
+    result.value = String.from_str(value);
+    result.has_value = has_value;
+    return result;
+}
+
+CliMatches cli_matches_new() {
+    CliMatches matches;
+    matches.command = String.new();
+    matches.options = Vec<CliOptionValue>.new();
+    matches.positionals = Vec<String>.new();
+    matches.trailing = Vec<String>.new();
+    return matches;
+}
+
+impl CliParser {
+    /// Create an empty parser. Color output is enabled by default.
+    CliParser new(str name) {
+        CliParser parser;
+        parser.name = String.from_str(name);
+        parser.description = String.new();
+        parser.examples = Vec<String>.new();
+        parser.options = Vec<CliOptionSpec>.new();
+        parser.aliases = Vec<CliOptionAlias>.new();
+        parser.commands = Vec<CliCommandSpec>.new();
+        parser.color = true;
+        return parser;
+    }
+
+    /// Set the one-line application description shown in both help forms.
+    bool describe(&mut self, str description) {
+        self.description = String.from_str(description);
+        return true;
+    }
+
+    /// Enable or disable ANSI styling in generated output.
+    void set_color(&mut self, bool enabled) {
+        self.color = enabled;
+    }
+
+    /// Add one usage example to detailed help.
+    void add_example(&mut self, str example) {
+        self.examples.push(String.from_str(example));
+    }
+
+    /// Register a boolean switch. Returns false if its name or short spelling conflicts.
+    bool add_flag(&mut self, str name, str short_name, str help, bool repeatable) {
+        return self.add_option_spec(name, short_name, "", help, CliValueKind.Flag, repeatable);
+    }
+
+    /// Register an option that requires a value.
+    bool add_value(&mut self, str name, str short_name, str value_name, str help, bool repeatable) {
+        return self.add_option_spec(name, short_name, value_name, help,
+            CliValueKind.Required, repeatable);
+    }
+
+    /// Register an option whose value may be omitted.
+    bool add_optional_value(&mut self, str name, str short_name, str value_name,
+        str help, bool repeatable) {
+        return self.add_option_spec(name, short_name, value_name, help,
+            CliValueKind.OptionalValue, repeatable);
+    }
+
+    bool add_option_spec(&mut self, str name, str short_name, str value_name, str help,
+        CliValueKind kind, bool repeatable) {
+        if (name == (str)0 || strlen(name) == 0 || name[0] == (u8)'-') { return false; }
+        if (short_name != (str)0 && strlen(short_name) > 0
+            && (strlen(short_name) != 1 || short_name[0] == (u8)'-')) { return false; }
+        if (self.find_long_option(name) >= 0) { return false; }
+        if (short_name != (str)0 && strlen(short_name) == 1
+            && self.find_short_option(short_name) >= 0) { return false; }
+        CliOptionSpec spec = cli_option_spec(name, short_name, value_name, help, kind, repeatable);
+        self.options.push(move spec);
+        return true;
+    }
+
+    /// Register a command name and optional short alias with its help description.
+    bool add_command(&mut self, str name, str alias, str help) {
+        if (name == (str)0 || strlen(name) == 0) { return false; }
+        if (self.find_command(name) >= 0) { return false; }
+        if (alias != (str)0 && strlen(alias) > 0
+            && (strcmp(name, alias) == 0 || self.find_command(alias) >= 0)) { return false; }
+        CliCommandSpec spec = cli_command_spec(name, alias, help);
+        self.commands.push(move spec);
+        return true;
+    }
+
+    /// Add an alternate complete spelling such as `-g0` or `--clean-cache`.
+    bool add_alias(&mut self, str option_name, str token) {
+        if (self.find_long_option(option_name) < 0 || token == (str)0
+            || strlen(token) < 2 || token[0] != (u8)'-') {
+            return false;
+        }
+        if (self.find_alias(token) >= 0) { return false; }
+        CliOptionAlias alias;
+        alias.name = String.from_str(option_name);
+        alias.token = String.from_str(token);
+        self.aliases.push(move alias);
+        return true;
+    }
+
+    /// Exclude an internal option from generated help while continuing to parse it.
+    bool hide_option(&mut self, str name) {
+        i64 index = self.find_long_option(name);
+        if (index < 0) { return false; }
+        self.options.get_ptr(index).hidden = true;
+        return true;
+    }
+
+    i64 find_long_option(&self, str name) {
+        i64 i = 0;
+        while (i < self.options.len()) {
+            if (self.options.get_ptr(i).name.equals(name)) { return i; }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    i64 find_short_option(&self, str short_name) {
+        i64 i = 0;
+        while (i < self.options.len()) {
+            String* current = &self.options.get_ptr(i).short_name;
+            if (current.len() == 1 && current.equals(short_name)) { return i; }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    i64 find_command(&self, str name) {
+        i64 i = 0;
+        while (i < self.commands.len()) {
+            CliCommandSpec* current = self.commands.get_ptr(i);
+            if (current.name.equals(name) || (current.alias.len() > 0 && current.alias.equals(name))) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    i64 find_alias(&self, str token) {
+        i64 i = 0;
+        while (i < self.aliases.len()) {
+            if (self.aliases.get_ptr(i).token.equals(token)) {
+                return self.find_long_option(self.aliases.get_ptr(i).name.to_str());
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    bool command_token(&self, str name) {
+        return self.find_command(name) >= 0;
+    }
+
+    /// Render the usage line without descriptions or examples.
+    String usage(&self) {
+        String output = self.name.clone();
+        output.push_str(" [OPTIONS]");
+        if (self.commands.len() > 0) {
+            output.push_str(" <COMMAND> [ARGS...]");
+        } else {
+            output.push_str(" [ARGS...]");
+        }
+        return output;
+    }
+
+    /// Render concise usage and point users to the full help text.
+    /// Render compact usage and a pointer to detailed help.
+    String short_help(&self) {
+        String output = String.new();
+        cli_append_styled(&mut output, self.name.to_str(), CliStyle.Title, self.color);
+        if (self.description.len() > 0) {
+            output.push_str(" - ");
+            output.push_str(self.description.to_str());
+        }
+        output.push((u8)'\n');
+        cli_append_styled(&mut output, "Usage:", CliStyle.Heading, self.color);
+        output.push((u8)' ');
+        String usage = self.usage();
+        output.push_str(usage.to_str());
+        usage.drop();
+        output.push((u8)'\n');
+        output.push_str("Use '");
+        output.push_str(self.name.to_str());
+        output.push_str(" --help' for commands, options, and examples.\n");
+        return output;
+    }
+
+    /// Render full help from the registered command and option descriptions.
+    /// Render commands, options, descriptions, aliases, and examples.
+    String help(&self) {
+        String output = String.new();
+        cli_append_styled(&mut output, self.name.to_str(), CliStyle.Title, self.color);
+        if (self.description.len() > 0) {
+            output.push_str(" - ");
+            output.push_str(self.description.to_str());
+        }
+        output.push_str("\n\n");
+        cli_append_styled(&mut output, "Usage:", CliStyle.Heading, self.color);
+        output.push((u8)' ');
+        String usage = self.usage();
+        output.push_str(usage.to_str());
+        usage.drop();
+        output.push_str("\n");
+
+        if (self.commands.len() > 0) {
+            output.push((u8)'\n');
+            cli_append_styled(&mut output, "Commands", CliStyle.Heading, self.color);
+            output.push_str(":\n");
+            i64 command_index = 0;
+            while (command_index < self.commands.len()) {
+                CliCommandSpec* command = self.commands.get_ptr(command_index);
+                String label = command.name.clone();
+                if (command.alias.len() > 0) {
+                    label.push_str(", ");
+                    label.push_str(command.alias.to_str());
+                }
+                output.push_str("  ");
+                cli_append_styled(&mut output, label.to_str(), CliStyle.Command, self.color);
+                cli_append_padding(&mut output, 24, label.len());
+                output.push_str(command.help.to_str());
+                output.push((u8)'\n');
+                label.drop();
+                command_index = command_index + 1;
+            }
+        }
+
+        output.push((u8)'\n');
+        cli_append_styled(&mut output, "Options", CliStyle.Heading, self.color);
+        output.push_str(":\n");
+        i64 option_index = 0;
+        while (option_index < self.options.len()) {
+            CliOptionSpec* option = self.options.get_ptr(option_index);
+            if (option.hidden) {
+                option_index = option_index + 1;
+                continue;
+            }
+            String label = String.new();
+            if (option.short_name.len() > 0) {
+                label.push((u8)'-');
+                label.push_str(option.short_name.to_str());
+                label.push_str(", ");
+            }
+            label.push_str("--");
+            label.push_str(option.name.to_str());
+            i64 alias_index = 0;
+            while (alias_index < self.aliases.len()) {
+                CliOptionAlias* alias = self.aliases.get_ptr(alias_index);
+                if (alias.name.equals(option.name.to_str())) {
+                    label.push_str(", ");
+                    label.push_str(alias.token.to_str());
+                }
+                alias_index = alias_index + 1;
+            }
+            if (option.kind == CliValueKind.Required) {
+                label.push_str(" <");
+                label.push_str(option.value_name.to_str());
+                label.push((u8)'>');
+            } else if (option.kind == CliValueKind.OptionalValue) {
+                label.push_str(" [");
+                label.push_str(option.value_name.to_str());
+                label.push((u8)']');
+            }
+            if (option.repeatable) { label.push_str("..."); }
+            output.push_str("  ");
+            cli_append_styled(&mut output, label.to_str(), CliStyle.Option, self.color);
+            cli_append_padding(&mut output, 30, label.len());
+            output.push_str(option.help.to_str());
+            output.push((u8)'\n');
+            label.drop();
+            option_index = option_index + 1;
+        }
+
+        if (self.examples.len() > 0) {
+            output.push((u8)'\n');
+            cli_append_styled(&mut output, "Examples", CliStyle.Heading, self.color);
+            output.push_str(":\n");
+            i64 example_index = 0;
+            while (example_index < self.examples.len()) {
+                output.push_str("  ");
+                cli_append_styled(&mut output, self.examples.get_ptr(example_index).to_str(), CliStyle.Example, self.color);
+                output.push((u8)'\n');
+                example_index = example_index + 1;
+            }
+        }
+        return output;
+    }
+
+    /// Parse an argv vector whose first item is the executable name.
+    /// Returns a structured `CliError` for unknown, missing, or repeated options.
+    Result<CliMatches, CliError> parse(&self, &Vec<String> arguments) {
+        CliMatches matches = cli_matches_new();
+        bool after_separator = false;
+        bool saw_positional = false;
+        i64 i = 1;
+        while (i < arguments.len()) {
+            String* argument = arguments.get_ptr(i);
+            if (after_separator) {
+                matches.trailing.push(argument.clone());
+                i = i + 1;
+                continue;
+            }
+            if (argument.equals("--")) {
+                after_separator = true;
+                i = i + 1;
+                continue;
+            }
+            i64 alias_index = self.find_alias(argument.to_str());
+            if (alias_index >= 0) {
+                CliOptionSpec* alias_spec = self.options.get_ptr(alias_index);
+                if (!self.can_add(&matches, alias_index)) {
+                    String bad = argument.clone();
+                    return Result<CliMatches, CliError>.Err(CliError.RepeatedOption(move bad));
+                }
+                if (alias_spec.kind == CliValueKind.Flag) {
+                    matches.options.push(cli_option_value(alias_spec.name.to_str(), "", false));
+                    i = i + 1;
+                    continue;
+                }
+                if (i + 1 < arguments.len()) {
+                    String* next = arguments.get_ptr(i + 1);
+                    if (alias_spec.kind == CliValueKind.Required || (!next.starts_with("-") && !self.command_token(next.to_str()))) {
+                        matches.options.push(cli_option_value(alias_spec.name.to_str(), next.to_str(), true));
+                        i = i + 2;
+                        continue;
+                    }
+                }
+                if (alias_spec.kind == CliValueKind.OptionalValue) {
+                    matches.options.push(cli_option_value(alias_spec.name.to_str(), "", false));
+                    i = i + 1;
+                    continue;
+                }
+                String missing = argument.clone();
+                return Result<CliMatches, CliError>.Err(CliError.MissingValue(move missing));
+            }
+            if (argument.starts_with("--")) {
+                Optional<[String, String]> split = argument.split_once("=");
+                if (split.is_some()) {
+                    [String, String] pair = split.unwrap();
+                    String option_name = pair[0].strip_prefix("--");
+                    i64 spec_index = self.find_long_option(option_name.to_str());
+                    if (spec_index < 0) {
+                        String bad = argument.clone();
+                        option_name.drop();
+                        pair[0].drop();
+                        pair[1].drop();
+                        return Result<CliMatches, CliError>.Err(CliError.UnknownOption(move bad));
+                    }
+                    CliOptionSpec* spec = self.options.get_ptr(spec_index);
+                    if (spec.kind == CliValueKind.Flag) {
+                        String bad = argument.clone();
+                        option_name.drop();
+                        pair[0].drop();
+                        pair[1].drop();
+                        return Result<CliMatches, CliError>.Err(CliError.UnexpectedValue(move bad));
+                    }
+                    if (!self.can_add(&matches, spec_index)) {
+                        String bad = argument.clone();
+                        option_name.drop();
+                        pair[0].drop();
+                        pair[1].drop();
+                        return Result<CliMatches, CliError>.Err(CliError.RepeatedOption(move bad));
+                    }
+                    matches.options.push(cli_option_value(spec.name.to_str(), pair[1].to_str(), true));
+                    option_name.drop();
+                    pair[0].drop();
+                    pair[1].drop();
+                    i = i + 1;
+                    continue;
+                }
+                String option_name = argument.strip_prefix("--");
+                i64 spec_index = self.find_long_option(option_name.to_str());
+                if (spec_index < 0) {
+                    String bad = argument.clone();
+                    option_name.drop();
+                    return Result<CliMatches, CliError>.Err(CliError.UnknownOption(move bad));
+                }
+                CliOptionSpec* spec = self.options.get_ptr(spec_index);
+                if (!self.can_add(&matches, spec_index)) {
+                    String bad = argument.clone();
+                    option_name.drop();
+                    return Result<CliMatches, CliError>.Err(CliError.RepeatedOption(move bad));
+                }
+                if (spec.kind == CliValueKind.Flag) {
+                    matches.options.push(cli_option_value(spec.name.to_str(), "", false));
+                    option_name.drop();
+                    i = i + 1;
+                    continue;
+                }
+                if (i + 1 < arguments.len()) {
+                    String* next = arguments.get_ptr(i + 1);
+                    if (spec.kind == CliValueKind.Required || (!next.starts_with("-") && !self.command_token(next.to_str()))) {
+                        matches.options.push(cli_option_value(spec.name.to_str(), next.to_str(), true));
+                        option_name.drop();
+                        i = i + 2;
+                        continue;
+                    }
+                }
+                if (spec.kind == CliValueKind.OptionalValue) {
+                    matches.options.push(cli_option_value(spec.name.to_str(), "", false));
+                    option_name.drop();
+                    i = i + 1;
+                    continue;
+                }
+                String missing = argument.clone();
+                option_name.drop();
+                return Result<CliMatches, CliError>.Err(CliError.MissingValue(move missing));
+            }
+            if (argument.starts_with("-") && argument.len() > 1) {
+                String short_name = String.new();
+                String attached = String.new();
+                i64 spec_index = -1;
+                i64 option_index = 0;
+                while (option_index < self.options.len()) {
+                    CliOptionSpec* candidate = self.options.get_ptr(option_index);
+                    if (candidate.short_name.len() == 1) {
+                        String candidate_prefix = String.from_str("-");
+                        candidate_prefix.push_str(candidate.short_name.to_str());
+                        if (argument.starts_with(candidate_prefix.to_str())) {
+                            spec_index = option_index;
+                            short_name = candidate.short_name.clone();
+                            attached = argument.strip_prefix(candidate_prefix.to_str());
+                            candidate_prefix.drop();
+                            break;
+                        }
+                        candidate_prefix.drop();
+                    }
+                    option_index = option_index + 1;
+                }
+                if (spec_index < 0) {
+                    String bad = argument.clone();
+                    short_name.drop();
+                    attached.drop();
+                    return Result<CliMatches, CliError>.Err(CliError.UnknownOption(move bad));
+                }
+                CliOptionSpec* spec = self.options.get_ptr(spec_index);
+                if (!self.can_add(&matches, spec_index)) {
+                    String bad = argument.clone();
+                    attached.drop();
+                    short_name.drop();
+                    return Result<CliMatches, CliError>.Err(CliError.RepeatedOption(move bad));
+                }
+                if (spec.kind == CliValueKind.Flag) {
+                    if (attached.len() > 0) {
+                        String bad = argument.clone();
+                        attached.drop();
+                        short_name.drop();
+                        return Result<CliMatches, CliError>.Err(CliError.UnexpectedValue(move bad));
+                    }
+                    matches.options.push(cli_option_value(spec.name.to_str(), "", false));
+                    attached.drop();
+                    short_name.drop();
+                    i = i + 1;
+                    continue;
+                }
+                if (attached.len() > 0) {
+                    matches.options.push(cli_option_value(spec.name.to_str(), attached.to_str(), true));
+                    attached.drop();
+                    short_name.drop();
+                    i = i + 1;
+                    continue;
+                }
+                if (i + 1 < arguments.len()) {
+                    String* next = arguments.get_ptr(i + 1);
+                    if (spec.kind == CliValueKind.Required || (!next.starts_with("-") && !self.command_token(next.to_str()))) {
+                        matches.options.push(cli_option_value(spec.name.to_str(), next.to_str(), true));
+                        attached.drop();
+                        short_name.drop();
+                        i = i + 2;
+                        continue;
+                    }
+                }
+                if (spec.kind == CliValueKind.OptionalValue) {
+                    matches.options.push(cli_option_value(spec.name.to_str(), "", false));
+                    attached.drop();
+                    short_name.drop();
+                    i = i + 1;
+                    continue;
+                }
+                String missing = argument.clone();
+                attached.drop();
+                short_name.drop();
+                return Result<CliMatches, CliError>.Err(CliError.MissingValue(move missing));
+            }
+            if (!saw_positional && matches.command.len() == 0) {
+                i64 command_index = self.find_command(argument.to_str());
+                if (command_index >= 0) {
+                    matches.command = String.from_str(self.commands.get_ptr(command_index).name.to_str());
+                    i = i + 1;
+                    continue;
+                }
+            }
+            saw_positional = true;
+            matches.positionals.push(argument.clone());
+            i = i + 1;
+        }
+        return Result<CliMatches, CliError>.Ok(move matches);
+    }
+
+    bool can_add(&self, &CliMatches matches, i64 spec_index) {
+        if (self.options.get_ptr(spec_index).repeatable) { return true; }
+        String* name = &self.options.get_ptr(spec_index).name;
+        i64 i = 0;
+        while (i < matches.options.len()) {
+            if (matches.options.get_ptr(i).name.equals(name.to_str())) { return false; }
+            i = i + 1;
+        }
+        return true;
+    }
+}
+
+impl CliError {
+    /// Return a plain-text diagnostic suitable for stderr.
+    String message(&self) {
+        String text = String.new();
+        match *self {
+            UnknownOption(token) : { text.push_str("unknown option: "); text.push_str(token.to_str()); },
+            MissingValue(option) : { text.push_str("option requires a value: "); text.push_str(option.to_str()); },
+            UnexpectedValue(option) : { text.push_str("flag does not accept a value: "); text.push_str(option.to_str()); },
+            RepeatedOption(option) : { text.push_str("option may only be specified once: "); text.push_str(option.to_str()); },
+        };
+        return text;
+    }
+}
+
+impl CliMatches {
+    /// Test whether a flag or value option appeared.
+    bool has(&self, str name) {
+        i64 i = 0;
+        while (i < self.options.len()) {
+            if (self.options.get_ptr(i).name.equals(name)) { return true; }
+            i = i + 1;
+        }
+        return false;
+    }
+
+    /// Return the first supplied value for an option, or None for a flag/absence.
+    Optional<String> value(&self, str name) {
+        i64 i = 0;
+        while (i < self.options.len()) {
+            CliOptionValue* option = self.options.get_ptr(i);
+            if (option.name.equals(name) && option.has_value) {
+                return Some(option.value.clone());
+            }
+            i = i + 1;
+        }
+        return None;
+    }
+
+    /// Return every supplied value for a repeatable option.
+    Vec<String> values(&self, str name) {
+        Vec<String> result = Vec<String>.new();
+        i64 i = 0;
+        while (i < self.options.len()) {
+            CliOptionValue* option = self.options.get_ptr(i);
+            if (option.name.equals(name) && option.has_value) {
+                result.push(option.value.clone());
+            }
+            i = i + 1;
+        }
+        return result;
+    }
+
+    /// Number of positional arguments before `--`.
+    i64 positional_count(&self) {
+        return self.positionals.len();
+    }
+
+    /// Get a positional argument as an owned String.
+    Optional<String> positional(&self, i64 index) {
+        if (index < 0 || index >= self.positionals.len()) { return None; }
+        return Some(self.positionals.get_ptr(index).clone());
+    }
+
+    /// Number of program arguments after `--`.
+    i64 trailing_count(&self) {
+        return self.trailing.len();
+    }
+
+    /// Get one program argument after `--` as an owned String.
+    Optional<String> trailing_arg(&self, i64 index) {
+        if (index < 0 || index >= self.trailing.len()) { return None; }
+        return Some(self.trailing.get_ptr(index).clone());
+    }
+}

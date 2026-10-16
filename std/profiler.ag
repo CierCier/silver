@@ -1,0 +1,634 @@
+// std/profiler.ag — compile-time and runtime phase profiler.
+//
+// Provides hierarchical phase timing and resident set size (RSS) memory
+// profiling with 1:1 parity to stage0's profiler report.
+
+import std.cli;
+import std.fmt;
+import std.io;
+import std.io.file;
+import std.mem.vec;
+import std.string;
+import std.sys.os;
+import std.time;
+
+/// A completed execution phase with timing and memory delta.
+struct PhaseRecord {
+    String name;
+    f64 elapsed_ms;
+    i64 memory_before_kb;
+    i64 memory_after_kb;
+    i64 depth;
+    bool skipped;
+}
+
+impl PhaseRecord {
+    i64 memory_delta_kb(*self) {
+        return self.memory_after_kb - self.memory_before_kb;
+    }
+
+    PhaseRecord clone(*self) {
+        PhaseRecord r;
+        r.name = self.name.clone();
+        r.elapsed_ms = self.elapsed_ms;
+        r.memory_before_kb = self.memory_before_kb;
+        r.memory_after_kb = self.memory_after_kb;
+        r.depth = self.depth;
+        r.skipped = self.skipped;
+        return move r;
+    }
+}
+
+/// An active phase awaiting end_phase completion.
+struct PhaseFrame {
+    String name;
+    Instant start;
+    i64 memory_before_kb;
+}
+
+/// A node in the hierarchical phase tree reconstructed from flat records.
+struct TreeNode {
+    PhaseRecord record;
+    Vec<TreeNode> children;
+}
+
+impl TreeNode {
+    TreeNode clone(*self) {
+        TreeNode n;
+        n.record = self.record.clone();
+        n.children = Vec<TreeNode>.with_capacity(self.children.len());
+        i64 i = 0;
+        while (i < self.children.len()) {
+            n.children.push(self.children.get_ptr(i).clone());
+            i += 1;
+        }
+        return move n;
+    }
+}
+
+/// Flattened tree entry with indentation connectors for report rendering.
+struct ReportEntry {
+    String name;
+    f64 elapsed_ms;
+    i64 memory_before_kb;
+    i64 memory_after_kb;
+    bool is_sub;
+    bool skipped;
+}
+
+/// Phase profiler tracking wall clock time and memory delta across phases.
+struct Profiler {
+    bool enabled;
+    bool verbose;
+    Vec<PhaseRecord> records;
+    bool started;
+    Instant start_time;
+    i64 total_memory_before_kb;
+    Vec<PhaseFrame> stack;
+}
+
+i64 utf8_display_width(str s) {
+    if (s == (str)0) { return 0; }
+    i64 len = 0;
+    i64 i = 0;
+    while (s[i] != '\0') {
+        u8 b = (u8)s[i];
+        if ((b & 0xC0) != 0x80) {
+            len += 1;
+        }
+        i += 1;
+    }
+    return len;
+}
+
+impl Drop for Profiler {
+    void drop(*self) {
+    }
+}
+
+impl Profiler {
+    Profiler new(bool enabled, bool verbose) {
+        Profiler p;
+        p.enabled = enabled;
+        p.verbose = verbose;
+        p.records = Vec<PhaseRecord>.new();
+        p.started = false;
+        p.start_time = now();
+        p.total_memory_before_kb = 0;
+        p.stack = Vec<PhaseFrame>.new();
+        return move p;
+    }
+
+    void begin(*self) {
+        if (!self.enabled) { return; }
+        self.started = true;
+        self.start_time = now();
+        self.total_memory_before_kb = read_rss_kb();
+    }
+
+    void begin_phase(*self, str name) {
+        if (!self.enabled) { return; }
+        if (!self.started) {
+            self.begin();
+        }
+        PhaseFrame frame;
+        frame.name = String.from_str(name);
+        frame.start = now();
+        frame.memory_before_kb = read_rss_kb();
+        self.stack.push(move frame);
+    }
+
+    void end_phase(*self, str name) {
+        if (!self.enabled || self.stack.len() == 0) { return; }
+        i64 found_idx = -1;
+        i64 idx = self.stack.len() - 1;
+        while (idx >= 0) {
+            if (self.stack.get_ptr(idx).name.equals(name)) {
+                found_idx = idx;
+                break;
+            }
+            idx -= 1;
+        }
+        PhaseFrame frame;
+        if (found_idx >= 0) {
+            frame = self.stack.take(found_idx);
+        } else {
+            frame = self.stack.pop();
+        }
+        Instant finish = now();
+        f64 elapsed_ms = (f64)finish.elapsed_ns(frame.start) / 1000000.0;
+        i64 memory_after_kb = read_rss_kb();
+        PhaseRecord rec;
+        rec.name = move frame.name;
+        rec.elapsed_ms = elapsed_ms;
+        rec.memory_before_kb = frame.memory_before_kb;
+        rec.memory_after_kb = memory_after_kb;
+        rec.depth = self.stack.len();
+        rec.skipped = false;
+        self.records.push(move rec);
+    }
+
+    void skip_phase(*self, str name) {
+        if (!self.enabled) { return; }
+        i64 memory_kb = read_rss_kb();
+        PhaseRecord rec;
+        rec.name = String.from_str(name);
+        rec.elapsed_ms = 0.0;
+        rec.memory_before_kb = memory_kb;
+        rec.memory_after_kb = memory_kb;
+        rec.depth = self.stack.len();
+        rec.skipped = true;
+        self.records.push(move rec);
+    }
+
+    void record_phase(*self, str name, f64 elapsed_ms, i64 mem_before_kb, i64 mem_after_kb, bool skipped) {
+        if (!self.enabled) { return; }
+        PhaseRecord rec;
+        rec.name = String.from_str(name);
+        rec.elapsed_ms = elapsed_ms;
+        rec.memory_before_kb = mem_before_kb;
+        rec.memory_after_kb = mem_after_kb;
+        rec.depth = self.stack.len();
+        rec.skipped = skipped;
+        self.records.push(move rec);
+    }
+
+    Vec<TreeNode> build_tree(*self) {
+        Vec<TreeNode> nodes = Vec<TreeNode>.new();
+        i64 r = 0;
+        while (r < self.records.len()) {
+            PhaseRecord* record = self.records.get_ptr(r);
+            i64 depth = record.depth;
+            i64 child_start = nodes.len();
+            while (child_start > 0 && nodes.get_ptr(child_start - 1).record.depth > depth) {
+                child_start -= 1;
+            }
+            i64 count = nodes.len() - child_start;
+            Vec<TreeNode> children = Vec<TreeNode>.with_capacity(count);
+            i64 c = 0;
+            while (c < count) {
+                TreeNode child = nodes.take(child_start);
+                children.push(move child);
+                c += 1;
+            }
+            TreeNode node;
+            node.record = record.clone();
+            node.children = move children;
+            nodes.push(move node);
+            r += 1;
+        }
+        return move nodes;
+    }
+
+    void collect_tree(*self, Vec<TreeNode>* nodes, str prefix, bool root_level, Vec<ReportEntry>* out) {
+        i64 i = 0;
+        while (i < nodes.len()) {
+            TreeNode* node = nodes.get_ptr(i);
+            bool is_last = i + 1 == nodes.len();
+            String connector = String.new();
+            if (!root_level) {
+                if (is_last) {
+                    connector.push_str("└── ");
+                } else {
+                    connector.push_str("├── ");
+                }
+            }
+            String child_prefix = String.new();
+            if (!root_level) {
+                child_prefix.push_str(prefix);
+                if (is_last) {
+                    child_prefix.push_str("    ");
+                } else {
+                    child_prefix.push_str("│   ");
+                }
+            }
+            String name = String.new();
+            name.push_str(prefix);
+            name.push_str(connector.to_str());
+            connector.drop();
+            name.push_str(node.record.name.to_str());
+
+            ReportEntry entry;
+            entry.name = move name;
+            entry.elapsed_ms = node.record.elapsed_ms;
+            entry.memory_before_kb = node.record.memory_before_kb;
+            entry.memory_after_kb = node.record.memory_after_kb;
+            entry.is_sub = !root_level;
+            entry.skipped = node.record.skipped;
+            out.push(move entry);
+
+            self.collect_tree(&node.children, child_prefix.to_str(), false, out);
+            child_prefix.drop();
+            i += 1;
+        }
+    }
+
+    void print_report(*self) {
+        if (!self.enabled || self.records.len() == 0) {
+            return;
+        }
+
+        f64 total_time_ms = 0.0;
+        i64 total_mem_delta_kb = 0;
+        i64 peak_mem_kb = 0;
+
+        i64 r = 0;
+        while (r < self.records.len()) {
+            PhaseRecord* rec = self.records.get_ptr(r);
+            if (rec.depth == 0) {
+                total_time_ms += rec.elapsed_ms;
+                total_mem_delta_kb += rec.memory_delta_kb();
+            }
+            if (rec.memory_after_kb > peak_mem_kb) {
+                peak_mem_kb = rec.memory_after_kb;
+            }
+            r += 1;
+        }
+
+        bool is_terminal = sys_is_tty(2) != 0;
+
+        STDERR.write_str("\n");
+        if (is_terminal) {
+            cli_write_styled(&STDERR, "=== Compiler Profile Report ===", CliStyle.Title, true);
+            STDERR.write_str("\n");
+        } else {
+            STDERR.write_str("=== Compiler Profile Report ===\n");
+        }
+
+        Vec<TreeNode> tree = self.build_tree();
+        Vec<ReportEntry> entries = Vec<ReportEntry>.new();
+        self.collect_tree(&tree, "", true, &entries);
+        tree.drop();
+
+        i64 width = 24;
+        i64 e = 0;
+        while (e < entries.len()) {
+            i64 nlen = utf8_display_width(entries.get_ptr(e).name.to_str());
+            if (nlen > width) {
+                width = nlen;
+            }
+            e += 1;
+        }
+
+        String hdr = String.new();
+        append_padded_right(&mut hdr, "Phase", width);
+        hdr.push_str(" ");
+        append_padded_left(&mut hdr, "Time (ms)", 10);
+        hdr.push_str(" ");
+        append_padded_left(&mut hdr, "Mem Before", 13);
+        hdr.push_str(" ");
+        append_padded_left(&mut hdr, "Mem After", 13);
+        hdr.push_str(" ");
+        append_padded_left(&mut hdr, "Delta (KB)", 13);
+        hdr.push_str("\n");
+        STDERR.write_str(hdr.to_str());
+        hdr.drop();
+
+        i64 rule_len = width + 52;
+        String rule = String.new();
+        i64 rl = 0;
+        while (rl < rule_len) {
+            rule.push_str("─");
+            rl += 1;
+        }
+        rule.push_str("\n");
+
+        if (is_terminal) {
+            cli_write_styled(&STDERR, rule.to_str(), CliStyle.Muted, true);
+        } else {
+            STDERR.write_str(rule.to_str());
+        }
+
+        e = 0;
+        while (e < entries.len()) {
+            ReportEntry* entry = entries.get_ptr(e);
+            String line = render_report_line(entry.name.to_str(), width,
+                entry.elapsed_ms, entry.memory_before_kb, entry.memory_after_kb, entry.skipped);
+            line.push_str("\n");
+
+            if (entry.is_sub && is_terminal) {
+                cli_write_styled(&STDERR, line.to_str(), CliStyle.Muted, true);
+            } else {
+                STDERR.write_str(line.to_str());
+            }
+            line.drop();
+            e += 1;
+        }
+        entries.drop();
+
+        if (is_terminal) {
+            cli_write_styled(&STDERR, rule.to_str(), CliStyle.Muted, true);
+        } else {
+            STDERR.write_str(rule.to_str());
+        }
+        rule.drop();
+
+        String tot_line = String.new();
+        append_padded_right(&mut tot_line, "Total", width);
+        tot_line.push_str(" ");
+        String tot_time = String.new();
+        append_f64_2dp(&mut tot_time, total_time_ms);
+        append_padded_left(&mut tot_line, tot_time.to_str(), 10);
+        tot_time.drop();
+
+        tot_line.push_str(" ");
+        append_padded_left(&mut tot_line, "", 34);
+        tot_line.push_str(" ");
+        String peak_str = int_to_str(peak_mem_kb);
+        append_padded_left(&mut tot_line, peak_str.to_str(), 10);
+        peak_str.drop();
+        tot_line.push_str(" KB\n");
+        STDERR.write_str(tot_line.to_str());
+        tot_line.drop();
+
+        String net_line = String.new();
+        append_padded_right(&mut net_line, "", width);
+        net_line.push_str(" ");
+        append_padded_left(&mut net_line, "", 36);
+        net_line.push_str(" ");
+
+        String net_val = String.new();
+        net_val.push_str("net: ");
+        if (total_mem_delta_kb >= 0) {
+            net_val.push_str("+");
+        }
+        String dstr = int_to_str(total_mem_delta_kb);
+        net_val.push_str(dstr.to_str());
+        dstr.drop();
+
+        append_padded_left(&mut net_line, net_val.to_str(), 10);
+        net_val.drop();
+        net_line.push_str(" KB\n\n");
+        STDERR.write_str(net_line.to_str());
+        net_line.drop();
+        STDERR.flush();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Report formatting helpers
+// ---------------------------------------------------------------------------
+
+String int_to_str(i64 v) {
+    u8 buf[32];
+    i64 len = itoa(v, (u8*)&buf[0]);
+    String s = String.new();
+    s.push_bytes((u8*)&buf[0], len);
+    return move s;
+}
+
+void append_padded_left(String* out, str text, i64 width) {
+    i64 len = utf8_display_width(text);
+    i64 pad = width - len;
+    while (pad > 0) {
+        out.push_str(" ");
+        pad -= 1;
+    }
+    out.push_str(text);
+}
+
+void append_padded_right(String* out, str text, i64 width) {
+    out.push_str(text);
+    i64 len = utf8_display_width(text);
+    i64 pad = width - len;
+    while (pad > 0) {
+        out.push_str(" ");
+        pad -= 1;
+    }
+}
+
+void append_f64_2dp(String* out, f64 ms) {
+    if (ms < 0.0) {
+        out.push_str("-");
+        ms = -ms;
+    }
+    i64 whole = (i64)ms;
+    i64 frac = (i64)((ms - (f64)whole) * 100.0 + 0.5);
+    if (frac >= 100) {
+        whole += 1;
+        frac -= 100;
+    }
+    u8 buf[32];
+    i64 len = itoa(whole, (u8*)&buf[0]);
+    out.push_bytes((u8*)&buf[0], len);
+    out.push_str(".");
+    if (frac < 10) {
+        out.push_str("0");
+    }
+    len = itoa(frac, (u8*)&buf[0]);
+    out.push_bytes((u8*)&buf[0], len);
+}
+
+String format_bytes(i64 kb) {
+    String s = String.new();
+    if (kb < 1024) {
+        String num = int_to_str(kb);
+        s.push_str(num.to_str());
+        num.drop();
+        s.push_str(" KB");
+        return move s;
+    }
+    if (kb < 1024 * 1024) {
+        i64 whole = kb / 1024;
+        i64 frac = (kb % 1024) * 10 / 1024;
+        String num = int_to_str(whole);
+        s.push_str(num.to_str());
+        num.drop();
+        s.push_str(".");
+        String f = int_to_str(frac);
+        s.push_str(f.to_str());
+        f.drop();
+        s.push_str(" MB");
+        return move s;
+    }
+    i64 whole = kb / (1024 * 1024);
+    i64 frac = ((kb % (1024 * 1024)) * 100) / (1024 * 1024);
+    String num = int_to_str(whole);
+    s.push_str(num.to_str());
+    num.drop();
+    s.push_str(".");
+    if (frac < 10) { s.push_str("0"); }
+    String f = int_to_str(frac);
+    s.push_str(f.to_str());
+    f.drop();
+    s.push_str(" GB");
+    return move s;
+}
+
+String render_report_line(str name, i64 width, f64 elapsed_ms, i64 before, i64 after, bool skipped) {
+    String line = String.new();
+    append_padded_right(&mut line, name, width);
+    line.push_str(" ");
+
+    if (skipped) {
+        append_padded_right(&mut line, "SKIPPED", 10);
+        line.push_str(" ");
+        append_padded_right(&mut line, "-", 10);
+        line.push_str(" ");
+        append_padded_right(&mut line, "-", 10);
+        line.push_str(" ");
+        append_padded_right(&mut line, "-", 10);
+        return move line;
+    }
+
+    String time_str = String.new();
+    append_f64_2dp(&mut time_str, elapsed_ms);
+    append_padded_left(&mut line, time_str.to_str(), 10);
+    time_str.drop();
+    line.push_str(" ");
+
+    String b_num = int_to_str(before);
+    String before_str = String.new();
+    append_padded_left(&mut before_str, b_num.to_str(), 10);
+    b_num.drop();
+    before_str.push_str(" KB");
+    line.push_str(before_str.to_str());
+    before_str.drop();
+    line.push_str(" ");
+
+    String a_num = int_to_str(after);
+    String after_str = String.new();
+    append_padded_left(&mut after_str, a_num.to_str(), 10);
+    a_num.drop();
+    after_str.push_str(" KB");
+    line.push_str(after_str.to_str());
+    after_str.drop();
+    line.push_str(" ");
+
+    i64 delta = after - before;
+    String delta_val = String.new();
+    if (delta >= 0) {
+        delta_val.push_str("+");
+    }
+    String dnum = int_to_str(delta);
+    delta_val.push_str(dnum.to_str());
+    dnum.drop();
+
+    String delta_str = String.new();
+    append_padded_left(&mut delta_str, delta_val.to_str(), 10);
+    delta_val.drop();
+    delta_str.push_str(" KB");
+    line.push_str(delta_str.to_str());
+    delta_str.drop();
+
+    return move line;
+}
+
+/// Query current resident set size (RSS) in kilobytes from `/proc/self/status`.
+i64 read_rss_kb() {
+    Result<String, Error> res = String.from_file("/proc/self/status");
+    if (res.is_err()) {
+        return 0;
+    }
+    String status = res.unwrap();
+    i64 idx = status.find("VmRSS:");
+    if (idx < 0) {
+        status.drop();
+        return 0;
+    }
+    str text = status.to_str();
+    i64 p = idx + 6;
+    while (p < status.len() && (text[p] == ' ' || text[p] == '\t')) {
+        p += 1;
+    }
+    i64 val = 0;
+    while (p < status.len() && text[p] >= '0' && text[p] <= '9') {
+        val = val * 10 + (i64)(text[p] - '0');
+        p += 1;
+    }
+    status.drop();
+    return val;
+}
+
+// ---------------------------------------------------------------------------
+// Process-wide global profiler state
+// ---------------------------------------------------------------------------
+
+bool g_profiler_installed;
+Profiler g_profiler;
+
+void profiler_install(Profiler profiler) {
+    if (g_profiler_installed) {
+        g_profiler.drop();
+    }
+    g_profiler = move profiler;
+    g_profiler_installed = true;
+}
+
+bool profiler_enabled() {
+    return g_profiler_installed && g_profiler.enabled;
+}
+
+bool profiler_verbose() {
+    return g_profiler_installed && g_profiler.verbose;
+}
+
+void profiler_begin() {
+    if (!profiler_enabled()) { return; }
+    g_profiler.begin();
+}
+
+void profiler_begin_phase(str name) {
+    if (!profiler_enabled()) { return; }
+    g_profiler.begin_phase(name);
+}
+
+void profiler_end_phase(str name) {
+    if (!profiler_enabled()) { return; }
+    g_profiler.end_phase(name);
+}
+
+void profiler_skip_phase(str name) {
+    if (!profiler_enabled()) { return; }
+    g_profiler.skip_phase(name);
+}
+
+void profiler_record_phase(str name, f64 elapsed_ms, i64 mem_before_kb, i64 mem_after_kb, bool skipped) {
+    if (!profiler_enabled()) { return; }
+    g_profiler.record_phase(name, elapsed_ms, mem_before_kb, mem_after_kb, skipped);
+}
+
+void profiler_print_report() {
+    if (!profiler_enabled()) { return; }
+    g_profiler.print_report();
+}

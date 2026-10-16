@@ -1,0 +1,135 @@
+// libs/agc/src/frontend/monomorph.ag — Monomorphization request collection and symbol mangling.
+import std.intern;
+import std.mem.vec;
+import std.string;
+import frontend.ast;
+import frontend.types;
+
+enum MonomorphKind {
+    Function;
+    Struct;
+    ImplMethod;
+}
+
+struct MonomorphRequest {
+    MonomorphKind kind;
+    u32 template_name_id;
+    u32 type_args_start;
+    u16 type_args_count;
+    Span call_span;
+    u32 mangled_name_id;
+}
+
+struct MonomorphCollector {
+    Interner names;
+    Vec<u32> type_arg_ids;
+    Vec<MonomorphRequest> requests;
+    u32 max_generations;
+}
+
+String sanitize_name(str s) {
+    String out = String.new();
+    i64 len = strlen(s);
+    i64 i = 0;
+    bool last_underscore = false;
+    while (i < len) {
+        char ch = s[i];
+        bool is_alnum = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9');
+        if (is_alnum) {
+            out.push(ch);
+            last_underscore = false;
+        } else if (ch == '*') {
+            out.push_str("ptr_");
+            last_underscore = true;
+        } else if (ch == '&') {
+            out.push_str("ref_");
+            last_underscore = true;
+        } else if (!last_underscore) {
+            out.push('_');
+            last_underscore = true;
+        }
+        i += 1;
+    }
+    if (out.len() == 0) {
+        out.push('_');
+    }
+    return move out;
+}
+
+String mangle_instance_name(str template_name, TypeTable* types, Vec<u32>* type_arg_ids, u32 start, u16 count) {
+    String mangled = String.from_str(template_name);
+    mangled.push_str("__");
+    i64 i = 0;
+    while (i < (i64)count) {
+        u32 tid = type_arg_ids.get((i64)start + i);
+        str ty_name = types.type_name(tid);
+        String sanitized = sanitize_name(ty_name);
+        mangled.push_str(sanitized.to_str());
+        sanitized.drop();
+        if (i + 1 < (i64)count) {
+            mangled.push('_');
+        }
+        i += 1;
+    }
+    return move mangled;
+}
+
+impl MonomorphCollector {
+    MonomorphCollector new() {
+        MonomorphCollector collector;
+        collector.names = Interner.new();
+        collector.type_arg_ids = Vec<u32>.new();
+        collector.requests = Vec<MonomorphRequest>.new();
+        collector.max_generations = 256;
+        return move collector;
+    }
+
+    i64 find_existing(MonomorphCollector* self, u32 mangled_id) {
+        i64 i = 0;
+        while (i < self.requests.len()) {
+            if (self.requests.get_ptr(i).mangled_name_id == mangled_id) {
+                return i;
+            }
+            i += 1;
+        }
+        return -1;
+    }
+
+    u32 request_instance(MonomorphCollector* self, MonomorphKind kind, str template_name,
+                         Vec<u32>* arg_ids, Span call_span, TypeTable* types) {
+        u32 start = (u32)self.type_arg_ids.len();
+        u16 count = (u16)arg_ids.len();
+        i64 i = 0;
+        while (i < arg_ids.len()) {
+            self.type_arg_ids.push(arg_ids.get(i));
+            i += 1;
+        }
+        String mangled = mangle_instance_name(template_name, types, &self.type_arg_ids, start, count);
+        u32 mangled_id = self.names.intern(mangled.to_str());
+        mangled.drop();
+
+        i64 existing = self.find_existing(mangled_id);
+        if (existing >= 0) {
+            return mangled_id;
+        }
+
+        MonomorphRequest req;
+        req.kind = kind;
+        req.template_name_id = self.names.intern(template_name);
+        req.type_args_start = start;
+        req.type_args_count = count;
+        req.call_span = call_span;
+        req.mangled_name_id = mangled_id;
+        self.requests.push(move req);
+
+        return mangled_id;
+    }
+
+    i64 count(MonomorphCollector* self) {
+        return self.requests.len();
+    }
+
+    MonomorphRequest* get(MonomorphCollector* self, i64 index) {
+        return self.requests.get_ptr(index);
+    }
+}

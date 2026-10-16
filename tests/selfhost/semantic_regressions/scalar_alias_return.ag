@@ -1,0 +1,6 @@
+struct Record { i64 value; }
+
+i64 read_value(Record* source) {
+    Record* alias = &source[0];
+    return alias.value;
+}

@@ -1,0 +1,13 @@
+// Transitive visibility (positive): a one-level source import chain works.
+// chain_b imports chain_c; this file imports chain_b and reaches the leaf
+// value through chain_b_val. (FE-009)
+// compile_flags: -I tests/modules
+import chain_b;
+import std.sys.entry;
+
+i32 main() {
+    if (chain_b_val() != 8) {
+        return 1;
+    }
+    return 0;
+}

@@ -1,0 +1,57 @@
+// AGSM commands are part of the compiler driver, not a separate executable.
+import std.io;
+import std.mem.vec;
+import std.string;
+
+void print_agsm_help() {
+    STDOUT.write_str("Silver foreign sourcemap module tool\n\n");
+    STDOUT.write_str("Usage: agc agsm <COMMAND>\n\n");
+    STDOUT.write_str("Commands:\n");
+    STDOUT.write_str("  build  Build a foreign module (not supported by this compiler)\n");
+    STDOUT.write_str("  help   Print this message\n");
+}
+
+void print_agsm_build_help() {
+    STDOUT.write_str("Usage: agc agsm build [OPTIONS] [SOURCEMAP]\n");
+    STDOUT.write_str("Foreign sourcemap module generation is not supported by this compiler.\n\n");
+    STDOUT.write_str("Arguments:\n");
+    STDOUT.write_str("  [SOURCEMAP]  [default: sourcemap.toml]\n\n");
+    STDOUT.write_str("Options:\n");
+    STDOUT.write_str("  -o, --output <OUTPUT>\n");
+    STDOUT.write_str("      --target <TARGET>\n");
+    STDOUT.write_str("  -I, --include-path <DIR>\n");
+    STDOUT.write_str("  -L, --lib-path <DIR>\n");
+    STDOUT.write_str("  -D, --define <NAME[=VALUE]>\n");
+    STDOUT.write_str("  -h, --help                   Print help\n");
+}
+
+i32 run_agsm(Vec<String>* arguments) {
+    if (arguments.len() <= 2) {
+        print_agsm_help();
+        return 0;
+    }
+
+    String* command = arguments.get_ptr(2);
+    if (command.equals("-h") || command.equals("--help") || command.equals("help")) {
+        print_agsm_help();
+        return 0;
+    }
+    if (!command.equals("build")) {
+        STDERR.write_str("agc agsm: error: unrecognized subcommand '");
+        STDERR.write_str(command.to_str());
+        STDERR.write_str("'\n\n");
+        print_agsm_help();
+        return 2;
+    }
+
+    if (arguments.len() > 3) {
+        String* option = arguments.get_ptr(3);
+        if (option.equals("-h") || option.equals("--help") || option.equals("help")) {
+            print_agsm_build_help();
+            return 0;
+        }
+    }
+
+    STDERR.write_str("agc agsm: error: foreign sourcemap module generation is not supported by this compiler; use a prebuilt .agm artifact\n");
+    return 2;
+}

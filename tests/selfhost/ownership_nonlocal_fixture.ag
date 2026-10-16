@@ -1,0 +1,13 @@
+const i64 OWNERSHIP_SHARED = 1;
+
+i64 ownership_helper() {
+    return OWNERSHIP_SHARED;
+}
+
+i64 repeated_nonlocal_uses() {
+    i64 first = ownership_helper();
+    i64 second = ownership_helper();
+    i64 third = OWNERSHIP_SHARED;
+    i64 fourth = OWNERSHIP_SHARED;
+    return first + second + third + fourth;
+}

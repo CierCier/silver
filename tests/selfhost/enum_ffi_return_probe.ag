@@ -1,0 +1,39 @@
+enum Linkage {
+    External0 = 0;
+    Internal8 = 8;
+}
+
+#[link("enum_ffi_probe")]
+extern "C" Linkage silver_test_get_fixed_linkage();
+
+#[link("enum_ffi_probe")]
+extern "C" {
+    #[link_name("silver_test_get_fixed_linkage")]
+    #[volatile]
+    #[inline]
+    Linkage silver_test_get_fixed_linkage_block();
+}
+
+Linkage read_linkage() {
+    Linkage value = silver_test_get_fixed_linkage();
+    return value;
+}
+
+Linkage read_inferred_linkage() {
+    let value = silver_test_get_fixed_linkage();
+    return value;
+}
+
+i32 main() {
+    Linkage block_value = silver_test_get_fixed_linkage_block();
+    if (block_value != Linkage.Internal8) { return 1; }
+    let block_inferred = silver_test_get_fixed_linkage_block();
+    if (block_inferred != Linkage.Internal8) { return 5; }
+    Linkage direct_value = silver_test_get_fixed_linkage();
+    if (direct_value != Linkage.Internal8) { return 2; }
+    Linkage wrapped_value = read_linkage();
+    if (wrapped_value != Linkage.Internal8) { return 3; }
+    Linkage inferred_value = read_inferred_linkage();
+    if (inferred_value != Linkage.Internal8) { return 4; }
+    return 42;
+}

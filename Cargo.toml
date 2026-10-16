@@ -1,12 +1,13 @@
 [workspace]
 resolver = "2"
+# The Rust bootstrap lives entirely under bootstrap/; the repository root is
+# the Silver self-host workspace (silver.toml packages: std, bin/agc, bin/aglsp, libs/agc).
 members = [
-    "bin/agc",
+    "bootstrap/stage0/agc",
+    "bootstrap/stage0/agsm",
+    "bootstrap/stage0/ffi-rust",
     "bootstrap/aglsp",
-    "bin/agsm",
-    "ffi/rust",
 ]
-
 
 [profile.profiling]
 inherits = "release"
@@ -15,4 +16,3 @@ debug = true
 [workspace.lints.clippy]
 disallowed_types = "deny"
 large_enum_variant = "deny"
-

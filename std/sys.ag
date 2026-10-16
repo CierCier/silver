@@ -1,5 +1,5 @@
 // std/sys.ag — Syscall layer: re-exports the std.sys submodules.
-import std.sys.entry;
+import std.sys.entry_api;
 import std.sys.errno;
 import std.sys.linux;
 import std.sys.result;

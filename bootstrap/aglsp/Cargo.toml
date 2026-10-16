@@ -4,7 +4,7 @@ version = "0.2.6"
 edition = "2024"
 
 [dependencies]
-agc = { path = "../../bin/agc" }
+agc = { path = "../stage0/agc" }
 parking_lot = "0.12"
 rustc-hash = "2.1.3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util"] }

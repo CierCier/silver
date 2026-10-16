@@ -1,0 +1,21 @@
+import std.sys.entry;
+
+macro void add_all(i32* total, i32... values) {
+    for value in values {
+        *total = *total + value;
+    }
+}
+
+i32 main() {
+    i32 total = 0;
+    @add_all(&total, 2, 4, 8);
+    if (total != 14) { return 1; }
+
+    i32 runtime_value = 7;
+    @add_all(&total, runtime_value);
+    if (total != 21) { return 2; }
+
+    @add_all(&total);
+    if (total != 21) { return 3; }
+    return 0;
+}

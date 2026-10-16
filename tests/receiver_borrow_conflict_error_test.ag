@@ -1,0 +1,31 @@
+// A mutable method receiver overlaps a live shared borrow of its receiver.
+
+struct Counter {
+    i64 value;
+}
+
+struct ReadOnlyCounter {
+    i64 value;
+}
+
+impl Counter {
+    void bump(&mut Counter self) {
+        self.value = self.value + 1;
+    }
+}
+
+impl ReadOnlyCounter {
+    void bump(&ReadOnlyCounter self) {
+    }
+}
+
+i64 main() {
+    Counter counter;
+    &Counter shared = &counter;
+    counter.bump();
+    {
+        ReadOnlyCounter counter;
+        counter.bump();
+    }
+    return shared.value;
+}

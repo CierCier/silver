@@ -1,88 +1,145 @@
-# Contributing
+# Contributing to Silver
 
-Thank you for taking an interest in Silver.
+Keep changes focused, executable, and easy to review. Read [AGENTS.md](AGENTS.md)
+for the repository workflow and [SYNTAX.md](SYNTAX.md) before writing Silver.
+The [compiler reference](docs/compiler-guide.md) describes pipeline and ownership
+contracts. The [maintainer profile](docs/maintainer-preferences.md) explains the
+preferences behind these conventions.
 
-This project is still evolving quickly, so the most helpful contributions are the ones that are clear, focused, and easy to review.
+## Set up and build
 
-## Before You Start
-
-- Read the current code and nearby tests before making changes.
-- Prefer small, well-scoped pull requests over large mixed changes.
-- If you plan to change language behavior or compiler architecture, open an issue or discussion first when possible.
-
-## Development Expectations
-
-- Follow existing naming, structure, and code style in the surrounding files.
-- Keep new code readable; avoid clever shortcuts that make maintenance harder.
-- Add or update tests when behavior changes.
-
-
-## Silver Style Guide
-
-### Naming
-
-| Element | Convention | Examples |
-|---|---|---|
-| Types (structs, enums) | `PascalCase` | `Vec`, `HashMap`, `BufWriter` |
-| Traits | `PascalCase` | `Drop`, `Display`, `Iterator` |
-| Functions / methods | `snake_case` | `silver_rt_alloc`, `mem_align_up` |
-| Variables | `snake_case` | `tracked_drop_count`, `idx` |
-| Constants | `SCREAMING_SNAKE_CASE` | `MEM_PAGE_SIZE`, `IO_SEEK` |
-| Internal helpers | `__` prefix + `snake_case` | `__fmt_write_fd`, `__optional_abort` |
-
-### Documentation
-
-- Use `///` for public-item doc comments (doc comments), `//` for implementation notes.
-- Every public type, function, and method should carry at least a one-sentence `///` summary.
-- Module-level documentation goes at the top of the file, before `import` statements.
-- See `std/mem/alloc.ag` and `std/rt/types.ag` for well-documented examples.
-
-### Error Handling
-
-- Use `Optional<T>` / `Result<T,E>` from `std.optional` for recoverable errors.
-- Use `SysResult` from `std.sys.result` for decoded syscall outcomes.
-- Unrecoverable errors (OOM, bounds violations) call `abort()` — do not return null and hope.
-- New allocation code should use the typed generic interface (`alloc<T>()`) which aborts on OOM.
-
-### Testing
-
-- Import `std.test` for shared assertion helpers (`assert_true`, `assert_eq_i64`, `done()`).
-- Return the result of `done()` from `main()` so the test harness sees the failure count.
-- Do not write ad-hoc `printf`-based assertion helpers; use the standard module.
-- Tests that intentionally exit nonzero must be registered in `tests/run_tests.py` `EXPECTED_EXIT`.
-
-### Standard Library
-
-- Prefer `@println("fmt {}", val)` (compiler builtin) over `println(str)` (plain function).
-- Prefer pointer receivers (`T* self`) for methods that inspect or mutate state.
-- Structs that own resources must explicitly call `field.drop()` in their own `Drop` implementation — field destruction is NOT automatic.
-- Follow the import structure: import only what you use; do not rely on transitive imports.
-## Recommended Workflow
-
-Build the compiler:
+Run commands from the repo root. Enter the development environment with
+`nix develop`, or use the existing `.envrc` with direnv. Without Nix, install
+a Rust toolchain supporting edition 2024, LLVM 22 development libraries, Python 3,
+and a system compiler/linker. Follow [the README](README.md) for installation.
 
 ```bash
 cargo build -p agc
+cargo run -p agc -- check examples/control_flow.ag
+cargo run -p agc -- run examples/control_flow.ag
 ```
 
-Run tests:
+Cargo builds Rust stage0 from `bootstrap/stage0/agc`, normally into `target/`.
+The Silver workspace is the root `silver.toml`; its driver and reusable library
+live in `bin/agc` and `libs/agc`. Build its driver through the package command:
 
 ```bash
-cargo test -p agc
+cargo run -p agc -- build silver.toml --bin agc -o /tmp/agc-stage1
 ```
 
-## Pull Requests
+An executable produced by stage0 is not evidence that stage1 can compile itself.
+Verify stage1 command behavior with stage0 unavailable before making a
+self-hosting claim. See [the self-host gates](tests/selfhost/README.md).
 
-When opening a pull request, please:
-- explain the problem being solved
-- describe the approach you took
-- mention any known limitations or follow-up work
-- include the verification steps you ran
+## Make one coherent change
 
-If your change affects the language, parser, type checker, code generation, module system, or standard library behavior, include at least one concrete example or test case.
+1. Inspect the branch, working tree, relevant implementation, and nearby tests.
+   Preserve unrelated work, including staged changes.
+2. Define the behavior and affected callers. Discuss new syntax or public API
+   choices with examples before committing to a design.
+3. Implement the simplest complete change. Reuse existing stdlib APIs and traits,
+   keep files cohesive, and avoid compatibility code without a supported caller.
+4. Test the behavior, update its docs and examples, and inspect the final diff.
+5. Commit that change before starting an unrelated one when committing is part
+   of the task. Publish a branch and PR when requested.
 
-## Communication
+Compiler phases have distinct responsibilities. Keep parsing/lowering separate
+from type checking, ownership, monomorphization, and codegen. Put shared compiler
+logic in the library and driver orchestration in the binary. Keep diagnostic
+messages in the relevant stage's catalog.
 
-Please keep discussions respectful, direct, and constructive.
+## Silver conventions
 
-We may not merge every contribution, but thoughtful work and clear reasoning are always appreciated.
+| Element | Convention | Examples |
+| --- | --- | --- |
+| Types and traits | `PascalCase` | `Vec`, `HashMap`, `Drop`, `Display` |
+| Functions, methods, variables | `snake_case` | `mem_align_up`, `tracked_drop_count` |
+| Constants | `SCREAMING_SNAKE_CASE` | `MEM_PAGE_SIZE` |
+| Existing internal helpers | `__` prefix and `snake_case` | `__fmt_write_fd` |
+
+Use current Silver syntax. Items are public by default; `private` restricts
+visibility. Constructors return values, and `move` expresses explicit ownership
+transfer. Prefer `&T` or `&mut T` receivers for caller-owned state; use `T*` when
+the raw memory or FFI contract requires it. Import the modules you use rather
+than depending accidentally on a broad transitive import.
+
+Prefer compiler formatting macros such as `@println("value {}", value)`.
+Use typed allocation APIs such as `alloc<T>()`. For recoverable failures, follow
+nearby `Optional<T>` and `Result<T, Error>` APIs and return useful error data.
+Unrecoverable allocator or bounds failures should fail explicitly.
+
+The compiler drops owned struct fields after the outer destructor. Do not call
+`field.drop()` again from the destructor. Clean up raw-pointer pointees, file
+descriptors, and other resources according to their ownership contract. Custom
+enum destructors manage their own payloads. See `tests/cascade_drop_test.ag`,
+`tests/enum_cascade_test.ag`, and `tests/memory_pentest.ag`.
+
+For Rust changes, follow the crate's edition and nearby conventions. Respect
+the workspace lints and `clippy.toml`, including the existing compiler map/set
+choices. Keep target layouts and ABI behavior grounded in the target interfaces.
+
+## Verify behavior
+
+```bash
+# Compiler tests
+cargo test -p agc
+
+# Focused integration tests while developing
+python3 tests/run_tests.py --no-tui memory_pentest cascade_drop_test
+
+# Complete integration suite before committing behavior changes
+python3 tests/run_tests.py --no-tui
+
+# Stage1 frontend and native command gates when affected
+bash tests/selfhost/run_stage.sh --include-std
+bash tests/selfhost/run_native.sh --no-tui --jobs 4
+```
+
+Rebuild stage0 after Rust changes before invoking the self-host scripts, which
+may reuse an existing binary. Run the ownership suite for ownership/pass changes
+and the complete integration suite for runtime changes. Report which compiler,
+target, flags, and execution path were used. Record failures, skips, and checks
+that were not run.
+
+Tests must observe behavior and failure modes, not merely find source text or
+confirm that a function exists. Check output and cleanup where relevant; exit
+zero alone can miss a broken program. For standalone `tests/*.ag` fixtures, use
+`std.test` helpers and return `done()` from `main()`. Fixtures are discovered
+automatically. Declare intentional nonzero exits with a `// expected_exit: N`
+comment, as supported by `get_expected_exit` in `tests/run_tests.py`. Expected
+compile failures and platform skips belong in the corresponding harness sets
+with a reason. See [the test guide](tests/README.md).
+
+Use existing `#[test]`/`agc test` conventions for package tests where appropriate;
+they supplement the compiler regression harness. Leak checking is opt-in per
+fixture through the integration runner. Do not enable it for stage builds.
+
+For performance changes, measure before and after on the same workload and
+configuration. Comparative reports need at least 10 runs and the median, with
+latency percentiles when relevant. State differences in concurrency and workload
+instead of presenting unlike execution models as equivalent.
+
+Documentation-only changes need checked links, accurate commands, and consistent
+contracts. They do not require unrelated compiler or runtime test runs.
+
+## Documentation and review
+
+Use concise `///` comments for public contracts: behavior, ownership, errors, and
+constraints that callers need. Use `//` for a non-obvious reason or edge case.
+Do not narrate code or add long progress reports inside source files. Put durable
+module explanations near their implementation and update examples with behavior.
+
+Keep temporary plans out of Git. Root `todo.md` and `handoff.md` are ignored local
+trackers; do not include their contents or private plan references in commit or
+PR descriptions. Keep permanent documentation limited to useful contracts and
+working instructions.
+
+Commit subjects name the behavior changed. Follow nearby Git history, without
+phase numbering or model coauthor trailers. A PR should explain the problem,
+resulting behavior, verification, and remaining limits. Include a concrete
+trigger/example for compiler or language changes, and measured before/after data
+for performance claims.
+
+Verify requested review findings before fixing them. Recheck the updated head
+after changes. Allow time for external reviewers to finish; report unavailable
+review tools. The maintainer decides when to merge unless they delegate it.

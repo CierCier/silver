@@ -14,3 +14,14 @@ __pycache__/
 result
 result-*
 .direnv/
+
+# MIG-008: stray build/test leftovers at repo root (manual `agc` builds,
+# io_test.ag output). `*.o` / `*.agm` above already cover vendor/llvm outputs.
+/agc
+/agc2
+/test_silver_io_read_line.txt
+
+# Local-only agent notes
+/todo.md
+/handoff.md
+/.agents/

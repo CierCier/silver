@@ -1,0 +1,56 @@
+// expected_exit: 42
+import std.test;
+
+i64 drops = 0;
+i64 dropped_values = 0;
+i64 order = 0;
+
+i64 next_value(i64 value) {
+    order = order * 10 + value;
+    return value;
+}
+
+struct Tracked {
+    i64 value;
+}
+impl Drop for Tracked {
+    void drop(Tracked* self) {
+        drops = drops + 1;
+        dropped_values = dropped_values + self.value;
+    }
+}
+
+struct Bundle {
+    Tracked owned;
+    i64 first;
+    i64 second;
+}
+struct Pair<T> {
+    T left;
+    T right;
+}
+
+i32 main() {
+    Pair<i64> pair = { .right = 29, .left = 13 };
+    assert_eq_i64(42, pair.left + pair.right, "generic fields use designated names");
+    {
+        Tracked original = { .value = 17 };
+        Bundle bundle = {
+            .owned = move original,
+            .first = next_value(7),
+            .second = next_value(3),
+        };
+        assert_eq_i64(73, order, "initializer values evaluate once");
+        assert_eq_i64(17, bundle.owned.value, "owned field retains nonzero value");
+        assert_eq_i64(7, bundle.first, "first designated field");
+        assert_eq_i64(3, bundle.second, "second designated field");
+        assert_eq_i64(0, drops, "initial assignment has no predrop");
+        Tracked replacement = { .value = 25 };
+        bundle.owned = move replacement;
+        assert_eq_i64(1, drops, "overwrite drops initialized field once");
+        assert_eq_i64(17, dropped_values, "overwrite drops original value");
+    }
+    assert_eq_i64(2, drops, "only initialized owned fields drop at scope exit");
+    assert_eq_i64(42, dropped_values, "moves preserve values and avoid duplicate drops");
+    return 42;
+}

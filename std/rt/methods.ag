@@ -46,7 +46,9 @@ enum RT_ERR {
 }
 
 // ---------------------------------------------------------------------------
-// Method opcodes (integer dispatch replaces the Rust Arc<dyn Fn> closures)
+// Method opcodes (integer dispatch replaces the Rust Arc<dyn Fn> closures;
+// LANG-008: Silver has non-capturing fn pointers but no capturing closures,
+// so the closure table still cannot port directly)
 
 const i32 RT_METHOD_OP_TYPE_NAME = 1;   // global "type_name" (arity 0)
 const i32 RT_METHOD_OP_STRING_LEN = 2;  // string.len (arity 0)

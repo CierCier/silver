@@ -1,0 +1,22 @@
+import std.test;
+
+struct Selector {}
+
+impl Selector {
+    i32 choose(Selector* self, i32 value) {
+        return value + 1;
+    }
+
+    bool choose(Selector* self, str value) {
+        return value == "ready";
+    }
+}
+
+i32 main() {
+    Selector selector;
+    i32 number = selector.choose(41);
+    bool text = selector.choose("ready");
+    assert_eq_i64(42, number, "integer overload selects integer return type");
+    assert_true(text, "string overload selects boolean return type");
+    return done();
+}

@@ -74,6 +74,8 @@ i64 find_first<T>(T* data, i64 len, T key) {
     return -1;
 }
 
+if (!@cfg(os.wasi)) {
+
 /// Vectorized search for i64 in 4-element (256-bit AVX2) chunks.
 #[target_feature("avx2")]
 i64 find_i64_v256(i64* data, i64 key, i64 blocks) {
@@ -107,19 +109,27 @@ i64 find_i64_v256(i64* data, i64 key, i64 blocks) {
     ", [blocks, (u8*)data, key], ["rbx", "rdx", "r8", "r9", "xmm0", "xmm1"]);
 }
 
+}
+
+
 /// Find index of first occurrence of `key` in `i64` slice with AVX2 acceleration.
 i64 find_i64(i64* data, i64 len, i64 key) {
     if (data == (i64*)0 || len <= 0) {
         return -1;
     }
     i64 i = 0;
-    if (len >= 4 && @cfg(cpu.avx2)) {
-        i64 blocks = len / 4;
-        i64 r = find_i64_v256(data, key, blocks);
-        if (r >= 0) {
-            return r;
+    // Nested (not `cond && @cfg(cpu.x)`): see mem_find_byte in std/mem/memory.ag.
+    if (!@cfg(os.wasi)) {
+        if (@cfg(cpu.avx2)) {
+            if (len >= 4) {
+                i64 blocks = len / 4;
+                i64 r = find_i64_v256(data, key, blocks);
+                if (r >= 0) {
+                    return r;
+                }
+                i = blocks * 4;
+            }
         }
-        i = blocks * 4;
     }
     while (i < len) {
         if (data[i] == key) {
@@ -178,6 +188,8 @@ i64 max_element<T>(T* data, i64 len) {
     return max_idx;
 }
 
+if (!@cfg(os.wasi)) {
+
 /// Vectorized sum of i64 array using AVX2.
 #[target_feature("avx2")]
 i64 sum_i64_v256(i64* data, i64 blocks) {
@@ -200,6 +212,9 @@ i64 sum_i64_v256(i64* data, i64 blocks) {
     ", [blocks, (u8*)data], ["rbx", "rdx", "r8", "r9", "xmm0", "xmm1"]);
 }
 
+}
+
+
 /// Compute sum of elements in `i64` slice with AVX2 vectorization.
 i64 sum_i64(i64* data, i64 len) {
     if (data == (i64*)0 || len <= 0) {
@@ -207,10 +222,15 @@ i64 sum_i64(i64* data, i64 len) {
     }
     i64 total = 0;
     i64 i = 0;
-    if (len >= 4 && @cfg(cpu.avx2)) {
-        i64 blocks = len / 4;
-        total = sum_i64_v256(data, blocks);
-        i = blocks * 4;
+    // Nested (not `cond && @cfg(cpu.x)`): see mem_find_byte in std/mem/memory.ag.
+    if (!@cfg(os.wasi)) {
+        if (@cfg(cpu.avx2)) {
+            if (len >= 4) {
+                i64 blocks = len / 4;
+                total = sum_i64_v256(data, blocks);
+                i = blocks * 4;
+            }
+        }
     }
     while (i < len) {
         total = total + data[i];
@@ -218,6 +238,8 @@ i64 sum_i64(i64* data, i64 len) {
     }
     return total;
 }
+
+if (!@cfg(os.wasi)) {
 
 /// Vectorized sum of f64 array using AVX.
 #[target_feature("avx")]
@@ -243,6 +265,9 @@ f64 sum_f64_v256(f64* data, i64 blocks) {
     return *ptr;
 }
 
+}
+
+
 /// Compute sum of elements in `f64` slice with AVX vectorization.
 f64 sum_f64(f64* data, i64 len) {
     if (data == (f64*)0 || len <= 0) {
@@ -250,10 +275,15 @@ f64 sum_f64(f64* data, i64 len) {
     }
     f64 total = 0.0;
     i64 i = 0;
-    if (len >= 4 && @cfg(cpu.avx)) {
-        i64 blocks = len / 4;
-        total = sum_f64_v256(data, blocks);
-        i = blocks * 4;
+    // Nested (not `cond && @cfg(cpu.x)`): see mem_find_byte in std/mem/memory.ag.
+    if (!@cfg(os.wasi)) {
+        if (@cfg(cpu.avx)) {
+            if (len >= 4) {
+                i64 blocks = len / 4;
+                total = sum_f64_v256(data, blocks);
+                i = blocks * 4;
+            }
+        }
     }
     while (i < len) {
         total = total + data[i];

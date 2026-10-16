@@ -1,0 +1,7 @@
+// Returning a local reference binding still escapes the borrowed local.
+
+i64* bad_borrow() {
+    i64 local = 5;
+    i64* alias = &local;
+    return alias;
+}

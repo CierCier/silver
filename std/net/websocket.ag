@@ -197,13 +197,7 @@ bool ws_header_has_token(str value, str token) {
 struct WsFrame {
     bool fin;
     i64 opcode;
-    Bytes payload; // owned; caller frees
-}
-
-impl Drop for WsFrame {
-    void drop(*self) {
-        self.payload.drop();
-    }
+    Bytes payload; // cascades when the frame leaves scope
 }
 
 /// A fully reassembled WebSocket message. `kind` is one of WS_MSG_*;
@@ -294,7 +288,6 @@ impl WebSocket {
 
         StreamIo io = http_transport_io(&conn);
         Result<i64, Error> written = req.write(&io);
-        req.headers.drop();
         if (written.is_err()) {
             conn.close();
             key_b64.drop();
@@ -472,7 +465,6 @@ impl WebSocket {
                     // Answer automatically, then deliver the ping to the caller.
                     Result<i64, Error> w = self.write_frame(WS_OP_PONG, true, f.payload.data, f.payload.len);
                     if (w.failed()) {
-                        f.payload.drop();
                         return Err(w.get_error());
                     }
                     WsMessage m;
@@ -498,7 +490,6 @@ impl WebSocket {
                         m.payload.extend(&f.payload.data[2], f.payload.len - 2);
                     }
                     ws_nul_terminate(&m.payload);
-                    f.payload.drop();
                     if (!self.close_sent) {
                         // Echo the close (RFC 6455 §5.5.1), then treat the
                         // connection as closed.
@@ -508,16 +499,13 @@ impl WebSocket {
                     self.closed = true;
                     return Ok(move m);
                 }
-                f.payload.drop();
                 return Err(WS_ERR_PROTOCOL, "unknown control opcode");
             }
             if (f.opcode == WS_OP_CONT) {
                 if (self.frag_opcode < 0) {
-                    f.payload.drop();
                     return Err(WS_ERR_PROTOCOL, "unexpected continuation frame");
                 }
                 self.frag_buf.extend(f.payload.data, f.payload.len);
-                f.payload.drop();
                 if (f.fin) {
                     i64 op = self.frag_opcode;
                     self.frag_opcode = -1;
@@ -528,7 +516,6 @@ impl WebSocket {
                 continue;
             }
             if (self.frag_opcode >= 0) {
-                f.payload.drop();
                 return Err(WS_ERR_PROTOCOL, "new data frame during fragmented message");
             }
             if (f.fin) {

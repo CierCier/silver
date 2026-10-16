@@ -1,0 +1,41 @@
+import std.sys.entry;
+
+macro i32 add(i32 left, i32 right) {
+    return left + right;
+}
+
+macro multiply(left, right) {
+    return left * right;
+}
+
+macro T identity<T>(T value) {
+    return value;
+}
+
+macro i32 double(i32 value) {
+    return value * 2;
+}
+
+macro i32 quadruple(i32 value) {
+    return @double(@double(value));
+}
+
+macro i32 sum(i32... values) {
+    let total = 0;
+    for value in values {
+        total = total + value;
+    }
+    return total;
+}
+
+i32 main() {
+    if (@add(10, 20) != 30) { return 1; }
+    if (@multiply(6, 7) != 42) { return 2; }
+    if (@identity(777) != 777) { return 3; }
+    if (@quadruple(3) != 12) { return 4; }
+    if (@sum(1, 2, 3, 4) != 10) { return 5; }
+    let runtime_value = 7;
+    if (@sum(runtime_value, 5) != 12) { return 6; }
+    if (@sum() != 0) { return 7; }
+    return 0;
+}

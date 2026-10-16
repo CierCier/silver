@@ -7,6 +7,7 @@ import std.hash;
 import std.io.file;
 import std.mem.drop;
 import std.iter;
+import std.string;
 
 // Internal entry state: Swiss Table 16-byte metadata control groups.
 // Control byte values:
@@ -40,6 +41,17 @@ u8 h2_fingerprint(i64 hash) {
 /// Match 16 control bytes against target h2 fingerprint using SSE2.
 /// Returns a 16-bit bitmask of matching bucket offsets.
 i64 probe_group_match(u8* ctrl_ptr, u8 h2) {
+    if (@cfg(os.wasi)) {
+        i64 mask = 0;
+        i64 i = 0;
+        while (i < 16) {
+            if (ctrl_ptr[i] == h2) {
+                mask = mask | ((i64)1 << i);
+            }
+            i = i + 1;
+        }
+        return mask;
+    }
     return asm("
         movq %rax, %r8
         movl %edi, %edx
@@ -57,6 +69,17 @@ i64 probe_group_match(u8* ctrl_ptr, u8 h2) {
 /// Match 16 control bytes against EMPTY (0x80) using SSE2.
 /// Returns a 16-bit bitmask of empty bucket offsets.
 i64 probe_group_empty(u8* ctrl_ptr) {
+    if (@cfg(os.wasi)) {
+        i64 mask = 0;
+        i64 i = 0;
+        while (i < 16) {
+            if (ctrl_ptr[i] == (u8)0x80) {
+                mask = mask | ((i64)1 << i);
+            }
+            i = i + 1;
+        }
+        return mask;
+    }
     return asm("
         movq %rax, %r8
         movl $$0x80808080, %edx
@@ -71,6 +94,17 @@ i64 probe_group_empty(u8* ctrl_ptr) {
 
 /// Match 16 control bytes for any free (EMPTY or DELETED, MSB=1) slot using SSE2.
 i64 probe_group_free(u8* ctrl_ptr) {
+    if (@cfg(os.wasi)) {
+        i64 mask = 0;
+        i64 i = 0;
+        while (i < 16) {
+            if ((ctrl_ptr[i] & (u8)0x80) != (u8)0) {
+                mask = mask | ((i64)1 << i);
+            }
+            i = i + 1;
+        }
+        return mask;
+    }
     return asm("
         movdqu (%rax), %xmm0
         pmovmskb %xmm0, %eax
@@ -80,6 +114,18 @@ i64 probe_group_free(u8* ctrl_ptr) {
 
 /// Bit scan forward (trailing zeros).
 i64 trailing_zeros(i64 mask) {
+    if (@cfg(os.wasi)) {
+        if (mask == 0) {
+            return 64;
+        }
+        i64 n = 0;
+        i64 m = mask;
+        while ((m & 1) == 0) {
+            m = m >> 1;
+            n = n + 1;
+        }
+        return n;
+    }
     return asm("
         bsfq %rax, %rax
     ", [mask], []);
@@ -816,6 +862,59 @@ impl<K, V> HashMapEntryRef<K, V> {
         if (self.idx < 0) { return; }
         f(&self.map.values[self.idx]);
     }
+}
+
+// -- Borrowed-content lookup for String-keyed maps (STD-002) ----------------
+// Concrete `HashMap<String, u32>` free functions: hashing the `str` content
+// directly avoids cloning a lookup key. Concrete (not `<V>` generic) because
+// the Silver backend skips generic free functions instead of monomorphizing
+// them, so a generic version would never be emitted (stage2 needs these
+// symbols; see P0-002). Generalize once FE-001 lands. A method on the generic
+// impl cannot do this either — stage0 checks method bodies per instantiation
+// and `K == str` fails for non-String K (e.g. map_test's `HashMap<i64, _>`).
+i64 map_find_slot_str_u32(HashMap<String, u32>* m, str key) {
+    if (m.capacity == 0 || m.len == 0) {
+        return -1;
+    }
+    i64 h = @hash(key);
+    if (h < 0) { h = -h; }
+    u8 h2 = h2_fingerprint(h);
+    i64 mask = m.capacity - 1;
+    i64 idx = h & mask;
+    i64 step = 0;
+
+    while (true) {
+        i64 matches = probe_group_match(&m.ctrl[idx], h2);
+        while (matches != 0) {
+            i64 bit = trailing_zeros(matches);
+            i64 slot = (idx + bit) & mask;
+            if (m.keys[slot] == key) {
+                return slot;
+            }
+            matches = matches & (matches - 1);
+        }
+        i64 empties = probe_group_empty(&m.ctrl[idx]);
+        if (empties != 0) {
+            return -1;
+        }
+        step = step + 16;
+        idx = (idx + step) & mask;
+    }
+    return -1;
+}
+
+/// Get value for a String key without cloning it.
+Optional<u32> map_get_opt_str_u32(HashMap<String, u32>* m, str key) {
+    i64 idx = map_find_slot_str_u32(m, key);
+    if (idx >= 0) {
+        return Optional<u32>.some(m.values[idx]);
+    }
+    return Optional<u32>.none();
+}
+
+/// Borrowed-content existence check for String-keyed maps.
+bool map_contains_key_str_u32(HashMap<String, u32>* m, str key) {
+    return map_find_slot_str_u32(m, key) >= 0;
 }
 
 // -- Ownership smoke (manual check) ---------------------------------------

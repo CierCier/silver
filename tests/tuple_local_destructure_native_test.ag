@@ -1,0 +1,15 @@
+// compile_flags: --no-cache
+import std.test;
+
+i32 main() {
+    [i32, i32] source = [1, 2];
+    let [first, second] = source;
+    assert_true(first == 1 && second == 2, "typed tuple locals destructure by field");
+
+    let [left, right] = [10, 20];
+    left = left + 1;
+    right = right + 2;
+    assert_true(left == 11 && right == 22, "tuple literal bindings remain mutable");
+
+    return done();
+}

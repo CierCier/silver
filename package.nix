@@ -26,9 +26,10 @@ rustPlatform.buildRustPackage {
         ./Cargo.toml
         ./Cargo.lock
         ./clippy.toml
-        ./bin
         ./bootstrap
-        ./ffi
+        ./bin
+        ./libs
+        ./silver.toml
         ./std
         ./vendor
         ./examples

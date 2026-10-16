@@ -1,0 +1,8 @@
+// The harness emits this module's AGM and object, then removes its source.
+import module_no_source_lib;
+import std.sys.entry;
+
+i32 main() {
+    if (artifact_add(20, 22) != 42) { return 1; }
+    return 0;
+}

@@ -1,0 +1,24 @@
+import std.thread;
+import std.sync;
+
+i32 wake_word = 0;
+i32 waiter_ready = 0;
+
+void wait_for_wake(i64 _arg) {
+    __atomic_store_i32(&waiter_ready, 1, ATOMIC_SEQ_CST);
+    futex_wait(&wake_word, 0);
+}
+
+i32 main() {
+    if (FUTEX_WAKE != 1) { return 1; }
+    TaskRecord* worker = thread_spawn(wait_for_wake, 0);
+    if (worker == (TaskRecord*)0) { return 2; }
+    while (__atomic_load_i32(&waiter_ready, ATOMIC_SEQ_CST) == 0) {
+        thread_yield();
+    }
+    __atomic_store_i32(&wake_word, 1, ATOMIC_SEQ_CST);
+    i64 woken = futex_wake(&wake_word, 1);
+    if (thread_join(worker) < 0) { return 3; }
+    if (woken < 0 || woken > 1) { return 4; }
+    return 0;
+}

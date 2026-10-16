@@ -307,6 +307,19 @@ impl JsonReader {
 
     void skip_whitespace(*self) {
         u8* bytes = (u8*)self.input;
+        if (@cfg(os.wasi)) {
+            // No SSE2 on wasm; plain scalar skip. (The scalar tail below does
+            // the same job, but the SIMD pre-scan is the common path.)
+            while (self.index < self.length) {
+                u8 c = bytes[self.index];
+                if (c == (u8)32 || c == (u8)9 || c == (u8)10 || c == (u8)13) {
+                    self.index = self.index + 1;
+                } else {
+                    break;
+                }
+            }
+            return;
+        }
         while (self.index + 16 <= self.length) {
             i64 non_ws = asm("
                 movdqu (%rax), %xmm0
@@ -696,7 +709,18 @@ impl JsonReader {
         while (self.index < self.length) {
             i64 start = self.index;
             while (self.index + 16 <= self.length) {
-                i64 delim = asm("
+                i64 delim = 0;
+                if (@cfg(os.wasi)) {
+                    i64 j = 0;
+                    while (j < 16) {
+                        u8 c = bytes[self.index + j];
+                        if (c == (u8)34 || c == (u8)92) {
+                            delim = delim | ((i64)1 << j);
+                        }
+                        j = j + 1;
+                    }
+                } else {
+                delim = asm("
                     movdqu (%rax), %xmm0
                     movl $$0x22222222, %edx
                     movd %edx, %xmm1
@@ -712,8 +736,17 @@ impl JsonReader {
                     pmovmskb %xmm1, %eax
                     movzwq %ax, %rax
                 ", [&bytes[self.index]], ["rdx", "xmm0", "xmm1", "xmm2"]);
+                }
                 if (delim != 0) {
-                    i64 bit = asm("bsfq %rax, %rax", [delim], []);
+                    i64 bit = 0;
+                    if (@cfg(os.wasi)) {
+                        while ((delim & 1) == 0) {
+                            delim = delim >> 1;
+                            bit = bit + 1;
+                        }
+                    } else {
+                        bit = asm("bsfq %rax, %rax", [delim], []);
+                    }
                     self.index = self.index + bit;
                     break;
                 }

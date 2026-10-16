@@ -25,10 +25,13 @@ i32 main() {
     test_start("user struct T coexists with generic std impls");
 
     // Generic methods on std's Result<T, E> must resolve normally.
-    Result<i64, Error> r = try_open(null_device(), O_RDONLY, 0);
-    assert_true(!r.is_err(), "try_open /dev/null succeeds");
-    i64 fd = r.value();
-    assert_eq_i64(0, fd % fd, "value() usable");
+    // Device-backed open is Linux/Windows-only (no null device on wasm).
+    if (@cfg(os.linux) || @cfg(os.windows)) {
+        Result<i64, Error> r = try_open(null_device(), O_RDONLY, 0);
+        assert_true(!r.is_err(), "try_open /dev/null succeeds");
+        i64 fd = r.value();
+        assert_eq_i64(0, fd % fd, "value() usable");
+    }
 
     // The local struct T is still the concrete global type here.
     T mine;

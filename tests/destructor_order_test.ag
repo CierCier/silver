@@ -1,0 +1,90 @@
+// expected_exit: 42
+import std.test;
+
+i64 events = 0;
+i64 observed_child = 0;
+bool inspect_child = true;
+
+struct Child {
+    i64 value;
+}
+impl Drop for Child {
+    void drop(Child* self) {
+        events = events * 10 + self.value;
+    }
+}
+
+struct Parent {
+    Child child;
+    Child sibling;
+}
+impl Drop for Parent {
+    void drop(Parent* self) {
+        if (inspect_child) {
+            observed_child = self.child.value;
+            self.child.value = self.child.value + 2;
+        }
+        events = events * 10 + 1;
+    }
+}
+
+Parent make_parent(i64 child, i64 sibling) {
+    Parent parent;
+    Child child_value = { .value = child };
+    Child sibling_value = { .value = sibling };
+    parent.child = move child_value;
+    parent.sibling = move sibling_value;
+    return move parent;
+}
+
+void early_return() {
+    Parent _parent = make_parent(4, 5);
+    return;
+}
+
+void consume_parent(Parent _parent) {
+}
+
+i32 main() {
+    // The parent's destructor can inspect a live child before cascading fields.
+    events = 0;
+    observed_child = 0;
+    inspect_child = true;
+    {
+        Parent _parent = make_parent(2, 3);
+    }
+    assert_eq_i64(2, observed_child, "parent destructor sees its nonzero child");
+    assert_eq_i64(143, events, "parent runs before fields and mutation reaches child drop");
+
+    // Early return uses the same parent-before-fields cleanup order.
+    events = 0;
+    observed_child = 0;
+    early_return();
+    assert_eq_i64(4, observed_child, "early-return destructor sees its child");
+    assert_eq_i64(165, events, "early return runs parent before mutated fields");
+
+    // Whole overwrite drops the old parent while its child is still available.
+    events = 0;
+    observed_child = 0;
+    inspect_child = true;
+    {
+        Parent parent = make_parent(4, 5);
+        parent = make_parent(6, 7);
+        assert_eq_i64(4, observed_child, "overwrite destructor sees old child");
+        assert_eq_i64(165, events, "old parent mutation reaches its child drop");
+    }
+    assert_eq_i64(6, observed_child, "replacement destructor sees its child");
+    assert_eq_i64(165187, events, "whole overwrite drops each parent before its fields");
+
+    // A whole move transfers the parent destructor and both field owners.
+    events = 0;
+    observed_child = 0;
+    {
+        Parent source = make_parent(1, 2);
+        consume_parent(move source);
+    }
+    assert_eq_i64(1, observed_child, "by-value owner sees moved parent's child");
+    assert_eq_i64(132, events, "moved parent mutates its child before declaration-order drops");
+
+    return 42;
+}

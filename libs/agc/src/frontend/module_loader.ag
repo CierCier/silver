@@ -1,0 +1,922 @@
+// Source and binary-module visibility for the stage1 name pass. It resolves
+// the small import subset used by the repository and records declarations with
+// an explicit worklist.
+import std.args;
+import std.error;
+import std.fs;
+import std.io;
+import std.mem.memory;
+import std.mem.vec;
+import std.path;
+import std.result;
+import frontend.artifacts;
+import frontend.ast;
+import frontend.diagnostics;
+import frontend.lexer;
+import frontend.items;
+import frontend.symbols;
+import frontend.cfg;
+import frontend.bindings;
+import frontend.messages;
+
+struct ModuleLoader {
+    SymbolTable* symbols;
+    Vec<String> visited;
+    Vec<String> pending;
+    Vec<String> include_dirs;
+    bool failed;
+}
+
+impl ModuleLoader {
+    ModuleLoader new(SymbolTable* symbols) {
+        ModuleLoader loader;
+        loader.symbols = symbols;
+        loader.visited = Vec<String>.new();
+        loader.pending = Vec<String>.new();
+        loader.include_dirs = Vec<String>.new();
+        loader.failed = false;
+        return loader;
+    }
+}
+
+bool module_text_equals(str left, str right) {
+    return strcmp(left, right) == 0;
+}
+
+bool module_seen(ModuleLoader* loader, str path) {
+    i64 i = 0;
+    while (i < loader.visited.len()) {
+        if (module_text_equals(loader.visited.get_ptr(i).to_str(), path)) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+bool module_pending(ModuleLoader* loader, str path) {
+    i64 i = 0;
+    while (i < loader.pending.len()) {
+        if (module_text_equals(loader.pending.get_ptr(i).to_str(), path)) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+bool module_path_is_artifact(str path) {
+    i64 length = strlen(path);
+    return length >= 4 && path[length - 4] == (u8)46
+        && path[length - 3] == (u8)97
+        && path[length - 2] == (u8)103
+        && path[length - 1] == (u8)109;
+}
+
+void report_unresolved_import(ModuleLoader* loader, DiagnosticBag* diagnostics, str module_name) {
+    loader.failed = true;
+    if (diagnostics == (DiagnosticBag*)0) {
+        return;
+    }
+    String message = unresolved_import(module_name);
+    diagnostics.error(Span.synthetic(), move message);
+}
+
+void report_submodule_artifact_missing(
+    ModuleLoader* loader,
+    DiagnosticBag* diagnostics,
+    str module_name,
+    str config_path,
+    str artifact_path
+) {
+    loader.failed = true;
+    if (diagnostics == (DiagnosticBag*)0) {
+        return;
+    }
+    String message = missing_submodule_artifact(module_name, config_path, artifact_path);
+    diagnostics.error(Span.synthetic(), move message);
+}
+
+void report_module_error(ModuleLoader* loader, DiagnosticBag* diagnostics, str path, str detail) {
+    loader.failed = true;
+    if (diagnostics == (DiagnosticBag*)0) {
+        return;
+    }
+    String message = String.from_str("could not load imported module `");
+    message.push_str(path);
+    message.push_str("`: ");
+    message.push_str(detail);
+    diagnostics.error(Span.synthetic(), move message);
+}
+
+void enqueue_module(ModuleLoader* loader, str path) {
+    if (strlen(path) == 0 || module_seen(loader, path) || module_pending(loader, path)) {
+        return;
+    }
+    String owned = String.from_str(path);
+    loader.pending.push(move owned);
+}
+
+void collect_include_dirs(ModuleLoader* loader) {
+    Vec<String> arguments = args();
+    i64 index = 1;
+    while (index < arguments.len()) {
+        String* argument = arguments.get_ptr(index);
+        if (argument.equals("-I") && index + 1 < arguments.len()) {
+            String directory = String.from_str(arguments.get_ptr(index + 1).to_str());
+            loader.include_dirs.push(move directory);
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    arguments.drop();
+}
+
+String module_root(str input_path) {
+    String root = String.from_str(".");
+    String probe = path_join(root.to_str(), "std/io.ag");
+    if (file_exists(probe.to_str())) {
+        probe.drop();
+        return root;
+    }
+    probe.drop();
+
+    String directory = path_dirname(input_path);
+    while (true) {
+        String candidate = path_join(directory.to_str(), "std/io.ag");
+        if (file_exists(candidate.to_str())) {
+            candidate.drop();
+            root.drop();
+            return directory;
+        }
+        candidate.drop();
+        String parent = path_dirname(directory.to_str());
+        if (parent.equals(directory.to_str())) {
+            parent.drop();
+            break;
+        }
+        directory.drop();
+        directory = move parent;
+    }
+    directory.drop();
+    return root;
+}
+
+bool module_text_starts_with(str text, str prefix) {
+    i64 text_len = strlen(text);
+    i64 prefix_len = strlen(prefix);
+    if (prefix_len > text_len) {
+        return false;
+    }
+    i64 i = 0;
+    while (i < prefix_len) {
+        if (text[i] != prefix[i]) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+String module_candidate(str base_path, str relative_path, str extension) {
+    String candidate = path_join(base_path, relative_path);
+    candidate.push_str(extension);
+    return move candidate;
+}
+
+String resolve_from_base(str base, str relative, String* submodule_config) {
+    String source = module_candidate(base, relative, ".ag");
+    if (file_exists(source.to_str())) {
+        return source;
+    }
+    source.drop();
+    String artifact = module_candidate(base, relative, ".agm");
+    if (file_exists(artifact.to_str())) {
+        return artifact;
+    }
+    artifact.drop();
+    if (submodule_config.len() == 0) {
+        String config = module_candidate(base, relative, ".submodule.toml");
+        if (file_exists(config.to_str())) {
+            *submodule_config = move config;
+        } else {
+            config.drop();
+        }
+    }
+    return String.new();
+}
+
+String resolve_module_path_with_config(
+    str owner_path,
+    str root_path,
+    str module_name,
+    Vec<String>* include_dirs,
+    String* submodule_config
+) {
+    String module_text = String.from_str(module_name);
+    String relative = module_text.replace(".", "/");
+    module_text.drop();
+    String config = String.new();
+    String base = String.from_str(root_path);
+    bool is_std = module_text_equals(module_name, "std") || module_text_starts_with(module_name, "std.");
+    if (!is_std) {
+        base.drop();
+        base = path_dirname(owner_path);
+    }
+
+    String resolved = resolve_from_base(base.to_str(), relative.to_str(), &config);
+    base.drop();
+    if (resolved.len() > 0) {
+        config.drop();
+        relative.drop();
+        return resolved;
+    }
+    resolved.drop();
+
+    String local_base = path_dirname(owner_path);
+    resolved = resolve_from_base(local_base.to_str(), relative.to_str(), &config);
+    local_base.drop();
+    if (resolved.len() > 0) {
+        config.drop();
+        relative.drop();
+        return resolved;
+    }
+    resolved.drop();
+
+    resolved = resolve_from_base(root_path, relative.to_str(), &config);
+    if (resolved.len() > 0) {
+        config.drop();
+        relative.drop();
+        return resolved;
+    }
+    resolved.drop();
+
+    i64 include_index = 0;
+    while (include_index < include_dirs.len()) {
+        String include_base = String.from_str(include_dirs.get_ptr(include_index).to_str());
+        resolved = resolve_from_base(include_base.to_str(), relative.to_str(), &config);
+        include_base.drop();
+        if (resolved.len() > 0) {
+            config.drop();
+            relative.drop();
+            return resolved;
+        }
+        resolved.drop();
+        include_index += 1;
+    }
+    *submodule_config = move config;
+    relative.drop();
+    return String.new();
+}
+
+String resolve_module_path(str owner_path, str root_path, str module_name, Vec<String>* include_dirs) {
+    String config = String.new();
+    String resolved = resolve_module_path_with_config(
+        owner_path, root_path, module_name, include_dirs, &config
+    );
+    config.drop();
+    return resolved;
+}
+
+void report_missing_import(
+    ModuleLoader* loader,
+    DiagnosticBag* diagnostics,
+    str module_name,
+    String* config
+) {
+    if (config.len() == 0) {
+        report_unresolved_import(loader, diagnostics, module_name);
+        return;
+    }
+    String artifact = config.replace(".submodule.toml", ".agm");
+    report_submodule_artifact_missing(
+        loader, diagnostics, module_name, config.to_str(), artifact.to_str()
+    );
+    artifact.drop();
+}
+
+SymbolKind artifact_symbol_kind(ArtifactExportKind kind) {
+    return match kind {
+        ArtifactExportKind.Function : SymbolKind.Function,
+        ArtifactExportKind.Struct : SymbolKind.Struct,
+        ArtifactExportKind.Enum : SymbolKind.Enum,
+        ArtifactExportKind.Trait : SymbolKind.Trait,
+        ArtifactExportKind.Constant : SymbolKind.Global,
+        ArtifactExportKind.Global : SymbolKind.Global,
+        ArtifactExportKind.TypeAlias : SymbolKind.TypeAlias,
+    };
+}
+
+void module_register_artifact_method_params(TypeTable* types, ArtifactExport* export) {
+    str name_str = export.name.to_str();
+    i64 name_len = strlen(name_str);
+    i64 sep = -1;
+    i64 i = 0;
+    while (i + 1 < name_len) {
+        if (name_str[i] == (u8)':' && name_str[i + 1] == (u8)':') {
+            sep = i;
+            break;
+        }
+        i += 1;
+    }
+    if (sep < 0) { return; }
+
+    String owner = String.new();
+    i = 0;
+    while (i < sep) {
+        if (name_str[i] == (u8)'<') { break; }
+        owner.push(name_str[i]);
+        i += 1;
+    }
+    String method = String.new();
+    i = sep + 2;
+    while (i < name_len) {
+        method.push(name_str[i]);
+        i += 1;
+    }
+
+    str sig = export.signature.to_str();
+    i64 sig_len = strlen(sig);
+    if (sig_len < 4 || sig[0] != (u8)'f' || sig[1] != (u8)'n' || sig[2] != (u8)'(') {
+        owner.drop();
+        method.drop();
+        return;
+    }
+
+    i64 p_depth = 1;
+    i64 close_paren = -1;
+    i = 3;
+    while (i < sig_len) {
+        if (sig[i] == (u8)'(') {
+            p_depth += 1;
+        } else if (sig[i] == (u8)')') {
+            p_depth -= 1;
+            if (p_depth == 0) {
+                close_paren = i;
+                break;
+            }
+        }
+        i += 1;
+    }
+    if (close_paren < 0) {
+        owner.drop();
+        method.drop();
+        return;
+    }
+
+    Vec<bool> is_vals = Vec<bool>.new();
+    Vec<u32> param_types = Vec<u32>.new();
+    i64 param_start = 3;
+    i64 angle_depth = 0;
+    i64 paren_depth = 0;
+    i = 3;
+    while (i <= close_paren) {
+        bool at_end = i == close_paren;
+        if (!at_end) {
+            if (sig[i] == (u8)'<') { angle_depth += 1; }
+            else if (sig[i] == (u8)'>' && angle_depth > 0) { angle_depth -= 1; }
+            else if (sig[i] == (u8)'(') { paren_depth += 1; }
+            else if (sig[i] == (u8)')' && paren_depth > 0) { paren_depth -= 1; }
+        }
+        if (at_end || (sig[i] == (u8)',' && angle_depth == 0 && paren_depth == 0)) {
+            i64 ps = param_start;
+            while (ps < i && (sig[ps] == (u8)' ' || sig[ps] == (u8)'\t')) { ps += 1; }
+            i64 pe = i;
+            while (pe > ps && (sig[pe - 1] == (u8)' ' || sig[pe - 1] == (u8)'\t')) { pe -= 1; }
+            if (pe > ps) {
+                bool is_view = false;
+                if (sig[ps] == (u8)'&' || sig[ps] == (u8)'*') {
+                    is_view = true;
+                } else if (ps + 5 <= pe && sig[ps] == (u8)'c' && sig[ps + 1] == (u8)'o'
+                           && sig[ps + 2] == (u8)'n' && sig[ps + 3] == (u8)'s' && sig[ps + 4] == (u8)'t') {
+                    i64 k = ps + 5;
+                    while (k < pe) {
+                        if (sig[k] == (u8)'*') { is_view = true; break; }
+                        k += 1;
+                    }
+                }
+                String p_text = String.new();
+                i64 pi = ps;
+                while (pi < pe) { p_text.push(sig[pi]); pi += 1; }
+                u32 param_type = types.parse_type_name(p_text.to_str());
+                p_text.drop();
+                is_vals.push(!is_view);
+                param_types.push(param_type);
+            }
+            param_start = i + 1;
+        }
+        i += 1;
+    }
+    i64 param_count = is_vals.len();
+    i64 idx = 0;
+    while (idx < param_count) {
+        types.register_method_param(owner.to_str(), method.to_str(),
+                                    param_count, idx, param_types.get(idx),
+                                    is_vals.get(idx));
+        idx += 1;
+    }
+    is_vals.drop();
+    param_types.drop();
+
+    owner.drop();
+    method.drop();
+}
+
+void load_artifact_module(ModuleLoader* loader, DiagnosticBag* diagnostics, str path) {
+    if (module_seen(loader, path)) {
+        return;
+    }
+    String visited_path = String.from_str(path);
+    loader.visited.push(move visited_path);
+    Artifact artifact = Artifact.new();
+    if (!read_artifact(path, &artifact)) {
+        if (diagnostics != (DiagnosticBag*)0) {
+            String message = String.from_str("invalid module artifact `");
+            message.push_str(path);
+            message.push_str("`");
+            diagnostics.error(Span.synthetic(), move message);
+        }
+        loader.failed = true;
+        artifact_drop(&artifact);
+        return;
+    }
+    i64 index = 0;
+    while (index < artifact.exports.len()) {
+        ArtifactExport* export = artifact.exports.get_ptr(index);
+        if (export.name.len() > 0) {
+            u32 name_id = loader.symbols.names.intern(export.name.to_str());
+            SymbolKind kind = artifact_symbol_kind(export.kind);
+            u32 type_id = 0;
+            if (kind == SymbolKind.Struct || kind == SymbolKind.Enum || kind == SymbolKind.Trait || kind == SymbolKind.TypeAlias) {
+                type_id = loader.symbols.types.get_named(export.name.to_str());
+            }
+            loader.symbols.declare_typed(name_id, kind, Span.synthetic(), (SyntaxNode*)0, type_id);
+            if (export.kind == ArtifactExportKind.Struct) {
+                Vec<u32> fields = Vec<u32>.new();
+                Vec<u32> field_names = Vec<u32>.new();
+                i64 fi = 0;
+                while (fi < export.fields.len()) {
+                    ArtifactField* field = export.fields.get_ptr(fi);
+                    fields.push(type_id_from_text(&loader.symbols.types, field.type_key.to_str()));
+                    field_names.push(loader.symbols.types.names.intern(field.name.to_str()));
+                    fi += 1;
+                }
+                Vec<u32> type_params = Vec<u32>.new();
+                i64 pi = 0;
+                while (pi < export.type_params.len()) {
+                    type_params.push(loader.symbols.types.names.intern(export.type_params.get_ptr(pi).to_str()));
+                    pi += 1;
+                }
+                loader.symbols.types.register_struct_properties(export.name.to_str(), &fields);
+                loader.symbols.types.register_struct_field_names(export.name.to_str(), &field_names);
+                loader.symbols.types.register_struct_type_params(export.name.to_str(), &type_params);
+                if (export.layout_present && export.layout_packed) {
+                    loader.symbols.types.mark_struct_packed(export.name.to_str());
+                }
+                type_params.drop();
+                field_names.drop();
+                fields.drop();
+            } else if (export.kind == ArtifactExportKind.Enum) {
+                Vec<u32> payload_types = Vec<u32>.new();
+                i64 vi = 0;
+                while (vi < export.variants.len()) {
+                    ArtifactVariant* variant = export.variants.get_ptr(vi);
+                    i64 pti = 0;
+                    while (pti < variant.payload_types.len()) {
+                        payload_types.push(type_id_from_text(&loader.symbols.types,
+                                                             variant.payload_types.get_ptr(pti).to_str()));
+                        pti += 1;
+                    }
+                    i64 pfi = 0;
+                    while (pfi < variant.payload_fields.len()) {
+                        ArtifactField* field = variant.payload_fields.get_ptr(pfi);
+                        payload_types.push(type_id_from_text(&loader.symbols.types,
+                                                             field.type_key.to_str()));
+                        pfi += 1;
+                    }
+                    vi += 1;
+                }
+                Vec<u32> type_params = Vec<u32>.new();
+                i64 pi = 0;
+                while (pi < export.type_params.len()) {
+                    type_params.push(loader.symbols.types.names.intern(export.type_params.get_ptr(pi).to_str()));
+                    pi += 1;
+                }
+                loader.symbols.types.register_struct_properties(export.name.to_str(), &payload_types);
+                loader.symbols.types.register_struct_type_params(export.name.to_str(), &type_params);
+                type_params.drop();
+                payload_types.drop();
+            } else if (export.kind == ArtifactExportKind.Function) {
+                if (export.impl_trait_present && strcmp(export.impl_trait.to_str(), "Drop") == 0) {
+                    str fn_name = export.name.to_str();
+                    String owner = String.new();
+                    i64 ci = 0;
+                    while (fn_name[ci] != 0 && fn_name[ci] != (u8)':') {
+                        if (fn_name[ci] == (u8)'<') { break; }
+                        owner.push(fn_name[ci]);
+                        ci += 1;
+                    }
+                    if (owner.len() > 0) {
+                        loader.symbols.types.mark_type_needs_drop(owner.to_str());
+                    }
+                    owner.drop();
+                }
+                module_register_artifact_method_params(&loader.symbols.types, export);
+            }
+        }
+        index += 1;
+    }
+    artifact_drop(&artifact);
+}
+
+SymbolKind source_item_symbol_kind(NodeKind kind) {
+    return match kind {
+        NodeKind.Function : SymbolKind.Function,
+        NodeKind.Struct : SymbolKind.Struct,
+        NodeKind.Enum : SymbolKind.Enum,
+        NodeKind.Trait : SymbolKind.Trait,
+        NodeKind.TypeAlias : SymbolKind.TypeAlias,
+        _ : SymbolKind.Global,
+    };
+}
+
+void module_collect_tokens(SyntaxNode* node, Vec<SyntaxNode*>* tokens) {
+    if (node == (SyntaxNode*)0) { return; }
+    if (node.kind == NodeKind.Token) {
+        tokens.push(node);
+        return;
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        module_collect_tokens(child, tokens);
+        child = child.next_sibling;
+    }
+}
+
+void module_collect_type_params(TypeTable* types, SyntaxNode* name, SyntaxNode* body,
+                                Vec<u32>* generic_params) {
+    SyntaxNode* cursor = name.next_sibling;
+    while (cursor != (SyntaxNode*)0 && cursor != body) {
+        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Less) {
+            cursor = cursor.next_sibling;
+            bool expecting_param = true;
+            i64 angle_depth = 0;
+            while (cursor != (SyntaxNode*)0 && cursor != body) {
+                if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Less) {
+                    angle_depth += 1;
+                } else if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Greater) {
+                    if (angle_depth == 0) { break; }
+                    angle_depth -= 1;
+                } else if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Comma
+                           && angle_depth == 0) {
+                    expecting_param = true;
+                } else if (expecting_param && angle_depth == 0
+                           && cursor.kind == NodeKind.Token
+                           && cursor.token_kind == TokenKind.Identifier) {
+                    generic_params.push(types.names.intern(cursor.text));
+                    expecting_param = false;
+                }
+                cursor = cursor.next_sibling;
+            }
+            break;
+        }
+        cursor = cursor.next_sibling;
+    }
+}
+
+void module_register_source_struct(TypeTable* types, SyntaxNode* item) {
+    SyntaxNode* name = item_identifier(item);
+    if (name == (SyntaxNode*)0) { return; }
+    SyntaxNode* body = item.first_child;
+    while (body != (SyntaxNode*)0 && body.kind != NodeKind.Block) {
+        body = body.next_sibling;
+    }
+    if (body == (SyntaxNode*)0) { return; }
+
+    Vec<u32> generic_params = Vec<u32>.new();
+    module_collect_type_params(types, name, body, &generic_params);
+
+    Vec<SyntaxNode*> tokens = Vec<SyntaxNode*>.new();
+    Vec<u32> fields = Vec<u32>.new();
+    Vec<u32> field_names = Vec<u32>.new();
+    module_collect_tokens(body, &tokens);
+    i64 start = 0;
+    while (start < tokens.len()) {
+        i64 end = start;
+        while (end < tokens.len() && tokens.get(end).token_kind != TokenKind.Semicolon) {
+            end += 1;
+        }
+        i64 name_index = end - 1;
+        while (name_index >= start && tokens.get(name_index).token_kind != TokenKind.Identifier) {
+            name_index -= 1;
+        }
+        if (name_index > start) {
+            String type_text = String.new();
+            i64 i = start;
+            while (i < name_index) {
+                type_text.push_str(tokens.get(i).text);
+                i += 1;
+            }
+            i = name_index + 1;
+            while (i < end) {
+                type_text.push_str(tokens.get(i).text);
+                i += 1;
+            }
+            fields.push(type_id_from_text(types, type_text.to_str()));
+            field_names.push(types.names.intern(tokens.get(name_index).text));
+            type_text.drop();
+        }
+        start = end + 1;
+    }
+    types.register_struct_properties(name.text, &fields);
+    types.register_struct_field_names(name.text, &field_names);
+    types.register_struct_type_params(name.text, &generic_params);
+    if (item_has_attribute(item, "packed")) {
+        types.mark_struct_packed(name.text);
+    }
+    field_names.drop();
+    fields.drop();
+    tokens.drop();
+    generic_params.drop();
+}
+
+void module_register_source_enum(TypeTable* types, SyntaxNode* root, SyntaxNode* item) {
+    SyntaxNode* name = item_identifier(item);
+    if (name == (SyntaxNode*)0) { return; }
+    SyntaxNode* body = item.first_child;
+    while (body != (SyntaxNode*)0 && body.kind != NodeKind.Block) {
+        body = body.next_sibling;
+    }
+    if (body == (SyntaxNode*)0) { return; }
+    Vec<u32> generic_params = Vec<u32>.new();
+    module_collect_type_params(types, name, body, &generic_params);
+    Vec<SyntaxNode*> variants = Vec<SyntaxNode*>.new();
+    Vec<i64> tags = Vec<i64>.new();
+    Vec<i64> arities = Vec<i64>.new();
+    Vec<u32> payload_types = Vec<u32>.new();
+    enum_each_variant(item, &variants, &tags, &arities);
+    i64 vi = 0;
+    while (vi < variants.len()) {
+        i64 pi = 0;
+        while (pi < arities.get(vi)) {
+            String payload_text = String.new();
+            if (enum_payload_type_text(root, name.text, variants.get(vi).text, pi, &payload_text)) {
+                payload_types.push(type_id_from_text(types, payload_text.to_str()));
+            }
+            payload_text.drop();
+            pi += 1;
+        }
+        vi += 1;
+    }
+    types.register_struct_properties(name.text, &payload_types);
+    types.register_struct_type_params(name.text, &generic_params);
+    payload_types.drop();
+    variants.drop();
+    tags.drop();
+    arities.drop();
+    generic_params.drop();
+}
+
+void module_register_source_drop_impl(TypeTable* types, SyntaxNode* item) {
+    bool saw_drop = false;
+    bool saw_for_after_drop = false;
+    SyntaxNode* child = item.first_child;
+    while (child != (SyntaxNode*)0 && child.kind != NodeKind.Block) {
+        if (child.kind == NodeKind.Token && strcmp(child.text, "Drop") == 0) {
+            saw_drop = true;
+        } else if (saw_drop && child.kind == NodeKind.Token
+                   && (child.token_kind == TokenKind.For || strcmp(child.text, "for") == 0)) {
+            saw_for_after_drop = true;
+            break;
+        }
+        child = child.next_sibling;
+    }
+    if (!saw_for_after_drop) { return; }
+    SyntaxNode* target = impl_target_identifier(item);
+    if (target != (SyntaxNode*)0) {
+        types.mark_type_needs_drop(target.text);
+    }
+}
+
+void module_register_source_impl(TypeTable* types, SyntaxNode* item) {
+    SyntaxNode* target = impl_target_identifier(item);
+    if (target == (SyntaxNode*)0) { return; }
+    str owner_name = target.text;
+
+    SyntaxNode* block = item.first_child;
+    while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+        block = block.next_sibling;
+    }
+    if (block == (SyntaxNode*)0) { return; }
+
+    SyntaxNode* member = block.first_child;
+    while (member != (SyntaxNode*)0) {
+        if (member.kind == NodeKind.Token && member.token_kind == TokenKind.Semicolon) {
+            member = member.next_sibling;
+            continue;
+        }
+        SyntaxNode* name = (SyntaxNode*)0;
+        SyntaxNode* params_node = (SyntaxNode*)0;
+        SyntaxNode* body = (SyntaxNode*)0;
+        SyntaxNode* scan = member;
+        while (scan != (SyntaxNode*)0) {
+            if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Semicolon) {
+                break;
+            }
+            if (scan.kind == NodeKind.Block) {
+                body = scan;
+                break;
+            }
+            if (scan.kind == NodeKind.Parenthesized) {
+                params_node = scan;
+                if (scan.next_sibling != (SyntaxNode*)0
+                    && scan.next_sibling.kind == NodeKind.Block) {
+                    body = scan.next_sibling;
+                    break;
+                }
+            }
+            if (scan.kind == NodeKind.Token
+                && scan.token_kind == TokenKind.Identifier) {
+                name = scan;
+            }
+            scan = scan.next_sibling;
+        }
+        if (body != (SyntaxNode*)0 && name != (SyntaxNode*)0 && params_node != (SyntaxNode*)0) {
+            Vec<Binding> params = Vec<Binding>.new();
+            collect_parameter_bindings(params_node, &params);
+            i64 param_count = params.len();
+            i64 pi = 0;
+            while (pi < param_count) {
+                Binding* p = params.get_ptr(pi);
+                bool is_val = p.declared_type.kind != ProjectionTypeKind.Pointer
+                    && p.declared_type.kind != ProjectionTypeKind.Reference;
+                String dtext = binding_parameter_type_text(p);
+                u32 param_type = types.parse_type_name(dtext.to_str());
+                if (!binding_has_function_type(p)) {
+                    if (p.declared_type.kind == ProjectionTypeKind.Pointer) {
+                        param_type = types.get_pointer(param_type, true);
+                    } else if (p.declared_type.kind == ProjectionTypeKind.Reference) {
+                        param_type = types.get_reference(param_type, p.declared_type.is_mutable);
+                    }
+                }
+                dtext.drop();
+                types.register_method_param(owner_name, name.text, param_count, pi, param_type, is_val);
+                pi += 1;
+            }
+            params.drop();
+        }
+        member = body != (SyntaxNode*)0 ? body.next_sibling
+            : (scan != (SyntaxNode*)0 && scan.kind == NodeKind.Token
+               && scan.token_kind == TokenKind.Semicolon ? scan.next_sibling : scan);
+    }
+}
+
+void add_visible_source_item(ModuleLoader* loader, SyntaxNode* item) {
+    SyntaxNode* name = item_identifier(item);
+    if (name == (SyntaxNode*)0) {
+        return;
+    }
+    SymbolKind kind = source_item_symbol_kind(item.kind);
+    u32 type_id = 0;
+    if (kind == SymbolKind.Struct || kind == SymbolKind.Enum
+        || kind == SymbolKind.Trait || kind == SymbolKind.TypeAlias) {
+        type_id = loader.symbols.types.get_named(name.text);
+    }
+    u32 name_id = loader.symbols.names.intern(name.text);
+    loader.symbols.declare_typed(name_id, kind, name.span, (SyntaxNode*)0, type_id);
+}
+
+void load_source_module(ModuleLoader* loader, DiagnosticBag* diagnostics, str path, str root_path, CfgSet* cfg, Vec<String>* include_dirs) {
+    if (module_seen(loader, path)) {
+        return;
+    }
+    String visited_path = String.from_str(path);
+    loader.visited.push(move visited_path);
+    Result<String, Error> loaded = String.from_file(path);
+    if (loaded.is_err()) {
+        report_module_error(loader, diagnostics, path, "read failed");
+        return;
+    }
+    String source = loaded.unwrap();
+    TokenStream stream = TokenStream.new();
+    DiagnosticBag local_diagnostics = DiagnosticBag.new();
+    Vec<SyntaxNode*> active_items = Vec<SyntaxNode*>.new();
+    Vec<CfgVisibleName> extern_names = Vec<CfgVisibleName>.new();
+    lex(move source, &stream, &local_diagnostics);
+    if (!local_diagnostics.is_empty()) {
+        report_module_error(loader, diagnostics, path, "lexer errors");
+        return;
+    }
+    NodePool pool = NodePool.new();
+    SyntaxTree tree;
+    parse(&stream, &local_diagnostics, &pool, &tree);
+    if (!local_diagnostics.is_empty()) {
+        report_module_error(loader, diagnostics, path, "parser errors");
+        pool.destroy();
+        return;
+    }
+    cfg_collect_items(tree.root, cfg, (DiagnosticBag*)0, &active_items);
+    i64 item_index = 0;
+    while (item_index < active_items.len()) {
+        SyntaxNode* item = active_items.get(item_index);
+        if (item.kind != NodeKind.Import && item.kind != NodeKind.Extern) {
+            add_visible_source_item(loader, item);
+            if (item.kind == NodeKind.Struct) {
+                module_register_source_struct(&loader.symbols.types, item);
+            } else if (item.kind == NodeKind.Enum) {
+                module_register_source_enum(&loader.symbols.types, tree.root, item);
+            } else if (item.kind == NodeKind.Impl) {
+                module_register_source_drop_impl(&loader.symbols.types, item);
+                module_register_source_impl(&loader.symbols.types, item);
+            }
+        }
+        cfg_collect_extern_from_item(item, &extern_names);
+        item_index += 1;
+    }
+    active_items.drop();
+    i64 extern_index = 0;
+    while (extern_index < extern_names.len()) {
+        CfgVisibleName* visible = extern_names.get_ptr(extern_index);
+        loader.symbols.add_visible(visible.name, visible.span, (SyntaxNode*)0);
+        extern_index += 1;
+    }
+    extern_names.drop();
+    Vec<CfgImportBinding> bindings = Vec<CfgImportBinding>.new();
+    cfg_collect_import_bindings(tree.root, cfg, &bindings);
+    i64 binding_index = 0;
+    while (binding_index < bindings.len()) {
+        CfgImportBinding* binding = bindings.get_ptr(binding_index);
+        loader.symbols.add_visible(binding.alias, binding.span, (SyntaxNode*)0);
+        binding_index += 1;
+    }
+    bindings.drop();
+    Vec<String> imports = Vec<String>.new();
+    cfg_collect_import_names(tree.root, cfg, &imports);
+    i64 i = 0;
+    while (i < imports.len()) {
+        String* module_name = imports.get_ptr(i);
+        if (module_name.len() > 0) {
+            String config = String.new();
+            String resolved = resolve_module_path_with_config(
+                path, root_path, module_name.to_str(), include_dirs, &config
+            );
+            if (resolved.len() > 0) {
+                enqueue_module(loader, resolved.to_str());
+            } else {
+                report_missing_import(loader, diagnostics, module_name.to_str(), &config);
+            }
+            config.drop();
+            resolved.drop();
+        }
+        i += 1;
+    }
+    imports.drop();
+    pool.destroy();
+}
+
+void load_module(ModuleLoader* loader, DiagnosticBag* diagnostics, str path, str root_path, CfgSet* cfg, Vec<String>* include_dirs) {
+    if (module_path_is_artifact(path)) {
+        load_artifact_module(loader, diagnostics, path);
+    } else {
+        load_source_module(loader, diagnostics, path, root_path, cfg, include_dirs);
+    }
+}
+
+bool load_imported_declarations(SymbolTable* symbols, DiagnosticBag* diagnostics, SyntaxTree* tree, str owner_path, CfgSet* cfg, Vec<String>* include_dirs) {
+    ModuleLoader loader = ModuleLoader.new(symbols);
+    String root = module_root(owner_path);
+    Vec<String> imports = Vec<String>.new();
+    cfg_collect_import_names(tree.root, cfg, &imports);
+    i64 i = 0;
+    while (i < imports.len()) {
+        String* module_name = imports.get_ptr(i);
+        if (module_name.len() > 0) {
+            String config = String.new();
+            String resolved = resolve_module_path_with_config(
+                owner_path, root.to_str(), module_name.to_str(), include_dirs, &config
+            );
+            if (resolved.len() > 0) {
+                enqueue_module(&loader, resolved.to_str());
+            } else {
+                report_missing_import(&loader, diagnostics, module_name.to_str(), &config);
+            }
+            config.drop();
+            resolved.drop();
+        }
+        i += 1;
+    }
+    imports.drop();
+    i64 next = 0;
+    while (next < loader.pending.len()) {
+        String current = String.from_str(loader.pending.get_ptr(next).to_str());
+        load_module(&loader, diagnostics, current.to_str(), root.to_str(), cfg, include_dirs);
+        current.drop();
+        next += 1;
+    }
+    bool ok = !loader.failed;
+    loader.pending.drop();
+    loader.visited.drop();
+    root.drop();
+    return ok;
+}

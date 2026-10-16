@@ -1,0 +1,19 @@
+T first<T, U>(T value, U _ignored) {
+    return value;
+}
+
+T identity<T>(T value) {
+    return value;
+}
+
+i32 main() {
+    i64 value = identity<i64>(
+        first<i64, i64>(identity<i64>(42), identity<i64>(0)));
+    if (value != 42) { return 1; }
+    if (value < 43 && value > 41) {
+        i64 shifted = 12 >> 1;
+        if (shifted != 6) { return 2; }
+        return 0;
+    }
+    return 3;
+}

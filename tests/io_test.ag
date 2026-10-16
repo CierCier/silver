@@ -101,7 +101,7 @@ i32 main() {
 
     // Test: File write_line and read_line
     {
-        str test_path = "/tmp/test_silver_io_read_line.txt";
+        str test_path = "test_silver_io_read_line.txt";
         File out_f = File.open(test_path, "w");
         assert_true(out_f.is_open, "opened test file for writing");
         out_f.write_line("first line");

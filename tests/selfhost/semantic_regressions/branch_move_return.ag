@@ -1,0 +1,11 @@
+import std.string;
+
+void consume_string(String _value) { }
+
+void move_then_return(String incoming, bool duplicate) {
+    if (duplicate) {
+        consume_string(move incoming);
+        return;
+    }
+    consume_string(move incoming);
+}

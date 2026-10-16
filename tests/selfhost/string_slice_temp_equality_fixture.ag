@@ -1,0 +1,15 @@
+import std.string;
+
+String make_text(str value) {
+    return String.from_str(value);
+}
+
+i32 main() {
+    String source = String.from_str("same");
+    Slice<u8> bytes = source.as_slice();
+    if (!(bytes == make_text("same"))) { return 1; }
+    if (!(bytes != make_text("other"))) { return 2; }
+    if (bytes == make_text("other")) { return 3; }
+    if (bytes != make_text("same")) { return 4; }
+    return 0;
+}

@@ -1,0 +1,6 @@
+void g(i64 x) {}
+void g(u64 x) {}
+
+void test_ambiguous_call() {
+    g(1);
+}

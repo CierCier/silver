@@ -13,7 +13,7 @@ import std.sys.raw.fs;
 import std.sys.raw.misc;
 import std.sys.raw.process;
 import std.sys.result;
-import std.sys.entry;
+import std.sys.entry_api;
 import std.sys.os;
 import std.error;
 import std.result;

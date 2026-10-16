@@ -1,0 +1,9 @@
+macro str literal_result() {
+    str local = "static-data";
+    return local;
+}
+
+i32 main() {
+    str result = @literal_result();
+    return result[0] == (u8)'s' ? 0 : 1;
+}

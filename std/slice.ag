@@ -204,6 +204,14 @@ impl<T> IntoIterator for Slice<T> {
     }
 }
 
+impl<T> IntoIterator for SliceIter<T> {
+    type Item = T;
+    type IntoIter = SliceIter<T>;
+    SliceIter<T> into_iter(self) {
+        return self;
+    }
+}
+
 impl<T> SliceIter<T> {
     i64 count(*self) {
         i64 c = 0;

@@ -1,0 +1,12 @@
+import std.json;
+
+i32 main() {
+    i32 value = 7;
+    str encoded = @json(value);
+    if (encoded != "7") { return 1; }
+
+    Result<i32, JsonError> decoded = @from_json(i32, encoded);
+    if (decoded.failed()) { return 2; }
+    if (decoded.unwrap() != 7) { return 3; }
+    return 0;
+}

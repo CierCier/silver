@@ -1,0 +1,55 @@
+f64 u64_to_f64(u64 val) {
+    return val;
+}
+
+u64 f64_to_u64(f64 val) {
+    return val;
+}
+
+f64 accept_f64(f64 val) {
+    return val;
+}
+
+u64 accept_u64(u64 val) {
+    return val;
+}
+
+i32 main() {
+    // 1. Explicit Casts
+    u64 big_u64 = 18446744073709551615;
+    f64 f1 = (f64)big_u64;
+    @assert(f1 > 0.0, "u64 max as f64 must be positive");
+    @assert(f1 > 1000000000000.0, "u64 max as f64 must be large");
+
+    u32 big_u32 = 3000000000;
+    f64 f2 = (f64)big_u32;
+    @assert(f2 > 2999999999.0 && f2 < 3000000001.0, "u32 as f64 must be 3000000000.0");
+
+    f64 f3 = 3000000000.0;
+    u32 u_from_f = (u32)f3;
+    @assert((i64)u_from_f == (i64)3000000000, "f64 to u32 must be 3000000000");
+
+    // 1b. Implicit stores and function arguments preserve conversion signedness.
+    f64 implicit_local = big_u64;
+    @assert(implicit_local > 10000000000000000000.0, "u64 local initialization must use uitofp");
+    f64 assigned;
+    assigned = big_u64;
+    @assert(assigned > 10000000000000000000.0, "u64 assignment must use uitofp");
+    f64 passed_float = accept_f64(big_u64);
+    @assert(passed_float > 10000000000000000000.0, "u64 argument must use uitofp");
+    u64 passed_unsigned = accept_u64(10000000000.0);
+    @assert((i64)passed_unsigned == (i64)10000000000, "float argument to u64 must use fptoui");
+
+    // 2. Binary float ops with unsigned int operand
+    f64 sum = big_u32 + 0.5;
+    @assert(sum > 3000000000.0 && sum < 3000000001.0, "u32 + f64 must use uitofp");
+
+    // 3. Return conversions
+    f64 ret_f = u64_to_f64(big_u64);
+    @assert(ret_f > 1000000000000.0, "return u64 as f64 must use uitofp");
+
+    u64 ret_u = f64_to_u64(10000000000.0);
+    @assert((i64)ret_u == (i64)10000000000, "return f64 as u64 must use fptoui");
+
+    return 0;
+}

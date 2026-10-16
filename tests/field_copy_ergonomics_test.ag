@@ -1,0 +1,286 @@
+// tests/field_copy_ergonomics_test.ag
+// Comprehensive 4-Tier E2E test suite for Field Copy Resolution ergonomics.
+//
+// Verifies direct reading of scalar fields (i64, bool, u32, f64) on non-Copy
+// structs, nested structs, and place projections without artificial clone/copy,
+// and ensures proper move tracking and destructor execution.
+
+import std.test;
+import std.string;
+import std.mem.vec;
+
+// --- Test Structures ---
+
+struct ScalarMetrics {
+    String name;
+    i64 count;
+    bool active;
+    u32 flags;
+    f64 ratio;
+}
+
+struct InnerConfig {
+    i64 retry_count;
+    f64 timeout_sec;
+    bool enabled;
+    u32 port;
+}
+
+struct OuterService {
+    String service_name;
+    InnerConfig config;
+    Vec<i64> status_codes;
+}
+
+struct LeafNode {
+    i64 val;
+    f64 weight;
+}
+
+struct BranchNode {
+    LeafNode leaf;
+    bool active;
+}
+
+struct DeepTree {
+    String tree_id;
+    BranchNode branch;
+}
+
+struct GenericMetrics<T> {
+    String label;
+    T value;
+}
+
+struct GenericMetricsWrapper<T> {
+    String label;
+    GenericMetrics<T> metrics;
+}
+
+i64 g_drop_record_count = 0;
+
+struct DropTrackedRecord {
+    i64 id;
+    bool valid;
+    f64 score;
+    u32 code;
+    String payload;
+}
+
+impl Drop for DropTrackedRecord {
+    void drop(*self) {
+        g_drop_record_count += 1;
+    }
+}
+
+// Tier 1: Happy Paths — direct scalar reading on non-Copy structs
+void test_tier1_direct_scalar_reads() {
+    test_start("tier1: direct scalar reads on non-Copy struct");
+
+    ScalarMetrics m;
+    m.name = String.from_str("worker_pool");
+    m.count = 42;
+    m.active = true;
+    m.flags = 0xA5A5;
+    m.ratio = 3.14159;
+
+    // Read scalar i64 multiple times
+    i64 c1 = m.count;
+    i64 c2 = m.count;
+    i64 c3 = m.count;
+    assert_eq_i64(42, c1, "first i64 read");
+    assert_eq_i64(42, c2, "second i64 read");
+    assert_eq_i64(42, c3, "third i64 read");
+
+    // Read scalar bool multiple times
+    bool b1 = m.active;
+    bool b2 = m.active;
+    assert_true(b1, "first bool read");
+    assert_true(b2, "second bool read");
+
+    // Read scalar u32 multiple times
+    u32 f1 = m.flags;
+    u32 f2 = m.flags;
+    assert_eq_u64((u64)0xA5A5, (u64)f1, "first u32 read");
+    assert_eq_u64((u64)0xA5A5, (u64)f2, "second u32 read");
+
+    // Read scalar f64 multiple times
+    f64 r1 = m.ratio;
+    f64 r2 = m.ratio;
+    assert_true(r1 == r2, "f64 reads are identical");
+    assert_true(r1 > 3.14 && r1 < 3.15, "f64 read value accuracy");
+
+    // Ensure the non-Copy root is still completely intact and usable
+    assert_eq_str("worker_pool", m.name.to_str(), "non-Copy String field untouched");
+    assert_eq_i64(11, m.name.len(), "String.len() works after scalar reads");
+
+    m.name.drop();
+}
+
+// Tier 2: Boundary Cases — Zero, Negative, and Extreme Values
+void test_tier2_boundary_and_extremes() {
+    test_start("tier2: boundary, zero, and negative values");
+
+    ScalarMetrics zero_m;
+    zero_m.name = String.from_str("zeros");
+    zero_m.count = 0;
+    zero_m.active = false;
+    zero_m.flags = 0;
+    zero_m.ratio = 0.0;
+
+    assert_eq_i64(0, zero_m.count, "i64 zero read 1");
+    assert_eq_i64(0, zero_m.count, "i64 zero read 2");
+    assert_false(zero_m.active, "bool false read 1");
+    assert_false(zero_m.active, "bool false read 2");
+    assert_eq_u64(0, (u64)zero_m.flags, "u32 zero read 1");
+    assert_eq_u64(0, (u64)zero_m.flags, "u32 zero read 2");
+    assert_true(zero_m.ratio == 0.0, "f64 zero read");
+
+    zero_m.name.drop();
+
+    ScalarMetrics neg_m;
+    neg_m.name = String.from_str("negatives");
+    neg_m.count = -9223372036854775807;
+    neg_m.active = true;
+    neg_m.flags = 0xFFFFFFFF;
+    neg_m.ratio = -12345.6789;
+
+    assert_eq_i64(-9223372036854775807, neg_m.count, "i64 min read 1");
+    assert_eq_i64(-9223372036854775807, neg_m.count, "i64 min read 2");
+    assert_eq_u64((u64)0xFFFFFFFF, (u64)neg_m.flags, "u32 max read 1");
+    assert_eq_u64((u64)0xFFFFFFFF, (u64)neg_m.flags, "u32 max read 2");
+    assert_true(neg_m.ratio < -12345.0, "f64 negative read");
+
+    neg_m.name.drop();
+}
+
+// Tier 3: Place Projections & Nested Structs
+void test_tier3_nested_place_projections() {
+    test_start("tier3: 2-level and 3-level place projections");
+
+    OuterService svc;
+    svc.service_name = String.from_str("auth_gateway");
+    svc.config.retry_count = 5;
+    svc.config.timeout_sec = 30.5;
+    svc.config.enabled = true;
+    svc.config.port = 8443;
+    svc.status_codes = Vec<i64>.new();
+    svc.status_codes.push(200);
+    svc.status_codes.push(401);
+    svc.status_codes.push(500);
+
+    // 2-level place projections
+    i64 retries1 = svc.config.retry_count;
+    i64 retries2 = svc.config.retry_count;
+    assert_eq_i64(5, retries1, "config.retry_count read 1");
+    assert_eq_i64(5, retries2, "config.retry_count read 2");
+
+    f64 t1 = svc.config.timeout_sec;
+    f64 t2 = svc.config.timeout_sec;
+    assert_true(t1 == t2, "config.timeout_sec equality");
+    assert_true(t1 > 30.0 && t1 < 31.0, "config.timeout_sec value");
+
+    bool en1 = svc.config.enabled;
+    bool en2 = svc.config.enabled;
+    assert_true(en1 && en2, "config.enabled reads");
+
+    u32 p1 = svc.config.port;
+    u32 p2 = svc.config.port;
+    assert_eq_u64(8443, (u64)p1, "config.port read 1");
+    assert_eq_u64(8443, (u64)p2, "config.port read 2");
+
+    // Verify non-Copy Vec<i64> field is still live
+    assert_eq_i64(3, svc.status_codes.len(), "status_codes len preserved");
+    assert_eq_i64(200, svc.status_codes.get(0), "status_codes[0] == 200");
+    assert_eq_i64(500, svc.status_codes.get(2), "status_codes[2] == 500");
+
+    svc.service_name.drop();
+    svc.status_codes.drop();
+
+    // 3-level deep place projections
+    DeepTree tree;
+    tree.tree_id = String.from_str("root_node");
+    tree.branch.active = true;
+    tree.branch.leaf.val = 999;
+    tree.branch.leaf.weight = 0.875;
+
+    i64 leaf_val1 = tree.branch.leaf.val;
+    i64 leaf_val2 = tree.branch.leaf.val;
+    assert_eq_i64(999, leaf_val1, "tree.branch.leaf.val read 1");
+    assert_eq_i64(999, leaf_val2, "tree.branch.leaf.val read 2");
+
+    f64 weight1 = tree.branch.leaf.weight;
+    f64 weight2 = tree.branch.leaf.weight;
+    assert_true(weight1 == weight2, "tree.branch.leaf.weight equality");
+
+    bool active1 = tree.branch.active;
+    bool active2 = tree.branch.active;
+    assert_true(active1 && active2, "tree.branch.active reads");
+
+    tree.tree_id.drop();
+}
+
+// Tier 4: Drop Semantics and Repeated Expression Usage
+void test_tier4_drop_semantics_and_expressions() {
+    test_start("tier4: Drop semantics and inline expressions");
+
+    g_drop_record_count = 0;
+
+    {
+        DropTrackedRecord rec;
+        rec.id = 1001;
+        rec.valid = true;
+        rec.score = 98.5;
+        rec.code = 77;
+        rec.payload = String.from_str("secure_payload");
+
+        // Use scalar fields directly in compound expressions repeatedly
+        i64 sum_check = rec.id + (rec.valid ? 10 : 0) + (i64)rec.code;
+        assert_eq_i64(1088, sum_check, "compound expression using scalar fields");
+
+        f64 computed = rec.score * 2.0;
+        assert_true(computed > 196.0 && computed < 198.0, "computed score");
+
+        // Multiple reads inside a loop
+        i64 loop_acc = 0;
+        i64 i = 0;
+        while (i < 5) {
+            loop_acc += rec.id;
+            i += 1;
+        }
+        assert_eq_i64(5005, loop_acc, "scalar field read in loop 5 times");
+    }
+
+    // Verify DropTrackedRecord destructor was invoked exactly once at scope exit
+    assert_eq_i64(1, g_drop_record_count, "DropTrackedRecord drop destructor executed once");
+}
+
+void test_generic_field_reads() {
+    test_start("generic Copy field projections");
+    GenericMetricsWrapper<i64> wrapper;
+    wrapper.label = String.from_str("wrapper");
+    wrapper.metrics.label = String.from_str("metrics");
+    wrapper.metrics.value = 73;
+    i64 first = wrapper.metrics.value;
+    i64 second = wrapper.metrics.value;
+    assert_eq_i64(73, first, "nested generic field first read");
+    assert_eq_i64(73, second, "nested generic field second read");
+    assert_eq_str("wrapper", wrapper.label.to_str(), "wrapper owner stays live");
+    assert_eq_str("metrics", wrapper.metrics.label.to_str(), "nested owner stays live");
+
+    String label = String.from_str("probe");
+    i64 first_length = label.len;
+    i64 second_length = label.len;
+    assert_eq_i64(5, first_length, "imported String field first read");
+    assert_eq_i64(5, second_length, "imported String field second read");
+    assert_eq_str("probe", label.to_str(), "imported owner stays live");
+}
+
+i32 main() {
+    test_tier1_direct_scalar_reads();
+    test_tier2_boundary_and_extremes();
+    test_tier3_nested_place_projections();
+    test_tier4_drop_semantics_and_expressions();
+    test_generic_field_reads();
+    return done();
+}

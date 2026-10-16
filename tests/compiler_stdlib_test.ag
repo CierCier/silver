@@ -1,0 +1,44 @@
+import std.test;
+import std.algo.sort;
+import std.intern;
+import std.mem;
+import std.string;
+
+struct StableItem {
+    i64 key;
+    i64 ordinal;
+}
+
+i32 compare_stable(StableItem* left, StableItem* right) {
+    if (left.key < right.key) { return -1; }
+    if (left.key > right.key) { return 1; }
+    return 0;
+}
+
+i32 main() {
+    Interner symbols = Interner.new();
+    u32 first = symbols.intern("struct");
+    u32 second = symbols.intern("TokenKind");
+    u32 again = symbols.intern("struct");
+    assert_true(first == again, "interning returns stable IDs");
+    assert_true(first != second, "different names receive different IDs");
+    assert_eq_i64(2, symbols.len(), "interner stores unique names");
+    assert_true(symbols.get(first) == "struct", "interner lookup returns text");
+
+    Vec<StableItem> values = Vec<StableItem>.new();
+    StableItem first_item = { .key = 1, .ordinal = 10 };
+    StableItem second_item = { .key = 0, .ordinal = 20 };
+    StableItem third_item = { .key = 1, .ordinal = 30 };
+    StableItem fourth_item = { .key = 0, .ordinal = 40 };
+    values.push(move first_item);
+    values.push(move second_item);
+    values.push(move third_item);
+    values.push(move fourth_item);
+    stable_sort_by(&values, compare_stable);
+    assert_eq_i64(20, values[0].ordinal, "stable sort keeps first equal item first");
+    assert_eq_i64(40, values[1].ordinal, "stable sort keeps second equal item second");
+    assert_eq_i64(10, values[2].ordinal, "stable sort keeps later equal item order");
+    assert_eq_i64(30, values[3].ordinal, "stable sort keeps final equal item order");
+    values.drop();
+    return 0;
+}

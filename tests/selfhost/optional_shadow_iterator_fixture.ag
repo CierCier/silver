@@ -1,0 +1,15 @@
+import std.mem.vec;
+
+struct Optional {
+    bool present;
+    i64 thing;
+}
+
+i32 main() {
+    Vec<i32> values = Vec<i32>.new();
+    i32 sum = 0;
+    for value in values {
+        sum = sum + value;
+    }
+    return sum;
+}

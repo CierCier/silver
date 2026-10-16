@@ -1,0 +1,11 @@
+import alias_source { alias_source_target as imported_alias };
+
+i32 alias_source_target() {
+    return 5;
+}
+
+i32 main() {
+    if (alias_source_target() != 5) { return 1; }
+    if (imported_alias() != 23) { return 2; }
+    return 0;
+}

@@ -11,6 +11,12 @@ struct PaddedPair {
     u32 value;
 }
 
+#[packed]
+struct PackedGeneric<T> {
+    u8 tag;
+    T value;
+}
+
 PackedPair make_packed(u8 tag, u32 value) {
     PackedPair p;
     p.tag = tag;
@@ -24,4 +30,8 @@ u32 read_packed(PackedPair p) {
 
 u8 tag_packed(PackedPair p) {
     return p.tag;
+}
+
+u32 read_packed_generic(PackedGeneric<u32> p) {
+    return p.value;
 }

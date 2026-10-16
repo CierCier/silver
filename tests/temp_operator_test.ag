@@ -1,6 +1,22 @@
 import std.string;
 import std.test;
 
+struct BorrowedOrder {
+    i64 value;
+}
+
+impl BorrowedOrder {
+    bool __lt(&self, &BorrowedOrder other) {
+        return self.value < other.value;
+    }
+}
+
+BorrowedOrder make_borrowed_order(i64 value) {
+    BorrowedOrder result;
+    result.value = value;
+    return result;
+}
+
 // The struct __add/__eq dispatch used to evaluate the left operand twice:
 // once to check its LLVM type, then again inside the operator-overload
 // call. A side-effecting lhs (a function call returning a String) ran its
@@ -22,6 +38,9 @@ i32 main() {
     String* p = (String*)0;
     bool null_eq = p == (String*)0;
     assert_true(null_eq, "pointer comparison stays address-based");
+
+    BorrowedOrder low = make_borrowed_order(1);
+    assert_true(low < make_borrowed_order(2), "operator borrows a temporary argument");
 
     // Plain struct arithmetic (i64) unaffected.
     i64 a = 5;

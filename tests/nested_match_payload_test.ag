@@ -1,0 +1,18 @@
+import std.test;
+
+enum NestedAddr { V4(i32); V6(i32); }
+enum AddressResult { Ok(NestedAddr); Err(i32); }
+
+i32 read_port(AddressResult result) {
+    return match result {
+        Ok(addr) : match addr { V4(port) : port, V6(port) : port },
+        Err(code) : code
+    };
+}
+
+i32 main() {
+    assert_eq_i32(42, read_port(AddressResult.Ok(NestedAddr.V4(42))), "nested V4 payload");
+    assert_eq_i32(443, read_port(AddressResult.Ok(NestedAddr.V6(443))), "nested V6 payload");
+    assert_eq_i32(-1, read_port(AddressResult.Err(-1)), "outer error payload");
+    return done();
+}

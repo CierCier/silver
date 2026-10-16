@@ -1,0 +1,9 @@
+const i32 limit = 1;
+
+i32 main() {
+    {
+        i32 limit = 3;
+        limit = 4;
+    }
+    return 0;
+}

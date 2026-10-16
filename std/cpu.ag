@@ -21,6 +21,21 @@ bool g_has_avx;
 bool g_has_avx2;
 bool g_has_avx512f;
 
+if (@cfg(os.wasi)) {
+
+// WebAssembly: no cpuid, no x86 registers, no pause instruction. The probe
+// globals stay zero-initialized (all features reported absent), which is
+// exactly what portable code paths want. `@cfg(cpu.*)` folds to a read of
+// these globals and therefore folds to false everywhere on wasm.
+
+void __silver_cpu_init() {
+}
+
+void cpu_relax() {
+}
+
+} else {
+
 /// Run cpuid(leaf, subleaf) and store eax/ebx/ecx/edx at buf[0..3]
 /// (64-bit slots, low 32 bits valid). Returns eax (unused).
 i64 cpuid_buf(i64 leaf, i64 subleaf, i64 buf) {
@@ -82,7 +97,15 @@ void __silver_cpu_init() {
     g_has_avx512f = cpuid_leaf7_ebx(16) && avx_state_ok(0xe6);
 }
 
-/// Explicit runtime probes (same storage as the @cfg folds).
+/// Emit a CPU pause instruction (spin-loop hint for SMT processors).
+void cpu_relax() {
+    asm("pause", [], []);
+}
+
+}
+
+/// Explicit runtime probes (same storage as the @cfg folds). Portable: the
+/// globals exist on every target and stay false where no probe runs (wasm).
 bool has_sse41() { return g_has_sse41; }
 bool has_sse42() { return g_has_sse42; }
 bool has_popcnt() { return g_has_popcnt; }
@@ -90,8 +113,3 @@ bool has_fma() { return g_has_fma; }
 bool has_avx() { return g_has_avx; }
 bool has_avx2() { return g_has_avx2; }
 bool has_avx512f() { return g_has_avx512f; }
-
-/// Emit a CPU pause instruction (spin-loop hint for SMT processors).
-void cpu_relax() {
-    asm("pause", [], []);
-}

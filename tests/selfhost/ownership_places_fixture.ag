@@ -1,0 +1,44 @@
+import std.string;
+
+struct OwnedPair {
+    String left;
+    String right;
+}
+
+i64 read_disjoint_field(OwnedPair pair) {
+    String taken = move pair.left;
+    return pair.right.len();
+}
+
+i64 reinitialize_moved_field(OwnedPair pair, String replacement) {
+    String taken = move pair.left;
+    pair.left = move replacement;
+    return pair.left.len();
+}
+i64 shadowed_move_is_local() {
+    String x = String.from_str("outer");
+    {
+        String x = String.from_str("inner");
+        String taken = move x;
+    }
+    return x.len();
+}
+
+i64 sibling_scope_moves(bool first) {
+    if (first) {
+        String d = String.from_str("first");
+        String taken = move d;
+    } else {
+        String d = String.from_str("second");
+        String taken = move d;
+    }
+    return 0;
+}
+
+String move_in_return_branches(bool first) {
+    String value = String.from_str("branch");
+    if (first) {
+        return move value;
+    }
+    return move value;
+}

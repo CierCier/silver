@@ -1,0 +1,207 @@
+// tests/iterator_ergonomics_test.ag
+// Comprehensive 4-Tier E2E test suite for Collection / Iterator Ergonomics.
+//
+// Verifies:
+// 1. Non-consuming iteration: `for x in vec.iter()` preserves underlying vector.
+// 2. Borrowed container iteration: `for x in &vec` preserves underlying vector.
+// 3. Early break and continue in iterator loops.
+// 4. Nested iterator loops, string element iteration, and empty collections.
+// compile_flags: --no-cache --leak-check
+
+import std.test;
+import std.mem.vec;
+import std.string;
+
+// Tier 1: Non-consuming iteration with vec.iter()
+void test_tier1_vec_iter_non_consuming() {
+    test_start("tier1: for x in vec.iter() non-consuming iteration");
+
+    Vec<i64> v = Vec<i64>.new();
+    v.push(10);
+    v.push(20);
+    v.push(30);
+    v.push(40);
+    v.push(50);
+
+    // First pass using vec.iter()
+    i64 sum1 = 0;
+    i64 count1 = 0;
+    for x in v.iter() {
+        sum1 += x;
+        count1 += 1;
+    }
+
+    assert_eq_i64(5, count1, "v.iter() visited 5 elements");
+    assert_eq_i64(150, sum1, "v.iter() sum == 150 (10+20+30+40+50)");
+
+    // Invariant: underlying vector must NOT be consumed or mutated!
+    assert_eq_i64(5, v.len(), "v.len() preserved after v.iter()");
+    assert_eq_i64(10, v.get(0), "v[0] preserved");
+    assert_eq_i64(30, v.get(2), "v[2] preserved");
+    assert_eq_i64(50, v.get(4), "v[4] preserved");
+
+    // Second pass using vec.iter() to verify idempotence
+    i64 sum2 = 0;
+    for x in v.iter() {
+        sum2 += x;
+    }
+    assert_eq_i64(150, sum2, "v.iter() second pass yields identical sum");
+    assert_eq_i64(5, v.len(), "v.len() still 5 after second iteration");
+
+    v.drop();
+}
+
+// Tier 2: Borrowed container iteration with &vec
+void test_tier2_borrowed_vec_iteration() {
+    test_start("tier2: for x in &vec borrowed container iteration");
+
+    Vec<i64> nums = Vec<i64>.new();
+    nums.push(1);
+    nums.push(2);
+    nums.push(3);
+    nums.push(4);
+
+    // Iterating borrowed &nums
+    i64 count = 0;
+    i64 product = 1;
+    for x in &nums {
+        count += 1;
+        product = product * x;
+    }
+
+    assert_eq_i64(4, count, "borrowed loop visited 4 elements");
+    assert_eq_i64(24, product, "borrowed loop product == 24 (1*2*3*4)");
+
+    // Invariant: nums must remain live and accessible
+    assert_eq_i64(4, nums.len(), "nums.len() preserved after borrowed iteration");
+    assert_eq_i64(1, nums.get(0), "nums[0] intact");
+    assert_eq_i64(4, nums.get(3), "nums[3] intact");
+
+    Vec<i64>* borrowed = &nums;
+    i64 borrowed_sum = 0;
+    for x in borrowed { borrowed_sum += x; }
+    assert_eq_i64(10, borrowed_sum, "pointer local uses borrowed iterator");
+    assert_eq_i64(4, borrowed.len(), "Copy pointer remains live after iteration");
+    assert_eq_i64(1, nums.get(0), "pointer iteration preserves first element");
+
+    Vec<i64> consumed = Vec<i64>.new();
+    consumed.push(17);
+    consumed.push(25);
+    i64 consumed_sum = 0;
+    for x in consumed { consumed_sum += x; }
+    assert_eq_i64(42, consumed_sum, "value target still uses consuming iterator");
+    assert_eq_i64(0, consumed.len(), "consumed vector is reset");
+
+    nums.drop();
+}
+
+// Tier 3: Early break and continue in iterator loops
+void test_tier3_break_and_continue() {
+    test_start("tier3: early break and continue in iterator loops");
+
+    Vec<i64> items = Vec<i64>.new();
+    i64 i = 1;
+    while (i <= 10) {
+        items.push(i);
+        i += 1;
+    }
+
+    // Early break at element 5
+    i64 break_visited = 0;
+    i64 break_last = 0;
+    for x in items.iter() {
+        break_visited += 1;
+        break_last = x;
+        if (x == 5) {
+            break;
+        }
+    }
+
+    assert_eq_i64(5, break_visited, "break terminated iteration after 5 visits");
+    assert_eq_i64(5, break_last, "last visited element was 5");
+    assert_eq_i64(10, items.len(), "items.len() preserved after early break");
+
+    // Continue to skip even numbers
+    i64 odd_sum = 0;
+    i64 odd_count = 0;
+    for x in items.iter() {
+        if (x % 2 == 0) {
+            continue;
+        }
+        odd_sum += x;
+        odd_count += 1;
+    }
+
+    assert_eq_i64(5, odd_count, "visited 5 odd elements");
+    assert_eq_i64(25, odd_sum, "sum of odds 1+3+5+7+9 == 25");
+
+    // Break on borrowed container &items
+    i64 borrowed_break_count = 0;
+    for x in &items {
+        borrowed_break_count += 1;
+        if (x == 3) {
+            break;
+        }
+    }
+    assert_eq_i64(3, borrowed_break_count, "break on &items stopped at 3");
+    assert_eq_i64(10, items.len(), "items still valid after borrowed break");
+
+    items.drop();
+}
+
+// Tier 4: Nested loops, non-primitive containers, and boundary cases
+void test_tier4_nested_and_boundaries() {
+    test_start("tier4: nested loops, strings, and empty collections");
+
+    // Empty vector iteration
+    Vec<i64> empty = Vec<i64>.new();
+    i64 empty_runs = 0;
+    for x in empty.iter() {
+        empty_runs += 1;
+    }
+    assert_eq_i64(0, empty_runs, "empty.iter() does not run loop body");
+
+    i64 empty_ref_runs = 0;
+    for x in &empty {
+        empty_ref_runs += 1;
+    }
+    assert_eq_i64(0, empty_ref_runs, "&empty does not run loop body");
+    empty.drop();
+
+    // Nested loops: 3x3 grid simulation
+    Vec<i64> rows = Vec<i64>.new();
+    rows.push(10);
+    rows.push(20);
+    rows.push(30);
+
+    Vec<i64> cols = Vec<i64>.new();
+    cols.push(1);
+    cols.push(2);
+    cols.push(3);
+
+    i64 matrix_sum = 0;
+    i64 cell_count = 0;
+    for r in rows.iter() {
+        for c in cols.iter() {
+            matrix_sum = matrix_sum + r + c;
+            cell_count += 1;
+        }
+    }
+
+    assert_eq_i64(9, cell_count, "nested loops executed 3*3 = 9 times");
+    // (10*3 + 1+2+3) + (20*3 + 1+2+3) + (30*3 + 1+2+3) = 36 + 66 + 96 = 198
+    assert_eq_i64(198, matrix_sum, "matrix sum matches expected 198");
+    assert_eq_i64(3, rows.len(), "rows preserved after nested iteration");
+    assert_eq_i64(3, cols.len(), "cols preserved after nested iteration");
+
+    rows.drop();
+    cols.drop();
+}
+
+i32 main() {
+    test_tier1_vec_iter_non_consuming();
+    test_tier2_borrowed_vec_iteration();
+    test_tier3_break_and_continue();
+    test_tier4_nested_and_boundaries();
+    return done();
+}

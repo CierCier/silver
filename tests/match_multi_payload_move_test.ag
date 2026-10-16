@@ -1,0 +1,271 @@
+// compile_flags: --no-cache
+
+import std.test;
+
+// Moving one payload out of a multi-payload variant must keep the other
+// payloads owned by the matched value, so each is destroyed exactly once.
+
+i64 drops = 0;
+i64 shadow_drops = 0;
+
+struct Tok {
+    i64 id;
+}
+
+impl Drop for Tok {
+    void drop(Tok* self) {
+        drops += 1;
+    }
+}
+
+struct ShadowTok {
+    i64 id;
+}
+
+impl Drop for ShadowTok {
+    void drop(ShadowTok* self) {
+        shadow_drops += 1;
+    }
+}
+
+enum Both {
+    Two(Tok, Tok);
+    Empty;
+}
+
+Tok mk(i64 id) {
+    Tok t;
+    t.id = id;
+    return move t;
+}
+
+ShadowTok mk_shadow(i64 id) {
+    ShadowTok t;
+    t.id = id;
+    return move t;
+}
+
+Both make_both() {
+    Tok a = mk(1);
+    Tok b = mk(2);
+    Both result = Both.Two(move a, move b);
+    return move result;
+}
+
+i64 take_first_block(Both value) {
+    Tok picked = match value {
+        Two(move first, second): { first; },
+        Empty: mk(9),
+    };
+    return picked.id;
+}
+
+i64 take_second(Both value) {
+    Tok picked = match value {
+        Two(first, move second): second,
+        Empty: mk(9),
+    };
+    return picked.id;
+}
+
+i64 consumed = 0;
+
+void consume(Tok token) {
+    consumed += token.id;
+}
+
+i64 take_first_after_consuming_second(Both value) {
+    Tok picked = match value {
+        Two(move first, second): { consume(second); first; },
+        Empty: mk(9),
+    };
+    return picked.id;
+}
+
+enum Single {
+    One(Tok);
+    Nothing;
+}
+
+Single make_single() {
+    Tok a = mk(5);
+    Single result = Single.One(move a);
+    return move result;
+}
+
+// Each path that transfers the payload must clear the matched value's
+// cleanup on its own; the later path must not rely on an earlier one.
+i64 consume_on_either_path(Single value, bool flag) {
+    match value {
+        One(text): {
+            if (flag) {
+                consume(move text);
+                return 1;
+            }
+            consume(move text);
+            return 2;
+        },
+        Nothing: { return 0; },
+    }
+    return -1;
+}
+
+i64 consume_first_then_return(Both value) {
+    match value {
+        Two(first, second): {
+            consume(move first);
+            return 1;
+        },
+        Empty: { return 0; },
+    }
+    return -1;
+}
+
+i64 consume_first_then_return_with_shadow(Both value) {
+    match value {
+        Two(value, second): {
+            consume(move value);
+            {
+                Both value = make_both();
+                ShadowTok second = mk_shadow(3);
+                return 1;
+            }
+        },
+        Empty: { return 0; },
+    }
+    return -1;
+}
+
+i64 consume_first_then_break(Both value) {
+    while (true) {
+        match value {
+            Two(first, second): {
+                consume(move first);
+                break;
+            },
+            Empty: { break; },
+        }
+    }
+    return 1;
+}
+
+i64 consume_first_then_continue(Both value) {
+    i64 iterations = 0;
+    while (iterations < 1) {
+        match value {
+            Two(first, second): {
+                consume(move first);
+                iterations += 1;
+                continue;
+            },
+            Empty: { iterations += 1; continue; },
+        }
+    }
+    return 1;
+}
+
+i64 keep_outer_payload_after_inner_break(Both value) {
+    match value {
+        Two(first, second): {
+            while (true) {
+                consume(move first);
+                break;
+            }
+            assert_eq_i64(1, drops, "inner break keeps second payload alive");
+            return second.id;
+        },
+        Empty: { return 0; },
+    }
+    return -1;
+}
+
+i64 borrow_only(Both value) {
+    match value {
+        Two(first, second): { return first.id + second.id; },
+        Empty: { return 0; },
+    }
+    return -1;
+}
+
+i32 main() {
+    test_start("block arm moves first, keeps second");
+    {
+        Both value = make_both();
+        assert_eq_i64(1, take_first_block(move value), "first payload extracted");
+    }
+    assert_eq_i64(2, drops, "both payloads dropped once");
+
+    test_start("plain arm moves second, keeps first");
+    drops = 0;
+    {
+        Both value = make_both();
+        assert_eq_i64(2, take_second(move value), "second payload extracted");
+    }
+    assert_eq_i64(2, drops, "both payloads dropped once");
+
+    test_start("arm without move leaves cleanup to the value");
+    drops = 0;
+    {
+        Both value = make_both();
+        assert_eq_i64(3, borrow_only(move value), "payloads read");
+    }
+    assert_eq_i64(2, drops, "both payloads dropped once");
+    test_start("payload consumed by value is not dropped again");
+    drops = 0;
+    {
+        Both value = make_both();
+        assert_eq_i64(1, take_first_after_consuming_second(move value), "first payload extracted");
+    }
+    assert_eq_i64(2, drops, "consumed and extracted payloads dropped once each");
+    test_start("payload consumed on either branch is dropped once");
+    drops = 0;
+    {
+        Single value = make_single();
+        assert_eq_i64(2, consume_on_either_path(move value, false), "second path taken");
+    }
+    assert_eq_i64(1, drops, "payload dropped once on the later path");
+    drops = 0;
+    {
+        Single value = make_single();
+        assert_eq_i64(1, consume_on_either_path(move value, true), "first path taken");
+    }
+    assert_eq_i64(1, drops, "payload dropped once on the first path");
+    test_start("unmoved payload is dropped when arm returns");
+    drops = 0;
+    {
+        Both value = make_both();
+        assert_eq_i64(1, consume_first_then_return(move value), "return from match arm");
+    }
+    assert_eq_i64(2, drops, "both payloads dropped once on return");
+    test_start("return cleanup uses original shadowed match locals");
+    drops = 0;
+    shadow_drops = 0;
+    {
+        Both value = make_both();
+        assert_eq_i64(1, consume_first_then_return_with_shadow(move value), "return from shadowed match arm");
+    }
+    assert_eq_i64(4, drops, "original payloads and shadowed scrutinee dropped once");
+    assert_eq_i64(1, shadow_drops, "shadowed payload name dropped once");
+    test_start("unmoved payload is dropped when match arm breaks loop");
+    drops = 0;
+    {
+        Both value = make_both();
+        assert_eq_i64(1, consume_first_then_break(move value), "break from match arm");
+    }
+    assert_eq_i64(2, drops, "both payloads dropped once on break");
+    test_start("unmoved payload is dropped when match arm continues loop");
+    drops = 0;
+    {
+        Both value = make_both();
+        assert_eq_i64(1, consume_first_then_continue(move value), "continue from match arm");
+    }
+    assert_eq_i64(2, drops, "both payloads dropped once on continue");
+    test_start("inner loop break preserves enclosing match payload");
+    drops = 0;
+    {
+        Both value = make_both();
+        assert_eq_i64(2, keep_outer_payload_after_inner_break(move value), "outer payload remains live");
+    }
+    assert_eq_i64(2, drops, "outer payload dropped once after inner break");
+    return done();
+}

@@ -14,9 +14,9 @@ i32 main() {
 
     test_start("match f64");
     {
-        f64 x = 1.5;
+        f64 x = 2.5;
         f64 r = match x { 1.5 : 10.0, 2.5 : 20.0, _ : 0.0 };
-        if (r != 10.0) { tests_failed += 1; @eprintln("  [FAIL] f64 literal arm selected"); }
+        if (r != 20.0) { tests_failed += 1; @eprintln("  [FAIL] f64 literal arm selected"); }
         else { tests_passed += 1; @println("  [PASS] f64 literal arm selected"); }
     }
 
@@ -25,6 +25,11 @@ i32 main() {
         str x = "hi";
         i64 r = match x { "hi" : 1, "bye" : 2, _ : 0 };
         assert_eq_i64(1, r, "str literal arm selected");
+        i64 miss = match x { "bye" : 2, _ : 0 };
+        assert_eq_i64(0, miss, "non-matching str literal falls through");
+        str absent = (str)0;
+        i64 null_match = match absent { "hi" : 1, _ : 0 };
+        assert_eq_i64(0, null_match, "null str does not match a literal");
     }
 
     test_start("match bool");

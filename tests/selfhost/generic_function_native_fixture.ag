@@ -1,0 +1,63 @@
+import std.mem.alloc;
+
+struct Big {
+    i64 first;
+    i64 second;
+    i64 third;
+    i64 fourth;
+}
+
+struct Box<T> {
+    T value;
+}
+
+i64 size_of<T>(T* _value) {
+    return @size(T);
+}
+
+i64 nested_size<T>(T* value) {
+    return size_of<T>(value);
+}
+
+i32 main() {
+    i128 shifted = (i128)1 << (i128)3;
+    if (shifted != (i128)8) { return 8; }
+    i128 dividend = (i128)-8;
+    if (dividend / (i128)2 != (i128)-4) { return 9; }
+
+    Big* one = alloc<Big>();
+    one.fourth = 32;
+    if (one.fourth != 32) { return 1; }
+
+    Box<Big>* box = alloc<Box<Big>>();
+    box.value.fourth = 48;
+    if (box.value.fourth != 48) { return 2; }
+
+    Big* many = alloc_n<Big>(2);
+    many[1].third = 64;
+    if (many[1].third != 64) { return 3; }
+
+    Big* maybe_many = try_alloc_n<Big>(1);
+    if (maybe_many == (Big*)0) { return 7; }
+
+    Big* overloaded = alloc<Big>(1);
+    Big* maybe_overloaded = try_alloc<Big>(1);
+    if (overloaded == (Big*)0 || maybe_overloaded == (Big*)0) { return 10; }
+
+    Big* grown = realloc<Big>(many, 3);
+    grown[2].fourth = 80;
+    if (grown[2].fourth != 80) { return 4; }
+
+    Big* optional = try_alloc<Big>();
+    if (optional == (Big*)0) { return 5; }
+    if (nested_size<Box<Big>>(box) != 32) { return 6; }
+
+    free(one);
+    free(box);
+    free(grown);
+    free(optional);
+    free(maybe_many);
+    free(overloaded);
+    free(maybe_overloaded);
+    return 42;
+}

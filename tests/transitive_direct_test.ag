@@ -1,0 +1,17 @@
+// Transitive visibility (direct): source imports inline transitively, so a
+// name imported by chain_b (chain_c_val) resolves in this file even though
+// only chain_b is imported here. Stage0 and stage1 agree; this fixture pins
+// that behavior. (FE-009)
+// compile_flags: -I tests/modules
+import chain_b;
+import std.sys.entry;
+
+i32 main() {
+    if (chain_c_val() != 7) {
+        return 1;
+    }
+    if (chain_b_val() != 8) {
+        return 2;
+    }
+    return 0;
+}
