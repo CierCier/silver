@@ -427,8 +427,8 @@ impl TypeTable {
 
     // Monomorphization substitution frames (FE-001/P0-002): while emitting a
     // specialized generic instance, type parameters resolve to concrete ids.
-    // Frames are backend-driver-private; the stack is always empty during
-    // checking, so normal type operations are unaffected.
+    // Method inference and native specialization scope these bindings around
+    // a template query, then restore the caller's substitution stack.
     void push_subst(TypeTable* self, u32 name_id, u32 type_id) {
         TypeSubst binding;
         binding.name_id = name_id;

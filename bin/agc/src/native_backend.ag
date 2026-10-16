@@ -374,46 +374,17 @@ bool native_discover_dynamic_linker(String* output) {
     return output.starts_with("/") && native_is_executable(output.to_str());
 }
 
-bool native_argument_consumes_value(Vec<String>* arguments, i64 index) {
-    String* argument = arguments.get_ptr(index);
-    return argument.equals("-o") || argument.equals("--output")
-        || argument.equals("-I") || argument.equals("--root")
-        || argument.equals("-D") || argument.equals("-L") || argument.equals("-l")
-        || argument.equals("-W") || argument.equals("--target")
-        || argument.equals("--sysroot") || argument.equals("--cfg")
-        || argument.equals("--cache-dir") || argument.equals("-j")
-        || argument.equals("--jobs") || argument.equals("--emit")
-        || argument.equals("--run-arg");
-}
-
-bool native_source_path(Vec<String>* arguments, String* source) {
-    i64 start = 1;
-    if (arguments.len() > 1) {
-        String* first = arguments.get_ptr(1);
-        if (first.equals("build") || first.equals("b") || first.equals("run") || first.equals("r")
-            || first.equals("check") || first.equals("c") || first.equals("test") || first.equals("t")) {
-            start = 2;
-        }
-    }
-    i64 i = start;
-    while (i < arguments.len()) {
-        String* argument = arguments.get_ptr(i);
-        if (argument.equals("--")) { return false; }
-        if (argument.starts_with("-")) {
-            if (native_argument_consumes_value(arguments, i)) { i += 2; }
-            else { i += 1; }
-            continue;
-        }
-        source.clear();
-        source.push_str(argument.to_str());
-        return true;
-    }
-    return false;
+bool native_source_path(CliMatches* cli, String* source) {
+    Optional<String> positional = cli.positional(0);
+    if (positional.is_none()) { return false; }
+    String path = positional.unwrap();
+    source.clear();
+    source.push_str(path.to_str());
+    return true;
 }
 
 bool native_output_path(Vec<String>* arguments, str default_name, String* output) {
-    i64 i = 1;
-    while (i < arguments.len()) {
+    for (i64 i = 1; i < arguments.len(); i += 1) {
         String* argument = arguments.get_ptr(i);
         if (argument.equals("--")) { break; }
         if (argument.equals("-o") || argument.equals("--output")) {
@@ -429,7 +400,6 @@ bool native_output_path(Vec<String>* arguments, str default_name, String* output
             value.drop();
             return true;
         }
-        i += 1;
     }
     output.clear();
     if (strlen(default_name) > 0) {
@@ -571,7 +541,8 @@ String native_cached_object_digest_path(str path) {
 bool native_copy_cached_object(str source, str destination) {
     String temporary = String.from_str(destination);
     temporary.push_str(".cache-check-");
-    native_append_i64(&temporary, getpid());
+    i64 process_id = getpid();
+    temporary.push_display(&process_id);
     bool copied = native_copy_binary(source, temporary.to_str());
     String actual = copied ? native_cached_object_digest(temporary.to_str()) : String.new();
     String digest_path = native_cached_object_digest_path(source);
@@ -632,12 +603,12 @@ String native_object_cache_path(Vec<String>* arguments, CliMatches* cli,
         i += 1;
     }
     identity.push((u8)(module_object ? 1 : 0));
-    native_append_i64(&identity, (i64)source_file_id);
+    identity.push_display(&source_file_id);
     identity.push((u8)0);
     i = 0;
     while (i < owned_source_ids.len()) {
         u32 owned_id = owned_source_ids.get(i);
-        native_append_i64(&identity, (i64)owned_id);
+        identity.push_display(&owned_id);
         identity.push((u8)':');
         if (owned_id == 0 || owned_id > source_paths.len()
             || !native_cache_append_file(&identity,
@@ -695,13 +666,14 @@ bool native_store_cached_object(str cache_path, str object_path) {
     if (cache_path == (str)0 || strlen(cache_path) == 0) { return false; }
     String temporary = String.from_str(cache_path);
     temporary.push_str(".tmp-");
-    native_append_i64(&temporary, getpid());
+    i64 process_id = getpid();
+    temporary.push_display(&process_id);
     bool copied = native_copy_binary(object_path, temporary.to_str());
     String digest = copied ? native_cached_object_digest(temporary.to_str()) : String.new();
     String digest_path = native_cached_object_digest_path(cache_path);
     String digest_temporary = String.from_str(digest_path.to_str());
     digest_temporary.push_str(".tmp-");
-    native_append_i64(&digest_temporary, getpid());
+    digest_temporary.push_display(&process_id);
     File digest_file = File.open_write(digest_temporary.to_str());
     bool wrote_digest = digest.len() == 64 && digest_file.valid()
         && digest_file.write_str(digest.to_str()) == 0;
@@ -1165,15 +1137,9 @@ void native_append_run_args(Vec<String>* arguments, Command* command) {
 }
 
 
-void native_append_i64(String* output, i64 value) {
-    u8 buffer[32];
-    i64 length = itoa(value, (u8*)&buffer[0]);
-    output.push_bytes((u8*)&buffer[0], length);
-}
-
 String native_temp_path(str suffix, i64 pid) {
     String path = String.from_str("/tmp/silver-stage1-native-");
-    native_append_i64(&path, pid);
+    path.push_display(&pid);
     path.push_str(suffix);
     return path;
 }
@@ -3056,7 +3022,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
             object_path = output.clone();
         } else {
             String suffix = String.from_str(".");
-            native_append_i64(&suffix, (i64)source_file_id);
+            suffix.push_display(&source_file_id);
             suffix.push_str(".o");
             object_path = native_temp_path(suffix.to_str(), pid);
             suffix.drop();

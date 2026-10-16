@@ -120,12 +120,6 @@ String invalid_cfg_argument_message() {
     return String.from_str("invalid #[cfg] argument: expected a name, string, or dotted path");
 }
 
-void append_i64(String* out, i64 value) {
-    u8 buffer[32];
-    i64 length = itoa(value, (u8*)&buffer[0]);
-    out.push_bytes((u8*)&buffer[0], length);
-}
-
 String source_line(u8* data, i64 length, i64 line) {
     String result = String.new();
     if (line <= 0 || data == (u8*)0) {
@@ -180,9 +174,9 @@ String render_diagnostic_span(Severity severity, Span span, str message, str pat
     if (span.start_line > 0) {
         out.push_str(path);
         out.push_str(":");
-        append_i64(&out, span.start_line);
+        out.push_display(&span.start_line);
         out.push_str(":");
-        append_i64(&out, span.start_col);
+        out.push_display(&span.start_col);
         out.push_str(": ");
     }
     out.push_str(message);

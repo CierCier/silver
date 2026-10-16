@@ -22,7 +22,7 @@ does not replace the full integration corpus exercised by `run_native.sh`.
 
 `check_native_backend.py` covers direct-file, workspace build, and run paths.
 Other focused checks exercise linker selection, format/assert/args support,
-enum and aggregate layout, generic functions, stage2, and cache behavior.
+enum and aggregate layout, generic functions and methods, stage2, and cache behavior.
 `check_native_coverage.py` reports a broader per-fixture build/run inventory;
 failures identify unsupported backend work and are not silently skipped.
 

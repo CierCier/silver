@@ -1617,38 +1617,89 @@ fn instantiate_requests(
             } => {
                 let impl_item = impl_item.as_ref();
                 let method = method.as_ref();
+                let has_method_generics = method.generics.is_some();
                 let args = ordered_args(type_params, mapping);
                 let base = impl_self_base_name(&impl_item.self_type).unwrap_or_default();
-                let mangled = mangle_name(&base, &args);
-                let key = format!("impl::{mangled}");
-                // Always rewrite method calls — this must happen for EVERY request
-                // (each method in the same impl needs its method calls rewritten).
-                rewrite_method_calls(program, &base, &method.name.name, &args, call_span);
-                // Only generate the monomorphized impl once per unique key.
+                let concrete_self_type = substitute_ast_type(&impl_item.self_type, mapping);
+                let (concrete_owner, owner_args) = impl_self_owner(&concrete_self_type);
+                let owner_params = impl_type_params(impl_item);
+                let has_unresolved_owner_arg = owner_params.iter().any(|name| {
+                    matches!(
+                        mapping.get(name),
+                        Some(Type::Named { path, generics })
+                            if path.len() == 1 && path[0] == *name && generics.is_empty()
+                    )
+                });
+                let is_unresolved_template_call = has_unresolved_owner_arg
+                    && impl_item.items.iter().any(|item| {
+                        let ast::ImplItemKind::Function(func) = item else {
+                            return false;
+                        };
+                        func.span.file == call_span.file
+                            && func.span.start <= call_span.start
+                            && func.span.end >= call_span.end
+                    });
+                let method_args = args
+                    .iter()
+                    .map(Type::canonical_key)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let concrete_params = method
+                    .parameters
+                    .iter()
+                    .map(|param| {
+                        Type::from_ast(&param.param_type)
+                            .substitute(mapping)
+                            .canonical_key()
+                    })
+                    .collect::<Vec<_>>();
+                let concrete_return = method
+                    .return_type
+                    .as_ref()
+                    .map(|ty| Type::from_ast(ty).substitute(mapping).canonical_key());
+                let specialized_name = crate::mangling::method_symbol(
+                    &concrete_owner,
+                    &method.name.name,
+                    &concrete_params,
+                    concrete_return.as_deref(),
+                    method.is_variadic,
+                );
+                let key = format!("impl::{specialized_name}<{method_args}>");
+                // Rewrite concrete call sites before deduplication; different
+                // requests may target different method specializations.
+                // Keep template-body calls on the generic method path until
+                // their owner is instantiated; an identity mapping can look
+                // concrete when a global type shares the parameter's name.
+                if has_method_generics && !is_unresolved_template_call {
+                    rewrite_method_calls(
+                        program,
+                        &base,
+                        &method.name.name,
+                        &specialized_name,
+                        &owner_args,
+                        call_span,
+                    );
+                }
+                // A method's generic arguments do not belong to its owner type.
+                // Emit only this method so another specialization on the same
+                // owner cannot shadow it or erase its generic signature.
                 if !generated.insert(key) {
                     continue;
                 }
                 let mut new_impl = impl_item.clone();
                 new_impl.generics = None;
                 new_impl.self_type = substitute_ast_type(&impl_item.self_type, mapping);
-                new_impl.items = new_impl
-                    .items
-                    .into_iter()
-                    .map(|mut item| {
-                        if let ast::ImplItemKind::Function(func) = &mut item {
-                            func.generics = None;
-                            func.attributes.push(monomorph_instance_attr());
-                            for param in &mut func.parameters {
-                                param.param_type = substitute_ast_type(&param.param_type, mapping);
-                            }
-                            if let Some(return_type) = &mut func.return_type {
-                                *return_type = substitute_ast_type(return_type, mapping);
-                            }
-                            substitute_block_types(&mut func.body, mapping);
-                        }
-                        item
-                    })
-                    .collect();
+                let mut method = method.clone();
+                method.generics = None;
+                method.attributes.push(monomorph_instance_attr());
+                for param in &mut method.parameters {
+                    param.param_type = substitute_ast_type(&param.param_type, mapping);
+                }
+                if let Some(return_type) = &mut method.return_type {
+                    *return_type = substitute_ast_type(return_type, mapping);
+                }
+                substitute_block_types(&mut method.body, mapping);
+                new_impl.items = vec![ast::ImplItemKind::Function(Box::new(method))];
 
                 items.push(ast::Item {
                     kind: ast::ItemKind::Impl(new_impl),
@@ -2196,11 +2247,12 @@ fn rewrite_method_calls(
     program: &mut ast::Program,
     base: &str,
     method: &str,
+    specialized_name: &str,
     args: &[Type],
     span: &Span,
 ) {
     for item in &mut program.items {
-        rewrite_item_method_calls(item, base, method, args, span);
+        rewrite_item_method_calls(item, base, method, specialized_name, args, span);
     }
 }
 
@@ -2208,17 +2260,25 @@ fn rewrite_item_method_calls(
     item: &mut ast::Item,
     base: &str,
     method: &str,
+    specialized_name: &str,
     args: &[Type],
     span: &Span,
 ) {
     match &mut item.kind {
         ast::ItemKind::Function(func) => {
-            rewrite_block_method_calls(&mut func.body, base, method, args, span)
+            rewrite_block_method_calls(&mut func.body, base, method, specialized_name, args, span)
         }
         ast::ItemKind::Impl(impl_item) => {
             for impl_item in &mut impl_item.items {
                 if let ast::ImplItemKind::Function(func) = impl_item {
-                    rewrite_block_method_calls(&mut func.body, base, method, args, span)
+                    rewrite_block_method_calls(
+                        &mut func.body,
+                        base,
+                        method,
+                        specialized_name,
+                        args,
+                        span,
+                    )
                 }
             }
         }
@@ -2230,11 +2290,12 @@ fn rewrite_block_method_calls(
     block: &mut ast::Block,
     base: &str,
     method: &str,
+    specialized_name: &str,
     args: &[Type],
     span: &Span,
 ) {
     for stmt in &mut block.statements {
-        rewrite_statement_method_calls(stmt, base, method, args, span);
+        rewrite_statement_method_calls(stmt, base, method, specialized_name, args, span);
     }
 }
 
@@ -2242,26 +2303,27 @@ fn rewrite_statement_method_calls(
     stmt: &mut ast::Statement,
     base: &str,
     method: &str,
+    specialized_name: &str,
     args: &[Type],
     span: &Span,
 ) {
     match &mut stmt.kind {
         ast::StatementKind::Block(block) => {
-            rewrite_block_method_calls(block, base, method, args, span)
+            rewrite_block_method_calls(block, base, method, specialized_name, args, span)
         }
         ast::StatementKind::Let(let_stmt) => {
             if let Some(init) = &mut let_stmt.initializer {
-                rewrite_expression_method_calls(init, base, method, args, span);
+                rewrite_expression_method_calls(init, base, method, specialized_name, args, span);
             }
         }
         ast::StatementKind::Expression(expr)
         | ast::StatementKind::Return(Some(expr))
         | ast::StatementKind::Break(Some(expr)) => {
-            rewrite_expression_method_calls(expr, base, method, args, span)
+            rewrite_expression_method_calls(expr, base, method, specialized_name, args, span)
         }
         ast::StatementKind::Return(None) | ast::StatementKind::Break(None) => {}
         ast::StatementKind::Defer(inner) => {
-            rewrite_statement_method_calls(inner, base, method, args, span)
+            rewrite_statement_method_calls(inner, base, method, specialized_name, args, span)
         }
         ast::StatementKind::Continue => {}
     }
@@ -2271,6 +2333,7 @@ fn rewrite_expression_method_calls(
     expr: &mut ast::Expression,
     base: &str,
     method: &str,
+    specialized_name: &str,
     args: &[Type],
     span: &Span,
 ) {
@@ -2280,13 +2343,13 @@ fn rewrite_expression_method_calls(
             then_expr,
             else_expr,
         } => {
-            rewrite_expression_method_calls(condition, base, method, args, span);
-            rewrite_expression_method_calls(then_expr, base, method, args, span);
-            rewrite_expression_method_calls(else_expr, base, method, args, span);
+            rewrite_expression_method_calls(condition, base, method, specialized_name, args, span);
+            rewrite_expression_method_calls(then_expr, base, method, specialized_name, args, span);
+            rewrite_expression_method_calls(else_expr, base, method, specialized_name, args, span);
         }
         ast::ExpressionKind::UnwrapOr { value, fallback } => {
-            rewrite_expression_method_calls(value, base, method, args, span);
-            rewrite_expression_method_calls(fallback, base, method, args, span);
+            rewrite_expression_method_calls(value, base, method, specialized_name, args, span);
+            rewrite_expression_method_calls(fallback, base, method, specialized_name, args, span);
         }
         ast::ExpressionKind::MethodCall {
             receiver,
@@ -2294,6 +2357,7 @@ fn rewrite_expression_method_calls(
             arguments,
         } => {
             if expr.span == *span && call_method.name == method {
+                call_method.name = specialized_name.to_string();
                 // Determine the base type name — may be Identifier("Rc") for static
                 // calls like `Rc.new(...)` or TypeName(Named("Rc")) for explicit
                 // type expressions like `Rc<i32>.new(...)`.
@@ -2342,53 +2406,53 @@ fn rewrite_expression_method_calls(
                     }
                 }
             }
-            rewrite_expression_method_calls(receiver, base, method, args, span);
+            rewrite_expression_method_calls(receiver, base, method, specialized_name, args, span);
             for arg in arguments {
-                rewrite_expression_method_calls(arg, base, method, args, span);
+                rewrite_expression_method_calls(arg, base, method, specialized_name, args, span);
             }
         }
         ast::ExpressionKind::FieldAccess { object, .. }
         | ast::ExpressionKind::Index { object, .. }
         | ast::ExpressionKind::Slice { object, .. } => {
-            rewrite_expression_method_calls(object, base, method, args, span);
+            rewrite_expression_method_calls(object, base, method, specialized_name, args, span);
         }
         ast::ExpressionKind::Cast {
             expression,
             target_type: _,
         } => {
-            rewrite_expression_method_calls(expression, base, method, args, span);
+            rewrite_expression_method_calls(expression, base, method, specialized_name, args, span);
         }
         ast::ExpressionKind::Call {
             function,
             arguments,
         } => {
-            rewrite_expression_method_calls(function, base, method, args, span);
+            rewrite_expression_method_calls(function, base, method, specialized_name, args, span);
             for arg in arguments {
-                rewrite_expression_method_calls(arg, base, method, args, span);
+                rewrite_expression_method_calls(arg, base, method, specialized_name, args, span);
             }
         }
         ast::ExpressionKind::Binary { left, right, .. } => {
-            rewrite_expression_method_calls(left, base, method, args, span);
-            rewrite_expression_method_calls(right, base, method, args, span);
+            rewrite_expression_method_calls(left, base, method, specialized_name, args, span);
+            rewrite_expression_method_calls(right, base, method, specialized_name, args, span);
         }
         ast::ExpressionKind::Unary { operand, .. }
         | ast::ExpressionKind::Postfix { operand, .. } => {
-            rewrite_expression_method_calls(operand, base, method, args, span)
+            rewrite_expression_method_calls(operand, base, method, specialized_name, args, span)
         }
         ast::ExpressionKind::If {
             condition,
             then_branch,
             else_branch,
         } => {
-            rewrite_expression_method_calls(condition, base, method, args, span);
-            rewrite_block_method_calls(then_branch, base, method, args, span);
+            rewrite_expression_method_calls(condition, base, method, specialized_name, args, span);
+            rewrite_block_method_calls(then_branch, base, method, specialized_name, args, span);
             if let Some(branch) = else_branch {
-                rewrite_block_method_calls(branch, base, method, args, span);
+                rewrite_block_method_calls(branch, base, method, specialized_name, args, span);
             }
         }
         ast::ExpressionKind::While { condition, body } => {
-            rewrite_expression_method_calls(condition, base, method, args, span);
-            rewrite_block_method_calls(body, base, method, args, span);
+            rewrite_expression_method_calls(condition, base, method, specialized_name, args, span);
+            rewrite_block_method_calls(body, base, method, specialized_name, args, span);
         }
         ast::ExpressionKind::For {
             init,
@@ -2397,46 +2461,95 @@ fn rewrite_expression_method_calls(
             body,
         } => {
             if let Some(init_expr) = &mut init.initializer {
-                rewrite_expression_method_calls(init_expr, base, method, args, span);
+                rewrite_expression_method_calls(
+                    init_expr,
+                    base,
+                    method,
+                    specialized_name,
+                    args,
+                    span,
+                );
             }
-            rewrite_expression_method_calls(condition, base, method, args, span);
-            rewrite_expression_method_calls(increment, base, method, args, span);
-            rewrite_block_method_calls(body, base, method, args, span);
+            rewrite_expression_method_calls(condition, base, method, specialized_name, args, span);
+            rewrite_expression_method_calls(increment, base, method, specialized_name, args, span);
+            rewrite_block_method_calls(body, base, method, specialized_name, args, span);
         }
         ast::ExpressionKind::Match { expression, arms } => {
-            rewrite_expression_method_calls(expression, base, method, args, span);
+            rewrite_expression_method_calls(expression, base, method, specialized_name, args, span);
             for arm in arms {
                 if let Some(guard) = &mut arm.guard {
-                    rewrite_expression_method_calls(guard, base, method, args, span);
+                    rewrite_expression_method_calls(
+                        guard,
+                        base,
+                        method,
+                        specialized_name,
+                        args,
+                        span,
+                    );
                 }
-                rewrite_expression_method_calls(&mut arm.body, base, method, args, span);
+                rewrite_expression_method_calls(
+                    &mut arm.body,
+                    base,
+                    method,
+                    specialized_name,
+                    args,
+                    span,
+                );
             }
         }
         ast::ExpressionKind::Block(block) => {
-            rewrite_block_method_calls(block, base, method, args, span)
+            rewrite_block_method_calls(block, base, method, specialized_name, args, span)
         }
         ast::ExpressionKind::Initializer { items } => {
             for item in items {
                 match item {
                     ast::InitializerItem::Positional(expr)
                     | ast::InitializerItem::Field { value: expr, .. } => {
-                        rewrite_expression_method_calls(expr, base, method, args, span)
+                        rewrite_expression_method_calls(
+                            expr,
+                            base,
+                            method,
+                            specialized_name,
+                            args,
+                            span,
+                        )
                     }
                     ast::InitializerItem::Index { index, value } => {
-                        rewrite_expression_method_calls(index, base, method, args, span);
-                        rewrite_expression_method_calls(value, base, method, args, span);
+                        rewrite_expression_method_calls(
+                            index,
+                            base,
+                            method,
+                            specialized_name,
+                            args,
+                            span,
+                        );
+                        rewrite_expression_method_calls(
+                            value,
+                            base,
+                            method,
+                            specialized_name,
+                            args,
+                            span,
+                        );
                     }
                 }
             }
         }
         ast::ExpressionKind::Array(items) | ast::ExpressionKind::Tuple(items) => {
             for item in items {
-                rewrite_expression_method_calls(item, base, method, args, span);
+                rewrite_expression_method_calls(item, base, method, specialized_name, args, span);
             }
         }
         ast::ExpressionKind::StructLiteral { fields, .. } => {
             for field in fields {
-                rewrite_expression_method_calls(&mut field.value, base, method, args, span);
+                rewrite_expression_method_calls(
+                    &mut field.value,
+                    base,
+                    method,
+                    specialized_name,
+                    args,
+                    span,
+                );
             }
         }
         ast::ExpressionKind::Move(inner)
@@ -2445,10 +2558,10 @@ fn rewrite_expression_method_calls(
         | ast::ExpressionKind::Wait(inner)
         | ast::ExpressionKind::Reference {
             expression: inner, ..
-        } => rewrite_expression_method_calls(inner, base, method, args, span),
+        } => rewrite_expression_method_calls(inner, base, method, specialized_name, args, span),
         ast::ExpressionKind::ForIn { iterable, body, .. } => {
-            rewrite_expression_method_calls(iterable, base, method, args, span);
-            rewrite_block_method_calls(body, base, method, args, span);
+            rewrite_expression_method_calls(iterable, base, method, specialized_name, args, span);
+            rewrite_block_method_calls(body, base, method, specialized_name, args, span);
         }
         ast::ExpressionKind::TypeName(_)
         | ast::ExpressionKind::Literal(_)
@@ -2456,7 +2569,7 @@ fn rewrite_expression_method_calls(
         | ast::ExpressionKind::EnumVariant { .. } => {}
         ast::ExpressionKind::Asm { inputs, .. } => {
             for input in inputs {
-                rewrite_expression_method_calls(input, base, method, args, span);
+                rewrite_expression_method_calls(input, base, method, specialized_name, args, span);
             }
         }
         ast::ExpressionKind::MacroCall { .. } => {}
@@ -2681,6 +2794,20 @@ fn mapping_covers_impl(mapping: &HashMap<String, Type>, generics: Option<&ast::G
     true
 }
 
+fn impl_type_params(impl_item: &ast::ImplItem) -> Vec<String> {
+    let mut params = impl_item.implicit_type_params.clone();
+    if let Some(generics) = &impl_item.generics {
+        for param in &generics.params {
+            if let ast::GenericParam::Type(type_param) = param
+                && !params.contains(&type_param.name.name)
+            {
+                params.push(type_param.name.name.clone());
+            }
+        }
+    }
+    params
+}
+
 fn is_generic_self_type(ty: &ast::Type) -> bool {
     matches!(ty.kind.as_ref(), ast::TypeKind::Named(named) if named.generics.is_some())
 }
@@ -2690,6 +2817,25 @@ fn impl_self_base_name(ty: &ast::Type) -> Option<String> {
         return None;
     };
     named.path.last().map(|id| id.name.clone())
+}
+
+fn impl_self_owner(ty: &ast::Type) -> (String, Vec<Type>) {
+    let ast::TypeKind::Named(named) = ty.kind.as_ref() else {
+        return (String::new(), Vec::new());
+    };
+    let base = named
+        .path
+        .last()
+        .map(|id| id.name.clone())
+        .unwrap_or_default();
+    let args = named
+        .generics
+        .as_ref()
+        .into_iter()
+        .flatten()
+        .map(Type::from_ast)
+        .collect::<Vec<_>>();
+    (mangle_name(&base, &args), args)
 }
 
 pub fn mangle_name(base: &str, args: &[Type]) -> String {
@@ -3963,6 +4109,127 @@ mod tests {
             _ => false,
         });
         assert!(has_enum, "expected Option<i32> monomorph");
+    }
+
+    #[test]
+    fn specializes_generic_methods_independently_for_each_method_type() {
+        let mut program = parse(
+            "struct MethodProbe {} \
+             impl MethodProbe { void accept<T>(MethodProbe* self, T value) {} } \
+             i32 main() { MethodProbe probe; probe.accept((i64)1); \
+                 probe.accept((u64)2); return 0; }",
+        );
+        let impl_item = program
+            .items
+            .iter()
+            .find_map(|item| match &item.kind {
+                ast::ItemKind::Impl(impl_item) => Some(impl_item.clone()),
+                _ => None,
+            })
+            .expect("expected MethodProbe impl");
+        let method = impl_item
+            .items
+            .iter()
+            .find_map(|item| match item {
+                ast::ImplItemKind::Function(method) => Some((**method).clone()),
+                _ => None,
+            })
+            .expect("expected generic accept method");
+        let call_spans = program
+            .items
+            .iter()
+            .find_map(|item| match &item.kind {
+                ast::ItemKind::Function(function) if function.name.name == "main" => Some(
+                    function
+                        .body
+                        .statements
+                        .iter()
+                        .filter_map(|statement| match &statement.kind {
+                            ast::StatementKind::Expression(expression)
+                                if matches!(
+                                    expression.kind.as_ref(),
+                                    ast::ExpressionKind::MethodCall { method, .. }
+                                        if method.name == "accept"
+                                ) =>
+                            {
+                                Some(expression.span)
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .expect("expected main function");
+        assert_eq!(call_spans.len(), 2, "expected two generic method calls");
+        let request = |ty, call_span| MonomorphRequest::ImplMethod {
+            impl_item: Box::new(impl_item.clone()),
+            method: Box::new(method.clone()),
+            type_params: vec!["T".to_string()],
+            mapping: HashMap::from_iter([("T".to_string(), ty)]),
+            call_span,
+        };
+        let items = append_monomorphs(
+            &mut program,
+            &[
+                request(Type::Primitive(ast::PrimitiveType::I64), call_spans[0]),
+                request(Type::Primitive(ast::PrimitiveType::U64), call_spans[1]),
+            ],
+            &[],
+        );
+        let parameter_types = items
+            .iter()
+            .filter_map(|item| match &item.kind {
+                ast::ItemKind::Impl(impl_item) => impl_item.items.iter().find_map(|item| {
+                    let ast::ImplItemKind::Function(method) = item else {
+                        return None;
+                    };
+                    (method.name.name == "accept")
+                        .then(|| Type::from_ast(&method.parameters[1].param_type))
+                }),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            parameter_types,
+            vec![
+                Type::Primitive(ast::PrimitiveType::I64),
+                Type::Primitive(ast::PrimitiveType::U64),
+            ],
+            "each concrete method type needs its own specialized method"
+        );
+        let call_names = program
+            .items
+            .iter()
+            .find_map(|item| match &item.kind {
+                ast::ItemKind::Function(function) if function.name.name == "main" => Some(
+                    function
+                        .body
+                        .statements
+                        .iter()
+                        .filter_map(|statement| match &statement.kind {
+                            ast::StatementKind::Expression(expression) => {
+                                let ast::ExpressionKind::MethodCall { method, .. } =
+                                    expression.kind.as_ref()
+                                else {
+                                    return None;
+                                };
+                                Some(method.name.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .expect("expected main function");
+        assert_eq!(call_names.len(), 2);
+        assert_ne!(call_names[0], call_names[1]);
+        assert!(
+            call_names
+                .iter()
+                .all(|name| name.starts_with("MethodProbe__accept__"))
+        );
     }
 
     /// Helper: check if any item contains a call expression with the given function name.
