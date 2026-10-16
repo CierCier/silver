@@ -1,8 +1,7 @@
 // std/term/ansi.ag — terminal escape-sequence emitters.
 //
-// Every helper writes through a caller-provided BufWriter: no allocation,
-// no syscalls here. Bytes are emitted with write_u8 / itoa formatting so no
-// string-literal escape forms are required.
+// Every helper writes through a caller-provided BufWriter: no allocation or
+// syscalls here. Numeric fields use write_u8 / write_i64.
 
 import std.io.file;
 import std.fmt;
@@ -28,12 +27,6 @@ void term_write_csi(BufWriter* out) {
     out.write_u8((u8)91); // '['
 }
 
-void term_write_num(BufWriter* out, i64 v) {
-    u8 buf[20];
-    i64 n = itoa(v, &buf[0]);
-    out.write(&buf[0], n);
-}
-
 // -- Cursor ---------------------------------------------------------------
 
 void term_hide_cursor(BufWriter* out) {
@@ -51,33 +44,33 @@ void term_cursor_home(BufWriter* out) {
 /// Move to 1-based (row, col).
 void term_move_to(BufWriter* out, i64 row, i64 col) {
     term_write_csi(out);
-    term_write_num(out, row);
+    out.write_i64(row);
     out.write_u8((u8)59); // ';'
-    term_write_num(out, col);
+    out.write_i64(col);
     out.write_u8((u8)72); // 'H'
 }
 
 void term_cursor_up(BufWriter* out, i64 n) {
     term_write_csi(out);
-    term_write_num(out, n);
+    out.write_i64(n);
     out.write_u8((u8)65); // 'A'
 }
 
 void term_cursor_down(BufWriter* out, i64 n) {
     term_write_csi(out);
-    term_write_num(out, n);
+    out.write_i64(n);
     out.write_u8((u8)66); // 'B'
 }
 
 void term_cursor_forward(BufWriter* out, i64 n) {
     term_write_csi(out);
-    term_write_num(out, n);
+    out.write_i64(n);
     out.write_u8((u8)67); // 'C'
 }
 
 void term_cursor_back(BufWriter* out, i64 n) {
     term_write_csi(out);
-    term_write_num(out, n);
+    out.write_i64(n);
     out.write_u8((u8)68); // 'D'
 }
 
@@ -139,9 +132,9 @@ void term_underline_on(BufWriter* out) {
 void term_set_fg(BufWriter* out, i64 color) {
     term_write_csi(out);
     if (color >= TERM_BRIGHT) {
-        term_write_num(out, 90 + (color - TERM_BRIGHT));
+        out.write_i64(90 + (color - TERM_BRIGHT));
     } else {
-        term_write_num(out, 30 + color);
+        out.write_i64(30 + color);
     }
     out.write_u8((u8)109); // 'm'
 }
@@ -150,9 +143,9 @@ void term_set_fg(BufWriter* out, i64 color) {
 void term_set_bg(BufWriter* out, i64 color) {
     term_write_csi(out);
     if (color >= TERM_BRIGHT) {
-        term_write_num(out, 100 + (color - TERM_BRIGHT));
+        out.write_i64(100 + (color - TERM_BRIGHT));
     } else {
-        term_write_num(out, 40 + color);
+        out.write_i64(40 + color);
     }
     out.write_u8((u8)109); // 'm'
 }
@@ -161,7 +154,7 @@ void term_set_bg(BufWriter* out, i64 color) {
 void term_set_fg256(BufWriter* out, i64 n) {
     term_write_csi(out);
     out.write_str("38;5;");
-    term_write_num(out, n);
+    out.write_i64(n);
     out.write_u8((u8)109); // 'm'
 }
 
@@ -169,7 +162,7 @@ void term_set_fg256(BufWriter* out, i64 n) {
 void term_set_bg256(BufWriter* out, i64 n) {
     term_write_csi(out);
     out.write_str("48;5;");
-    term_write_num(out, n);
+    out.write_i64(n);
     out.write_u8((u8)109); // 'm'
 }
 
@@ -177,11 +170,11 @@ void term_set_bg256(BufWriter* out, i64 n) {
 void term_set_fg_rgb(BufWriter* out, i64 r, i64 g, i64 b) {
     term_write_csi(out);
     out.write_str("38;2;");
-    term_write_num(out, r);
+    out.write_i64(r);
     out.write_u8((u8)59); // ';'
-    term_write_num(out, g);
+    out.write_i64(g);
     out.write_u8((u8)59); // ';'
-    term_write_num(out, b);
+    out.write_i64(b);
     out.write_u8((u8)109); // 'm'
 }
 
@@ -189,10 +182,10 @@ void term_set_fg_rgb(BufWriter* out, i64 r, i64 g, i64 b) {
 void term_set_bg_rgb(BufWriter* out, i64 r, i64 g, i64 b) {
     term_write_csi(out);
     out.write_str("48;2;");
-    term_write_num(out, r);
+    out.write_i64(r);
     out.write_u8((u8)59); // ';'
-    term_write_num(out, g);
+    out.write_i64(g);
     out.write_u8((u8)59); // ';'
-    term_write_num(out, b);
+    out.write_i64(b);
     out.write_u8((u8)109); // 'm'
 }

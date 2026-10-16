@@ -1035,9 +1035,8 @@ bool publish_artifact(str path, Artifact* artifact) {
     }
     String temporary = String.from_str(path);
     temporary.push_str(".tmp.");
-    u8 pid_buffer[32];
-    i64 pid_length = itoa(getpid(), &pid_buffer[0]);
-    temporary.push_bytes(&pid_buffer[0], pid_length);
+    i64 pid = getpid();
+    temporary.push_display(&pid);
     File file = File.open_write(temporary.to_str());
     if (!file.valid()) {
         temporary.drop();

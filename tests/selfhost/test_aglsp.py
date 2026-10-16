@@ -174,8 +174,12 @@ def main():
         print("7. Completion response items count:", len(comp_resp["result"]["items"]))
         assert comp_resp["id"] == 6
         labels = [item["label"] for item in comp_resp["result"]["items"]]
-        assert "fn" in labels
+        assert "private" in labels
+        assert "fn" not in labels
+        assert "pub" not in labels
         assert "i32" in labels
+        assert "i128" in labels
+        assert "u128" in labels
         assert "add" in labels
         print("   -> Completion items verified: found keywords and symbols.")
 

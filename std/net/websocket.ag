@@ -278,7 +278,8 @@ impl WebSocket {
         host_hdr.push_str((str)&parsed.host[0]);
         if ((parsed.tls && parsed.port != 443) || (!parsed.tls && parsed.port != 80)) {
             host_hdr.push((u8)':');
-            http_append_i64(&mut host_hdr, (i64)parsed.port);
+            i64 port = (i64)parsed.port;
+            host_hdr.push_display(&port);
         }
 
         HttpRequest req = HttpRequest.new(HttpVersion.Http11, "GET", parsed.path, (str)host_hdr.data);

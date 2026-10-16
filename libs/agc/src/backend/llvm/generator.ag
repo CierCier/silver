@@ -236,6 +236,7 @@ bool llvm_define_method_instance(LlvmContext* ctx, TypeTable* types, Interner* n
         self_instance_id = types.get_pointer(self_instance_id, true);
         receiver_index += 1;
     }
+    types.push_subst(types.names.intern("Self"), self_instance_id);
     SyntaxNode* rscan = ret_start;
     while (rscan != (SyntaxNode*)0 && rscan != method_name_node) {
         if (rscan.kind == NodeKind.Token && rscan.text == "#") {
@@ -245,7 +246,7 @@ bool llvm_define_method_instance(LlvmContext* ctx, TypeTable* types, Interner* n
             }
             continue;
         }
-        if (rscan.kind == NodeKind.Token && (rscan.text == "pub" || rscan.text == "static")) {
+        if (rscan.kind == NodeKind.Token && (rscan.text == "private" || rscan.text == "static")) {
             rscan = rscan.next_sibling;
             continue;
         }
@@ -342,6 +343,7 @@ bool llvm_define_method_instance(LlvmContext* ctx, TypeTable* types, Interner* n
         }
     }
     ctx.pop_type_bindings(1);
+    types.pop_subst(1);
     ctx.pop_scope();
     return true;
 }
@@ -447,7 +449,9 @@ void llvm_drain_mono_queue(LlvmContext* ctx, TypeTable* types, Interner* names, 
         u32 mangled_id = req_ptr.mangled_id;
         u32 args_start = req_ptr.args_start;
         u32 args_count = req_ptr.args_count;
+        u32 receiver_args_count = req_ptr.receiver_args_count;
         u32 value_arg_count = req_ptr.value_arg_count;
+        bool is_static_method = req_ptr.is_static_method;
         index += 1;
         str base = ctx.names.get(base_id);
         str method = req_ptr.is_free_function ? (str)0 : ctx.names.get(method_id);
@@ -473,37 +477,56 @@ void llvm_drain_mono_queue(LlvmContext* ctx, TypeTable* types, Interner* names, 
         MonoMethodTemplate template;
         Vec<u32> param_ids = Vec<u32>.new();
         Vec<u32> arg_ids = Vec<u32>.new();
+        Vec<u32> receiver_arg_ids = Vec<u32>.new();
         i64 k = 0;
         while (k < (i64)args_count) {
             arg_ids.push(ctx.mono_queue_args.get((i64)args_start + k));
+            if (k < (i64)receiver_args_count) { receiver_arg_ids.push(arg_ids.get(k)); }
             k += 1;
         }
         bool found = is_free_function
             ? mono_find_function_template(ctx.root, types, base, value_arg_count, &template, &param_ids)
             : mono_find_method_template(ctx.root, types, base, method, receiver_depth,
-                                        &arg_ids, &template, &param_ids);
+                                        &receiver_arg_ids, &template, &param_ids,
+                                        args_count > receiver_args_count ? (i64)value_arg_count : (i64)-1,
+                                        is_static_method);
+        if (found && !is_free_function && item_method_is_generic(template.name_node)) {
+            while (param_ids.len() < (i64)receiver_args_count) { param_ids.push(0); }
+            Vec<u32> method_params = Vec<u32>.new();
+            mono_collect_generic_parameters(template.name_node.next_sibling, types, &method_params);
+            k = 0;
+            while (k < method_params.len()) {
+                param_ids.push(method_params.get(k));
+                k += 1;
+            }
+            method_params.drop();
+        }
         if (found && (param_ids.len() == arg_ids.len() || param_ids.len() == 0)) {
             i64 b = 0;
             while (b < param_ids.len()) {
                 u32 param_id = param_ids.get(b);
                 u32 arg_id = arg_ids.get(b);
-                types.push_subst(param_id, arg_id);
-                ctx.push_type_binding(types.names.get(param_id), arg_id);
+                if (param_id != 0) {
+                    types.push_subst(param_id, arg_id);
+                    ctx.push_type_binding(types.names.get(param_id), arg_id);
+                }
                 b += 1;
             }
             bool defined = is_free_function
                 ? llvm_define_free_function_instance(ctx, types, names, pool, fn_val, template.ret_start, template.name_node, template.params_node, template.body_node)
-                : llvm_define_method_instance(ctx, types, names, pool, base, fn_val, template.ret_start, template.name_node, template.params_node, template.body_node, &arg_ids, receiver_depth);
+                : llvm_define_method_instance(ctx, types, names, pool, base, fn_val, template.ret_start, template.name_node, template.params_node, template.body_node, &receiver_arg_ids, receiver_depth);
             if (!defined) {
                 ctx.note_unresolved("monomorph-body", mangled);
             }
-            types.pop_subst(param_ids.len());
-            ctx.pop_type_bindings(param_ids.len());
+            i64 binding_count = receiver_binding_count(&param_ids, param_ids.len());
+            types.pop_subst(binding_count);
+            ctx.pop_type_bindings(binding_count);
         } else {
             ctx.note_unresolved("monomorph-template", mangled);
         }
         param_ids.drop();
         arg_ids.drop();
+        receiver_arg_ids.drop();
     }
 }
 
@@ -988,13 +1011,14 @@ void llvm_bt_record_imported_methods(LlvmContext* ctx, TypeTable* types,
             }
             scan = scan.next_sibling;
         }
+        if (!is_cast) { method_name_node = item_method_name(ret_start, params_node); }
         if (semi_node != (SyntaxNode*)0) {
             cursor = semi_node.next_sibling;
             continue;
         }
         if (body_node != (SyntaxNode*)0 && params_node != (SyntaxNode*)0
             && (is_cast || method_name_node != (SyntaxNode*)0)
-            && !llvm_item_is_generic_fn(cursor)) {
+            && !item_method_is_generic(method_name_node)) {
             String emitted_name = String.from_str(struct_name);
             emitted_name.push_str("__");
             if (is_cast) {
@@ -1405,6 +1429,11 @@ impl LlvmGenerator {
                                     method_name_node = scan;
                                 }
                                 scan = scan.next_sibling;
+                            }
+                            if (!is_cast) { method_name_node = item_method_name(ret_start, params_node); }
+                            if (body_node != (SyntaxNode*)0 && item_method_is_generic(method_name_node)) {
+                                cursor = body_node.next_sibling;
+                                continue;
                             }
                             if (hit_semi) {
                                 cursor = semi_node.next_sibling;
@@ -2109,6 +2138,11 @@ impl LlvmGenerator {
                                     method_name_node = scan;
                                 }
                                 scan = scan.next_sibling;
+                            }
+                            if (!is_cast) { method_name_node = item_method_name(ret_start, params_node); }
+                            if (body_node != (SyntaxNode*)0 && item_method_is_generic(method_name_node)) {
+                                cursor = body_node.next_sibling;
+                                continue;
                             }
                             if (hit_semi) {
                                 cursor = semi_node.next_sibling;

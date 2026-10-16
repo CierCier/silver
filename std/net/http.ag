@@ -260,7 +260,7 @@ impl Display for HttpUrl {
 
 // --- Byte helpers ---------------------------------------------------------
 // Shared byte utilities (http_is_space, http_is_digit, http_lower,
-// http_equal_ci, http_parse_i64, http_append_i64) live in std/net/cookie.ag
+// http_equal_ci, http_parse_i64) live in std/net/cookie.ag
 // so the low-level helpers have a single definition point.
 
 /// Append `block` minus Authorization/Cookie/Cookie2/WWW-Authenticate header
@@ -1056,7 +1056,8 @@ impl HttpRequest {
         head.push_str("\r\n");
         if (self.body != (str)0) {
             head.push_str("Content-Length: ");
-            http_append_i64(&mut head, strlen(self.body));
+            i64 body_length = strlen(self.body);
+            head.push_display(&body_length);
             head.push_str("\r\n");
         }
         if (self.close) { head.push_str("Connection: close\r\n"); }
@@ -1339,7 +1340,8 @@ impl HttpResponse {
     /// "200 OK"-style status text. Mirrors Go's Response.Status.
     String status_text(*self) {
         String text = String.new();
-        http_append_i64(&mut text, (i64)self.status);
+        i64 status = (i64)self.status;
+        text.push_display(&status);
         text.push((u8)' ');
         text.push_str((str)self.reason.data);
         return move text;
@@ -2481,7 +2483,8 @@ impl ResponseWriter {
         }
         self.wire_buf.clear();
         self.wire_buf.push_str("HTTP/1.1 ");
-        http_append_i64(&mut self.wire_buf, (i64)self.status_code);
+        i64 status_code = (i64)self.status_code;
+        self.wire_buf.push_display(&status_code);
         self.wire_buf.push((u8)' ');
         self.wire_buf.push_str(http_status_reason(self.status_code));
         self.wire_buf.push_str("\r\n");
@@ -2490,7 +2493,7 @@ impl ResponseWriter {
         if (!has_cl) {
             if (content_len >= 0) {
                 self.wire_buf.push_str("Content-Length: ");
-                http_append_i64(&mut self.wire_buf, content_len);
+                self.wire_buf.push_display(&content_len);
                 self.wire_buf.push_str("\r\n");
             } else if (self.version == HttpVersion.Http11 && !self.close_connection) {
                 self.wire_buf.push_str("Transfer-Encoding: chunked\r\n");

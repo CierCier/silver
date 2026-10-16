@@ -62,16 +62,12 @@ i32 main() {
         out.write_str("key: ");
         out.write_str(describe(&e));
         if (e.kind == KeyKind.Char) {
-            u8 buf[16];
-            i64 n = utoa((u64)e.codepoint, &buf[0]);
             out.write_str(" cp=");
-            out.write(&buf[0], n);
+            out.write_u64(e.codepoint);
         }
         if (e.kind == KeyKind.FKey) {
-            u8 buf[16];
-            i64 n = itoa(e.fnum, &buf[0]);
             out.write_str(" F");
-            out.write(&buf[0], n);
+            out.write_i64(e.fnum);
         }
         if (e.ctrl) { out.write_str(" ctrl"); }
         if (e.alt) { out.write_str(" alt"); }

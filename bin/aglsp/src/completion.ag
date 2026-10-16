@@ -13,9 +13,7 @@ void append_completion_item(String* out, str label, i64 kind, str detail, bool* 
     out.push_str("{\"label\":\"");
     json_escape(label, out);
     out.push_str("\",\"kind\":");
-    u8 num_buf[32];
-    i64 n = itoa(kind, (u8*)&num_buf[0]);
-    for (i64 k = 0; k < n; k += 1) { out.push((char)num_buf[k]); }
+    out.push_display(&kind);
 
     if (strlen(detail) > 0) {
         out.push_str(",\"detail\":\"");
@@ -30,7 +28,6 @@ String compute_completion(str text, i64 _line, i64 _character) {
     bool first = true;
 
     // 1. Silver keywords
-    append_completion_item(&out, "fn", 14, "keyword", &first);
     append_completion_item(&out, "let", 14, "keyword", &first);
     append_completion_item(&out, "mut", 14, "keyword", &first);
     append_completion_item(&out, "struct", 14, "keyword", &first);
@@ -38,7 +35,7 @@ String compute_completion(str text, i64 _line, i64 _character) {
     append_completion_item(&out, "impl", 14, "keyword", &first);
     append_completion_item(&out, "trait", 14, "keyword", &first);
     append_completion_item(&out, "type", 14, "keyword", &first);
-    append_completion_item(&out, "pub", 14, "keyword", &first);
+    append_completion_item(&out, "private", 14, "keyword", &first);
     append_completion_item(&out, "const", 14, "keyword", &first);
     append_completion_item(&out, "static", 14, "keyword", &first);
     append_completion_item(&out, "if", 14, "keyword", &first);
@@ -61,10 +58,12 @@ String compute_completion(str text, i64 _line, i64 _character) {
     append_completion_item(&out, "i16", 7, "primitive type", &first);
     append_completion_item(&out, "i32", 7, "primitive type", &first);
     append_completion_item(&out, "i64", 7, "primitive type", &first);
+    append_completion_item(&out, "i128", 7, "primitive type", &first);
     append_completion_item(&out, "u8", 7, "primitive type", &first);
     append_completion_item(&out, "u16", 7, "primitive type", &first);
     append_completion_item(&out, "u32", 7, "primitive type", &first);
     append_completion_item(&out, "u64", 7, "primitive type", &first);
+    append_completion_item(&out, "u128", 7, "primitive type", &first);
     append_completion_item(&out, "f32", 7, "primitive type", &first);
     append_completion_item(&out, "f64", 7, "primitive type", &first);
     append_completion_item(&out, "bool", 7, "primitive type", &first);
@@ -98,7 +97,7 @@ String compute_completion(str text, i64 _line, i64 _character) {
         str detail = "";
         if (sym.kind == SymbolKind.Function) {
             sym_kind = 3; // Function
-            detail = "fn";
+            detail = "function";
         } else if (sym.kind == SymbolKind.Struct) {
             sym_kind = 7; // Struct
             detail = "struct";

@@ -374,7 +374,7 @@ impl Profiler {
         tot_line.push_str(" ");
         append_padded_left(&mut tot_line, "", 34);
         tot_line.push_str(" ");
-        String peak_str = int_to_str(peak_mem_kb);
+        String peak_str = String.from_i64(peak_mem_kb);
         append_padded_left(&mut tot_line, peak_str.to_str(), 10);
         peak_str.drop();
         tot_line.push_str(" KB\n");
@@ -392,7 +392,7 @@ impl Profiler {
         if (total_mem_delta_kb >= 0) {
             net_val.push_str("+");
         }
-        String dstr = int_to_str(total_mem_delta_kb);
+        String dstr = String.from_i64(total_mem_delta_kb);
         net_val.push_str(dstr.to_str());
         dstr.drop();
 
@@ -408,14 +408,6 @@ impl Profiler {
 // ---------------------------------------------------------------------------
 // Report formatting helpers
 // ---------------------------------------------------------------------------
-
-String int_to_str(i64 v) {
-    u8 buf[32];
-    i64 len = itoa(v, (u8*)&buf[0]);
-    String s = String.new();
-    s.push_bytes((u8*)&buf[0], len);
-    return move s;
-}
 
 void append_padded_left(String* out, str text, i64 width) {
     i64 len = utf8_display_width(text);
@@ -448,21 +440,18 @@ void append_f64_2dp(String* out, f64 ms) {
         whole += 1;
         frac -= 100;
     }
-    u8 buf[32];
-    i64 len = itoa(whole, (u8*)&buf[0]);
-    out.push_bytes((u8*)&buf[0], len);
+    out.push_display(&whole);
     out.push_str(".");
     if (frac < 10) {
         out.push_str("0");
     }
-    len = itoa(frac, (u8*)&buf[0]);
-    out.push_bytes((u8*)&buf[0], len);
+    out.push_display(&frac);
 }
 
 String format_bytes(i64 kb) {
     String s = String.new();
     if (kb < 1024) {
-        String num = int_to_str(kb);
+        String num = String.from_i64(kb);
         s.push_str(num.to_str());
         num.drop();
         s.push_str(" KB");
@@ -471,11 +460,11 @@ String format_bytes(i64 kb) {
     if (kb < 1024 * 1024) {
         i64 whole = kb / 1024;
         i64 frac = (kb % 1024) * 10 / 1024;
-        String num = int_to_str(whole);
+        String num = String.from_i64(whole);
         s.push_str(num.to_str());
         num.drop();
         s.push_str(".");
-        String f = int_to_str(frac);
+        String f = String.from_i64(frac);
         s.push_str(f.to_str());
         f.drop();
         s.push_str(" MB");
@@ -483,12 +472,12 @@ String format_bytes(i64 kb) {
     }
     i64 whole = kb / (1024 * 1024);
     i64 frac = ((kb % (1024 * 1024)) * 100) / (1024 * 1024);
-    String num = int_to_str(whole);
+    String num = String.from_i64(whole);
     s.push_str(num.to_str());
     num.drop();
     s.push_str(".");
     if (frac < 10) { s.push_str("0"); }
-    String f = int_to_str(frac);
+    String f = String.from_i64(frac);
     s.push_str(f.to_str());
     f.drop();
     s.push_str(" GB");
@@ -517,7 +506,7 @@ String render_report_line(str name, i64 width, f64 elapsed_ms, i64 before, i64 a
     time_str.drop();
     line.push_str(" ");
 
-    String b_num = int_to_str(before);
+    String b_num = String.from_i64(before);
     String before_str = String.new();
     append_padded_left(&mut before_str, b_num.to_str(), 10);
     b_num.drop();
@@ -526,7 +515,7 @@ String render_report_line(str name, i64 width, f64 elapsed_ms, i64 before, i64 a
     before_str.drop();
     line.push_str(" ");
 
-    String a_num = int_to_str(after);
+    String a_num = String.from_i64(after);
     String after_str = String.new();
     append_padded_left(&mut after_str, a_num.to_str(), 10);
     a_num.drop();
@@ -540,7 +529,7 @@ String render_report_line(str name, i64 width, f64 elapsed_ms, i64 before, i64 a
     if (delta >= 0) {
         delta_val.push_str("+");
     }
-    String dnum = int_to_str(delta);
+    String dnum = String.from_i64(delta);
     delta_val.push_str(dnum.to_str());
     dnum.drop();
 

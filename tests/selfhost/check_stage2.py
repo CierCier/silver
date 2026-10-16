@@ -239,6 +239,16 @@ i32 main() {
                 "stage2-compiled generic_tuple_return_test returned "
                 f"{executed.returncode}, expected 0"
             )
+        generic_method_source = root / "tests/generic_method_literal_inference_test.ag"
+        generic_method_program = work / "generic-method"
+        invoke(stage2, ["build", str(generic_method_source), "--no-cache",
+                        "-o", str(generic_method_program)])
+        executed = subprocess.run([str(generic_method_program)], timeout=30, check=False)
+        if executed.returncode != 0:
+            raise AssertionError(
+                "stage2-compiled generic_method_literal_inference_test returned "
+                f"{executed.returncode}, expected 0"
+            )
         global_array_source = root / "tests/global_array_string_init_test.ag"
         global_array_program = work / "global-array-string-init"
         invoke(stage2, ["build", str(global_array_source), "--no-cache",
