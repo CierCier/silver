@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 
 from enum_ffi_probe import run_enum_ffi_probe
+from check_native_target import discover_host_triple
 
 
 def run(
@@ -57,6 +58,7 @@ def main() -> int:
 
         env = os.environ.copy()
         env["SILVER_STAGE1_CC"] = str(pathlib.Path(cc).resolve())
+        host_triple, _ = discover_host_triple(stage1, source, env, root)
 
         if args.stage0 is not None:
             run_enum_ffi_probe(
@@ -492,7 +494,7 @@ def main() -> int:
         target_build = run(
             stage1,
             ["build", "--manifest", str(target_package / "silver.toml"), "--no-cache",
-             "--target", "x86_64-unknown-linux-gnu", "--cfg", "build.feature=1",
+             "--target", host_triple, "--cfg", "build.feature=1",
              "-Werror", "-o", str(target_output)],
             env,
             root,

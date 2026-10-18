@@ -112,10 +112,13 @@ def tool_versions(root: pathlib.Path, env: dict[str, str]) -> dict:
     def first_line(command: list[str]) -> str | None:
         if not shutil.which(command[0]):
             return None
-        output = subprocess.run(
-            command, cwd=str(root), env=env, capture_output=True, text=True,
-            check=False, errors="replace",
-        )
+        try:
+            output = subprocess.run(
+                command, cwd=str(root), env=env, capture_output=True, text=True,
+                check=False, errors="replace", timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            return None
         combined = (output.stdout + output.stderr).strip()
         return combined.splitlines()[0] if combined else None
 
@@ -133,10 +136,13 @@ def tool_versions(root: pathlib.Path, env: dict[str, str]) -> dict:
 def snapshot_identity(root: pathlib.Path) -> dict:
     """Hash the full working-tree identity, including uncommitted changes."""
     def git(*arguments: str) -> str:
-        result = subprocess.run(
-            ["git", *arguments], cwd=str(root), capture_output=True, text=True,
-            check=False, errors="replace",
-        )
+        try:
+            result = subprocess.run(
+                ["git", *arguments], cwd=str(root), capture_output=True, text=True,
+                check=False, errors="replace", timeout=60,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(f"git {' '.join(arguments)} timed out") from error
         if result.returncode != 0:
             raise RuntimeError(f"git {' '.join(arguments)} failed: {result.stderr.strip()}")
         return result.stdout

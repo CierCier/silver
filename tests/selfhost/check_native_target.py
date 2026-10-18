@@ -414,19 +414,22 @@ def main() -> int:
 
         # Rejection happens before the source is read, so a missing source still
         # reports the target diagnostic rather than a read error.
-        missing = run(
-            stage1,
-            ["build", str(root / "does-not-exist.ag"), "--no-cache",
-             "--target=wasm32-wasi", "-o", str(root / "missing-output")],
-            env,
-            root,
-        )
-        require_rejected(missing, (root / "missing-output",), "missing source", host_triple)
-        require(
-            "failed to read" not in missing.stderr,
-            "target rejection did not happen before the source was read",
-            missing,
-        )
+        for command in ("build", "test"):
+            missing = run(
+                stage1,
+                [command, str(root / "does-not-exist.ag"), "--no-cache",
+                 "--target=wasm32-wasi", "-o", str(root / "missing-output")],
+                env,
+                root,
+            )
+            require_rejected(
+                missing, (root / "missing-output",), f"{command} missing source", host_triple
+            )
+            require(
+                "failed to read" not in missing.stderr,
+                "target rejection did not happen before the source was read",
+                missing,
+            )
 
         # A repeated `--target` is a parser error, not the native diagnostic.
         duplicate = run(

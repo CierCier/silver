@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
@@ -59,6 +60,22 @@ class ParseHarnessLogTests(unittest.TestCase):
     def test_skip_summary_disagreeing_with_lines_is_flagged(self) -> None:
         text = "  [SKIP]  gamma  (reason)\n  Skipped:  3\n"
         self.assertTrue(recorder.parse_harness_log(text)["skip_count_mismatch"])
+
+
+class ProbeTimeoutTests(unittest.TestCase):
+    def test_timed_out_tool_versions_are_unavailable(self) -> None:
+        with mock.patch.object(recorder.shutil, "which", return_value="/tool"), \
+             mock.patch.object(recorder.subprocess, "run",
+                               side_effect=subprocess.TimeoutExpired("tool", 60)):
+            versions = recorder.tool_versions(pathlib.Path("/"), {})
+        for tool in ("cargo", "rustc", "cc", "llvm_config"):
+            self.assertIsNone(versions[tool])
+
+    def test_git_timeout_cannot_certify_source_identity(self) -> None:
+        with mock.patch.object(recorder.subprocess, "run",
+                               side_effect=subprocess.TimeoutExpired("git", 60)):
+            with self.assertRaisesRegex(RuntimeError, "git rev-parse HEAD timed out"):
+                recorder.snapshot_identity(pathlib.Path("/"))
 
 
 class SnapshotIdentityTests(unittest.TestCase):
