@@ -109,9 +109,11 @@ and output creation so that target-specific cfg cannot select code
 for a different machine than the backend emits. Program arguments forwarded by
 `run ... --` or `--run-arg` are not compiler target options.
 
-Frontend-only `check`, `lex`, `parse`, and `ast` retain target-dependent cfg
-selection. They do not prove that a program can be compiled or linked for that
-target. Stage0's cross-target implementations are separate and unchanged.
+Source and workspace `check` commands retain target-dependent cfg selection.
+`lex`, `parse`, and `ast` accept `--target` but dump the unfiltered source; they
+do not apply target cfg. Neither checks nor dumps prove that a program can be
+compiled or linked for that target. Stage0's cross-target implementations are
+separate and unchanged.
 
 The [native target regression](../tests/selfhost/check_native_target.py)
 exercises this contract through compiler commands. The option audit below

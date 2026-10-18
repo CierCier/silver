@@ -118,10 +118,10 @@ agc path/to/file.ag --emit=module --shared -o path/to/file.agm
 The Silver stage1 compiler builds native programs on x86_64 Linux using LLVM's
 default host target. An explicit `--target TRIPLE` must match that triple
 exactly. Unsupported native targets fail before source compilation or output
-creation. Frontend-only `check`, `lex`, `parse`, and `ast` commands can still
-select another target's cfg values; passing those checks does not establish
-native support for that target. The Rust stage0 compiler retains its separate
-cross-compilation paths.
+creation. Source and workspace `check` commands can use another target's cfg
+values; `lex`, `parse`, and `ast` accept `--target` but dump the unfiltered
+source. Neither frontend check nor dump establishes native support for that
+target. The Rust stage0 compiler retains its separate cross-compilation paths.
 
 See the [compiler target contract](docs/compiler-guide.md#native-target-contract)
 for the scope of this restriction.

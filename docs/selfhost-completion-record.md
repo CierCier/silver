@@ -12,8 +12,9 @@ links language families to implementations and runtime fixtures; the
 remaining checking, ownership, ABI, and artifact work.
 
 The native driver accepts only the exact LLVM host target triple for code
-generation. Frontend `check`, `lex`, `parse`, and `ast` retain cross-target cfg
-selection. The [target gate](../tests/selfhost/check_native_target.py) exercises
+generation. Source and workspace `check` commands retain target-dependent cfg
+selection. `lex`, `parse`, and `ast` accept `--target` but dump unfiltered
+source. The [target gate](../tests/selfhost/check_native_target.py) exercises
 rejection before output creation and preservation of program arguments.
 
 The [native option audit](compiler-guide.md#native-options) is part of this
@@ -30,7 +31,38 @@ be identified as a source snapshot, not reported as a clean commit baseline.
 CI results require a published workflow run; local execution does not certify
 that GitHub Actions ran.
 
-## Local C01 baseline (2026-10-18)
+## Clean C01 baseline (2026-10-18)
+
+The recorder completed against clean commit
+`4ce949f942301e84a13e8af8bea9ccf717f95872` with `status: ok` and
+`snapshot_stable: true`. It rebuilt debug stage0 with Cargo, bootstrapped
+stage1 with `--no-cache`, and ran both complete corpora sequentially with
+eight workers. Stage0 reported `v0.2.6-247-g4ce949f`; stage1 reported
+`agc 0.2.6`.
+
+| Compiler | SHA-256 | Passed / failed / skipped |
+| --- | --- | --- |
+| Stage0 | `c9a95492f81adc249bed6ae8f852dc41fc9cd2003a106aad67b4d03fb86c1f46` | 289 / 0 / 7 |
+| Stage1 | `b4e6835e8eca74773e4cf076c460cd3a36567239407e49c02d55356f2fa906aa` | 294 / 0 / 2 |
+
+Skips are identical to the dirty-snapshot run below. Evidence is retained at
+`/tmp/silver-c01-clean-4ce949f/baseline.json` with per-command logs. This
+record and the subsequent recorder edge-case fixes were added after capture;
+the compiler implementation remains unchanged. Stage1's hash matches the
+compiler used for the earlier full stage2/stage3 run.
+
+`run_stage.sh --include-std` also passed using Cargo stage0 and a fresh native
+stage1: token and AST-span parity on 445 files, semantic-status parity on
+449 files, typed Send, AGLSP protocol, workspace, and artifact checks. Two
+foreign AGM cases lacked artifacts. GATE-003 still defers rendered diagnostic,
+normalized LLVM IR, and production AGM/cache-key comparisons. The script
+started before the documentation commits and ran unchanged compiler sources;
+this is a separate frontend run, not part of the recorder's source snapshot.
+
+Implementation PR: [#45](https://github.com/CierCier/silver/pull/45).
+Hosted generations remain unrun; the local results do not certify hosted CI.
+
+## Dirty-snapshot C01 baseline (2026-10-18)
 
 The recorder completed with `status: ok` and unchanged source during the run.
 The base commit was `962ed91c884f409957cb810b61390c68f6dcc5d4`, with the
@@ -77,9 +109,9 @@ Local evidence is in `/tmp/silver-c01-baseline-20261018/baseline.json` and its
 versions, commands, statuses, counts, and every skip reason. Its fingerprint
 covers tracked and non-ignored source, excluding ignored artifacts and other
 ambient build inputs. Native allocator leak instrumentation remains disabled,
-as documented above. Full frontend parity was not rerun for this documentation
-and tooling change. The manual hosted workflow has not run, and implementation
-PR publication and a clean-commit baseline remain outstanding for C01.
+as documented above. At that capture, full frontend parity, publication, and a
+clean-commit baseline remained outstanding. The newer results above supersede
+those local gaps; the manual hosted workflow has not run.
 
 ## Definition of done
 

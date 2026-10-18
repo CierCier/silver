@@ -231,7 +231,7 @@ void() callback;             // function pointer: no params → void
 ### Module Imports
 
 ```silver
-// Imports currently bring all public module items into scope.
+// Whole-module imports bring all public module items into scope.
 import std.io;
 ```
 
