@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import pathlib
 import shutil
@@ -12,6 +14,30 @@ import sys
 import tempfile
 
 from enum_ffi_probe import run_enum_ffi_probe
+
+
+def record_compiler_identity(
+    evidence_dir: pathlib.Path | None, label: str, binary: pathlib.Path,
+    build_argv: list[str],
+) -> None:
+    """Save a built compiler's identity while its temp workdir still exists."""
+    if evidence_dir is None:
+        return
+    probed = subprocess.run(
+        [str(binary), "--version"], capture_output=True, text=True,
+        timeout=60, check=True,
+    )
+    identity = {
+        "label": label,
+        "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+        "size": binary.stat().st_size,
+        "version": probed.stdout.strip() or None,
+        "version_exit_code": probed.returncode,
+        "build_argv": build_argv,
+    }
+    (evidence_dir / f"{label}.json").write_text(
+        json.dumps(identity, indent=2) + "\n", encoding="utf-8"
+    )
 
 
 def main() -> int:
@@ -23,9 +49,13 @@ def main() -> int:
                         help="Build stage3 with stage2 and exercise its frontend and runtimes")
     parser.add_argument("--jobs", type=int, default=4,
                         help="Integration corpus workers (default: 4)")
+    parser.add_argument("--evidence-dir", type=pathlib.Path, default=None,
+                        help="Write per-stage compiler identity JSON here after each build")
     args = parser.parse_args()
     if args.jobs < 1:
         parser.error("--jobs must be positive")
+    if args.evidence_dir is not None:
+        args.evidence_dir.mkdir(parents=True, exist_ok=True)
     root = pathlib.Path(__file__).parents[2]
     cc = shutil.which("cc")
     if cc is None:
@@ -72,8 +102,11 @@ def main() -> int:
             )
 
         print("Building stage2 with stage1", flush=True)
-        invoke(args.stage1.resolve(), ["build", "--manifest", str(root / "silver.toml"),
-                                      "--bin", "agc", "--no-cache", "-o", str(stage2)])
+        stage2_build = ["build", "--manifest", str(root / "silver.toml"),
+                        "--bin", "agc", "--no-cache", "-o", str(stage2)]
+        invoke(args.stage1.resolve(), stage2_build)
+        record_compiler_identity(args.evidence_dir, "stage2", stage2,
+                                 [str(args.stage1.resolve()), *stage2_build])
         run_enum_ffi_probe(
             stage2, pathlib.Path(cc).resolve(), root, work, "stage2", env
         )
@@ -323,8 +356,11 @@ i32 main() {
         if args.stage3:
             stage3 = work / "agc-stage3"
             print("Building stage3 with stage2", flush=True)
-            invoke(stage2, ["build", "--manifest", str(root / "silver.toml"),
-                            "--bin", "agc", "--no-cache", "-o", str(stage3)])
+            stage3_build = ["build", "--manifest", str(root / "silver.toml"),
+                            "--bin", "agc", "--no-cache", "-o", str(stage3)]
+            invoke(stage2, stage3_build)
+            record_compiler_identity(args.evidence_dir, "stage3", stage3,
+                                     [str(stage2), *stage3_build])
             run_enum_ffi_probe(stage3, pathlib.Path(cc).resolve(), root, work, "stage3", env)
             invoke(stage3, ["--version"])
             invoke(stage3, ["--help"])
