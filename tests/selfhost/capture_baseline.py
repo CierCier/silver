@@ -145,7 +145,7 @@ def snapshot_identity(root: pathlib.Path) -> dict:
     branch = git("rev-parse", "--abbrev-ref", "HEAD").strip()
     status = git("status", "--porcelain")
     diff = git("diff", "--binary", "HEAD")
-    untracked = git("ls-files", "--others", "--exclude-standard").splitlines()
+    untracked = git("ls-files", "--others", "--exclude-standard", "-z").split("\0")[:-1]
 
     digest = hashlib.sha256()
     for part in (head, status, diff):
@@ -253,7 +253,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Capture a fresh stage0/stage1 self-host baseline.",
     )
     parser.add_argument("--out", required=True, type=pathlib.Path,
-                        help="evidence output directory (must be new or empty)")
+                        help="new or empty evidence directory outside the source checkout")
     parser.add_argument("--profile", choices=("debug", "release"), default="debug",
                         help="cargo profile for stage0 (default: debug)")
     parser.add_argument("--jobs", type=int, default=4,
@@ -266,6 +266,8 @@ def main(argv: list[str] | None = None) -> int:
 
     root = pathlib.Path(__file__).resolve().parents[2]
     out = args.out.resolve()
+    if out.is_relative_to(root):
+        parser.error("--out must be outside the source checkout")
     try:
         prepare_out_dir(out)
     except EvidenceError as error:
@@ -345,9 +347,10 @@ def main(argv: list[str] | None = None) -> int:
             if entry["stage1"]["version_exit_code"] != 0:
                 failures.append("stage1 version probe failed")
 
-    if entry["stage1"] is not None:
+    if entry["stage0"] is not None:
         entry["corpora"]["stage0"] = corpus(
             "stage0 integration corpus", "03-corpus-stage0.log", None)
+    if entry["stage1"] is not None:
         entry["corpora"]["stage1"] = corpus(
             "stage1 integration corpus", "04-corpus-stage1.log", stage1)
 

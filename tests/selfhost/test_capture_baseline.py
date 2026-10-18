@@ -115,6 +115,17 @@ class SnapshotIdentityTests(unittest.TestCase):
         self.assertNotEqual(first["snapshot_id"],
                             recorder.snapshot_identity(self.root)["snapshot_id"])
 
+    def test_quoted_untracked_names_are_hashed(self) -> None:
+        for name in ("notes-é.ag", "tab\tname.ag", "line\nbreak.ag"):
+            with self.subTest(name=name):
+                path = self.root / name
+                path.write_text("first", encoding="utf-8")
+                first = recorder.snapshot_identity(self.root)
+                path.write_text("second", encoding="utf-8")
+                self.assertNotEqual(first["snapshot_id"],
+                                    recorder.snapshot_identity(self.root)["snapshot_id"])
+                path.unlink()
+
 
 class GenerationLogTests(unittest.TestCase):
     def test_focused_counts_do_not_substitute_for_a_full_corpus(self) -> None:
@@ -139,6 +150,13 @@ class GenerationLogTests(unittest.TestCase):
 
 
 class PrepareOutDirTests(unittest.TestCase):
+    def test_main_rejects_output_inside_checkout_before_writing(self) -> None:
+        out = pathlib.Path(recorder.__file__).resolve().parents[2] / "baseline-evidence"
+        with self.assertRaises(SystemExit) as error:
+            recorder.main(["--out", str(out)])
+        self.assertEqual(error.exception.code, 2)
+        self.assertFalse(out.exists())
+
     def test_refuses_non_empty_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             out = pathlib.Path(temporary)
