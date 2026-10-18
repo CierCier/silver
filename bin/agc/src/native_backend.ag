@@ -18,6 +18,7 @@ import std.sys.errno;
 import std.time;
 import std.atomic;
 import std.thread;
+import vendor.llvm.llvm;
 import agc;
 import frontend.serialize;
 import frontend.lint;
@@ -1162,6 +1163,32 @@ void native_append_run_args(Vec<String>* arguments, Command* command) {
         }
         i += 1;
     }
+}
+
+bool native_validate_target(CliMatches* cli) {
+    str host_triple_raw = LLVMGetDefaultTargetTriple();
+    String host_triple = String.from_str(host_triple_raw);
+    LLVMDisposeMessage(host_triple_raw);
+
+    bool supported_host = host_triple.starts_with("x86_64-")
+        && host_triple.contains("-linux-");
+    Optional<String> requested_target = cli.value("target");
+    bool supported_target = true;
+    if (requested_target.is_some()) {
+        String target = requested_target.unwrap();
+        supported_target = target.equals(host_triple.to_str());
+        target.drop();
+    }
+
+    if (!supported_host) {
+        STDERR.write_str("agc: error: stage1 native backend requires an x86_64 Linux host\n");
+    } else if (!supported_target) {
+        STDERR.write_str("agc: error: stage1 native backend supports only the host target triple (");
+        STDERR.write_str(host_triple.to_str());
+        STDERR.write_str(")\n");
+    }
+    host_triple.drop();
+    return supported_host && supported_target;
 }
 
 
@@ -2781,6 +2808,12 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     profiler_end_phase("serialize");
 
     CfgSet cfg = linux_defaults();
+    Optional<String> requested_target = cli.value("target");
+    if (requested_target.is_some()) {
+        String target = requested_target.unwrap();
+        cfg_apply_target(&cfg, target.to_str());
+        target.drop();
+    }
     Vec<String> includes = Vec<String>.new();
     i64 ei = 0;
     while (ei < extra_includes.len()) {
@@ -2790,18 +2823,6 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     i64 arg_idx = 1;
     while (arg_idx < arguments.len()) {
         String* arg = arguments.get_ptr(arg_idx);
-        if (arg.equals("--target") && arg_idx + 1 < arguments.len()) {
-            cfg_apply_target(&cfg, arguments.get_ptr(arg_idx + 1).to_str());
-            arg_idx += 2;
-            continue;
-        }
-        if (arg.starts_with("--target=")) {
-            String target = arg.strip_prefix("--target=");
-            cfg_apply_target(&cfg, target.to_str());
-            target.drop();
-            arg_idx += 1;
-            continue;
-        }
         if (arg.equals("-I") && arg_idx + 1 < arguments.len()) {
             includes.push(String.from_str(arguments.get_ptr(arg_idx + 1).to_str()));
             arg_idx += 2;

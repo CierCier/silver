@@ -26,7 +26,7 @@ CliParser agc_cli_parser() {
     parser.add_value("library-path", "L", "DIR", "Add a library search directory", true);
     parser.add_value("library", "l", "LIB", "Link with LIB", true);
     parser.add_value("warning", "W", "WARNING", "Configure a warning", true);
-    parser.add_value("target", "", "TRIPLE", "Compile for target triple TRIPLE", false);
+    parser.add_value("target", "", "TRIPLE", "Native builds require the LLVM host triple; frontend checks use it for cfg", false);
     parser.add_value("sysroot", "", "DIR", "Use DIR as the target sysroot", false);
     parser.add_flag("no-std", "", "Do not link the standard library", false);
     parser.add_flag("static-runtime", "", "Use the static Silver runtime", false);
