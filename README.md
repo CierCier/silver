@@ -1,6 +1,10 @@
 # Silver
 
-Silver is a statically typed systems programming language with an LLVM backend. It provides deterministic resource management, compile-time borrow checks, structured concurrency, and a freestanding runtime.
+Silver is a statically typed systems programming language with an LLVM backend,
+automatic resource cleanup, ownership and borrow checks, OS threads, and a
+freestanding runtime. The Rust stage0 compiler bootstraps the Silver stage1
+compiler. Their supported commands and checking coverage differ; see the
+[stage1 checklist](stage1-checklist.md) and [verification record](docs/selfhost-completion-record.md).
 
 ## Example
 
@@ -30,11 +34,15 @@ i32 main() {
 
 ## Features
 
-- **Resource management**: Automatic drop cleanup on scope exit via compiler-managed drop flags. Ownership transfers explicitly with `move`.
-- **Borrowing**: References (`&T`, `&mut T`) cannot escape their stack frames. Raw pointers (`T*`) remain available for manual control and FFI.
-- **Concurrency**: Structured task spawning with `launch` and `wait`. The compiler enforces that non-thread-safe types cannot cross task boundaries.
+- **Resource management**: Automatic drop cleanup on scope exit via compiler-managed drop flags. Owned values transfer implicitly or with `move`; see the [ownership rules](SYNTAX.md#8-memory-management--ownership-model) and [cleanup fixture](tests/cascade_drop_test.ag).
+- **Borrowing**: References (`&T`, `&mut T`) carry borrow-origin checks. Raw pointers (`T*`) remain available for manual control and FFI. [Borrow fixtures](tests/borrow_conflict_test.ag) cover selected checks; complete typed control-flow analysis remains open.
+- **Concurrency**: OS tasks use `launch` and explicit `wait`, with a Send check on arguments. A dropped task handle does not join the task. See [task semantics](SYNTAX.md#9-concurrency--threading) and [task fixtures](tests/launch_send_test.ag).
 - **Freestanding runtime**: Pure-Silver runtime (`std/rt/`) with no required C standard library dependency.
-- **Tooling and diagnostics**: DWARF debug information by default, built-in allocation leak tracking (`--leak-check`), crash backtraces, and Language Server Protocol (`aglsp`) support.
+- **Tooling and diagnostics**: Stage0 provides DWARF debug information and allocation leak tracking. Stage1 builds the [AGLSP language server](tests/selfhost/test_aglsp.py); its native option limits are listed in the [compiler guide](docs/compiler-guide.md#native-options).
+
+The [syntax reference](SYNTAX.md) documents tuple values and destructuring,
+slices, selective imports, receiver shorthand, and the Optional/Result APIs,
+with links to their implementations and runtime fixtures.
 
 ## Installation
 
@@ -85,14 +93,14 @@ cargo build --release -p agc
 # Compile to an executable
 agc path/to/file.ag -o out
 
-# Compile and run in one step
-agc run path/to/file.ag [args...]
+# Compile and run, forwarding program arguments after --
+agc run path/to/file.ag -- input.txt
 
 # Frontend type checking only
 agc check path/to/file.ag
 
-# Run with allocation leak tracking
-agc --leak-check run path/to/file.ag
+# Stage0: run with allocation leak tracking
+agc run path/to/file.ag --leak-check
 ```
 
 ### Modules and packaging
@@ -101,9 +109,22 @@ agc --leak-check run path/to/file.ag
 # Emit a precompiled module (.agm)
 agc path/to/file.ag --emit=module -o path/to/file.agm
 
-# Emit a shared packaged module
+# Stage0: emit a shared packaged module
 agc path/to/file.ag --emit=module --shared -o path/to/file.agm
 ```
+
+### Native targets
+
+The Silver stage1 compiler builds native programs on x86_64 Linux using LLVM's
+default host target. An explicit `--target TRIPLE` must match that triple
+exactly. Unsupported native targets fail before source compilation or output
+creation. Source and workspace `check` commands can use another target's cfg
+values; `lex`, `parse`, and `ast` accept `--target` but dump the unfiltered
+source. Neither frontend check nor dump establishes native support for that
+target. The Rust stage0 compiler retains its separate cross-compilation paths.
+
+See the [compiler target contract](docs/compiler-guide.md#native-target-contract)
+for the scope of this restriction.
 
 ### Running tests
 
@@ -117,7 +138,7 @@ python3 tests/run_tests.py --no-tui
 # Build stage1 with stage0 and run frontend parity gates
 tests/selfhost/run_stage.sh --include-std
 
-# Exercise the full Linux command surface through stage1's compatibility seam
+# Exercise stage1's Linux native backend and integration corpus
 bash tests/selfhost/run_native.sh --no-tui --jobs 4
 ```
 
@@ -127,7 +148,7 @@ bash tests/selfhost/run_native.sh --no-tui --jobs 4
 - `bootstrap/stage0/agsm/`: Source maps and module artifact generator
 - `bootstrap/stage0/ffi-rust/`: Optional Rust implementation behind Silver's versioned C ABI
 - `bootstrap/aglsp/`: Rust Language Server Protocol server
-- `bin/agc/`: Stage1 self-hosting compiler driver (Silver); see `docs/selfhost-plan.txt`
+- `bin/agc/`: Stage1 self-hosting compiler driver in Silver; see the [compiler guide](docs/compiler-guide.md)
 - `bin/aglsp/`: Silver language-server binary package
 - `bin/agc/src/agsm.ag`: AGSM command integrated into the stage1 compiler driver
 - `libs/agc/`: Reusable stage1 compiler frontend library (Silver)

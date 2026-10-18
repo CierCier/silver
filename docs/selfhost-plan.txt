@@ -3,6 +3,11 @@
  docs/selfhost-plan.txt — 2026-09-23
 ===============================================================================
 
+Historical design plan, not a current blocker inventory. For supported behavior
+and dated verification, read SYNTAX.md, stage1-checklist.md, and
+docs/selfhost-completion-record.md. Several implementation gaps described below
+have since been addressed; retain this document for the original rationale.
+
 Goal
 ----
 One day `agc` should be written in Silver and built by the Rust bootstrap

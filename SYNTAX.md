@@ -1,9 +1,9 @@
 # Silver Language Syntax Specification
 
-This document is the authoritative reference for the Silver systems programming
-language (`agc`) as implemented by the compiler — every claim is verified against
-the compiler source.  Features not yet implemented are explicitly marked as
-**Planned** or omitted.
+This reference describes Silver syntax and behavior implemented by the compiler
+and standard library. Stage0 and stage1 do not support every feature equally.
+The notes below identify known limits, and the evidence index links the parser,
+stage1 source, standard-library modules, and representative fixtures.
 
 ---
 
@@ -19,6 +19,26 @@ the compiler source.  Features not yet implemented are explicitly marked as
 8. [Memory Management & Ownership Model](#8-memory-management--ownership-model)
 9. [Concurrency & Threading](#9-concurrency--threading)
 10. [Standard Library & Patterns](#10-standard-library--patterns)
+
+### Evidence by area
+
+These links are representative evidence. Parser acceptance does not by itself
+prove type checking, code generation, or runtime behavior. Stage0 lives under
+`bootstrap/stage0`; stage1's Silver implementation lives under `libs/agc`.
+
+| Area | Implementation | Representative fixture |
+|---|---|---|
+| Tokens and literals | [stage0 lexer](bootstrap/stage0/agc/src/lexer.rs), [stage1 lexer](libs/agc/src/frontend/lexer.ag) | [literal and reflection tests](tests/literals_and_reflection_test.ag) |
+| Types, expressions, and patterns | [stage0 parser](bootstrap/stage0/agc/src/parser/prt_parser.rs), [stage1 type checker](libs/agc/src/frontend/typecheck_expr.ag) | [tuple destructuring](tests/destructure_let_test.ag), [slice syntax](tests/slice_syntax_test.ag) |
+| Declarations and imports | [stage0 parser](bootstrap/stage0/agc/src/parser/prt_parser.rs), [stage0 import loader](bootstrap/stage0/agc/src/parser/import_hook.rs) | [selective imports](tests/selective_import_test.ag), [source import aliases](tests/source_import_alias_test.ag) |
+| Functions, callbacks, and generics | [stage1 monomorphization](libs/agc/src/frontend/monomorph.ag), [type checking](libs/agc/src/frontend/typecheck_expr.ag) | [function pointers](tests/native_function_pointer_test.ag), [generic calls](tests/nested_generic_call_test.ag), [generic tuple returns](tests/generic_tuple_return_test.ag) |
+| Traits, operators, and casts | [operator traits](std/ops.ag), [stage1 expression lowering](libs/agc/src/frontend/lower_expr.ag) | [comparison traits](tests/compare_trait_test.ag), [temporary operators](tests/temp_operator_test.ag), [casts](tests/cast_ergonomics_test.ag) |
+| Control flow, matching, and defers | [stage1 statement codegen](libs/agc/src/backend/llvm/stmt.ag) | [loop exits](tests/native_for_in_continue_test.ag), [match values](tests/match_value_test.ag), [defers](tests/defer_test.ag) |
+| Macros, attributes, cfg, and static values | [stage1 cfg](libs/agc/src/frontend/cfg.ag), [stage0 parser](bootstrap/stage0/agc/src/parser/prt_parser.rs) | [macro expressions](tests/macro_expression_test.ag), [cfg blocks](tests/cfg_global_block_test.ag), [static/volatile](tests/static_volatile_test.ag), [packed layouts](tests/packed_layout_test.ag) |
+| Ownership and borrowing | [stage0 borrow checker](bootstrap/stage0/agc/src/semantic/borrow_check.rs), [stage1 ownership pass](libs/agc/src/frontend/ownership.ag) | [borrow origins](tests/borrow_origin_test.ag), [cascading drops](tests/cascade_drop_test.ag) |
+| Threads and channels | [stage1 Send check](libs/agc/src/frontend/send.ag), [channel implementation](std/channel.ag) | [launch and Send](tests/launch_send_test.ag), [channel behavior](tests/channel_test.ag), [bounded channels](tests/channel_bounded_test.ag) |
+| Result and optional values | [Optional](std/optional.ag), [Result](std/result.ag), [syscall helpers](std/sys/result.ag) | [structured errors](tests/structured_error_test.ag), [Result payload cleanup](tests/unwrap_or_err_drop_test.ag) |
+| Allocation, formatting, FFI, and assembly | [allocator](std/mem/alloc.ag), [display](std/display.ag), [stage1 codegen](libs/agc/src/backend/llvm/generator.ag) | [allocation](tests/alloc_validity_test.ag), [display](tests/display_test.ag), [C enum ABI](tests/selfhost/enum_ffi_probe.py), [syscalls](tests/syscall_test.ag) |
 
 ---
 
@@ -73,9 +93,12 @@ These are hard keywords — they cannot be used as identifiers:
 ### Literals
 
 ```silver
-// Integers — decimal and hexadecimal
+// Integers — decimal, binary, octal, and hexadecimal
 i32 dec = 42;
+i64 bin = 0b1010;
+i64 oct = 0o755;
 i64 hex = 0x1A2F;
+i64 grouped = 1_000_000;
 
 // Floating-point
 f64 pi = 3.1415926535;
@@ -94,8 +117,9 @@ bool active = true;
 bool disabled = false;
 ```
 
-> **Note**: Octal (`0o755`) and binary (`0b101010`) integer literals are **not**
-> supported.  The lexer has no token paths for them.
+Underscores may separate digits in integer and floating-point literals. Binary
+(`0b` or `0B`), octal (`0o` or `0O`), and hexadecimal (`0x` or `0X`) prefixes
+select the integer radix.
 
 String escapes include newline, carriage return, tab, NUL, backslash, quotation
 mark, apostrophe, two-digit hexadecimal bytes (`\xNN`), and Unicode scalar
@@ -135,8 +159,9 @@ void update(&mut Pair p) { p.set(42); }     // &mut T borrow origin
 Pair* borrow_first(&Pair a, &Pair b) { ... } // returned ref may borrow a or b
 ```
 
-Reference receivers (`&T self`, `&mut T self`) behave like pointer receivers
-in codegen but carry borrow-origin semantics.
+Methods can write the first receiver parameter as `self`, `&self`, or
+`&mut self`. These forms mean by-value, shared-borrow, and mutable-borrow
+receivers. The raw-pointer shorthand is `*self`.
 
 ### Raw Pointers
 
@@ -156,31 +181,43 @@ Prefer `&T`/`&mut T` whenever the callee borrows caller-owned data; reserve
 raw pointers for FFI, manual address arithmetic, and state owned by the
 callee (heap-backed).
 
-### Arrays
+### Arrays, tuples, and slices
 
-Fixed-size arrays use postfix `[N]` syntax.
+Fixed-size array declarations put `[N]` after the variable name. Array literals
+use braces.
 
 ```silver
-i32[10] fixed_arr;      // 10-element array of i32
+i32 fixed_arr[10];      // 10-element array of i32
 u8 buf[512];            // local array
 DnsCacheEntry cache[64]; // global array (size must be an integer literal)
+i32 values[3] = { 1, 2, 3 };
 ```
 
-Slices exist as the `Slice<T>`
-library type in `std/slice.ag`.
+Tuple types and tuple literals use square brackets. A comma separates tuple
+elements. A bracket type with one element and no comma is a slice type.
+
+```silver
+[i32, str] pair = [42, "answer"];
+[i32] view = values[1:];
+```
+
+The standard library also exposes the named `Slice<T>` type in
+[`std/slice.ag`](std/slice.ag). Indexing uses `value[index]`. Slicing uses
+`value[start:end]`; either bound may be omitted, as in `value[:]` or
+`value[2:]`. Slicing arrays, vectors, strings, and slices produces a borrowed
+slice view.
 
 ### Compound & Generic Types
 
 ```silver
 Vec<i32> numbers;
-Map<str, f64> scores;
+HashMap<str, f64> scores;
 Optional<str> name;
 ```
 
 ### Function Types
 
-Function types use `ReturnType(ParamTypes...)` syntax.  Tuple types `(T1, T2)`
-are **not** supported — parens group a single expression.
+Function types use `ReturnType(ParamTypes...)` syntax.
 
 ```silver
 bool(i32, f64) predicate;   // function pointer: takes i32, f64 → returns bool
@@ -194,11 +231,17 @@ void() callback;             // function pointer: no params → void
 ### Module Imports
 
 ```silver
-// Imports currently bring all public module items into scope.
+// Whole-module imports bring all public module items into scope.
 import std.io;
 ```
 
-Selective imports and aliases are planned but are not implemented yet.
+Selective imports can name exported items and rename them with `as`. Whole-module
+imports remain supported and can coexist with selective imports.
+
+```silver
+import std.io.file { println as pln, STDOUT };
+```
+
 Imports inline `.ag` source modules or ingest `.agm` binary artifacts.
 
 ### Type Aliases
@@ -244,8 +287,9 @@ extern "C" i32 printf(const char* fmt, ...);
 
 ### Struct Definitions
 
-Fields are separated by `;`. All struct fields are private to the struct.
-Struct items are public by default; use `private struct ...` to restrict visibility.
+Fields are separated by `;` and are public by default. Prefix a field with
+`private` to restrict its visibility. Struct items are public by default; use
+`private struct ...` to restrict the item's visibility.
 
 ```silver
 struct Point<T> {
@@ -358,7 +402,7 @@ Supported linkage specs: `"C"`, `"Silver"`, `"system"`, `"Rust"`, `"cdecl"`,
 extern "C" f64 c_pow(f64 base, f64 exp);
 
 #[volatile]           // never dead-code-eliminated (globaldce root)
-fn runtime_shim(...) { ... }
+i32 runtime_shim() { return 0; }
 ```
 
 `#[volatile]` on a top-level function or global keeps the item alive even
@@ -449,7 +493,13 @@ let n = compute();    // type inferred from compute()'s return type
 let b = move owned;   // move transfers ownership, as with annotated lets
 ```
 
-Pattern destructuring (`let (a, b) = ...`) is **not** supported.
+Tuple destructuring in inferred bindings uses square brackets:
+
+```silver
+let [first, second] = [10, 20];
+```
+
+Parenthesized tuple syntax is not used.
 
 ### Assignments & Compound Assignments
 
@@ -530,11 +580,12 @@ Point p = { .x = 10.0, .y = 20.0 };
 Point p2 = { 10.0, 20.0 };
 
 // Array initializer
-i32[3] arr = { 1, 2, 3 };
+i32 arr[3] = { 1, 2, 3 };
 ```
 
-> **Note**: `[1, 2, 3]` bracket syntax and `(100, "OK")` tuple literals are
-> **not** supported.  Array and struct initialization uses `{ ... }` braces.
+Tuple literals use square brackets and array literals use braces. For example,
+`[100, "OK"]` is a tuple literal, while `{ 1, 2, 3 }` initializes an array
+whose type and size are declared separately.
 
 ### Binary Expressions
 
@@ -547,8 +598,10 @@ i32[3] arr = { 1, 2, 3 };
 | Range | `..` | `0..10` |
 
 
-All binary operands must have matching types — e.g., `u64 << 8` fails;
-use `(u64)8`.
+Numeric literal operands can take their type from context. For example,
+`value << 1` works with a `u64 value` in both stages. Use `(Type)expression`
+when an explicit numeric conversion is needed; broader coercion and diagnostic
+parity remains part of the stage1 checking work.
 
 ### Unary & Postfix Expressions
 
@@ -920,9 +973,12 @@ argument type must be **Send**.  The check is a structural field walk:
   holding a zero value.
 - **`RawMutex`**: the low-level futex lock (`lock`/`unlock`/`try_lock`)
   underneath `Mutex<T>` and `Channel<T>`.
-- **`Channel<T>`**: unbounded MPSC FIFO.  `send(T)` moves a value in
-  (non-blocking), `recv()` blocks until a value is available, and `close()`
-  frees the queue buffer (needed for a leak-check-clean exit).
+- **`Channel<T>`**: thread-safe FIFO with unbounded (`Channel<T>.new()`) and
+  bounded (`Channel<T>.bounded(cap)`) modes. `send(T)` moves a value into the
+  queue; bounded sends block when the queue is full. `recv()` blocks until it
+  can return `Some(value)`, or until a closed, drained channel returns `None`.
+  `send()` returns false if the channel is closed. `close()` wakes blocked
+  senders and receivers. Call `destroy()` after use to free the queue buffer.
 - **`WaitGroup`**: `add(n)` / `done()` / `wait_all()` — a counter that
   blocks `wait_all()` until `done()` brings it to zero.
 - **Atomics**: the `__atomic_*` intrinsic layer (`__atomic_load_i64`,
@@ -946,14 +1002,21 @@ All futex-based primitives are seq_cst by default.
 
 ### Error Handling
 
-Silver uses tagged structs — there is no exception mechanism.
+Silver uses payload enums for optional values and recoverable errors. It has no
+exception mechanism.
 
-| Type | Module | Fields |
+| Type | Module | Variants or fields |
 |---|---|---|
-| `Optional<T>` | `std.optional` | `bool present`, `T thing` |
-| `Result<T, E>` | `std.optional` | `bool ok`, `T value`, `E error` |
-| `SysResult` | `std.sys.result` | `bool ok`, `i64 value`, `i64 errno` |
+| `Optional<T>` | `std.optional` | `None`; `Some(T)` |
+| `Result<T, E>` | `std.result` | `Ok(T)`; `Err(E)` |
 | `TypeResult` | `std.rt.types` | `bool ok`, `TypeId id`, `i32 err`, `String msg` |
+
+`Optional<T>.unwrap()` aborts on `None`; `Result<T, E>.unwrap()` aborts on
+`Err(E)`. `unwrap_or(fallback)` returns the payload or the fallback. Result
+also provides `unwrap_err()` and `get_error()`, which abort on `Ok(T)`.
+`std.sys.result` provides typed syscall helpers that return `Result<i64, Error>`.
+The `value ? fallback` operator also selects a fallback when an `Optional` or
+`Result` has no success value; it does not propagate errors to the caller.
 
 Unrecoverable errors call `abort()` from `std.mem.memory`.
 
@@ -974,11 +1037,12 @@ The allocator (`std.mem.alloc`) provides three tiers:
 
 ### Receiver Convention
 
-| Receiver | When |
+| Receiver form | Meaning |
 |---|---|
-| `&T self` / `&mut T self` | Borrowing receivers — inspect/mutate caller-owned state; the borrow is escape-checked and may be returned (deriving from this origin) |
-| `T* self` | Raw-pointer receiver — escape hatch (FFI, heap-backed state); creates no borrow constraint |
-| `T self` | Consuming transfer or copy semantics |
+| `&self` / `&mut self` | Shared or mutable borrow of caller-owned state; the borrow is escape-checked |
+| `*self` | Raw-pointer receiver; creates no borrow constraint |
+| `self` | By-value receiver; follows normal copy or move rules |
+| `T* self` | Explicit raw-pointer parameter form |
 
 Constructors return by value: `Vec<T> new() { ... return move v; }`.
 Prefer `&T`/`&mut T` receivers for methods that inspect or mutate

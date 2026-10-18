@@ -1,21 +1,136 @@
 # Self-host completion record
 
-Updated: 2026-10-12
+Reviewed: 2026-10-18. Historical results below apply only to their named source
+and compiler snapshots. They do not certify the current tree.
+
+## Current supported contract
+
+Stage0 bootstraps stage1 from the root workspace. Stage1 owns supported native
+compilation and does not dispatch to stage0. The [syntax reference](../SYNTAX.md)
+links language families to implementations and runtime fixtures; the
+[feature checklist](../stage1-checklist.md) separates implemented cases from
+remaining checking, ownership, ABI, and artifact work.
+
+The native driver accepts only the exact LLVM host target triple for code
+generation. Source and workspace `check` commands retain target-dependent cfg
+selection. `lex`, `parse`, and `ast` accept `--target` but dump unfiltered
+source. The [target gate](../tests/selfhost/check_native_target.py) exercises
+rejection before output creation and preservation of program arguments.
+
+The [native option audit](compiler-guide.md#native-options) is part of this
+contract. Parser acceptance is not evidence of option support. In particular,
+native `--leak-check` leaves allocator instrumentation disabled, debug-info
+flags do not enable DWARF, and several output/build flags have no effect.
+Destruction-counter fixtures still prove their observed cleanup behavior, but
+passing them with an ignored leak flag does not prove absence of allocator leaks.
+
+The reproducible baseline command and manually triggered generation workflow
+record source/compiler identities, commands, failures, and skips as described
+in the [gate documentation](../tests/selfhost/README.md). A dirty worktree must
+be identified as a source snapshot, not reported as a clean commit baseline.
+CI results require a published workflow run; local execution does not certify
+that GitHub Actions ran.
+
+## Clean C01 baseline (2026-10-18)
+
+The recorder completed against clean commit
+`4ce949f942301e84a13e8af8bea9ccf717f95872` with `status: ok` and
+`snapshot_stable: true`. It rebuilt debug stage0 with Cargo, bootstrapped
+stage1 with `--no-cache`, and ran both complete corpora sequentially with
+eight workers. Stage0 reported `v0.2.6-247-g4ce949f`; stage1 reported
+`agc 0.2.6`.
+
+| Compiler | SHA-256 | Passed / failed / skipped |
+| --- | --- | --- |
+| Stage0 | `c9a95492f81adc249bed6ae8f852dc41fc9cd2003a106aad67b4d03fb86c1f46` | 289 / 0 / 7 |
+| Stage1 | `b4e6835e8eca74773e4cf076c460cd3a36567239407e49c02d55356f2fa906aa` | 294 / 0 / 2 |
+
+Skips are identical to the dirty-snapshot run below. Evidence is retained at
+`/tmp/silver-c01-clean-4ce949f/baseline.json` with per-command logs. This
+record and the subsequent recorder edge-case fixes were added after capture;
+the compiler implementation remains unchanged. Stage1's hash matches the
+compiler used for the earlier full stage2/stage3 run.
+
+`run_stage.sh --include-std` also passed using Cargo stage0 and a fresh native
+stage1: token and AST-span parity on 445 files, semantic-status parity on
+449 files, typed Send, AGLSP protocol, workspace, and artifact checks. Two
+foreign AGM cases lacked artifacts. GATE-003 still defers rendered diagnostic,
+normalized LLVM IR, and production AGM/cache-key comparisons. The script
+started before the documentation commits and ran unchanged compiler sources;
+this is a separate frontend run, not part of the recorder's source snapshot.
+
+Implementation PR: [#45](https://github.com/CierCier/silver/pull/45).
+Hosted generations remain unrun; the local results do not certify hosted CI.
+
+## Dirty-snapshot C01 baseline (2026-10-18)
+
+The recorder completed with `status: ok` and unchanged source during the run.
+The base commit was `962ed91c884f409957cb810b61390c68f6dcc5d4`, with the
+uncommitted C01 changes identified by source fingerprint
+`9e0851fe58b19c90b9e698a9125a36e9492da18fbc35d931865025e848ad14bf`.
+This is a dirty source snapshot, not a clean committed or hosted CI baseline.
+The final documentation annotations, including this section, were added after
+capture; compiler and test-runner code stayed unchanged.
+
+```bash
+python3 tests/selfhost/capture_baseline.py \
+    --out /tmp/silver-c01-baseline-20261018 --profile debug --jobs 8 --generations
+```
+
+Stage0 was rebuilt with Cargo and stage1 freshly bootstrapped with
+`--no-cache`. The native generation gate built stage2 and stage3 with
+`--no-cache`; compiler builds did not enable leak checking. All four compilers
+report version 0.2.6. Their complete integration corpora ran sequentially, each
+covering 296 fixtures:
+
+| Compiler | SHA-256 | Passed / failed / skipped |
+| --- | --- | --- |
+| Stage0 | `1e62960bf26050fc9bb25a89279280569515e4947b2d47a840927cdd6f7da03e` | 289 / 0 / 7 |
+| Stage1 | `b4e6835e8eca74773e4cf076c460cd3a36567239407e49c02d55356f2fa906aa` | 294 / 0 / 2 |
+| Stage2 | `6d84d5b4d90aec3663d5cbc43f8033adedfcb5fc8d3bc58d7db5398cee7c9f94` | 294 / 0 / 2 |
+| Stage3 | `6d84d5b4d90aec3663d5cbc43f8033adedfcb5fc8d3bc58d7db5398cee7c9f94` | 294 / 0 / 2 |
+
+Every stage skipped `mem_growth_watch`, the manual benchmark, and
+`rust_ffi_test`, whose optional Rust FFI library was not built. Stage0 also
+skipped five stage1-only regressions: `json_synthesis_scope_test`,
+`match_multi_payload_move_test`, `match_payload_remainder_test`,
+`method_slice_coercion_test`, and `unwrap_or_array_element_error_test`.
+
+The generation gate passed its native self-build, frontend/workspace, C enum
+ABI, focused runtime, and Drop-rejection checks. Matching stage2/stage3 hashes
+are one observation in this build, not a complete language or reproducibility
+guarantee. Other checks passed: 609 Cargo tests, 15 recorder tests, 17 focused
+syntax/API fixtures in each of stage0 and stage1, the README and combined
+syntax examples in both stages, native target/workspace/link gates, relative
+documentation links, and actionlint for the new workflow.
+
+Local evidence is in `/tmp/silver-c01-baseline-20261018/baseline.json` and its
+`logs/` and `generations/` directories. The JSON preserves tool/compiler
+versions, commands, statuses, counts, and every skip reason. Its fingerprint
+covers tracked and non-ignored source, excluding ignored artifacts and other
+ambient build inputs. Native allocator leak instrumentation remains disabled,
+as documented above. At that capture, full frontend parity, publication, and a
+clean-commit baseline remained outstanding. The newer results above supersede
+those local gaps; the manual hosted workflow has not run.
 
 ## Definition of done
 
 The Linux pipeline is complete when a stage1-built `agc`:
 
 1. builds from the root `silver.toml` using stage0;
-2. accepts the stage0 command surface for native build/run/check/package/cache operations;
+2. implements the documented native build/run/check/package/cache paths, with
+   explicit errors for unsupported requests and behavioral coverage for every
+   advertised option;
 3. passes the complete Linux integration corpus with the same results as stage0;
 4. preserves cache correctness, reproducibility, diagnostics, and runtime behavior;
 5. passes the full frontend parity gate without deferred-boundary skips; and
 6. can compile itself to a stage2 binary whose behavior is fixed-point equal to stage1.
 
-Stage1 now owns the native backend for supported commands and returns local
-errors for unsupported requests. Stage0 builds stage1 and remains available for
-comparison; stage1 runtime commands do not delegate to it.
+Stage1 owns the native backend for supported commands and explicitly rejects
+some unsupported requests, including non-host native targets. The option audit
+lists other requests that are still accepted without their promised behavior;
+the completion criterion above is not yet met. Stage0 builds stage1 and remains
+available for comparison; stage1 runtime commands do not delegate to it.
 
 ## Local generational verification (2026-10-12)
 
@@ -86,7 +201,8 @@ and language behavior beyond this corpus remain open.
 
 ## Frontend completion summary at the historical baseline
 
-The frontend migration is complete across all slices:
+These are the implementation claims recorded at that historical baseline.
+They do not establish complete frontend behavior:
 - Canonical type table with integer `TypeId`s and $O(1)$ property queries.
 - CST lowering to flat POD `AstExpr` and `AstStmt` representations with bottom-up type checking.
 - Place and projection model with field-disjointness and $O(1)$ `BitSet` local variable tracking.

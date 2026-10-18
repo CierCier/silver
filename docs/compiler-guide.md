@@ -94,6 +94,91 @@ silver/
 
 ---
 
+### Native target contract
+
+Stage1's native backend uses the triple returned by
+`LLVMGetDefaultTargetTriple()` for its LLVM target machine. The supported
+runtime and linker path is x86_64 Linux. Omitting `--target` selects this host
+path. An explicit target must match the LLVM default triple exactly, including
+its vendor and environment components. The error reports the supported triple.
+Aliases and different ABI environments are not treated as equivalent.
+
+The restriction covers native source and workspace build/run commands, including
+object and module emission. Unsupported targets fail before source compilation
+and output creation so that target-specific cfg cannot select code
+for a different machine than the backend emits. Program arguments forwarded by
+`run ... --` or `--run-arg` are not compiler target options.
+
+Source and workspace `check` commands retain target-dependent cfg selection.
+`lex`, `parse`, and `ast` accept `--target` but dump the unfiltered source; they
+do not apply target cfg. Neither checks nor dumps prove that a program can be
+compiled or linked for that target. Stage0's cross-target implementations are
+separate and unchanged.
+
+The [native target regression](../tests/selfhost/check_native_target.py)
+exercises this contract through compiler commands. The option audit below
+describes the other native driver boundaries.
+
+### Native options
+
+Audited on 2026-10-18 against the native driver based on `962ed91`, including
+the host-target guard committed as `64dfb27`. This is the stage1 `build`/`run` contract,
+not the Rust stage0 CLI contract. The [schema](../bin/agc/src/cli.ag) accepts
+more options than the [native backend](../bin/agc/src/native_backend.ag)
+implements. An accepted spelling alone does not establish behavior.
+
+| Option or command | Observed native behavior and scope |
+| --- | --- |
+| `--help`, `-h`, `--version`, `-V` | Print the stage1 help/version and exit. |
+| `build`/`b`, `run`/`r`, direct source paths | Build native code; `run` executes the result. Use the command form rather than hidden `--run`. |
+| `check`/`c`, `lex`, `parse`, `ast` | Local frontend commands. `check` has partial typed checking; syntax acceptance is not a complete semantic guarantee. |
+| `--manifest PATH`, `--bin NAME`, `--lib NAME` | Select supported package/workspace targets. Git dependencies remain unsupported. See the [workspace gate](../tests/selfhost/check_workspace.py). |
+| `-o FILE`, `--output FILE`, `--output=FILE` | Select the output path. |
+| `--emit=exe` or no emit option | Produce an executable. |
+| `--emit=object` or `--emit object` | Produce an ELF relocatable object. The advertised `--emit=obj` and `-c` currently produce executables instead. |
+| `--emit=module` | Produce frontend AGM metadata plus its native object. Rich ABI/layout metadata parity remains open. `--shared` does not select shared native output. |
+| `-S`, `--emit-asm`, `--emit-llvm`, other `--emit` values | No requested-mode handling. `asm`, `llvm-ir`, `check`, `tokens`, `ast`, and `grammar` fall back to executable output on `build`. Use the frontend commands for checking and dumps. |
+| `-I DIR`, `-IDIR`, `--include DIR`, `--include=DIR`, `--include-path DIR` | Add source import roots. `--root DIR` is accepted but does not set a native import root. |
+| `--target TRIPLE` or `--target=TRIPLE` | Exact LLVM host triple only for native output, as described above. |
+| `--cfg KEY=VALUE,...` | Add cfg values; repeated flags are accepted. Explicit cfg values can coexist with derived values. |
+| `-O`, `-O1`/`2`/`3`/`s`/`z`/`fast` | Select release cfg and prune debug assertions. They do not select an LLVM optimization pipeline; the target machine uses its fixed default codegen level. `-O0` retains debug cfg. |
+| `--opt-level=LEVEL` | Accepted but does not select cfg or an LLVM optimization level. Prefer the short spelling for the existing cfg behavior. |
+| `-g`, `--debug-info`, `-g0`, `--g0` | Accepted without native DWARF generation or suppression. The debug cfg flag controls assertions, not DWARF. |
+| `--leak-check` | Accepted without enabling native allocator instrumentation. The generated `__silver_leak_check_enabled` global remains false. |
+| `-L DIR`/`-LDIR`, `-l LIB`/`-lLIB`, `--static` | Forward native library/search/static-link inputs. Long `--library-path`, `--lib-path`, and `--library` spellings are accepted but not forwarded. See the [link contract gate](../tests/selfhost/check_native_link_contract.py). |
+| `-Wall`, `-Wextra`, `-Wunused`, `-Wunreachable-code`, `-Werror`, their implemented `-Wno-*` forms | Configure the selected entry-file lints. The [lint configuration](../libs/agc/src/frontend/lint.ag) enumerates the supported spellings; unknown warnings and long `--warning` forms have no effect. |
+| `-j N`, `--jobs N` | Require a positive worker count and bound native module workers. |
+| `--no-cache`, `-nc`, `--cache-dir DIR` | Bypass native object caching or select its directory. Dependency-local invalidation and full artifact reproducibility remain open. |
+| `cache info`/`prune`/`clean`, `clean`, `--clean`, `--clean-cache`, `--cache-info`, `--cache-prune` | Inspect or remove native object cache entries; not package initialization. See the [cache gate](../tests/selfhost/check_native_cache.py). |
+| `--progress`, `--no-progress`, `-v`/`--verbose`, `--profile` | Control build progress, details, and phase profiling. |
+| `--run-arg ARG`, program arguments after `--` | Forward program arguments for `run`. They do not select compiler target cfg. |
+| `--static-runtime` | Accepted for the existing static Silver runtime; it does not select a second runtime implementation. |
+| `--tree-shake`, `--no-tree-shake`, `--dry-run`, `-###`, `--show-graph` | Accepted without the promised behavior. In particular, a native dry run still creates an executable. |
+| `--sysroot`, `-D`/`--define`, `--no-std` | Accepted without applying a native sysroot, preprocessor definitions, or standard-runtime exclusion. |
+| `--check`, `--run`, `--test`, `--test-harness`, `--nocapture` | Accepted without selecting those native build behaviors. Workspace `test`/`t` explicitly reports unsupported; use the integration harness for tests. |
+| `init`, `--init`, `--name` | Recognized by the CLI but no working stage1 package initialization path is implemented. `--name` on a native build has no effect. |
+| `agsm` | Own CLI/help and local rejection of unsupported foreign-module generation; it does not invoke a bootstrap generator. |
+
+The audit used executable exit codes for cfg and option probes, ELF type
+inspection to distinguish objects from executables, section inspection for
+DWARF, and runtime reads of the allocator flag. For example, compiling this
+program with `--leak-check` returned 43 under stage0 and 42 under stage1:
+
+```silver
+import std.mem.alloc;
+
+i32 main() {
+    if (__silver_leak_check_enabled) { return 43; }
+    return 42;
+}
+```
+
+These gaps remain compiler work. [C06](https://github.com/CierCier/silver/issues/36)
+tracks native artifacts and option behavior; [C04](https://github.com/CierCier/silver/issues/34)
+tracks ownership and cleanup proof. Passing fixtures with an ignored leak flag
+does not establish allocator leak freedom. Neither C01 documentation nor
+parser acceptance closes those correctness gates.
+
 ## 4. Compiler Pipeline
 
 ```mermaid

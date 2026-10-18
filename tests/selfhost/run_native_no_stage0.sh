@@ -10,6 +10,7 @@ fi
 stage1=$(realpath "$1")
 "$stage1" --version
 python3 "$root/tests/selfhost/check_native_backend.py" --stage1 "$stage1"
+python3 "$root/tests/selfhost/check_native_target.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_send_gate.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_native_link_contract.py" --stage1 "$stage1"
 python3 "$root/tests/selfhost/check_native_format.py" --stage1 "$stage1"
