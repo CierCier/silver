@@ -7,6 +7,7 @@ import frontend.ast_expr;
 import frontend.bindings;
 import frontend.items;
 import frontend.messages;
+import frontend.typecheck_expr;
 import frontend.types;
 
 struct MonoMethodTemplate {
@@ -334,7 +335,8 @@ bool mono_find_method_template(SyntaxNode* root, TypeTable* types, str base, str
                                                 copy_index += 1;
                                             }
                                             String failure = String.new();
-                                            u32 receiver_type = types.get_named_args(base, arg_ids);
+                                            u32 receiver_type = arg_ids.len() == 0
+                                                ? types.parse_type_name(base) : types.get_named_args(base, arg_ids);
                                             specificity = mono_match_method_call(call_pool, root, types,
                                                 receiver_type, call_args, static_method, &candidate,
                                                 &names, &args, &failure);
@@ -491,7 +493,7 @@ bool mono_resolve_generic_method(AstPool* pool, SyntaxNode* root, TypeTable* typ
         depth += 1;
         receiver = types.get(receiver_type);
     }
-    if (receiver.kind != TypeKind.Named) { return false; }
+    if (receiver.kind != TypeKind.Named && !type_is_primitive(receiver_type)) { return false; }
     str base = types.names.get(receiver.name_id);
     i64 count = receiver.count;
     u32 start = receiver.inner;
@@ -583,11 +585,18 @@ i64 mono_match_method_call(AstPool* pool, SyntaxNode* root, TypeTable* types,
                 formal = types.get_pointer(formal, true);
             }
         }
-        AstExpr* actual = pool.get_expr(pool.args.get((i64)args_start + 1 + i));
+        u32 actual_id = pool.args.get((i64)args_start + 1 + i);
         specificity += mono_type_specificity(types, formal, &method_params);
-        bool literal = actual.kind == ExprKind.Literal && type_is_numeric(actual.aux);
-        matched = mono_unify_free_parameter(types, formal,
-            types.resolve_subst(actual.inferred_type), &method_params, &inferred, literal);
+        if (method_params.len() == 0) {
+            i64 argument_score = 0;
+            matched = typecheck_method_argument_score(pool, types, root, receiver_type,
+                actual_id, formal, &argument_score);
+        } else {
+            AstExpr* actual = pool.get_expr(actual_id);
+            bool literal = actual.kind == ExprKind.Literal && type_is_numeric(actual.aux);
+            matched = mono_unify_free_parameter(types, formal,
+                types.resolve_subst(actual.inferred_type), &method_params, &inferred, literal);
+        }
         i += 1;
     }
     types.pop_subst(method_params.len());
@@ -669,6 +678,12 @@ void mono_check_bound_list(SyntaxNode* root, TypeTable* types, SyntaxNode* curso
 
 bool mono_type_implements_trait(SyntaxNode* root, TypeTable* types, u32 type_id, str trait_name, u32 depth) {
     if (depth > 64) { return false; }
+    u32 owner_type = types.resolve_subst(type_id);
+    u32 pointer_depth = 0;
+    while (types.get(owner_type).kind == TypeKind.Pointer) {
+        owner_type = types.get(owner_type).inner;
+        pointer_depth += 1;
+    }
     SyntaxNode* item = root.first_child;
     while (item != (SyntaxNode*)0) {
         if (item.kind == NodeKind.Impl) {
@@ -686,10 +701,10 @@ bool mono_type_implements_trait(SyntaxNode* root, TypeTable* types, u32 type_id,
             if (cursor != (SyntaxNode*)0 && cursor.kind != NodeKind.Block
                 && trait_node != (SyntaxNode*)0 && strcmp(trait_node.text, trait_name) == 0) {
                 SyntaxNode* target = impl_target_identifier(item);
-                if (target != (SyntaxNode*)0 && impl_target_pointer_depth(item) == 0) {
+                if (target != (SyntaxNode*)0 && impl_target_pointer_depth(item) == pointer_depth) {
                     if (!item_method_is_generic(target)
-                        && types.parse_type_name(target.text) == type_id) { return true; }
-                    TypeEntry* actual = types.get(type_id);
+                        && types.parse_type_name(target.text) == owner_type) { return true; }
+                    TypeEntry* actual = types.get(owner_type);
                     if (actual.kind == TypeKind.Named && actual.count > 0
                         && strcmp(types.names.get(actual.name_id), target.text) == 0) {
                         Vec<u32> args = Vec<u32>.new();

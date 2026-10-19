@@ -16,6 +16,9 @@ struct Marked { i64 value; i64 extra; }
 impl Marker for Marked { i64 marker(&self) { return self.value; } }
 struct Tagged<T> { T value; }
 impl<T: Marker> Marker for Tagged<T> { i64 marker(&self) { return 1; } }
+struct PointerLeaf { i64 value; }
+impl Marker for PointerLeaf* { i64 marker(&self) { return 1; } }
+impl<T: Marker> Marker for Tagged<T>* { i64 marker(&self) { return 1; } }
 struct Holder { i64 value; i64 rows[2][3]; }
 struct Methods { i32 unused; }
 impl Methods {
@@ -23,6 +26,7 @@ impl Methods {
     i64 constrained<T>(&self, &T _value) where T: Marker { return @size(T); }
     i64 by_value<T>(&self, T _value) { return @size(T); }
     i64 tuple_width<T>(&self, [T, i64] _value) { return @size(T); }
+    i64 pointer_width<T: Marker>(&self, T _value) { return @size(T); }
 }
 """
 
@@ -76,6 +80,12 @@ i32 main() {
     if (methods.by_value(holder.rows[1][2]) != 8) { return 8; }
     [i32, i64] pair = [7, 11];
     if (methods.tuple_width(pair) != 4) { return 6; }
+    PointerLeaf leaf;
+    PointerLeaf* pointer = &leaf;
+    Tagged<i64>* tagged_pointer = &tagged;
+    if (methods.pointer_width(pointer) != 8) { return 9; }
+    if (methods.width(&pointer) != 8) { return 10; }
+    if (methods.pointer_width(tagged_pointer) != 8) { return 11; }
     return 42;
 }
 """, encoding="utf-8")
@@ -88,8 +98,10 @@ i32 main() {
         )
         build_and_run(imported, 42)
         overloads = (
-            "i64 pick<T>(&self, &T _value) { return @size(T); }\n",
-            "i64 pick(&self, i64 value) { return value + 100; }\n",
+            "i64 pick<T>(&self, &T _value) { return @size(T); }\n"
+            "i64 converted<T>(&self, T _value) { return @size(T); }\n",
+            "i64 pick(&self, i64 value) { return value + 100; }\n"
+            "i64 converted(&self, i64 value) { return value + 100; }\n",
         )
         for order in (overloads, overloads[::-1]):
             overloaded = work / "overloaded.ag"
@@ -105,6 +117,7 @@ i32 main() {
     if (methods.pick(&small) != 4) { return 2; }
     if (methods.shape(small) != 4) { return 3; }
     if (methods.shape(&small) != 104) { return 4; }
+    if (methods.converted(small) != 103) { return 5; }
     return 42;
 }
 """, encoding="utf-8")
@@ -113,6 +126,9 @@ i32 main() {
             ("width", "Missing"),
             ("constrained", "Missing"),
             ("width", "Tagged<Missing>"),
+            ("width", "PointerLeaf"),
+            ("width", "PointerLeaf**"),
+            ("width", "Tagged<Missing>*"),
         ):
             rejected = work / f"bad-{method}.ag"
             rejected.write_text(BOUNDS + f"""\

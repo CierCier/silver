@@ -2415,6 +2415,7 @@ impl MethodCallRewrite<'_> {
             ty = inner;
         }
         match ty {
+            Type::Primitive(_) => self.args.is_empty() && ty.canonical_key() == self.base,
             Type::Named { path, generics } => path.last().is_some_and(|name| {
                 (name == self.base && generics == self.args)
                     || (generics.is_empty() && name == &mangle_name(self.base, self.args))
@@ -2879,13 +2880,17 @@ fn is_generic_self_type(ty: &ast::Type) -> bool {
 }
 
 fn impl_self_base_name(ty: &ast::Type) -> Option<String> {
-    let ast::TypeKind::Named(named) = ty.kind.as_ref() else {
-        return None;
-    };
-    named.path.last().map(|id| id.name.clone())
+    match ty.kind.as_ref() {
+        ast::TypeKind::Named(named) => named.path.last().map(|id| id.name.clone()),
+        ast::TypeKind::Primitive(_) => Some(Type::from_ast(ty).canonical_key()),
+        _ => None,
+    }
 }
 
 fn impl_self_owner(ty: &ast::Type) -> (String, Vec<Type>) {
+    if matches!(ty.kind.as_ref(), ast::TypeKind::Primitive(_)) {
+        return (Type::from_ast(ty).canonical_key(), Vec::new());
+    }
     let ast::TypeKind::Named(named) = ty.kind.as_ref() else {
         return (String::new(), Vec::new());
     };

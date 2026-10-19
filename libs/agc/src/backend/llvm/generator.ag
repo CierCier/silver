@@ -230,7 +230,8 @@ bool llvm_define_method_instance(LlvmContext* ctx, TypeTable* types, Interner* n
     if (fn_val == (LLVMOpaqueValue*)0 || LLVMCountBasicBlocks(fn_val) > 0) {
         return false;
     }
-    u32 self_instance_id = types.get_named_args(struct_name, arg_ids);
+    u32 self_instance_id = arg_ids.len() == 0
+        ? types.parse_type_name(struct_name) : types.get_named_args(struct_name, arg_ids);
     u32 receiver_index = 0;
     while (receiver_index < receiver_depth) {
         self_instance_id = types.get_pointer(self_instance_id, true);

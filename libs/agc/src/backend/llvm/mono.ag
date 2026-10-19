@@ -339,7 +339,8 @@ LLVMOpaqueValue* mono_declare_specialized(LlvmContext* ctx, str base, MonoMethod
     Vec<u32> receiver_args = Vec<u32>.new();
     i64 ri = 0;
     while (ri < (i64)receiver_args_count) { receiver_args.push(arg_ids.get(ri)); ri += 1; }
-    u32 self_instance_id = ctx.types.get_named_args(base, &receiver_args);
+    u32 self_instance_id = receiver_args.len() == 0
+        ? ctx.types.parse_type_name(base) : ctx.types.get_named_args(base, &receiver_args);
     receiver_args.drop();
     u32 receiver_index = 0;
     while (receiver_index < receiver_depth) {
