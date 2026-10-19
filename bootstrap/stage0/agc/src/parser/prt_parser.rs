@@ -7119,6 +7119,19 @@ mod tests {
     }
 
     #[test]
+    fn rejects_parenthesized_tuple_forms() {
+        for source in [
+            "i32 main() { (i32, str) pair; return 0; }",
+            "i32 main() { let pair = (7, \"seven\"); return 0; }",
+            "i32 main() { [i32, str] pair = [7, \"seven\"]; let (a, b) = pair; return 0; }",
+        ] {
+            let tokens = lex(source).expect("lex failed");
+            let mut parser = PRT_Parser::new(None);
+            assert!(parser.parse_program(&tokens).is_err(), "accepted: {source}");
+        }
+    }
+
+    #[test]
     fn parses_top_level_cfg_if_with_imports() {
         let source = "if (@cfg(os.linux)) { import foo.bar; } else { import baz.qux; }";
         let tokens = lex(source).expect("lex failed");
