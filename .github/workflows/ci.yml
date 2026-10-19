@@ -70,7 +70,9 @@ jobs:
         run: tests/selfhost/run_stage.sh --include-std
 
       - name: Run integration tests
-        run: python3 tests/run_tests.py --release
+        run: |
+          python3 -m unittest discover -s tests -p 'test_runner.py'
+          python3 tests/run_tests.py --release
 
       - name: Run native command-surface parity through stage1
         run: tests/selfhost/run_native.sh --release --no-tui --jobs 4

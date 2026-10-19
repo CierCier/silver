@@ -117,5 +117,15 @@ i32 main() {
         assert_eq_i64(5, count, "iterated all 5 elements");
     }
 
+    test_start("into_vec transfers storage without losing elements");
+    {
+        BinaryHeap<i64> heap = BinaryHeap<i64>.new();
+        heap.push(7); heap.push(2); heap.push(9);
+        Vec<i64> values = heap.into_vec();
+        assert_eq_i64(3, values.len(), "all heap elements transferred");
+        assert_eq_i64(9, values.get(0), "maximum remains first");
+        assert_true((values.get(1) == 2 && values.get(2) == 7)
+            || (values.get(1) == 7 && values.get(2) == 2), "both smaller values preserved");
+    }
     return done();
 }

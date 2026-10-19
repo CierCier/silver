@@ -1,4 +1,4 @@
-// Memory growth watch test: allocates ~1 GiB incrementally over ~10 sec,
+// Manual memory growth watch: allocates ~1 GiB incrementally over ~10 sec,
 // holds for ~10 sec, frees incrementally over ~10 sec.
 // Run with:  top -p $(pgrep -f mem_growth_watch)
 import std.mem;

@@ -1,6 +1,6 @@
+// error_contains: 'absent_selected_name'
 // An unresolved selected name cannot be called through its import binding.
 // compile_flags: -I tests/modules
-// expected_compile_failure
 import alias_source { absent_selected_name };
 import std.sys.entry;
 

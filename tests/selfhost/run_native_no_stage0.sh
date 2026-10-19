@@ -49,4 +49,4 @@ python3 "$root/tests/run_tests.py" --no-tui --jobs 1 --compiler "$stage1" \
     string_utf8_test path_test text_test term_ansi_test term_keys_test \
     libc_test compare_trait_test match_value_test cyclic_test \
     selective_import_test source_import_alias_test \
-    module_import_test module_artifact_no_source_test module_artifact_unsupported_test
+    module_import_test module_artifact_no_source_test

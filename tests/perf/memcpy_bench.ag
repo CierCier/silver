@@ -1,9 +1,9 @@
-// tests/memcpy_bench.ag — memory intrinsics benchmarks.
+// Memory intrinsics benchmarks, outside the correctness corpus.
 //
 // Measures memcpy/memset (SIMD dispatch), strlen (SSE2), memcmp (16-byte
 // blocks) and memmove (forward/backward SIMD overlap) on heap buffers above
-// 4GB. run_tests.sh compiles with the cpu.* cfg flags, so the fat SIMD
-// paths are live. Compare runs with run_tests.sh --compare.
+// 4GB. Pass --cfg cpu.sse41=1,cpu.avx2=1,cpu.avx512f=1 when comparing
+// the SIMD paths. Correctness cases live in adversarial_mem_intrinsics_test.ag.
 
 import std.io;
 import std.mem.alloc;

@@ -58,7 +58,7 @@ Execution order alternated between the old and patched compiler outputs:
 | Workload | Old median / p90 | Patched median / p90 | Old / patched file bytes |
 | --- | --- | --- | --- |
 | `optimization_loop_fixture.ag` | 52.687 / 52.925 ms | 12.499 / 12.978 ms | 813,344 / 766,544 |
-| `tests/memcpy_bench.ag`, whole program | 180.904 / 206.359 ms | 163.374 / 175.007 ms | 823,544 / 776,280 |
+| `tests/perf/memcpy_bench.ag`, whole program | 180.904 / 206.359 ms | 163.374 / 175.007 ms | 823,544 / 776,280 |
 
 The loop checksum was `3749943600` in every execution. The memory benchmark's
 debug assertions are disabled at `-O2`, and some inner call results are unused;
@@ -69,8 +69,9 @@ whole-language performance parity. Binary reachability and size remain open.
 
 Old compiler SHA-256: `b4e6835e8eca74773e4cf076c460cd3a36567239407e49c02d55356f2fa906aa`.
 Patched compiler SHA-256: `7ca1740bc5464090c6ef176dc3d10cb7aea63f1619a37ae7319188be39022f25`.
-`check_native_coverage.py` reports a broader per-fixture build/run inventory;
-failures identify unsupported backend work and are not silently skipped.
+Use `python3 tests/run_tests.py --compiler /path/to/agc-stage1 --no-tui --jobs 4`
+for the full integration inventory. It shares diagnostic expectations, special
+exit statuses, fixture flags, and service setup with the stage0 run.
 
 `check_stage2.py` builds stage2 with the native stage1 backend, then exercises
 stage2 help/version, lexer/parser/checker, and representative compiled

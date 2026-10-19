@@ -1,3 +1,4 @@
+// error_contains: cannot borrow 'pair
 // Projected places remain distinct for fields but conflict when the same field is borrowed twice.
 
 struct Pair {

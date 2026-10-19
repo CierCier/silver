@@ -1,3 +1,4 @@
+// error_contains: use of moved value 't'
 // Negative test: a Task is consumed by `wait` — awaiting it a second time is
 // a use-after-move, rejected at compile time by the move checker.
 

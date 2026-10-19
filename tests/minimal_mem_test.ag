@@ -1,5 +1,0 @@
-import std.test;
-
-i32 main() {
-    return 0;
-}

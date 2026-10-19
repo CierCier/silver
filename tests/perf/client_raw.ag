@@ -4,7 +4,7 @@
 // GET workload against the Go server, with a minimal buffered read of the
 // response (head through CRLFCRLF + 5 body bytes). This measures the
 // loopback+TCP round-trip ceiling that a full client stacks on top of —
-// compare with tests/http_perf_test.ag (the full HttpClient) to see the
+// compare with tests/perf/http_perf_test.ag (the full HttpClient) to see the
 // client machinery's cost.
 
 import std.io;

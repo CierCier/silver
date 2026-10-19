@@ -1,4 +1,4 @@
-// expected_compile_failure
+// error_contains: unwrap-or 'owned array element'
 import std.result;
 import std.string;
 

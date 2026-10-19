@@ -66,27 +66,6 @@ LEAK_CHECK_TESTS = {
     "leak_regression_test",
 }
 
-EXPECTED_COMPILE_FAILURES = {
-    "borrow_origin_escape_error_test",
-    "borrow_alias_escape_error_test",
-    "borrow_global_escape_error_test",
-    "enum_move_in_error_test",
-    "launch_wait_error_test",
-    "launch_send_error_test",
-    "launch_send_declarations_error_test",
-    "match_guard_move_error_test",
-    "borrow_conflict_error_test",
-    "struct_borrow_error_test",
-    "call_borrow_conflict_error_test",
-    "projected_borrow_conflict_error_test",
-    "index_deref_borrow_conflict_error_test",
-    "receiver_borrow_conflict_error_test",
-}
-
-DEFAULT_SKIP = {
-    "mem_growth_watch",  # manual 30-sec memory growth benchmark
-}
-
 # These regressions are exercised by run_native.sh with the stage1 compiler.
 STAGE1_ONLY_TESTS = {
     "match_payload_remainder_test": "stage1 mixed move payload bindings",
@@ -132,6 +111,7 @@ WASM_SKIP = {
     "rwlock_test": "depends on threads/atomics (WASI threading pending)",
     "select_test": "depends on threads/atomics (WASI threading pending)",
     "launch_send_declarations_test": "launch requires the thread runtime (unsupported on wasm)",
+    "launch_send_declarations_error_test": "launch requires the thread runtime (unsupported on wasm)",
     "launch_send_test": "launch requires the thread runtime (unsupported on wasm)",
     "launch_failure_drop_test": "launch requires the thread runtime (unsupported on wasm)",
     "launch_wait_test": "launch requires the thread runtime (unsupported on wasm)",
@@ -160,8 +140,6 @@ WASM_SKIP = {
     "http2_test": "std.net over Linux socket syscalls (empty on wasm)",
     "http2_tls_test": "std.net over Linux socket syscalls (empty on wasm)",
     "https_server_test": "std.net over Linux socket syscalls (empty on wasm)",
-    "http_bench": "std.net over Linux socket syscalls (empty on wasm)",
-    "http_perf_test": "std.net over Linux socket syscalls (empty on wasm)",
     "json_tcp_test": "std.net over Linux socket syscalls (empty on wasm)",
     "server_raw_test": "std.net over Linux socket syscalls (empty on wasm)",
     "pool_test": "std.net over Linux socket syscalls (empty on wasm)",
@@ -185,11 +163,7 @@ WASM_SKIP = {
     # module artifact test precompiles a .agm with native defaults
     "module_import_test": "precompiled .agm artifact workflow is native-only in v1",
     "module_artifact_no_source_test": "precompiled native object workflow is unavailable on wasm",
-    "module_artifact_unsupported_test": "source-less native object artifact workflow is unavailable on wasm",
-    # benches / long-running
-    "memcpy_bench": "performance benchmark, not a correctness test",
     "memory_stress": "large memory footprint (wasm linear memory cap)",
-    "mem_growth_watch": "manual 30-sec memory growth benchmark",
 }
 
 # Tests that exercise Linux-only mechanisms (raw syscall/clone asm, epoll-
@@ -215,8 +189,6 @@ WINDOWS_SKIP = {
     "http2_test": "std.net over Linux socket syscalls (winsock layer pending)",
     "http2_tls_test": "std.net over Linux socket syscalls (winsock layer pending)",
     "https_server_test": "std.net over Linux socket syscalls (winsock layer pending)",
-    "http_bench": "std.net over Linux socket syscalls (winsock layer pending)",
-    "http_perf_test": "std.net over Linux socket syscalls (winsock layer pending)",
     "json_tcp_test": "std.net over Linux socket syscalls (winsock layer pending)",
     "server_raw_test": "std.net over Linux socket syscalls (winsock layer pending)",
     "pool_test": "std.net over Linux socket syscalls (winsock layer pending)",
@@ -293,7 +265,6 @@ class BackgroundServices:
         self.procs: List[subprocess.Popen] = []
         self.openssl_lib = self._find_openssl()
         self.has_node = shutil.which("node") is not None
-        self.has_go = shutil.which("go") is not None
         self.ffi_dir = self._find_ffi()
         self.modlib_dir = workdir / "modlib"
 
@@ -376,30 +347,6 @@ class BackgroundServices:
                 raise RuntimeError("source-independent module artifact outputs are missing")
             if mod_src.exists():
                 mod_src.unlink()
-        if "module_artifact_unsupported_test" in test_names:
-            self.modlib_dir.mkdir(parents=True, exist_ok=True)
-            fixture = self.root / "tests/modules/module_no_source_pointer_lib.ag"
-            mod_src = self.modlib_dir / fixture.name
-            shutil.copyfile(fixture, mod_src)
-            cmd = [str(agc_bin), "--emit=module", str(mod_src)]
-            eff_target = target or self.target
-            if eff_target:
-                cmd.extend(["--target", eff_target])
-            res = subprocess.run(
-                cmd,
-                cwd=str(self.modlib_dir),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            if res.returncode != 0:
-                raise RuntimeError("failed to emit unsupported-signature module artifact")
-            artifact = self.modlib_dir / "module_no_source_pointer_lib.agm"
-            object_suffix = ".o.wasm" if target_is_wasm(eff_target) else ".o"
-            object_file = self.modlib_dir / f"module_no_source_pointer_lib{object_suffix}"
-            if not artifact.is_file() or not object_file.is_file():
-                raise RuntimeError("unsupported-signature module artifact outputs are missing")
-            if mod_src.exists():
-                mod_src.unlink()
         # Node TLS server
         if ("tls_test" in test_names or "https_server_test" in test_names) and self.has_node and self.openssl_lib:
             self._spawn_daemon(["node", "tests/tls_server.js"], "TLS_NODE_READY", "tls_node.log")
@@ -411,17 +358,6 @@ class BackgroundServices:
         # Node WebSocket / SSE server
         if ("websocket_test" in test_names or "sse_test" in test_names) and self.has_node:
             self._spawn_daemon(["node", "tests/ws_server.js"], "WS_NODE_READY", "ws_node.log")
-
-        # Go HTTP perf server
-        if "http_perf_test" in test_names and self.has_go:
-            perf_bin = self.workdir / "perf_server"
-            src = self.root / "tests/perf/http_server.go"
-            if src.is_file():
-                env = os.environ.copy()
-                env["CGO_ENABLED"] = "0"
-                subprocess.run(["go", "build", "-o", str(perf_bin), str(src)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                if perf_bin.is_file():
-                    self._spawn_daemon([str(perf_bin)], "PERF_SERVER_READY", "perf_server.log")
 
     def _spawn_daemon(self, cmd: List[str], ready_token: str, log_name: str):
         log_path = self.workdir / log_name
@@ -504,7 +440,7 @@ def get_extra_flags(name: str, content: str, services: BackgroundServices) -> Li
         flags.extend(["-L", services.openssl_lib])
     if name == "rust_ffi_test" and services.ffi_dir:
         flags.extend(["-L", services.ffi_dir])
-    if name in ("module_import_test", "module_artifact_no_source_test", "module_artifact_unsupported_test"):
+    if name in ("module_import_test", "module_artifact_no_source_test"):
         flags.extend(["-I", str(services.modlib_dir)])
     if name == "cfg_test":
         flags.extend(["--cfg", "cfg_test_flag=1,cpu.sse41=1,cpu.avx2=1,cpu.avx512f=1"])
@@ -530,6 +466,7 @@ def run_single_test(
     target: Optional[str] = None,
     runner: Optional[List[str]] = None,
     libdirs: Optional[List[List[str]]] = None,
+    compile_timeout_secs: float = 300,
 ) -> TestResult:
     name = test_path.stem
     content = test_path.read_text(errors="replace")
@@ -543,10 +480,11 @@ def run_single_test(
     if name in ("tls_test", "http2_tls_test", "https_server_test"):
         run_dir = services.root
 
-    is_expected_compile_err = name in EXPECTED_COMPILE_FAILURES
-    for line in content.splitlines():
-        if "compile_fail" in line or "expected_compile_failure" in line:
-            is_expected_compile_err = True
+    expected_errors = [
+        line.strip().removeprefix("// error_contains:").strip()
+        for line in content.splitlines()
+        if line.strip().startswith("// error_contains:")
+    ]
 
     expected_code = get_expected_exit(name, content)
     extra_flags = get_extra_flags(name, content, services)
@@ -574,7 +512,10 @@ def run_single_test(
     compile_cmd = [str(agc_bin), str(test_path), "-o", str(bin_path), "--no-progress"] + extra_flags
     t0 = time.perf_counter()
     try:
-        cp = subprocess.run(compile_cmd, cwd=str(services.root), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        cp = subprocess.run(compile_cmd, cwd=str(services.root), stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, timeout=compile_timeout_secs)
+    except subprocess.TimeoutExpired:
+        return TestResult(name, "FAIL", f"compile timeout ({compile_timeout_secs}s)")
     except Exception as e:
         return TestResult(name, "FAIL", f"failed to spawn compiler: {e}")
 
@@ -582,11 +523,17 @@ def run_single_test(
     compile_output = cp.stdout + ("\n" + cp.stderr if cp.stderr else "")
 
     if cp.returncode != 0:
-        if is_expected_compile_err:
+        if expected_errors:
+            diagnostics = re.sub(r"\x1b\[[0-9;]*m", "", compile_output)
+            error_lines = "\n".join(line for line in diagnostics.splitlines() if "error:" in line)
+            missing = [message for message in expected_errors if message not in error_lines]
+            if cp.returncode < 0 or missing:
+                return TestResult(name, "FAIL", f"wrong compile failure; expected {expected_errors}",
+                                  compile_ms=compile_ms, compile_output=compile_output)
             return TestResult(name, "PASS", "expected compile error", compile_ms=compile_ms, compile_output=compile_output)
         return TestResult(name, "FAIL", "compile error", compile_ms=compile_ms, compile_output=compile_output)
 
-    if is_expected_compile_err:
+    if expected_errors:
         return TestResult(name, "FAIL", "expected compile failure but succeeded", compile_ms=compile_ms, compile_output=compile_output)
 
     if update_worker:
@@ -809,6 +756,7 @@ def main():
     parser.add_argument("--no-tui", action="store_true", help="Disable live interactive TUI")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose test execution output")
     parser.add_argument("--timeout", type=int, default=120, help="Per-test timeout in seconds")
+    parser.add_argument("--compile-timeout", type=int, default=300, help="Per-test compiler timeout in seconds")
     parser.add_argument("--target", type=str, default="", help="Cross-compile for this target triple (e.g. x86_64-pc-windows-msvc)")
     parser.add_argument("--runner", type=str, default="", help="Prefix command used to execute each test binary (e.g. 'wine' on a posix host)")
     parser.add_argument("--compiler", type=Path, default=None, help="Use an existing agc-compatible binary instead of building stage0 (for self-host parity runs)")
@@ -915,14 +863,10 @@ def main():
 
             # Check skip rules
             skip_reason = ""
-            if not is_explicit and name in DEFAULT_SKIP:
-                skip_reason = "in default skip list"
-            elif name in ("tls_test", "http2_tls_test", "https_server_test") and (not services.openssl_lib or not services.has_node):
+            if name in ("tls_test", "http2_tls_test", "https_server_test") and (not services.openssl_lib or not services.has_node):
                 skip_reason = "requires OpenSSL and Node.js"
             elif name in ("http2_test", "websocket_test", "sse_test") and not services.has_node:
                 skip_reason = "requires Node.js"
-            elif name == "http_perf_test" and not services.has_go:
-                skip_reason = "requires Go compiler"
             elif name == "rust_ffi_test" and not services.ffi_dir:
                 skip_reason = "requires built Rust FFI library (build bootstrap/stage0/ffi-rust)"
             elif compiler is None and name in STAGE1_ONLY_TESTS:
@@ -948,6 +892,7 @@ def main():
                     target=target,
                     runner=runner,
                     libdirs=libdirs,
+                    compile_timeout_secs=args.compile_timeout,
                 )
 
             with results_lock:

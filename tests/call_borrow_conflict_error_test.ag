@@ -1,3 +1,4 @@
+// error_contains: cannot borrow 'pt'
 // Negative test: Intra-call argument borrow conflicts are rejected at compile time.
 
 struct Point {

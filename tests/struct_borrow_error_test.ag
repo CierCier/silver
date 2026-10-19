@@ -1,3 +1,4 @@
+// error_contains: cannot assign to 'val' because it is borrowed
 // Negative test: mutating a variable while held by a struct reference field is rejected by the borrow checker.
 
 struct StringView<'a> {

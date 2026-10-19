@@ -1,3 +1,4 @@
+// error_contains: cannot borrow 'pt' as mutable
 // Negative test: Active borrow conflict checker rejects simultaneous mutable and shared borrows.
 
 struct Point {
