@@ -2594,7 +2594,9 @@ impl MethodCallRewrite<'_> {
                     }
                 }
             }
-            ast::ExpressionKind::Array(items) | ast::ExpressionKind::Tuple(items) => {
+            ast::ExpressionKind::Array(items)
+            | ast::ExpressionKind::Tuple(items)
+            | ast::ExpressionKind::EnumVariant { fields: items, .. } => {
                 for item in items {
                     self.expression(item, scope);
                 }
@@ -4414,6 +4416,64 @@ mod tests {
         );
         assert_eq!(call(&program.items[0]).1, "accept_i32");
         assert_eq!(call(&program.items[1]).1, "accept_i64");
+    }
+
+    #[test]
+    fn rewrites_generic_method_calls_in_enum_payloads() {
+        let mut program = parse(
+            "struct Probe {} \
+             enum Width { Some(i64); } \
+             impl Probe { i64 width<T>(&self, T value) { return @size(T); } } \
+             Width measure(Probe probe) { return Width.Some(probe.width((i32)3)); }",
+        );
+        let call_span = {
+            let ast::ItemKind::Function(function) = &mut program.items[3].kind else {
+                panic!("expected measure function")
+            };
+            let ast::StatementKind::Return(Some(expression)) =
+                &mut function.body.statements[0].kind
+            else {
+                panic!("expected return expression")
+            };
+            let ast::ExpressionKind::MethodCall { arguments, .. } = expression.kind.as_ref() else {
+                panic!("expected enum constructor")
+            };
+            let call_span = arguments[0].span;
+            *expression.kind = ast::ExpressionKind::EnumVariant {
+                path: vec![ast::Identifier {
+                    name: "Width".into(),
+                    span: expression.span,
+                }],
+                variant: ast::Identifier {
+                    name: "Some".into(),
+                    span: expression.span,
+                },
+                fields: arguments.clone(),
+            };
+            call_span
+        };
+        rewrite_method_calls(
+            &mut program,
+            "Probe",
+            "width",
+            "width_i32",
+            &[],
+            &call_span,
+            &HashMap::default(),
+        );
+        let ast::ItemKind::Function(function) = &program.items[3].kind else {
+            panic!("expected measure function")
+        };
+        let ast::StatementKind::Return(Some(expression)) = &function.body.statements[0].kind else {
+            panic!("expected return expression")
+        };
+        let ast::ExpressionKind::EnumVariant { fields, .. } = expression.kind.as_ref() else {
+            panic!("expected enum variant")
+        };
+        let ast::ExpressionKind::MethodCall { method, .. } = fields[0].kind.as_ref() else {
+            panic!("expected payload method call")
+        };
+        assert_eq!(method.name, "width_i32");
     }
 
     #[test]
