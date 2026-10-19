@@ -2947,7 +2947,8 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     profiler_end_phase("symbol_table");
     if (diagnostics.is_empty()) {
         profiler_begin_phase("semantic");
-        resolve_names(&symbols, &diagnostics, &tree, source_path, &cfg, &includes);
+        resolve_names(&symbols, &diagnostics, &tree, source_path, &cfg, &includes,
+                      (ImportedDeclarations*)0);
         profiler_end_phase("semantic");
     }
     if (diagnostics.is_empty()) {

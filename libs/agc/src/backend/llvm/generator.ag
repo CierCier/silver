@@ -451,6 +451,7 @@ void llvm_drain_mono_queue(LlvmContext* ctx, TypeTable* types, Interner* names, 
         u32 args_count = req_ptr.args_count;
         u32 receiver_args_count = req_ptr.receiver_args_count;
         u32 value_arg_count = req_ptr.value_arg_count;
+        SyntaxNode* template_name = req_ptr.template_name;
         bool is_static_method = req_ptr.is_static_method;
         index += 1;
         str base = ctx.names.get(base_id);
@@ -489,7 +490,7 @@ void llvm_drain_mono_queue(LlvmContext* ctx, TypeTable* types, Interner* names, 
             : mono_find_method_template(ctx.root, types, base, method, receiver_depth,
                                         &receiver_arg_ids, &template, &param_ids,
                                         args_count > receiver_args_count ? (i64)value_arg_count : (i64)-1,
-                                        is_static_method);
+                                        is_static_method, (AstPool*)0, 0, template_name);
         if (found && !is_free_function && item_method_is_generic(template.name_node)) {
             while (param_ids.len() < (i64)receiver_args_count) { param_ids.push(0); }
             Vec<u32> method_params = Vec<u32>.new();

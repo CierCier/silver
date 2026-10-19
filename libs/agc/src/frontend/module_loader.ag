@@ -19,8 +19,31 @@ import frontend.cfg;
 import frontend.bindings;
 import frontend.messages;
 
+struct ImportedDeclarations {
+    NodePool pool;
+    Vec<TokenStream> streams;
+    SyntaxNode* root;
+}
+
+impl ImportedDeclarations {
+    ImportedDeclarations new() {
+        ImportedDeclarations declarations;
+        declarations.pool = NodePool.new();
+        declarations.streams = Vec<TokenStream>.new();
+        declarations.root = declarations.pool.create(NodeKind.Program, Span.synthetic(), "");
+        return move declarations;
+    }
+}
+
+impl Drop for ImportedDeclarations {
+    void drop(*self) {
+        self.pool.destroy();
+    }
+}
+
 struct ModuleLoader {
     SymbolTable* symbols;
+    ImportedDeclarations* declarations;
     Vec<String> visited;
     Vec<String> pending;
     Vec<String> include_dirs;
@@ -28,9 +51,10 @@ struct ModuleLoader {
 }
 
 impl ModuleLoader {
-    ModuleLoader new(SymbolTable* symbols) {
+    ModuleLoader new(SymbolTable* symbols, ImportedDeclarations* declarations) {
         ModuleLoader loader;
         loader.symbols = symbols;
+        loader.declarations = declarations;
         loader.visited = Vec<String>.new();
         loader.pending = Vec<String>.new();
         loader.include_dirs = Vec<String>.new();
@@ -612,20 +636,8 @@ void module_register_source_struct(TypeTable* types, SyntaxNode* item) {
             name_index -= 1;
         }
         if (name_index > start) {
-            String type_text = String.new();
-            i64 i = start;
-            while (i < name_index) {
-                type_text.push_str(tokens.get(i).text);
-                i += 1;
-            }
-            i = name_index + 1;
-            while (i < end) {
-                type_text.push_str(tokens.get(i).text);
-                i += 1;
-            }
-            fields.push(type_id_from_text(types, type_text.to_str()));
+            fields.push(struct_field_type_id(types, item, tokens.get(name_index).text));
             field_names.push(types.names.intern(tokens.get(name_index).text));
-            type_text.drop();
         }
         start = end + 1;
     }
@@ -810,7 +822,9 @@ void load_source_module(ModuleLoader* loader, DiagnosticBag* diagnostics, str pa
     }
     NodePool pool = NodePool.new();
     SyntaxTree tree;
-    parse(&stream, &local_diagnostics, &pool, &tree);
+    NodePool* parse_pool = loader.declarations == (ImportedDeclarations*)0
+        ? &pool : &loader.declarations.pool;
+    parse(&stream, &local_diagnostics, parse_pool, &tree);
     if (!local_diagnostics.is_empty()) {
         report_module_error(loader, diagnostics, path, "parser errors");
         pool.destroy();
@@ -834,7 +848,6 @@ void load_source_module(ModuleLoader* loader, DiagnosticBag* diagnostics, str pa
         cfg_collect_extern_from_item(item, &extern_names);
         item_index += 1;
     }
-    active_items.drop();
     i64 extern_index = 0;
     while (extern_index < extern_names.len()) {
         CfgVisibleName* visible = extern_names.get_ptr(extern_index);
@@ -872,6 +885,21 @@ void load_source_module(ModuleLoader* loader, DiagnosticBag* diagnostics, str pa
         i += 1;
     }
     imports.drop();
+    if (loader.declarations != (ImportedDeclarations*)0) {
+        // Method bounds and trait impls must outlive the imported token text.
+        item_index = 0;
+        while (item_index < active_items.len()) {
+            SyntaxNode* item = active_items.get(item_index);
+            if (item.kind == NodeKind.Struct || item.kind == NodeKind.Enum
+                || item.kind == NodeKind.Trait || item.kind == NodeKind.Impl
+                || item.kind == NodeKind.TypeAlias) {
+                append_child(loader.declarations.root, item);
+            }
+            item_index += 1;
+        }
+        loader.declarations.streams.push(move stream);
+    }
+    active_items.drop();
     pool.destroy();
 }
 
@@ -883,8 +911,10 @@ void load_module(ModuleLoader* loader, DiagnosticBag* diagnostics, str path, str
     }
 }
 
-bool load_imported_declarations(SymbolTable* symbols, DiagnosticBag* diagnostics, SyntaxTree* tree, str owner_path, CfgSet* cfg, Vec<String>* include_dirs) {
-    ModuleLoader loader = ModuleLoader.new(symbols);
+bool load_imported_declarations(SymbolTable* symbols, DiagnosticBag* diagnostics, SyntaxTree* tree,
+                                str owner_path, CfgSet* cfg, Vec<String>* include_dirs,
+                                ImportedDeclarations* declarations) {
+    ModuleLoader loader = ModuleLoader.new(symbols, declarations);
     String root = module_root(owner_path);
     Vec<String> imports = Vec<String>.new();
     cfg_collect_import_names(tree.root, cfg, &imports);

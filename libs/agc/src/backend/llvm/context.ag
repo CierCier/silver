@@ -66,6 +66,7 @@ struct LlvmSymbolInfo {
 }
 
 struct MonoRequest {
+    SyntaxNode* template_name;
     bool is_free_function;
     bool is_static_method;
     u32 receiver_depth;

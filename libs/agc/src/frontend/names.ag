@@ -344,7 +344,9 @@ void resolve_function(NameResolver* resolver, SyntaxNode* function, CfgSet* cfg)
     resolver.locals.len = 0;
 }
 
-bool resolve_names(SymbolTable* symbols, DiagnosticBag* diagnostics, SyntaxTree* tree, str owner_path, CfgSet* cfg, Vec<String>* include_dirs) {
+bool resolve_names(SymbolTable* symbols, DiagnosticBag* diagnostics, SyntaxTree* tree,
+                    str owner_path, CfgSet* cfg, Vec<String>* include_dirs,
+                    ImportedDeclarations* declarations) {
     NameResolver resolver = NameResolver.new(symbols, diagnostics);
     Vec<String> import_names = Vec<String>.new();
     cfg_collect_import_names(tree.root, cfg, &import_names);
@@ -352,7 +354,8 @@ bool resolve_names(SymbolTable* symbols, DiagnosticBag* diagnostics, SyntaxTree*
     import_names.drop();
     if (resolver.has_imports) {
         profiler_begin_phase("load imported declarations");
-        bool loaded = load_imported_declarations(symbols, diagnostics, tree, owner_path, cfg, include_dirs);
+        bool loaded = load_imported_declarations(symbols, diagnostics, tree, owner_path,
+                                                 cfg, include_dirs, declarations);
         profiler_end_phase("load imported declarations");
         if (!loaded) {
             resolver.failed = true;

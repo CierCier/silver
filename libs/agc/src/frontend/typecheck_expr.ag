@@ -829,46 +829,8 @@ u32 typecheck_struct_field_type(TypeTable* types, SyntaxNode* root,
         }
         return TYPE_UNKNOWN;
     }
-    SyntaxNode* body = item.first_child;
-    while (body != (SyntaxNode*)0 && body.kind != NodeKind.Block) {
-        body = body.next_sibling;
-    }
-    if (body == (SyntaxNode*)0) { return TYPE_UNKNOWN; }
-
-    Vec<SyntaxNode*> tokens = Vec<SyntaxNode*>.new();
-    typecheck_expr_collect_tokens(body, &tokens);
-    u32 result = TYPE_UNKNOWN;
-    i64 start = 0;
-    while (start < tokens.len()) {
-        i64 end = start;
-        while (end < tokens.len() && tokens.get(end).token_kind != TokenKind.Semicolon) {
-            end += 1;
-        }
-        i64 name_index = end - 1;
-        while (name_index >= start && tokens.get(name_index).token_kind != TokenKind.Identifier) {
-            name_index -= 1;
-        }
-        if (name_index >= start && strcmp(tokens.get(name_index).text, field_name) == 0) {
-            String field_type_text = String.new();
-            i64 i = start;
-            while (i < name_index) {
-                field_type_text.push_str(tokens.get(i).text);
-                i += 1;
-            }
-            i = name_index + 1;
-            while (i < end) {
-                field_type_text.push_str(tokens.get(i).text);
-                i += 1;
-            }
-            u32 member_type = type_id_from_text(types, field_type_text.to_str());
-            result = resolve_generic_member_type(types, root, owner_type, member_type);
-            field_type_text.drop();
-            break;
-        }
-        start = end + 1;
-    }
-    tokens.drop();
-    return result;
+    u32 member_type = struct_field_type_id(types, item, field_name);
+    return resolve_generic_member_type(types, root, owner_type, member_type);
 }
 
 bool typecheck_type_has_drop_impl(SyntaxNode* root, TypeTable* types, u32 type_id) {
@@ -2639,6 +2601,8 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                         );
                         diagnostics.error(expr.span, move message);
                         *ok = false;
+                    } else {
+                        inferred = typecheck_struct_field_type(types, root, receiver_type, field_name);
                     }
                     fields.drop();
                 }
@@ -2737,7 +2701,21 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         Vec<u32> generic_params = Vec<u32>.new();
         Vec<u32> generic_args = Vec<u32>.new();
         String generic_failure = String.new();
-        if (mono_resolve_generic_method(pool, root, types, receiver_type, method_name,
+        bool generic_args_known = true;
+        i64 known_index = 0;
+        while (known_index < (i64)arg_count) {
+            u32 known_id = pool.args.get((i64)expr.inner1 + 1 + known_index);
+            u32 known_type = pool.get_expr(known_id).inferred_type;
+            TypeEntry* known = types.get(types.resolve_subst(known_type));
+            while (known.kind == TypeKind.Pointer || known.kind == TypeKind.Reference) {
+                known_type = known.inner;
+                known = types.get(types.resolve_subst(known_type));
+            }
+            if (known.kind == TypeKind.Unknown) { generic_args_known = false; }
+            known_index += 1;
+        }
+        if (generic_args_known
+            && mono_resolve_generic_method(pool, root, types, receiver_type, method_name,
                 expr.inner1, static_method, &generic_template, &generic_params,
                 &generic_args, &generic_failure) && generic_failure.len() > 0) {
             diagnostics.error(expr.span, generic_failure.clone());
@@ -3378,6 +3356,14 @@ bool typecheck_expressions_scoped(AstPool* pool, SymbolTable* symbols, SyntaxTre
 }
 
 bool typecheck_expressions(AstPool* pool, SymbolTable* symbols, SyntaxTree* tree,
-                           CfgSet* cfg, DiagnosticBag* diagnostics) {
-    return typecheck_expressions_scoped(pool, symbols, tree, cfg, diagnostics, 0);
+                           CfgSet* cfg, DiagnosticBag* diagnostics, SyntaxNode* imported_root) {
+    SyntaxNode* local_last = tree.root.last_child;
+    if (local_last != (SyntaxNode*)0 && imported_root.first_child != (SyntaxNode*)0) {
+        local_last.next_sibling = imported_root.first_child;
+        tree.root.last_child = imported_root.last_child;
+    }
+    bool ok = typecheck_expressions_scoped(pool, symbols, tree, cfg, diagnostics, 0);
+    if (local_last != (SyntaxNode*)0) { local_last.next_sibling = (SyntaxNode*)0; }
+    tree.root.last_child = local_last;
+    return ok;
 }

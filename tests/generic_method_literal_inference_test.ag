@@ -1,3 +1,5 @@
+import std.test;
+
 struct MethodInferenceBox<T> {
     T value;
 }
@@ -5,6 +7,10 @@ struct MethodInferenceBox<T> {
 impl<T> MethodInferenceBox<T> {
     void set(MethodInferenceBox<T>* self, T value) {
         self.value = value;
+    }
+
+    i64 measure<U>(&self, U _value) {
+        return @size(T) * 100 + @size(U);
     }
 }
 
@@ -16,6 +22,12 @@ void set_before_receiver<T>(T value, &mut MethodInferenceBox<T> box) {
     box.set(value);
 }
 
+MethodInferenceBox<i32> make_small_box() {
+    MethodInferenceBox<i32> box;
+    box.value = 7;
+    return box;
+}
+
 i32 main() {
     MethodInferenceBox<i64> first;
     MethodInferenceBox<i64> second;
@@ -25,6 +37,12 @@ i32 main() {
     set_after_receiver(&mut first, explicit_value);
     set_before_receiver((i64)42, &mut second);
 
-    if (first.value == 43 && second.value == 42) { return 0; }
-    return 1;
+    assert_eq_i64(first.value, 43, "method argument follows receiver type");
+    assert_eq_i64(second.value, 42, "method argument follows prior parameter");
+    MethodInferenceBox<i32> small;
+    small.set(7);
+    assert_eq_i64(first.measure((i32)7), 804, "wide owner keeps narrow method argument");
+    assert_eq_i64(small.measure((i64)9), 408, "narrow owner keeps wide method argument");
+    assert_eq_i64(make_small_box().measure((i64)9), 408, "temporary receiver keeps method argument");
+    return done();
 }

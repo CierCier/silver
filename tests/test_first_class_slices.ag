@@ -43,7 +43,7 @@ i32 main() {
     }
 
     // 3. Auto-borrow Vec<i64> to [i64]
-    Vec<i64> v = Vec<i64>.new();
+    Vec<i64> v = Vec.new();
     v.push(10);
     v.push(20);
     v.push(30);

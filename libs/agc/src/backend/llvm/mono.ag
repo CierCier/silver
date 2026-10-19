@@ -288,6 +288,7 @@ LLVMOpaqueValue* mono_ensure_free_function(LlvmContext* ctx, str base, Vec<u32>*
     param_types.drop();
     ctx.types.pop_subst(param_ids.len());
     MonoRequest req;
+    req.template_name = template.name_node;
     req.is_free_function = true;
     req.is_static_method = false;
     req.receiver_depth = 0;
@@ -410,6 +411,13 @@ LLVMOpaqueValue* mono_ensure_generic_method_call(LlvmContext* ctx, u32 receiver_
         str base = ctx.types.names.get(receiver.name_id);
         u32 receiver_count = (u32)receiver.count;
         String mangled = mono_mangle_method(base, method, &arg_ids);
+        mono_push_method_bindings(ctx.types, &param_ids, &arg_ids);
+        String signature = typecheck_method_symbol(ctx.types, base, method,
+            template.ret_start, template.name_node, template.params_node);
+        ctx.types.pop_subst(receiver_binding_count(&param_ids, param_ids.len()));
+        mangled.push_str("__signature_");
+        mangled.push_str(signature.to_str());
+        signature.drop();
         // Delimit the two argument lists even when a method shadows an impl name.
         mangled.push_str("__receiver_args_");
         append_u32(&mangled, receiver_count);
@@ -433,6 +441,7 @@ LLVMOpaqueValue* mono_ensure_generic_method_call(LlvmContext* ctx, u32 receiver_
                 fn_val = mono_declare_specialized(ctx, base, &template, &param_ids,
                     &arg_ids, mangled.to_str(), template.receiver_depth, receiver_count);
                 MonoRequest req;
+                req.template_name = template.name_node;
                 req.is_free_function = false;
                 req.is_static_method = static_method;
                 req.receiver_depth = template.receiver_depth;
@@ -497,11 +506,13 @@ LLVMOpaqueValue* mono_ensure_specialized(LlvmContext* ctx, u32 receiver_type_id,
     MonoMethodTemplate template;
     Vec<u32> param_ids = Vec<u32>.new();
     bool ok = mono_find_method_template(ctx.root, ctx.types, base, method, receiver_depth,
-                                       &arg_ids, &template, &param_ids, -1, false);
+                                       &arg_ids, &template, &param_ids, -1, false,
+                                       (AstPool*)0, 0, (SyntaxNode*)0);
     if (!ok && receiver_depth > 0) {
         receiver_depth = 0;
         ok = mono_find_method_template(ctx.root, ctx.types, base, method, receiver_depth,
-                                      &arg_ids, &template, &param_ids, -1, false);
+                                      &arg_ids, &template, &param_ids, -1, false,
+                                      (AstPool*)0, 0, (SyntaxNode*)0);
         mangled.drop();
         mangled = mono_mangle_method(base, method, &arg_ids);
         found = LLVMGetNamedFunction(ctx.module, mangled.to_str());
@@ -524,6 +535,7 @@ LLVMOpaqueValue* mono_ensure_specialized(LlvmContext* ctx, u32 receiver_type_id,
                                                      &arg_ids, mangled.to_str(), receiver_depth, (u32)arg_ids.len());
     if (fn_val != (LLVMOpaqueValue*)0) {
         MonoRequest req;
+        req.template_name = template.name_node;
         req.is_free_function = false;
         req.is_static_method = false;
         req.receiver_depth = receiver_depth;

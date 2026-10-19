@@ -211,11 +211,15 @@ void mono_collect_struct_parameters(SyntaxNode* root, str base, TypeTable* types
 bool mono_find_method_template(SyntaxNode* root, TypeTable* types, str base, str method,
                                u32 receiver_depth, Vec<u32>* arg_ids,
                                MonoMethodTemplate* out, Vec<u32>* param_ids,
-                               i64 value_arg_count, bool static_method) {
+                               i64 value_arg_count, bool static_method,
+                               AstPool* call_pool, u32 call_args, SyntaxNode* required_name) {
     if (root == (SyntaxNode*)0) {
         return false;
     }
     bool found_any = false;
+    i64 best_specificity = -1;
+    bool best_concrete_owner = false;
+    bool best_generic_method = true;
     MonoMethodTemplate generic_template;
     Vec<u32> generic_params = Vec<u32>.new();
 
@@ -311,29 +315,46 @@ bool mono_find_method_template(SyntaxNode* root, TypeTable* types, str base, str
                                     Vec<u32> candidate_params = Vec<u32>.new();
                                     bool matched = mono_match_target_args(target, types, &declared_params, arg_ids, &candidate_params);
                                     declared_params.drop();
-                                    if (matched) {
-                                        if (receiver_binding_count(&candidate_params, candidate_params.len()) == 0) {
-                                            out.ret_start = current_ret;
-                                            out.name_node = current_name;
-                                            out.params_node = current_params;
-                                            out.body_node = current_body;
-                                            out.receiver_depth = receiver_depth;
-                                            i64 cp = 0;
-                                            while (cp < candidate_params.len()) {
-                                                param_ids.push(candidate_params.get(cp));
-                                                cp += 1;
+                                    if (matched && (required_name == (SyntaxNode*)0 || current_name == required_name)) {
+                                        MonoMethodTemplate candidate;
+                                        candidate.ret_start = current_ret;
+                                        candidate.name_node = current_name;
+                                        candidate.params_node = current_params;
+                                        candidate.body_node = current_body;
+                                        candidate.receiver_depth = receiver_depth;
+                                        bool generic_method = item_method_is_generic(current_name);
+                                        i64 specificity = 0;
+                                        if (call_pool != (AstPool*)0) {
+                                            Vec<u32> names = Vec<u32>.new();
+                                            Vec<u32> args = Vec<u32>.new();
+                                            i64 copy_index = 0;
+                                            while (copy_index < candidate_params.len()) {
+                                                names.push(candidate_params.get(copy_index));
+                                                args.push(arg_ids.get(copy_index));
+                                                copy_index += 1;
                                             }
-                                            candidate_params.drop();
-                                            generic_params.drop();
-                                            return true;
+                                            String failure = String.new();
+                                            u32 receiver_type = types.get_named_args(base, arg_ids);
+                                            specificity = mono_match_method_call(call_pool, root, types,
+                                                receiver_type, call_args, static_method, &candidate,
+                                                &names, &args, &failure);
+                                            names.drop();
+                                            args.drop();
+                                            failure.drop();
                                         }
-                                        if (!found_any) {
+                                        bool concrete_owner = receiver_binding_count(&candidate_params, candidate_params.len()) == 0;
+                                        bool preferred = !found_any || specificity > best_specificity
+                                            || (specificity == best_specificity
+                                                && ((concrete_owner && !best_concrete_owner)
+                                                    || (concrete_owner == best_concrete_owner
+                                                        && !generic_method && best_generic_method)));
+                                        if ((specificity >= 0 || generic_method) && preferred) {
+                                            best_specificity = specificity;
+                                            best_concrete_owner = concrete_owner;
+                                            best_generic_method = generic_method;
                                             found_any = true;
-                                            generic_template.ret_start = current_ret;
-                                            generic_template.name_node = current_name;
-                                            generic_template.params_node = current_params;
-                                            generic_template.body_node = current_body;
-                                            generic_template.receiver_depth = receiver_depth;
+                                            generic_template = candidate;
+                                            generic_params.clear();
                                             i64 cp = 0;
                                             while (cp < candidate_params.len()) {
                                                 generic_params.push(candidate_params.get(cp));
@@ -437,8 +458,9 @@ bool mono_unify_free_parameter(TypeTable* types, u32 formal_id, u32 actual_id,
         }
         return true;
     }
-    if (formal.kind == TypeKind.Named) {
-        if (formal.name_id != actual.name_id || formal.count != actual.count) { return false; }
+    if (formal.kind == TypeKind.Named || formal.kind == TypeKind.Tuple) {
+        if (formal.count != actual.count
+            || (formal.kind == TypeKind.Named && formal.name_id != actual.name_id)) { return false; }
         i64 i = 0;
         while (i < formal.count) {
             if (!mono_unify_free_parameter(types, types.type_args.get(formal.inner + i),
@@ -479,12 +501,44 @@ bool mono_resolve_generic_method(AstPool* pool, SyntaxNode* root, TypeTable* typ
         i += 1;
     }
     bool found = mono_find_method_template(root, types, base, method, depth,
-        arg_ids, template, param_ids, (i64)pool.args.get((i64)args_start), static_method);
+        arg_ids, template, param_ids, (i64)pool.args.get((i64)args_start), static_method,
+        pool, args_start, (SyntaxNode*)0);
     if (!found && depth > 0) {
         found = mono_find_method_template(root, types, base, method, 0,
-            arg_ids, template, param_ids, (i64)pool.args.get((i64)args_start), static_method);
+            arg_ids, template, param_ids, (i64)pool.args.get((i64)args_start), static_method,
+            pool, args_start, (SyntaxNode*)0);
     }
     if (!found || !item_method_is_generic(template.name_node)) { return false; }
+    mono_match_method_call(pool, root, types, receiver_type, args_start,
+        static_method, template, param_ids, arg_ids, failure);
+    return true;
+}
+
+i64 mono_type_specificity(TypeTable* types, u32 type_id, Vec<u32>* method_params) {
+    TypeEntry* entry = types.get(type_id);
+    if (entry.kind == TypeKind.Named && entry.count == 0
+        && mono_contains_type_param(method_params, entry.name_id)) { return 0; }
+    if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference
+        || entry.kind == TypeKind.Array || entry.kind == TypeKind.Slice) {
+        return 1 + mono_type_specificity(types, entry.inner, method_params);
+    }
+    i64 score = 1;
+    if (entry.kind == TypeKind.Named || entry.kind == TypeKind.Tuple) {
+        i64 i = 0;
+        while (i < entry.count) {
+            score += mono_type_specificity(types, types.type_args.get(entry.inner + (u32)i), method_params);
+            i += 1;
+        }
+    }
+    return score;
+}
+
+i64 mono_match_method_call(AstPool* pool, SyntaxNode* root, TypeTable* types,
+                            u32 receiver_type, u32 args_start, bool static_method,
+                            MonoMethodTemplate* template, Vec<u32>* param_ids,
+                            Vec<u32>* arg_ids, String* failure) {
+    i64 count = arg_ids.len();
+    i64 i = 0;
     while (param_ids.len() < count) { param_ids.push(0); }
     Vec<u32> method_params = Vec<u32>.new();
     mono_collect_generic_parameters(template.name_node.next_sibling, types, &method_params);
@@ -515,6 +569,7 @@ bool mono_resolve_generic_method(AstPool* pool, SyntaxNode* root, TypeTable* typ
     u32 arg_count = pool.args.get((i64)args_start);
     i64 offset = static_method ? 0 : 1;
     bool matched = pool != (AstPool*)0 && params.len() == (i64)arg_count + offset;
+    i64 specificity = 0;
     i = 0;
     while (matched && i < (i64)arg_count) {
         Binding* param = params.get_ptr(i + offset);
@@ -529,6 +584,7 @@ bool mono_resolve_generic_method(AstPool* pool, SyntaxNode* root, TypeTable* typ
             }
         }
         AstExpr* actual = pool.get_expr(pool.args.get((i64)args_start + 1 + i));
+        specificity += mono_type_specificity(types, formal, &method_params);
         bool literal = actual.kind == ExprKind.Literal && type_is_numeric(actual.aux);
         matched = mono_unify_free_parameter(types, formal,
             types.resolve_subst(actual.inferred_type), &method_params, &inferred, literal);
@@ -544,12 +600,14 @@ bool mono_resolve_generic_method(AstPool* pool, SyntaxNode* root, TypeTable* typ
         i += 1;
     }
     if (!matched) { failure.push_str(generic_method_inference_failed()); }
-    else { mono_check_method_bounds(root, types, template, failure); }
+    else if (item_method_is_generic(template.name_node)) {
+        mono_check_method_bounds(root, types, template, failure);
+    }
     types.pop_subst(method_params.len() + receiver_bindings);
     params.drop();
     inferred.drop();
     method_params.drop();
-    return true;
+    return matched && failure.len() == 0 ? specificity : -1;
 }
 
 i64 receiver_binding_count(Vec<u32>* param_ids, i64 count) {

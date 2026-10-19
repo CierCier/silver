@@ -2155,43 +2155,7 @@ impl ExprLowerer {
         }
 
         SyntaxNode* item = find_item_by_name(self.unit_root, NodeKind.Struct, struct_name);
-        if (item == (SyntaxNode*)0) { return TYPE_UNKNOWN; }
-        SyntaxNode* body = item.first_child;
-        while (body != (SyntaxNode*)0 && body.kind != NodeKind.Block) {
-            body = body.next_sibling;
-        }
-        if (body == (SyntaxNode*)0) { return TYPE_UNKNOWN; }
-
-        SyntaxNode* cursor = body.first_child;
-        while (cursor != (SyntaxNode*)0) {
-            if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
-                cursor = cursor.next_sibling;
-                continue;
-            }
-            SyntaxNode* start = cursor;
-            SyntaxNode* last_ident = (SyntaxNode*)0;
-            while (cursor != (SyntaxNode*)0
-                && !(cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon)) {
-                if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Identifier) {
-                    last_ident = cursor;
-                }
-                cursor = cursor.next_sibling;
-            }
-            if (last_ident != (SyntaxNode*)0 && strcmp(last_ident.text, field_name) == 0) {
-                String type_text = String.new();
-                SyntaxNode* scan = start;
-                while (scan != last_ident && scan != (SyntaxNode*)0) {
-                    append_node_tokens(scan, &type_text);
-                    scan = scan.next_sibling;
-                }
-                u32 type_id = type_id_from_declarator(self.types,
-                    type_text.to_str(), last_ident.next_sibling);
-                type_text.drop();
-                return type_id;
-            }
-            if (cursor != (SyntaxNode*)0) { cursor = cursor.next_sibling; }
-        }
-        return TYPE_UNKNOWN;
+        return struct_field_type_id(self.types, item, field_name);
     }
 
     u32 lower_struct_lit(ExprLowerer* self, str struct_name, SyntaxNode* block) {
