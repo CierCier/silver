@@ -2479,7 +2479,10 @@ impl MethodCallRewrite<'_> {
                         matches!(receiver.kind.as_ref(), ast::ExpressionKind::TypeName(_))
                             || matches!(receiver.kind.as_ref(), ast::ExpressionKind::Identifier(id)
                             if id.name == self.base && !scope.contains_key(&id.name));
-                    if static_receiver {
+                    if static_receiver
+                        && !matches!(receiver.kind.as_ref(), ast::ExpressionKind::TypeName(ty)
+                            if matches!(ty.kind.as_ref(), ast::TypeKind::Primitive(_)))
+                    {
                         let named = ast::NamedType {
                             path: vec![ast::Identifier {
                                 name: self.base.to_string(),
@@ -4416,6 +4419,55 @@ mod tests {
         );
         assert_eq!(call(&program.items[0]).1, "accept_i32");
         assert_eq!(call(&program.items[1]).1, "accept_i64");
+    }
+
+    #[test]
+    fn preserves_primitive_static_method_receivers() {
+        let mut program = parse(
+            "impl i64 { i64 width<T>(T value) { return @size(T); } } \
+             i64 measure() { return i64.width((i32)3); }",
+        );
+        let ast::ItemKind::Function(function) = &mut program.items[1].kind else {
+            panic!("expected measure function")
+        };
+        let ast::StatementKind::Return(Some(expression)) = &mut function.body.statements[0].kind
+        else {
+            panic!("expected return expression")
+        };
+        let ast::ExpressionKind::MethodCall { receiver, .. } = expression.kind.as_mut() else {
+            panic!("expected static method call")
+        };
+        *receiver.kind = ast::ExpressionKind::TypeName(type_to_ast(
+            &Type::Primitive(ast::PrimitiveType::I64),
+            receiver.span,
+        ));
+        let call_span = expression.span;
+        rewrite_method_calls(
+            &mut program,
+            "i64",
+            "width",
+            "width_i32",
+            &[],
+            &call_span,
+            &HashMap::default(),
+        );
+        let ast::ItemKind::Function(function) = &program.items[1].kind else {
+            panic!("expected measure function")
+        };
+        let ast::StatementKind::Return(Some(expression)) = &function.body.statements[0].kind else {
+            panic!("expected return expression")
+        };
+        let ast::ExpressionKind::MethodCall {
+            receiver, method, ..
+        } = expression.kind.as_ref()
+        else {
+            panic!("expected static method call")
+        };
+        assert_eq!(method.name, "width_i32");
+        assert!(
+            matches!(receiver.kind.as_ref(), ast::ExpressionKind::TypeName(ty)
+            if matches!(ty.kind.as_ref(), ast::TypeKind::Primitive(ast::PrimitiveType::I64)))
+        );
     }
 
     #[test]
