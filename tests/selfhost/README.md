@@ -37,6 +37,38 @@ assembly output mode; `-S`, `--emit-llvm`, and `--emit=llvm-ir` currently fall
 back to native output, which is a separate open gap.
 Other focused checks exercise linker selection, format/assert/args support,
 enum and aggregate layout, generic functions, stage2, and cache behavior.
+`check_native_optimization.py` verifies native optimization through emitted IR
+and executable results. It covers short and long level options, invalid levels,
+debug/release cfg, package/object/module emission, cache separation, and forwarded
+program arguments. It uses structural IR checks, not timing thresholds.
+Its loop probe declares a scalar after a branch, covering entry-block allocation
+and promotion as well as selection of the optimization pipeline.
+It also proves that explicit `--cfg debug=1` retains assertions with `-O2`, so
+optimized correctness runs can exercise assertions rather than prune them.
+
+For runtime measurements, build `optimization_loop_fixture.ag` with `-O2`
+and `--no-cache` using each compiler, then run each output at least ten times
+under the same conditions. The fixture checks its checksum without debug
+assertions. Keep execution timing separate from compilation and report medians.
+
+Local measurement on 2026-10-18, using the same host and requested `-O2` flags,
+sequential uncached builds, one warmup and ten measured executions per output.
+Execution order alternated between the old and patched compiler outputs:
+
+| Workload | Old median / p90 | Patched median / p90 | Old / patched file bytes |
+| --- | --- | --- | --- |
+| `optimization_loop_fixture.ag` | 52.687 / 52.925 ms | 12.499 / 12.978 ms | 813,344 / 766,544 |
+| `tests/memcpy_bench.ag`, whole program | 180.904 / 206.359 ms | 163.374 / 175.007 ms | 823,544 / 776,280 |
+
+The loop checksum was `3749943600` in every execution. The memory benchmark's
+debug assertions are disabled at `-O2`, and some inner call results are unused;
+its whole-program timing does not establish per-intrinsic throughput or
+correctness. Optimized correctness fixtures were run separately with explicit
+`--cfg debug=1`. These measurements do not establish compiler-throughput or
+whole-language performance parity. Binary reachability and size remain open.
+
+Old compiler SHA-256: `b4e6835e8eca74773e4cf076c460cd3a36567239407e49c02d55356f2fa906aa`.
+Patched compiler SHA-256: `7ca1740bc5464090c6ef176dc3d10cb7aea63f1619a37ae7319188be39022f25`.
 `check_native_coverage.py` reports a broader per-fixture build/run inventory;
 failures identify unsupported backend work and are not silently skipped.
 

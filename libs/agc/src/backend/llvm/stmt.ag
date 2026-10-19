@@ -14,6 +14,20 @@ import backend.llvm.expr;
 import backend.llvm.types;
 import backend.llvm.mono;
 
+LLVMOpaqueValue* llvm_entry_alloca(LlvmContext* ctx, LLVMOpaqueType* llvm_type, str name) {
+    LLVMOpaqueBasicBlock* entry = LLVMGetEntryBasicBlock(ctx.current_fn);
+    LLVMOpaqueValue* first = LLVMGetFirstInstruction(entry);
+    LLVMOpaqueBuilder* builder = LLVMCreateBuilderInContext(ctx.ctx);
+    if (first != (LLVMOpaqueValue*)0) {
+        LLVMPositionBuilderBefore(builder, first);
+    } else {
+        LLVMPositionBuilderAtEnd(builder, entry);
+    }
+    LLVMOpaqueValue* storage = LLVMBuildAlloca(builder, llvm_type, name);
+    LLVMDisposeBuilder(builder);
+    return storage;
+}
+
 String llvm_static_local_symbol(LlvmContext* ctx, u32 var_name_id, Span span,
                                 str prefix) {
     String symbol = String.from_str(prefix);
@@ -244,11 +258,19 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
             }
             return;
         }
-        LLVMOpaqueValue* ptr = LLVMBuildAlloca(ctx.builder, llvm_ty, var_name);
+        TypeEntry* local_entry = ctx.types.get(type_id);
+        bool scalar = type_is_numeric(type_id) || type_id == TYPE_BOOL
+            || type_id == TYPE_CHAR || local_entry.kind == TypeKind.Str
+            || local_entry.kind == TypeKind.Pointer || local_entry.kind == TypeKind.Reference
+            || local_entry.kind == TypeKind.Function;
+        // mem2reg only promotes entry allocas. Initialization stays at the
+        // declaration, including declarations reached on each loop iteration.
+        LLVMOpaqueValue* ptr = scalar
+            ? llvm_entry_alloca(ctx, llvm_ty, var_name)
+            : LLVMBuildAlloca(ctx.builder, llvm_ty, var_name);
         // Zero-initialize every local, mirroring stage0: partially assigned
         // values must read as zero/null so promoted whole-flag drops never
         // free garbage siblings (unassigned fields are never destructed).
-        TypeEntry* local_entry = ctx.types.get(type_id);
         if (local_entry.kind == TypeKind.Array) {
             LLVMOpaqueType* byte_ty = LLVMInt8TypeInContext(ctx.ctx);
             LLVMOpaqueType* size_ty = LLVMInt64TypeInContext(ctx.ctx);

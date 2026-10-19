@@ -13,6 +13,8 @@ struct LLVMOpaqueMetadata {}
 struct LLVMOpaqueAttributeRef {}
 struct LLVMOpaqueDIBuilder {}
 struct LLVMOpaqueDbgRecord {}
+struct LLVMOpaquePassBuilderOptions {}
+struct LLVMOpaqueError {}
 
 
 enum LLVMCodeGenOptLevel {
@@ -190,6 +192,9 @@ extern "C" {
     LLVMOpaqueBasicBlock* LLVMAppendBasicBlockInContext(LLVMOpaqueContext* p0, LLVMOpaqueValue* p1, i8* p2);
     u32 LLVMCountBasicBlocks(LLVMOpaqueValue* p0);
     void LLVMPositionBuilderAtEnd(LLVMOpaqueBuilder* p0, LLVMOpaqueBasicBlock* p1);
+    void LLVMPositionBuilderBefore(LLVMOpaqueBuilder* builder, LLVMOpaqueValue* instruction);
+    LLVMOpaqueBasicBlock* LLVMGetEntryBasicBlock(LLVMOpaqueValue* function);
+    LLVMOpaqueValue* LLVMGetFirstInstruction(LLVMOpaqueBasicBlock* block);
     LLVMOpaqueValue* LLVMBuildPhi(LLVMOpaqueBuilder* p0, LLVMOpaqueType* p1, i8* p2);
     void LLVMAddIncoming(LLVMOpaqueValue* p0, LLVMOpaqueValue** p1, LLVMOpaqueBasicBlock** p2, u32 p3);
     void LLVMSetCurrentDebugLocation2(LLVMOpaqueBuilder* p0, LLVMOpaqueMetadata* p1);
@@ -264,6 +269,12 @@ extern "C" {
     LLVMOpaqueValue* LLVMConstRealOfString(LLVMOpaqueType* p0, i8* p1);
     i8* LLVMPrintModuleToString(LLVMOpaqueModule* p0);
     void LLVMDisposeMessage(i8* p0);
+    LLVMOpaquePassBuilderOptions* LLVMCreatePassBuilderOptions();
+    void LLVMDisposePassBuilderOptions(LLVMOpaquePassBuilderOptions* options);
+    LLVMOpaqueError* LLVMRunPasses(LLVMOpaqueModule* module, str passes,
+        LLVMOpaqueTargetMachine* machine, LLVMOpaquePassBuilderOptions* options);
+    i8* LLVMGetErrorMessage(LLVMOpaqueError* error);
+    void LLVMDisposeErrorMessage(i8* message);
     i32 LLVMVerifyModule(LLVMOpaqueModule* p0, LLVMVerifierFailureAction p1, i8** p2);
     void LLVMInitializeX86TargetInfo();
     void LLVMInitializeX86Target();

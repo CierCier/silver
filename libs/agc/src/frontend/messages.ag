@@ -2,6 +2,19 @@
 import std.mem.vec;
 import std.string;
 
+String invalid_optimization_level(str level) {
+    String message = String.from_str("invalid optimization level '");
+    message.push_str(level);
+    message.push_str("'; expected 0, 1, 2, 3, s, z, or fast");
+    return move message;
+}
+
+String llvm_optimization_failed(str detail) {
+    String message = String.from_str("LLVM optimization failed: ");
+    message.push_str(detail);
+    return move message;
+}
+
 String did_you_mean(str suggestion) {
     String s = String.from_str(", did you mean '");
     s.push_str(suggestion);
