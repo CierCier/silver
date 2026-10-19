@@ -11,7 +11,6 @@ over the historical preferences summarized here.
    existing staged, unstaged, and untracked work.
 3. Read nearby implementations and tests. Use `rg` and `rg --files` for searches.
 4. For compiler work, consult [the compiler reference](docs/compiler-guide.md).
-   For collaboration details, consult [the maintainer preference profile](docs/maintainer-preferences.md).
 5. If present, read root `todo.md` and `handoff.md` for active work. Verify their
    claims against the current tree; they are local notes, not implementation truth.
 

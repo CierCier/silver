@@ -1,8 +1,40 @@
+// compile_flags: --leak-check
 import std.test;
 import std.io.file;
 import std.io.byte_stream;
 import std.string;
 import std.optional;
+
+void check_float_writer_growth() {
+    u8 scratch[64];
+    BufWriter writer = {
+        .data = (i64)&scratch[0], .len = 0, .cap = -64, .fd = -1,
+        .list_next = (BufWriter*)0, .list_prev = (BufWriter*)0,
+        .mode = IOMODE_MEMORY
+    };
+    u64 bits = (u64)6103021453049119613;
+    writer.write_f64(*(f64*)&bits);
+    assert_eq_i64(writer.len, 101, "large float grows the writer buffer");
+    u8* data = (u8*)writer.data;
+    bool large_ok = writer.len == 101 && data[0] == (u8)'1';
+    for (i64 i = 1; i < writer.len; i += 1) {
+        large_ok = large_ok && data[i] == (u8)'0';
+    }
+    assert_true(large_ok, "large float preserves every digit");
+
+    writer.len = 0;
+    bits = (u64)9223372036854775809;
+    writer.write_f64(*(f64*)&bits);
+    assert_eq_i64(writer.len, 327, "negative subnormal grows the writer buffer");
+    data = (u8*)writer.data;
+    bool small_ok = writer.len == 327 && data[0] == (u8)'-'
+        && data[1] == (u8)'0' && data[2] == (u8)'.' && data[326] == (u8)'5';
+    for (i64 i = 3; i < writer.len - 1; i += 1) {
+        small_ok = small_ok && data[i] == (u8)'0';
+    }
+    assert_true(small_ok, "negative subnormal preserves every digit");
+}
+
 i32 main() {
     STDOUT.write_str("=== I/O Tests ===\n\n");
 
@@ -10,45 +42,34 @@ i32 main() {
     STDOUT.write_str("--- write_str Tests ---\n");
 
     STDOUT.write_str("Test string\n");
-    assert_true(true, "write_str works");
-    tests_passed = tests_passed + 1;
 
     // Test: write_i64
     STDOUT.write_str("\n--- write_i64 Tests ---\n");
     STDOUT.write_str("Integer: ");
     STDOUT.write_i64(42);
     STDOUT.write_str("\n");
-    assert_true(true, "write_i64 works");
-    tests_passed = tests_passed + 1;
 
     STDOUT.write_str("Long: ");
     STDOUT.write_i64(9223372036854775807);
     STDOUT.write_str("\n");
-    assert_true(true, "write_i64 with large value works");
-    tests_passed = tests_passed + 1;
 
     // Test: write_f64
+    check_float_writer_growth();
     STDOUT.write_str("\n--- write_f64 Tests ---\n");
     STDOUT.write_str("Float: ");
     STDOUT.write_f64(3.14159);
     STDOUT.write_str("\n");
-    assert_true(true, "write_f64 works");
-    tests_passed = tests_passed + 1;
 
     // Test: write_str with string
     str str_val = "hello";
     STDOUT.write_str("String: ");
     STDOUT.write_str(str_val);
     STDOUT.write_str("\n");
-    assert_true(true, "write_str works");
-    tests_passed = tests_passed + 1;
 
     // Test: write_u64
     STDOUT.write_str("Hex: 255 = ");
     STDOUT.write_u64(255);
     STDOUT.write_str("\n");
-    assert_true(true, "write_u64 works");
-    tests_passed = tests_passed + 1;
 
     // Test: write_bool
     STDOUT.write_str("bool true = ");
@@ -56,8 +77,6 @@ i32 main() {
     STDOUT.write_str(", bool false = ");
     STDOUT.write_bool(false);
     STDOUT.write_str("\n");
-    assert_true(true, "write_bool works");
-    tests_passed = tests_passed + 1;
 
     // Test: println wrapper
     STDOUT.write_str("\n--- println Tests ---\n");
@@ -75,8 +94,6 @@ i32 main() {
     STDOUT.write_str(", ");
     STDOUT.write_i64(3);
     STDOUT.write_str("\n");
-    assert_true(true, "multiple write_i64 calls work");
-    tests_passed = tests_passed + 1;
 
     // Test: Escape sequences
     STDOUT.write_str("\n--- Escape Sequences ---\n");
@@ -84,8 +101,6 @@ i32 main() {
     STDOUT.write_str("Tab:\tafter tab\n");
     STDOUT.write_str("Quote: \"quoted\"\n");
     STDOUT.write_str("Backslash: \\\n");
-    assert_true(true, "escape sequences work");
-    tests_passed = tests_passed + 1;
 
     // Test: Empty string
     STDOUT.write_str("\n--- Edge Cases ---\n");
@@ -96,8 +111,6 @@ i32 main() {
     // Test: eprintln
     STDOUT.write_str("\n--- eprintln Tests ---\n");
     eprintln("stderr message via eprintln");
-    assert_true(true, "eprintln works");
-    tests_passed = tests_passed + 1;
 
     // Test: File write_line and read_line
     {
