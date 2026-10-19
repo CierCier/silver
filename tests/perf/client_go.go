@@ -2,7 +2,7 @@
 //
 // Hammers the loopback server with sequential keep-alive GETs for the same
 // 15-second window as the Silver and Rust clients, then prints the sustained
-// request rate. Mirrors tests/http_perf_test.ag's workload: one connection,
+// request rate. Mirrors tests/perf/http_perf_test.ag's workload: one connection,
 // small body, full response read per request.
 package main
 

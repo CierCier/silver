@@ -1,3 +1,4 @@
+// error_contains: returned reference does not outlive
 // Returning a local reference binding still escapes the borrowed local.
 
 i64* bad_borrow() {

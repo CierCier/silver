@@ -1,4 +1,4 @@
-// expected_compile_failure
+// error_contains: because it implements Drop
 struct Leaf { i64 value; }
 impl Drop for Leaf { void drop(Leaf* self) {} }
 enum Payload { Item(Leaf); Empty; }

@@ -1,3 +1,8 @@
+// error_contains: type Rc<i64> is not Send
+// error_contains: type i64* is not Send
+// error_contains: type Vec<Rc<i64>> is not Send
+// error_contains: type Box<Rc<i64>> is not Send
+// error_contains: type HashMap<i64, Rc<i64>> is not Send
 // Negative launch Send-gate test: shared-ownership, GC-handle, raw-pointer,
 // and reference types must be REJECTED as launch arguments (they are moved
 // into the child thread, where they would race or dangle). Compile failure

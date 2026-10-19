@@ -22,6 +22,8 @@ import vendor.llvm.llvm;
 import agc;
 import frontend.serialize;
 import frontend.lint;
+import frontend.messages;
+import backend.llvm.optimization;
 
 #[link(c)]
 #[link(pthread)]
@@ -2351,15 +2353,17 @@ void native_add_search_path(Command* command, bool direct_linker, str dir) {
 bool native_compile_module_object(SyntaxTree* tree, TypeTable* types, Interner* names,
                                  SymbolTable* symbols, Vec<String>* source_paths,
                                  str root_path, String* root_source,
-                                 bool debug_mode, bool module_object,
+                                 bool debug_mode, bool module_object, LlvmOptimization optimization,
                                  u32 source_file_id, Vec<u32>* owned_source_ids,
                                  Vec<u32>* standalone_source_ids, str object_path,
                                  String* cache_path, NativeBuildProgress* progress,
                                  str progress_target, bool* was_cached, i32* result,
-                                 i64* ir_gen_ms, i64* verify_ms, i64* emit_obj_ms) {
+                                 i64* ir_gen_ms, i64* verify_ms, i64* optimize_ms,
+                                 i64* emit_obj_ms) {
     *result = 0;
     *ir_gen_ms = 0;
     *verify_ms = 0;
+    *optimize_ms = 0;
     *emit_obj_ms = 0;
     bool cache_hit = cache_path.len() > 0 && is_file(cache_path.to_str());
     if (cache_hit && !native_copy_cached_object(cache_path.to_str(), object_path)) {
@@ -2372,7 +2376,7 @@ bool native_compile_module_object(SyntaxTree* tree, TypeTable* types, Interner* 
         native_progress_start(progress, progress_target);
         Instant t0 = now();
         AstPool ast_pool = AstPool.new();
-        LlvmGenerator gen = LlvmGenerator.new("silver_native");
+        LlvmGenerator gen = LlvmGenerator.new("silver_native", optimization);
         bool compile_ok = gen.compile(tree, &ast_pool, types, names, symbols,
             source_paths, debug_mode, module_object, source_file_id,
             owned_source_ids, standalone_source_ids);
@@ -2403,15 +2407,6 @@ bool native_compile_module_object(SyntaxTree* tree, TypeTable* types, Interner* 
             return true;
         }
 
-        Optional<String> dump_ir = var("SILVER_DUMP_IR");
-        if (dump_ir.is_some()) {
-            String ir = gen.emit_ir();
-            STDERR.write_str(ir.to_str());
-            ir.drop();
-            String dump_val = dump_ir.unwrap();
-            dump_val.drop();
-        }
-
         if (gen.unresolved_calls > 0) {
             STDERR.write_str("agc: error: native backend cannot emit code with unresolved symbols\n");
             gen.destroy();
@@ -2437,6 +2432,29 @@ bool native_compile_module_object(SyntaxTree* tree, TypeTable* types, Interner* 
         Instant t_v1 = now();
         *verify_ms = t_v1.elapsed_ns(t_v0) / 1000000;
 
+        Instant t_o0 = now();
+        String optimization_error = String.new();
+        if (!gen.optimize(optimization, &optimization_error)) {
+            String message = llvm_optimization_failed(optimization_error.to_str());
+            STDERR.write_str("agc: error: ");
+            STDERR.write_str(message.to_str());
+            STDERR.write_str("\n");
+            message.drop();
+            optimization_error.drop();
+            gen.destroy();
+            *result = 2;
+            return true;
+        }
+        optimization_error.drop();
+        *optimize_ms = now().elapsed_ns(t_o0) / 1000000;
+        Optional<String> dump_ir = var("SILVER_DUMP_IR");
+        if (dump_ir.is_some()) {
+            String ir = gen.emit_ir();
+            STDERR.write_str(ir.to_str());
+            ir.drop();
+            String dump_val = dump_ir.unwrap();
+            dump_val.drop();
+        }
         Instant t_e0 = now();
         String emit_err = String.new();
         bool emitted = gen.emit_object_file(object_path, &emit_err);
@@ -2478,6 +2496,7 @@ struct NativeCompileResult {
     i64 elapsed_ms;
     i64 ir_gen_ms;
     i64 verify_ms;
+    i64 optimize_ms;
     i64 emit_obj_ms;
 }
 
@@ -2492,6 +2511,7 @@ struct NativeCompilePool {
     String* root_source;
     bool debug_mode;
     bool module_object;
+    LlvmOptimization optimization;
 }
 
 struct NativeCompileWorker {
@@ -2527,10 +2547,11 @@ bool native_compile_one(NativeCompileWorker* worker) {
     result.compiled = native_compile_module_object(pool.tree,
         &worker.symbols.types, &worker.symbols.names, &worker.symbols,
         pool.source_paths, pool.root_path, pool.root_source, pool.debug_mode,
-        pool.module_object, job.source_file_id, &job.owned_source_ids,
+        pool.module_object, pool.optimization, job.source_file_id, &job.owned_source_ids,
         pool.standalone_source_ids, job.object_path.to_str(),
         &job.cache_path, &quiet, job.module_name.to_str(), &result.cached,
-        &result.result, &result.ir_gen_ms, &result.verify_ms, &result.emit_obj_ms);
+        &result.result, &result.ir_gen_ms, &result.verify_ms, &result.optimize_ms,
+        &result.emit_obj_ms);
     result.elapsed_ms = now().elapsed_ns(started) / 1000000;
     __atomic_store_i32(&result.completed, 1, ATOMIC_RELEASE);
     return true;
@@ -2551,7 +2572,8 @@ bool native_compile_jobs(SyntaxTree* tree, SymbolTable* symbols,
                          Vec<String>* source_paths, str root_path,
                          Vec<u32>* standalone_source_ids,
                          String* root_source, NativeBuildProgress* progress,
-                         bool debug_mode, bool module_object, i64 requested_jobs,
+                         bool debug_mode, bool module_object, LlvmOptimization optimization,
+                         i64 requested_jobs,
                          Vec<NativeCompileJob>* jobs,
                          Vec<NativeCompileResult>* results) {
     if (jobs.len() == 0) { return true; }
@@ -2567,6 +2589,7 @@ bool native_compile_jobs(SyntaxTree* tree, SymbolTable* symbols,
     pool.root_source = root_source;
     pool.debug_mode = debug_mode;
     pool.module_object = module_object;
+    pool.optimization = optimization;
 
     i64 worker_count = thread_available_parallelism();
     if (requested_jobs > 0 && requested_jobs < worker_count) {
@@ -2682,6 +2705,28 @@ bool native_compile_jobs(SyntaxTree* tree, SymbolTable* symbols,
 
 bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path, str default_name,
                         Vec<String>* extra_includes, bool module_object, i32* result) {
+    LlvmOptimization optimization = LlvmOptimization.Unspecified;
+    if (cli.has("opt-level")) {
+        String level = String.from_str("2");
+        Optional<String> requested_level = cli.value("opt-level");
+        if (requested_level.is_some()) {
+            level.drop();
+            level = requested_level.unwrap();
+        }
+        Optional<LlvmOptimization> parsed = llvm_parse_optimization(level.to_str());
+        if (parsed.is_none()) {
+            String message = invalid_optimization_level(level.to_str());
+            STDERR.write_str("agc: error: ");
+            STDERR.write_str(message.to_str());
+            STDERR.write_str("\n");
+            message.drop();
+            level.drop();
+            *result = 2;
+            return true;
+        }
+        optimization = parsed.unwrap();
+        level.drop();
+    }
     i64 requested_jobs = 0;
     Optional<String> jobs_value = cli.value("jobs");
     if (jobs_value.is_some()) {
@@ -2808,6 +2853,8 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     profiler_end_phase("serialize");
 
     CfgSet cfg = linux_defaults();
+    if (optimization != LlvmOptimization.Unspecified
+        && optimization != LlvmOptimization.O0) { cfg.set_release(); }
     Optional<String> requested_target = cli.value("target");
     if (requested_target.is_some()) {
         String target = requested_target.unwrap();
@@ -2843,13 +2890,6 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
             String c = arg.strip_prefix("--cfg=");
             cfg.add_flag(c.to_str());
             c.drop();
-            arg_idx += 1;
-            continue;
-        }
-        if (arg.equals("-O") || arg.equals("-O1") || arg.equals("-O2")
-            || arg.equals("-O3") || arg.equals("-Os") || arg.equals("-Oz")
-            || arg.equals("-Ofast")) {
-            cfg.set_release();
             arg_idx += 1;
             continue;
         }
@@ -3104,6 +3144,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         pending.elapsed_ms = 0;
         pending.ir_gen_ms = 0;
         pending.verify_ms = 0;
+        pending.optimize_ms = 0;
         pending.emit_obj_ms = 0;
         results.push(move pending);
         object_paths.push(jobs.get_ptr(module_index).object_path.clone());
@@ -3113,22 +3154,25 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     bool modules_ok = native_compile_jobs(&tree, &symbols, &source_paths,
         source_path, &standalone_source_ids, &source_copy, &progress,
         cfg.contains("debug"),
-        module_object, requested_jobs, &jobs, &results);
+        module_object, optimization, requested_jobs, &jobs, &results);
     if (profiler_verbose()) {
         i64 total_ir_gen = 0;
         i64 total_verify = 0;
+        i64 total_optimize = 0;
         i64 total_emit_obj = 0;
         i64 j = 0;
         while (j < results.len()) {
             NativeCompileResult* res = results.get_ptr(j);
             total_ir_gen += res.ir_gen_ms;
             total_verify += res.verify_ms;
+            total_optimize += res.optimize_ms;
             total_emit_obj += res.emit_obj_ms;
             j += 1;
         }
         i64 rss = read_rss_kb();
         profiler_record_phase("llvm ir gen (all jobs)", (f64)total_ir_gen, rss, rss, false);
         profiler_record_phase("llvm verify (all jobs)", (f64)total_verify, rss, rss, false);
+        profiler_record_phase("llvm optimize (all jobs)", (f64)total_optimize, rss, rss, false);
         profiler_record_phase("llvm emit object (all jobs)", (f64)total_emit_obj, rss, rss, false);
         j = 0;
         while (j < jobs.len()) {

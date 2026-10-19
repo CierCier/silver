@@ -1,4 +1,4 @@
-// expected_compile_failure
+// error_contains: block-local
 import std.string;
 
 macro String* borrow_local() {

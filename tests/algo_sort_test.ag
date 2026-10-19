@@ -7,6 +7,30 @@ struct Item {
     i64 score;
 }
 
+void test_slice_algorithms() {
+    i64 values[6] = { 4, 2, -1, 2, 9, 0 };
+    Slice<i64> slice = values[:];
+    assert_false(is_sorted_slice<i64>(slice), "slice starts unsorted");
+    sort_slice_ref<i64>(slice);
+    i64 expected[6] = { -1, 0, 2, 2, 4, 9 };
+    i64 i = 0;
+    while (i < 6) {
+        assert_eq_i64(expected[i], values[i], "slice sort preserves values and duplicates");
+        i = i + 1;
+    }
+    assert_true(is_sorted_slice<i64>(slice), "slice is sorted");
+    assert_true(binary_search_slice<i64>(slice, 2), "search finds duplicate value");
+    assert_false(binary_search_slice<i64>(slice, 3), "search rejects missing value");
+    assert_eq_i64(2, lower_bound_slice<i64>(slice, 2), "lower bound starts duplicate run");
+    assert_eq_i64(4, upper_bound_slice<i64>(slice, 2), "upper bound ends duplicate run");
+    reverse_slice_ref<i64>(slice);
+    i = 0;
+    while (i < 6) {
+        assert_eq_i64(expected[5 - i], values[i], "reverse preserves every element");
+        i = i + 1;
+    }
+}
+
 i32 cmp_desc_i64(i64* a, i64* b) {
     if (*a > *b) { return -1; }
     if (*a < *b) { return 1; }
@@ -22,6 +46,7 @@ i32 cmp_item_score_desc(Item* a, Item* b) {
 }
 
 i32 main() {
+    test_slice_algorithms();
     STDOUT.write_str("=== Algo Sort Tests ===\n\n");
 
     // --- sort empty ---

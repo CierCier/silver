@@ -2,7 +2,7 @@
 
 - **Primary Specifications**: [RFC 9110 (HTTP Semantics)](https://datatracker.ietf.org/doc/html/rfc9110), [RFC 9112 (HTTP/1.1 Framing)](https://datatracker.ietf.org/doc/html/rfc9112).
 - **Implementation**: [`std/net/http.ag`](file:///home/cier/Projects/silver/std/net/http.ag) (`HttpClient`, `HttpServer`, `ResponseWriter`, `ServeMux`, `HttpRequest`, `HttpResponse`, `HttpStream`, `HttpConnection`).
-- **Test Suite**: [`tests/http_test.ag`](file:///home/cier/Projects/silver/tests/http_test.ag), [`tests/http_server_test.ag`](file:///home/cier/Projects/silver/tests/http_server_test.ag), [`tests/http_bench.ag`](file:///home/cier/Projects/silver/tests/http_bench.ag), [`tests/stream_test.ag`](file:///home/cier/Projects/silver/tests/stream_test.ag), [`tests/pool_test.ag`](file:///home/cier/Projects/silver/tests/pool_test.ag).
+- **Test Suite**: [`http_test.ag`](../../tests/http_test.ag), [`http_server_test.ag`](../../tests/http_server_test.ag), [`stream_test.ag`](../../tests/stream_test.ag), [`pool_test.ag`](../../tests/pool_test.ag).
 
 ## Client Compliance Table
 

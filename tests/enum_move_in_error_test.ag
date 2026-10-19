@@ -1,3 +1,4 @@
+// error_contains: must be moved into the enum
 import std.sys.entry;
 import std.string;
 

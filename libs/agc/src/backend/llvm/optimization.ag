@@ -1,0 +1,42 @@
+import vendor.llvm.llvm;
+import std.optional;
+import std.string;
+
+enum LlvmOptimization {
+    Unspecified;
+    O0;
+    O1;
+    O2;
+    O3;
+    Os;
+    Oz;
+    Ofast;
+}
+
+Optional<LlvmOptimization> llvm_parse_optimization(str level) {
+    if (strcmp(level, "0") == 0) { return Some(LlvmOptimization.O0); }
+    if (strcmp(level, "1") == 0) { return Some(LlvmOptimization.O1); }
+    if (strcmp(level, "2") == 0) { return Some(LlvmOptimization.O2); }
+    if (strcmp(level, "3") == 0) { return Some(LlvmOptimization.O3); }
+    if (strcmp(level, "s") == 0) { return Some(LlvmOptimization.Os); }
+    if (strcmp(level, "z") == 0) { return Some(LlvmOptimization.Oz); }
+    if (strcmp(level, "fast") == 0) { return Some(LlvmOptimization.Ofast); }
+    return None;
+}
+
+LLVMCodeGenOptLevel llvm_codegen_optimization(LlvmOptimization level) {
+    if (level == LlvmOptimization.O0) { return LLVMCodeGenOptLevel.LLVMCodeGenLevelNone; }
+    if (level == LlvmOptimization.O1) { return LLVMCodeGenOptLevel.LLVMCodeGenLevelLess; }
+    if (level == LlvmOptimization.O3) { return LLVMCodeGenOptLevel.LLVMCodeGenLevelAggressive; }
+    return LLVMCodeGenOptLevel.LLVMCodeGenLevelDefault;
+}
+
+str llvm_optimization_pipeline(LlvmOptimization level) {
+    if (level == LlvmOptimization.Unspecified || level == LlvmOptimization.O0) { return ""; }
+    // Match stage0, including LLVM 22's instcombine fixpoint-check workaround.
+    if (level == LlvmOptimization.O3 || level == LlvmOptimization.Os
+        || level == LlvmOptimization.Oz || level == LlvmOptimization.Ofast) {
+        return "always-inline,mem2reg,instcombine<no-verify-fixpoint>,reassociate,gvn,simplifycfg,instcombine<no-verify-fixpoint>";
+    }
+    return "always-inline,mem2reg,instcombine<no-verify-fixpoint>,reassociate,gvn,simplifycfg";
+}

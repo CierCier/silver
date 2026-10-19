@@ -20,6 +20,7 @@ import backend.llvm.context;
 import backend.llvm.drop;
 import backend.llvm.expr;
 import backend.llvm.mono;
+import backend.llvm.optimization;
 import backend.llvm.stmt;
 import backend.llvm.types;
 
@@ -1109,7 +1110,7 @@ void llvm_initialize_targets() {
 }
 
 impl LlvmGenerator {
-    LlvmGenerator new(str module_name) {
+    LlvmGenerator new(str module_name, LlvmOptimization optimization) {
         llvm_initialize_targets();
 
         str triple = LLVMGetDefaultTargetTriple();
@@ -1120,7 +1121,7 @@ impl LlvmGenerator {
         if (LLVMGetTargetFromTriple(triple, &target, &target_error) == 0) {
             target_machine = LLVMCreateTargetMachine(
                 target, triple, "generic", "",
-                LLVMCodeGenOptLevel.LLVMCodeGenLevelDefault,
+                llvm_codegen_optimization(optimization),
                 LLVMRelocMode.LLVMRelocPIC,
                 LLVMCodeModel.LLVMCodeModelDefault
             );
@@ -2295,6 +2296,21 @@ impl LlvmGenerator {
             } else {
                 out_error.push_str("unknown LLVM verification error");
             }
+            return false;
+        }
+        return true;
+    }
+
+    bool optimize(LlvmGenerator* self, LlvmOptimization level, String* out_error) {
+        if (level == LlvmOptimization.Unspecified || level == LlvmOptimization.O0) { return true; }
+        LLVMOpaquePassBuilderOptions* options = LLVMCreatePassBuilderOptions();
+        LLVMOpaqueError* error = LLVMRunPasses(self.module,
+            llvm_optimization_pipeline(level), self.target_machine, options);
+        LLVMDisposePassBuilderOptions(options);
+        if (error != (LLVMOpaqueError*)0) {
+            i8* message = LLVMGetErrorMessage(error);
+            out_error.push_str(message);
+            LLVMDisposeErrorMessage(message);
             return false;
         }
         return true;

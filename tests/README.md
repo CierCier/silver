@@ -1,107 +1,85 @@
-# Silver Integration Tests
+# Silver tests
 
-This directory contains integration tests for the Silver compiler (`agc`) and
-the standard library. Each `tests/*.ag` file is a standalone program that is
-compiled and executed by the test harness.
+Run from the repository root inside `nix develop`:
 
-## Test Files
-
-| File | Description |
-|------|-------------|
-| `align_test.ag` | Struct layout and alignment checks |
-| `box_test.ag` | Tests for `std.mem` Box smart pointer |
-| `cascade_drop_test.ag` | Nested/cascading `Drop` behavior |
-| `defer_test.ag` | `defer` block execution order |
-| `file_test.ag` | Tests for `std.file` (File handle, read/write, seek, utilities) |
-| `io_test.ag` | Tests for `std.io` (printf, puts, putchar, etc.) |
-| `map_test.ag` | Tests for `std.map` HashMap |
-| `mem_test.ag` | Tests for `std.mem` (alloc, free, memset, memcpy, memmove, realloc) |
-| `memory_pentest.ag` | Definitive RAII/move/drop-flag regression suite |
-| `memory_stress.ag` | Allocation-heavy stress test |
-| `optional_test.ag` | Tests for `std.optional` (Optional and Result types) |
-| `rc_test.ag` | Tests for `std.mem` Rc smart pointer |
-| `str_eq_test.ag` | String equality semantics |
-| `str_key_map_test.ag` | HashMap with string keys |
-| `string_test.ag` | Tests for `std.string` (String object with dynamic memory) |
-| `syscall_test.ag` | Raw inline-asm syscall (`sys_exit(42)`) |
-| `syscall_wrapper_test.ag` | `std.sys.syscall` wrappers (`sys_exit(42)`) |
-| `vec_test.ag` | Tests for `std.vec` (Vec_i32, Vec_i64, Vec_f64, Vec_ptr) |
-| `rust_ffi_test.ag` | Optional Rust C ABI layout, ownership, callbacks, process handles, and the native `Result`-shaped layer |
-
-## Running Tests
-
-The harness is `tests/run_tests.py`. It builds `agc` (debug or release profile),
-then compiles and executes `tests/*.ag` in parallel with a terminal progress UI,
-reporting passes, failures, durations, and summaries.
-
-```bash
-# Run all integration tests (from the repo root, or anywhere)
-python3 tests/run_tests.py
-
-# Run a single test by name (the .ag suffix is optional)
-python3 tests/run_tests.py vec_test
-
-# Run tests using the release build of agc
-python3 tests/run_tests.py --release
-
-# Specify thread count
-python3 tests/run_tests.py -j 8
+```sh
+cargo test -p agc
+python3 -m unittest discover -s tests -p 'test_runner.py'
+python3 tests/run_tests.py --release --no-tui --jobs 4
+python3 tests/run_tests.py --release --no-tui memory_pentest cascade_drop_test
+bash tests/selfhost/run_native.sh --release --no-tui --jobs 4
 ```
 
-The Rust bridge test is opt-in because it needs the built native artifact:
+The integration runner discovers `tests/*.ag`, compiles each program, and checks
+its exit status. Name filters select a subset. `--compiler /path/to/agc` uses an
+existing stage1 compiler. `--timeout N` bounds execution; `--compile-timeout N`
+bounds compiler processes, allowing more time for large fixtures. The runner
+reports compilation and execution times separately.
 
-```bash
+`--release` selects Cargo's release profile for the compiler. It does not
+optimize each test program. Fixture flags come from `// compile_flags: ...`
+comments and the few platform-specific settings in `run_tests.py`.
+
+## Keep cases focused
+
+A case needs an observable result that fails for a plausible defect.
+Check values, diagnostics, ownership effects, or output artifacts. An empty
+program, an unconditional success, and printing a measurement are insufficient.
+
+Keep a regression's smallest reproducer when it exercises a distinct compiler
+path. Put shared library behavior in its module's existing fixture. Extend
+`algo_sort_test.ag`, `bytes_test.ag`, or `collections_heap_test.ag` rather than
+adding another broad modernization checklist. Unit tests for finite rule sets
+should use explicit input/expected-result tables instead of repeated setup.
+
+Most fixtures use `std.test` and return `done()`, or return a nonzero status
+directly on a mismatch. Both `@assert` and `std.test` checks depend on debug cfg.
+A fixture compiled with `-O2` must use explicit failure returns or explicitly
+enable debug cfg when release cfg itself is not being tested.
+
+## Negative cases and special exits
+
+Declare the intended diagnostic in the fixture:
+
+```silver
+// error_contains: returned reference does not outlive
+i64* escape() {
+    i64 local = 5;
+    return &local;
+}
+i32 main() { return 0; }
+```
+
+Repeat `error_contains` for independently required diagnostics. All substrings
+must occur on compiler error lines. A crash, timeout, unrelated error, or
+successful compile fails the case. Avoid matching incidental formatting or
+source positions.
+
+A runtime fixture can declare `// expected_exit: 42`. Existing syscall,
+backtrace, and static-storage fixtures also have expected statuses in the
+runner. Target-specific skip dictionaries explain unsupported cases.
+
+The optional Rust bridge fixture needs a native artifact:
+
+```sh
 cargo build -p silver-ffi
 SILVER_FFI_LIBRARY_DIR="$PWD/target/debug" python3 tests/run_tests.py rust_ffi_test
 ```
 
-A test fails when it does not compile, or when the produced binary exits with
-an unexpected status. Most tests are expected to exit `0`; per-test expected
-exit codes are read by `get_expected_exit` in `run_tests.py`. A fixture can
-declare one with `// expected_exit: N`; the harness also recognizes several
-named cases, including syscall tests that exit `42`. Tests that must be skipped
-are listed in `DEFAULT_SKIP` or the target-specific skip sets with a reason.
+## Performance workloads
 
-Compiler unit tests live in the `agc` crate and are run separately:
+Timed workloads live in `tests/perf/` and are excluded from correctness discovery:
 
-```bash
-cargo test -p agc
+```sh
+bash tests/perf/run_perf.sh silver
+target/release/agc tests/perf/memcpy_bench.ag -o /tmp/silver-memcpy-bench
+/tmp/silver-memcpy-bench
+target/release/agc tests/perf/mem_growth_watch.ag -o /tmp/silver-mem-growth
+/tmp/silver-mem-growth
 ```
 
-Both suites run in CI on every push and pull request
-(`.github/workflows/ci.yml`).
-
-## Test Structure
-
-Most tests use the shared harness `std.test` (`std/test.ag`). Import it instead
-of writing ad-hoc assertion helpers:
-
-```silver
-import std.test;
-// Import module being tested
-
-i32 main() {
-    test_start("My Tests");
-    assert_true(1 + 1 == 2, "basic arithmetic");
-    assert_eq_i64(42, compute_answer(), "answer check");
-    return done();  // returns number of failed tests
-}
-```
-
-The full assertion suite: `assert_true`, `assert_false`, `check`, `assert_eq_i64`,
-`assert_eq_i32`, `assert_eq_str`. See `std/test.ag` for details.
-
-Some older tests use a local `printf`-based pattern and do not import `std.test`.
-This is legacy — new tests should use `std.test`.
-
-By default, tests return exit code 0 on success and 1 on failure. However, some
-special test cases (like syscall tests) may intentionally exit with a different
-status if configured through the harness's `get_expected_exit` function.
-
-## Adding New Tests
-
-1. Create a new `.ag` file in this directory following the pattern above.
-2. The harness discovers `tests/*.ag` automatically; no registration needed.
-3. If the test intentionally exits with a nonzero status, declare the expected
-   exit code with a `// expected_exit: N` comment in the fixture.
-4. Run `python3 tests/run_tests.py <name>` to verify it passes.
+The HTTP comparison needs Go and a built `target/debug/agc`. The memory-growth
+watch intentionally allocates about 1 GiB and runs for about 30 seconds.
+Correctness coverage for memory intrinsics stays in
+`adversarial_mem_intrinsics_test.ag` and `mem_test.ag`; HTTP buffering, streaming,
+and pooling stay in `http_test.ag`, `stream_test.ag`, and `pool_test.ag`.

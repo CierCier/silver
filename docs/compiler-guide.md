@@ -141,8 +141,7 @@ implements. An accepted spelling alone does not establish behavior.
 | `-I DIR`, `-IDIR`, `--include DIR`, `--include=DIR`, `--include-path DIR` | Add source import roots. `--root DIR` is accepted but does not set a native import root. |
 | `--target TRIPLE` or `--target=TRIPLE` | Exact LLVM host triple only for native output, as described above. |
 | `--cfg KEY=VALUE,...` | Add cfg values; repeated flags are accepted. Explicit cfg values can coexist with derived values. |
-| `-O`, `-O1`/`2`/`3`/`s`/`z`/`fast` | Select release cfg and prune debug assertions. They do not select an LLVM optimization pipeline; the target machine uses its fixed default codegen level. `-O0` retains debug cfg. |
-| `--opt-level=LEVEL` | Accepted but does not select cfg or an LLVM optimization level. Prefer the short spelling for the existing cfg behavior. |
+| `-O`, `-O LEVEL`, `-O1`/`2`/`3`/`s`/`z`/`fast`, `--opt-level LEVEL`, `--opt-level=LEVEL` | Native builds apply the stage0 IR pass sequence and select the corresponding target-machine codegen level. Bare `-O` means level 2. Nonzero levels select release cfg and prune debug assertions; `-O0` retains debug cfg and skips the IR pass sequence. Invalid levels fail before source compilation. Size and `fast` spellings currently follow stage0's limited pass mapping, not full LLVM size pipelines or fast-math semantics. |
 | `-g`, `--debug-info`, `-g0`, `--g0` | Accepted without native DWARF generation or suppression. The debug cfg flag controls assertions, not DWARF. |
 | `--leak-check` | Accepted without enabling native allocator instrumentation. The generated `__silver_leak_check_enabled` global remains false. |
 | `-L DIR`/`-LDIR`, `-l LIB`/`-lLIB`, `--static` | Forward native library/search/static-link inputs. Long `--library-path`, `--lib-path`, and `--library` spellings are accepted but not forwarded. See the [link contract gate](../tests/selfhost/check_native_link_contract.py). |
@@ -178,6 +177,17 @@ tracks native artifacts and option behavior; [C04](https://github.com/CierCier/s
 tracks ownership and cleanup proof. Passing fixtures with an ignored leak flag
 does not establish allocator leak freedom. Neither C01 documentation nor
 parser acceptance closes those correctness gates.
+
+The [native optimization gate](../tests/selfhost/check_native_optimization.py)
+checks actual IR simplification and executable behavior, including option
+spellings, package/object/module builds, cache separation, and forwarded arguments.
+With no optimization flag, native builds retain the existing default machine
+codegen level without running IR optimization. This does not establish binary
+size or performance parity with stage0; reachability and artifact work remain
+open. Scalar local storage is allocated in the entry block so LLVM can promote
+it even when the declaration follows control flow. Initialization stays at the
+declaration; aggregate allocation behavior is unchanged. Verbose profiles report
+LLVM optimization separately from object emission.
 
 ## 4. Compiler Pipeline
 

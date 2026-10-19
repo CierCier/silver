@@ -1,3 +1,4 @@
+// error_contains: local value
 // Storing a reference to a local in a global lets it outlive the function.
 
 i64* global_ref;

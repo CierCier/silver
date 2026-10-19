@@ -1,7 +1,7 @@
+// error_contains: import `broken_build`
 // The .submodule.toml candidate exists but cannot be built; both compilers
 // must reject the unresolved import rather than accept a nonexistent module.
 // compile_flags: -I tests/modules
-// expected_compile_failure
 import broken_build;
 import std.sys.entry;
 

@@ -137,6 +137,13 @@ i32 main() {
         assert_eq_i64(b.find((u8)'z'), -1, "find 'z' = -1");
         assert_eq_i64(b.rfind((u8)'z'), -1, "rfind 'z' = -1");
 
+        Slice<u8> all = b.as_slice();
+        Slice<u8> middle = b.__slice_get(2, 5);
+        assert_eq_i64(10, all.len, "as_slice exposes all bytes");
+        assert_eq_i64(3, middle.len, "subslice uses exclusive end");
+        assert_eq_i32((i32)middle.data[0], (i32)'c', "subslice starts at offset");
+        assert_eq_i32((i32)middle.data[2], (i32)'a', "subslice ends at expected byte");
+
         b.drop();
     }
 

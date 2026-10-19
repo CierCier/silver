@@ -1,3 +1,4 @@
+// error_contains: cannot borrow 'values'
 // Indices conservatively overlap, and dereferences of the same pointer overlap.
 
 void take_two(&mut i64 first, &i64 second) {

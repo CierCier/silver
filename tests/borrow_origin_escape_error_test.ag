@@ -1,3 +1,4 @@
+// error_contains: returned reference does not outlive
 // A reference to a local value cannot escape its defining function.
 i64* bad_borrow() {
     i64 local = 5;

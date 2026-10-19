@@ -1,6 +1,12 @@
+// error_contains: type RcField is not Send
+// error_contains: type RcPayload is not Send
+// error_contains: type GenericField<Rc<i64>> is not Send
+// error_contains: type NestedGeneric<Rc<i64>> is not Send
+// error_contains: type Recursive is not Send
 // Declaration-aware Send negatives shared by stage0 and stage1.
 import std.thread;
 import std.mem.rc;
+import std.mem.vec;
 import std.sys.entry;
 
 struct RcField { Rc<i64> value; }

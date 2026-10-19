@@ -241,7 +241,7 @@ i32 run_wire_case(str wire, i32 expected_status, str expected_body,
 
     HttpRequest request = HttpRequest.new(HttpVersion.Http11, "GET", "/status", "fixture.test");
     Result<HttpResponse, Error> response_result =
-        connection.send(&request, 65536, 1024);
+        connection.send(&request, 65536, 65536);
     @assert(!(response_result.failed()), "response_result.failed()");
     HttpResponse response = response_result.unwrap();
     @assert(!(response.status != expected_status), "response.status != expected_status");
@@ -410,6 +410,25 @@ i32 run_get_public_case() {
 }
 
  i32 main() {
+    test_start("headers and body spanning read buffers");
+    {
+        String body = String.new();
+        i64 i = 0;
+        while (i < 20480) {
+            body.push((u8)'a' + (u8)(i % 26));
+            i = i + 1;
+        }
+        String wire = String.from_str("HTTP/1.1 200 OK\r\nContent-Length: 20480\r\n");
+        i = 0;
+        while (i < 300) {
+            wire.push_str("X-Padding: abcdefghijklmnopqrstuvwxyz0123456789\r\n");
+            i = i + 1;
+        }
+        wire.push_str("Connection: close\r\n\r\n");
+        wire.push_str(body.to_str());
+        assert_eq_i64(0, run_wire_case(wire.to_str(), 200, body.to_str(), (str)0, "OK"),
+            "full body survives header and body buffer refills");
+    }
     test_start("HTTP/1.1 client");
     assert_eq_i64(0, run_http_case(HttpVersion.Http11,
         "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello"),
