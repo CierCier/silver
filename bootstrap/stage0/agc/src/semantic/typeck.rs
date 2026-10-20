@@ -4766,8 +4766,8 @@ impl TypeChecker {
             ),
             ast::Literal::String(_) => {
                 is_string(expected)
-                    || matches!(expected, Type::Slice { element } if Self::is_byte_like(element))
-                    || matches!(expected, Type::Reference { inner, .. } | Type::Pointer { inner, .. } if matches!(inner.as_ref(), Type::Slice { element } if Self::is_byte_like(element)))
+                    || matches!(expected, Type::Slice { element } if Self::is_byte_element(element))
+                    || matches!(expected, Type::Reference { inner, .. } | Type::Pointer { inner, .. } if matches!(inner.as_ref(), Type::Slice { element } if Self::is_byte_element(element)))
             }
             ast::Literal::Char(value) => {
                 if matches!(expected, Type::Primitive(ast::PrimitiveType::Char)) {
@@ -4956,34 +4956,37 @@ impl TypeChecker {
         }
     }
 
-    pub(crate) fn is_byte_like(ty: &Type) -> bool {
+    /// Byte-sized element types. `char` is deliberately absent: it is a
+    /// 32-bit Unicode scalar, so treating it as byte-like would let a `u8*`
+    /// pass as a `char*` and a char store would write four bytes into a
+    /// one-byte buffer.
+    pub(crate) fn is_byte_element(ty: &Type) -> bool {
         matches!(
             ty,
-            Type::Primitive(
-                ast::PrimitiveType::U8 | ast::PrimitiveType::I8 | ast::PrimitiveType::Char
-            )
+            Type::Primitive(ast::PrimitiveType::U8 | ast::PrimitiveType::I8)
         )
     }
+
 
     pub(crate) fn can_coerce_to_slice(&self, found: &Type, expected_elem: &Type) -> bool {
         match found {
             Type::Slice { element } => {
                 self.is_assignable(expected_elem, element)
-                    || (Self::is_byte_like(expected_elem) && Self::is_byte_like(element))
+                    || (Self::is_byte_element(expected_elem) && Self::is_byte_element(element))
             }
-            Type::Primitive(ast::PrimitiveType::Str) => Self::is_byte_like(expected_elem),
+            Type::Primitive(ast::PrimitiveType::Str) => Self::is_byte_element(expected_elem),
             Type::Named { path, generics } => {
                 if path.last().map(|s| s.as_str()) == Some("String") && generics.is_empty() {
-                    Self::is_byte_like(expected_elem)
+                    Self::is_byte_element(expected_elem)
                 } else if path.last().map(|s| s.as_str()) == Some("Vec") && generics.len() == 1 {
                     self.is_assignable(expected_elem, &generics[0])
-                        || (Self::is_byte_like(expected_elem) && Self::is_byte_like(&generics[0]))
+                        || (Self::is_byte_element(expected_elem) && Self::is_byte_element(&generics[0]))
                 } else {
                     false
                 }
             }
             Type::Reference { inner, .. } | Type::Pointer { inner, .. } => {
-                if Self::is_byte_like(inner) && Self::is_byte_like(expected_elem) {
+                if Self::is_byte_element(inner) && Self::is_byte_element(expected_elem) {
                     true
                 } else {
                     self.can_coerce_to_slice(inner, expected_elem)
@@ -4991,7 +4994,7 @@ impl TypeChecker {
             }
             Type::Array { element, .. } => {
                 self.is_assignable(expected_elem, element)
-                    || (Self::is_byte_like(expected_elem) && Self::is_byte_like(element))
+                    || (Self::is_byte_element(expected_elem) && Self::is_byte_element(element))
             }
             _ => false,
         }
@@ -5077,9 +5080,10 @@ impl TypeChecker {
                     inner: f_inner,
                 },
             ) => (!*is_mutable || *f_mut) && e_inner == f_inner,
-            // Byte pointers (u8*/char*) convert implicitly; a mutable source
+            // Byte pointers (u8*/i8*) convert implicitly; a mutable source
             // may become a const target, never the reverse. Volatile pointees
-            // must not silently become plain pointers.
+            // must not silently become plain pointers. `char*` is excluded:
+            // a char is four bytes wide, so the pointers do not alias.
             (
                 Type::Pointer {
                     is_mutable: to_mut,
@@ -5091,13 +5095,8 @@ impl TypeChecker {
                     is_volatile: from_vol,
                     inner: from_inner,
                 },
-            ) if matches!(
-                to_inner.as_ref(),
-                Type::Primitive(ast::PrimitiveType::U8 | ast::PrimitiveType::Char)
-            ) && matches!(
-                from_inner.as_ref(),
-                Type::Primitive(ast::PrimitiveType::U8 | ast::PrimitiveType::Char)
-            ) =>
+            ) if Self::is_byte_element(to_inner.as_ref())
+                && Self::is_byte_element(from_inner.as_ref()) =>
             {
                 !*to_vol && !*from_vol && (!*to_mut || *from_mut)
             }
@@ -5105,49 +5104,20 @@ impl TypeChecker {
             // both directions (str is a non-owning view of a NUL-terminated
             // byte buffer, so mutable u8* is accepted as well).
             (Type::Primitive(ast::PrimitiveType::Str), Type::Pointer { inner, .. }) => {
-                matches!(
-                    inner.as_ref(),
-                    Type::Primitive(
-                        ast::PrimitiveType::U8 | ast::PrimitiveType::I8 | ast::PrimitiveType::Char
-                    )
-                )
+                Self::is_byte_element(inner.as_ref())
             }
             (Type::Pointer { inner, .. }, Type::Primitive(ast::PrimitiveType::Str)) => {
-                matches!(
-                    inner.as_ref(),
-                    Type::Primitive(
-                        ast::PrimitiveType::U8 | ast::PrimitiveType::I8 | ast::PrimitiveType::Char
-                    )
-                )
+                Self::is_byte_element(inner.as_ref())
             }
             (Type::Primitive(ast::PrimitiveType::Str), Type::Slice { element }) => {
-                matches!(
-                    element.as_ref(),
-                    Type::Primitive(
-                        ast::PrimitiveType::U8 | ast::PrimitiveType::I8 | ast::PrimitiveType::Char
-                    )
-                )
+                Self::is_byte_element(element.as_ref())
             }
             (Type::Slice { element }, Type::Primitive(ast::PrimitiveType::Str)) => {
-                matches!(
-                    element.as_ref(),
-                    Type::Primitive(
-                        ast::PrimitiveType::U8 | ast::PrimitiveType::I8 | ast::PrimitiveType::Char
-                    )
-                )
+                Self::is_byte_element(element.as_ref())
             }
             (Type::Pointer { inner, .. }, Type::Slice { element }) => {
-                matches!(
-                    inner.as_ref(),
-                    Type::Primitive(
-                        ast::PrimitiveType::U8 | ast::PrimitiveType::I8 | ast::PrimitiveType::Char
-                    )
-                ) && matches!(
-                    element.as_ref(),
-                    Type::Primitive(
-                        ast::PrimitiveType::U8 | ast::PrimitiveType::I8 | ast::PrimitiveType::Char
-                    )
-                )
+                Self::is_byte_element(inner.as_ref())
+                    && Self::is_byte_element(element.as_ref())
             }
             _ => false,
         };
@@ -5220,7 +5190,7 @@ impl TypeChecker {
                 if *is_mutable {
                     return false;
                 }
-                matches!(inner.as_ref(), Type::Primitive(ast::PrimitiveType::Char))
+                Self::is_byte_element(inner.as_ref())
             }
             (
                 Type::Named { path, generics },
@@ -5978,7 +5948,7 @@ impl TypeChecker {
             }
         }
         if let Type::Slice { element } = from {
-            if matches!(to, Type::Primitive(ast::PrimitiveType::Str)) && Self::is_byte_like(element)
+            if matches!(to, Type::Primitive(ast::PrimitiveType::Str)) && Self::is_byte_element(element)
             {
                 return true;
             }
@@ -5989,7 +5959,7 @@ impl TypeChecker {
             } = to
             {
                 if self.is_assignable(inner, element)
-                    || (Self::is_byte_like(inner) && Self::is_byte_like(element))
+                    || (Self::is_byte_element(inner) && Self::is_byte_element(element))
                 {
                     return true;
                 }
@@ -6021,28 +5991,21 @@ impl TypeChecker {
                     inner,
                 },
             ) => {
-                // str is a byte pointer; implicit conversion to const char*,
-                // const u8*, or const i8* (mutable targets require an explicit cast).
+                // str is a byte pointer; implicit conversion to const u8* or
+                // const i8* (mutable targets require an explicit cast).
+                // `char*` is excluded: a char is four bytes wide.
                 if *is_mutable {
                     return false;
                 }
-                matches!(
-                    inner.as_ref(),
-                    Type::Primitive(
-                        ast::PrimitiveType::Char | ast::PrimitiveType::U8 | ast::PrimitiveType::I8
-                    )
-                )
+                Self::is_byte_element(inner.as_ref())
             }
             (Type::Pointer { inner, .. }, Type::Primitive(ast::PrimitiveType::Str)) => {
-                matches!(
-                    inner.as_ref(),
-                    Type::Primitive(
-                        ast::PrimitiveType::U8 | ast::PrimitiveType::I8 | ast::PrimitiveType::Char
-                    )
-                )
+                Self::is_byte_element(inner.as_ref())
             }
-            // Byte pointers (u8*/i8*/char*) convert implicitly; a mutable source
-            // may become a const target, never the reverse.
+            // Byte pointers (u8*/i8*) convert implicitly; a mutable source
+            // may become a const target, never the reverse. `char*` is
+            // excluded: a char is four bytes wide, so the pointers do not
+            // alias.
             (
                 Type::Pointer {
                     is_mutable: to_mut,
@@ -6054,17 +6017,8 @@ impl TypeChecker {
                     is_volatile: from_vol,
                     inner: from_inner,
                 },
-            ) if matches!(
-                to_inner.as_ref(),
-                Type::Primitive(
-                    ast::PrimitiveType::U8 | ast::PrimitiveType::I8 | ast::PrimitiveType::Char
-                )
-            ) && matches!(
-                from_inner.as_ref(),
-                Type::Primitive(
-                    ast::PrimitiveType::U8 | ast::PrimitiveType::I8 | ast::PrimitiveType::Char
-                )
-            ) =>
+            ) if Self::is_byte_element(to_inner.as_ref())
+                && Self::is_byte_element(from_inner.as_ref()) =>
             {
                 !*to_vol && !*from_vol && (!*to_mut || *from_mut)
             }

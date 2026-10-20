@@ -317,13 +317,13 @@ bool test_strlen_size(i64 n) {
             i = i + 1;
         }
 
-        i64 len = strlen((const char*)s);
+        i64 len = strlen(s);
         if (len != n) {
             free(buf);
             return false;
         }
 
-        i64 rt_len = silver_rt_strlen((const char*)s);
+        i64 rt_len = silver_rt_strlen(s);
         if (rt_len != n) {
             free(buf);
             return false;
@@ -503,8 +503,8 @@ bool test_null_pointers() {
     if ((u8*)memcpy((void*)0, (const void*)0, 0) != (u8*)0) { return false; }
     if ((u8*)memset((void*)0, 0, 0) != (u8*)0) { return false; }
     if ((u8*)memmove((void*)0, (const void*)0, 0) != (u8*)0) { return false; }
-    if (strlen((const char*)0) != 0) { return false; }
-    if (silver_rt_strlen((const char*)0) != 0) { return false; }
+    if (strlen((str)0) != 0) { return false; }
+    if (silver_rt_strlen((str)0) != 0) { return false; }
     if (memchr((const void*)0, (i32)'a', 0) != (u8*)0) { return false; }
     if (mem_find_byte((u8*)0, (u8)'a', 0) != -1) { return false; }
     if (mem_count_byte((u8*)0, (u8)'a', 0) != 0) { return false; }

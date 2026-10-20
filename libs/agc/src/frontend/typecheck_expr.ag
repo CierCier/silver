@@ -81,7 +81,10 @@ impl TypeEnv {
 }
 
 bool type_is_byte_like(u32 id) {
-    return id == TYPE_U8 || id == TYPE_I8 || id == TYPE_CHAR;
+    // `char` is a 32-bit Unicode scalar, not a byte: accepting it here would
+    // let a `u8*` pass as a `char*` and a char store would write four bytes
+    // into a one-byte buffer.
+    return id == TYPE_U8 || id == TYPE_I8;
 }
 
 bool type_is_numeric_or_char(u32 id) {

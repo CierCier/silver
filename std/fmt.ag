@@ -1030,8 +1030,8 @@ void silver_rt_print_f64(f64 v) {
     write_stdout(p, n + 1);
 }
 
-void silver_rt_print_cstr(char* ptr) {
-    if (ptr == (char*)0) {
+void silver_rt_print_cstr(str ptr) {
+    if (ptr == (str)0) {
         write_stdout((u8*)"<null>\n", 7);
         return;
     }
@@ -1074,8 +1074,8 @@ void silver_rt_abort() {
     sys_exit_group(134);
 }
 
-void silver_rt_abort_cstr(char* ptr) {
-    if (ptr != (char*)0) {
+void silver_rt_abort_cstr(str ptr) {
+    if (ptr != (str)0) {
         u8* p = (u8*)ptr;
         i64 len = cstr_len(p);
         // ffi.rs prints the message only when it is valid UTF-8.

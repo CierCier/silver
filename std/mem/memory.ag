@@ -364,7 +364,7 @@ u8* silver_rt_memmove(u8* dst, u8* src, i64 len) {
 /// bytes so every wide read starts on a 16-byte boundary — aligned 16-byte
 /// reads never cross a page, so the scan cannot fault on a string that ends
 /// at a page edge.
-i64 silver_rt_strlen(const char* s) {
+i64 silver_rt_strlen(str s) {
     u8* p = (u8*)s;
     if (p == (u8*)0) {
         return 0;
@@ -767,7 +767,7 @@ i32 bcmp(const void* s1, const void* s2, i64 n) {
 /// Compare two NUL-terminated strings. Kept scalar: strings are typically
 /// short, and the wide-path dispatch overhead would dominate; the page-edge
 /// alignment cost of a SIMD version is not worth it here.
-i32 strcmp(const char* s1, const char* s2) {
+i32 strcmp(str s1, str s2) {
     u8* p1 = (u8*)s1;
     u8* p2 = (u8*)s2;
     i64 i = 0;
@@ -782,7 +782,8 @@ i32 strcmp(const char* s1, const char* s2) {
 //
 // These keep existing std/ call sites (memset/memcpy/memmove/strlen with the
 // classic C signatures) compiling unchanged, routed through the pure-Silver
-// implementations above.
+// implementations above. The string shims take `str`: Silver's `char` is a
+// 32-bit codepoint, so a C byte string is a `str`, not a `char*`.
 // ---------------------------------------------------------------------------
 
 void* memset(void* ptr, i32 value, i64 num) {
@@ -797,7 +798,7 @@ void* memmove(void* dest, const void* src, i64 num) {
     return (void*)silver_rt_memmove((u8*)dest, (u8*)src, num);
 }
 
-i64 strlen(const char* s) {
+i64 strlen(str s) {
     return silver_rt_strlen(s);
 }
 

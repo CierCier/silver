@@ -664,9 +664,9 @@ u8* __silver_leak_alloc(i64 size, i64 align) {
                 if (idx >= 0) {
                     BtEntry e = __silver_bt_entries[idx];
                     if (e.file != (u8*)0
-                        && strcmp((const char*)e.file, (const char*)"alloc.ag") != 0
-                        && strcmp((const char*)e.name, (const char*)"mem_alloc_impl") != 0
-                        && strcmp((const char*)e.name, "__silver_leak_alloc") != 0) {
+                        && strcmp(e.file, "alloc.ag") != 0
+                        && strcmp(e.name, "mem_alloc_impl") != 0
+                        && strcmp(e.name, "__silver_leak_alloc") != 0) {
                         alloc_caller = ret_addr;
                         break;
                     }
@@ -692,9 +692,9 @@ u8* __silver_leak_alloc(i64 size, i64 align) {
                 if (idx >= 0) {
                     BtEntry e = __silver_bt_entries[idx];
                     if (e.file != (u8*)0
-                        && strcmp((const char*)e.file, (const char*)"alloc.ag") != 0
-                        && strcmp((const char*)e.name, (const char*)"mem_alloc_impl") != 0
-                        && strcmp((const char*)e.name, "__silver_leak_alloc") != 0) {
+                        && strcmp(e.file, "alloc.ag") != 0
+                        && strcmp(e.name, "mem_alloc_impl") != 0
+                        && strcmp(e.name, "__silver_leak_alloc") != 0) {
                         break;
                     }
                 }

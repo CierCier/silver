@@ -145,6 +145,12 @@ generics, and algebraic data types.
 | String & Character | `str`, `char` | NUL-terminated byte pointer, 32-bit codepoint |
 | Boolean & Void | `bool`, `void` | `true`/`false`, unit return |
 
+`char` is a 32-bit Unicode scalar and `char*` points at `char` values. Byte
+buffers use `u8`/`i8`, and a `u8*`/`i8*` never converts to a `char*` (or the
+reverse) without an explicit cast: the element widths differ, so an implicit
+conversion would let a `char` store write four bytes into a one-byte buffer.
+C byte strings therefore use `u8*` or `str`, not `char*`.
+
 ### References & Borrowing
 
 References are the **enforced** indirection mechanism.  A parameter declared
@@ -297,7 +303,7 @@ private void log_message(str msg) {
 }
 
 // External variadic function
-extern "C" i32 printf(const char* fmt, ...);
+extern "C" i32 printf(const u8* fmt, ...);
 ```
 
 ### Struct Definitions
@@ -398,7 +404,7 @@ impl Display for Vector2 {
 extern "C" f32 sinf(f32 x);
 
 extern "C" {
-    i32 open(const char* path, i32 flags);
+    i32 open(const u8* path, i32 flags);
     i32 close(i32 fd);
     i32 errno;    // mutable extern variables not supported (no `mut` keyword)
 }
@@ -406,6 +412,11 @@ extern "C" {
 
 Supported linkage specs: `"C"`, `"Silver"`, `"system"`, `"Rust"`, `"cdecl"`,
 `"stdcall"`, `"fastcall"`.
+
+C string parameters use `const u8*` (or `str`): Silver's `char` is a 32-bit
+codepoint, so `char*` addresses `char` values and cannot alias a byte buffer.
+The C ABI is unchanged — both spellings are pointers — but a Silver call
+passes a `str` only to a `const u8*` parameter.
 
 ### Attributes & Metadata
 

@@ -326,7 +326,7 @@ i32 main() {
     free(mv);
 
     assert_eq_i64(silver_rt_strlen("hello"), 5, "silver_rt_strlen counts bytes");
-    assert_eq_i64(silver_rt_strlen((const char*)0), 0, "silver_rt_strlen(null) is 0");
+    assert_eq_i64(silver_rt_strlen((str)0), 0, "silver_rt_strlen(null) is 0");
     assert_eq_i64(strlen(""), 0, "strlen of empty string is 0");
 
     // Test: Arena allocation alignment

@@ -57,12 +57,12 @@ i32 main() {
     big[16384] = (u8)0;
     t0 = now();
     r = 0;
-    while (r < 20000) { strlen((const char*)big); r = r + 1; }
+    while (r < 20000) { strlen(big); r = r + 1; }
     t1 = now();
     us = t1.elapsed_ns(t0) / 1000;
     if (us < 1) { us = 1; }
     @println("strlen 16KB: {} ns/call ({} us for 20K)", us * 1000 / 20000, us);
-    @assert(!(strlen((const char*)big) != 16384), "strlen((const char*)big) != 16384");
+    @assert(!(strlen(big) != 16384), "strlen(big) != 16384");
 
     // memcmp on equal buffers (full scan, not early-exit) — before memset.
     t0 = now();

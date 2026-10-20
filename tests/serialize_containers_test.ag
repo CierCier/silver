@@ -39,7 +39,7 @@ impl Nested {
 }
 
 bool cstr_eq(str a, str b) {
-    return strcmp((const char*)a, (const char*)b) == 0;
+    return strcmp(a, b) == 0;
 }
 
 i32 main() {

@@ -81,6 +81,13 @@ STAGE1_ONLY_TESTS = {
     "unwrap_or_array_element_error_test": "stage1 rejects owned array element unwrap-or",
 }
 
+# These regressions are enforced by stage0 only. The stage1 checker is still a
+# projection: it does not compare pointer types across a call or a local
+# initializer yet, so it cannot reject these conversions.
+STAGE0_ONLY_TESTS = {
+    "char_pointer_width_test": "stage0 rejects byte-pointer to char-pointer conversions",
+}
+
 IS_WINDOWS = os.name == "nt"
 
 
@@ -879,6 +886,8 @@ def main():
                 skip_reason = "requires built Rust FFI library (build bootstrap/stage0/ffi-rust)"
             elif compiler is None and name in STAGE1_ONLY_TESTS:
                 skip_reason = STAGE1_ONLY_TESTS[name]
+            elif compiler is not None and name in STAGE0_ONLY_TESTS:
+                skip_reason = STAGE0_ONLY_TESTS[name]
             elif IS_WINDOWS and name in WINDOWS_SKIP:
                 skip_reason = WINDOWS_SKIP[name]
             elif target and target_is_windows_name(target) and name in WINDOWS_SKIP:

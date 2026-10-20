@@ -1,0 +1,16 @@
+// compile_flags: --no-cache
+import std.test;
+
+char g_char = 'A';
+
+char* get_char_ptr() {
+    return &g_char;
+}
+
+i32 main() {
+    char* p = get_char_ptr();
+    *p = 'B';
+    assert_eq_i64(66, (i64)g_char, "char pointer stores the whole codepoint");
+    assert_eq_i64(66, (i64)*p, "char pointer loads the whole codepoint");
+    return done();
+}

@@ -200,7 +200,7 @@ i32 main() {
     silver_rt_print_f64(2.5);
     {
         str msg = "cstr line";
-        silver_rt_print_cstr((char*)msg);
+        silver_rt_print_cstr(msg);
         SilverSlice s;
         s.ptr = (u8*)msg;
         s.len = 4;
@@ -218,7 +218,7 @@ i32 main() {
         s.ptr = (u8*)0;
         s.len = 0;
         silver_rt_print_bytes(s);
-        silver_rt_print_cstr((char*)0);
+        silver_rt_print_cstr((str)0);
     }
 
     return done();
