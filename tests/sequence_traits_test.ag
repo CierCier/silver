@@ -1,0 +1,166 @@
+// compile_flags: --no-cache
+import std.test;
+import std.slice;
+import std.mem.vec;
+import std.string;
+import std.bytes;
+import std.algo;
+
+struct Key {
+    i64 value;
+    i64 ignored;
+}
+
+impl Eq<Key> for Key {
+    bool __eq(&self, &Key other) { return self.value == other.value; }
+}
+
+impl Compare for Key {
+    i32 compare(&self, &Key other) {
+        if (self.value < other.value) { return -7; }
+        if (self.value > other.value) { return 7; }
+        return 0;
+    }
+}
+
+i64 count_byte<C: AsSlice<u8>>(&C source, u8 byte) {
+    Slice<u8> view = source.as_slice();
+    i64 count = 0;
+    for (i64 i = 0; i < view.len; i += 1) {
+        if (view.data[i] == byte) { count += 1; }
+    }
+    return count;
+}
+
+bool equal<C: Eq<C>>(&C left, &C right) {
+    return *left == *right;
+}
+
+i32 order<C: Compare>(&C left, &C right) {
+    return left.compare(right);
+}
+
+void test_views() {
+    String text = String.from_str("banana");
+    Bytes bytes = Bytes.from_str("banana");
+    Vec<u8> vector = Vec<u8>.new();
+    for (i64 i = 0; i < text.len(); i += 1) { vector.push(text.data[i]); }
+    Slice<u8> slice = bytes.as_slice();
+    assert_eq_i64(3, count_byte<String>(&text, (u8)'a'), "String satisfies AsSlice");
+    assert_eq_i64(3, count_byte<Bytes>(&bytes, (u8)'a'), "Bytes satisfies AsSlice");
+    assert_eq_i64(3, count_byte<Vec<u8>>(&vector, (u8)'a'), "Vec satisfies AsSlice");
+    assert_eq_i64(3, count_byte<Slice<u8>>(&slice, (u8)'a'), "Slice satisfies AsSlice");
+    Slice<u8> view = text.as_slice();
+    assert_true(view.data == text.data, "String view borrows original allocation");
+    assert_eq_i64(6, text.len(), "view excludes the String terminator");
+    assert_true(text == "banana", "generic borrower preserves source");
+}
+
+void test_slices() {
+    i64 a[3] = { 2, 4, 6 };
+    i64 b[3] = { 2, 4, 6 };
+    i64 c[3] = { 2, 5, 0 };
+    Slice<i64> left = a[:];
+    Slice<i64> same = b[:];
+    Slice<i64> later = c[:];
+    Slice<i64> prefix = a[:2];
+    Slice<i64> empty = Slice<i64>.from_raw((i64*)0, 0);
+    assert_true(equal<Slice<i64>>(&left, &same), "slice equality compares contents");
+    assert_false(left != same, "equal slices are not unequal");
+    assert_true(left != later, "different contents are unequal");
+    assert_false(left == prefix, "equality compares lengths");
+    assert_true(left < later && later > left, "first different element determines order");
+    assert_true(left <= same && left >= same, "equal slices satisfy inclusive order");
+    assert_true(prefix < left, "shorter equal prefix sorts first");
+    assert_true(empty < prefix && empty == empty, "empty slices compare without storage");
+    assert_eq_i32(0, order<Slice<i64>>(&left, &same), "slice satisfies Compare");
+    assert_true(a[:2] == b[:2], "temporary slice operands compare by content");
+
+    Key first[2];
+    Key second[2];
+    Key third[2];
+    first[0].value = 1; first[0].ignored = 10;
+    first[1].value = 3; first[1].ignored = 20;
+    second[0].value = 1; second[0].ignored = 99;
+    second[1].value = 3; second[1].ignored = 88;
+    third[0].value = 1; third[0].ignored = 0;
+    third[1].value = 4; third[1].ignored = 0;
+    Slice<Key> x = first[:];
+    Slice<Key> y = second[:];
+    Slice<Key> z = third[:];
+    assert_true(x == y, "generic equality calls custom element Eq");
+    assert_eq_i32(-7, x.compare(&z), "generic ordering calls custom element Compare");
+    assert_true(x < z, "ordering accepts any negative compare result");
+
+    f64 floats_a[1] = { 0.0 };
+    f64 floats_b[1] = { -0.0 };
+    Slice<f64> fa = floats_a[:];
+    Slice<f64> fb = floats_b[:];
+    assert_true(fa == fb, "element equality does not compare raw float bytes");
+}
+
+void test_owned_sequences() {
+    Vec<String> left = Vec<String>.new();
+    left.push(String.from_str("alpha"));
+    left.push(String.from_str("beta"));
+    Vec<String> right = Vec<String>.new();
+    right.push(String.from_str("alpha"));
+    right.push(String.from_str("beta"));
+    assert_true(equal<Vec<String>>(&left, &right), "owned elements compare through Eq");
+    assert_false(left != right, "Vec inequality agrees with equality");
+    assert_true(left <= right && left >= right, "Vec inclusive ordering");
+    right.push(String.from_str("gamma"));
+    assert_true(left != right, "Vec unequal lengths");
+    assert_true(left < right && right > left, "Vec prefix ordering");
+    assert_eq_i32(-1, order<Vec<String>>(&left, &right), "Vec satisfies Compare");
+    assert_true(left.data[0] == "alpha", "comparison preserves owned left element");
+    assert_true(right.data[1] == "beta", "comparison preserves owned right element");
+
+    String binary_left = String.from_str("a");
+    binary_left.push((u8)0);
+    binary_left.push((u8)'x');
+    String binary_right = String.from_str("a");
+    binary_right.push((u8)0);
+    binary_right.push((u8)'y');
+    assert_true(binary_left != binary_right, "String equality includes bytes after NUL");
+    assert_true(binary_left != "a", "String equality includes length");
+    Vec<String> binary_a = Vec<String>.new();
+    binary_a.push(move binary_left);
+    Vec<String> binary_b = Vec<String>.new();
+    binary_b.push(move binary_right);
+    assert_true(binary_a != binary_b, "Vec equality preserves binary String semantics");
+
+    Bytes a = Bytes.from_str("ab");
+    Bytes b = Bytes.from_str("ab");
+    Bytes c = Bytes.from_str("ac");
+    a.push((u8)0);
+    b.push((u8)0);
+    assert_true(equal<Bytes>(&a, &b), "Bytes satisfies Eq with embedded NUL");
+    assert_false(a != b, "Bytes inequality agrees with equality");
+    assert_true(a < c && c > a, "Bytes order includes bytes after common prefix");
+    assert_true(a <= b && a >= b, "Bytes inclusive ordering");
+    assert_true(a != c, "Bytes unequal content");
+    assert_eq_i32(-1, order<Bytes>(&a, &c), "Bytes satisfies Compare");
+    assert_eq_i64(3, a.len(), "Bytes remains available after comparison");
+
+    Vec<i64> small = Vec<i64>.new();
+    Vec<i64> large = Vec<i64>.new();
+    small.push(1);
+    large.push(2);
+    Vec<Vec<i64>> nested = Vec<Vec<i64>>.new();
+    nested.push(move large);
+    nested.push(move small);
+    sort(&nested);
+    assert_eq_i64(1, nested.data[0].data[0], "existing sort accepts sequence ordering");
+    assert_eq_i64(2, nested.data[1].data[0], "sort preserves nested owned storage");
+}
+
+i32 main() {
+    test_start("Sequence traits");
+    test_views();
+    test_slices();
+    test_owned_sequences();
+    String combined = String.from_str("hello") + " world";
+    assert_true(combined == "hello world", "Add<str> preserves concatenation behavior");
+    return done();
+}

@@ -474,8 +474,12 @@ their body once per argument in a final variadic binding; an empty binding
 produces no iterations. This is not general iteration or variadic splicing.
 Expression macros support a direct `return` expression or an `if`/`else` whose
 branches each return an expression; statement macros must not contain `return`.
-Nested calls are supported. Hygienic local names and broader control-flow
-expression macros are not implemented yet. Built-in compiler macros include `@print`, `@println`,
+Nested calls are supported. Stage0 renames local bindings; stage1 does not
+provide full hygienic renaming. Macro arguments substitute at each use, so
+repeated parameters repeat evaluation and unused arguments do not run.
+Both compilers reject incorrect value-argument counts. See the
+[macro contract](docs/macros.md) for evaluation rules and stage limits.
+Built-in compiler macros include `@print`, `@println`,
 `@eprint`, `@eprintln`, `@fprint`, `@sprint`, `@format`, `@size`, `@align`,
 `@hash`, `@json`, `@from_json`, `@memcpy`, `@memset`, and `@memmove`.
 
@@ -1045,6 +1049,11 @@ on the wrong variant. `Result.get_error()` is a consuming alias for
 The `value ? fallback` operator also selects a fallback when an `Optional` or
 `Result` has no success value; it does not propagate errors to the caller.
 
+`map` and `and_then` consume `Optional` or `Result` and call a function only
+on the success/present variant. `Result.map_err` transforms only the error.
+Payloads move into callbacks; unselected variants pass through unchanged.
+See [stdlib contracts](docs/stdlib-contracts.md) for signatures and examples.
+
 Unrecoverable errors call `abort()` from `std.mem.memory`.
 
 ### Output
@@ -1053,6 +1062,21 @@ Unrecoverable errors call `abort()` from `std.mem.memory`.
 |---|---|
 | `@print`, `@println`, `@eprintln` | Compiler builtin macro with `{}` formatting. Preferred. |
 | `println(str)`, `eprintln(str)` | Plain functions in `std.io`, single NUL-terminated string. |
+
+Formatting `String` preserves its full byte length, including embedded NULs.
+Formatting `str` stops at NUL. Character formatting writes UTF-8, replacing
+invalid Unicode scalars with U+FFFD. `BufWriter.write_u8` writes a raw byte.
+
+### Checked conversions and hardware DMA
+
+`std.convert.TryFrom<i128>` provides explicit checked integer narrowing and
+Unicode scalar conversion through `Result`. It does not change the language's
+permissive implicit numeric conversions or ordinary casts.
+
+On Linux, `std.dma.DmaBuffer` owns a DMA-BUF descriptor, supports explicit
+DMA-heap allocation and fd import, and brackets scoped CPU access with kernel
+coherency ioctls. Device submission and fence waits remain driver-specific.
+See [stdlib contracts](docs/stdlib-contracts.md) for ownership and error behavior.
 
 ### Building strings
 
@@ -1076,6 +1100,15 @@ The append preserves the bytes emitted by the formatter, including embedded NUL
 bytes. Use `len()` and `as_slice()` for byte content; `to_str()` exposes a
 NUL-terminated view. Formatting may allocate when its output exceeds the scratch
 buffer or the destination's remaining capacity.
+
+### Borrowing and comparing sequences
+
+`AsSlice<T>` in `std.slice` provides `Slice<T> as_slice(&self)` for generic
+borrowers. Vec, Slice, String, and Bytes implement it. Slice, Vec, and Bytes
+support content equality and lexicographic comparison through the operator
+traits. Ordering requires an element `Compare` implementation. See
+[the sequence API](docs/stdlib-sequences.md) for ownership, examples, and hashing
+limits.
 
 ### Memory Allocation
 

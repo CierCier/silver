@@ -46,6 +46,12 @@ LEAK_CHECK_TESTS = {
     "vec_test",
     "method_slice_coercion_test",
     "bytes_test",
+    "sequence_traits_test",
+    "allocation_bounds_test",
+    "format_bytes_test",
+    "result_combinators_test",
+    "checked_conversion_test",
+    "dma_test",
     "collections_set_test",
     "mem_test",
     "memmove_scalar_test",
@@ -97,6 +103,7 @@ def target_is_wasm(target: Optional[str]) -> bool:
 #   - raw syscall/asm tests: x86_64 asm does not exist on wasm
 #   - SIMD probes: cpu.* cfg keys are false on cross targets
 WASM_SKIP = {
+    "dma_test": "Linux DMA-BUF and DMA-heap ioctls",
     # raw x86_64 asm / syscalls
     "syscall_test": "raw Linux syscall asm (x86_64 syscall ABI)",
     "syscall_wrapper_test": "raw Linux syscall wrappers (std.sys.syscall)",
@@ -171,6 +178,7 @@ WASM_SKIP = {
 # portable suite members; on Windows the equivalent coverage comes from the
 # std.sys.win seam and the thread/allocator tests that run on both.
 WINDOWS_SKIP = {
+    "dma_test": "Linux DMA-BUF and DMA-heap ioctls",
     "syscall_test": "raw Linux syscall asm (x86_64 syscall ABI)",
     "syscall_wrapper_test": "raw Linux syscall wrappers (std.sys.syscall)",
     "allocator_threads_test": "raw clone(2) thread creation",

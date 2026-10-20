@@ -59,6 +59,22 @@ impl Optional<T> {
     T unwrap_or(self, T fallback) {
         return match self { Some(move v) : v, None : fallback };
     }
+
+    /// Consume this optional, transforming its payload when present.
+    Optional<U> map<U>(self, U(T) transform) {
+        return match self {
+            Some(move value) : Optional<U>.some(transform(move value)),
+            None : Optional<U>.none()
+        };
+    }
+
+    /// Consume this optional and run the next operation when present.
+    Optional<U> and_then<U>(self, Optional<U>(T) next) {
+        return match self {
+            Some(move value) : next(move value),
+            None : Optional<U>.none()
+        };
+    }
 }
 
 /// Debug-style formatting: `Some(v)` / `None`. The payload binding is a

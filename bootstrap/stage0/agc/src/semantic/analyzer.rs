@@ -599,7 +599,11 @@ impl Analyzer {
                 arguments,
                 ..
             } => {
-                self.check_expression(receiver);
+                if !matches!(receiver.kind.as_ref(), ast::ExpressionKind::Identifier(ident)
+                    if self.is_type_param(&ident.name) && !self.table_backend.resolve_var(&ident.name))
+                {
+                    self.check_expression(receiver);
+                }
                 for arg in arguments {
                     self.check_expression(arg);
                 }

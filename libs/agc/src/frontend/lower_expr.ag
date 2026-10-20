@@ -10,6 +10,7 @@ import frontend.lexer;
 import frontend.names;
 import frontend.symbols;
 import frontend.types;
+import frontend.messages;
 
 bool match_head_has_question(SyntaxNode* start, SyntaxNode* end) {
     SyntaxNode* cursor = start;
@@ -22,10 +23,10 @@ bool match_head_has_question(SyntaxNode* start, SyntaxNode* end) {
     return false;
 }
 
-bool int_literal_fits_i32(str text) {
-    if (text == (str)0) { return true; }
+u32 int_literal_type(str text) {
+    if (text == (str)0) { return TYPE_I32; }
     i64 len = strlen(text);
-    if (len == 0) { return true; }
+    if (len == 0) { return TYPE_I32; }
     i64 i = 0;
     bool neg = false;
     if (text[0] == (u8)'-') {
@@ -34,36 +35,37 @@ bool int_literal_fits_i32(str text) {
     } else if (text[0] == (u8)'+') {
         i += 1;
     }
-    if (i + 2 <= len && text[i] == (u8)'0' && (text[i + 1] == (u8)'x' || text[i + 1] == (u8)'X')) {
-        i += 2;
-        i64 hex_digits = 0;
-        while (i < len) {
-            u8 c = (u8)text[i];
-            if (c != (u8)'_') {
-                hex_digits += 1;
-            }
-            i += 1;
-        }
-        return hex_digits <= 8;
+    u128 base = (u128)10;
+    if (i + 2 <= len && text[i] == (u8)'0') {
+        u8 prefix = (u8)text[i + 1];
+        if (prefix == (u8)'x' || prefix == (u8)'X') { base = (u128)16; i += 2; }
+        else if (prefix == (u8)'b' || prefix == (u8)'B') { base = (u128)2; i += 2; }
+        else if (prefix == (u8)'o' || prefix == (u8)'O') { base = (u128)8; i += 2; }
     }
-    i64 val = 0;
-    i64 digits = 0;
+    u128 val = (u128)0;
     while (i < len) {
         u8 c = (u8)text[i];
-        if (c >= (u8)'0' && c <= (u8)'9') {
-            val = val * 10 + (i64)(c - (u8)'0');
-            digits += 1;
-        } else if (c != (u8)'_') {
-            break;
-        }
         i += 1;
+        if (c == (u8)'_') { continue; }
+        u128 digit = (u128)0;
+        if (c >= (u8)'0' && c <= (u8)'9') {
+            digit = (u128)(c - (u8)'0');
+        } else if (c >= (u8)'a' && c <= (u8)'f') {
+            digit = (u128)(c - (u8)'a') + (u128)10;
+        } else if (c >= (u8)'A' && c <= (u8)'F') {
+            digit = (u128)(c - (u8)'A') + (u128)10;
+        } else { break; }
+        if (digit >= base || val > ((u128)340282366920938463463374607431768211455 - digit) / base) {
+            return TYPE_U128;
+        }
+        val = val * base + digit;
     }
-    if (digits < 10) { return true; }
-    if (digits > 10) { return false; }
-    if (neg) {
-        return val <= 2147483648;
+    if (val <= (u128)2147483647 + (neg ? (u128)1 : (u128)0)) { return TYPE_I32; }
+    if (val <= (u128)9223372036854775807 + (neg ? (u128)1 : (u128)0)) { return TYPE_I64; }
+    if (val <= (u128)170141183460469231731687303715884105727 + (neg ? (u128)1 : (u128)0)) {
+        return TYPE_I128;
     }
-    return val <= 2147483647;
+    return TYPE_U128;
 }
 
 SyntaxNode* lower_find_item_in_file(SyntaxNode* root, NodeKind kind, str name,
@@ -132,6 +134,8 @@ struct ExprLowerer {
     bool debug_mode;
     u32 macro_depth;
     u32 expected_type_id;
+    String macro_error;
+    Span macro_error_span;
 }
 
 struct LowerMacroArgument {
@@ -521,13 +525,16 @@ void lower_append_macro_if_return_expression(String* output, SyntaxNode* conditi
 
 bool lower_collect_macro_bindings(SyntaxNode* definition, SyntaxNode* call_args,
                                  Vec<LowerMacroBinding>* bindings,
-                                 Vec<LowerMacroArgument>* arguments) {
+                                 Vec<LowerMacroArgument>* arguments,
+                                 str macro_name, String* failure) {
     if (!lower_collect_macro_arguments(call_args, arguments)) { return false; }
 
     SyntaxNode* parameter_list = lower_macro_parameter_list(definition);
     bool supported = parameter_list != (SyntaxNode*)0;
     SyntaxNode* param_start = supported ? parameter_list.first_child : (SyntaxNode*)0;
     i64 argument_index = 0;
+    i64 fixed_count = 0;
+    bool has_variadic = false;
     while (supported && param_start != (SyntaxNode*)0) {
         SyntaxNode* param_end = param_start;
         while (param_end != (SyntaxNode*)0
@@ -547,12 +554,14 @@ bool lower_collect_macro_bindings(SyntaxNode* definition, SyntaxNode* call_args,
             }
             cursor = cursor.next_sibling;
         }
-        if (param_name == (SyntaxNode*)0
-            || (!is_variadic && argument_index >= arguments.len())
-            || (is_variadic && param_end != (SyntaxNode*)0
-                && param_end.next_sibling != (SyntaxNode*)0)) {
+        if (param_name == (SyntaxNode*)0) {
             supported = false;
             break;
+        }
+        if (is_variadic && param_end != (SyntaxNode*)0
+            && param_end.next_sibling != (SyntaxNode*)0) {
+            *failure = macro_variadic_must_be_last(macro_name);
+            return false;
         }
         LowerMacroBinding binding;
         binding.name = param_name.text;
@@ -562,9 +571,12 @@ bool lower_collect_macro_bindings(SyntaxNode* definition, SyntaxNode* call_args,
         binding.has_type_replacement = false;
         binding.type_replacement = "";
         if (is_variadic) {
-            binding.arguments_count = (u32)(arguments.len() - argument_index);
+            has_variadic = true;
+            binding.arguments_count = arguments.len() >= argument_index
+                ? (u32)(arguments.len() - argument_index) : (u32)0;
             argument_index = arguments.len();
         } else {
+            fixed_count += 1;
             binding.arguments_count = 1;
             argument_index += 1;
         }
@@ -572,7 +584,10 @@ bool lower_collect_macro_bindings(SyntaxNode* definition, SyntaxNode* call_args,
         if (is_variadic) { break; }
         param_start = param_end == (SyntaxNode*)0 ? (SyntaxNode*)0 : param_end.next_sibling;
     }
-    if (argument_index != arguments.len()) { supported = false; }
+    if (argument_index != arguments.len() || fixed_count > arguments.len()) {
+        *failure = macro_arity(macro_name, fixed_count, has_variadic, arguments.len());
+        supported = false;
+    }
     return supported;
 }
 
@@ -697,7 +712,7 @@ u32 lower_macro_argument_type(SyntaxNode* start, SyntaxNode* end) {
         return TYPE_UNKNOWN;
     }
     if (start.token_kind == TokenKind.IntLiteral) {
-        return int_literal_fits_i32(start.text) ? TYPE_I32 : TYPE_I64;
+        return int_literal_type(start.text);
     }
     if (start.token_kind == TokenKind.FloatLiteral) { return TYPE_F64; }
     if (start.token_kind == TokenKind.StringLiteral) { return TYPE_STR; }
@@ -931,6 +946,8 @@ impl ExprLowerer {
         lowerer.debug_mode = true;
         lowerer.macro_depth = 0;
         lowerer.expected_type_id = TYPE_UNKNOWN;
+        lowerer.macro_error = String.new();
+        lowerer.macro_error_span = Span.synthetic();
         return move lowerer;
     }
 
@@ -1114,7 +1131,8 @@ impl ExprLowerer {
         Vec<LowerMacroArgument> arguments = Vec<LowerMacroArgument>.new();
         Vec<LowerMacroBinding> bindings = Vec<LowerMacroBinding>.new();
         bool supported = lower_collect_macro_bindings(definition, call_args,
-                                                      &bindings, &arguments);
+            &bindings, &arguments, name_node.text, &self.macro_error);
+        if (!supported) { self.macro_error_span = name_node.span; }
         if (supported) {
             supported = lower_bind_macro_type_arguments(self, definition,
                 generic_less, generic_greater, &bindings, &arguments);
@@ -1230,7 +1248,8 @@ impl ExprLowerer {
         Vec<LowerMacroArgument> arguments = Vec<LowerMacroArgument>.new();
         Vec<LowerMacroBinding> bindings = Vec<LowerMacroBinding>.new();
         if (!lower_collect_macro_bindings(definition, call_args,
-                                          &bindings, &arguments)) {
+                &bindings, &arguments, name_node.text, &self.macro_error)) {
+            self.macro_error_span = name_node.span;
             bindings.drop();
             arguments.drop();
             self.unsupported = true;
@@ -1308,7 +1327,7 @@ impl ExprLowerer {
         if (node.kind == NodeKind.Token) {
             if (node.token_kind == TokenKind.IntLiteral) {
                 u32 val_id = self.names.intern(node.text);
-                u32 lit_type = int_literal_fits_i32(node.text) ? TYPE_I32 : TYPE_I64;
+                u32 lit_type = int_literal_type(node.text);
                 return self.pool.add_literal_val(lit_type, val_id, node.span);
             }
             if (node.token_kind == TokenKind.FloatLiteral) {
@@ -1368,7 +1387,7 @@ impl ExprLowerer {
             *kind_out = MatchPatternKind.Literal;
             if (start.token_kind == TokenKind.IntLiteral) {
                 u32 val_id = self.names.intern(start.text);
-                u32 lit_type = int_literal_fits_i32(start.text) ? TYPE_I32 : TYPE_I64;
+                u32 lit_type = int_literal_type(start.text);
                 *literal_out = self.pool.add_literal_val(lit_type, val_id, start.span);
             } else if (start.token_kind == TokenKind.FloatLiteral) {
                 u32 val_id = self.names.intern(start.text);

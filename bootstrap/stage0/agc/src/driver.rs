@@ -1666,8 +1666,16 @@ pub fn run(cli: Cli) {
                 profiler::end_phase("serialize");
 
                 profiler::begin_phase("macro expansion");
-                crate::semantic::macro_expand::expand_macros_in_program(&mut ast);
+                let macro_errors = crate::semantic::macro_expand::expand_macros_in_program(&mut ast);
                 profiler::end_phase("macro expansion");
+                if !macro_errors.is_empty() {
+                    for error in &macro_errors {
+                        eprintln!("{}", diagnostics::render(
+                            error.span, &error.message, diagnostics::Severity::Error,
+                        ));
+                    }
+                    std::process::exit(2);
+                }
 
                 if plan.test_harness {
                     let test_fns: Vec<String> = ast

@@ -1,0 +1,44 @@
+// compile_flags: --no-cache
+import std.test;
+import std.mem.alloc;
+
+i32 main() {
+    assert_true(try_alloc_n<i64>(-1) == (i64*)0, "negative count is rejected");
+    assert_true(try_alloc_n<i64>(9223372036854775807) == (i64*)0,
+        "element count overflow is rejected");
+    assert_true(try_alloc_n<u8>(9223372036854775807) == (u8*)0,
+        "mapping overhead overflow is rejected");
+    assert_true(calloc(-1, -1) == (void*)0, "negative calloc operands are rejected");
+    u8* dirty = (u8*)calloc(16, 1);
+    dirty[0] = (u8)255;
+    dirty[15] = (u8)255;
+    free(dirty);
+    u8* clean = (u8*)calloc(16, 1);
+    assert_true(clean[0] == (u8)0 && clean[15] == (u8)0, "calloc zeroes recycled storage");
+    free(clean);
+    i64* values = alloc_n<i64>(2);
+    assert_true(values[0] == 0 && values[1] == 0, "array allocations are zeroed");
+    values[0] = 123;
+    values[1] = 456;
+    assert_true(try_realloc<i64>(values, -1) == (i64*)0, "negative realloc rejected");
+    assert_true(values[0] == 123 && values[1] == 456, "failed realloc preserves allocation");
+    assert_true(try_realloc<i64>(values, 9223372036854775807) == (i64*)0,
+        "realloc multiplication overflow rejected");
+    assert_true(values[1] == 456, "overflow does not free allocation");
+    values = realloc<i64>(values, 64);
+    assert_true(values[0] == 123 && values[1] == 456, "valid realloc preserves data");
+    free(values);
+    i64* empty = try_alloc_n<i64>(0);
+    assert_true(empty != (i64*)0, "empty allocations retain dangling convention");
+    free(empty);
+
+    u8* raw = silver_rt_alloc(32, 16);
+    raw[0] = 77;
+    u8* aligned = silver_rt_realloc(raw, 32, 16, 4096);
+    assert_true(aligned != (u8*)0 && (i64)aligned % 4096 == 0,
+        "realloc honors stronger requested alignment");
+    assert_true(aligned[0] == (u8)77, "realigned realloc preserves bytes");
+    silver_rt_dealloc(aligned, 16, 4096);
+    assert_true(silver_rt_alloc(64, 3) == (u8*)0, "invalid alignment rejected");
+    return done();
+}

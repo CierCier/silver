@@ -658,7 +658,8 @@ impl AstPool {
         expr.inner1 = 0;
         expr.aux = target_type_id;
         expr.span = span;
-        expr.inferred_type = target_type_id;
+        // Operand checking must finish before caching the target type.
+        expr.inferred_type = TYPE_UNKNOWN;
         expr.generic_args_start = 0;
         expr.generic_args_count = 0;
         self.exprs.push(move expr);

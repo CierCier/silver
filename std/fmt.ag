@@ -16,6 +16,35 @@
 
 import std.sys.os;
 
+/// Encode one Unicode scalar into a caller-provided buffer of at least 4 bytes.
+/// Invalid scalar values encode as the replacement character U+FFFD.
+i64 utf8_encode(char value, u8* out) {
+    u32 code = (u32)value;
+    if (code > (u32)0x10ffff || (code >= (u32)0xd800 && code <= (u32)0xdfff)) {
+        code = (u32)0xfffd;
+    }
+    if (code < (u32)0x80) {
+        out[0] = (u8)code;
+        return 1;
+    }
+    if (code < (u32)0x800) {
+        out[0] = (u8)((u32)0xc0 | (code >> (u32)6));
+        out[1] = (u8)((u32)0x80 | (code & (u32)0x3f));
+        return 2;
+    }
+    if (code < (u32)0x10000) {
+        out[0] = (u8)((u32)0xe0 | (code >> (u32)12));
+        out[1] = (u8)((u32)0x80 | ((code >> (u32)6) & (u32)0x3f));
+        out[2] = (u8)((u32)0x80 | (code & (u32)0x3f));
+        return 3;
+    }
+    out[0] = (u8)((u32)0xf0 | (code >> (u32)18));
+    out[1] = (u8)((u32)0x80 | ((code >> (u32)12) & (u32)0x3f));
+    out[2] = (u8)((u32)0x80 | ((code >> (u32)6) & (u32)0x3f));
+    out[3] = (u8)((u32)0x80 | (code & (u32)0x3f));
+    return 4;
+}
+
 // ---------------------------------------------------------------------------
 // Raw fd writers (b): write the full buffer, retrying on EINTR/short writes.
 // Returns the number of bytes written, or a negative errno on failure.

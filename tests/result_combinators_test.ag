@@ -1,0 +1,86 @@
+// compile_flags: --no-cache
+import std.test;
+import std.result;
+import std.optional;
+import std.string;
+
+i32 calls = 0;
+
+String describe(i32 value) {
+    calls += 1;
+    return @format("value={}", value);
+}
+
+i64 length(String value) {
+    calls += 1;
+    return value.len();
+}
+
+Result<String, String> positive(i32 value) {
+    calls += 1;
+    if (value > 0) { return Ok(String.from_str("positive")); }
+    return Err(String.from_str("nonpositive"));
+}
+
+Optional<String> optional_positive(i32 value) {
+    calls += 1;
+    if (value > 0) { return Optional<String>.some(String.from_str("positive")); }
+    return Optional<String>.none();
+}
+
+i32 main() {
+    Result<i32, String> ok = Ok(7);
+    Result<String, String> mapped = ok.map(describe);
+    String text = mapped.unwrap();
+    assert_eq_str("value=7", text.to_str(), "map transforms success");
+    assert_eq_i32(1, calls, "map called once");
+
+    Result<i32, String> err = Err(String.from_str("kept"));
+    Result<String, String> kept = err.map(describe);
+    String error = kept.unwrap_err();
+    assert_eq_str("kept", error.to_str(), "map preserves owned error");
+    assert_eq_i32(1, calls, "map skips error callback");
+
+    Result<String, String> error_result = Err(String.from_str("four"));
+    Result<String, i64> sized = error_result.map_err(length);
+    assert_eq_i64(4, sized.unwrap_err(), "map_err consumes owned payload");
+    Result<String, String> success_result = Ok(String.from_str("untouched"));
+    Result<String, i64> success = success_result.map_err(length);
+    String untouched = success.unwrap();
+    assert_eq_str("untouched", untouched.to_str(), "map_err preserves success");
+    assert_eq_i32(2, calls, "map_err skips success callback");
+
+    Result<i32, String> start = Ok(1);
+    Result<String, String> chained = start.and_then(positive);
+    String chained_text = chained.unwrap();
+    assert_eq_str("positive", chained_text.to_str(), "and_then success");
+    Result<i32, String> rejected = Ok(0);
+    Result<String, String> failed = rejected.and_then(positive);
+    String failure = failed.unwrap_err();
+    assert_eq_str("nonpositive", failure.to_str(), "and_then callback error");
+    Result<i32, String> stopped = Err(String.from_str("stop"));
+    Result<String, String> skipped = stopped.and_then(positive);
+    String stop = skipped.unwrap_err();
+    assert_eq_str("stop", stop.to_str(), "and_then preserves error");
+    assert_eq_i32(4, calls, "and_then short circuits");
+
+    Optional<i32> some = Optional<i32>.some(9);
+    Optional<String> described = some.map(describe);
+    Optional<i64> measured = described.map(length);
+    assert_eq_i64(7, measured.unwrap(), "optional map composes and consumes");
+    Optional<i32> none = Optional<i32>.none();
+    Optional<String> absent = none.map(describe);
+    assert_true(absent.is_none(), "optional map preserves absence");
+    Optional<i32> present = Optional<i32>.some(1);
+    Optional<String> next = present.and_then(optional_positive);
+    String next_text = next.unwrap();
+    assert_eq_str("positive", next_text.to_str(), "optional and_then success");
+    Optional<i32> zero = Optional<i32>.some(0);
+    Optional<String> filtered = zero.and_then(optional_positive);
+    assert_true(filtered.is_none(), "optional and_then can return absence");
+    Optional<i32> missing = Optional<i32>.none();
+    Optional<String> missing_next = missing.and_then(optional_positive);
+    assert_true(missing_next.is_none(), "optional and_then short circuits");
+    assert_eq_i32(8, calls, "absent values skip callbacks");
+    return done();
+}

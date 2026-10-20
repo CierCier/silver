@@ -1,0 +1,69 @@
+// compile_flags: --no-cache
+import std.test;
+import std.convert;
+import std.string;
+
+trait Describes<T> { i64 describe(&self); }
+struct Tagged<T> { T value; }
+impl<T> Describes<T> for Tagged<T> {
+    i64 describe(&self) { return 17; }
+}
+
+Result<T, Error> narrow<T: TryFrom<i128>>(i128 value) {
+    return T.try_from(value);
+}
+
+struct Converter<T> { i32 unused; }
+
+impl<T: TryFrom<i128>> Converter<T> {
+    Result<T, Error> convert(&self, i128 value) { return T.try_from(value); }
+    Result<U, Error> convert_other<U: TryFrom<i128>>(&self, U sample, i128 value) {
+        return U.try_from(value);
+    }
+    i64 describe_text<U: Describes<String>>(&self, &U value) { return value.describe(); }
+}
+
+i32 main() {
+    Result<u8, Error> byte = u8.try_from((i128)255);
+    assert_true(byte.unwrap() == (u8)255, "checked byte upper bound");
+    Result<u8, Error> large = u8.try_from((i128)256);
+    Error range = large.unwrap_err();
+    assert_eq_i64(34, range.code, "checked conversion reports ERANGE");
+    Result<u8, Error> negative = u8.try_from((i128)-1);
+    assert_true(negative.is_err(), "negative to unsigned rejected");
+    Result<i8, Error> signed_min = i8.try_from((i128)-128);
+    assert_true(signed_min.unwrap() == (i8)-128, "signed byte lower bound");
+    Result<i8, Error> signed_overflow = i8.try_from((i128)128);
+    assert_true(signed_overflow.is_err(), "signed byte overflow rejected");
+    Result<i16, Error> half = i16.try_from((i128)-32768);
+    assert_true(half.unwrap() == (i16)-32768, "i16 lower bound");
+    Result<u16, Error> unsigned_half = u16.try_from((i128)65536);
+    assert_true(unsigned_half.is_err(), "u16 overflow rejected");
+    Result<i32, Error> word = narrow<i32>((i128)2147483647);
+    assert_true(word.unwrap() == 2147483647, "generic conversion trait dispatch");
+    Converter<u8> converter = { .unused = 0 };
+    Result<u8, Error> converted = converter.convert((i128)255);
+    assert_true(converted.unwrap() == (u8)255, "conversion from an impl type parameter");
+    Result<i16, Error> other = converter.convert_other((i16)0, (i128)32767);
+    assert_true(other.unwrap() == (i16)32767, "conversion from a method type parameter");
+    Tagged<String> tagged;
+    tagged.value = String.from_str("owned");
+    assert_eq_i64(17, converter.describe_text(&tagged), "generic impl binds named trait arguments");
+    Result<u32, Error> unsigned_word = u32.try_from((i128)4294967295);
+    assert_true(unsigned_word.unwrap() == (u32)4294967295, "u32 upper bound");
+    Result<i64, Error> low = i64.try_from((i128)-9223372036854775808);
+    assert_true(low.unwrap() == (i64)-9223372036854775808, "i64 lower bound");
+    Result<i64, Error> wide = i64.try_from((i128)9223372036854775808);
+    assert_true(wide.is_err(), "i64 overflow rejected before narrowing");
+    Result<u64, Error> high = u64.try_from((i128)18446744073709551615);
+    assert_true(high.unwrap() == (u64)18446744073709551615, "u64 upper bound");
+    Result<u64, Error> unsigned_wide = u64.try_from((i128)18446744073709551616);
+    assert_true(unsigned_wide.is_err(), "u64 overflow rejected");
+    Result<char, Error> scalar = char.try_from((i128)0x10ffff);
+    assert_true(scalar.unwrap() == (char)0x10ffff, "Unicode scalar upper bound");
+    Result<char, Error> surrogate = char.try_from((i128)0xd800);
+    assert_true(surrogate.is_err(), "surrogates rejected");
+    Result<char, Error> invalid = char.try_from((i128)0x110000);
+    assert_true(invalid.is_err(), "codepoint overflow rejected");
+    return done();
+}

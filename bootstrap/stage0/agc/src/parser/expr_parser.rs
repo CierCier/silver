@@ -1003,6 +1003,17 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
         | Token::Str
         | Token::Char
         | Token::Void => {
+            if matches!(cursor.tokens.get(cursor.pos + 1).map(|t| &t.kind), Some(Token::Dot))
+                && let Some((ty, next)) =
+                    parse_simple_type_prefix(cursor.tokens, cursor.pos, cursor.end)
+                && matches!(ty.kind.as_ref(), ast::TypeKind::Primitive(_))
+            {
+                cursor.pos = next;
+                return Ok(ast::Expression {
+                    kind: Box::new(ast::ExpressionKind::TypeName(ty.clone())),
+                    span: ty.span,
+                });
+            }
             if let Some((ty, next)) =
                 parse_named_type_expr_prefix(cursor.tokens, cursor.pos, cursor.end)
             {

@@ -1,0 +1,101 @@
+// compile_flags: --no-cache
+import std.test;
+import std.dma;
+import std.string;
+import std.sys.raw.misc;
+
+i32 cpu_callbacks = 0;
+
+Result<String, Error> write_dma(Slice<u8> bytes) {
+    cpu_callbacks += 1;
+    bytes.data[0] = (u8)42;
+    bytes.data[bytes.len - 1] = (u8)99;
+    return Ok(String.from_str("written"));
+}
+
+Result<String, Error> check_dma(Slice<u8> bytes) {
+    cpu_callbacks += 1;
+    assert_true(bytes.data[0] == (u8)42 && bytes.data[bytes.len - 1] == (u8)99,
+        "DMA mapping retains writes across CPU sessions");
+    return Err(123, "callback failure");
+}
+
+// Linux UAPI udmabuf.h. This exercises real DMA-BUF sync when the exporter exists.
+struct UdmabufCreate {
+    u32 memfd;
+    u32 flags;
+    u64 offset;
+    u64 size;
+}
+
+void test_dma_exporter(i32 backing) {
+    i64 device = sys_open((i64)"/dev/udmabuf", O_RDWR | O_CLOEXEC, 0);
+    if (device < 0) {
+        @println("[SKIP] DMA-BUF exporter unavailable, errno {}", -device);
+        return;
+    }
+    // F_ADD_SEALS / F_SEAL_SHRINK: udmabuf requires stable backing pages.
+    assert_eq_i64(0, sys_fcntl((i64)backing, 1033, 2), "seal DMA backing size");
+    UdmabufCreate request = {
+        .memfd = (u32)backing, .flags = (u32)1, .offset = (u64)0, .size = (u64)4096
+    };
+    i64 exported = sys_ioctl(device, 0x40187542, (i64)&request);
+    sys_close(device);
+    assert_true(exported >= 0, "udmabuf exports a real DMA buffer");
+    if (exported < 0) { return; }
+    i32 duplicate = -1;
+    {
+        Result<DmaBuffer, Error> imported = DmaBuffer.from_fd((i32)exported);
+        assert_true(imported.is_ok(), "import DMA-BUF descriptor");
+        DmaBuffer buffer = imported.unwrap();
+        duplicate = buffer.fd();
+        sys_close(exported);
+        assert_true(buffer.len() == 4096, "DMA-BUF reports its size");
+        Result<String, Error> wrote = buffer.with_cpu_access(write_dma);
+        String message = wrote.unwrap();
+        assert_eq_str("written", message.to_str(), "CPU callback returns owned value");
+        Result<String, Error> checked = buffer.with_cpu_access(check_dma);
+        Error error = checked.unwrap_err();
+        assert_eq_i64(123, error.code, "callback error survives DMA cleanup");
+        Result<String, Error> again = buffer.with_cpu_access(write_dma);
+        String final_message = again.unwrap();
+        assert_eq_str("written", final_message.to_str(), "CPU session works after callback error");
+    }
+    assert_eq_i64(-9, sys_fcntl((i64)duplicate, F_GETFL, 0), "Drop closes owned DMA descriptor");
+}
+
+i32 main() {
+    Result<DmaBuffer, Error> invalid = DmaBuffer.from_fd(-1);
+    Error invalid_error = invalid.unwrap_err();
+    assert_eq_i64(9, invalid_error.code, "invalid descriptor returns EBADF");
+    Result<DmaBuffer, Error> empty = DmaBuffer.allocate("/dev/dma_heap/system", 0);
+    Error size_error = empty.unwrap_err();
+    assert_eq_i64(22, size_error.code, "empty DMA allocation is rejected");
+    Result<DmaBuffer, Error> missing = DmaBuffer.allocate("/dev/__silver_missing_dma_heap", 4096);
+    Error missing_error = missing.unwrap_err();
+    assert_eq_i64(2, missing_error.code, "missing heap returns ENOENT");
+    Result<DmaBuffer, Error> wrong_heap = DmaBuffer.allocate("/dev/null", 4096);
+    Error wrong_heap_error = wrong_heap.unwrap_err();
+    assert_eq_i64(25, wrong_heap_error.code, "ordinary fd cannot allocate DMA memory");
+
+    i64 backing = sys_memfd_create((i64)"silver-dma-test", 3);
+    assert_true(backing >= 0, "create test backing descriptor");
+    assert_eq_i64(0, sys_ftruncate(backing, 4096), "size test backing");
+    i32 owned = -1;
+    {
+        Result<DmaBuffer, Error> imported = DmaBuffer.from_fd((i32)backing);
+        DmaBuffer buffer = imported.unwrap();
+        owned = buffer.fd();
+        assert_true(owned != (i32)backing, "import duplicates descriptor");
+        assert_eq_i64(1, sys_fcntl((i64)owned, 1, 0), "imported descriptor is close-on-exec");
+        Result<String, Error> access = buffer.with_cpu_access(write_dma);
+        Error error = access.unwrap_err();
+        assert_eq_i64(25, error.code, "ordinary memory rejects DMA sync with ENOTTY");
+        assert_eq_i32(0, cpu_callbacks, "failed sync never exposes CPU view");
+    }
+    assert_eq_i64(-9, sys_fcntl((i64)owned, F_GETFL, 0), "failed session retains RAII cleanup");
+    assert_true(sys_fcntl(backing, F_GETFL, 0) >= 0, "borrowed original stays open");
+    test_dma_exporter((i32)backing);
+    sys_close(backing);
+    return done();
+}

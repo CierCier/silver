@@ -1,4 +1,5 @@
 import std.display;
+import std.fmt { utf8_encode };
 import std.io.file;
 import std.mem.alloc;
 import std.mem.memory;
@@ -67,14 +68,18 @@ impl String {
     i64 capacity(&self) {
         return self.capacity;
     }
+}
 
+impl AsSlice<u8> for String {
     Slice<u8> as_slice(&self) {
         Slice<u8> s;
         s.data = self.data;
         s.len = self.len;
         return s;
     }
+}
 
+impl String {
     /// Returns a sub-slice spanning [start, end) with Python-style negative index clamping.
     Slice<u8> __slice_get(&self, i64 start, i64 end) {
         Slice<u8> s = self.as_slice();
@@ -155,10 +160,7 @@ impl String {
         if (other == (str)0) {
             return false;
         }
-        if (self.data == (u8*)0) {
-            return strlen(other) == 0;
-        }
-        return strcmp((const char*)self.data, other) == 0;
+        return self.__eq(other);
     }
 
     str to_str(&self) {
@@ -670,21 +672,9 @@ impl String {
         // Reject surrogates and out-of-range values
         if (cp >= (u32)0xD800 && cp <= (u32)0xDFFF) { return false; }
         if (cp > (u32)0x10FFFF) { return false; }
-        if (cp < (u32)0x80) {
-            self.push((u8)cp);
-        } else if (cp < (u32)0x800) {
-            self.push((u8)((u32)0xC0 | (cp >> (u32)6)));
-            self.push((u8)((u32)0x80 | (cp & (u32)0x3F)));
-        } else if (cp < (u32)0x10000) {
-            self.push((u8)((u32)0xE0 | (cp >> (u32)12)));
-            self.push((u8)((u32)0x80 | ((cp >> (u32)6) & (u32)0x3F)));
-            self.push((u8)((u32)0x80 | (cp & (u32)0x3F)));
-        } else {
-            self.push((u8)((u32)0xF0 | (cp >> (u32)18)));
-            self.push((u8)((u32)0x80 | ((cp >> (u32)12) & (u32)0x3F)));
-            self.push((u8)((u32)0x80 | ((cp >> (u32)6) & (u32)0x3F)));
-            self.push((u8)((u32)0x80 | (cp & (u32)0x3F)));
-        }
+        u8 bytes[4];
+        i64 length = utf8_encode((char)cp, &bytes[0]);
+        self.push_bytes(&bytes[0], length);
         return true;
     }
     Optional<i64> parse_i64(&self) {
@@ -844,11 +834,9 @@ impl String {
     }
 }
 
-/// Display forwards to the borrowed NUL-terminated view. Lives here (not
-/// in std/display.ag) so the body always resolves `to_str` in every unit
-/// this module is inlined into.
+/// Display writes all bytes, including embedded NULs.
 impl Display for String {
-    void fmt(*self, BufWriter* out) { out.write_str(self.to_str()); }
+    void fmt(*self, BufWriter* out) { out.write(self.data, self.len); }
 }
 
 impl Drop for String {
@@ -906,7 +894,7 @@ impl String {
 }
 
 // __add(String, str) for string-literal concatenation (same ABI note as above).
-impl String {
+impl Add<str> for String {
     String __add(self, str other) {
         i64 other_len = strlen(other);
         return string_concat_bytes(move self, (u8*)other, other_len);

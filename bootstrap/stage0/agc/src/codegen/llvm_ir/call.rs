@@ -656,11 +656,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return false;
         }
         for (i, argument) in arguments.iter().enumerate() {
-            let param_key = Type::from_ast(&sig.params[skip + i]).canonical_key();
+            let param_ty = Type::from_ast(&sig.params[skip + i]);
             let Some(arg_ty) = self.resolve_argument_type(argument) else {
                 return false;
             };
-            if Type::from_ast(&arg_ty).canonical_key() != param_key {
+            let arg_ty = Type::from_ast(&arg_ty);
+            let borrowed_match = matches!(&param_ty, Type::Reference { is_mutable: false, inner } if inner.as_ref() == &arg_ty);
+            if arg_ty != param_ty && !borrowed_match {
                 return false;
             }
         }

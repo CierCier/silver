@@ -618,6 +618,7 @@ impl NameCollector {
                     self.names.insert("write_f64".to_string());
                     self.names.insert("write_bool".to_string());
                     self.names.insert("write_u8".to_string());
+                    self.names.insert("write_char".to_string());
                     self.names.insert("write_i128".to_string());
                     self.names.insert("write_u128".to_string());
                     self.names.insert("write_ptr".to_string());

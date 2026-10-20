@@ -295,17 +295,53 @@ impl Bytes {
         it.idx = 0;
         return it;
     }
+}
 
+impl AsSlice<u8> for Bytes {
     Slice<u8> as_slice(&self) {
         Slice<u8> s;
         s.data = self.data;
         s.len = self.len;
         return s;
     }
+}
 
+impl Bytes {
     /// Returns a sub-slice spanning [start, end) with Python-style negative index clamping.
     Slice<u8> __slice_get(&self, i64 start, i64 end) {
         Slice<u8> s = self.as_slice();
         return s.__slice_get(start, end);
     }
+}
+
+impl Eq<Bytes> for Bytes {
+    bool __eq(&self, &Bytes other) { return self.equals(other); }
+}
+
+impl Ne<Bytes> for Bytes {
+    bool __ne(&self, &Bytes other) { return !self.equals(other); }
+}
+
+impl Compare for Bytes {
+    i32 compare(&self, &Bytes other) {
+        Slice<u8> left = self.as_slice();
+        Slice<u8> right = other.as_slice();
+        return left.compare(&right);
+    }
+}
+
+impl Lt<Bytes> for Bytes {
+    bool __lt(&self, &Bytes other) { return self.compare(other) < 0; }
+}
+
+impl Gt<Bytes> for Bytes {
+    bool __gt(&self, &Bytes other) { return self.compare(other) > 0; }
+}
+
+impl Le<Bytes> for Bytes {
+    bool __le(&self, &Bytes other) { return self.compare(other) <= 0; }
+}
+
+impl Ge<Bytes> for Bytes {
+    bool __ge(&self, &Bytes other) { return self.compare(other) >= 0; }
 }

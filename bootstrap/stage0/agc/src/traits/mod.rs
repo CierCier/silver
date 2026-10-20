@@ -277,7 +277,18 @@ impl TraitRegistry {
             };
 
             let self_key = type_key(&Type::from_ast(&impl_item.self_type));
-            let impl_key = format!("{} for {}", trait_key, self_key);
+            let args = trait_ref
+                .generics
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|arg| type_key(&Type::from_ast(arg)))
+                .collect::<Vec<_>>();
+            let impl_key = if args.is_empty() {
+                format!("{} for {}", trait_key, self_key)
+            } else {
+                format!("{}<{}> for {}", trait_key, args.join(","), self_key)
+            };
             if impl_keys.contains_key(&impl_key) {
                 errors.push(TraitError {
                     message: format!("conflicting impl for '{}'", impl_key),
@@ -1022,6 +1033,17 @@ mod tests {
         );
         let errors = validate_traits(&program);
         assert!(!errors.is_empty(), "expected trait errors");
+    }
+
+    #[test]
+    fn distinct_trait_arguments_are_distinct_impls() {
+        let program = parse(
+            "trait Convert<T> { T convert(self); } struct S {}
+            impl Convert<i32> for S { i32 convert(self) { return 1; } }
+            impl Convert<i64> for S { i64 convert(self) { return 2; } }",
+        );
+        let errors = validate_traits(&program);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
     }
 
     #[test]

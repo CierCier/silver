@@ -37,6 +37,7 @@ pub struct TypeChecker {
     volatile_vars: Vec<HashSet<String>>,
     volatile_globals: HashSet<String>,
     current_return: Option<Type>,
+    current_type_params: HashSet<String>,
     method_symbols: HashMap<SymbolId, MethodSig>,
     defer_depth: u32,
     methods: HashMap<(String, String), Vec<SymbolId>>,
@@ -45,11 +46,8 @@ pub struct TypeChecker {
     functions: HashMap<String, Vec<SymbolId>>,
     /// Default type arguments for local aggregate definitions.
     generic_defaults: HashMap<String, Vec<Option<ast::Type>>>,
-    trait_impls: HashMap<String, HashSet<String>>,
-    /// Trait names to base type names with generic impls (`impl<T> FromJson
-    /// for Vec<T>` registers Vec under FromJson); concrete generic types
-    /// resolve against these when no exact impl is registered.
-    generic_trait_impls: HashMap<String, HashSet<String>>,
+    imported_trait_impls: HashMap<String, HashSet<String>>,
+    source_trait_impls: HashMap<String, Vec<TraitImpl>>,
     /// Base type names that implement Drop (from `impl Drop<X>` — including
     /// generic impls like `impl<T> Drop<Vec<T>>`), used to require explicit
     /// `move` when an owned payload enters an enum.
@@ -111,6 +109,7 @@ struct ImplicitMethodReq {
     receiver: Type,
     name: String,
     args: Vec<Type>,
+    style: MethodCallStyle,
     origin_span: Span,
 }
 
@@ -160,6 +159,14 @@ struct FunctionSig {
 struct TypeBoundPredicate {
     bounded: Type,
     bounds: Vec<ast::TraitBound>,
+}
+
+#[derive(Debug, Clone)]
+struct TraitImpl {
+    owner: Type,
+    params: Vec<String>,
+    args: Vec<Type>,
+    bounds: Vec<TypeBoundPredicate>,
 }
 
 #[derive(Debug, Clone)]
@@ -289,15 +296,17 @@ impl TypeChecker {
             }
             if let ast::ItemKind::Impl(impl_item) = &item.kind {
                 let self_ty = Type::from_ast(&impl_item.self_type);
+                let mut type_params = Self::type_param_names(impl_item.generics.as_ref());
+                type_params.extend(impl_item.implicit_type_params.iter().cloned());
                 for impl_member in &impl_item.items {
                     match impl_member {
                         ast::ImplItemKind::Function(func) => {
                             self.errors
                                 .extend(Self::check_function_attributes(&func.attributes));
-                            self.check_impl_method(&self_ty, func);
+                            self.check_impl_method(&self_ty, func, &type_params);
                         }
                         ast::ImplItemKind::Cast(cast) => {
-                            self.check_impl_cast(&self_ty, cast);
+                            self.check_impl_cast(&self_ty, cast, &type_params);
                         }
                         _ => {}
                     }
@@ -513,11 +522,9 @@ impl TypeChecker {
                                 .entry((owner_key, method_name.to_string()))
                                 .or_default()
                                 .push(symbol_id);
-                            // Trait provenance: bound checks (@json macros,
-                            // where clauses) consult trait_impls, which only
-                            // sees source impls — record artifact impls too.
+                            // Artifact exports retain the trait name and concrete owner.
                             if let Some(trait_name) = &export.impl_trait {
-                                self.trait_impls
+                                self.imported_trait_impls
                                     .entry(trait_name.clone())
                                     .or_default()
                                     .insert(owner_ty.canonical_key());
@@ -788,18 +795,34 @@ impl TypeChecker {
                 continue;
             }
             let self_ty = Type::from_ast(&impl_item.self_type);
-            let key = self_ty.canonical_key();
-            if self.is_concrete_type(&self_ty) {
-                self.trait_impls
-                    .entry(name.clone())
-                    .or_default()
-                    .insert(key);
-            } else if let ast::TypeKind::Named(named) = impl_item.self_type.kind.as_ref() {
-                self.generic_trait_impls
-                    .entry(name.clone())
-                    .or_default()
-                    .insert(named.path[0].name.clone());
-            }
+            let params = if let Some(generics) = &impl_item.generics {
+                generics
+                    .params
+                    .iter()
+                    .filter_map(|param| match param {
+                        ast::GenericParam::Type(param) => Some(param.name.name.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            } else {
+                impl_item.implicit_type_params.clone()
+            };
+            let implementation = TraitImpl {
+                owner: self_ty,
+                params,
+                args: trait_ref
+                    .generics
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(Type::from_ast)
+                    .collect(),
+                bounds: self.collect_bounds(impl_item.generics.as_ref()),
+            };
+            self.source_trait_impls
+                .entry(name.clone())
+                .or_default()
+                .push(implementation);
             // Record the Drop-owner base name for ANY Drop impl (generic
             // templates included): Vec<String> must count even though
             // `impl<T> Drop<Vec<T>>` has a non-concrete self type.
@@ -910,7 +933,16 @@ impl TypeChecker {
         errors
     }
 
+    fn type_param_names(generics: Option<&ast::Generics>) -> HashSet<String> {
+        generics.iter().flat_map(|g| &g.params)
+            .filter_map(|p| match p {
+                ast::GenericParam::Type(p) => Some(p.name.name.clone()),
+                _ => None,
+            }).collect()
+    }
+
     fn check_function(&mut self, func: &ast::FunctionItem) {
+        self.current_type_params = Self::type_param_names(func.generics.as_ref());
         self.current_implicit_reqs = Vec::new();
         self.current_implicit_method_reqs = Vec::new();
         let return_type = func
@@ -941,8 +973,12 @@ impl TypeChecker {
         let key = Self::free_fn_key(func);
         self.store_implicit_reqs(key.clone());
         self.store_implicit_method_reqs(key);
+        self.current_type_params.clear();
     }
-    fn check_impl_method(&mut self, self_ty: &Type, func: &ast::ImplFunction) {
+    fn check_impl_method(&mut self, self_ty: &Type, func: &ast::ImplFunction,
+                         impl_type_params: &HashSet<String>) {
+        self.current_type_params = impl_type_params.clone();
+        self.current_type_params.extend(Self::type_param_names(func.generics.as_ref()));
         self.current_implicit_reqs = Vec::new();
         self.current_implicit_method_reqs = Vec::new();
         let return_type = func
@@ -974,9 +1010,12 @@ impl TypeChecker {
         let key = Self::impl_method_key(self_ty, func);
         self.store_implicit_reqs(key.clone());
         self.store_implicit_method_reqs(key);
+        self.current_type_params.clear();
     }
 
-    fn check_impl_cast(&mut self, self_ty: &Type, cast: &ast::ImplCast) {
+    fn check_impl_cast(&mut self, self_ty: &Type, cast: &ast::ImplCast,
+                       impl_type_params: &HashSet<String>) {
+        self.current_type_params = impl_type_params.clone();
         let return_type = self.substitute_self_type(&Type::from_ast(&cast.target_type), self_ty);
         self.reject_wasm_extended_float(&return_type, cast.target_type.span);
         self.current_return = Some(return_type);
@@ -991,6 +1030,7 @@ impl TypeChecker {
         self.check_block(&cast.body);
         self.pop_scope();
         self.current_return = None;
+        self.current_type_params.clear();
     }
 
     fn check_block(&mut self, block: &ast::Block) {
@@ -2292,7 +2332,14 @@ impl TypeChecker {
                 arguments,
             } => {
                 let style = self.method_call_style(receiver);
-                let receiver_ty = self.check_expr(receiver, None);
+                let receiver_ty = if let ast::ExpressionKind::Identifier(ident) = receiver.kind.as_ref()
+                    && style == MethodCallStyle::Static
+                    && self.current_type_params.contains(&ident.name)
+                {
+                    Type::Named { path: vec![ident.name.clone()], generics: Vec::new() }
+                } else {
+                    self.check_expr(receiver, None)
+                };
                 // Check if this is an enum variant construction first
                 if let Type::Named { path: ty_path, .. } = &receiver_ty
                     && ty_path.len() == 1
@@ -3856,6 +3903,7 @@ impl TypeChecker {
                         receiver: receiver_ty.clone(),
                         name: method.name.clone(),
                         args: arg_types,
+                        style,
                         origin_span: span,
                     });
                     return expected.cloned().unwrap_or(Type::Unknown);
@@ -3988,7 +4036,7 @@ impl TypeChecker {
                         && param_path.len() == 1
                         && candidate.type_params.contains(&param_path[0])
                     {
-                        mapping.insert(param_path[0].clone(), exp_arg.clone());
+                        mapping.entry(param_path[0].clone()).or_insert_with(|| exp_arg.clone());
                     }
                 }
             }
@@ -4221,7 +4269,9 @@ impl TypeChecker {
                     {
                         let substituted = self.substitute_type(&param_ty, &inferred_mapping);
                         if self.is_assignable(&substituted, arg_ty) {
-                            if substituted != *arg_ty {
+                            if substituted != *arg_ty
+                                && !matches!(&substituted, Type::Reference { inner, .. } if inner.as_ref() == arg_ty)
+                            {
                                 score += 1;
                             }
                             mapping = inferred_mapping;
@@ -4249,7 +4299,9 @@ impl TypeChecker {
                     if !matched {
                         let substituted = self.substitute_type(&param_ty, &mapping);
                         if self.is_assignable(&substituted, arg_ty) {
-                            if substituted != *arg_ty {
+                            if substituted != *arg_ty
+                                && !matches!(&substituted, Type::Reference { inner, .. } if inner.as_ref() == arg_ty)
+                            {
                                 score += 1;
                             }
                             matched = true;
@@ -4784,7 +4836,6 @@ impl TypeChecker {
             if !self.is_concrete_type(&bounded) {
                 continue;
             }
-            let bounded_key = bounded.canonical_key();
             for bound in &predicate.bounds {
                 let trait_name = bound
                     .trait_ref
@@ -4795,11 +4846,15 @@ impl TypeChecker {
                 if trait_name.is_empty() {
                     continue;
                 }
-                let has_impl = self
-                    .trait_impls
-                    .get(&trait_name)
-                    .map(|set| set.contains(&bounded_key))
-                    .unwrap_or(false);
+                let args = bound
+                    .trait_ref
+                    .generics
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|arg| Type::from_ast(arg).substitute(mapping))
+                    .collect::<Vec<_>>();
+                let has_impl = self.has_trait_impl(&trait_name, &bounded, &args, 0);
                 if !has_impl {
                     self.error(
                         format!("missing impl for bound '{}' on {:?}", trait_name, bounded),
@@ -5587,7 +5642,7 @@ impl TypeChecker {
         };
         let value_ty = self.check_expr(value_expr, None);
         let owner_ty = Self::json_owner_type(&value_ty);
-        if !self.has_json_trait_impl("ToJson", &owner_ty) {
+        if !self.has_trait_impl("ToJson", &owner_ty, &[], 0) {
             self.error(
                 format!("type {} does not implement ToJson", owner_ty),
                 value_expr.span,
@@ -5655,7 +5710,7 @@ impl TypeChecker {
         if self.check_expr(input, None) != Type::Primitive(ast::PrimitiveType::Str) {
             self.error(msg::from_json_input_type(), input.span);
         }
-        if !self.has_json_trait_impl("FromJson", &target_ty) {
+        if !self.has_trait_impl("FromJson", &target_ty, &[], 0) {
             self.error(
                 format!("type {} does not implement FromJson", target_ty),
                 target.span,
@@ -5682,24 +5737,63 @@ impl TypeChecker {
         }
     }
 
-    fn has_json_trait_impl(&self, trait_name: &str, ty: &Type) -> bool {
+    fn has_trait_impl(&self, trait_name: &str, ty: &Type, args: &[Type], depth: usize) -> bool {
+        if depth >= MAX_TYPE_CHECK_DEPTH {
+            return false;
+        }
         if self
-            .trait_impls
+            .imported_trait_impls
             .get(trait_name)
             .is_some_and(|impls| impls.contains(&ty.canonical_key()))
         {
             return true;
         }
-        // Generic impls are registered by base name: Optional<String> and
-        // Optional<Vec<i32>> resolve against impl<T> for Optional<T>.
-        let base = match ty {
-            Type::Named { path, .. } => path[0].clone(),
-            Type::Optional { .. } => "Optional".to_string(),
-            _ => return false,
-        };
-        self.generic_trait_impls
+        self.source_trait_impls
             .get(trait_name)
-            .is_some_and(|bases| bases.contains(&base))
+            .is_some_and(|implementations| {
+                implementations.iter().any(|implementation| {
+                    if implementation.args.len() != args.len() {
+                        return false;
+                    }
+                    let mut mapping = HashMap::default();
+                    if !self.infer_type_params(
+                        &implementation.owner,
+                        ty,
+                        &implementation.params,
+                        &mut mapping,
+                    ) || implementation.owner.substitute(&mapping) != *ty
+                    {
+                        return false;
+                    }
+                    for (param, arg) in implementation.args.iter().zip(args) {
+                        if !self.infer_type_params(param, arg, &implementation.params, &mut mapping)
+                            || param.substitute(&mapping) != *arg
+                        {
+                            return false;
+                        }
+                    }
+                    implementation.bounds.iter().all(|predicate| {
+                        let bounded = predicate.bounded.substitute(&mapping);
+                        predicate.bounds.iter().all(|bound| {
+                            let name = bound
+                                .trait_ref
+                                .path
+                                .last()
+                                .map(|id| id.name.as_str())
+                                .unwrap_or_default();
+                            let args = bound
+                                .trait_ref
+                                .generics
+                                .as_deref()
+                                .unwrap_or_default()
+                                .iter()
+                                .map(|arg| Type::from_ast(arg).substitute(&mapping))
+                                .collect::<Vec<_>>();
+                            self.has_trait_impl(name, &bounded, &args, depth + 1)
+                        })
+                    })
+                })
+            })
     }
 
     pub(crate) fn print_typeck(
@@ -6707,7 +6801,7 @@ impl TypeChecker {
                     &req.name,
                     &args,
                     None,
-                    MethodCallStyle::Instance,
+                    req.style,
                     None,
                     span,
                 )
@@ -6812,7 +6906,9 @@ impl TypeChecker {
             ast::ExpressionKind::Identifier(ident) => {
                 if self.lookup_type(&ident.name).is_some() {
                     MethodCallStyle::Instance
-                } else if self.known_types.contains_key(&ident.name) {
+                } else if self.known_types.contains_key(&ident.name)
+                    || self.current_type_params.contains(&ident.name)
+                {
                     MethodCallStyle::Static
                 } else {
                     MethodCallStyle::Instance
@@ -8909,6 +9005,68 @@ mod tests {
             parse("trait Copy {} T foo<T: Copy>(T x) { return x; } i32 main() { return foo(1); }");
         let (errors, _) = TypeChecker::new().check_program(&program);
         assert!(!errors.is_empty(), "expected errors");
+    }
+
+    #[test]
+    fn accepts_generic_impls_in_trait_bounds() {
+        let program = parse(
+            "trait View<E> {} struct Bag<T> { T value; }
+             impl<T> View<T> for Bag<T> {}
+             i32 use_view<C: View<i32>>(C value) { return 0; }
+             i32 main() { Bag<i32> bag = { 1 }; return use_view(bag); }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    #[test]
+    fn rejects_mismatched_trait_arguments() {
+        let program = parse(
+            "trait View<E> {} impl View<i32> for i32 {}
+             i32 use_view<C: View<i64>>(C value) { return 0; }
+             i32 main() { return use_view(1); }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("missing impl for bound 'View'")),
+            "expected wrong trait argument error: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_specialization_of_generic_trait_impl() {
+        let program = parse(
+            "trait Marker {} struct Pair<A, B> { A a; B b; }
+             impl<T> Marker for Pair<T, i32> {}
+             i32 use_marker<C: Marker>(C value) { return 0; }
+             i32 main() { Pair<i32, i64> pair = { 1, 2 }; return use_marker(pair); }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("missing impl for bound 'Marker'")),
+            "expected specialization error: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn enforces_bounds_on_generic_trait_impls() {
+        let program = parse(
+            "trait Element {} trait Sequence {} impl Element for i32 {}
+             struct Bag<T> { T value; } impl<T: Element> Sequence for Bag<T> {}
+             i32 use_sequence<C: Sequence>(C value) { return 0; }
+             i32 main() { Bag<f64> bag = { 1.0 }; return use_sequence(bag); }",
+        );
+        let (errors, _) = TypeChecker::new().check_program(&program);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("missing impl for bound 'Sequence'")),
+            "expected conditional impl error: {errors:?}"
+        );
     }
 
     #[test]
