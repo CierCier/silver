@@ -52,13 +52,7 @@ void json_escape(str input, String* out) {
 void send_raw_payload(str payload) {
     i64 payload_len = strlen(payload);
     String header = String.from_str("Content-Length: ");
-    u8 num_buf[32];
-    i64 n = itoa(payload_len, (u8*)&num_buf[0]);
-    i64 k = 0;
-    while (k < n) {
-        header.push((char)num_buf[k]);
-        k += 1;
-    }
+    header.push_display(&payload_len);
     header.push_str("\r\n\r\n");
 
     STDOUT.write_str(header.to_str());
@@ -93,13 +87,7 @@ void send_error(str id_json, i64 code, str message) {
     String resp = String.from_str("{\"jsonrpc\":\"2.0\",\"id\":");
     resp.push_str(id_json);
     resp.push_str(",\"error\":{\"code\":");
-    u8 num_buf[32];
-    i64 n = itoa(code, (u8*)&num_buf[0]);
-    i64 k = 0;
-    while (k < n) {
-        resp.push((char)num_buf[k]);
-        k += 1;
-    }
+    resp.push_display(&code);
     resp.push_str(",\"message\":\"");
     json_escape(message, &resp);
     resp.push_str("\"}}");

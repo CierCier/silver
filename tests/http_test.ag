@@ -3,9 +3,7 @@
 // The loopback cases preload a deterministic response before the client sends
 // its request. Framing cases (content length, chunked) are single-threaded;
 // the convenience-verb cases run a small server thread that accepts the
-// client's connection, serves the response, and captures the request. The
-// public API case requires internet access: it GETs api.ipify.org and checks
-// the JSON shape.
+// client's connection, serves the response, and captures the request.
 
 import std.fmt;
 import std.net.http;
@@ -168,9 +166,9 @@ i32 run_trailer_case() {
 }
 
 /// Loopback case for the convenience verbs. `body`/`headers` select the
-/// helper arity: POST is called with body+headers, PUT with body, HEAD bare.
+/// helper arity: POST is called with body+headers, PUT with body, GET/HEAD bare.
 i32 run_verb_case(str verb, str body, str headers) {
-    @assert(!(verb != "POST" && verb != "PUT" && verb != "HEAD"), "check");
+    @assert(!(verb != "POST" && verb != "PUT" && verb != "HEAD" && verb != "GET"), "check");
     u16 port = 0;
     i32 r = bind_loopback(&g_listener, &port);
     if (r != 0) { return r; }
@@ -196,10 +194,12 @@ i32 run_verb_case(str verb, str body, str headers) {
         response_result = client.do(&req);
     }
     else if (verb == "PUT") { response_result = client.put((str)url.data, body); }
-    else { response_result = client.head((str)url.data); }
+    else if (verb == "HEAD") { response_result = client.head((str)url.data); }
+    else { response_result = client.get((str)url.data); }
     if (response_result.failed()) { thread_join(server_handle); return 8; }
     HttpResponse response = response_result.unwrap();
     if (response.status != 200) { thread_join(server_handle); return 9; }
+    if (verb == "GET" && !response.body.equals("hello")) { thread_join(server_handle); return 15; }
     @assert(!(thread_join(server_handle) < 0), "thread_join(server_handle) < 0");
     if (g_job.status != 0) { return g_job.status; }
 
@@ -393,19 +393,6 @@ i32 run_redirect_case(str first_wire, str second_wire, str method, str body,
         && memcmp(&g_req_body[0], (const void*)expected_second_body, g_second_body_len) != 0) {
         return 13;
     }
-    return 0;
-}
-
-/// GET `/?format=json` from api.ipify.org and check the JSON shape.
-i32 run_get_public_case() {
-    HttpClient client = HttpClient.new();
-    Result<HttpResponse, Error> response_result =
-        client.get("http://api.ipify.org/?format=json");
-    @assert(!(response_result.failed()), "response_result.failed()");
-    HttpResponse response = response_result.unwrap();
-    @assert(!(response.status != 200), "response.status != 200");
-    @assert(!(!response.body.starts_with("{\"ip\":\"")), "check");
-    response.drop();
     return 0;
 }
 
@@ -638,8 +625,8 @@ i32 run_get_public_case() {
         assert_true(r2.failed(), "control char host rejected");
     }
 
-    test_start("client.get public API");
-    assert_eq_i64(0, run_get_public_case(), "GET convenience against public API");
+    test_start("client.get convenience method");
+    assert_eq_i64(0, run_verb_case("GET", (str)0, (str)0), "GET convenience against loopback server");
 
     return done();
 }

@@ -105,10 +105,8 @@ impl Pty {
             p.drop();
             return Err(-g, "pty number failed");
         }
-        u8 nbuf[20];
-        i64 nlen = itoa((i64)num, &nbuf[0]);
         String path = String.from_str("/dev/pts/");
-        path.push_bytes(&nbuf[0], nlen);
+        path.push_display(&num);
         Result<i64, Error> s = try_open(path.to_str(), O_RDWR | O_NOCTTY, 0);
         path.drop();
         if (s.is_err()) {

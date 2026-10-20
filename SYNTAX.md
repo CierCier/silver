@@ -215,6 +215,19 @@ HashMap<str, f64> scores;
 Optional<str> name;
 ```
 
+### Tuples
+
+Tuple types and values use square brackets. Elements can have different types;
+constant indices select individual elements.
+
+```silver
+[i32, str] pair = [7, "seven"];
+i32 number = pair[0];
+let [value, label] = pair;
+```
+
+Parentheses group expressions; `(i32, str)` and `(7, "seven")` are not tuple syntax.
+
 ### Function Types
 
 Function types use `ReturnType(ParamTypes...)` syntax.
@@ -233,16 +246,18 @@ void() callback;             // function pointer: no params → void
 ```silver
 // Whole-module imports bring all public module items into scope.
 import std.io;
+
+// Select names and give a function a local alias.
+import std.io.file { println as print_line, STDOUT };
 ```
 
 Selective imports can name exported items and rename them with `as`. Whole-module
 imports remain supported and can coexist with selective imports.
 
-```silver
-import std.io.file { println as pln, STDOUT };
-```
-
 Imports inline `.ag` source modules or ingest `.agm` binary artifacts.
+Named selections are non-restrictive: other public exports remain available.
+Function aliases introduce a local name for an imported function; they do not
+create a module namespace.
 
 ### Type Aliases
 
@@ -493,13 +508,14 @@ let n = compute();    // type inferred from compute()'s return type
 let b = move owned;   // move transfers ownership, as with annotated lets
 ```
 
-Tuple destructuring in inferred bindings uses square brackets:
+Tuple destructuring uses square brackets. Use `_` to ignore an element.
 
 ```silver
-let [first, second] = [10, 20];
+let [x, y] = [10, 20];
+let [first, _, last] = [1, 2, 3];
 ```
 
-Parenthesized tuple syntax is not used.
+The parenthesized form `let (a, b) = ...` is not supported.
 
 ### Assignments & Compound Assignments
 
@@ -581,11 +597,14 @@ Point p2 = { 10.0, 20.0 };
 
 // Array initializer
 i32 arr[3] = { 1, 2, 3 };
+
+// Tuple initializer
+[i32, str] entry = [100, "OK"];
 ```
 
-Tuple literals use square brackets and array literals use braces. For example,
-`[100, "OK"]` is a tuple literal, while `{ 1, 2, 3 }` initializes an array
-whose type and size are declared separately.
+Array and struct initializers use braces. Bracket literals such as `[1, 2, 3]`
+construct tuples, not fixed-size arrays. Parenthesized tuple literals are not
+supported.
 
 ### Binary Expressions
 
@@ -1002,19 +1021,27 @@ All futex-based primitives are seq_cst by default.
 
 ### Error Handling
 
-Silver uses payload enums for optional values and recoverable errors. It has no
-exception mechanism.
+Silver uses explicit return values for recoverable failures. `Optional<T>` and
+`Result<T, E>` are payload enums; inspect them with `match` or their predicate
+methods before extracting a value. There is no exception mechanism.
 
-| Type | Module | Variants or fields |
+| Type | Module | Representation |
 |---|---|---|
-| `Optional<T>` | `std.optional` | `None`; `Some(T)` |
-| `Result<T, E>` | `std.result` | `Ok(T)`; `Err(E)` |
+| `Optional<T>` | `std.optional` | `None` or `Some(T)` |
+| `Result<T, E>` | `std.result` | `Ok(T)` or `Err(E)` |
+| `Error` | `std.error` | `i64 code`, borrowed `str message` |
 | `TypeResult` | `std.rt.types` | `bool ok`, `TypeId id`, `i32 err`, `String msg` |
 
-`Optional<T>.unwrap()` aborts on `None`; `Result<T, E>.unwrap()` aborts on
-`Err(E)`. `unwrap_or(fallback)` returns the payload or the fallback. Result
-also provides `unwrap_err()` and `get_error()`, which abort on `Ok(T)`.
-`std.sys.result` provides typed syscall helpers that return `Result<i64, Error>`.
+Typed syscall wrappers in `std.sys.result` return `Result<i64, Error>`.
+Their error codes are positive errno values. The former `SysResult` type is
+no longer used.
+
+`Optional.is_some()` / `is_none()` and `Result.is_ok()` / `is_err()` borrow the
+container. `unwrap()`, `unwrap_err()`, and `unwrap_or(fallback)` consume it and
+transfer the selected value. `unwrap()` and `unwrap_err()` abort when called
+on the wrong variant. `Result.get_error()` is a consuming alias for
+`unwrap_err()` and aborts on `Ok(T)`.
+
 The `value ? fallback` operator also selects a fallback when an `Optional` or
 `Result` has no success value; it does not propagate errors to the caller.
 
@@ -1026,6 +1053,29 @@ Unrecoverable errors call `abort()` from `std.mem.memory`.
 |---|---|
 | `@print`, `@println`, `@eprintln` | Compiler builtin macro with `{}` formatting. Preferred. |
 | `println(str)`, `eprintln(str)` | Plain functions in `std.io`, single NUL-terminated string. |
+
+### Building strings
+
+`String.push_display(&value)` appends the `Display` representation of a borrowed
+value. It calls the formatter once and leaves the source value available to the
+caller. Custom types use the same `Display` implementation as `{}` formatting.
+For signed decimal integers, `String.from_i64(value)` constructs a new string.
+
+```silver
+import std.string;
+
+i32 main() {
+    String message = String.from_str("count=");
+    i64 count = 42;
+    message.push_display(&count);
+    return message.equals("count=42") && count == 42 ? 0 : 1;
+}
+```
+
+The append preserves the bytes emitted by the formatter, including embedded NUL
+bytes. Use `len()` and `as_slice()` for byte content; `to_str()` exposes a
+NUL-terminated view. Formatting may allocate when its output exceeds the scratch
+buffer or the destination's remaining capacity.
 
 ### Memory Allocation
 

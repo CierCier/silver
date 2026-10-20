@@ -745,7 +745,8 @@ void hir_check_call_group(SyntaxNode* group, HirFunction* callee, HirContext* co
             u32 actual = hir_syntax_literal_type(leaves.get(0), context);
             if (hir_types_conflict(context, parameter.type_id, actual)) {
                 String message = String.from_str("type mismatch in argument ");
-                append_i64(&message, argument + 1);
+                i64 argument_number = argument + 1;
+                message.push_display(&argument_number);
                 message.push_str(": expected ");
                 hir_append_type(&message, context, parameter.type_id);
                 message.push_str(", found ");
@@ -761,9 +762,10 @@ void hir_check_call_group(SyntaxNode* group, HirFunction* callee, HirContext* co
     }
     if (!callee.arity_unreliable && argument_count != callee.parameters.len()) {
         String message = String.from_str("argument count mismatch: expected ");
-        append_i64(&message, callee.parameters.len());
+        i64 expected_count = callee.parameters.len();
+        message.push_display(&expected_count);
         message.push_str(", found ");
-        append_i64(&message, argument_count);
+        message.push_display(&argument_count);
         diagnostics.error(group.span, move message);
         *ok = false;
     }

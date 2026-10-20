@@ -12,6 +12,7 @@ import frontend.lexer;
 import frontend.lower_expr;
 import frontend.symbols;
 import frontend.messages;
+import frontend.monomorph;
 import frontend.types;
 import frontend.cfg;
 const u32 MAX_TYPE_CHECK_DEPTH = 256;
@@ -405,7 +406,7 @@ String typecheck_canonical_type(TypeTable* types, u32 type_id, u32 depth) {
             result.push_str("Array<");
             result.push_str(inner.to_str());
             result.push_str(", ");
-            append_i64(&result, entry.count);
+            result.push_display(&entry.count);
             result.push('>');
         }
         inner.drop();
@@ -828,46 +829,8 @@ u32 typecheck_struct_field_type(TypeTable* types, SyntaxNode* root,
         }
         return TYPE_UNKNOWN;
     }
-    SyntaxNode* body = item.first_child;
-    while (body != (SyntaxNode*)0 && body.kind != NodeKind.Block) {
-        body = body.next_sibling;
-    }
-    if (body == (SyntaxNode*)0) { return TYPE_UNKNOWN; }
-
-    Vec<SyntaxNode*> tokens = Vec<SyntaxNode*>.new();
-    typecheck_expr_collect_tokens(body, &tokens);
-    u32 result = TYPE_UNKNOWN;
-    i64 start = 0;
-    while (start < tokens.len()) {
-        i64 end = start;
-        while (end < tokens.len() && tokens.get(end).token_kind != TokenKind.Semicolon) {
-            end += 1;
-        }
-        i64 name_index = end - 1;
-        while (name_index >= start && tokens.get(name_index).token_kind != TokenKind.Identifier) {
-            name_index -= 1;
-        }
-        if (name_index >= start && strcmp(tokens.get(name_index).text, field_name) == 0) {
-            String field_type_text = String.new();
-            i64 i = start;
-            while (i < name_index) {
-                field_type_text.push_str(tokens.get(i).text);
-                i += 1;
-            }
-            i = name_index + 1;
-            while (i < end) {
-                field_type_text.push_str(tokens.get(i).text);
-                i += 1;
-            }
-            u32 member_type = type_id_from_text(types, field_type_text.to_str());
-            result = resolve_generic_member_type(types, root, owner_type, member_type);
-            field_type_text.drop();
-            break;
-        }
-        start = end + 1;
-    }
-    tokens.drop();
-    return result;
+    u32 member_type = struct_field_type_id(types, item, field_name);
+    return resolve_generic_member_type(types, root, owner_type, member_type);
 }
 
 bool typecheck_type_has_drop_impl(SyntaxNode* root, TypeTable* types, u32 type_id) {
@@ -1268,6 +1231,7 @@ bool typecheck_method_parameter_is_value(SyntaxNode* root, TypeTable* types,
                         }
                         scan = scan.next_sibling;
                     }
+                    name = item_method_name(member, params_node);
                     if (body != (SyntaxNode*)0 && name != (SyntaxNode*)0
                         && params_node != (SyntaxNode*)0
                         && strcmp(name.text, method_name) == 0) {
@@ -1356,7 +1320,7 @@ u32 typecheck_method_decl_return_type(TypeTable* types, SyntaxNode* ret_start,
             }
             continue;
         }
-        if (scan.kind == NodeKind.Token && (scan.text == "pub" || scan.text == "static")) {
+        if (scan.kind == NodeKind.Token && (scan.text == "private" || scan.text == "static")) {
             scan = scan.next_sibling;
             continue;
         }
@@ -1409,6 +1373,7 @@ bool typecheck_method_has_overloads(SyntaxNode* method_name_node,
             }
             scan = scan.next_sibling;
         }
+        name = item_method_name(member, params_node);
         if (body != (SyntaxNode*)0 && params_node != (SyntaxNode*)0
             && name != (SyntaxNode*)0
             && strcmp(name.text, method_name) == 0) {
@@ -1595,6 +1560,9 @@ u32 typecheck_method_return_type_for_call(AstPool* pool, SyntaxNode* root,
                                           TypeTable* types, u32 receiver_type,
                                           str method_name, i64 param_count,
                                           u32 args_start, bool static_method) {
+    u32 generic_result = typecheck_generic_method_type(pool, root, types,
+        receiver_type, method_name, args_start, static_method, -1);
+    if (generic_result != TYPE_UNKNOWN) { return generic_result; }
     u32 resolved_receiver = types.resolve_subst(receiver_type);
     TypeEntry* receiver = types.get(resolved_receiver);
     u32 receiver_depth = 0;
@@ -1743,6 +1711,9 @@ u32 typecheck_method_parameter_type_for_call(AstPool* pool, SyntaxNode* root,
                                              i64 parameter_index,
                                              bool* out_variadic) {
     if (out_variadic != (bool*)0) { *out_variadic = false; }
+    u32 generic_result = typecheck_generic_method_type(pool, root, types,
+        receiver_type, method_name, args_start, static_method, parameter_index);
+    if (generic_result != TYPE_UNKNOWN) { return generic_result; }
     u32 resolved_receiver = types.resolve_subst(receiver_type);
     TypeEntry* receiver = types.get(resolved_receiver);
     while (receiver.kind == TypeKind.Pointer || receiver.kind == TypeKind.Reference) {
@@ -1880,6 +1851,51 @@ u32 typecheck_method_parameter_type_for_call(AstPool* pool, SyntaxNode* root,
     }
     return best_parameter_type != TYPE_UNKNOWN
         ? best_parameter_type : fallback_parameter_type;
+}
+
+u32 typecheck_generic_method_type(AstPool* pool, SyntaxNode* root, TypeTable* types,
+                                  u32 receiver_type, str method_name, u32 args_start,
+                                  bool static_method, i64 parameter_index) {
+    if (pool == (AstPool*)0) { return TYPE_UNKNOWN; }
+    MonoMethodTemplate template;
+    Vec<u32> param_ids = Vec<u32>.new();
+    Vec<u32> arg_ids = Vec<u32>.new();
+    String failure = String.new();
+    u32 result = TYPE_UNKNOWN;
+    if (mono_resolve_generic_method(pool, root, types, receiver_type, method_name,
+            args_start, static_method, &template, &param_ids, &arg_ids, &failure)
+        && failure.len() == 0) {
+        mono_push_method_bindings(types, &param_ids, &arg_ids);
+        u32 self_id = types.names.intern("Self");
+        u32 self_type = receiver_type;
+        TypeEntry* receiver = types.get(self_type);
+        while (receiver.kind == TypeKind.Pointer || receiver.kind == TypeKind.Reference) {
+            self_type = receiver.inner;
+            receiver = types.get(self_type);
+        }
+        u32 depth = 0;
+        while (depth < template.receiver_depth) {
+            self_type = types.get_pointer(self_type, true);
+            depth += 1;
+        }
+        types.push_subst(self_id, self_type);
+        if (parameter_index < 0) {
+            result = typecheck_method_decl_return_type(types, template.ret_start, template.name_node);
+        } else {
+            Vec<Binding> params = Vec<Binding>.new();
+            collect_parameter_bindings(template.params_node, &params);
+            if (parameter_index < params.len()) {
+                result = typecheck_parameter_type_id(types, params.get_ptr(parameter_index));
+            }
+            params.drop();
+        }
+        result = types.resolve_subst(result);
+        types.pop_subst(receiver_binding_count(&param_ids, param_ids.len()) + 1);
+    }
+    failure.drop();
+    param_ids.drop();
+    arg_ids.drop();
+    return result;
 }
 
 u32 typecheck_slice_result_type(TypeTable* types, SyntaxNode* root, u32 target_type) {
@@ -2418,9 +2434,11 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                     String message = variadic
                         ? String.from_str("argument count mismatch: expected at least ")
                         : String.from_str("argument count mismatch: expected ");
-                    append_i64(&message, variadic ? fixed_count : params.len());
+                    i64 expected_count = variadic ? fixed_count : params.len();
+                    message.push_display(&expected_count);
                     message.push_str(", found ");
-                    append_i64(&message, (i64)args_count);
+                    i64 actual_count = (i64)args_count;
+                    message.push_display(&actual_count);
                     diagnostics.error(expr.span, move message);
                     *ok = false;
                 } else {
@@ -2503,9 +2521,10 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                             }
                             if (arity != (i64)expr.aux && !flattened) {
                                 String message = String.from_str("argument count mismatch: expected ");
-                                append_i64(&message, arity);
+                                message.push_display(&arity);
                                 message.push_str(", found ");
-                                append_i64(&message, (i64)expr.aux);
+                                i64 actual_count = (i64)expr.aux;
+                                message.push_display(&actual_count);
                                 diagnostics.error(expr.span, move message);
                                 *ok = false;
                             }
@@ -2582,6 +2601,8 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                         );
                         diagnostics.error(expr.span, move message);
                         *ok = false;
+                    } else {
+                        inferred = typecheck_struct_field_type(types, root, receiver_type, field_name);
                     }
                     fields.drop();
                 }
@@ -2676,6 +2697,33 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 arg_index += 1;
             }
         }
+        MonoMethodTemplate generic_template;
+        Vec<u32> generic_params = Vec<u32>.new();
+        Vec<u32> generic_args = Vec<u32>.new();
+        String generic_failure = String.new();
+        bool generic_args_known = true;
+        i64 known_index = 0;
+        while (known_index < (i64)arg_count) {
+            u32 known_id = pool.args.get((i64)expr.inner1 + 1 + known_index);
+            u32 known_type = pool.get_expr(known_id).inferred_type;
+            TypeEntry* known = types.get(types.resolve_subst(known_type));
+            while (known.kind == TypeKind.Pointer || known.kind == TypeKind.Reference) {
+                known_type = known.inner;
+                known = types.get(types.resolve_subst(known_type));
+            }
+            if (known.kind == TypeKind.Unknown) { generic_args_known = false; }
+            known_index += 1;
+        }
+        if (generic_args_known
+            && mono_resolve_generic_method(pool, root, types, receiver_type, method_name,
+                expr.inner1, static_method, &generic_template, &generic_params,
+                &generic_args, &generic_failure) && generic_failure.len() > 0) {
+            diagnostics.error(expr.span, generic_failure.clone());
+            *ok = false;
+        }
+        generic_failure.drop();
+        generic_params.drop();
+        generic_args.drop();
         inferred = typecheck_method_return_type_for_call(pool, root, types,
             receiver_type, method_name, total_param_count, expr.inner1,
             static_method);
@@ -2725,9 +2773,11 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                                 }
                                 if (!flattened) {
                                     String message = String.from_str("argument count mismatch: expected ");
-                                    append_i64(&message, variant_arities.get(vi));
+                                    i64 expected_count = variant_arities.get(vi);
+                                    message.push_display(&expected_count);
                                     message.push_str(", found ");
-                                    append_i64(&message, (i64)args_count);
+                                    i64 actual_count = (i64)args_count;
+                                    message.push_display(&actual_count);
                                     diagnostics.error(expr.span, move message);
                                     *ok = false;
                                 }
@@ -3282,6 +3332,7 @@ bool typecheck_expressions_scoped(AstPool* pool, SymbolTable* symbols, SyntaxTre
                         if (typecheck_str_starts_with(diagnostic_text,
                                                      "call to overloaded function '")
                             || typecheck_str_starts_with(diagnostic_text, "unwrap-or ")
+                            || typecheck_str_starts_with(diagnostic_text, "generic method ")
                             || typecheck_str_starts_with(diagnostic_text, "cannot move '")
                             || typecheck_str_starts_with(diagnostic_text,
                                 "return statement is not allowed inside a defer block")
@@ -3305,6 +3356,14 @@ bool typecheck_expressions_scoped(AstPool* pool, SymbolTable* symbols, SyntaxTre
 }
 
 bool typecheck_expressions(AstPool* pool, SymbolTable* symbols, SyntaxTree* tree,
-                           CfgSet* cfg, DiagnosticBag* diagnostics) {
-    return typecheck_expressions_scoped(pool, symbols, tree, cfg, diagnostics, 0);
+                           CfgSet* cfg, DiagnosticBag* diagnostics, SyntaxNode* imported_root) {
+    SyntaxNode* local_last = tree.root.last_child;
+    if (local_last != (SyntaxNode*)0 && imported_root.first_child != (SyntaxNode*)0) {
+        local_last.next_sibling = imported_root.first_child;
+        tree.root.last_child = imported_root.last_child;
+    }
+    bool ok = typecheck_expressions_scoped(pool, symbols, tree, cfg, diagnostics, 0);
+    if (local_last != (SyntaxNode*)0) { local_last.next_sibling = (SyntaxNode*)0; }
+    tree.root.last_child = local_last;
+    return ok;
 }

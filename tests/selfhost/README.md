@@ -36,7 +36,7 @@ missing source, and a repeated `--target`. Forwarded `--target` arguments after
 assembly output mode; `-S`, `--emit-llvm`, and `--emit=llvm-ir` currently fall
 back to native output, which is a separate open gap.
 Other focused checks exercise linker selection, format/assert/args support,
-enum and aggregate layout, generic functions, stage2, and cache behavior.
+enum and aggregate layout, generic functions and methods, stage2, and cache behavior.
 `check_native_optimization.py` verifies native optimization through emitted IR
 and executable results. It covers short and long level options, invalid levels,
 debug/release cfg, package/object/module emission, cache separation, and forwarded

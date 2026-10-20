@@ -652,6 +652,44 @@ u32 type_id_from_declarator(TypeTable* types, str base_type, SyntaxNode* suffix)
     return result;
 }
 
+u32 struct_field_type_id(TypeTable* types, SyntaxNode* item, str field_name) {
+    if (item == (SyntaxNode*)0) { return TYPE_UNKNOWN; }
+    SyntaxNode* body = item.first_child;
+    while (body != (SyntaxNode*)0 && body.kind != NodeKind.Block) {
+        body = body.next_sibling;
+    }
+    if (body == (SyntaxNode*)0) { return TYPE_UNKNOWN; }
+    SyntaxNode* cursor = body.first_child;
+    while (cursor != (SyntaxNode*)0) {
+        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
+            cursor = cursor.next_sibling;
+            continue;
+        }
+        SyntaxNode* start = cursor;
+        SyntaxNode* name = (SyntaxNode*)0;
+        while (cursor != (SyntaxNode*)0
+            && !(cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon)) {
+            if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Identifier) {
+                name = cursor;
+            }
+            cursor = cursor.next_sibling;
+        }
+        if (name != (SyntaxNode*)0 && strcmp(name.text, field_name) == 0) {
+            String type_text = String.new();
+            SyntaxNode* scan = start;
+            while (scan != name && scan != (SyntaxNode*)0) {
+                append_node_tokens(scan, &type_text);
+                scan = scan.next_sibling;
+            }
+            u32 type_id = type_id_from_declarator(types, type_text.to_str(), name.next_sibling);
+            type_text.drop();
+            return type_id;
+        }
+        if (cursor != (SyntaxNode*)0) { cursor = cursor.next_sibling; }
+    }
+    return TYPE_UNKNOWN;
+}
+
 bool enum_payload_type_text(SyntaxNode* root, str enum_name, str variant_name,
                             i64 field_index, String* out) {
     SyntaxNode* item = find_enum_item(root, enum_name);
@@ -728,6 +766,28 @@ bool item_first_parameter_is_self(SyntaxNode* parameters) {
     return last_identifier != (SyntaxNode*)0 && strcmp(last_identifier.text, "self") == 0;
 }
 
+// Ignore identifiers inside return applications and method type parameters.
+SyntaxNode* item_method_name(SyntaxNode* start, SyntaxNode* parameters) {
+    SyntaxNode* name = (SyntaxNode*)0;
+    SyntaxNode* cursor = start;
+    i64 depth = 0;
+    while (cursor != (SyntaxNode*)0 && cursor != parameters) {
+        if (cursor.kind == NodeKind.Token) {
+            if (cursor.token_kind == TokenKind.Less) { depth += 1; }
+            else if (cursor.token_kind == TokenKind.Greater) { depth -= 1; }
+            else if (depth == 0 && cursor.token_kind == TokenKind.Identifier) { name = cursor; }
+        }
+        cursor = cursor.next_sibling;
+    }
+    return name;
+}
+
+bool item_method_is_generic(SyntaxNode* name) {
+    SyntaxNode* next = name == (SyntaxNode*)0 ? (SyntaxNode*)0 : name.next_sibling;
+    return next != (SyntaxNode*)0 && next.kind == NodeKind.Token
+        && next.token_kind == TokenKind.Less;
+}
+
 bool impl_has_method(SyntaxNode* root, str owner_name, str method_name,
                     bool instance_method) {
     if (root == (SyntaxNode*)0 || owner_name == (str)0 || method_name == (str)0) {
@@ -763,6 +823,7 @@ bool impl_has_method(SyntaxNode* root, str owner_name, str method_name,
                         }
                         scan = scan.next_sibling;
                     }
+                    name = item_method_name(member, parameters);
                     if (name != (SyntaxNode*)0 && parameters != (SyntaxNode*)0
                         && strcmp(name.text, method_name) == 0
                         && item_first_parameter_is_self(parameters) == instance_method) {

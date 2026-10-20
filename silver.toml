@@ -5,8 +5,8 @@
 # library), built stage-by-stage toward parity with bootstrap/stage0/agc.
 #
 # The Rust bootstrap lives under bootstrap/ (stage0) and is built with
-# cargo from the same root; see docs/selfhost-plan.txt for the migration
-# plan and docs/wasm-target.md for the wasm target survey.
+# cargo from the same root; see docs/compiler-guide.md for the compiler
+# pipeline and docs/wasm-target.md for the wasm target survey.
 #
 # P0 goal: 1:1 linux/x86_64 frontend parity between bootstrap/stage0/agc
 # (Rust) and bin/agc (Silver). The reusable frontend lives in libs/agc.

@@ -3,8 +3,7 @@
 Keep changes focused, executable, and easy to review. Read [AGENTS.md](AGENTS.md)
 for the repository workflow and [SYNTAX.md](SYNTAX.md) before writing Silver.
 The [compiler reference](docs/compiler-guide.md) describes pipeline and ownership
-contracts. The [maintainer profile](docs/maintainer-preferences.md) explains the
-preferences behind these conventions.
+contracts.
 
 ## Set up and build
 

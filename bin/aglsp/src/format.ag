@@ -80,13 +80,10 @@ String compute_formatting(str text) {
     }
 
     String out = String.from_str("[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":");
-    u8 num_buf[32];
-    i64 n = itoa(end_line, (u8*)&num_buf[0]);
-    for (i64 k = 0; k < n; k += 1) { out.push((char)num_buf[k]); }
+    out.push_display(&end_line);
 
     out.push_str(",\"character\":");
-    n = itoa(last_line_len, (u8*)&num_buf[0]);
-    for (i64 k = 0; k < n; k += 1) { out.push((char)num_buf[k]); }
+    out.push_display(&last_line_len);
 
     out.push_str("}},\"newText\":\"");
     json_escape(formatted.to_str(), &out);

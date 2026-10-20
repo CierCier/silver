@@ -11,21 +11,16 @@ void append_range(String* out, Span span) {
     i64 end_line = span.end_line > 0 ? span.end_line - 1 : 0;
     i64 end_col = span.end_col > 0 ? span.end_col - 1 : 0;
 
-    u8 num_buf[32];
-    i64 n = itoa(start_line, (u8*)&num_buf[0]);
-    for (i64 k = 0; k < n; k += 1) { out.push((char)num_buf[k]); }
+    out.push_display(&start_line);
 
     out.push_str(",\"character\":");
-    n = itoa(start_col, (u8*)&num_buf[0]);
-    for (i64 k = 0; k < n; k += 1) { out.push((char)num_buf[k]); }
+    out.push_display(&start_col);
 
     out.push_str("},\"end\":{\"line\":");
-    n = itoa(end_line, (u8*)&num_buf[0]);
-    for (i64 k = 0; k < n; k += 1) { out.push((char)num_buf[k]); }
+    out.push_display(&end_line);
 
     out.push_str(",\"character\":");
-    n = itoa(end_col, (u8*)&num_buf[0]);
-    for (i64 k = 0; k < n; k += 1) { out.push((char)num_buf[k]); }
+    out.push_display(&end_col);
     out.push_str("}}");
 }
 
@@ -79,9 +74,7 @@ String compute_document_symbols(str text) {
                 out.push_str("{\"name\":\"");
                 json_escape(name.to_str(), &out);
                 out.push_str("\",\"kind\":");
-                u8 num_buf[32];
-                i64 n = itoa(kind_num, (u8*)&num_buf[0]);
-                for (i64 k = 0; k < n; k += 1) { out.push((char)num_buf[k]); }
+                out.push_display(&kind_num);
 
                 out.push_str(",\"range\":");
                 append_range(&out, item.span);

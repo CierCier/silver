@@ -258,30 +258,10 @@ String rt_type_str_owned(str text) {
 
 /// Append the decimal representation of an unsigned 32-bit value.
 void rt_type_append_u32(String* out, u32 value) {
-    if (value >= (u32)10) {
-        rt_type_append_u32(out, value / (u32)10);
-    }
-    out.push((u8)(48 + (i32)(value % (u32)10)));
-}
-
-// Digits of a non-positive value (avoids overflow on i64 min).
-void rt_type_append_i64_neg(String* out, i64 value) {
-    if (value <= -10) {
-        rt_type_append_i64_neg(out, value / 10);
-    }
-    i64 digit = -(value % 10);
-    out.push((u8)(48 + (i32)digit));
+    out.push_display(&value);
 }
 
 /// Append the decimal representation of a signed 64-bit value.
 void rt_type_append_i64(String* out, i64 value) {
-    if (value < 0) {
-        out.push((u8)45); // '-'
-        rt_type_append_i64_neg(out, value);
-        return;
-    }
-    if (value >= 10) {
-        rt_type_append_i64(out, value / 10);
-    }
-    out.push((u8)(48 + (i32)(value % 10)));
+    out.push_display(&value);
 }

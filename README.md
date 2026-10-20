@@ -164,7 +164,6 @@ bash tests/selfhost/run_native.sh --no-tui --jobs 4
 - [Agent Working Guide](AGENTS.md)
 - [Contributing](CONTRIBUTING.md)
 - [Compiler Architecture Reference](docs/compiler-guide.md)
-- [Maintainer Preferences](docs/maintainer-preferences.md)
 - [C ABI and FFI](docs/rust-ffi.md)
 - [Standard Library Protocols](docs/standards/README.md)
 
