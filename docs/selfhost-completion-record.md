@@ -7,9 +7,9 @@ and compiler snapshots. They do not certify the current tree.
 
 Stage0 bootstraps stage1 from the root workspace. Stage1 owns supported native
 compilation and does not dispatch to stage0. The [syntax reference](../SYNTAX.md)
-links language families to implementations and runtime fixtures; the
-[feature checklist](../stage1-checklist.md) separates implemented cases from
-remaining checking, ownership, ABI, and artifact work.
+links language families to implementations and runtime fixtures; this
+record separates verified compiler behavior from remaining checking,
+ownership, ABI, and artifact work.
 
 The native driver accepts only the exact LLVM host target triple for code
 generation. Source and workspace `check` commands retain target-dependent cfg

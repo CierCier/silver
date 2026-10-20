@@ -25,3 +25,16 @@ result-*
 /todo.md
 /handoff.md
 /.agents/
+
+# Local root checklists and plans
+/plan.md
+/stage1-checklist.md
+
+# Local audit tables
+*.tsv
+/.audit-selfhost.tsv
+
+# Audit documents
+docs/*audit*.md
+
+/playground/

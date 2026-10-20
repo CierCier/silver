@@ -4,7 +4,7 @@ Silver is a statically typed systems programming language with an LLVM backend,
 automatic resource cleanup, ownership and borrow checks, OS threads, and a
 freestanding runtime. The Rust stage0 compiler bootstraps the Silver stage1
 compiler. Their supported commands and checking coverage differ; see the
-[stage1 checklist](stage1-checklist.md) and [verification record](docs/selfhost-completion-record.md).
+[verification record](docs/selfhost-completion-record.md).
 
 ## Example
 
