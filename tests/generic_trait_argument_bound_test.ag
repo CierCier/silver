@@ -1,0 +1,25 @@
+// compile_flags: --no-cache
+import std.test;
+
+// The implementation's type parameter appears only in the trait arguments, so
+// the bound check must infer it from the requested trait arguments instead of
+// requiring the owner to carry it.
+trait View<T> {
+    i64 view(&self);
+}
+
+impl<T> View<T> for i32 {
+    i64 view(&self) { return 7; }
+}
+
+struct Holder { i32 unused; }
+
+impl Holder {
+    i64 probe<U: View<i64>>(&self, U _value) { return 1; }
+}
+
+i32 main() {
+    Holder holder = { .unused = 0 };
+    assert_eq_i64(1, holder.probe((i32)5), "generic trait argument bound");
+    return done();
+}

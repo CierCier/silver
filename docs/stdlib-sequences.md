@@ -64,7 +64,9 @@ content equality a valid hash key. Equal keys must produce equal hashes.
 Stage0's source trait checker matches owner types, trait arguments, and
 implementation bounds. Imported AGM exports currently retain the trait name
 and owner without its trait arguments, so that metadata path does not provide
-the same argument validation.
+the same argument validation. A generic implementation in an imported module
+is matched by its owner name alone, so a bound on such an owner needs the
+implementation's source to be visible.
 
 The runtime regression is [sequence_traits_test.ag](../tests/sequence_traits_test.ag).
 It exercises all four AsSlice implementations, comparison traits, custom
