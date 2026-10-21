@@ -61,6 +61,30 @@ impl Result<T, E> {
         return match self { Ok(move v) : v, Err(e) : fallback };
     }
 
+    /// Consume this result, transforming only its success payload.
+    Result<U, E> map<U>(self, U(T) transform) {
+        return match self {
+            Ok(move value) : Ok(transform(move value)),
+            Err(move error) : Err(move error)
+        };
+    }
+
+    /// Consume this result, transforming only its error payload.
+    Result<T, F> map_err<F>(self, F(E) transform) {
+        return match self {
+            Ok(move value) : Ok(move value),
+            Err(move error) : Err(transform(move error))
+        };
+    }
+
+    /// Consume this result and run the next fallible operation on success.
+    Result<U, E> and_then<U>(self, Result<U, E>(T) next) {
+        return match self {
+            Ok(move value) : next(move value),
+            Err(move error) : Err(move error)
+        };
+    }
+
     /// Extract the error value, transferring ownership out of the result.
     /// Aborts if the result is ok.
     E unwrap_err(self) {

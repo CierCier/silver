@@ -1859,6 +1859,24 @@ bool llvm_emit_display_format_arg(LlvmContext* ctx, u32 arg_id, u32 arg_type,
     return true;
 }
 
+bool llvm_emit_format_char(LlvmContext* ctx, LLVMOpaqueValue* value,
+                          LLVMOpaqueValue* string_slot, LLVMOpaqueValue* output_writer) {
+    LLVMOpaqueValue* encoder = LLVMGetNamedFunction(ctx.module, "utf8_encode");
+    if (encoder == (LLVMOpaqueValue*)0) {
+        ctx.note_unresolved("format-runtime", "utf8_encode");
+        return false;
+    }
+    LLVMOpaqueValue* buffer = LLVMBuildAlloca(ctx.builder,
+        LLVMArrayType(LLVMInt8TypeInContext(ctx.ctx), 4), "format.char.bytes");
+    Vec<LLVMOpaqueValue*> args = Vec<LLVMOpaqueValue*>.with_capacity(2);
+    args.push(value);
+    args.push(buffer);
+    LLVMOpaqueValue* length = LLVMBuildCall2(ctx.builder,
+        LLVMGlobalGetValueType(encoder), encoder, args.get_ptr(0), 2, "format.char.length");
+    args.drop();
+    return llvm_emit_format_write_bytes(ctx, string_slot, output_writer, buffer, length);
+}
+
 bool llvm_emit_unit_enum_format_arg(LlvmContext* ctx, u32 arg_id, u32 arg_type,
                                     LLVMOpaqueValue* string_slot,
                                     LLVMOpaqueValue* output_writer,
@@ -2056,14 +2074,7 @@ bool llvm_emit_format_debug_value(LlvmContext* ctx, u32 value_type,
     if (value_type == TYPE_CHAR) {
         LLVMOpaqueValue* value = LLVMBuildLoad2(ctx.builder,
             LLVMInt32TypeInContext(ctx.ctx), value_ptr, "format.debug.char");
-        LLVMOpaqueType* byte_ty = LLVMInt8TypeInContext(ctx.ctx);
-        LLVMOpaqueValue* byte = LLVMBuildAlloca(ctx.builder, byte_ty, "format.debug.char.byte");
-        LLVMBuildStore(ctx.builder, LLVMBuildIntCast(ctx.builder, value, byte_ty,
-            "format.debug.char.cast"), byte);
-        LLVMOpaqueValue* bytes = LLVMBuildBitCast(ctx.builder, byte,
-            LLVMPointerTypeInContext(ctx.ctx, 0), "format.debug.char.ptr");
-        return llvm_emit_format_write_bytes(ctx, string_slot, output_writer, bytes,
-            LLVMConstInt(LLVMInt64TypeInContext(ctx.ctx), 1, 0));
+        return llvm_emit_format_char(ctx, value, string_slot, output_writer);
     }
     if (entry.kind == TypeKind.Named) {
         str name = ctx.types.names.get(entry.name_id);
@@ -2075,8 +2086,11 @@ bool llvm_emit_format_debug_value(LlvmContext* ctx, u32 value_type,
             LLVMOpaqueValue* data = LLVMBuildLoad2(ctx.builder,
                 LLVMPointerTypeInContext(ctx.ctx, 0), data_ptr,
                 "format.debug.string.data");
-            return llvm_emit_format_write_str(ctx, string_slot,
-                output_writer, data);
+            LLVMOpaqueValue* length_ptr = LLVMBuildStructGEP2(ctx.builder, string_ty,
+                value_ptr, 1, "format.debug.string.len.ptr");
+            LLVMOpaqueValue* length = LLVMBuildLoad2(ctx.builder,
+                LLVMInt64TypeInContext(ctx.ctx), length_ptr, "format.debug.string.len");
+            return llvm_emit_format_write_bytes(ctx, string_slot, output_writer, data, length);
         }
         if (llvm_emit_display_format_arg(ctx, 0, value_type, string_slot,
             output_writer, value_ptr)) {
@@ -2345,14 +2359,7 @@ LLVMOpaqueValue* llvm_emit_format_to(LlvmContext* ctx, AstExpr* expr,
                     return (LLVMOpaqueValue*)0;
                 }
             } else if (arg_type == TYPE_CHAR) {
-                LLVMOpaqueType* byte_ty = LLVMInt8TypeInContext(ctx.ctx);
-                LLVMOpaqueValue* byte = LLVMBuildAlloca(ctx.builder, byte_ty, "format.char");
-                LLVMOpaqueValue* value = LLVMBuildIntCast(ctx.builder, arg_val, byte_ty, "format.char.byte");
-                LLVMBuildStore(ctx.builder, value, byte);
-                LLVMOpaqueValue* char_ptr = LLVMBuildBitCast(ctx.builder, byte,
-                    LLVMPointerTypeInContext(ctx.ctx, 0), "format.char.ptr");
-                LLVMOpaqueValue* len = LLVMConstInt(LLVMInt64TypeInContext(ctx.ctx), 1, 0);
-                if (!llvm_emit_format_write_bytes(ctx, string_slot, output_writer, char_ptr, len)) {
+                if (!llvm_emit_format_char(ctx, arg_val, string_slot, output_writer)) {
                     format.drop();
                     return (LLVMOpaqueValue*)0;
                 }
@@ -2362,7 +2369,11 @@ LLVMOpaqueValue* llvm_emit_format_to(LlvmContext* ctx, AstExpr* expr,
                 LLVMBuildStore(ctx.builder, arg_val, tmp);
                 LLVMOpaqueValue* data_ptr = LLVMBuildStructGEP2(ctx.builder, string_ty2, tmp, 0, "format.str.data");
                 LLVMOpaqueValue* data = LLVMBuildLoad2(ctx.builder, LLVMPointerTypeInContext(ctx.ctx, 0), data_ptr, "format.str.load");
-                if (!llvm_emit_format_write_str(ctx, string_slot, output_writer, data)) {
+                LLVMOpaqueValue* length_ptr = LLVMBuildStructGEP2(ctx.builder, string_ty2,
+                    tmp, 1, "format.str.len.ptr");
+                LLVMOpaqueValue* length = LLVMBuildLoad2(ctx.builder,
+                    LLVMInt64TypeInContext(ctx.ctx), length_ptr, "format.str.len");
+                if (!llvm_emit_format_write_bytes(ctx, string_slot, output_writer, data, length)) {
                     format.drop();
                     return (LLVMOpaqueValue*)0;
                 }
@@ -4104,25 +4115,20 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         }
         if (strlen(method_name) > 0 && lhs_entry.kind == TypeKind.Named
             && ctx.find_struct_by_str(ctx.types.type_name(lhs_type)) != (LlvmStructDef*)0) {
-            str lhs_name = ctx.types.type_name(lhs_type);
-            bool string_equality = (op == (u32)TokenKind.Equal || op == (u32)TokenKind.NotEqual)
-                && strcmp(lhs_name, "String") == 0;
-            if (!string_equality) {
-                AstExpr method_call;
-                method_call.kind = ExprKind.MethodCall;
-                method_call.inner0 = lhs_id;
-                method_call.inner1 = (u32)ctx.pool.args.len();
-                method_call.aux = ctx.names.intern(method_name);
-                method_call.span = expr.span;
-                method_call.inferred_type = expr.inferred_type;
-                method_call.generic_args_start = 0;
-                method_call.generic_args_count = 0;
-                method_call.resolved_callee_id = 0;
-                ctx.pool.args.push((u32)1);
-                ctx.pool.args.push(rhs_id);
-                ctx.pool.exprs.push(move method_call);
-                return llvm_emit_expr(ctx, (u32)(ctx.pool.exprs.len() - 1));
-            }
+            AstExpr method_call;
+            method_call.kind = ExprKind.MethodCall;
+            method_call.inner0 = lhs_id;
+            method_call.inner1 = (u32)ctx.pool.args.len();
+            method_call.aux = ctx.names.intern(method_name);
+            method_call.span = expr.span;
+            method_call.inferred_type = expr.inferred_type;
+            method_call.generic_args_start = 0;
+            method_call.generic_args_count = 0;
+            method_call.resolved_callee_id = 0;
+            ctx.pool.args.push((u32)1);
+            ctx.pool.args.push(rhs_id);
+            ctx.pool.exprs.push(move method_call);
+            return llvm_emit_expr(ctx, (u32)(ctx.pool.exprs.len() - 1));
         }
         // Logical && / || short-circuit like stage0 (which has dedicated
         // LogicalAnd/LogicalOr ops). Eager bitwise emission evaluated guard

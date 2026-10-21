@@ -1,0 +1,114 @@
+/// Linux DMA-BUF allocation, descriptor ownership, and scoped CPU access.
+/// Device drivers import the descriptor and determine device-visible addresses.
+import std.error;
+import std.result;
+import std.slice;
+import std.mem.drop;
+import std.sys.result;
+import std.sys.errno { EINTR, EAGAIN, EINVAL };
+import std.sys.raw.fs;
+import std.sys.raw.memory;
+
+if (@cfg(os.linux)) {
+// Linux UAPI: dma-heap.h and dma-buf.h, generic ioctl encoding on x86_64.
+const i64 DMA_HEAP_IOCTL_ALLOC = 0xc0184800;
+const i64 DMA_BUF_IOCTL_SYNC = 0x40086200;
+const i64 DMA_F_DUPFD_CLOEXEC = 1030;
+const u64 DMA_BUF_SYNC_RW = 3;
+const u64 DMA_BUF_SYNC_END = 4;
+
+struct DmaHeapAllocation {
+    u64 len;
+    u32 fd;
+    u32 fd_flags;
+    u64 heap_flags;
+}
+
+/// Owns a DMA-BUF descriptor. Dropping it closes only this descriptor.
+/// Borrowed descriptors and CPU views must not outlive their owner or callback.
+struct DmaBuffer {
+    private i32 descriptor;
+    private i64 size;
+}
+
+// EINTR and EAGAIN require retrying the same coherency operation.
+i64 dma_sync(i32 fd, u64 flags) {
+    i64 result = sys_ioctl((i64)fd, DMA_BUF_IOCTL_SYNC, (i64)&flags);
+    while (result == -EINTR || result == -EAGAIN) {
+        result = sys_ioctl((i64)fd, DMA_BUF_IOCTL_SYNC, (i64)&flags);
+    }
+    return result;
+}
+
+impl DmaBuffer {
+    /// Allocate from an explicit /dev/dma_heap/<name> path. No heap fallback.
+    /// Size must be positive; unavailable heaps return the kernel's errno.
+    Result<DmaBuffer, Error> allocate(str heap_path, i64 size) {
+        if (size <= 0) { return Err(EINVAL, "DMA buffer size must be positive"); }
+        i64 heap = sys_open((i64)heap_path, O_RDONLY | O_CLOEXEC, 0);
+        if (heap < 0) { return Err(-heap, "open DMA heap failed"); }
+        DmaHeapAllocation request = {
+            .len = (u64)size, .fd = 0,
+            .fd_flags = (u32)(O_RDWR | O_CLOEXEC), .heap_flags = (u64)0
+        };
+        i64 allocated = sys_ioctl(heap, DMA_HEAP_IOCTL_ALLOC, (i64)&request);
+        // Do not retry allocation: successful allocation creates a new resource.
+        sys_close(heap);
+        if (allocated < 0) { return Err(-allocated, "allocate DMA buffer failed"); }
+        DmaBuffer buffer = { .descriptor = (i32)request.fd, .size = size };
+        return Ok(move buffer);
+    }
+
+    /// Duplicate an existing DMA-BUF fd with close-on-exec, retaining the caller's fd.
+    /// The kernel must support the DMA-BUF size query. CPU access validates sync support.
+    Result<DmaBuffer, Error> from_fd(i32 fd) {
+        i64 owned = sys_fcntl((i64)fd, DMA_F_DUPFD_CLOEXEC, 0);
+        if (owned < 0) { return Err(-owned, "duplicate DMA descriptor failed"); }
+        i64 size = sys_lseek(owned, 0, SEEK_END);
+        if (size <= 0) {
+            sys_close(owned);
+            if (size < 0) { return Err(-size, "query DMA buffer size failed"); }
+            return Err(EINVAL, "DMA buffer size must be positive");
+        }
+        DmaBuffer buffer = { .descriptor = (i32)owned, .size = size };
+        return Ok(move buffer);
+    }
+
+    /// Borrow the descriptor for a device-specific import. Do not close it.
+    i32 fd(&self) { return self.descriptor; }
+
+    i64 len(&self) { return self.size; }
+
+    /// Run a fallible callback on a mapped byte slice, with read/write cache coherency.
+    /// The view is valid only during the callback. Wait for device work before calling;
+    /// submit new device work only after success. This does not wait on device fences.
+    /// Sync/unmap failures take precedence over the callback result. Cleanup still runs
+    /// when the callback returns an error; process termination cannot run cleanup.
+    Result<T, Error> with_cpu_access<T>(&mut self, Result<T, Error>(Slice<u8>) access) {
+        i64 address = sys_mmap(0, self.size, PROT_READ | PROT_WRITE, MAP_SHARED,
+            (i64)self.descriptor, 0);
+        if (is_errno(address)) { return Err(-address, "map DMA buffer failed"); }
+        i64 started = dma_sync(self.descriptor, DMA_BUF_SYNC_RW);
+        if (started < 0) {
+            sys_munmap(address, self.size);
+            return Err(-started, "begin DMA CPU access failed");
+        }
+        Slice<u8> view = { .data = (u8*)address, .len = self.size };
+        Result<T, Error> result = access(view);
+        i64 ended = dma_sync(self.descriptor, DMA_BUF_SYNC_RW | DMA_BUF_SYNC_END);
+        i64 unmapped = sys_munmap(address, self.size);
+        if (ended < 0) { return Err(-ended, "end DMA CPU access failed"); }
+        if (unmapped < 0) { return Err(-unmapped, "unmap DMA buffer failed"); }
+        return move result;
+    }
+}
+
+impl Drop for DmaBuffer {
+    void drop(*self) {
+        if (self.descriptor >= 0) {
+            sys_close((i64)self.descriptor);
+            self.descriptor = -1;
+        }
+    }
+}
+}

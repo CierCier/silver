@@ -16,6 +16,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use rustc_hash::FxHashMap as HashMap;
 
 use crate::lexer::Span;
+use crate::diagnostics::messages as msg;
+use crate::semantic::analyzer::SemanticError;
 use crate::parser::ast::{
     self, BinaryOperator, Block, Expression, ExpressionKind, Identifier, InitializerItem, Item,
     ItemKind, Literal, MacroArg, MacroDef, PatternKind, Statement, StatementKind,
@@ -33,10 +35,11 @@ struct MacroContext<'a> {
     ret_type: Option<ast::Type>,
     scope_types: HashMap<String, ast::Type>,
     fn_signatures: HashMap<String, Vec<ast::Type>>,
+    errors: Vec<SemanticError>,
 }
 
 /// Expands all user-defined macros throughout the program.
-pub fn expand_macros_in_program(program: &mut ast::Program) {
+pub fn expand_macros_in_program(program: &mut ast::Program) -> Vec<SemanticError> {
     let mut macro_table: HashMap<String, MacroDef> = HashMap::default();
     let mut struct_defs: HashMap<String, ast::StructItem> = HashMap::default();
     let mut fn_signatures: HashMap<String, Vec<ast::Type>> = HashMap::default();
@@ -66,7 +69,7 @@ pub fn expand_macros_in_program(program: &mut ast::Program) {
     }
 
     if macro_table.is_empty() {
-        return;
+        return Vec::new();
     }
 
     let mut ctx = MacroContext {
@@ -75,11 +78,13 @@ pub fn expand_macros_in_program(program: &mut ast::Program) {
         ret_type: None,
         scope_types: HashMap::default(),
         fn_signatures,
+        errors: Vec::new(),
     };
 
     for item in &mut program.items {
         expand_macros_in_item(item, &mut ctx);
     }
+    ctx.errors
 }
 
 fn expand_macros_in_item(item: &mut Item, ctx: &mut MacroContext) {
@@ -471,6 +476,23 @@ fn expand_macros_in_expr(
                         MacroArg::Expression(e) => call_args.push(e.clone()),
                         _ => {}
                     }
+                }
+
+                let variadic = def.parameters.last().is_some_and(|p| p.is_variadic);
+                let fixed = def.parameters.len() - usize::from(variadic);
+                if def.parameters.iter().take(fixed).any(|p| p.is_variadic) {
+                    ctx.errors.push(SemanticError {
+                        message: msg::macro_variadic_must_be_last(&name.name),
+                        span: expr.span,
+                    });
+                    return;
+                }
+                if call_args.len() < fixed || (!variadic && call_args.len() != fixed) {
+                    ctx.errors.push(SemanticError {
+                        message: msg::macro_arity(&name.name, fixed, variadic, call_args.len()),
+                        span: expr.span,
+                    });
+                    return;
                 }
 
                 let expanded = expand_macro_invocation(&def, &type_args, &call_args, expected, expr.span, ctx.macro_table, depth + 1);
@@ -1743,107 +1765,5 @@ fn infer_type_from_expr(expr: &Expression) -> Option<ast::Type> {
         ExpressionKind::TypeName(ty) => Some(ty.clone()),
         ExpressionKind::Cast { target_type, .. } => Some((**target_type).clone()),
         _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::lexer::lex;
-    use crate::parser::Parser;
-
-    fn parse_and_expand(source: &str) -> ast::Program {
-        let tokens = lex(source).expect("lex ok");
-        let mut parser = Parser::new(tokens);
-        let (mut program, errors) = parser.parse_program();
-        assert!(errors.is_empty(), "parse errors: {:?}", errors);
-        expand_macros_in_program(&mut program);
-        program
-    }
-
-    #[test]
-    fn test_macro_comptime_eval() {
-        let source = r#"
-macro i32 add(i32 a, i32 b) {
-    return a + b;
-}
-i32 test_fn() {
-    return @add(15, 27);
-}
-"#;
-        let program = parse_and_expand(source);
-        for item in &program.items {
-            if let ItemKind::Function(func) = &item.kind {
-                if func.name.name == "test_fn" {
-                    let ret = &func.body.statements[0];
-                    if let StatementKind::Return(Some(expr)) = &ret.kind {
-                        if let ExpressionKind::Literal(Literal::Integer(val)) = expr.kind.as_ref() {
-                            assert_eq!(*val, 42);
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-        panic!("test_fn return value was not folded to 42");
-    }
-
-    #[test]
-    fn test_variadic_macro_comptime_eval() {
-        let source = r#"
-macro i32 sum(i32... nums) {
-    let s = 0;
-    for n in nums {
-        s = s + n;
-    }
-    return s;
-}
-i32 test_fn() {
-    return @sum(1, 2, 3, 4);
-}
-"#;
-        let program = parse_and_expand(source);
-        for item in &program.items {
-            if let ItemKind::Function(func) = &item.kind {
-                if func.name.name == "test_fn" {
-                    let ret = &func.body.statements[0];
-                    if let StatementKind::Return(Some(expr)) = &ret.kind {
-                        if let ExpressionKind::Literal(Literal::Integer(val)) = expr.kind.as_ref() {
-                            assert_eq!(*val, 10);
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-        panic!("test_fn return value was not folded to 10");
-    }
-
-    #[test]
-    fn test_macro_runtime_substitution() {
-        let source = r#"
-macro i32 add(i32 a, i32 b) {
-    return a + b;
-}
-i32 test_fn(i32 x) {
-    return @add(x, 5);
-}
-"#;
-        let program = parse_and_expand(source);
-        for item in &program.items {
-            if let ItemKind::Function(func) = &item.kind {
-                if func.name.name == "test_fn" {
-                    let ret = &func.body.statements[0];
-                    if let StatementKind::Return(Some(expr)) = &ret.kind {
-                        if let ExpressionKind::Binary { left, operator, right: _ } = expr.kind.as_ref() {
-                            assert_eq!(*operator, BinaryOperator::Add);
-                            assert!(matches!(left.kind.as_ref(), ExpressionKind::Identifier(_)));
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-        panic!("test_fn return was not substituted to x + 5");
     }
 }

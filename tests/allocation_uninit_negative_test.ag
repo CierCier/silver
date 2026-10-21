@@ -1,0 +1,9 @@
+// compile_flags: --no-cache
+// expected_exit: 134
+import std.mem.alloc;
+
+i32 main() {
+    i64* values = alloc_uninit_n<i64>(-1);
+    free(values);
+    return 0;
+}

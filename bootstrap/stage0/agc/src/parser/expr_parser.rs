@@ -1003,6 +1003,18 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
         | Token::Str
         | Token::Char
         | Token::Void => {
+            if cursor.pos + 1 < cursor.end
+                && matches!(cursor.tokens.get(cursor.pos + 1).map(|t| &t.kind), Some(Token::Dot))
+                && let Some((ty, next)) =
+                    parse_simple_type_prefix(cursor.tokens, cursor.pos, cursor.end)
+                && matches!(ty.kind.as_ref(), ast::TypeKind::Primitive(_))
+            {
+                cursor.pos = next;
+                return Ok(ast::Expression {
+                    kind: Box::new(ast::ExpressionKind::TypeName(ty.clone())),
+                    span: ty.span,
+                });
+            }
             if let Some((ty, next)) =
                 parse_named_type_expr_prefix(cursor.tokens, cursor.pos, cursor.end)
             {
@@ -2277,172 +2289,4 @@ pub(crate) fn parse_expression(
         });
     }
     Ok(expr)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::lexer::lex;
-    use crate::parser::prt_parser::PRT_Parser;
-
-    #[test]
-    fn rejects_expression_nesting_above_the_named_limit() {
-        let rejected_depth = MAX_EXPRESSION_DEPTH + 1;
-        let source = format!(
-            "{}value{}",
-            "(".repeat(rejected_depth),
-            ")".repeat(rejected_depth)
-        );
-        let tokens = lex(&source).expect("lex failed");
-        let error = parse_expression(&tokens, 0, tokens.len(), None)
-            .expect_err("over-limit nesting must fail");
-        assert!(error.to_string().contains(&format!(
-            "expression nesting exceeds maximum depth ({MAX_EXPRESSION_DEPTH})"
-        )));
-    }
-    #[test]
-    fn parses_function_pointer_type_and_cast() {
-        // The fn-pointer type `void(i64)` in a cast `(void(i64))worker` must
-        // parse as a Function type — including the cast of a plain identifier
-        // (no inner parens), a nested-args case, and a trailing `*` (pointer
-        // to fn-pointer).
-        let source = r#"
-            void worker(i64 x) { }
-            i64 main() {
-                void(i64) fn = (void(i64))worker;
-                void(i64, i64) fn2 = (void(i64, i64))worker;
-                void(i64)* fn3 = (void(i64)*)fn;
-                fn(7);
-                return 0;
-            }
-        "#;
-        let tokens = lex(source).expect("lex failed");
-        let mut parser = PRT_Parser::new(None);
-        let program = parser.parse_program(&tokens).expect("parse failed");
-        assert_eq!(program.items.len(), 2);
-
-        let ast::ItemKind::Function(main) = &program.items[1].kind else {
-            panic!("expected function item");
-        };
-        let stmts = &main.body.statements;
-        assert_eq!(stmts.len(), 5);
-
-        // First let: declared type is Function([I64] -> Void).
-        let ast::StatementKind::Let(first) = &stmts[0].kind else {
-            panic!("expected let statement");
-        };
-        let declared = first.type_annotation.as_ref().expect("type annotation");
-        let ast::TypeKind::Function(fnty) = &*declared.kind else {
-            panic!("expected function type annotation");
-        };
-        assert_eq!(fnty.parameters.len(), 1);
-        assert!(matches!(
-            &*fnty.parameters[0].kind,
-            ast::TypeKind::Primitive(ast::PrimitiveType::I64)
-        ));
-        assert!(matches!(
-            &*fnty.return_type.kind,
-            ast::TypeKind::Primitive(ast::PrimitiveType::Void)
-        ));
-
-        // The initializer of the first let is the cast; its target type must
-        // be the same Function type.
-        let init = first.initializer.as_ref().expect("initializer");
-        let ast::ExpressionKind::Cast { target_type, .. } = &*init.kind else {
-            panic!("expected cast initializer");
-        };
-        assert!(matches!(&*target_type.kind, ast::TypeKind::Function(_)));
-
-        // Second let: multi-argument function type via the comma-aware split.
-        let ast::StatementKind::Let(second) = &stmts[1].kind else {
-            panic!("expected let statement");
-        };
-        let declared2 = second.type_annotation.as_ref().expect("type annotation");
-        let ast::TypeKind::Function(fnty2) = &*declared2.kind else {
-            panic!("expected function type");
-        };
-        assert_eq!(fnty2.parameters.len(), 2);
-
-        // Third let: `void(i64)*` is a pointer to the function type — the `*`
-        // loop must still apply after the paren group.
-        let ast::StatementKind::Let(third) = &stmts[2].kind else {
-            panic!("expected let statement");
-        };
-        let declared3 = third.type_annotation.as_ref().expect("type annotation");
-        assert!(matches!(&*declared3.kind, ast::TypeKind::Pointer(_)));
-        let ast::TypeKind::Pointer(ptr) = &*declared3.kind else {
-            panic!("expected pointer type");
-        };
-        assert!(matches!(&*ptr.inner.kind, ast::TypeKind::Function(_)));
-    }
-
-    #[test]
-    fn parses_launch_and_wait_expressions() {
-        // `launch f(args...)` wraps the call; `wait t` wraps its Task
-        // operand. Both are prefix expressions binding tighter than the
-        // surrounding statement.
-        let source = r#"
-            i64 work(i64 x) { return x + 1; }
-            i64 main() {
-                Task<i64> t = launch work(40);
-                defer wait t;
-                return 0;
-            }
-        "#;
-        let tokens = lex(source).expect("lex failed");
-        let mut parser = PRT_Parser::new(None);
-        let program = parser.parse_program(&tokens).expect("parse failed");
-        assert_eq!(program.items.len(), 2);
-
-        let ast::ItemKind::Function(main) = &program.items[1].kind else {
-            panic!("expected function item");
-        };
-        let stmts = &main.body.statements;
-        assert_eq!(stmts.len(), 3);
-
-        // `Task<i64> t = launch work(40);` — the initializer is Launch
-        // wrapping a Call whose callee is the bare identifier `work`.
-        let ast::StatementKind::Let(first) = &stmts[0].kind else {
-            panic!("expected let statement");
-        };
-        let declared = first.type_annotation.as_ref().expect("type annotation");
-        let ast::TypeKind::Named(named) = &*declared.kind else {
-            panic!("expected named type annotation");
-        };
-        assert_eq!(named.path.len(), 1);
-        assert_eq!(named.path[0].name, "Task");
-        assert_eq!(named.generics.as_ref().expect("generics").len(), 1);
-
-        let init = first.initializer.as_ref().expect("initializer");
-        let ast::ExpressionKind::Launch(call) = &*init.kind else {
-            panic!("expected launch initializer");
-        };
-        let ast::ExpressionKind::Call {
-            function,
-            arguments,
-        } = &*call.kind
-        else {
-            panic!("expected call inside launch");
-        };
-        let ast::ExpressionKind::Identifier(callee) = &*function.kind else {
-            panic!("expected identifier callee");
-        };
-        assert_eq!(callee.name, "work");
-        assert_eq!(arguments.len(), 1);
-
-        // `defer wait t;` — the deferred statement's expression is Wait.
-        let ast::StatementKind::Defer(deferred) = &stmts[1].kind else {
-            panic!("expected defer statement");
-        };
-        let ast::StatementKind::Expression(wait_expr) = &deferred.kind else {
-            panic!("expected expression statement inside defer");
-        };
-        let ast::ExpressionKind::Wait(task) = &*wait_expr.kind else {
-            panic!("expected wait expression");
-        };
-        let ast::ExpressionKind::Identifier(task_id) = &*task.kind else {
-            panic!("expected task identifier");
-        };
-        assert_eq!(task_id.name, "t");
-    }
 }

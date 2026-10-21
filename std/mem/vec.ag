@@ -1,5 +1,5 @@
 // Growable contiguous array. Move transfers owned elements; Copy is bitwise.
-// Drop frees the buffer only, so drain owned elements before discarding Vec.
+// Drop destroys owned elements and frees the buffer.
 import std.display;
 import std.slice;
 import std.mem.alloc;
@@ -310,14 +310,16 @@ impl<T> IntoIterator for Vec<T>* {
     }
 }
 
-impl<T> Vec<T> {
+impl<T> AsSlice<T> for Vec<T> {
     Slice<T> as_slice(&self) {
         Slice<T> s;
         s.data = self.data;
         s.len = self.len;
         return s;
     }
+}
 
+impl<T> Vec<T> {
     Slice<T> as_mut_slice(&mut self) {
         Slice<T> s;
         s.data = self.data;
@@ -348,6 +350,41 @@ impl<T> Vec<T> {
         r.idx = 0;
         return r;
     }
+}
+
+impl<T> Eq<Vec<T>> for Vec<T> {
+    bool __eq(&self, &Vec<T> other) {
+        Slice<T> view = self.as_slice();
+        return view.equals_slice(other.as_slice());
+    }
+}
+
+impl<T> Ne<Vec<T>> for Vec<T> {
+    bool __ne(&self, &Vec<T> other) { return !self.__eq(other); }
+}
+
+impl<T: Compare> Compare for Vec<T> {
+    i32 compare(&self, &Vec<T> other) {
+        Slice<T> left = self.as_slice();
+        Slice<T> right = other.as_slice();
+        return left.compare(&right);
+    }
+}
+
+impl<T: Compare> Lt<Vec<T>> for Vec<T> {
+    bool __lt(&self, &Vec<T> other) { return self.compare(other) < 0; }
+}
+
+impl<T: Compare> Gt<Vec<T>> for Vec<T> {
+    bool __gt(&self, &Vec<T> other) { return self.compare(other) > 0; }
+}
+
+impl<T: Compare> Le<Vec<T>> for Vec<T> {
+    bool __le(&self, &Vec<T> other) { return self.compare(other) <= 0; }
+}
+
+impl<T: Compare> Ge<Vec<T>> for Vec<T> {
+    bool __ge(&self, &Vec<T> other) { return self.compare(other) >= 0; }
 }
 
 

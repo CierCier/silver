@@ -2585,35 +2585,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         depth: u32,
     ) -> CodegenResult<()> {
         if self.is_string_type_expr(val_expr) {
-            let string_expr = match val_expr.kind.as_ref() {
-                ast::ExpressionKind::Reference { expression, .. } => expression.as_ref(),
-                _ => val_expr,
-            };
-            let data_expr = ast::Expression {
-                kind: Box::new(ast::ExpressionKind::FieldAccess {
-                    object: Box::new(string_expr.clone()),
-                    field: ast::Identifier {
-                        name: "data".to_string(),
-                        span: val_expr.span,
-                    },
-                }),
-                span: val_expr.span,
-            };
-            let cast_expr = ast::Expression {
-                kind: Box::new(ast::ExpressionKind::Cast {
-                    expression: Box::new(data_expr),
-                    target_type: Box::new(ast::Type {
-                        kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::Str)),
-                        span: val_expr.span,
-                    }),
-                }),
-                span: val_expr.span,
-            };
-            let method = ast::Identifier {
-                name: "write_str".to_string(),
-                span: *span,
-            };
-            self.emit_method_call_expression(writer_expr, &method, &[cast_expr], true, span)?;
+            self.emit_display_fmt_call(writer_expr, val_expr, span)?;
             return Ok(());
         }
         if let Some(ty) = self.resolve_receiver_type(val_expr)

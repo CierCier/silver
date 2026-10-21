@@ -26,19 +26,19 @@ These links are representative evidence. Parser acceptance does not by itself
 prove type checking, code generation, or runtime behavior. Stage0 lives under
 `bootstrap/stage0`; stage1's Silver implementation lives under `libs/agc`.
 
-| Area | Implementation | Representative fixture |
+| Area | Implementation | Stdlib examples |
 |---|---|---|
-| Tokens and literals | [stage0 lexer](bootstrap/stage0/agc/src/lexer.rs), [stage1 lexer](libs/agc/src/frontend/lexer.ag) | [literal and reflection tests](tests/literals_and_reflection_test.ag) |
-| Types, expressions, and patterns | [stage0 parser](bootstrap/stage0/agc/src/parser/prt_parser.rs), [stage1 type checker](libs/agc/src/frontend/typecheck_expr.ag) | [tuple destructuring](tests/destructure_let_test.ag), [slice syntax](tests/slice_syntax_test.ag) |
-| Declarations and imports | [stage0 parser](bootstrap/stage0/agc/src/parser/prt_parser.rs), [stage0 import loader](bootstrap/stage0/agc/src/parser/import_hook.rs) | [selective imports](tests/selective_import_test.ag), [source import aliases](tests/source_import_alias_test.ag) |
-| Functions, callbacks, and generics | [stage1 monomorphization](libs/agc/src/frontend/monomorph.ag), [type checking](libs/agc/src/frontend/typecheck_expr.ag) | [function pointers](tests/native_function_pointer_test.ag), [generic calls](tests/nested_generic_call_test.ag), [generic tuple returns](tests/generic_tuple_return_test.ag) |
-| Traits, operators, and casts | [operator traits](std/ops.ag), [stage1 expression lowering](libs/agc/src/frontend/lower_expr.ag) | [comparison traits](tests/compare_trait_test.ag), [temporary operators](tests/temp_operator_test.ag), [casts](tests/cast_ergonomics_test.ag) |
-| Control flow, matching, and defers | [stage1 statement codegen](libs/agc/src/backend/llvm/stmt.ag) | [loop exits](tests/native_for_in_continue_test.ag), [match values](tests/match_value_test.ag), [defers](tests/defer_test.ag) |
-| Macros, attributes, cfg, and static values | [stage1 cfg](libs/agc/src/frontend/cfg.ag), [stage0 parser](bootstrap/stage0/agc/src/parser/prt_parser.rs) | [macro expressions](tests/macro_expression_test.ag), [cfg blocks](tests/cfg_global_block_test.ag), [static/volatile](tests/static_volatile_test.ag), [packed layouts](tests/packed_layout_test.ag) |
-| Ownership and borrowing | [stage0 borrow checker](bootstrap/stage0/agc/src/semantic/borrow_check.rs), [stage1 ownership pass](libs/agc/src/frontend/ownership.ag) | [borrow origins](tests/borrow_origin_test.ag), [cascading drops](tests/cascade_drop_test.ag) |
-| Threads and channels | [stage1 Send check](libs/agc/src/frontend/send.ag), [channel implementation](std/channel.ag) | [launch and Send](tests/launch_send_test.ag), [channel behavior](tests/channel_test.ag), [bounded channels](tests/channel_bounded_test.ag) |
-| Result and optional values | [Optional](std/optional.ag), [Result](std/result.ag), [syscall helpers](std/sys/result.ag) | [structured errors](tests/structured_error_test.ag), [Result payload cleanup](tests/unwrap_or_err_drop_test.ag) |
-| Allocation, formatting, FFI, and assembly | [allocator](std/mem/alloc.ag), [display](std/display.ag), [stage1 codegen](libs/agc/src/backend/llvm/generator.ag) | [allocation](tests/alloc_validity_test.ag), [display](tests/display_test.ag), [C enum ABI](tests/selfhost/enum_ffi_probe.py), [syscalls](tests/syscall_test.ag) |
+| Tokens and literals | [stage0 lexer](bootstrap/stage0/agc/src/lexer.rs), [stage1 lexer](libs/agc/src/frontend/lexer.ag) | [byte formatting](tests/format_bytes_test.ag) |
+| Types, expressions, and patterns | [stage0 parser](bootstrap/stage0/agc/src/parser/prt_parser.rs), [stage1 type checker](libs/agc/src/frontend/typecheck_expr.ag) | [slices](tests/slice_syntax_test.ag) |
+| Declarations and imports | [stage0 import loader](bootstrap/stage0/agc/src/parser/import_hook.rs) | [stdlib re-exports](tests/std_shim_test.ag) |
+| Functions, callbacks, and generics | [stage1 monomorphization](libs/agc/src/frontend/monomorph.ag) | [Result callbacks](tests/result_combinators_test.ag), [checked conversions](tests/checked_conversion_test.ag) |
+| Traits, operators, and casts | [operator traits](std/ops.ag), [stage1 lowering](libs/agc/src/frontend/lower_expr.ag) | [comparison](tests/compare_trait_test.ag), [sequences](tests/sequence_traits_test.ag) |
+| Control flow, matching, and defers | [stage1 statement codegen](libs/agc/src/backend/llvm/stmt.ag) | [iterators](tests/iterator_ergonomics_test.ag), [guards](tests/guard_test.ag) |
+| Macros, attributes, cfg, and static values | [stage1 cfg](libs/agc/src/frontend/cfg.ag), [stage0 parser](bootstrap/stage0/agc/src/parser/prt_parser.rs) | [JSON serialization](tests/json_test.ag), [formatting](tests/fmt_test.ag) |
+| Ownership and borrowing | [stage0 borrow checker](bootstrap/stage0/agc/src/semantic/borrow_check.rs), [stage1 ownership](libs/agc/src/frontend/ownership.ag) | [container cleanup](tests/collection_drop_glue_test.ag), [Box](tests/box_test.ag) |
+| Threads and channels | [stage1 Send check](libs/agc/src/frontend/send.ag), [channels](std/channel.ag) | [channels](tests/channel_test.ag), [bounded channels](tests/channel_bounded_test.ag) |
+| Result and optional values | [Optional](std/optional.ag), [Result](std/result.ag), [syscall errors](std/sys/result.ag) | [structured errors](tests/structured_error_test.ag), [Result cleanup](tests/unwrap_or_err_drop_test.ag) |
+| Allocation, formatting, FFI, and assembly | [allocator](std/mem/alloc.ag), [display](std/display.ag), [stage1 codegen](libs/agc/src/backend/llvm/generator.ag) | [allocation](tests/allocation_bounds_test.ag), [display](tests/display_test.ag), [Rust FFI](tests/rust_ffi_test.ag), [syscalls](tests/syscall_wrapper_test.ag) |
 
 ---
 
@@ -144,6 +144,12 @@ generics, and algebraic data types.
 | Complex Numbers | `c32`, `c64`, `c80` | Lexer tokens exist; type-level support incomplete |
 | String & Character | `str`, `char` | NUL-terminated byte pointer, 32-bit codepoint |
 | Boolean & Void | `bool`, `void` | `true`/`false`, unit return |
+
+`char` is a 32-bit Unicode scalar and `char*` points at `char` values. Byte
+buffers use `u8`/`i8`, and a `u8*`/`i8*` never converts to a `char*` (or the
+reverse) without an explicit cast: the element widths differ, so an implicit
+conversion would let a `char` store write four bytes into a one-byte buffer.
+C byte strings therefore use `u8*` or `str`, not `char*`.
 
 ### References & Borrowing
 
@@ -297,7 +303,7 @@ private void log_message(str msg) {
 }
 
 // External variadic function
-extern "C" i32 printf(const char* fmt, ...);
+extern "C" i32 printf(const u8* fmt, ...);
 ```
 
 ### Struct Definitions
@@ -398,7 +404,7 @@ impl Display for Vector2 {
 extern "C" f32 sinf(f32 x);
 
 extern "C" {
-    i32 open(const char* path, i32 flags);
+    i32 open(const u8* path, i32 flags);
     i32 close(i32 fd);
     i32 errno;    // mutable extern variables not supported (no `mut` keyword)
 }
@@ -406,6 +412,11 @@ extern "C" {
 
 Supported linkage specs: `"C"`, `"Silver"`, `"system"`, `"Rust"`, `"cdecl"`,
 `"stdcall"`, `"fastcall"`.
+
+C string parameters use `const u8*` (or `str`): Silver's `char` is a 32-bit
+codepoint, so `char*` addresses `char` values and cannot alias a byte buffer.
+The C ABI is unchanged — both spellings are pointers — but a Silver call
+passes a `str` only to a `const u8*` parameter.
 
 ### Attributes & Metadata
 
@@ -474,8 +485,12 @@ their body once per argument in a final variadic binding; an empty binding
 produces no iterations. This is not general iteration or variadic splicing.
 Expression macros support a direct `return` expression or an `if`/`else` whose
 branches each return an expression; statement macros must not contain `return`.
-Nested calls are supported. Hygienic local names and broader control-flow
-expression macros are not implemented yet. Built-in compiler macros include `@print`, `@println`,
+Nested calls are supported. Stage0 renames local bindings; stage1 does not
+provide full hygienic renaming. Macro arguments substitute at each use, so
+repeated parameters repeat evaluation and unused arguments do not run.
+Both compilers reject incorrect value-argument counts. See the
+[macro contract](docs/macros.md) for evaluation rules and stage limits.
+Built-in compiler macros include `@print`, `@println`,
 `@eprint`, `@eprintln`, `@fprint`, `@sprint`, `@format`, `@size`, `@align`,
 `@hash`, `@json`, `@from_json`, `@memcpy`, `@memset`, and `@memmove`.
 
@@ -1045,6 +1060,11 @@ on the wrong variant. `Result.get_error()` is a consuming alias for
 The `value ? fallback` operator also selects a fallback when an `Optional` or
 `Result` has no success value; it does not propagate errors to the caller.
 
+`map` and `and_then` consume `Optional` or `Result` and call a function only
+on the success/present variant. `Result.map_err` transforms only the error.
+Payloads move into callbacks; unselected variants pass through unchanged.
+See [stdlib contracts](docs/stdlib-contracts.md) for signatures and examples.
+
 Unrecoverable errors call `abort()` from `std.mem.memory`.
 
 ### Output
@@ -1053,6 +1073,21 @@ Unrecoverable errors call `abort()` from `std.mem.memory`.
 |---|---|
 | `@print`, `@println`, `@eprintln` | Compiler builtin macro with `{}` formatting. Preferred. |
 | `println(str)`, `eprintln(str)` | Plain functions in `std.io`, single NUL-terminated string. |
+
+Formatting `String` preserves its full byte length, including embedded NULs.
+Formatting `str` stops at NUL. Character formatting writes UTF-8, replacing
+invalid Unicode scalars with U+FFFD. `BufWriter.write_u8` writes a raw byte.
+
+### Checked conversions and hardware DMA
+
+`std.convert.TryFrom<i128>` provides explicit checked integer narrowing and
+Unicode scalar conversion through `Result`. It does not change the language's
+permissive implicit numeric conversions or ordinary casts.
+
+On Linux, `std.dma.DmaBuffer` owns a DMA-BUF descriptor, supports explicit
+DMA-heap allocation and fd import, and brackets scoped CPU access with kernel
+coherency ioctls. Device submission and fence waits remain driver-specific.
+See [stdlib contracts](docs/stdlib-contracts.md) for ownership and error behavior.
 
 ### Building strings
 
@@ -1076,6 +1111,15 @@ The append preserves the bytes emitted by the formatter, including embedded NUL
 bytes. Use `len()` and `as_slice()` for byte content; `to_str()` exposes a
 NUL-terminated view. Formatting may allocate when its output exceeds the scratch
 buffer or the destination's remaining capacity.
+
+### Borrowing and comparing sequences
+
+`AsSlice<T>` in `std.slice` provides `Slice<T> as_slice(&self)` for generic
+borrowers. Vec, Slice, String, and Bytes implement it. Slice, Vec, and Bytes
+support content equality and lexicographic comparison through the operator
+traits. Ordering requires an element `Compare` implementation. See
+[the sequence API](docs/stdlib-sequences.md) for ownership, examples, and hashing
+limits.
 
 ### Memory Allocation
 

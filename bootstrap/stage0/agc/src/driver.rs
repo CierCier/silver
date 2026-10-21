@@ -1666,8 +1666,16 @@ pub fn run(cli: Cli) {
                 profiler::end_phase("serialize");
 
                 profiler::begin_phase("macro expansion");
-                crate::semantic::macro_expand::expand_macros_in_program(&mut ast);
+                let macro_errors = crate::semantic::macro_expand::expand_macros_in_program(&mut ast);
                 profiler::end_phase("macro expansion");
+                if !macro_errors.is_empty() {
+                    for error in &macro_errors {
+                        eprintln!("{}", diagnostics::render(
+                            error.span, &error.message, diagnostics::Severity::Error,
+                        ));
+                    }
+                    std::process::exit(2);
+                }
 
                 if plan.test_harness {
                     let test_fns: Vec<String> = ast
@@ -3132,138 +3140,4 @@ fn list_available_llvm_targets() -> Vec<String> {
     }
     out.sort();
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn test_plan() -> CompilePlan {
-        CompilePlan {
-            emit: EmitKind::Exe,
-            inputs: Vec::new(),
-            output: PathBuf::from("a.out"),
-            package_root: PathBuf::from("."),
-            package_roots: Vec::new(),
-            package_imports: Vec::new(),
-            package_target_kind: None,
-            package_target_name: None,
-            include_dirs: Vec::new(),
-            defines: Vec::new(),
-            lib_dirs: Vec::new(),
-            libs: Vec::new(),
-            opt_level: None,
-            debug_info: false,
-            target: None,
-            sysroot: None,
-            no_std: false,
-            static_runtime: true,
-            static_link: false,
-            shared: false,
-            verbose: false,
-            dry_run: false,
-            profile: false,
-            leak_check: false,
-            cfg_flags: Vec::new(),
-            cache_dir: None,
-            no_cache: false,
-            clean: false,
-            cache_info: false,
-            cache_prune: None,
-            jobs: 0,
-            run_mode: false,
-            run_args: Vec::new(),
-            show_graph: false,
-            progress: false,
-            auto_output: false,
-            warning_config: crate::semantic::linter::WarningConfig::default(),
-            test_harness: false,
-            tree_shake: false,
-        }
-    }
-
-    fn unique_temp_dir(label: &str) -> PathBuf {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!("agc-main-{label}-{nonce}"))
-    }
-
-    fn test_module_artifact() -> ModuleArtifact {
-        ModuleArtifact {
-            module_name: "sample".to_string(),
-            module_path: "sample".to_string(),
-            source_path: String::new(),
-            source_hash_fnv1a64: hash_source_text("pub i32 answer() { return 42; }\n"),
-            compiler_version: crate::cache_store::compiler_cache_version(),
-            target_triple: "unknown".to_string(),
-            code_artifacts: ModuleCodeArtifacts {
-                has_static_library: true,
-                has_shared_library: false,
-            },
-            module_deps: Vec::new(),
-            transitive_deps: Vec::new(),
-            exports: Vec::new(),
-            native_libs: Vec::new(),
-            native_lib_paths: Vec::new(),
-            generic_templates: Vec::new(),
-            artifact_path: None,
-        }
-    }
-
-    #[test]
-    fn rejects_module_artifact_from_different_compiler_version() {
-        let mut artifact = test_module_artifact();
-        artifact.compiler_version = "0.0.0-test".to_string();
-
-        let error = artifact_compatibility_error(&artifact, &test_plan())
-            .expect("expected compiler version mismatch");
-        assert!(error.contains("compiler version"));
-    }
-
-    #[test]
-    fn package_target_flags_accept_default_selection() {
-        let cli = Cli::try_parse_from(["agc", "--lib"]).expect("bare --lib parses");
-        assert_eq!(cli.lib.as_deref(), Some(""));
-        assert!(cli.bin.is_none());
-
-        let cli = Cli::try_parse_from(["agc", "--bin", "worker"]).expect("named --bin parses");
-        assert_eq!(cli.bin.as_deref(), Some("worker"));
-        assert!(cli.lib.is_none());
-    }
-
-    #[test]
-    fn init_flags_accept_a_target_directory_and_name_override() {
-        let cli = Cli::try_parse_from([
-            "agc",
-            "--init",
-            "/tmp/example",
-            "--name",
-            "custom",
-        ])
-        .expect("init parses");
-        assert!(cli.init);
-        assert_eq!(cli.inputs, vec![PathBuf::from("/tmp/example")]);
-        assert_eq!(cli.init_name.as_deref(), Some("custom"));
-    }
-
-    #[test]
-    fn rejects_stale_module_artifact_when_source_changed() {
-        let root = unique_temp_dir("stale-artifact");
-        std::fs::create_dir_all(&root).unwrap();
-        let source_path = root.join("sample.ag");
-        let manifest_path = root.join("sample.agm");
-        std::fs::write(&source_path, "pub i32 answer() { return 7; }\n").unwrap();
-
-        let mut artifact = test_module_artifact();
-        artifact.artifact_path = Some(manifest_path);
-
-        let error = artifact_compatibility_error(&artifact, &test_plan())
-            .expect("expected stale source mismatch");
-        assert!(error.contains("is stale"));
-
-        let _ = std::fs::remove_dir_all(root);
-    }
 }

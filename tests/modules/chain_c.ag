@@ -1,5 +1,0 @@
-// Leaf module for the transitive-visibility fixtures.
-// Only imported directly by chain_b.ag (same directory).
-i32 chain_c_val() {
-    return 7;
-}

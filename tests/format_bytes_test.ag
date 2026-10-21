@@ -1,0 +1,56 @@
+// compile_flags: --no-cache
+import std.test;
+import std.string;
+import std.optional;
+
+String binary() {
+    String value = String.from_str("a");
+    value.push((u8)0);
+    value.push_str("b");
+    return move value;
+}
+
+struct Character { char value; }
+
+i32 main() {
+    String value = binary();
+    assert_false(value.equals("a"), "String.equals compares the complete byte content");
+    String formatted = @format("[{}]", value);
+    assert_eq_i64(5, formatted.len(), "String formatting preserves embedded NUL");
+    assert_true(formatted.data[0] == (u8)'[' && formatted.data[1] == (u8)'a'
+        && formatted.data[2] == (u8)0 && formatted.data[3] == (u8)'b'
+        && formatted.data[4] == (u8)']', "all binary bytes survive");
+    String temporary = @format("{}", binary());
+    assert_eq_i64(3, temporary.len(), "temporary String formats once without truncation");
+    String appended = String.new();
+    appended.push_display(&value);
+    assert_eq_i64(3, appended.len(), "generic Display uses byte length");
+    Optional<String> wrapped = Optional<String>.some(binary());
+    String nested = @format("{}", wrapped);
+    assert_eq_i64(9, nested.len(), "nested Display preserves binary payload");
+
+    String unicode = @format("{}{}{}{}", (char)0x41, (char)0xe9,
+        (char)0x20ac, (char)0x1f642);
+    assert_true(unicode.equals("Aé€🙂"), "characters encode all UTF-8 widths");
+    String codepoints = String.new();
+    assert_true(codepoints.push_codepoint((u32)0x41) && codepoints.push_codepoint((u32)0xe9)
+        && codepoints.push_codepoint((u32)0x20ac) && codepoints.push_codepoint((u32)0x1f642),
+        "String accepts valid Unicode scalars");
+    assert_true(codepoints.equals("Aé€🙂"), "String and formatting share Unicode encoding");
+    assert_false(codepoints.push_codepoint((u32)0xd800), "String rejects surrogates");
+    assert_false(codepoints.push_codepoint((u32)0x110000), "String rejects out-of-range codepoints");
+    assert_true(codepoints.equals("Aé€🙂"), "invalid append leaves String unchanged");
+    String invalid = @format("{}{}{}", (char)0xd800, (char)0x110000, (char)0xffffffff);
+    assert_true(invalid.equals("���"), "invalid scalars use replacement character");
+    String nul = @format("x{}y", (char)0);
+    assert_true(nul.len() == 3 && nul.data[1] == (u8)0 && nul.data[2] == (u8)'y',
+        "NUL character remains a byte");
+    Character character = { .value = (char)0x20ac };
+    String debug = @format("{}", character);
+    assert_true(debug.contains("€"), "debug fields encode Unicode characters");
+    String generic = String.new();
+    char smile = (char)0x1f642;
+    generic.push_display(&smile);
+    assert_true(generic.equals("🙂"), "generic char Display agrees with macros");
+    return done();
+}

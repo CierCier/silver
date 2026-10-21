@@ -306,18 +306,17 @@ grow a debug mode that checks declared clobbers against the Win64 nonvolatile se
    `silver_ffi.lib` instead of `.so/.a` (`120-128`).
 4. OpenSSL discovery: Windows paths / `shutil.which("openssl")` instead of `ldconfig` (`102-118`);
    TLS tests otherwise SKIP (acceptable initially).
-5. ELF post-checks: `ldd` (`346-352`) and `readelf -S .debug_info` (`354-360`) →
-   `llvm-readobj --coff-imports` / `llvm-readobj --sections` (ships with LLVM) or skip.
+5. Inspect COFF imports and sections with `llvm-readobj` when diagnosing a build.
+   Compiler artifact inspections are not part of the stdlib suite.
 6. TUI ANSI: enable VT processing (`os.system("")` trick) or default `--no-tui` on nt (`24-37, 448-468`).
-7. `static_link_test`, `syscall_test`, `syscall_wrapper_test`, `allocator_threads_test`
-   (raw `clone`), `cfg_derived_test` (`os.linux` assertions — add `os.windows` branch): **skip-gate
-   on Windows** until the corresponding runtime pieces land; `backtrace_test` becomes
-   a primary Windows acceptance test.
+7. Skip Linux-only stdlib programs such as `syscall_wrapper_test` and
+   `allocator_threads_test` until the corresponding runtime pieces land.
+   Dedicated compiler and backtrace fixtures are retired.
 8. Leak-check tests: gate until the Win32 allocator + leak rbp-walk is proven.
 
 Scripts/CI: `scripts/create-windows-bundle.ps1` (zip with `*.exe`, triple
 `x86_64-pc-windows-msvc`); CI matrix gains a `windows-latest` leg installing LLVM via winget +
-`LLVM_SYS_221_PREFIX`, running `cargo test -p agc` and the ported harness subset.
+`LLVM_SYS_221_PREFIX`, building the bootstrap workspace and running the stdlib suite.
 
 Path/sysroot conventions (small but real): `module_loader.rs:619-634` (`HOME`/XDG, `/usr/local/share/silver`)
 → `%LOCALAPPDATA%\silver` + exe-relative; `package.rs:1527-1541` hard-errors without `HOME` →
@@ -333,8 +332,8 @@ Path/sysroot conventions (small but real): `module_loader.rs:619-634` (`HOME`/XD
 | P1a | Triple default + `Win64Abi` + codegen COFF object emission | `agc --emit obj` produces a valid COFF (`llvm-readobj` verifies) |
 | P1b | `LldLink` flavor + CRT linking + `.exe`/`.obj` driver plumbing | link a hello-world with `extern "C" { puts }` |
 | P2 | Win64 asm constraints + nonvolatile clobber modeling | asm audit list clean |
-| P3 | `std.sys.win` (allocator, threads, sync, io, entry) | `tests/memory_pentest.ag` passes on Windows; "hello world" + threads + `Vec`/`String`/`Rc` programs run |
-| P4 | COFF reader in `dwarf_bt.rs`; DWARF-in-COFF verified | `backtrace_test.ag` prints resolved frames + args on Windows |
+| P3 | `std.sys.win` (allocator, threads, sync, io, entry) | Stdlib allocator, thread, `Vec`, `String`, `Box`, and `Rc` tests pass on Windows |
+| P4 | COFF reader in `dwarf_bt.rs`; DWARF-in-COFF verified | A manual backtrace probe prints resolved frames and arguments on Windows |
 | P5 | harness port + CI leg | `run_tests.py` green (minus skip-gated set) on a Windows runner |
 
 ### Cross-target harness leg (run from a posix host)
@@ -423,8 +422,9 @@ links `ntdll.lib` by default. Verified end-to-end from Linux (cached
 multi-unit link + execution under Wine); after pulling, run
 `agc --clean` once to drop pre-fix cached objects.
 
-`memory_pentest.ag` remains the definitive regression gate at every phase that touches
-ownership/ABI/codegen (per docs/compiler-guide.md §8).
+The current suite covers stdlib behavior only. Compiler builds and stdlib
+container cleanup tests exercise ownership and code generation; see
+[testing expectations](compiler-guide.md#8-testing-expectations).
 
 ## 8. Risks
 

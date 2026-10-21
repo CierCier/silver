@@ -326,6 +326,15 @@ pub fn macro_requires_min_args(name: &str, min: usize) -> String {
     format!("`@{name}` requires at least {min} argument(s)")
 }
 
+pub fn macro_arity(name: &str, fixed: usize, variadic: bool, got: usize) -> String {
+    let qualifier = if variadic { "at least " } else { "" };
+    format!("macro '@{name}' expects {qualifier}{fixed} argument(s), got {got}")
+}
+
+pub fn macro_variadic_must_be_last(name: &str) -> String {
+    format!("macro '@{name}' requires its variadic parameter to be last")
+}
+
 pub fn macro_expected_format_args(name: &str, expected: usize, got: usize) -> String {
     format!("`@{name}` expected {expected} format argument(s), got {got}")
 }

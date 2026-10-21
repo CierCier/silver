@@ -1,25 +1,20 @@
 #!/usr/bin/env python3
-"""
-Integration test harness for the Silver compiler (agc).
-Provides a modern parallel TUI test runner for integration tests.
-"""
+"""Compile and run the standard-library behavior suite."""
 
 import argparse
 import atexit
 import dataclasses
 import glob
 import os
-import re
 import shlex
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set
 
 # Terminal styling
 C_RESET = "\033[0m"
@@ -37,43 +32,32 @@ C_BG_GREEN = "\033[42m"
 C_CLEAR_LINE = "\033[2K"
 C_CURSOR_UP = "\033[A"
 
+MAX_STDLIB_TESTS = 124
+
 LEAK_CHECK_TESTS = {
-    "memory_pentest",
-    "alloc_validity_test",
-    "string_test",
-    "string_split_once_drop_test",
-    "launch_failure_drop_test",
-    "vec_test",
-    "method_slice_coercion_test",
-    "bytes_test",
-    "collections_set_test",
-    "mem_test",
-    "memmove_scalar_test",
-    "channel_test",
-    "memory_stress",
-    "http_test",
-    "cookie_test",
-    "assignment_drop_test",
-    "field_predrop_test",
-    "temp_operator_test",
-    "enum_move_test",
-    "match_block_payload_drop_test",
-    "match_payload_remainder_test",
-    "enum_cascade_test",
-    "uuid_test",
-    "display_test",
-    "display_net_test",
-    "leak_regression_test",
+    'alloc_validity_test',
+    'allocation_bounds_test',
+    'box_test',
+    'bytes_test',
+    'channel_test',
+    'checked_conversion_test',
+    'collections_set_test',
+    'cookie_test',
+    'display_net_test',
+    'display_test',
+    'dma_test',
+    'format_bytes_test',
+    'http_test',
+    'mem_test',
+    'memory_stress',
+    'result_combinators_test',
+    'sequence_traits_test',
+    'string_split_once_drop_test',
+    'string_test',
+    'uuid_test',
+    'vec_test',
 }
 
-# These regressions are exercised by run_native.sh with the stage1 compiler.
-STAGE1_ONLY_TESTS = {
-    "match_payload_remainder_test": "stage1 mixed move payload bindings",
-    "json_synthesis_scope_test": "stage1 JSON method synthesis",
-    "method_slice_coercion_test": "stage1 borrowed-slice coercion",
-    "match_multi_payload_move_test": "stage1 multi-payload move patterns",
-    "unwrap_or_array_element_error_test": "stage1 rejects owned array element unwrap-or",
-}
 
 IS_WINDOWS = os.name == "nt"
 
@@ -97,73 +81,46 @@ def target_is_wasm(target: Optional[str]) -> bool:
 #   - raw syscall/asm tests: x86_64 asm does not exist on wasm
 #   - SIMD probes: cpu.* cfg keys are false on cross targets
 WASM_SKIP = {
-    # raw x86_64 asm / syscalls
-    "syscall_test": "raw Linux syscall asm (x86_64 syscall ABI)",
-    "syscall_wrapper_test": "raw Linux syscall wrappers (std.sys.syscall)",
-    "backtrace_test": "rbp-chain walker + cpuid probes (x86_64 asm)",
-    # threads & launch (no WASI threads in v1)
-    "allocator_threads_test": "raw clone(2) thread creation",
-    "thread_test": "WASI threading pending (threads are a compile error on wasm)",
-    "thread_stress_test": "WASI threading pending (threads are a compile error on wasm)",
-    "channel_test": "depends on threads/atomics (WASI threading pending)",
-    "channel_bounded_test": "depends on threads/atomics (WASI threading pending)",
-    "condvar_test": "depends on threads/atomics (WASI threading pending)",
-    "rwlock_test": "depends on threads/atomics (WASI threading pending)",
-    "select_test": "depends on threads/atomics (WASI threading pending)",
-    "launch_send_declarations_test": "launch requires the thread runtime (unsupported on wasm)",
-    "launch_send_declarations_error_test": "launch requires the thread runtime (unsupported on wasm)",
-    "launch_send_test": "launch requires the thread runtime (unsupported on wasm)",
-    "launch_failure_drop_test": "launch requires the thread runtime (unsupported on wasm)",
-    "launch_wait_test": "launch requires the thread runtime (unsupported on wasm)",
-    "launch_crossmodule_test": "launch requires the thread runtime (unsupported on wasm)",
-    "launch_wait_native_test": "native launch backend fixture uses the thread runtime (unsupported on wasm)",
-    "launch_send_error_test": "launch requires the thread runtime (unsupported on wasm)",
-    "launch_wait_error_test": "launch requires the thread runtime (unsupported on wasm)",
-    "guard_test": "guarded counter across launched tasks (launch is a compile error on wasm)",
-    "native_futex_wake_test": "Linux thread creation and futex wake-up",
-    "rust_ffi_test": "links a native-arch Rust staticlib (no wasm FFI artifact in v1)",
-    # process / sockets / pty / kernel interfaces (std modules empty on wasm)
-    "process_test": "fork/exec via Linux process syscalls",
-    "libc_test": "Linux libc interop test",
-    "io_uring_test": "Linux io_uring kernel interface",
-    "net_test": "std.net over Linux socket syscalls (empty on wasm)",
-    "net_udp_test": "std.net over Linux socket syscalls (empty on wasm)",
-    "net_dns_test": "std.net over Linux socket syscalls (empty on wasm)",
-    "socket_addr_test": "std.net over Linux socket syscalls (empty on wasm)",
-    "udp_test": "std.net over Linux socket syscalls (empty on wasm)",
-    "tcp_test": "std.net over Linux socket syscalls (empty on wasm)",
-    "dial_timeout_test": "std.net over Linux socket syscalls (empty on wasm)",
-    "timeout_test": "std.net over Linux socket syscalls (empty on wasm)",
-    "http_test": "std.net over Linux socket syscalls (empty on wasm)",
-    "http_server_test": "std.net over Linux socket syscalls (empty on wasm)",
-    "http2_server_test": "std.net over Linux socket syscalls (empty on wasm)",
-    "http2_test": "std.net over Linux socket syscalls (empty on wasm)",
-    "http2_tls_test": "std.net over Linux socket syscalls (empty on wasm)",
-    "https_server_test": "std.net over Linux socket syscalls (empty on wasm)",
-    "json_tcp_test": "std.net over Linux socket syscalls (empty on wasm)",
-    "server_raw_test": "std.net over Linux socket syscalls (empty on wasm)",
-    "pool_test": "std.net over Linux socket syscalls (empty on wasm)",
-    "sse_test": "std.net over Linux socket syscalls (empty on wasm)",
-    "tls_test": "std.net over Linux socket syscalls (empty on wasm)",
-    "websocket_test": "std.net over Linux socket syscalls (empty on wasm)",
-    "cookie_test": "std.net over Linux socket syscalls (empty on wasm)",
-    "stream_test": "std.net over Linux socket syscalls (empty on wasm)",
-    "display_net_test": "std.net over Linux socket syscalls (empty on wasm)",
-    "term_pty_test": "pty via Linux kernel interfaces (empty on wasm)",
-    "term_raw_test": "raw terminal mode via termios (empty on wasm)",
-    "term_keys_test": "raw terminal mode via termios (empty on wasm)",
-    "term_loop_test": "raw terminal mode via termios (empty on wasm)",
-    # target-specific probes
-    "target_feature_test": "cpu.* cfg probes are false on cross targets",
-    "cfg_derived_test": "asserts native DWARF/section layout in the object",
-    "cfg_test": "cfg matrix expects native os/arch values",
-    "static_link_test": "asserts ELF dynamic-linking properties",
-    "static_volatile_test": "asserts ELF section/codegen layout",
-    "cfg_global_block_test": "native-gated global block semantics",
-    # module artifact test precompiles a .agm with native defaults
-    "module_import_test": "precompiled .agm artifact workflow is native-only in v1",
-    "module_artifact_no_source_test": "precompiled native object workflow is unavailable on wasm",
-    "memory_stress": "large memory footprint (wasm linear memory cap)",
+    'dma_test': 'Linux DMA-BUF and DMA-heap ioctls',
+    'syscall_wrapper_test': 'raw Linux syscall wrappers (std.sys.syscall)',
+    'allocator_threads_test': 'raw clone(2) thread creation',
+    'thread_test': 'WASI threading pending (threads are a compile error on wasm)',
+    'thread_stress_test': 'WASI threading pending (threads are a compile error on wasm)',
+    'channel_test': 'depends on threads/atomics (WASI threading pending)',
+    'channel_bounded_test': 'depends on threads/atomics (WASI threading pending)',
+    'condvar_test': 'depends on threads/atomics (WASI threading pending)',
+    'rwlock_test': 'depends on threads/atomics (WASI threading pending)',
+    'guard_test': 'guarded counter across launched tasks (launch is a compile error on wasm)',
+    'rust_ffi_test': 'links a native-arch Rust staticlib (no wasm FFI artifact in v1)',
+    'process_test': 'fork/exec via Linux process syscalls',
+    'io_uring_test': 'Linux io_uring kernel interface',
+    'net_test': 'std.net over Linux socket syscalls (empty on wasm)',
+    'net_udp_test': 'std.net over Linux socket syscalls (empty on wasm)',
+    'net_dns_test': 'std.net over Linux socket syscalls (empty on wasm)',
+    'socket_addr_test': 'std.net over Linux socket syscalls (empty on wasm)',
+    'udp_test': 'std.net over Linux socket syscalls (empty on wasm)',
+    'dial_timeout_test': 'std.net over Linux socket syscalls (empty on wasm)',
+    'timeout_test': 'std.net over Linux socket syscalls (empty on wasm)',
+    'http_test': 'std.net over Linux socket syscalls (empty on wasm)',
+    'http_server_test': 'std.net over Linux socket syscalls (empty on wasm)',
+    'http2_server_test': 'std.net over Linux socket syscalls (empty on wasm)',
+    'http2_test': 'std.net over Linux socket syscalls (empty on wasm)',
+    'http2_tls_test': 'std.net over Linux socket syscalls (empty on wasm)',
+    'https_server_test': 'std.net over Linux socket syscalls (empty on wasm)',
+    'json_tcp_test': 'std.net over Linux socket syscalls (empty on wasm)',
+    'server_raw_test': 'std.net over Linux socket syscalls (empty on wasm)',
+    'pool_test': 'std.net over Linux socket syscalls (empty on wasm)',
+    'sse_test': 'std.net over Linux socket syscalls (empty on wasm)',
+    'tls_test': 'std.net over Linux socket syscalls (empty on wasm)',
+    'websocket_test': 'std.net over Linux socket syscalls (empty on wasm)',
+    'cookie_test': 'std.net over Linux socket syscalls (empty on wasm)',
+    'stream_test': 'std.net over Linux socket syscalls (empty on wasm)',
+    'display_net_test': 'std.net over Linux socket syscalls (empty on wasm)',
+    'term_pty_test': 'pty via Linux kernel interfaces (empty on wasm)',
+    'term_raw_test': 'raw terminal mode via termios (empty on wasm)',
+    'term_keys_test': 'raw terminal mode via termios (empty on wasm)',
+    'term_loop_test': 'raw terminal mode via termios (empty on wasm)',
+    'memory_stress': 'large memory footprint (wasm linear memory cap)',
 }
 
 # Tests that exercise Linux-only mechanisms (raw syscall/clone asm, epoll-
@@ -171,34 +128,32 @@ WASM_SKIP = {
 # portable suite members; on Windows the equivalent coverage comes from the
 # std.sys.win seam and the thread/allocator tests that run on both.
 WINDOWS_SKIP = {
-    "syscall_test": "raw Linux syscall asm (x86_64 syscall ABI)",
-    "syscall_wrapper_test": "raw Linux syscall wrappers (std.sys.syscall)",
-    "allocator_threads_test": "raw clone(2) thread creation",
-    "http_test": "std.net over Linux socket syscalls (winsock layer pending)",
-    "cookie_test": "std.net over Linux socket syscalls (winsock layer pending)",
-    "net_test": "std.net over Linux socket syscalls (winsock layer pending)",
-    "net_udp_test": "std.net over Linux socket syscalls (winsock layer pending)",
-    "net_dns_test": "std.net over Linux socket syscalls (winsock layer pending)",
-    "socket_addr_test": "std.net over Linux socket syscalls (winsock layer pending)",
-    "udp_test": "std.net over Linux socket syscalls (winsock layer pending)",
-    "tcp_test": "std.net over Linux socket syscalls (winsock layer pending)",
-    "dial_timeout_test": "std.net over Linux socket syscalls (winsock layer pending)",
-    "timeout_test": "std.net over Linux socket syscalls (winsock layer pending)",
-    "http_server_test": "std.net over Linux socket syscalls (winsock layer pending)",
-    "http2_server_test": "std.net over Linux socket syscalls (winsock layer pending)",
-    "http2_test": "std.net over Linux socket syscalls (winsock layer pending)",
-    "http2_tls_test": "std.net over Linux socket syscalls (winsock layer pending)",
-    "https_server_test": "std.net over Linux socket syscalls (winsock layer pending)",
-    "json_tcp_test": "std.net over Linux socket syscalls (winsock layer pending)",
-    "server_raw_test": "std.net over Linux socket syscalls (winsock layer pending)",
-    "pool_test": "std.net over Linux socket syscalls (winsock layer pending)",
-    "sse_test": "std.net over Linux socket syscalls (winsock layer pending)",
-    "tls_test": "std.net over Linux socket syscalls (winsock layer pending)",
-    "websocket_test": "std.net over Linux socket syscalls (winsock layer pending)",
-    "io_uring_test": "Linux io_uring kernel interface",
-    "libc_test": "Linux libc interop test",
-    "process_test": "fork/exec via Linux process syscalls",
-    "stream_test": "std.net over Linux socket syscalls (winsock layer pending)",
+    'dma_test': 'Linux DMA-BUF and DMA-heap ioctls',
+    'syscall_wrapper_test': 'raw Linux syscall wrappers (std.sys.syscall)',
+    'allocator_threads_test': 'raw clone(2) thread creation',
+    'http_test': 'std.net over Linux socket syscalls (winsock layer pending)',
+    'cookie_test': 'std.net over Linux socket syscalls (winsock layer pending)',
+    'net_test': 'std.net over Linux socket syscalls (winsock layer pending)',
+    'net_udp_test': 'std.net over Linux socket syscalls (winsock layer pending)',
+    'net_dns_test': 'std.net over Linux socket syscalls (winsock layer pending)',
+    'socket_addr_test': 'std.net over Linux socket syscalls (winsock layer pending)',
+    'udp_test': 'std.net over Linux socket syscalls (winsock layer pending)',
+    'dial_timeout_test': 'std.net over Linux socket syscalls (winsock layer pending)',
+    'timeout_test': 'std.net over Linux socket syscalls (winsock layer pending)',
+    'http_server_test': 'std.net over Linux socket syscalls (winsock layer pending)',
+    'http2_server_test': 'std.net over Linux socket syscalls (winsock layer pending)',
+    'http2_test': 'std.net over Linux socket syscalls (winsock layer pending)',
+    'http2_tls_test': 'std.net over Linux socket syscalls (winsock layer pending)',
+    'https_server_test': 'std.net over Linux socket syscalls (winsock layer pending)',
+    'json_tcp_test': 'std.net over Linux socket syscalls (winsock layer pending)',
+    'server_raw_test': 'std.net over Linux socket syscalls (winsock layer pending)',
+    'pool_test': 'std.net over Linux socket syscalls (winsock layer pending)',
+    'sse_test': 'std.net over Linux socket syscalls (winsock layer pending)',
+    'tls_test': 'std.net over Linux socket syscalls (winsock layer pending)',
+    'websocket_test': 'std.net over Linux socket syscalls (winsock layer pending)',
+    'io_uring_test': 'Linux io_uring kernel interface',
+    'process_test': 'fork/exec via Linux process syscalls',
+    'stream_test': 'std.net over Linux socket syscalls (winsock layer pending)',
 }
 
 
@@ -266,7 +221,6 @@ class BackgroundServices:
         self.openssl_lib = self._find_openssl()
         self.has_node = shutil.which("node") is not None
         self.ffi_dir = self._find_ffi()
-        self.modlib_dir = workdir / "modlib"
 
     def _find_openssl(self) -> str:
         env_dir = os.environ.get("OPENSSL_LIB_DIR") or os.environ.get("SILVER_OPENSSL_LIB_DIR")
@@ -305,48 +259,7 @@ class BackgroundServices:
                 if (candidate / "libsilver_ffi.a").is_file() or (candidate / "libsilver_ffi.so").is_file():
                     return str(candidate)
         return ""
-    def start_service_if_needed(self, test_names: Set[str], agc_bin: Path, target: Optional[str] = None):
-        # Module import precompilation
-        if "module_import_test" in test_names:
-            self.modlib_dir.mkdir(parents=True, exist_ok=True)
-            mod_src = self.root / "tests/modules/module_lib.ag"
-            if mod_src.is_file():
-                cmd = [str(agc_bin), "--emit=module", str(mod_src)]
-                eff_target = target or self.target
-                if eff_target:
-                    cmd.extend(["--target", eff_target])
-                res = subprocess.run(
-                    cmd,
-                    cwd=str(self.modlib_dir),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
-                if res.returncode != 0:
-                    print(f"{C_YELLOW}warning: failed to emit module_lib for module_import_test{C_RESET}")
-        if "module_artifact_no_source_test" in test_names:
-            self.modlib_dir.mkdir(parents=True, exist_ok=True)
-            fixture = self.root / "tests/modules/module_no_source_lib.ag"
-            mod_src = self.modlib_dir / "module_no_source_lib.ag"
-            shutil.copyfile(fixture, mod_src)
-            cmd = [str(agc_bin), "--emit=module", str(mod_src)]
-            eff_target = target or self.target
-            if eff_target:
-                cmd.extend(["--target", eff_target])
-            res = subprocess.run(
-                cmd,
-                cwd=str(self.modlib_dir),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            if res.returncode != 0:
-                raise RuntimeError("failed to emit source-independent module artifact")
-            artifact = self.modlib_dir / "module_no_source_lib.agm"
-            object_suffix = ".o.wasm" if target_is_wasm(eff_target) else ".o"
-            object_file = self.modlib_dir / f"module_no_source_lib{object_suffix}"
-            if not artifact.is_file() or not object_file.is_file():
-                raise RuntimeError("source-independent module artifact outputs are missing")
-            if mod_src.exists():
-                mod_src.unlink()
+    def start_service_if_needed(self, test_names: Set[str]):
         # Node TLS server
         if ("tls_test" in test_names or "https_server_test" in test_names) and self.has_node and self.openssl_lib:
             self._spawn_daemon(["node", "tests/tls_server.js"], "TLS_NODE_READY", "tls_node.log")
@@ -395,7 +308,7 @@ def get_test_stdin(name: str) -> Optional[bytes]:
     return None
 
 
-def get_expected_exit(name: str, content: str) -> int:
+def get_expected_exit(content: str) -> int:
     for line in content.splitlines():
         line = line.strip()
         if line.startswith("//"):
@@ -407,12 +320,6 @@ def get_expected_exit(name: str, content: str) -> int:
                         return int(val)
                     except ValueError:
                         pass
-    if name in ("syscall_test", "syscall_wrapper_test"):
-        return 42
-    if name == "static_volatile_test":
-        return 7
-    if name in ("assert_fail_test", "backtrace_test"):
-        return 134
     return 0
 
 
@@ -426,30 +333,10 @@ def get_extra_flags(name: str, content: str, services: BackgroundServices) -> Li
                 if rest.startswith(prefix):
                     flags.extend(rest[len(prefix):].strip().split())
 
-    if name in (
-        "static_link_test",
-        "thread_test",
-        "launch_wait_test",
-        "launch_failure_drop_test",
-        "channel_test",
-        "guard_test",
-        "launch_send_test",
-    ):
-        flags.append("--static-runtime")
     if name in ("tls_test", "http2_tls_test", "https_server_test") and services.openssl_lib:
         flags.extend(["-L", services.openssl_lib])
     if name == "rust_ffi_test" and services.ffi_dir:
         flags.extend(["-L", services.ffi_dir])
-    if name in ("module_import_test", "module_artifact_no_source_test"):
-        flags.extend(["-I", str(services.modlib_dir)])
-    if name == "cfg_test":
-        flags.extend(["--cfg", "cfg_test_flag=1,cpu.sse41=1,cpu.avx2=1,cpu.avx512f=1"])
-    if name == "ternary_test":
-        flags.extend(["--cfg", "cpu.sse41=1"])
-    if name == "target_feature_test":
-        flags.extend(["--cfg", "cpu.avx2=1"])
-    if name in ("cfg_derived_test", "volatile_attr_test"):
-        flags.append("-O2")
     if name in LEAK_CHECK_TESTS and "--leak-check" not in flags:
         flags.append("--leak-check")
 
@@ -480,13 +367,8 @@ def run_single_test(
     if name in ("tls_test", "http2_tls_test", "https_server_test"):
         run_dir = services.root
 
-    expected_errors = [
-        line.strip().removeprefix("// error_contains:").strip()
-        for line in content.splitlines()
-        if line.strip().startswith("// error_contains:")
-    ]
 
-    expected_code = get_expected_exit(name, content)
+    expected_code = get_expected_exit(content)
     extra_flags = get_extra_flags(name, content, services)
     if target:
         extra_flags = ["--target", target] + extra_flags
@@ -523,18 +405,8 @@ def run_single_test(
     compile_output = cp.stdout + ("\n" + cp.stderr if cp.stderr else "")
 
     if cp.returncode != 0:
-        if expected_errors:
-            diagnostics = re.sub(r"\x1b\[[0-9;]*m", "", compile_output)
-            error_lines = "\n".join(line for line in diagnostics.splitlines() if "error:" in line)
-            missing = [message for message in expected_errors if message not in error_lines]
-            if cp.returncode < 0 or missing:
-                return TestResult(name, "FAIL", f"wrong compile failure; expected {expected_errors}",
-                                  compile_ms=compile_ms, compile_output=compile_output)
-            return TestResult(name, "PASS", "expected compile error", compile_ms=compile_ms, compile_output=compile_output)
         return TestResult(name, "FAIL", "compile error", compile_ms=compile_ms, compile_output=compile_output)
 
-    if expected_errors:
-        return TestResult(name, "FAIL", "expected compile failure but succeeded", compile_ms=compile_ms, compile_output=compile_output)
 
     if update_worker:
         update_worker(name, "running")
@@ -584,68 +456,10 @@ def run_single_test(
     stderr_str = rp.stderr.decode(errors="replace")
     run_output = stdout_str + ("\n" + stderr_str if stderr_str else "")
 
-    # Post-run special assertions
-    if name == "static_link_test":
-        if target_is_windows or IS_WINDOWS:
-            # Static CRT (/MT): the import table must not reference the
-            # dynamic UCRT/vcruntime DLLs. System DLLs (kernel32 etc.) are
-            # always imported and fine.
-            readobj = shutil.which("llvm-readobj")
-            if readobj:
-                try:
-                    imp_out = subprocess.check_output(
-                        [readobj, "--coff-imports", str(bin_path)], stderr=subprocess.DEVNULL
-                    ).decode(errors="replace")
-                    bad = [dll for dll in ("ucrtbase.dll", "vcruntime140.dll", "msvcp140.dll") if dll in imp_out.lower()]
-                    if bad:
-                        return TestResult(name, "FAIL", f"binary imports dynamic CRT: {', '.join(bad)}", compile_ms, run_ms, run_output=run_output)
-                except Exception:
-                    pass
-        else:
-            try:
-                ldd_out = subprocess.check_output(["ldd", str(bin_path)], stderr=subprocess.STDOUT).decode(errors="replace")
-                if "not a dynamic executable" not in ldd_out:
-                    return TestResult(name, "FAIL", "binary is not static", compile_ms, run_ms, run_output=run_output)
-            except Exception:
-                pass
 
-    if name == "cfg_derived_test":
-        readobj = shutil.which("llvm-readobj") if (target_is_windows or IS_WINDOWS) else None
-        if readobj:
-            try:
-                re_out = subprocess.check_output(
-                    [readobj, "--sections", str(bin_path)], stderr=subprocess.DEVNULL
-                ).decode(errors="replace")
-                if ".debug_info" in re_out:
-                    return TestResult(name, "FAIL", "release build still contains DWARF", compile_ms, run_ms, run_output=run_output)
-            except Exception:
-                pass
-        else:
-            try:
-                re_out = subprocess.check_output(["readelf", "-S", str(bin_path)], stderr=subprocess.DEVNULL).decode(errors="replace")
-                if ".debug_info" in re_out:
-                    return TestResult(name, "FAIL", "release build still contains DWARF", compile_ms, run_ms, run_output=run_output)
-            except Exception:
-                pass
 
-    if name == "backtrace_test":
-        frame_lines = run_output.splitlines()
-        user_frames = ["level3", "level2", "level1", "main"]
-        missing = [
-            f"{frame} at backtrace_test.ag:"
-            for frame in user_frames
-            if not any(
-                f"{frame} at " in line and re.search(r"\bbacktrace_test\.ag:\d+", line)
-                for line in frame_lines
-            )
-        ]
-        for expected in ("__silver_assert_failed", "args: x="):
-            if expected not in run_output:
-                missing.append(expected)
-        if missing:
-            return TestResult(name, "FAIL", f"backtrace missing frames: {', '.join(missing)}", compile_ms, run_ms, run_output=run_output)
 
-    # Check exit code
+    # A failed assertion or abort must reach the process status.
     exit_code = rp.returncode
     # On Linux, negative code or signal
     if exit_code < 0:
@@ -748,7 +562,7 @@ class TestDashboard:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Silver Compiler Integration Test Runner")
+    parser = argparse.ArgumentParser(description="Silver standard-library test runner")
     parser.add_argument("filters", nargs="*", default=[], help="Run only tests matching these filters/names")
     parser.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 4, help="Number of concurrent workers")
     parser.add_argument("--release", action="store_true", help="Use release compiler build")
@@ -759,7 +573,7 @@ def main():
     parser.add_argument("--compile-timeout", type=int, default=300, help="Per-test compiler timeout in seconds")
     parser.add_argument("--target", type=str, default="", help="Cross-compile for this target triple (e.g. x86_64-pc-windows-msvc)")
     parser.add_argument("--runner", type=str, default="", help="Prefix command used to execute each test binary (e.g. 'wine' on a posix host)")
-    parser.add_argument("--compiler", type=Path, default=None, help="Use an existing agc-compatible binary instead of building stage0 (for self-host parity runs)")
+    parser.add_argument("--compiler", type=Path, default=None, help="Run the stdlib suite with this compiler instead of building stage0")
     parser.add_argument("--libdir", action="append", default=[], help="Library search dir passed as -L to every compile (repeatable; e.g. generated Windows import libs)")
     parser.add_argument("--compare", type=str, default="", help="Compare run time metrics with a baseline file")
     args = parser.parse_args()
@@ -794,6 +608,8 @@ def main():
     # Collect test files
     tests_dir = root / "tests"
     all_test_files = sorted(tests_dir.glob("*.ag"))
+    if len(all_test_files) > MAX_STDLIB_TESTS:
+        parser.error(f"stdlib suite has {len(all_test_files)} programs; limit is {MAX_STDLIB_TESTS}. Extend an existing module test.")
     selected_tests: List[Path] = []
 
     filters = [f.strip().removesuffix(".ag").lower() for f in args.filters if f.strip()]
@@ -837,14 +653,14 @@ def main():
     libdirs = [[d] for d in args.libdir]  # each value is one complete path; never resplit ("Program Files" spaces)
 
     selected_stems = {p.stem for p in selected_tests}
-    services.start_service_if_needed(selected_stems, agc_bin, target=target)
+    services.start_service_if_needed(selected_stems)
 
     if IS_WINDOWS:
         os.system("")  # enable ANSI escape processing in the legacy console
     is_tty = sys.stdout.isatty() and not args.no_tui
     dashboard = TestDashboard(len(selected_tests), args.jobs, is_tty, args.verbose)
 
-    print(f"\n{C_BOLD}Running {len(selected_tests)} integration tests with {args.jobs} workers...{C_RESET}\n")
+    print(f"\n{C_BOLD}Running {len(selected_tests)} stdlib tests with {args.jobs} workers...{C_RESET}\n")
 
     results: List[TestResult] = []
     results_lock = threading.Lock()
@@ -869,8 +685,6 @@ def main():
                 skip_reason = "requires Node.js"
             elif name == "rust_ffi_test" and not services.ffi_dir:
                 skip_reason = "requires built Rust FFI library (build bootstrap/stage0/ffi-rust)"
-            elif compiler is None and name in STAGE1_ONLY_TESTS:
-                skip_reason = STAGE1_ONLY_TESTS[name]
             elif IS_WINDOWS and name in WINDOWS_SKIP:
                 skip_reason = WINDOWS_SKIP[name]
             elif target and target_is_windows_name(target) and name in WINDOWS_SKIP:

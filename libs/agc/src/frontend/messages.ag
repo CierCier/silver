@@ -2,6 +2,15 @@
 import std.mem.vec;
 import std.string;
 
+String macro_arity(str name, i64 fixed, bool variadic, i64 got) {
+    str qualifier = variadic ? "at least " : "";
+    return @format("macro '@{}' expects {}{} argument(s), got {}", name, qualifier, fixed, got);
+}
+
+String macro_variadic_must_be_last(str name) {
+    return @format("macro '@{}' requires its variadic parameter to be last", name);
+}
+
 String invalid_optimization_level(str level) {
     String message = String.from_str("invalid optimization level '");
     message.push_str(level);
@@ -82,6 +91,10 @@ String type_mismatch(str expected, str found) {
     s.push_str(", found ");
     s.push_str(found);
     return move s;
+}
+
+String pointer_argument_type_mismatch(str expected, str found) {
+    return @format("pointer argument type mismatch: expected {}, found {}", expected, found);
 }
 
 str generic_method_inference_failed() {

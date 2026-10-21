@@ -17,6 +17,18 @@ struct Slice<T> {
     i64 len;
 }
 
+/// Borrows contiguous elements without allocating or transferring ownership.
+/// The view must not outlive the source or a change to its backing storage.
+trait AsSlice<T> {
+    Slice<T> as_slice(&self);
+}
+
+impl<T> AsSlice<T> for Slice<T> {
+    Slice<T> as_slice(&self) {
+        return *self;
+    }
+}
+
 /// Indexed access implementation for Slice.
 impl<T> IndexedAccess for Slice<T> {
     type Item = T;
@@ -62,6 +74,17 @@ impl<T> Slice<T> {
 
     /// Returns true if the slice is empty.
     bool is_empty(&self) { return self.len == 0; }
+
+    /// Compares contents using element equality, without consuming elements.
+    bool equals_slice(&self, Slice<T> other) {
+        if (self.len != other.len) { return false; }
+        i64 i = 0;
+        while (i < self.len) {
+            if (!(self.data[i] == other.data[i])) { return false; }
+            i += 1;
+        }
+        return true;
+    }
 
     /// Returns a pointer to the slice's underlying data.
     T* as_ptr(&self) { return self.data; }
@@ -143,7 +166,7 @@ impl<T> Slice<T> {
         return &self.data[index];
     }
 
-    /// Returns element at index wrapped in Optional, or None if out of bounds.
+    /// Returns the element at index, aborting if out of bounds.
     T get(&self, i64 index) {
         if (index < 0 || index >= self.len) { abort(); }
         return self.data[index];
@@ -178,6 +201,51 @@ struct SliceIter<T> {
     T* data;
     i64 len;
     i64 idx;
+}
+
+impl<T> Eq<Slice<T>> for Slice<T> {
+    bool __eq(&self, &Slice<T> other) {
+        return self.equals_slice(*other);
+    }
+}
+
+impl<T> Ne<Slice<T>> for Slice<T> {
+    bool __ne(&self, &Slice<T> other) {
+        return !self.__eq(other);
+    }
+}
+
+/// Lexicographic ordering using each element's Compare implementation.
+impl<T: Compare> Compare for Slice<T> {
+    i32 compare(&self, &Slice<T> other) {
+        i64 len = self.len;
+        if (other.len < len) { len = other.len; }
+        i64 i = 0;
+        while (i < len) {
+            i32 order = self.data[i].compare(&other.data[i]);
+            if (order != 0) { return order; }
+            i += 1;
+        }
+        if (self.len < other.len) { return -1; }
+        if (self.len > other.len) { return 1; }
+        return 0;
+    }
+}
+
+impl<T: Compare> Lt<Slice<T>> for Slice<T> {
+    bool __lt(&self, &Slice<T> other) { return self.compare(other) < 0; }
+}
+
+impl<T: Compare> Gt<Slice<T>> for Slice<T> {
+    bool __gt(&self, &Slice<T> other) { return self.compare(other) > 0; }
+}
+
+impl<T: Compare> Le<Slice<T>> for Slice<T> {
+    bool __le(&self, &Slice<T> other) { return self.compare(other) <= 0; }
+}
+
+impl<T: Compare> Ge<Slice<T>> for Slice<T> {
+    bool __ge(&self, &Slice<T> other) { return self.compare(other) >= 0; }
 }
 
 impl<T> Iterator for SliceIter<T> {
@@ -234,13 +302,6 @@ impl Slice<u8> {
         return memcmp((const void*)self.data, (const void*)text, tlen) == 0;
     }
 
-    /// Returns true if this byte slice equals another byte slice `other`.
-    bool equals_slice(&self, Slice<u8> other) {
-        if (self.len != other.len) { return false; }
-        if (self.len == 0) { return true; }
-        return memcmp((const void*)self.data, (const void*)other.data, self.len) == 0;
-    }
-
     /// Equality operator against string literal / C-string.
     bool __eq(&self, str other) {
         return self.equals_str(other);
@@ -248,16 +309,6 @@ impl Slice<u8> {
 
     /// Inequality operator against string literal / C-string.
     bool __ne(&self, str other) {
-        return !self.__eq(other);
-    }
-
-    /// Equality operator against another Slice<u8>.
-    bool __eq(&self, Slice<u8> other) {
-        return self.equals_slice(other);
-    }
-
-    /// Inequality operator against another Slice<u8>.
-    bool __ne(&self, Slice<u8> other) {
         return !self.__eq(other);
     }
 

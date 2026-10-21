@@ -1,3 +1,0 @@
-i32 artifact_add(i32 left, i32 right) {
-    return left + right;
-}

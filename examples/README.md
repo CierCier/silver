@@ -48,7 +48,7 @@ Build with: `agc examples/<name>.ag -o <name> && ./<name>`
 
 ## Language Quick Reference
 
-- **Entry point**: `i32 main()` or `i32 main(i32 argc, char** argv)`
+- **Entry point**: `i32 main()` or `i32 main(i32 argc, u8** argv)`
 - **Output**: `println(str)` for simple lines, `printf(fmt, ...)` for formatted
 - **Variables**: `i32 x = 42;` — type annotations required for locals
 - **Structs**: `struct Name { Type field; ... }` — fields end with `;`

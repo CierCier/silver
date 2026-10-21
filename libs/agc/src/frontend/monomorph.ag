@@ -652,6 +652,38 @@ void mono_check_method_bounds(SyntaxNode* root, TypeTable* types,
     }
 }
 
+String mono_bound_trait_text(SyntaxNode** position, SyntaxNode* end, bool* outer_closed) {
+    SyntaxNode* cursor = *position;
+    String text = String.from_str(cursor.text);
+    cursor = cursor.next_sibling;
+    if (cursor != end && cursor != (SyntaxNode*)0 && cursor.token_kind == TokenKind.Less) {
+        i64 depth = 0;
+        while (cursor != (SyntaxNode*)0 && cursor != end) {
+            if (cursor.token_kind == TokenKind.Less) {
+                depth += 1;
+                text.push((u8)'<');
+            } else if (cursor.token_kind == TokenKind.Greater || cursor.token_kind == TokenKind.RightShift) {
+                i64 closings = cursor.token_kind == TokenKind.RightShift ? 2 : 1;
+                while (closings > 0 && depth > 0) {
+                    text.push((u8)'>');
+                    depth -= 1;
+                    closings -= 1;
+                }
+                *outer_closed = closings > 0;
+            } else {
+                append_node_tokens(cursor, &text);
+                if (cursor.token_kind == TokenKind.Const || cursor.token_kind == TokenKind.Mut) {
+                    text.push((u8)' ');
+                }
+            }
+            cursor = cursor.next_sibling;
+            if (depth == 0) { break; }
+        }
+    }
+    *position = cursor;
+    return move text;
+}
+
 void mono_check_bound_list(SyntaxNode* root, TypeTable* types, SyntaxNode* cursor,
                            SyntaxNode* end, String* failure, u32 depth) {
     u32 parameter = 0;
@@ -663,9 +695,16 @@ void mono_check_bound_list(SyntaxNode* root, TypeTable* types, SyntaxNode* curso
             else if (cursor.token_kind == TokenKind.Colon) { bound = true; }
             else if (cursor.token_kind == TokenKind.Identifier) {
                 if (parameter == 0) { parameter = types.parse_type_name(cursor.text); }
-                else if (bound && !mono_type_implements_trait(root, types, parameter, cursor.text, depth + 1)) {
-                    failure.push_str(generic_method_bound_failed(types.type_name(parameter), cursor.text).to_str());
-                    return;
+                else if (bound) {
+                    bool outer_closed = false;
+                    String trait_text = mono_bound_trait_text(&cursor, end, &outer_closed);
+                    bool implemented = mono_type_implements_trait(root, types, parameter,
+                        trait_text.to_str(), depth + 1);
+                    if (!implemented) {
+                        failure.push_str(generic_method_bound_failed(types.type_name(parameter), trait_text.to_str()).to_str());
+                    }
+                    if (!implemented || outer_closed) { return; }
+                    continue;
                 }
             } else if (cursor.token_kind != TokenKind.Plus) {
                 failure.push_str(generic_method_unsupported_bound());
@@ -676,9 +715,198 @@ void mono_check_bound_list(SyntaxNode* root, TypeTable* types, SyntaxNode* curso
     }
 }
 
+// The node holding an implementation's declared type parameters (`impl<T>`),
+// or null when the implementation declares none.
+SyntaxNode* mono_impl_generics(SyntaxNode* item) {
+    SyntaxNode* head = item.first_child;
+    while (head != (SyntaxNode*)0 && head.token_kind != TokenKind.Impl) {
+        head = head.next_sibling;
+    }
+    return head == (SyntaxNode*)0 ? (SyntaxNode*)0 : head.next_sibling;
+}
+
+// The type parameters an implementation declares (`impl<T, U>`).
+void mono_impl_type_parameters(SyntaxNode* item, TypeTable* types, Vec<u32>* out) {
+    mono_collect_generic_parameters(mono_impl_generics(item), types, out);
+}
+
+// Record a binding for an implementation's type parameter. A parameter that
+// is already bound must keep the same type.
+bool mono_record_binding(u32 name_id, u32 type_id, Vec<u32>* names, Vec<u32>* values) {
+    i64 i = 0;
+    while (i < names.len()) {
+        if (names.get(i) == name_id) { return values.get(i) == type_id; }
+        i += 1;
+    }
+    names.push(name_id);
+    values.push(type_id);
+    return true;
+}
+
+// Unify one implementation trait argument with the requested argument,
+// binding the implementation's type parameters on the way.
+bool mono_unify_trait_argument(TypeTable* types, u32 impl_arg, u32 required_arg,
+                               Vec<u32>* declared, Vec<u32>* names, Vec<u32>* values) {
+    TypeEntry* impl_entry = types.get(impl_arg);
+    TypeEntry* required_entry = types.get(required_arg);
+    if (impl_entry.kind == TypeKind.Named && impl_entry.count == 0
+        && mono_contains_type_param(declared, impl_entry.name_id)) {
+        return mono_record_binding(impl_entry.name_id, required_arg, names, values);
+    }
+    if (impl_entry.kind != required_entry.kind) { return false; }
+    if (impl_entry.kind == TypeKind.Pointer || impl_entry.kind == TypeKind.Reference) {
+        return impl_entry.is_mut == required_entry.is_mut
+            && mono_unify_trait_argument(types, impl_entry.inner, required_entry.inner,
+                                         declared, names, values);
+    }
+    if (impl_entry.kind == TypeKind.Array || impl_entry.kind == TypeKind.Slice) {
+        return impl_entry.count == required_entry.count
+            && mono_unify_trait_argument(types, impl_entry.inner, required_entry.inner,
+                                         declared, names, values);
+    }
+    if (impl_entry.kind != TypeKind.Named && impl_entry.kind != TypeKind.Tuple) {
+        return impl_arg == required_arg;
+    }
+    if (impl_entry.kind == TypeKind.Named && impl_entry.name_id != required_entry.name_id) { return false; }
+    if (impl_entry.count != required_entry.count) { return false; }
+    i64 i = 0;
+    while (i < impl_entry.count) {
+        if (!mono_unify_trait_argument(types,
+                types.type_args.get(impl_entry.inner + (u32)i),
+                types.type_args.get(required_entry.inner + (u32)i),
+                declared, names, values)) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+// Bind the implementation's type parameters from the requested trait
+// arguments, so `impl<T> View<T> for i32` satisfies a `View<i64>` bound.
+bool mono_bind_trait_arguments(TypeTable* types, str trait_text, u32 required_trait,
+                                Vec<u32>* declared, Vec<u32>* names, Vec<u32>* values) {
+    TypeEntry* impl_entry = types.get(types.parse_type_name(trait_text));
+    TypeEntry* required_entry = types.get(required_trait);
+    if (impl_entry.name_id != required_entry.name_id) { return false; }
+    if (impl_entry.count != required_entry.count) { return false; }
+    i64 i = 0;
+    while (i < impl_entry.count) {
+        if (!mono_unify_trait_argument(types,
+                types.type_args.get(impl_entry.inner + (u32)i),
+                types.type_args.get(required_entry.inner + (u32)i),
+                declared, names, values)) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+// Bind the implementation's type parameters from the owner's arguments.
+bool mono_bind_owner_arguments(TypeTable* types, SyntaxNode* target, u32 owner_type,
+                                Vec<u32>* declared, Vec<u32>* names, Vec<u32>* values) {
+    TypeEntry* owner_entry = types.get(owner_type);
+    if (owner_entry.kind == TypeKind.Named) {
+        if (strcmp(types.names.get(owner_entry.name_id), target.text) != 0) { return false; }
+    } else if (types.parse_type_name(target.text) != owner_type) {
+        return false;
+    }
+    Vec<u32> args = Vec<u32>.new();
+    if (owner_entry.kind == TypeKind.Named && owner_entry.count > 0) {
+        i64 i = 0;
+        while (i < owner_entry.count) {
+            args.push(types.type_args.get(owner_entry.inner + (u32)i));
+            i += 1;
+        }
+    }
+    Vec<u32> params = Vec<u32>.new();
+    bool matched = mono_match_target_args(target, types, declared, &args, &params);
+    i64 i = 0;
+    while (matched && i < params.len()) {
+        u32 name_id = params.get(i);
+        if (name_id != 0
+            && !mono_record_binding(name_id, args.get(i), names, values)) {
+            matched = false;
+        }
+        i += 1;
+    }
+    params.drop();
+    args.drop();
+    return matched;
+}
+
+// The implementation's own parameter bounds must hold for the bound types.
+bool mono_impl_bounds_hold(SyntaxNode* root, TypeTable* types, SyntaxNode* item,
+                           SyntaxNode* target, u32 depth) {
+    SyntaxNode* generics = mono_impl_generics(item);
+    String failure = String.new();
+    if (generics != (SyntaxNode*)0 && generics.token_kind == TokenKind.Less) {
+        mono_check_bound_list(root, types, generics.next_sibling, target, &failure, depth);
+    }
+    SyntaxNode* scan = target.next_sibling;
+    while (scan != (SyntaxNode*)0 && scan.kind != NodeKind.Block) {
+        if (strcmp(scan.text, "where") == 0) {
+            mono_check_bound_list(root, types, scan.next_sibling, (SyntaxNode*)0, &failure, depth);
+            break;
+        }
+        scan = scan.next_sibling;
+    }
+    bool holds = failure.len() == 0;
+    failure.drop();
+    return holds;
+}
+
+// Decide whether one implementation satisfies the requested trait for the
+// requested owner. The implementation's type parameters are inferred from the
+// owner arguments and the requested trait arguments before the comparison.
+bool mono_impl_matches(SyntaxNode* root, TypeTable* types, SyntaxNode* item,
+                       SyntaxNode* target, str trait_text, u32 owner_type,
+                       u32 required_trait, u32 depth) {
+    Vec<u32> declared = Vec<u32>.new();
+    mono_impl_type_parameters(item, types, &declared);
+    if (declared.len() == 0) {
+        mono_collect_struct_parameters(root, target.text, types, &declared);
+    }
+    Vec<u32> names = Vec<u32>.new();
+    Vec<u32> values = Vec<u32>.new();
+    bool matched = mono_bind_owner_arguments(types, target, owner_type,
+        &declared, &names, &values);
+    if (matched) {
+        // Resolve the implementation's own parameter names while the trait
+        // text is parsed, so an enclosing binding of the same name cannot
+        // shadow the parameter this implementation declares.
+        i64 shadowed = 0;
+        i64 i = 0;
+        while (i < declared.len()) {
+            u32 name_id = declared.get(i);
+            types.push_subst(name_id, types.get_named(types.names.get(name_id)));
+            shadowed += 1;
+            i += 1;
+        }
+        matched = mono_bind_trait_arguments(types, trait_text, required_trait,
+            &declared, &names, &values);
+        types.pop_subst(shadowed);
+    }
+    if (matched) {
+        i64 pushed = 0;
+        while (pushed < names.len()) {
+            types.push_subst(names.get(pushed), values.get(pushed));
+            pushed += 1;
+        }
+        matched = types.parse_type_name(trait_text) == required_trait;
+        if (matched) {
+            matched = mono_impl_bounds_hold(root, types, item, target, depth);
+        }
+        types.pop_subst(pushed);
+    }
+    names.drop();
+    values.drop();
+    declared.drop();
+    return matched;
+}
+
 bool mono_type_implements_trait(SyntaxNode* root, TypeTable* types, u32 type_id, str trait_name, u32 depth) {
     if (depth > 64) { return false; }
     u32 owner_type = types.resolve_subst(type_id);
+    u32 required_trait = types.parse_type_name(trait_name);
+    u32 required_name = types.get(required_trait).name_id;
     u32 pointer_depth = 0;
     while (types.get(owner_type).kind == TypeKind.Pointer) {
         owner_type = types.get(owner_type).inner;
@@ -688,67 +916,40 @@ bool mono_type_implements_trait(SyntaxNode* root, TypeTable* types, u32 type_id,
     while (item != (SyntaxNode*)0) {
         if (item.kind == NodeKind.Impl) {
             SyntaxNode* cursor = item.first_child;
-            SyntaxNode* trait_node = (SyntaxNode*)0;
+            while (cursor != (SyntaxNode*)0 && cursor.token_kind != TokenKind.Impl) {
+                cursor = cursor.next_sibling;
+            }
+            cursor = cursor == (SyntaxNode*)0 ? (SyntaxNode*)0 : cursor.next_sibling;
+            if (cursor != (SyntaxNode*)0 && cursor.token_kind == TokenKind.Less) {
+                i64 angle = 0;
+                while (cursor != (SyntaxNode*)0) {
+                    if (cursor.token_kind == TokenKind.Less) { angle += 1; }
+                    else if (cursor.token_kind == TokenKind.Greater) { angle -= 1; }
+                    else if (cursor.token_kind == TokenKind.RightShift) { angle -= 2; }
+                    cursor = cursor.next_sibling;
+                    if (angle <= 0) { break; }
+                }
+            }
+            String trait_text = String.new();
             while (cursor != (SyntaxNode*)0 && cursor.kind != NodeKind.Block) {
                 if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.For) {
                     break;
                 }
-                if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Identifier) {
-                    trait_node = cursor;
-                }
+                append_node_tokens(cursor, &trait_text);
                 cursor = cursor.next_sibling;
             }
             if (cursor != (SyntaxNode*)0 && cursor.kind != NodeKind.Block
-                && trait_node != (SyntaxNode*)0 && strcmp(trait_node.text, trait_name) == 0) {
+                && types.get(types.parse_type_name(trait_text.to_str())).name_id == required_name) {
                 SyntaxNode* target = impl_target_identifier(item);
                 if (target != (SyntaxNode*)0 && impl_target_pointer_depth(item) == pointer_depth) {
-                    if (!item_method_is_generic(target)
-                        && types.parse_type_name(target.text) == owner_type) { return true; }
-                    TypeEntry* actual = types.get(owner_type);
-                    if (actual.kind == TypeKind.Named && actual.count > 0
-                        && strcmp(types.names.get(actual.name_id), target.text) == 0) {
-                        Vec<u32> args = Vec<u32>.new();
-                        i64 i = 0;
-                        while (i < actual.count) {
-                            args.push(types.type_args.get(actual.inner + (u32)i));
-                            i += 1;
-                        }
-                        Vec<u32> declared = Vec<u32>.new();
-                        SyntaxNode* head = item.first_child;
-                        while (head != (SyntaxNode*)0 && head.token_kind != TokenKind.Impl) {
-                            head = head.next_sibling;
-                        }
-                        SyntaxNode* generics = head == (SyntaxNode*)0 ? (SyntaxNode*)0 : head.next_sibling;
-                        mono_collect_generic_parameters(generics, types, &declared);
-                        Vec<u32> params = Vec<u32>.new();
-                        bool matched = mono_match_target_args(target, types, &declared, &args, &params);
-                        if (matched) {
-                            mono_push_method_bindings(types, &params, &args);
-                            String impl_failure = String.new();
-                            if (generics != (SyntaxNode*)0 && generics.token_kind == TokenKind.Less) {
-                                mono_check_bound_list(root, types, generics.next_sibling, target,
-                                    &impl_failure, depth);
-                            }
-                            SyntaxNode* scan = target.next_sibling;
-                            while (scan != (SyntaxNode*)0 && scan.kind != NodeKind.Block) {
-                                if (strcmp(scan.text, "where") == 0) {
-                                    mono_check_bound_list(root, types, scan.next_sibling,
-                                        (SyntaxNode*)0, &impl_failure, depth);
-                                    break;
-                                }
-                                scan = scan.next_sibling;
-                            }
-                            matched = impl_failure.len() == 0;
-                            impl_failure.drop();
-                            types.pop_subst(receiver_binding_count(&params, params.len()));
-                        }
-                        args.drop();
-                        params.drop();
-                        declared.drop();
-                        if (matched) { return true; }
+                    if (mono_impl_matches(root, types, item, target, trait_text.to_str(),
+                                          owner_type, required_trait, depth)) {
+                        trait_text.drop();
+                        return true;
                     }
                 }
             }
+            trait_text.drop();
         }
         item = item.next_sibling;
     }

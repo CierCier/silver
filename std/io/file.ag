@@ -251,6 +251,13 @@ impl BufWriter {
         self.write(&c, 1);
     }
 
+    /// Write a Unicode scalar as UTF-8, replacing invalid values with U+FFFD.
+    void write_char(*self, char value) {
+        u8 bytes[4];
+        i64 length = utf8_encode(value, &bytes[0]);
+        self.write(&bytes[0], length);
+    }
+
     /// Format and buffer a pointer value as 0x... hex.
     void write_ptr(*self, void* p) {
         u64 val = (u64)p;

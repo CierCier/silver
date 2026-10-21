@@ -391,7 +391,7 @@ LLVMOpaqueType* llvm_lower_type(LLVMOpaqueContext* ctx, TypeTable* types, u32 ty
         TypeKind.Bool : LLVMInt1TypeInContext(ctx),
         TypeKind.I8 : LLVMInt8TypeInContext(ctx),
         TypeKind.U8 : LLVMInt8TypeInContext(ctx),
-        TypeKind.Char : LLVMInt8TypeInContext(ctx),
+        TypeKind.Char : LLVMInt32TypeInContext(ctx),
         TypeKind.I16 : LLVMInt16TypeInContext(ctx),
         TypeKind.U16 : LLVMInt16TypeInContext(ctx),
         TypeKind.I32 : LLVMInt32TypeInContext(ctx),

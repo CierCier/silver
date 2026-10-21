@@ -1,3 +1,0 @@
-void assert_imported() {
-    @assert(false, "imported assert marker");
-}

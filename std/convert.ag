@@ -1,0 +1,71 @@
+/// Explicit, fallible conversions. These implementations never participate in
+/// implicit coercion or `(T)value` casts.
+import std.result;
+import std.error;
+import std.sys.errno { ERANGE };
+
+trait TryFrom<T> {
+    Result<Self, Error> try_from(T value);
+}
+
+// i128 can represent every value of the integer types through u64.
+impl TryFrom<i128> for i8 {
+    Result<i8, Error> try_from(i128 value) {
+        if (value < -128 || value > 127) { return Err(ERANGE, "value out of i8 range"); }
+        return Ok((i8)value);
+    }
+}
+impl TryFrom<i128> for u8 {
+    Result<u8, Error> try_from(i128 value) {
+        if (value < 0 || value > 255) { return Err(ERANGE, "value out of u8 range"); }
+        return Ok((u8)value);
+    }
+}
+impl TryFrom<i128> for i16 {
+    Result<i16, Error> try_from(i128 value) {
+        if (value < -32768 || value > 32767) { return Err(ERANGE, "value out of i16 range"); }
+        return Ok((i16)value);
+    }
+}
+impl TryFrom<i128> for u16 {
+    Result<u16, Error> try_from(i128 value) {
+        if (value < 0 || value > 65535) { return Err(ERANGE, "value out of u16 range"); }
+        return Ok((u16)value);
+    }
+}
+impl TryFrom<i128> for i32 {
+    Result<i32, Error> try_from(i128 value) {
+        if (value < -2147483648 || value > 2147483647) { return Err(ERANGE, "value out of i32 range"); }
+        return Ok((i32)value);
+    }
+}
+impl TryFrom<i128> for u32 {
+    Result<u32, Error> try_from(i128 value) {
+        if (value < 0 || value > 4294967295) { return Err(ERANGE, "value out of u32 range"); }
+        return Ok((u32)value);
+    }
+}
+impl TryFrom<i128> for i64 {
+    Result<i64, Error> try_from(i128 value) {
+        if (value < -9223372036854775808 || value > 9223372036854775807) {
+            return Err(ERANGE, "value out of i64 range");
+        }
+        return Ok((i64)value);
+    }
+}
+impl TryFrom<i128> for u64 {
+    Result<u64, Error> try_from(i128 value) {
+        if (value < 0 || value > 18446744073709551615) {
+            return Err(ERANGE, "value out of u64 range");
+        }
+        return Ok((u64)value);
+    }
+}
+impl TryFrom<i128> for char {
+    Result<char, Error> try_from(i128 value) {
+        if (value < 0 || value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff)) {
+            return Err(ERANGE, "value is not a Unicode scalar");
+        }
+        return Ok((char)value);
+    }
+}

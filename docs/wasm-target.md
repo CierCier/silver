@@ -145,10 +145,13 @@ module: re-check against the wat control before touching the compiler.
    semantics, atelier-on-wasm (explicitly out of scope).
 4. **Scratch leftovers** — `.agents/`, `amt`, `silver_dbg.txt`,
    `ball.ag`, `plan.md` are untracked and unrelated to the port.
-   (`tests/adversarial_mem_intrinsics_test.ag` shipped with the port and
-   passes both legs.)
+   Current memory API coverage lives in `tests/mem_test.ag` and
+   `tests/allocation_bounds_test.ag`.
 
 ## 6. Verification log (2026-09-23)
+
+This log records the original port. Compiler unit and parity suites have since
+been retired; current verification builds the tools and runs the stdlib suite.
 
 - `agc --target wasm32-wasip1` hello (return 42): builds, prints via
   `@println`/`fd_write`, exit 42 under node — all green.

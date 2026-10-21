@@ -81,7 +81,10 @@ impl TypeEnv {
 }
 
 bool type_is_byte_like(u32 id) {
-    return id == TYPE_U8 || id == TYPE_I8 || id == TYPE_CHAR;
+    // `char` is a 32-bit Unicode scalar, not a byte: accepting it here would
+    // let a `u8*` pass as a `char*` and a char store would write four bytes
+    // into a one-byte buffer.
+    return id == TYPE_U8 || id == TYPE_I8;
 }
 
 bool type_is_numeric_or_char(u32 id) {
@@ -264,6 +267,27 @@ bool typecheck_call_argument_matches(TypeTable* types, u32 expected, u32 actual,
                                      bool actual_is_literal) {
     return types_match_value(types, expected, actual, actual_is_literal)
         || typecheck_slice_argument_coercion(types, expected, actual);
+}
+
+void typecheck_char_pointer_argument(TypeTable* types, u32 expected, u32 actual,
+                                     Span span, DiagnosticBag* diagnostics, bool* ok) {
+    TypeEntry* expected_entry = types.get(types.resolve_subst(expected));
+    TypeEntry* actual_entry = types.get(types.resolve_subst(actual));
+    u32 expected_element = expected_entry.kind == TypeKind.Str ? TYPE_U8 : TYPE_UNKNOWN;
+    u32 actual_element = actual_entry.kind == TypeKind.Str ? TYPE_U8 : TYPE_UNKNOWN;
+    if (expected_entry.kind == TypeKind.Pointer || expected_entry.kind == TypeKind.Reference) {
+        expected_element = expected_entry.inner;
+    }
+    if (actual_entry.kind == TypeKind.Pointer || actual_entry.kind == TypeKind.Reference
+        || actual_entry.kind == TypeKind.Array) {
+        actual_element = actual_entry.inner;
+    }
+    if ((expected_element == TYPE_CHAR && type_is_byte_like(actual_element))
+        || (actual_element == TYPE_CHAR && type_is_byte_like(expected_element))) {
+        diagnostics.error(span, pointer_argument_type_mismatch(
+            types.type_name(expected), types.type_name(actual)));
+        *ok = false;
+    }
 }
 
 bool expr_is_literal(AstPool* pool, u32 expr_id) {
@@ -1297,6 +1321,11 @@ bool typecheck_method_argument_score(AstPool* pool, TypeTable* types,
         *score = *score + 2;
         return true;
     }
+    if (expected_entry.kind == TypeKind.Reference && !expected_entry.is_mut
+        && types_match(types, expected_entry.inner, actual)) {
+        *score = *score + 1;
+        return true;
+    }
     if (typecheck_slice_argument_coercion(types, expected, actual)) {
         *score = *score + 1;
         return true;
@@ -1343,46 +1372,64 @@ bool typecheck_method_has_overloads(SyntaxNode* method_name_node,
     while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
         block = block.parent;
     }
-    SyntaxNode* member = block == (SyntaxNode*)0
-        ? (SyntaxNode*)0 : block.first_child;
-    while (member != (SyntaxNode*)0 && method_count < 2) {
-        if (member.kind == NodeKind.Token
-            && member.token_kind == TokenKind.Semicolon) {
-            member = member.next_sibling;
+    SyntaxNode* implementation = block == (SyntaxNode*)0 ? (SyntaxNode*)0 : block.parent;
+    SyntaxNode* owner = implementation == (SyntaxNode*)0 ? (SyntaxNode*)0
+        : impl_target_identifier(implementation);
+    SyntaxNode* root = implementation == (SyntaxNode*)0 ? (SyntaxNode*)0 : implementation.parent;
+    SyntaxNode* item = root == (SyntaxNode*)0 ? (SyntaxNode*)0 : root.first_child;
+    while (item != (SyntaxNode*)0 && method_count < 2) {
+        SyntaxNode* target = item.kind == NodeKind.Impl ? impl_target_identifier(item) : (SyntaxNode*)0;
+        if (owner == (SyntaxNode*)0 || target == (SyntaxNode*)0
+            || strcmp(owner.text, target.text) != 0) {
+            item = item.next_sibling;
             continue;
         }
-        SyntaxNode* name = (SyntaxNode*)0;
-        SyntaxNode* params_node = (SyntaxNode*)0;
-        SyntaxNode* body = (SyntaxNode*)0;
-        SyntaxNode* scan = member;
-        while (scan != (SyntaxNode*)0) {
-            if (scan.kind == NodeKind.Token
-                && scan.token_kind == TokenKind.Semicolon) { break; }
-            if (scan.kind == NodeKind.Block) { body = scan; break; }
-            if (scan.kind == NodeKind.Parenthesized) {
-                params_node = scan;
-                if (scan.next_sibling != (SyntaxNode*)0
-                    && scan.next_sibling.kind == NodeKind.Block) {
-                    body = scan.next_sibling;
-                    break;
+        block = item.first_child;
+        while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+            block = block.next_sibling;
+        }
+        SyntaxNode* member = block == (SyntaxNode*)0
+            ? (SyntaxNode*)0 : block.first_child;
+        while (member != (SyntaxNode*)0 && method_count < 2) {
+            if (member.kind == NodeKind.Token
+                && member.token_kind == TokenKind.Semicolon) {
+                member = member.next_sibling;
+                continue;
+            }
+            SyntaxNode* name = (SyntaxNode*)0;
+            SyntaxNode* params_node = (SyntaxNode*)0;
+            SyntaxNode* body = (SyntaxNode*)0;
+            SyntaxNode* scan = member;
+            while (scan != (SyntaxNode*)0) {
+                if (scan.kind == NodeKind.Token
+                    && scan.token_kind == TokenKind.Semicolon) { break; }
+                if (scan.kind == NodeKind.Block) { body = scan; break; }
+                if (scan.kind == NodeKind.Parenthesized) {
+                    params_node = scan;
+                    if (scan.next_sibling != (SyntaxNode*)0
+                        && scan.next_sibling.kind == NodeKind.Block) {
+                        body = scan.next_sibling;
+                        break;
+                    }
                 }
+                if (scan.kind == NodeKind.Token
+                    && scan.token_kind == TokenKind.Identifier) {
+                    name = scan;
+                }
+                scan = scan.next_sibling;
             }
-            if (scan.kind == NodeKind.Token
-                && scan.token_kind == TokenKind.Identifier) {
-                name = scan;
+            name = item_method_name(member, params_node);
+            if (body != (SyntaxNode*)0 && params_node != (SyntaxNode*)0
+                && name != (SyntaxNode*)0
+                && strcmp(name.text, method_name) == 0) {
+                method_count += 1;
             }
-            scan = scan.next_sibling;
+            member = body != (SyntaxNode*)0 ? body.next_sibling
+                : (scan != (SyntaxNode*)0 && scan.kind == NodeKind.Token
+                   && scan.token_kind == TokenKind.Semicolon
+                   ? scan.next_sibling : scan);
         }
-        name = item_method_name(member, params_node);
-        if (body != (SyntaxNode*)0 && params_node != (SyntaxNode*)0
-            && name != (SyntaxNode*)0
-            && strcmp(name.text, method_name) == 0) {
-            method_count += 1;
-        }
-        member = body != (SyntaxNode*)0 ? body.next_sibling
-            : (scan != (SyntaxNode*)0 && scan.kind == NodeKind.Token
-               && scan.token_kind == TokenKind.Semicolon
-               ? scan.next_sibling : scan);
+        item = item.next_sibling;
     }
     return method_count > 1;
 }
@@ -1399,6 +1446,7 @@ String typecheck_method_symbol(TypeTable* types, str owner_name,
         return move symbol;
     }
 
+    types.push_subst(types.names.intern("Self"), types.parse_type_name(owner_name));
     Vec<Binding> params = Vec<Binding>.new();
     collect_parameter_bindings(params_node, &params);
     String key = String.from_str(owner_name);
@@ -1424,6 +1472,7 @@ String typecheck_method_symbol(TypeTable* types, str owner_name,
     u64 hash = typecheck_fnv1a64(key.to_str());
     key.drop();
     params.drop();
+    types.pop_subst(1);
 
     symbol.push_str("__");
     i64 shift = 60;
@@ -2369,7 +2418,9 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 TypeEntry* parameter_entry = types.get(parameter_type);
                 TypeKind parameter_kind = parameter_entry.kind;
                 u32 arg_id = pool.args.get((i64)expr.inner1 + i);
-                infer_expr(pool, types, symbols, root, env, arg_id, diagnostics, ok);
+                u32 actual_type = infer_expr(pool, types, symbols, root, env, arg_id, diagnostics, ok);
+                typecheck_char_pointer_argument(types, parameter_type, actual_type,
+                    pool.get_expr(arg_id).span, diagnostics, ok);
                 if (parameter_kind != TypeKind.Pointer
                     && parameter_kind != TypeKind.Reference
                     && pool.get_expr(arg_id).kind != ExprKind.Move) {
@@ -2451,6 +2502,8 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                             : typecheck_parameter_type_id(types, param);
                         u32 arg_expr_id = pool.args.get((i64)expr.inner1 + i);
                         u32 actual_arg_type = infer_expr(pool, types, symbols, root, env, arg_expr_id, diagnostics, ok);
+                        typecheck_char_pointer_argument(types, expected_arg_type, actual_arg_type,
+                            pool.get_expr(arg_expr_id).span, diagnostics, ok);
                         TypeEntry* expected_entry = types.get(expected_arg_type);
                         if (expected_entry.kind != TypeKind.Pointer
                             && expected_entry.kind != TypeKind.Reference
@@ -2657,6 +2710,8 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                     pool, root, types, receiver_type, method_name, total_param_count,
                     expr.inner1, static_method, parameter_index, (bool*)0);
                 u32 arg_type = pool.get_expr(arg_id).inferred_type;
+                typecheck_char_pointer_argument(types, expected_arg_type, arg_type,
+                    pool.get_expr(arg_id).span, diagnostics, ok);
                 AstExpr* argument = pool.get_expr(arg_id);
                 TypeEntry* expected_entry = types.get(types.resolve_subst(expected_arg_type));
                 if (argument.kind == ExprKind.ArrayLit
@@ -3230,6 +3285,10 @@ void typecheck_generic_call_drop_ownership(
     Vec<u32> stmt_ids = Vec<u32>.new();
     lowerer.lower_block(body, &stmt_ids);
     if (lowerer.unsupported) {
+        if (lowerer.macro_error.len() > 0) {
+            diagnostics.error(lowerer.macro_error_span, move lowerer.macro_error);
+            *ok = false;
+        }
         stmt_ids.drop();
         return;
     }
@@ -3249,7 +3308,8 @@ void typecheck_generic_call_drop_ownership(
     while (i < probe_diagnostics.len()) {
         Diagnostic* diagnostic = probe_diagnostics.get(i);
         if (diagnostic.severity == Severity.Error
-            && typecheck_is_drop_ancestor_error(diagnostic.message.to_str())) {
+            && (typecheck_is_drop_ancestor_error(diagnostic.message.to_str())
+                || typecheck_str_starts_with(diagnostic.message.to_str(), "pointer argument type mismatch:"))) {
             diagnostics.error(diagnostic.span, diagnostic.message.clone());
             *ok = false;
         }
@@ -3294,6 +3354,10 @@ void typecheck_function_statements_scoped(AstPool* pool, TypeTable* types, Symbo
         if (unsupported_out != (bool*)0) {
             *unsupported_out = true;
         }
+        if (lowerer.macro_error.len() > 0) {
+            diagnostics.error(lowerer.macro_error_span, move lowerer.macro_error);
+            *ok = false;
+        }
         stmt_ids.drop();
         return;
     }
@@ -3331,6 +3395,8 @@ bool typecheck_expressions_scoped(AstPool* pool, SymbolTable* symbols, SyntaxTre
                         str diagnostic_text = diagnostic.message.to_str();
                         if (typecheck_str_starts_with(diagnostic_text,
                                                      "call to overloaded function '")
+                            || typecheck_str_starts_with(diagnostic_text, "macro '@")
+                            || typecheck_str_starts_with(diagnostic_text, "pointer argument type mismatch:")
                             || typecheck_str_starts_with(diagnostic_text, "unwrap-or ")
                             || typecheck_str_starts_with(diagnostic_text, "generic method ")
                             || typecheck_str_starts_with(diagnostic_text, "cannot move '")

@@ -60,7 +60,7 @@ silver/
 │   ├── rt/                      # Pure-Silver runtime: GC heap, type system, casts, method dispatch
 │   └── ops.ag                   # Core arithmetic and index operator overloading traits
 ├── examples/                    # Silver example applications (.ag files)
-├── tests/                       # Test suite including integration tests
+├── tests/                       # Standard-library behavior suite
 └── scripts/                     # Packaging and release scripts
 ```
 > **External Dependency**: Parsing engine libraries (`elise-core`, `elise-lex`, `elise-parse`, `elise-grammar`) are maintained in the standalone repository [**CierCier/elise**](https://github.com/CierCier/elise).
@@ -75,9 +75,9 @@ silver/
    ```bash
    cargo build -p agc
    ```
-2. **Run the Test Suite**:
+2. **Run the Stdlib Suite**:
    ```bash
-   cargo test -p agc
+   python3 tests/run_tests.py --no-tui --jobs 4
    ```
 3. **Compile a Silver file**:
    ```bash
@@ -115,9 +115,8 @@ do not apply target cfg. Neither checks nor dumps prove that a program can be
 compiled or linked for that target. Stage0's cross-target implementations are
 separate and unchanged.
 
-The [native target regression](../tests/selfhost/check_native_target.py)
-exercises this contract through compiler commands. The option audit below
-describes the other native driver boundaries.
+The [native driver](../bin/agc/src/native_backend.ag) implements this contract.
+The option audit below describes the other native driver boundaries.
 
 ### Native options
 
@@ -132,7 +131,7 @@ implements. An accepted spelling alone does not establish behavior.
 | `--help`, `-h`, `--version`, `-V` | Print the stage1 help/version and exit. |
 | `build`/`b`, `run`/`r`, direct source paths | Build native code; `run` executes the result. Use the command form rather than hidden `--run`. |
 | `check`/`c`, `lex`, `parse`, `ast` | Local frontend commands. `check` has partial typed checking; syntax acceptance is not a complete semantic guarantee. |
-| `--manifest PATH`, `--bin NAME`, `--lib NAME` | Select supported package/workspace targets. Git dependencies remain unsupported. See the [workspace gate](../tests/selfhost/check_workspace.py). |
+| `--manifest PATH`, `--bin NAME`, `--lib NAME` | Select supported package/workspace targets. Git dependencies remain unsupported. See the [workspace implementation](../bin/agc/src/workspace.ag). |
 | `-o FILE`, `--output FILE`, `--output=FILE` | Select the output path. |
 | `--emit=exe` or no emit option | Produce an executable. |
 | `--emit=object` or `--emit object` | Produce an ELF relocatable object. The advertised `--emit=obj` and `-c` currently produce executables instead. |
@@ -144,11 +143,11 @@ implements. An accepted spelling alone does not establish behavior.
 | `-O`, `-O LEVEL`, `-O1`/`2`/`3`/`s`/`z`/`fast`, `--opt-level LEVEL`, `--opt-level=LEVEL` | Native builds apply the stage0 IR pass sequence and select the corresponding target-machine codegen level. Bare `-O` means level 2. Nonzero levels select release cfg and prune debug assertions; `-O0` retains debug cfg and skips the IR pass sequence. Invalid levels fail before source compilation. Size and `fast` spellings currently follow stage0's limited pass mapping, not full LLVM size pipelines or fast-math semantics. |
 | `-g`, `--debug-info`, `-g0`, `--g0` | Accepted without native DWARF generation or suppression. The debug cfg flag controls assertions, not DWARF. |
 | `--leak-check` | Accepted without enabling native allocator instrumentation. The generated `__silver_leak_check_enabled` global remains false. |
-| `-L DIR`/`-LDIR`, `-l LIB`/`-lLIB`, `--static` | Forward native library/search/static-link inputs. Long `--library-path`, `--lib-path`, and `--library` spellings are accepted but not forwarded. See the [link contract gate](../tests/selfhost/check_native_link_contract.py). |
+| `-L DIR`/`-LDIR`, `-l LIB`/`-lLIB`, `--static` | Forward native library/search/static-link inputs. Long `--library-path`, `--lib-path`, and `--library` spellings are accepted but not forwarded. |
 | `-Wall`, `-Wextra`, `-Wunused`, `-Wunreachable-code`, `-Werror`, their implemented `-Wno-*` forms | Configure the selected entry-file lints. The [lint configuration](../libs/agc/src/frontend/lint.ag) enumerates the supported spellings; unknown warnings and long `--warning` forms have no effect. |
 | `-j N`, `--jobs N` | Require a positive worker count and bound native module workers. |
 | `--no-cache`, `-nc`, `--cache-dir DIR` | Bypass native object caching or select its directory. Dependency-local invalidation and full artifact reproducibility remain open. |
-| `cache info`/`prune`/`clean`, `clean`, `--clean`, `--clean-cache`, `--cache-info`, `--cache-prune` | Inspect or remove native object cache entries; not package initialization. See the [cache gate](../tests/selfhost/check_native_cache.py). |
+| `cache info`/`prune`/`clean`, `clean`, `--clean`, `--clean-cache`, `--cache-info`, `--cache-prune` | Inspect or remove native object cache entries; not package initialization. |
 | `--progress`, `--no-progress`, `-v`/`--verbose`, `--profile` | Control build progress, details, and phase profiling. |
 | `--run-arg ARG`, program arguments after `--` | Forward program arguments for `run`. They do not select compiler target cfg. |
 | `--static-runtime` | Accepted for the existing static Silver runtime; it does not select a second runtime implementation. |
@@ -178,9 +177,8 @@ tracks ownership and cleanup proof. Passing fixtures with an ignored leak flag
 does not establish allocator leak freedom. Neither C01 documentation nor
 parser acceptance closes those correctness gates.
 
-The [native optimization gate](../tests/selfhost/check_native_optimization.py)
-checks actual IR simplification and executable behavior, including option
-spellings, package/object/module builds, cache separation, and forwarded arguments.
+The [native optimization implementation](../libs/agc/src/backend/llvm/optimization.ag)
+applies LLVM IR passes before object emission.
 With no optimization flag, native builds retain the existing default machine
 codegen level without running IR optimization. This does not establish binary
 size or performance parity with stage0; reachability and artifact work remain
@@ -352,7 +350,6 @@ The compiler emits a link-time-resolved symbol table for every function with a b
 - `linkonce_odr` dedups the table when .agm library objects are linked into a consumer — the application's own copy (first in link order) wins, so its addresses match the final binary.
 - `std/rt/backtrace.ag` walks the rbp chain (inline asm reads rbp), resolves each return address to the entry with the largest `addr <= ret_addr`, and prints `#N  <name> (0x...)` to stderr. `abort()` (in `std/mem/memory.ag`) and `__silver_assert_failed` print the trace before dying.
 - **Exact source lines and argument values** come from a compiler post-pass: after emitting the object, `bootstrap/stage0/agc/src/codegen/dwarf_bt.rs` parses the object's ELF + DWARF (`.symtab`, `.debug_line` v4/v5, `.debug_info`/`.debug_abbrev`/`.debug_str` — including relocations) and folds the results into alloc'd, link-time-resolved tables: `__silver_bt_lines` ({fn start, offset, line, file} per line transition) and `__silver_bt_args` ({fn start, count, args} where each arg = {name, rbp-relative fbreg, size}; the DWARF frame base is rbp, so the slot is `rbp + fbreg`). The object is then re-emitted with the tables. Frames print the call-site line (`level3 at probe.ag:4` — the assert's line) and `args: x=42`. Without DWARF (`-O1+`, `-g0`) the tables are empty and the trace falls back to declaration lines, no args.
-- Integration test: `tests/backtrace_test.ag` (exit 134 + the harness greps stderr for the resolved `level1`/`level2`/`level3`/`main` names and `args: x=`).
 
 ## 7.3 Leak-Check Allocation Origins
 
@@ -366,9 +363,17 @@ leak-check: leak ptr=0x... size=64 allocated at create_user (test.ag:15)
 
 ## 8. Testing Expectations
 
-### Writing Tests
-- All language features should be tested using both unit tests in `bootstrap/stage0/agc/src/` (e.g. mock AST tests in `typeck.rs`, `monomorph.rs`) and integration test scripts in `tests/`.
-- The suite at `tests/memory_pentest.ag` acts as the definitive regression suite for verifying RAII, move semantics, nested scopes, loop breaks/continues, and early returns. Any modifications to compiler pass structures must verify cleanly against this suite.
+### Standard-library contracts
+
+The test suite is limited to stdlib behavior and at most 124 runnable programs.
+Extend a module's existing test to check values, failure paths, and resource
+cleanup. The library and compiler builds exercise language features; dedicated
+compiler unit, parity, and self-host suites are retired.
+
+Build the bootstrap workspace, build the Silver compiler and language server,
+then run the stdlib suite with stage0 and native stage1. Container ownership is
+exercised by `tests/box_test.ag` and `tests/collection_drop_glue_test.ag`.
+See [the test guide](../tests/README.md) for commands and platform skips.
 
 ---
 
@@ -404,14 +409,14 @@ When introducing a new syntax item or language capability, follow this checklist
    - Add code generation logic translating the AST nodes to LLVM instructions.
    - Setup debug info lines, stack allocations, drop flags, and defer stack scopes if needed.
 9. **Tests**:
-   - Add unit tests verifying compiler behavior under `bootstrap/stage0/agc/src/`.
-   - Add integration files in `tests/` to run final compilation and execute the generated binary.
+   - Exercise the feature through an appropriate stdlib API and extend its existing fixture.
+   - Build the compiler tools and run the stdlib suite with both compilers.
 
 ---
 
 ## 11. Things Never To Do
 
 - **DO NOT** mix compilation phases. Do not perform type checking or code generation directly inside the parser, and do not resolve imports during codegen.
-- **DO NOT** manually drop owned struct fields in a custom destructor. The compiler cascades their drops after the destructor; manual field drops can double-free. Raw-pointer pointees and other non-field resources still need explicit cleanup. See `tests/cascade_drop_test.ag` and `codegen/llvm_ir/scope.rs`.
+- **DO NOT** manually drop owned struct fields in a custom destructor. The compiler cascades their drops after the destructor; manual field drops can double-free. Raw-pointer pointees and other non-field resources still need explicit cleanup. See `tests/collection_drop_glue_test.ag` and `codegen/llvm_ir/scope.rs`.
 - **DO NOT** guess platform layout dimensions. Always use target data classification interfaces provided by System V AMD64 ABI specifications in `codegen/abi.rs`.
 - **DO NOT** modify the runtime (`std/rt/') in a way that breaks compatibility with existing test suite expectations. Always run 'python3 tests/run_tests.py' after changes.

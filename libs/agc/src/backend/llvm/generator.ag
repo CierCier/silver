@@ -28,12 +28,17 @@ bool llvm_item_is_generic_impl(SyntaxNode* impl_item) {
     SyntaxNode* child = impl_item.first_child;
     while (child != (SyntaxNode*)0 && child.kind != NodeKind.Block) {
         if (child.kind == NodeKind.Token
-            && (child.token_kind == TokenKind.Less || strcmp(child.text, "<") == 0)) {
-            return true;
+            && child.token_kind == TokenKind.Impl) {
+            SyntaxNode* next = child.next_sibling;
+            if (next != (SyntaxNode*)0 && next.token_kind == TokenKind.Less) {
+                return true;
+            }
+            break;
         }
         child = child.next_sibling;
     }
-    return false;
+    SyntaxNode* target = impl_target_identifier(impl_item);
+    return item_method_is_generic(target);
 }
 
 bool llvm_item_is_generic_enum(SyntaxNode* enum_item) {

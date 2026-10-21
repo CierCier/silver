@@ -312,6 +312,10 @@ void mem_mark_multithreaded() {
 /// Core allocation: `size` bytes with at least `align` alignment.
 /// Returns dangling non-null for size <= 0, null on OOM.
 u8* mem_alloc_raw_impl(i64 size, i64 align) {
+    if (align <= 0 || (align & (align - 1)) != 0) { return (u8*)0; }
+    if (size > 9223372036854775807 - MEM_HEADER_SIZE - MEM_PAGE_SIZE - align) {
+        return (u8*)0;
+    }
     if (size <= 0) {
         return mem_dangling(align);
     }
@@ -611,6 +615,8 @@ void __silver_leak_ignore(u8* ptr) {
 // -- Public allocation hooks -------------------------------------------------
 
 u8* __silver_leak_alloc(i64 size, i64 align) {
+    if (align <= 0 || (align & (align - 1)) != 0
+        || size > 9223372036854775807 - align - 16) { return (u8*)0; }
     if (size <= 0) {
         return mem_alloc_raw_impl(size, align);
     }
@@ -618,7 +624,7 @@ u8* __silver_leak_alloc(i64 size, i64 align) {
     i64 raw_size = size + align + 16;
     u8* raw = mem_alloc_raw_impl(raw_size, align);
     if (raw == (u8*)0) {
-        __silver_leak_abort("allocation failed");
+        return (u8*)0;
     }
     i64 user = __leak_align_up((i64)raw + 8, align);
     // Live canary before user data
@@ -658,9 +664,9 @@ u8* __silver_leak_alloc(i64 size, i64 align) {
                 if (idx >= 0) {
                     BtEntry e = __silver_bt_entries[idx];
                     if (e.file != (u8*)0
-                        && strcmp((const char*)e.file, (const char*)"alloc.ag") != 0
-                        && strcmp((const char*)e.name, (const char*)"mem_alloc_impl") != 0
-                        && strcmp((const char*)e.name, "__silver_leak_alloc") != 0) {
+                        && strcmp(e.file, "alloc.ag") != 0
+                        && strcmp(e.name, "mem_alloc_impl") != 0
+                        && strcmp(e.name, "__silver_leak_alloc") != 0) {
                         alloc_caller = ret_addr;
                         break;
                     }
@@ -686,9 +692,9 @@ u8* __silver_leak_alloc(i64 size, i64 align) {
                 if (idx >= 0) {
                     BtEntry e = __silver_bt_entries[idx];
                     if (e.file != (u8*)0
-                        && strcmp((const char*)e.file, (const char*)"alloc.ag") != 0
-                        && strcmp((const char*)e.name, (const char*)"mem_alloc_impl") != 0
-                        && strcmp((const char*)e.name, "__silver_leak_alloc") != 0) {
+                        && strcmp(e.file, "alloc.ag") != 0
+                        && strcmp(e.name, "mem_alloc_impl") != 0
+                        && strcmp(e.name, "__silver_leak_alloc") != 0) {
                         break;
                     }
                 }
@@ -817,6 +823,7 @@ void mem_free_impl(u8* ptr) {
 /// Core realloc. Null/dangling input behaves like a fresh allocation;
 /// new_size <= 0 frees and returns a dangling pointer.
 u8* mem_realloc_impl(u8* ptr, i64 new_size, i64 align) {
+    if (align <= 0 || (align & (align - 1)) != 0) { return (u8*)0; }
     if (__silver_leak_check_enabled) {
         return __silver_leak_realloc(ptr, new_size, align);
     }
@@ -830,14 +837,16 @@ u8* mem_realloc_impl(u8* ptr, i64 new_size, i64 align) {
     }
     i64* header = (i64*)(a - MEM_HEADER_SIZE);
     i64 cap = header[0];
-    if (new_size <= cap) {
+    if (new_size <= cap && a % align == 0) {
         return ptr;
     }
     u8* fresh = mem_alloc_raw_impl(new_size, align);
     if (fresh == (u8*)0) {
         return (u8*)0;
     }
-    silver_rt_memcpy(fresh, ptr, cap);
+    i64 copy_size = cap;
+    if (new_size < copy_size) { copy_size = new_size; }
+    silver_rt_memcpy(fresh, ptr, copy_size);
     mem_free_raw_impl(ptr);
     return fresh;
 }
@@ -855,7 +864,7 @@ u8* silver_rt_alloc_zeroed(i64 size, i64 align) {
     u8* ptr = mem_alloc_impl(size, align);
     if ((i64)ptr >= MEM_MIN_VALID_ADDR) {
         i64* header = (i64*)((i64)ptr - MEM_HEADER_SIZE);
-        if (header[1] >= 0) {
+        if (__silver_leak_check_enabled || header[1] >= 0) {
             // Recycled size-class block: may hold stale data.
             // (Huge blocks are freshly mmap'd and already zeroed.)
             silver_rt_memset(ptr, (u8)0, size);
@@ -891,20 +900,14 @@ void* malloc(i64 size) {
 }
 
 void* calloc(i64 count, i64 size) {
+    if (count < 0 || size < 0) { return (void*)0; }
     if (count > 0) {
         if (size > 9223372036854775807 / count) {
             return (void*)0;
         }
     }
     i64 total = count * size;
-    u8* ptr = mem_alloc_impl(total, 16);
-    if ((i64)ptr >= MEM_MIN_VALID_ADDR) {
-        i64* header = (i64*)((i64)ptr - MEM_HEADER_SIZE);
-        if (header[1] >= 0) {
-            silver_rt_memset(ptr, (u8)0, total);
-        }
-    }
-    return (void*)ptr;
+    return (void*)silver_rt_alloc_zeroed(total, 16);
 }
 
 #[link_name("realloc")]
@@ -930,26 +933,32 @@ void free(void* ptr) {
 // new code — they abort on OOM, matching Rust/Zig safe defaults.
 
 T* try_alloc<T>() {
-    return (T*)(malloc(@size(T)));
+    return (T*)silver_rt_alloc(@size(T), @align(T));
 }
 
 T* try_alloc_n<T>(i64 count) {
-    return (T*)(calloc(count, @size(T)));
+    if (count < 0 || (count > 0 && @size(T) > 9223372036854775807 / count)) {
+        return (T*)0;
+    }
+    return (T*)silver_rt_alloc_zeroed(@size(T) * count, @align(T));
 }
 
 T* try_alloc<T>(i64 count) {
-    return (T*)(calloc(count, @size(T)));
+    return try_alloc_n<T>(count);
 }
 
 T* try_realloc<T>(T* ptr, i64 count) {
-    return (T*)(realloc_bytes(ptr, @size(T) * count));
+    if (count < 0 || (count > 0 && @size(T) > 9223372036854775807 / count)) {
+        return (T*)0;
+    }
+    return (T*)mem_realloc_impl((u8*)ptr, @size(T) * count, @align(T));
 }
 
 // Abort-on-OOM variants (safe default). These call `abort()` from std.mem.memory
 // when allocation fails, providing explicit failure instead of a segfault.
 
 T* alloc<T>() {
-    T* ptr = (T*)(malloc(@size(T)));
+    T* ptr = try_alloc<T>();
     if (ptr == (T*)0) {
         abort();
     }
@@ -957,7 +966,7 @@ T* alloc<T>() {
 }
 
 T* alloc_n<T>(i64 count) {
-    T* ptr = (T*)(calloc(count, @size(T)));
+    T* ptr = try_alloc_n<T>(count);
     if (ptr == (T*)0) {
         abort();
     }
@@ -968,12 +977,10 @@ T* alloc_n<T>(i64 count) {
 /// written before any read (container buffers guarded by len/ctrl bytes).
 /// Aborts on OOM or size overflow, matching `alloc_n`.
 T* alloc_uninit_n<T>(i64 count) {
-    if (count > 0) {
-        if (@size(T) > 9223372036854775807 / count) {
-            abort();
-        }
+    if (count < 0 || (count > 0 && @size(T) > 9223372036854775807 / count)) {
+        abort();
     }
-    T* ptr = (T*)(malloc(@size(T) * count));
+    T* ptr = (T*)silver_rt_alloc(@size(T) * count, @align(T));
     if (ptr == (T*)0) {
         abort();
     }

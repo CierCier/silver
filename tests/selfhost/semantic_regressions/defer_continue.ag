@@ -1,6 +1,0 @@
-i32 main() {
-    defer {
-        while (true) { continue; }
-    }
-    return 0;
-}
