@@ -343,13 +343,56 @@ def main() -> int:
             )
             if read_result.returncode != 0:
                 failures.append(f"stage1 rejected stage0-written AGM: {read_result.stderr}")
+
+        # Trait arguments, implicit parameters and bounds must survive without source.
+        trait_module = directory / "trait_metadata.ag"
+        trait_module.write_text(
+            "trait View<T> { i32 view(&self); }\ntrait Element {}\n"
+            "impl Element for i32 {}\n"
+            "struct Leaf { i32 value; }\n"
+            "impl View<i32> for Leaf { i32 view(&self) { return 7; } }\n"
+            "struct Bag<T> { T value; }\n"
+            "impl<T: Element> View<T> for Bag<T> { i32 view(&self) { return 8; } }\n"
+            "trait Implicit {}\nimpl Implicit for Bag<T> {}\n",
+            encoding="utf-8",
+        )
+        emitted = subprocess.run(
+            [str(stage0), "--no-cache", "--emit=module", str(trait_module),
+             "-o", str(trait_module.with_suffix(".agm"))],
+            cwd=root, capture_output=True, text=True, timeout=60, check=False,
+        )
+        if emitted.returncode != 0:
+            failures.append(f"trait AGM emission failed: {emitted.stderr}")
+        else:
+            trait_module.unlink()
+            for name, owner, bound, accepted in (
+                ("concrete_trait", "Leaf", "View<i32>", True),
+                ("wrong_trait_argument", "Leaf", "View<i64>", False),
+                ("generic_owner", "Bag<i32>", "View<i32>", True),
+                ("wrong_owner_argument", "Bag<i32>", "View<i64>", False),
+                ("unsatisfied_impl_bound", "Bag<f64>", "View<f64>", False),
+                ("implicit_owner", "Bag<i64>", "Implicit", True),
+            ):
+                consumer = directory / f"{name}.ag"
+                consumer.write_text(
+                    f"import trait_metadata;\n"
+                    f"i32 require<C: {bound}>(C value) {{ return 0; }}\n"
+                    f"i32 main() {{ {owner} value; return require(value); }}\n",
+                    encoding="utf-8",
+                )
+                checked = run_check(stage0, root, consumer)
+                if (checked.returncode == 0) != accepted:
+                    failures.append(f"{name}: acceptance mismatch: {checked.stderr}")
+                elif not accepted and "missing impl for bound" not in checked.stderr:
+                    failures.append(f"{name}: wrong diagnostic: {checked.stderr}")
     if failures:
         for failure in failures:
             print(f"artifact check failed: {failure}")
         return 1
     print(
         f"artifact checks passed: {len(SUPPORTED_VERSIONS)} reader versions, "
-        f"{len(bad_cases)} bad inputs, legacy v9 trailer, 3 cross-stage roundtrips"
+        f"{len(bad_cases)} bad inputs, legacy v9 trailer, 3 cross-stage roundtrips, "
+        "6 source-free trait bounds"
     )
     return 0
 

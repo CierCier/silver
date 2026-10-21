@@ -33,6 +33,33 @@ def main() -> int:
                 f"generic free-function runtime failed: rc={executed.returncode}, "
                 f"stdout={executed.stdout!r}, stderr={executed.stderr!r}"
             )
+        for name, source, diagnostic in (
+            (
+                "macro_arity",
+                "macro i32 first(i32 value) { return value; }\n"
+                "i32 invoke<T>(T value) { return @first(0, 1); }\n"
+                "i32 main() { return invoke((i32)0); }\n",
+                "macro '@first' expects 1 argument(s), got 2",
+            ),
+            (
+                "char_pointer",
+                "void put(char* target) { target[0] = (char)0x1f642; }\n"
+                "void forward<T>(T value) { put(value); }\n"
+                "i32 main() { u8 bytes[1] = {0}; forward(&bytes[0]); return 0; }\n",
+                "pointer argument type mismatch: expected char*, found &u8",
+            ),
+        ):
+            rejected_source = pathlib.Path(temporary) / f"{name}.ag"
+            rejected_source.write_text(source, encoding="utf-8")
+            checked = subprocess.run(
+                [str(stage1), "check", str(rejected_source), "--no-cache"],
+                env=env, capture_output=True, text=True, timeout=30, check=False,
+            )
+            if checked.returncode != 2 or diagnostic not in checked.stdout + checked.stderr:
+                raise AssertionError(
+                    f"{name} generic-call diagnostic failed: rc={checked.returncode}\n"
+                    f"{checked.stdout}{checked.stderr}"
+                )
     print("stage1 native structural generic free functions passed")
     return 0
 

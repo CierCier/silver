@@ -1,5 +1,5 @@
 // compile_flags: --no-cache
-// error_contains: no matching overload for 'put_char'
+// error_contains: char
 // A `char` is a 32-bit Unicode scalar, so a `char*` must never alias a byte
 // buffer: storing through one would write four bytes into a one-byte array.
 void put_char(char* target) {

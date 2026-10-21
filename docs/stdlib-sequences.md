@@ -61,12 +61,13 @@ which hashes String and `str` content but hashes other types by representation.
 Content equality alone does not make Vec, Bytes, Slice, or a custom type with
 content equality a valid hash key. Equal keys must produce equal hashes.
 
-Stage0's source trait checker matches owner types, trait arguments, and
-implementation bounds. Imported AGM exports currently retain the trait name
-and owner without its trait arguments, so that metadata path does not provide
-the same argument validation. A generic implementation in an imported module
-is matched by its owner name alone, so a bound on such an owner needs the
-implementation's source to be visible.
+Stage0 matches owner types, trait arguments, and implementation bounds for
+source and imported AGM modules. AGM templates retain complete trait
+implementation declarations, including concrete owners and empty implementations.
+The checker uses these declarations even when the module's source is absent.
+Older artifacts that lack the declaration cannot satisfy a trait bound from
+the method export's trait name alone. Rebuild those modules to retain the
+required metadata.
 
 The runtime regression is [sequence_traits_test.ag](../tests/sequence_traits_test.ag).
 It exercises all four AsSlice implementations, comparison traits, custom

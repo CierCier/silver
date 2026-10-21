@@ -15,6 +15,12 @@ The current v11 file is laid out as:
 7. Export count, then each export in deterministic `(kind byte, name, signature)` ascending order: kind byte (`1` function, `2` struct, `3` enum, `4` trait, `5` constant, `6` global, `7` type alias), name and signature strings, type-parameter count and strings, optional link-name, optional ABI byte (`1` C, `2` Silver, `3` system, `4` Rust, `5` cdecl, `6` stdcall, `7` fastcall), variadic boolean, optional canonical type key, fields (count then name/type-key strings and tag maps), optional layout (size and alignment optional `u64`s, then packed boolean), optional enum backing type, variants (name, signed 128-bit little-endian value, payload type strings, payload fields), trait items (name/signature pairs), optional constant value, mutable boolean, and optional implementation-trait string.
 8. Native-library count and strings; native-library-path count and strings; generic-template count and strings.
 
+Stage0 stores source declarations in the template section for generic items and
+all trait implementations. Complete implementation declarations preserve trait
+arguments, owner parameters, and bounds, including implementations with no methods.
+Bound checking uses these templates rather than inferring an implementation from
+the optional trait name on a method export.
+
 For older supported versions the decoder uses explicit per-version gates, not numeric ranges: v2 has no field tags, packed bit, constants/globals, library paths, or generic templates; v6 adds field tags; v7 adds library paths; v8 adds constant/global data; v9 adds no new record fields; v10 adds the packed-layout bit; v11 adds implementation-trait provenance and generic templates. Unsupported versions are rejected.
 
 Stage0's v9 reader accepts a legacy four-byte all-zero trailer present in the

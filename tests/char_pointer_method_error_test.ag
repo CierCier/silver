@@ -1,0 +1,13 @@
+// compile_flags: --no-cache
+// error_contains: char
+struct Writer { i32 unused; }
+impl Writer {
+    void put(&self, char* target) { target[0] = (char)0x1f642; }
+}
+
+i32 main() {
+    Writer writer;
+    u8 bytes[1] = {0};
+    writer.put(&bytes[0]);
+    return 0;
+}

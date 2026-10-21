@@ -211,7 +211,9 @@ impl ModuleArtifact {
             let is_generic = match &item.kind {
                 ast::ItemKind::Function(func) => func.generics.is_some(),
                 ast::ItemKind::Impl(impl_item) => {
-                    impl_item.generics.is_some() || is_type_or_named_generic(&impl_item.self_type)
+                    impl_item.trait_ref.is_some()
+                        || impl_item.generics.is_some()
+                        || is_type_or_named_generic(&impl_item.self_type)
                 }
                 ast::ItemKind::Struct(s) => s.generics.is_some(),
                 ast::ItemKind::Enum(e) => e.generics.is_some(),

@@ -269,6 +269,27 @@ bool typecheck_call_argument_matches(TypeTable* types, u32 expected, u32 actual,
         || typecheck_slice_argument_coercion(types, expected, actual);
 }
 
+void typecheck_char_pointer_argument(TypeTable* types, u32 expected, u32 actual,
+                                     Span span, DiagnosticBag* diagnostics, bool* ok) {
+    TypeEntry* expected_entry = types.get(types.resolve_subst(expected));
+    TypeEntry* actual_entry = types.get(types.resolve_subst(actual));
+    u32 expected_element = expected_entry.kind == TypeKind.Str ? TYPE_U8 : TYPE_UNKNOWN;
+    u32 actual_element = actual_entry.kind == TypeKind.Str ? TYPE_U8 : TYPE_UNKNOWN;
+    if (expected_entry.kind == TypeKind.Pointer || expected_entry.kind == TypeKind.Reference) {
+        expected_element = expected_entry.inner;
+    }
+    if (actual_entry.kind == TypeKind.Pointer || actual_entry.kind == TypeKind.Reference
+        || actual_entry.kind == TypeKind.Array) {
+        actual_element = actual_entry.inner;
+    }
+    if ((expected_element == TYPE_CHAR && type_is_byte_like(actual_element))
+        || (actual_element == TYPE_CHAR && type_is_byte_like(expected_element))) {
+        diagnostics.error(span, pointer_argument_type_mismatch(
+            types.type_name(expected), types.type_name(actual)));
+        *ok = false;
+    }
+}
+
 bool expr_is_literal(AstPool* pool, u32 expr_id) {
     if (expr_id == 0) {
         return false;
@@ -2397,7 +2418,9 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 TypeEntry* parameter_entry = types.get(parameter_type);
                 TypeKind parameter_kind = parameter_entry.kind;
                 u32 arg_id = pool.args.get((i64)expr.inner1 + i);
-                infer_expr(pool, types, symbols, root, env, arg_id, diagnostics, ok);
+                u32 actual_type = infer_expr(pool, types, symbols, root, env, arg_id, diagnostics, ok);
+                typecheck_char_pointer_argument(types, parameter_type, actual_type,
+                    pool.get_expr(arg_id).span, diagnostics, ok);
                 if (parameter_kind != TypeKind.Pointer
                     && parameter_kind != TypeKind.Reference
                     && pool.get_expr(arg_id).kind != ExprKind.Move) {
@@ -2479,6 +2502,8 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                             : typecheck_parameter_type_id(types, param);
                         u32 arg_expr_id = pool.args.get((i64)expr.inner1 + i);
                         u32 actual_arg_type = infer_expr(pool, types, symbols, root, env, arg_expr_id, diagnostics, ok);
+                        typecheck_char_pointer_argument(types, expected_arg_type, actual_arg_type,
+                            pool.get_expr(arg_expr_id).span, diagnostics, ok);
                         TypeEntry* expected_entry = types.get(expected_arg_type);
                         if (expected_entry.kind != TypeKind.Pointer
                             && expected_entry.kind != TypeKind.Reference
@@ -2685,6 +2710,8 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                     pool, root, types, receiver_type, method_name, total_param_count,
                     expr.inner1, static_method, parameter_index, (bool*)0);
                 u32 arg_type = pool.get_expr(arg_id).inferred_type;
+                typecheck_char_pointer_argument(types, expected_arg_type, arg_type,
+                    pool.get_expr(arg_id).span, diagnostics, ok);
                 AstExpr* argument = pool.get_expr(arg_id);
                 TypeEntry* expected_entry = types.get(types.resolve_subst(expected_arg_type));
                 if (argument.kind == ExprKind.ArrayLit
@@ -3258,6 +3285,10 @@ void typecheck_generic_call_drop_ownership(
     Vec<u32> stmt_ids = Vec<u32>.new();
     lowerer.lower_block(body, &stmt_ids);
     if (lowerer.unsupported) {
+        if (lowerer.macro_error.len() > 0) {
+            diagnostics.error(lowerer.macro_error_span, move lowerer.macro_error);
+            *ok = false;
+        }
         stmt_ids.drop();
         return;
     }
@@ -3277,7 +3308,8 @@ void typecheck_generic_call_drop_ownership(
     while (i < probe_diagnostics.len()) {
         Diagnostic* diagnostic = probe_diagnostics.get(i);
         if (diagnostic.severity == Severity.Error
-            && typecheck_is_drop_ancestor_error(diagnostic.message.to_str())) {
+            && (typecheck_is_drop_ancestor_error(diagnostic.message.to_str())
+                || typecheck_str_starts_with(diagnostic.message.to_str(), "pointer argument type mismatch:"))) {
             diagnostics.error(diagnostic.span, diagnostic.message.clone());
             *ok = false;
         }
@@ -3364,6 +3396,7 @@ bool typecheck_expressions_scoped(AstPool* pool, SymbolTable* symbols, SyntaxTre
                         if (typecheck_str_starts_with(diagnostic_text,
                                                      "call to overloaded function '")
                             || typecheck_str_starts_with(diagnostic_text, "macro '@")
+                            || typecheck_str_starts_with(diagnostic_text, "pointer argument type mismatch:")
                             || typecheck_str_starts_with(diagnostic_text, "unwrap-or ")
                             || typecheck_str_starts_with(diagnostic_text, "generic method ")
                             || typecheck_str_starts_with(diagnostic_text, "cannot move '")

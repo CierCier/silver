@@ -32,6 +32,18 @@ i32 main() {
     assert_true(empty != (i64*)0, "empty allocations retain dangling convention");
     free(empty);
 
+    i64* uninitialized = alloc_uninit_n<i64>(3);
+    uninitialized[0] = 123;
+    uninitialized[1] = 456;
+    uninitialized[2] = 789;
+    assert_true(uninitialized[0] == 123 && uninitialized[1] == 456
+        && uninitialized[2] == 789, "uninitialized allocation holds written elements");
+    assert_true((i64)uninitialized % @align(i64) == 0, "uninitialized allocation is aligned");
+    free(uninitialized);
+    i64* empty_uninitialized = alloc_uninit_n<i64>(0);
+    assert_true(empty_uninitialized != (i64*)0, "empty uninitialized allocation is non-null");
+    free(empty_uninitialized);
+
     u8* raw = silver_rt_alloc(32, 16);
     raw[0] = 77;
     u8* aligned = silver_rt_realloc(raw, 32, 16, 4096);

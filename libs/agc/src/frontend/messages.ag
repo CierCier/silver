@@ -93,6 +93,10 @@ String type_mismatch(str expected, str found) {
     return move s;
 }
 
+String pointer_argument_type_mismatch(str expected, str found) {
+    return @format("pointer argument type mismatch: expected {}, found {}", expected, found);
+}
+
 str generic_method_inference_failed() {
     return "generic method arguments cannot be inferred from the call";
 }

@@ -342,7 +342,9 @@ impl Analyzer {
             }
             ast::ItemKind::Impl(impl_item) => {
                 let mut implicit = HashSet::default();
-                if impl_item.generics.is_none() {
+                if !impl_item.generics.as_ref().is_some_and(|generics| {
+                    generics.params.iter().any(|param| matches!(param, ast::GenericParam::Type(_)))
+                }) {
                     self.collect_implicit_type_params(&impl_item.self_type, &mut implicit);
                 }
                 self.push_type_params(impl_item.generics.as_ref());

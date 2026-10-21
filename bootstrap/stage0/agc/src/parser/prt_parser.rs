@@ -4672,7 +4672,9 @@ impl PRT_Parser {
         // type). Global registrations from other files must not steal these
         // names — generic parameters shadow global types inside the impl.
         let mut implicit_type_params = Vec::new();
-        if generics.is_none() {
+        if !generics.as_ref().is_some_and(|generics| {
+            generics.params.iter().any(|param| matches!(param, ast::GenericParam::Type(_)))
+        }) {
             Self::collect_file_local_type_params(
                 &self_type,
                 &self.declared_type_names,

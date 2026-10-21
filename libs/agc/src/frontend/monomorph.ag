@@ -754,8 +754,20 @@ bool mono_unify_trait_argument(TypeTable* types, u32 impl_arg, u32 required_arg,
         return mono_record_binding(impl_entry.name_id, required_arg, names, values);
     }
     if (impl_entry.kind != required_entry.kind) { return false; }
-    if (impl_entry.kind != TypeKind.Named) { return impl_arg == required_arg; }
-    if (impl_entry.name_id != required_entry.name_id) { return false; }
+    if (impl_entry.kind == TypeKind.Pointer || impl_entry.kind == TypeKind.Reference) {
+        return impl_entry.is_mut == required_entry.is_mut
+            && mono_unify_trait_argument(types, impl_entry.inner, required_entry.inner,
+                                         declared, names, values);
+    }
+    if (impl_entry.kind == TypeKind.Array || impl_entry.kind == TypeKind.Slice) {
+        return impl_entry.count == required_entry.count
+            && mono_unify_trait_argument(types, impl_entry.inner, required_entry.inner,
+                                         declared, names, values);
+    }
+    if (impl_entry.kind != TypeKind.Named && impl_entry.kind != TypeKind.Tuple) {
+        return impl_arg == required_arg;
+    }
+    if (impl_entry.kind == TypeKind.Named && impl_entry.name_id != required_entry.name_id) { return false; }
     if (impl_entry.count != required_entry.count) { return false; }
     i64 i = 0;
     while (i < impl_entry.count) {
@@ -849,6 +861,9 @@ bool mono_impl_matches(SyntaxNode* root, TypeTable* types, SyntaxNode* item,
                        u32 required_trait, u32 depth) {
     Vec<u32> declared = Vec<u32>.new();
     mono_impl_type_parameters(item, types, &declared);
+    if (declared.len() == 0) {
+        mono_collect_struct_parameters(root, target.text, types, &declared);
+    }
     Vec<u32> names = Vec<u32>.new();
     Vec<u32> values = Vec<u32>.new();
     bool matched = mono_bind_owner_arguments(types, target, owner_type,

@@ -305,7 +305,8 @@ impl TraitRegistry {
                 });
             }
 
-            let impl_generics = impl_generic_names(&impl_item.generics);
+            let mut impl_generics = impl_generic_names(&impl_item.generics);
+            impl_generics.extend(impl_item.implicit_type_params.iter().cloned());
             validate_impl_bounds(
                 &self.trait_names,
                 &impl_item.generics,

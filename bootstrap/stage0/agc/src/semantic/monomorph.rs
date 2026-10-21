@@ -931,7 +931,9 @@ fn collect_item_instantiations(
         }
         ast::ItemKind::Impl(impl_item) => {
             push_type_params(scopes, impl_item.generics.as_ref());
-            if impl_item.generics.is_none() {
+            if !impl_item.generics.as_ref().is_some_and(|generics| {
+                generics.params.iter().any(|param| matches!(param, ast::GenericParam::Type(_)))
+            }) {
                 let mut implicit = HashSet::default();
                 collect_implicit_type_params(&impl_item.self_type, &mut implicit);
                 if let Some(scope) = scopes.last_mut() {

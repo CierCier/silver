@@ -46,7 +46,6 @@ pub struct TypeChecker {
     functions: HashMap<String, Vec<SymbolId>>,
     /// Default type arguments for local aggregate definitions.
     generic_defaults: HashMap<String, Vec<Option<ast::Type>>>,
-    imported_trait_impls: HashMap<String, HashSet<String>>,
     source_trait_impls: HashMap<String, Vec<TraitImpl>>,
     /// Base type names that implement Drop (from `impl Drop<X>` — including
     /// generic impls like `impl<T> Drop<Vec<T>>`), used to require explicit
@@ -522,13 +521,6 @@ impl TypeChecker {
                                 .entry((owner_key, method_name.to_string()))
                                 .or_default()
                                 .push(symbol_id);
-                            // Artifact exports retain the trait name and concrete owner.
-                            if let Some(trait_name) = &export.impl_trait {
-                                self.imported_trait_impls
-                                    .entry(trait_name.clone())
-                                    .or_default()
-                                    .insert(owner_ty.canonical_key());
-                            }
                         }
                     }
                 }
@@ -783,54 +775,62 @@ impl TypeChecker {
             let ast::ItemKind::Impl(impl_item) = &item.kind else {
                 continue;
             };
-            let Some(trait_ref) = &impl_item.trait_ref else {
-                continue;
-            };
-            let name = trait_ref
-                .path
-                .last()
-                .map(|id| id.name.clone())
-                .unwrap_or_default();
-            if name.is_empty() {
-                continue;
-            }
-            let self_ty = Type::from_ast(&impl_item.self_type);
-            let params = if let Some(generics) = &impl_item.generics {
-                generics
-                    .params
-                    .iter()
-                    .filter_map(|param| match param {
-                        ast::GenericParam::Type(param) => Some(param.name.name.clone()),
-                        _ => None,
-                    })
-                    .collect()
-            } else {
-                impl_item.implicit_type_params.clone()
-            };
-            let implementation = TraitImpl {
-                owner: self_ty,
-                params,
-                args: trait_ref
-                    .generics
-                    .as_deref()
-                    .unwrap_or_default()
-                    .iter()
-                    .map(Type::from_ast)
-                    .collect(),
-                bounds: self.collect_bounds(impl_item.generics.as_ref()),
-            };
-            self.source_trait_impls
-                .entry(name.clone())
-                .or_default()
-                .push(implementation);
-            // Record the Drop-owner base name for ANY Drop impl (generic
-            // templates included): Vec<String> must count even though
-            // `impl<T> Drop<Vec<T>>` has a non-concrete self type.
-            if name == "Drop"
-                && let ast::TypeKind::Named(named) = impl_item.self_type.kind.as_ref()
-            {
-                self.drop_owner_bases.insert(named.path[0].name.clone());
-            }
+            self.collect_trait_impl(impl_item);
+        }
+    }
+
+    fn collect_trait_impl(&mut self, impl_item: &ast::ImplItem) {
+        let Some(trait_ref) = &impl_item.trait_ref else {
+            return;
+        };
+        let name = trait_ref
+            .path
+            .last()
+            .map(|id| id.name.clone())
+            .unwrap_or_default();
+        if name.is_empty() {
+            return;
+        }
+        let self_ty = Type::from_ast(&impl_item.self_type);
+        let params = Self::impl_type_parameters(impl_item);
+        let implementation = TraitImpl {
+            owner: self_ty,
+            params,
+            args: trait_ref
+                .generics
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(Type::from_ast)
+                .collect(),
+            bounds: self.collect_bounds(impl_item.generics.as_ref()),
+        };
+        self.source_trait_impls
+            .entry(name.clone())
+            .or_default()
+            .push(implementation);
+        // Record the Drop-owner base name for generic templates too.
+        if name == "Drop"
+            && let ast::TypeKind::Named(named) = impl_item.self_type.kind.as_ref()
+        {
+            self.drop_owner_bases.insert(named.path[0].name.clone());
+        }
+    }
+
+    fn impl_type_parameters(impl_item: &ast::ImplItem) -> Vec<String> {
+        let explicit = impl_item
+            .generics
+            .iter()
+            .flat_map(|generics| &generics.params)
+            .filter_map(|param| match param {
+                ast::GenericParam::Type(param) => Some(param.name.name.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if explicit.is_empty() {
+            impl_item.implicit_type_params.clone()
+        } else {
+            explicit
         }
     }
 
@@ -5711,13 +5711,6 @@ impl TypeChecker {
         if depth >= MAX_TYPE_CHECK_DEPTH {
             return false;
         }
-        if self
-            .imported_trait_impls
-            .get(trait_name)
-            .is_some_and(|impls| impls.contains(&ty.canonical_key()))
-        {
-            return true;
-        }
         self.source_trait_impls
             .get(trait_name)
             .is_some_and(|implementations| {
@@ -6879,6 +6872,7 @@ impl TypeChecker {
                 all_impls.push(impl_item.clone());
             }
         }
+        let local_impl_count = all_impls.len();
         for module in &self.imported_modules {
             for template_src in &module.generic_templates {
                 let file_id = crate::lexer::register_source(&module.source_path, template_src);
@@ -6887,7 +6881,19 @@ impl TypeChecker {
                         crate::parser::Parser::new_with_source(tokens, module.source_path.clone());
                     let (prog, _) = parser.parse_program();
                     for item in prog.items {
-                        if let ast::ItemKind::Impl(impl_item) = item.kind {
+                        if let ast::ItemKind::Impl(mut impl_item) = item.kind {
+                            // Templates are parsed without the module's concrete declarations.
+                            impl_item.implicit_type_params.retain(|name| {
+                                !module.exports.iter().any(|export| {
+                                    matches!(
+                                        export.kind,
+                                        crate::module_artifact::ExportKind::Struct
+                                            | crate::module_artifact::ExportKind::Enum
+                                            | crate::module_artifact::ExportKind::TypeAlias
+                                    )
+                                        && export.name == *name
+                                })
+                            });
                             all_impls.push(impl_item);
                         }
                     }
@@ -6895,7 +6901,12 @@ impl TypeChecker {
             }
         }
 
-        for impl_item in &all_impls {
+        // Imported templates carry complete trait arguments and conditional bounds.
+        for impl_item in all_impls.iter().skip(local_impl_count) {
+            self.collect_trait_impl(impl_item);
+        }
+
+        for (index, impl_item) in all_impls.iter().enumerate() {
             let self_ty = Type::from_ast(&impl_item.self_type);
             let self_key = self.method_key(&self_ty);
 
@@ -6903,20 +6914,11 @@ impl TypeChecker {
             // registering N methods clones the impl body once, not N times.
             let shared_impl = std::sync::Arc::new(impl_item.clone());
 
-            let mut impl_type_params = Vec::new();
-            if let Some(generics) = &impl_item.generics {
-                for param in &generics.params {
-                    if let ast::GenericParam::Type(type_param) = param {
-                        impl_type_params.push(type_param.name.name.clone());
-                    }
-                }
-            } else if !impl_item.implicit_type_params.is_empty() {
-                // Parser-recorded file-local parameters: decided when the
-                // impl's own file was parsed, so a global type registered
-                // later (e.g. a user `struct T`) cannot steal the name —
-                // generic parameters shadow global types in their context.
-                impl_type_params.extend(impl_item.implicit_type_params.iter().cloned());
-            } else {
+            let mut impl_type_params = Self::impl_type_parameters(impl_item);
+            if index < local_impl_count
+                && impl_type_params.is_empty()
+                && impl_item.generics.is_none()
+            {
                 // Preserve parameter order from the AST (HashSet loses order,
                 // causing non-deterministic generic argument swapping).
                 let mut implicit = Vec::new();
@@ -6929,6 +6931,13 @@ impl TypeChecker {
             for impl_member in &impl_item.items {
                 match impl_member {
                     ast::ImplItemKind::Function(func) => {
+                        if index >= local_impl_count
+                            && impl_type_params.is_empty()
+                            && func.generics.is_none()
+                        {
+                            // Concrete imported methods already have linked export signatures.
+                            continue;
+                        }
                         let mut type_params = impl_type_params.clone();
                         if let Some(generics) = &func.generics {
                             for param in &generics.params {
@@ -9021,6 +9030,32 @@ mod tests {
                 .any(|error| error.message.contains("missing impl for bound 'Sequence'")),
             "expected conditional impl error: {errors:?}"
         );
+    }
+
+    #[test]
+    fn infers_where_only_impl_parameters_for_traits_and_methods() {
+        for (call, missing_bound) in [("require(bag)", "Sequence"), ("bag.probe()", "Element")] {
+            for element in ["i32", "f64"] {
+                let program = parse(&format!(
+                    "trait Element {{}} impl Element for i32 {{}}
+                     trait Sequence {{}} struct Bag<T> {{ T value; }}
+                     impl where T: Element Sequence for Bag<T> {{}}
+                     impl where T: Element Bag<T> {{ i32 probe(&self) {{ return 7; }} }}
+                     i32 require<C: Sequence>(C value) {{ return 0; }}
+                     i32 main() {{ Bag<{element}> bag; return {call}; }}"
+                ));
+                let (errors, _) = TypeChecker::new().check_program(&program);
+                if element == "i32" {
+                    assert!(errors.is_empty(), "{call} with {element}: {errors:?}");
+                } else {
+                    let diagnostic = format!("missing impl for bound '{missing_bound}'");
+                    assert!(
+                        errors.iter().any(|error| error.message.contains(&diagnostic)),
+                        "{call} with {element}: expected {diagnostic}, got {errors:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
