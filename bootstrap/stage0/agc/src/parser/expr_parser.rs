@@ -1003,7 +1003,8 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
         | Token::Str
         | Token::Char
         | Token::Void => {
-            if matches!(cursor.tokens.get(cursor.pos + 1).map(|t| &t.kind), Some(Token::Dot))
+            if cursor.pos + 1 < cursor.end
+                && matches!(cursor.tokens.get(cursor.pos + 1).map(|t| &t.kind), Some(Token::Dot))
                 && let Some((ty, next)) =
                     parse_simple_type_prefix(cursor.tokens, cursor.pos, cursor.end)
                 && matches!(ty.kind.as_ref(), ast::TypeKind::Primitive(_))

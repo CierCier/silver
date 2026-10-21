@@ -1023,6 +1023,7 @@ impl<'a> ParallelGraphExecutor<'a> {
         crate::semantic::serialize::synthesize_serialization_for_program(&mut ast);
         let macro_errors = crate::semantic::macro_expand::expand_macros_in_program(&mut ast);
         if !macro_errors.is_empty() {
+            eprint!("\r\x1b[2K");
             for error in &macro_errors {
                 eprintln!("{}", crate::diagnostics::render(
                     error.span, &error.message, crate::diagnostics::Severity::Error,

@@ -4894,7 +4894,7 @@ impl TypeChecker {
         mapping: &HashMap<String, Type>,
         span: Span,
     ) {
-        if candidate.type_params.is_empty() {
+        if candidate.type_params.is_empty() && candidate.source_impl.generics.is_none() {
             return;
         }
         if !self.mapping_is_concrete(mapping, &candidate.type_params) {
@@ -6932,10 +6932,8 @@ impl TypeChecker {
                 match impl_member {
                     ast::ImplItemKind::Function(func) => {
                         if index >= local_impl_count
-                            && impl_type_params.is_empty()
-                            && func.generics.is_none()
+                            && matches!(func.visibility, ast::Visibility::Private)
                         {
-                            // Concrete imported methods already have linked export signatures.
                             continue;
                         }
                         let mut type_params = impl_type_params.clone();
@@ -6961,6 +6959,23 @@ impl TypeChecker {
                             .as_ref()
                             .map(Type::from_ast)
                             .unwrap_or(Type::Unit);
+                        if index >= local_impl_count
+                            && type_params.is_empty()
+                            && self
+                                .imported_functions
+                                .get(&format!("{}::{}", self_ty.canonical_key(), func.name.name))
+                                .is_some_and(|signatures| {
+                                    signatures.iter().any(|signature| {
+                                        signature.type_params.is_empty()
+                                            && signature.params == params
+                                            && signature.return_type == return_type
+                                            && signature.is_variadic == func.is_variadic
+                                    })
+                                })
+                        {
+                            // Use a linked signature only when this method was actually exported.
+                            continue;
+                        }
                         let symbol_key = self.method_symbol_key(
                             &self_ty,
                             &func.name.name,

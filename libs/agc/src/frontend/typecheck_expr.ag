@@ -1323,7 +1323,7 @@ bool typecheck_method_argument_score(AstPool* pool, TypeTable* types,
     }
     if (expected_entry.kind == TypeKind.Reference && !expected_entry.is_mut
         && types_match(types, expected_entry.inner, actual)) {
-        *score = *score + 2;
+        *score = *score + 1;
         return true;
     }
     if (typecheck_slice_argument_coercion(types, expected, actual)) {
