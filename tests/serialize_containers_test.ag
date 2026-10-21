@@ -58,7 +58,6 @@ i32 main() {
 
     JsonWriter w = JsonWriter.new();
     m.to_json(&w);
-    assert_true(true, "encode runs");
     w.output.write_u8((u8)0);
     str encoded = (str)w.output.data;
     assert_true(cstr_eq(encoded,

@@ -28,7 +28,8 @@ cargo run -p agc -- build silver.toml --bin agc -o /tmp/agc-stage1
 
 An executable produced by stage0 is not evidence that stage1 can compile itself.
 Verify stage1 command behavior with stage0 unavailable before making a
-self-hosting claim. See [the self-host gates](tests/selfhost/README.md).
+self-hosting claim. The CI workflow builds both Silver tools and runs the
+stdlib suite through stage0 and native stage1.
 
 ## Make one coherent change
 
@@ -70,8 +71,8 @@ Unrecoverable allocator or bounds failures should fail explicitly.
 The compiler drops owned struct fields after the outer destructor. Do not call
 `field.drop()` again from the destructor. Clean up raw-pointer pointees, file
 descriptors, and other resources according to their ownership contract. Custom
-enum destructors manage their own payloads. See `tests/cascade_drop_test.ag`,
-`tests/enum_cascade_test.ag`, and `tests/memory_pentest.ag`.
+enum destructors manage their own payloads. See `tests/box_test.ag` and
+`tests/collection_drop_glue_test.ag` for stdlib resource cleanup.
 
 For Rust changes, follow the crate's edition and nearby conventions. Respect
 the workspace lints and `clippy.toml`, including the existing compiler map/set
@@ -80,38 +81,38 @@ choices. Keep target layouts and ABI behavior grounded in the target interfaces.
 ## Verify behavior
 
 ```bash
-# Compiler tests
-cargo test -p agc
+# Bootstrap tools and optional Rust FFI
+cargo build --workspace
 
-# Focused integration tests while developing
-python3 tests/run_tests.py --no-tui memory_pentest cascade_drop_test
+# Focused stdlib tests while developing
+python3 tests/run_tests.py --no-tui string vec collection_drop_glue
 
-# Complete integration suite before committing behavior changes
-python3 tests/run_tests.py --no-tui
+# Complete stdlib suite before committing behavior changes
+python3 tests/run_tests.py --no-tui --jobs 4
 
-# Stage1 frontend and native command gates when affected
-bash tests/selfhost/run_stage.sh --include-std
-bash tests/selfhost/run_native.sh --no-tui --jobs 4
+# Build Silver tools and run the same suite through native stage1
+target/debug/agc build silver.toml --bin agc --no-cache -o /tmp/agc-stage1
+target/debug/agc build silver.toml --bin aglsp --no-cache -o /tmp/aglsp-stage1
+python3 tests/run_tests.py --compiler /tmp/agc-stage1 --no-tui --jobs 4
 ```
 
-Rebuild stage0 after Rust changes before invoking the self-host scripts, which
-may reuse an existing binary. Run the ownership suite for ownership/pass changes
-and the complete integration suite for runtime changes. Report which compiler,
-target, flags, and execution path were used. Record failures, skips, and checks
-that were not run.
+Rebuild stage0 after Rust changes before building stage1. Keep the suite focused
+on stdlib APIs and capped at 124 runnable programs; extend the relevant module
+test instead of adding compiler-only fixtures. Compiler builds and stdlib use
+exercise language features. Report which compiler, target, flags, and execution
+path were used. Record failures, skips, and checks that were not run.
 
 Tests must observe behavior and failure modes, not merely find source text or
 confirm that a function exists. Check output and cleanup where relevant; exit
 zero alone can miss a broken program. For standalone `tests/*.ag` fixtures, use
 `std.test` helpers and return `done()` from `main()`. Fixtures are discovered
 automatically. Declare intentional nonzero exits with a `// expected_exit: N`
-comment, as supported by `get_expected_exit` in `tests/run_tests.py`. Expected
-compile failures and platform skips belong in the corresponding harness sets
-with a reason. See [the test guide](tests/README.md).
+comment, as supported by `get_expected_exit` in `tests/run_tests.py`.
+Platform skips belong in the corresponding harness sets with a reason.
+See [the test guide](tests/README.md).
 
-Use existing `#[test]`/`agc test` conventions for package tests where appropriate;
-they supplement the compiler regression harness. Leak checking is opt-in per
-fixture through the integration runner. Do not enable it for stage builds.
+Leak checking is opt-in per stdlib fixture through the runner. Do not enable
+it for compiler builds.
 
 For performance changes, measure before and after on the same workload and
 configuration. Comparative reports need at least 10 runs and the median, with

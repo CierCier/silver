@@ -26,26 +26,6 @@ impl SymbolIdentity {
     }
 }
 
-/// All occurrences of the symbol under `offset`: every identifier use that
-/// resolved to the same symbol, plus (optionally) the definition.
-pub(crate) fn symbol_occurrences(
-    analysis: &SymbolIndex,
-    offset: usize,
-    include_declaration: bool,
-) -> Vec<&Occurrence> {
-    let Some(cursor) = find_occurrence(offset, &analysis.occurrences) else {
-        return Vec::new();
-    };
-    let Some(symbol_id) = cursor.symbol else {
-        return Vec::new();
-    };
-
-    analysis
-        .occurrences
-        .iter()
-        .filter(|occ| occ.symbol == Some(symbol_id) && (include_declaration || !occ.is_definition))
-        .collect()
-}
 /// Find the selected symbol's occurrences in every cached open buffer.
 ///
 /// Symbol IDs are local to each index, so buffers are matched by the

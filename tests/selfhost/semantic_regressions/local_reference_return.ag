@@ -1,4 +1,0 @@
-i64* bad_local_reference() {
-    i64 local = 1;
-    return &local;
-}

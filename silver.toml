@@ -18,17 +18,15 @@ name = "silver"
 version = "0.2.6"
 # NOTE (MIG-006): `default_target = "agc"` below matches two same-named targets
 # ([bin."agc"] and [lib."agc"]). This is kind-namespaced, not a conflict: every
-# caller passes `--bin agc` or `--lib agc` (see tests/selfhost/run_stage.sh,
-# check_workspace.py:132-133), and a bare `agc build` resolves to the binary by
-# manifest declaration order (bin first, cf. package.rs:519-531 first-match).
-# Do NOT rename either target without updating check_workspace.py:133
-# (`--lib agc`), bin/agc + bin/aglsp `import agc;` sites, and package.rs:1884-1887.
+# caller passes `--bin agc` or `--lib agc`, and a bare `agc build` resolves to
+# the binary by manifest declaration order. Both binaries import the `agc`
+# library, so retain its name when changing target declarations.
 # The stdlib is not a manifest dependency — it arrives via source `import std.*`.
 default_target = "agc"
 
 
 # Stage1 frontend binary. Its target manifest lives in bin/agc; stage0
-# builds this entry point with the commands in tests/selfhost/run_stage.sh.
+# builds this entry point with `agc build silver.toml --bin agc`.
 # It owns the frontend and Linux native backend. Stage0 bootstraps the binary,
 # but stage1 does not use stage0 for native commands.
 [bin."agc"]

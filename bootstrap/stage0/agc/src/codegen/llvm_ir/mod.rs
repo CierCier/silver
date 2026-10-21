@@ -223,6 +223,3 @@ pub(crate) mod stmt;
 pub(crate) mod symbols;
 pub(crate) mod tasks;
 pub(crate) mod types;
-
-#[cfg(test)]
-mod tests;

@@ -72,27 +72,28 @@ package dependencies.
 | Task | Command |
 | --- | --- |
 | Build stage0 | `cargo build -p agc` |
-| Compiler tests | `cargo test -p agc` |
+| Build bootstrap tools and Rust FFI | `cargo build --workspace` |
 | Check a file | `cargo run -p agc -- check path/to/file.ag` |
 | Run a file | `cargo run -p agc -- run path/to/file.ag` |
 | Build Silver driver | `cargo run -p agc -- build silver.toml --bin agc -o /tmp/agc-stage1` |
-| Integration suite | `python3 tests/run_tests.py --no-tui` |
-| Focused ownership tests | `python3 tests/run_tests.py --no-tui memory_pentest cascade_drop_test` |
-| Frontend parity | `bash tests/selfhost/run_stage.sh --include-std` |
-| Stage1 native command coverage | `bash tests/selfhost/run_native.sh --no-tui --jobs 4` |
+| Stdlib suite | `python3 tests/run_tests.py --no-tui --jobs 4` |
+| Focused stdlib tests | `python3 tests/run_tests.py --no-tui string vec collection_drop_glue` |
+| Stdlib suite with native stage1 | `python3 tests/run_tests.py --no-tui --jobs 4 --compiler /tmp/agc-stage1` |
 
 - Test observable behavior, failure paths, output, and resource cleanup.
   Source-presence checks and a successful compile alone do not prove behavior.
+- Keep at most 124 runnable test programs, focused on standard-library behavior.
+  Extend the relevant stdlib fixture instead of adding compiler-only regression,
+  parity, or smoke suites. The stdlib and compiler builds exercise language features.
 - Run focused checks while developing. Before committing compiler or stdlib
-  behavior changes, run compiler tests and the complete integration suite.
-  Runtime changes require the integration suite. Ownership/pass changes also
-  require `memory_pentest`. Changes to stage1 require the relevant self-host gates.
-- Rebuild stage0 after Rust edits before invoking self-host scripts; the scripts
-  may reuse an existing executable. Identify the actual compiler used in results.
+  behavior changes, build the bootstrap workspace and Silver tools, then run the
+  complete stdlib suite with stage0 and native stage1.
+- Rebuild stage0 after Rust edits before building stage1. Identify the actual
+  compiler used in results.
 - Exercise package/workspace commands through `agc build`, not only isolated files.
   Distinguish frontend parity, a stage0 bridge, a native smoke path, and genuine
   stage1/stage2 execution. State which one a passing gate covers.
-- Check the current gate scripts and backend sources for stage1 status. Old plans,
+- Check the current CI workflow and backend sources for stage1 status. Old plans,
   cached executables, and test counts are not proof of current completion.
 - Do not enable `--leak-check` for stage builds. The integration harness opts
   selected fixtures into leak checking separately.

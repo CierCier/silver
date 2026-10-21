@@ -26,19 +26,19 @@ These links are representative evidence. Parser acceptance does not by itself
 prove type checking, code generation, or runtime behavior. Stage0 lives under
 `bootstrap/stage0`; stage1's Silver implementation lives under `libs/agc`.
 
-| Area | Implementation | Representative fixture |
+| Area | Implementation | Stdlib examples |
 |---|---|---|
-| Tokens and literals | [stage0 lexer](bootstrap/stage0/agc/src/lexer.rs), [stage1 lexer](libs/agc/src/frontend/lexer.ag) | [literal and reflection tests](tests/literals_and_reflection_test.ag) |
-| Types, expressions, and patterns | [stage0 parser](bootstrap/stage0/agc/src/parser/prt_parser.rs), [stage1 type checker](libs/agc/src/frontend/typecheck_expr.ag) | [tuple destructuring](tests/destructure_let_test.ag), [slice syntax](tests/slice_syntax_test.ag) |
-| Declarations and imports | [stage0 parser](bootstrap/stage0/agc/src/parser/prt_parser.rs), [stage0 import loader](bootstrap/stage0/agc/src/parser/import_hook.rs) | [selective imports](tests/selective_import_test.ag), [source import aliases](tests/source_import_alias_test.ag) |
-| Functions, callbacks, and generics | [stage1 monomorphization](libs/agc/src/frontend/monomorph.ag), [type checking](libs/agc/src/frontend/typecheck_expr.ag) | [function pointers](tests/native_function_pointer_test.ag), [generic calls](tests/nested_generic_call_test.ag), [generic tuple returns](tests/generic_tuple_return_test.ag) |
-| Traits, operators, and casts | [operator traits](std/ops.ag), [stage1 expression lowering](libs/agc/src/frontend/lower_expr.ag) | [comparison traits](tests/compare_trait_test.ag), [temporary operators](tests/temp_operator_test.ag), [casts](tests/cast_ergonomics_test.ag) |
-| Control flow, matching, and defers | [stage1 statement codegen](libs/agc/src/backend/llvm/stmt.ag) | [loop exits](tests/native_for_in_continue_test.ag), [match values](tests/match_value_test.ag), [defers](tests/defer_test.ag) |
-| Macros, attributes, cfg, and static values | [stage1 cfg](libs/agc/src/frontend/cfg.ag), [stage0 parser](bootstrap/stage0/agc/src/parser/prt_parser.rs) | [macro expressions](tests/macro_expression_test.ag), [cfg blocks](tests/cfg_global_block_test.ag), [static/volatile](tests/static_volatile_test.ag), [packed layouts](tests/packed_layout_test.ag) |
-| Ownership and borrowing | [stage0 borrow checker](bootstrap/stage0/agc/src/semantic/borrow_check.rs), [stage1 ownership pass](libs/agc/src/frontend/ownership.ag) | [borrow origins](tests/borrow_origin_test.ag), [cascading drops](tests/cascade_drop_test.ag) |
-| Threads and channels | [stage1 Send check](libs/agc/src/frontend/send.ag), [channel implementation](std/channel.ag) | [launch and Send](tests/launch_send_test.ag), [channel behavior](tests/channel_test.ag), [bounded channels](tests/channel_bounded_test.ag) |
-| Result and optional values | [Optional](std/optional.ag), [Result](std/result.ag), [syscall helpers](std/sys/result.ag) | [structured errors](tests/structured_error_test.ag), [Result payload cleanup](tests/unwrap_or_err_drop_test.ag) |
-| Allocation, formatting, FFI, and assembly | [allocator](std/mem/alloc.ag), [display](std/display.ag), [stage1 codegen](libs/agc/src/backend/llvm/generator.ag) | [allocation](tests/alloc_validity_test.ag), [display](tests/display_test.ag), [C enum ABI](tests/selfhost/enum_ffi_probe.py), [syscalls](tests/syscall_test.ag) |
+| Tokens and literals | [stage0 lexer](bootstrap/stage0/agc/src/lexer.rs), [stage1 lexer](libs/agc/src/frontend/lexer.ag) | [byte formatting](tests/format_bytes_test.ag) |
+| Types, expressions, and patterns | [stage0 parser](bootstrap/stage0/agc/src/parser/prt_parser.rs), [stage1 type checker](libs/agc/src/frontend/typecheck_expr.ag) | [slices](tests/slice_syntax_test.ag) |
+| Declarations and imports | [stage0 import loader](bootstrap/stage0/agc/src/parser/import_hook.rs) | [stdlib re-exports](tests/std_shim_test.ag) |
+| Functions, callbacks, and generics | [stage1 monomorphization](libs/agc/src/frontend/monomorph.ag) | [Result callbacks](tests/result_combinators_test.ag), [checked conversions](tests/checked_conversion_test.ag) |
+| Traits, operators, and casts | [operator traits](std/ops.ag), [stage1 lowering](libs/agc/src/frontend/lower_expr.ag) | [comparison](tests/compare_trait_test.ag), [sequences](tests/sequence_traits_test.ag) |
+| Control flow, matching, and defers | [stage1 statement codegen](libs/agc/src/backend/llvm/stmt.ag) | [iterators](tests/iterator_ergonomics_test.ag), [guards](tests/guard_test.ag) |
+| Macros, attributes, cfg, and static values | [stage1 cfg](libs/agc/src/frontend/cfg.ag), [stage0 parser](bootstrap/stage0/agc/src/parser/prt_parser.rs) | [JSON serialization](tests/json_test.ag), [formatting](tests/fmt_test.ag) |
+| Ownership and borrowing | [stage0 borrow checker](bootstrap/stage0/agc/src/semantic/borrow_check.rs), [stage1 ownership](libs/agc/src/frontend/ownership.ag) | [container cleanup](tests/collection_drop_glue_test.ag), [Box](tests/box_test.ag) |
+| Threads and channels | [stage1 Send check](libs/agc/src/frontend/send.ag), [channels](std/channel.ag) | [channels](tests/channel_test.ag), [bounded channels](tests/channel_bounded_test.ag) |
+| Result and optional values | [Optional](std/optional.ag), [Result](std/result.ag), [syscall errors](std/sys/result.ag) | [structured errors](tests/structured_error_test.ag), [Result cleanup](tests/unwrap_or_err_drop_test.ag) |
+| Allocation, formatting, FFI, and assembly | [allocator](std/mem/alloc.ag), [display](std/display.ag), [stage1 codegen](libs/agc/src/backend/llvm/generator.ag) | [allocation](tests/allocation_bounds_test.ag), [display](tests/display_test.ag), [Rust FFI](tests/rust_ffi_test.ag), [syscalls](tests/syscall_wrapper_test.ag) |
 
 ---
 

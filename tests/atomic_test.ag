@@ -7,10 +7,6 @@
 // realistic pattern.
 import std.atomic;
 
-i64 checks_passed() {
-    return 0;
-}
-
 i64 spin_lock(AtomicI32* lock) {
     while (!lock.compare_exchange(0, 1)) {
         // spin: keep trying until the lock is acquired
@@ -128,5 +124,5 @@ i64 main() {
         __atomic_fence(ATOMIC_ACQ_REL);
     }
 
-    return checks_passed();
+    return 0;
 }

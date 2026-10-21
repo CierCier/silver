@@ -4,7 +4,7 @@ Silver is a statically typed systems programming language with an LLVM backend,
 automatic resource cleanup, ownership and borrow checks, OS threads, and a
 freestanding runtime. The Rust stage0 compiler bootstraps the Silver stage1
 compiler. Their supported commands and checking coverage differ; see the
-[verification record](docs/selfhost-completion-record.md).
+[compiler reference](docs/compiler-guide.md).
 
 ## Example
 
@@ -34,11 +34,11 @@ i32 main() {
 
 ## Features
 
-- **Resource management**: Automatic drop cleanup on scope exit via compiler-managed drop flags. Owned values transfer implicitly or with `move`; see the [ownership rules](SYNTAX.md#8-memory-management--ownership-model) and [cleanup fixture](tests/cascade_drop_test.ag).
-- **Borrowing**: References (`&T`, `&mut T`) carry borrow-origin checks. Raw pointers (`T*`) remain available for manual control and FFI. [Borrow fixtures](tests/borrow_conflict_test.ag) cover selected checks; complete typed control-flow analysis remains open.
-- **Concurrency**: OS tasks use `launch` and explicit `wait`, with a Send check on arguments. A dropped task handle does not join the task. See [task semantics](SYNTAX.md#9-concurrency--threading) and [task fixtures](tests/launch_send_test.ag).
+- **Resource management**: Automatic drop cleanup on scope exit via compiler-managed drop flags. Owned values transfer implicitly or with `move`; see the [ownership rules](SYNTAX.md#8-memory-management--ownership-model) and [container cleanup tests](tests/collection_drop_glue_test.ag).
+- **Borrowing**: References (`&T`, `&mut T`) carry borrow-origin checks. Raw pointers (`T*`) remain available for manual control and FFI. [Iterator tests](tests/iterator_ergonomics_test.ag) exercise borrowing through stdlib APIs; complete typed control-flow analysis remains open.
+- **Concurrency**: OS tasks use `launch` and explicit `wait`, with a Send check on arguments. A dropped task handle does not join the task. See [task semantics](SYNTAX.md#9-concurrency--threading) and [guard tests](tests/guard_test.ag).
 - **Freestanding runtime**: Pure-Silver runtime (`std/rt/`) with no required C standard library dependency.
-- **Tooling and diagnostics**: Stage0 provides DWARF debug information and allocation leak tracking. Stage1 builds the [AGLSP language server](tests/selfhost/test_aglsp.py); its native option limits are listed in the [compiler guide](docs/compiler-guide.md#native-options).
+- **Tooling and diagnostics**: Stage0 provides DWARF debug information and allocation leak tracking. Stage1 builds the [AGLSP language server](bin/aglsp); its native option limits are listed in the [compiler guide](docs/compiler-guide.md#native-options).
 
 The [syntax reference](SYNTAX.md) documents tuple values and destructuring,
 slices, selective imports, receiver shorthand, and the Optional/Result APIs,
@@ -129,18 +129,23 @@ for the scope of this restriction.
 ### Running tests
 
 ```bash
-# Run compiler unit and parser parity tests
-cargo test -p agc
+# Build bootstrap tools and the optional Rust FFI bridge
+cargo build --workspace
 
-# Run integration test suite
-python3 tests/run_tests.py --no-tui
+# Run standard-library behavior tests
+python3 tests/run_tests.py --no-tui --jobs 4
 
-# Build stage1 with stage0 and run frontend parity gates
-tests/selfhost/run_stage.sh --include-std
+# Build the Silver compiler and language server
+target/debug/agc build silver.toml --bin agc --no-cache -o /tmp/agc-stage1
+target/debug/agc build silver.toml --bin aglsp --no-cache -o /tmp/aglsp-stage1
 
-# Exercise stage1's Linux native backend and integration corpus
-bash tests/selfhost/run_native.sh --no-tui --jobs 4
+# Run the same stdlib suite with the native Silver compiler
+python3 tests/run_tests.py --compiler /tmp/agc-stage1 --no-tui --jobs 4
 ```
+
+The suite contains 114 stdlib programs and is capped at 124. Extend an existing
+module test for new behavior. Compiler builds and stdlib use exercise language
+features; separate compiler unit, parity, and self-host test suites are retired.
 
 ## Repository layout
 
@@ -155,7 +160,7 @@ bash tests/selfhost/run_native.sh --no-tui --jobs 4
 - `silver.toml`: Silver workspace manifest for the self-host root
 - `std/`: Standard library (allocators, collections, I/O, networking, runtime)
 - `examples/`: Sample programs
-- `tests/`: Unit, ownership, and integration test suites
+- `tests/`: Stdlib behavior tests and their runner
 - `docs/`: Language specifications and standard protocol designs
 
 ## Documentation

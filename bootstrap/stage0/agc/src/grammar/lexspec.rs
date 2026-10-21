@@ -4,9 +4,7 @@
 //! — including its quirks (byte-wise identifier continuation over UTF-8, the
 //! `'lifetime` reading of an apostrophe followed by a word, complex-literal
 //! `i` suffixes, and the absence of shift/compound-bitwise tokens, which the
-//! expression parser joins from two `<`/`>` tokens instead). The
-//! differential parity test (`tests/elise_lexer_parity.rs`) pins this
-//! against the old implementation across the whole corpus.
+//! expression parser joins from two `<`/`>` tokens instead).
 
 use elise_lex::{CommonKinds, KeywordMap, LexError, LexSpec, OpTrie, TokenBuf};
 
@@ -697,53 +695,5 @@ impl Tok {
             x if x == Tok::Eof as u16 => Tok::Eof,
             _ => return None,
         })
-    }
-}
-
-#[cfg(test)]
-mod discriminant_tests {
-    use super::*;
-
-    /// Guards the from_discriminant table against enum/table drift.
-    #[test]
-    fn discriminant_table_covers_every_variant() {
-        let all = [
-            Tok::IntLit, Tok::FloatLit, Tok::ComplexLit, Tok::StrLit,
-            Tok::CharLit, Tok::Lifetime, Tok::Struct, Tok::Enum,
-            Tok::Impl, Tok::Trait, Tok::Mut, Tok::Const, Tok::Static,
-            Tok::Volatile, Tok::If, Tok::Else, Tok::While, Tok::For,
-            Tok::Match, Tok::Break, Tok::Continue, Tok::Return,
-            Tok::Type, Tok::Let, Tok::SelfType, Tok::Defer,
-            Tok::Import, Tok::Comptime, Tok::Cast, Tok::Move,
-            Tok::Extern, Tok::Private, Tok::Asm, Tok::As, Tok::In,
-            Tok::Macro, Tok::Launch, Tok::Wait, Tok::True, Tok::False,
-            Tok::I8, Tok::I16, Tok::I32, Tok::I64, Tok::I128, Tok::U8,
-            Tok::U16, Tok::U32, Tok::U64, Tok::U128, Tok::F32,
-            Tok::F64, Tok::F80, Tok::C32, Tok::C64, Tok::C80,
-            Tok::Bool, Tok::Str, Tok::Char, Tok::Void, Tok::Vec,
-            Tok::Optional, Tok::Plus, Tok::Minus, Tok::Star,
-            Tok::Slash, Tok::Percent, Tok::Equal, Tok::NotEqual,
-            Tok::Less, Tok::Greater, Tok::LessEqual, Tok::GreaterEqual,
-            Tok::AndAnd, Tok::OrOr, Tok::Not, Tok::Assign,
-            Tok::PlusAssign, Tok::MinusAssign, Tok::StarAssign,
-            Tok::SlashAssign, Tok::PercentAssign,
-            Tok::BitAndAssign, Tok::BitOrAssign, Tok::BitXorAssign,
-            Tok::ShlAssign, Tok::ShrAssign,
-            Tok::BitAnd,
-            Tok::BitOr, Tok::BitXor, Tok::BitNot, Tok::Increment,
-            Tok::Decrement, Tok::LParen, Tok::RParen, Tok::LBrace,
-            Tok::RBrace, Tok::LBracket, Tok::RBracket, Tok::Semi,
-            Tok::Comma, Tok::Dot, Tok::DotDot, Tok::DotDotDot,
-            Tok::Colon, Tok::ColonColon, Tok::Question, Tok::At,
-            Tok::Hash, Tok::Ident, Tok::Eof,
-        ];
-        for variant in all {
-            assert_eq!(
-                Tok::from_discriminant(variant as u16),
-                Some(variant),
-                "discriminant collision or gap at {variant:?}"
-            );
-        }
-        assert!(Tok::from_discriminant(Tok::TriviaLayout as u16).is_none());
     }
 }

@@ -337,6 +337,5 @@ i32 main() {
         assert_eq_i64(5, g_drops, "BinaryHeap dropped reused element on scope exit");
     }
 
-    done();
-    return 0;
+    return done();
 }

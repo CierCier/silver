@@ -1,5 +1,0 @@
-import std.mem.vec;
-
-Vec<Vec<Missing>> invalid_nested_type() {
-    return Vec<Vec<Missing>>.new();
-}

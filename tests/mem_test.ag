@@ -18,7 +18,6 @@ i32 main() {
     assert_eq_i32(*single_int, 42, "allocated memory is writable/readable");
     
     free(single_int);
-    check(true, "free() completes without crash");
     
     // Test: Array allocation
     STDOUT.write_str("\n--- Array Allocation ---\n");
@@ -287,10 +286,8 @@ i32 main() {
     u8* dangling = silver_rt_alloc(0, 8);
     assert_true(dangling != (u8*)0, "silver_rt_alloc(0) returns non-null dangling pointer");
     silver_rt_dealloc(dangling, 0, 8);
-    check(true, "size-0 dealloc is a no-op");
 
     silver_rt_dealloc((u8*)0, 64, 8);
-    check(true, "null dealloc is a no-op");
 
     u8* rt_buf = silver_rt_alloc(100, 16);
     assert_true(rt_buf != (u8*)0, "silver_rt_alloc(100) returns non-null");
@@ -372,7 +369,6 @@ i32 main() {
         free(ptr_4096);
         free(ptr_8192);
         free(ptr_huge);
-        check(true, "Freeing page-aligned and large-aligned zero-sized allocations is successful");
     }
 
     // Test: SIMD search & count primitives

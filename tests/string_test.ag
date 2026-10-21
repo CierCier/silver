@@ -51,10 +51,7 @@ i32 main(){
     assert_true(s2.equals("abcdef"), "Modified string equals updated literal");
     
     // Test to_str
-    STDOUT.write_str("to_str: \"");
-    STDOUT.write_str((str)s3.to_str());
-    STDOUT.write_str("\"\n");
-    check(true, "to_str runs without crashing");
+    assert_true(strcmp(s3.to_str(), "abcde") == 0, "to_str exposes the cloned bytes");
 
     // Test clear
     s3.clear();

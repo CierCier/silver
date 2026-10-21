@@ -1,0 +1,15 @@
+import std.test;
+import std.intern;
+
+i32 main() {
+    Interner symbols = Interner.new();
+    u32 first = symbols.intern("struct");
+    u32 second = symbols.intern("TokenKind");
+    u32 again = symbols.intern("struct");
+    assert_true(first == again, "interning returns stable IDs");
+    assert_true(first != second, "different names receive different IDs");
+    assert_eq_i64(2, symbols.len(), "interner stores unique names");
+    assert_true(symbols.get(first) == "struct", "interner lookup returns text");
+
+    return done();
+}

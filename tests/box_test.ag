@@ -1,29 +1,28 @@
-import std.mem;
+import std.mem.box;
+import std.test;
 
-i32 drop_count = 0;
+i64 payload_drops = 0;
+
+struct Payload { i64 value; }
+impl Drop for Payload {
+    void drop(*self) { payload_drops += 1; }
+}
 
 i32 main() {
-    // Test that defer works
     {
-        defer {
-            drop_count = drop_count + 1;
-        }
+        Box<i64> number = Box<i64>.new(17);
+        i64* value = number.get();
+        assert_eq_i64(17, *value, "Box stores its value");
+        *value = 42;
+        assert_eq_i64(42, *number.get(), "get borrows the stored value");
     }
-
-    @assert(!(drop_count != 1), "drop_count != 1");
-
-    // Test multiple defers run in reverse order
-    drop_count = 0;
     {
-        defer {
-            drop_count = drop_count + 10;
-        }
-        defer {
-            drop_count = drop_count + 3;
-        }
+        Payload payload = { .value = 9 };
+        Box<Payload> owned = Box<Payload>.new(move payload);
+        Payload* value = owned.get();
+        assert_eq_i64(9, value.value, "Box takes ownership of its payload");
+        assert_eq_i64(0, payload_drops, "payload remains alive inside Box");
     }
-    // LIFO: +3 first, then +10: 0+3+10 = 13
-    @assert(!(drop_count != 13), "drop_count != 13");
-
-    return 0;
+    assert_eq_i64(1, payload_drops, "Box destroys the payload exactly once");
+    return done();
 }

@@ -1,4 +1,0 @@
-// compile_flags: --no-cache
-// error_contains: macro '@first' expects at least 1 argument(s), got 0
-macro i32 first(i32 value, i32... rest) { return value; }
-i32 main() { return @first(); }

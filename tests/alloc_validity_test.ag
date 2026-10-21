@@ -40,7 +40,6 @@ i32 main() {
         a[31] = (u8)shift;
         silver_rt_dealloc(a, 32, align);
     }
-    assert_true(true, "all alignment sizes passed");
 
     // 4. Free-list recycling: freed block reappears for same size class
     STDOUT.write_str("\n--- Free-list recycling ---\n");
@@ -55,23 +54,14 @@ i32 main() {
     STDOUT.write_str("\n--- Size classes ---\n");
     // Exercise each size class individually.
     u8* b16  = alloc<u8>(16);   assert_true(b16  != (u8*)0, "16-byte alloc non-null");  b16[0] = 16;  free(b16);
-    check(true, "size class 16 exercised");
     u8* b32  = alloc<u8>(32);   assert_true(b32  != (u8*)0, "32-byte alloc non-null");  b32[0] = 32;  free(b32);
-    check(true, "size class 32 exercised");
     u8* b64  = alloc<u8>(64);   assert_true(b64  != (u8*)0, "64-byte alloc non-null");  b64[0] = 64;  free(b64);
-    check(true, "size class 64 exercised");
     u8* b128 = alloc<u8>(128);  assert_true(b128 != (u8*)0, "128-byte alloc non-null"); b128[0] = 128; free(b128);
-    check(true, "size class 128 exercised");
     u8* b256 = alloc<u8>(256);  assert_true(b256 != (u8*)0, "256-byte alloc non-null"); b256[0] = 256; free(b256);
-    check(true, "size class 256 exercised");
     u8* b512 = alloc<u8>(512);  assert_true(b512 != (u8*)0, "512-byte alloc non-null"); b512[0] = 512; free(b512);
-    check(true, "size class 512 exercised");
     u8* b1k  = alloc<u8>(1024); assert_true(b1k  != (u8*)0, "1 KiB alloc non-null");     b1k[0] = 1;   free(b1k);
-    check(true, "size class 1024 exercised");
     u8* b2k  = alloc<u8>(2048); assert_true(b2k  != (u8*)0, "2 KiB alloc non-null");     b2k[0] = 2;   free(b2k);
-    check(true, "size class 2048 exercised");
     u8* b4k  = alloc<u8>(4096); assert_true(b4k  != (u8*)0, "4 KiB alloc non-null");     b4k[0] = 4;   free(b4k);
-    check(true, "all size classes exercised");
 
     // 6. Huge allocation (> 4096 bytes, mmap path)
     STDOUT.write_str("\n--- Huge allocation (mmap path) ---\n");
@@ -106,10 +96,8 @@ i32 main() {
     // 9. Null free is a no-op
     STDOUT.write_str("\n--- Null/dangling safety ---\n");
     free((i64*)0);
-    check(true, "free(null) is safe");
     free((i64*)1);
-    check(true, "free(dangling < 64 KiB) is safe");
 
     STDOUT.write_str("\n--- All allocator validity tests passed ---\n");
-    return 0;
+    return done();
 }

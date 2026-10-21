@@ -57,7 +57,6 @@ Free names resolve in the expanded context, and local shadowing is not a
 portable macro technique. Keep macro locals scoped and distinctive. Avoid
 depending on stage0's broader compile-time evaluator when targeting stage1.
 
-Runtime evidence is in `tests/macro_contract_test.ag`,
-`tests/macro_variadic_expression_test.ag`, and
-`tests/macro_variadic_loop_statement_test.ag`. Wrong-arity fixtures cover
-rejection separately from successful expansion.
+The stdlib exercises macros through formatting and JSON serialization.
+See `tests/format_bytes_test.ag`, `tests/fmt_test.ag`, and `tests/json_test.ag`.
+Dedicated language macro fixtures are retired under the stdlib-only test policy.

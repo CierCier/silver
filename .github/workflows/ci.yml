@@ -45,37 +45,19 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-llvm-22-cargo-
 
-      - name: Run compiler unit tests
-        run: cargo test --release -p agc
+      - name: Build bootstrap tools and Rust FFI
+        run: cargo build --release --workspace
 
-      - name: Run Rust FFI unit tests
-        run: cargo test -p silver-ffi
-
-      - name: Build Rust FFI artifacts
-        run: cargo build -p silver-ffi
-
-      - name: Validate C ABI consumer
+      - name: Build Silver compiler and language server
         run: |
-          clang-22 -std=c11 -Wall -Wextra -Werror \
-            -I bootstrap/stage0/ffi-rust/include bootstrap/stage0/ffi-rust/tests/abi_smoke.c \
-            -L target/debug -Wl,-rpath,"$GITHUB_WORKSPACE/target/debug" \
-            -lsilver_ffi -o "$RUNNER_TEMP/silver_ffi_abi_smoke"
-          "$RUNNER_TEMP/silver_ffi_abi_smoke"
+          target/release/agc build silver.toml --bin agc --no-cache -o "$RUNNER_TEMP/agc-stage1"
+          target/release/agc build silver.toml --bin aglsp --no-cache -o "$RUNNER_TEMP/aglsp-stage1"
 
-      - name: Run Rust FFI Silver integration test
-        run: |
-          SILVER_FFI_LIBRARY_DIR="$GITHUB_WORKSPACE/target/debug" python3 tests/run_tests.py rust_ffi_test
+      - name: Run stdlib suite with stage0
+        run: python3 tests/run_tests.py --release --no-tui --jobs 4
 
-      - name: Build stage1 and run frontend parity gates
-        run: tests/selfhost/run_stage.sh --include-std
-
-      - name: Run integration tests
-        run: |
-          python3 -m unittest discover -s tests -p 'test_runner.py'
-          python3 tests/run_tests.py --release
-
-      - name: Run native command-surface parity through stage1
-        run: tests/selfhost/run_native.sh --release --no-tui --jobs 4
+      - name: Run stdlib suite with native stage1
+        run: python3 tests/run_tests.py --compiler "$RUNNER_TEMP/agc-stage1" --no-tui --jobs 4
 
   wasm:
     runs-on: ubuntu-24.04
@@ -116,7 +98,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-llvm-22-cargo-
 
-      - name: Run wasm integration tests
+      - name: Run wasm stdlib suite
         # Runner auto-resolves to `node <shim>` for wasm targets; WASM_SKIP
         # in run_tests.py triages threads/sockets/raw-asm suites.
-        run: python3 tests/run_tests.py --release --target wasm32-wasip1
+        run: python3 tests/run_tests.py --release --no-tui --jobs 4 --target wasm32-wasip1

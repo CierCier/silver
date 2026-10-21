@@ -12,7 +12,6 @@ i32 main() {
     test_start("std.io umbrella exposes submodules");
     {
         // std.io.file: STDOUT + File
-        STDOUT.write_str("  [PASS] std.io STDOUT\n");
         File f = File.closed();
         assert_true(f.invalid(), "File API available via std.io");
 

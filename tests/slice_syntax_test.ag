@@ -221,6 +221,5 @@ i32 main() {
         assert_eq_i64(101, (i64)b_neg[9], "b_neg[9] == 'e'");
     }
 
-    done();
-    return 0;
+    return done();
 }
