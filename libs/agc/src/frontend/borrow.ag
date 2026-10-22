@@ -1062,7 +1062,7 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
     Vec<Binding> bindings = Vec<Binding>.new();
     collect_function_bindings(function, &bindings);
     Vec<u32> binding_types = Vec<u32>.new();
-    typecheck_binding_types(symbols, tree.root, &bindings, &binding_types);
+    typecheck_binding_types(symbols, &symbols.types, tree.root, &bindings, &binding_types);
     Vec<i64> release_points = Vec<i64>.new();
     collect_borrow_release_points(body, &leaves, &release_points);
     i64 i = 0;
@@ -1100,6 +1100,25 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
         if (node.token_kind == TokenKind.Identifier && i + 1 < leaves.len()) {
             bool is_field = i > 0 && borrow_text_equals(leaves.get(i - 1).text, ".");
             if (!is_field) {
+                str aggregate = borrow_aggregate_holder(&bindings, &binding_types,
+                    &symbols.types, tree.root, node);
+                if (strlen(aggregate) > 0) {
+                    u32 source_id = analyzer.names.intern(node.text);
+                    u32 holder_id = analyzer.names.intern(aggregate);
+                    i64 release = last_use(&leaves, i + 1, aggregate);
+                    i64 count = analyzer.loans.len();
+                    i64 loan_index = 0;
+                    while (loan_index < count) {
+                        Loan inherited = analyzer.loans.get(loan_index);
+                        if (inherited.active && inherited.persistent
+                            && inherited.holder_id == source_id && source_id != holder_id) {
+                            inherited.holder_id = holder_id;
+                            inherited.release_index = release >= 0 ? release : i;
+                            analyzer.loans.push(inherited);
+                        }
+                        loan_index += 1;
+                    }
+                }
                 str next = leaves.get(i + 1).text;
                 if (borrow_text_equals(next, "=") || borrow_text_equals(next, "+=") || borrow_text_equals(next, "-=") || borrow_text_equals(next, "*=") || borrow_text_equals(next, "/=") || borrow_text_equals(next, "%=")) {
                     analyzer.assign(node.text, node.span);
@@ -1110,7 +1129,11 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
                     if (!address) {
                         Place place = borrow_place(analyzer, &leaves, i, leaves.len());
                         bool consuming = false;
-                        if (i > 0 && leaves.get(i - 1).token_kind == TokenKind.Move) {
+                        bool explicit_move = i > 0 && leaves.get(i - 1).token_kind == TokenKind.Move;
+                        bool assignment_source = i > 0 && leaves.get(i - 1).token_kind == TokenKind.Assign
+                            && node.next_sibling != (SyntaxNode*)0
+                            && node.next_sibling.token_kind == TokenKind.Semicolon;
+                        if (explicit_move || assignment_source) {
                             Binding* binding = visible_binding(&bindings, node.text, node);
                             u32 type_id = borrow_binding_type(symbols, binding);
                             if (type_id == TYPE_UNKNOWN) {

@@ -2058,7 +2058,12 @@ impl TypeChecker {
                             (value, target)
                         }
                     };
-                    self.check_expr(value, target.as_ref());
+                    let found = self.check_expr(value, target.as_ref());
+                    if let Some(target) = target.as_ref()
+                        && !self.is_assignable(target, &found)
+                    {
+                        self.error(msg::type_mismatch(target, &found), value.span);
+                    }
                 }
                 expected.cloned().unwrap_or(Type::Unknown)
             }
@@ -3486,6 +3491,7 @@ impl TypeChecker {
         };
         self.expr_types
             .insert((expr.span.start, expr.span.end), ty.to_string());
+        self.record_lambda_type(expr, &ty);
         ty
     }
 

@@ -3049,12 +3049,12 @@ void typecheck_reject_defer_control(AstPool* pool, u32 node_id, bool is_stmt,
 
 // Resolve local initializers with the same expression checker as function bodies.
 // Entries follow binding order; visibility excludes shadowed and sibling locals.
-void typecheck_binding_types(SymbolTable* symbols, SyntaxNode* root,
+void typecheck_binding_types(SymbolTable* symbols, TypeTable* types, SyntaxNode* root,
                              Vec<Binding>* bindings, Vec<u32>* resolved) {
     i64 i = 0;
     while (i < bindings.len()) {
         Binding* binding = bindings.get_ptr(i);
-        u32 type_id = typecheck_parameter_type_id(&symbols.types, binding);
+        u32 type_id = typecheck_parameter_type_id(types, binding);
         SyntaxNode* assign = binding.name_node.next_sibling;
         if (type_id == TYPE_UNKNOWN && binding.kind == BindingKind.Let
             && assign != (SyntaxNode*)0 && assign.token_kind == TokenKind.Assign) {
@@ -3072,13 +3072,13 @@ void typecheck_binding_types(SymbolTable* symbols, SyntaxNode* root,
                 end = end.next_sibling;
             }
             AstPool pool = AstPool.new();
-            ExprLowerer lowerer = ExprLowerer.new(&pool, &symbols.types, &symbols.names);
+            ExprLowerer lowerer = ExprLowerer.new(&pool, types, &symbols.names);
             lowerer.unit_root = root;
             u32 expression = lowerer.lower_sequence(assign.next_sibling, end);
             DiagnosticBag diagnostics = DiagnosticBag.new();
             bool ok = true;
             if (!lowerer.unsupported) {
-                type_id = infer_expr(&pool, &symbols.types, symbols, root,
+                type_id = infer_expr(&pool, types, symbols, root,
                     &env, expression, &diagnostics, &ok);
             }
         }

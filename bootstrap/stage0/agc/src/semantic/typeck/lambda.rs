@@ -17,6 +17,7 @@ pub(super) struct LambdaState {
     items: Vec<ast::Item>,
     callable_types: HashSet<String>,
     method_receivers: HashMap<ExprKey, ast::Expression>,
+    checked_types: HashMap<ExprKey, Type>,
 }
 
 pub(super) struct CaptureFrame {
@@ -82,6 +83,14 @@ fn place_root(expression: &ast::Expression) -> Option<&ast::Identifier> {
 }
 
 impl TypeChecker {
+    pub(super) fn record_lambda_type(&mut self, expression: &ast::Expression, ty: &Type) {
+        if !self.lambdas.frames.is_empty() {
+            self.lambdas
+                .checked_types
+                .insert(key(expression.span), ty.clone());
+        }
+    }
+
     pub(super) fn lambda_copy_type(&self, ty: &Type) -> bool {
         let mut context = TypePropertiesContext::new();
         context
@@ -112,7 +121,41 @@ impl TypeChecker {
         if self.lambdas.frames.is_empty() {
             return;
         }
+        if self
+            .lambdas
+            .checked_types
+            .get(&key(expression.span))
+            .is_some_and(|ty| self.lambda_copy_type(ty))
+        {
+            self.demand_capture(expression, CaptureMode::Shared);
+            return;
+        }
         match expression.kind.as_ref() {
+            ast::ExpressionKind::Match { arms, .. } => {
+                for arm in arms {
+                    self.consume_capture(&arm.body);
+                }
+                return;
+            }
+            ast::ExpressionKind::Block(block) => {
+                if let Some(ast::Statement {
+                    kind: ast::StatementKind::Expression(value),
+                    ..
+                }) = block.statements.last()
+                {
+                    self.consume_capture(value);
+                }
+                return;
+            }
+            ast::ExpressionKind::Ternary {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                self.consume_capture(then_expr);
+                self.consume_capture(else_expr);
+                return;
+            }
             ast::ExpressionKind::Array(items)
             | ast::ExpressionKind::Tuple(items)
             | ast::ExpressionKind::EnumVariant { fields: items, .. } => {

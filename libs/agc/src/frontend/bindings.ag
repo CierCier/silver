@@ -289,8 +289,11 @@ bool binding_is_match_block(SyntaxNode* node) {
 
 void collect_match_arm_bindings(SyntaxNode* block, Vec<Binding>* bindings) {
     SyntaxNode* child = block.first_child;
+    bool in_pattern = true;
     while (child != (SyntaxNode*)0) {
-        if (binding_is_value_name(child)) {
+        if (child.token_kind == TokenKind.Colon) { in_pattern = false; }
+        else if (child.token_kind == TokenKind.Comma) { in_pattern = true; }
+        if (in_pattern && binding_is_value_name(child)) {
             SyntaxNode* next = child.next_sibling;
             if (next != (SyntaxNode*)0 && next.kind == NodeKind.Token
                 && (next.token_kind == TokenKind.Comma || next.token_kind == TokenKind.Colon

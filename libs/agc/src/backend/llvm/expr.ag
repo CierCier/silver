@@ -296,7 +296,8 @@ LLVMOpaqueValue* llvm_emit_enum_build(LlvmContext* ctx, str enum_name, str varia
         llvm_name = instance_name.to_str();
     }
     LLVMOpaqueType* enum_ty = LLVMGetTypeByName2(ctx.ctx, llvm_name);
-    if (enum_ty == (LLVMOpaqueType*)0) {
+    if (enum_ty == (LLVMOpaqueType*)0 || LLVMTypeIsSized(enum_ty) == 0) {
+        ctx.note_unresolved("enum-layout", llvm_name);
         base.drop();
         instance_name.drop();
         return (LLVMOpaqueValue*)0;

@@ -166,6 +166,44 @@ i32 main() {
     }
     assert_eq_i64(1, g_drops, "lambda tuple drops its Vec once");
 
+    test_start("lambda tuple copies a field from a Drop owner");
+    g_drops = 0;
+    {
+        DropSpy owner;
+        owner.val = 7;
+        Vec<DropSpy> values = Vec<DropSpy>.new();
+        DropSpy element;
+        element.val = 42;
+        values.push(move element);
+        let take = || [owner.val, values];
+        let [tag, received] = take();
+        assert_eq_i64(7, tag, "tuple copies the field value");
+        assert_eq_i64(7, owner.val, "copying the field leaves its Drop owner usable");
+        assert_eq_i64(1, received.len(), "tuple transfers the owned Vec");
+        assert_eq_i64(0, g_drops, "copied field and Vec transfer preserve both owners");
+    }
+    assert_eq_i64(2, g_drops, "field owner and Vec element each drop once");
+
+    test_start("lambda match transfers the selected Vec capture");
+    g_drops = 0;
+    {
+        Vec<DropSpy> left = Vec<DropSpy>.new();
+        Vec<DropSpy> right = Vec<DropSpy>.new();
+        DropSpy first;
+        first.val = 17;
+        left.push(move first);
+        DropSpy second;
+        second.val = 25;
+        right.push(move second);
+        bool choose_left = true;
+        let take = || match choose_left { true: left, false: right, };
+        Vec<DropSpy> received = take();
+        DropSpy* element = received.get_ptr(0);
+        assert_eq_i64(17, element.val, "match preserves the selected capture");
+        assert_eq_i64(1, g_drops, "unselected capture drops when the lambda is consumed");
+    }
+    assert_eq_i64(2, g_drops, "selected capture drops once at scope exit");
+
     test_start("lambda struct initializer transfers its owned Vec capture");
     g_drops = 0;
     {

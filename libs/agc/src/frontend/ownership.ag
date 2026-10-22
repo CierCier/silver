@@ -743,7 +743,7 @@ void collect_ownership_variables(OwnershipAnalyzer* analyzer, SyntaxNode* functi
     Vec<Binding> bindings = Vec<Binding>.new();
     collect_function_bindings(function, &bindings);
     Vec<u32> binding_types = Vec<u32>.new();
-    typecheck_binding_types(symbols, root, &bindings, &binding_types);
+    typecheck_binding_types(symbols, analyzer.type_table, root, &bindings, &binding_types);
     i64 i = 0;
     while (i < bindings.len()) {
         Binding* binding = bindings.get_ptr(i);

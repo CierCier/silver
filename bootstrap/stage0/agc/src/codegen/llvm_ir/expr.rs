@@ -2868,7 +2868,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         } else {
             match expression.kind.as_ref() {
                 ast::ExpressionKind::Tuple(items)
-                | ast::ExpressionKind::Array(items)
                 | ast::ExpressionKind::EnumVariant { fields: items, .. } => {
                     for item in items {
                         self.clear_yielded_value_flags(item)?;
