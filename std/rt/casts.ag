@@ -5,12 +5,9 @@
 // silver_runtime/src/runtime/casts.rs (CastRegistry: a (from, to) -> cast
 // table prepopulated with the 156 numeric pairs).
 //
-// FN-POINTER-FREE DESIGN (LANG-008: Silver HAS non-capturing fn pointers —
-// see sort_by in std/algo/sort.ag and SYNTAX.md — but no closures/capture,
-// so a per-pair `Arc<dyn Fn>` table still cannot port directly; each
-// registered pair maps to an INTEGER OPCODE and a single dispatcher (`cast_exec_opcode`) executes the
-// cast by opcode with an if-chain.  Opcodes are laid out on the 13x12
-// numeric-type grid:
+// Each (from, to) pair maps to an integer opcode executed by
+// cast_exec_opcode, so the registry stays static instead of building a
+// closure table at startup. Opcodes use the 13x12 numeric grid:
 //
 //   opcode = 0               -> BOOL source,   to_index = target type 1..13
 //   opcode = (t - 1) * 12    -> non-BOOL source of numeric index t (2..13),

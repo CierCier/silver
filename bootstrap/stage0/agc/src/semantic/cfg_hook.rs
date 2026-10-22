@@ -323,7 +323,7 @@ fn rewrite_expression(expression: &mut ast::Expression, cfg: &CfgSet) {
                 rewrite_expression(&mut arm.body, cfg);
             }
         }
-        ast::ExpressionKind::Block(block) => rewrite_block(block, cfg),
+        ast::ExpressionKind::Block(block) | ast::ExpressionKind::Lambda { body: block, .. } => rewrite_block(block, cfg),
         ast::ExpressionKind::Initializer { items } => {
             for item in items {
                 match item {

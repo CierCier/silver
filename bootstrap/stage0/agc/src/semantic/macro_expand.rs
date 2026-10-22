@@ -221,6 +221,16 @@ fn expand_macros_in_expr(
 
     // First, recursively expand subexpressions:
     match expr.kind.as_mut() {
+        ExpressionKind::Lambda { parameters, body } => {
+            let previous_return = ctx.ret_type.take();
+            let previous_scope = ctx.scope_types.clone();
+            for parameter in parameters {
+                if let Some(ty) = &parameter.type_annotation { ctx.scope_types.insert(parameter.name.name.clone(), ty.clone()); }
+            }
+            expand_macros_in_block(body, ctx, depth);
+            ctx.scope_types = previous_scope;
+            ctx.ret_type = previous_return;
+        }
         ExpressionKind::Binary { left, operator, right } => {
             if *operator == BinaryOperator::Assign {
                 let lhs_exp = if let ExpressionKind::Identifier(ident) = left.kind.as_ref() {

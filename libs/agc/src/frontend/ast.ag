@@ -4,6 +4,7 @@
 import std.mem.alloc;
 import std.mem.memory;
 import std.recursion;
+import std.intern;
 import frontend.diagnostics;
 import frontend.lexer;
 
@@ -58,6 +59,7 @@ struct SyntaxNode {
 
 struct NodePool {
     SyntaxNode* head;
+    Interner generated_text;
 }
 
 struct SyntaxTree {
@@ -78,7 +80,15 @@ impl NodePool {
     NodePool new() {
         NodePool pool;
         pool.head = (SyntaxNode*)0;
+        pool.generated_text = Interner.new();
         return pool;
+    }
+
+    SyntaxNode* create_token(NodePool* self, TokenKind kind, Span span, str text) {
+        str retained = self.generated_text.get(self.generated_text.intern(text));
+        SyntaxNode* node = self.create(NodeKind.Token, span, retained);
+        node.token_kind = kind;
+        return node;
     }
 
     SyntaxNode* create(NodePool* self, NodeKind kind, Span span, str text) {

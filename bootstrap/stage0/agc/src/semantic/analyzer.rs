@@ -542,6 +542,17 @@ impl Analyzer {
 
     fn check_expression(&mut self, expr: &ast::Expression) {
         match expr.kind.as_ref() {
+            ast::ExpressionKind::Lambda { parameters, body } => {
+                self.push_var_scope();
+                for parameter in parameters {
+                    if let Some(ty) = &parameter.type_annotation {
+                        self.check_type(ty);
+                    }
+                    self.bind_var(&parameter.name, parameter.span);
+                }
+                self.check_block(body);
+                self.pop_var_scope();
+            }
             ast::ExpressionKind::Literal(_) => {}
             ast::ExpressionKind::Identifier(ident) => self.resolve_var(ident),
             ast::ExpressionKind::TypeName(_) => {}

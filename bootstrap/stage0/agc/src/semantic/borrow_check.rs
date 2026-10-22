@@ -836,6 +836,23 @@ impl BorrowChecker {
                                 }
                             } else {
                                 self.check_expr(init);
+                                let inherited: Vec<_> = self
+                                    .scopes
+                                    .iter()
+                                    .flatten()
+                                    .filter(|loan| {
+                                        loan.borrower.as_deref() == Some(ident.name.as_str())
+                                    })
+                                    .cloned()
+                                    .collect();
+                                for mut loan in inherited {
+                                    loan.borrower = Some(name.clone());
+                                    loan.last_use = self.get_last_use_for(name);
+                                    loan.span = init.span;
+                                    if let Some(scope) = self.scopes.last_mut() {
+                                        scope.push(loan);
+                                    }
+                                }
                             }
                         } else if let ast::ExpressionKind::StructLiteral { fields, .. } =
                             init.kind.as_ref()
@@ -1571,6 +1588,15 @@ impl BorrowChecker {
             }
             ast::ExpressionKind::Block(block) => {
                 self.check_block(block);
+            }
+            ast::ExpressionKind::MacroCall { args, .. } => {
+                for arg in args {
+                    match arg {
+                        ast::MacroArg::Expression(expression) => self.check_expr(expression),
+                        ast::MacroArg::Statement(statement) => self.check_statement(statement),
+                        _ => {}
+                    }
+                }
             }
             _ => {}
         }

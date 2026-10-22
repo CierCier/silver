@@ -54,18 +54,6 @@ void handle_hello(ResponseWriter* w, HttpRequest* r) {
     }
 }
 
-void handle_echo(ResponseWriter* w, HttpRequest* r) {
-    w.set_header("Content-Type", "text/plain");
-    w.write_header(200);
-    w.write_str(r.body_str());
-}
-
-void handle_query(ResponseWriter* w, HttpRequest* r) {
-    w.set_header("Content-Type", "text/plain");
-    w.write_header(200);
-    w.write_str(r.query());
-}
-
 i32 main() {
     ignore_sigpipe();
     tls_init();
@@ -92,8 +80,16 @@ i32 main() {
         ignore_sigpipe();
         HttpServer s = HttpServer.new("127.0.0.1:0");
         s.get("/hello", handle_hello);
-        s.post("/echo", handle_echo);
-        s.get("/search", handle_query);
+        s.post("/echo", |ResponseWriter* w, HttpRequest* r| {
+            w.set_header("Content-Type", "text/plain");
+            w.write_header(200);
+            w.write_str(r.body_str());
+        });
+        s.get("/search", |ResponseWriter* w, HttpRequest* r| {
+            w.set_header("Content-Type", "text/plain");
+            w.write_header(200);
+            w.write_str(r.query());
+        });
 
         i64 count = 0;
         while (count < 4) {

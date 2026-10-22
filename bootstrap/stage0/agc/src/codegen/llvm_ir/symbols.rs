@@ -767,7 +767,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     Self::substitute_expression_types(&mut arm.body, mapping);
                 }
             }
-            ast::ExpressionKind::Block(block) => Self::substitute_block_types(block, mapping),
+            ast::ExpressionKind::Block(block) | ast::ExpressionKind::Lambda { body: block, .. } => Self::substitute_block_types(block, mapping),
             ast::ExpressionKind::Tuple(items) | ast::ExpressionKind::Array(items) => {
                 for item in items {
                     Self::substitute_expression_types(item, mapping);

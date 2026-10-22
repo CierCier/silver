@@ -1278,7 +1278,22 @@ impl LlvmGenerator {
             item = item.next_sibling;
         }
 
-        // Pass 0b: Set bodies for all struct types
+        // Pass 0b: Name enum layouts before struct bodies. A struct field that
+        // holds an enum must lower to the enum type, not the i32 fallback for
+        // a named type whose LLVM struct has not been created yet.
+        SyntaxNode* enum_item = tree.root.first_child;
+        while (enum_item != (SyntaxNode*)0) {
+            if (enum_item.kind == NodeKind.Enum) {
+                SyntaxNode* enum_id = item_identifier(enum_item);
+                if (enum_id != (SyntaxNode*)0
+                    && LLVMGetTypeByName2(self.ctx, enum_id.text) == (LLVMOpaqueType*)0) {
+                    LLVMStructCreateNamed(self.ctx, enum_id.text);
+                }
+            }
+            enum_item = enum_item.next_sibling;
+        }
+
+        // Pass 0c: Set bodies for all struct types
         i64 s_idx = 0;
         while (s_idx < ctx.struct_defs.len()) {
             LlvmStructDef* def = ctx.struct_defs.get_ptr(s_idx);
@@ -1295,19 +1310,15 @@ impl LlvmGenerator {
             s_idx += 1;
         }
 
-        // Pass 0c: Register enum layouts ({i16 tag, [N x i8] data}).
-        SyntaxNode* enum_item = tree.root.first_child;
+        // Pass 0d: Set concrete enum layouts ({i16 tag, [N x i8] data}).
+        // Generic enums get their bodies from monomorphization.
+        enum_item = tree.root.first_child;
         while (enum_item != (SyntaxNode*)0) {
-            if (enum_item.kind == NodeKind.Enum && llvm_item_is_generic_enum(enum_item)) {
+            if (enum_item.kind == NodeKind.Enum && !llvm_item_is_generic_enum(enum_item)) {
                 SyntaxNode* enum_id = item_identifier(enum_item);
-                if (enum_id != (SyntaxNode*)0
-                    && LLVMGetTypeByName2(self.ctx, enum_id.text) == (LLVMOpaqueType*)0) {
-                    LLVMStructCreateNamed(self.ctx, enum_id.text);
-                }
-            } else if (enum_item.kind == NodeKind.Enum) {
-                SyntaxNode* enum_id = item_identifier(enum_item);
-                if (enum_id != (SyntaxNode*)0
-                    && LLVMGetTypeByName2(self.ctx, enum_id.text) == (LLVMOpaqueType*)0) {
+                LLVMOpaqueType* enum_ty = enum_id != (SyntaxNode*)0
+                    ? LLVMGetTypeByName2(self.ctx, enum_id.text) : (LLVMOpaqueType*)0;
+                if (enum_id != (SyntaxNode*)0 && enum_ty != (LLVMOpaqueType*)0) {
                     Vec<SyntaxNode*> variant_names = Vec<SyntaxNode*>.new();
                     Vec<i64> variant_tags = Vec<i64>.new();
                     Vec<i64> variant_arities = Vec<i64>.new();
@@ -1340,7 +1351,6 @@ impl LlvmGenerator {
                         ctx.note_unresolved("empty-enum-payload-layout", enum_id.text);
                     }
                     LLVMOpaqueType* tag_ty = LLVMInt16TypeInContext(self.ctx);
-                    LLVMOpaqueType* enum_ty = LLVMStructCreateNamed(self.ctx, enum_id.text);
                     Vec<LLVMOpaqueType*> enum_body = Vec<LLVMOpaqueType*>.new();
                     enum_body.push(tag_ty);
                     if (data_size > 0) {

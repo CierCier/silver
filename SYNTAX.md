@@ -701,6 +701,63 @@ f64 dist = point.magnitude();    // method call (passes self pointer)
 Vector2 v = Vector2.new(1, 2);   // static method (no self param)
 ```
 
+### Lambdas
+
+Both compilers support lambda expressions. Run the
+[lambda example](examples/lambdas.ag):
+
+```bash
+cargo run -p agc -- run examples/lambdas.ag
+```
+
+An expression body returns its result automatically. A block body needs an
+explicit `return` to produce a value; a block without a return produces `void`.
+`return` exits the lambda. A `match` expression can be the entire body.
+
+```silver
+let double = |i32 value| value * 2;
+let absolute = |i32 value| {
+    if (value < 0) { return -value; }
+    return value;
+};
+let classify = |i32 value| match value { 0: "zero", _: "nonzero" };
+let answer = || 42;
+```
+
+Parameters use type-before-name order. `&T` and `&mut T` parameters borrow;
+`move T name` explicitly declares a by-value parameter with Silver's usual
+copy or move behavior. An expected function type can supply omitted parameter
+types, including an unambiguous non-generic named callback parameter:
+
+```silver
+i32(i32) triple = |value| value * 3;
+let length = |&String value| value.len();
+let consume = |move String value| value.len();
+```
+
+Outer locals are captured automatically. Reads use shared borrows, writes use
+mutable borrows, and consuming a non-Copy value moves it into the lambda when
+the lambda is created. Copy values retain ordinary copy semantics. Captures
+do not clone values or allocate a heap environment. Conflicting outside access
+is rejected while a capture borrow is still needed. A lambda that consumes an
+owned capture can be called once; an uncalled lambda drops its owned captures.
+
+```silver
+String text = String.from_str("silver");
+let length = || text.len();
+@println("length={}, text={}", length(), text);
+
+let take = || move text;
+String received = take();
+```
+
+A lambda without captures can be stored in a function pointer. A capturing
+lambda has its own generated type; use an inferred `let` binding. This initial
+implementation supports typed parameters and function-type context inference;
+it does not infer an untyped local lambda's parameters from later calls.
+Lambdas inside generic functions or impls are not supported yet. Map integration
+is outside this change.
+
 ### Field Access & Indexing
 
 ```silver

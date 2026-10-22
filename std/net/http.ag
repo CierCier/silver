@@ -2603,6 +2603,7 @@ impl ServeMux {
         return move mux;
     }
 
+    /// Register a route. A null, empty, or "*" method accepts every request method.
     void handle_func(&mut self, str method, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
         RouteEntry e;
         e.method = method;
@@ -2639,6 +2640,8 @@ impl ServeMux {
         Slice<u8> p = r.path_slice();
         str m = r.method;
         if (m == (str)0) { m = "GET"; }
+        let any_method = |str method| method == (str)0 || strlen(method) == 0 || strcmp(method, "*") == 0;
+        let matches_method = |str method| any_method(method) || strcmp(method, m) == 0;
         i64 n = self.routes.len();
 
         // 1. Exact path matches
@@ -2647,7 +2650,7 @@ impl ServeMux {
             RouteEntry* e = self.routes.get_ptr(i);
             if (p == e.pattern) {
                 has_exact_path = true;
-                if (strcmp(e.method, "*") == 0 || strlen(e.method) == 0 || strcmp(e.method, m) == 0) {
+                if (matches_method(e.method)) {
                     void(ResponseWriter*, HttpRequest*) h = e.handler;
                     h(w, r);
                     return;
@@ -2675,7 +2678,7 @@ impl ServeMux {
                 RouteEntry* e = self.routes.get_ptr(i);
                 if (p == e.pattern) {
                     str em = e.method;
-                    if (em == (str)0 || strlen(em) == 0 || strcmp(em, "*") == 0) {
+                    if (any_method(em)) {
                         em = "GET, POST, PUT, DELETE, HEAD, OPTIONS";
                     }
                     if (!allow.contains(em)) {
@@ -2709,7 +2712,7 @@ impl ServeMux {
                 RouteEntry* e = self.routes.get_ptr(i);
                 i64 elen = strlen(e.pattern);
                 if (elen == best_len && p.starts_with(e.pattern)) {
-                    if (strcmp(e.method, "*") == 0 || strlen(e.method) == 0 || strcmp(e.method, m) == 0) {
+                    if (matches_method(e.method)) {
                         void(ResponseWriter*, HttpRequest*) h = e.handler;
                         h(w, r);
                         return;
@@ -2738,7 +2741,7 @@ impl ServeMux {
                 i64 elen = strlen(e.pattern);
                 if (elen == best_len && p.starts_with(e.pattern)) {
                     str em = e.method;
-                    if (em == (str)0 || strlen(em) == 0 || strcmp(em, "*") == 0) {
+                    if (any_method(em)) {
                         em = "GET, POST, PUT, DELETE, HEAD, OPTIONS";
                     }
                     if (!allow.contains(em)) {

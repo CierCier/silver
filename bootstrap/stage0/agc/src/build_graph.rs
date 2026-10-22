@@ -1047,6 +1047,7 @@ impl<'a> ParallelGraphExecutor<'a> {
         let mut checker = crate::semantic::typeck::TypeChecker::new()
             .with_imported_modules(&import_lowering.module_artifacts);
         let (type_errors, monomorphs) = checker.check_program_with_table(&ast, &mut symbol_table);
+        checker.lower_lambdas(&mut ast);
         if !type_errors.is_empty() {
             eprint!("\r\x1b[2K");
             for error in &type_errors {

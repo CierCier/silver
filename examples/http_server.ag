@@ -6,7 +6,7 @@
 //   3. Request headers, body reading, and keep-alive handling
 //
 // Compile and run:
-//   cargo run -p agc --release -- examples/http_server.ag -o /tmp/http_server
+//   cargo run -p agc --release -- build examples/http_server.ag -o /tmp/http_server
 //   /tmp/http_server
 //
 // Benchmark with Apache Bench (ab):
@@ -16,41 +16,32 @@ import std.error;
 import std.io;
 import std.net.http;
 
-void handle_index(ResponseWriter* w, HttpRequest* _r) {
-    w.set_header("Content-Type", "text/plain; charset=utf-8");
-    w.set_header("Content-Length", "144");
-    w.write_header(200);
-    w.write_str("Welcome to Silver HTTP Server!\nEndpoints:\n  /plaintext - Fast throughput benchmark\n  /json      - JSON payload\n  /echo      - Echo request body\n");
-}
-
-void handle_plaintext(ResponseWriter* w, HttpRequest* _r) {
-    w.set_header("Content-Type", "text/plain");
-    w.set_header("Content-Length", "14");
-    w.write_header(200);
-    w.write_str("Hello, World!\n");
-}
-
-void handle_json(ResponseWriter* w, HttpRequest* _r) {
-    w.set_header("Content-Type", "application/json");
-    w.set_header("Content-Length", "28");
-    w.write_header(200);
-    w.write_str("{\"message\":\"Hello, World!\"}\n");
-}
-
-void handle_echo(ResponseWriter* w, HttpRequest* r) {
-    w.set_header("Content-Type", "text/plain");
-    w.write_header(200);
-    w.write_str(r.body_str());
-}
-
 i32 main() {
     HttpServer server = HttpServer.new("0.0.0.0:8080");
 
-    // Register routes
-    server.get("/", handle_index);
-    server.get("/plaintext", handle_plaintext);
-    server.get("/json", handle_json);
-    server.post("/echo", handle_echo);
+    server.get("/", |ResponseWriter* w, HttpRequest* _r| {
+        w.set_header("Content-Type", "text/plain; charset=utf-8");
+        w.set_header("Content-Length", "144");
+        w.write_header(200);
+        w.write_str("Welcome to Silver HTTP Server!\nEndpoints:\n  /plaintext - Fast throughput benchmark\n  /json      - JSON payload\n  /echo      - Echo request body\n");
+    });
+    server.get("/plaintext", |ResponseWriter* w, HttpRequest* _r| {
+        w.set_header("Content-Type", "text/plain");
+        w.set_header("Content-Length", "14");
+        w.write_header(200);
+        w.write_str("Hello, World!\n");
+    });
+    server.get("/json", |ResponseWriter* w, HttpRequest* _r| {
+        w.set_header("Content-Type", "application/json");
+        w.set_header("Content-Length", "28");
+        w.write_header(200);
+        w.write_str("{\"message\":\"Hello, World!\"}\n");
+    });
+    server.post("/echo", |ResponseWriter* w, HttpRequest* r| {
+        w.set_header("Content-Type", "text/plain");
+        w.write_header(200);
+        w.write_str(r.body_str());
+    });
 
     @println("=========================================================");
     @println("  Silver High-Performance HTTP Server");

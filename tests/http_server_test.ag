@@ -14,23 +14,47 @@ import std.sys.entry;
 import std.test;
 import std.thread;
 
-void handle_hello(ResponseWriter* w, HttpRequest* r) {
+void handle_hello(ResponseWriter* w, HttpRequest* _r) {
     w.set_header("Content-Type", "text/plain; charset=utf-8");
     w.set_header("X-Silver-Server", "true");
     w.write_header(200);
     w.write_str("hello from silver server");
 }
 
-void handle_echo(ResponseWriter* w, HttpRequest* r) {
-    w.set_header("Content-Type", "text/plain");
-    w.write_header(200);
-    w.write_str(r.body_str());
+Result<i64, Error> discard_write(void* _ctx, u8* _buf, i64 len) {
+    return Ok(len);
 }
 
-void handle_query(ResponseWriter* w, HttpRequest* r) {
-    w.set_header("Content-Type", "text/plain");
-    w.write_header(200);
-    w.write_str(r.query());
+void check_route(ServeMux* mux, str method, str path, i32 status, str allow) {
+    StreamIo io;
+    io.ctx = (void*)0;
+    io.write = discard_write;
+    HttpRequest request = HttpRequest.new(HttpVersion.Http11, method, path, "localhost");
+    ResponseWriter writer = ResponseWriter.new(io, HttpVersion.Http11, true);
+    mux.serve_http(&mut writer, &mut request);
+    assert_eq_i32(status, writer.status_code, path);
+    if (allow != "") {
+        assert_true(writer.headers.contains(allow), "Allow header matches route methods");
+    }
+}
+
+void check_route_methods() {
+    ServeMux mux = ServeMux.new();
+    mux.get("/exact", handle_hello);
+    mux.get("/prefix/", handle_hello);
+    mux.handle_func("*", "/wildcard", handle_hello);
+    mux.handle_func("", "/empty/", handle_hello);
+    mux.handle_func((str)0, "/null", handle_hello);
+
+    check_route(&mut mux, "PATCH", "/wildcard", 200, "");
+    check_route(&mut mux, "DELETE", "/empty/child", 200, "");
+    check_route(&mut mux, "PUT", "/null", 200, "");
+    check_route(&mut mux, (str)0, "/exact", 200, "");
+    check_route(&mut mux, "HEAD", "/exact", 200, "");
+    check_route(&mut mux, "HEAD", "/prefix/child", 200, "");
+    check_route(&mut mux, "GET", "/prefix/child", 200, "");
+    check_route(&mut mux, "POST", "/prefix/child", 405, "Allow: GET\r\n");
+    check_route(&mut mux, "POST", "/exact", 405, "Allow: GET\r\n");
 }
 
 void server_worker(i32 fd) {
@@ -39,8 +63,16 @@ void server_worker(i32 fd) {
     s.set_workers(2);
     assert_eq_i64(s.workers, 2, "s.workers == 2");
     s.get("/hello", handle_hello);
-    s.post("/echo", handle_echo);
-    s.get("/search", handle_query);
+    s.post("/echo", |ResponseWriter* w, HttpRequest* r| {
+        w.set_header("Content-Type", "text/plain");
+        w.write_header(200);
+        w.write_str(r.body_str());
+    });
+    s.get("/search", |ResponseWriter* w, HttpRequest* r| {
+        w.set_header("Content-Type", "text/plain");
+        w.write_header(200);
+        w.write_str(r.query());
+    });
 
     // Serve 6 test requests (4 successful/not found, 2 method not allowed)
     i64 count = 0;
@@ -60,6 +92,7 @@ void server_worker(i32 fd) {
 
 i32 main() {
     test_start("http server: Go-like API");
+    check_route_methods();
 
     Result<SocketAddr, AddrError> bind_result = SocketAddr.v4("127.0.0.1", (u16)0);
     assert_true(bind_result.success(), "bind_result.success()");

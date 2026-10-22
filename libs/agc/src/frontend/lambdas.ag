@@ -1,0 +1,953 @@
+// Closure conversion over the native frontend's lossless syntax tree.
+// Generated declarations keep source spans and use the ordinary ownership/ABI passes.
+import std.intern;
+import std.mem.vec;
+import std.recursion;
+import std.string;
+import frontend.ast;
+import frontend.ast_expr;
+import frontend.bindings;
+import frontend.cfg;
+import frontend.diagnostics;
+import frontend.items;
+import frontend.lexer;
+import frontend.lower_expr;
+import frontend.messages;
+import frontend.module_loader;
+import frontend.symbols;
+import frontend.typecheck_expr;
+import frontend.types;
+
+enum LambdaCaptureMode {
+    Shared;
+    Mutable;
+    Owned;
+}
+
+struct LambdaCapture {
+    u32 name_id;
+    u32 type_id;
+    LambdaCaptureMode mode;
+    Span span;
+}
+
+struct LambdaOccurrence {
+    SyntaxNode* node;
+    u32 capture;
+    bool implicit_move;
+}
+
+struct LambdaCallable {
+    u32 type_id;
+    u32 function_name;
+    LambdaCaptureMode mode;
+}
+
+struct LambdaLowering {
+    NodePool* nodes;
+    SyntaxNode* root;
+    SymbolTable* symbols;
+    DiagnosticBag* diagnostics;
+    Vec<LambdaCallable> callables;
+    bool changed;
+}
+
+SyntaxNode* lambda_clone_node(NodePool* pool, SyntaxNode* node, bool retain_text) {
+    SyntaxNode* copy = retain_text && node.kind == NodeKind.Token
+        ? pool.create_token(node.token_kind, node.span, node.text)
+        : pool.create(node.kind, node.span, node.text);
+    copy.token_kind = node.token_kind;
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        append_child(copy, lambda_clone_node(pool, child, retain_text));
+        child = child.next_sibling;
+    }
+    return copy;
+}
+
+void lambda_clone_range(NodePool* pool, SyntaxNode* parent,
+                        SyntaxNode* start, SyntaxNode* end) {
+    SyntaxNode* cursor = start;
+    while (cursor != (SyntaxNode*)0 && cursor != end) {
+        append_child(parent, lambda_clone_node(pool, cursor, false));
+        cursor = cursor.next_sibling;
+    }
+}
+
+void lambda_replace_range(SyntaxNode* parent, SyntaxNode* start,
+                          SyntaxNode* end, SyntaxNode* replacement) {
+    SyntaxNode* previous = (SyntaxNode*)0;
+    SyntaxNode* cursor = parent.first_child;
+    while (cursor != (SyntaxNode*)0 && cursor != start) {
+        previous = cursor;
+        cursor = cursor.next_sibling;
+    }
+    if (cursor == (SyntaxNode*)0) { return; }
+    SyntaxNode* first = replacement.first_child;
+    SyntaxNode* last = replacement.last_child;
+    if (previous == (SyntaxNode*)0) { parent.first_child = first; }
+    else { previous.next_sibling = first; }
+    last.next_sibling = end;
+    if (end == (SyntaxNode*)0) { parent.last_child = last; }
+    cursor = first;
+    while (cursor != end) {
+        cursor.parent = parent;
+        cursor = cursor.next_sibling;
+    }
+}
+
+void lambda_append_type(NodePool* pool, SyntaxNode* parent, TypeTable* types,
+                        u32 type_id, Span span) {
+    TokenStream tokens = TokenStream.new();
+    DiagnosticBag diagnostics = DiagnosticBag.new();
+    lex(String.from_str(types.type_name(type_id)), &tokens, &diagnostics);
+    NodePool temporary = NodePool.new();
+    SyntaxNode* group = temporary.create(NodeKind.Type, span, "");
+    Parser parser;
+    parser.tokens = &tokens;
+    parser.diagnostics = &diagnostics;
+    parser.pool = &temporary;
+    parser.budget = DepthBudget.new(DEFAULT_MAX_RECURSION_DEPTH);
+    parser.cursor = 0;
+    parser.nesting = 0;
+    parser.failed = false;
+    build_token_region(&parser, group, 0, tokens.len() - 1);
+    SyntaxNode* child = group.first_child;
+    while (child != (SyntaxNode*)0) {
+        SyntaxNode* copy = lambda_clone_node(pool, child, true);
+        copy.span = span;
+        append_child(parent, copy);
+        child = child.next_sibling;
+    }
+    temporary.destroy();
+}
+
+TypeEnv lambda_clone_env(TypeEnv* source) {
+    TypeEnv result = TypeEnv.new();
+    i64 i = 0;
+    while (i < source.locals.len()) {
+        result.locals.push(source.locals.get(i));
+        i += 1;
+    }
+    return move result;
+}
+
+bool lambda_operand_position(SyntaxNode* previous) {
+    if (previous == (SyntaxNode*)0) { return true; }
+    if (previous.kind != NodeKind.Token) { return false; }
+    TokenKind kind = previous.token_kind;
+    return kind == TokenKind.Assign || kind == TokenKind.Return
+        || kind == TokenKind.Comma || kind == TokenKind.Colon
+        || kind == TokenKind.Question || kind == TokenKind.Semicolon
+        || kind == TokenKind.Plus || kind == TokenKind.Minus
+        || kind == TokenKind.Star || kind == TokenKind.Slash
+        || kind == TokenKind.Not || kind == TokenKind.And || kind == TokenKind.Or;
+}
+
+bool contains_lambda(SyntaxNode* node) {
+    SyntaxNode* previous = (SyntaxNode*)0;
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Token
+            && (child.token_kind == TokenKind.BitwiseOr || child.token_kind == TokenKind.Or)
+            && lambda_operand_position(previous)) { return true; }
+        if (contains_lambda(child)) { return true; }
+        previous = child;
+        child = child.next_sibling;
+    }
+    return false;
+}
+
+impl LambdaLowering {
+    LambdaLowering new(NodePool* nodes, SyntaxNode* root,
+                       SymbolTable* symbols, DiagnosticBag* diagnostics) {
+        LambdaLowering lowering;
+        lowering.nodes = nodes;
+        lowering.root = root;
+        lowering.symbols = symbols;
+        lowering.diagnostics = diagnostics;
+        lowering.callables = Vec<LambdaCallable>.new();
+        lowering.changed = false;
+        return move lowering;
+    }
+
+    SyntaxNode* token(LambdaLowering* self, TokenKind kind, str text, Span span) {
+        return self.nodes.create_token(kind, span, text);
+    }
+
+    i64 callable_index(LambdaLowering* self, u32 type_id) {
+        i64 i = 0;
+        while (i < self.callables.len()) {
+            if (self.callables.get_ptr(i).type_id == type_id) { return i; }
+            i += 1;
+        }
+        return -1;
+    }
+
+    TypeEnv environment(LambdaLowering* self, SyntaxNode* function,
+                         str owner, SyntaxNode* use, TypeEnv* inherited) {
+        TypeEnv env = lambda_clone_env(inherited);
+        Vec<Binding> bindings = Vec<Binding>.new();
+        collect_function_bindings(function, &bindings);
+        i64 i = 0;
+        while (i < bindings.len()) {
+            Binding* binding = bindings.get_ptr(i);
+            if (visible_binding(&bindings, binding.name, use) != binding) {
+                i += 1;
+                continue;
+            }
+            u32 type_id = typecheck_parameter_type_id(&self.symbols.types, binding);
+            if (binding.kind == BindingKind.Parameter && strcmp(binding.name, "self") == 0
+                && strlen(owner) > 0) {
+                type_id = self.symbols.types.get_named(owner);
+                if (binding.declared_type.kind == ProjectionTypeKind.Reference) {
+                    type_id = self.symbols.types.get_reference(type_id, binding.declared_type.is_mutable);
+                } else if (binding.declared_type.kind == ProjectionTypeKind.Pointer) {
+                    type_id = self.symbols.types.get_pointer(type_id, true);
+                }
+            }
+            SyntaxNode* assign = binding.name_node.next_sibling;
+            if (type_id == TYPE_UNKNOWN && assign != (SyntaxNode*)0
+                && assign.token_kind == TokenKind.Assign) {
+                SyntaxNode* end = assign.next_sibling;
+                while (end != (SyntaxNode*)0 && end.token_kind != TokenKind.Semicolon) {
+                    end = end.next_sibling;
+                }
+                AstPool ast = AstPool.new();
+                ExprLowerer lowerer = ExprLowerer.new(&ast, &self.symbols.types, &self.symbols.names);
+                lowerer.unit_root = self.root;
+                u32 expression = lowerer.lower_sequence(assign.next_sibling, end);
+                DiagnosticBag scratch = DiagnosticBag.new();
+                bool ok = true;
+                if (!lowerer.unsupported) {
+                    type_id = infer_expr(&ast, &self.symbols.types, self.symbols,
+                        self.root, &env, expression, &scratch, &ok);
+                }
+            }
+            if (type_id != TYPE_UNKNOWN) {
+                env.insert(self.symbols.names.intern(binding.name), type_id);
+            }
+            i += 1;
+        }
+        return move env;
+    }
+
+    void capture_occurrences(LambdaLowering* self, SyntaxNode* node,
+                              TypeEnv* outer, Vec<Binding>* locals,
+                              Vec<LambdaCapture>* captures,
+                              Vec<LambdaOccurrence>* occurrences) {
+        SyntaxNode* previous = (SyntaxNode*)0;
+        SyntaxNode* before_previous = (SyntaxNode*)0;
+        SyntaxNode* child = node.first_child;
+        while (child != (SyntaxNode*)0) {
+            if (node_is_identifier(child)
+                && !(previous != (SyntaxNode*)0 && previous.token_kind == TokenKind.Dot)
+                && visible_binding(locals, child.text, child) == (Binding*)0) {
+                u32 name = self.symbols.names.intern(child.text);
+                u32 type_id = outer.lookup(name);
+                if (type_id != TYPE_UNKNOWN) {
+                    i64 index = 0;
+                    while (index < captures.len() && captures.get_ptr(index).name_id != name) {
+                        index += 1;
+                    }
+                    if (index == captures.len()) {
+                        LambdaCapture capture;
+                        capture.name_id = name;
+                        capture.type_id = type_id;
+                        capture.mode = LambdaCaptureMode.Shared;
+                        capture.span = child.span;
+                        captures.push(capture);
+                    }
+                    if (previous != (SyntaxNode*)0 && previous.token_kind == TokenKind.Mut
+                        && before_previous != (SyntaxNode*)0
+                        && before_previous.token_kind == TokenKind.BitwiseAnd) {
+                        captures.get_ptr(index).mode = LambdaCaptureMode.Mutable;
+                    }
+                    LambdaOccurrence occurrence;
+                    occurrence.node = child;
+                    occurrence.capture = (u32)index;
+                    occurrence.implicit_move = false;
+                    occurrences.push(occurrence);
+                }
+            }
+            self.capture_occurrences(child, outer, locals, captures, occurrences);
+            before_previous = previous;
+            previous = child;
+            child = child.next_sibling;
+        }
+    }
+
+    void demand(LambdaLowering* self, AstPool* ast, u32 expression,
+                 LambdaCaptureMode mode, bool implicit,
+                 Vec<LambdaCapture>* captures, Vec<LambdaOccurrence>* occurrences) {
+        if (expression == 0) { return; }
+        AstExpr value = *ast.get_expr(expression);
+        if (value.kind == ExprKind.Move) {
+            if (value.inner0 != 0) {
+                self.demand(ast, value.inner0, mode, false, captures, occurrences);
+                return;
+            }
+        } else if (value.kind == ExprKind.Field || value.kind == ExprKind.Index
+            || (value.kind == ExprKind.Unary && value.aux == (u32)TokenKind.Star)) {
+            self.demand(ast, value.inner0, mode, implicit, captures, occurrences);
+            return;
+        } else if (value.kind == ExprKind.Ternary) {
+            self.demand(ast, value.inner1, mode, implicit, captures, occurrences);
+            self.demand(ast, value.aux, mode, implicit, captures, occurrences);
+            return;
+        } else if (value.kind != ExprKind.Var) {
+            return;
+        }
+        i64 i = 0;
+        while (i < occurrences.len()) {
+            LambdaOccurrence* occurrence = occurrences.get_ptr(i);
+            if (occurrence.node.span.file == value.span.file
+                && occurrence.node.span.start == value.span.start) {
+                LambdaCapture* capture = captures.get_ptr((i64)occurrence.capture);
+                LambdaCaptureMode requested = mode;
+                if (requested == LambdaCaptureMode.Owned
+                    && typecheck_type_is_copy(self.root, &self.symbols.types, capture.type_id)) {
+                    requested = LambdaCaptureMode.Shared;
+                }
+                if ((i64)requested > (i64)capture.mode) { capture.mode = requested; }
+                if (requested == LambdaCaptureMode.Owned && implicit) {
+                    occurrence.implicit_move = true;
+                }
+            }
+            i += 1;
+        }
+    }
+
+    void demand_parameter(LambdaLowering* self, AstPool* ast, u32 argument,
+                           u32 expected, Vec<LambdaCapture>* captures,
+                           Vec<LambdaOccurrence>* occurrences) {
+        TypeEntry parameter = *self.symbols.types.get(expected);
+        LambdaCaptureMode mode = LambdaCaptureMode.Owned;
+        if (parameter.kind == TypeKind.Reference || parameter.kind == TypeKind.Pointer) {
+            mode = parameter.is_mut ? LambdaCaptureMode.Mutable : LambdaCaptureMode.Shared;
+        }
+        self.demand(ast, argument, mode, true, captures, occurrences);
+    }
+
+    void analyze_accesses(LambdaLowering* self, AstPool* ast, TypeEnv* env,
+                          Vec<LambdaCapture>* captures, Vec<LambdaOccurrence>* occurrences) {
+        i64 i = 1;
+        while (i < ast.stmts.len()) {
+            AstStmt statement = *ast.get_stmt((u32)i);
+            if (statement.kind == StmtKind.Assign) {
+                self.demand(ast, statement.inner0, LambdaCaptureMode.Mutable, false, captures, occurrences);
+                self.demand(ast, statement.inner1, LambdaCaptureMode.Owned, true, captures, occurrences);
+            } else if (statement.kind == StmtKind.Let) {
+                self.demand(ast, statement.inner1, LambdaCaptureMode.Owned, true, captures, occurrences);
+            } else if (statement.kind == StmtKind.Return) {
+                self.demand(ast, statement.inner0, LambdaCaptureMode.Owned, true, captures, occurrences);
+            }
+            i += 1;
+        }
+        i = 1;
+        while (i < ast.exprs.len()) {
+            AstExpr expression = *ast.get_expr((u32)i);
+            if (expression.kind == ExprKind.Move) {
+                self.demand(ast, (u32)i, LambdaCaptureMode.Owned, false, captures, occurrences);
+            } else if (expression.kind == ExprKind.Unary
+                && (expression.aux == (u32)TokenKind.Increment
+                    || expression.aux == (u32)TokenKind.Decrement)) {
+                self.demand(ast, expression.inner0, LambdaCaptureMode.Mutable, false, captures, occurrences);
+            } else if (expression.kind == ExprKind.Call) {
+                AstExpr callee = *ast.get_expr(expression.inner0);
+                u32 callable_type = ast.get_expr(expression.inner0).inferred_type;
+                TypeEntry callable = *self.symbols.types.get(callable_type);
+                Vec<Binding> parameters = Vec<Binding>.new();
+                if (callee.kind == ExprKind.Var) {
+                    bool overloaded = false;
+                    bool ambiguous = false;
+                    bool no_match = false;
+                    u32 resolved = 0;
+                    bool ok = true;
+                    DiagnosticBag scratch = DiagnosticBag.new();
+                    SyntaxNode* function = typecheck_resolve_free_function(ast, &self.symbols.types,
+                        self.symbols, self.root, env, self.symbols.names.get(callee.aux),
+                        ast.get_expr((u32)i), &scratch, &ok, &overloaded, &ambiguous,
+                        &no_match, &resolved);
+                    if (function != (SyntaxNode*)0) {
+                        collect_parameter_bindings(binding_function_parameters(function), &parameters);
+                    }
+                }
+                i64 argument = 0;
+                while (argument < (i64)expression.aux) {
+                    u32 expected = TYPE_UNKNOWN;
+                    if (argument < parameters.len()) {
+                        expected = typecheck_parameter_type_id(&self.symbols.types, parameters.get_ptr(argument));
+                    } else if (callable.kind == TypeKind.Function && argument < callable.count) {
+                        expected = self.symbols.types.type_args.get(callable.inner + 1 + (u32)argument);
+                    }
+                    if (expected != TYPE_UNKNOWN) {
+                        self.demand_parameter(ast, ast.args.get((i64)expression.inner1 + argument),
+                            expected, captures, occurrences);
+                    }
+                    argument += 1;
+                }
+            } else if (expression.kind == ExprKind.MethodCall) {
+                u32 receiver_type = ast.get_expr(expression.inner0).inferred_type;
+                str method = self.symbols.names.get(expression.aux);
+                i64 count = (i64)ast.args.get((i64)expression.inner1);
+                bool value_receiver = typecheck_method_has_value_receiver(self.root,
+                    &self.symbols.types, receiver_type, method, count + 1);
+                u32 parameter = typecheck_method_parameter_type_for_call(ast, self.root,
+                    &self.symbols.types, receiver_type, method, count + 1,
+                    expression.inner1, false, 0, (bool*)0);
+                if (value_receiver) {
+                    self.demand(ast, expression.inner0, LambdaCaptureMode.Owned, true, captures, occurrences);
+                } else if (parameter != TYPE_UNKNOWN) {
+                    self.demand_parameter(ast, expression.inner0, parameter, captures, occurrences);
+                }
+                i64 argument = 0;
+                while (argument < count) {
+                    parameter = typecheck_method_parameter_type_for_call(ast, self.root,
+                        &self.symbols.types, receiver_type, method, count + 1,
+                        expression.inner1, false, argument + 1, (bool*)0);
+                    if (parameter != TYPE_UNKNOWN) {
+                        self.demand_parameter(ast, ast.args.get((i64)expression.inner1 + 1 + argument),
+                            parameter, captures, occurrences);
+                    }
+                    argument += 1;
+                }
+            }
+            i += 1;
+        }
+    }
+
+    u32 expected_type(LambdaLowering* self, SyntaxNode* function, SyntaxNode* pipe) {
+        Vec<Binding> bindings = Vec<Binding>.new();
+        collect_function_bindings(function, &bindings);
+        i64 i = 0;
+        while (i < bindings.len()) {
+            Binding* binding = bindings.get_ptr(i);
+            SyntaxNode* assign = binding.name_node.next_sibling;
+            if (assign != (SyntaxNode*)0 && assign.token_kind == TokenKind.Assign
+                && assign.next_sibling == pipe) {
+                return typecheck_parameter_type_id(&self.symbols.types, binding);
+            }
+            i += 1;
+        }
+        SyntaxNode* arguments = pipe.parent;
+        if (arguments.kind != NodeKind.Parenthesized) { return TYPE_UNKNOWN; }
+        SyntaxNode* callee = arguments.parent.first_child;
+        while (callee != (SyntaxNode*)0 && callee.next_sibling != arguments) {
+            callee = callee.next_sibling;
+        }
+        if (!node_is_identifier(callee)) { return TYPE_UNKNOWN; }
+        i64 index = 0;
+        SyntaxNode* cursor = arguments.first_child;
+        while (cursor != (SyntaxNode*)0 && cursor != pipe) {
+            if (cursor.token_kind == TokenKind.Comma) { index += 1; }
+            cursor = cursor.next_sibling;
+        }
+        SyntaxNode* selected = (SyntaxNode*)0;
+        cursor = self.root.first_child;
+        while (cursor != (SyntaxNode*)0) {
+            if (cursor.kind == NodeKind.Function && !typecheck_is_generic_function(cursor)) {
+                SyntaxNode* name = function_identifier(cursor);
+                if (name != (SyntaxNode*)0 && strcmp(name.text, callee.text) == 0) {
+                    if (selected != (SyntaxNode*)0) { return TYPE_UNKNOWN; }
+                    selected = cursor;
+                }
+            }
+            cursor = cursor.next_sibling;
+        }
+        if (selected == (SyntaxNode*)0) { return TYPE_UNKNOWN; }
+        Vec<Binding> parameters = Vec<Binding>.new();
+        collect_parameter_bindings(binding_function_parameters(selected), &parameters);
+        if (index >= parameters.len()) { return TYPE_UNKNOWN; }
+        return typecheck_parameter_type_id(&self.symbols.types, parameters.get_ptr(index));
+    }
+
+    bool parameters(LambdaLowering* self, SyntaxNode* start, SyntaxNode* end,
+                     u32 expected, SyntaxNode* output, Vec<u32>* types) {
+        TypeEntry context = *self.symbols.types.get(expected);
+        SyntaxNode* cursor = start;
+        i64 index = 0;
+        while (cursor != (SyntaxNode*)0 && cursor != end) {
+            SyntaxNode* segment = cursor;
+            SyntaxNode* name = (SyntaxNode*)0;
+            i64 depth = 0;
+            while (cursor != (SyntaxNode*)0 && cursor != end) {
+                if (cursor.token_kind == TokenKind.Comma && depth == 0) { break; }
+                if (cursor.token_kind == TokenKind.Less) { depth += 1; }
+                else if (cursor.token_kind == TokenKind.Greater) { depth -= 1; }
+                else if (cursor.token_kind == TokenKind.RightShift) { depth -= 2; }
+                if (node_is_identifier(cursor)) { name = cursor; }
+                cursor = cursor.next_sibling;
+            }
+            if (name == (SyntaxNode*)0) {
+                self.diagnostics.error(segment.span, lambda_parameter_list());
+                return false;
+            }
+            SyntaxNode* type_start = segment;
+            if (type_start.token_kind == TokenKind.Move) { type_start = type_start.next_sibling; }
+            SyntaxNode* base = type_start;
+            bool reference = base != (SyntaxNode*)0 && base.token_kind == TokenKind.BitwiseAnd;
+            bool mutable = false;
+            if (reference) {
+                base = base.next_sibling;
+                if (base != (SyntaxNode*)0 && base.token_kind == TokenKind.Mut) {
+                    mutable = true;
+                    base = base.next_sibling;
+                }
+            }
+            u32 type_id = TYPE_UNKNOWN;
+            if (base == name) {
+                if (context.kind == TypeKind.Function && index < context.count) {
+                    type_id = self.symbols.types.type_args.get(context.inner + 1 + (u32)index);
+                    if (reference) {
+                        TypeEntry inferred = *self.symbols.types.get(type_id);
+                        if (inferred.kind == TypeKind.Reference) { type_id = inferred.inner; }
+                        type_id = self.symbols.types.get_reference(type_id, mutable);
+                    }
+                }
+            } else {
+                String text = String.new();
+                SyntaxNode* token = base;
+                while (token != (SyntaxNode*)0 && token != name) {
+                    append_node_tokens(token, &text);
+                    token = token.next_sibling;
+                }
+                type_id = type_id_from_text(&self.symbols.types, text.to_str());
+                if (reference) { type_id = self.symbols.types.get_reference(type_id, mutable); }
+            }
+            if (type_id == TYPE_UNKNOWN) {
+                self.diagnostics.error(name.span, lambda_parameter_type(name.text));
+                return false;
+            }
+            if (context.kind == TypeKind.Function && index < context.count) {
+                u32 parameter = self.symbols.types.type_args.get(context.inner + 1 + (u32)index);
+                if (parameter != type_id) {
+                    self.diagnostics.error(name.span, type_mismatch(
+                        self.symbols.types.type_name(parameter), self.symbols.types.type_name(type_id)));
+                    return false;
+                }
+            }
+            if (index > 0) { append_child(output, self.token(TokenKind.Comma, ",", name.span)); }
+            lambda_append_type(self.nodes, output, &self.symbols.types, type_id, name.span);
+            append_child(output, lambda_clone_node(self.nodes, name, false));
+            types.push(type_id);
+            index += 1;
+            if (cursor != (SyntaxNode*)0 && cursor != end) { cursor = cursor.next_sibling; }
+        }
+        if (context.kind == TypeKind.Function && index != context.count) {
+            self.diagnostics.error(output.span, lambda_parameter_count(context.count, index));
+            return false;
+        }
+        return true;
+    }
+
+    void rewrite_occurrences(LambdaLowering* self, str environment,
+                              Vec<LambdaCapture>* captures,
+                              Vec<LambdaOccurrence>* occurrences) {
+        i64 i = 0;
+        while (i < occurrences.len()) {
+            LambdaOccurrence occurrence = occurrences.get(i);
+            LambdaCapture capture = captures.get((i64)occurrence.capture);
+            Span span = occurrence.node.span;
+            SyntaxNode* replacement = self.nodes.create(NodeKind.Expression, span, "");
+            SyntaxNode* group = self.nodes.create(NodeKind.Parenthesized, span, "");
+            if (capture.mode != LambdaCaptureMode.Owned) {
+                append_child(group, self.token(TokenKind.Star, "*", span));
+            } else if (occurrence.implicit_move) {
+                append_child(group, self.token(TokenKind.Move, "move", span));
+            }
+            append_child(group, self.token(TokenKind.Identifier, environment, span));
+            append_child(group, self.token(TokenKind.Dot, ".", span));
+            append_child(group, self.token(TokenKind.Identifier,
+                self.symbols.names.get(capture.name_id), span));
+            append_child(replacement, group);
+            lambda_replace_range(occurrence.node.parent, occurrence.node,
+                occurrence.node.next_sibling, replacement);
+            i += 1;
+        }
+    }
+
+    void type_local_binding(LambdaLowering* self, SyntaxNode* function,
+                             SyntaxNode* pipe, u32 type_id) {
+        Vec<Binding> bindings = Vec<Binding>.new();
+        collect_function_bindings(function, &bindings);
+        i64 i = 0;
+        while (i < bindings.len()) {
+            Binding* binding = bindings.get_ptr(i);
+            SyntaxNode* assign = binding.name_node.next_sibling;
+            if (binding.kind == BindingKind.Let && assign != (SyntaxNode*)0
+                && assign.token_kind == TokenKind.Assign && assign.next_sibling == pipe) {
+                SyntaxNode* start = binding.name_node.parent.first_child;
+                while (start != (SyntaxNode*)0 && start.token_kind != TokenKind.Let) {
+                    start = start.next_sibling;
+                }
+                // A block can contain several let declarations.
+                while (start != (SyntaxNode*)0 && start.next_sibling != binding.name_node) {
+                    start = start.next_sibling;
+                }
+                if (start != (SyntaxNode*)0 && start.token_kind == TokenKind.Let) {
+                    SyntaxNode* replacement = self.nodes.create(NodeKind.Type, start.span, "");
+                    lambda_append_type(self.nodes, replacement, &self.symbols.types, type_id, start.span);
+                    lambda_replace_range(start.parent, start, binding.name_node, replacement);
+                }
+                return;
+            }
+            i += 1;
+        }
+    }
+
+    SyntaxNode* lower_lambda(LambdaLowering* self, SyntaxNode* parent,
+                             SyntaxNode* pipe, SyntaxNode* function,
+                             str owner, TypeEnv* inherited) {
+        u32 expected = self.expected_type(function, pipe);
+        TypeEntry context = *self.symbols.types.get(expected);
+        TypeEnv outer = self.environment(function, owner, pipe, inherited);
+        SyntaxNode* close = pipe;
+        SyntaxNode* parameter_start = pipe.next_sibling;
+        if (pipe.token_kind == TokenKind.BitwiseOr) {
+            close = parameter_start;
+            while (close != (SyntaxNode*)0 && close.token_kind != TokenKind.BitwiseOr
+                && close.token_kind != TokenKind.Semicolon && close.kind != NodeKind.Block) {
+                close = close.next_sibling;
+            }
+            if (close == (SyntaxNode*)0 || close.token_kind != TokenKind.BitwiseOr) {
+                self.diagnostics.error(pipe.span, lambda_parameter_list());
+                return pipe.next_sibling;
+            }
+        } else {
+            parameter_start = close;
+        }
+        String name_text = @format("__silver_lambda_{}_{}", pipe.span.file, pipe.span.start);
+        while (self.symbols.find(name_text.to_str()) >= 0) { name_text.push((u8)'_'); }
+        str name = self.nodes.generated_text.get(self.nodes.generated_text.intern(name_text.to_str()));
+        SyntaxNode* generated = self.nodes.create(NodeKind.Function, pipe.span, "");
+        append_child(generated, self.token(TokenKind.Private, "private", pipe.span));
+        SyntaxNode* return_token = self.token(TokenKind.Void, "void", pipe.span);
+        append_child(generated, return_token);
+        append_child(generated, self.token(TokenKind.Identifier, name, pipe.span));
+        SyntaxNode* parameters = self.nodes.create(NodeKind.Parenthesized, pipe.span, "");
+        Vec<u32> parameter_types = Vec<u32>.new();
+        if (!self.parameters(parameter_start, close, expected, parameters, &parameter_types)) {
+            return close.next_sibling;
+        }
+        append_child(generated, parameters);
+        SyntaxNode* start = close.next_sibling;
+        if (start == (SyntaxNode*)0) {
+            self.diagnostics.error(pipe.span, lambda_return_type());
+            return start;
+        }
+        SyntaxNode* end = start.next_sibling;
+        bool expression_body = start.kind != NodeKind.Block;
+        SyntaxNode* body = (SyntaxNode*)0;
+        if (!expression_body) {
+            body = lambda_clone_node(self.nodes, start, false);
+        } else {
+            end = start;
+            while (end != (SyntaxNode*)0 && end.token_kind != TokenKind.Comma
+                && end.token_kind != TokenKind.Semicolon) {
+                end = end.next_sibling;
+            }
+            body = self.nodes.create(NodeKind.Block, pipe.span, "");
+            append_child(body, self.token(TokenKind.Return, "return", pipe.span));
+            lambda_clone_range(self.nodes, body, start, end);
+            append_child(body, self.token(TokenKind.Semicolon, ";", pipe.span));
+        }
+        SyntaxNode* last = start;
+        while (last.next_sibling != end && last.next_sibling != (SyntaxNode*)0) {
+            last = last.next_sibling;
+        }
+        generated.span = pipe.span.extend(last.span);
+        if (expression_body) { body.span = generated.span; }
+        append_child(generated, body);
+        self.walk(body, generated, "", &outer);
+        if (!self.diagnostics.is_empty()) { return end; }
+
+        TypeEnv env = lambda_clone_env(&outer);
+        Vec<Binding> locals = Vec<Binding>.new();
+        collect_function_bindings(generated, &locals);
+        i64 p = 0;
+        while (p < locals.len()) {
+            Binding* parameter = locals.get_ptr(p);
+            if (parameter.kind == BindingKind.Parameter) {
+                env.insert(self.symbols.names.intern(parameter.name),
+                    typecheck_parameter_type_id(&self.symbols.types, parameter));
+            }
+            p += 1;
+        }
+        AstPool ast = AstPool.new();
+        ExprLowerer lowerer = ExprLowerer.new(&ast, &self.symbols.types, &self.symbols.names);
+        lowerer.unit_root = self.root;
+        u32 expected_return = context.kind == TypeKind.Function
+            ? self.symbols.types.type_args.get(context.inner) : TYPE_UNKNOWN;
+        lowerer.expected_type_id = expected_return;
+        env.expected_return = expected_return;
+        Vec<u32> statements = Vec<u32>.new();
+        lowerer.lower_block(body, &statements);
+        if (lowerer.unsupported) {
+            self.diagnostics.error(pipe.span, lambda_return_type());
+            return end;
+        }
+        bool ok = true;
+        i64 s = 0;
+        while (s < statements.len()) {
+            typecheck_statement(&ast, &self.symbols.types, self.symbols, self.root,
+                &env, expected_return, statements.get(s), self.diagnostics, &ok);
+            s += 1;
+        }
+        u32 result = TYPE_VOID;
+        bool returned = false;
+        s = 1;
+        while (s < ast.stmts.len()) {
+            AstStmt statement = *ast.get_stmt((u32)s);
+            if (statement.kind == StmtKind.Return) {
+                u32 current = statement.inner0 == 0 ? TYPE_VOID
+                    : ast.get_expr(statement.inner0).inferred_type;
+                if (current == TYPE_UNKNOWN) {
+                    self.diagnostics.error(statement.span, lambda_return_type());
+                    ok = false;
+                } else if (returned && !types_match(&self.symbols.types, result, current)) {
+                    self.diagnostics.error(statement.span, type_mismatch(
+                        self.symbols.types.type_name(result), self.symbols.types.type_name(current)));
+                    ok = false;
+                } else if (!returned) {
+                    result = current;
+                    returned = true;
+                }
+            }
+            s += 1;
+        }
+        if (expected_return != TYPE_UNKNOWN) {
+            if (!types_match(&self.symbols.types, expected_return, result)) {
+                self.diagnostics.error(pipe.span, type_mismatch(
+                    self.symbols.types.type_name(expected_return), self.symbols.types.type_name(result)));
+                ok = false;
+            } else {
+                result = expected_return;
+            }
+        }
+        if (!ok) { return end; }
+        if (expression_body && result == TYPE_VOID) {
+            body.first_child = body.first_child.next_sibling;
+            append_child(body, self.token(TokenKind.Return, "return", pipe.span));
+            append_child(body, self.token(TokenKind.Semicolon, ";", pipe.span));
+        }
+        SyntaxNode* return_type = self.nodes.create(NodeKind.Type, pipe.span, "");
+        lambda_append_type(self.nodes, return_type, &self.symbols.types, result, pipe.span);
+        lambda_replace_range(generated, return_token, return_token.next_sibling, return_type);
+
+        Vec<LambdaCapture> captures = Vec<LambdaCapture>.new();
+        Vec<LambdaOccurrence> occurrences = Vec<LambdaOccurrence>.new();
+        self.capture_occurrences(body, &outer, &locals, &captures, &occurrences);
+        self.analyze_accesses(&ast, &env, &captures, &occurrences);
+        if (!captures.is_empty() && context.kind == TypeKind.Function) {
+            self.diagnostics.error(pipe.span, lambda_capturing_function_pointer());
+            return end;
+        }
+        SyntaxNode* replacement = self.nodes.create(NodeKind.Expression, pipe.span, "");
+        u32 value_type = TYPE_UNKNOWN;
+        if (captures.is_empty()) {
+            append_child(replacement, self.token(TokenKind.Identifier, name, pipe.span));
+            value_type = self.symbols.types.get_function(result, &parameter_types);
+        } else {
+            String environment_name = @format("{}__env", name);
+            while (env.lookup(self.symbols.names.intern(environment_name.to_str())) != TYPE_UNKNOWN) {
+                environment_name.push((u8)'_');
+            }
+            String type_name = @format("{}__captures", name);
+            value_type = self.symbols.types.get_named(type_name.to_str());
+            SyntaxNode* structure = self.nodes.create(NodeKind.Struct, pipe.span, "");
+            append_child(structure, self.token(TokenKind.Private, "private", pipe.span));
+            append_child(structure, self.token(TokenKind.Struct, "struct", pipe.span));
+            append_child(structure, self.token(TokenKind.Identifier, type_name.to_str(), pipe.span));
+            SyntaxNode* fields = self.nodes.create(NodeKind.Block, pipe.span, "");
+            append_child(structure, fields);
+            append_child(replacement, self.token(TokenKind.Identifier, type_name.to_str(), pipe.span));
+            SyntaxNode* initializer = self.nodes.create(NodeKind.Block, pipe.span, "");
+            append_child(replacement, initializer);
+            LambdaCaptureMode mode = LambdaCaptureMode.Shared;
+            i64 c = 0;
+            while (c < captures.len()) {
+                LambdaCapture capture = captures.get(c);
+                if ((i64)capture.mode > (i64)mode) { mode = capture.mode; }
+                u32 field_type = capture.type_id;
+                if (capture.mode != LambdaCaptureMode.Owned) {
+                    // A mutable str capture needs the slot address so writes
+                    // reach the captured local instead of its bytes.
+                    field_type = capture.mode == LambdaCaptureMode.Mutable
+                        && capture.type_id == TYPE_STR
+                        ? self.symbols.types.get_pointer(TYPE_STR, true)
+                        : self.symbols.types.get_reference(field_type,
+                            capture.mode == LambdaCaptureMode.Mutable);
+                }
+                str field = self.symbols.names.get(capture.name_id);
+                lambda_append_type(self.nodes, fields, &self.symbols.types, field_type, capture.span);
+                append_child(fields, self.token(TokenKind.Identifier, field, capture.span));
+                append_child(fields, self.token(TokenKind.Semicolon, ";", capture.span));
+                if (c > 0) { append_child(initializer, self.token(TokenKind.Comma, ",", capture.span)); }
+                append_child(initializer, self.token(TokenKind.Dot, ".", capture.span));
+                append_child(initializer, self.token(TokenKind.Identifier, field, capture.span));
+                append_child(initializer, self.token(TokenKind.Assign, "=", capture.span));
+                append_child(initializer, self.token(capture.mode == LambdaCaptureMode.Owned
+                    ? TokenKind.Move : TokenKind.BitwiseAnd,
+                    capture.mode == LambdaCaptureMode.Owned ? "move" : "&", capture.span));
+                if (capture.mode == LambdaCaptureMode.Mutable) {
+                    append_child(initializer, self.token(TokenKind.Mut, "mut", capture.span));
+                }
+                append_child(initializer, self.token(TokenKind.Identifier, field, capture.span));
+                c += 1;
+            }
+            append_child(self.root, structure);
+            record_item(self.symbols, self.diagnostics, structure);
+            module_register_source_struct(&self.symbols.types, structure);
+            self.rewrite_occurrences(environment_name.to_str(), &captures, &occurrences);
+            SyntaxNode* environment_parameter = self.nodes.create(NodeKind.Parameter, pipe.span, "");
+            u32 environment_type = value_type;
+            if (mode != LambdaCaptureMode.Owned) {
+                environment_type = self.symbols.types.get_reference(value_type, mode == LambdaCaptureMode.Mutable);
+            }
+            lambda_append_type(self.nodes, environment_parameter, &self.symbols.types,
+                environment_type, pipe.span);
+            append_child(environment_parameter, self.token(TokenKind.Identifier,
+                environment_name.to_str(), pipe.span));
+            if (parameters.first_child != (SyntaxNode*)0) {
+                append_child(environment_parameter, self.token(TokenKind.Comma, ",", pipe.span));
+            }
+            environment_parameter.last_child.next_sibling = parameters.first_child;
+            if (parameters.last_child == (SyntaxNode*)0) {
+                parameters.last_child = environment_parameter.last_child;
+            }
+            parameters.first_child = environment_parameter.first_child;
+            SyntaxNode* parameter = parameters.first_child;
+            while (parameter != (SyntaxNode*)0) {
+                parameter.parent = parameters;
+                parameter = parameter.next_sibling;
+            }
+            Vec<u32> signature = Vec<u32>.new();
+            signature.push(environment_type);
+            p = 0;
+            while (p < parameter_types.len()) { signature.push(parameter_types.get(p)); p += 1; }
+            parameter_types = move signature;
+            LambdaCallable callable;
+            callable.type_id = value_type;
+            callable.function_name = self.symbols.names.intern(name);
+            callable.mode = mode;
+            self.callables.push(callable);
+        }
+        append_child(self.root, generated);
+        record_item(self.symbols, self.diagnostics, generated);
+        self.symbols.set_type(name, self.symbols.types.get_function(result, &parameter_types));
+        self.type_local_binding(function, pipe, value_type);
+        lambda_replace_range(parent, pipe, end, replacement);
+        self.changed = true;
+        return end;
+    }
+
+    void walk(LambdaLowering* self, SyntaxNode* parent, SyntaxNode* function,
+               str owner, TypeEnv* inherited) {
+        SyntaxNode* cursor = parent.first_child;
+        SyntaxNode* previous = (SyntaxNode*)0;
+        while (cursor != (SyntaxNode*)0 && self.diagnostics.is_empty()) {
+            if (cursor.kind == NodeKind.Token
+                && (cursor.token_kind == TokenKind.BitwiseOr || cursor.token_kind == TokenKind.Or)
+                && lambda_operand_position(previous)) {
+                cursor = self.lower_lambda(parent, cursor, function, owner, inherited);
+                previous = parent.first_child;
+                while (previous != (SyntaxNode*)0 && previous.next_sibling != cursor) {
+                    previous = previous.next_sibling;
+                }
+                continue;
+            }
+            if (node_is_identifier(cursor) && cursor.next_sibling != (SyntaxNode*)0
+                && cursor.next_sibling.kind == NodeKind.Parenthesized
+                && !(previous != (SyntaxNode*)0 && previous.token_kind == TokenKind.Dot)) {
+                SyntaxNode* arguments = cursor.next_sibling;
+                self.walk(arguments, function, owner, inherited);
+                TypeEnv env = self.environment(function, owner, cursor, inherited);
+                u32 type_id = env.lookup(self.symbols.names.intern(cursor.text));
+                i64 index = self.callable_index(type_id);
+                if (index >= 0) {
+                    LambdaCallable callable = self.callables.get(index);
+                    SyntaxNode* replacement = self.nodes.create(NodeKind.Expression, cursor.span, "");
+                    append_child(replacement, self.token(TokenKind.Identifier,
+                        self.symbols.names.get(callable.function_name), cursor.span));
+                    SyntaxNode* call = self.nodes.create(NodeKind.Parenthesized, arguments.span, "");
+                    append_child(replacement, call);
+                    append_child(call, self.token(callable.mode == LambdaCaptureMode.Owned
+                        ? TokenKind.Move : TokenKind.BitwiseAnd,
+                        callable.mode == LambdaCaptureMode.Owned ? "move" : "&", cursor.span));
+                    if (callable.mode == LambdaCaptureMode.Mutable) {
+                        append_child(call, self.token(TokenKind.Mut, "mut", cursor.span));
+                    }
+                    append_child(call, lambda_clone_node(self.nodes, cursor, false));
+                    if (arguments.first_child != (SyntaxNode*)0) {
+                        append_child(call, self.token(TokenKind.Comma, ",", arguments.span));
+                        lambda_clone_range(self.nodes, call, arguments.first_child, (SyntaxNode*)0);
+                    }
+                    SyntaxNode* next = arguments.next_sibling;
+                    lambda_replace_range(parent, cursor, next, replacement);
+                    previous = replacement.last_child;
+                    cursor = next;
+                    continue;
+                }
+                previous = arguments;
+                cursor = arguments.next_sibling;
+                continue;
+            }
+            self.walk(cursor, function, owner, inherited);
+            previous = cursor;
+            cursor = cursor.next_sibling;
+        }
+    }
+}
+
+bool lower_lambdas(SyntaxTree* tree, NodePool* nodes, SymbolTable* symbols,
+                    DiagnosticBag* diagnostics, CfgSet* cfg) {
+    LambdaLowering lowering = LambdaLowering.new(nodes, tree.root, symbols, diagnostics);
+    Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
+    cfg_collect_items(tree.root, cfg, diagnostics, &items);
+    TypeEnv inherited = TypeEnv.new();
+    i64 i = 0;
+    while (i < items.len() && diagnostics.is_empty()) {
+        SyntaxNode* item = items.get(i);
+        if (item.kind == NodeKind.Function && contains_lambda(item)) {
+            if (typecheck_is_generic_function(item)) {
+                diagnostics.error(item.span, lambda_generic_scope());
+            } else {
+                lowering.walk(find_function_body(item), item, "", &inherited);
+            }
+        } else if (item.kind == NodeKind.Impl) {
+            SyntaxNode* owner = impl_target_identifier(item);
+            SyntaxNode* block = item.first_child;
+            while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) { block = block.next_sibling; }
+            if (owner != (SyntaxNode*)0 && block != (SyntaxNode*)0 && contains_lambda(block)) {
+                SyntaxNode* start = block.first_child;
+                while (start != (SyntaxNode*)0 && diagnostics.is_empty()) {
+                    SyntaxNode* body = start;
+                    while (body != (SyntaxNode*)0 && body.kind != NodeKind.Block) { body = body.next_sibling; }
+                    if (body == (SyntaxNode*)0) { break; }
+                    SyntaxNode* end = body.next_sibling;
+                    if (contains_lambda(body)) {
+                        SyntaxNode* function = nodes.create(NodeKind.Function, start.span.extend(body.span), "");
+                        lambda_clone_range(nodes, function, start, end);
+                        bool generic = owner.next_sibling != (SyntaxNode*)0
+                            && owner.next_sibling.token_kind == TokenKind.Less;
+                        SyntaxNode* token = item.first_child;
+                        while (token != (SyntaxNode*)0 && token != owner) {
+                            if (token.token_kind == TokenKind.Less) { generic = true; }
+                            token = token.next_sibling;
+                        }
+                        if (generic || typecheck_is_generic_function(function)) {
+                            diagnostics.error(function.span, lambda_generic_scope());
+                            break;
+                        }
+                        lowering.walk(find_function_body(function), function, owner.text, &inherited);
+                        lambda_replace_range(block, start, end, function);
+                    }
+                    start = end;
+                }
+            }
+        }
+        i += 1;
+    }
+    return lowering.changed;
+}

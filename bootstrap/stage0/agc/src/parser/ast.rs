@@ -329,6 +329,22 @@ pub struct Parameter {
     pub span: Span,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct LambdaParameter {
+    pub name: Identifier,
+    pub type_annotation: Option<Type>,
+    pub mode: LambdaParameterMode,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LambdaParameterMode {
+    Value,
+    Move,
+    Shared,
+    Mutable,
+}
+
 /// Function signature (for extern functions)
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionSignature {
@@ -735,6 +751,10 @@ pub enum IterAccessMode {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExpressionKind {
+    Lambda {
+        parameters: Vec<LambdaParameter>,
+        body: Block,
+    },
     Literal(Literal),
     Identifier(Identifier),
     TypeName(Type),

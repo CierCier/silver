@@ -63,6 +63,31 @@ i32 main() {
         assert_eq_i64(5, g_drops, "Vec dropped 5 elements");
     }
 
+    test_start("Vec captured by an uncalled lambda drops its elements");
+    g_drops = 0;
+    {
+        Vec<DropSpy> values = Vec<DropSpy>.new();
+        DropSpy value;
+        value.val = 42;
+        values.push(move value);
+        let _take = || move values;
+    }
+    assert_eq_i64(1, g_drops, "uncalled capture drops the owned Vec once");
+
+    test_start("Vec transferred through a lambda keeps its elements alive");
+    g_drops = 0;
+    {
+        Vec<DropSpy> values = Vec<DropSpy>.new();
+        DropSpy value;
+        value.val = 42;
+        values.push(move value);
+        let take = || move values;
+        Vec<DropSpy> received = take();
+        assert_eq_i64(1, received.len(), "transferred Vec retains its element");
+        assert_eq_i64(0, g_drops, "capture transfer preserves the element");
+    }
+    assert_eq_i64(1, g_drops, "transferred Vec drops its element once");
+
     // 2. Deque<DropSpy>
     test_start("Deque drops contained elements across ring buffer");
     {

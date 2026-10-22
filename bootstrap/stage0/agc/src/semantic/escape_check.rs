@@ -8,9 +8,8 @@
 //! independent origins and may escape without a caller-lifetime constraint.
 //!
 //! The checker remains intentionally conservative at opaque expressions:
-//! references stored into structs/containers are not tracked, cross-function
-//! global stores through reference parameters are not detected, and unknown
-//! calls/casts are treated as independent outliving values.
+//! aggregate construction propagates contained borrows, but field projections,
+//! cross-function global stores, and opaque calls remain incomplete.
 
 use crate::diagnostics::messages as msg;
 use crate::lexer::Span;
@@ -67,6 +66,21 @@ enum Source {
     /// The old checker permits opaque expressions conservatively, but they
     /// cannot be advertised as independent to caller-side checking.
     Opaque,
+}
+
+fn merge_sources(left: Option<Source>, right: Option<Source>) -> Option<Source> {
+    match (left, right) {
+        (None, source) | (source, None) => source,
+        (Some(Source::Local { depth: left }), Some(Source::Local { depth: right })) => {
+            Some(Source::Local { depth: left.max(right) })
+        }
+        (Some(local @ Source::Local { .. }), _) | (_, Some(local @ Source::Local { .. })) => Some(local),
+        (Some(Source::Opaque), _) | (_, Some(Source::Opaque)) => Some(Source::Opaque),
+        (Some(Source::Escapable { mut origins }), Some(Source::Escapable { origins: other })) => {
+            origins.extend(other);
+            Some(Source::Escapable { origins })
+        }
+    }
 }
 
 /// Scope entry: (name, previous source) for shadow restore.
@@ -361,6 +375,22 @@ impl Checker {
         ref_params: &FxHashSet<String>,
     ) -> Option<Source> {
         match expr.kind.as_ref() {
+            ast::ExpressionKind::Move(value) => {
+                self.reference_source(value, scopes, ref_sources, ptr_locals, ref_params)
+            }
+            ast::ExpressionKind::StructLiteral { fields, .. } => fields.iter().fold(None, |source, field| {
+                merge_sources(source, self.reference_source(&field.value, scopes, ref_sources, ptr_locals, ref_params))
+            }),
+            ast::ExpressionKind::Tuple(values) | ast::ExpressionKind::Array(values) => values.iter().fold(None, |source, value| {
+                merge_sources(source, self.reference_source(value, scopes, ref_sources, ptr_locals, ref_params))
+            }),
+            ast::ExpressionKind::Initializer { items } => items.iter().fold(None, |source, item| {
+                let value = match item {
+                    ast::InitializerItem::Positional(value) | ast::InitializerItem::Field { value, .. }
+                    | ast::InitializerItem::Index { value, .. } => value,
+                };
+                merge_sources(source, self.reference_source(value, scopes, ref_sources, ptr_locals, ref_params))
+            }),
             ast::ExpressionKind::Reference { expression, .. } => {
                 Some(self.classify(expression, scopes, ref_sources, ptr_locals, ref_params))
             }
@@ -376,7 +406,7 @@ impl Checker {
                 self.reference_source(expression, scopes, ref_sources, ptr_locals, ref_params)
             }
             ast::ExpressionKind::Identifier(ident) => ref_sources.get(&ident.name).cloned(),
-            ast::ExpressionKind::Block(block) => {
+            ast::ExpressionKind::Block(block) | ast::ExpressionKind::Lambda { body: block, .. } => {
                 let mut block_scopes = scopes.to_vec();
                 let mut block_sources = ref_sources.clone();
                 let block_ptrs = ptr_locals.clone();
@@ -773,7 +803,7 @@ impl Checker {
                     );
                 }
             }
-            ast::ExpressionKind::Block(block) => {
+            ast::ExpressionKind::Block(block) | ast::ExpressionKind::Lambda { body: block, .. } => {
                 self.check_block(block, scopes, ref_sources, ptr_locals, ref_params);
             }
             ast::ExpressionKind::Initializer { items } => {

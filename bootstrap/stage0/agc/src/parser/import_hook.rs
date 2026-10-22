@@ -915,7 +915,7 @@ fn scan_expr_for_bare_ctor(expr: &ast::Expression, ctor: &str, found: &mut bool)
                 *found = true;
             }
         }
-        ast::ExpressionKind::Block(block) => scan_block_for_bare_ctor(block, ctor, found),
+        ast::ExpressionKind::Block(block) | ast::ExpressionKind::Lambda { body: block, .. } => scan_block_for_bare_ctor(block, ctor, found),
         ast::ExpressionKind::Ternary {
             condition,
             then_expr,
@@ -1174,7 +1174,7 @@ fn scan_expr_for_macro(expr: &ast::Expression, macro_names: &[&str], found: &mut
         | ast::ExpressionKind::Wait(operand) => {
             scan_expr_for_macro(operand, macro_names, found);
         }
-        ast::ExpressionKind::Block(block) => scan_block_for_macro(block, macro_names, found),
+        ast::ExpressionKind::Block(block) | ast::ExpressionKind::Lambda { body: block, .. } => scan_block_for_macro(block, macro_names, found),
         ast::ExpressionKind::Ternary {
             condition,
             then_expr,

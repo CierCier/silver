@@ -176,7 +176,7 @@ fn rewrite_expression(expression: &mut ast::Expression) {
                 rewrite_expression(&mut arm.body);
             }
         }
-        ast::ExpressionKind::Block(block) => rewrite_block(block),
+        ast::ExpressionKind::Block(block) | ast::ExpressionKind::Lambda { body: block, .. } => rewrite_block(block),
         ast::ExpressionKind::Initializer { items } => {
             for item in items {
                 match item {

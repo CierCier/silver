@@ -4,6 +4,7 @@
 //! nodes with a simple cursor.
 
 use crate::lexer::{LexToken, Span, Token};
+use crate::diagnostics::messages as msg;
 use crate::parser::{ParseError, ast};
 
 /// A callback the expression parser invokes when it needs to parse a block
@@ -862,6 +863,120 @@ fn parse_enum_type_pattern(
     })
 }
 
+fn parse_lambda(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseError> {
+    let opening = &cursor.tokens[cursor.pos];
+    let empty = matches!(opening.kind, Token::Or);
+    cursor.bump();
+    let mut parameters = Vec::new();
+    if !empty {
+        let type_parser = super::prt_parser::PRT_Parser::new(None);
+        while !matches!(cursor.current().map(|t| &t.kind), Some(Token::BitwiseOr)) {
+            let start = cursor.pos;
+            let mode = match cursor.current().map(|t| &t.kind) {
+                Some(Token::Move) => {
+                    cursor.bump();
+                    ast::LambdaParameterMode::Move
+                }
+                Some(Token::BitwiseAnd) => {
+                    cursor.bump();
+                    if matches!(cursor.current().map(|t| &t.kind), Some(Token::Mut)) {
+                        cursor.bump();
+                        ast::LambdaParameterMode::Mutable
+                    } else {
+                        ast::LambdaParameterMode::Shared
+                    }
+                }
+                _ => ast::LambdaParameterMode::Value,
+            };
+            let type_start = cursor.pos;
+            let mut depth = 0usize;
+            while let Some(token) = cursor.current() {
+                match token.kind {
+                    Token::Comma | Token::BitwiseOr if depth == 0 => break,
+                    Token::LeftParen | Token::LeftBracket | Token::Less => depth += 1,
+                    Token::RightParen | Token::RightBracket | Token::Greater => {
+                        depth = depth.saturating_sub(1);
+                    }
+                    _ => {}
+                }
+                cursor.bump();
+            }
+            let end = cursor.pos;
+            let name_index = end.checked_sub(1).filter(|&i| i >= type_start);
+            let Some((name, name_span)) = name_index.and_then(|i| match &cursor.tokens[i].kind {
+                Token::Identifier(name) => Some((name.clone(), cursor.tokens[i].span)),
+                _ => None,
+            }) else {
+                return Err(ParseError::InvalidSyntax {
+                    message: msg::lambda_parameter_name_expected().to_string(),
+                    span: cursor.tokens.get(start).map(|t| t.span).unwrap_or(opening.span),
+                });
+            };
+            let type_annotation = if end - 1 == type_start {
+                None
+            } else {
+                Some(type_parser.parse_type_prefix(cursor.tokens, type_start, end - 1)
+                    .filter(|(_, next)| *next == end - 1).map(|(ty, _)| ty).ok_or_else(|| {
+                    ParseError::InvalidSyntax {
+                        message: msg::lambda_parameter_invalid_type().to_string(),
+                        span: cursor.tokens[type_start].span.extend_to(&name_span),
+                    }
+                })?)
+            };
+            parameters.push(ast::LambdaParameter {
+                name: ast::Identifier { name, span: name_span },
+                type_annotation,
+                mode,
+                span: cursor.tokens[start].span.extend_to(&name_span),
+            });
+            if matches!(cursor.current().map(|t| &t.kind), Some(Token::Comma)) {
+                cursor.bump();
+            } else {
+                break;
+            }
+        }
+        if !matches!(cursor.current().map(|t| &t.kind), Some(Token::BitwiseOr)) {
+            return Err(ParseError::InvalidSyntax {
+                message: msg::lambda_parameters_unterminated().to_string(),
+                span: opening.span,
+            });
+        }
+        cursor.bump();
+    }
+    let body = if matches!(cursor.current().map(|t| &t.kind), Some(Token::LeftBrace)) {
+        let start = cursor.pos;
+        let end = find_matching_brace(cursor.tokens, start, cursor.end).ok_or_else(|| {
+            ParseError::InvalidSyntax {
+                message: msg::lambda_body_unterminated().to_string(),
+                span: cursor.tokens[start].span,
+            }
+        })?;
+        let Some(parser) = cursor.block_parser.as_mut() else {
+            return Err(ParseError::InvalidSyntax {
+                message: msg::lambda_block_requires_parser().to_string(),
+                span: cursor.tokens[start].span,
+            });
+        };
+        let body = parser(cursor.tokens, start, end + 1)?;
+        cursor.pos = end + 1;
+        body
+    } else {
+        let value = parse_assignment(cursor)?;
+        let span = value.span;
+        ast::Block {
+            statements: vec![ast::Statement {
+                kind: ast::StatementKind::Return(Some(value)),
+                span,
+            }],
+            span,
+        }
+    };
+    Ok(ast::Expression {
+        span: opening.span.extend_to(&body.span),
+        kind: Box::new(ast::ExpressionKind::Lambda { parameters, body }),
+    })
+}
+
 fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseError> {
     let token = cursor.current().ok_or_else(|| ParseError::InvalidSyntax {
         message: "expected expression".to_string(),
@@ -869,6 +984,7 @@ fn parse_primary(cursor: &mut ExprCursor<'_>) -> Result<ast::Expression, ParseEr
     })?;
 
     let mut expr = match &token.kind {
+        Token::BitwiseOr | Token::Or => return parse_lambda(cursor),
         Token::Match => {
             let match_start = token.span.start;
             cursor.bump();

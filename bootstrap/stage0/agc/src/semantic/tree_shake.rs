@@ -561,7 +561,7 @@ impl NameCollector {
                     self.walk_expr(&arm.body);
                 }
             }
-            ExpressionKind::Block(b) => self.walk_block(b),
+            ExpressionKind::Block(b) | ExpressionKind::Lambda { body: b, .. } => self.walk_block(b),
             ExpressionKind::Initializer { items } => {
                 for item in items {
                     match item {

@@ -32,6 +32,7 @@ struct MoveOrigin {
     u32 name_id;
     u32 variable_index;
     Span span;
+    SyntaxNode* node;
     Span scope;
     bool branch_local;
     bool active;
@@ -210,6 +211,7 @@ impl OwnershipAnalyzer {
         while (i >= 0) {
             MoveOrigin* origin = self.move_origins.get_ptr(i);
             if (origin.active && origin.variable_index == (u32)variable_index
+                && !ownership_in_alternative_branch(origin.node, span)
                 && (!origin.branch_local || (origin.scope.start <= span.start
                     && span.end <= origin.scope.end))
                 && ownership_place_overlaps(self.names.get(origin.name_id), place)) {
@@ -229,8 +231,9 @@ impl OwnershipAnalyzer {
         self.observed_set.set((i64)place_id);
     }
 
-    void transfer(OwnershipAnalyzer* self, str place, Span span, bool continues,
+    void transfer(OwnershipAnalyzer* self, str place, SyntaxNode* node, bool continues,
                   bool branch_local, Span scope) {
+        Span span = node.span;
         i64 variable_index = self.variable_index(place, span);
         if (variable_index < 0 || !self.needs_move_tracking(place, span)) { return; }
         self.observe(place, span);
@@ -239,6 +242,7 @@ impl OwnershipAnalyzer {
         origin.name_id = self.names.intern(place);
         origin.variable_index = (u32)variable_index;
         origin.span = span;
+        origin.node = node;
         origin.scope = scope;
         origin.branch_local = branch_local;
         origin.active = true;
@@ -266,6 +270,49 @@ impl OwnershipAnalyzer {
 
 bool ownership_text_equals(str left, str right) {
     return strcmp(left, right) == 0;
+}
+
+bool ownership_in_alternative_branch(SyntaxNode* source, Span use) {
+    SyntaxNode* block = source.parent;
+    while (block != (SyntaxNode*)0 && block.kind != NodeKind.Function) {
+        if (block.kind == NodeKind.Block) {
+            SyntaxNode* tail = block.next_sibling;
+            if (tail != (SyntaxNode*)0 && tail.token_kind == TokenKind.Else) {
+                SyntaxNode* alternative = tail.next_sibling;
+                if (alternative != (SyntaxNode*)0) {
+                    Span range = alternative.span;
+                    while (alternative != (SyntaxNode*)0) {
+                        if (alternative.kind == NodeKind.Block) {
+                            range = range.extend(alternative.span);
+                            tail = alternative.next_sibling;
+                            if (tail == (SyntaxNode*)0 || tail.token_kind != TokenKind.Else) { break; }
+                            alternative = tail.next_sibling;
+                        } else if (alternative.token_kind == TokenKind.If) {
+                            while (alternative != (SyntaxNode*)0 && alternative.kind != NodeKind.Block) {
+                                alternative = alternative.next_sibling;
+                            }
+                        } else { break; }
+                    }
+                    if (span_contains(range, use)) { return true; }
+                }
+            }
+            SyntaxNode* branch = block;
+            while (branch != (SyntaxNode*)0) {
+                SyntaxNode* before = binding_previous_sibling(branch);
+                if (before != (SyntaxNode*)0 && before.kind == NodeKind.Parenthesized) {
+                    before = binding_previous_sibling(before);
+                    if (before == (SyntaxNode*)0 || before.token_kind != TokenKind.If) { break; }
+                    before = binding_previous_sibling(before);
+                }
+                if (before == (SyntaxNode*)0 || before.token_kind != TokenKind.Else) { break; }
+                branch = binding_previous_sibling(before);
+                if (branch == (SyntaxNode*)0 || branch.kind != NodeKind.Block) { break; }
+                if (span_contains(branch.span, use)) { return true; }
+            }
+        }
+        block = block.parent;
+    }
+    return false;
 }
 
 bool contains_drop_type(OwnershipAnalyzer* analyzer, str name) {
@@ -647,52 +694,21 @@ Span ownership_binding_scope(SyntaxNode* name, SyntaxNode* function) {
     return function.span;
 }
 
-void collect_ownership_variables(OwnershipAnalyzer* analyzer, SyntaxNode* function, Vec<SyntaxNode*>* leaves) {
+void collect_ownership_variables(OwnershipAnalyzer* analyzer, SyntaxNode* function) {
+    Vec<Binding> bindings = Vec<Binding>.new();
+    collect_function_bindings(function, &bindings);
     i64 i = 0;
-    while (i < leaves.len()) {
-        SyntaxNode* type_node = leaves.get(i);
-        if (type_node.kind != NodeKind.Token || type_node.token_kind != TokenKind.Identifier
-            || ownership_text_equals(type_node.text, "return")
-            || ownership_text_equals(type_node.text, "move")
-            || ownership_text_equals(type_node.text, "wait")) {
-            i += 1;
-            continue;
-        }
-        String type_name = String.new();
-        type_name.push_str(type_node.text);
-        i64 name_index = i + 1;
-        if (name_index < leaves.len() && ownership_text_equals(leaves.get(name_index).text, "<")) {
-            i64 depth = 0;
-            while (name_index < leaves.len()) {
-                str text = leaves.get(name_index).text;
-                type_name.push_str(text);
-                if (ownership_text_equals(text, "<")) {
-                    depth += 1;
-                } else if (ownership_text_equals(text, ">")) {
-                    depth -= 1;
-                } else if (ownership_text_equals(text, ">>")) {
-                    depth -= 2;
-                }
-                name_index += 1;
-                if (depth <= 0) { break; }
-            }
-        }
-        while (name_index < leaves.len()
-            && (ownership_text_equals(leaves.get(name_index).text, "*")
-                || ownership_text_equals(leaves.get(name_index).text, "&"))) {
-            type_name.push_str(leaves.get(name_index).text);
-            name_index += 1;
-        }
-        if (name_index < leaves.len() && leaves.get(name_index).token_kind == TokenKind.Identifier) {
-            SyntaxNode* name = leaves.get(name_index);
+    while (i < bindings.len()) {
+        Binding* binding = bindings.get_ptr(i);
+        u32 type_id = typecheck_parameter_type_id(analyzer.type_table, binding);
+        if (type_id != TYPE_UNKNOWN) {
             OwnershipVar variable;
-            variable.name_id = analyzer.names.intern(name.text);
-            variable.type_id = analyzer.type_table.parse_type_name(type_name.to_str());
-            variable.declaration_span = name.span;
-            variable.scope = ownership_binding_scope(name, function);
+            variable.name_id = analyzer.names.intern(binding.name);
+            variable.type_id = type_id;
+            variable.declaration_span = binding.span;
+            variable.scope = ownership_binding_scope(binding.name_node, function);
             analyzer.variables.push(variable);
         }
-        type_name.drop();
         i += 1;
     }
 }
@@ -700,7 +716,7 @@ void collect_ownership_variables(OwnershipAnalyzer* analyzer, SyntaxNode* functi
 void check_move_sequences(OwnershipAnalyzer* analyzer, SyntaxNode* function, CfgSet* cfg) {
     Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
     cfg_collect_live_leaves(function, cfg, &leaves);
-    collect_ownership_variables(analyzer, function, &leaves);
+    collect_ownership_variables(analyzer, function);
     Vec<Span> match_ranges = Vec<Span>.new();
     bool match_ranges_loaded = false;
     i64 i = 0;
@@ -715,7 +731,7 @@ void check_move_sequences(OwnershipAnalyzer* analyzer, SyntaxNode* function, Cfg
             if (non_consuming) {
                 analyzer.observe(returned.to_str(), leaves.get(i + 1).span);
             } else {
-                analyzer.transfer(returned.to_str(), leaves.get(i + 1).span, false,
+                analyzer.transfer(returned.to_str(), leaves.get(i + 1), false,
                     false, function.span);
             }
             returned.drop();
@@ -745,7 +761,7 @@ void check_move_sequences(OwnershipAnalyzer* analyzer, SyntaxNode* function, Cfg
             if (non_consuming) {
                 analyzer.observe(place.to_str(), leaves.get(i + 1).span);
             } else {
-                analyzer.transfer(place.to_str(), leaves.get(i + 1).span, continues,
+                analyzer.transfer(place.to_str(), leaves.get(i + 1), continues,
                     branch_local, branch_local ? branch.span : function.span);
             }
             place.drop();
@@ -773,12 +789,14 @@ void check_move_sequences(OwnershipAnalyzer* analyzer, SyntaxNode* function, Cfg
                         if (non_consuming) {
                             analyzer.observe(source.to_str(), leaves.get(end + 2).span);
                         } else {
-                            analyzer.transfer(source.to_str(), leaves.get(end + 2).span, true,
+                            analyzer.transfer(source.to_str(), leaves.get(end + 2), true,
                                 false, function.span);
-                            i = source_end;
+                            end = source_end;
                         }
                         source.drop();
                     }
+                } else {
+                    analyzer.observe(place.to_str(), node.span);
                 }
                 place.drop();
                 i = end;

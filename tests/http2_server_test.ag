@@ -18,24 +18,20 @@ import std.sys.entry;
 import std.test;
 import std.thread;
 
-void handle_h2_hello(ResponseWriter* w, HttpRequest* r) {
-    w.set_header("Content-Type", "text/plain");
-    w.set_header("X-Proto-Echo", r.proto());
-    w.write_header(200);
-    w.write_str("hello h2 world");
-}
-
-void handle_h2_echo(ResponseWriter* w, HttpRequest* r) {
-    w.set_header("Content-Type", "text/plain");
-    w.write_header(200);
-    w.write_str(r.body_str());
-}
-
 void server_h2_worker(i32 fd) {
     TcpListener listener = TcpListener.from_fd(fd);
     HttpServer s = HttpServer.new("127.0.0.1:0");
-    s.get("/hello", handle_h2_hello);
-    s.post("/echo", handle_h2_echo);
+    s.get("/hello", |ResponseWriter* w, HttpRequest* r| {
+        w.set_header("Content-Type", "text/plain");
+        w.set_header("X-Proto-Echo", r.proto());
+        w.write_header(200);
+        w.write_str("hello h2 world");
+    });
+    s.post("/echo", |ResponseWriter* w, HttpRequest* r| {
+        w.set_header("Content-Type", "text/plain");
+        w.write_header(200);
+        w.write_str(r.body_str());
+    });
 
     // Serve 3 connections: 2 HTTP/2 connections and 1 HTTP/1.1 connection
     i64 count = 0;

@@ -455,6 +455,12 @@ bool binding_lowercase_type_start(SyntaxNode* child) {
     if (next.kind == NodeKind.Bracket) {
         return true;
     }
+    if (next.kind == NodeKind.Parenthesized) {
+        SyntaxNode* name = next.next_sibling;
+        return node_is_identifier(name) && name.next_sibling != (SyntaxNode*)0
+            && (name.next_sibling.token_kind == TokenKind.Assign
+                || name.next_sibling.token_kind == TokenKind.Semicolon);
+    }
     if (next.kind != NodeKind.Token) {
         return false;
     }
@@ -566,6 +572,13 @@ void collect_block_bindings(SyntaxNode* block, Vec<Binding>* bindings) {
                     }
                     TypeProjection declared_type = binding_declared_type(child, candidate);
                     add_typed_binding(bindings, candidate, array ? BindingKind.Array : BindingKind.Variable, &declared_type);
+                    if (bindings.len() > 0) {
+                        Binding* binding = bindings.get_ptr(bindings.len() - 1);
+                        if (binding.name_node == candidate) {
+                            binding.type_start = child;
+                            binding.type_end = candidate;
+                        }
+                    }
                     while (cursor != (SyntaxNode*)0
                         && !(cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon)) {
                         if (cursor.kind == NodeKind.Block

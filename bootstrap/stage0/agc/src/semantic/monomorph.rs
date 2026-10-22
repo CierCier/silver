@@ -447,6 +447,12 @@ fn normalize_expression(
     defaults: &[(String, Vec<Option<ast::Type>>)],
 ) {
     match expression.kind.as_mut() {
+        ast::ExpressionKind::Lambda { parameters, body } => {
+            for parameter in parameters {
+                if let Some(ty) = &mut parameter.type_annotation { normalize_type(ty, defaults); }
+            }
+            normalize_block(body, defaults);
+        }
         ast::ExpressionKind::TypeName(ty) => normalize_type(ty, defaults),
         ast::ExpressionKind::Cast {
             expression,
@@ -1132,7 +1138,7 @@ fn collect_expression_instantiations(
                 );
             }
         }
-        ast::ExpressionKind::Block(block) => {
+        ast::ExpressionKind::Block(block) | ast::ExpressionKind::Lambda { body: block, .. } => {
             collect_block_instantiations(block, generic_structs, instantiations, scopes)
         }
         ast::ExpressionKind::Initializer { items } => {
@@ -1771,6 +1777,12 @@ fn substitute_statement_types(stmt: &mut ast::Statement, mapping: &HashMap<Strin
 
 fn substitute_expression_types(expr: &mut ast::Expression, mapping: &HashMap<String, Type>) {
     match expr.kind.as_mut() {
+        ast::ExpressionKind::Lambda { parameters, body } => {
+            for parameter in parameters {
+                if let Some(ty) = &mut parameter.type_annotation { *ty = substitute_ast_type(ty, mapping); }
+            }
+            substitute_block_types(body, mapping);
+        }
         ast::ExpressionKind::Ternary {
             condition,
             then_expr,
@@ -2186,7 +2198,7 @@ fn rewrite_expression_function_calls(
                 );
             }
         }
-        ast::ExpressionKind::Block(block) => {
+        ast::ExpressionKind::Block(block) | ast::ExpressionKind::Lambda { body: block, .. } => {
             rewrite_block_function_calls(block, name, args, mangled, span, param_count)
         }
         ast::ExpressionKind::Initializer { items } => {
@@ -3116,7 +3128,7 @@ fn collect_expression_remaining_calls(
                 results.extend(collect_expression_remaining_calls(&arm.body, generic_fns));
             }
         }
-        ast::ExpressionKind::Block(block) => {
+        ast::ExpressionKind::Block(block) | ast::ExpressionKind::Lambda { body: block, .. } => {
             results.extend(collect_block_remaining_calls(block, generic_fns));
         }
         ast::ExpressionKind::Initializer { items } => {

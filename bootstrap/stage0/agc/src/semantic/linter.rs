@@ -270,6 +270,14 @@ impl<'a> Linter<'a> {
 
     fn lint_expr(&mut self, expr: &ast::Expression) {
         match expr.kind.as_ref() {
+            ast::ExpressionKind::Lambda { parameters, body } => {
+                self.push_scope();
+                for parameter in parameters {
+                    self.add_binding(&parameter.name.name, parameter.name.span, true);
+                }
+                self.lint_block(body);
+                self.pop_scope();
+            }
             ast::ExpressionKind::Identifier(ident) => {
                 self.mark_used(&ident.name);
             }
