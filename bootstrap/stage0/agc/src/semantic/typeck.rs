@@ -2061,6 +2061,7 @@ impl TypeChecker {
                     let found = self.check_expr(value, target.as_ref());
                     if let Some(target) = target.as_ref()
                         && !self.is_assignable(target, &found)
+                        && !self.is_implicitly_castable(&found, target)
                     {
                         self.error(msg::type_mismatch(target, &found), value.span);
                     }

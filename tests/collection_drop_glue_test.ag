@@ -204,6 +204,33 @@ i32 main() {
     }
     assert_eq_i64(2, g_drops, "selected capture drops once at scope exit");
 
+    test_start("shadowed lambda locals preserve the outer Vec");
+    g_drops = 0;
+    {
+        Vec<DropSpy> values = Vec<DropSpy>.new();
+        i32 number = 42;
+        DropSpy element = { .val = number };
+        values.push(move element);
+        let build = |bool filled| match filled {
+            true: {
+                Vec<DropSpy> values = Vec<DropSpy>.new();
+                DropSpy element;
+                element.val = 7;
+                values.push(move element);
+                values;
+            },
+            false: { Vec<DropSpy> values = Vec<DropSpy>.new(); values; },
+        };
+        Vec<DropSpy> first = build(true);
+        Vec<DropSpy> second = build(false);
+        DropSpy* original = values.get_ptr(0);
+        assert_eq_i64(42, original.val, "initializer conversion and outer element are preserved");
+        assert_eq_i64(1, first.len(), "first call returns its local Vec");
+        assert_eq_i64(0, second.len(), "second call creates a fresh local Vec");
+        assert_eq_i64(0, g_drops, "outer and returned elements remain live");
+    }
+    assert_eq_i64(2, g_drops, "outer and returned Vec elements each drop once");
+
     test_start("lambda struct initializer transfers its owned Vec capture");
     g_drops = 0;
     {

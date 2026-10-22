@@ -18,6 +18,7 @@ pub(super) struct LambdaState {
     callable_types: HashSet<String>,
     method_receivers: HashMap<ExprKey, ast::Expression>,
     checked_types: HashMap<ExprKey, Type>,
+    binding_origins: HashMap<ExprKey, (usize, Type)>,
 }
 
 pub(super) struct CaptureFrame {
@@ -193,6 +194,7 @@ impl TypeChecker {
                 .captures
                 .get(&name.name)
                 .is_some_and(|capture| capture.mode == CaptureMode::Owned)
+                && frame.occurrences.contains_key(&key(name.span))
             {
                 frame.implicit_moves.insert(key(expression.span));
             }
@@ -230,14 +232,22 @@ impl TypeChecker {
         let Some(name) = place_root(expression) else {
             return;
         };
-        let Some((scope, ty)) = self
-            .scopes
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(index, scope)| scope.get(&name.name).map(|(ty, _)| (index, ty.clone())))
-        else {
-            return;
+        let binding_key = key(name.span);
+        // Result walks can revisit identifiers after their arm scopes have closed.
+        let (scope, ty) = if let Some(binding) = self.lambdas.binding_origins.get(&binding_key) {
+            binding.clone()
+        } else {
+            let Some(binding) = self
+                .scopes
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(index, scope)| scope.get(&name.name).map(|(ty, _)| (index, ty.clone())))
+            else {
+                return;
+            };
+            self.lambdas.binding_origins.insert(binding_key, binding.clone());
+            binding
         };
         let mode = if mode == CaptureMode::Owned && self.lambda_copy_type(&ty) {
             CaptureMode::Shared
