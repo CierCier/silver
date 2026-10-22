@@ -41,6 +41,10 @@ pub fn missing_match_arm_cleanup_block() -> &'static str {
     "missing match arm cleanup block"
 }
 
+pub fn clear_yielded_value_drop_flag(error: impl std::fmt::Display) -> String {
+    format!("clear yielded value drop flag: {error}")
+}
+
 // =========================================================================
 // General & Suggestions
 // =========================================================================

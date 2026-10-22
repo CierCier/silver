@@ -505,7 +505,8 @@ impl TypeChecker {
             );
         }
         visit::expressions_in_block(&mut lowered_body, &mut |expression| {
-            if let Some(name) = frame.occurrences.get(&key(expression.span))
+            if matches!(expression.kind.as_ref(), ast::ExpressionKind::Identifier(_))
+                && let Some(name) = frame.occurrences.get(&key(expression.span))
                 && let Some(replacement) = replacements.get(name)
             {
                 let span = expression.span;
@@ -650,10 +651,11 @@ impl TypeChecker {
         function: &ast::Expression,
         arguments: &[ast::Expression],
         span: Span,
+        checked_callee: Option<&Type>,
     ) -> Option<Type> {
         let ty = match function.kind.as_ref() {
             ast::ExpressionKind::Identifier(name) => self.lookup_type(&name.name)?,
-            _ => self.check_expr(function, None),
+            _ => checked_callee?.clone(),
         };
         let Type::Named { path, .. } = &ty else {
             return None;

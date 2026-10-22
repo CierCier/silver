@@ -433,10 +433,15 @@ impl LambdaLowering {
         SyntaxNode* arguments = pipe.parent;
         if (arguments.kind != NodeKind.Parenthesized) { return TYPE_UNKNOWN; }
         SyntaxNode* callee = arguments.parent.first_child;
+        SyntaxNode* before_callee = (SyntaxNode*)0;
         while (callee != (SyntaxNode*)0 && callee.next_sibling != arguments) {
+            before_callee = callee;
             callee = callee.next_sibling;
         }
         if (!node_is_identifier(callee)) { return TYPE_UNKNOWN; }
+        if (before_callee != (SyntaxNode*)0 && before_callee.token_kind == TokenKind.Dot) {
+            return TYPE_UNKNOWN;
+        }
         i64 index = 0;
         SyntaxNode* cursor = arguments.first_child;
         while (cursor != (SyntaxNode*)0 && cursor != pipe) {

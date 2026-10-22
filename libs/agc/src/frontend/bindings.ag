@@ -143,61 +143,42 @@ String binding_parameter_type_text(Binding* binding) {
         && binding != (Binding*)0
         && binding.type_start != (SyntaxNode*)0
         && binding.type_end != (SyntaxNode*)0) {
-        SyntaxNode* tuple_type = binding.type_start;
-        while (tuple_type != binding.type_end && tuple_type.kind == NodeKind.Token
-            && projection_is_qualifier(tuple_type)) {
-            tuple_type = tuple_type.next_sibling;
-        }
-        if (tuple_type != binding.type_end && tuple_type.kind == NodeKind.Bracket) {
-            if (binding_bracket_has_tuple_separator(tuple_type)) {
-                String tuple_text = String.new();
-                while (tuple_type != binding.type_end) {
-                    append_node_tokens(tuple_type, &tuple_text);
-                    tuple_type = tuple_type.next_sibling;
-                }
-                return move tuple_text;
-            }
-        }
-        Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
-        SyntaxNode* cursor = binding.type_start;
-        while (cursor != (SyntaxNode*)0 && cursor != binding.type_end) {
-            binding_collect_leaves(cursor, &leaves);
-            cursor = cursor.next_sibling;
-        }
-
-        i64 start = 0;
-        i64 end = leaves.len();
-        while (start < end && projection_is_qualifier(leaves.get(start))) {
-            start += 1;
+        SyntaxNode* start = binding.type_start;
+        SyntaxNode* end = binding.type_end;
+        while (start != end && projection_is_qualifier(start)) {
+            start = start.next_sibling;
         }
         if (binding.declared_type.kind == ProjectionTypeKind.Pointer) {
-            SyntaxNode* last = end > start ? leaves.get(end - 1) : (SyntaxNode*)0;
+            SyntaxNode* last = binding_previous_sibling(end);
             if (last != (SyntaxNode*)0 && last.token_kind == TokenKind.Star) {
-                end -= 1;
+                end = last;
             }
         } else if (binding.declared_type.kind == ProjectionTypeKind.Reference) {
-            if (start < end && leaves.get(start).token_kind == TokenKind.BitwiseAnd) {
-                start += 1;
-                if (start < end && leaves.get(start).token_kind == TokenKind.Mut) {
-                    start += 1;
+            if (start != end && start.token_kind == TokenKind.BitwiseAnd) {
+                start = start.next_sibling;
+                if (start != end && start.token_kind == TokenKind.Mut) {
+                    start = start.next_sibling;
                 }
-                while (start < end && projection_is_qualifier(leaves.get(start))) {
-                    start += 1;
+                while (start != end && projection_is_qualifier(start)) {
+                    start = start.next_sibling;
                 }
-            } else if (end > start && leaves.get(end - 1).token_kind == TokenKind.BitwiseAnd) {
-                end -= 1;
+            } else {
+                SyntaxNode* last = binding_previous_sibling(end);
+                if (last != (SyntaxNode*)0 && last.token_kind == TokenKind.BitwiseAnd) {
+                    end = last;
+                }
             }
         }
 
+        // Keep group delimiters, including tuples nested in generic arguments.
         String text = String.new();
-        i64 i = start;
-        while (i < end) {
-            if (leaves.get(i).token_kind != TokenKind.DotDotDot) {
-                text.push_str(leaves.get(i).text);
+        SyntaxNode* cursor = start;
+        while (cursor != (SyntaxNode*)0 && cursor != end) {
+            if (cursor.token_kind != TokenKind.DotDotDot) {
+                append_node_tokens(cursor, &text);
             }
-            i += 1;
+            cursor = cursor.next_sibling;
         }
-        leaves.drop();
         if (text.len() > 0) {
             return move text;
         }

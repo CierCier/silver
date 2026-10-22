@@ -1006,6 +1006,8 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
     cfg_collect_live_leaves(body, cfg, &leaves);
     Vec<Binding> bindings = Vec<Binding>.new();
     collect_function_bindings(function, &bindings);
+    Vec<u32> binding_types = Vec<u32>.new();
+    typecheck_binding_types(symbols, tree.root, &bindings, &binding_types);
     Vec<i64> release_points = Vec<i64>.new();
     collect_borrow_release_points(body, &leaves, &release_points);
     i64 i = 0;
@@ -1057,10 +1059,10 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
                             Binding* binding = visible_binding(&bindings, node.text, node);
                             u32 type_id = borrow_binding_type(symbols, binding);
                             if (type_id == TYPE_UNKNOWN) {
-                                type_id = borrow_inferred_let_type(symbols, &bindings, binding, 0);
+                                type_id = typecheck_resolved_binding_type(&bindings, &binding_types, binding);
                             }
-                            consuming = type_id != TYPE_UNKNOWN
-                                && !typecheck_type_is_copy(tree.root, &symbols.types, type_id);
+                            consuming = type_id == TYPE_UNKNOWN
+                                || !typecheck_type_is_copy(tree.root, &symbols.types, type_id);
                         }
                         i64 conflict = analyzer.find_conflict(&place,
                             consuming ? LoanKind.Mutable : LoanKind.Shared);

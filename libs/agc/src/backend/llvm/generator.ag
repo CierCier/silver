@@ -66,6 +66,47 @@ bool llvm_item_is_generic_fn(SyntaxNode* fn_item) {
     return false;
 }
 
+bool llvm_define_enum_layout(LlvmContext* ctx, SyntaxNode* item) {
+    SyntaxNode* name = item_identifier(item);
+    if (name == (SyntaxNode*)0) { return false; }
+    LLVMOpaqueType* enum_ty = LLVMGetTypeByName2(ctx.ctx, name.text);
+    if (enum_ty == (LLVMOpaqueType*)0 || LLVMTypeIsSized(enum_ty) != 0) { return false; }
+    Vec<SyntaxNode*> variants = Vec<SyntaxNode*>.new();
+    Vec<i64> tags = Vec<i64>.new();
+    Vec<i64> arities = Vec<i64>.new();
+    enum_each_variant(item, &variants, &tags, &arities);
+    u64 data_size = 0;
+    bool has_payload = false;
+    i64 variant = 0;
+    while (variant < variants.len()) {
+        Vec<u32> payload_types = Vec<u32>.new();
+        llvm_enum_payload_types(ctx.types, ctx.root, name.text, variants.get(variant).text, &payload_types);
+        i64 payload = 0;
+        while (payload < payload_types.len()) {
+            u32 payload_type = ctx.types.resolve_subst(payload_types.get(payload));
+            mono_ensure_child_layouts(ctx, payload_type, &ctx.generic_layout_ids);
+            LLVMOpaqueType* payload_ty = llvm_lower_type(ctx.ctx, ctx.types, payload_type);
+            // A later enum, possibly inside a struct, can still be opaque.
+            if (LLVMTypeIsSized(payload_ty) == 0) { return false; }
+            payload += 1;
+        }
+        u64 size = llvm_target_payload_size(ctx, &payload_types);
+        if (size > data_size) { data_size = size; }
+        has_payload = has_payload || arities.get(variant) > 0;
+        variant += 1;
+    }
+    if (has_payload && data_size == 0) {
+        ctx.note_unresolved("empty-enum-payload-layout", name.text);
+    }
+    Vec<LLVMOpaqueType*> body = Vec<LLVMOpaqueType*>.new();
+    body.push(LLVMInt16TypeInContext(ctx.ctx));
+    if (data_size > 0) {
+        body.push(LLVMArrayType(LLVMInt8TypeInContext(ctx.ctx), (u32)data_size));
+    }
+    LLVMStructSetBody(enum_ty, body.data, (u32)body.len(), 0);
+    return true;
+}
+
 bool llvm_job_owns_source(Vec<u32>* owned_source_ids, u32 source_file_id) {
     i64 i = 0;
     while (i < owned_source_ids.len()) {
@@ -1311,54 +1352,27 @@ impl LlvmGenerator {
         }
 
         // Pass 0d: Set concrete enum layouts ({i16 tag, [N x i8] data}).
-        // Generic enums get their bodies from monomorphization.
+        // Complete dependencies before sizing by-value payloads. Generic enums
+        // get their bodies from monomorphization.
+        bool layout_progress = true;
+        while (layout_progress) {
+            layout_progress = false;
+            enum_item = tree.root.first_child;
+            while (enum_item != (SyntaxNode*)0) {
+                if (enum_item.kind == NodeKind.Enum && !llvm_item_is_generic_enum(enum_item)) {
+                    if (llvm_define_enum_layout(&ctx, enum_item)) { layout_progress = true; }
+                }
+                enum_item = enum_item.next_sibling;
+            }
+        }
         enum_item = tree.root.first_child;
         while (enum_item != (SyntaxNode*)0) {
             if (enum_item.kind == NodeKind.Enum && !llvm_item_is_generic_enum(enum_item)) {
                 SyntaxNode* enum_id = item_identifier(enum_item);
                 LLVMOpaqueType* enum_ty = enum_id != (SyntaxNode*)0
                     ? LLVMGetTypeByName2(self.ctx, enum_id.text) : (LLVMOpaqueType*)0;
-                if (enum_id != (SyntaxNode*)0 && enum_ty != (LLVMOpaqueType*)0) {
-                    Vec<SyntaxNode*> variant_names = Vec<SyntaxNode*>.new();
-                    Vec<i64> variant_tags = Vec<i64>.new();
-                    Vec<i64> variant_arities = Vec<i64>.new();
-                    enum_each_variant(enum_item, &variant_names, &variant_tags, &variant_arities);
-                    u64 data_size = 0;
-                    i64 variant_index = 0;
-                    while (variant_index < variant_names.len()) {
-                        Vec<u32> payload_types = Vec<u32>.new();
-                        llvm_enum_payload_types(types, tree.root, enum_id.text,
-                                                variant_names.get(variant_index).text, &payload_types);
-                        u64 variant_size = llvm_target_payload_size(&ctx, &payload_types);
-                        payload_types.drop();
-                        if (variant_size > data_size) {
-                            data_size = variant_size;
-                        }
-                        variant_index += 1;
-                    }
-                    bool has_payload = false;
-                    i64 vi = 0;
-                    while (vi < variant_arities.len()) {
-                        if (variant_arities.get(vi) > 0) {
-                            has_payload = true;
-                        }
-                        vi += 1;
-                    }
-                    variant_names.drop();
-                    variant_tags.drop();
-                    variant_arities.drop();
-                    if (has_payload && data_size == 0) {
-                        ctx.note_unresolved("empty-enum-payload-layout", enum_id.text);
-                    }
-                    LLVMOpaqueType* tag_ty = LLVMInt16TypeInContext(self.ctx);
-                    Vec<LLVMOpaqueType*> enum_body = Vec<LLVMOpaqueType*>.new();
-                    enum_body.push(tag_ty);
-                    if (data_size > 0) {
-                        LLVMOpaqueType* data_ty = LLVMArrayType(LLVMInt8TypeInContext(self.ctx), (u32)data_size);
-                        enum_body.push(data_ty);
-                    }
-                    LLVMStructSetBody(enum_ty, enum_body.data, (u32)enum_body.len(), 0);
-                    enum_body.drop();
+                if (enum_ty != (LLVMOpaqueType*)0 && LLVMTypeIsSized(enum_ty) == 0) {
+                    ctx.note_unresolved("unsized-enum-payload", enum_id.text);
                 }
             }
             enum_item = enum_item.next_sibling;

@@ -2208,7 +2208,17 @@ impl TypeChecker {
                 function,
                 arguments,
             } => {
-                if let Some(result) = self.check_lambda_call(function, arguments, expr.span) {
+                let checked_callee = if matches!(
+                    function.kind.as_ref(),
+                    ast::ExpressionKind::Identifier(_)
+                ) {
+                    None
+                } else {
+                    Some(self.check_expr(function, None))
+                };
+                if let Some(result) = self.check_lambda_call(
+                    function, arguments, expr.span, checked_callee.as_ref(),
+                ) {
                     return result;
                 }
                 if let ast::ExpressionKind::Identifier(ident) = function.kind.as_ref() {
@@ -2339,7 +2349,7 @@ impl TypeChecker {
                     }
                 } else {
                     // Type-check the function expression and try indirect call
-                    let fn_ty = self.check_expr(function, None);
+                    let fn_ty = checked_callee.unwrap_or_else(|| self.check_expr(function, None));
                     if let Type::Function {
                         params,
                         return_type,

@@ -31,6 +31,17 @@ impl DropSpy {
     }
 }
 
+enum WrappedVec { Payload(VecPayload); }
+enum VecPayload { Values(Vec<DropSpy>); }
+
+Vec<DropSpy> unwrap_vec(WrappedVec wrapped) {
+    return match wrapped {
+        Payload(move payload): match payload {
+            Values(move values): { values; },
+        },
+    };
+}
+
 i32 main() {
     STDOUT.write_str("=== Collection Drop Glue Tests ===\n\n");
 
@@ -87,6 +98,40 @@ i32 main() {
         assert_eq_i64(0, g_drops, "capture transfer preserves the element");
     }
     assert_eq_i64(1, g_drops, "transferred Vec drops its element once");
+
+    test_start("Vec survives nested shared captures");
+    g_drops = 0;
+    {
+        Vec<DropSpy> values = Vec<DropSpy>.new();
+        DropSpy value;
+        value.val = 42;
+        values.push(move value);
+        let outer = || {
+            let inner = || values.len();
+            return inner();
+        };
+        assert_eq_i64(1, outer(), "nested capture sees the Vec");
+        assert_eq_i64(1, values.len(), "shared capture preserves outside access");
+        assert_eq_i64(0, g_drops, "shared captures do not destroy elements");
+    }
+    assert_eq_i64(1, g_drops, "nested shared captures leave one Vec owner");
+
+    test_start("Vec match block transfers owned elements through forward enum payloads");
+    g_drops = 0;
+    {
+        Vec<DropSpy> values = Vec<DropSpy>.new();
+        DropSpy value;
+        value.val = 42;
+        values.push(move value);
+        VecPayload payload = VecPayload.Values(move values);
+        WrappedVec wrapped = WrappedVec.Payload(move payload);
+        Vec<DropSpy> received = unwrap_vec(move wrapped);
+        DropSpy* element = received.get_ptr(0);
+        assert_eq_i64(1, received.len(), "match result retains the Vec element");
+        assert_eq_i64(42, element.val, "forward enum layout preserves the element");
+        assert_eq_i64(0, g_drops, "match cleanup preserves the yielded Vec");
+    }
+    assert_eq_i64(1, g_drops, "yielded Vec drops its element once");
 
     // 2. Deque<DropSpy>
     test_start("Deque drops contained elements across ring buffer");

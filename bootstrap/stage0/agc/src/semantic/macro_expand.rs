@@ -918,6 +918,22 @@ fn apply_hygiene_and_subst_in_expr(
     }
 
     match expr.kind.as_mut() {
+        ExpressionKind::Lambda { parameters, body } => {
+            let mut scoped_hygiene = hygiene_map.clone();
+            let mut scoped_subst = param_subst.clone();
+            let mut scoped_varargs = vararg_subst.clone();
+            for parameter in parameters {
+                scoped_hygiene.remove(&parameter.name.name);
+                scoped_subst.remove(&parameter.name.name);
+                if scoped_varargs
+                    .as_ref()
+                    .is_some_and(|(name, _)| name == &parameter.name.name)
+                {
+                    scoped_varargs = None;
+                }
+            }
+            apply_hygiene_and_subst(body, &scoped_hygiene, &scoped_subst, &scoped_varargs);
+        }
         ExpressionKind::Binary { left, right, .. } => {
             apply_hygiene_and_subst_in_expr(left, hygiene_map, param_subst, vararg_subst);
             apply_hygiene_and_subst_in_expr(right, hygiene_map, param_subst, vararg_subst);

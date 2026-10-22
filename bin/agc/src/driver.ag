@@ -396,7 +396,7 @@ i32 emit_check(str path, CfgSet* cfg, Vec<String>* include_dirs, LintConfig* lin
                     check_send(&tree, &diagnostics, cfg);
                 }
                 if (diagnostics.is_empty()) {
-                    check_ownership(&tree, &symbols.types, &diagnostics, cfg);
+                    check_ownership(&tree, &symbols, &diagnostics, cfg);
                 }
                 if (diagnostics.is_empty()) {
                     AstPool check_pool = AstPool.new();
