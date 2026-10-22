@@ -244,14 +244,43 @@ bool borrow_is_global(SyntaxTree* tree, SymbolTable* symbols, str name) {
     return false;
 }
 
-bool borrow_type_contains_reference(TypeTable* types, u32 type_id, u32 depth) {
+bool borrow_type_contains_reference(TypeTable* types, SyntaxNode* root, u32 type_id, u32 depth) {
     if (depth >= MAX_TYPE_CHECK_DEPTH) { return true; }
     TypeEntry entry = *types.get(types.resolve_subst(type_id));
     if (entry.kind == TypeKind.Reference) { return true; }
     if (entry.kind == TypeKind.Array) {
-        return borrow_type_contains_reference(types, entry.inner, depth + 1);
+        return borrow_type_contains_reference(types, root, entry.inner, depth + 1);
+    }
+    if (entry.kind == TypeKind.Tuple) {
+        i64 i = 0;
+        while (i < entry.count) {
+            if (borrow_type_contains_reference(types, root,
+                types.type_args.get(entry.inner + (u32)i), depth + 1)) { return true; }
+            i += 1;
+        }
+        return false;
     }
     if (entry.kind != TypeKind.Named) { return false; }
+    SyntaxNode* item = find_item_by_name(root, NodeKind.Struct, types.names.get(entry.name_id));
+    if (item != (SyntaxNode*)0) {
+        SyntaxNode* body = item.first_child;
+        while (body != (SyntaxNode*)0 && body.kind != NodeKind.Block) { body = body.next_sibling; }
+        SyntaxNode* cursor = body != (SyntaxNode*)0 ? body.first_child : (SyntaxNode*)0;
+        while (cursor != (SyntaxNode*)0) {
+            SyntaxNode* name = (SyntaxNode*)0;
+            while (cursor != (SyntaxNode*)0 && cursor.token_kind != TokenKind.Semicolon) {
+                if (node_is_identifier(cursor)) { name = cursor; }
+                cursor = cursor.next_sibling;
+            }
+            if (name != (SyntaxNode*)0) {
+                u32 member = struct_field_type_id(types, item, name.text);
+                member = resolve_generic_member_type(types, root, type_id, member);
+                if (borrow_type_contains_reference(types, root, member, depth + 1)) { return true; }
+            }
+            if (cursor != (SyntaxNode*)0) { cursor = cursor.next_sibling; }
+        }
+        return false;
+    }
     i64 i = 0;
     while (i < types.struct_properties.len()) {
         TypeStructProperties definition = types.struct_properties.get(i);
@@ -259,7 +288,7 @@ bool borrow_type_contains_reference(TypeTable* types, u32 type_id, u32 depth) {
             u32 field = 0;
             while (field < definition.field_count) {
                 u32 member = types.struct_fields.get(definition.field_start + field);
-                if (borrow_type_contains_reference(types, member, depth + 1)) { return true; }
+                if (borrow_type_contains_reference(types, root, member, depth + 1)) { return true; }
                 field += 1;
             }
             return false;
@@ -284,7 +313,7 @@ bool borrow_function_returns_indirect(SyntaxNode* function, SymbolTable* symbols
     leaves.drop();
     return return_type.kind == ProjectionTypeKind.Pointer
         || return_type.kind == ProjectionTypeKind.Reference
-        || borrow_type_contains_reference(&symbols.types,
+        || borrow_type_contains_reference(&symbols.types, function.parent,
             function_return_type_id(&symbols.types, function), 0);
 }
 
@@ -339,6 +368,32 @@ bool borrow_node_within(SyntaxNode* node, SyntaxNode* ancestor) {
         parent = parent.parent;
     }
     return false;
+}
+
+str borrow_aggregate_holder(Vec<Binding>* bindings, Vec<u32>* types,
+                            TypeTable* table, SyntaxNode* root, SyntaxNode* node) {
+    i64 i = 0;
+    while (i < bindings.len()) {
+        Binding* binding = bindings.get_ptr(i);
+        SyntaxNode* assign = binding.name_node.next_sibling;
+        if (assign != (SyntaxNode*)0 && assign.token_kind == TokenKind.Assign) {
+            SyntaxNode* value = assign.next_sibling;
+            if (value != (SyntaxNode*)0
+                && (value.kind == NodeKind.Bracket || value.kind == NodeKind.Block)
+                && borrow_node_within(node, value)
+                && borrow_type_contains_reference(table, root, types.get(i), 0)) {
+                SyntaxNode* parent = node.parent;
+                while (parent != value && parent != (SyntaxNode*)0) {
+                    SyntaxNode* before = binding_previous_sibling(parent);
+                    if (parent.kind == NodeKind.Parenthesized && node_is_identifier(before)) { return ""; }
+                    parent = parent.parent;
+                }
+                return binding.name;
+            }
+        }
+        i += 1;
+    }
+    return "";
 }
 
 str persistent_holder(Vec<SyntaxNode*>* leaves, i64 borrow_index) {
@@ -1157,6 +1212,9 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
                     }
                     Place place = borrow_place(analyzer, &leaves, j, leaves.len());
                     bool persistent = i > 0 && borrow_text_equals(leaves.get(i - 1).text, "=");
+                    str aggregate_holder = borrow_aggregate_holder(&bindings,
+                        &binding_types, &symbols.types, tree.root, node);
+                    persistent = persistent || strlen(aggregate_holder) > 0;
                     LoanKind kind = LoanKind.Shared;
                     if (mutable) {
                         kind = LoanKind.Mutable;
@@ -1164,7 +1222,8 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
                     u32 holder_id = (u32)0;
                     i64 release_index = leaves.len();
                     if (persistent) {
-                        str holder = persistent_holder(&leaves, i);
+                        str holder = strlen(aggregate_holder) > 0
+                            ? aggregate_holder : persistent_holder(&leaves, i);
                         if (strlen(holder) > 0) {
                             holder_id = analyzer.names.intern(holder);
                             i64 use_index = last_use(&leaves, i + 1, holder);

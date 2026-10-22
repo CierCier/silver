@@ -2865,6 +2865,30 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .map_err(|e| CodegenError::new(msg::clear_yielded_value_drop_flag(e)))?;
             }
             self.clear_field_flags(&ident.name)?;
+        } else {
+            match expression.kind.as_ref() {
+                ast::ExpressionKind::Tuple(items)
+                | ast::ExpressionKind::Array(items)
+                | ast::ExpressionKind::EnumVariant { fields: items, .. } => {
+                    for item in items {
+                        self.clear_yielded_value_flags(item)?;
+                    }
+                }
+                ast::ExpressionKind::StructLiteral { fields, .. } => {
+                    for field in fields {
+                        self.clear_yielded_value_flags(&field.value)?;
+                    }
+                }
+                ast::ExpressionKind::Initializer { items } => {
+                    for item in items {
+                        let (ast::InitializerItem::Positional(value)
+                        | ast::InitializerItem::Field { value, .. }
+                        | ast::InitializerItem::Index { value, .. }) = item;
+                        self.clear_yielded_value_flags(value)?;
+                    }
+                }
+                _ => {}
+            }
         }
         Ok(())
     }

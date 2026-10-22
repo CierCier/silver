@@ -2036,7 +2036,32 @@ impl TypeChecker {
                     Type::Unknown
                 }
             }
-            ast::ExpressionKind::Initializer { .. } => Type::Unknown,
+            ast::ExpressionKind::Initializer { items } => {
+                for (position, item) in items.iter().enumerate() {
+                    let (value, target) = match item {
+                        ast::InitializerItem::Field { name, value } => (
+                            value,
+                            expected.and_then(|ty| self.resolve_field_access_type(ty, &name.name)),
+                        ),
+                        ast::InitializerItem::Positional(value)
+                        | ast::InitializerItem::Index { value, .. } => {
+                            if let ast::InitializerItem::Index { index, .. } = item {
+                                self.check_expr(index, None);
+                            }
+                            let target = match expected {
+                                Some(Type::Tuple(types)) => types.get(position).cloned(),
+                                Some(Type::Array { element, .. } | Type::Slice { element }) => {
+                                    Some((**element).clone())
+                                }
+                                _ => None,
+                            };
+                            (value, target)
+                        }
+                    };
+                    self.check_expr(value, target.as_ref());
+                }
+                expected.cloned().unwrap_or(Type::Unknown)
+            }
             ast::ExpressionKind::Tuple(items) => {
                 let elem_expected = match expected {
                     Some(Type::Tuple(elem_tys)) => elem_tys.as_slice(),

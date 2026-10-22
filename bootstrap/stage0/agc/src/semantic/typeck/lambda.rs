@@ -112,6 +112,32 @@ impl TypeChecker {
         if self.lambdas.frames.is_empty() {
             return;
         }
+        match expression.kind.as_ref() {
+            ast::ExpressionKind::Array(items)
+            | ast::ExpressionKind::Tuple(items)
+            | ast::ExpressionKind::EnumVariant { fields: items, .. } => {
+                for item in items {
+                    self.consume_capture(item);
+                }
+                return;
+            }
+            ast::ExpressionKind::StructLiteral { fields, .. } => {
+                for field in fields {
+                    self.consume_capture(&field.value);
+                }
+                return;
+            }
+            ast::ExpressionKind::Initializer { items } => {
+                for item in items {
+                    let (ast::InitializerItem::Positional(value)
+                    | ast::InitializerItem::Field { value, .. }
+                    | ast::InitializerItem::Index { value, .. }) = item;
+                    self.consume_capture(value);
+                }
+                return;
+            }
+            _ => {}
+        }
         self.demand_capture(expression, CaptureMode::Owned);
         if matches!(expression.kind.as_ref(), ast::ExpressionKind::Move(_)) {
             return;

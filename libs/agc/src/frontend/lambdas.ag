@@ -295,6 +295,16 @@ impl LambdaLowering {
             self.demand(ast, value.inner1, mode, implicit, captures, occurrences);
             self.demand(ast, value.aux, mode, implicit, captures, occurrences);
             return;
+        } else if (value.kind == ExprKind.ArrayLit || value.kind == ExprKind.StructLit) {
+            i64 i = 0;
+            i64 count = value.aux;
+            while (i < count) {
+                i64 offset = value.kind == ExprKind.ArrayLit ? 1 + i : i * 2 + 1;
+                self.demand(ast, ast.args.get((i64)value.inner1 + offset),
+                    mode, implicit, captures, occurrences);
+                i += 1;
+            }
+            return;
         } else if (value.kind != ExprKind.Var) {
             return;
         }

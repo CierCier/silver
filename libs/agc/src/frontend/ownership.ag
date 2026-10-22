@@ -67,7 +67,11 @@ bool ownership_breaks_after(SyntaxNode* source, SyntaxNode* loop_body) {
         nearest_loop = nearest_loop.parent;
     }
     if (nearest_loop != loop_body) { return false; }
-    SyntaxNode* next = source.next_sibling;
+    SyntaxNode* statement = source;
+    while (statement.parent != (SyntaxNode*)0 && statement.parent.kind != NodeKind.Block) {
+        statement = statement.parent;
+    }
+    SyntaxNode* next = statement.next_sibling;
     while (next != (SyntaxNode*)0) {
         if (next.token_kind == TokenKind.Break || next.token_kind == TokenKind.Return) { return true; }
         if (next.kind == NodeKind.Block || next.token_kind == TokenKind.If

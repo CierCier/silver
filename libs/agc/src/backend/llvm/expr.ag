@@ -4994,6 +4994,9 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                     arm_val = llvm_compat_value(ctx, arm_val, arm_val_ty, result_ty_id);
                     LLVMBuildStore(ctx.builder, arm_val, result_slot);
                 }
+                if (llvm_type_needs_tracking(ctx, result_ty_id)) {
+                    llvm_clear_place_drops(ctx, arm.value_id);
+                }
                 if (arm.pattern == MatchPatternKind.Variant) {
                     llvm_drop_unmoved_payloads(ctx, expr.inner0, (i64)arm.bindings_count);
                 }

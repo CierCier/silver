@@ -16,6 +16,8 @@ struct DropSpy {
     i64 val;
 }
 
+struct VecSlot { Vec<DropSpy> values; }
+
 impl Drop for DropSpy {
     void drop(*self) {
         g_drops = g_drops + 1;
@@ -32,6 +34,8 @@ impl DropSpy {
 }
 
 enum WrappedVec { Payload(VecPayload); }
+enum GenericWrappedVec { Payload(PayloadEnvelope<VecPayload>); }
+enum PayloadEnvelope<T> { Value(T); }
 enum VecPayload { Values(Vec<DropSpy>); }
 
 Vec<DropSpy> unwrap_vec(WrappedVec wrapped) {
@@ -40,6 +44,20 @@ Vec<DropSpy> unwrap_vec(WrappedVec wrapped) {
             Values(move values): { values; },
         },
     };
+}
+
+[Vec<DropSpy>, i32] unwrap_vec_pair(GenericWrappedVec wrapped) {
+    return match wrapped {
+        Payload(move envelope): match envelope {
+            Value(move payload): match payload {
+                Values(move values): [values, 7],
+            },
+        },
+    };
+}
+
+void consume_values(Vec<DropSpy> values) {
+    assert_eq_i64(1, values.len(), "consuming call receives the Vec");
 }
 
 i32 main() {
@@ -132,6 +150,71 @@ i32 main() {
         assert_eq_i64(0, g_drops, "match cleanup preserves the yielded Vec");
     }
     assert_eq_i64(1, g_drops, "yielded Vec drops its element once");
+
+    test_start("lambda tuple transfers its owned Vec capture");
+    g_drops = 0;
+    {
+        Vec<DropSpy> values = Vec<DropSpy>.new();
+        DropSpy value;
+        value.val = 42;
+        values.push(move value);
+        let take = || [values, 7];
+        let [received, tag] = take();
+        assert_eq_i64(1, received.len(), "lambda tuple retains its element");
+        assert_eq_i32(7, tag, "lambda tuple retains its tag");
+        assert_eq_i64(0, g_drops, "tuple capture transfer preserves the element");
+    }
+    assert_eq_i64(1, g_drops, "lambda tuple drops its Vec once");
+
+    test_start("lambda struct initializer transfers its owned Vec capture");
+    g_drops = 0;
+    {
+        Vec<DropSpy> values = Vec<DropSpy>.new();
+        DropSpy value;
+        value.val = 42;
+        values.push(move value);
+        let take = || {
+            VecSlot slot = { .values = values };
+            return move slot;
+        };
+        VecSlot received = take();
+        assert_eq_i64(1, received.values.len(), "struct initializer retains the captured Vec");
+        assert_eq_i64(0, g_drops, "struct capture transfer preserves the element");
+    }
+    assert_eq_i64(1, g_drops, "lambda struct drops its Vec once");
+
+    test_start("match tuple transfers a Vec through a generic forward payload");
+    g_drops = 0;
+    {
+        Vec<DropSpy> values = Vec<DropSpy>.new();
+        DropSpy value;
+        value.val = 42;
+        values.push(move value);
+        VecPayload payload = VecPayload.Values(move values);
+        PayloadEnvelope<VecPayload> envelope = PayloadEnvelope<VecPayload>.Value(move payload);
+        GenericWrappedVec wrapped = GenericWrappedVec.Payload(move envelope);
+        let [received, tag] = unwrap_vec_pair(move wrapped);
+        DropSpy* element = received.get_ptr(0);
+        assert_eq_i64(42, element.val, "generic forward payload preserves the element");
+        assert_eq_i32(7, tag, "match tuple retains its tag");
+        assert_eq_i64(0, g_drops, "match tuple preserves the yielded Vec");
+    }
+    assert_eq_i64(1, g_drops, "match tuple drops its Vec once");
+
+    test_start("a consuming call followed by break has no ownership back edge");
+    g_drops = 0;
+    {
+        Vec<DropSpy> values = Vec<DropSpy>.new();
+        DropSpy value;
+        value.val = 42;
+        values.push(move value);
+        while (true) {
+            consume_values(move values);
+            break;
+        }
+        assert_eq_i64(1, g_drops, "call drops its argument before break");
+    }
+    assert_eq_i64(1, g_drops, "loop exit does not drop the consumed Vec again");
 
     // 2. Deque<DropSpy>
     test_start("Deque drops contained elements across ring buffer");
