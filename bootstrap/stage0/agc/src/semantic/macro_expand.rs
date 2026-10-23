@@ -530,6 +530,25 @@ fn is_signed_type(ty: &ast::Type) -> bool {
     }
 }
 
+fn expansion_id(counter: usize) -> u32 {
+    u32::try_from(counter + 1).unwrap_or(u32::MAX)
+}
+
+/// Marks a node copied by macro expansion so span-keyed analyses can tell
+/// repeated copies of the same source apart.
+fn tag_expansion(expression: &mut Expression, expansion: u32) {
+    expression.span.expansion = expansion;
+    if let ExpressionKind::Identifier(name) = expression.kind.as_mut() {
+        name.span.expansion = expansion;
+    }
+}
+
+fn tag_expansion_in_block(block: &mut Block, expansion: u32) {
+    crate::parser::visit::expressions_in_block(block, &mut |expression| {
+        tag_expansion(expression, expansion);
+    });
+}
+
 /// Expands a single user macro invocation.
 fn expand_macro_invocation(
     def: &MacroDef,
@@ -598,14 +617,7 @@ fn expand_macro_invocation(
     collect_local_bindings_in_block(&def.body, &mut hygiene_map, macro_id);
 
     let mut body = def.body.clone();
-    // Tag macro-body nodes before substitution so caller arguments keep their spans.
-    let expansion = u32::try_from(macro_id + 1).unwrap_or(u32::MAX);
-    crate::parser::visit::expressions_in_block(&mut body, &mut |expression| {
-        expression.span.expansion = expansion;
-        if let ExpressionKind::Identifier(name) = expression.kind.as_mut() {
-            name.span.expansion = expansion;
-        }
-    });
+    tag_expansion_in_block(&mut body, expansion_id(macro_id));
     apply_hygiene_and_subst(&mut body, &hygiene_map, &param_subst, &vararg_subst);
     if !type_subst.is_empty() {
         substitute_types_in_block(&mut body, &type_subst);
@@ -860,6 +872,12 @@ fn apply_hygiene_and_subst_in_expr(
     if let ExpressionKind::Identifier(id) = expr.kind.as_ref() {
         if let Some(subst) = param_subst.get(&id.name) {
             *expr = subst.clone();
+            // Each copy of an argument may resolve in a different scope (for
+            // example inside and outside a lambda), so give it its own identity.
+            let occurrence = expansion_id(MACRO_COUNTER.fetch_add(1, Ordering::Relaxed));
+            crate::parser::visit::expression(expr, &mut |expression| {
+                tag_expansion(expression, occurrence);
+            });
             return;
         }
         if let Some(hyg_name) = hygiene_map.get(&id.name) {
