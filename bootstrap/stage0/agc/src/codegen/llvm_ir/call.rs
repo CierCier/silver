@@ -744,6 +744,18 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         allow_void: bool,
         span: &Span,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        self.emit_method_call_with_values(receiver, method, arguments, allow_void, span, None)
+    }
+
+    pub(crate) fn emit_method_call_with_values(
+        &mut self,
+        receiver: &ast::Expression,
+        method: &ast::Identifier,
+        arguments: &[ast::Expression],
+        allow_void: bool,
+        span: &Span,
+        prepared: Option<(PointerValue<'ctx>, BasicValueEnum<'ctx>)>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let owners = self.receiver_owner_candidates(receiver);
         let mut candidates = Vec::new();
         for owner_name in &owners {
@@ -957,7 +969,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 None
             };
 
-            let receiver_arg = if expects_ref {
+            let receiver_arg = if let Some((ptr, value)) = prepared {
+                if expects_ref {
+                    ptr.as_basic_value_enum()
+                } else {
+                    if signature.as_ref().is_some_and(|sig| sig.linkage.is_none())
+                        && receiver_ty.as_ref().is_some_and(|ty| {
+                            self.param_type_drops_on_exit(ty).unwrap_or(false)
+                        })
+                    {
+                        self.clear_drop_flag_of(receiver)?;
+                    }
+                    value
+                }
+            } else if expects_ref {
                 if receiver_is_pointer {
                     self.emit_expression_value(receiver)?
                 } else {

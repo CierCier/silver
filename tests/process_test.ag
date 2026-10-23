@@ -1,5 +1,21 @@
 import std.test;
 import std.process;
+import std.sys.raw.process;
+
+i32* compound_fail_target() {
+    exit(23);
+    return (i32*)0;
+}
+
+i64 compound_fail_index() {
+    exit(23);
+    return 0;
+}
+
+i32 compound_forbidden_rhs() {
+    exit(24);
+    return 1;
+}
 
 i32 main() {
     test_start("native process management");
@@ -52,6 +68,31 @@ i32 main() {
     Result<ExitStatus, i64> r4 = cmd_none.status();
     assert_true(r4.is_ok(), "exec of nonexistent binary spawns and exits 127");
     assert_eq_i32(127, r4.unwrap().exit_code(), "nonexistent binary exits 127");
+
+    test_start("compound target failure stops evaluation");
+    for (i32 mode = 0; mode < 2; mode = mode + 1) {
+        i64 child_pid = sys_fork();
+        assert_true(child_pid >= 0, "fork compound failure child");
+        if (child_pid < 0) { return 1; }
+        if (child_pid == 0) {
+            if (mode == 0) {
+                *compound_fail_target() += compound_forbidden_rhs();
+            } else {
+                i32 values[1];
+                values[0] = 10;
+                values[compound_fail_index()] += compound_forbidden_rhs();
+            }
+            exit(25);
+        }
+        if (child_pid > 0) {
+            Child child;
+            child.pid = child_pid;
+            ExitStatus status = child.wait_status();
+            assert_true(status.exited, "compound failure child exits normally");
+            assert_eq_i32(status.exit_code(), 23, "target or index exits before RHS and store");
+            if (!status.exited || status.exit_code() != 23) { return 1; }
+        }
+    }
 
     return done();
 }

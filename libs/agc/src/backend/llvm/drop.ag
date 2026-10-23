@@ -1200,7 +1200,21 @@ void llvm_clear_place_drops_at_local(LlvmContext* ctx, u32 expr_id,
     }
 }
 
+// Captured places borrow storage, but ownership still belongs to the source.
+u32 llvm_assignment_source(LlvmContext* ctx, u32 expr_id) {
+    if (expr_id == 0) { return 0; }
+    AstExpr* expr = ctx.pool.get_expr(expr_id);
+    if (expr.kind == ExprKind.Var) {
+        LlvmLocal* local = ctx.find_local(expr.aux);
+        if (local != (LlvmLocal*)0 && local.assignment_source != 0) {
+            return local.assignment_source;
+        }
+    }
+    return expr_id;
+}
+
 void llvm_clear_place_drops(LlvmContext* ctx, u32 expr_id) {
+    expr_id = llvm_assignment_source(ctx, expr_id);
     if (expr_id == 0) { return; }
     AstExpr value = *ctx.pool.get_expr(expr_id);
     if (value.kind == ExprKind.ArrayLit || value.kind == ExprKind.StructLit) {
@@ -1303,6 +1317,7 @@ void llvm_emit_drops_above(LlvmContext* ctx, i64 mark) {
 
 // Overwrite predrop releases the target subtree in parent-first preorder.
 void llvm_emit_assign_predrop(LlvmContext* ctx, u32 target_id, u32 rhs_id) {
+    target_id = llvm_assignment_source(ctx, target_id);
     if (target_id == 0 || rhs_id == 0 || ctx.current_fn == (LLVMOpaqueValue*)0) { return; }
     AstExpr* target = ctx.pool.get_expr(target_id);
     AstExpr* rhs = ctx.pool.get_expr(rhs_id);

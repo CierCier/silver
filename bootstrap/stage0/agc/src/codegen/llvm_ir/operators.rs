@@ -2,17 +2,120 @@ use inkwell::AddressSpace;
 use inkwell::FloatPredicate;
 use inkwell::IntPredicate;
 use inkwell::targets::TargetData;
-use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::types::BasicMetadataTypeEnum;
+use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, PointerValue};
 
-use crate::codegen::llvm_ir::LlvmIrGenerator;
+use crate::codegen::llvm_ir::{LlvmIrGenerator, VarInfo};
 use crate::codegen::{CodegenError, CodegenResult};
 use crate::lexer::Span;
 use crate::parser::ast;
 use crate::semantic::typeck::{operator_method_name, unary_operator_method_name};
 
 impl<'ctx> LlvmIrGenerator<'ctx> {
+    fn compound_alias(
+        &mut self,
+        name: &str,
+        ptr: PointerValue<'ctx>,
+        ty: ast::Type,
+        span: Span,
+    ) -> ast::Expression {
+        self.variables.last_mut().unwrap().insert(
+            name.to_owned(),
+            VarInfo {
+                ptr,
+                ty,
+                is_mutable: true,
+                is_volatile: false,
+                drop_flag: None,
+                field_flags: Vec::new(),
+            },
+        );
+        ast::Expression {
+            kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
+                name: name.to_owned(),
+                span,
+            })),
+            span,
+        }
+    }
+
+    fn emit_index_compound_assignment(
+        &mut self,
+        object: &ast::Expression,
+        index: &ast::Expression,
+        object_ty: &ast::Type,
+        operator: &ast::BinaryOperator,
+        right: &ast::Expression,
+        whole_expr: &ast::Expression,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        self.push_scope();
+        let result = (|| {
+            let function = self
+                .current_fn
+                .ok_or_else(|| CodegenError::new("no active function for compound assignment"))?;
+            let (object_ptr, temporary) = if let Ok((ptr, _)) = self.resolve_lvalue_ptr(object) {
+                (ptr, false)
+            } else {
+                let value = self.emit_expression_value(object)?;
+                let ptr =
+                    self.create_entry_alloca(function, "compound.object", value.get_type())?;
+                self.builder
+                    .build_store(ptr, value)
+                    .map_err(|e| CodegenError::new(e.to_string()))?;
+                (ptr, true)
+            };
+            let object_alias = self.compound_alias(
+                "$compound.object",
+                object_ptr,
+                object_ty.clone(),
+                object.span,
+            );
+            if temporary {
+                self.register_drop_flag("$compound.object", object_ty, object_ptr)?;
+            }
+            let index_ty = self
+                .resolve_argument_type(index)
+                .ok_or_else(|| CodegenError::with_span("unknown index type", index.span))?;
+            let index_value = self.emit_expression_value(index)?;
+            let index_ptr =
+                self.create_entry_alloca(function, "compound.index", index_value.get_type())?;
+            self.builder
+                .build_store(index_ptr, index_value)
+                .map_err(|e| CodegenError::new(e.to_string()))?;
+            let index_alias =
+                self.compound_alias("$compound.index", index_ptr, index_ty, index.span);
+            let target = ast::Expression {
+                kind: Box::new(ast::ExpressionKind::Index {
+                    object: Box::new(object_alias),
+                    index: Box::new(index_alias),
+                }),
+                span: whole_expr.span,
+            };
+            let value_ty = self.resolve_argument_type(&target).ok_or_else(|| {
+                CodegenError::with_span("unknown indexed value type", target.span)
+            })?;
+            let value = self.emit_binary_expression(&target, operator, right, whole_expr)?;
+            let value_ptr =
+                self.create_entry_alloca(function, "compound.value", value.get_type())?;
+            self.builder
+                .build_store(value_ptr, value)
+                .map_err(|e| CodegenError::new(e.to_string()))?;
+            let value_alias =
+                self.compound_alias("$compound.value", value_ptr, value_ty, whole_expr.span);
+            self.emit_binary_expression(
+                &target,
+                &ast::BinaryOperator::Assign,
+                &value_alias,
+                whole_expr,
+            )?;
+            self.emit_defers(1)?;
+            Ok(value)
+        })();
+        self.pop_scope();
+        result
+    }
+
     pub(crate) fn emit_unary_expression(
         &mut self,
         operator: &ast::UnaryOperator,
@@ -411,6 +514,32 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             | ast::BinaryOperator::LeftShiftAssign
             | ast::BinaryOperator::RightShiftAssign => {
                 self.check_assignment_mutability(left)?;
+                let bin_op = match operator {
+                    ast::BinaryOperator::AddAssign => ast::BinaryOperator::Add,
+                    ast::BinaryOperator::SubtractAssign => ast::BinaryOperator::Subtract,
+                    ast::BinaryOperator::MultiplyAssign => ast::BinaryOperator::Multiply,
+                    ast::BinaryOperator::DivideAssign => ast::BinaryOperator::Divide,
+                    ast::BinaryOperator::ModuloAssign => ast::BinaryOperator::Modulo,
+                    ast::BinaryOperator::BitwiseAndAssign => ast::BinaryOperator::BitwiseAnd,
+                    ast::BinaryOperator::BitwiseOrAssign => ast::BinaryOperator::BitwiseOr,
+                    ast::BinaryOperator::BitwiseXorAssign => ast::BinaryOperator::BitwiseXor,
+                    ast::BinaryOperator::LeftShiftAssign => ast::BinaryOperator::LeftShift,
+                    ast::BinaryOperator::RightShiftAssign => ast::BinaryOperator::RightShift,
+                    _ => unreachable!(),
+                };
+                if let ast::ExpressionKind::Index { object, index } = left.kind.as_ref()
+                    && let Some(object_ty) = self.resolve_argument_type(object)
+                    && !matches!(
+                        object_ty.kind.as_ref(),
+                        ast::TypeKind::Pointer(_)
+                            | ast::TypeKind::Array(_)
+                            | ast::TypeKind::Tuple(_)
+                    )
+                {
+                    return self.emit_index_compound_assignment(
+                        object, index, &object_ty, &bin_op, right, whole_expr,
+                    );
+                }
                 let (target_ptr, target_ty) = self.resolve_lvalue_ptr(left)?;
                 let llvm_ty = self.lower_basic_type(&target_ty)?;
                 let lhs = if self.lvalue_is_volatile(left) {
@@ -420,34 +549,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .build_load(llvm_ty, target_ptr, "assign.load")
                         .map_err(|e| CodegenError::new(format!("load failed: {e}")))?
                 };
-                let rhs = self.emit_expression_value(right)?;
-
                 let updated = if lhs.get_type().is_struct_type() {
                     // Use trait method for struct types: a += b desugars to a = a + b
-                    let bin_op = match operator {
-                        ast::BinaryOperator::AddAssign => ast::BinaryOperator::Add,
-                        ast::BinaryOperator::SubtractAssign => ast::BinaryOperator::Subtract,
-                        ast::BinaryOperator::MultiplyAssign => ast::BinaryOperator::Multiply,
-                        ast::BinaryOperator::DivideAssign => ast::BinaryOperator::Divide,
-                        ast::BinaryOperator::ModuloAssign => ast::BinaryOperator::Modulo,
-                        ast::BinaryOperator::BitwiseAndAssign => ast::BinaryOperator::BitwiseAnd,
-                        ast::BinaryOperator::BitwiseOrAssign => ast::BinaryOperator::BitwiseOr,
-                        ast::BinaryOperator::BitwiseXorAssign => ast::BinaryOperator::BitwiseXor,
-                        ast::BinaryOperator::LeftShiftAssign => ast::BinaryOperator::LeftShift,
-                        ast::BinaryOperator::RightShiftAssign => ast::BinaryOperator::RightShift,
-                        _ => unreachable!(),
-                    };
                     if let Some(method_name) = operator_method_name(&bin_op) {
                         let method_ident = ast::Identifier {
                             name: method_name.to_string(),
                             span: whole_expr.span,
                         };
-                        let result = self.emit_method_call_expression(
+                        let result = self.emit_method_call_with_values(
                             left,
                             &method_ident,
                             std::slice::from_ref(right),
                             false,
                             &whole_expr.span,
+                            Some((target_ptr, lhs)),
                         )?;
                         if let Some(val) = result {
                             val
@@ -464,16 +579,25 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         ));
                     }
                 } else {
+                    let rhs = self.emit_expression_value(right)?;
                     let rhs = self.cast_value_to_basic_type(rhs, llvm_ty, &right.span)?;
                     let is_unsigned = type_is_unsigned(&target_ty);
                     self.emit_arith_values(&lhs, operator, &rhs, whole_expr, is_unsigned)?
                 };
+                self.emit_assignment_pre_drop(left, target_ptr, &target_ty)?;
                 if self.lvalue_is_volatile(left) {
                     self.emit_volatile_store(target_ptr, updated)?;
                 } else {
                     self.builder.build_store(target_ptr, updated).map_err(|e| {
                         CodegenError::with_span(format!("failed assignment: {e}"), whole_expr.span)
                     })?;
+                }
+                match left.kind.as_ref() {
+                    ast::ExpressionKind::FieldAccess { .. } | ast::ExpressionKind::Index { .. } => {
+                        self.set_assigned_field_flags(left)?;
+                    }
+                    ast::ExpressionKind::Identifier(_) => self.set_all_field_flags(left)?,
+                    _ => {}
                 }
                 Ok(updated)
             }

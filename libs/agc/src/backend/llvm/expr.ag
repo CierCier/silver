@@ -4941,7 +4941,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             if (arm.body_stmt_id != 0) {
                 // Block arm body: run its statements inline (diverging arms
                 // return from the function here). No value is produced.
-                AstStmt* body_stmt = ctx.pool.get_stmt(arm.body_stmt_id);
+                AstStmt body_stmt = *ctx.pool.get_stmt(arm.body_stmt_id);
                 if (body_stmt.kind == StmtKind.Block) {
                     u32 start = body_stmt.inner0;
                     u32 count = body_stmt.aux;
@@ -4958,7 +4958,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                         // unless the body ends in a known-diverging call
                         // (abort): then control can never reach merge, so
                         // terminate explicitly instead of recording a note.
-                        if (match_body_diverges(ctx, body_stmt)) {
+                        if (match_body_diverges(ctx, &body_stmt)) {
                             LLVMBuildUnreachable(ctx.builder);
                         } else if (void_match) {
                             LLVMBuildBr(ctx.builder, merge_bb);

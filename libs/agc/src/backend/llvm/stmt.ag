@@ -74,9 +74,73 @@ void llvm_emit_defers_above(LlvmContext* ctx, i64 mark) {
     }
 }
 
+u32 llvm_assignment_alias(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 type_id,
+                           Span span, str name) {
+    u32 name_id = ctx.names.intern(name);
+    ctx.add_local(name_id, ptr, type_id, true);
+    u32 expr_id = ctx.pool.add_var(name_id, span);
+    ctx.pool.get_expr(expr_id).inferred_type = type_id;
+    return expr_id;
+}
+
+void llvm_emit_compound_assignment(LlvmContext* ctx, u32 stmt_id) {
+    AstStmt statement = *ctx.pool.get_stmt(stmt_id);
+    AstExpr target = *ctx.pool.get_expr(statement.inner0);
+    AstExpr binary = *ctx.pool.get_expr(statement.inner1);
+    u32 target_type = llvm_expr_type(ctx, statement.inner0);
+    i64 local_mark = ctx.locals.len();
+    ctx.push_scope();
+    u32 captured_target = 0;
+    LLVMOpaqueValue* temporary_base = (LLVMOpaqueValue*)0;
+    u32 base_type = target.kind == ExprKind.Index
+        ? ctx.types.resolve_subst(llvm_expr_type(ctx, target.inner0)) : TYPE_UNKNOWN;
+    if (target.kind == ExprKind.Index && ctx.types.get(base_type).kind == TypeKind.Named) {
+        LLVMOpaqueValue* base = llvm_emit_lvalue(ctx, target.inner0);
+        if (base == (LLVMOpaqueValue*)0) {
+            LLVMOpaqueValue* value = llvm_emit_expr(ctx, target.inner0);
+            if (value != (LLVMOpaqueValue*)0) {
+                base = llvm_entry_alloca(ctx, LLVMTypeOf(value), "compound_base");
+                LLVMBuildStore(ctx.builder, value, base);
+                temporary_base = base;
+            }
+        }
+        LLVMOpaqueValue* index = llvm_emit_expr(ctx, target.inner1);
+        if (base != (LLVMOpaqueValue*)0 && index != (LLVMOpaqueValue*)0) {
+            LLVMOpaqueValue* index_ptr = llvm_entry_alloca(ctx, LLVMTypeOf(index), "compound_index");
+            LLVMBuildStore(ctx.builder, index, index_ptr);
+            u32 base_id = llvm_assignment_alias(ctx, base, base_type, target.span, "$compound_base");
+            u32 index_id = llvm_assignment_alias(ctx, index_ptr, llvm_expr_type(ctx, target.inner1),
+                                                target.span, "$compound_index");
+            captured_target = ctx.pool.add_index(base_id, index_id, target.span);
+            ctx.pool.get_expr(captured_target).inferred_type = target_type;
+        }
+    } else {
+        LLVMOpaqueValue* ptr = llvm_emit_lvalue(ctx, statement.inner0);
+        if (ptr != (LLVMOpaqueValue*)0) {
+            captured_target = llvm_assignment_alias(ctx, ptr, target_type, target.span, "$compound_target");
+            ctx.locals.get_ptr(ctx.locals.len() - 1).assignment_source = statement.inner0;
+        }
+    }
+    if (captured_target == 0) {
+        ctx.note_unresolved("compound-target", "expression");
+    } else {
+        u32 value_id = ctx.pool.add_binary(binary.aux, captured_target, binary.inner1, binary.span);
+        ctx.pool.get_expr(value_id).inferred_type = target_type;
+        u32 assignment = ctx.pool.add_stmt_assign(captured_target, value_id, statement.span);
+        llvm_emit_stmt(ctx, assignment);
+        llvm_mark_assign_live(ctx, statement.inner0);
+    }
+    llvm_emit_drops_above(ctx, local_mark);
+    if (temporary_base != (LLVMOpaqueValue*)0) {
+        llvm_emit_value_drop_at_ptr(ctx, temporary_base, base_type);
+    }
+    ctx.pop_scope();
+}
+
 void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
     if (stmt_id == 0 || ctx.is_terminated()) { return; }
-    AstStmt* stmt = ctx.pool.get_stmt(stmt_id);
+    // Compound assignments can grow the pool while emitting child statements.
+    AstStmt stmt = *ctx.pool.get_stmt(stmt_id);
 
     if (stmt.kind == StmtKind.Return) {
         if (ctx.defer_emission_depth > 0) {
@@ -342,7 +406,11 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
     }
 
     if (stmt.kind == StmtKind.Assign) {
-        AstExpr* target_expr = ctx.pool.get_expr(stmt.inner0);
+        if (stmt.aux != 0) {
+            llvm_emit_compound_assignment(ctx, stmt_id);
+            return;
+        }
+        AstExpr target_expr = *ctx.pool.get_expr(stmt.inner0);
         if (target_expr.kind == ExprKind.Index) {
             u32 target_type = ctx.types.resolve_subst(llvm_expr_type(ctx, target_expr.inner0));
             TypeEntry* target_entry = ctx.types.get(target_type);
