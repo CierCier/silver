@@ -4518,7 +4518,19 @@ impl TypeChecker {
                 self.capture_method_receiver(span, &parameter);
             }
             if let Some(arguments) = arg_exprs {
-                for (argument, parameter) in arguments.iter().zip(candidate.params.iter().skip(offset)) {
+                let parameters = &candidate.params[offset.min(candidate.params.len())..];
+                // Trailing variadic arguments all take the variadic element type.
+                let variadic = candidate
+                    .source_method
+                    .parameters
+                    .iter()
+                    .any(|p| p.is_variadic)
+                    .then(|| parameters.last())
+                    .flatten();
+                for (index, argument) in arguments.iter().enumerate() {
+                    let Some(parameter) = parameters.get(index).or(variadic) else {
+                        break;
+                    };
                     let parameter = self.substitute_type(&self.substitute_self_type(parameter, receiver_ty), mapping);
                     self.capture_argument(argument, &parameter);
                 }
