@@ -336,6 +336,15 @@ bool send_type_is_send(TypeProjection* value, String* reason) {
         return false;
     }
     if (value.kind == ProjectionTypeKind.Primitive) {
+        // Tuple projections are named by their first element; flags cover the rest.
+        if (value.contains_rc) {
+            reason.push_str("Rc<T> carries a shared non-atomic reference count");
+            return false;
+        }
+        if (value.contains_non_send) {
+            reason.push_str("the tuple contains a non-Send element");
+            return false;
+        }
         return true;
     }
     if (value.kind == ProjectionTypeKind.Pointer) {
@@ -400,6 +409,37 @@ void send_report_type(SendAnalyzer* analyzer, Span span, str type_name, str reas
     analyzer.failed = true;
 }
 
+void send_append_type_tokens(SyntaxNode* node, String* out) {
+    if (node.kind == NodeKind.Token) {
+        out.push_str(node.text);
+        if (node.token_kind == TokenKind.Comma || node.token_kind == TokenKind.Mut) {
+            out.push((u8)' ');
+        }
+        return;
+    }
+    if (node.kind == NodeKind.Bracket) { out.push((u8)'['); }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        send_append_type_tokens(child, out);
+        child = child.next_sibling;
+    }
+    if (node.kind == NodeKind.Bracket) { out.push((u8)']'); }
+}
+
+// Tuple projections only name their first element, so show the declared text.
+String send_binding_type_display(Binding* binding) {
+    if (binding.type_start == (SyntaxNode*)0 || binding.type_start.kind != NodeKind.Bracket) {
+        return send_type_display(&binding.declared_type);
+    }
+    String result = String.new();
+    SyntaxNode* cursor = binding.type_start;
+    while (cursor != (SyntaxNode*)0 && cursor != binding.type_end) {
+        send_append_type_tokens(cursor, &result);
+        cursor = cursor.next_sibling;
+    }
+    return move result;
+}
+
 void check_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root,
                            Vec<Binding>* bindings, LaunchArgument* argument) {
     if ((*argument).kind == ProjectionExpressionKind.Address) {
@@ -433,7 +473,7 @@ void check_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root,
     bool is_send = send_type_is_send_in_declarations(root, &(*binding).declared_type, &visiting, 0, &reason);
     visiting.drop();
     if (!is_send) {
-        String type_name = send_type_display(&(*binding).declared_type);
+        String type_name = send_binding_type_display(binding);
         send_report_type(analyzer, (*argument).span, type_name.to_str(), reason.to_str());
         type_name.drop();
     }

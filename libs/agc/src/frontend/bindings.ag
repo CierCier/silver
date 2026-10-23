@@ -391,6 +391,7 @@ void collect_parameter_bindings(SyntaxNode* parameters, Vec<Binding>* bindings) 
             if (name_index > 0) {
                 declared_type = projection_parse_type(&segment,
                     binding_type_projection_start(start, &segment, name_index), name_index);
+                binding_merge_bracket_flags(start, &declared_type);
                 if (start.kind == NodeKind.Bracket
                     && !binding_bracket_has_tuple_separator(start)) {
                     declared_type.kind = ProjectionTypeKind.Array;
@@ -472,6 +473,29 @@ i64 binding_type_projection_start(SyntaxNode* first, Vec<SyntaxNode*>* leaves, i
     return start;
 }
 
+// The projection names only the first element of a bracket type, so merge
+// every element's flags: a reference or Rc anywhere makes the aggregate non-Send.
+void binding_merge_bracket_flags(SyntaxNode* bracket, TypeProjection* result) {
+    if (bracket == (SyntaxNode*)0 || bracket.kind != NodeKind.Bracket) {
+        return;
+    }
+    SyntaxNode* element = bracket.first_child;
+    while (element != (SyntaxNode*)0) {
+        Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+        while (element != (SyntaxNode*)0
+            && !(element.kind == NodeKind.Token && element.token_kind == TokenKind.Comma)) {
+            binding_collect_leaves(element, &leaves);
+            element = element.next_sibling;
+        }
+        if (leaves.len() > 0) {
+            TypeProjection projected = projection_parse_type(&leaves, 0, leaves.len());
+            projection_merge_type_flags(result, &projected);
+        }
+        leaves.drop();
+        if (element != (SyntaxNode*)0) { element = element.next_sibling; }
+    }
+}
+
 TypeProjection binding_declared_type(SyntaxNode* first, SyntaxNode* name) {
     TypeProjection result = projection_type_empty();
     if (first == (SyntaxNode*)0 || name == (SyntaxNode*)0) {
@@ -486,6 +510,7 @@ TypeProjection binding_declared_type(SyntaxNode* first, SyntaxNode* name) {
     if (prefix.len() > 0) {
         result = projection_parse_type(&prefix,
             binding_type_projection_start(first, &prefix, prefix.len()), prefix.len());
+        binding_merge_bracket_flags(first, &result);
     }
     prefix.drop();
     return result;
