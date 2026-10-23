@@ -389,7 +389,8 @@ void collect_parameter_bindings(SyntaxNode* parameters, Vec<Binding>* bindings) 
                 i += 1;
             }
             if (name_index > 0) {
-                declared_type = projection_parse_type(&segment, 0, name_index);
+                declared_type = projection_parse_type(&segment,
+                    binding_type_projection_start(start, &segment, name_index), name_index);
                 if (start.kind == NodeKind.Bracket
                     && !binding_bracket_has_tuple_separator(start)) {
                     declared_type.kind = ProjectionTypeKind.Array;
@@ -454,6 +455,23 @@ bool binding_lowercase_type_start(SyntaxNode* child) {
         || next.text == "<";
 }
 
+// Leaves of a bracket node omit its delimiters, so a `&`, `mut`, or `*` on the
+// first element of `[&A, B]` or `[&A]` would otherwise project as the outer
+// type. Bracket types are never references or pointers themselves.
+i64 binding_type_projection_start(SyntaxNode* first, Vec<SyntaxNode*>* leaves, i64 end) {
+    i64 start = 0;
+    if (first == (SyntaxNode*)0 || first.kind != NodeKind.Bracket) {
+        return start;
+    }
+    while (start < end
+        && (leaves.get(start).token_kind == TokenKind.BitwiseAnd
+            || leaves.get(start).token_kind == TokenKind.Mut
+            || leaves.get(start).token_kind == TokenKind.Star)) {
+        start += 1;
+    }
+    return start;
+}
+
 TypeProjection binding_declared_type(SyntaxNode* first, SyntaxNode* name) {
     TypeProjection result = projection_type_empty();
     if (first == (SyntaxNode*)0 || name == (SyntaxNode*)0) {
@@ -466,7 +484,8 @@ TypeProjection binding_declared_type(SyntaxNode* first, SyntaxNode* name) {
         cursor = cursor.next_sibling;
     }
     if (prefix.len() > 0) {
-        result = projection_parse_type(&prefix, 0, prefix.len());
+        result = projection_parse_type(&prefix,
+            binding_type_projection_start(first, &prefix, prefix.len()), prefix.len());
     }
     prefix.drop();
     return result;
