@@ -19,25 +19,25 @@ import std.net.http;
 i32 main() {
     HttpServer server = HttpServer.new("0.0.0.0:8080");
 
-    server.get("/", |ResponseWriter* w, HttpRequest* _r| {
+    server.get("/", (ResponseWriter* w, HttpRequest* _r) => {
         w.set_header("Content-Type", "text/plain; charset=utf-8");
         w.set_header("Content-Length", "144");
         w.write_header(200);
         w.write_str("Welcome to Silver HTTP Server!\nEndpoints:\n  /plaintext - Fast throughput benchmark\n  /json      - JSON payload\n  /echo      - Echo request body\n");
     });
-    server.get("/plaintext", |ResponseWriter* w, HttpRequest* _r| {
+    server.get("/plaintext", (ResponseWriter* w, HttpRequest* _r) => {
         w.set_header("Content-Type", "text/plain");
         w.set_header("Content-Length", "14");
         w.write_header(200);
         w.write_str("Hello, World!\n");
     });
-    server.get("/json", |ResponseWriter* w, HttpRequest* _r| {
+    server.get("/json", (ResponseWriter* w, HttpRequest* _r) => {
         w.set_header("Content-Type", "application/json");
         w.set_header("Content-Length", "28");
         w.write_header(200);
         w.write_str("{\"message\":\"Hello, World!\"}\n");
     });
-    server.post("/echo", |ResponseWriter* w, HttpRequest* r| {
+    server.post("/echo", (ResponseWriter* w, HttpRequest* r) => {
         w.set_header("Content-Type", "text/plain");
         w.write_header(200);
         w.write_str(r.body_str());

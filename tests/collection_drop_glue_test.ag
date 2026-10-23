@@ -92,6 +92,23 @@ i32 main() {
         assert_eq_i64(5, g_drops, "Vec dropped 5 elements");
     }
 
+    test_start("context-inferred lambda parameters borrow and consume owned values");
+    g_drops = 0;
+    {
+        DropSpy left;
+        left.val = 3;
+        DropSpy right;
+        right.val = 6;
+        void(&mut DropSpy) bump = (&mut value) => { value.val += 1; };
+        i64(&DropSpy) read = (&value) => value.val;
+        i64(DropSpy, DropSpy) sum = (move a, move b) => a.val + b.val;
+        bump(&mut left);
+        assert_eq_i64(4, read(&left), "borrowed parameter preserves outside ownership");
+        assert_eq_i64(10, sum(move left, move right), "context infers both moved parameters");
+        assert_eq_i64(2, g_drops, "moved parameters drop exactly once on return");
+    }
+    assert_eq_i64(2, g_drops, "caller does not drop consumed parameters again");
+
     test_start("Vec captured by an uncalled lambda drops its elements");
     g_drops = 0;
     {
@@ -99,7 +116,7 @@ i32 main() {
         DropSpy value;
         value.val = 42;
         values.push(move value);
-        let _take = || move values;
+        let _take = () => move values;
     }
     assert_eq_i64(1, g_drops, "uncalled capture drops the owned Vec once");
 
@@ -110,7 +127,7 @@ i32 main() {
         DropSpy value;
         value.val = 42;
         values.push(move value);
-        let take = || move values;
+        let take = () => move values;
         Vec<DropSpy> received = take();
         assert_eq_i64(1, received.len(), "transferred Vec retains its element");
         assert_eq_i64(0, g_drops, "capture transfer preserves the element");
@@ -124,8 +141,8 @@ i32 main() {
         DropSpy value;
         value.val = 42;
         values.push(move value);
-        let outer = || {
-            let inner = || values.len();
+        let outer = () => {
+            let inner = () => values.len();
             return inner();
         };
         assert_eq_i64(1, outer(), "nested capture sees the Vec");
@@ -158,7 +175,7 @@ i32 main() {
         DropSpy value;
         value.val = 42;
         values.push(move value);
-        let take = || [values, 7];
+        let take = () => [values, 7];
         let [received, tag] = take();
         assert_eq_i64(1, received.len(), "lambda tuple retains its element");
         assert_eq_i32(7, tag, "lambda tuple retains its tag");
@@ -175,7 +192,7 @@ i32 main() {
         DropSpy element;
         element.val = 42;
         values.push(move element);
-        let take = || [owner.val, values];
+        let take = () => [owner.val, values];
         let [tag, received] = take();
         assert_eq_i64(7, tag, "tuple copies the field value");
         assert_eq_i64(7, owner.val, "copying the field leaves its Drop owner usable");
@@ -196,7 +213,7 @@ i32 main() {
         second.val = 25;
         right.push(move second);
         bool choose_left = true;
-        let take = || match choose_left { true: left, false: right, };
+        let take = () => match choose_left { true: left, false: right, };
         Vec<DropSpy> received = take();
         DropSpy* element = received.get_ptr(0);
         assert_eq_i64(17, element.val, "match preserves the selected capture");
@@ -211,7 +228,7 @@ i32 main() {
         i32 number = 42;
         DropSpy element = { .val = number };
         values.push(move element);
-        let build = |bool filled| match filled {
+        let build = (bool filled) => match filled {
             true: {
                 Vec<DropSpy> values = Vec<DropSpy>.new();
                 DropSpy element;
@@ -238,7 +255,7 @@ i32 main() {
         DropSpy value;
         value.val = 42;
         values.push(move value);
-        let take = || {
+        let take = () => {
             VecSlot slot = { .values = values };
             return move slot;
         };

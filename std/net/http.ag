@@ -2640,8 +2640,8 @@ impl ServeMux {
         Slice<u8> p = r.path_slice();
         str m = r.method;
         if (m == (str)0) { m = "GET"; }
-        let any_method = |str method| method == (str)0 || strlen(method) == 0 || strcmp(method, "*") == 0;
-        let matches_method = |str method| any_method(method) || strcmp(method, m) == 0;
+        let any_method = (str method) => method == (str)0 || strlen(method) == 0 || strcmp(method, "*") == 0;
+        let matches_method = (str method) => any_method(method) || strcmp(method, m) == 0;
         i64 n = self.routes.len();
 
         // 1. Exact path matches

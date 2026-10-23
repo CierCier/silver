@@ -98,6 +98,7 @@ pub enum Tok {
     OrOr,
     Not,
     Assign,
+    FatArrow,
     PlusAssign,
     MinusAssign,
     StarAssign,
@@ -145,9 +146,8 @@ pub enum Tok {
     TriviaDocBlockComment,
 }
 
-/// Operators, longest-first. Exactly the legacy set — note absences:
-/// no `<<`/`>>` (the expression parser joins two `<`/`>` tokens), no
-/// compound bitwise assignments, no arrow.
+/// Operators, longest-first. The expression parser joins separate `<`/`>`
+/// tokens for `<<`/`>>`.
 const OPERATORS: &[(&str, Tok)] = &[
     ("...", Tok::DotDotDot),
     ("..", Tok::DotDot),
@@ -164,6 +164,7 @@ const OPERATORS: &[(&str, Tok)] = &[
     ("<<=", Tok::ShlAssign),
     (">>=", Tok::ShrAssign),
     ("==", Tok::Equal),
+    ("=>", Tok::FatArrow),
     ("!=", Tok::NotEqual),
     ("<=", Tok::LessEqual),
     (">=", Tok::GreaterEqual),
@@ -659,6 +660,7 @@ impl Tok {
             x if x == Tok::OrOr as u16 => Tok::OrOr,
             x if x == Tok::Not as u16 => Tok::Not,
             x if x == Tok::Assign as u16 => Tok::Assign,
+            x if x == Tok::FatArrow as u16 => Tok::FatArrow,
             x if x == Tok::PlusAssign as u16 => Tok::PlusAssign,
             x if x == Tok::MinusAssign as u16 => Tok::MinusAssign,
             x if x == Tok::StarAssign as u16 => Tok::StarAssign,

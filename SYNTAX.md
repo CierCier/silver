@@ -713,15 +713,16 @@ cargo run -p agc -- run examples/lambdas.ag
 An expression body returns its result automatically. A block body needs an
 explicit `return` to produce a value; a block without a return produces `void`.
 `return` exits the lambda. A `match` expression can be the entire body.
+The parameter list is always parenthesized; `() => ...` declares no parameters.
 
 ```silver
-let double = |i32 value| value * 2;
-let absolute = |i32 value| {
+let double = (i32 value) => value * 2;
+let absolute = (i32 value) => {
     if (value < 0) { return -value; }
     return value;
 };
-let classify = |i32 value| match value { 0: "zero", _: "nonzero" };
-let answer = || 42;
+let classify = (i32 value) => match value { 0: "zero", _: "nonzero" };
+let answer = () => 42;
 ```
 
 Parameters use type-before-name order. `&T` and `&mut T` parameters borrow;
@@ -730,9 +731,9 @@ copy or move behavior. An expected function type can supply omitted parameter
 types, including an unambiguous non-generic named callback parameter:
 
 ```silver
-i32(i32) triple = |value| value * 3;
-let length = |&String value| value.len();
-let consume = |move String value| value.len();
+i32(i32, i32) multiply = (a, b) => a * b;
+let length = (&String value) => value.len();
+let consume = (move String value) => value.len();
 ```
 
 Outer locals are captured automatically. Reads use shared borrows, writes use
@@ -744,10 +745,10 @@ owned capture can be called once; an uncalled lambda drops its owned captures.
 
 ```silver
 String text = String.from_str("silver");
-let length = || text.len();
+let length = () => text.len();
 @println("length={}, text={}", length(), text);
 
-let take = || move text;
+let take = () => move text;
 String received = take();
 ```
 

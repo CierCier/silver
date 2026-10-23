@@ -116,6 +116,7 @@ pub enum Token {
     Or,
     Not,
     Assign,
+    FatArrow,
     PlusAssign,
     MinusAssign,
     StarAssign,
@@ -563,6 +564,8 @@ impl Lexer {
             '=' => {
                 if self.match_char('=') {
                     Ok(Token::Equal)
+                } else if self.match_char('>') {
+                    Ok(Token::FatArrow)
                 } else {
                     Ok(Token::Assign)
                 }

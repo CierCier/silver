@@ -318,7 +318,8 @@ The Silver compiler implements a lightweight deterministic memory and resource c
 
 ### Lambda lowering
 
-Pipe lambdas use the syntax and capture rules in [SYNTAX.md](../SYNTAX.md#lambdas).
+Arrow lambdas use `(parameters) => expression` or `(parameters) => { statements }`
+with the capture rules in [SYNTAX.md](../SYNTAX.md#lambdas).
 Stage0 checks lambda bodies with a separate return context and lowers them after
 type checking in `semantic/typeck/lambda.rs`. The native frontend converts them
 before name resolution in `frontend/lambdas.ag`, using the existing expression

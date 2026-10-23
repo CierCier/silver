@@ -52,6 +52,7 @@ pub enum BodyKind {
     Pattern = 67,
     ExprPostfix = 68,
     ExprPrimary = 69,
+    ExprLambda = 70,
 }
 
 pub struct BodyParser<'a, 'e> {
@@ -552,6 +553,7 @@ impl<'a, 'e> BodyParser<'a, 'e> {
             self.level_unary();
             self.exit();
         } else if matches!(self.peek_tok(), Some(Tok::LParen))
+            && !self.lambda_ahead()
             && self.cast_paren_ahead()
         {
             // `(Type)operand` cast: type tokens up to and including `)`,
@@ -611,6 +613,17 @@ impl<'a, 'e> BodyParser<'a, 'e> {
 
     fn primary(&mut self) {
         match self.peek_tok() {
+            Some(Tok::LParen) if self.lambda_ahead() => {
+                self.enter(BodyKind::ExprLambda as u16);
+                self.consume_balanced_group();
+                self.advance(); // =>
+                if matches!(self.peek_tok(), Some(Tok::LBrace)) {
+                    self.braced_block();
+                } else {
+                    self.expr();
+                }
+                self.exit();
+            }
             // Parenthesized expression `(expr)`
             Some(Tok::LParen) => {
                 self.enter(BodyKind::ExprParen as u16);
@@ -843,6 +856,26 @@ impl<'a, 'e> BodyParser<'a, 'e> {
             }
             self.advance();
         }
+    }
+
+    fn lambda_ahead(&self) -> bool {
+        let mut depth = 0usize;
+        for i in self.pos..self.end.min(self.rows.len()) {
+            match Tok::from_discriminant(self.rows[i].kind) {
+                Some(Tok::LParen) => depth += 1,
+                Some(Tok::RParen) => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        let next = self.skip_trivia(i + 1);
+                        return self.rows.get(next)
+                            .and_then(|row| Tok::from_discriminant(row.kind))
+                            == Some(Tok::FatArrow);
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     /// Detect `( Type ) operand` casts. Conservative shape check: the group

@@ -63,12 +63,12 @@ void server_worker(i32 fd) {
     s.set_workers(2);
     assert_eq_i64(s.workers, 2, "s.workers == 2");
     s.get("/hello", handle_hello);
-    s.post("/echo", |ResponseWriter* w, HttpRequest* r| {
+    s.post("/echo", (ResponseWriter* w, HttpRequest* r) => {
         w.set_header("Content-Type", "text/plain");
         w.write_header(200);
         w.write_str(r.body_str());
     });
-    s.get("/search", |ResponseWriter* w, HttpRequest* r| {
+    s.get("/search", (ResponseWriter* w, HttpRequest* r) => {
         w.set_header("Content-Type", "text/plain");
         w.write_header(200);
         w.write_str(r.query());

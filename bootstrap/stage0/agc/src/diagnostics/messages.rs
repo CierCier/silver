@@ -21,10 +21,6 @@ pub fn lambda_parameter_invalid_type() -> &'static str {
     "invalid lambda parameter type"
 }
 
-pub fn lambda_parameters_unterminated() -> &'static str {
-    "expected '|' after lambda parameters"
-}
-
 pub fn lambda_body_unterminated() -> &'static str {
     "unterminated lambda body"
 }
