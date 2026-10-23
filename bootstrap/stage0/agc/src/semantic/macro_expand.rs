@@ -598,6 +598,14 @@ fn expand_macro_invocation(
     collect_local_bindings_in_block(&def.body, &mut hygiene_map, macro_id);
 
     let mut body = def.body.clone();
+    // Tag macro-body nodes before substitution so caller arguments keep their spans.
+    let expansion = u32::try_from(macro_id + 1).unwrap_or(u32::MAX);
+    crate::parser::visit::expressions_in_block(&mut body, &mut |expression| {
+        expression.span.expansion = expansion;
+        if let ExpressionKind::Identifier(name) = expression.kind.as_mut() {
+            name.span.expansion = expansion;
+        }
+    });
     apply_hygiene_and_subst(&mut body, &hygiene_map, &param_subst, &vararg_subst);
     if !type_subst.is_empty() {
         substitute_types_in_block(&mut body, &type_subst);

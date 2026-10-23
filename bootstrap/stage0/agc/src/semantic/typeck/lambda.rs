@@ -7,7 +7,8 @@ use crate::symbol_table::{CompilerPhase, CompilerSymbolTable, SymbolKind};
 use crate::types::{Type, struct_layout};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-type ExprKey = (u32, usize, usize);
+// Macro expansions copy body spans, so the expansion id is part of node identity.
+type ExprKey = (u32, usize, usize, u32);
 
 #[derive(Default)]
 pub(super) struct LambdaState {
@@ -18,9 +19,7 @@ pub(super) struct LambdaState {
     callable_types: HashSet<String>,
     method_receivers: HashMap<ExprKey, ast::Expression>,
     checked_types: HashMap<ExprKey, Type>,
-    /// Keyed by span and node address: macro expansions copy body spans, so
-    /// the span alone conflates identifiers resolved in different scopes.
-    binding_origins: HashMap<(ExprKey, usize), (usize, Type)>,
+    binding_origins: HashMap<ExprKey, (usize, Type)>,
 }
 
 pub(super) struct CaptureFrame {
@@ -45,7 +44,7 @@ pub(super) enum CaptureMode {
 }
 
 fn key(span: Span) -> ExprKey {
-    (span.file, span.start, span.end)
+    (span.file, span.start, span.end, span.expansion)
 }
 
 fn identifier(name: &str, span: Span) -> ast::Identifier {
@@ -239,7 +238,7 @@ impl TypeChecker {
         let Some(name) = place_root(expression) else {
             return;
         };
-        let binding_key = (key(name.span), std::ptr::from_ref(name) as usize);
+        let binding_key = key(name.span);
         // Result walks can revisit identifiers after their arm scopes have closed.
         let (scope, ty) = if let Some(binding) = self.lambdas.binding_origins.get(&binding_key) {
             binding.clone()
@@ -439,10 +438,6 @@ impl TypeChecker {
         let Some(frame) = self.lambdas.frames.pop() else {
             return Type::Unknown;
         };
-        if self.lambdas.frames.is_empty() {
-            // Node addresses are only stable while the enclosing body is borrowed.
-            self.lambdas.binding_origins.clear();
-        }
         self.current_return = outer_return;
         self.defer_depth = outer_defer;
         let return_type = if frame.returns.is_empty() {
@@ -470,6 +465,9 @@ impl TypeChecker {
             .map(|parameter| Type::from_ast(&parameter.param_type))
             .collect();
         let mut name = format!("__silver_lambda_{}_{}", span.file, span.start);
+        if span.expansion != 0 {
+            name = format!("{name}_m{}", span.expansion);
+        }
         while self.functions.contains_key(&name) || self.known_types.contains_key(&name) {
             name.push('_');
         }

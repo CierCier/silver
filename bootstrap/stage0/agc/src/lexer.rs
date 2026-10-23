@@ -211,6 +211,9 @@ pub struct Span {
     /// 1-based line/column of the span end; 0 means unknown.
     pub end_line: u32,
     pub end_col: u32,
+    /// Macro expansion that copied this node from a macro body; 0 for source
+    /// nodes. Lets span-keyed analyses tell repeated expansions apart.
+    pub expansion: u32,
 }
 
 impl Span {
@@ -298,6 +301,7 @@ pub fn lex_with_source(input: &str, file: u32) -> Result<Vec<LexToken>, Vec<LexE
                     start_col,
                     end_line,
                     end_col,
+                    expansion: 0,
                 },
             }])
         }
@@ -433,6 +437,7 @@ impl Lexer {
                         start_col,
                         end_line,
                         end_col,
+                        expansion: 0,
                     },
                     text,
                 });
@@ -458,6 +463,7 @@ impl Lexer {
                     start_col,
                     end_line,
                     end_col,
+                    expansion: 0,
                 },
                 text,
             });
@@ -476,6 +482,7 @@ impl Lexer {
                 start_col: eof_col,
                 end_line: eof_line,
                 end_col: eof_col,
+                expansion: 0,
             },
             text: String::new(),
         });
