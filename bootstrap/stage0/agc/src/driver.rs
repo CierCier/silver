@@ -1752,6 +1752,7 @@ pub fn run(cli: Cli) {
                 checker.target_triple = plan.target.clone().unwrap_or_default();
                 let (type_errors, mut monomorphs) =
                     checker.check_program_with_table(&ast, &mut symbol_table);
+                checker.lower_lambdas(&mut ast);
                 // Populate ForIn iterator_type from typeck-resolved types
                 let resolved_iter_types = checker.take_resolved_iter_types();
                 if !resolved_iter_types.is_empty() {

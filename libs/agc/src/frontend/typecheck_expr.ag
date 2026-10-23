@@ -3047,6 +3047,56 @@ void typecheck_reject_defer_control(AstPool* pool, u32 node_id, bool is_stmt,
     }
 }
 
+// Resolve local initializers with the same expression checker as function bodies.
+// Entries follow binding order; visibility excludes shadowed and sibling locals.
+void typecheck_binding_types(SymbolTable* symbols, TypeTable* types, SyntaxNode* root,
+                             Vec<Binding>* bindings, Vec<u32>* resolved) {
+    i64 i = 0;
+    while (i < bindings.len()) {
+        Binding* binding = bindings.get_ptr(i);
+        u32 type_id = typecheck_parameter_type_id(types, binding);
+        SyntaxNode* assign = binding.name_node.next_sibling;
+        if (type_id == TYPE_UNKNOWN && binding.kind == BindingKind.Let
+            && assign != (SyntaxNode*)0 && assign.token_kind == TokenKind.Assign) {
+            TypeEnv env = TypeEnv.new();
+            i64 previous = 0;
+            while (previous < i) {
+                Binding* candidate = bindings.get_ptr(previous);
+                if (visible_binding(bindings, candidate.name, assign.next_sibling) == candidate) {
+                    env.insert(symbols.names.intern(candidate.name), resolved.get(previous));
+                }
+                previous += 1;
+            }
+            SyntaxNode* end = assign.next_sibling;
+            while (end != (SyntaxNode*)0 && end.token_kind != TokenKind.Semicolon) {
+                end = end.next_sibling;
+            }
+            AstPool pool = AstPool.new();
+            ExprLowerer lowerer = ExprLowerer.new(&pool, types, &symbols.names);
+            lowerer.unit_root = root;
+            u32 expression = lowerer.lower_sequence(assign.next_sibling, end);
+            DiagnosticBag diagnostics = DiagnosticBag.new();
+            bool ok = true;
+            if (!lowerer.unsupported) {
+                type_id = infer_expr(&pool, types, symbols, root,
+                    &env, expression, &diagnostics, &ok);
+            }
+        }
+        resolved.push(type_id);
+        i += 1;
+    }
+}
+
+u32 typecheck_resolved_binding_type(Vec<Binding>* bindings, Vec<u32>* resolved,
+                                    Binding* binding) {
+    i64 i = 0;
+    while (i < bindings.len()) {
+        if (bindings.get_ptr(i) == binding) { return resolved.get(i); }
+        i += 1;
+    }
+    return TYPE_UNKNOWN;
+}
+
 void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
                          SyntaxNode* root, TypeEnv* env, u32 expected_return,
                          u32 stmt_id, DiagnosticBag* diagnostics, bool* ok) {

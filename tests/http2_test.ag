@@ -27,23 +27,19 @@ Result<i64, Error> tcp_io_write(void* ctx, u8* buf, i64 len) {
     return s.write(buf, len);
 }
 
-void handle_hello(ResponseWriter* w, HttpRequest* r) {
-    w.set_header("content-type", "text/plain");
-    w.write_header(200);
-    w.write_str("hello h2");
-}
-
-void handle_echo(ResponseWriter* w, HttpRequest* r) {
-    w.set_header("content-type", "text/plain");
-    w.write_header(200);
-    w.write_str(r.body_str());
-}
-
 void server_worker(i32 fd) {
     TcpListener listener = TcpListener.from_fd(fd);
     HttpServer s = HttpServer.new("127.0.0.1:0");
-    s.get("/hello", handle_hello);
-    s.post("/echo", handle_echo);
+    s.get("/hello", (ResponseWriter* w, HttpRequest* _r) => {
+        w.set_header("content-type", "text/plain");
+        w.write_header(200);
+        w.write_str("hello h2");
+    });
+    s.post("/echo", (ResponseWriter* w, HttpRequest* r) => {
+        w.set_header("content-type", "text/plain");
+        w.write_header(200);
+        w.write_str(r.body_str());
+    });
 
     Result<i64, Error> a = listener.accept();
 	match a {

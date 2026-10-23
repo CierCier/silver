@@ -559,6 +559,16 @@ fn field_pattern_node(field_pattern: &ast::FieldPattern) -> Node {
 
 fn expression_node(expression: &ast::Expression) -> Node {
     let mut node = match expression.kind.as_ref() {
+        ast::ExpressionKind::Lambda { parameters, body } => {
+            let mut node = Node::new("Expr::Lambda");
+            for parameter in parameters {
+                let mut parameter_node = Node::new(format!("{:?} {}", parameter.mode, parameter.name.name));
+                if let Some(ty) = &parameter.type_annotation { parameter_node.children.push(type_node(ty)); }
+                node.children.push(parameter_node);
+            }
+            node.children.push(block_node(body));
+            node
+        }
         ast::ExpressionKind::Literal(literal) => {
             Node::new(format!("Expr::Literal {}", literal_name(literal)))
         }

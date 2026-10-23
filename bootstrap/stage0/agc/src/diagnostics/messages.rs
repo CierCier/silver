@@ -5,6 +5,42 @@
 
 use std::fmt::Display;
 
+pub fn lambda_parameter_needs_type(name: &str) -> String {
+    format!("cannot infer lambda parameter '{name}'; add a type or provide a function-type context")
+}
+
+pub fn capturing_lambda_not_function_pointer() -> &'static str {
+    "a capturing lambda cannot be stored in a function pointer; use an inferred binding"
+}
+
+pub fn lambda_parameter_name_expected() -> &'static str {
+    "expected lambda parameter name"
+}
+
+pub fn lambda_parameter_invalid_type() -> &'static str {
+    "invalid lambda parameter type"
+}
+
+pub fn lambda_body_unterminated() -> &'static str {
+    "unterminated lambda body"
+}
+
+pub fn lambda_block_requires_parser() -> &'static str {
+    "lambda block requires a statement parser"
+}
+
+pub fn lambda_in_generic_scope() -> &'static str {
+    "lambdas in generic functions or impls are not supported yet"
+}
+
+pub fn missing_match_arm_cleanup_block() -> &'static str {
+    "missing match arm cleanup block"
+}
+
+pub fn clear_yielded_value_drop_flag(error: impl std::fmt::Display) -> String {
+    format!("clear yielded value drop flag: {error}")
+}
+
 // =========================================================================
 // General & Suggestions
 // =========================================================================

@@ -16,6 +16,7 @@ use crate::codegen::llvm_ir::LlvmIrGenerator;
 use crate::codegen::llvm_ir::VarInfo;
 use crate::codegen::llvm_ir::{DeferAction, DeferredEntry};
 use crate::codegen::{CodegenError, CodegenResult};
+use crate::diagnostics::messages as msg;
 use crate::lexer::Span;
 use crate::parser::ast;
 use crate::symbol_table::{CompilerPhase, SymbolKind};
@@ -2828,7 +2829,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         let last = block.statements.last().expect("non-empty checked above");
         let value = match &last.kind {
-            ast::StatementKind::Expression(expr) => self.emit_expression_value(expr)?,
+            ast::StatementKind::Expression(expr) => {
+                let value = self.emit_expression_value(expr)?;
+                self.clear_yielded_value_flags(expr)?;
+                value
+            }
             _ => {
                 self.pop_scope();
                 if has_debug_scope && let Some(debug) = &mut self.debug {
@@ -2847,6 +2852,44 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
 
         Ok(value)
+    }
+
+    fn clear_yielded_value_flags(&mut self, expression: &ast::Expression) -> CodegenResult<()> {
+        if let ast::ExpressionKind::Identifier(ident) = expression.kind.as_ref() {
+            if let Some(flag) = self
+                .lookup_variable(&ident.name)
+                .and_then(|var| var.drop_flag)
+            {
+                self.builder
+                    .build_store(flag, self.context.bool_type().const_int(0, false))
+                    .map_err(|e| CodegenError::new(msg::clear_yielded_value_drop_flag(e)))?;
+            }
+            self.clear_field_flags(&ident.name)?;
+        } else {
+            match expression.kind.as_ref() {
+                ast::ExpressionKind::Tuple(items)
+                | ast::ExpressionKind::EnumVariant { fields: items, .. } => {
+                    for item in items {
+                        self.clear_yielded_value_flags(item)?;
+                    }
+                }
+                ast::ExpressionKind::StructLiteral { fields, .. } => {
+                    for field in fields {
+                        self.clear_yielded_value_flags(&field.value)?;
+                    }
+                }
+                ast::ExpressionKind::Initializer { items } => {
+                    for item in items {
+                        let (ast::InitializerItem::Positional(value)
+                        | ast::InitializerItem::Field { value, .. }
+                        | ast::InitializerItem::Index { value, .. }) = item;
+                        self.clear_yielded_value_flags(value)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     /// Lowers `if` as an expression using a PHI merge.
@@ -3285,11 +3328,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                                 },
                                             );
                                         }
-                                        self.register_drop_flag(
-                                            &binding.name,
-                                            &concrete_pt,
-                                            alloca,
-                                        )?;
+                                        if is_move {
+                                            self.register_drop_flag(
+                                                &binding.name,
+                                                &concrete_pt,
+                                                alloca,
+                                            )?;
+                                        }
                                         // Move-out: null the payload slot in the
                                         // ORIGINAL scrutinee storage so ownership
                                         // leaves the matched enum (no dangling
@@ -3476,20 +3521,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
 
             let mut arm_value = self.emit_expression_value(&arm.body)?;
-            // If the arm body is an identifier yielding a droppable value as
-            // the match result, clear its drop flag so it transfers out cleanly.
-            if let ast::ExpressionKind::Identifier(ident) = arm.body.kind.as_ref() {
-                if let Some(var) = self.lookup_variable(&ident.name) {
-                    if let Some(flag) = var.drop_flag {
-                        self.builder
-                            .build_store(flag, self.context.bool_type().const_int(0, false))
-                            .map_err(|e| {
-                                CodegenError::new(format!("clear match result drop flag: {e}"))
-                            })?;
-                    }
-                    self.clear_field_flags(&ident.name)?;
-                }
-            }
+            self.clear_yielded_value_flags(&arm.body)?;
             // Cast to first arm's type if needed (handles i32 vs i64 mismatch)
             if let Some((first_value, _)) = incoming.first() {
                 let target_ty = first_value.get_type();
@@ -3504,6 +3536,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .ok_or_else(|| CodegenError::new("missing match arm insertion block"))?;
             let arm_terminated = arm_end.get_terminator().is_some();
             if !arm_terminated {
+                self.emit_defers(1)?;
+                let arm_end = self.builder.get_insert_block()
+                    .ok_or_else(|| CodegenError::new(msg::missing_match_arm_cleanup_block()))?;
                 self.builder
                     .build_unconditional_branch(end_bb)
                     .map_err(|e| CodegenError::new(format!("failed match expr end branch: {e}")))?;

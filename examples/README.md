@@ -38,6 +38,7 @@ Build with: `agc examples/<name>.ag -o <name> && ./<name>`
 | `ownership.ag` | `move` ownership transfer, `drop` destructors, scope-based teardown |
 | `defer_cleanup.ag` | `defer` blocks — LIFO release order, cleanup before early return |
 | `associated_fn_values.ag` | Function-typed trait members (`handler: i32 (i32)`) with static dispatch |
+| `lambdas.ag` | Arrow lambdas, context-inferred parameters, explicit block returns, `match`, and automatic captures |
 | `regression_demo.ag` | Larger program — linear/logistic regression with structs, impls, `std.math` |
 
 ## Graphics (requires raylib)

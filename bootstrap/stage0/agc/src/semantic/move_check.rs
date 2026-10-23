@@ -1552,37 +1552,14 @@ impl MoveChecker {
             } => {
                 let is_consuming = method.name == "drop"
                     || self.consuming_receiver(receiver, &method.name, var_types);
-                self.check_place_operands(receiver, state, scopes, var_types);
                 if is_consuming {
-                    if let Some((root_name, path)) = expr_root_and_path(receiver)
-                        && state.contains_key(&root_name)
-                        && self.is_path_tracked(&root_name, &path, var_types)
-                    {
-                        let blocked = !path.is_empty()
-                            && self.reject_partial_move_from_drop_ancestor(
-                                &root_name,
-                                &path,
-                                receiver.span,
-                                var_types,
-                            );
-                        if !blocked {
-                            if path.is_empty() {
-                                if let Some(var) = state.get_mut(&root_name) {
-                                    var.mark_moved(
-                                        receiver.span,
-                                        msg::note_value_consumed_by_method(),
-                                    );
-                                }
-                            } else if let Some(var) = state.get_mut(&root_name) {
-                                let place = place_from_root_and_path(&root_name, &path);
-                                var.mark_place_moved(
-                                    &place,
-                                    receiver.span,
-                                    msg::note_value_consumed_by_method(),
-                                );
-                            }
-                        }
-                    }
+                    self.move_value_argument(
+                        receiver,
+                        msg::note_value_consumed_by_method(),
+                        state,
+                        scopes,
+                        var_types,
+                    );
                 } else {
                     self.check_expr(receiver, state, scopes, var_types);
                 }
@@ -2109,7 +2086,7 @@ impl MoveChecker {
                 }
                 *state = merged;
             }
-            ast::ExpressionKind::Block(block) => {
+            ast::ExpressionKind::Block(block) | ast::ExpressionKind::Lambda { body: block, .. } => {
                 self.check_block(block, state, scopes, var_types);
             }
             ast::ExpressionKind::Initializer { items } => {

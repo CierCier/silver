@@ -316,6 +316,33 @@ The Silver compiler implements a lightweight deterministic memory and resource c
 8. **Place & Overlap**: `Place {local, projections=[Field/Index/Deref]}` with `is_prefix_of` (x is prefix of x.a) and `overlaps` (x overlaps x.a, x.a vs x.b disjoint, `v` overlaps `v[i]`, `v[i]` vs `v[j]` conservative). Borrow/move/init/drop all share this.
 9. **Copy vs Move**: `TypeProperties {is_copy, needs_drop}` central; primitives/`T*`/all-Copy struct = Copy (`copy_from` — read without invalidate), `String`/`Vec`/`HashMap`/`HashSet`/`Deque` = Move (`move_out` — invalidate, `v[i]=move old[i]` via tmp, hybrid flags: `Init`→direct drop, `Uninit`→elided, `Partial`→guard).
 
+### Lambda lowering
+
+Arrow lambdas use `(parameters) => expression` or `(parameters) => { statements }`
+with the capture rules in [SYNTAX.md](../SYNTAX.md#lambdas).
+Stage0 checks lambda bodies with a separate return context and lowers them after
+type checking in `semantic/typeck/lambda.rs`. The native frontend converts them
+before name resolution in `frontend/lambdas.ag`, using the existing expression
+checker to infer parameter contexts, returns, and capture access.
+
+Stage0 keys lambda replacements and capture bindings by span. Macro expansion
+copies body spans, so it also tags copied nodes with `Span::expansion`: one id per
+expansion of the macro body, and a fresh id for each substituted argument copy,
+preserving any distinct ids already inside the argument.
+
+Both paths generate private functions and ordinary capture structs. Reads borrow
+captured locals, writes borrow them mutably, and consuming non-Copy state moves
+it into the environment. Consuming calls transfer the environment by value.
+The regular ownership, layout, and cleanup passes handle the generated items;
+capture structs need no custom destructor. Borrowed environments must not escape
+their sources, and aliases retain the underlying capture loans.
+
+`examples/lambdas.ag` demonstrates the supported forms. The existing collection
+drop-glue fixture checks owned Vec captures and transfers, and the HTTP server
+fixture exercises the local routing predicates in `std.net.http`. Generic
+lambda scopes and capturing callbacks through generic callable APIs remain
+unsupported.
+
 ## 7. Diagnostics
 
 Compiler diagnostic messages are rendered using the `diagnostics::render` utility.

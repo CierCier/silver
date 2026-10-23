@@ -1138,6 +1138,29 @@ impl Walker<'_> {
 
     fn walk_expr(&mut self, expr: &ast::Expression) {
         match &*expr.kind {
+            ast::ExpressionKind::Lambda { parameters, body } => {
+                self.locals.push(HashMap::default());
+                for parameter in parameters {
+                    if let Some(ty) = &parameter.type_annotation { self.walk_type(ty); }
+                    let symbol = self.declare_local(&parameter.name.name, parameter.name.span, SymbolKind::Parameter);
+                    let ty = self.expr_types.get(&(parameter.name.span.start, parameter.name.span.end)).cloned()
+                        .or_else(|| parameter.type_annotation.as_ref().map(|ty| {
+                            let ty = format_type(ty);
+                            match parameter.mode {
+                                ast::LambdaParameterMode::Shared => format!("&{ty}"),
+                                ast::LambdaParameterMode::Mutable => format!("&mut {ty}"),
+                                _ => ty,
+                            }
+                        }));
+                    if let Some(ty) = ty {
+                        self.symbols[symbol].signature = format!("{ty} {}", parameter.name.name);
+                        self.symbols[symbol].inferred_type = Some(ty);
+                        self.symbols[symbol].has_explicit_type = parameter.type_annotation.is_some();
+                    }
+                }
+                self.walk_block(body);
+                self.locals.pop();
+            }
             ast::ExpressionKind::Literal(_) => {}
             ast::ExpressionKind::Identifier(id) => self.emit_identifier(id),
             ast::ExpressionKind::TypeName(ty) => self.walk_type(ty),

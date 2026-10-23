@@ -16,6 +16,8 @@ struct DropSpy {
     i64 val;
 }
 
+struct VecSlot { Vec<DropSpy> values; }
+
 impl Drop for DropSpy {
     void drop(*self) {
         g_drops = g_drops + 1;
@@ -29,6 +31,33 @@ impl DropSpy {
     bool __eq(&self, &DropSpy other) {
         return self.val == other.val;
     }
+}
+
+enum WrappedVec { Payload(VecPayload); }
+enum GenericWrappedVec { Payload(PayloadEnvelope<VecPayload>); }
+enum PayloadEnvelope<T> { Value(T); }
+enum VecPayload { Values(Vec<DropSpy>); }
+
+Vec<DropSpy> unwrap_vec(WrappedVec wrapped) {
+    return match wrapped {
+        Payload(move payload): match payload {
+            Values(move values): { values; },
+        },
+    };
+}
+
+[Vec<DropSpy>, i32] unwrap_vec_pair(GenericWrappedVec wrapped) {
+    return match wrapped {
+        Payload(move envelope): match envelope {
+            Value(move payload): match payload {
+                Values(move values): [values, 7],
+            },
+        },
+    };
+}
+
+void consume_values(Vec<DropSpy> values) {
+    assert_eq_i64(1, values.len(), "consuming call receives the Vec");
 }
 
 i32 main() {
@@ -62,6 +91,212 @@ i32 main() {
         }
         assert_eq_i64(5, g_drops, "Vec dropped 5 elements");
     }
+
+    test_start("context-inferred lambda parameters borrow and consume owned values");
+    g_drops = 0;
+    {
+        DropSpy left;
+        left.val = 3;
+        DropSpy right;
+        right.val = 6;
+        void(&mut DropSpy) bump = (&mut value) => { value.val += 1; };
+        i64(&DropSpy) read = (&value) => value.val;
+        i64(DropSpy, DropSpy) sum = (move a, move b) => a.val + b.val;
+        bump(&mut left);
+        assert_eq_i64(4, read(&left), "borrowed parameter preserves outside ownership");
+        assert_eq_i64(10, sum(move left, move right), "context infers both moved parameters");
+        assert_eq_i64(2, g_drops, "moved parameters drop exactly once on return");
+    }
+    assert_eq_i64(2, g_drops, "caller does not drop consumed parameters again");
+
+    test_start("Vec captured by an uncalled lambda drops its elements");
+    g_drops = 0;
+    {
+        Vec<DropSpy> values = Vec<DropSpy>.new();
+        DropSpy value;
+        value.val = 42;
+        values.push(move value);
+        let _take = () => move values;
+    }
+    assert_eq_i64(1, g_drops, "uncalled capture drops the owned Vec once");
+
+    test_start("Vec transferred through a lambda keeps its elements alive");
+    g_drops = 0;
+    {
+        Vec<DropSpy> values = Vec<DropSpy>.new();
+        DropSpy value;
+        value.val = 42;
+        values.push(move value);
+        let take = () => move values;
+        Vec<DropSpy> received = take();
+        assert_eq_i64(1, received.len(), "transferred Vec retains its element");
+        assert_eq_i64(0, g_drops, "capture transfer preserves the element");
+    }
+    assert_eq_i64(1, g_drops, "transferred Vec drops its element once");
+
+    test_start("Vec survives nested shared captures");
+    g_drops = 0;
+    {
+        Vec<DropSpy> values = Vec<DropSpy>.new();
+        DropSpy value;
+        value.val = 42;
+        values.push(move value);
+        let outer = () => {
+            let inner = () => values.len();
+            return inner();
+        };
+        assert_eq_i64(1, outer(), "nested capture sees the Vec");
+        assert_eq_i64(1, values.len(), "shared capture preserves outside access");
+        assert_eq_i64(0, g_drops, "shared captures do not destroy elements");
+    }
+    assert_eq_i64(1, g_drops, "nested shared captures leave one Vec owner");
+
+    test_start("Vec match block transfers owned elements through forward enum payloads");
+    g_drops = 0;
+    {
+        Vec<DropSpy> values = Vec<DropSpy>.new();
+        DropSpy value;
+        value.val = 42;
+        values.push(move value);
+        VecPayload payload = VecPayload.Values(move values);
+        WrappedVec wrapped = WrappedVec.Payload(move payload);
+        Vec<DropSpy> received = unwrap_vec(move wrapped);
+        DropSpy* element = received.get_ptr(0);
+        assert_eq_i64(1, received.len(), "match result retains the Vec element");
+        assert_eq_i64(42, element.val, "forward enum layout preserves the element");
+        assert_eq_i64(0, g_drops, "match cleanup preserves the yielded Vec");
+    }
+    assert_eq_i64(1, g_drops, "yielded Vec drops its element once");
+
+    test_start("lambda tuple transfers its owned Vec capture");
+    g_drops = 0;
+    {
+        Vec<DropSpy> values = Vec<DropSpy>.new();
+        DropSpy value;
+        value.val = 42;
+        values.push(move value);
+        let take = () => [values, 7];
+        let [received, tag] = take();
+        assert_eq_i64(1, received.len(), "lambda tuple retains its element");
+        assert_eq_i32(7, tag, "lambda tuple retains its tag");
+        assert_eq_i64(0, g_drops, "tuple capture transfer preserves the element");
+    }
+    assert_eq_i64(1, g_drops, "lambda tuple drops its Vec once");
+
+    test_start("lambda tuple copies a field from a Drop owner");
+    g_drops = 0;
+    {
+        DropSpy owner;
+        owner.val = 7;
+        Vec<DropSpy> values = Vec<DropSpy>.new();
+        DropSpy element;
+        element.val = 42;
+        values.push(move element);
+        let take = () => [owner.val, values];
+        let [tag, received] = take();
+        assert_eq_i64(7, tag, "tuple copies the field value");
+        assert_eq_i64(7, owner.val, "copying the field leaves its Drop owner usable");
+        assert_eq_i64(1, received.len(), "tuple transfers the owned Vec");
+        assert_eq_i64(0, g_drops, "copied field and Vec transfer preserve both owners");
+    }
+    assert_eq_i64(2, g_drops, "field owner and Vec element each drop once");
+
+    test_start("lambda match transfers the selected Vec capture");
+    g_drops = 0;
+    {
+        Vec<DropSpy> left = Vec<DropSpy>.new();
+        Vec<DropSpy> right = Vec<DropSpy>.new();
+        DropSpy first;
+        first.val = 17;
+        left.push(move first);
+        DropSpy second;
+        second.val = 25;
+        right.push(move second);
+        bool choose_left = true;
+        let take = () => match choose_left { true: left, false: right, };
+        Vec<DropSpy> received = take();
+        DropSpy* element = received.get_ptr(0);
+        assert_eq_i64(17, element.val, "match preserves the selected capture");
+        assert_eq_i64(1, g_drops, "unselected capture drops when the lambda is consumed");
+    }
+    assert_eq_i64(2, g_drops, "selected capture drops once at scope exit");
+
+    test_start("shadowed lambda locals preserve the outer Vec");
+    g_drops = 0;
+    {
+        Vec<DropSpy> values = Vec<DropSpy>.new();
+        i32 number = 42;
+        DropSpy element = { .val = number };
+        values.push(move element);
+        let build = (bool filled) => match filled {
+            true: {
+                Vec<DropSpy> values = Vec<DropSpy>.new();
+                DropSpy element;
+                element.val = 7;
+                values.push(move element);
+                values;
+            },
+            false: { Vec<DropSpy> values = Vec<DropSpy>.new(); values; },
+        };
+        Vec<DropSpy> first = build(true);
+        Vec<DropSpy> second = build(false);
+        DropSpy* original = values.get_ptr(0);
+        assert_eq_i64(42, original.val, "initializer conversion and outer element are preserved");
+        assert_eq_i64(1, first.len(), "first call returns its local Vec");
+        assert_eq_i64(0, second.len(), "second call creates a fresh local Vec");
+        assert_eq_i64(0, g_drops, "outer and returned elements remain live");
+    }
+    assert_eq_i64(2, g_drops, "outer and returned Vec elements each drop once");
+
+    test_start("lambda struct initializer transfers its owned Vec capture");
+    g_drops = 0;
+    {
+        Vec<DropSpy> values = Vec<DropSpy>.new();
+        DropSpy value;
+        value.val = 42;
+        values.push(move value);
+        let take = () => {
+            VecSlot slot = { .values = values };
+            return move slot;
+        };
+        VecSlot received = take();
+        assert_eq_i64(1, received.values.len(), "struct initializer retains the captured Vec");
+        assert_eq_i64(0, g_drops, "struct capture transfer preserves the element");
+    }
+    assert_eq_i64(1, g_drops, "lambda struct drops its Vec once");
+
+    test_start("match tuple transfers a Vec through a generic forward payload");
+    g_drops = 0;
+    {
+        Vec<DropSpy> values = Vec<DropSpy>.new();
+        DropSpy value;
+        value.val = 42;
+        values.push(move value);
+        VecPayload payload = VecPayload.Values(move values);
+        PayloadEnvelope<VecPayload> envelope = PayloadEnvelope<VecPayload>.Value(move payload);
+        GenericWrappedVec wrapped = GenericWrappedVec.Payload(move envelope);
+        let [received, tag] = unwrap_vec_pair(move wrapped);
+        DropSpy* element = received.get_ptr(0);
+        assert_eq_i64(42, element.val, "generic forward payload preserves the element");
+        assert_eq_i32(7, tag, "match tuple retains its tag");
+        assert_eq_i64(0, g_drops, "match tuple preserves the yielded Vec");
+    }
+    assert_eq_i64(1, g_drops, "match tuple drops its Vec once");
+
+    test_start("a consuming call followed by break has no ownership back edge");
+    g_drops = 0;
+    {
+        Vec<DropSpy> values = Vec<DropSpy>.new();
+        DropSpy value;
+        value.val = 42;
+        values.push(move value);
+        while (true) {
+            consume_values(move values);
+            break;
+        }
+        assert_eq_i64(1, g_drops, "call drops its argument before break");
+    }
+    assert_eq_i64(1, g_drops, "loop exit does not drop the consumed Vec again");
 
     // 2. Deque<DropSpy>
     test_start("Deque drops contained elements across ring buffer");

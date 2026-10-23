@@ -4019,13 +4019,15 @@ SyntaxNode* block_trailing_operand(SyntaxNode* block) {
         bool final_statement = next != (SyntaxNode*)0
             && next.kind == NodeKind.Token && next.token_kind == TokenKind.Semicolon
             && next.next_sibling == (SyntaxNode*)0;
-        if (final_statement && cursor.kind == NodeKind.Token
-            && (cursor.token_kind == TokenKind.Identifier
-                || cursor.token_kind == TokenKind.IntLiteral
-                || cursor.token_kind == TokenKind.FloatLiteral
-                || cursor.token_kind == TokenKind.BoolLiteral
-                || cursor.token_kind == TokenKind.CharLiteral
-                || cursor.token_kind == TokenKind.StringLiteral)) {
+        if (final_statement
+            && (cursor.kind == NodeKind.Expression || cursor.kind == NodeKind.Parenthesized
+                || (cursor.kind == NodeKind.Token
+                    && (cursor.token_kind == TokenKind.Identifier
+                        || cursor.token_kind == TokenKind.IntLiteral
+                        || cursor.token_kind == TokenKind.FloatLiteral
+                        || cursor.token_kind == TokenKind.BoolLiteral
+                        || cursor.token_kind == TokenKind.CharLiteral
+                        || cursor.token_kind == TokenKind.StringLiteral)))) {
             bool boundary = previous == (SyntaxNode*)0
                 || (previous.kind == NodeKind.Token && previous.token_kind == TokenKind.Semicolon)
                 || previous.kind == NodeKind.Block;

@@ -8,8 +8,8 @@
 // exits via sys_exit (which with CLONE_THREAD ends only that thread). Callers
 // spin briefly on the flag and then sleep in the kernel (futex wait).
 //
-// Model: `spawn(fn, arg)` — no closures; a function (or fn pointer) plus one
-// machine word of argument. This is the M3 "threads pass addresses" core that
+// Model: `spawn(fn, arg)` accepts a plain function pointer plus one machine
+// word of argument. This is the M3 "threads pass addresses" core that
 // the T1 `Task<T>` message layer and channels build on.
 
 import std.sys.os;

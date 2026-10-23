@@ -97,6 +97,7 @@ enum TokenKind {
     Or;
     Not;
     Assign;
+    FatArrow;
     PlusAssign;
     MinusAssign;
     StarAssign;
@@ -785,6 +786,7 @@ impl Lexer {
             else { kind = TokenKind.Percent; }
         } else if (ch == (u8)'=') {
             if (self.match_char((u8)'=')) { kind = TokenKind.Equal; }
+            else if (self.match_char((u8)'>')) { kind = TokenKind.FatArrow; }
             else { kind = TokenKind.Assign; }
         } else if (ch == (u8)'!') {
             if (self.match_char((u8)'=')) { kind = TokenKind.NotEqual; }

@@ -536,7 +536,8 @@ impl BorrowChecker {
     /// they no longer constrain statement `i` or later code.
     fn expire_loans_before(&mut self, i: usize) {
         let mut expired: FxHashSet<String> = FxHashSet::default();
-        for scope in &mut self.scopes {
+        // Last-use indices belong to the block currently being checked.
+        if let Some(scope) = self.scopes.last_mut() {
             let mut kept: Vec<ActiveBorrow> = Vec::with_capacity(scope.len());
             for b in scope.drain(..) {
                 if !b.param && b.last_use.is_some_and(|last| last < i) {
@@ -567,7 +568,12 @@ impl BorrowChecker {
                 self.collect_expr_uses(expr, &mut uses);
             }
             ast::StatementKind::Defer(inner) => {
-                self.collect_stmt_uses(inner);
+                uses.extend(self.collect_stmt_uses(inner));
+            }
+            ast::StatementKind::Block(block) => {
+                for statement in &block.statements {
+                    uses.extend(self.collect_stmt_uses(statement));
+                }
             }
             _ => {}
         }
@@ -813,15 +819,6 @@ impl BorrowChecker {
                         } else if let ast::ExpressionKind::Identifier(ident) = init.kind.as_ref() {
                             // Reborrow from an existing reference binding:
                             if let Some(existing) = self.ref_bindings.get(&ident.name).cloned() {
-                                let loan = ActiveBorrow {
-                                    root: existing.root.clone(),
-                                    path: existing.path.clone(),
-                                    kind: existing.kind,
-                                    span: init.span,
-                                    borrower: Some(name.clone()),
-                                    last_use: self.get_last_use_for(name),
-                                    param: false,
-                                };
                                 self.ref_bindings.insert(
                                     name.clone(),
                                     RefVarInfo {
@@ -831,11 +828,26 @@ impl BorrowChecker {
                                         span: init.span,
                                     },
                                 );
+                            } else {
+                                self.check_expr(init);
+                            }
+                            let inherited: Vec<_> = self
+                                .scopes
+                                .iter()
+                                .flatten()
+                                .filter(|loan| {
+                                    loan.borrower.as_deref() == Some(ident.name.as_str())
+                                })
+                                .cloned()
+                                .collect();
+                            for mut loan in inherited {
+                                loan.borrower = Some(name.clone());
+                                loan.last_use = self.get_last_use_for(name);
+                                loan.span = init.span;
+                                loan.param = false;
                                 if let Some(scope) = self.scopes.last_mut() {
                                     scope.push(loan);
                                 }
-                            } else {
-                                self.check_expr(init);
                             }
                         } else if let ast::ExpressionKind::StructLiteral { fields, .. } =
                             init.kind.as_ref()
@@ -1571,6 +1583,15 @@ impl BorrowChecker {
             }
             ast::ExpressionKind::Block(block) => {
                 self.check_block(block);
+            }
+            ast::ExpressionKind::MacroCall { args, .. } => {
+                for arg in args {
+                    match arg {
+                        ast::MacroArg::Expression(expression) => self.check_expr(expression),
+                        ast::MacroArg::Statement(statement) => self.check_statement(statement),
+                        _ => {}
+                    }
+                }
             }
             _ => {}
         }

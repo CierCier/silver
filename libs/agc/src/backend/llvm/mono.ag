@@ -676,6 +676,7 @@ void mono_ensure_type_layout(LlvmContext* ctx, u32 type_id, Vec<u32>* layout_ids
     if (!mono_type_is_concrete(ctx.ctx, ctx.types, type_id, 0)) {
         return;
     }
+    i64 layout_index = layout_ids.len();
     layout_ids.push(type_id);
     str base = ctx.types.names.get(name_id);
     SyntaxNode* item = find_item_by_name(ctx.root, NodeKind.Struct, base);
@@ -714,6 +715,13 @@ void mono_ensure_type_layout(LlvmContext* ctx, u32 type_id, Vec<u32>* layout_ids
             while (pj < payloads.len()) {
                 u32 field_type = ctx.types.resolve_subst(payloads.get(pj));
                 mono_ensure_child_layouts(ctx, field_type, layout_ids);
+                LLVMOpaqueType* field_llvm = llvm_lower_type(ctx.ctx, ctx.types, field_type);
+                if (LLVMTypeIsSized(field_llvm) == 0) {
+                    // Keep the named type opaque and retry after its dependencies.
+                    ctx.types.pop_subst(arg_count);
+                    layout_ids.swap_remove(layout_index);
+                    return;
+                }
                 payloads.set(pj, field_type);
                 pj += 1;
             }

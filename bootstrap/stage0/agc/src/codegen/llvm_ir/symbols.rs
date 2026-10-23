@@ -767,7 +767,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     Self::substitute_expression_types(&mut arm.body, mapping);
                 }
             }
-            ast::ExpressionKind::Block(block) => Self::substitute_block_types(block, mapping),
+            ast::ExpressionKind::Block(block) | ast::ExpressionKind::Lambda { body: block, .. } => Self::substitute_block_types(block, mapping),
             ast::ExpressionKind::Tuple(items) | ast::ExpressionKind::Array(items) => {
                 for item in items {
                     Self::substitute_expression_types(item, mapping);
@@ -1713,6 +1713,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         match expr.kind.as_ref() {
             ast::ExpressionKind::TypeName(ty) => Some(ty.clone()),
             ast::ExpressionKind::Identifier(identifier) => self.lookup_value_type(&identifier.name),
+            // Lambda lowering wraps owned capture reads in `move`.
+            ast::ExpressionKind::Move(inner) => self.resolve_receiver_type(inner),
             ast::ExpressionKind::Cast { target_type, .. } => Some((**target_type).clone()),
             ast::ExpressionKind::Tuple(items) => {
                 let mut elem_types = Vec::with_capacity(items.len());

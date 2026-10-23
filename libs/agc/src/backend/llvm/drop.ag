@@ -1201,6 +1201,21 @@ void llvm_clear_place_drops_at_local(LlvmContext* ctx, u32 expr_id,
 }
 
 void llvm_clear_place_drops(LlvmContext* ctx, u32 expr_id) {
+    if (expr_id == 0) { return; }
+    AstExpr value = *ctx.pool.get_expr(expr_id);
+    if (value.kind == ExprKind.ArrayLit || value.kind == ExprKind.StructLit) {
+        i64 count = value.aux;
+        i64 i = 0;
+        while (i < count) {
+            i64 offset = value.kind == ExprKind.ArrayLit ? 1 + i : i * 2 + 1;
+            u32 member = ctx.pool.args.get((i64)value.inner1 + offset);
+            if (llvm_type_needs_tracking(ctx, llvm_expr_type(ctx, member))) {
+                llvm_clear_place_drops(ctx, member);
+            }
+            i += 1;
+        }
+        return;
+    }
     llvm_clear_place_drops_at_local(ctx, expr_id, -1);
 }
 

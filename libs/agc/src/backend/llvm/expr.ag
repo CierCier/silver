@@ -296,7 +296,8 @@ LLVMOpaqueValue* llvm_emit_enum_build(LlvmContext* ctx, str enum_name, str varia
         llvm_name = instance_name.to_str();
     }
     LLVMOpaqueType* enum_ty = LLVMGetTypeByName2(ctx.ctx, llvm_name);
-    if (enum_ty == (LLVMOpaqueType*)0) {
+    if (enum_ty == (LLVMOpaqueType*)0 || LLVMTypeIsSized(enum_ty) == 0) {
+        ctx.note_unresolved("enum-layout", llvm_name);
         base.drop();
         instance_name.drop();
         return (LLVMOpaqueValue*)0;
@@ -3934,6 +3935,12 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         if (expr.aux == (u32)TokenKind.Star) {
             LLVMOpaqueValue* ptr = llvm_emit_expr(ctx, expr.inner0);
             if (ptr == (LLVMOpaqueValue*)0) { return (LLVMOpaqueValue*)0; }
+            // &str already holds the byte view; only str* addresses a slot.
+            u32 operand_type = ctx.types.resolve_subst(llvm_expr_type(ctx, expr.inner0));
+            TypeEntry* operand_entry = ctx.types.get(operand_type);
+            if (operand_entry.kind == TypeKind.Reference && operand_entry.inner == TYPE_STR) {
+                return ptr;
+            }
             u32 elem_type_id = llvm_expr_type(ctx, expr_id);
             if (elem_type_id == TYPE_UNKNOWN || llvm_type_has_unresolved(ctx, elem_type_id, 0)) {
                 ctx.note_unresolved("deref-type", "unresolved");
@@ -4988,6 +4995,9 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                     arm_val = llvm_compat_value(ctx, arm_val, arm_val_ty, result_ty_id);
                     LLVMBuildStore(ctx.builder, arm_val, result_slot);
                 }
+                if (llvm_type_needs_tracking(ctx, result_ty_id)) {
+                    llvm_clear_place_drops(ctx, arm.value_id);
+                }
                 if (arm.pattern == MatchPatternKind.Variant) {
                     llvm_drop_unmoved_payloads(ctx, expr.inner0, (i64)arm.bindings_count);
                 }
@@ -5797,8 +5807,8 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                     variant_names.drop();
                     variant_tags.drop();
                     variant_arities.drop();
-                    base.drop();
                     if (built != (LLVMOpaqueValue*)0) {
+                        base.drop();
                         return built;
                     }
                 }

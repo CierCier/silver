@@ -2,6 +2,38 @@
 import std.mem.vec;
 import std.string;
 
+String lambda_parameter_type(str name) {
+    return @format("cannot infer lambda parameter '{}'; add a type or a function-type context", name);
+}
+
+String lambda_parameter_list() {
+    return String.from_str("expected a lambda parameter list before '=>'");
+}
+
+String lambda_body_expected() {
+    return String.from_str("expected an expression or block after '=>'");
+}
+
+String lambda_return_type() {
+    return String.from_str("cannot infer lambda return type");
+}
+
+String lambda_generic_scope() {
+    return String.from_str("lambdas inside generic functions or impls are not supported yet");
+}
+
+String lambda_parameter_count(i64 expected, i64 actual) {
+    return @format("lambda parameter count mismatch: expected {}, found {}", expected, actual);
+}
+
+String lambda_capturing_function_pointer() {
+    return String.from_str("capturing lambda cannot be stored in a function pointer; use an inferred 'let' binding");
+}
+
+String cannot_move_borrowed(str name) {
+    return @format("cannot move '{}' because it is borrowed", name);
+}
+
 String macro_arity(str name, i64 fixed, bool variadic, i64 got) {
     str qualifier = variadic ? "at least " : "";
     return @format("macro '@{}' expects {}{} argument(s), got {}", name, qualifier, fixed, got);

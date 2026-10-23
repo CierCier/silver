@@ -20,6 +20,7 @@ import frontend.bindings;
 import frontend.messages;
 
 struct ImportedDeclarations {
+    bool loaded;
     NodePool pool;
     Vec<TokenStream> streams;
     SyntaxNode* root;
@@ -28,6 +29,7 @@ struct ImportedDeclarations {
 impl ImportedDeclarations {
     ImportedDeclarations new() {
         ImportedDeclarations declarations;
+        declarations.loaded = false;
         declarations.pool = NodePool.new();
         declarations.streams = Vec<TokenStream>.new();
         declarations.root = declarations.pool.create(NodeKind.Program, Span.synthetic(), "");
@@ -945,6 +947,9 @@ bool load_imported_declarations(SymbolTable* symbols, DiagnosticBag* diagnostics
         next += 1;
     }
     bool ok = !loader.failed;
+    if (declarations != (ImportedDeclarations*)0) {
+        declarations.loaded = ok;
+    }
     loader.pending.drop();
     loader.visited.drop();
     root.drop();

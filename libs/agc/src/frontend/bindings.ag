@@ -143,61 +143,42 @@ String binding_parameter_type_text(Binding* binding) {
         && binding != (Binding*)0
         && binding.type_start != (SyntaxNode*)0
         && binding.type_end != (SyntaxNode*)0) {
-        SyntaxNode* tuple_type = binding.type_start;
-        while (tuple_type != binding.type_end && tuple_type.kind == NodeKind.Token
-            && projection_is_qualifier(tuple_type)) {
-            tuple_type = tuple_type.next_sibling;
-        }
-        if (tuple_type != binding.type_end && tuple_type.kind == NodeKind.Bracket) {
-            if (binding_bracket_has_tuple_separator(tuple_type)) {
-                String tuple_text = String.new();
-                while (tuple_type != binding.type_end) {
-                    append_node_tokens(tuple_type, &tuple_text);
-                    tuple_type = tuple_type.next_sibling;
-                }
-                return move tuple_text;
-            }
-        }
-        Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
-        SyntaxNode* cursor = binding.type_start;
-        while (cursor != (SyntaxNode*)0 && cursor != binding.type_end) {
-            binding_collect_leaves(cursor, &leaves);
-            cursor = cursor.next_sibling;
-        }
-
-        i64 start = 0;
-        i64 end = leaves.len();
-        while (start < end && projection_is_qualifier(leaves.get(start))) {
-            start += 1;
+        SyntaxNode* start = binding.type_start;
+        SyntaxNode* end = binding.type_end;
+        while (start != end && projection_is_qualifier(start)) {
+            start = start.next_sibling;
         }
         if (binding.declared_type.kind == ProjectionTypeKind.Pointer) {
-            SyntaxNode* last = end > start ? leaves.get(end - 1) : (SyntaxNode*)0;
+            SyntaxNode* last = binding_previous_sibling(end);
             if (last != (SyntaxNode*)0 && last.token_kind == TokenKind.Star) {
-                end -= 1;
+                end = last;
             }
         } else if (binding.declared_type.kind == ProjectionTypeKind.Reference) {
-            if (start < end && leaves.get(start).token_kind == TokenKind.BitwiseAnd) {
-                start += 1;
-                if (start < end && leaves.get(start).token_kind == TokenKind.Mut) {
-                    start += 1;
+            if (start != end && start.token_kind == TokenKind.BitwiseAnd) {
+                start = start.next_sibling;
+                if (start != end && start.token_kind == TokenKind.Mut) {
+                    start = start.next_sibling;
                 }
-                while (start < end && projection_is_qualifier(leaves.get(start))) {
-                    start += 1;
+                while (start != end && projection_is_qualifier(start)) {
+                    start = start.next_sibling;
                 }
-            } else if (end > start && leaves.get(end - 1).token_kind == TokenKind.BitwiseAnd) {
-                end -= 1;
+            } else {
+                SyntaxNode* last = binding_previous_sibling(end);
+                if (last != (SyntaxNode*)0 && last.token_kind == TokenKind.BitwiseAnd) {
+                    end = last;
+                }
             }
         }
 
+        // Keep group delimiters, including tuples nested in generic arguments.
         String text = String.new();
-        i64 i = start;
-        while (i < end) {
-            if (leaves.get(i).token_kind != TokenKind.DotDotDot) {
-                text.push_str(leaves.get(i).text);
+        SyntaxNode* cursor = start;
+        while (cursor != (SyntaxNode*)0 && cursor != end) {
+            if (cursor.token_kind != TokenKind.DotDotDot) {
+                append_node_tokens(cursor, &text);
             }
-            i += 1;
+            cursor = cursor.next_sibling;
         }
-        leaves.drop();
         if (text.len() > 0) {
             return move text;
         }
@@ -266,6 +247,24 @@ void binding_collect_leaves(SyntaxNode* node, Vec<SyntaxNode*>* leaves) {
     }
 }
 
+// Like binding_collect_leaves, but drops function parameter lists nested in a
+// bracket type so `[i32(&i32), i32]` projects as `i32`, not `i32 & i32`.
+void binding_collect_type_leaves(SyntaxNode* node, Vec<SyntaxNode*>* leaves, bool in_bracket) {
+    if (node == (SyntaxNode*)0 || (in_bracket && node.kind == NodeKind.Parenthesized)) {
+        return;
+    }
+    if (node.kind == NodeKind.Token) {
+        leaves.push(node);
+        return;
+    }
+    bool nested = in_bracket || node.kind == NodeKind.Bracket;
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        binding_collect_type_leaves(child, leaves, nested);
+        child = child.next_sibling;
+    }
+}
+
 bool binding_is_value_name(SyntaxNode* node) {
     if (node == (SyntaxNode*)0 || node.kind != NodeKind.Token
         || node.token_kind != TokenKind.Identifier || strlen(node.text) == 0) {
@@ -308,8 +307,11 @@ bool binding_is_match_block(SyntaxNode* node) {
 
 void collect_match_arm_bindings(SyntaxNode* block, Vec<Binding>* bindings) {
     SyntaxNode* child = block.first_child;
+    bool in_pattern = true;
     while (child != (SyntaxNode*)0) {
-        if (binding_is_value_name(child)) {
+        if (child.token_kind == TokenKind.Colon) { in_pattern = false; }
+        else if (child.token_kind == TokenKind.Comma) { in_pattern = true; }
+        if (in_pattern && binding_is_value_name(child)) {
             SyntaxNode* next = child.next_sibling;
             if (next != (SyntaxNode*)0 && next.kind == NodeKind.Token
                 && (next.token_kind == TokenKind.Comma || next.token_kind == TokenKind.Colon
@@ -386,7 +388,7 @@ void collect_parameter_bindings(SyntaxNode* parameters, Vec<Binding>* bindings) 
                 && (cursor.token_kind == TokenKind.Greater || strcmp(cursor.text, ">") == 0)) {
                 angle_depth -= 1;
             }
-            binding_collect_leaves(cursor, &segment);
+            binding_collect_type_leaves(cursor, &segment, false);
             if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Identifier) {
                 last_identifier = cursor;
             }
@@ -405,7 +407,9 @@ void collect_parameter_bindings(SyntaxNode* parameters, Vec<Binding>* bindings) 
                 i += 1;
             }
             if (name_index > 0) {
-                declared_type = projection_parse_type(&segment, 0, name_index);
+                declared_type = projection_parse_type(&segment,
+                    binding_type_projection_start(start, &segment, name_index), name_index);
+                binding_merge_bracket_flags(start, &declared_type);
                 if (start.kind == NodeKind.Bracket
                     && !binding_bracket_has_tuple_separator(start)) {
                     declared_type.kind = ProjectionTypeKind.Array;
@@ -455,6 +459,12 @@ bool binding_lowercase_type_start(SyntaxNode* child) {
     if (next.kind == NodeKind.Bracket) {
         return true;
     }
+    if (next.kind == NodeKind.Parenthesized) {
+        SyntaxNode* name = next.next_sibling;
+        return node_is_identifier(name) && name.next_sibling != (SyntaxNode*)0
+            && (name.next_sibling.token_kind == TokenKind.Assign
+                || name.next_sibling.token_kind == TokenKind.Semicolon);
+    }
     if (next.kind != NodeKind.Token) {
         return false;
     }
@@ -462,6 +472,68 @@ bool binding_lowercase_type_start(SyntaxNode* child) {
         || next.token_kind == TokenKind.Star
         || next.token_kind == TokenKind.BitwiseAnd
         || next.text == "<";
+}
+
+// Leaves of a bracket node omit its delimiters, so a `&`, `mut`, or `*` on the
+// first element of `[&A, B]` or `[&A]` would otherwise project as the outer
+// type. Bracket types are never references or pointers themselves.
+i64 binding_type_projection_start(SyntaxNode* first, Vec<SyntaxNode*>* leaves, i64 end) {
+    i64 start = 0;
+    if (first == (SyntaxNode*)0 || first.kind != NodeKind.Bracket) {
+        return start;
+    }
+    while (start < end
+        && (leaves.get(start).token_kind == TokenKind.BitwiseAnd
+            || leaves.get(start).token_kind == TokenKind.Mut
+            || leaves.get(start).token_kind == TokenKind.Star)) {
+        start += 1;
+    }
+    return start;
+}
+
+// Function parameter lists describe a callee, not stored data, so a callback
+// such as `i32(&i32)` stays Send. Nested brackets merge their own elements.
+void binding_collect_element_leaves(SyntaxNode* node, Vec<SyntaxNode*>* leaves,
+                                    TypeProjection* result) {
+    if (node.kind == NodeKind.Parenthesized) {
+        return;
+    }
+    if (node.kind == NodeKind.Bracket) {
+        binding_merge_bracket_flags(node, result);
+        return;
+    }
+    if (node.kind == NodeKind.Token) {
+        leaves.push(node);
+        return;
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        binding_collect_element_leaves(child, leaves, result);
+        child = child.next_sibling;
+    }
+}
+
+// The projection names only the first element of a bracket type, so merge
+// every element's flags: a reference or Rc anywhere makes the aggregate non-Send.
+void binding_merge_bracket_flags(SyntaxNode* bracket, TypeProjection* result) {
+    if (bracket == (SyntaxNode*)0 || bracket.kind != NodeKind.Bracket) {
+        return;
+    }
+    SyntaxNode* element = bracket.first_child;
+    while (element != (SyntaxNode*)0) {
+        Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+        while (element != (SyntaxNode*)0
+            && !(element.kind == NodeKind.Token && element.token_kind == TokenKind.Comma)) {
+            binding_collect_element_leaves(element, &leaves, result);
+            element = element.next_sibling;
+        }
+        if (leaves.len() > 0) {
+            TypeProjection projected = projection_parse_type(&leaves, 0, leaves.len());
+            projection_merge_type_flags(result, &projected);
+        }
+        leaves.drop();
+        if (element != (SyntaxNode*)0) { element = element.next_sibling; }
+    }
 }
 
 TypeProjection binding_declared_type(SyntaxNode* first, SyntaxNode* name) {
@@ -472,11 +544,13 @@ TypeProjection binding_declared_type(SyntaxNode* first, SyntaxNode* name) {
     Vec<SyntaxNode*> prefix = Vec<SyntaxNode*>.new();
     SyntaxNode* cursor = first;
     while (cursor != (SyntaxNode*)0 && cursor != name) {
-        binding_collect_leaves(cursor, &prefix);
+        binding_collect_type_leaves(cursor, &prefix, false);
         cursor = cursor.next_sibling;
     }
     if (prefix.len() > 0) {
-        result = projection_parse_type(&prefix, 0, prefix.len());
+        result = projection_parse_type(&prefix,
+            binding_type_projection_start(first, &prefix, prefix.len()), prefix.len());
+        binding_merge_bracket_flags(first, &result);
     }
     prefix.drop();
     return result;
@@ -566,6 +640,13 @@ void collect_block_bindings(SyntaxNode* block, Vec<Binding>* bindings) {
                     }
                     TypeProjection declared_type = binding_declared_type(child, candidate);
                     add_typed_binding(bindings, candidate, array ? BindingKind.Array : BindingKind.Variable, &declared_type);
+                    if (bindings.len() > 0) {
+                        Binding* binding = bindings.get_ptr(bindings.len() - 1);
+                        if (binding.name_node == candidate) {
+                            binding.type_start = child;
+                            binding.type_end = candidate;
+                        }
+                    }
                     while (cursor != (SyntaxNode*)0
                         && !(cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon)) {
                         if (cursor.kind == NodeKind.Block

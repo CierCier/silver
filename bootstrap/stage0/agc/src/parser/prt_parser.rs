@@ -894,7 +894,7 @@ impl PRT_Parser {
         )
     }
 
-    fn parse_type_prefix(
+    pub(super) fn parse_type_prefix(
         &self,
         tokens: &[LexToken],
         start: usize,

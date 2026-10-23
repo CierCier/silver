@@ -4,6 +4,7 @@ pub mod expr_parser;
 pub mod import_hook;
 pub mod prt_parser;
 pub mod prt_table;
+pub mod visit;
 
 pub use ast::*;
 pub use error::ParseError;

@@ -221,6 +221,16 @@ fn expand_macros_in_expr(
 
     // First, recursively expand subexpressions:
     match expr.kind.as_mut() {
+        ExpressionKind::Lambda { parameters, body } => {
+            let previous_return = ctx.ret_type.take();
+            let previous_scope = ctx.scope_types.clone();
+            for parameter in parameters {
+                if let Some(ty) = &parameter.type_annotation { ctx.scope_types.insert(parameter.name.name.clone(), ty.clone()); }
+            }
+            expand_macros_in_block(body, ctx, depth);
+            ctx.scope_types = previous_scope;
+            ctx.ret_type = previous_return;
+        }
         ExpressionKind::Binary { left, operator, right } => {
             if *operator == BinaryOperator::Assign {
                 let lhs_exp = if let ExpressionKind::Identifier(ident) = left.kind.as_ref() {
@@ -520,6 +530,25 @@ fn is_signed_type(ty: &ast::Type) -> bool {
     }
 }
 
+fn expansion_id(counter: usize) -> u32 {
+    u32::try_from(counter + 1).unwrap_or(u32::MAX)
+}
+
+/// Marks a node copied by macro expansion so span-keyed analyses can tell
+/// repeated copies of the same source apart.
+fn tag_expansion(expression: &mut Expression, expansion: u32) {
+    expression.span.expansion = expansion;
+    if let ExpressionKind::Identifier(name) = expression.kind.as_mut() {
+        name.span.expansion = expansion;
+    }
+}
+
+fn tag_expansion_in_block(block: &mut Block, expansion: u32) {
+    crate::parser::visit::expressions_in_block(block, &mut |expression| {
+        tag_expansion(expression, expansion);
+    });
+}
+
 /// Expands a single user macro invocation.
 fn expand_macro_invocation(
     def: &MacroDef,
@@ -588,6 +617,7 @@ fn expand_macro_invocation(
     collect_local_bindings_in_block(&def.body, &mut hygiene_map, macro_id);
 
     let mut body = def.body.clone();
+    tag_expansion_in_block(&mut body, expansion_id(macro_id));
     apply_hygiene_and_subst(&mut body, &hygiene_map, &param_subst, &vararg_subst);
     if !type_subst.is_empty() {
         substitute_types_in_block(&mut body, &type_subst);
@@ -842,6 +872,17 @@ fn apply_hygiene_and_subst_in_expr(
     if let ExpressionKind::Identifier(id) = expr.kind.as_ref() {
         if let Some(subst) = param_subst.get(&id.name) {
             *expr = subst.clone();
+            // Each copy of an argument may resolve in a different scope (for
+            // example inside and outside a lambda), so give it its own identity.
+            // Remap per distinct id so nested expansions inside the argument
+            // stay distinct from each other.
+            let mut fresh: HashMap<u32, u32> = HashMap::default();
+            crate::parser::visit::expression(expr, &mut |expression| {
+                let id = *fresh.entry(expression.span.expansion).or_insert_with(|| {
+                    expansion_id(MACRO_COUNTER.fetch_add(1, Ordering::Relaxed))
+                });
+                tag_expansion(expression, id);
+            });
             return;
         }
         if let Some(hyg_name) = hygiene_map.get(&id.name) {
@@ -908,6 +949,22 @@ fn apply_hygiene_and_subst_in_expr(
     }
 
     match expr.kind.as_mut() {
+        ExpressionKind::Lambda { parameters, body } => {
+            let mut scoped_hygiene = hygiene_map.clone();
+            let mut scoped_subst = param_subst.clone();
+            let mut scoped_varargs = vararg_subst.clone();
+            for parameter in parameters {
+                scoped_hygiene.remove(&parameter.name.name);
+                scoped_subst.remove(&parameter.name.name);
+                if scoped_varargs
+                    .as_ref()
+                    .is_some_and(|(name, _)| name == &parameter.name.name)
+                {
+                    scoped_varargs = None;
+                }
+            }
+            apply_hygiene_and_subst(body, &scoped_hygiene, &scoped_subst, &scoped_varargs);
+        }
         ExpressionKind::Binary { left, right, .. } => {
             apply_hygiene_and_subst_in_expr(left, hygiene_map, param_subst, vararg_subst);
             apply_hygiene_and_subst_in_expr(right, hygiene_map, param_subst, vararg_subst);

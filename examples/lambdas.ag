@@ -1,0 +1,45 @@
+// Run with: agc run examples/lambdas.ag
+import std.string;
+
+i32 main() {
+    let double = (i32 value) => value * 2;
+    i32(i32, i32) multiply = (a, b) => a * b;
+
+    let absolute = (i32 value) => {
+        if (value < 0) { return -value; }
+        return value;
+    };
+
+    let classify = (i32 value) => match value {
+        0: "zero",
+        _: "nonzero",
+    };
+    @println("double={}, product={}, absolute={}, kind={}",
+        double(6), multiply(3, 6), absolute(-7), classify(0));
+
+    String text = String.from_str("silver");
+    let length = () => text.len();
+    @println("captured length={}, original={}", length(), text);
+
+    i32 count = 0;
+    let increment = () => { count += 1; };
+    increment();
+    increment();
+    count += 1;
+    @println("count={}", count);
+
+    let borrowed_length = (&String value) => value.len();
+    let bump = (&mut i32 value) => { *value += 1; };
+    bump(&mut count);
+    @println("borrowed length={}, bumped count={}", borrowed_length(&text), count);
+
+    let consume = (move String value) => value.len();
+    String argument = String.from_str("owned");
+    @println("consumed length={}", consume(move argument));
+
+    let take = () => move text;
+    String received = take();
+    @println("moved capture={}", received);
+
+    return 0;
+}

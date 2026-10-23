@@ -15,6 +15,8 @@ use crate::types::{
     is_void, parse_struct_attributes, struct_layout,
 };
 
+mod lambda;
+
 const MAX_TYPE_CHECK_DEPTH: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +27,7 @@ pub struct TypeError {
 
 #[derive(Default)]
 pub struct TypeChecker {
+    lambdas: lambda::LambdaState,
     errors: Vec<TypeError>,
     expression_depth: usize,
     scopes: Vec<HashMap<String, (Type, bool)>>,
@@ -256,6 +259,7 @@ impl TypeChecker {
         self.collect_impl_methods(program, table);
         self.collect_struct_layouts(program);
         self.check_global_attributes(&program.attributes);
+        self.lambdas.symbols = std::mem::take(table);
         for item in &program.items {
             self.check_global_attributes(&item.attributes);
             if let ast::ItemKind::Struct(_) = &item.kind {
@@ -312,6 +316,7 @@ impl TypeChecker {
                 }
             }
         }
+        *table = std::mem::take(&mut self.lambdas.symbols);
         table.touch_phase(
             CompilerPhase::TypeCheck,
             format!("type checking done (errors={})", self.errors.len()),
@@ -1084,6 +1089,9 @@ impl TypeChecker {
 
                     if let Some(init) = &let_stmt.initializer {
                         let init_type = self.check_expr(init, Some(&declared));
+                        if !self.lambdas.frames.is_empty() && !self.lambda_copy_type(&init_type) {
+                            self.consume_capture(init);
+                        }
                         if !self.is_assignable(&declared, &init_type)
                             && !self.is_implicitly_castable(&init_type, &declared)
                         {
@@ -1098,6 +1106,9 @@ impl TypeChecker {
                         return;
                     };
                     let inferred = self.check_expr(init, None);
+                    if !self.lambdas.frames.is_empty() && !self.lambda_copy_type(&inferred) {
+                        self.consume_capture(init);
+                    }
                     if Self::is_void_like(&inferred) {
                         self.error(msg::void_func_cannot_return_value(), init.span);
                         return;
@@ -1115,6 +1126,20 @@ impl TypeChecker {
             ast::StatementKind::Return(value) => {
                 if self.defer_depth > 0 {
                     self.error(msg::return_not_allowed_in_defer(), stmt.span);
+                }
+                if !self.lambdas.frames.is_empty() {
+                    let expected = self.current_return.clone();
+                    let found = value.as_ref().map(|value| {
+                        let found = self.check_expr(value, expected.as_ref());
+                        if !self.lambda_copy_type(&found) {
+                            self.consume_capture(value);
+                        }
+                        found
+                    }).unwrap_or(Type::Unit);
+                    if let Some(frame) = self.lambdas.frames.last_mut() {
+                        frame.returns.push(found);
+                    }
+                    return;
                 }
                 let expected = self.current_return.clone().unwrap_or(Type::Unit);
                 match value {
@@ -1272,11 +1297,15 @@ impl TypeChecker {
     }
 
     fn check_expr_inner(&mut self, expr: &ast::Expression, expected: Option<&Type>) -> Type {
+        self.observe_lambda_access(expr);
         #[expect(
             clippy::match_like_matches_macro,
             reason = "two-column (primitive, literal) table reads better as a match than matches!"
         )]
         let ty = match expr.kind.as_ref() {
+            ast::ExpressionKind::Lambda { parameters, body } => {
+                self.check_lambda(parameters, body, expected, expr.span)
+            }
             ast::ExpressionKind::Literal(literal) => {
                 self.literal_type(literal, expected, &expr.span)
             }
@@ -1680,6 +1709,9 @@ impl TypeChecker {
                 ast::BinaryOperator::Assign => {
                     let left_ty = self.check_expr(left, None);
                     let right_ty = self.check_expr(right, None);
+                    if !self.lambdas.frames.is_empty() && !self.lambda_copy_type(&right_ty) {
+                        self.consume_capture(right);
+                    }
                     if left_ty != right_ty && !self.is_implicitly_castable(&right_ty, &left_ty) {
                         self.error(
                             msg::assignment_type_mismatch(&left_ty, &right_ty),
@@ -2004,7 +2036,38 @@ impl TypeChecker {
                     Type::Unknown
                 }
             }
-            ast::ExpressionKind::Initializer { .. } => Type::Unknown,
+            ast::ExpressionKind::Initializer { items } => {
+                for (position, item) in items.iter().enumerate() {
+                    let (value, target) = match item {
+                        ast::InitializerItem::Field { name, value } => (
+                            value,
+                            expected.and_then(|ty| self.resolve_field_access_type(ty, &name.name)),
+                        ),
+                        ast::InitializerItem::Positional(value)
+                        | ast::InitializerItem::Index { value, .. } => {
+                            if let ast::InitializerItem::Index { index, .. } = item {
+                                self.check_expr(index, None);
+                            }
+                            let target = match expected {
+                                Some(Type::Tuple(types)) => types.get(position).cloned(),
+                                Some(Type::Array { element, .. } | Type::Slice { element }) => {
+                                    Some((**element).clone())
+                                }
+                                _ => None,
+                            };
+                            (value, target)
+                        }
+                    };
+                    let found = self.check_expr(value, target.as_ref());
+                    if let Some(target) = target.as_ref()
+                        && !self.is_assignable(target, &found)
+                        && !self.is_implicitly_castable(&found, target)
+                    {
+                        self.error(msg::type_mismatch(target, &found), value.span);
+                    }
+                }
+                expected.cloned().unwrap_or(Type::Unknown)
+            }
             ast::ExpressionKind::Tuple(items) => {
                 let elem_expected = match expected {
                     Some(Type::Tuple(elem_tys)) => elem_tys.as_slice(),
@@ -2176,6 +2239,19 @@ impl TypeChecker {
                 function,
                 arguments,
             } => {
+                let checked_callee = if matches!(
+                    function.kind.as_ref(),
+                    ast::ExpressionKind::Identifier(_)
+                ) {
+                    None
+                } else {
+                    Some(self.check_expr(function, None))
+                };
+                if let Some(result) = self.check_lambda_call(
+                    function, arguments, expr.span, checked_callee.as_ref(),
+                ) {
+                    return result;
+                }
                 if let ast::ExpressionKind::Identifier(ident) = function.kind.as_ref() {
                     // Bare enum constructor with expected-type inference:
                     // `Optional<i32> x = Some(42);` / `Result<i32,str> r = Ok(7);`.
@@ -2211,7 +2287,14 @@ impl TypeChecker {
                         {
                             let arg_types: Vec<Type> = arguments
                                 .iter()
-                                .map(|arg| self.check_expr_with_literal_naturals(arg))
+                                .enumerate()
+                                .map(|(index, arg)| {
+                                    if matches!(arg.kind.as_ref(), ast::ExpressionKind::Lambda { .. }) {
+                                        self.check_expr(arg, params.get(index))
+                                    } else {
+                                        self.check_expr_with_literal_naturals(arg)
+                                    }
+                                })
                                 .collect();
                             if arguments.len() != params.len() {
                                 self.error(
@@ -2227,6 +2310,7 @@ impl TypeChecker {
                             for (i, (param_ty, arg_ty)) in
                                 params.iter().zip(arg_types.iter()).enumerate()
                             {
+                                self.capture_argument(&arguments[i], param_ty);
                                 // Integer literals narrow to the parameter type
                                 // when the value fits (overflow otherwise).
                                 let literal_ok = Self::literal_integer_value(&arguments[i])
@@ -2296,16 +2380,43 @@ impl TypeChecker {
                     }
                 } else {
                     // Type-check the function expression and try indirect call
-                    let fn_ty = self.check_expr(function, None);
+                    let fn_ty = checked_callee.unwrap_or_else(|| self.check_expr(function, None));
                     if let Type::Function {
                         params,
                         return_type,
                     } = &fn_ty
                     {
-                        let _arg_types: Vec<Type> = arguments
+                        let arg_types: Vec<Type> = arguments
                             .iter()
-                            .map(|arg| self.check_expr(arg, None))
+                            .enumerate()
+                            .map(|(index, arg)| {
+                                if matches!(arg.kind.as_ref(), ast::ExpressionKind::Lambda { .. }) {
+                                    self.check_expr(arg, params.get(index))
+                                } else {
+                                    self.check_expr_with_literal_naturals(arg)
+                                }
+                            })
                             .collect();
+                        for (i, (param_ty, arg_ty)) in params.iter().zip(&arg_types).enumerate() {
+                            self.capture_argument(&arguments[i], param_ty);
+                            let literal_ok = Self::literal_integer_value(&arguments[i])
+                                .is_some_and(|value| {
+                                    matches!(param_ty, Type::Primitive(prim)
+                                        if Self::integer_value_fits(value, prim))
+                                });
+                            if !literal_ok
+                                && !self.is_assignable(param_ty, arg_ty)
+                                && !self.is_implicitly_castable(arg_ty, param_ty)
+                            {
+                                self.error(
+                                    format!(
+                                        "mismatched argument type for parameter {}: expected {}, got {}",
+                                        i, param_ty, arg_ty
+                                    ),
+                                    arguments[i].span,
+                                );
+                            }
+                        }
                         if arguments.len() != params.len() {
                             self.error(
                                 format!(
@@ -3400,6 +3511,7 @@ impl TypeChecker {
         };
         self.expr_types
             .insert((expr.span.start, expr.span.end), ty.to_string());
+        self.record_lambda_type(expr, &ty);
         ty
     }
 
@@ -3584,9 +3696,29 @@ impl TypeChecker {
         arguments: &[ast::Expression],
         span: Span,
     ) -> (Type, Vec<Type>) {
+        let contextual_parameters: Vec<_> = if arguments.iter().any(|argument| {
+            matches!(argument.kind.as_ref(), ast::ExpressionKind::Lambda { .. })
+        }) {
+            self.functions.get(&ident.name).into_iter().flatten()
+                .filter_map(|symbol| self.function_symbols.get(symbol))
+                .filter(|signature| signature.type_params.is_empty() && signature.params.len() == arguments.len())
+                .map(|signature| signature.params.clone()).collect()
+        } else {
+            Vec::new()
+        };
         let arg_types = arguments
             .iter()
-            .map(|arg| self.check_expr_with_literal_naturals(arg))
+            .enumerate()
+            .map(|(index, arg)| {
+                if matches!(arg.kind.as_ref(), ast::ExpressionKind::Lambda { .. })
+                    && let Some(first) = contextual_parameters.first().and_then(|params| params.get(index))
+                    && contextual_parameters.iter().all(|params| params.get(index) == Some(first))
+                {
+                    self.check_expr(arg, Some(first))
+                } else {
+                    self.check_expr_with_literal_naturals(arg)
+                }
+            })
             .collect::<Vec<_>>();
 
         let Some(candidate_ids) = self.functions.get(&ident.name).cloned() else {
@@ -3847,6 +3979,23 @@ impl TypeChecker {
 
         let (_, return_type, mapping, candidate) = &best_matches[0];
         self.record_function_monomorph(candidate, mapping, span);
+        if !self.lambdas.frames.is_empty() {
+            // Trailing variadic arguments all take the variadic element type.
+            let variadic = candidate
+                .source
+                .parameters
+                .iter()
+                .any(|p| p.is_variadic)
+                .then(|| candidate.params.last())
+                .flatten();
+            for (index, argument) in arguments.iter().enumerate() {
+                let Some(parameter) = candidate.params.get(index).or(variadic) else {
+                    break;
+                };
+                let parameter = self.substitute_type(parameter, mapping);
+                self.capture_argument(argument, &parameter);
+            }
+        }
         (return_type.clone(), arg_types)
     }
 
@@ -4362,6 +4511,31 @@ impl TypeChecker {
 
         let (_, return_type, mapping, candidate) = &best_matches[0];
         self.record_method_monomorph(candidate, mapping, span);
+        if !self.lambdas.frames.is_empty() {
+            let offset = usize::from(style == MethodCallStyle::Instance);
+            if offset != 0 && let Some(parameter) = candidate.params.first() {
+                let parameter = self.substitute_type(&self.substitute_self_type(parameter, receiver_ty), mapping);
+                self.capture_method_receiver(span, &parameter);
+            }
+            if let Some(arguments) = arg_exprs {
+                let parameters = &candidate.params[offset.min(candidate.params.len())..];
+                // Trailing variadic arguments all take the variadic element type.
+                let variadic = candidate
+                    .source_method
+                    .parameters
+                    .iter()
+                    .any(|p| p.is_variadic)
+                    .then(|| parameters.last())
+                    .flatten();
+                for (index, argument) in arguments.iter().enumerate() {
+                    let Some(parameter) = parameters.get(index).or(variadic) else {
+                        break;
+                    };
+                    let parameter = self.substitute_type(&self.substitute_self_type(parameter, receiver_ty), mapping);
+                    self.capture_argument(argument, &parameter);
+                }
+            }
+        }
         Some(return_type.clone())
     }
 
@@ -7614,6 +7788,12 @@ impl TypeChecker {
     ) {
         use ast::ExpressionKind;
         match expr.kind.as_mut() {
+            ExpressionKind::Lambda { parameters, body } => {
+                for parameter in parameters {
+                    if let Some(ty) = &mut parameter.type_annotation { Self::resolve_type_aliases_in_type(ty, aliases); }
+                }
+                Self::resolve_type_aliases_in_block(body, aliases);
+            }
             ExpressionKind::Binary { left, right, .. } => {
                 Self::resolve_type_aliases_in_expression(left, aliases);
                 Self::resolve_type_aliases_in_expression(right, aliases);
@@ -8091,7 +8271,7 @@ fn populate_expr_blocks_inferred_let_types(
     inferred: &HashMap<(usize, usize), (Type, Span)>,
 ) {
     match expr.kind.as_mut() {
-        ast::ExpressionKind::Block(block) => {
+        ast::ExpressionKind::Block(block) | ast::ExpressionKind::Lambda { body: block, .. } => {
             populate_block_inferred_let_types(block, inferred);
         }
         ast::ExpressionKind::If {
@@ -8335,7 +8515,7 @@ fn rewrite_expression_bare_constructors(
         return;
     }
     match expr.kind.as_mut() {
-        ast::ExpressionKind::Block(block) => {
+        ast::ExpressionKind::Block(block) | ast::ExpressionKind::Lambda { body: block, .. } => {
             rewrite_block_bare_constructors(block, rewrites);
         }
         ast::ExpressionKind::If {

@@ -352,7 +352,8 @@ bool resolve_names(SymbolTable* symbols, DiagnosticBag* diagnostics, SyntaxTree*
     cfg_collect_import_names(tree.root, cfg, &import_names);
     resolver.has_imports = import_names.len() > 0;
     import_names.drop();
-    if (resolver.has_imports) {
+    if (resolver.has_imports
+        && (declarations == (ImportedDeclarations*)0 || !declarations.loaded)) {
         profiler_begin_phase("load imported declarations");
         bool loaded = load_imported_declarations(symbols, diagnostics, tree, owner_path,
                                                  cfg, include_dirs, declarations);
