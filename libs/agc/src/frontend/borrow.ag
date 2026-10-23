@@ -261,7 +261,35 @@ bool borrow_type_contains_reference(TypeTable* types, SyntaxNode* root, u32 type
         return false;
     }
     if (entry.kind != TypeKind.Named) { return false; }
-    SyntaxNode* item = find_item_by_name(root, NodeKind.Struct, types.names.get(entry.name_id));
+    str type_name = types.names.get(entry.name_id);
+    SyntaxNode* enum_item = find_enum_item(root, type_name);
+    if (enum_item != (SyntaxNode*)0) {
+        Vec<SyntaxNode*> variants = Vec<SyntaxNode*>.new();
+        Vec<i64> tags = Vec<i64>.new();
+        Vec<i64> arities = Vec<i64>.new();
+        enum_each_variant(enum_item, &variants, &tags, &arities);
+        bool found = false;
+        i64 vi = 0;
+        while (!found && vi < variants.len()) {
+            i64 pi = 0;
+            while (!found && pi < arities.get(vi)) {
+                String payload_text = String.new();
+                if (enum_payload_type_text(root, type_name, variants.get(vi).text, pi, &payload_text)) {
+                    u32 payload = type_id_from_text(types, payload_text.to_str());
+                    payload = resolve_generic_member_type(types, root, type_id, payload);
+                    found = borrow_type_contains_reference(types, root, payload, depth + 1);
+                }
+                payload_text.drop();
+                pi += 1;
+            }
+            vi += 1;
+        }
+        variants.drop();
+        tags.drop();
+        arities.drop();
+        return found;
+    }
+    SyntaxNode* item = find_item_by_name(root, NodeKind.Struct, type_name);
     if (item != (SyntaxNode*)0) {
         SyntaxNode* body = item.first_child;
         while (body != (SyntaxNode*)0 && body.kind != NodeKind.Block) { body = body.next_sibling; }
@@ -370,6 +398,40 @@ bool borrow_node_within(SyntaxNode* node, SyntaxNode* ancestor) {
     return false;
 }
 
+// Type of the slot in aggregate initializer `value` whose expression contains
+// `node`, or TYPE_UNKNOWN when the slot cannot be resolved.
+u32 borrow_aggregate_slot_type(TypeTable* table, SyntaxNode* root, u32 aggregate_type,
+                               SyntaxNode* value, SyntaxNode* node) {
+    SyntaxNode* top = node;
+    while (top != (SyntaxNode*)0 && top.parent != value) { top = top.parent; }
+    if (top == (SyntaxNode*)0) { return TYPE_UNKNOWN; }
+    i64 index = 0;
+    SyntaxNode* start = value.first_child;
+    SyntaxNode* cursor = value.first_child;
+    while (cursor != (SyntaxNode*)0 && cursor != top) {
+        if (cursor.token_kind == TokenKind.Comma) {
+            index += 1;
+            start = cursor.next_sibling;
+        }
+        cursor = cursor.next_sibling;
+    }
+    TypeEntry entry = *table.get(table.resolve_subst(aggregate_type));
+    SyntaxNode* field = start != (SyntaxNode*)0 ? start.next_sibling : (SyntaxNode*)0;
+    if (start != (SyntaxNode*)0 && start.kind == NodeKind.Token && borrow_text_equals(start.text, ".")
+        && node_is_identifier(field)) {
+        if (entry.kind != TypeKind.Named) { return TYPE_UNKNOWN; }
+        SyntaxNode* item = find_item_by_name(root, NodeKind.Struct, table.names.get(entry.name_id));
+        u32 member = struct_field_type_id(table, item, field.text);
+        if (member == TYPE_UNKNOWN) { return TYPE_UNKNOWN; }
+        return resolve_generic_member_type(table, root, aggregate_type, member);
+    }
+    if (entry.kind == TypeKind.Array) { return entry.inner; }
+    if (entry.kind == TypeKind.Tuple && index < entry.count) {
+        return table.type_args.get(entry.inner + (u32)index);
+    }
+    return TYPE_UNKNOWN;
+}
+
 str borrow_aggregate_holder(Vec<Binding>* bindings, Vec<u32>* types,
                             TypeTable* table, SyntaxNode* root, SyntaxNode* node) {
     i64 i = 0;
@@ -382,6 +444,12 @@ str borrow_aggregate_holder(Vec<Binding>* bindings, Vec<u32>* types,
                 && (value.kind == NodeKind.Bracket || value.kind == NodeKind.Block)
                 && borrow_node_within(node, value)
                 && borrow_type_contains_reference(table, root, types.get(i), 0)) {
+                // Uses in non-reference slots (e.g. `*view` stored as an integer)
+                // do not keep their loans alive through the aggregate.
+                u32 slot = borrow_aggregate_slot_type(table, root, types.get(i), value, node);
+                if (slot != TYPE_UNKNOWN && !borrow_type_contains_reference(table, root, slot, 0)) {
+                    return "";
+                }
                 SyntaxNode* parent = node.parent;
                 while (parent != value && parent != (SyntaxNode*)0) {
                     SyntaxNode* before = binding_previous_sibling(parent);

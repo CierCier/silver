@@ -2386,17 +2386,36 @@ impl TypeChecker {
                         return_type,
                     } = &fn_ty
                     {
-                        let _arg_types: Vec<Type> = arguments
+                        let arg_types: Vec<Type> = arguments
                             .iter()
                             .enumerate()
                             .map(|(index, arg)| {
-                                let expected = matches!(arg.kind.as_ref(), ast::ExpressionKind::Lambda { .. })
-                                    .then(|| params.get(index)).flatten();
-                                self.check_expr(arg, expected)
+                                if matches!(arg.kind.as_ref(), ast::ExpressionKind::Lambda { .. }) {
+                                    self.check_expr(arg, params.get(index))
+                                } else {
+                                    self.check_expr_with_literal_naturals(arg)
+                                }
                             })
                             .collect();
-                        for (argument, parameter) in arguments.iter().zip(params) {
-                            self.capture_argument(argument, parameter);
+                        for (i, (param_ty, arg_ty)) in params.iter().zip(&arg_types).enumerate() {
+                            self.capture_argument(&arguments[i], param_ty);
+                            let literal_ok = Self::literal_integer_value(&arguments[i])
+                                .is_some_and(|value| {
+                                    matches!(param_ty, Type::Primitive(prim)
+                                        if Self::integer_value_fits(value, prim))
+                                });
+                            if !literal_ok
+                                && !self.is_assignable(param_ty, arg_ty)
+                                && !self.is_implicitly_castable(arg_ty, param_ty)
+                            {
+                                self.error(
+                                    format!(
+                                        "mismatched argument type for parameter {}: expected {}, got {}",
+                                        i, param_ty, arg_ty
+                                    ),
+                                    arguments[i].span,
+                                );
+                            }
                         }
                         if arguments.len() != params.len() {
                             self.error(
@@ -3961,7 +3980,18 @@ impl TypeChecker {
         let (_, return_type, mapping, candidate) = &best_matches[0];
         self.record_function_monomorph(candidate, mapping, span);
         if !self.lambdas.frames.is_empty() {
-            for (argument, parameter) in arguments.iter().zip(&candidate.params) {
+            // Trailing variadic arguments all take the variadic element type.
+            let variadic = candidate
+                .source
+                .parameters
+                .iter()
+                .any(|p| p.is_variadic)
+                .then(|| candidate.params.last())
+                .flatten();
+            for (index, argument) in arguments.iter().enumerate() {
+                let Some(parameter) = candidate.params.get(index).or(variadic) else {
+                    break;
+                };
                 let parameter = self.substitute_type(parameter, mapping);
                 self.capture_argument(argument, &parameter);
             }

@@ -5808,6 +5808,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
                     variant_tags.drop();
                     variant_arities.drop();
                     if (built != (LLVMOpaqueValue*)0) {
+                        base.drop();
                         return built;
                     }
                 }

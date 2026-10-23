@@ -18,7 +18,9 @@ pub(super) struct LambdaState {
     callable_types: HashSet<String>,
     method_receivers: HashMap<ExprKey, ast::Expression>,
     checked_types: HashMap<ExprKey, Type>,
-    binding_origins: HashMap<ExprKey, (usize, Type)>,
+    /// Keyed by span and node address: macro expansions copy body spans, so
+    /// the span alone conflates identifiers resolved in different scopes.
+    binding_origins: HashMap<(ExprKey, usize), (usize, Type)>,
 }
 
 pub(super) struct CaptureFrame {
@@ -157,6 +159,11 @@ impl TypeChecker {
                 self.consume_capture(else_expr);
                 return;
             }
+            ast::ExpressionKind::UnwrapOr { value, fallback } => {
+                self.consume_capture(value);
+                self.consume_capture(fallback);
+                return;
+            }
             ast::ExpressionKind::Array(items)
             | ast::ExpressionKind::Tuple(items)
             | ast::ExpressionKind::EnumVariant { fields: items, .. } => {
@@ -232,7 +239,7 @@ impl TypeChecker {
         let Some(name) = place_root(expression) else {
             return;
         };
-        let binding_key = key(name.span);
+        let binding_key = (key(name.span), std::ptr::from_ref(name) as usize);
         // Result walks can revisit identifiers after their arm scopes have closed.
         let (scope, ty) = if let Some(binding) = self.lambdas.binding_origins.get(&binding_key) {
             binding.clone()
@@ -432,6 +439,10 @@ impl TypeChecker {
         let Some(frame) = self.lambdas.frames.pop() else {
             return Type::Unknown;
         };
+        if self.lambdas.frames.is_empty() {
+            // Node addresses are only stable while the enclosing body is borrowed.
+            self.lambdas.binding_origins.clear();
+        }
         self.current_return = outer_return;
         self.defer_depth = outer_defer;
         let return_type = if frame.returns.is_empty() {

@@ -1713,6 +1713,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         match expr.kind.as_ref() {
             ast::ExpressionKind::TypeName(ty) => Some(ty.clone()),
             ast::ExpressionKind::Identifier(identifier) => self.lookup_value_type(&identifier.name),
+            // Lambda lowering wraps owned capture reads in `move`.
+            ast::ExpressionKind::Move(inner) => self.resolve_receiver_type(inner),
             ast::ExpressionKind::Cast { target_type, .. } => Some((**target_type).clone()),
             ast::ExpressionKind::Tuple(items) => {
                 let mut elem_types = Vec::with_capacity(items.len());

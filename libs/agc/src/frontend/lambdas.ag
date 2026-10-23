@@ -299,6 +299,12 @@ impl LambdaLowering {
             self.demand(ast, value.inner1, mode, implicit, captures, occurrences);
             self.demand(ast, value.aux, mode, implicit, captures, occurrences);
             return;
+        } else if (value.kind == ExprKind.UnwrapOr) {
+            // Both operands can become the result: the payload moves out of the
+            // optional, and the fallback is transferred when it is absent.
+            self.demand(ast, value.inner0, mode, implicit, captures, occurrences);
+            self.demand(ast, value.inner1, mode, implicit, captures, occurrences);
+            return;
         } else if (value.kind == ExprKind.Match) {
             i64 i = 0;
             while (i < value.aux) {
