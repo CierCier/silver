@@ -418,11 +418,13 @@ void send_append_type_tokens(SyntaxNode* node, String* out) {
         return;
     }
     if (node.kind == NodeKind.Bracket) { out.push((u8)'['); }
+    if (node.kind == NodeKind.Parenthesized) { out.push((u8)'('); }
     SyntaxNode* child = node.first_child;
     while (child != (SyntaxNode*)0) {
         send_append_type_tokens(child, out);
         child = child.next_sibling;
     }
+    if (node.kind == NodeKind.Parenthesized) { out.push((u8)')'); }
     if (node.kind == NodeKind.Bracket) { out.push((u8)']'); }
 }
 

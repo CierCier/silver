@@ -247,6 +247,24 @@ void binding_collect_leaves(SyntaxNode* node, Vec<SyntaxNode*>* leaves) {
     }
 }
 
+// Like binding_collect_leaves, but drops function parameter lists nested in a
+// bracket type so `[i32(&i32), i32]` projects as `i32`, not `i32 & i32`.
+void binding_collect_type_leaves(SyntaxNode* node, Vec<SyntaxNode*>* leaves, bool in_bracket) {
+    if (node == (SyntaxNode*)0 || (in_bracket && node.kind == NodeKind.Parenthesized)) {
+        return;
+    }
+    if (node.kind == NodeKind.Token) {
+        leaves.push(node);
+        return;
+    }
+    bool nested = in_bracket || node.kind == NodeKind.Bracket;
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        binding_collect_type_leaves(child, leaves, nested);
+        child = child.next_sibling;
+    }
+}
+
 bool binding_is_value_name(SyntaxNode* node) {
     if (node == (SyntaxNode*)0 || node.kind != NodeKind.Token
         || node.token_kind != TokenKind.Identifier || strlen(node.text) == 0) {
@@ -370,7 +388,7 @@ void collect_parameter_bindings(SyntaxNode* parameters, Vec<Binding>* bindings) 
                 && (cursor.token_kind == TokenKind.Greater || strcmp(cursor.text, ">") == 0)) {
                 angle_depth -= 1;
             }
-            binding_collect_leaves(cursor, &segment);
+            binding_collect_type_leaves(cursor, &segment, false);
             if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Identifier) {
                 last_identifier = cursor;
             }
@@ -473,6 +491,28 @@ i64 binding_type_projection_start(SyntaxNode* first, Vec<SyntaxNode*>* leaves, i
     return start;
 }
 
+// Function parameter lists describe a callee, not stored data, so a callback
+// such as `i32(&i32)` stays Send. Nested brackets merge their own elements.
+void binding_collect_element_leaves(SyntaxNode* node, Vec<SyntaxNode*>* leaves,
+                                    TypeProjection* result) {
+    if (node.kind == NodeKind.Parenthesized) {
+        return;
+    }
+    if (node.kind == NodeKind.Bracket) {
+        binding_merge_bracket_flags(node, result);
+        return;
+    }
+    if (node.kind == NodeKind.Token) {
+        leaves.push(node);
+        return;
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        binding_collect_element_leaves(child, leaves, result);
+        child = child.next_sibling;
+    }
+}
+
 // The projection names only the first element of a bracket type, so merge
 // every element's flags: a reference or Rc anywhere makes the aggregate non-Send.
 void binding_merge_bracket_flags(SyntaxNode* bracket, TypeProjection* result) {
@@ -484,7 +524,7 @@ void binding_merge_bracket_flags(SyntaxNode* bracket, TypeProjection* result) {
         Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
         while (element != (SyntaxNode*)0
             && !(element.kind == NodeKind.Token && element.token_kind == TokenKind.Comma)) {
-            binding_collect_leaves(element, &leaves);
+            binding_collect_element_leaves(element, &leaves, result);
             element = element.next_sibling;
         }
         if (leaves.len() > 0) {
@@ -504,7 +544,7 @@ TypeProjection binding_declared_type(SyntaxNode* first, SyntaxNode* name) {
     Vec<SyntaxNode*> prefix = Vec<SyntaxNode*>.new();
     SyntaxNode* cursor = first;
     while (cursor != (SyntaxNode*)0 && cursor != name) {
-        binding_collect_leaves(cursor, &prefix);
+        binding_collect_type_leaves(cursor, &prefix, false);
         cursor = cursor.next_sibling;
     }
     if (prefix.len() > 0) {
