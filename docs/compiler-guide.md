@@ -179,13 +179,15 @@ parser acceptance closes those correctness gates.
 
 The [native optimization implementation](../libs/agc/src/backend/llvm/optimization.ag)
 applies LLVM IR passes before object emission.
-With no optimization flag, native builds retain the existing default machine
-codegen level without running IR optimization. This does not establish binary
-size or performance parity with stage0; reachability and artifact work remain
-open. Scalar local storage is allocated in the entry block so LLVM can promote
-it even when the declaration follows control flow. Initialization stays at the
-declaration; aggregate allocation behavior is unchanged. Verbose profiles report
-LLVM optimization separately from object emission.
+With no optimization flag, native stage1 uses LLVM's `Default` machine-codegen
+level without running IR optimization; stage0 instead uses `None`. Explicit
+`-O0` uses `None` in both stages and retains debug cfg. Record the exact flags
+when comparing compile times; an omitted `-O` is not equivalent to `-O0` across
+stages. This does not establish binary size or performance parity; reachability
+and artifact work remain open. Scalar local storage is allocated in the entry
+block so LLVM can promote it even when the declaration follows control flow.
+Initialization stays at the declaration; aggregate allocation behavior is
+unchanged. Verbose profiles report LLVM optimization separately from object emission.
 
 ## 4. Compiler Pipeline
 

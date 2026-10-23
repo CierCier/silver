@@ -171,6 +171,14 @@ class TestResult:
     expected_exit: int = 0
 
 
+def subprocess_output(stdout, stderr) -> str:
+    def decode(value):
+        return value.decode(errors="replace") if isinstance(value, bytes) else (value or "")
+
+    out, err = decode(stdout), decode(stderr)
+    return out + ("\n" + err if err else "")
+
+
 # Path of the node WASI shim. Mirrors driver.rs (wasm_runner_shim_path): the
 # shim is written to the system temp dir and reused; `agc run` on a wasm
 # target keeps it fresh, so the harness just needs to reference the same file.
@@ -395,14 +403,18 @@ def run_single_test(
     t0 = time.perf_counter()
     try:
         cp = subprocess.run(compile_cmd, cwd=str(services.root), stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True, timeout=compile_timeout_secs)
-    except subprocess.TimeoutExpired:
-        return TestResult(name, "FAIL", f"compile timeout ({compile_timeout_secs}s)")
+                            stderr=subprocess.PIPE, text=True, errors="replace", timeout=compile_timeout_secs)
+    except subprocess.TimeoutExpired as e:
+        return TestResult(
+            name, "FAIL", f"compile timeout ({compile_timeout_secs}s)",
+            compile_ms=int((time.perf_counter() - t0) * 1000),
+            compile_output=f"Command: {shlex.join(compile_cmd)}\n" + subprocess_output(e.stdout, e.stderr),
+        )
     except Exception as e:
         return TestResult(name, "FAIL", f"failed to spawn compiler: {e}")
 
     compile_ms = int((time.perf_counter() - t0) * 1000)
-    compile_output = cp.stdout + ("\n" + cp.stderr if cp.stderr else "")
+    compile_output = subprocess_output(cp.stdout, cp.stderr)
 
     if cp.returncode != 0:
         return TestResult(name, "FAIL", "compile error", compile_ms=compile_ms, compile_output=compile_output)
@@ -446,15 +458,17 @@ def run_single_test(
             )
         run_cmd = ([*runner, str(bin_path)]) if runner else [str(bin_path)]
         rp = subprocess.run(run_cmd, **run_kwargs)
-    except subprocess.TimeoutExpired:
-        return TestResult(name, "FAIL", f"timed out after {timeout_secs}s", compile_ms=compile_ms)
+    except subprocess.TimeoutExpired as e:
+        return TestResult(
+            name, "FAIL", f"timed out after {timeout_secs}s", compile_ms=compile_ms,
+            run_ms=int((time.perf_counter() - t0) * 1000), compile_output=compile_output,
+            run_output=f"Command: {shlex.join(run_cmd)}\n" + subprocess_output(e.stdout, e.stderr),
+        )
     except Exception as e:
         return TestResult(name, "FAIL", f"failed to execute test: {e}", compile_ms=compile_ms)
 
     run_ms = int((time.perf_counter() - t0) * 1000)
-    stdout_str = rp.stdout.decode(errors="replace")
-    stderr_str = rp.stderr.decode(errors="replace")
-    run_output = stdout_str + ("\n" + stderr_str if stderr_str else "")
+    run_output = subprocess_output(rp.stdout, rp.stderr)
 
 
 
@@ -514,6 +528,8 @@ class TestDashboard:
                 # Streaming plain log for non-tty
                 badge = f"[{res.status}]"
                 timing = f"({res.compile_ms + res.run_ms}ms)" if res.status == "PASS" else f"({res.reason})"
+                if self.verbose:
+                    timing += f" [compile {res.compile_ms}ms, run {res.run_ms}ms]"
                 print(f"  {badge:6} {res.name:<28} {timing}", flush=True)
                 if res.status == "FAIL":
                     if res.compile_output:
@@ -542,6 +558,8 @@ class TestDashboard:
             else:
                 status_str = f"{C_RED}{C_BOLD}FAIL{C_RESET}"
                 extra = f"{C_RED}({finished_res.reason}){C_RESET}"
+            if self.verbose:
+                extra += f" [compile {finished_res.compile_ms}ms, run {finished_res.run_ms}ms]"
             sys.stdout.write(f"  {status_str}  {finished_res.name:<28} {extra}\n")
 
         # Live status header line
