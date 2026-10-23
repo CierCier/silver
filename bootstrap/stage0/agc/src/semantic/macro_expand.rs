@@ -874,9 +874,14 @@ fn apply_hygiene_and_subst_in_expr(
             *expr = subst.clone();
             // Each copy of an argument may resolve in a different scope (for
             // example inside and outside a lambda), so give it its own identity.
-            let occurrence = expansion_id(MACRO_COUNTER.fetch_add(1, Ordering::Relaxed));
+            // Remap per distinct id so nested expansions inside the argument
+            // stay distinct from each other.
+            let mut fresh: HashMap<u32, u32> = HashMap::default();
             crate::parser::visit::expression(expr, &mut |expression| {
-                tag_expansion(expression, occurrence);
+                let id = *fresh.entry(expression.span.expansion).or_insert_with(|| {
+                    expansion_id(MACRO_COUNTER.fetch_add(1, Ordering::Relaxed))
+                });
+                tag_expansion(expression, id);
             });
             return;
         }
