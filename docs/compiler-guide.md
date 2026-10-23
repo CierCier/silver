@@ -324,6 +324,11 @@ type checking in `semantic/typeck/lambda.rs`. The native frontend converts them
 before name resolution in `frontend/lambdas.ag`, using the existing expression
 checker to infer parameter contexts, returns, and capture access.
 
+Stage0 keys lambda replacements and capture bindings by span. Macro expansion
+copies body spans, so it also tags copied nodes with `Span::expansion`: one id per
+expansion of the macro body, and a fresh id for each substituted argument copy,
+preserving any distinct ids already inside the argument.
+
 Both paths generate private functions and ordinary capture structs. Reads borrow
 captured locals, writes borrow them mutably, and consuming non-Copy state moves
 it into the environment. Consuming calls transfer the environment by value.
