@@ -73,6 +73,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             );
             if temporary {
                 self.register_drop_flag("$compound.object", object_ty, object_ptr)?;
+                self.set_all_field_flags(&object_alias)?;
             }
             let index_ty = self
                 .resolve_argument_type(index)

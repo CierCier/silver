@@ -3687,7 +3687,8 @@ bool llvm_block_result_aliases_local(LlvmContext* ctx, LLVMOpaqueValue* value,
 
 LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
     if (expr_id == 0) { return (LLVMOpaqueValue*)0; }
-    AstExpr* expr = ctx.pool.get_expr(expr_id);
+    // Child statements can synthesize expressions and reallocate the pool.
+    AstExpr expr = *ctx.pool.get_expr(expr_id);
     if (expr.kind == ExprKind.Launch) { return llvm_emit_launch(ctx, expr_id); }
     if (expr.kind == ExprKind.Wait) { return llvm_emit_wait(ctx, expr_id); }
     if (expr.kind == ExprKind.Block) {
@@ -3780,16 +3781,16 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         return (LLVMOpaqueValue*)0;
     }
     if (expr.kind == ExprKind.Format) {
-        return llvm_emit_format(ctx, expr);
+        return llvm_emit_format(ctx, &expr);
     }
     if (expr.kind == ExprKind.Fprint) {
-        return llvm_emit_fprint(ctx, expr);
+        return llvm_emit_fprint(ctx, &expr);
     }
     if (expr.kind == ExprKind.Hash) {
-        return llvm_emit_hash(ctx, expr);
+        return llvm_emit_hash(ctx, &expr);
     }
     if (expr.kind == ExprKind.StructLit) {
-        return llvm_emit_struct_lit(ctx, expr);
+        return llvm_emit_struct_lit(ctx, &expr);
     }
     if (expr.kind == ExprKind.Slice) {
         return llvm_emit_slice(ctx, expr_id);
@@ -5905,7 +5906,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             u32 args_count = ctx.pool.args.get((i64)args_start);
             if (args_count == 1) {
                 u32 other_expr_id = ctx.pool.args.get((i64)args_start + 1);
-                expr.inferred_type = TYPE_I32;
+                ctx.pool.get_expr(expr_id).inferred_type = TYPE_I32;
                 return llvm_emit_primitive_compare(ctx, expr.inner0, other_expr_id,
                                                    receiver_type_id, rx_is_ptr);
             }

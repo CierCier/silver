@@ -91,24 +91,33 @@ void llvm_emit_compound_assignment(LlvmContext* ctx, u32 stmt_id) {
     i64 local_mark = ctx.locals.len();
     ctx.push_scope();
     u32 captured_target = 0;
-    LLVMOpaqueValue* temporary_base = (LLVMOpaqueValue*)0;
     u32 base_type = target.kind == ExprKind.Index
         ? ctx.types.resolve_subst(llvm_expr_type(ctx, target.inner0)) : TYPE_UNKNOWN;
     if (target.kind == ExprKind.Index && ctx.types.get(base_type).kind == TypeKind.Named) {
+        bool temporary_base = false;
+        u32 base_id = 0;
         LLVMOpaqueValue* base = llvm_emit_lvalue(ctx, target.inner0);
         if (base == (LLVMOpaqueValue*)0) {
             LLVMOpaqueValue* value = llvm_emit_expr(ctx, target.inner0);
             if (value != (LLVMOpaqueValue*)0) {
                 base = llvm_entry_alloca(ctx, LLVMTypeOf(value), "compound_base");
                 LLVMBuildStore(ctx.builder, value, base);
-                temporary_base = base;
+                temporary_base = true;
+            }
+        }
+        if (ctx.is_terminated()) { ctx.pop_scope(); return; }
+        if (base != (LLVMOpaqueValue*)0) {
+            base_id = llvm_assignment_alias(ctx, base, base_type, target.span, "$compound_base");
+            if (temporary_base) {
+                // Index and RHS expressions may return from the enclosing function.
+                llvm_register_local_drops(ctx, ctx.names.intern("$compound_base"), base, base_type, true);
             }
         }
         LLVMOpaqueValue* index = llvm_emit_expr(ctx, target.inner1);
+        if (ctx.is_terminated()) { ctx.pop_scope(); return; }
         if (base != (LLVMOpaqueValue*)0 && index != (LLVMOpaqueValue*)0) {
             LLVMOpaqueValue* index_ptr = llvm_entry_alloca(ctx, LLVMTypeOf(index), "compound_index");
             LLVMBuildStore(ctx.builder, index, index_ptr);
-            u32 base_id = llvm_assignment_alias(ctx, base, base_type, target.span, "$compound_base");
             u32 index_id = llvm_assignment_alias(ctx, index_ptr, llvm_expr_type(ctx, target.inner1),
                                                 target.span, "$compound_index");
             captured_target = ctx.pool.add_index(base_id, index_id, target.span);
@@ -130,10 +139,7 @@ void llvm_emit_compound_assignment(LlvmContext* ctx, u32 stmt_id) {
         llvm_emit_stmt(ctx, assignment);
         llvm_mark_assign_live(ctx, statement.inner0);
     }
-    llvm_emit_drops_above(ctx, local_mark);
-    if (temporary_base != (LLVMOpaqueValue*)0) {
-        llvm_emit_value_drop_at_ptr(ctx, temporary_base, base_type);
-    }
+    if (!ctx.is_terminated()) { llvm_emit_drops_above(ctx, local_mark); }
     ctx.pop_scope();
 }
 
