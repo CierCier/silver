@@ -37,6 +37,16 @@ enum WrappedVec { Payload(VecPayload); }
 enum GenericWrappedVec { Payload(PayloadEnvelope<VecPayload>); }
 enum PayloadEnvelope<T> { Value(T); }
 enum VecPayload { Values(Vec<DropSpy>); }
+enum BoundaryPayload<T> { Empty = 65534; Value(T); }
+enum UnsignedPayload { Value(DropSpy) = 65535; }
+enum SignedPayload { Low(DropSpy) = -32768; High(DropSpy) = 32767; }
+
+DropSpy unwrap_boundary_payload(BoundaryPayload<DropSpy> payload) {
+    return match payload {
+        Empty: { DropSpy empty; empty.val = -1; empty; },
+        Value(move spy): spy,
+    };
+}
 
 Vec<DropSpy> unwrap_vec(WrappedVec wrapped) {
     return match wrapped {
@@ -571,6 +581,36 @@ i32 main() {
         }
         assert_eq_i64(5, g_drops, "BinaryHeap dropped reused element on scope exit");
     }
+
+    test_start("boundary enum tags preserve payload dispatch and cleanup");
+    g_drops = 0;
+    {
+        DropSpy spy;
+        spy.val = 65535;
+        BoundaryPayload<DropSpy> payload = BoundaryPayload<DropSpy>.Value(move spy);
+        DropSpy received = unwrap_boundary_payload(move payload);
+        assert_eq_i64(65535, received.val, "generic u16 boundary payload matches");
+        if (received.val != 65535) { return 1; }
+    }
+    assert_eq_i64(1, g_drops, "moved boundary payload drops exactly once");
+    if (g_drops != 1) { return 1; }
+    {
+        DropSpy spy;
+        spy.val = 1;
+        UnsignedPayload payload = UnsignedPayload.Value(move spy);
+    }
+    assert_eq_i64(2, g_drops, "unmatched u16 boundary payload drops");
+    if (g_drops != 2) { return 1; }
+    {
+        DropSpy low;
+        low.val = 2;
+        SignedPayload low_payload = SignedPayload.Low(move low);
+        DropSpy high;
+        high.val = 3;
+        SignedPayload high_payload = SignedPayload.High(move high);
+    }
+    assert_eq_i64(4, g_drops, "signed boundary payloads each drop once");
+    if (g_drops != 4) { return 1; }
 
     return done();
 }

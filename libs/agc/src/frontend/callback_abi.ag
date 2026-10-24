@@ -1,0 +1,419 @@
+import std.mem.vec;
+import std.string;
+import frontend.ast;
+import frontend.bindings;
+import frontend.diagnostics;
+import frontend.items;
+import frontend.lexer;
+import frontend.messages;
+import frontend.symbols;
+import frontend.typecheck_expr;
+import frontend.types;
+
+u32 callback_abi_type_from_text(TypeTable* types, str text) {
+    String normalized = String.new();
+    i64 i = 0;
+    i64 len = strlen(text);
+    while (i < len) {
+        bool boundary = i == 0 || text[i - 1] == (u8)'(' || text[i - 1] == (u8)','
+            || text[i - 1] == (u8)'<' || text[i - 1] == (u8)' ' || text[i - 1] == (u8)'&';
+        if (boundary && i + 6 <= len && text[i] == (u8)'c' && text[i + 1] == (u8)'o'
+            && text[i + 2] == (u8)'n' && text[i + 3] == (u8)'s'
+            && text[i + 4] == (u8)'t' && text[i + 5] == (u8)' ') {
+            i += 6;
+        } else {
+            normalized.push(text[i]);
+            i += 1;
+        }
+    }
+    u32 result = type_id_from_text(types, normalized.to_str());
+    normalized.drop();
+    return result;
+}
+
+u32 callback_abi_resolve_alias(SyntaxNode* root, TypeTable* types, u32 type_id, i64 depth) {
+    if (depth > 64) { return TYPE_UNKNOWN; }
+    u32 resolved = types.resolve_subst(type_id);
+    TypeEntry* entry = types.get(resolved);
+    if (entry.kind != TypeKind.Named || entry.count != 0) { return resolved; }
+    SyntaxNode* alias = find_item_by_name(root, NodeKind.TypeAlias, types.names.get(entry.name_id));
+    if (alias == (SyntaxNode*)0) { return resolved; }
+    SyntaxNode* part = alias.first_child;
+    while (part != (SyntaxNode*)0 && part.text != "=") { part = part.next_sibling; }
+    if (part == (SyntaxNode*)0) { return TYPE_UNKNOWN; }
+    part = part.next_sibling;
+    String text = String.new();
+    while (part != (SyntaxNode*)0 && part.token_kind != TokenKind.Semicolon) {
+        append_node_tokens(part, &text);
+        part = part.next_sibling;
+    }
+    u32 result = callback_abi_type_from_text(types, text.to_str());
+    text.drop();
+    return callback_abi_resolve_alias(root, types, result, depth + 1);
+}
+
+bool callback_abi_scalar_supported(SyntaxNode* root, TypeTable* types, u32 type_id, i64 depth) {
+    if (depth > 64) { return false; }
+    u32 resolved = callback_abi_resolve_alias(root, types, type_id, depth);
+    if (resolved == TYPE_VOID || resolved == TYPE_I32 || resolved == TYPE_I64
+        || resolved == TYPE_U32 || resolved == TYPE_U64
+        || resolved == TYPE_F32 || resolved == TYPE_F64
+        || resolved == TYPE_CHAR || resolved == TYPE_STR) {
+        return true;
+    }
+    TypeEntry* entry = types.get(resolved);
+    TypeKind kind = entry.kind;
+    u32 inner = entry.inner;
+    i64 count = entry.count;
+    if (kind == TypeKind.Pointer || kind == TypeKind.Reference) {
+        return true;
+    }
+    if (kind != TypeKind.Function) { return false; }
+    i64 i = 0;
+    while (i <= count) {
+        u32 parameter = types.type_args.get(inner + (u32)i);
+        if (i > 0 && callback_abi_resolve_alias(root, types, parameter, depth + 1) == TYPE_VOID) {
+            return false;
+        }
+        if (!callback_abi_scalar_supported(root, types, parameter, depth + 1)) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+bool callback_abi_unsupported_callback(SyntaxNode* root, TypeTable* types, u32 type_id, i64 depth) {
+    Vec<u32> visiting = Vec<u32>.new();
+    bool result = callback_abi_nested_callback(root, types, type_id, depth, &visiting);
+    visiting.drop();
+    return result;
+}
+
+bool callback_abi_nested_callback(SyntaxNode* root, TypeTable* types, u32 type_id, i64 depth,
+                                  Vec<u32>* visiting) {
+    u32 resolved = callback_abi_resolve_alias(root, types, type_id, depth);
+    i64 i = 0;
+    while (i < visiting.len()) {
+        if (visiting.get(i) == resolved) { return false; }
+        i += 1;
+    }
+    if (depth > 64) { return true; }
+    visiting.push(resolved);
+    TypeEntry* entry = types.get(resolved);
+    TypeKind kind = entry.kind;
+    u32 inner = entry.inner;
+    i64 count = entry.count;
+    u32 name_id = entry.name_id;
+    bool unsupported = false;
+    if (kind == TypeKind.Unknown || kind == TypeKind.TypeParam) {
+        unsupported = true;
+    } else if (kind == TypeKind.Function) {
+        unsupported = !callback_abi_scalar_supported(root, types, resolved, depth + 1);
+        i = 0;
+        while (i <= count && !unsupported) {
+            u32 part = types.type_args.get(inner + (u32)i);
+            unsupported = callback_abi_nested_callback(root, types, part, depth + 1, visiting);
+            i += 1;
+        }
+    } else if (kind == TypeKind.Pointer || kind == TypeKind.Reference || kind == TypeKind.Array
+        || kind == TypeKind.Slice) {
+        unsupported = callback_abi_nested_callback(root, types, inner, depth + 1, visiting);
+    } else if (kind == TypeKind.Named || kind == TypeKind.Tuple) {
+        if (kind == TypeKind.Tuple) {
+            i = 0;
+            while (i < count && !unsupported) {
+                u32 part = types.type_args.get(inner + (u32)i);
+                unsupported = callback_abi_nested_callback(root, types, part, depth + 1, visiting);
+                i += 1;
+            }
+        }
+        SyntaxNode* item = kind == TypeKind.Named
+            ? find_item_by_name(root, NodeKind.Struct, types.names.get(name_id)) : (SyntaxNode*)0;
+        SyntaxNode* enum_item = kind == TypeKind.Named
+            ? find_enum_item(root, types.names.get(name_id)) : (SyntaxNode*)0;
+        SyntaxNode* definition = item != (SyntaxNode*)0 ? item : enum_item;
+        if (definition != (SyntaxNode*)0 && count == 0) {
+            SyntaxNode* name = item_identifier(definition);
+            if (name != (SyntaxNode*)0 && name.next_sibling != (SyntaxNode*)0
+                && name.next_sibling.text == "<") {
+                // Native type IDs do not instantiate omitted generic defaults.
+                unsupported = true;
+            }
+        }
+        SyntaxNode* body = item == (SyntaxNode*)0 ? (SyntaxNode*)0 : item.first_child;
+        while (body != (SyntaxNode*)0 && body.kind != NodeKind.Block) { body = body.next_sibling; }
+        SyntaxNode* cursor = body == (SyntaxNode*)0 ? (SyntaxNode*)0 : body.first_child;
+        while (cursor != (SyntaxNode*)0 && !unsupported) {
+            SyntaxNode* start = cursor;
+            SyntaxNode* name = (SyntaxNode*)0;
+            while (cursor != (SyntaxNode*)0 && cursor.token_kind != TokenKind.Semicolon) {
+                if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Identifier) { name = cursor; }
+                cursor = cursor.next_sibling;
+            }
+            if (name != (SyntaxNode*)0) {
+                String text = String.new();
+                SyntaxNode* part = start;
+                while (part != (SyntaxNode*)0 && part != name) {
+                    append_node_tokens(part, &text);
+                    part = part.next_sibling;
+                }
+                part = name.next_sibling;
+                while (part != (SyntaxNode*)0 && part != cursor) {
+                    append_node_tokens(part, &text);
+                    part = part.next_sibling;
+                }
+                u32 field_type = callback_abi_type_from_text(types, text.to_str());
+                text.drop();
+                field_type = resolve_generic_member_type(types, root, resolved, field_type);
+                unsupported = callback_abi_nested_callback(root, types, field_type, depth + 1, visiting);
+            }
+            if (cursor != (SyntaxNode*)0) { cursor = cursor.next_sibling; }
+        }
+        if (enum_item != (SyntaxNode*)0 && !unsupported) {
+            Vec<SyntaxNode*> variants = Vec<SyntaxNode*>.new();
+            Vec<i64> tags = Vec<i64>.new();
+            Vec<i64> arities = Vec<i64>.new();
+            enum_each_variant(enum_item, &variants, &tags, &arities);
+            i = 0;
+            while (i < variants.len() && !unsupported) {
+                SyntaxNode* payload = variants.get(i).next_sibling;
+                SyntaxNode* part = payload != (SyntaxNode*)0 && payload.kind == NodeKind.Parenthesized
+                    ? payload.first_child : (SyntaxNode*)0;
+                // Preserve nested function declarators in payload types.
+                while (part != (SyntaxNode*)0 && !unsupported) {
+                    String text = String.new();
+                    i64 angles = 0;
+                    while (part != (SyntaxNode*)0) {
+                        if (part.token_kind == TokenKind.Comma && angles == 0) { break; }
+                        if (part.text == "<") { angles += 1; }
+                        if (part.text == ">") { angles -= 1; }
+                        if (part.text == ">>") { angles -= 2; }
+                        append_node_tokens(part, &text);
+                        part = part.next_sibling;
+                    }
+                    u32 field_type = callback_abi_type_from_text(types, text.to_str());
+                    field_type = resolve_generic_member_type(types, root, resolved, field_type);
+                    unsupported = callback_abi_nested_callback(root, types, field_type, depth + 1, visiting);
+                    text.drop();
+                    if (part != (SyntaxNode*)0) { part = part.next_sibling; }
+                }
+                i += 1;
+            }
+            variants.drop();
+            tags.drop();
+            arities.drop();
+        }
+        if (kind == TypeKind.Named && definition == (SyntaxNode*)0) {
+            i64 di = 0;
+            bool found = false;
+            while (di < types.struct_properties.len() && !unsupported) {
+                TypeStructProperties* property = types.struct_properties.get_ptr(di);
+                u32 field_start = property.field_start;
+                u32 field_count = property.field_count;
+                u32 param_start = property.type_param_start;
+                u32 param_count = property.type_param_count;
+                if (property.name_id == name_id) {
+                    found = true;
+                    if (param_count != (u32)count) {
+                        unsupported = true;
+                    } else {
+                        i64 pi = 0;
+                        while (pi < (i64)param_count) {
+                            types.push_subst(types.struct_type_params.get(param_start + (u32)pi),
+                                types.type_args.get(inner + (u32)pi));
+                            pi += 1;
+                        }
+                        i64 fi = 0;
+                        while (fi < (i64)field_count && !unsupported) {
+                            u32 field_type = types.struct_fields.get(field_start + (u32)fi);
+                            unsupported = callback_abi_nested_callback(root, types, field_type, depth + 1, visiting);
+                            fi += 1;
+                        }
+                        types.pop_subst(param_count);
+                    }
+                }
+                di += 1;
+            }
+            if (!found) { unsupported = true; }
+        }
+    }
+    visiting.len -= 1;
+    return unsupported;
+}
+
+u32 callback_abi_parameter_type(TypeTable* types, Binding* parameter) {
+    bool function_type = binding_has_function_type(parameter);
+    String text = binding_parameter_type_text(parameter);
+    u32 result = callback_abi_type_from_text(types, text.to_str());
+    text.drop();
+    if (!function_type && parameter.declared_type.kind == ProjectionTypeKind.Pointer) {
+        result = types.get_pointer(result, true);
+    } else if (!function_type && parameter.declared_type.kind == ProjectionTypeKind.Reference) {
+        result = types.get_reference(result, parameter.declared_type.is_mutable);
+    }
+    return result;
+}
+
+bool callback_abi_has_variadic(SyntaxNode* node) {
+    if (node == (SyntaxNode*)0) { return false; }
+    if (node.kind == NodeKind.Token && node.token_kind == TokenKind.DotDotDot) { return true; }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (callback_abi_has_variadic(child)) { return true; }
+        child = child.next_sibling;
+    }
+    return false;
+}
+
+bool callback_abi_function_value_unsupported(SyntaxNode* root, TypeTable* types, str name) {
+    ExternFunctionSignature signature = item_find_c_extern_function(root, name);
+    if (signature.parameter_list == (SyntaxNode*)0) { return false; }
+    if (callback_abi_has_variadic(signature.parameter_list)) { return true; }
+    u32 result = item_c_extern_function_return_type_id(types, root, name);
+    if (!callback_abi_scalar_supported(root, types, result, 0)) { return true; }
+    Vec<Binding> parameters = Vec<Binding>.new();
+    collect_parameter_bindings(signature.parameter_list, &parameters);
+    bool unsupported = false;
+    i64 i = 0;
+    while (i < parameters.len()) {
+        Binding* parameter = parameters.get_ptr(i);
+        u32 parameter_type = callback_abi_parameter_type(types, parameter);
+        if (binding_is_variadic_parameter(parameter)
+            || callback_abi_resolve_alias(root, types, parameter_type, 0) == TYPE_VOID
+            || !callback_abi_scalar_supported(root, types, parameter_type, 0)) {
+            unsupported = true;
+        }
+        i += 1;
+    }
+    parameters.drop();
+    return unsupported;
+}
+
+bool callback_abi_imported_function_value_unsupported(SyntaxNode* root, TypeTable* types,
+                                                       SymbolTable* symbols, str name) {
+    i64 index = symbols.find(name);
+    if (index < 0) { return false; }
+    Symbol* symbol = symbols.get(index);
+    if (!symbol.c_abi || symbol.kind != SymbolKind.Function) { return false; }
+    u32 type_id = symbol.type_id;
+    return symbol.c_variadic || types.get(type_id).kind != TypeKind.Function
+        || !callback_abi_scalar_supported(root, types, type_id, 0)
+        || callback_abi_unsupported_callback(root, types, type_id, 0);
+}
+
+void callback_abi_check_declaration(SyntaxNode* root, TypeTable* types, str name,
+                                    DiagnosticBag* diagnostics, bool* ok) {
+    ExternFunctionSignature signature = item_find_c_extern_function(root, name);
+    if (signature.parameter_list == (SyntaxNode*)0) { return; }
+    bool unsupported = callback_abi_unsupported_callback(root, types,
+        item_c_extern_function_return_type_id(types, root, name), 0);
+    Vec<Binding> parameters = Vec<Binding>.new();
+    collect_parameter_bindings(signature.parameter_list, &parameters);
+    i64 i = 0;
+    while (i < parameters.len()) {
+        Binding* parameter = parameters.get_ptr(i);
+        u32 parameter_type = callback_abi_parameter_type(types, parameter);
+        if ((binding_has_function_type(parameter) && parameter_type == TYPE_UNKNOWN)
+            || callback_abi_unsupported_callback(root, types, parameter_type, 0)) {
+            unsupported = true;
+        }
+        i += 1;
+    }
+    SyntaxNode* child = signature.parameter_list.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Parenthesized && callback_abi_has_variadic(child)) {
+            unsupported = true;
+        }
+        child = child.next_sibling;
+    }
+    parameters.drop();
+    if (unsupported) {
+        diagnostics.error(signature.function_name.span, c_callback_unsupported());
+        *ok = false;
+    }
+}
+
+void callback_abi_check_extern_item(SyntaxNode* root, TypeTable* types, SyntaxNode* item,
+                                    DiagnosticBag* diagnostics, bool* ok) {
+    if (item_extern_uses_c_abi(item)) {
+        SyntaxNode* part = item.first_child;
+        while (part != (SyntaxNode*)0 && part.kind != NodeKind.Block) { part = part.next_sibling; }
+        SyntaxNode* cursor = part == (SyntaxNode*)0
+            ? item_extern_single_signature_start(item) : part.first_child;
+        while (cursor != (SyntaxNode*)0) {
+            SyntaxNode* start = item_skip_extern_attribute(cursor);
+            SyntaxNode* name = (SyntaxNode*)0;
+            while (cursor != (SyntaxNode*)0 && cursor.token_kind != TokenKind.Semicolon) {
+                if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Identifier) {
+                    name = cursor;
+                }
+                cursor = cursor.next_sibling;
+            }
+            if (name != (SyntaxNode*)0) {
+                if (item_is_c_extern_function(root, name.text)) {
+                    callback_abi_check_declaration(root, types, name.text, diagnostics, ok);
+                } else {
+                    String text = String.new();
+                    SyntaxNode* type_part = start;
+                    while (type_part != (SyntaxNode*)0 && type_part != name) {
+                        append_node_tokens(type_part, &text);
+                        type_part = type_part.next_sibling;
+                    }
+                    u32 variable_type = callback_abi_type_from_text(types, text.to_str());
+                    text.drop();
+                    if (callback_abi_unsupported_callback(root, types, variable_type, 0)) {
+                        diagnostics.error(name.span, c_callback_unsupported());
+                        *ok = false;
+                    }
+                }
+            }
+            if (cursor != (SyntaxNode*)0) { cursor = cursor.next_sibling; }
+        }
+    } else {
+        callback_abi_check_item_values(root, types, item, diagnostics, ok);
+    }
+}
+
+// Some expression forms still use the CST fallback. Check escapes there too.
+void callback_abi_check_value_tree(SyntaxNode* root, TypeTable* types, SyntaxNode* node,
+                                   Vec<Binding>* bindings, DiagnosticBag* diagnostics, bool* ok) {
+    if (node == (SyntaxNode*)0) { return; }
+    if (node.kind == NodeKind.Token && node.token_kind == TokenKind.Identifier
+        && visible_binding(bindings, node.text, node) == (Binding*)0) {
+        SyntaxNode* next = node.next_sibling;
+        SyntaxNode* previous = binding_previous_sibling(node);
+        bool member = previous != (SyntaxNode*)0
+            && (previous.text == "." || previous.text == "::");
+        bool field_name = next != (SyntaxNode*)0 && next.text == ":";
+        if (!member && !field_name && (next == (SyntaxNode*)0 || next.kind != NodeKind.Parenthesized)
+            && callback_abi_function_value_unsupported(root, types, node.text)) {
+            diagnostics.error(node.span, c_function_value_unsupported());
+            *ok = false;
+        }
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        callback_abi_check_value_tree(root, types, child, bindings, diagnostics, ok);
+        child = child.next_sibling;
+    }
+}
+
+void callback_abi_check_item_values(SyntaxNode* root, TypeTable* types, SyntaxNode* item,
+                                    DiagnosticBag* diagnostics, bool* ok) {
+    if (item.kind == NodeKind.Function || item.kind == NodeKind.Global) {
+        Vec<Binding> bindings = Vec<Binding>.new();
+        SyntaxNode* body = item;
+        if (item.kind == NodeKind.Function) {
+            collect_function_bindings(item, &bindings);
+            body = binding_function_body(item);
+        }
+        callback_abi_check_value_tree(root, types, body, &bindings, diagnostics, ok);
+        bindings.drop();
+    } else if (item.kind == NodeKind.Impl || item.kind == NodeKind.Trait
+        || item.kind == NodeKind.Block) {
+        SyntaxNode* child = item.first_child;
+        while (child != (SyntaxNode*)0) {
+            callback_abi_check_item_values(root, types, child, diagnostics, ok);
+            child = child.next_sibling;
+        }
+    }
+}

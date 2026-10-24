@@ -1,6 +1,45 @@
 import std.test;
 import std.process;
 import std.sys.raw.process;
+import std.mem.vec;
+import std.slice;
+
+void bounds_child(i32 container, i32 operation, i64 index, bool empty) {
+    i32 array[3] = {10, 20, 30};
+    Vec<i32> vec = Vec<i32>.new();
+    if (!empty) { vec.push(10); vec.push(20); vec.push(30); }
+    Slice<i32> slice = Slice<i32>.from_raw(&array[0], empty ? 0 : 3);
+    if (container == 0) {
+        if (operation == 0) { exit(array[index]); }
+        if (operation == 1) { array[index] = 41; }
+        if (operation == 2) { array[index] += 1; }
+        if (operation == 3) { i32* p = &array[index]; exit(*p); }
+    } else if (container == 1) {
+        if (operation == 0) { exit(slice[index]); }
+        if (operation == 1) { slice[index] = 41; }
+        if (operation == 2) { slice[index] += 1; }
+        if (operation == 3) { exit(*slice.get_ptr(index)); }
+    } else {
+        if (operation == 0) { exit(vec[index]); }
+        if (operation == 1) { vec[index] = 41; }
+        if (operation == 2) { vec[index] += 1; }
+        if (operation == 3) { exit(*vec.get_ptr(index)); }
+    }
+    exit(42);
+}
+
+void array_boundary_child(i32 boundary) {
+    i32 array[1] = {17};
+    i8 negative = -1;
+    u64 high = (u64)0x8000000000000000;
+    u128 wide = (u128)1 << 64;
+    i128 low = -((i128)1 << 64);
+    if (boundary == 0) { exit(array[negative]); }
+    if (boundary == 1) { exit(array[high]); }
+    if (boundary == 2) { exit(array[wide]); }
+    if (boundary == 3) { exit(array[low]); }
+    exit(42);
+}
 
 i32* compound_fail_target() {
     exit(23);
@@ -94,5 +133,35 @@ i32 main() {
         }
     }
 
+    for (i32 container = 0; container < 3; container += 1) {
+        for (i32 operation = 0; operation < 4; operation += 1) {
+            for (i32 boundary = 0; boundary < 3; boundary += 1) {
+                if (container == 0 && boundary == 2) { continue; }
+                i64 child_pid = sys_fork();
+                assert_true(child_pid >= 0, "fork bounds child");
+                if (child_pid < 0) { return 1; }
+                if (child_pid == 0) {
+                    bounds_child(container, operation, boundary == 0 ? -1 : (boundary == 1 ? 3 : 0), boundary == 2);
+                } else if (child_pid > 0) {
+                    Child child;
+                    child.pid = child_pid;
+                    ExitStatus status = child.wait_status();
+                    assert_eq_i32(status.termsig(), 6, "invalid public access aborts with SIGABRT");
+                    if (status.termsig() != 6) { return 1; }
+                }
+            }
+        }
+    }
+    for (i32 boundary = 0; boundary < 4; boundary += 1) {
+        i64 child_pid = sys_fork();
+        assert_true(child_pid >= 0, "fork array boundary child");
+        if (child_pid < 0) { return 1; }
+        if (child_pid == 0) { array_boundary_child(boundary); }
+        Child child;
+        child.pid = child_pid;
+        ExitStatus status = child.wait_status();
+        assert_eq_i32(6, status.termsig(), "wide and negative array access aborts");
+        if (status.termsig() != 6) { return 1; }
+    }
     return done();
 }

@@ -5,6 +5,7 @@ import std.string;
 import frontend.ast;
 import frontend.ast_expr;
 import frontend.bindings;
+import frontend.callback_abi;
 import frontend.diagnostics;
 import frontend.expressions;
 import frontend.items;
@@ -1992,6 +1993,11 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         inferred = env.lookup(expr.aux);
         if (inferred == TYPE_UNKNOWN) {
             str var_name = symbols.names.get(expr.aux);
+            if (callback_abi_function_value_unsupported(root, types, var_name)
+                || callback_abi_imported_function_value_unsupported(root, types, symbols, var_name)) {
+                diagnostics.error(expr.span, c_function_value_unsupported());
+                *ok = false;
+            }
             inferred = symbols.get_type(var_name);
         }
         if (inferred == TYPE_UNKNOWN) {
@@ -2399,7 +2405,15 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         inferred = result_type;
     } else if (expr.kind == ExprKind.Call) {
         AstExpr* callee = pool.get_expr(expr.inner0);
-        u32 callable_type = infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
+        bool direct_c_call = callee.kind == ExprKind.Var
+            && env.lookup(callee.aux) == TYPE_UNKNOWN
+            && item_is_c_extern_function(root, symbols.names.get(callee.aux));
+        if (callee.kind == ExprKind.Var && env.lookup(callee.aux) == TYPE_UNKNOWN) {
+            i64 symbol_index = symbols.find(symbols.names.get(callee.aux));
+            if (symbol_index >= 0 && symbols.get(symbol_index).c_abi) { direct_c_call = true; }
+        }
+        u32 callable_type = direct_c_call ? symbols.get_type(symbols.names.get(callee.aux))
+            : infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
         TypeEntry* callable_entry = types.get(callable_type);
         while (callable_entry.kind == TypeKind.Pointer || callable_entry.kind == TypeKind.Reference) {
             callable_type = callable_entry.inner;
@@ -2884,7 +2898,12 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
             } else if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) {
                 inferred = types.resolve_subst(entry.inner);
             } else if (entry.kind == TypeKind.Array) {
-                inferred = types.resolve_subst(entry.inner);
+                if (entry.count == 0) {
+                    diagnostics.error(expr.span, zero_size_array_index());
+                    *ok = false;
+                } else {
+                    inferred = types.resolve_subst(entry.inner);
+                }
             } else if (entry.kind == TypeKind.Tuple) {
                 AstExpr* index_expr = pool.get_expr(expr.inner1);
                 if (index_expr.kind == ExprKind.Literal) {
@@ -3445,6 +3464,8 @@ bool typecheck_expressions_scoped(AstPool* pool, SymbolTable* symbols, SyntaxTre
                         str diagnostic_text = diagnostic.message.to_str();
                         if (typecheck_str_starts_with(diagnostic_text,
                                                      "call to overloaded function '")
+                            || typecheck_str_starts_with(diagnostic_text,
+                                "cannot use this C function as a value:")
                             || typecheck_str_starts_with(diagnostic_text, "macro '@")
                             || typecheck_str_starts_with(diagnostic_text, "pointer argument type mismatch:")
                             || typecheck_str_starts_with(diagnostic_text, "unwrap-or ")
@@ -3456,6 +3477,7 @@ bool typecheck_expressions_scoped(AstPool* pool, SymbolTable* symbols, SyntaxTre
                                 "break statement is not allowed inside a defer block")
                             || typecheck_str_starts_with(diagnostic_text,
                                 "continue statement is not allowed inside a defer block")
+                            || strcmp(diagnostic_text, "cannot index into zero-size array") == 0
                             || strcmp(diagnostic_text, "expected expression") == 0) {
                             diagnostics.error(diagnostic.span, diagnostic.message.clone());
                             ok = false;
@@ -3478,7 +3500,19 @@ bool typecheck_expressions(AstPool* pool, SymbolTable* symbols, SyntaxTree* tree
         local_last.next_sibling = imported_root.first_child;
         tree.root.last_child = imported_root.last_child;
     }
-    bool ok = typecheck_expressions_scoped(pool, symbols, tree, cfg, diagnostics, 0);
+    bool ok = true;
+    Vec<SyntaxNode*> imported_items = Vec<SyntaxNode*>.new();
+    cfg_collect_items(imported_root, cfg, diagnostics, &imported_items);
+    i64 imported_index = 0;
+    while (imported_index < imported_items.len()) {
+        SyntaxNode* item = imported_items.get(imported_index);
+        if (item.kind == NodeKind.Extern) {
+            callback_abi_check_extern_item(tree.root, &symbols.types, item, diagnostics, &ok);
+        }
+        imported_index += 1;
+    }
+    imported_items.drop();
+    if (!typecheck_expressions_scoped(pool, symbols, tree, cfg, diagnostics, 0)) { ok = false; }
     if (local_last != (SyntaxNode*)0) { local_last.next_sibling = (SyntaxNode*)0; }
     tree.root.last_child = local_last;
     return ok;

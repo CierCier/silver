@@ -6,6 +6,7 @@ use super::ast;
 use super::error::ParseError;
 use super::prt_table::*;
 use crate::attributes;
+use crate::diagnostics::messages as msg;
 
 /// Declaration-level qualifiers consumed by `consume_declaration_qualifiers`.
 /// Mirrors the `const` model: qualifiers are declaration-level, not type-level.
@@ -4026,9 +4027,9 @@ impl PRT_Parser {
             let mut discriminant = None;
             if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Assign)) {
                 cursor += 1;
-                let mut sign = 1i128;
+                let mut negative = false;
                 if matches!(tokens.get(cursor).map(|t| &t.kind), Some(Token::Minus)) {
-                    sign = -1;
+                    negative = true;
                     cursor += 1;
                 }
                 let Some(value_token) = tokens.get(cursor) else {
@@ -4037,13 +4038,39 @@ impl PRT_Parser {
                         span: variant_name_token.span,
                     });
                 };
-                let Token::IntLiteral(value) = value_token.kind else {
+                let Token::IntLiteral(_) = value_token.kind else {
                     return Err(ParseError::InvalidSyntax {
                         message: "enum discriminant must be an integer literal".to_string(),
                         span: value_token.span,
                     });
                 };
-                discriminant = Some(sign.saturating_mul(value));
+                // General integer tokens preserve u128 bit patterns; enum tags are signed values.
+                let spelling = value_token.text.replace('_', "");
+                let (digits, radix) = if spelling.starts_with("0x") || spelling.starts_with("0X") {
+                    (&spelling[2..], 16)
+                } else if spelling.starts_with("0b") || spelling.starts_with("0B") {
+                    (&spelling[2..], 2)
+                } else if spelling.starts_with("0o") || spelling.starts_with("0O") {
+                    (&spelling[2..], 8)
+                } else {
+                    (spelling.as_str(), 10)
+                };
+                let value = u128::from_str_radix(digits, radix)
+                    .ok()
+                    .and_then(|magnitude| {
+                        if negative && magnitude == (1u128 << 127) {
+                            Some(i128::MIN)
+                        } else {
+                            i128::try_from(magnitude)
+                                .ok()
+                                .map(|value| if negative { -value } else { value })
+                        }
+                    })
+                    .ok_or_else(|| ParseError::InvalidSyntax {
+                        message: msg::enum_discriminant_literal_out_of_range(),
+                        span: value_token.span,
+                    })?;
+                discriminant = Some(value);
                 cursor += 1;
             }
 

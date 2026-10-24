@@ -815,7 +815,13 @@ bool binding_is_const(Binding* binding) {
                     found_const = false;
                 } else if (leaf.kind == NodeKind.Token
                     && leaf.token_kind == TokenKind.Const) {
-                    found_const = true;
+                    SyntaxNode* owner = leaf.parent;
+                    bool function_parameter = false;
+                    while (owner != (SyntaxNode*)0 && owner != statement.parent) {
+                        if (owner.kind == NodeKind.Parenthesized) { function_parameter = true; }
+                        owner = owner.parent;
+                    }
+                    if (!function_parameter) { found_const = true; }
                 }
                 i += 1;
             }

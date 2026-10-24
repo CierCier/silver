@@ -4,9 +4,11 @@
 import std.mem.vec;
 import frontend.ast;
 import frontend.bindings;
+import frontend.callback_abi;
 import frontend.cfg;
 import frontend.diagnostics;
 import frontend.expressions;
+import frontend.items;
 import frontend.messages;
 import frontend.symbols;
 import frontend.types;
@@ -352,6 +354,55 @@ void typecheck_struct(SymbolTable* symbols, SyntaxNode* item,
     candidates.drop();
 }
 
+void typecheck_enum(SyntaxNode* item, DiagnosticBag* diagnostics, bool* ok) {
+    Vec<SyntaxNode*> names = Vec<SyntaxNode*>.new();
+    Vec<i64> tags = Vec<i64>.new();
+    Vec<i64> arities = Vec<i64>.new();
+    SyntaxNode* invalid = (SyntaxNode*)0;
+    bool valid = enum_collect_variants(item, &names, &tags, &arities, &invalid);
+    if (!valid && invalid != (SyntaxNode*)0) {
+        String message = enum_discriminant_overflow(invalid.text);
+        diagnostics.error(invalid.span, move message);
+        *ok = false;
+    } else if (valid) {
+        bool negative = false;
+        bool has_payload = false;
+        i64 i = 0;
+        while (i < tags.len()) {
+            if (tags.get(i) < 0) { negative = true; }
+            SyntaxNode* payload = names.get(i).next_sibling;
+            if (arities.get(i) > 0 || (payload != (SyntaxNode*)0 && payload.kind == NodeKind.Block)) {
+                has_payload = true;
+            }
+            i += 1;
+        }
+        i64 maximum = negative ? 32767 : 65535;
+        i = 0;
+        while (i < tags.len()) {
+            i64 tag = tags.get(i);
+            if (tag < -32768 || tag > maximum) {
+                String message = enum_tag_out_of_range(negative);
+                diagnostics.error(names.get(i).span, move message);
+                *ok = false;
+            }
+            i64 earlier = 0;
+            while (has_payload && earlier < i) {
+                if (tags.get(earlier) == tag) {
+                    String message = enum_payload_duplicate_discriminant(names.get(i).text, tag);
+                    diagnostics.error(names.get(i).span, move message);
+                    *ok = false;
+                    break;
+                }
+                earlier += 1;
+            }
+            i += 1;
+        }
+    }
+    names.drop();
+    tags.drop();
+    arities.drop();
+}
+
 bool check_declared_types(SymbolTable* symbols, SyntaxTree* tree, CfgSet* cfg,
                           DiagnosticBag* diagnostics) {
     bool ok = true;
@@ -360,12 +411,15 @@ bool check_declared_types(SymbolTable* symbols, SyntaxTree* tree, CfgSet* cfg,
     i64 index = 0;
     while (index < items.len()) {
         SyntaxNode* item = items.get(index);
+        callback_abi_check_extern_item(tree.root, &symbols.types, item, diagnostics, &ok);
         if (symbol_item_is_function(item)) {
             typecheck_function(symbols, item, diagnostics, &ok);
         } else if (symbol_item_is_struct(item)) {
             typecheck_struct(symbols, item, diagnostics, &ok);
         } else if (item.kind == NodeKind.TypeAlias) {
             typecheck_alias(symbols, item, diagnostics, &ok);
+        } else if (item.kind == NodeKind.Enum) {
+            typecheck_enum(item, diagnostics, &ok);
         }
         index += 1;
     }

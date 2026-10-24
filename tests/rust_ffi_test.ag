@@ -6,7 +6,15 @@
 import std.test;
 import std.ffi;
 
+#[link(silver_ffi)]
+extern "C" {
+    #[link_name("silver_fs_exists")]
+    i32 rust_ffi_exists_ref(&RustFfiSlice path, &mut i32 out_exists, &mut RustFfiError error);
+}
+
 i64 g_callback_bytes = 0;
+
+i64 slice_length(RustFfiSlice chunk) { return chunk.len; }
 
 i32 collect_bytes(void* userdata, const RustFfiSlice* chunk) {
     if (userdata == (void*)0 || chunk == (const RustFfiSlice*)0) {
@@ -36,9 +44,18 @@ i32 main() {
     test_start("Rust FFI ABI, filesystem, and native layer");
     assert_eq_i32(SILVER_FFI_ABI_VERSION, silver_ffi_abi_version(),
         "ABI version");
+    i32() abi_version = silver_ffi_abi_version;
+    assert_eq_i32(SILVER_FFI_ABI_VERSION, abi_version(), "indirect C scalar return");
+    str(i32) status_message = silver_ffi_status_message;
+    assert_eq_str("operation succeeded", status_message(SILVER_FFI_OK), "indirect C str return");
+    if (abi_version() != SILVER_FFI_ABI_VERSION
+        || status_message(SILVER_FFI_OK) != "operation succeeded") { return 1; }
 
     RustFfiError error = rust_ffi_error_new();
     RustFfiSlice path = rust_ffi_text("rust_ffi_test.txt");
+    i64(RustFfiSlice) length_fn = slice_length;
+    assert_eq_i64(path.len, length_fn(path), "Silver aggregate function pointer remains supported");
+    if (length_fn(path) != path.len) { return 1; }
     RustFfiSlice text = rust_ffi_text("hello from Rust FFI");
     RustFfiBuffer output = rust_ffi_buffer_new();
 
@@ -51,6 +68,22 @@ i32 main() {
         silver_fs_exists((const RustFfiSlice*)&path, &exists, &error),
         "exists call");
     assert_eq_i32(1, exists, "file exists");
+    i32(const RustFfiSlice*, i32*, RustFfiError*) exists_fn = silver_fs_exists;
+    exists = 0;
+    assert_eq_i32(SILVER_FFI_OK, exists_fn((const RustFfiSlice*)&path, &exists, &error),
+        "indirect C pointer-to-aggregate arguments");
+    assert_eq_i32(1, exists, "indirect C writes output pointer");
+    exists = 0;
+    if (exists_fn((const RustFfiSlice*)&path, &exists, &error) != SILVER_FFI_OK
+        || exists != 1) { return 1; }
+    i32(&RustFfiSlice, &mut i32, &mut RustFfiError) exists_ref = rust_ffi_exists_ref;
+    exists = 0;
+    assert_eq_i32(SILVER_FFI_OK, exists_ref(&path, &mut exists, &mut error),
+        "indirect C reference arguments");
+    assert_eq_i32(1, exists, "indirect C writes through reference");
+    exists = 0;
+    if (exists_ref(&path, &mut exists, &mut error) != SILVER_FFI_OK
+        || exists != 1) { return 1; }
 
     assert_eq_i32(SILVER_FFI_OK,
         silver_fs_read_file((const RustFfiSlice*)&path, &output, &error),
@@ -62,6 +95,17 @@ i32 main() {
         silver_fs_read_file_callback((const RustFfiSlice*)&path, collect_bytes,
             (void*)&g_callback_bytes, &error), "callback read");
     assert_eq_i64(text.len, g_callback_bytes, "callback byte count");
+    i32(const RustFfiSlice*, i32(void*, const RustFfiSlice*), void*, RustFfiError*)
+        read_callback = silver_fs_read_file_callback;
+    g_callback_bytes = 0;
+    assert_eq_i32(SILVER_FFI_OK,
+        read_callback((const RustFfiSlice*)&path, collect_bytes,
+            (void*)&g_callback_bytes, &error), "indirect C call with scalar callback");
+    assert_eq_i64(text.len, g_callback_bytes, "indirect callback byte count");
+    g_callback_bytes = 0;
+    if (read_callback((const RustFfiSlice*)&path, collect_bytes,
+            (void*)&g_callback_bytes, &error) != SILVER_FFI_OK
+        || g_callback_bytes != text.len) { return 1; }
 
     RustFfiBuffer joined = rust_ffi_buffer_new();
     RustFfiSlice base = rust_ffi_text("/tmp");

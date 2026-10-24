@@ -25,6 +25,8 @@ struct Symbol {
     Span span;
     SyntaxNode* declaration;
     u32 type_id;
+    bool c_abi;
+    bool c_variadic;
 }
 
 struct SymbolTable {
@@ -119,6 +121,8 @@ impl SymbolTable {
         symbol.span = span;
         symbol.declaration = declaration;
         symbol.type_id = type_id;
+        symbol.c_abi = false;
+        symbol.c_variadic = false;
         self.symbols.push(move symbol);
         self.set_symbol_index(name_id, symbol_idx);
         return true;
@@ -151,6 +155,8 @@ impl SymbolTable {
         symbol.span = span;
         symbol.declaration = declaration;
         symbol.type_id = 0;
+        symbol.c_abi = false;
+        symbol.c_variadic = false;
         self.symbols.push(move symbol);
         self.set_symbol_index(name_id, symbol_idx);
     }

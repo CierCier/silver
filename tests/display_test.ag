@@ -21,6 +21,9 @@ enum Color { Red; Green; Blue; }
 
 enum Signed { Neg = -1; Zero = 0; }
 
+enum UnsignedBoundary { Zero; Before = 0xff_fe; Last; }
+enum SignedBoundary { Low = -0x8000; High = 0b0111_1111_1111_1111; }
+
 struct Pixel { Color color; i64 brightness; }
 
 struct Label { str text; }
@@ -199,6 +202,24 @@ i32 main() {
         Signed n = Signed.Neg;
         String sn = @format("{}", n);
         assert_true(sn.equals("Neg"), "negative discriminant enum");
+
+        UnsignedBoundary unsigned_tag = UnsignedBoundary.Last;
+        String unsigned_boundary = @format("{}", unsigned_tag);
+        assert_true(unsigned_boundary.equals("Last"), "implicit u16 boundary tag formats");
+        SignedBoundary signed_tag = SignedBoundary.Low;
+        String signed_low = @format("{}", signed_tag);
+        assert_true(signed_low.equals("Low"), "i16 minimum tag formats");
+        SignedBoundary signed_high_tag = SignedBoundary.High;
+        String signed_high = @format("{}", signed_high_tag);
+        assert_true(signed_high.equals("High"), "i16 maximum tag formats");
+        i64 selected = match unsigned_tag { Zero: 0, Before: 1, Last: 2, };
+        assert_eq_i64(2, selected, "u16 boundary tag matches without aliasing zero");
+        i64 signed_selected = match signed_tag { Low: 3, High: 4, };
+        assert_eq_i64(3, signed_selected, "i16 minimum tag matches");
+        if (!unsigned_boundary.equals("Last") || !signed_low.equals("Low")
+            || !signed_high.equals("High") || selected != 2 || signed_selected != 3) {
+            return 1;
+        }
 
         HttpStatus st = HttpStatus.Ok;
         String mst = @format("{}", st);
