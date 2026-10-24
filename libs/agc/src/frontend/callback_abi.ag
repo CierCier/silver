@@ -88,6 +88,38 @@ bool callback_abi_unsupported_callback(SyntaxNode* root, TypeTable* types, u32 t
     return result;
 }
 
+bool callback_abi_record_fields(SyntaxNode* root, TypeTable* types, u32 type_id,
+                                SyntaxNode* body, i64 depth, Vec<u32>* visiting) {
+    SyntaxNode* cursor = body == (SyntaxNode*)0 ? (SyntaxNode*)0 : body.first_child;
+    while (cursor != (SyntaxNode*)0) {
+        SyntaxNode* start = cursor;
+        SyntaxNode* name = (SyntaxNode*)0;
+        while (cursor != (SyntaxNode*)0 && cursor.token_kind != TokenKind.Semicolon) {
+            if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Identifier) { name = cursor; }
+            cursor = cursor.next_sibling;
+        }
+        if (name != (SyntaxNode*)0) {
+            String text = String.new();
+            SyntaxNode* part = start;
+            while (part != (SyntaxNode*)0 && part != name) {
+                append_node_tokens(part, &text);
+                part = part.next_sibling;
+            }
+            part = name.next_sibling;
+            while (part != (SyntaxNode*)0 && part != cursor) {
+                append_node_tokens(part, &text);
+                part = part.next_sibling;
+            }
+            u32 field_type = callback_abi_type_from_text(types, text.to_str());
+            text.drop();
+            field_type = resolve_generic_member_type(types, root, type_id, field_type);
+            if (callback_abi_nested_callback(root, types, field_type, depth + 1, visiting)) { return true; }
+        }
+        if (cursor != (SyntaxNode*)0) { cursor = cursor.next_sibling; }
+    }
+    return false;
+}
+
 bool callback_abi_nested_callback(SyntaxNode* root, TypeTable* types, u32 type_id, i64 depth,
                                   Vec<u32>* visiting) {
     u32 resolved = callback_abi_resolve_alias(root, types, type_id, depth);
@@ -141,32 +173,8 @@ bool callback_abi_nested_callback(SyntaxNode* root, TypeTable* types, u32 type_i
         }
         SyntaxNode* body = item == (SyntaxNode*)0 ? (SyntaxNode*)0 : item.first_child;
         while (body != (SyntaxNode*)0 && body.kind != NodeKind.Block) { body = body.next_sibling; }
-        SyntaxNode* cursor = body == (SyntaxNode*)0 ? (SyntaxNode*)0 : body.first_child;
-        while (cursor != (SyntaxNode*)0 && !unsupported) {
-            SyntaxNode* start = cursor;
-            SyntaxNode* name = (SyntaxNode*)0;
-            while (cursor != (SyntaxNode*)0 && cursor.token_kind != TokenKind.Semicolon) {
-                if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Identifier) { name = cursor; }
-                cursor = cursor.next_sibling;
-            }
-            if (name != (SyntaxNode*)0) {
-                String text = String.new();
-                SyntaxNode* part = start;
-                while (part != (SyntaxNode*)0 && part != name) {
-                    append_node_tokens(part, &text);
-                    part = part.next_sibling;
-                }
-                part = name.next_sibling;
-                while (part != (SyntaxNode*)0 && part != cursor) {
-                    append_node_tokens(part, &text);
-                    part = part.next_sibling;
-                }
-                u32 field_type = callback_abi_type_from_text(types, text.to_str());
-                text.drop();
-                field_type = resolve_generic_member_type(types, root, resolved, field_type);
-                unsupported = callback_abi_nested_callback(root, types, field_type, depth + 1, visiting);
-            }
-            if (cursor != (SyntaxNode*)0) { cursor = cursor.next_sibling; }
+        if (!unsupported) {
+            unsupported = callback_abi_record_fields(root, types, resolved, body, depth, visiting);
         }
         if (enum_item != (SyntaxNode*)0 && !unsupported) {
             Vec<SyntaxNode*> variants = Vec<SyntaxNode*>.new();
@@ -176,6 +184,9 @@ bool callback_abi_nested_callback(SyntaxNode* root, TypeTable* types, u32 type_i
             i = 0;
             while (i < variants.len() && !unsupported) {
                 SyntaxNode* payload = variants.get(i).next_sibling;
+                if (payload != (SyntaxNode*)0 && payload.kind == NodeKind.Block) {
+                    unsupported = callback_abi_record_fields(root, types, resolved, payload, depth, visiting);
+                }
                 SyntaxNode* part = payload != (SyntaxNode*)0 && payload.kind == NodeKind.Parenthesized
                     ? payload.first_child : (SyntaxNode*)0;
                 // Preserve nested function declarators in payload types.

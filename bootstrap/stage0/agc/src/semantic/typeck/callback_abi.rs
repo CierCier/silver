@@ -49,6 +49,20 @@ impl TypeChecker {
 
     fn callback_in_aggregate(&self, ty: &Type, visiting: &mut FxHashSet<String>) -> bool {
         let ty = Self::expand_imported_type_aliases(ty.clone(), &self.callback_abi.aliases);
+        let ty = if matches!(ty, Type::Named { .. }) {
+            let mut normalized = ty.to_ast();
+            let defaults = self
+                .generic_defaults
+                .iter()
+                .map(|(name, params)| (name.clone(), params.clone()))
+                .collect::<Vec<_>>();
+            if ast::apply_generic_defaults(&mut normalized, &defaults).is_err() {
+                return true;
+            }
+            Self::expand_imported_type_aliases(Type::from_ast(&normalized), &self.callback_abi.aliases)
+        } else {
+            ty
+        };
         let key = ty.canonical_key();
         if visiting.contains(&key) {
             return false;
