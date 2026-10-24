@@ -534,6 +534,12 @@ The parenthesized form `let (a, b) = ...` is not supported.
 
 ### Assignments & Compound Assignments
 
+Compound assignments evaluate the target receiver and index once, before the
+right-hand side. The current value is combined with the right-hand side and
+stored back into that captured target. If target or index evaluation exits or
+aborts, neither the right-hand side nor the store runs. Overloaded operators and
+indexed collection access follow the same evaluation order.
+
 All compound assignment operators are supported:
 
 ```silver

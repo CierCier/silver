@@ -1,9 +1,278 @@
 // Test suite for Vec<T> — contiguous growable array
 import std.test;  // assert_eq_i64, assert_eq_i32, assert_true, done, STDOUT
 import std.mem;
+import std.string;
+
+i32 compound_trace = 0;
+i32 compound_targets = 0;
+i32 compound_indices = 0;
+i32 compound_rhs_calls = 0;
+
+struct CompoundCell { i32 value; }
+
+impl CompoundCell {
+    CompoundCell __add(&self, CompoundCell other) {
+        compound_trace = compound_trace * 10 + 4;
+        CompoundCell result = { .value = self.value + other.value };
+        return result;
+    }
+}
+
+i32* compound_pointer(i32* value) {
+    compound_targets = compound_targets + 1;
+    compound_trace = compound_trace * 10 + 1;
+    return value;
+}
+
+CompoundCell* compound_cell(CompoundCell* value) {
+    compound_targets = compound_targets + 1;
+    compound_trace = compound_trace * 10 + 1;
+    return value;
+}
+
+Vec<i32>* compound_vec(Vec<i32>* value) {
+    compound_targets = compound_targets + 1;
+    compound_trace = compound_trace * 10 + 1;
+    return value;
+}
+
+i64 compound_index() {
+    compound_indices = compound_indices + 1;
+    compound_trace = compound_trace * 10 + 2;
+    return 0;
+}
+
+i32 compound_rhs() {
+    compound_rhs_calls = compound_rhs_calls + 1;
+    compound_trace = compound_trace * 10 + 3;
+    return 3;
+}
+
+CompoundCell compound_cell_rhs() {
+    CompoundCell result = { .value = compound_rhs() };
+    return result;
+}
+
+CompoundCell* compound_rhs_pointer(CompoundCell* value) {
+    compound_rhs_calls = compound_rhs_calls + 1;
+    compound_trace = compound_trace * 10 + 3;
+    return value;
+}
+
+bool test_compound_access() {
+    bool correct = true;
+    compound_targets = 0;
+    compound_indices = 0;
+    compound_rhs_calls = 0;
+    compound_trace = 0;
+    i32 value = 10;
+    i32* value_ptr = &value;
+    *compound_pointer(value_ptr) += compound_rhs();
+    assert_eq_i64(value, 13, "pointer compound result");
+    assert_eq_i64(compound_trace, 13, "pointer target precedes RHS once");
+    correct = correct && value == 13 && compound_trace == 13;
+
+    compound_trace = 0;
+    CompoundCell cell = { .value = 10 };
+    CompoundCell* cell_ptr = &cell;
+    compound_cell(cell_ptr).value += compound_rhs();
+    assert_eq_i64(cell.value, 13, "field compound result");
+    assert_eq_i64(compound_trace, 13, "field target precedes RHS once");
+    correct = correct && cell.value == 13 && compound_trace == 13;
+
+    compound_trace = 0;
+    i32 values[2];
+    values[0] = 10;
+    values[1] = 20;
+    values[compound_index()] += compound_rhs();
+    assert_eq_i64(values[0], 13, "array compound result");
+    assert_eq_i64(values[1], 20, "array neighbor unchanged");
+    assert_eq_i64(compound_trace, 23, "array index precedes RHS once");
+    correct = correct && values[0] == 13 && values[1] == 20 && compound_trace == 23;
+
+    compound_trace = 0;
+    *compound_cell(cell_ptr) += compound_cell_rhs();
+    assert_eq_i64(cell.value, 16, "overloaded compound result");
+    assert_eq_i64(compound_trace, 134, "overloaded target, RHS, operator order");
+    correct = correct && cell.value == 16 && compound_trace == 134;
+
+    compound_trace = 0;
+    CompoundCell other = { .value = 3 };
+    CompoundCell* other_ptr = &other;
+    *compound_cell(cell_ptr) += *compound_rhs_pointer(other_ptr);
+    assert_eq_i64(cell.value, 19, "overloaded compound dereferenced RHS result");
+    assert_eq_i64(compound_trace, 134, "overloaded RHS pointer evaluated once");
+    correct = correct && cell.value == 19 && compound_trace == 134;
+
+    compound_trace = 0;
+    Vec<i32> vector = Vec<i32>.new();
+    vector.push(10);
+    Vec<i32>* vector_ptr = &vector;
+    (*compound_vec(vector_ptr))[compound_index()] += compound_rhs();
+    assert_eq_i64(vector[0], 13, "Vec compound result");
+    assert_eq_i64(compound_trace, 123, "Vec receiver, index, RHS order");
+    assert_eq_i64(compound_targets, 5, "compound targets evaluated once");
+    assert_eq_i64(compound_indices, 2, "compound indices evaluated once");
+    assert_eq_i64(compound_rhs_calls, 6, "compound RHS evaluated once");
+    correct = correct && vector[0] == 13 && compound_trace == 123
+        && compound_targets == 5 && compound_indices == 2 && compound_rhs_calls == 6;
+    vector.drop();
+    return correct;
+}
+
+i32 compound_drops = 0;
+
+struct CompoundResource { i32 value; }
+struct CompoundHolder { CompoundResource resource; }
+
+impl Drop for CompoundResource {
+    void drop(*self) { compound_drops = compound_drops + 1; }
+}
+
+impl CompoundResource {
+    CompoundResource __add(&self, CompoundResource* other) {
+        CompoundResource result = { .value = self.value + other.value };
+        other.value = other.value + 1;
+        return result;
+    }
+}
+
+CompoundResource* compound_resource_rhs(CompoundResource* value) {
+    compound_trace = compound_trace * 10 + 3;
+    return value;
+}
+
+Vec<i32> compound_temporary_vec() {
+    compound_trace = compound_trace * 10 + 1;
+    Vec<i32> result = Vec<i32>.new();
+    result.push(10);
+    return result;
+}
+
+bool test_compound_ownership() {
+    bool correct = true;
+    compound_drops = 0;
+    compound_trace = 0;
+    {
+        CompoundResource value = { .value = 10 };
+        CompoundResource other = { .value = 3 };
+        value += compound_resource_rhs(&other);
+        assert_eq_i64(value.value, 13, "borrowed compound result");
+        assert_eq_i64(other.value, 4, "compound RHS retains mutable reference");
+        assert_eq_i64(compound_trace, 3, "borrowed RHS evaluated once");
+        assert_eq_i64(compound_drops, 1, "compound drops overwritten local once");
+        correct = correct && value.value == 13 && other.value == 4
+            && compound_trace == 3 && compound_drops == 1;
+    }
+    assert_eq_i64(compound_drops, 3, "compound result and borrowed RHS drop once");
+    correct = correct && compound_drops == 3;
+
+    compound_drops = 0;
+    {
+        CompoundHolder holder;
+        holder.resource.value = 10;
+        CompoundResource other = { .value = 3 };
+        holder.resource += &other;
+        assert_eq_i64(holder.resource.value, 13, "owned field compound result");
+        assert_eq_i64(compound_drops, 1, "compound drops overwritten field once");
+        correct = correct && holder.resource.value == 13 && compound_drops == 1;
+    }
+    assert_eq_i64(compound_drops, 3, "compound field drop flags remain live");
+    correct = correct && compound_drops == 3;
+
+    {
+        String text = String.from_str("a");
+        text += "b";
+        assert_eq_i64(text.len, 2, "by-value compound receiver result");
+        assert_eq_i64(text.data[1], 98, "by-value compound receiver contents");
+        correct = correct && text.len == 2 && text.data[1] == 98;
+    }
+    compound_trace = 0;
+    compound_temporary_vec()[compound_index()] += compound_rhs();
+    assert_eq_i64(compound_trace, 123, "temporary Vec receiver evaluated once before RHS");
+    return correct && compound_trace == 123;
+}
+
+struct CompoundCollection { Vec<i32> values; }
+
+impl Drop for CompoundCollection {
+    void drop(*self) { compound_drops = compound_drops + 1; }
+}
+
+impl CompoundCollection {
+    i32 __index_get(&self, i64 index) { return self.values[index]; }
+    void __index_set(*self, i64 index, i32 value) { self.values[index] = value; }
+}
+
+CompoundCollection compound_temporary_collection() {
+    CompoundCollection result;
+    result.values = Vec<i32>.new();
+    result.values.push(10);
+    return result;
+}
+
+i32 compound_return_from_temporary(i32 mode) {
+    compound_temporary_collection()[(i64)(match mode {
+        0: { if (mode == 0) { return 7; } 0; },
+        _: 0,
+    })] += (i32)(match mode {
+        1: { if (mode == 1) { return 8; } 3; },
+        _: 3,
+    });
+    return 9;
+}
+
+i32 compound_match(Vec<i32>* values, i32 mode) {
+    return match mode {
+        0: {
+            (*values)[0] += 1;
+            (*values)[1] += 2;
+            10;
+        },
+        1: {
+            (*values)[0] *= 2;
+            (*values)[1] *= 3;
+            20;
+        },
+        _: {
+            (*values)[0] -= 1;
+            (*values)[1] -= 2;
+            30;
+        },
+    };
+}
+
+bool test_compound_control_flow() {
+    bool correct = true;
+    for (i32 mode = 0; mode < 3; mode = mode + 1) {
+        compound_drops = 0;
+        i32 result = compound_return_from_temporary(mode);
+        assert_eq_i64(mode + 7, result, "compound return selects index, RHS, or completion");
+        assert_eq_i64(1, compound_drops, "temporary collection drops once on every path");
+        correct = correct && result == mode + 7 && compound_drops == 1;
+    }
+    Vec<i32> values = Vec<i32>.new();
+    values.push(10);
+    values.push(20);
+    assert_eq_i64(10, compound_match(&values, 0), "first compound match arm result");
+    assert_eq_i64(11, values[0], "first compound match arm updates first element");
+    assert_eq_i64(22, values[1], "first compound match arm updates second element");
+    correct = correct && values[0] == 11 && values[1] == 22;
+    assert_eq_i64(20, compound_match(&values, 1), "second compound match arm result");
+    assert_eq_i64(22, values[0], "second compound match arm updates first element");
+    assert_eq_i64(66, values[1], "second compound match arm updates second element");
+    correct = correct && values[0] == 22 && values[1] == 66;
+    assert_eq_i64(30, compound_match(&values, 2), "fallback compound match arm result");
+    assert_eq_i64(21, values[0], "fallback compound match arm updates first element");
+    assert_eq_i64(64, values[1], "fallback compound match arm updates second element");
+    return correct && values[0] == 21 && values[1] == 64;
+}
 
 i32 main() {
     STDOUT.write_str("=== Vec Tests ===\n\n");
+    if (!test_compound_access()) { return 1; }
+    if (!test_compound_ownership()) { return 1; }
+    if (!test_compound_control_flow()) { return 1; }
 
     // --- Basic new ---
     STDOUT.write_str("--- Vec.new ---\n");

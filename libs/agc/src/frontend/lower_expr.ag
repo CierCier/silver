@@ -3411,16 +3411,12 @@ impl ExprLowerer {
                     stmt_ids.push(id);
                     return;
                 }
-                // Compound assignment desugars to target = target <op> rhs.
-                // The target sequence lowers twice (once for the place, once
-                // for the loaded value), so side-effecting targets evaluate
-                // twice — stage0 evaluates once; accept the divergence for
-                // the pure-local/index/field cases that dominate real code.
+                // Preserve the operation so codegen can capture the place once.
                 u32 target_id = self.lower_sequence(start, assign_node);
-                u32 lhs_id = self.lower_sequence(start, assign_node);
                 u32 rhs_id = self.lower_sequence(assign_node.next_sibling, end);
-                u32 bin_id = self.pool.add_binary(base_op, lhs_id, rhs_id, assign_node.span);
+                u32 bin_id = self.pool.add_binary(base_op, target_id, rhs_id, assign_node.span);
                 u32 id = self.pool.add_stmt_assign(target_id, bin_id, start.span);
+                self.pool.get_stmt(id).aux = base_op;
                 stmt_ids.push(id);
                 return;
             }

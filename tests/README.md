@@ -21,6 +21,25 @@ status. Name filters select a subset. `--compiler` uses an existing compiler;
 assertions. `--timeout` and `--compile-timeout` bound execution and compilation.
 Compilation and execution times are reported separately.
 
+Use `--verbose` to print separate compile/run times on each result line. Timeout
+failures retain elapsed time, the command, and partial stdout/stderr; their time
+counts toward the summary. Redirect output to a local log when investigating.
+A compile timeout is a wall-clock budget failure, not proof of a source-size
+limit or a compiler hang. Large HTTP fixtures may exceed the default 300 seconds
+under parallel load even when an isolated compile succeeds. Preserve the initial
+failure, then retry affected fixtures with `--jobs 1` and unchanged limits before
+attributing the result to compiler behavior. A passing subset retry does not
+replace the full-suite gate.
+
+For native compiler phase timings, compile the affected fixture directly with
+`--profile --verbose`, preserving its flags and recording the compiler hash.
+Use `--no-cache` to measure actual code generation rather than object-cache
+reuse, and record it as a distinct diagnostic run. Verbose profiles separate
+IR generation, verification, optimization, and object emission; all-job totals
+can exceed wall time because jobs overlap. Also record the exact optimization
+flag: native stage1's omitted `-O` uses LLVM's `Default` machine-codegen level,
+whereas explicit `-O0` uses `None` (see the [compiler guide](../docs/compiler-guide.md)).
+
 Extend an existing module fixture instead of adding another test program for
 each regression. Check values, bytes, error variants, or cleanup. Printing
 success, an unconditional assertion, or compiling alone does not prove an API

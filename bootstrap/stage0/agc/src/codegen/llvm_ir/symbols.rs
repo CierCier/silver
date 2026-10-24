@@ -499,12 +499,22 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 }
                 None
             }
-            ast::ExpressionKind::Index { object, .. } => {
+            ast::ExpressionKind::Index { object, index } => {
                 let obj_ty = self.resolve_argument_type(object)?;
                 match obj_ty.kind.as_ref() {
                     ast::TypeKind::Pointer(ptr) => Some((*ptr.inner).clone()),
                     ast::TypeKind::Reference(reference) => Some((*reference.inner).clone()),
                     ast::TypeKind::Array(array) => Some((*array.element_type).clone()),
+                    ast::TypeKind::Tuple(elements) => match index.kind.as_ref() {
+                        ast::ExpressionKind::Literal(ast::Literal::Integer(value)) => {
+                            usize::try_from(*value).ok().and_then(|i| elements.get(i).cloned())
+                        }
+                        _ => None,
+                    },
+                    ast::TypeKind::Primitive(ast::PrimitiveType::Str) => Some(ast::Type {
+                        kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::U8)),
+                        span: expr.span,
+                    }),
                     ast::TypeKind::Slice(slice) => Some((*slice.element_type).clone()),
                     ast::TypeKind::Named(named) => {
                         if let Some(args) = &named.generics
@@ -1732,11 +1742,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             | ast::ExpressionKind::Unary {
                 operator: ast::UnaryOperator::Dereference,
                 ..
-            } => self
-                .resolve_lvalue_ptr(expr)
-                .ok()
-                .map(|(_, ty)| ty)
-                .or_else(|| self.resolve_argument_type(expr)),
+            } => self.resolve_argument_type(expr),
             ast::ExpressionKind::Reference {
                 is_mutable,
                 expression,

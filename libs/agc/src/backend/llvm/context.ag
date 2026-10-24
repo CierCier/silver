@@ -20,6 +20,7 @@ struct LlvmLocal {
     bool is_mut;
     bool is_string_literal_backed;
     LLVMOpaqueValue* drop_flag;
+    u32 assignment_source;
     Vec<LlvmFieldFlag> field_flags;
     Vec<Projection> drop_projections;
 }
@@ -396,6 +397,7 @@ impl LlvmContext {
         local.is_mut = is_mut;
         local.is_string_literal_backed = false;
         local.drop_flag = (LLVMOpaqueValue*)0;
+        local.assignment_source = 0;
         local.field_flags = Vec<LlvmFieldFlag>.new();
         local.drop_projections = Vec<Projection>.new();
         self.locals.push(move local);
