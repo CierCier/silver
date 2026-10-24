@@ -1584,9 +1584,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         // Unit enum — compare integer discriminant
                         if let BasicValueEnum::IntValue(scrutinee_int) = scrutinee {
                             let expected =
-                                if let Some(variants) = self.enum_variants.get(&enum_name) {
-                                    if let Some(val) = variants.get(&variant.name) {
-                                        scrutinee_int.get_type().const_int(*val as u64, true)
+                                if self.enum_variants.contains_key(&enum_name) {
+                                    if let Some(value) =
+                                        self.enum_member_constant(&enum_name, &variant.name)
+                                    {
+                                        value.into_int_value()
                                     } else {
                                         return Err(CodegenError::with_span(
                                             format!(

@@ -484,6 +484,19 @@ pub fn enum_discriminant_overflow(name: &str) -> String {
     format!("enum variant '{name}' overflows automatic discriminant resolution")
 }
 
+pub fn enum_tag_out_of_range(name: &str, signed: bool) -> String {
+    let range = if signed { "-32768..32767" } else { "0..65535" };
+    format!("payload enum '{name}' discriminants exceed the supported 16-bit tag range {range}")
+}
+
+pub fn enum_discriminant_literal_out_of_range() -> String {
+    "enum discriminant literal is outside the supported signed 128-bit range".to_string()
+}
+
+pub fn enum_payload_duplicate_discriminant(name: &str, value: i128) -> String {
+    format!("payload enum variant '{name}' has duplicate discriminant {value}")
+}
+
 pub fn format_string_must_be_literal() -> &'static str {
     "format string must be a literal"
 }
@@ -562,4 +575,12 @@ pub fn column_expects_zero() -> &'static str {
 
 pub fn dbg_expects_one() -> &'static str {
     "@dbg expects exactly 1 argument"
+}
+
+pub fn c_callback_unsupported() -> &'static str {
+    "unsupported C callback signature: use ABI-compatible scalars (not bool, narrow/128-bit integers, or f80), or pointers to aggregates"
+}
+
+pub fn c_function_value_unsupported() -> &'static str {
+    "cannot use this C function as a value: variadic, aggregate, enum, bool, narrow/128-bit integer, and f80 signatures require ABI-aware function pointers"
 }

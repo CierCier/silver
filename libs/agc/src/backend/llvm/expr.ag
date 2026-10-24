@@ -995,6 +995,7 @@ LLVMOpaqueValue* llvm_emit_lvalue(LlvmContext* ctx, u32 expr_id) {
         bool is_pointer = target_entry.kind == TypeKind.Pointer || target_entry.kind == TypeKind.Reference
             || target_entry.kind == TypeKind.Str;
         bool is_array = target_entry.kind == TypeKind.Array;
+        i64 array_len = target_entry.count;
         LLVMOpaqueValue* target_ptr = is_pointer
             ? llvm_emit_expr(ctx, expr.inner0)
             : llvm_emit_lvalue(ctx, expr.inner0);
@@ -1004,6 +1005,21 @@ LLVMOpaqueValue* llvm_emit_lvalue(LlvmContext* ctx, u32 expr_id) {
                 target_ptr = LLVMBuildIntToPtr(ctx.builder, target_ptr, LLVMPointerTypeInContext(ctx.ctx, (u32)0), "idx_ptr");
             }
             if (is_array) {
+                index_val = llvm_slice_bound_i64(ctx, expr.inner1, index_val, "array.index");
+                if (index_val == (LLVMOpaqueValue*)0) { return (LLVMOpaqueValue*)0; }
+                LLVMOpaqueValue* valid = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntULT,
+                    index_val, LLVMConstInt(LLVMInt64TypeInContext(ctx.ctx), (u64)array_len, 0), "array.index.valid");
+                LLVMOpaqueBasicBlock* ready = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "array.index.ready");
+                LLVMOpaqueBasicBlock* failed = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "array.index.failed");
+                LLVMBuildCondBr(ctx.builder, valid, ready, failed);
+                LLVMPositionBuilderAtEnd(ctx.builder, failed);
+                LLVMOpaqueValue* abort_fn = LLVMGetNamedFunction(ctx.module, "abort");
+                if (abort_fn == (LLVMOpaqueValue*)0) {
+                    abort_fn = LLVMAddFunction(ctx.module, "abort", LLVMFunctionType(LLVMVoidTypeInContext(ctx.ctx), (LLVMOpaqueType**)0, 0, 0));
+                }
+                LLVMBuildCall2(ctx.builder, LLVMGlobalGetValueType(abort_fn), abort_fn, (LLVMOpaqueValue**)0, 0, "");
+                LLVMBuildUnreachable(ctx.builder);
+                LLVMPositionBuilderAtEnd(ctx.builder, ready);
                 target_ptr = LLVMBuildBitCast(ctx.builder, target_ptr, LLVMPointerTypeInContext(ctx.ctx, (u32)0), "arr_decay");
             }
             u32 elem_type = llvm_index_elem_type(ctx, expr.inner0, expr.inner1);

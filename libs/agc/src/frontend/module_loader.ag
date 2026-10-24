@@ -18,6 +18,7 @@ import frontend.symbols;
 import frontend.cfg;
 import frontend.bindings;
 import frontend.messages;
+import frontend.callback_abi;
 
 struct ImportedDeclarations {
     bool loaded;
@@ -449,6 +450,137 @@ void module_register_artifact_method_params(TypeTable* types, ArtifactExport* ex
     method.drop();
 }
 
+u32 module_canonical_type(TypeTable* types, str text, i64 first, i64 last, i64 depth) {
+    if (depth > 64) { return TYPE_UNKNOWN; }
+    while (first < last && (text[first] == (u8)' ' || text[first] == (u8)'\t')) { first += 1; }
+    while (last > first && (text[last - 1] == (u8)' ' || text[last - 1] == (u8)'\t')) { last -= 1; }
+    if (first == last) { return TYPE_UNKNOWN; }
+    if (text[first] == (u8)'*' || text[first] == (u8)'&') {
+        bool reference = text[first] == (u8)'&';
+        first += 1;
+        bool mutable = false;
+        if (first + 4 <= last && text[first] == (u8)'m' && text[first + 1] == (u8)'u'
+            && text[first + 2] == (u8)'t' && text[first + 3] == (u8)' ') {
+            mutable = true;
+            first += 4;
+        } else if (first + 6 <= last && text[first] == (u8)'c' && text[first + 1] == (u8)'o'
+            && text[first + 2] == (u8)'n' && text[first + 3] == (u8)'s'
+            && text[first + 4] == (u8)'t' && text[first + 5] == (u8)' ') {
+            first += 6;
+        }
+        if (first + 9 <= last && text[first] == (u8)'v' && text[first + 1] == (u8)'o'
+            && text[first + 2] == (u8)'l' && text[first + 3] == (u8)'a'
+            && text[first + 4] == (u8)'t' && text[first + 5] == (u8)'i'
+            && text[first + 6] == (u8)'l' && text[first + 7] == (u8)'e'
+            && text[first + 8] == (u8)' ') { first += 9; }
+        u32 inner = module_canonical_type(types, text, first, last, depth + 1);
+        if (inner == TYPE_UNKNOWN) { return TYPE_UNKNOWN; }
+        return reference ? types.get_reference(inner, mutable) : types.get_pointer(inner, mutable);
+    }
+    if (first + 3 <= last && text[first] == (u8)'f' && text[first + 1] == (u8)'n'
+        && text[first + 2] == (u8)'(') {
+        i64 close = first + 3;
+        i64 nesting = 1;
+        while (close < last && nesting > 0) {
+            if (text[close] == (u8)'(') { nesting += 1; }
+            if (text[close] == (u8)')') { nesting -= 1; }
+            if (nesting > 0) { close += 1; }
+        }
+        i64 result_start = close + 1;
+        while (result_start < last && text[result_start] == (u8)' ') { result_start += 1; }
+        if (result_start + 2 > last || text[result_start] != (u8)'-'
+            || text[result_start + 1] != (u8)'>') { return TYPE_UNKNOWN; }
+        u32 result = module_canonical_type(types, text, result_start + 2, last, depth + 1);
+        if (result == TYPE_UNKNOWN) { return TYPE_UNKNOWN; }
+        Vec<u32> parameters = Vec<u32>.new();
+        i64 start = first + 3;
+        i64 cursor = start;
+        i64 parens = 0;
+        i64 angles = 0;
+        bool valid = true;
+        while (cursor <= close && valid) {
+            bool separator = cursor == close || (text[cursor] == (u8)',' && parens == 0 && angles == 0);
+            if (separator) {
+                if (cursor > start) {
+                    u32 parameter = module_canonical_type(types, text, start, cursor, depth + 1);
+                    valid = parameter != TYPE_UNKNOWN;
+                    parameters.push(parameter);
+                } else if (cursor != first + 3) { valid = false; }
+                start = cursor + 1;
+            } else {
+                if (text[cursor] == (u8)'(') { parens += 1; }
+                if (text[cursor] == (u8)')') { parens -= 1; }
+                if (text[cursor] == (u8)'<') { angles += 1; }
+                if (text[cursor] == (u8)'>' && cursor > first && text[cursor - 1] != (u8)'-') { angles -= 1; }
+            }
+            cursor += 1;
+        }
+        u32 function_type = valid ? types.get_function(result, &parameters) : TYPE_UNKNOWN;
+        parameters.drop();
+        return function_type;
+    }
+    String name = String.new();
+    while (first < last) { name.push(text[first]); first += 1; }
+    u32 result = name.equals("unit") ? TYPE_VOID : type_id_from_text(types, name.to_str());
+    name.drop();
+    return result;
+}
+
+void module_retain_artifact_c_declaration(ModuleLoader* loader, DiagnosticBag* diagnostics,
+                                          ArtifactExport* export, u32 type_id) {
+    if (loader.declarations == (ImportedDeclarations*)0) { return; }
+    TypeEntry* entry = loader.symbols.types.get(type_id);
+    if (export.kind == ArtifactExportKind.Function && entry.kind != TypeKind.Function) {
+        if (diagnostics != (DiagnosticBag*)0) { diagnostics.error(Span.synthetic(), c_callback_unsupported()); }
+        loader.failed = true;
+        return;
+    }
+    u32 inner = entry.inner;
+    i64 count = entry.count;
+    String source = String.from_str("extern \"C\" { ");
+    if (export.kind == ArtifactExportKind.Global) {
+        source.push_str(loader.symbols.types.type_name(type_id));
+        source.push((u8)' ');
+        source.push_str(export.name.to_str());
+        source.push_str("; }");
+    } else {
+        source.push_str(loader.symbols.types.type_name(loader.symbols.types.type_args.get(inner)));
+        source.push((u8)' ');
+        source.push_str(export.name.to_str());
+        source.push((u8)'(');
+        i64 i = 0;
+        while (i < count) {
+            if (i > 0) { source.push((u8)','); }
+            source.push_str(loader.symbols.types.type_name(loader.symbols.types.type_args.get(inner + 1 + (u32)i)));
+            source.push_str(" arg");
+            source.push_display(&i);
+            i += 1;
+        }
+        if (export.is_variadic) {
+            if (count > 0) { source.push((u8)','); }
+            source.push_str("...");
+        }
+        source.push_str("); }");
+    }
+    TokenStream stream = TokenStream.new();
+    DiagnosticBag local = DiagnosticBag.new();
+    lex(move source, &stream, &local);
+    SyntaxTree tree;
+    parse(&stream, &local, &loader.declarations.pool, &tree);
+    if (local.is_empty()) {
+        SyntaxNode* item = tree.root.first_child;
+        while (item != (SyntaxNode*)0) {
+            SyntaxNode* next = item.next_sibling;
+            append_child(loader.declarations.root, item);
+            item = next;
+        }
+        loader.declarations.streams.push(move stream);
+    } else {
+        if (diagnostics != (DiagnosticBag*)0) { diagnostics.error(Span.synthetic(), c_callback_unsupported()); }
+        loader.failed = true;
+    }
+}
+
 void load_artifact_module(ModuleLoader* loader, DiagnosticBag* diagnostics, str path) {
     if (module_seen(loader, path)) {
         return;
@@ -478,6 +610,16 @@ void load_artifact_module(ModuleLoader* loader, DiagnosticBag* diagnostics, str 
                 type_id = loader.symbols.types.get_named(export.name.to_str());
             }
             loader.symbols.declare_typed(name_id, kind, Span.synthetic(), (SyntaxNode*)0, type_id);
+            if ((export.kind == ArtifactExportKind.Function || export.kind == ArtifactExportKind.Global)
+                && export.abi_present && export.abi == (u8)1) {
+                i64 symbol_index = loader.symbols.find(export.name.to_str());
+                Symbol* symbol = loader.symbols.get(symbol_index);
+                symbol.c_abi = export.kind == ArtifactExportKind.Function;
+                symbol.c_variadic = export.kind == ArtifactExportKind.Function && export.is_variadic;
+                symbol.type_id = module_canonical_type(&loader.symbols.types,
+                    export.signature.to_str(), 0, export.signature.len, 0);
+                module_retain_artifact_c_declaration(loader, diagnostics, export, symbol.type_id);
+            }
             if (export.kind == ArtifactExportKind.Struct) {
                 Vec<u32> fields = Vec<u32>.new();
                 Vec<u32> field_names = Vec<u32>.new();
@@ -549,6 +691,39 @@ void load_artifact_module(ModuleLoader* loader, DiagnosticBag* diagnostics, str 
                     owner.drop();
                 }
                 module_register_artifact_method_params(&loader.symbols.types, export);
+            }
+        }
+        index += 1;
+    }
+    index = 0;
+    while (index < artifact.exports.len()) {
+        ArtifactExport* export = artifact.exports.get_ptr(index);
+        if (export.abi_present && export.abi == (u8)1
+            && (export.kind == ArtifactExportKind.Function || export.kind == ArtifactExportKind.Global)) {
+            i64 si = loader.symbols.find(export.name.to_str());
+            if (si >= 0) {
+                u32 type_id = loader.symbols.get(si).type_id;
+                TypeEntry* entry = loader.symbols.types.get(type_id);
+                TypeKind kind = entry.kind;
+                u32 inner = entry.inner;
+                i64 count = entry.count;
+                SyntaxNode* root = loader.declarations == (ImportedDeclarations*)0
+                    ? (SyntaxNode*)0 : loader.declarations.root;
+                bool unsupported = false;
+                if (export.kind == ArtifactExportKind.Function && kind == TypeKind.Function) {
+                    i64 pi = 0;
+                    while (pi <= count && !unsupported) {
+                        u32 part = loader.symbols.types.type_args.get(inner + (u32)pi);
+                        unsupported = callback_abi_unsupported_callback(root, &loader.symbols.types, part, 0);
+                        pi += 1;
+                    }
+                } else {
+                    unsupported = callback_abi_unsupported_callback(root, &loader.symbols.types, type_id, 0);
+                }
+                if (unsupported) {
+                    if (diagnostics != (DiagnosticBag*)0) { diagnostics.error(Span.synthetic(), c_callback_unsupported()); }
+                    loader.failed = true;
+                }
             }
         }
         index += 1;
@@ -894,7 +1069,7 @@ void load_source_module(ModuleLoader* loader, DiagnosticBag* diagnostics, str pa
             SyntaxNode* item = active_items.get(item_index);
             if (item.kind == NodeKind.Struct || item.kind == NodeKind.Enum
                 || item.kind == NodeKind.Trait || item.kind == NodeKind.Impl
-                || item.kind == NodeKind.TypeAlias) {
+                || item.kind == NodeKind.TypeAlias || item.kind == NodeKind.Extern) {
                 append_child(loader.declarations.root, item);
             }
             item_index += 1;

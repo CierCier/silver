@@ -772,7 +772,7 @@ impl TypeTable {
                     count = count * 10 + ((i64)name[d] - 48);
                     d += 1;
                 }
-                if (open > start && digits && d == len - 1 && count > 0) {
+                if (open > start && digits && d == len - 1 && count >= 0) {
                     String base = String.new();
                     i64 i = start;
                     while (i < open) { base.push(name[i]); i += 1; }

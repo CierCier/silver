@@ -350,6 +350,16 @@ enum Shape {
 }
 ```
 
+Discriminants accept signed decimal, hexadecimal, binary, and octal literals
+with digit separators. Automatic successors and literal overflow are diagnosed
+instead of wrapping. Native stage1 uses 16-bit tags for every enum; stage0 uses
+16-bit tags for payload enums and supports signed 128-bit discriminants for
+unit-only enums. The 16-bit range is `-32768..32767` if any variant is negative,
+otherwise `0..65535`. Values outside a stage's supported range are rejected.
+Payload enums require unique discriminants. Unit-only enums may alias a value;
+aliases share identity and cannot be distinguished by matching or display.
+These limits do not establish a stable cross-stage or C enum ABI.
+
 ### Trait Declarations
 
 Traits define interface contracts, associated types, and optional default method
@@ -417,6 +427,19 @@ C string parameters use `const u8*` (or `str`): Silver's `char` is a 32-bit
 codepoint, so `char*` addresses `char` values and cannot alias a byte buffer.
 The C ABI is unchanged — both spellings are pointers — but a Silver call
 passes a `str` only to a `const u8*` parameter.
+
+Indirect C function values and C callback signatures currently support `void`
+results, 32/64-bit integers, `f32`/`f64`, 32-bit `char`, borrowed `str`,
+pointers/references, and recursively compatible function types. Pointers and
+references to aggregates remain supported. By-value aggregates/enums, `bool`,
+narrow/128-bit integers, complex values, and `f80` are not supported in these
+signatures and are rejected, including through aliases and nested callbacks.
+Checks also inspect callback fields inside C-boundary aggregates and enum
+payloads. Native checking rejects unresolved aggregate metadata and omitted
+generic defaults at these boundaries rather than guessing a callback ABI.
+Variadic C functions may be called directly but cannot escape as function values.
+Ordinary Silver callbacks, including aggregate callbacks, are not subject to
+this C-boundary restriction. This is a checked subset, not general C ABI parity.
 
 ### Attributes & Metadata
 
@@ -774,6 +797,18 @@ f64 y = p_ptr.y;          // auto-deref: equivalent to (*p_ptr).y
 i32 item = arr[0];        // array/container index (may invoke __index_get)
 arr[1] = 100;             // index write (may invoke __index_set)
 ```
+
+Array, `Vec`, and `Slice` element access is checked in every build profile,
+including optimized builds. Negative indices, indices at or beyond the length,
+and access to empty containers abort before accessing memory. Both compiler
+stages reject indexing a zero-length array at compile time. This includes
+reads, writes, compound assignments, and checked element-pointer access.
+`Vec.try_get` returns `None` instead. No existing method signatures change.
+`Vec` and `Slice` index parameters remain `i64`; bounds checks apply after
+argument conversion. Range-check wider integers before converting them to `i64`.
+Raw-pointer indexing (including pointers returned by `as_ptr`/`as_mut_ptr`) is
+explicitly unchecked; callers must ensure validity. Slice ranges retain their
+clamping semantics, which differ from element indexing.
 
 > **Note**: Fields on struct pointers and struct references can be directly accessed
 > without dereferencing (`s.f` is the same as `*(s).f`).

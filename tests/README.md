@@ -45,6 +45,14 @@ each regression. Check values, bytes, error variants, or cleanup. Printing
 success, an unconditional assertion, or compiling alone does not prove an API
 contract. Runtime failures must produce a nonzero exit status.
 
+Bounds, enum tags, and indirect C callbacks are covered by `process_test`,
+`slice_syntax_test`, `display_test`, `collection_drop_glue_test`, and
+`rust_ffi_test`. Run the changed fixtures with both compiler stages and explicit
+`-O0`/`-O2`; keep `--no-cache` when verifying changed code generation. New bounds
+and callback checks retain explicit failure exits when assertions are disabled.
+Stage0 supports wider unit-enum tags than native stage1; temporary boundary
+probes must distinguish stage-specific expected rejections from shared behavior.
+
 Most fixtures use `std.test` and return `done()`, or use `@assert` and explicit
 failure returns. Assertions depend on debug cfg, so do not optimize test
 programs in a way that removes their checks.

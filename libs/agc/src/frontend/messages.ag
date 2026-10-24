@@ -2,8 +2,25 @@
 import std.mem.vec;
 import std.string;
 
+String enum_discriminant_overflow(str name) {
+    return @format("enum variant '{}' discriminant or automatic successor exceeds the supported integer range", name);
+}
+
+String enum_tag_out_of_range(bool signed_tag) {
+    str range = signed_tag ? "-32768..32767" : "0..65535";
+    return @format("enum discriminant exceeds the supported 16-bit tag range {}", range);
+}
+
+String enum_payload_duplicate_discriminant(str name, i64 value) {
+    return @format("payload enum variant '{}' has duplicate discriminant {}", name, value);
+}
+
 String lambda_parameter_type(str name) {
     return @format("cannot infer lambda parameter '{}'; add a type or a function-type context", name);
+}
+
+String zero_size_array_index() {
+    return String.from_str("cannot index into zero-size array");
 }
 
 String lambda_parameter_list() {
@@ -402,4 +419,12 @@ str fuzzy_suggest(str target, Vec<str>* candidates, i64 max_dist) {
         return best_cand;
     }
     return "";
+}
+
+String c_callback_unsupported() {
+    return String.from_str("unsupported C callback signature: use ABI-compatible scalars (not bool, narrow/128-bit integers, or f80), or pointers to aggregates");
+}
+
+String c_function_value_unsupported() {
+    return String.from_str("cannot use this C function as a value: variadic, aggregate, enum, bool, narrow/128-bit integer, and f80 signatures require ABI-aware function pointers");
 }

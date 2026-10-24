@@ -259,7 +259,19 @@ impl DependencyGraph {
         let file_id = crate::lexer::register_source(&source_path.display().to_string(), &src);
         let tokens = match crate::lexer::lex_with_source(&src, file_id) {
             Ok(t) => t,
-            Err(_) => return Ok(None),
+            Err(errors) => {
+                for error in &errors {
+                    eprintln!(
+                        "{}",
+                        crate::diagnostics::render(
+                            error.span,
+                            &error.kind.to_string(),
+                            crate::diagnostics::Severity::Error,
+                        )
+                    );
+                }
+                return Err(format!("lexer error in {}", source_path.display()));
+            }
         };
 
         let mut parser =

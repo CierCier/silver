@@ -15,6 +15,7 @@ use crate::types::{
     is_void, parse_struct_attributes, struct_layout,
 };
 
+mod callback_abi;
 mod lambda;
 
 const MAX_TYPE_CHECK_DEPTH: usize = 32;
@@ -27,6 +28,7 @@ pub struct TypeError {
 
 #[derive(Default)]
 pub struct TypeChecker {
+    callback_abi: callback_abi::CallbackAbiState,
     lambdas: lambda::LambdaState,
     errors: Vec<TypeError>,
     expression_depth: usize,
@@ -256,6 +258,7 @@ impl TypeChecker {
         self.collect_extern_variables(program, table);
         self.collect_global_variables(program, table);
         self.collect_imported_functions(table);
+        self.check_c_callback_contracts(program);
         self.collect_impl_methods(program, table);
         self.collect_struct_layouts(program);
         self.check_global_attributes(&program.attributes);
@@ -1312,6 +1315,7 @@ impl TypeChecker {
             ast::ExpressionKind::Identifier(ident) => match self.lookup_type(&ident.name) {
                 Some(ty) => ty,
                 None => {
+                    self.check_c_function_value(&ident.name, ident.span);
                     // Bare payload-less enum constructor with expected-type
                     // inference: `Optional<i32> x = None;` / `Result<i32,str> r = Err("x")`.
                     if let Some(bare) = self.check_bare_enum_constructor(
@@ -7929,15 +7933,26 @@ impl TypeChecker {
 
     fn build_enum_def(&mut self, enum_item: &ast::EnumItem) -> Option<EnumDef> {
         let mut variants = HashMap::default();
-        let mut next_value = 0i128;
+        let mut next_value = Some(0i128);
         let mut min_value = 0i128;
         let mut max_value = 0i128;
         let mut saw_any = false;
+        let has_payload = enum_item
+            .variants
+            .iter()
+            .any(|variant| !Self::variant_payload(&variant.data).is_empty());
+        let mut seen_tags = HashSet::default();
 
         for variant in &enum_item.variants {
             let payload = Self::variant_payload(&variant.data);
 
-            let value = variant.discriminant.unwrap_or(next_value);
+            let Some(value) = variant.discriminant.or(next_value) else {
+                self.error(
+                    msg::enum_discriminant_overflow(&variant.name.name),
+                    variant.span,
+                );
+                continue;
+            };
             if variants
                 .insert(variant.name.name.clone(), VariantInfo { payload })
                 .is_some()
@@ -7952,16 +7967,14 @@ impl TypeChecker {
                 continue;
             }
 
-            next_value = match value.checked_add(1) {
-                Some(next) => next,
-                None => {
-                    self.error(
-                        msg::enum_discriminant_overflow(&variant.name.name),
-                        variant.span,
-                    );
-                    value
-                }
-            };
+            next_value = value.checked_add(1);
+
+            if has_payload && !seen_tags.insert(value) {
+                self.error(
+                    msg::enum_payload_duplicate_discriminant(&variant.name.name, value),
+                    variant.span,
+                );
+            }
 
             if !saw_any {
                 min_value = value;
@@ -7971,6 +7984,21 @@ impl TypeChecker {
                 min_value = min_value.min(value);
                 max_value = max_value.max(value);
             }
+        }
+
+        if has_payload
+            && (min_value < i16::MIN as i128
+                || max_value
+                    > if min_value < 0 {
+                        i16::MAX as i128
+                    } else {
+                        u16::MAX as i128
+                    })
+        {
+            self.error(
+                msg::enum_tag_out_of_range(&enum_item.name.name, min_value < 0),
+                enum_item.name.span,
+            );
         }
 
         Some(EnumDef {

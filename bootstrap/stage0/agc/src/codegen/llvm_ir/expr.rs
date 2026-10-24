@@ -3413,9 +3413,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         // Unit enum — compare integer discriminant
                         if let BasicValueEnum::IntValue(scrutinee_int) = scrutinee {
                             let expected =
-                                if let Some(variants) = self.enum_variants.get(&enum_name) {
-                                    if let Some(val) = variants.get(&variant.name) {
-                                        scrutinee_int.get_type().const_int(*val as u64, true)
+                                if self.enum_variants.contains_key(&enum_name) {
+                                    if let Some(value) =
+                                        self.enum_member_constant(&enum_name, &variant.name)
+                                    {
+                                        value.into_int_value()
                                     } else {
                                         return Err(CodegenError::with_span(
                                             format!(
@@ -3960,18 +3962,53 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             ));
                         };
                         let i64_ty = self.context.i64_type();
-                        let index_i64 = if index_int.get_type().get_bit_width() == 64 {
-                            index_int
-                        } else {
-                            self.builder
-                                .build_int_cast(index_int, i64_ty, "idx.cast")
-                                .map_err(|e| {
-                                    CodegenError::with_span(
-                                        format!("failed to cast array index: {e}"),
-                                        index.span,
-                                    )
-                                })?
-                        };
+                        // Clamp wide indices before narrowing so they cannot alias valid elements.
+                        let index_i64 = self.cast_slice_bound_to_i64(
+                            index,
+                            index_int,
+                            index.span,
+                            "array.index",
+                        )?;
+                        let valid = self
+                            .builder
+                            .build_int_compare(
+                                IntPredicate::ULT,
+                                index_i64,
+                                i64_ty.const_int(array.size as u64, false),
+                                "array.index.valid",
+                            )
+                            .map_err(|e| CodegenError::with_span(e.to_string(), index.span))?;
+                        let function = self
+                            .builder
+                            .get_insert_block()
+                            .and_then(|b| b.get_parent())
+                            .ok_or_else(|| {
+                                CodegenError::with_span("array access outside function", index.span)
+                            })?;
+                        let ready = self
+                            .context
+                            .append_basic_block(function, "array.index.ready");
+                        let failed = self
+                            .context
+                            .append_basic_block(function, "array.index.failed");
+                        self.builder
+                            .build_conditional_branch(valid, ready, failed)
+                            .map_err(|e| CodegenError::with_span(e.to_string(), index.span))?;
+                        self.builder.position_at_end(failed);
+                        let abort = self.module.get_function("abort").unwrap_or_else(|| {
+                            self.module.add_function(
+                                "abort",
+                                self.context.void_type().fn_type(&[], false),
+                                None,
+                            )
+                        });
+                        self.builder
+                            .build_call(abort, &[], "")
+                            .map_err(|e| CodegenError::with_span(e.to_string(), index.span))?;
+                        self.builder
+                            .build_unreachable()
+                            .map_err(|e| CodegenError::with_span(e.to_string(), index.span))?;
+                        self.builder.position_at_end(ready);
                         let array_llvm_ty = self.lower_basic_type(&object_ty)?;
                         let zero = i64_ty.const_zero();
                         let element_ptr = unsafe {

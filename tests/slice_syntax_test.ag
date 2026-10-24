@@ -17,6 +17,13 @@ i32 main() {
 
         bool use_first = true;
         assert_eq_i64(20, arr[use_first ? 1 : 3], "ternary expression is an array index");
+        i8 narrow = 1;
+        u128 wide = 2;
+        assert_eq_i64(20, arr[narrow], "valid narrow signed array index");
+        assert_eq_i64(30, arr[wide], "valid wide unsigned array index");
+        i32* middle = &arr[1];
+        assert_eq_i64(10, middle[-1], "raw pointer indexing remains unchecked");
+        if (arr[narrow] != 20 || arr[wide] != 30 || middle[-1] != 10) { return 1; }
 
         u32 high_u32 = (u32)0x80000000;
         Slice<i32> high_u32_slice = arr[high_u32:];
