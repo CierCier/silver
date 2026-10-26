@@ -320,7 +320,9 @@ SymbolTarget resolve_occurrence(Document* doc, i64 occurrence) {
         if (separator != (SyntaxNode*)0 && separator.token_kind == TokenKind.Dot) {
             SyntaxNode* receiver = binding_previous_sibling(separator);
             if (receiver == (SyntaxNode*)0 || !node_is_identifier(receiver)) { return target; }
-            owner = symbol_receiver_owner(visible_name(doc, receiver.text, receiver.span.start));
+            i64 receiver_occurrence = doc.analysis.occurrence_at(receiver.span.start);
+            if (receiver_occurrence < 0 || receiver_occurrence >= occurrence) { return target; }
+            owner = symbol_receiver_owner(resolve_occurrence(doc, receiver_occurrence));
             if (owner.len() == 0) { return target; }
             i64 local = ide_name_head(&doc.analysis, selected.node.text);
             while (local >= 0) {

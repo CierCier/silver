@@ -141,7 +141,10 @@ free-function overloads do not resolve to an arbitrary declaration. Rename rejec
 non-ASCII identifiers, keywords, primitive types, and detected binding conflicts.
 Module paths are excluded from symbol references and rename edits. Dot-qualified
 members resolve through visible type declarations and aliases in their defining
-documents, using the same receiver lookup as completion.
+documents, using the same receiver lookup as completion. Chained receivers follow
+the preceding member's declaration, so an unrelated local with the same name
+cannot redirect navigation or rename. Original names in import selections resolve
+to imported declarations; aliases keep their independent rename identities.
 Conflict checking is conservative and can reject otherwise valid renames.
 Match payload and bare bindings are limited to their own arm, including guards
 and nested matches. Constructor arguments in arm values remain references.

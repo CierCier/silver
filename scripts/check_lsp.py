@@ -2173,6 +2173,63 @@ class NativeLsp(unittest.TestCase):
             self.assertIsNone(response["id"])
 
 
+    def test_import_selection_originals_do_not_bind_to_local_names(self):
+        module = "i32 answer(i32 value) { return value; }\ni32 extra() { return 2; }\n"
+        self.open(module, "helper.ag")
+        text = ('import helper { answer as calculate, extra };\n'
+                'i32 answer() { return 1; }\ni32 extra() { return 3; }\n'
+                'i32 main() { return answer() + extra() + calculate(4); }\n')
+        uri = self.open(text)
+        for name in ("answer", "extra"):
+            with self.subTest(name=name):
+                local = text.index("i32 " + name)
+                target = self.at(uri, text, name, local)
+                ranges = [location(text, name, local), location(text, name, text.index("return answer"))]
+                self.assertEqual(self.session.result("textDocument/references", {
+                    **target, "context": {"includeDeclaration": True}}),
+                    [{"uri": uri, "range": span} for span in ranges])
+                renamed = self.session.result("textDocument/rename", {**target, "newName": "local_" + name})
+                self.assertEqual(renamed, {"changes": {uri: [
+                    {"range": span, "newText": "local_" + name} for span in ranges]}})
+                self.assertEqual(self.session.result("textDocument/definition", self.at(uri, text, name)), {
+                    "uri": (self.root / "helper.ag").as_uri(), "range": location(module, name)})
+        alias = self.at(uri, text, "calculate", text.index("return answer"))
+        self.assertEqual(self.session.result("textDocument/rename", {**alias, "newName": "compute"}), {
+            "changes": {uri: [{"range": location(text, "calculate", start), "newText": "compute"}
+                              for start in (0, text.index("return answer"))]}})
+
+    def test_chained_members_resolve_receiver_identity_despite_shadowing(self):
+        model = ('struct Leaf { i32 real; }\nstruct Decoy { i32 real; i32 missing; }\n'
+                 'struct Branch { Leaf child; }\nstruct Root { Branch branch; }\n')
+        calls = ('i32 read(Root root, Decoy child, Decoy branch) {\n'
+                 ' return root.branch.child.real + root.branch.child.missing + child.real;\n}\n')
+        for imported in (False, True):
+            model_uri = self.open(model, "chain_model.ag") if imported else None
+            text = ("import chain_model;\n" if imported else model) + calls
+            uri = self.open(text, "chain-imported.ag" if imported else "chain-local.ag")
+            declaration_uri = model_uri or uri
+            declaration_text = model if imported else text
+            at = text.index("real", text.index("return root"))
+            target = {"textDocument": {"uri": uri}, "position": position(text, at)}
+            with self.subTest(imported=imported):
+                self.assertEqual(self.session.result("textDocument/definition", target), {
+                    "uri": declaration_uri, "range": location(declaration_text, "real")})
+                missing = self.at(uri, text, "missing", text.index("return root"))
+                self.assertIsNone(self.session.result("textDocument/definition", missing))
+                self.assertIsNone(self.session.result("textDocument/prepareRename", missing))
+                self.assertEqual(self.session.result("textDocument/references", {
+                    **missing, "context": {"includeDeclaration": True}}), [])
+                renamed = self.session.result("textDocument/rename", {**target, "newName": "actual"})
+                expected = {declaration_uri: [{"range": location(declaration_text, "real"), "newText": "actual"}]}
+                expected.setdefault(uri, []).append({"range": location(text, "real", at), "newText": "actual"})
+                self.assertEqual(renamed, {"changes": expected})
+                completion = self.session.result("textDocument/completion", target)["items"]
+                self.assertEqual({item["label"] for item in completion}, {"real"})
+            self.session.send("textDocument/didClose", {"textDocument": {"uri": uri}})
+            if imported:
+                self.session.send("textDocument/didClose", {"textDocument": {"uri": model_uri}})
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--server", type=Path, required=True)

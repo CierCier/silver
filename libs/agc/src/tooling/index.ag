@@ -493,12 +493,12 @@ void ide_members(IdeIndex* index, SyntaxNode* item, str owner, bool methods, Sym
     }
 }
 
-void ide_collect_nodes(IdeIndex* index, SyntaxNode* node) {
+void ide_collect_nodes(IdeIndex* index, SyntaxNode* node, bool import_selection) {
     if (node == (SyntaxNode*)0) { return; }
     if (node.kind == NodeKind.Import) {
         SyntaxNode* selection = node.first_child;
         while (selection != (SyntaxNode*)0 && selection.kind != NodeKind.Block) { selection = selection.next_sibling; }
-        ide_collect_nodes(index, selection);
+        ide_collect_nodes(index, selection, true);
         return;
     }
     if (node_is_identifier(node) || node.token_kind == TokenKind.SelfType) {
@@ -510,12 +510,14 @@ void ide_collect_nodes(IdeIndex* index, SyntaxNode* node) {
         SyntaxNode* previous = binding_previous_sibling(node);
         occurrence.member = previous != (SyntaxNode*)0
             && (previous.token_kind == TokenKind.Dot || previous.token_kind == TokenKind.DoubleColon);
-        if (!occurrence.definition && !occurrence.member) {
+        if (!occurrence.definition && !occurrence.member && !import_selection) {
             occurrence.symbol = ide_resolve_local(index, node.text, node.span.start);
         }
         if (occurrence.member) {
             SyntaxNode* receiver = binding_previous_sibling(previous);
-            if (receiver != (SyntaxNode*)0 && node_is_identifier(receiver)) {
+            SyntaxNode* outer = receiver == (SyntaxNode*)0 ? (SyntaxNode*)0 : binding_previous_sibling(receiver);
+            if (receiver != (SyntaxNode*)0 && node_is_identifier(receiver)
+                && (outer == (SyntaxNode*)0 || (outer.token_kind != TokenKind.Dot && outer.token_kind != TokenKind.DoubleColon))) {
                 if (previous.token_kind == TokenKind.DoubleColon) {
                     occurrence.owner = String.from_str(receiver.text);
                 } else {
@@ -541,7 +543,7 @@ void ide_collect_nodes(IdeIndex* index, SyntaxNode* node) {
     }
     SyntaxNode* child = node.first_child;
     while (child != (SyntaxNode*)0) {
-        ide_collect_nodes(index, child);
+        ide_collect_nodes(index, child, import_selection);
         child = child.next_sibling;
     }
 }
@@ -647,5 +649,5 @@ void ide_collect(IdeIndex* index) {
         if (symbol.type_name.len() > 0) { symbol.type_owner = ide_owner_name(symbol.type_name.to_str()); }
         i += 1;
     }
-    ide_collect_nodes(index, index.tree.root);
+    ide_collect_nodes(index, index.tree.root, false);
 }
