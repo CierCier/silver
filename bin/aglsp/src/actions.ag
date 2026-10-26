@@ -1,0 +1,152 @@
+import document;
+import params;
+import json_rpc;
+import capabilities;
+import transport;
+import tooling.format;
+
+void action_import_closure(Document* doc, Vec<Document*>* documents) {
+    documents.push(doc); i64 i = 0;
+    while (i < documents.len()) {
+        Document* source = documents.get(i); i64 dependency = 0;
+        while (dependency < source.dependencies.len()) {
+            Document* next = source.dependencies.get(dependency); i64 existing = 0;
+            while (existing < documents.len() && documents.get(existing) != next) { existing += 1; }
+            if (existing == documents.len()) { documents.push(next); }
+            dependency += 1;
+        }
+        i += 1;
+    }
+}
+
+bool action_import_conflicts(Document* active, Document* added, PendingMessage* pending) {
+    Vec<Document*> existing = Vec<Document*>.new(); action_import_closure(active, &existing);
+    Vec<Document*> introduced = Vec<Document*>.new(); action_import_closure(added, &introduced);
+    i64 i = 0;
+    while (i < introduced.len()) {
+        Document* source = introduced.get(i); if (source == active) { return true; }
+        i64 old = 0; while (old < existing.len() && existing.get(old) != source) { old += 1; }
+        if (old < existing.len()) { i += 1; continue; }
+        i64 symbol = 0;
+        while (symbol < source.analysis.symbols.len()) {
+            if (request_cancelled(pending)) { return true; }
+            IdeSymbol* candidate = source.analysis.symbols.get_ptr(symbol);
+            if (!candidate.local && !candidate.is_private) {
+                i64 previous = 0;
+                // Imported declarations are non-restrictive, including named selections.
+                while (previous < existing.len() + i) {
+                    Document* other = previous < existing.len() ? existing.get(previous) : introduced.get(previous - existing.len());
+                    if (other != source) {
+                        i64 name = ide_name_head(&other.analysis, candidate.name.to_str());
+                        while (name >= 0) {
+                            IdeSymbol* found = other.analysis.symbols.get_ptr(name);
+                            if (!found.local && (other == active || !found.is_private) && found.owner.equals(candidate.owner.to_str())) { return true; }
+                            name = other.analysis.next_name.get(name);
+                        }
+                    }
+                    previous += 1;
+                }
+            }
+            symbol += 1;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+String action_module_from_base(str base, str path) {
+    String directory = path_normalize(base); String file = String.from_str(path);
+    if (!directory.ends_with("/")) { directory.push('/'); }
+    if (!file.starts_with(directory.to_str()) || !file.ends_with(".ag")) { return String.new(); }
+    String relative = file.substr(directory.len(), file.len() - directory.len() - 3);
+    String name = relative.replace("/", ".");
+    TokenStream tokens = TokenStream.new(); DiagnosticBag errors = DiagnosticBag.new(); lex(name.clone(), &tokens, &errors);
+    if (!errors.is_empty() || tokens.len() < 2) { return String.new(); }
+    i64 i = 0;
+    while (i + 1 < tokens.len()) {
+        if (tokens.get(i).kind != (i % 2 == 0 ? TokenKind.Identifier : TokenKind.Dot)) { return String.new(); }
+        i += 1;
+    }
+    if (i % 2 == 0) { return String.new(); }
+    return move name;
+}
+
+String action_module_name(DocumentStore* store, Document* active, Document* target) {
+    String parent = path_dirname(active.path.to_str()); i64 i = -1;
+    while (i < store.include_dirs.len()) {
+        str base = i < 0 ? parent.to_str() : store.include_dirs.get_ptr(i).to_str();
+        String name = action_module_from_base(base, target.path.to_str());
+        if (name.len() > 0) {
+            String resolved = resolve_document_import(store, active, name.to_str());
+            String normalized = path_normalize(resolved.to_str());
+            if (resolved.len() > 0 && normalized.equals(target.path.to_str())) { return move name; }
+        }
+        i += 1;
+    }
+    return String.new();
+}
+
+bool action_quickfix_context(str json, bool* allowed) {
+    String diagnostics = json_field(json, "diagnostics"); JsonReader reader = JsonReader.new(diagnostics.to_str());
+    if (!reader.begin_array()) { return false; }
+    String only = json_field(json, "only"); *allowed = only.len() == 0;
+    if (only.len() == 0) { return true; }
+    reader = JsonReader.new(only.to_str()); if (!reader.begin_array()) { return false; }
+    reader.skip_whitespace();
+    while (!reader.failed && reader.index < reader.length && reader.input[reader.index] != ']') {
+        String kind = reader.read_string(); if (reader.failed) { return false; }
+        if (kind.equals("") || kind.equals("quickfix")) { *allowed = true; }
+        if (!skip_comma_if_present(&reader)) { break; } reader.skip_whitespace();
+    }
+    return reader.end_array() && !reader.failed;
+}
+
+void append_import_action(String* out, Document* active, str module_name, str name, bool versioned) {
+    out.push_str("{\"title\":\"Import "); json_escape(name, out); out.push_str(" from "); json_escape(module_name, out);
+    out.push_str("\",\"kind\":\"quickfix\",\"edit\":");
+    out.push_str(versioned ? "{\"documentChanges\":[{\"textDocument\":{\"uri\":\"" : "{\"changes\":{\"");
+    json_escape(active.uri.to_str(), out);
+    if (versioned) {
+        out.push_str("\",\"version\":"); if (active.open) { out.push_display(&active.version); } else { out.push_str("null"); }
+        out.push_str("},\"edits\":[");
+    } else { out.push_str("\":["); }
+    String inserted = String.from_str("import "); inserted.push_str(module_name); inserted.push(';');
+    inserted.push_str(source_newline(active.text.to_str(), &active.analysis.tokens));
+    out.push_str("{\"range\":"); active.append_range(out, Span.synthetic());
+    out.push_str(",\"newText\":\""); json_escape(inserted.to_str(), out); out.push_str("\"}");
+    out.push_str(versioned ? "]}]}" : "]}}"); out.push('}');
+}
+
+String compute_import_actions(DocumentStore* store, Document* active, Span selection, bool allowed, ClientOptions* client, PendingMessage* pending) {
+    Vec<Document*> documents = store.query_documents(active);
+    String out = String.from_str("["); bool comma = false; Vec<String> offered = Vec<String>.new(); i64 occurrence = 0;
+    while (allowed && occurrence < active.analysis.occurrences.len() && !request_cancelled(pending)) {
+        IdeOccurrence* selected = active.analysis.occurrences.get_ptr(occurrence); Span span = selected.node.span;
+        bool intersects = span.start <= selection.end && span.end >= selection.start;
+        if (!selected.definition && !selected.member && intersects && resolve_occurrence(active, occurrence).symbol == -1) {
+            i64 doc = 0;
+            while (doc < documents.len() && !request_cancelled(pending)) {
+                Document* candidate = documents.get(doc);
+                if (candidate != active && candidate.path.len() > 0 && candidate.analysis.diagnostics.is_empty()) {
+                    Vec<Document*> visited = Vec<Document*>.new(); SymbolTarget target; target.document = candidate; target.symbol = -1;
+                    find_imported_symbol(candidate, selected.node.text, "", &visited, &target);
+                    if (target.symbol >= 0 && target.document == candidate
+                        && candidate.analysis.symbols.get_ptr(target.symbol).kind != IdeSymbolKind.ImportAlias) {
+                        String module_name = action_module_name(store, active, candidate);
+                        if (module_name.len() > 0) {
+                            String key = module_name.clone(); key.push(':'); key.push_str(selected.node.text); i64 existing = 0;
+                            while (existing < offered.len() && !offered.get_ptr(existing).equals(key.to_str())) { existing += 1; }
+                            if (existing == offered.len() && !action_import_conflicts(active, candidate, pending)) {
+                                offered.push(move key); if (comma) { out.push(','); } comma = true;
+                                append_import_action(&out, active, module_name.to_str(), selected.node.text, client.versioned_edits);
+                            }
+                        }
+                    }
+                }
+                doc += 1;
+            }
+        }
+        occurrence += 1;
+    }
+    out.push(']'); return move out;
+}

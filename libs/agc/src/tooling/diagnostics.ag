@@ -1,0 +1,165 @@
+// Synchronous diagnostics over borrowed editor snapshots. Only this scratch CST
+// is rewritten; token text remains borrowed until the check returns.
+import frontend.hir;
+import frontend.names;
+import frontend.borrow;
+import frontend.send;
+import frontend.ownership;
+import frontend.lint;
+import frontend.lambdas;
+
+struct DiagnosticTree {
+    NodePool pool;
+    SyntaxTree tree;
+}
+
+impl DiagnosticTree {
+    DiagnosticTree new(SyntaxTree* source) {
+        DiagnosticTree scratch;
+        scratch.pool = NodePool.new();
+        scratch.tree.root = lambda_clone_node(&scratch.pool, source.root, false);
+        return move scratch;
+    }
+}
+
+impl Drop for DiagnosticTree {
+    void drop(*self) { self.pool.destroy(); }
+}
+
+SyntaxNode* diagnostic_clone_signature(NodePool* pool, SyntaxNode* node,
+                                       i64 file, bool strip_bodies) {
+    Span span = node.span; span.file = file;
+    SyntaxNode* copy = pool.create(node.kind, span, node.text);
+    copy.token_kind = node.token_kind;
+    // Method lookup requires a Block even when the executable body is absent.
+    if (node.kind == NodeKind.Block && strip_bodies) { return copy; }
+    bool nested_bodies = strip_bodies || (node.kind == NodeKind.Block
+        && node.parent != (SyntaxNode*)0
+        && (node.parent.kind == NodeKind.Impl || node.parent.kind == NodeKind.Trait
+            || node.parent.kind == NodeKind.Extern));
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (node.kind == NodeKind.Global && child.token_kind == TokenKind.Assign) { break; }
+        SyntaxNode* attribute = child.next_sibling;
+        // Active items were selected in the source snapshot. Rechecking a
+        // malformed foreign cfg must not stop local closure conversion.
+        if (cfg_node_text(child, "#") && attribute != (SyntaxNode*)0
+            && attribute.kind == NodeKind.Bracket
+            && cfg_node_text(attribute.first_child, "cfg")) {
+            child = attribute.next_sibling;
+            continue;
+        }
+        append_child(copy, diagnostic_clone_signature(pool, child, file, nested_bodies));
+        child = child.next_sibling;
+    }
+    return copy;
+}
+
+void diagnostic_register_types(SymbolTable* symbols, SyntaxTree* tree, CfgSet* cfg) {
+    Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
+    cfg_collect_items(tree.root, cfg, (DiagnosticBag*)0, &items);
+    i64 i = 0;
+    while (i < items.len()) {
+        SyntaxNode* item = items.get(i);
+        if (item.kind == NodeKind.Struct) { module_register_source_struct(&symbols.types, item); }
+        else if (item.kind == NodeKind.Enum) { module_register_source_enum(&symbols.types, tree.root, item); }
+        else if (item.kind == NodeKind.Impl) {
+            module_register_source_drop_impl(&symbols.types, item);
+            module_register_source_impl(&symbols.types, item);
+        }
+        i += 1;
+    }
+}
+
+void diagnostic_add_snapshot(DiagnosticTree* scratch, SyntaxTree* dependency,
+                             i64 file, SymbolTable* symbols, CfgSet* cfg) {
+    Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
+    cfg_collect_items(dependency.root, cfg, (DiagnosticBag*)0, &items);
+    SyntaxTree signatures;
+    signatures.root = scratch.pool.create(NodeKind.Program, Span.synthetic(), "");
+    i64 i = 0;
+    while (i < items.len()) {
+        SyntaxNode* item = items.get(i);
+        if (item.kind == NodeKind.Function || item.kind == NodeKind.Global
+            || item.kind == NodeKind.Struct || item.kind == NodeKind.Enum
+            || item.kind == NodeKind.Trait || item.kind == NodeKind.Impl
+            || item.kind == NodeKind.TypeAlias || item.kind == NodeKind.Extern
+            || item.kind == NodeKind.Import) {
+            append_child(signatures.root, diagnostic_clone_signature(&scratch.pool, item,
+                file, item.kind == NodeKind.Function));
+        }
+        i += 1;
+    }
+    DiagnosticBag ignored = DiagnosticBag.new();
+    collect_symbols(symbols, &ignored, &signatures, cfg);
+    SyntaxNode* item = signatures.root.first_child;
+    while (item != (SyntaxNode*)0) {
+        SyntaxNode* next = item.next_sibling;
+        if (item.kind != NodeKind.Import) { append_child(scratch.tree.root, item); }
+        item = next;
+    }
+    signatures.root.first_child = (SyntaxNode*)0;
+    signatures.root.last_child = (SyntaxNode*)0;
+}
+
+void diagnostic_append_local(DiagnosticBag* output, DiagnosticBag* checked) {
+    i64 i = 0;
+    while (i < checked.len()) {
+        Diagnostic* item = checked.get(i);
+        if (item.span.file <= 1) {
+            output.push(item.span, item.severity, item.message.clone());
+            if (item.has_note && item.note_span.file <= 1) {
+                Diagnostic* copy = output.get(output.len() - 1);
+                copy.has_note = true; copy.note_span = item.note_span;
+                copy.note_message = item.note_message.clone();
+            }
+        }
+        i += 1;
+    }
+}
+
+// Dependencies are deduplicated source snapshots, including current overlays.
+// The returned bag owns its messages and retains no scratch nodes or token text.
+DiagnosticBag check_snapshot_diagnostics(SyntaxTree* source, Vec<SyntaxTree*>* dependencies,
+                                         CfgSet* cfg, str path, Vec<String>* include_dirs) {
+    DiagnosticBag diagnostics = DiagnosticBag.new();
+    DiagnosticTree scratch = DiagnosticTree.new(source);
+    check_hir(&scratch.tree, cfg, &diagnostics);
+    if (!diagnostics.is_empty()) { return move diagnostics; }
+    SymbolTable symbols = SymbolTable.new();
+    collect_symbols(&symbols, &diagnostics, &scratch.tree, cfg);
+    i64 i = 0;
+    while (i < dependencies.len()) {
+        // Lexer snapshots all start at file 1. Reserve it for local subjects.
+        diagnostic_add_snapshot(&scratch, dependencies.get(i), i + 2, &symbols, cfg);
+        i += 1;
+    }
+    diagnostic_register_types(&symbols, &scratch.tree, cfg);
+    ImportedDeclarations imported = ImportedDeclarations.new();
+    imported.loaded = true;
+    if (diagnostics.is_empty()) { lower_lambdas(&scratch.tree, &scratch.pool, &symbols, &diagnostics, cfg); }
+    if (diagnostics.is_empty()) {
+        resolve_names(&symbols, &diagnostics, &scratch.tree, path, cfg, include_dirs, &imported);
+    }
+    if (diagnostics.is_empty()) {
+        // Foreign declaration errors belong to their own document and must not
+        // prevent checking local bodies against the available signatures.
+        DiagnosticBag declarations = DiagnosticBag.new();
+        check_declared_types(&symbols, &scratch.tree, cfg, &declarations);
+        diagnostic_append_local(&diagnostics, &declarations);
+    }
+    if (diagnostics.is_empty()) { check_borrows(&scratch.tree, &symbols, &diagnostics, cfg); }
+    if (diagnostics.is_empty()) { check_send(&scratch.tree, &diagnostics, cfg); }
+    if (diagnostics.is_empty()) { check_ownership(&scratch.tree, &symbols, &diagnostics, cfg); }
+    if (diagnostics.is_empty()) {
+        AstPool expressions = AstPool.new();
+        typecheck_expressions_scoped(&expressions, &symbols, &scratch.tree, cfg, &diagnostics, 1);
+    }
+    if (diagnostics.is_empty()) {
+        LintConfig lint = lint_config_default();
+        check_lints_for_file(&scratch.tree, cfg, 1, &diagnostics, &lint);
+    }
+    DiagnosticBag local = DiagnosticBag.new();
+    diagnostic_append_local(&local, &diagnostics);
+    return move local;
+}

@@ -1,0 +1,50 @@
+import capabilities;
+import json_rpc;
+
+enum ClientRequestKind { DiagnosticRefresh; SemanticRefresh; }
+
+struct ClientRequest { String id; ClientRequestKind kind; bool repeat; }
+
+struct ClientRequests { Vec<ClientRequest> pending; i64 next_id; }
+
+impl ClientRequests {
+    ClientRequests new() {
+        ClientRequests requests; requests.pending = Vec<ClientRequest>.new(); requests.next_id = 0; return move requests;
+    }
+
+    void refresh(ClientRequests* self, ClientRequestKind kind) {
+        i64 i = 0;
+        while (i < self.pending.len()) {
+            ClientRequest* request = self.pending.get_ptr(i);
+            if (request.kind == kind) { request.repeat = true; return; } i += 1;
+        }
+        self.next_id += 1;
+        ClientRequest request; request.id = String.from_str("silver/client/"); request.id.push_display(&self.next_id);
+        request.kind = kind; request.repeat = false;
+        String out = String.from_str("{\"jsonrpc\":\"2.0\",\"id\":\""); json_escape(request.id.to_str(), &out);
+        out.push_str("\",\"method\":\""); out.push_str(kind == ClientRequestKind.DiagnosticRefresh ? "workspace/diagnostic/refresh" : "workspace/semanticTokens/refresh");
+        out.push_str("\"}"); self.pending.push(move request); send_raw_payload(out.to_str());
+    }
+
+    bool accept_response(ClientRequests* self, str body, ClientOptions* client) {
+        String method = json_field(body, "method"); String id = json_field(body, "id");
+        String result = json_field(body, "result"); String error = json_field(body, "error");
+        if (method.len() > 0 || id.len() == 0 || (result.len() == 0 && error.len() == 0)) { return false; }
+        String version = String.new(); String decoded_id = String.new();
+        if (!json_string(body, "jsonrpc", &version) || !version.equals("2.0") || !json_string(body, "id", &decoded_id)
+            || (result.len() > 0 && error.len() > 0)) { return true; }
+        i64 i = 0;
+        while (i < self.pending.len()) {
+            if (self.pending.get_ptr(i).id.equals(decoded_id.to_str())) {
+                ClientRequest completed = self.pending.take(i);
+                if (error.len() > 0) {
+                    if (completed.kind == ClientRequestKind.DiagnosticRefresh) { client.diagnostic_refresh = false; }
+                    else { client.semantic_refresh = false; }
+                } else if (completed.repeat) { self.refresh(completed.kind); }
+                break;
+            }
+            i += 1;
+        }
+        return true;
+    }
+}

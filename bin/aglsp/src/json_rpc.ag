@@ -7,6 +7,8 @@ import std.mem.alloc;
 import std.mem.memory;
 import std.mem.vec;
 import std.string;
+import std.atomic;
+import std.sys.raw.poll;
 
 struct JsonRpcMessage {
     bool has_id;
@@ -31,7 +33,7 @@ void json_escape(str input, String* out) {
     i64 len = strlen(input);
     i64 i = 0;
     while (i < len) {
-        char ch = input[i];
+        u8 ch = (u8)input[i];
         if (ch == '"') {
             out.push_str("\\\"");
         } else if (ch == '\\') {
@@ -42,6 +44,11 @@ void json_escape(str input, String* out) {
             out.push_str("\\r");
         } else if (ch == '\t') {
             out.push_str("\\t");
+        } else if (ch < 32) {
+            str digits = "0123456789abcdef";
+            out.push_str("\\u00");
+            out.push((u8)digits[ch / 16]);
+            out.push((u8)digits[ch % 16]);
         } else {
             out.push(ch);
         }
@@ -100,6 +107,8 @@ bool parse_rpc_request(str body, JsonRpcMessage* msg) {
     msg.method.clear();
     msg.params_json.clear();
     msg.id_raw.clear();
+    bool valid_version = false;
+    bool saw_version = false; bool saw_method = false; bool saw_params = false;
 
     JsonReader r = JsonReader.new(body);
     if (!r.begin_object()) {
@@ -121,22 +130,35 @@ bool parse_rpc_request(str body, JsonRpcMessage* msg) {
             break;
         }
 
-        if (key.equals("method")) {
+        if (key.equals("jsonrpc")) {
+            if (saw_version) { return false; } saw_version = true;
+            String version = r.read_string();
+            valid_version = version.equals("2.0");
+        } else if (key.equals("method")) {
+            if (saw_method) { return false; } saw_method = true;
             String m = r.read_string();
+            if (m.len() > 0 && !m.is_valid_utf8()) { return false; }
             msg.method.push_str(m.to_str());
             m.drop();
         } else if (key.equals("id")) {
+            if (msg.has_id) { return false; }
             r.skip_whitespace();
             i64 id_start = r.index;
-            if (r.skip_value()) {
-                msg.has_id = true;
-                i64 id_end = r.index;
-                while (id_start < id_end && id_start < r.length) {
-                    msg.id_raw.push(body[id_start]);
-                    id_start += 1;
-                }
+            if (id_start >= r.length) { return false; }
+            if (body[id_start] == '"') {
+                String id = r.read_string();
+                if (r.failed || (id.len() > 0 && !id.is_valid_utf8())) { return false; }
+            } else {
+                i64 id = 0;
+                if (!r.read_i64(&id) || id < -2147483648 || id > 2147483647) { return false; }
+            }
+            msg.has_id = true;
+            i64 id_end = r.index;
+            while (id_start < id_end) {
+                msg.id_raw.push(body[id_start]); id_start += 1;
             }
         } else if (key.equals("params")) {
+            if (saw_params) { return false; } saw_params = true;
             r.skip_whitespace();
             i64 p_start = r.index;
             r.skip_value();
@@ -150,16 +172,33 @@ bool parse_rpc_request(str body, JsonRpcMessage* msg) {
             r.skip_value();
         }
         key.drop();
-        if (!r.comma()) { break; }
+        r.skip_whitespace();
+        if (r.index >= r.length || body[r.index] != ',') { break; }
+        r.index += 1;
     }
-    r.end_object();
-    return msg.method.len() > 0;
+    if (!r.end_object() || r.failed) { return false; }
+    r.skip_whitespace();
+    return valid_version && r.index == r.length && msg.method.len() > 0 && msg.method.len() == strlen(msg.method.to_str());
 }
 
-bool read_header_line(ByteStream* stream, String* line) {
+struct RpcPollFd { i32 fd; i16 events; i16 returned; }
+
+i32 rpc_read_byte(ByteStream* stream, i32* stopping) {
+    while (stream.pos >= stream.len) {
+        if (__atomic_load_i32(stopping, ATOMIC_ACQUIRE) != 0) { return -1; }
+        RpcPollFd descriptor; descriptor.fd = (i32)stream.file.fd;
+        descriptor.events = 1; descriptor.returned = 0;
+        i64 ready = sys_poll((i64)&descriptor, 1, 50);
+        if (ready > 0) { break; }
+        if (ready < 0 && ready != -4) { return -1; }
+    }
+    return stream.read_byte();
+}
+
+bool read_header_line(ByteStream* stream, String* line, i32* stopping) {
     line.clear();
     while (true) {
-        i32 b = stream.read_byte();
+        i32 b = rpc_read_byte(stream, stopping);
         if (b < 0) {
             return false;
         }
@@ -169,17 +208,18 @@ bool read_header_line(ByteStream* stream, String* line) {
         if (b != 13) { // skip \r
             line.push((char)b);
         }
+        if (line.len() > 8192) { return false; }
     }
     return true;
 }
 
-bool read_rpc_message(ByteStream* stream, String* body_out) {
+bool read_rpc_message(ByteStream* stream, String* body_out, i32* stopping) {
     body_out.clear();
     i64 content_length = -1;
     String line = String.new();
 
     while (true) {
-        if (!read_header_line(stream, &line)) {
+        if (!read_header_line(stream, &line, stopping)) {
             line.drop();
             return false;
         }
@@ -187,17 +227,24 @@ bool read_rpc_message(ByteStream* stream, String* body_out) {
             // End of headers (\r\n\r\n reached)
             break;
         }
-        if (line.starts_with("Content-Length:")) {
+        String lower = line.to_lowercase();
+        if (lower.starts_with("content-length:")) {
+            if (content_length >= 0) { return false; }
             str s = line.to_str();
             i64 idx = 15;
             while (idx < line.len() && (s[idx] == ' ' || s[idx] == '\t')) {
                 idx += 1;
             }
             i64 val = 0;
+            i64 digit_start = idx;
             while (idx < line.len() && s[idx] >= '0' && s[idx] <= '9') {
                 val = val * 10 + (i64)(s[idx] - '0');
+                if (val > 16777216) { return false; }
                 idx += 1;
             }
+            if (idx == digit_start) { return false; }
+            while (idx < line.len() && (s[idx] == ' ' || s[idx] == '\t')) { idx += 1; }
+            if (idx != line.len()) { return false; }
             content_length = val;
         }
     }
@@ -210,7 +257,7 @@ bool read_rpc_message(ByteStream* stream, String* body_out) {
     u8* buf = alloc<u8>(content_length + 1);
     i64 total_read = 0;
     while (total_read < content_length) {
-        i32 ch = stream.read_byte();
+        i32 ch = rpc_read_byte(stream, stopping);
         if (ch < 0) {
             free(buf);
             return false;
@@ -220,7 +267,7 @@ bool read_rpc_message(ByteStream* stream, String* body_out) {
     }
     buf[content_length] = (u8)0;
 
-    body_out.push_str((str)buf);
+    body_out.push_bytes(buf, content_length);
     free(buf);
     return true;
 }

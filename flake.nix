@@ -24,7 +24,7 @@
             config = { };
             overlays = [ ];
           };
-          silver = pkgs.callPackage ./package.nix { };
+          silver = pkgs.callPackage ./nix/package.nix { };
         in
         {
           inherit silver;
@@ -72,36 +72,12 @@
           silver = self.packages.${system}.silver;
         in
         {
-          default = pkgs.mkShell {
-            inputsFrom = [ silver ];
-            packages = builtins.attrValues {
-              inherit (pkgs)
-                cargo
-                rustc
-                rustfmt
-                clippy
-                rust-analyzer
-                gdb
-                openssl
-                nodejs
-                go
-                ;
-              inherit (pkgs.llvmPackages_22)
-                lld
-                ;
-            };
-
-            LLVM_SYS_221_PREFIX = "${pkgs.llvmPackages_22.llvm.dev}";
-            LIBCLANG_PATH = "${pkgs.llvmPackages_22.libclang.lib}/lib";
-            OPENSSL_LIB_DIR = "${pkgs.lib.getLib pkgs.openssl}/lib";
-            OPENSSL_DIR = "${pkgs.openssl.dev}";
-            SILVER_SYSROOT = builtins.toString ./.;
-          };
+          default = import ./nix/dev-shell.nix { inherit pkgs silver; };
         }
       );
 
       overlays.default = final: prev: {
-        silver = final.callPackage ./package.nix { };
+        silver = final.callPackage ./nix/package.nix { };
       };
     };
 }

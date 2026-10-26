@@ -1,89 +1,169 @@
-// bin/aglsp/src/diagnostics.ag — Semantic diagnostics publisher for open LSP buffers.
-import std.mem.vec;
-import std.string;
-import agc;
+import document;
 import json_rpc;
+import positions;
+import tooling.diagnostics;
+import capabilities;
+import transport;
 
 void publish_empty_diagnostics(str uri) {
-    String params = String.from_str("{\"uri\":\"");
-    json_escape(uri, &params);
-    params.push_str("\",\"diagnostics\":[]}");
-    send_notification("textDocument/publishDiagnostics", params.to_str());
-    params.drop();
+    String out = String.from_str("{\"uri\":\""); json_escape(uri, &out);
+    out.push_str("\",\"diagnostics\":[]}"); send_notification("textDocument/publishDiagnostics", out.to_str());
 }
 
-void publish_file_diagnostics(str uri, str text) {
-    TokenStream stream = TokenStream.new();
-    DiagnosticBag diagnostics = DiagnosticBag.new();
-    String source = String.from_str(text);
-    lex(move source, &stream, &diagnostics);
+void diagnostic_dependencies(Document* doc, Vec<SyntaxTree*>* trees) {
+    SyntaxTree* tree = &doc.analysis.tree;
+    i64 i = 0;
+    while (i < trees.len()) { if (trees.get(i) == tree) { return; } i += 1; }
+    trees.push(tree);
+    i = 0;
+    while (i < doc.dependencies.len()) { diagnostic_dependencies(doc.dependencies.get(i), trees); i += 1; }
+}
 
+void update_file_diagnostics(Document* doc, DocumentStore* store, ClientOptions* client) {
+    if (!doc.diagnostics_dirty) { return; }
+    DiagnosticBag semantic = DiagnosticBag.new();
+    DiagnosticBag* diagnostics = &doc.analysis.diagnostics;
     if (diagnostics.is_empty()) {
-        NodePool pool = NodePool.new();
-        SyntaxTree tree;
-        parse(&stream, &diagnostics, &pool, &tree);
-        if (diagnostics.is_empty()) {
-            CfgSet cfg = linux_defaults();
-            check_hir(&tree, &cfg, &diagnostics);
-            if (diagnostics.is_empty()) {
-                SymbolTable symbols = SymbolTable.new();
-                collect_symbols(&symbols, &diagnostics, &tree, &cfg);
-                check_declared_types(&symbols, &tree, &cfg, &diagnostics);
-                check_borrows(&tree, &symbols, &diagnostics, &cfg);
-                check_ownership(&tree, &symbols, &diagnostics, &cfg);
+        CfgSet cfg = linux_defaults();
+        Vec<SyntaxTree*> trees = Vec<SyntaxTree*>.new();
+        // Seed the visited set with the local snapshot to break import cycles.
+        trees.push(&doc.analysis.tree);
+        i64 dependency = 0;
+        while (dependency < doc.dependencies.len()) {
+            diagnostic_dependencies(doc.dependencies.get(dependency), &trees); dependency += 1;
+        }
+        trees.take(0);
+        semantic = check_snapshot_diagnostics(&doc.analysis.tree, &trees, &cfg,
+                                             doc.path.to_str(), &store.include_dirs);
+        diagnostics = &semantic;
+        if (doc.path.len() > 0) {
+            i64 i = 0;
+            while (i < doc.analysis.imports.len()) {
+                String* name = doc.analysis.imports.get_ptr(i);
+                String resolved = resolve_document_import(store, doc, name.to_str());
+                if (resolved.len() == 0) { diagnostics.error(Span.synthetic(), unresolved_import(name.to_str())); }
+                i += 1;
             }
         }
-        pool.destroy();
     }
-
-    String params = String.from_str("{\"uri\":\"");
-    json_escape(uri, &params);
-    params.push_str("\",\"diagnostics\":[");
-
+    String out = String.from_str("[");
     i64 i = 0;
     while (i < diagnostics.len()) {
-        Diagnostic* d = diagnostics.get(i);
-        if (i > 0) {
-            params.push(',');
+        Diagnostic* diagnostic = diagnostics.get(i);
+        if (i > 0) { out.push(','); }
+        out.push_str("{\"range\":"); doc.append_range(&out, diagnostic.span);
+        i64 severity = diagnostic.severity == Severity.Warning ? 2 : (diagnostic.severity == Severity.Note ? 3 : 1);
+        out.push_str(",\"severity\":"); out.push_display(&severity);
+        out.push_str(",\"source\":\"silver\",\"message\":\""); json_escape(diagnostic.message.to_str(), &out);
+        if (diagnostic.has_note && !client.related_diagnostics) { out.push_str("\\n"); json_escape(diagnostic.note_message.to_str(), &out); }
+        out.push('"');
+        if (diagnostic.has_note && client.related_diagnostics) {
+            out.push_str(",\"relatedInformation\":[{\"location\":{\"uri\":\""); json_escape(doc.uri.to_str(), &out);
+            out.push_str("\",\"range\":"); doc.append_range(&out, diagnostic.note_span);
+            out.push_str("},\"message\":\""); json_escape(diagnostic.note_message.to_str(), &out); out.push_str("\"}]");
         }
-        params.push_str("{\"range\":{\"start\":{\"line\":");
-        i64 start_line = d.span.start_line;
-        if (start_line > 0) { start_line -= 1; }
-        i64 start_col = d.span.start_col;
-        if (start_col > 0) { start_col -= 1; }
-        i64 end_line = d.span.end_line;
-        if (end_line > 0) { end_line -= 1; }
-        i64 end_col = d.span.end_col;
-        if (end_col > 0) { end_col -= 1; }
-
-        params.push_display(&start_line);
-
-        params.push_str(",\"character\":");
-        params.push_display(&start_col);
-
-        params.push_str("},\"end\":{\"line\":");
-        params.push_display(&end_line);
-
-        params.push_str(",\"character\":");
-        params.push_display(&end_col);
-
-        params.push_str("}},\"severity\":");
-        i64 sev = 1;
-        if (d.severity == Severity.Warning) {
-            sev = 2;
-        } else if (d.severity == Severity.Note) {
-            sev = 3;
-        }
-        params.push_display(&sev);
-
-        params.push_str(",\"message\":\"");
-        json_escape(d.message.to_str(), &params);
-        params.push_str("\"}");
-
+        out.push('}');
         i += 1;
     }
+    out.push(']');
+    doc.diagnostic_items = move out; doc.diagnostics_dirty = false; doc.diagnostic_revision += 1;
+}
 
-    params.push_str("]}");
-    send_notification("textDocument/publishDiagnostics", params.to_str());
-    params.drop();
+void publish_file_diagnostics(Document* doc, DocumentStore* store, ClientOptions* client) {
+    update_file_diagnostics(doc, store, client);
+    String out = String.from_str("{\"uri\":\""); json_escape(doc.uri.to_str(), &out);
+    out.push('"');
+    if (client.diagnostic_versions) { out.push_str(",\"version\":"); out.push_display(&doc.version); }
+    out.push_str(",\"diagnostics\":");
+    out.push_str(doc.diagnostic_items.to_str()); out.push('}');
+    send_notification("textDocument/publishDiagnostics", out.to_str());
+}
+
+void publish_open_diagnostics(DocumentStore* store, ClientOptions* client) {
+    i64 i = 0;
+    while (i < store.docs.len()) {
+        Document* doc = store.docs.get(i);
+        if (doc.open && doc.diagnostics_dirty) { publish_file_diagnostics(doc, store, client); }
+        i += 1;
+    }
+}
+
+String diagnostic_result_id(Document* doc) {
+    String id = doc.uri.clone(); id.push_str("#diagnostic/"); id.push_display(&doc.diagnostic_revision); return move id;
+}
+
+bool diagnostic_identifier(str params) {
+    String field = json_field(params, "identifier"); String id = String.new();
+    return field.len() == 0 || (json_string(params, "identifier", &id) && id.equals("silver"));
+}
+
+bool previous_diagnostic_result(str params, String* previous) {
+    String field = json_field(params, "previousResultId");
+    return field.len() == 0 || json_string(params, "previousResultId", previous);
+}
+
+void append_diagnostic_report(String* out, Document* doc, str previous, bool workspace) {
+    String id = diagnostic_result_id(doc); out.push('{');
+    if (workspace) {
+        out.push_str("\"uri\":\""); json_escape(doc.uri.to_str(), out); out.push_str("\",\"version\":");
+        if (doc.open) { out.push_display(&doc.version); } else { out.push_str("null"); } out.push(',');
+    }
+    bool unchanged = id.equals(previous);
+    out.push_str("\"kind\":\""); out.push_str(unchanged ? "unchanged" : "full"); out.push_str("\",\"resultId\":\"");
+    json_escape(id.to_str(), out); out.push('"');
+    if (!unchanged) { out.push_str(",\"items\":"); out.push_str(doc.diagnostic_items.to_str()); }
+    out.push('}');
+}
+
+String compute_document_diagnostics(Document* doc, DocumentStore* store, ClientOptions* client, str previous) {
+    update_file_diagnostics(doc, store, client); String out = String.new();
+    append_diagnostic_report(&out, doc, previous, false); return move out;
+}
+
+struct PreviousDiagnostic { String uri; String id; bool reported; }
+
+bool parse_previous_diagnostics(str params, Vec<PreviousDiagnostic>* previous) {
+    String values = json_field(params, "previousResultIds"); JsonReader reader = JsonReader.new(values.to_str());
+    if (!reader.begin_array()) { return false; } reader.skip_whitespace();
+    while (!reader.failed && reader.index < reader.length && reader.input[reader.index] != ']') {
+        i64 begin = reader.index;
+        if (!reader.skip_value()) { return false; }
+        String item = values.substr(begin, reader.index - begin); PreviousDiagnostic record;
+        record.uri = String.new(); record.id = String.new(); record.reported = false;
+        if (!json_string(item.to_str(), "uri", &record.uri) || !json_string(item.to_str(), "value", &record.id)) { return false; }
+        previous.push(move record);
+        if (!skip_comma_if_present(&reader)) { break; } reader.skip_whitespace();
+    }
+    return reader.end_array() && !reader.failed;
+}
+
+String compute_workspace_diagnostics(DocumentStore* store, ClientOptions* client,
+                                     Vec<PreviousDiagnostic>* previous, PendingMessage* pending) {
+    String out = String.from_str("{\"items\":["); bool first = true; i64 i = 0;
+    while (i < store.docs.len() && !request_cancelled(pending)) {
+        Document* doc = store.docs.get(i);
+        if (workspace_document(store, doc)) {
+            String id = String.new(); i64 p = 0;
+            while (p < previous.len()) {
+                PreviousDiagnostic* record = previous.get_ptr(p);
+                if (record.uri.equals(doc.uri.to_str())) { record.reported = true; id = record.id.clone(); }
+                p += 1;
+            }
+            update_file_diagnostics(doc, store, client);
+            if (!first) { out.push(','); } first = false;
+            append_diagnostic_report(&out, doc, id.to_str(), true);
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < previous.len() && !request_cancelled(pending)) {
+        PreviousDiagnostic* record = previous.get_ptr(i);
+        if (!record.reported) {
+            if (!first) { out.push(','); } first = false;
+            out.push_str("{\"uri\":\""); json_escape(record.uri.to_str(), &out);
+            out.push_str("\",\"version\":null,\"kind\":\"full\",\"items\":[]}");
+        }
+        i += 1;
+    }
+    out.push_str("]}"); return move out;
 }

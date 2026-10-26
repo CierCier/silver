@@ -56,6 +56,14 @@ jobs:
       - name: Run stdlib suite with stage0
         run: python3 tests/run_tests.py --release --no-tui --jobs 4
 
+      - name: Check native language-server protocol
+        run: |
+          python3 scripts/check_lsp.py --server "$RUNNER_TEMP/aglsp-stage1" -v
+          "$RUNNER_TEMP/agc-stage1" build --manifest silver.toml --bin aglsp --no-cache -o "$RUNNER_TEMP/aglsp-stage2"
+          python3 scripts/check_lsp.py --server "$RUNNER_TEMP/aglsp-stage2" -v
+          scripts/install.sh --prefix "$RUNNER_TEMP/silver-install" --no-symlinks
+          python3 scripts/check_lsp.py --server "$RUNNER_TEMP/silver-install/bin/aglsp" --stdlib-root "$RUNNER_TEMP/silver-install/include/std" -v
+
       - name: Run stdlib suite with native stage1
         run: python3 tests/run_tests.py --compiler "$RUNNER_TEMP/agc-stage1" --no-tui --jobs 4
 

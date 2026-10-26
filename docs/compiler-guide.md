@@ -36,7 +36,7 @@ silver/
 │   │   ├── agc/                 # The Silver compiler source code (Rust crate, uses Elise)
 │   │   │   ├── src/
 │   │   │   │   ├── main.rs          # Compiler driver, CLI options parsing, and build orchestrator
-│   │   │   │   ├── lib.rs           # Exported frontend modules (for reuse by tooling/LSP)
+│   │   │   │   ├── lib.rs           # Exported bootstrap compiler modules
 │   │   │   │   ├── lexer.rs         # Token definition, lexical scanner, and spans
 │   │   │   │   ├── parser/          # Syntactic analysis and import resolution
 │   │   │   │   ├── semantic/        # Semantic analysis, type checking, and monomorphization
@@ -47,13 +47,11 @@ silver/
 │   │   │   │   │   ├── drop_elaborate.rs # Drop elaboration + hybrid flag plan
 │   │   │   │   │   ├── move_check.rs / borrow_check.rs # Place-based analyses
 │   │   │   │   ├── symbol_table.rs  # Phase-aware compiler symbol registration & scopes
-│   │   │   │   ├── symbol_index.rs  # LSP symbol index + move/copy inlay hints
 │   │   │   │   ├── diagnostics/     # Centralized message catalog and error visualizer
 │   │   │   │   └── profiler.rs      # Phase timing instrumenter
 │   │   │   └── Cargo.toml
 │   │   ├── agsm/                # Bootstrap source maps/module artifact generator
 │   │   └── ffi-rust/            # Optional Rust implementation behind Silver's versioned C ABI
-│   └── aglsp/                   # Language Server Protocol server (Rust, driven by stage0)
 ├── target/                      # Default Rust build output (cargo)
 ├── std/                         # Silver standard library sources
 │   ├── mem/                     # Allocator, smart pointers (Box, Rc, Vec, Arena)
@@ -355,8 +353,7 @@ Compiler diagnostic messages are rendered using the `diagnostics::render` utilit
 - **Compiler Warning System & Linter**: Configured via `-Wall`, `-Werror` (treat warnings as errors), `-Wunused`, `-Wunreachable-code`, and `-Wno-*` flags. Detects unused variables/parameters (suppressed with `_` prefix) and unreachable statements following unconditional returns/breaks/continues.
 - **Fuzzy Typo Suggestions ("Did you mean ...?")**: Levenshtein distance matching generates suggestion suffixes (`did you mean '...'?`) across unknown identifiers, struct fields, methods, types/enums, traits, and compiler-builtin macros.
 - **In-Memory Formatting (`@format`)**: Builtin macro `@format("...", args...)` builds a formatted heap string into an owned `String` instance.
-- **LSP Inlay Hints (`textDocument/inlayHint`)**: `agc::symbol_index` records `CallSite { open_paren, args, callee }` for every buffer-local `Call`/`MethodCall` (receiver `self` param skipped for instance methods) plus `MoveHint {span, Move|Copy}` for every place `let`/`assign`/`return`/call-arg (`String a = b`→`move` before `b`, `i64 y = x`→`copy` before `x`; explicit `move` excluded, `v[i]` via `tmp`); `aglsp/src/inlay_hints.rs` renders `name:` and `move`/`copy` hints before each argument/place.
-- **LSP Formatting (`textDocument/formatting`)**: `aglsp/src/format.rs` is a conservative whitespace-only formatter (strip trailing whitespace, collapse blank runs, single trailing newline) that cannot corrupt code.
+- **Native Silver LSP**: `libs/agc/src/tooling/index.ag` records declarations, lexical scopes, and identifier occurrences for `bin/aglsp`. The native server provides parameter and type hints and checks lexer-token preservation before formatting. See [native LSP setup, capabilities, and limits](language-server.md).
 ## 7.1 Debugging Support (DWARF by default)
 
 DWARF is emitted by default for non-release builds (no `-O` / `-O0`) and

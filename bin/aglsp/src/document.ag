@@ -1,61 +1,338 @@
-// bin/aglsp/src/document.ag — In-memory document tracking for LSP buffers.
 import std.mem.vec;
+import std.mem.alloc;
+import std.mem.memory;
 import std.string;
+import std.path;
+import std.fs;
+import std.env;
+import std.sys.raw.fs;
+import tooling.index;
+import positions;
+
+String absolute_document_path(str source) {
+    String path = String.from_str(source);
+    if (!path.starts_with("/")) {
+        String cwd = current_dir(); path = path_join(cwd.to_str(), path.to_str());
+    }
+    return path_normalize(path.to_str());
+}
+
+String document_path(str uri) {
+    Optional<String> decoded = file_uri_to_path(uri);
+    if (!decoded.is_some()) { return String.new(); }
+    String path = decoded.unwrap(); return absolute_document_path(path.to_str());
+}
 
 struct Document {
+    i64 store_id;
     String uri;
+    String path;
     String text;
+    LspLineIndex lines;
     i64 version;
+    i64 revision;
+    bool open;
+    bool imports_dirty;
+    bool unresolved_imports;
+    bool diagnostics_dirty;
+    String diagnostic_items;
+    i64 diagnostic_revision;
+    bool semantic_dirty;
+    i64 semantic_generation;
+    i64 previous_semantic_generation;
+    Vec<i64> semantic_data;
+    Vec<i64> previous_semantic_data;
+    IdeIndex analysis;
+    Vec<Document*> dependencies;
 }
 
 struct DocumentStore {
-    Vec<Document> docs;
+    Vec<Document*> docs;
+    Vec<String> roots;
+    Vec<String> include_dirs;
+    Vec<String> overlay_paths;
+}
+
+bool workspace_document(DocumentStore* store, Document* doc) {
+    if (doc.open) { return true; } i64 i = 0;
+    while (i < store.roots.len()) {
+        String* root = store.roots.get_ptr(i); i64 length = root.len();
+        if (length > 0 && doc.path.starts_with(root.to_str()) && (doc.path.len() == length
+            || root.data[length - 1] == (u8)'/' || doc.path.data[length] == (u8)'/')) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+impl Document {
+    LspPosition position(Document* self, i64 offset) { return self.lines.position(self.text.to_str(), offset); }
+
+    bool offset(Document* self, i64 line, i64 character, i64* result) {
+        return self.lines.offset(self.text.to_str(), line, character, result);
+    }
+
+    void append_range(Document* self, String* out, Span span) {
+        out.push_str("{\"start\":"); append_position(out, self.position(span.start));
+        out.push_str(",\"end\":"); append_position(out, self.position(span.end)); out.push('}');
+    }
 }
 
 impl DocumentStore {
+    /// Return an owned list borrowing the current workspace/import graph.
+    /// An explicit target also participates when it is outside the workspace.
+    Vec<Document*> query_documents(DocumentStore* self, Document* selected) {
+        Vec<Document*> documents = Vec<Document*>.new(); Vec<bool> included = Vec<bool>.new(); i64 i = 0;
+        while (i < self.docs.len()) {
+            Document* doc = self.docs.get(i); bool include = doc == selected || workspace_document(self, doc);
+            included.push(include); if (include) { documents.push(doc); } i += 1;
+        }
+        i = 0;
+        while (i < documents.len()) {
+            Document* doc = documents.get(i); i64 dependency = 0;
+            while (dependency < doc.dependencies.len()) {
+                Document* imported = doc.dependencies.get(dependency);
+                if (!included.get(imported.store_id)) { included.set(imported.store_id, true); documents.push(imported); }
+                dependency += 1;
+            }
+            i += 1;
+        }
+        return move documents;
+    }
+
     DocumentStore new() {
         DocumentStore store;
-        store.docs = Vec<Document>.new();
+        store.docs = Vec<Document*>.new();
+        store.roots = Vec<String>.new();
+        store.include_dirs = Vec<String>.new();
+        store.overlay_paths = Vec<String>.new();
+        Optional<String> sysroot = var("SILVER_SYSROOT");
+        if (sysroot.is_some()) {
+            String configured = sysroot.unwrap(); String root = absolute_document_path(configured.to_str());
+            store.include_dirs.push(path_join(root.to_str(), "include/silver"));
+            store.include_dirs.push(path_join(root.to_str(), "include"));
+            store.include_dirs.push(move root);
+        }
+        u8 executable[4096];
+        i64 length = sys_readlink((i64)"/proc/self/exe", (i64)&executable[0], 4096);
+        if (length > 0 && length < 4096) {
+            String path = String.new(); path.push_bytes(&executable[0], length);
+            String bin = path_dirname(path.to_str()); String prefix = path_dirname(bin.to_str());
+            store.include_dirs.push(path_join(prefix.to_str(), "include/silver"));
+            store.include_dirs.push(path_join(prefix.to_str(), "include"));
+        }
         return move store;
     }
 
     Document* get(DocumentStore* self, str uri) {
+        String path = document_path(uri);
         i64 i = 0;
         while (i < self.docs.len()) {
-            Document* doc = self.docs.get_ptr(i);
-            if (doc.uri.equals(uri)) {
-                return doc;
-            }
+            Document* doc = self.docs.get(i);
+            if (doc.uri.equals(uri) || (path.len() > 0 && doc.path.equals(path.to_str()))) { return doc; }
             i += 1;
         }
         return (Document*)0;
     }
 
-    void set(DocumentStore* self, str uri, str text, i64 version) {
-        Document* existing = self.get(uri);
-        if (existing != (Document*)0) {
-            existing.text = String.from_str(text);
-            existing.version = version;
-            return;
-        }
-        Document doc;
-        doc.uri = String.from_str(uri);
+    Document* set(DocumentStore* self, str uri, str text, i64 version, bool open) {
+        Document* doc = self.get(uri);
+        bool newly_opened = open && (doc == (Document*)0 || !doc.open);
+        if (doc == (Document*)0) {
+            // Field replacement drops old values, so the initial snapshot must be zeroed.
+            doc = alloc<Document>(1);
+            doc.store_id = self.docs.len();
+            doc.uri = String.from_str(uri);
+            doc.path = document_path(uri);
+            doc.dependencies = Vec<Document*>.new();
+            self.docs.push(doc);
+        } else if (doc.open && version <= doc.version) {
+            return (Document*)0;
+        } else { self.invalidate_dependents(doc); }
+        if (open) { doc.uri = String.from_str(uri); }
         doc.text = String.from_str(text);
+        doc.lines = LspLineIndex.new(text);
         doc.version = version;
-        self.docs.push(move doc);
+        doc.revision += 1;
+        doc.open = open;
+        doc.imports_dirty = true;
+        doc.diagnostics_dirty = true;
+        doc.semantic_dirty = true;
+        doc.analysis = IdeIndex.new(text);
+        if (newly_opened) {
+            i64 i = 0;
+            while (i < self.docs.len()) {
+                Document* candidate = self.docs.get(i);
+                if (candidate.unresolved_imports) { candidate.imports_dirty = true; candidate.diagnostics_dirty = true; }
+                i += 1;
+            }
+        }
+        return doc;
     }
 
-    void remove(DocumentStore* self, str uri) {
+    Document* load(DocumentStore* self, str path) {
+        String normalized = absolute_document_path(path);
+        String uri = path_to_file_uri(normalized.to_str());
+        Document* doc = self.get(uri.to_str());
+        if (doc != (Document*)0) { return doc; }
+        Result<String, Error> loaded = String.from_file(normalized.to_str());
+        if (loaded.is_err()) { return (Document*)0; }
+        String source = loaded.unwrap();
+        if (source.len() != strlen(source.to_str()) || (source.len() > 0 && !source.is_valid_utf8())) { return (Document*)0; }
+        return self.set(uri.to_str(), source.to_str(), 0, false);
+    }
+
+    void refresh_imports(DocumentStore* self) {
+        self.overlay_paths.clear(); i64 overlay = 0;
+        while (overlay < self.docs.len()) {
+            Document* doc = self.docs.get(overlay);
+            if (doc.open && doc.path.len() > 0) { self.overlay_paths.push(doc.path.clone()); }
+            overlay += 1;
+        }
         i64 i = 0;
         while (i < self.docs.len()) {
-            Document* doc = self.docs.get_ptr(i);
-            if (doc.uri.equals(uri)) {
-                Document removed = self.docs.swap_remove(i);
-                removed.uri.drop();
-                removed.text.drop();
-                return;
+            Document* doc = self.docs.get(i);
+            if (!doc.imports_dirty) { i += 1; continue; }
+            doc.imports_dirty = false;
+            doc.diagnostics_dirty = true;
+            doc.semantic_dirty = true;
+            doc.unresolved_imports = false;
+            doc.dependencies.clear();
+            if (doc.path.len() > 0) {
+                i64 j = 0;
+                while (j < doc.analysis.imports.len()) {
+                    String path = resolve_document_import(self, doc, doc.analysis.imports.get_ptr(j).to_str());
+                    if (path.len() == 0) { doc.unresolved_imports = true; }
+                    if (path.len() > 0 && !path.ends_with(".agm")) {
+                        Document* imported = self.load(path.to_str());
+                        if (imported != (Document*)0 && imported != doc) { doc.dependencies.push(imported); }
+                    }
+                    j += 1;
+                }
             }
             i += 1;
         }
     }
+
+    void close(DocumentStore* self, str uri) {
+        Document* doc = self.get(uri);
+        if (doc == (Document*)0) { return; }
+        self.invalidate_dependents(doc);
+        doc.open = false;
+        doc.revision += 1;
+        doc.imports_dirty = true;
+        doc.diagnostics_dirty = true;
+        doc.semantic_dirty = true;
+        if (doc.path.len() > 0) {
+            Result<String, Error> loaded = String.from_file(doc.path.to_str());
+            if (loaded.is_ok()) {
+                String text = loaded.unwrap();
+                if (text.len() == strlen(text.to_str()) && (text.len() == 0 || text.is_valid_utf8())) {
+                    doc.text = move text;
+                    doc.lines = LspLineIndex.new(doc.text.to_str());
+                    doc.analysis = IdeIndex.new(doc.text.to_str());
+                    return;
+                }
+            }
+        }
+        doc.text = String.new();
+        doc.lines = LspLineIndex.new("");
+        doc.analysis = IdeIndex.new("");
+        doc.dependencies.clear();
+    }
+
+    void invalidate_dependents(DocumentStore* self, Document* changed) {
+        Vec<Document*> affected = Vec<Document*>.new(); affected.push(changed); i64 next = 0;
+        while (next < affected.len()) {
+            Document* dependency = affected.get(next); dependency.diagnostics_dirty = true; dependency.semantic_dirty = true;
+            i64 i = 0;
+            while (i < self.docs.len()) {
+                Document* candidate = self.docs.get(i); bool depends = false; i64 j = 0;
+                while (j < candidate.dependencies.len()) {
+                    if (candidate.dependencies.get(j) == dependency) { depends = true; break; } j += 1;
+                }
+                if (depends) {
+                    candidate.imports_dirty = true;
+                    j = 0;
+                    while (j < affected.len() && affected.get(j) != candidate) { j += 1; }
+                    if (j == affected.len()) { affected.push(candidate); }
+                }
+                i += 1;
+            }
+            next += 1;
+        }
+    }
+}
+
+String resolve_document_import(DocumentStore* store, Document* doc, str name) {
+    String module = module_root(doc.path.to_str()); String root = absolute_document_path(module.to_str()); String config = String.new();
+    return resolve_module_path_with_sources(doc.path.to_str(), root.to_str(), name,
+        &store.include_dirs, &config, &store.overlay_paths);
+}
+
+impl Drop for DocumentStore {
+    void drop(*self) {
+        i64 i = 0;
+        while (i < self.docs.len()) {
+            Document* doc = self.docs.get(i);
+            @drop_in_place(doc, 1);
+            free(doc);
+            i += 1;
+        }
+    }
+}
+
+struct SymbolTarget { Document* document; i64 symbol; }
+
+void find_imported_symbol(Document* doc, str name, str owner, Vec<Document*>* visited, SymbolTarget* target) {
+    i64 i = 0;
+    while (i < visited.len()) { if (visited.get(i) == doc) { return; } i += 1; }
+    visited.push(doc);
+    i = ide_name_head(&doc.analysis, name);
+    while (i >= 0) {
+        IdeSymbol* symbol = doc.analysis.symbols.get_ptr(i);
+        if (!symbol.local && !symbol.is_private && symbol.name.equals(name) && symbol.owner.equals(owner)) {
+            if (target.symbol == -1) { target.document = doc; target.symbol = i; }
+            else { target.symbol = -2; }
+        }
+        i = doc.analysis.next_name.get(i);
+    }
+    i = 0;
+    while (i < doc.dependencies.len()) {
+        find_imported_symbol(doc.dependencies.get(i), name, owner, visited, target);
+        i += 1;
+    }
+}
+
+SymbolTarget resolve_occurrence(Document* doc, i64 occurrence) {
+    SymbolTarget target;
+    target.document = doc;
+    target.symbol = -1;
+    if (occurrence < 0) { return target; }
+    IdeOccurrence* selected = doc.analysis.occurrences.get_ptr(occurrence);
+    if (selected.symbol >= 0) { target.symbol = selected.symbol; return target; }
+    if (selected.symbol == -2) { target.symbol = -2; return target; }
+    if (selected.member && selected.owner.len() == 0) { return target; }
+    Vec<Document*> visited = Vec<Document*>.new();
+    visited.push(doc);
+    i64 i = 0;
+    while (i < doc.dependencies.len()) {
+        find_imported_symbol(doc.dependencies.get(i), selected.node.text, selected.owner.to_str(), &visited, &target);
+        i += 1;
+    }
+    return target;
+}
+
+SymbolTarget follow_import_alias(SymbolTarget target) {
+    if (target.symbol < 0) { return target; }
+    IdeSymbol* symbol = target.document.analysis.symbols.get_ptr(target.symbol);
+    if (symbol.kind != IdeSymbolKind.ImportAlias) { return target; }
+    Document* doc = target.document;
+    Vec<Document*> visited = Vec<Document*>.new(); visited.push(doc);
+    target.symbol = -1;
+    i64 i = 0;
+    while (i < doc.dependencies.len()) {
+        find_imported_symbol(doc.dependencies.get(i), symbol.type_name.to_str(), "", &visited, &target);
+        i += 1;
+    }
+    return target;
 }

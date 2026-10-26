@@ -1,0 +1,140 @@
+import document;
+import params;
+
+bool add_workspace_root(DocumentStore* store, str uri) {
+    String path = document_path(uri); if (path.len() == 0) { return false; } i64 i = 0;
+    while (i < store.roots.len()) { if (store.roots.get_ptr(i).equals(path.to_str())) { return false; } i += 1; }
+    store.include_dirs.push(path.clone());
+    store.roots.push(move path);
+    return true;
+}
+
+bool remove_workspace_root(DocumentStore* store, str uri) {
+    String path = document_path(uri); if (path.len() == 0) { return false; } i64 i = 0;
+    while (i < store.roots.len()) {
+        if (store.roots.get_ptr(i).equals(path.to_str())) {
+            String removed = store.roots.take(i); i64 include = store.include_dirs.len() - 1;
+            // Workspace entries follow installation/sysroot entries, which must survive.
+            while (include >= 0) {
+                if (store.include_dirs.get_ptr(include).equals(removed.to_str())) { store.include_dirs.take(include); break; }
+                include -= 1;
+            }
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+bool workspace_folder_uris(str json, Vec<String>* uris) {
+    JsonReader reader = JsonReader.new(json); if (!reader.begin_array()) { return false; }
+    reader.skip_whitespace();
+    while (!reader.failed && reader.index < reader.length && reader.input[reader.index] != ']') {
+        i64 start = reader.index; if (!reader.skip_value()) { return false; }
+        String item = String.new(); item.push_bytes((u8*)json + start, reader.index - start);
+        String uri = String.new(); String name = String.new();
+        if (!json_string(item.to_str(), "uri", &uri) || !json_string(item.to_str(), "name", &name)) { return false; }
+        uris.push(move uri);
+        if (!skip_comma_if_present(&reader)) { break; } reader.skip_whitespace();
+    }
+    return reader.end_array() && !reader.failed;
+}
+
+bool update_workspace_folders(DocumentStore* store, str json) {
+    String event = json_field(json, "event"); String added = json_field(event.to_str(), "added"); String removed = json_field(event.to_str(), "removed");
+    Vec<String> additions = Vec<String>.new(); Vec<String> removals = Vec<String>.new();
+    if (!workspace_folder_uris(added.to_str(), &additions) || !workspace_folder_uris(removed.to_str(), &removals)) { return false; }
+    i64 i = 0; bool changed = false;
+    while (i < removals.len()) { if (remove_workspace_root(store, removals.get_ptr(i).to_str())) { changed = true; } i += 1; }
+    i = 0;
+    while (i < additions.len()) { if (add_workspace_root(store, additions.get_ptr(i).to_str())) { changed = true; } i += 1; }
+    if (changed) {
+        i = 0; while (i < store.docs.len()) { store.docs.get(i).imports_dirty = true; i += 1; }
+        store.refresh_imports();
+    }
+    return changed;
+}
+
+void configure_workspace(DocumentStore* store, str json) {
+    String uri = String.new();
+    String folders = json_field(json, "workspaceFolders"); JsonReader reader = JsonReader.new(folders.to_str());
+    if (!reader.begin_array()) {
+        if (json_string(json, "rootUri", &uri)) { add_workspace_root(store, uri.to_str()); } return;
+    }
+    reader.skip_whitespace();
+    while (!reader.failed && reader.index < reader.length && reader.input[reader.index] != ']') {
+        i64 start = reader.index;
+        if (!reader.skip_value()) { break; }
+        String folder = folders.substr(start, reader.index - start);
+        if (json_string(folder.to_str(), "uri", &uri)) { add_workspace_root(store, uri.to_str()); }
+        if (!skip_comma_if_present(&reader)) { break; } reader.skip_whitespace();
+    }
+}
+
+struct IndexPath { String path; i64 depth; bool directory; }
+
+struct WorkspaceIndex {
+    Vec<IndexPath> paths;
+}
+
+WorkspaceIndex workspace_index(DocumentStore* store) {
+    WorkspaceIndex index; index.paths = Vec<IndexPath>.new(); i64 i = 0;
+    while (i < store.roots.len()) {
+        IndexPath path; path.path = store.roots.get_ptr(i).clone(); path.depth = 0; path.directory = true;
+        index.paths.push(move path); i += 1;
+    }
+    return move index;
+}
+
+// One file or directory per turn lets document requests overtake background work.
+void index_workspace_step(DocumentStore* store, WorkspaceIndex* index) {
+    if (index.paths.len() == 0) { return; }
+    IndexPath path = index.paths.pop();
+    if (!path.directory) {
+        store.load(path.path.to_str()); store.refresh_imports(); return;
+    }
+    if (path.depth >= 32) { return; }
+    Result<Vec<String>, Error> result = read_dir(path.path.to_str());
+    if (result.is_err()) { return; }
+    Vec<String> entries = result.unwrap(); i64 i = 0;
+    while (i < entries.len()) {
+        String* name = entries.get_ptr(i);
+        if (!name.starts_with(".") && !name.equals("target") && !name.equals("node_modules")) {
+            String child = path_join(path.path.to_str(), name.to_str());
+            Result<Metadata, Error> stat = symlink_metadata(child.to_str());
+            if (stat.is_ok()) {
+                Metadata metadata = stat.unwrap();
+                if (!metadata.is_symlink) {
+                    if (metadata.is_dir || (metadata.is_file && name.ends_with(".ag"))) {
+                        IndexPath pending; pending.path = move child; pending.depth = path.depth + 1;
+                        pending.directory = metadata.is_dir;
+                        index.paths.push(move pending);
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+}
+
+void update_watched_files(DocumentStore* store, str json) {
+    String changes = json_field(json, "changes"); JsonReader reader = JsonReader.new(changes.to_str());
+    if (!reader.begin_array()) { return; }
+    reader.skip_whitespace();
+    while (!reader.failed && reader.index < reader.length && reader.input[reader.index] != ']') {
+        i64 start = reader.index;
+        if (!reader.skip_value()) { break; }
+        String change = changes.substr(start, reader.index - start); String uri = String.new();
+        if (json_string(change.to_str(), "uri", &uri)) {
+            Document* doc = store.get(uri.to_str());
+            if (doc == (Document*)0) {
+                Optional<String> decoded = file_uri_to_path(uri.to_str());
+                if (decoded.is_some()) { String path = decoded.unwrap(); store.load(path.to_str()); }
+            } else if (!doc.open) { store.close(uri.to_str()); }
+        }
+        if (!skip_comma_if_present(&reader)) { break; } reader.skip_whitespace();
+    }
+    i64 i = 0;
+    while (i < store.docs.len()) { store.docs.get(i).imports_dirty = true; i += 1; }
+    store.refresh_imports();
+}

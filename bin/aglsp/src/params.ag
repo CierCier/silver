@@ -1,283 +1,113 @@
-// bin/aglsp/src/params.ag — Parameter extraction from LSP JSON-RPC request bodies.
 import std.json;
 import std.string;
+import document;
+import positions;
 
-bool skip_comma_if_present(JsonReader* r) {
-    r.skip_whitespace();
-    if (r.failed) { return false; }
-    u8* bytes = (u8*)r.input;
-    if (r.index < r.length && bytes[r.index] == (u8)44) {
-        r.index += 1;
-        return true;
-    }
-    return false;
+bool skip_comma_if_present(JsonReader* reader) {
+    reader.skip_whitespace();
+    if (reader.failed || reader.index >= reader.length || reader.input[reader.index] != ',') { return false; }
+    reader.index += 1;
+    return true;
 }
 
-bool parse_did_open_params(str json, String* uri_out, String* text_out, i64* ver_out) {
-    uri_out.clear();
-    text_out.clear();
-    *ver_out = 0;
-    JsonReader r = JsonReader.new(json);
-    if (!r.begin_object()) {
-        return false;
-    }
-    while (true) {
-        r.skip_whitespace();
-        if (r.failed) { break; }
-        u8* bytes = (u8*)r.input;
-        if (r.index < r.length && bytes[r.index] == (u8)125) { break; }
-        String key = r.read_string();
-        if (r.failed) { key.drop(); break; }
-        if (!r.expect((u8)58)) { key.drop(); break; }
-
-        if (key.equals("textDocument")) {
-            if (r.begin_object()) {
-                while (true) {
-                    r.skip_whitespace();
-                    if (r.failed) { break; }
-                    u8* inner_bytes = (u8*)r.input;
-                    if (r.index < r.length && inner_bytes[r.index] == (u8)125) { break; }
-                    String inner_key = r.read_string();
-                    if (r.failed) { inner_key.drop(); break; }
-                    if (!r.expect((u8)58)) { inner_key.drop(); break; }
-
-                    if (inner_key.equals("uri")) {
-                        String s = r.read_string();
-                        uri_out.push_str(s.to_str());
-                        s.drop();
-                    } else if (inner_key.equals("text")) {
-                        String s = r.read_string();
-                        text_out.push_str(s.to_str());
-                        s.drop();
-                    } else if (inner_key.equals("version")) {
-                        r.read_i64(ver_out);
-                    } else {
-                        r.skip_value();
-                    }
-                    inner_key.drop();
-                    if (!skip_comma_if_present(&r)) { break; }
-                }
-                r.end_object();
-            }
-        } else {
-            r.skip_value();
+String json_field(str json, str wanted) {
+    JsonReader reader = JsonReader.new(json);
+    String result = String.new();
+    if (!reader.begin_object()) { return move result; }
+    reader.skip_whitespace();
+    if (reader.index < reader.length && reader.input[reader.index] == '}') { return move result; }
+    while (!reader.failed) {
+        String key = reader.read_string();
+        if (!reader.expect((u8)':')) { break; }
+        reader.skip_whitespace();
+        i64 start = reader.index;
+        if (!reader.skip_value()) { break; }
+        if (key.equals(wanted)) {
+            result.clear();
+            result.push_bytes((u8*)json + start, reader.index - start);
         }
-        key.drop();
-        if (!skip_comma_if_present(&r)) { break; }
+        if (!skip_comma_if_present(&reader)) { break; }
     }
-    r.end_object();
-    return uri_out.len() > 0;
+    if (!reader.end_object() || reader.failed) { result.clear(); }
+    return move result;
 }
 
-bool parse_did_change_params(str json, String* uri_out, String* text_out, i64* ver_out) {
-    uri_out.clear();
-    text_out.clear();
-    *ver_out = 0;
-    bool has_text = false;
-    JsonReader r = JsonReader.new(json);
-    if (!r.begin_object()) {
-        return false;
-    }
-    while (true) {
-        r.skip_whitespace();
-        if (r.failed) { break; }
-        u8* bytes = (u8*)r.input;
-        if (r.index < r.length && bytes[r.index] == (u8)125) { break; }
-        String key = r.read_string();
-        if (r.failed) { key.drop(); break; }
-        if (!r.expect((u8)58)) { key.drop(); break; }
-
-        if (key.equals("textDocument")) {
-            if (r.begin_object()) {
-                while (true) {
-                    r.skip_whitespace();
-                    if (r.failed) { break; }
-                    u8* inner_bytes = (u8*)r.input;
-                    if (r.index < r.length && inner_bytes[r.index] == (u8)125) { break; }
-                    String inner_key = r.read_string();
-                    if (r.failed) { inner_key.drop(); break; }
-                    if (!r.expect((u8)58)) { inner_key.drop(); break; }
-
-                    if (inner_key.equals("uri")) {
-                        String s = r.read_string();
-                        uri_out.push_str(s.to_str());
-                        s.drop();
-                    } else if (inner_key.equals("version")) {
-                        r.read_i64(ver_out);
-                    } else {
-                        r.skip_value();
-                    }
-                    inner_key.drop();
-                    if (!skip_comma_if_present(&r)) { break; }
-                }
-                r.end_object();
-            }
-        } else if (key.equals("contentChanges")) {
-            if (r.begin_array()) {
-                r.skip_whitespace();
-                u8* arr_bytes = (u8*)r.input;
-                if (r.index < r.length && arr_bytes[r.index] != (u8)93) {
-                    if (r.begin_object()) {
-                        while (true) {
-                            r.skip_whitespace();
-                            if (r.failed) { break; }
-                            u8* obj_bytes = (u8*)r.input;
-                            if (r.index < r.length && obj_bytes[r.index] == (u8)125) { break; }
-                            String obj_key = r.read_string();
-                            if (r.failed) { obj_key.drop(); break; }
-                            if (!r.expect((u8)58)) { obj_key.drop(); break; }
-
-                            if (obj_key.equals("text")) {
-                                String s = r.read_string();
-                                text_out.push_str(s.to_str());
-                                s.drop();
-                                has_text = true;
-                            } else {
-                                r.skip_value();
-                            }
-                            obj_key.drop();
-                            if (!skip_comma_if_present(&r)) { break; }
-                        }
-                        r.end_object();
-                    }
-                }
-                while (true) {
-                    r.skip_whitespace();
-                    if (r.failed) { break; }
-                    u8* obj_bytes = (u8*)r.input;
-                    if (r.index < r.length && obj_bytes[r.index] == (u8)93) { break; }
-                    if (!skip_comma_if_present(&r)) { break; }
-                    r.skip_value();
-                }
-                r.end_array();
-            }
-        } else {
-            r.skip_value();
-        }
-        key.drop();
-        if (!skip_comma_if_present(&r)) { break; }
-    }
-    r.end_object();
-    return uri_out.len() > 0 && has_text;
+bool json_string(str json, str field, String* output) {
+    String value = json_field(json, field);
+    JsonReader reader = JsonReader.new(value.to_str());
+    String decoded = reader.read_string();
+    if (reader.failed || decoded.len() != strlen(decoded.to_str()) || (decoded.len() > 0 && !decoded.is_valid_utf8())) { return false; }
+    *output = move decoded;
+    return true;
 }
 
-bool parse_position_params(str json, String* uri_out, i64* line_out, i64* col_out) {
-    uri_out.clear();
-    *line_out = 0;
-    *col_out = 0;
-    JsonReader r = JsonReader.new(json);
-    if (!r.begin_object()) {
-        return false;
-    }
-    while (true) {
-        r.skip_whitespace();
-        if (r.failed) { break; }
-        u8* bytes = (u8*)r.input;
-        if (r.index < r.length && bytes[r.index] == (u8)125) { break; }
-        String key = r.read_string();
-        if (r.failed) { key.drop(); break; }
-        if (!r.expect((u8)58)) { key.drop(); break; }
-
-        if (key.equals("textDocument")) {
-            if (r.begin_object()) {
-                while (true) {
-                    r.skip_whitespace();
-                    if (r.failed) { break; }
-                    u8* inner_bytes = (u8*)r.input;
-                    if (r.index < r.length && inner_bytes[r.index] == (u8)125) { break; }
-                    String inner_key = r.read_string();
-                    if (r.failed) { inner_key.drop(); break; }
-                    if (!r.expect((u8)58)) { inner_key.drop(); break; }
-
-                    if (inner_key.equals("uri")) {
-                        String s = r.read_string();
-                        uri_out.push_str(s.to_str());
-                        s.drop();
-                    } else {
-                        r.skip_value();
-                    }
-                    inner_key.drop();
-                    if (!skip_comma_if_present(&r)) { break; }
-                }
-                r.end_object();
-            }
-        } else if (key.equals("position")) {
-            if (r.begin_object()) {
-                while (true) {
-                    r.skip_whitespace();
-                    if (r.failed) { break; }
-                    u8* inner_bytes = (u8*)r.input;
-                    if (r.index < r.length && inner_bytes[r.index] == (u8)125) { break; }
-                    String inner_key = r.read_string();
-                    if (r.failed) { inner_key.drop(); break; }
-                    if (!r.expect((u8)58)) { inner_key.drop(); break; }
-
-                    if (inner_key.equals("line")) {
-                        r.read_i64(line_out);
-                    } else if (inner_key.equals("character")) {
-                        r.read_i64(col_out);
-                    } else {
-                        r.skip_value();
-                    }
-                    inner_key.drop();
-                    if (!skip_comma_if_present(&r)) { break; }
-                }
-                r.end_object();
-            }
-        } else {
-            r.skip_value();
-        }
-        key.drop();
-        if (!skip_comma_if_present(&r)) { break; }
-    }
-    r.end_object();
-    return uri_out.len() > 0;
+bool json_integer(str json, str field, i64* output) {
+    String value = json_field(json, field);
+    JsonReader reader = JsonReader.new(value.to_str());
+    return reader.read_i64(output) && !reader.failed && reader.index == reader.length;
 }
 
-bool parse_document_uri_param(str json, String* uri_out) {
-    uri_out.clear();
-    JsonReader r = JsonReader.new(json);
-    if (!r.begin_object()) {
-        return false;
-    }
-    while (true) {
-        r.skip_whitespace();
-        if (r.failed) { break; }
-        u8* bytes = (u8*)r.input;
-        if (r.index < r.length && bytes[r.index] == (u8)125) { break; }
-        String key = r.read_string();
-        if (r.failed) { key.drop(); break; }
-        if (!r.expect((u8)58)) { key.drop(); break; }
+bool parse_document_uri_param(str json, String* uri) {
+    String document = json_field(json, "textDocument");
+    return json_string(document.to_str(), "uri", uri) && uri.len() > 0;
+}
 
-        if (key.equals("textDocument")) {
-            if (r.begin_object()) {
-                while (true) {
-                    r.skip_whitespace();
-                    if (r.failed) { break; }
-                    u8* inner_bytes = (u8*)r.input;
-                    if (r.index < r.length && inner_bytes[r.index] == (u8)125) { break; }
-                    String inner_key = r.read_string();
-                    if (r.failed) { inner_key.drop(); break; }
-                    if (!r.expect((u8)58)) { inner_key.drop(); break; }
+bool parse_position(str json, i64* line, i64* character) {
+    return json_integer(json, "line", line) && json_integer(json, "character", character)
+        && *line >= 0 && *character >= 0;
+}
 
-                    if (inner_key.equals("uri")) {
-                        String s = r.read_string();
-                        uri_out.push_str(s.to_str());
-                        s.drop();
-                    } else {
-                        r.skip_value();
-                    }
-                    inner_key.drop();
-                    if (!skip_comma_if_present(&r)) { break; }
-                }
-                r.end_object();
-            }
-        } else {
-            r.skip_value();
+bool parse_position_params(str json, String* uri, i64* line, i64* character) {
+    String position = json_field(json, "position");
+    return parse_document_uri_param(json, uri) && parse_position(position.to_str(), line, character);
+}
+
+bool parse_document_range(Document* doc, str json, Span* range) {
+    String start = json_field(json, "start"); String end = json_field(json, "end"); i64 line = 0; i64 character = 0;
+    return parse_position(start.to_str(), &line, &character) && doc.offset(line, character, &range.start)
+        && parse_position(end.to_str(), &line, &character) && doc.offset(line, character, &range.end) && range.start <= range.end;
+}
+
+bool parse_did_open_params(str json, String* uri, String* text, i64* version) {
+    String document = json_field(json, "textDocument");
+    return json_string(document.to_str(), "uri", uri) && uri.len() > 0
+        && json_string(document.to_str(), "text", text) && json_integer(document.to_str(), "version", version);
+}
+
+bool apply_document_changes(DocumentStore* store, str json, String* uri) {
+    String identifier = json_field(json, "textDocument");
+    i64 version = 0;
+    if (!json_string(identifier.to_str(), "uri", uri) || !json_integer(identifier.to_str(), "version", &version)) { return false; }
+    Document* doc = store.get(uri.to_str());
+    if (doc == (Document*)0 || !doc.open || version <= doc.version) { return false; }
+    String text = doc.text.clone();
+    String changes = json_field(json, "contentChanges");
+    JsonReader reader = JsonReader.new(changes.to_str());
+    if (!reader.begin_array()) { return false; }
+    reader.skip_whitespace();
+    while (!reader.failed && reader.index < reader.length && reader.input[reader.index] != ']') {
+        i64 start = reader.index;
+        if (!reader.skip_value()) { return false; }
+        String change = changes.substr(start, reader.index - start);
+        String replacement = String.new();
+        if (!json_string(change.to_str(), "text", &replacement)) { return false; }
+        String range = json_field(change.to_str(), "range");
+        if (range.len() == 0) { text = move replacement; }
+        else {
+            String first = json_field(range.to_str(), "start");
+            String last = json_field(range.to_str(), "end");
+            i64 line = 0; i64 column = 0; i64 begin = 0; i64 finish = 0;
+            if (!parse_position(first.to_str(), &line, &column) || !lsp_offset(text.to_str(), line, column, &begin)
+                || !parse_position(last.to_str(), &line, &column) || !lsp_offset(text.to_str(), line, column, &finish)
+                || begin > finish) { return false; }
+            String updated = text.substr(0, begin);
+            updated.push_str(replacement.to_str());
+            updated.push_bytes(text.data + finish, text.len() - finish);
+            text = move updated;
         }
-        key.drop();
-        if (!skip_comma_if_present(&r)) { break; }
+        if (!skip_comma_if_present(&reader)) { break; }
+        reader.skip_whitespace();
     }
-    r.end_object();
-    return uri_out.len() > 0;
+    if (!reader.end_array()) { return false; }
+    return store.set(uri.to_str(), text.to_str(), version, true) != (Document*)0;
 }

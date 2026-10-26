@@ -1,0 +1,24 @@
+import transport;
+
+bool progress_request(str method) {
+    return strcmp(method, "workspace/symbol") == 0 || strcmp(method, "textDocument/references") == 0
+        || strcmp(method, "textDocument/diagnostic") == 0 || strcmp(method, "workspace/diagnostic") == 0
+        || strcmp(method, "textDocument/implementation") == 0 || strcmp(method, "textDocument/rename") == 0 || strcmp(method, "textDocument/codeAction") == 0
+        || strcmp(method, "callHierarchy/incomingCalls") == 0 || strcmp(method, "callHierarchy/outgoingCalls") == 0
+        || strcmp(method, "typeHierarchy/supertypes") == 0 || strcmp(method, "typeHierarchy/subtypes") == 0;
+}
+
+bool begin_progress(PendingMessage* pending) {
+    if (pending.progress_token.len() == 0) { return true; }
+    JsonReader reader = JsonReader.new(pending.progress_token.to_str());
+    if (reader.input[0] == '"') { if (!reader.skip_value()) { return false; } }
+    else {
+        i64 token = 0;
+        if (!reader.read_i64(&token) || token < -2147483648 || token > 2147483647) { return false; }
+    }
+    if (reader.failed || reader.index != reader.length) { return false; }
+    pending.progress_started = true;
+    String out = String.from_str("{\"token\":"); out.push_str(pending.progress_token.to_str());
+    out.push_str(",\"value\":{\"kind\":\"begin\",\"title\":\"Silver analysis\",\"cancellable\":true}}");
+    send_notification("$/progress", out.to_str()); return true;
+}

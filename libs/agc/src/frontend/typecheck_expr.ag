@@ -3067,6 +3067,20 @@ void typecheck_reject_defer_control(AstPool* pool, u32 node_id, bool is_stmt,
 }
 
 // Resolve local initializers with the same expression checker as function bodies.
+// The environment is supplied by the caller's scope model.
+u32 typecheck_initializer_type(SymbolTable* symbols, TypeTable* types, SyntaxNode* root,
+                              SyntaxNode* name, TypeEnv* env) {
+    SyntaxNode* assign = name.next_sibling;
+    if (assign == (SyntaxNode*)0 || assign.token_kind != TokenKind.Assign) { return TYPE_UNKNOWN; }
+    SyntaxNode* end = assign.next_sibling;
+    while (end != (SyntaxNode*)0 && end.token_kind != TokenKind.Semicolon) { end = end.next_sibling; }
+    AstPool pool = AstPool.new(); ExprLowerer lowerer = ExprLowerer.new(&pool, types, &symbols.names);
+    lowerer.unit_root = root; u32 expression = lowerer.lower_sequence(assign.next_sibling, end);
+    DiagnosticBag diagnostics = DiagnosticBag.new(); bool ok = true;
+    if (lowerer.unsupported) { return TYPE_UNKNOWN; }
+    return infer_expr(&pool, types, symbols, root, env, expression, &diagnostics, &ok);
+}
+
 // Entries follow binding order; visibility excludes shadowed and sibling locals.
 void typecheck_binding_types(SymbolTable* symbols, TypeTable* types, SyntaxNode* root,
                              Vec<Binding>* bindings, Vec<u32>* resolved) {
@@ -3086,20 +3100,7 @@ void typecheck_binding_types(SymbolTable* symbols, TypeTable* types, SyntaxNode*
                 }
                 previous += 1;
             }
-            SyntaxNode* end = assign.next_sibling;
-            while (end != (SyntaxNode*)0 && end.token_kind != TokenKind.Semicolon) {
-                end = end.next_sibling;
-            }
-            AstPool pool = AstPool.new();
-            ExprLowerer lowerer = ExprLowerer.new(&pool, types, &symbols.names);
-            lowerer.unit_root = root;
-            u32 expression = lowerer.lower_sequence(assign.next_sibling, end);
-            DiagnosticBag diagnostics = DiagnosticBag.new();
-            bool ok = true;
-            if (!lowerer.unsupported) {
-                type_id = infer_expr(&pool, types, symbols, root,
-                    &env, expression, &diagnostics, &ok);
-            }
+            type_id = typecheck_initializer_type(symbols, types, root, binding.name_node, &env);
         }
         resolved.push(type_id);
         i += 1;

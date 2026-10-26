@@ -1,0 +1,627 @@
+// Editor analysis over the frontend CST. Symbol IDs belong to one snapshot.
+import frontend.ast;
+import frontend.bindings;
+import frontend.cfg;
+import frontend.items;
+import frontend.module_loader;
+import frontend.symbols;
+import frontend.typecheck_expr;
+import frontend.typecheck;
+import frontend.lambda_syntax;
+
+enum IdeSymbolKind {
+    Function; Method; Struct; Enum; Trait; Global; TypeAlias;
+    Field; Variant; Parameter; Local; ImportAlias; TypeParameter;
+}
+
+struct IdeSymbol {
+    String name;
+    String owner;
+    String signature;
+    String type_name;
+    String type_owner;
+    String documentation;
+    IdeSymbolKind kind;
+    Span selection;
+    Span extent;
+    Span scope;
+    bool local;
+    bool readonly;
+    bool instance;
+    bool has_body;
+    bool inferred;
+    bool is_private;
+    Vec<String> parameters;
+    Vec<String> parameter_names;
+}
+
+struct IdeOccurrence {
+    SyntaxNode* node;
+    i64 symbol;
+    String owner;
+    bool member;
+    bool definition;
+}
+
+struct IdeImplementation {
+    SyntaxNode* node;
+    SyntaxNode* target;
+    SyntaxNode* trait_name;
+}
+
+struct IdeIndex {
+    TokenStream tokens;
+    NodePool pool;
+    SyntaxTree tree;
+    DiagnosticBag diagnostics;
+    Vec<IdeSymbol> symbols;
+    Vec<IdeOccurrence> occurrences;
+    Vec<String> imports;
+    Interner names;
+    Vec<i64> name_heads;
+    Vec<i64> next_name;
+    Vec<i64> definitions;
+    Vec<IdeImplementation> implementations;
+    bool recovered;
+}
+
+impl IdeIndex {
+    IdeIndex new(str text) {
+        IdeIndex index;
+        index.tokens = TokenStream.new();
+        index.pool = NodePool.new();
+        index.diagnostics = DiagnosticBag.new();
+        index.symbols = Vec<IdeSymbol>.new();
+        index.occurrences = Vec<IdeOccurrence>.new();
+        index.imports = Vec<String>.new();
+        index.names = Interner.new(); index.name_heads = Vec<i64>.new();
+        index.next_name = Vec<i64>.new(); index.definitions = Vec<i64>.new();
+        index.implementations = Vec<IdeImplementation>.new();
+        index.recovered = false;
+        lex(String.from_str(text), &index.tokens, &index.diagnostics);
+        parse(&index.tokens, &index.diagnostics, &index.pool, &index.tree);
+        if (!index.diagnostics.is_empty()) { ide_recover_delimiters(&index); }
+        i64 token = 0;
+        while (token < index.tokens.len()) { index.definitions.push(-1); token += 1; }
+        ide_collect(&index);
+        return move index;
+    }
+
+    i64 occurrence_at(IdeIndex* self, i64 offset) {
+        i64 low = 0; i64 high = self.occurrences.len();
+        while (low < high) {
+            i64 middle = low + (high - low) / 2;
+            if (self.occurrences.get_ptr(middle).node.span.start <= offset) { low = middle + 1; }
+            else { high = middle; }
+        }
+        if (low == 0) { return -1; }
+        Span span = self.occurrences.get_ptr(low - 1).node.span;
+        return offset <= span.end ? low - 1 : -1;
+    }
+}
+
+void ide_recover_delimiters(IdeIndex* index) {
+    Vec<TokenKind> stack = Vec<TokenKind>.new(); i64 i = 0;
+    while (i < index.tokens.len()) {
+        Token* token = index.tokens.get(i);
+        if (is_open(token)) { stack.push(token.kind); }
+        else if (is_close(token)) {
+            if (stack.len() == 0) { return; }
+            TokenKind open = stack.pop();
+            if ((open == TokenKind.LeftBrace && token.kind != TokenKind.RightBrace)
+                || (open == TokenKind.LeftParen && token.kind != TokenKind.RightParen)
+                || (open == TokenKind.LeftBracket && token.kind != TokenKind.RightBracket)) { return; }
+        }
+        i += 1;
+    }
+    if (stack.len() == 0 || stack.len() > 64) { return; }
+    Token* eof = index.tokens.last();
+    if (eof == (Token*)0 || eof.kind != TokenKind.Eof) { return; }
+    Span position = eof.span;
+    Token last = index.tokens.tokens.pop();
+    while (stack.len() > 0) {
+        TokenKind open = stack.pop(); Token token;
+        token.kind = open == TokenKind.LeftBrace ? TokenKind.RightBrace
+            : (open == TokenKind.LeftParen ? TokenKind.RightParen : TokenKind.RightBracket);
+        token.span = position;
+        token.text = String.from_str(open == TokenKind.LeftBrace ? "}" : (open == TokenKind.LeftParen ? ")" : "]"));
+        index.tokens.tokens.push(move token);
+    }
+    index.tokens.tokens.push(move last);
+    DiagnosticBag ignored = DiagnosticBag.new();
+    parse(&index.tokens, &ignored, &index.pool, &index.tree);
+    index.recovered = true;
+}
+
+impl Drop for IdeIndex {
+    void drop(*self) { self.pool.destroy(); }
+}
+
+String ide_render(SyntaxNode* start, SyntaxNode* end) {
+    String text = String.new();
+    SyntaxNode* cursor = start;
+    while (cursor != (SyntaxNode*)0 && cursor != end) {
+        ide_append_tokens(cursor, &text);
+        cursor = cursor.next_sibling;
+    }
+    return move text;
+}
+
+void ide_append_tokens(SyntaxNode* node, String* text) {
+    if (node.kind == NodeKind.Token) {
+        if (text.len() > 0 && strlen(node.text) > 0) {
+            u8 previous = text.data[text.len() - 1];
+            if ((typecheck_name_continue(previous) && typecheck_name_continue((u8)node.text[0]))
+                || previous == (u8)',') { text.push(' '); }
+        }
+        text.push_str(node.text);
+        return;
+    }
+    if (node.kind == NodeKind.Parenthesized) { text.push('('); }
+    if (node.kind == NodeKind.Bracket) { text.push('['); }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) { ide_append_tokens(child, text); child = child.next_sibling; }
+    if (node.kind == NodeKind.Parenthesized) { text.push(')'); }
+    if (node.kind == NodeKind.Bracket) { text.push(']'); }
+}
+
+String ide_documentation(IdeIndex* index, Span span) {
+    String doc = String.new();
+    i64 i = ide_token_at_or_after(index, span.start) - 1;
+    i64 next_line = span.start_line;
+    while (i >= 0) {
+        Token* token = index.tokens.get(i);
+        if (token.kind != TokenKind.Comment || token.span.end_line + 1 < next_line) { break; }
+        if (token.comment_kind != CommentKind.DocLine && token.comment_kind != CommentKind.DocBlock) { break; }
+        String combined = token.text.trim();
+        if (doc.len() > 0) { combined.push('\n'); combined.push_str(doc.to_str()); }
+        doc = move combined;
+        next_line = token.span.start_line;
+        i -= 1;
+    }
+    return move doc;
+}
+
+i64 ide_add_symbol(IdeIndex* index, SyntaxNode* name, IdeSymbolKind kind,
+                   str owner, Span extent, Span scope, bool local) {
+    IdeSymbol symbol;
+    symbol.name = String.from_str(name.text);
+    symbol.owner = String.from_str(owner);
+    symbol.signature = String.new();
+    symbol.type_name = String.new();
+    symbol.type_owner = String.new();
+    symbol.documentation = ide_documentation(index, extent);
+    symbol.kind = kind;
+    symbol.selection = name.span;
+    symbol.extent = extent;
+    symbol.scope = scope;
+    symbol.local = local;
+    symbol.readonly = false;
+    symbol.instance = false;
+    symbol.has_body = false;
+    symbol.inferred = false;
+    symbol.is_private = false;
+    i64 token_index = ide_token_at_or_after(index, extent.start);
+    while (token_index < index.tokens.len()) {
+        Token* token = index.tokens.get(token_index);
+        if (token.span.start >= name.span.start) { break; }
+        if (token.span.start >= extent.start && token.kind == TokenKind.Private) { symbol.is_private = true; }
+        token_index += 1;
+    }
+    symbol.parameters = Vec<String>.new();
+    symbol.parameter_names = Vec<String>.new();
+    i64 id = index.symbols.len();
+    u32 name_id = index.names.intern(name.text);
+    while (index.name_heads.len() <= (i64)name_id) { index.name_heads.push(-1); }
+    index.next_name.push(index.name_heads.get((i64)name_id));
+    index.name_heads.set((i64)name_id, id);
+    i64 definition = ide_token_at_or_after(index, name.span.start);
+    if (definition < index.tokens.len()) { index.definitions.set(definition, id); }
+    index.symbols.push(move symbol);
+    return id;
+}
+
+i64 ide_token_at_or_after(IdeIndex* index, i64 offset) {
+    i64 low = 0; i64 high = index.tokens.len();
+    while (low < high) {
+        i64 middle = low + (high - low) / 2;
+        if (index.tokens.get(middle).span.start < offset) { low = middle + 1; }
+        else { high = middle; }
+    }
+    return low;
+}
+
+i64 ide_find_definition(IdeIndex* index, Span span) {
+    i64 token = ide_token_at_or_after(index, span.start);
+    if (token >= index.tokens.len() || index.tokens.get(token).span.start != span.start) { return -1; }
+    return index.definitions.get(token);
+}
+
+i64 ide_name_head(IdeIndex* index, str name) {
+    Optional<u32> found = map_get_opt_str_u32(&index.names.ids, name);
+    return found.is_some() ? index.name_heads.get((i64)found.unwrap()) : -1;
+}
+
+String ide_owner_name(str text) {
+    TokenStream tokens = TokenStream.new(); DiagnosticBag diagnostics = DiagnosticBag.new();
+    lex(String.from_str(text), &tokens, &diagnostics);
+    i64 i = 0;
+    while (i < tokens.len()) {
+        Token* token = tokens.get(i);
+        if (token.kind == TokenKind.Identifier || is_primitive_type_token(token.kind)) { return token.text.clone(); }
+        i += 1;
+    }
+    return String.new();
+}
+
+// Resolve only unqualified names here. The workspace owns import visibility.
+i64 ide_resolve_local(IdeIndex* index, str name, i64 offset) {
+    i64 best = -1;
+    bool ambiguous = false;
+    i64 i = ide_name_head(index, name);
+    while (i >= 0) {
+        IdeSymbol* symbol = index.symbols.get_ptr(i);
+        if (symbol.name.equals(name) && symbol.owner.len() == 0
+            && (!symbol.local || ((symbol.selection.start <= offset || symbol.kind == IdeSymbolKind.TypeParameter)
+                && symbol.scope.start <= offset && (offset < symbol.scope.end
+                    || (index.recovered && offset == symbol.scope.end))))) {
+            if (best < 0) { best = i; }
+            else {
+                IdeSymbol* previous = index.symbols.get_ptr(best);
+                if (!previous.local && !symbol.local) { ambiguous = true; }
+                if (symbol.local && (!previous.local
+                    || symbol.scope.end - symbol.scope.start < previous.scope.end - previous.scope.start
+                    || (symbol.scope.start == previous.scope.start
+                        && symbol.selection.start > previous.selection.start))) { best = i; ambiguous = false; }
+            }
+        }
+        i = index.next_name.get(i);
+    }
+    return ambiguous ? -2 : best;
+}
+
+void ide_generic_parameters(IdeIndex* index, SyntaxNode* name, Span scope) {
+    SyntaxNode* cursor = name.next_sibling;
+    if (cursor == (SyntaxNode*)0 || cursor.token_kind != TokenKind.Less) { return; }
+    cursor = cursor.next_sibling; bool parameter = true; i64 depth = 1;
+    while (cursor != (SyntaxNode*)0 && depth > 0) {
+        if (cursor.token_kind == TokenKind.Less) { depth += 1; }
+        else if (cursor.token_kind == TokenKind.Greater) { depth -= 1; }
+        else if (depth == 1 && cursor.token_kind == TokenKind.Comma) { parameter = true; }
+        else if (depth == 1 && parameter && node_is_identifier(cursor)) {
+            i64 id = ide_add_symbol(index, cursor, IdeSymbolKind.TypeParameter, "", cursor.span, scope, true);
+            index.symbols.get_ptr(id).signature = String.from_str("type ");
+            index.symbols.get_ptr(id).signature.push_str(cursor.text);
+            parameter = false;
+        }
+        cursor = cursor.next_sibling;
+    }
+}
+
+bool ide_match_body(SyntaxNode* node) {
+    if (node.kind != NodeKind.Block || node.parent == (SyntaxNode*)0) { return false; }
+    bool match_pending = false; SyntaxNode* sibling = node.parent.first_child;
+    while (sibling != (SyntaxNode*)0 && sibling != node) {
+        if (sibling.kind == NodeKind.Token && sibling.token_kind == TokenKind.Match) { match_pending = true; }
+        else if (sibling.kind == NodeKind.Block || (sibling.kind == NodeKind.Token && sibling.token_kind == TokenKind.Semicolon)) { match_pending = false; }
+        sibling = sibling.next_sibling;
+    }
+    return match_pending;
+}
+
+bool ide_match_binding_scope(Binding* binding, Span* scope) {
+    SyntaxNode* block = binding.name_node.parent;
+    while (block != (SyntaxNode*)0 && !ide_match_body(block)) { block = block.parent; }
+    if (block == (SyntaxNode*)0) { return false; }
+    SyntaxNode* start = block.first_child;
+    while (start != (SyntaxNode*)0) {
+        while (start != (SyntaxNode*)0 && start.kind == NodeKind.Token
+            && (start.token_kind == TokenKind.Comma || start.token_kind == TokenKind.Semicolon)) { start = start.next_sibling; }
+        if (start == (SyntaxNode*)0) { break; }
+        SyntaxNode* colon = start;
+        while (colon != (SyntaxNode*)0 && !(colon.kind == NodeKind.Token && colon.token_kind == TokenKind.Colon)) { colon = colon.next_sibling; }
+        if (colon == (SyntaxNode*)0) { return false; }
+        // Commas before the colon introduce guards, not another arm or binding.
+        SyntaxNode* pattern_end = start;
+        while (pattern_end != colon && !(pattern_end.kind == NodeKind.Token && pattern_end.token_kind == TokenKind.Comma)) { pattern_end = pattern_end.next_sibling; }
+        SyntaxNode* end = colon.next_sibling;
+        while (end != (SyntaxNode*)0 && !(end.kind == NodeKind.Token && end.token_kind == TokenKind.Comma)) { end = end.next_sibling; }
+        if (start.span.start <= binding.span.start && binding.span.end <= pattern_end.span.start) {
+            *scope = start.span; scope.end = end == (SyntaxNode*)0 ? block.span.end : end.span.start; return true;
+        }
+        start = end == (SyntaxNode*)0 ? (SyntaxNode*)0 : end.next_sibling;
+    }
+    return false;
+}
+
+void ide_add_bindings(IdeIndex* index, Vec<Binding>* bindings, Span function,
+                      str owner, SymbolTable* table) {
+    i64 i = 0;
+    while (i < bindings.len()) {
+        Binding* binding = bindings.get_ptr(i);
+        if (ide_find_definition(index, binding.span) >= 0) { i += 1; continue; }
+        SyntaxNode* visibility = binding_visibility_scope(binding);
+        Span scope = visibility == (SyntaxNode*)0 ? function : visibility.span;
+        if (binding.kind == BindingKind.Parameter) { scope = function; }
+        if (binding.kind == BindingKind.MatchBinding && !ide_match_binding_scope(binding, &scope)) { i += 1; continue; }
+        bool counter = false;
+        SyntaxNode* parameters = binding.name_node.parent;
+        Optional<LambdaSyntax> projected = lambda_syntax(parameters); bool lambda_parameter = lambda_start(parameters);
+        if (projected.is_some()) {
+            LambdaSyntax syntax = projected.unwrap(); scope = syntax.extent;
+            if (syntax.expression_body) { scope.end = syntax.end == (SyntaxNode*)0 ? parameters.parent.span.end : syntax.end.span.end; }
+        } else if (lambda_parameter) {
+            SyntaxNode* body = parameters.next_sibling.next_sibling; scope = parameters.span;
+            scope.end = body == (SyntaxNode*)0 ? parameters.parent.span.end : body.span.end;
+        }
+        SyntaxNode* before = binding_previous_sibling(parameters);
+        if (parameters != (SyntaxNode*)0 && parameters.kind == NodeKind.Parenthesized
+            && before != (SyntaxNode*)0 && before.token_kind == TokenKind.For) {
+            SyntaxNode* body = parameters.next_sibling;
+            if (body != (SyntaxNode*)0 && body.kind == NodeKind.Block) {
+                scope = parameters.span.extend(body.span); counter = true;
+            }
+        }
+        i64 id = ide_add_symbol(index, binding.name_node,
+            (binding.kind == BindingKind.Parameter || lambda_parameter) && !counter ? IdeSymbolKind.Parameter : IdeSymbolKind.Local,
+            "", binding.span, scope, true);
+        IdeSymbol* symbol = index.symbols.get_ptr(id);
+        u32 type_id = typecheck_parameter_type_id(&table.types, binding);
+        symbol.type_name = String.from_str(type_id == TYPE_UNKNOWN ? binding.declared_type.name : table.types.type_name(type_id));
+        if (strcmp(binding.declared_type.name, "Self") == 0) { symbol.type_name = String.from_str(owner); }
+        symbol.inferred = binding.kind == BindingKind.Let;
+        symbol.readonly = binding_is_const(binding);
+        symbol.signature = symbol.type_name.clone();
+        if (symbol.signature.len() > 0) { symbol.signature.push(' '); }
+        symbol.signature.push_str(binding.name);
+        i += 1;
+    }
+}
+
+void ide_lambda_bindings(SyntaxNode* node, Vec<Binding>* bindings) {
+    if (node == (SyntaxNode*)0) { return; }
+    if (lambda_start(node)) { collect_parameter_bindings(node, bindings); }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) { ide_lambda_bindings(child, bindings); child = child.next_sibling; }
+}
+
+void ide_infer_local_nodes(IdeIndex* index, SyntaxNode* node, SymbolTable* table) {
+    if (node == (SyntaxNode*)0) { return; }
+    if (node.kind == NodeKind.Token && node.token_kind == TokenKind.Identifier) {
+        i64 definition = ide_find_definition(index, node.span);
+        if (definition >= 0 && index.symbols.get_ptr(definition).inferred) {
+            SyntaxNode* assign = node.next_sibling;
+            // Unconverted lambda heads are not ordinary initializer expressions.
+            if (assign != (SyntaxNode*)0 && lambda_start(assign.next_sibling)) { return; }
+            TypeEnv env = TypeEnv.new(); i64 i = 0;
+            while (i < index.symbols.len()) {
+                IdeSymbol* visible = index.symbols.get_ptr(i);
+                if (visible.local && visible.type_name.len() > 0
+                    && ide_resolve_local(index, visible.name.to_str(), node.span.end) == i) {
+                    u32 type_id = table.types.parse_type_name(visible.type_name.to_str());
+                    env.insert(table.names.intern(visible.name.to_str()), type_id);
+                }
+                i += 1;
+            }
+            u32 type_id = typecheck_initializer_type(table, &table.types, index.tree.root, node, &env);
+            IdeSymbol* symbol = index.symbols.get_ptr(definition);
+            if (type_id != TYPE_UNKNOWN) {
+                symbol.type_name = String.from_str(table.types.type_name(type_id));
+                symbol.signature = symbol.type_name.clone(); symbol.signature.push(' '); symbol.signature.push_str(symbol.name.to_str());
+            }
+        }
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) { ide_infer_local_nodes(index, child, table); child = child.next_sibling; }
+}
+
+void ide_function(IdeIndex* index, SyntaxNode* start, SyntaxNode* name,
+                  SyntaxNode* params, SyntaxNode* body, SyntaxNode* end,
+                  str owner, SymbolTable* table) {
+    Span extent = start.span;
+    if (body != (SyntaxNode*)0) { extent = extent.extend(body.span); }
+    else if (params != (SyntaxNode*)0) { extent = extent.extend(params.span); }
+    i64 id = ide_add_symbol(index, name, strlen(owner) == 0 ? IdeSymbolKind.Function : IdeSymbolKind.Method,
+        owner, extent, extent, false);
+    IdeSymbol* symbol = index.symbols.get_ptr(id);
+    symbol.has_body = body != (SyntaxNode*)0;
+    symbol.signature = ide_render(start, body == (SyntaxNode*)0 ? end : body);
+    String return_type = ide_render(start, name);
+    symbol.type_name = return_type.trim();
+    if (symbol.type_name.equals("Self")) { symbol.type_name = String.from_str(owner); }
+    Vec<Binding> bindings = Vec<Binding>.new();
+    collect_parameter_bindings(params, &bindings);
+    i64 p = 0;
+    while (p < bindings.len()) {
+        Binding* binding = bindings.get_ptr(p);
+        if (p == 0 && strcmp(binding.name, "self") == 0) { symbol.instance = true; }
+        String label = ide_render(binding.type_start, binding.type_end);
+        if (label.len() > 0) { label.push(' '); }
+        label.push_str(binding.name);
+        symbol.parameters.push(move label);
+        symbol.parameter_names.push(String.from_str(binding.name));
+        p += 1;
+    }
+    collect_block_bindings(body, &bindings);
+    ide_lambda_bindings(body, &bindings);
+    ide_add_bindings(index, &bindings, extent, owner, table);
+    ide_generic_parameters(index, name, extent);
+}
+
+void ide_members(IdeIndex* index, SyntaxNode* item, str owner, bool methods, SymbolTable* table) {
+    SyntaxNode* block = binding_function_body(item);
+    if (block == (SyntaxNode*)0) { return; }
+    SyntaxNode* start = block.first_child;
+    while (start != (SyntaxNode*)0) {
+        SyntaxNode* cursor = start;
+        SyntaxNode* name = (SyntaxNode*)0;
+        SyntaxNode* params = (SyntaxNode*)0;
+        SyntaxNode* body = (SyntaxNode*)0;
+        while (cursor != (SyntaxNode*)0 && cursor.token_kind != TokenKind.Semicolon) {
+            if (cursor.kind == NodeKind.Parenthesized && params == (SyntaxNode*)0) { params = cursor; }
+            if (cursor.kind == NodeKind.Block) { body = cursor; break; }
+            if (node_is_identifier(cursor) && params == (SyntaxNode*)0) { name = cursor; }
+            cursor = cursor.next_sibling;
+        }
+        SyntaxNode* end = cursor == (SyntaxNode*)0 ? (SyntaxNode*)0 : cursor.next_sibling;
+        if (name != (SyntaxNode*)0) {
+            if (methods && params != (SyntaxNode*)0) {
+                ide_function(index, start, name, params, body, cursor, owner, table);
+            } else if (!methods) {
+                i64 id = ide_add_symbol(index, name, IdeSymbolKind.Field, owner, name.span, item.span, false);
+                IdeSymbol* symbol = index.symbols.get_ptr(id);
+                symbol.signature = ide_render(start, cursor);
+                String type_text = ide_render(start, name);
+                symbol.type_name = type_text.trim();
+            }
+        }
+        start = end;
+    }
+}
+
+void ide_collect_nodes(IdeIndex* index, SyntaxNode* node) {
+    if (node == (SyntaxNode*)0) { return; }
+    if (node_is_identifier(node) || node.token_kind == TokenKind.SelfType) {
+        IdeOccurrence occurrence;
+        occurrence.node = node;
+        occurrence.symbol = ide_find_definition(index, node.span);
+        occurrence.definition = occurrence.symbol >= 0;
+        occurrence.owner = String.new();
+        SyntaxNode* previous = binding_previous_sibling(node);
+        occurrence.member = previous != (SyntaxNode*)0
+            && (previous.token_kind == TokenKind.Dot || previous.token_kind == TokenKind.DoubleColon);
+        if (!occurrence.definition && !occurrence.member) {
+            occurrence.symbol = ide_resolve_local(index, node.text, node.span.start);
+        }
+        if (occurrence.member) {
+            SyntaxNode* receiver = binding_previous_sibling(previous);
+            if (receiver != (SyntaxNode*)0 && node_is_identifier(receiver)) {
+                if (previous.token_kind == TokenKind.DoubleColon) {
+                    occurrence.owner = String.from_str(receiver.text);
+                } else {
+                    i64 target = ide_resolve_local(index, receiver.text, receiver.span.start);
+                    if (target >= 0) { occurrence.owner = index.symbols.get_ptr(target).type_owner.clone(); }
+                }
+            }
+            i64 i = ide_name_head(index, node.text);
+            while (i >= 0 && occurrence.owner.len() > 0) {
+                IdeSymbol* symbol = index.symbols.get_ptr(i);
+                if (symbol.owner.equals(occurrence.owner.to_str()) && symbol.name.equals(node.text)) {
+                    if (occurrence.symbol == -1) { occurrence.symbol = i; }
+                    else { occurrence.symbol = -2; }
+                }
+                i = index.next_name.get(i);
+            }
+        }
+        index.occurrences.push(move occurrence);
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        ide_collect_nodes(index, child);
+        child = child.next_sibling;
+    }
+}
+
+void ide_collect(IdeIndex* index) {
+    CfgSet cfg = linux_defaults();
+    Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
+    cfg_collect_items(index.tree.root, &cfg, (DiagnosticBag*)0, &items);
+    cfg_collect_import_names(index.tree.root, &cfg, &index.imports);
+    Vec<CfgImportBinding> aliases = Vec<CfgImportBinding>.new();
+    cfg_collect_import_bindings(index.tree.root, &cfg, &aliases);
+    i64 alias_index = 0;
+    while (alias_index < aliases.len()) {
+        CfgImportBinding* alias = aliases.get_ptr(alias_index);
+        SyntaxNode* selection = alias.import_node.first_child;
+        while (selection != (SyntaxNode*)0 && selection.kind != NodeKind.Block) { selection = selection.next_sibling; }
+        SyntaxNode* name = selection == (SyntaxNode*)0 ? (SyntaxNode*)0 : selection.first_child;
+        while (name != (SyntaxNode*)0 && name.span.start != alias.span.start) { name = name.next_sibling; }
+        if (name != (SyntaxNode*)0) {
+            i64 id = ide_add_symbol(index, name, IdeSymbolKind.ImportAlias, "", name.span, index.tree.root.span, false);
+            index.symbols.get_ptr(id).type_name = String.from_str(alias.original);
+            index.symbols.get_ptr(id).signature = String.from_str(alias.alias);
+        }
+        alias_index += 1;
+    }
+    SymbolTable table = SymbolTable.new();
+    DiagnosticBag ignored = DiagnosticBag.new();
+    collect_symbols(&table, &ignored, &index.tree, &cfg);
+    i64 i = 0;
+    while (i < items.len()) {
+        SyntaxNode* item = items.get(i);
+        if (item.kind == NodeKind.Struct) { module_register_source_struct(&table.types, item); }
+        if (item.kind == NodeKind.Enum) { module_register_source_enum(&table.types, index.tree.root, item); }
+        i += 1;
+    }
+    i = 0;
+    while (i < items.len()) {
+        SyntaxNode* item = items.get(i);
+        SyntaxNode* name = item_identifier(item);
+        if (item.kind == NodeKind.Function && name != (SyntaxNode*)0) {
+            ide_function(index, item.first_child, name, binding_function_parameters(item),
+                binding_function_body(item), (SyntaxNode*)0, "", &table);
+        } else if (item.kind == NodeKind.Impl) {
+            SyntaxNode* target = impl_target_identifier(item);
+            if (target != (SyntaxNode*)0) {
+                IdeImplementation implementation;
+                implementation.node = item; implementation.target = target;
+                implementation.trait_name = (SyntaxNode*)0;
+                SyntaxNode* cursor = item.first_child; SyntaxNode* candidate = (SyntaxNode*)0; i64 depth = 0;
+                while (cursor != (SyntaxNode*)0 && cursor != target) {
+                    if (cursor.token_kind == TokenKind.For) {
+                        implementation.trait_name = candidate; break;
+                    } else if (cursor.token_kind == TokenKind.Less) { depth += 1; }
+                    else if (cursor.token_kind == TokenKind.Greater) { depth -= 1; }
+                    else if (cursor.token_kind == TokenKind.RightShift) { depth -= 2; }
+                    else if (depth == 0 && node_is_identifier(cursor) && candidate == (SyntaxNode*)0) { candidate = cursor; }
+                    cursor = cursor.next_sibling;
+                }
+                index.implementations.push(implementation);
+                ide_members(index, item, target.text, true, &table);
+            }
+        } else if (name != (SyntaxNode*)0) {
+            IdeSymbolKind kind = IdeSymbolKind.Global;
+            if (item.kind == NodeKind.Struct) { kind = IdeSymbolKind.Struct; }
+            else if (item.kind == NodeKind.Enum) { kind = IdeSymbolKind.Enum; }
+            else if (item.kind == NodeKind.Trait) { kind = IdeSymbolKind.Trait; }
+            else if (item.kind == NodeKind.TypeAlias) { kind = IdeSymbolKind.TypeAlias; }
+            i64 id = ide_add_symbol(index, name, kind, "", item.span, item.span, false);
+            index.symbols.get_ptr(id).signature = ide_render(item.first_child, binding_function_body(item));
+            if (kind == IdeSymbolKind.TypeAlias) {
+                SyntaxNode* assign = name.next_sibling;
+                while (assign != (SyntaxNode*)0 && assign.token_kind != TokenKind.Assign) { assign = assign.next_sibling; }
+                if (assign != (SyntaxNode*)0) {
+                    SyntaxNode* end = assign.next_sibling;
+                    while (end != (SyntaxNode*)0 && end.token_kind != TokenKind.Semicolon) { end = end.next_sibling; }
+                    index.symbols.get_ptr(id).type_name = ide_render(assign.next_sibling, end);
+                }
+            } else if (kind == IdeSymbolKind.Global) { index.symbols.get_ptr(id).type_name = ide_render(item.first_child, name); }
+            ide_generic_parameters(index, name, item.span);
+            if (item.kind == NodeKind.Struct) { ide_members(index, item, name.text, false, &table); }
+            if (item.kind == NodeKind.Trait) { ide_members(index, item, name.text, true, &table); }
+            if (item.kind == NodeKind.Enum) {
+                Vec<SyntaxNode*> names = Vec<SyntaxNode*>.new();
+                Vec<i64> tags = Vec<i64>.new();
+                Vec<i64> counts = Vec<i64>.new();
+                enum_each_variant(item, &names, &tags, &counts);
+                i64 v = 0;
+                while (v < names.len()) {
+                    SyntaxNode* variant = names.get(v);
+                    i64 variant_id = ide_add_symbol(index, variant, IdeSymbolKind.Variant, name.text, variant.span, item.span, false);
+                    index.symbols.get_ptr(variant_id).signature = String.from_str(variant.text);
+                    index.symbols.get_ptr(variant_id).type_name = String.from_str(name.text);
+                    v += 1;
+                }
+            }
+        }
+        i += 1;
+    }
+    ide_infer_local_nodes(index, index.tree.root, &table);
+    i = 0;
+    while (i < index.symbols.len()) {
+        IdeSymbol* symbol = index.symbols.get_ptr(i);
+        if (symbol.type_name.len() > 0) { symbol.type_owner = ide_owner_name(symbol.type_name.to_str()); }
+        i += 1;
+    }
+    ide_collect_nodes(index, index.tree.root);
+}

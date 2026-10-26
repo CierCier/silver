@@ -1,227 +1,281 @@
-// bin/aglsp/src/symbols.ag — Document symbols and hover provider for aglsp.
-import std.mem.vec;
-import std.string;
-import agc;
+import document;
+import positions;
 import json_rpc;
+import navigation;
+import tooling.search;
+import std.algo.sort;
 
-void append_range(String* out, Span span) {
-    out.push_str("{\"start\":{\"line\":");
-    i64 start_line = span.start_line > 0 ? span.start_line - 1 : 0;
-    i64 start_col = span.start_col > 0 ? span.start_col - 1 : 0;
-    i64 end_line = span.end_line > 0 ? span.end_line - 1 : 0;
-    i64 end_col = span.end_col > 0 ? span.end_col - 1 : 0;
-
-    out.push_display(&start_line);
-
-    out.push_str(",\"character\":");
-    out.push_display(&start_col);
-
-    out.push_str("},\"end\":{\"line\":");
-    out.push_display(&end_line);
-
-    out.push_str(",\"character\":");
-    out.push_display(&end_col);
-    out.push_str("}}");
+i64 symbol_kind(IdeSymbolKind kind) {
+    return match kind {
+        IdeSymbolKind.Function : 12, IdeSymbolKind.Method : 6,
+        IdeSymbolKind.Struct : 23, IdeSymbolKind.Enum : 10,
+        IdeSymbolKind.Trait : 11, IdeSymbolKind.TypeAlias : 5,
+        IdeSymbolKind.Field : 8, IdeSymbolKind.Variant : 22,
+        _ : 13,
+    };
 }
 
-String get_item_name(SyntaxNode* item) {
-    SyntaxNode* child = item.first_child;
-    while (child != (SyntaxNode*)0) {
-        if (child.kind == NodeKind.Token && child.token_kind == TokenKind.Identifier) {
-            return String.from_str(child.text);
-        }
-        child = child.next_sibling;
-    }
-    return String.from_str("anonymous");
+String compute_hover(Document* doc, i64 offset, bool markdown) {
+    i64 occurrence = doc.analysis.occurrence_at(offset);
+    SymbolTarget target = follow_import_alias(resolve_occurrence(doc, occurrence));
+    if (target.symbol < 0) { return String.from_str("null"); }
+    IdeSymbol* symbol = target.document.analysis.symbols.get_ptr(target.symbol);
+    String content = String.new();
+    if (markdown) { content.push_str("```silver\n"); }
+    content.push_str(symbol.signature.to_str());
+    if (markdown) { content.push_str("\n```"); }
+    if (symbol.documentation.len() > 0) { content.push_str("\n\n"); content.push_str(symbol.documentation.to_str()); }
+    String out = String.from_str("{\"contents\":{\"kind\":\""); out.push_str(markdown ? "markdown" : "plaintext"); out.push_str("\",\"value\":\"");
+    json_escape(content.to_str(), &out); out.push_str("\"},\"range\":");
+    doc.append_range(&out, doc.analysis.occurrences.get_ptr(occurrence).node.span);
+    out.push('}'); return move out;
 }
 
-String compute_document_symbols(str text) {
-    TokenStream stream = TokenStream.new();
-    DiagnosticBag diagnostics = DiagnosticBag.new();
-    String source = String.from_str(text);
-    lex(move source, &stream, &diagnostics);
-
-    NodePool pool = NodePool.new();
-    SyntaxTree tree;
-    parse(&stream, &diagnostics, &pool, &tree);
-
-    String out = String.from_str("[");
-    bool first = true;
-
-    if (tree.root != (SyntaxNode*)0) {
-        SyntaxNode* item = tree.root.first_child;
-        while (item != (SyntaxNode*)0) {
-            i64 kind_num = 0;
-            if (item.kind == NodeKind.Function) {
-                kind_num = 12; // LSP Function
-            } else if (item.kind == NodeKind.Struct) {
-                kind_num = 23; // LSP Struct
-            } else if (item.kind == NodeKind.Enum) {
-                kind_num = 10; // LSP Enum
-            } else if (item.kind == NodeKind.Trait) {
-                kind_num = 11; // LSP Interface
-            } else if (item.kind == NodeKind.Impl) {
-                kind_num = 5;  // LSP Class
-            }
-
-            if (kind_num != 0) {
-                if (!first) {
-                    out.push(',');
-                }
-                first = false;
-
-                String name = get_item_name(item);
-                out.push_str("{\"name\":\"");
-                json_escape(name.to_str(), &out);
-                out.push_str("\",\"kind\":");
-                out.push_display(&kind_num);
-
-                out.push_str(",\"range\":");
-                append_range(&out, item.span);
-                out.push_str(",\"selectionRange\":");
-                append_range(&out, item.span);
-                out.push_str("}");
-                name.drop();
-            }
-            item = item.next_sibling;
-        }
-    }
-
-    out.push(']');
-    pool.destroy();
+String compute_definition(Document* doc, i64 offset) {
+    SymbolTarget target = follow_import_alias(resolve_occurrence(doc, doc.analysis.occurrence_at(offset)));
+    if (target.symbol < 0) { return String.from_str("null"); }
+    String out = String.new();
+    append_location(&out, target.document, target.document.analysis.symbols.get_ptr(target.symbol).selection);
     return move out;
 }
 
-SyntaxNode* find_leaf_at_pos(SyntaxNode* node, i64 line, i64 col) {
-    if (node == (SyntaxNode*)0) {
-        return (SyntaxNode*)0;
-    }
-    if (line < node.span.start_line || line > node.span.end_line) {
-        return (SyntaxNode*)0;
-    }
-    if (node.kind == NodeKind.Token) {
-        if (line == node.span.start_line && col >= node.span.start_col && col <= node.span.end_col) {
-            return node;
-        }
-        return (SyntaxNode*)0;
-    }
-    SyntaxNode* child = node.first_child;
-    while (child != (SyntaxNode*)0) {
-        SyntaxNode* found = find_leaf_at_pos(child, line, col);
-        if (found != (SyntaxNode*)0) {
-            return found;
-        }
-        child = child.next_sibling;
-    }
-    return (SyntaxNode*)0;
-}
-
-String compute_hover(str text, i64 line, i64 character) {
-    i64 src_line = line + 1;
-    i64 src_col = character + 1;
-
-    TokenStream stream = TokenStream.new();
-    DiagnosticBag diagnostics = DiagnosticBag.new();
-    String source = String.from_str(text);
-    lex(move source, &stream, &diagnostics);
-
-    NodePool pool = NodePool.new();
-    SyntaxTree tree;
-    parse(&stream, &diagnostics, &pool, &tree);
-
-    SyntaxNode* leaf = find_leaf_at_pos(tree.root, src_line, src_col);
-    if (leaf == (SyntaxNode*)0) {
-        pool.destroy();
-        return String.from_str("null");
-    }
-
-    str word = leaf.text;
-    String hover_text = String.new();
-
-    if (types_is_primitive_name(word)) {
-        hover_text.push_str("**type:** `");
-        hover_text.push_str(word);
-        hover_text.push_str("` (primitive)");
-    } else if (strcmp(word, "struct") == 0 || strcmp(word, "enum") == 0 || strcmp(word, "impl") == 0
-        || strcmp(word, "trait") == 0 || strcmp(word, "let") == 0 || strcmp(word, "return") == 0
-        || strcmp(word, "move") == 0 || strcmp(word, "defer") == 0 || strcmp(word, "match") == 0) {
-        hover_text.push_str("`");
-        hover_text.push_str(word);
-        hover_text.push_str("` — keyword");
-    } else {
-        // Look up in symbol table
-        CfgSet cfg = linux_defaults();
-        SymbolTable symbols = SymbolTable.new();
-        collect_symbols(&symbols, &diagnostics, &tree, &cfg);
-        i64 sym_idx = symbols.find(word);
-        if (sym_idx >= 0) {
-            Symbol* sym = symbols.get(sym_idx);
-            hover_text.push_str("```silver\n");
-            if (sym.kind == SymbolKind.Function) {
-                hover_text.push_str("fn ");
-            } else if (sym.kind == SymbolKind.Struct) {
-                hover_text.push_str("struct ");
-            } else if (sym.kind == SymbolKind.Enum) {
-                hover_text.push_str("enum ");
-            } else if (sym.kind == SymbolKind.Trait) {
-                hover_text.push_str("trait ");
+void append_document_symbol(String* out, Document* doc, i64 id, bool children) {
+    IdeSymbol* symbol = doc.analysis.symbols.get_ptr(id);
+    out.push_str("{\"name\":\"");
+    if (symbol.kind == IdeSymbolKind.Method) { json_escape(symbol.owner.to_str(), out); out.push('.'); }
+    json_escape(symbol.name.to_str(), out);
+    out.push_str("\",\"detail\":\""); json_escape(symbol.signature.to_str(), out);
+    out.push_str("\",\"kind\":"); i64 kind = symbol_kind(symbol.kind); out.push_display(&kind);
+    out.push_str(",\"range\":"); doc.append_range(out, symbol.extent);
+    out.push_str(",\"selectionRange\":"); doc.append_range(out, symbol.selection);
+    if (children) {
+        out.push_str(",\"children\":["); bool first = true; i64 i = 0;
+        while (i < doc.analysis.symbols.len()) {
+            IdeSymbol* child = doc.analysis.symbols.get_ptr(i);
+            if (child.owner.equals(symbol.name.to_str()) && child.selection.start >= symbol.extent.start
+                && child.selection.end <= symbol.extent.end && !child.local) {
+                if (!first) { out.push(','); } first = false;
+                append_document_symbol(out, doc, i, false);
             }
-            hover_text.push_str(word);
-            hover_text.push_str("\n```");
+            i += 1;
         }
+        out.push(']');
     }
-
-    pool.destroy();
-
-    if (hover_text.len() == 0) {
-        hover_text.drop();
-        return String.from_str("null");
-    }
-
-    String resp = String.from_str("{\"contents\":{\"kind\":\"markdown\",\"value\":\"");
-    json_escape(hover_text.to_str(), &resp);
-    resp.push_str("\"}}");
-    hover_text.drop();
-    return move resp;
+    out.push('}');
 }
 
-String compute_definition(str text, str uri, i64 line, i64 character) {
-    i64 src_line = line + 1;
-    i64 src_col = character + 1;
+void append_symbol_information(String* out, Document* doc, IdeSymbol* symbol) {
+    out.push_str("{\"name\":\""); json_escape(symbol.name.to_str(), out);
+    out.push_str("\",\"containerName\":\""); json_escape(symbol.owner.to_str(), out);
+    out.push_str("\",\"kind\":"); i64 kind = symbol_kind(symbol.kind); out.push_display(&kind);
+    out.push_str(",\"location\":"); append_location(out, doc, symbol.selection); out.push('}');
+}
 
-    TokenStream stream = TokenStream.new();
-    DiagnosticBag diagnostics = DiagnosticBag.new();
-    String source = String.from_str(text);
-    lex(move source, &stream, &diagnostics);
-
-    NodePool pool = NodePool.new();
-    SyntaxTree tree;
-    parse(&stream, &diagnostics, &pool, &tree);
-
-    SyntaxNode* leaf = find_leaf_at_pos(tree.root, src_line, src_col);
-    if (leaf == (SyntaxNode*)0) {
-        pool.destroy();
-        return String.from_str("null");
+String compute_document_symbols(Document* doc, bool hierarchical) {
+    String out = String.from_str("["); bool first = true; i64 i = 0;
+    while (i < doc.analysis.symbols.len()) {
+        IdeSymbol* symbol = doc.analysis.symbols.get_ptr(i);
+        if (!symbol.local && (!hierarchical || symbol.owner.len() == 0 || symbol.kind == IdeSymbolKind.Method)) {
+            if (!first) { out.push(','); } first = false;
+            if (hierarchical) { append_document_symbol(&out, doc, i, symbol.kind != IdeSymbolKind.Method); }
+            else { append_symbol_information(&out, doc, symbol); }
+        }
+        i += 1;
     }
+    out.push(']'); return move out;
+}
 
-    str word = leaf.text;
-    CfgSet cfg = linux_defaults();
-    SymbolTable symbols = SymbolTable.new();
-    collect_symbols(&symbols, &diagnostics, &tree, &cfg);
-    i64 sym_idx = symbols.find(word);
-
-    if (sym_idx < 0) {
-        pool.destroy();
-        return String.from_str("null");
+String compute_references(DocumentStore* store, Document* doc, i64 offset, bool declarations, bool highlights) {
+    SymbolTarget target = resolve_occurrence(doc, doc.analysis.occurrence_at(offset));
+    Vec<Document*> documents = store.query_documents(doc);
+    String out = String.from_str("["); bool first = true; i64 i = 0;
+    while (target.symbol >= 0 && i < documents.len()) {
+        Document* candidate = documents.get(i);
+        if (highlights && candidate != doc) { i += 1; continue; }
+        i64 j = 0;
+        while (j < candidate.analysis.occurrences.len()) {
+            IdeOccurrence* occurrence = candidate.analysis.occurrences.get_ptr(j);
+            SymbolTarget resolved = resolve_occurrence(candidate, j);
+            if (resolved.document == target.document && resolved.symbol == target.symbol
+                && (declarations || !occurrence.definition)) {
+                if (!first) { out.push(','); } first = false;
+                if (highlights) {
+                    out.push_str("{\"range\":"); candidate.append_range(&out, occurrence.node.span);
+                    out.push_str(",\"kind\":1}");
+                } else { append_location(&out, candidate, occurrence.node.span); }
+            }
+            j += 1;
+        }
+        i += 1;
     }
+    out.push(']'); return move out;
+}
 
-    Symbol* sym = symbols.get(sym_idx);
-    String resp = String.from_str("{\"uri\":\"");
-    json_escape(uri, &resp);
-    resp.push_str("\",\"range\":");
-    append_range(&resp, sym.span);
-    resp.push('}');
+bool valid_rename(str name) {
+    if (!typecheck_name_start((u8)name[0])) { return false; }
+    i64 i = 1;
+    while (name[i] != (u8)0) { if (!typecheck_name_continue((u8)name[i])) { return false; } i += 1; }
+    TokenStream tokens = TokenStream.new(); DiagnosticBag diagnostics = DiagnosticBag.new();
+    lex(String.from_str(name), &tokens, &diagnostics);
+    return diagnostics.is_empty() && tokens.len() == 2 && tokens.get(0).kind == TokenKind.Identifier;
+}
 
-    pool.destroy();
-    return move resp;
+String compute_prepare_rename(Document* doc, i64 offset) {
+    i64 occurrence = doc.analysis.occurrence_at(offset);
+    SymbolTarget target = rename_target(resolve_occurrence(doc, occurrence));
+    if (target.symbol < 0) { return String.from_str("null"); }
+    String out = String.from_str("{\"range\":");
+    doc.append_range(&out, doc.analysis.occurrences.get_ptr(occurrence).node.span);
+    out.push_str(",\"placeholder\":\"");
+    json_escape(target.document.analysis.symbols.get_ptr(target.symbol).name.to_str(), &out);
+    out.push_str("\"}"); return move out;
+}
+
+SymbolTarget rename_target(SymbolTarget target) {
+    if (target.symbol >= 0 && target.document.analysis.symbols.get_ptr(target.symbol).kind == IdeSymbolKind.Method) {
+        return declaration_target(target);
+    }
+    return target;
+}
+
+Vec<SymbolTarget> rename_plan(DocumentStore* store, Document* context, SymbolTarget target) {
+    Vec<SymbolTarget> plan = Vec<SymbolTarget>.new(); target = rename_target(target);
+    if (target.symbol < 0) { return move plan; }
+    plan.push(target);
+    if (target.document.analysis.symbols.get_ptr(target.symbol).kind != IdeSymbolKind.Method) { return move plan; }
+    Vec<Document*> documents = store.query_documents(context);
+    i64 i = 0;
+    while (i < documents.len()) {
+        Document* doc = documents.get(i); i64 symbol = ide_name_head(&doc.analysis, target.document.analysis.symbols.get_ptr(target.symbol).name.to_str());
+        while (symbol >= 0) {
+            SymbolTarget candidate; candidate.document = doc; candidate.symbol = symbol;
+            if (!same_target(candidate, target) && same_target(rename_target(candidate), target)) { plan.push(candidate); }
+            symbol = doc.analysis.next_name.get(symbol);
+        }
+        i += 1;
+    }
+    return move plan;
+}
+
+bool rename_conflicts(DocumentStore* store, Document* context, SymbolTarget target, str name) {
+    target = rename_target(target); Vec<SymbolTarget> plan = rename_plan(store, context, target);
+    if (target.symbol < 0) { return true; }
+    IdeSymbol* selected = target.document.analysis.symbols.get_ptr(target.symbol);
+    Vec<Document*> documents = store.query_documents(context);
+    i64 i = 0;
+    while (i < documents.len()) {
+        Document* doc = documents.get(i); i64 j = 0;
+        while (j < doc.analysis.symbols.len()) {
+            IdeSymbol* symbol = doc.analysis.symbols.get_ptr(j);
+            if (symbol.name.equals(name)) {
+                i64 p = 0;
+                while (p < plan.len()) {
+                    SymbolTarget renamed = plan.get(p); IdeSymbol* declaration = renamed.document.analysis.symbols.get_ptr(renamed.symbol);
+                    if (symbol != declaration && symbol.owner.equals(declaration.owner.to_str())) {
+                        if (!declaration.local && !symbol.local) { return true; }
+                        if (doc == renamed.document && symbol.scope.start < declaration.scope.end
+                            && declaration.scope.start < symbol.scope.end) { return true; }
+                    }
+                    p += 1;
+                }
+            }
+            j += 1;
+        }
+        // A local at a use site could capture a newly renamed imported item.
+        j = 0;
+        while (j < doc.analysis.occurrences.len()) {
+            IdeOccurrence* occurrence = doc.analysis.occurrences.get_ptr(j);
+            if (strcmp(occurrence.node.text, selected.name.to_str()) != 0) { j += 1; continue; }
+            SymbolTarget resolved = rename_target(resolve_occurrence(doc, j));
+            if (resolved.symbol == -2) {
+                i64 p = 0;
+                while (p < plan.len()) {
+                    SymbolTarget renamed = plan.get(p);
+                    if (occurrence.owner.equals(renamed.document.analysis.symbols.get_ptr(renamed.symbol).owner.to_str())) { return true; }
+                    p += 1;
+                }
+            }
+            if (occurrence.member) { j += 1; continue; }
+            if (same_target(resolved, target)) {
+                i64 other = ide_resolve_local(&doc.analysis, name, doc.analysis.occurrences.get_ptr(j).node.span.start);
+                if (other >= 0 && !(doc == target.document && other == target.symbol)) { return true; }
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+String compute_rename(DocumentStore* store, Document* context, SymbolTarget target, str name, bool versioned) {
+    target = rename_target(target);
+    if (target.symbol < 0) { return String.from_str("null"); }
+    str selected_name = target.document.analysis.symbols.get_ptr(target.symbol).name.to_str();
+    Vec<Document*> documents = store.query_documents(context);
+    String out = String.from_str(versioned ? "{\"documentChanges\":[" : "{\"changes\":{"); bool first_doc = true; i64 i = 0;
+    while (i < documents.len()) {
+        Document* doc = documents.get(i); String edits = String.new(); bool first = true; i64 j = 0;
+        while (j < doc.analysis.occurrences.len()) {
+            if (strcmp(doc.analysis.occurrences.get_ptr(j).node.text, selected_name) != 0) { j += 1; continue; }
+            SymbolTarget resolved = rename_target(resolve_occurrence(doc, j));
+            if (same_target(resolved, target)) {
+                if (!first) { edits.push(','); } first = false;
+                edits.push_str("{\"range\":");
+                doc.append_range(&edits, doc.analysis.occurrences.get_ptr(j).node.span);
+                edits.push_str(",\"newText\":\""); json_escape(name, &edits); edits.push_str("\"}");
+            }
+            j += 1;
+        }
+        if (!first) {
+            if (!first_doc) { out.push(','); } first_doc = false;
+            if (versioned) { out.push_str("{\"textDocument\":{\"uri\":\""); }
+            else { out.push('"'); }
+            json_escape(doc.uri.to_str(), &out);
+            if (versioned) {
+                out.push_str("\",\"version\":");
+                if (doc.open) { out.push_display(&doc.version); } else { out.push_str("null"); }
+                out.push_str("},\"edits\":[");
+            } else { out.push_str("\":["); }
+            out.push_str(edits.to_str()); out.push(']');
+            if (versioned) { out.push('}'); }
+        }
+        i += 1;
+    }
+    out.push_str(versioned ? "]}" : "}}"); return move out;
+}
+
+struct WorkspaceSymbolMatch { Document* document; i64 symbol; i64 score; }
+
+impl Lt<WorkspaceSymbolMatch> for WorkspaceSymbolMatch {
+    bool __lt(&self, &WorkspaceSymbolMatch other) {
+        if (self.score != other.score) { return self.score < other.score; }
+        i32 name = strcmp(self.document.analysis.symbols.get_ptr(self.symbol).name.to_str(), other.document.analysis.symbols.get_ptr(other.symbol).name.to_str());
+        if (name != 0) { return name < 0; }
+        i32 path = strcmp(self.document.uri.to_str(), other.document.uri.to_str());
+        if (path != 0) { return path < 0; }
+        return self.symbol < other.symbol;
+    }
+}
+
+String compute_workspace_symbols(DocumentStore* store, str query) {
+    Vec<Document*> documents = store.query_documents((Document*)0);
+    Vec<WorkspaceSymbolMatch> matches = Vec<WorkspaceSymbolMatch>.new(); i64 i = 0;
+    while (i < documents.len()) {
+        Document* doc = documents.get(i); i64 j = 0;
+        while (j < doc.analysis.symbols.len()) {
+            IdeSymbol* symbol = doc.analysis.symbols.get_ptr(j); i64 score = ide_match_score(query, symbol.name.to_str());
+            if (!symbol.local && score >= 0) {
+                WorkspaceSymbolMatch found; found.document = doc; found.symbol = j; found.score = score; matches.push(found);
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    sort<WorkspaceSymbolMatch>(&matches); String out = String.from_str("["); i = 0;
+    while (i < matches.len()) {
+        WorkspaceSymbolMatch* found = matches.get_ptr(i);
+        if (i > 0) { out.push(','); }
+        append_symbol_information(&out, found.document, found.document.analysis.symbols.get_ptr(found.symbol)); i += 1;
+    }
+    out.push(']'); return move out;
 }
