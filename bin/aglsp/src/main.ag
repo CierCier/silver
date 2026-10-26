@@ -28,6 +28,7 @@ void notify_analysis_change(ServerState* state) {
     if (!state.client.pull_diagnostics) { publish_open_diagnostics(&state.store, &state.client); }
     else if (state.client.diagnostic_refresh) { state.requests.refresh(ClientRequestKind.DiagnosticRefresh); }
     if (state.client.semantic_refresh) { state.requests.refresh(ClientRequestKind.SemanticRefresh); }
+    if (state.client.inlay_refresh) { state.requests.refresh(ClientRequestKind.InlayHintRefresh); }
 }
 
 bool request_uses_position(str method) {
@@ -46,8 +47,10 @@ void handle_document_request(DocumentStore* store, ClientOptions* client, JsonRp
     bool positioned = request_uses_position(method);
     bool supported = positioned || strcmp(method, "textDocument/documentSymbol") == 0
         || strcmp(method, "textDocument/formatting") == 0 || strcmp(method, "textDocument/rangeFormatting") == 0
-        || strcmp(method, "textDocument/rangesFormatting") == 0 || strcmp(method, "textDocument/onTypeFormatting") == 0 || strcmp(method, "textDocument/semanticTokens/full") == 0
-        || strcmp(method, "textDocument/semanticTokens/full/delta") == 0 || strcmp(method, "textDocument/semanticTokens/range") == 0
+        || strcmp(method, "textDocument/rangesFormatting") == 0 || strcmp(method, "textDocument/onTypeFormatting") == 0
+        || (client.semantic.full != SemanticFullMode.Disabled && strcmp(method, "textDocument/semanticTokens/full") == 0)
+        || (client.semantic.full == SemanticFullMode.Delta && strcmp(method, "textDocument/semanticTokens/full/delta") == 0)
+        || (client.semantic.range && strcmp(method, "textDocument/semanticTokens/range") == 0)
         || strcmp(method, "textDocument/foldingRange") == 0 || strcmp(method, "textDocument/selectionRange") == 0
         || strcmp(method, "textDocument/inlayHint") == 0;
     supported = supported || strcmp(method, "textDocument/diagnostic") == 0 || strcmp(method, "textDocument/documentLink") == 0;
@@ -112,15 +115,15 @@ void handle_document_request(DocumentStore* store, ClientOptions* client, JsonRp
         if (formatted.is_err()) { complete_error(pending, message.id_raw.to_str(), -32803, "Formatting could not preserve the source safely"); return; }
         result = formatted.unwrap();
     }
-    else if (strcmp(method, "textDocument/semanticTokens/full") == 0) { result = compute_semantic_tokens(doc); }
+    else if (strcmp(method, "textDocument/semanticTokens/full") == 0) { result = compute_semantic_tokens(doc, &client.semantic); }
     else if (strcmp(method, "textDocument/semanticTokens/full/delta") == 0) {
         String previous = String.new();
         if (!json_string(params, "previousResultId", &previous)) { complete_error(pending, message.id_raw.to_str(), -32602, "Missing semantic token result ID"); return; }
-        result = compute_semantic_delta(doc, previous.to_str());
+        result = compute_semantic_delta(doc, &client.semantic, previous.to_str());
     } else if (strcmp(method, "textDocument/semanticTokens/range") == 0) {
         String json_range = json_field(params, "range"); Span range = Span.synthetic();
         if (!parse_document_range(doc, json_range.to_str(), &range)) { complete_error(pending, message.id_raw.to_str(), -32602, "Invalid semantic token range"); return; }
-        result = compute_semantic_range(doc, range.start, range.end);
+        result = compute_semantic_range(doc, &client.semantic, range.start, range.end);
     }
     else if (strcmp(method, "textDocument/foldingRange") == 0) { result = compute_folding(doc, client); }
     else if (strcmp(method, "textDocument/selectionRange") == 0) {

@@ -7,7 +7,7 @@ from pathlib import Path
 import statistics
 import time
 
-from check_lsp import Session
+from check_lsp import Session, semantic_capability
 
 
 def summarize(samples):
@@ -27,7 +27,8 @@ def benchmark(binary, root, runs, semantic_document):
     for _ in range(runs):
         session = Session(binary, root)
         try:
-            session.result("initialize", {"rootUri": root.as_uri(), "capabilities": {}})
+            session.result("initialize", {"rootUri": root.as_uri(), "capabilities": {
+                "textDocument": {"semanticTokens": semantic_capability()}} if semantic_document else {}})
             start = time.perf_counter()
             session.send("initialized", {})
             session.send("textDocument/didOpen", {"textDocument": {

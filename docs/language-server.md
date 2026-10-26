@@ -153,17 +153,39 @@ diagnostic versions/related locations, and versioned workspace edits. Clients
 without hierarchical symbol support receive flat symbol information. Markdown
 is sent only when it is preferred in the client's supported formats.
 
+Semantic tokens require `textDocument.semanticTokens`, the `relative` format,
+and a supported full or range request mode. The server advertises only those
+request modes and legend entries supported by the client. Delta requests require
+`requests.full.delta`. An absent or unusable capability disables the provider.
+Unsupported semantic methods return `MethodNotFound`.
+
+The legend follows Silver's token order. Unsupported struct, enum, and type
+parameter kinds fall back to `type`; methods fall back to `function`; parameters,
+properties, and enum members fall back to `variable`. Kinds without a supported
+fallback are omitted. Modifier bits refer to the negotiated modifier legend.
+Filtering happens before relative position encoding and full-token caching.
+Range queries return complete overlapping tokens and preserve the full-token
+delta baseline. Multiline tokens are split into single-line tokens.
+
 Workspace queries and pull diagnostics accept a client-supplied `workDoneToken`.
 Progress ends before the response, including cancellation and invalid-parameter
 errors. `window/workDoneProgress/cancel` cancels the associated operation.
-Refresh requests for diagnostics and semantic tokens use the client's advertised
-refresh support. Outstanding requests coalesce; a change arriving before an
+Refresh requests for diagnostics, semantic tokens, and inlay hints use the
+client's advertised refresh support. Semantic refresh also requires an enabled
+token provider. Outstanding requests coalesce; a change arriving before an
 acknowledgement schedules another refresh. A rejected refresh disables further
 requests of that kind for the session.
+
+Inlay refresh follows analysis changes, including imported signature changes,
+and asks the editor to request hints again. It refreshes all visible editors;
+the server coalesces changes while a refresh is outstanding. Save notifications
+retain their diagnostic-only behavior.
 
 Messages are limited to 16 MiB, with header lines limited to 8192 bytes. The server
 returns JSON-RPC errors for malformed JSON, invalid requests, invalid parameters,
 unsupported methods, and requests outside its initialization lifecycle.
+Present JSON-RPC parameters must be an object or array. Primitive parameters,
+including `null`, produce `InvalidRequest` before lifecycle state can change.
 
 The stdin reader feeds a bounded queue of 32 messages. One dispatcher owns all
 document snapshots and stdout. Background workspace indexing yields after each
@@ -258,10 +280,10 @@ It is a work list, not a statement of full support.
 | Navigation: `textDocument/definition`, `declaration`, `typeDefinition`, `implementation` | Implemented for resolved declarations and explicit types | General inferred receivers, generic substitution and overloads |
 | References: `textDocument/references`, `documentHighlight`, `rename`, `prepareRename`, `linkedEditingRange` | First four implemented, with versioned edits and coordinated trait rename | Pattern/capture precision and linked ranges |
 | Completion: `textDocument/completion`, `completionItem/resolve`, `textDocument/signatureHelp`, `textDocument/inlineCompletion` | Scoped fuzzy completion, call snippets, deferred detail/docs, signatures | Type ranking, auto-import, postfix assists, inline completion and generic substitution |
-| Inspection: `textDocument/hover`, `inlayHint`, `inlayHint/resolve`, `workspace/inlayHint/refresh` | Signature/docs hover and basic hints | Expression types, ownership hints, lazy hints and refresh |
+| Inspection: `textDocument/hover`, `inlayHint`, `inlayHint/resolve`, `workspace/inlayHint/refresh` | Signature/docs hover, basic hints and negotiated hint refresh | Expression types, ownership hints and lazy hints |
 | Outline: `textDocument/documentSymbol`, `workspace/symbol`, `workspaceSymbol/resolve` | Eager symbols and ranked fuzzy workspace search | Deferred workspace locations |
 | Structure: `textDocument/foldingRange`, `selectionRange`, `workspace/foldingRange/refresh` | Client folding limits/line-only output and validated selection ranges implemented | Region/import folds and folding refresh |
-| Tokens: `textDocument/semanticTokens/full`, `full/delta`, `range`, `workspace/semanticTokens/refresh` | Full, delta, range, dependency invalidation and refresh implemented | Negotiated token-type fallbacks |
+| Tokens: `textDocument/semanticTokens/full`, `full/delta`, `range`, `workspace/semanticTokens/refresh` | Negotiated request modes, compact legends, type fallbacks, modifier bits, full/delta/range caches and refresh implemented | Classification inherits the semantic index's inference limits |
 | Diagnostics: `textDocument/publishDiagnostics`, `textDocument/diagnostic`, `workspace/diagnostic`, `workspace/diagnostic/refresh` | Push/pull reports, dependency caches, result IDs and refresh implemented | Actionable diagnostic data and build/package configuration |
 | Actions: `textDocument/codeAction`, `codeAction/resolve`, `workspace/executeCommand`, `workspace/applyEdit` | Import quick fixes for clients supporting action literals | Other diagnostic fixes, extraction, inline and structural assists, lazy actions and command contracts |
 | Lenses: `textDocument/codeLens`, `codeLens/resolve`, `workspace/codeLens/refresh` | Open | Reference/implementation annotations and runnable targets |
@@ -274,7 +296,7 @@ It is a work list, not a statement of full support.
 | Colors: `textDocument/documentColor`, `colorPresentation` | No general Silver color literal | Decide supported library-specific color APIs before advertising |
 | Notebooks: `notebookDocument/didOpen`, `didChange`, `didSave`, `didClose` | No Silver notebook execution model | Requires a notebook document/cell contract |
 | Virtual documents: `workspace/textDocumentContent`, `workspace/textDocumentContent/refresh` | Open | Content provider and refresh contract |
-| Client integration: `client/registerCapability`, `unregisterCapability`, `window/showMessage`, `showMessageRequest`, `logMessage`, `showDocument`, `window/workDoneProgress/create`, `cancel`, `telemetry/event` | Open | Use only negotiated client services; do not emit unsolicited telemetry |
+| Client integration: `client/registerCapability`, `unregisterCapability`, `window/showMessage`, `showMessageRequest`, `logMessage`, `showDocument`, `window/workDoneProgress/create`, `cancel`, `telemetry/event` | Work-done progress cancellation implemented; other listed client services open | Use only negotiated client services; do not emit unsolicited telemetry |
 
 Upstream extensions also set targets for Silver: module/macro navigation,
 expansion views, related control-flow highlights, source/header-like module

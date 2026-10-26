@@ -161,6 +161,7 @@ bool parse_rpc_request(str body, JsonRpcMessage* msg) {
             if (saw_params) { return false; } saw_params = true;
             r.skip_whitespace();
             i64 p_start = r.index;
+            if (p_start >= r.length || (body[p_start] != '{' && body[p_start] != '[')) { return false; }
             r.skip_value();
             i64 p_end = r.index;
             i64 j = p_start;

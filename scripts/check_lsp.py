@@ -12,6 +12,29 @@ import threading
 import unittest
 
 
+SEMANTIC_TYPES = ["namespace", "type", "struct", "enum", "enumMember", "typeParameter", "parameter",
+                  "variable", "property", "function", "method", "macro", "keyword", "comment", "string", "number", "operator"]
+SEMANTIC_MODIFIERS = ["declaration", "definition", "readonly"]
+
+
+def semantic_capability(**overrides):
+    return {"tokenTypes": SEMANTIC_TYPES, "tokenModifiers": SEMANTIC_MODIFIERS,
+            "formats": ["relative"], "requests": {"full": {"delta": True}, "range": True}, **overrides}
+
+
+def decode_tokens(data, legend):
+    if len(data) % 5:
+        raise AssertionError(f"incomplete semantic token data: {data}")
+    tokens = []
+    line = character = 0
+    for delta_line, delta_character, length, kind, modifiers in zip(*[iter(data)] * 5):
+        line += delta_line
+        character = delta_character if delta_line else character + delta_character
+        tokens.append((line, character, length, legend["tokenTypes"][kind],
+                       tuple(name for bit, name in enumerate(legend["tokenModifiers"]) if modifiers & (1 << bit))))
+    return tokens
+
+
 def position(text, offset):
     prefix = text[:offset].replace("\r\n", "\n").replace("\r", "\n")
     return {"line": prefix.count("\n"), "character": len(prefix.rsplit("\n", 1)[-1].encode("utf-16-le")) // 2}
@@ -153,6 +176,7 @@ class NativeLsp(unittest.TestCase):
                 "codeAction": {"codeActionLiteralSupport": {"codeActionKind": {"valueSet": ["quickfix", "refactor"]}}},
                 "documentLink": {"tooltipSupport": True},
                 "publishDiagnostics": {"versionSupport": True, "relatedInformation": True},
+                "semanticTokens": semantic_capability(),
             }},
         })["capabilities"]
         self.session.send("initialized", {})
@@ -177,6 +201,42 @@ class NativeLsp(unittest.TestCase):
         self.assertEqual(capabilities["workspace"]["workspaceFolders"], {"supported": True, "changeNotifications": True})
         session.send("initialized", {})
         return session
+
+    def semantic_session(self, capability=..., refresh=False):
+        session = Session(self.binary, self.root)
+        self.addCleanup(session.close)
+        requested = {"workspace": {"semanticTokens": {"refreshSupport": refresh}}}
+        if capability is not ...:
+            requested["textDocument"] = {"semanticTokens": capability}
+        capabilities = session.result("initialize", {"rootUri": self.root.as_uri(), "capabilities": requested})["capabilities"]
+        session.send("initialized", {})
+        return session, capabilities
+
+    def inlay_session(self, refresh=..., pull=False, semantic=False):
+        session = Session(self.binary, self.root)
+        self.addCleanup(session.close)
+        requested = {"workspace": {"inlayHint": {}}, "textDocument": {}}
+        if refresh is not ...:
+            requested["workspace"]["inlayHint"]["refreshSupport"] = refresh
+        if pull:
+            requested["textDocument"]["diagnostic"] = {}
+            requested["workspace"]["diagnostics"] = {"refreshSupport": True}
+        if semantic:
+            requested["textDocument"]["semanticTokens"] = semantic_capability()
+            requested["workspace"]["semanticTokens"] = {"refreshSupport": True}
+        capabilities = session.result("initialize", {"rootUri": self.root.as_uri(), "capabilities": requested})["capabilities"]
+        session.send("initialized", {})
+        return session, capabilities
+
+    def assert_refreshes(self, session, methods):
+        self.assertTrue(all("method" in message for message in session.notifications), session.notifications)
+        requests = [message for message in session.notifications if message["method"].endswith("/refresh")]
+        self.assertEqual([message["method"] for message in requests], methods)
+        self.assertEqual(len({message["id"] for message in requests}), len(requests))
+        for message in requests:
+            self.assertIsInstance(message["id"], str)
+            self.assertEqual(message, {"jsonrpc": "2.0", "id": message["id"], "method": message["method"]})
+        return requests
 
     def test_workspace_folder_removal_excludes_closed_files_from_all_workspace_queries(self):
         active = self.root / "active"; active.mkdir()
@@ -870,6 +930,20 @@ class NativeLsp(unittest.TestCase):
         invalid["position"]["character"] = 4.5
         self.assertEqual(self.session.request("textDocument/hover", invalid)["error"]["code"], -32602)
 
+    def test_jsonrpc_params_must_be_structured_and_invalid_shutdown_does_not_stop_server(self):
+        for value in [False, True, 42, "invalid", None]:
+            with self.subTest(params=value):
+                self.session.send_raw(json.dumps({"jsonrpc": "2.0", "id": "invalid-shutdown",
+                                                 "method": "shutdown", "params": value}).encode())
+                response = self.session.messages.get(timeout=10)
+                self.assertEqual(response["error"]["code"], -32600)
+                self.assertIsNone(response["id"])
+                self.assertEqual(self.session.request("unknown/request", {})["error"]["code"], -32601)
+        self.assertEqual(self.session.request("unknown/request", [1, False])["error"]["code"], -32601)
+        self.assertIsNone(self.session.result("shutdown"))
+        self.session.send("exit")
+        self.assertEqual(self.session.process.wait(timeout=10), 0)
+
     def test_formatting_preserves_multiline_tokens_and_utf16_range(self):
         text = 'i32 main() { str text = "😀"; return 0; }  '
         uri = self.open(text)
@@ -1209,14 +1283,182 @@ class NativeLsp(unittest.TestCase):
             **document, "range": {"start": position(updated, start), "end": position(updated, end)}})
         data = result["data"]
         self.assertEqual(len(data), 10)
-        first = position(updated, start)
+        first = position(updated, updated.index("return"))
         second = position(updated, end - 3)
-        self.assertEqual(data[:5], [first["line"], first["character"], 4, 12, 0])
-        self.assertEqual(data[5:], [0, second["character"] - first["character"], 3, 7, 0])
+        self.assertEqual(data[:5], [first["line"], first["character"], 6, 12, 0])
+        self.assertEqual(data[5:], [0, second["character"] - first["character"], 5, 7, 0])
+        self.assertEqual(self.session.result("textDocument/semanticTokens/range", {
+            **document, "range": {"start": position(updated, start), "end": position(updated, start)}}), {"data": []})
         split = position(updated, updated.index("😀"))
         split["character"] += 1
         invalid = self.session.request("textDocument/semanticTokens/range", {**document, "range": {"start": split, "end": split}})
         self.assertEqual(invalid["error"]["code"], -32602)
+
+    def test_semantic_tokens_require_complete_usable_client_capabilities(self):
+        invalid = [
+            ..., None, False, [], {},
+            semantic_capability(formats=[]), semantic_capability(formats=["absolute"]),
+            semantic_capability(formats=["relative", False]),
+            semantic_capability(tokenTypes=[]), semantic_capability(tokenTypes=["unsupported"]),
+            semantic_capability(tokenTypes=["type", 3]), semantic_capability(tokenTypes="type"),
+            semantic_capability(tokenModifiers=None), semantic_capability(tokenModifiers=["readonly", {}]),
+            semantic_capability(requests={}), semantic_capability(requests={"full": False, "range": False}),
+            semantic_capability(requests={"full": [], "range": "true"}),
+            semantic_capability(requests={"full": 1, "range": None}),
+        ]
+        for capability in invalid:
+            with self.subTest(capability=capability):
+                session, caps = self.semantic_session(capability, refresh=True)
+                self.assertNotIn("semanticTokensProvider", caps)
+                for method in ["full", "full/delta", "range"]:
+                    for params in [{}, [], {"textDocument": None}]:
+                        self.assertEqual(session.request("textDocument/semanticTokens/" + method, params)["error"]["code"], -32601)
+                uri = (self.root / "disabled.ag").as_uri()
+                session.send("textDocument/didOpen", {"textDocument": {"uri": uri, "languageId": "silver",
+                             "version": 1, "text": "i32 main() { return 1; }"}})
+                session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+                self.assertFalse(any(message.get("method") == "workspace/semanticTokens/refresh" for message in session.notifications))
+                session.close()
+
+    def test_semantic_request_modes_negotiate_and_gate_each_method(self):
+        cases = [
+            ({"full": True}, True, False, False),
+            ({"full": {}}, True, False, False),
+            ({"full": {"delta": False}, "range": True}, True, False, True),
+            ({"full": {"delta": True}, "range": {}}, True, True, True),
+            ({"full": {"delta": "true"}, "range": []}, True, False, False),
+            ({"full": False, "delta": True, "range": True}, False, False, True),
+            ({"full": None, "range": {}}, False, False, True),
+            ({"full": "true", "range": True}, False, False, True),
+        ]
+        document = {"textDocument": {"uri": (self.root / "helper.ag").as_uri()}}
+        for requests, full, delta, ranged in cases:
+            with self.subTest(requests=requests):
+                session, caps = self.semantic_session(semantic_capability(requests=requests, tokenModifiers=[]))
+                provider = caps["semanticTokensProvider"]
+                self.assertEqual(provider["legend"], {"tokenTypes": SEMANTIC_TYPES, "tokenModifiers": []})
+                self.assertEqual(provider.get("full", False), {"delta": True} if delta else full)
+                self.assertEqual(provider.get("range", False), ranged)
+                for method, enabled, extra in [
+                    ("full", full, {}), ("full/delta", delta, {"previousResultId": "unknown"}),
+                    ("range", ranged, {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 2, "character": 0}}}),
+                ]:
+                    if enabled:
+                        self.assertTrue(session.result("textDocument/semanticTokens/" + method, {**document, **extra})["data"])
+                    else:
+                        self.assertEqual(session.request("textDocument/semanticTokens/" + method, {})["error"]["code"], -32601)
+                self.assertEqual(session.request("initialize", {"capabilities": {}})["error"]["code"], -32600)
+                self.assertTrue(session.result("textDocument/semanticTokens/" + ("full" if full else "range"), {
+                    **document, "range": {"start": {"line": 0, "character": 0}, "end": {"line": 2, "character": 0}},
+                })["data"])
+                session.close()
+
+    def test_semantic_compact_legends_fallbacks_and_dropped_tokens_keep_positions(self):
+        text = ("struct Box { i32 field; }\nenum Choice { Item; }\n"
+                "T identity<T>(T input) { return input; }\n"
+                "impl Box { i32 read(&self) { return self.field; } }\n"
+                "i32 main() { Box box; return box.read(); }\n")
+        canonical = [
+            (0, 7, 3, "struct", True), (0, 13, 3, "type", False), (0, 17, 5, "property", True),
+            (1, 5, 6, "enum", True), (1, 14, 4, "enumMember", True),
+            (2, 0, 1, "typeParameter", False), (2, 2, 8, "function", True), (2, 11, 1, "typeParameter", True),
+            (2, 14, 1, "typeParameter", False), (2, 16, 5, "parameter", True), (2, 32, 5, "parameter", False),
+            (3, 5, 3, "struct", False), (3, 11, 3, "type", False), (3, 15, 4, "method", True),
+            (3, 21, 4, "parameter", True), (3, 36, 4, "parameter", False), (3, 41, 5, "property", False),
+            (4, 0, 3, "type", False), (4, 4, 4, "function", True), (4, 13, 3, "struct", False),
+            (4, 17, 3, "variable", True), (4, 29, 3, "variable", False), (4, 33, 4, "method", False),
+        ]
+        fallbacks = {"struct": "type", "enum": "type", "typeParameter": "type", "method": "function",
+                     "parameter": "variable", "property": "variable", "enumMember": "variable"}
+        for names in [["function", "variable", "type", "variable", "unsupported"],
+                      ["method", "variable", "struct", "type", "function", "typeParameter", "enumMember", "property", "parameter", "enum"],
+                      ["method", "variable"]]:
+            with self.subTest(types=names):
+                session, caps = self.semantic_session(semantic_capability(tokenTypes=names, tokenModifiers=["definition", "unknown", "definition"]))
+                legend = caps["semanticTokensProvider"]["legend"]
+                self.assertEqual(legend, {"tokenTypes": [name for name in SEMANTIC_TYPES if name in names], "tokenModifiers": ["definition"]})
+                uri = (self.root / "mapped.ag").as_uri()
+                session.send("textDocument/didOpen", {"textDocument": {"uri": uri, "languageId": "silver", "version": 1, "text": text}})
+                document = {"textDocument": {"uri": uri}}
+                expected = []
+                for line, column, length, kind, definition in canonical:
+                    mapped = kind if kind in names else fallbacks.get(kind)
+                    if mapped in names:
+                        expected.append((line, column, length, mapped, ("definition",) if definition else ()))
+                full = session.result("textDocument/semanticTokens/full", document)
+                self.assertEqual(decode_tokens(full["data"], legend), expected)
+                ranged = session.result("textDocument/semanticTokens/range", {**document, "range": {
+                    "start": {"line": 0, "character": 0}, "end": position(text, len(text))}})
+                self.assertEqual(ranged, {"data": full["data"]})
+                session.close()
+
+    def test_semantic_modifier_bits_are_repacked(self):
+        text = "i32 main() { const i32 value = 7; return value; }\n"
+        for modifiers, declaration_bits, reference_bits in [
+            (["readonly"], 1, 1), (["readonly", "definition"], 3, 2),
+            (["declaration", "readonly"], 3, 2), ([], 0, 0),
+        ]:
+            with self.subTest(modifiers=modifiers):
+                session, caps = self.semantic_session(semantic_capability(tokenTypes=["variable"], tokenModifiers=modifiers))
+                self.assertEqual(caps["semanticTokensProvider"]["legend"]["tokenModifiers"],
+                                 [name for name in SEMANTIC_MODIFIERS if name in modifiers])
+                uri = (self.root / "readonly.ag").as_uri()
+                session.send("textDocument/didOpen", {"textDocument": {"uri": uri, "languageId": "silver", "version": 1, "text": text}})
+                data = session.result("textDocument/semanticTokens/full", {"textDocument": {"uri": uri}})["data"]
+                first = text.index("value"); second = text.index("value", first + 1)
+                self.assertEqual(data, [0, first, 5, 0, declaration_bits, 0, second - first, 5, 0, reference_bits])
+                session.close()
+
+    def test_semantic_compact_deltas_preserve_baselines_across_ranges_and_dependencies(self):
+        session, caps = self.semantic_session(semantic_capability(tokenTypes=["number", "function", "variable"], tokenModifiers=["readonly"]))
+        legend = caps["semanticTokensProvider"]["legend"]
+        self.assertEqual(legend, {"tokenTypes": ["variable", "function", "number"], "tokenModifiers": ["readonly"]})
+        text = "import helper;\ni32 main() { const i32 value = 1; return answer(value); }\n"
+        uri = (self.root / "compact.ag").as_uri()
+        document = {"textDocument": {"uri": uri}}
+        session.send("textDocument/didOpen", {"textDocument": {"uri": uri, "languageId": "silver", "version": 1, "text": text}})
+        previous = session.result("textDocument/semanticTokens/full", document)
+        for dependency in [False, True]:
+            with self.subTest(dependency=dependency):
+                if dependency:
+                    session.send("textDocument/didOpen", {"textDocument": {"uri": (self.root / "helper.ag").as_uri(),
+                                 "languageId": "silver", "version": 1, "text": "i32 answer = 1;\n"}})
+                else:
+                    text = "// shifted 😀\n" + text.replace("value", "long_value").replace("= 1", "= 123")
+                    session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2}, "contentChanges": [{"text": text}]})
+                start = text.index("answer") + 1
+                ranged = session.result("textDocument/semanticTokens/range", {**document, "range": {
+                    "start": position(text, start), "end": position(text, start + 2)}})
+                at = position(text, start - 1)
+                self.assertEqual(decode_tokens(ranged["data"], legend),
+                                 [(at["line"], at["character"], 6, "variable" if dependency else "function", ())])
+                if not dependency:
+                    text = "// another shift\n" + text
+                    session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 3}, "contentChanges": [{"text": text}]})
+                    session.result("textDocument/semanticTokens/range", {**document, "range": {
+                        "start": {"line": 0, "character": 0}, "end": position(text, len(text))}})
+                delta = session.result("textDocument/semanticTokens/full/delta", {**document, "previousResultId": previous["resultId"]})
+                self.assertIn("edits", delta)
+                reconstructed = previous["data"][:]
+                for edit in reversed(delta["edits"]):
+                    reconstructed[edit["start"]:edit["start"] + edit["deleteCount"]] = edit.get("data", [])
+                complete = session.result("textDocument/semanticTokens/full", document)
+                self.assertEqual(reconstructed, complete["data"])
+                self.assertNotEqual(previous["data"], complete["data"])
+                self.assertEqual(delta["resultId"], complete["resultId"])
+                previous = complete
+        self.assertEqual(session.result("textDocument/semanticTokens/full/delta", {
+            **document, "previousResultId": previous["resultId"]}), {"resultId": previous["resultId"], "edits": []})
+
+    def test_semantic_range_returns_whole_multiline_tokens_with_utf16_lengths(self):
+        text = "/* first\r\n😀 last */\r\ni32 main() { return 0; }\r\n"
+        uri = self.open(text)
+        document = {"textDocument": {"uri": uri}}
+        result = self.session.result("textDocument/semanticTokens/range", {**document, "range": {
+            "start": {"line": 0, "character": 3}, "end": {"line": 1, "character": 4}}})
+        self.assertEqual(result, {"data": [0, 0, 8, 13, 0, 1, 0, 10, 13, 0]})
+        full = self.session.result("textDocument/semanticTokens/full", document)
+        self.assertEqual(full["data"][:10], result["data"])
 
     def test_semantic_tokens_invalidate_when_an_import_changes(self):
         text = "import helper;\ni32 main() { return answer(1); }\n"
@@ -1334,7 +1576,7 @@ class NativeLsp(unittest.TestCase):
         session = Session(self.binary, self.root)
         try:
             initialized = session.result("initialize", {"rootUri": self.root.as_uri(), "capabilities": {
-                "textDocument": {"diagnostic": {}, "publishDiagnostics": {"relatedInformation": True}},
+                "textDocument": {"diagnostic": {}, "publishDiagnostics": {"relatedInformation": True}, "semanticTokens": semantic_capability()},
                 "workspace": {"diagnostics": {"refreshSupport": True}, "semanticTokens": {"refreshSupport": True}},
             }})
             self.assertTrue(initialized["capabilities"]["diagnosticProvider"]["interFileDependencies"])
@@ -1383,7 +1625,8 @@ class NativeLsp(unittest.TestCase):
     def test_client_refresh_requests_coalesce_without_losing_later_changes(self):
         session = Session(self.binary, self.root)
         try:
-            session.result("initialize", {"rootUri": self.root.as_uri(), "capabilities": {"workspace": {"semanticTokens": {"refreshSupport": True}}}})
+            session.result("initialize", {"rootUri": self.root.as_uri(), "capabilities": {
+                "textDocument": {"semanticTokens": semantic_capability()}, "workspace": {"semanticTokens": {"refreshSupport": True}}}})
             session.send("initialized", {})
             uri = (self.root / "refresh.ag").as_uri()
             text = "i32 main() { return 1; }\n"
@@ -1407,6 +1650,169 @@ class NativeLsp(unittest.TestCase):
             self.assertEqual(len(refresh()), 2)
         finally:
             session.close()
+
+    def test_inlay_refresh_requires_literal_true_and_hints_remain_available(self):
+        text = "import helper;\ni32 main() { return answer(7); }\n"
+        uri = (self.root / "inlay.ag").as_uri()
+        for support in (..., False, None, "true", 1, {}, [], True):
+            with self.subTest(refreshSupport=support):
+                session, caps = self.inlay_session(support)
+                self.assertIs(caps["inlayHintProvider"], True)
+                session.send("textDocument/didOpen", {"textDocument": {
+                    "uri": uri, "languageId": "silver", "version": 1, "text": text}})
+                self.assertEqual(session.result("textDocument/inlayHint", {"textDocument": {"uri": uri}, "range": {
+                    "start": position(text, 0), "end": position(text, len(text))}}), [{
+                        "position": position(text, text.index("7")), "kind": 2, "paddingRight": True, "label": "value:"}])
+                self.assert_refreshes(session, ["workspace/inlayHint/refresh"] if support is True else [])
+                self.assertEqual(session.notifications[0]["method"], "textDocument/publishDiagnostics")
+                if support is True:
+                    self.assertEqual([message["method"] for message in session.notifications],
+                                     ["textDocument/publishDiagnostics", "workspace/inlayHint/refresh"])
+
+    def test_inlay_refresh_coalesces_changes_and_ignores_invalid_or_duplicate_acknowledgements(self):
+        session, _ = self.inlay_session(True)
+        method = "workspace/inlayHint/refresh"
+        text = "i32 main() { return 1; }\n"
+        uri = (self.root / "inlay.ag").as_uri()
+        document = {"textDocument": {"uri": uri}}
+        session.send("textDocument/didOpen", {"textDocument": {
+            "uri": uri, "languageId": "silver", "version": 1, "text": text}})
+        session.result("textDocument/documentSymbol", document)
+        first = self.assert_refreshes(session, [method])[0]["id"]
+        for version in range(2, 5):
+            session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": version},
+                "contentChanges": [{"text": text.replace("1", str(version))}]})
+        for response in ({"jsonrpc": "1.0", "id": first, "result": None}, {"id": first, "result": None},
+                         {"jsonrpc": "2.0", "id": first, "result": None, "error": {"code": -32601, "message": "No"}},
+                         {"jsonrpc": "2.0", "id": 99, "result": None}):
+            session.send_raw(json.dumps(response).encode())
+        session.respond("unknown-refresh-id")
+        session.result("textDocument/documentSymbol", document)
+        self.assert_refreshes(session, [method])
+        session.respond(first)
+        session.result("textDocument/documentSymbol", document)
+        second = self.assert_refreshes(session, [method, method])[1]["id"]
+        session.respond(first, error={"code": -32601, "message": "Duplicate"})
+        session.respond(second)
+        session.respond(second)
+        session.result("textDocument/documentSymbol", document)
+        self.assert_refreshes(session, [method, method])
+        session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 5}, "contentChanges": [{"text": text}]})
+        session.result("textDocument/documentSymbol", document)
+        third = self.assert_refreshes(session, [method, method, method])[2]["id"]
+        session.respond(third)
+        session.result("textDocument/documentSymbol", document)
+        self.assert_refreshes(session, [method, method, method])
+
+    def test_inlay_refresh_shares_ordered_ids_and_errors_disable_only_the_failed_kind(self):
+        methods = ["workspace/diagnostic/refresh", "workspace/semanticTokens/refresh", "workspace/inlayHint/refresh"]
+        text = "import helper;\ni32 main() { return answer(7); }\n"
+        uri = (self.root / "inlay.ag").as_uri()
+        document = {"textDocument": {"uri": uri}}
+        for failed in methods:
+            with self.subTest(failed=failed):
+                session, _ = self.inlay_session(True, pull=True, semantic=True)
+                session.send("textDocument/didOpen", {"textDocument": {
+                    "uri": uri, "languageId": "silver", "version": 1, "text": text}})
+                session.result("textDocument/documentSymbol", document)
+                initial = self.assert_refreshes(session, methods)
+                self.assertEqual(session.notifications, initial)
+                session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
+                    "contentChanges": [{"text": text + "\n"}]})
+                session.result("textDocument/documentSymbol", document)
+                self.assert_refreshes(session, methods)
+                for request in initial:
+                    session.respond(request["id"], error={"code": -32601, "message": "Unsupported"}
+                                    if request["method"] == failed else None)
+                session.result("textDocument/documentSymbol", document)
+                surviving = [method for method in methods if method != failed]
+                repeated = self.assert_refreshes(session, methods + surviving)[3:]
+                for request in repeated:
+                    session.respond(request["id"])
+                session.result("textDocument/documentSymbol", document)
+                self.assert_refreshes(session, methods + surviving)
+                session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 3},
+                    "contentChanges": [{"text": text}]})
+                self.assertEqual(session.result("textDocument/inlayHint", {**document, "range": {
+                    "start": position(text, 0), "end": position(text, len(text))}}), [{
+                        "position": position(text, text.index("7")), "kind": 2, "paddingRight": True, "label": "value:"}])
+                self.assert_refreshes(session, methods + surviving + surviving)
+
+    def test_inlay_refresh_recomputes_unchanged_callers_before_acknowledgement(self):
+        session, _ = self.inlay_session(True)
+        text = "import helper;\ni32 main() { return answer(7); }\n"
+        uri = (self.root / "inlay.ag").as_uri()
+        helper = self.root / "helper.ag"
+        disk = helper.read_text()
+        overlay = disk.replace("value", "amount")
+        document = {"textDocument": {"uri": uri}}
+        method = "workspace/inlayHint/refresh"
+
+        def hints(label):
+            self.assertEqual(session.result("textDocument/inlayHint", {**document, "range": {
+                "start": position(text, 0), "end": position(text, len(text))}}), [{
+                    "position": position(text, text.index("7")), "kind": 2, "paddingRight": True, "label": label}])
+
+        def acknowledge():
+            request = self.assert_refreshes(session, [method])[0]
+            session.respond(request["id"])
+            session.result("textDocument/documentSymbol", document)
+            self.assert_refreshes(session, [method])
+            session.notifications.clear()
+
+        session.send("textDocument/didOpen", {"textDocument": {
+            "uri": uri, "languageId": "silver", "version": 1, "text": text}})
+        hints("value:")
+        acknowledge()
+        session.send("textDocument/didOpen", {"textDocument": {
+            "uri": helper.as_uri(), "languageId": "silver", "version": 1, "text": disk}})
+        hints("value:")
+        acknowledge()
+        session.send("textDocument/didChange", {"textDocument": {"uri": helper.as_uri(), "version": 2},
+            "contentChanges": [{"text": overlay}]})
+        hints("amount:")
+        acknowledge()
+        self.assertEqual(helper.read_text(), disk)
+        session.send("textDocument/didClose", {"textDocument": {"uri": helper.as_uri()}})
+        hints("value:")
+        acknowledge()
+        helper.write_text(overlay)
+        session.send("workspace/didChangeWatchedFiles", {"changes": [{"uri": helper.as_uri(), "type": 2}]})
+        hints("amount:")
+        acknowledge()
+
+    def test_inlay_refresh_tracks_workspace_folder_changes(self):
+        session, _ = self.inlay_session(True)
+        folder = self.root / "added"; folder.mkdir()
+        item = {"uri": folder.as_uri(), "name": folder.name}
+        for added, removed in [([item], []), ([], [item])]:
+            session.send("workspace/didChangeWorkspaceFolders", {"event": {"added": added, "removed": removed}})
+            self.assertEqual(session.result("workspace/symbol", {"query": "absent"}), [])
+            request = self.assert_refreshes(session, ["workspace/inlayHint/refresh"])[0]
+            session.respond(request["id"])
+            session.result("workspace/symbol", {"query": "absent"})
+            session.notifications.clear()
+
+    def test_inlay_refresh_is_not_requested_on_save(self):
+        text = "i32 main() { return 0; }\n"
+        uri = (self.root / "inlay.ag").as_uri()
+        document = {"textDocument": {"uri": uri}}
+        for pull in (False, True):
+            with self.subTest(pull=pull):
+                session, _ = self.inlay_session(True, pull=pull, semantic=True)
+                session.send("textDocument/didOpen", {"textDocument": {
+                    "uri": uri, "languageId": "silver", "version": 1, "text": text}})
+                session.result("textDocument/documentSymbol", document)
+                methods = (["workspace/diagnostic/refresh"] if pull else []) + [
+                    "workspace/semanticTokens/refresh", "workspace/inlayHint/refresh"]
+                for request in self.assert_refreshes(session, methods):
+                    session.respond(request["id"])
+                session.result("textDocument/documentSymbol", document)
+                session.notifications.clear()
+                session.send("textDocument/didSave", document)
+                session.result("textDocument/documentSymbol", document)
+                self.assertEqual([message["method"] for message in session.notifications],
+                                 ["workspace/diagnostic/refresh" if pull else "textDocument/publishDiagnostics"])
 
     def test_save_republishes_overlay_diagnostics_or_requests_pull_refresh(self):
         text = 'i32 main() { return missing(); }\n'

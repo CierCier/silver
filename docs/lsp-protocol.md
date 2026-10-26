@@ -52,9 +52,9 @@ providers return eager results instead.
 | `textDocument/selectionRange` | C → S | Supported | Nested CST ranges; validates the complete UTF-16 position batch before computing results and rejects invalid input with `InvalidParams`. [Source][features], [checks][checks]. |
 | `textDocument/inlayHint` | C → S | Supported | Local inferred types and call parameter labels within the requested range. Direct lambda initializers have no inferred-type hints; ownership/move hints remain open. [Source][features], [checks][checks]. |
 | `inlayHint/resolve` | C → S | Open | Hints are eager; no resolve provider. |
-| `textDocument/semanticTokens/full` | C → S | Partial | Cached UTF-16 token stream with result IDs. The fixed legend does not yet adapt to the client's supported token types. [Source][features], [checks][checks]. |
-| `textDocument/semanticTokens/full/delta` | C → S | Partial | One previous generation; unknown/older IDs return full data. Same legend negotiation gap as full tokens. [Source][features], [checks][checks]. |
-| `textDocument/semanticTokens/range` | C → S | Partial | UTF-16 clipping and multiline token splitting. Same legend negotiation gap as full tokens. [Source][features], [checks][checks]. |
+| `textDocument/semanticTokens/full` | C → S | Conditional | Requires a negotiated full provider and relative format. Cached UTF-16 tokens use a compact supported legend, type fallbacks, and repacked modifier bits. Unsupported kinds are omitted before relative encoding. [Source][capabilities], [tokens][features], [checks][checks]. |
+| `textDocument/semanticTokens/full/delta` | C → S | Conditional | Requires negotiated delta support. One previous generation; unknown/older IDs return full data. Deltas compare arrays encoded with the session's immutable legend. Range queries preserve the full-token cache. [Source][features], [checks][checks]. |
+| `textDocument/semanticTokens/range` | C → S | Conditional | Requires negotiated range support. Returns complete overlapping tokens in UTF-16, with multiline tokens split by line. Uses the same negotiated legend as full tokens. [Source][features], [checks][checks]. |
 | `textDocument/diagnostic` | C → S | Conditional | Advertised for pull-diagnostic clients; full/unchanged result IDs and dependency invalidation. Lambda analysis uses owned syntax copies and current import signatures. Diagnostics inherit native frontend limits. [Source][diagnostics], [analysis][analysis], [checks][checks]. |
 | `workspace/diagnostic` | C → S | Conditional | Pull-diagnostic sessions; workspace/open-file reports, previous result IDs and removal reports. No partial-result streaming. [Source][diagnostics], [checks][checks]. |
 | `textDocument/codeAction` | C → S | Conditional | Import quick fixes require action-literal support. Honors `context.only`, compiler path precedence, ambiguity/privacy/conflict checks and negotiated versioned edits. Other fixes and refactorings remain open. [Source][actions], [checks][checks]. |
@@ -89,9 +89,9 @@ providers return eager results instead.
 | Method | Direction | Status | Scope, limits, and evidence |
 | --- | --- | --- | --- |
 | `workspace/diagnostic/refresh` | S → C | Conditional | Pull-diagnostic sessions with `workspace.diagnostics.refreshSupport`. Coalesces requests; changes during an outstanding request schedule another. Client errors disable further requests of this kind. [Source][client-requests], [checks][checks]. |
-| `workspace/semanticTokens/refresh` | S → C | Conditional | Requires `workspace.semanticTokens.refreshSupport`; dependency invalidation, coalescing and acknowledgement/error handling. [Source][client-requests], [checks][checks]. |
+| `workspace/semanticTokens/refresh` | S → C | Conditional | Requires an enabled semantic-token provider and `workspace.semanticTokens.refreshSupport`; dependency invalidation, coalescing and acknowledgement/error handling. [Source][client-requests], [checks][checks]. |
 | `workspace/foldingRange/refresh` | S → C | Open | No folding refresh request. Added to the stable inventory in 3.18. |
-| `workspace/inlayHint/refresh` | S → C | Open | No hint refresh request. |
+| `workspace/inlayHint/refresh` | S → C | Conditional | Requires `workspace.inlayHint.refreshSupport`. Analysis changes ask editors to recompute hints from current snapshots, including imported signatures. Coalesces requests, repeats after acknowledgement when needed, and disables only this kind on client error. [Source][client-requests], [checks][checks]. |
 | `workspace/codeLens/refresh` | S → C | Open | No lens provider or refresh request. |
 | `workspace/inlineValue/refresh` | S → C | Open | No inline-value provider or refresh request. |
 | `workspace/textDocumentContent/refresh` | S → C | Open | No virtual content provider or refresh request. Added to the stable inventory in 3.18. |
@@ -142,6 +142,7 @@ server, not source-text checks or capability flags alone. Relevant scenarios
 include:
 
 - Lifecycle/transport: `test_protocol_errors_and_string_request_ids`,
+  `test_jsonrpc_params_must_be_structured_and_invalid_shutdown_does_not_stop_server`,
   `test_transport_rejects_invalid_utf8_nul_suffixes_and_noninteger_request_ids`,
   `test_cancelled_index_request_and_bounded_pipeline`,
   `test_exit_stops_reader_with_incomplete_following_frame`.
@@ -170,9 +171,21 @@ include:
   `test_lambda_diagnostics_use_unsaved_imported_methods_and_invalidate_dependencies`,
   `test_pull_diagnostics_cache_dependency_changes_and_refresh_acknowledgements`,
   `test_semantic_token_deltas_round_trip_and_ranges_use_utf16`,
+  `test_semantic_tokens_require_complete_usable_client_capabilities`,
+  `test_semantic_request_modes_negotiate_and_gate_each_method`,
+  `test_semantic_compact_legends_fallbacks_and_dropped_tokens_keep_positions`,
+  `test_semantic_modifier_bits_are_repacked`,
+  `test_semantic_compact_deltas_preserve_baselines_across_ranges_and_dependencies`,
+  `test_semantic_range_returns_whole_multiline_tokens_with_utf16_lengths`,
   `test_semantic_tokens_invalidate_when_an_import_changes`,
   `test_request_progress_cancellation_and_completion_are_balanced`,
   `test_client_refresh_requests_coalesce_without_losing_later_changes`.
+- Hint refresh: `test_inlay_refresh_requires_literal_true_and_hints_remain_available`,
+  `test_inlay_refresh_coalesces_changes_and_ignores_invalid_or_duplicate_acknowledgements`,
+  `test_inlay_refresh_shares_ordered_ids_and_errors_disable_only_the_failed_kind`,
+  `test_inlay_refresh_recomputes_unchanged_callers_before_acknowledgement`,
+  `test_inlay_refresh_tracks_workspace_folder_changes`,
+  `test_inlay_refresh_is_not_requested_on_save`.
 - Actions/links: the `test_import_quickfix_*` scenarios and
   `test_document_links_follow_active_imports_unsaved_modules_and_disk_precedence`.
 - Formatting: `test_formatting_options_ranges_comments_and_incomplete_code`,

@@ -15,8 +15,9 @@ i64 semantic_kind(IdeSymbolKind kind) {
     };
 }
 
-Vec<i64> semantic_data(Document* doc, i64 begin, i64 finish) {
+Vec<i64> semantic_data(Document* doc, SemanticTokenOptions* options, i64 begin, i64 finish) {
     Vec<i64> data = Vec<i64>.new();
+    if (begin == finish) { return move data; }
     i64 previous_line = 0; i64 previous_character = 0; i64 i = 0;
     while (i < doc.analysis.tokens.len()) {
         Token* token = doc.analysis.tokens.get(i);
@@ -39,8 +40,15 @@ Vec<i64> semantic_data(Document* doc, i64 begin, i64 finish) {
             }
         }
         if (kind >= 0) {
-            i64 start = token.span.start > begin ? token.span.start : begin;
-            i64 limit = token.span.end < finish ? token.span.end : finish;
+            kind = options.type_map[kind];
+            if (kind < 0) { i += 1; continue; }
+            i64 mapped_modifiers = 0; i64 bit = 0;
+            while (bit < 3) {
+                if ((modifiers & (1 << bit)) != 0) { mapped_modifiers = mapped_modifiers | options.modifier_map[bit]; }
+                bit += 1;
+            }
+            i64 start = token.span.start;
+            i64 limit = token.span.end;
             while (start < limit) {
                 i64 end = start;
                 while (end < limit && doc.text.data[end] != (u8)'\n' && doc.text.data[end] != (u8)'\r') { end += 1; }
@@ -50,7 +58,7 @@ Vec<i64> semantic_data(Document* doc, i64 begin, i64 finish) {
                     i64 delta_line = position.line - previous_line;
                     i64 delta_character = delta_line == 0 ? position.character - previous_character : position.character;
                     i64 length = token_end.character - position.character;
-                    data.push(delta_line); data.push(delta_character); data.push(length); data.push(kind); data.push(modifiers);
+                    data.push(delta_line); data.push(delta_character); data.push(length); data.push(kind); data.push(mapped_modifiers);
                     previous_line = position.line; previous_character = position.character;
                 }
                 start = end + 1;
@@ -71,26 +79,26 @@ String semantic_result_id(Document* doc, i64 generation) {
     String id = doc.uri.clone(); id.push('#'); id.push_display(&generation); return move id;
 }
 
-void update_semantic_data(Document* doc) {
+void update_semantic_data(Document* doc, SemanticTokenOptions* options) {
     if (!doc.semantic_dirty) { return; }
     doc.previous_semantic_generation = doc.semantic_generation;
     doc.previous_semantic_data = move doc.semantic_data;
-    doc.semantic_data = semantic_data(doc, 0, doc.text.len());
+    doc.semantic_data = semantic_data(doc, options, 0, doc.text.len());
     doc.semantic_generation += 1; doc.semantic_dirty = false;
 }
 
-String compute_semantic_tokens(Document* doc) {
-    update_semantic_data(doc); String id = semantic_result_id(doc, doc.semantic_generation);
+String compute_semantic_tokens(Document* doc, SemanticTokenOptions* options) {
+    update_semantic_data(doc, options); String id = semantic_result_id(doc, doc.semantic_generation);
     String out = String.from_str("{\"resultId\":\""); json_escape(id.to_str(), &out); out.push_str("\",\"data\":");
     append_semantic_data(&out, &doc.semantic_data, 0, doc.semantic_data.len()); out.push('}'); return move out;
 }
 
-String compute_semantic_delta(Document* doc, str previous_id) {
-    update_semantic_data(doc);
+String compute_semantic_delta(Document* doc, SemanticTokenOptions* options, str previous_id) {
+    update_semantic_data(doc, options);
     String current = semantic_result_id(doc, doc.semantic_generation);
     String previous = semantic_result_id(doc, doc.previous_semantic_generation);
     if (strcmp(previous_id, current.to_str()) != 0 && (doc.previous_semantic_generation == 0 || strcmp(previous_id, previous.to_str()) != 0)) {
-        return compute_semantic_tokens(doc);
+        return compute_semantic_tokens(doc, options);
     }
     String out = String.from_str("{\"resultId\":\""); json_escape(current.to_str(), &out); out.push_str("\",\"edits\":[");
     if (strcmp(previous_id, current.to_str()) != 0) {
@@ -108,8 +116,8 @@ String compute_semantic_delta(Document* doc, str previous_id) {
     out.push_str("]}"); return move out;
 }
 
-String compute_semantic_range(Document* doc, i64 begin, i64 end) {
-    Vec<i64> data = semantic_data(doc, begin, end); String out = String.from_str("{\"data\":");
+String compute_semantic_range(Document* doc, SemanticTokenOptions* options, i64 begin, i64 end) {
+    Vec<i64> data = semantic_data(doc, options, begin, end); String out = String.from_str("{\"data\":");
     append_semantic_data(&out, &data, 0, data.len()); out.push('}'); return move out;
 }
 
