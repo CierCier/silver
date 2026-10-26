@@ -41,7 +41,13 @@ bool request_uses_position(str method) {
         || strcmp(method, "textDocument/completion") == 0 || strcmp(method, "textDocument/signatureHelp") == 0;
 }
 
-void handle_document_request(DocumentStore* store, ClientOptions* client, JsonRpcMessage* message, PendingMessage* pending) {
+bool index_request_workspace(DocumentStore* store, WorkspaceIndex* index, PendingMessage* pending) {
+    pending.preemptible = true;
+    while (index.paths.len() > 0 && !request_interrupted(pending)) { index_workspace_step(store, index); }
+    return !request_interrupted(pending);
+}
+
+void handle_document_request(DocumentStore* store, WorkspaceIndex* index, ClientOptions* client, JsonRpcMessage* message, PendingMessage* pending) {
     str method = message.method.to_str(); str params = message.params_json.to_str();
     String uri = String.new(); i64 line = 0; i64 column = 0; i64 offset = 0;
     bool positioned = request_uses_position(method);
@@ -67,6 +73,21 @@ void handle_document_request(DocumentStore* store, ClientOptions* client, JsonRp
     if (positioned && !doc.offset(line, column, &offset)) {
         complete_error(pending, message.id_raw.to_str(), -32602, "Invalid UTF-16 position"); return;
     }
+    String name = String.new(); Span action_range = Span.synthetic(); bool actions_allowed = false;
+    if (strcmp(method, "textDocument/rename") == 0 && (!json_string(params, "newName", &name) || !valid_rename(name.to_str()))) {
+        complete_error(pending, message.id_raw.to_str(), -32602, "Rename requires a Silver identifier"); return;
+    }
+    if (strcmp(method, "textDocument/codeAction") == 0) {
+        String json_range = json_field(params, "range"); String context = json_field(params, "context");
+        if (!parse_document_range(doc, json_range.to_str(), &action_range) || !action_quickfix_context(context.to_str(), &actions_allowed)) {
+            complete_error(pending, message.id_raw.to_str(), -32602, "Invalid code action parameters"); return;
+        }
+    }
+    bool workspace_analysis = strcmp(method, "textDocument/references") == 0 || strcmp(method, "textDocument/rename") == 0
+        || strcmp(method, "textDocument/implementation") == 0 || strcmp(method, "textDocument/codeAction") == 0;
+    if (workspace_analysis && !index_request_workspace(store, index, pending)) {
+        complete_response(pending, message.id_raw.to_str(), "null"); return;
+    }
     String result = String.new();
     if (strcmp(method, "textDocument/hover") == 0) { result = compute_hover(doc, offset, client.hover_markdown); }
     else if (strcmp(method, "textDocument/definition") == 0) { result = compute_definition(doc, offset); }
@@ -85,11 +106,7 @@ void handle_document_request(DocumentStore* store, ClientOptions* client, JsonRp
     else if (strcmp(method, "textDocument/documentSymbol") == 0) { result = compute_document_symbols(doc, client.hierarchical_symbols); }
     else if (strcmp(method, "textDocument/documentLink") == 0) { result = compute_document_links(store, doc, client.document_link_tooltips); }
     else if (strcmp(method, "textDocument/codeAction") == 0) {
-        Span range = Span.synthetic(); String json_range = json_field(params, "range"); String context = json_field(params, "context"); bool allowed = false;
-        if (!parse_document_range(doc, json_range.to_str(), &range) || !action_quickfix_context(context.to_str(), &allowed)) {
-            complete_error(pending, message.id_raw.to_str(), -32602, "Invalid code action parameters"); return;
-        }
-        result = compute_import_actions(store, doc, range, allowed, client, pending);
+        result = compute_import_actions(store, doc, action_range, actions_allowed, client, pending);
     }
     else if (strcmp(method, "textDocument/diagnostic") == 0) {
         String previous = String.new();
@@ -139,10 +156,6 @@ void handle_document_request(DocumentStore* store, ClientOptions* client, JsonRp
         String context = json_field(params, "context"); String declaration = json_field(context.to_str(), "includeDeclaration");
         result = compute_references(store, doc, offset, highlights || declaration.equals("true"), highlights);
     } else if (strcmp(method, "textDocument/rename") == 0) {
-        String name = String.new();
-        if (!json_string(params, "newName", &name) || !valid_rename(name.to_str())) {
-            complete_error(pending, message.id_raw.to_str(), -32602, "Rename requires a Silver identifier"); return;
-        }
         SymbolTarget target = resolve_occurrence(doc, doc.analysis.occurrence_at(offset));
         if (target.symbol < 0) { result = String.from_str("null"); }
         else if (rename_conflicts(store, doc, target, name.to_str())) {
@@ -183,11 +196,11 @@ i32 dispatch_message(ServerState* state, PendingMessage* pending) {
         } else if (strcmp(method, "initialize") == 0 && message.has_id) {
             if (*initialized) { complete_error(pending, message.id_raw.to_str(), -32600, "Already initialized"); return -1; }
             configure_workspace(store, params); *client = client_options(params); *initialized = true;
-            String result = server_capabilities(client); send_response(message.id_raw.to_str(), result.to_str());
+            String result = server_capabilities(client); seal_message(pending, false); send_response(message.id_raw.to_str(), result.to_str());
         } else if (!*initialized) {
             if (message.has_id) { complete_error(pending, message.id_raw.to_str(), -32002, "Server not initialized"); }
         } else if (strcmp(method, "shutdown") == 0 && message.has_id) {
-            *shutdown = true; send_response(message.id_raw.to_str(), "null");
+            *shutdown = true; seal_message(pending, false); send_response(message.id_raw.to_str(), "null");
         } else if (message.has_id && request_cancelled(pending)) { complete_error(pending, message.id_raw.to_str(), -32800, "Request cancelled"); }
         else if (strcmp(method, "initialized") == 0) { *index = workspace_index(store); }
         else if (strcmp(method, "textDocument/didOpen") == 0) {
@@ -232,7 +245,9 @@ i32 dispatch_message(ServerState* state, PendingMessage* pending) {
             if (!diagnostic_identifier(params) || !parse_previous_diagnostics(params, &previous)) {
                 complete_error(pending, message.id_raw.to_str(), -32602, "Invalid workspace diagnostic parameters");
             } else {
-                while (index.paths.len() > 0 && !request_cancelled(pending)) { index_workspace_step(store, index); }
+                if (!index_request_workspace(store, index, pending)) {
+                    complete_response(pending, message.id_raw.to_str(), "null"); return -1;
+                }
                 String result = compute_workspace_diagnostics(store, client, &previous, pending);
                 complete_response(pending, message.id_raw.to_str(), result.to_str());
             }
@@ -241,28 +256,29 @@ i32 dispatch_message(ServerState* state, PendingMessage* pending) {
             String query = String.new();
             if (!json_string(params, "query", &query)) { complete_error(pending, message.id_raw.to_str(), -32602, "Missing symbol query"); }
             else {
-                while (index.paths.len() > 0 && !request_cancelled(pending)) { index_workspace_step(store, index); }
-                String result = request_cancelled(pending) ? String.from_str("null") : compute_workspace_symbols(store, query.to_str());
+                if (!index_request_workspace(store, index, pending)) {
+                    complete_response(pending, message.id_raw.to_str(), "null"); return -1;
+                }
+                String result = compute_workspace_symbols(store, query.to_str(), pending);
                 complete_response(pending, message.id_raw.to_str(), result.to_str());
             }
         } else if (message.has_id) {
             bool calls = strcmp(method, "callHierarchy/incomingCalls") == 0 || strcmp(method, "callHierarchy/outgoingCalls") == 0;
             bool types = strcmp(method, "typeHierarchy/supertypes") == 0 || strcmp(method, "typeHierarchy/subtypes") == 0;
-            if (strcmp(method, "textDocument/references") == 0 || strcmp(method, "textDocument/rename") == 0
-                || strcmp(method, "textDocument/implementation") == 0 || strcmp(method, "textDocument/codeAction") == 0 || calls || types) {
-                while (index.paths.len() > 0 && !request_cancelled(pending)) { index_workspace_step(store, index); }
-            }
             if (request_cancelled(pending)) { complete_error(pending, message.id_raw.to_str(), -32800, "Request cancelled"); }
             else if (calls || types) {
                 SymbolTarget target; i64 error = hierarchy_target(store, params, calls, &target);
                 if (error != 0) { complete_error(pending, message.id_raw.to_str(), error, error == -32801 ? "Hierarchy item is stale" : "Invalid hierarchy item"); }
                 else {
+                    if (!index_request_workspace(store, index, pending)) {
+                        complete_response(pending, message.id_raw.to_str(), "null"); return -1;
+                    }
                     String result = calls ? compute_call_hierarchy(store, target, strcmp(method, "callHierarchy/incomingCalls") == 0, pending)
                         : compute_type_hierarchy(store, target, strcmp(method, "typeHierarchy/supertypes") == 0, pending);
                     complete_response(pending, message.id_raw.to_str(), result.to_str());
                 }
             }
-            else { handle_document_request(store, client, &message, pending); }
+            else { handle_document_request(store, index, client, &message, pending); }
         }
         return -1;
 }

@@ -140,15 +140,16 @@ bool parse_previous_diagnostics(str params, Vec<PreviousDiagnostic>* previous) {
 String compute_workspace_diagnostics(DocumentStore* store, ClientOptions* client,
                                      Vec<PreviousDiagnostic>* previous, PendingMessage* pending) {
     String out = String.from_str("{\"items\":["); bool first = true; i64 i = 0;
-    while (i < store.docs.len() && !request_cancelled(pending)) {
+    while (i < store.docs.len() && !request_interrupted(pending)) {
         Document* doc = store.docs.get(i);
         if (workspace_document(store, doc)) {
             String id = String.new(); i64 p = 0;
-            while (p < previous.len()) {
+            while (p < previous.len() && !request_interrupted(pending)) {
                 PreviousDiagnostic* record = previous.get_ptr(p);
                 if (record.uri.equals(doc.uri.to_str())) { record.reported = true; id = record.id.clone(); }
                 p += 1;
             }
+            if (request_interrupted(pending)) { break; }
             update_file_diagnostics(doc, store, client);
             if (!first) { out.push(','); } first = false;
             append_diagnostic_report(&out, doc, id.to_str(), true);
@@ -156,7 +157,7 @@ String compute_workspace_diagnostics(DocumentStore* store, ClientOptions* client
         i += 1;
     }
     i = 0;
-    while (i < previous.len() && !request_cancelled(pending)) {
+    while (i < previous.len() && !request_interrupted(pending)) {
         PreviousDiagnostic* record = previous.get_ptr(i);
         if (!record.reported) {
             if (!first) { out.push(','); } first = false;

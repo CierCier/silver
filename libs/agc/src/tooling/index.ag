@@ -254,14 +254,20 @@ String ide_owner_name(str text) {
     return String.new();
 }
 
+bool ide_type_symbol(IdeSymbolKind kind) {
+    return kind == IdeSymbolKind.Struct || kind == IdeSymbolKind.Enum || kind == IdeSymbolKind.Trait
+        || kind == IdeSymbolKind.TypeAlias || kind == IdeSymbolKind.TypeParameter;
+}
+
 // Resolve only unqualified names here. The workspace owns import visibility.
-i64 ide_resolve_local(IdeIndex* index, str name, i64 offset) {
+private i64 ide_resolve_name(IdeIndex* index, str name, i64 offset, bool types_only) {
     i64 best = -1;
     bool ambiguous = false;
     i64 i = ide_name_head(index, name);
     while (i >= 0) {
         IdeSymbol* symbol = index.symbols.get_ptr(i);
-        if (symbol.name.equals(name) && symbol.owner.len() == 0
+        if ((!types_only || ide_type_symbol(symbol.kind) || symbol.kind == IdeSymbolKind.ImportAlias)
+            && symbol.name.equals(name) && symbol.owner.len() == 0
             && (!symbol.local || ((symbol.selection.start <= offset || symbol.kind == IdeSymbolKind.TypeParameter)
                 && symbol.scope.start <= offset && (offset < symbol.scope.end
                     || (index.recovered && offset == symbol.scope.end))))) {
@@ -278,6 +284,14 @@ i64 ide_resolve_local(IdeIndex* index, str name, i64 offset) {
         i = index.next_name.get(i);
     }
     return ambiguous ? -2 : best;
+}
+
+i64 ide_resolve_local(IdeIndex* index, str name, i64 offset) {
+    return ide_resolve_name(index, name, offset, false);
+}
+
+i64 ide_resolve_type(IdeIndex* index, str name, i64 offset) {
+    return ide_resolve_name(index, name, offset, true);
 }
 
 void ide_generic_parameters(IdeIndex* index, SyntaxNode* name, Span scope) {
@@ -481,6 +495,12 @@ void ide_members(IdeIndex* index, SyntaxNode* item, str owner, bool methods, Sym
 
 void ide_collect_nodes(IdeIndex* index, SyntaxNode* node) {
     if (node == (SyntaxNode*)0) { return; }
+    if (node.kind == NodeKind.Import) {
+        SyntaxNode* selection = node.first_child;
+        while (selection != (SyntaxNode*)0 && selection.kind != NodeKind.Block) { selection = selection.next_sibling; }
+        ide_collect_nodes(index, selection);
+        return;
+    }
     if (node_is_identifier(node) || node.token_kind == TokenKind.SelfType) {
         IdeOccurrence occurrence;
         occurrence.node = node;
@@ -500,7 +520,11 @@ void ide_collect_nodes(IdeIndex* index, SyntaxNode* node) {
                     occurrence.owner = String.from_str(receiver.text);
                 } else {
                     i64 target = ide_resolve_local(index, receiver.text, receiver.span.start);
-                    if (target >= 0) { occurrence.owner = index.symbols.get_ptr(target).type_owner.clone(); }
+                    if (target >= 0) {
+                        IdeSymbol* symbol = index.symbols.get_ptr(target);
+                        occurrence.owner = symbol.kind == IdeSymbolKind.Struct || symbol.kind == IdeSymbolKind.Enum
+                            || symbol.kind == IdeSymbolKind.Trait ? symbol.name.clone() : symbol.type_owner.clone();
+                    }
                 }
             }
             i64 i = ide_name_head(index, node.text);

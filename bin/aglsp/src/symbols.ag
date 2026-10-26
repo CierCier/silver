@@ -4,6 +4,7 @@ import json_rpc;
 import navigation;
 import tooling.search;
 import std.algo.sort;
+import transport;
 
 i64 symbol_kind(IdeSymbolKind kind) {
     return match kind {
@@ -257,12 +258,12 @@ impl Lt<WorkspaceSymbolMatch> for WorkspaceSymbolMatch {
     }
 }
 
-String compute_workspace_symbols(DocumentStore* store, str query) {
+String compute_workspace_symbols(DocumentStore* store, str query, PendingMessage* pending) {
     Vec<Document*> documents = store.query_documents((Document*)0);
     Vec<WorkspaceSymbolMatch> matches = Vec<WorkspaceSymbolMatch>.new(); i64 i = 0;
-    while (i < documents.len()) {
+    while (i < documents.len() && !request_interrupted(pending)) {
         Document* doc = documents.get(i); i64 j = 0;
-        while (j < doc.analysis.symbols.len()) {
+        while (j < doc.analysis.symbols.len() && !request_interrupted(pending)) {
             IdeSymbol* symbol = doc.analysis.symbols.get_ptr(j); i64 score = ide_match_score(query, symbol.name.to_str());
             if (!symbol.local && score >= 0) {
                 WorkspaceSymbolMatch found; found.document = doc; found.symbol = j; found.score = score; matches.push(found);
@@ -271,8 +272,10 @@ String compute_workspace_symbols(DocumentStore* store, str query) {
         }
         i += 1;
     }
+    if (request_interrupted(pending)) { return String.from_str("null"); }
+    // Sorting is synchronous; interruption checks bracket it.
     sort<WorkspaceSymbolMatch>(&matches); String out = String.from_str("["); i = 0;
-    while (i < matches.len()) {
+    while (i < matches.len() && !request_interrupted(pending)) {
         WorkspaceSymbolMatch* found = matches.get_ptr(i);
         if (i > 0) { out.push(','); }
         append_symbol_information(&out, found.document, found.document.analysis.symbols.get_ptr(found.symbol)); i += 1;

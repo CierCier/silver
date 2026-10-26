@@ -33,7 +33,6 @@ struct Document {
     i64 revision;
     bool open;
     bool imports_dirty;
-    bool unresolved_imports;
     bool diagnostics_dirty;
     String diagnostic_items;
     i64 diagnostic_revision;
@@ -136,7 +135,6 @@ impl DocumentStore {
 
     Document* set(DocumentStore* self, str uri, str text, i64 version, bool open) {
         Document* doc = self.get(uri);
-        bool newly_opened = open && (doc == (Document*)0 || !doc.open);
         if (doc == (Document*)0) {
             // Field replacement drops old values, so the initial snapshot must be zeroed.
             doc = alloc<Document>(1);
@@ -158,14 +156,6 @@ impl DocumentStore {
         doc.diagnostics_dirty = true;
         doc.semantic_dirty = true;
         doc.analysis = IdeIndex.new(text);
-        if (newly_opened) {
-            i64 i = 0;
-            while (i < self.docs.len()) {
-                Document* candidate = self.docs.get(i);
-                if (candidate.unresolved_imports) { candidate.imports_dirty = true; candidate.diagnostics_dirty = true; }
-                i += 1;
-            }
-        }
         return doc;
     }
 
@@ -182,11 +172,26 @@ impl DocumentStore {
     }
 
     void refresh_imports(DocumentStore* self) {
-        self.overlay_paths.clear(); i64 overlay = 0;
+        Vec<String> overlay_paths = Vec<String>.new(); i64 overlay = 0; bool changed = false;
         while (overlay < self.docs.len()) {
             Document* doc = self.docs.get(overlay);
-            if (doc.open && doc.path.len() > 0) { self.overlay_paths.push(doc.path.clone()); }
+            if (doc.open && doc.path.len() > 0) {
+                i64 previous = 0;
+                while (previous < self.overlay_paths.len() && !self.overlay_paths.get_ptr(previous).equals(doc.path.to_str())) { previous += 1; }
+                if (previous == self.overlay_paths.len()) { changed = true; }
+                overlay_paths.push(doc.path.clone());
+            }
             overlay += 1;
+        }
+        changed = changed || overlay_paths.len() != self.overlay_paths.len();
+        self.overlay_paths = move overlay_paths;
+        if (changed) {
+            i64 dirty = 0;
+            while (dirty < self.docs.len()) {
+                Document* doc = self.docs.get(dirty);
+                doc.imports_dirty = true; doc.diagnostics_dirty = true; doc.semantic_dirty = true;
+                dirty += 1;
+            }
         }
         i64 i = 0;
         while (i < self.docs.len()) {
@@ -195,13 +200,11 @@ impl DocumentStore {
             doc.imports_dirty = false;
             doc.diagnostics_dirty = true;
             doc.semantic_dirty = true;
-            doc.unresolved_imports = false;
             doc.dependencies.clear();
             if (doc.path.len() > 0) {
                 i64 j = 0;
                 while (j < doc.analysis.imports.len()) {
                     String path = resolve_document_import(self, doc, doc.analysis.imports.get_ptr(j).to_str());
-                    if (path.len() == 0) { doc.unresolved_imports = true; }
                     if (path.len() > 0 && !path.ends_with(".agm")) {
                         Document* imported = self.load(path.to_str());
                         if (imported != (Document*)0 && imported != doc) { doc.dependencies.push(imported); }
@@ -311,12 +314,32 @@ SymbolTarget resolve_occurrence(Document* doc, i64 occurrence) {
     IdeOccurrence* selected = doc.analysis.occurrences.get_ptr(occurrence);
     if (selected.symbol >= 0) { target.symbol = selected.symbol; return target; }
     if (selected.symbol == -2) { target.symbol = -2; return target; }
-    if (selected.member && selected.owner.len() == 0) { return target; }
+    String owner = selected.owner.clone();
+    if (selected.member) {
+        SyntaxNode* separator = binding_previous_sibling(selected.node);
+        if (separator != (SyntaxNode*)0 && separator.token_kind == TokenKind.Dot) {
+            SyntaxNode* receiver = binding_previous_sibling(separator);
+            if (receiver == (SyntaxNode*)0 || !node_is_identifier(receiver)) { return target; }
+            owner = symbol_receiver_owner(visible_name(doc, receiver.text, receiver.span.start));
+            if (owner.len() == 0) { return target; }
+            i64 local = ide_name_head(&doc.analysis, selected.node.text);
+            while (local >= 0) {
+                IdeSymbol* symbol = doc.analysis.symbols.get_ptr(local);
+                if (symbol.owner.equals(owner.to_str())) {
+                    if (target.symbol == -1) { target.symbol = local; }
+                    else { target.symbol = -2; }
+                }
+                local = doc.analysis.next_name.get(local);
+            }
+            if (target.symbol != -1) { return target; }
+        }
+    }
+    if (selected.member && owner.len() == 0) { return target; }
     Vec<Document*> visited = Vec<Document*>.new();
     visited.push(doc);
     i64 i = 0;
     while (i < doc.dependencies.len()) {
-        find_imported_symbol(doc.dependencies.get(i), selected.node.text, selected.owner.to_str(), &visited, &target);
+        find_imported_symbol(doc.dependencies.get(i), selected.node.text, owner.to_str(), &visited, &target);
         i += 1;
     }
     return target;
@@ -335,4 +358,53 @@ SymbolTarget follow_import_alias(SymbolTarget target) {
         i += 1;
     }
     return target;
+}
+
+SymbolTarget visible_name(Document* doc, str name, i64 offset) {
+    SymbolTarget target; target.document = doc;
+    target.symbol = ide_resolve_local(&doc.analysis, name, offset);
+    if (target.symbol != -1) { return follow_import_alias(target); }
+    Vec<Document*> visited = Vec<Document*>.new(); visited.push(doc); i64 i = 0;
+    while (i < doc.dependencies.len()) {
+        find_imported_symbol(doc.dependencies.get(i), name, "", &visited, &target); i += 1;
+    }
+    return follow_import_alias(target);
+}
+
+SymbolTarget visible_type_name(Document* doc, str name, i64 offset) {
+    SymbolTarget target; target.document = doc;
+    target.symbol = ide_resolve_type(&doc.analysis, name, offset);
+    if (target.symbol == -1) {
+        Vec<Document*> visited = Vec<Document*>.new(); visited.push(doc); i64 i = 0;
+        while (i < doc.dependencies.len()) {
+            find_imported_symbol(doc.dependencies.get(i), name, "", &visited, &target); i += 1;
+        }
+    }
+    target = follow_import_alias(target);
+    if (target.symbol >= 0 && !ide_type_symbol(target.document.analysis.symbols.get_ptr(target.symbol).kind)) { target.symbol = -1; }
+    return target;
+}
+
+String symbol_receiver_owner(SymbolTarget target) {
+    target = follow_import_alias(target);
+    Vec<SymbolTarget> visited = Vec<SymbolTarget>.new();
+    while (target.symbol >= 0) {
+        i64 i = 0;
+        while (i < visited.len()) {
+            SymbolTarget previous = visited.get(i);
+            if (previous.document == target.document && previous.symbol == target.symbol) { return String.new(); }
+            i += 1;
+        }
+        visited.push(target);
+        IdeSymbol* symbol = target.document.analysis.symbols.get_ptr(target.symbol);
+        if (symbol.kind == IdeSymbolKind.Struct || symbol.kind == IdeSymbolKind.Enum
+            || symbol.kind == IdeSymbolKind.Trait) { return symbol.name.clone(); }
+        if (symbol.kind == IdeSymbolKind.Function || symbol.kind == IdeSymbolKind.Method) { return String.new(); }
+        if (symbol.type_owner.len() == 0 || (visited.len() > 1 && symbol.kind != IdeSymbolKind.TypeAlias)) { return String.new(); }
+        if (is_primitive_type_token(Lexer.keyword_kind(symbol.type_owner.data, 0, symbol.type_owner.len()))) {
+            return symbol.type_owner.clone();
+        }
+        target = visible_type_name(target.document, symbol.type_owner.to_str(), symbol.selection.start);
+    }
+    return String.new();
 }

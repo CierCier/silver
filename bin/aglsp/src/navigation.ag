@@ -43,29 +43,13 @@ bool same_target(SymbolTarget left, SymbolTarget right) {
     return left.symbol >= 0 && left.symbol == right.symbol && left.document == right.document;
 }
 
-SymbolTarget visible_name(Document* doc, str name, i64 offset) {
-    SymbolTarget target; target.document = doc;
-    target.symbol = ide_resolve_local(&doc.analysis, name, offset);
-    if (target.symbol != -1) { return follow_import_alias(target); }
-    Vec<Document*> visited = Vec<Document*>.new(); visited.push(doc); i64 i = 0;
-    while (i < doc.dependencies.len()) {
-        find_imported_symbol(doc.dependencies.get(i), name, "", &visited, &target); i += 1;
-    }
-    return follow_import_alias(target);
-}
-
-bool type_symbol(IdeSymbolKind kind) {
-    return kind == IdeSymbolKind.Struct || kind == IdeSymbolKind.Enum || kind == IdeSymbolKind.Trait
-        || kind == IdeSymbolKind.TypeAlias || kind == IdeSymbolKind.TypeParameter;
-}
-
 SymbolTarget type_definition_target(SymbolTarget target) {
     if (target.symbol < 0) { return target; }
     IdeSymbol* symbol = target.document.analysis.symbols.get_ptr(target.symbol);
-    if (type_symbol(symbol.kind) && symbol.kind != IdeSymbolKind.TypeAlias) { return target; }
+    if (ide_type_symbol(symbol.kind) && symbol.kind != IdeSymbolKind.TypeAlias) { return target; }
     if (symbol.type_owner.len() > 0) {
-        target = visible_name(target.document, symbol.type_owner.to_str(), symbol.selection.start);
-        if (target.symbol >= 0 && type_symbol(target.document.analysis.symbols.get_ptr(target.symbol).kind)) { return target; }
+        target = visible_type_name(target.document, symbol.type_owner.to_str(), symbol.selection.start);
+        if (target.symbol >= 0 && ide_type_symbol(target.document.analysis.symbols.get_ptr(target.symbol).kind)) { return target; }
     }
     target.symbol = -1; return target;
 }

@@ -110,7 +110,7 @@ providers return eager results instead.
 | --- | --- | --- | --- |
 | `initialized` | C → S | Supported | Starts background workspace indexing after initialization. [Source][dispatch], [checks][checks]. |
 | `exit` | C → S | Supported | Stops the reader and process, including an incomplete following frame. [Source][dispatch], [checks][checks]. |
-| `$/cancelRequest` | Both | Partial | Incoming cancellation of queued/running requests; IDs are reusable after completion. Unknown IDs are discarded. No outgoing cancellation of client requests. Cancellation checks occur between files, not inside frontend passes. [Source][transport], [checks][checks]. |
+| `$/cancelRequest` | Both | Partial | Incoming cancellation of queued/running requests; IDs are reusable after completion. Unknown IDs are discarded. A full input queue interrupts eligible analysis with `RequestFailed` so intake can resume; this is distinct from observed client cancellation. No outgoing cancellation of client requests. Checks occur between files/items, not inside frontend passes. [Source][transport], [checks][checks]. |
 | `$/progress` | Both | Partial | Outgoing begin/end for client-supplied work-done tokens on selected queries. No incoming progress consumer, partial-result streaming, percentages or server-created tokens. [Source][progress], [checks][checks]. |
 | `$/setTrace` | C → S | Open | No trace-level handling. |
 | `$/logTrace` | S → C | Open | No trace notifications. |
@@ -145,14 +145,24 @@ include:
   `test_jsonrpc_params_must_be_structured_and_invalid_shutdown_does_not_stop_server`,
   `test_transport_rejects_invalid_utf8_nul_suffixes_and_noninteger_request_ids`,
   `test_cancelled_index_request_and_bounded_pipeline`,
+  `test_active_progress_cancellation_behind_saturated_edit_pipeline`,
+  `test_active_progress_interruption_behind_saturated_edits_without_cancel`,
+  `test_active_progress_cancellation_behind_saturated_request_pipeline`,
   `test_exit_stops_reader_with_incomplete_following_frame`.
 - Synchronization/workspace: `test_utf16_incremental_changes_are_atomic_and_versioned`,
   `test_save_republishes_overlay_diagnostics_or_requests_pull_refresh`,
   `test_unopened_files_imports_and_unsaved_overlay`,
+  `test_nearer_unsaved_import_rebinds_cached_direct_transitive_and_unused_origins`,
   `test_workspace_folder_removal_excludes_closed_files_from_all_workspace_queries`,
   `test_workspace_folder_batches_are_atomic_and_preserve_sysroot_imports`,
   `test_watched_files_refresh_closed_imports`.
 - Navigation/rename: `test_scope_aware_navigation_and_rename`,
+  `test_function_rename_and_references_exclude_import_module_paths`,
+  `test_grouped_import_alias_rename_preserves_dotted_module_path`,
+  `test_type_qualified_enum_dot_calls_navigate_and_rename`,
+  `test_type_qualified_static_dot_calls_preserve_value_receiver_targets`,
+  `test_dot_receivers_follow_alias_context_without_guessing_value_types`,
+  `test_imported_primitive_members_and_types_shadowed_by_value_names`,
   `test_type_declaration_and_implementation_navigation`,
   `test_ambiguous_methods_do_not_choose_an_arbitrary_implementation`,
   `test_trait_method_rename_updates_contract_implementations_and_calls`,

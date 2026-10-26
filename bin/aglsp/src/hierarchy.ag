@@ -44,7 +44,7 @@ i64 hierarchy_target(DocumentStore* store, str params, bool calls, SymbolTarget*
     i64 symbol = ide_find_definition(&doc.analysis, span);
     if (symbol < 0) { return -32801; }
     IdeSymbolKind kind = doc.analysis.symbols.get_ptr(symbol).kind;
-    if (calls ? !callable_symbol(kind) : !type_symbol(kind)) { return -32602; }
+    if (calls ? !callable_symbol(kind) : !ide_type_symbol(kind)) { return -32602; }
     target.document = doc; target.symbol = symbol; return 0;
 }
 
@@ -68,10 +68,10 @@ struct CallGroup { SymbolTarget target; Vec<Span> ranges; }
 String compute_call_hierarchy(DocumentStore* store, SymbolTarget selected, bool incoming, PendingMessage* pending) {
     Vec<CallGroup> groups = Vec<CallGroup>.new(); i64 i = 0;
     Vec<Document*> documents = store.query_documents(selected.document);
-    while (i < documents.len() && !request_cancelled(pending)) {
+    while (i < documents.len() && !request_interrupted(pending)) {
         Document* doc = documents.get(i); i64 token = 0;
         if (!incoming && doc != selected.document) { i += 1; continue; }
-        while (token < doc.analysis.tokens.len() && !request_cancelled(pending)) {
+        while (token < doc.analysis.tokens.len() && !request_interrupted(pending)) {
             if (doc.analysis.tokens.get(token).kind == TokenKind.LeftParen) {
                 i64 occurrence = call_occurrence(doc, token);
                 if (occurrence >= 0 && !doc.analysis.occurrences.get_ptr(occurrence).definition) {
@@ -94,13 +94,13 @@ String compute_call_hierarchy(DocumentStore* store, SymbolTarget selected, bool 
         i += 1;
     }
     String out = String.from_str("["); i = 0;
-    while (i < groups.len()) {
+    while (i < groups.len() && !request_interrupted(pending)) {
         CallGroup* group = groups.get_ptr(i);
         if (i > 0) { out.push(','); }
         out.push_str(incoming ? "{\"from\":" : "{\"to\":"); append_hierarchy_item(&out, group.target);
         out.push_str(",\"fromRanges\":["); i64 range = 0;
         Document* caller = incoming ? group.target.document : selected.document;
-        while (range < group.ranges.len()) {
+        while (range < group.ranges.len() && !request_interrupted(pending)) {
             if (range > 0) { out.push(','); }
             caller.append_range(&out, group.ranges.get(range)); range += 1;
         }
@@ -112,16 +112,16 @@ String compute_call_hierarchy(DocumentStore* store, SymbolTarget selected, bool 
 String compute_type_hierarchy(DocumentStore* store, SymbolTarget selected, bool supers, PendingMessage* pending) {
     Vec<SymbolTarget> targets = Vec<SymbolTarget>.new(); i64 i = 0;
     Vec<Document*> documents = store.query_documents(selected.document);
-    while (i < documents.len() && !request_cancelled(pending)) {
+    while (i < documents.len() && !request_interrupted(pending)) {
         Document* doc = documents.get(i); i64 j = 0;
-        while (j < doc.analysis.implementations.len()) {
+        while (j < doc.analysis.implementations.len() && !request_interrupted(pending)) {
             IdeImplementation* implementation = doc.analysis.implementations.get_ptr(j);
             if (implementation.trait_name != (SyntaxNode*)0) {
                 SymbolTarget type_target = resolve_occurrence(doc, doc.analysis.occurrence_at(implementation.target.span.start));
                 SymbolTarget trait_target = resolve_occurrence(doc, doc.analysis.occurrence_at(implementation.trait_name.span.start));
                 if (same_target(supers ? type_target : trait_target, selected)) {
                     SymbolTarget target = supers ? trait_target : type_target;
-                    if (target.symbol >= 0 && type_symbol(target.document.analysis.symbols.get_ptr(target.symbol).kind)) {
+                    if (target.symbol >= 0 && ide_type_symbol(target.document.analysis.symbols.get_ptr(target.symbol).kind)) {
                         i64 previous = 0;
                         while (previous < targets.len() && !same_target(targets.get(previous), target)) { previous += 1; }
                         if (previous == targets.len()) { targets.push(target); }
@@ -133,6 +133,6 @@ String compute_type_hierarchy(DocumentStore* store, SymbolTarget selected, bool 
         i += 1;
     }
     String out = String.from_str("["); i = 0;
-    while (i < targets.len()) { if (i > 0) { out.push(','); } append_hierarchy_item(&out, targets.get(i)); i += 1; }
+    while (i < targets.len() && !request_interrupted(pending)) { if (i > 0) { out.push(','); } append_hierarchy_item(&out, targets.get(i)); i += 1; }
     out.push(']'); return move out;
 }

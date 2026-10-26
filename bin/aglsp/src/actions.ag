@@ -29,7 +29,7 @@ bool action_import_conflicts(Document* active, Document* added, PendingMessage* 
         if (old < existing.len()) { i += 1; continue; }
         i64 symbol = 0;
         while (symbol < source.analysis.symbols.len()) {
-            if (request_cancelled(pending)) { return true; }
+            if (request_interrupted(pending)) { return true; }
             IdeSymbol* candidate = source.analysis.symbols.get_ptr(symbol);
             if (!candidate.local && !candidate.is_private) {
                 i64 previous = 0;
@@ -120,12 +120,12 @@ void append_import_action(String* out, Document* active, str module_name, str na
 String compute_import_actions(DocumentStore* store, Document* active, Span selection, bool allowed, ClientOptions* client, PendingMessage* pending) {
     Vec<Document*> documents = store.query_documents(active);
     String out = String.from_str("["); bool comma = false; Vec<String> offered = Vec<String>.new(); i64 occurrence = 0;
-    while (allowed && occurrence < active.analysis.occurrences.len() && !request_cancelled(pending)) {
+    while (allowed && occurrence < active.analysis.occurrences.len() && !request_interrupted(pending)) {
         IdeOccurrence* selected = active.analysis.occurrences.get_ptr(occurrence); Span span = selected.node.span;
         bool intersects = span.start <= selection.end && span.end >= selection.start;
         if (!selected.definition && !selected.member && intersects && resolve_occurrence(active, occurrence).symbol == -1) {
             i64 doc = 0;
-            while (doc < documents.len() && !request_cancelled(pending)) {
+            while (doc < documents.len() && !request_interrupted(pending)) {
                 Document* candidate = documents.get(doc);
                 if (candidate != active && candidate.path.len() > 0 && candidate.analysis.diagnostics.is_empty()) {
                     Vec<Document*> visited = Vec<Document*>.new(); SymbolTarget target; target.document = candidate; target.symbol = -1;

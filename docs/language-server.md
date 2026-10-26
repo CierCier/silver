@@ -118,6 +118,8 @@ The server indexes `.ag` files under `rootUri` and `workspaceFolders`, including
 unopened files. It skips hidden entries, `target`, `node_modules`, symlinks, and
 directories deeper than 32 levels. Import resolution uses the compiler's module
 resolver. Source imports use unsaved open buffers when available.
+Opening or closing an overlay rebuilds import selections for every cached document,
+including imports that previously resolved to a lower-priority source file.
 An explicit `workspaceFolders` list takes precedence over `rootUri`.
 `workspace/didChangeWorkspaceFolders` adds/removes normalized folders and refreshes
 imports and indexing. Malformed batches leave the roots unchanged. Removing a
@@ -137,6 +139,9 @@ Rename identifies declarations by document and symbol ID rather than spelling.
 Import aliases have independent rename identities. Ambiguous imported names and
 free-function overloads do not resolve to an arbitrary declaration. Rename rejects
 non-ASCII identifiers, keywords, primitive types, and detected binding conflicts.
+Module paths are excluded from symbol references and rename edits. Dot-qualified
+members resolve through visible type declarations and aliases in their defining
+documents, using the same receiver lookup as completion.
 Conflict checking is conservative and can reject otherwise valid renames.
 Match payload and bare bindings are limited to their own arm, including guards
 and nested matches. Constructor arguments in arm values remain references.
@@ -193,6 +198,10 @@ file or directory, so local requests can run while indexing remains unfinished.
 Workspace search, references, and rename finish the pending index before
 returning. Cancellation checks stop that traversal between files and return
 `RequestCancelled`; individual frontend passes currently run to completion.
+If the reader is waiting for queue space, interruptible analysis stops at its next
+checkpoint and returns `RequestFailed` with a retry message. Pending document
+changes remain ordered. Queue pressure does not count as client cancellation;
+a cancellation behind the backlog may arrive after the overload response.
 Cancelled and completed request identities are removed, allowing ID reuse.
 
 ## Performance checks

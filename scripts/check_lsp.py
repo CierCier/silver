@@ -160,7 +160,7 @@ class NativeLsp(unittest.TestCase):
     stdlib_root = None
 
     def setUp(self):
-        self.directory = tempfile.TemporaryDirectory(prefix="silver lsp ")
+        self.directory = tempfile.TemporaryDirectory(prefix="silver-lsp-review- ")
         self.root = Path(self.directory.name)
         (self.root / "helper.ag").write_text("/// The answer.\ni32 answer(i32 value) { return value; }\n")
         (self.root / "other.ag").write_text("import helper;\ni32 other() { return answer(7); }\n")
@@ -901,6 +901,152 @@ class NativeLsp(unittest.TestCase):
         signature = self.session.result("textDocument/signatureHelp", {"textDocument": {"uri": uri}, "position": position(text, text.index("42"))})
         self.assertEqual(signature["signatures"][0]["parameters"][0]["label"], "i32 value")
 
+    def test_function_rename_and_references_exclude_import_module_paths(self):
+        package = self.root / "pkg"
+        package.mkdir()
+        (package / "helper.ag").write_text("i32 answer(i32 value) { return value; }\n")
+        for index, imported in enumerate(("helper", "pkg.helper", "pkg.helper { answer as calculate }")):
+            text = f"import {imported};\ni32 helper() {{ return 1; }}\ni32 main() {{ return helper(); }}\n"
+            uri = self.open(text, f"rename-path-{index}.ag")
+            target = self.at(uri, text, "helper", text.index("i32 helper"))
+            ranges = [location(text, "helper", text.index("i32 helper")),
+                      location(text, "helper", text.index("return helper"))]
+            with self.subTest(imported=imported, operation="references"):
+                self.assertEqual(self.session.result("textDocument/references", {
+                    **target, "context": {"includeDeclaration": True}}),
+                    [{"uri": uri, "range": span} for span in ranges])
+            with self.subTest(imported=imported, operation="rename"):
+                renamed = self.session.result("textDocument/rename", {**target, "newName": "local_helper"})
+                self.assertEqual(renamed, {"changes": {uri: [
+                    {"range": span, "newText": "local_helper"} for span in ranges]}})
+            with self.subTest(imported=imported, operation="module-references"):
+                self.assertEqual(self.session.result("textDocument/references", {
+                    **self.at(uri, text, "helper"), "context": {"includeDeclaration": True}}), [])
+
+    def test_grouped_import_alias_rename_preserves_dotted_module_path(self):
+        package = self.root / "pkg"
+        package.mkdir()
+        module = "i32 answer(i32 value) { return value; }\ni32 extra() { return 2; }\n"
+        (package / "helper.ag").write_text(module)
+        text = ("import pkg.helper { answer as calculate, extra };\n"
+                "i32 helper() { return 1; }\ni32 main() { return calculate(helper()) + extra(); }\n")
+        uri = self.open(text)
+        for start in (0, text.index("return calculate")):
+            with self.subTest(start=start):
+                target = self.at(uri, text, "calculate", start)
+                self.assertEqual(self.session.result("textDocument/definition", target), {
+                    "uri": (package / "helper.ag").as_uri(), "range": location(module, "answer")})
+                renamed = self.session.result("textDocument/rename", {**target, "newName": "compute"})
+                self.assertEqual(renamed, {"changes": {uri: [
+                    {"range": location(text, "calculate", at), "newText": "compute"}
+                    for at in (0, text.index("return calculate"))]}})
+                self.assertEqual(apply_edits(text, renamed["changes"][uri]), text.replace("calculate", "compute"))
+
+    def test_type_qualified_enum_dot_calls_navigate_and_rename(self):
+        model = "enum Choice { First(i32); Second(i32); }\ntype ChoiceAlias = Choice;\n"
+        calls = ("Choice direct() { return Choice.First(1); }\n"
+                 "Choice colon() { return Choice::First(2); }\n"
+                 "Choice alias() { return ChoiceAlias.First(3); }\n")
+        for imported in (False, True):
+            model_uri = self.open(model, "choice.ag") if imported else None
+            text = ("import choice;\n" if imported else model) + calls
+            uri = self.open(text, "imported-choice.ag" if imported else "local-choice.ag")
+            declaration_uri = model_uri or uri
+            declaration_text = model if imported else text
+            declaration = {"uri": declaration_uri, "range": location(declaration_text, "First")}
+            expected = {declaration_uri: [{"range": declaration["range"], "newText": "Initial"}]}
+            for call in ("Choice.First", "Choice::First", "ChoiceAlias.First"):
+                at = text.index(call) + len(call) - len("First")
+                expected.setdefault(uri, []).append({"range": location(text, "First", at), "newText": "Initial"})
+                with self.subTest(imported=imported, call=call):
+                    target = self.at(uri, text, "First", at)
+                    self.assertEqual(self.session.result("textDocument/definition", target), declaration)
+                    self.assertEqual(self.session.result("textDocument/prepareRename", target)["range"], location(text, "First", at))
+            with self.subTest(imported=imported, operation="rename"):
+                renamed = self.session.result("textDocument/rename", {
+                    **self.at(declaration_uri, declaration_text, "First"), "newName": "Initial"})
+                self.assertEqual(renamed, {"changes": expected})
+            self.session.send("textDocument/didClose", {"textDocument": {"uri": uri}})
+
+    def test_type_qualified_static_dot_calls_preserve_value_receiver_targets(self):
+        model = ("struct Type { i32 value; }\n"
+                 "impl Type { Type make(i32 value) { Type result; result.value = value; return result; }\n"
+                 " i32 read(&self) { return self.value; } }\ntype TypeAlias = Type;\n")
+        model_uri = self.open(model, "factory.ag")
+        text = ("import factory;\nType direct() { return Type.make(1); }\n"
+                "Type colon() { return Type::make(2); }\n"
+                "Type alias() { return TypeAlias.make(3); }\n"
+                "i32 read_value(Type value) { return value.read(); }\n")
+        uri = self.open(text)
+        ranges = []
+        for call in ("Type.make", "Type::make", "TypeAlias.make"):
+            at = text.index(call) + len(call) - len("make")
+            ranges.append(location(text, "make", at))
+            with self.subTest(call=call):
+                target = self.at(uri, text, "make", at)
+                self.assertEqual(self.session.result("textDocument/definition", target), {
+                    "uri": model_uri, "range": location(model, "make")})
+                renamed = self.session.result("textDocument/rename", {**target, "newName": "create"})
+                self.assertEqual(apply_edits(model, renamed["changes"][model_uri]), model.replace("make", "create"))
+        with self.subTest(operation="rename"):
+            self.assertEqual(self.session.result("textDocument/rename", {
+                **self.at(model_uri, model, "make"), "newName": "create"}), {"changes": {
+                    model_uri: [{"range": location(model, "make"), "newText": "create"}],
+                    uri: [{"range": span, "newText": "create"} for span in ranges]}})
+        target = self.at(uri, text, "read", text.index("value.read"))
+        self.assertEqual(self.session.result("textDocument/definition", target), {
+            "uri": model_uri, "range": location(model, "read")})
+        self.assertEqual(self.session.result("textDocument/rename", {**target, "newName": "fetch"}), {"changes": {
+            model_uri: [{"range": location(model, "read"), "newText": "fetch"}],
+            uri: [{"range": location(text, "read", text.index("value.read")), "newText": "fetch"}]}})
+
+    def test_dot_receivers_follow_alias_context_without_guessing_value_types(self):
+        model = ("struct Remote { i32 value; }\n"
+                 "impl Remote { i32 read(&self) { return self.value; } }\n"
+                 "type RemoteAlias = Remote;\ntype CycleA = CycleB;\ntype CycleB = CycleA;\n"
+                 "Remote produce() { Remote value; return value; }\n")
+        model_uri = self.open(model, "receiver_model.ag")
+        text = ("import receiver_model { RemoteAlias as Selected, CycleA, produce };\n"
+                "struct Other { i32 value; }\ntype Remote = Other;\n"
+                "i32 valid(Selected value) { return value.read(); }\n"
+                "i32 shadow(i32 Selected) { return Selected.read(); }\n"
+                "i32 invalid(CycleA cycle) { return cycle.read() + missing.read() + produce.read(); }\n")
+        uri = self.open(text)
+        self.assertEqual(self.session.result("textDocument/definition", self.at(uri, text, "read")), {
+            "uri": model_uri, "range": location(model, "read")})
+        for receiver in ("Selected", "cycle", "missing", "produce"):
+            with self.subTest(receiver=receiver):
+                at = text.index(receiver + ".read") + len(receiver) + 1
+                self.assertIsNone(self.session.result("textDocument/definition", self.at(uri, text, "read", at)))
+                completions = self.session.result("textDocument/completion", {
+                    "textDocument": {"uri": uri}, "position": position(text, at)})
+                self.assertNotIn("read", {item["label"] for item in completions["items"]})
+
+    def test_imported_primitive_members_and_types_shadowed_by_value_names(self):
+        model = ("struct Item { i32 field; }\n"
+                 "impl i32 { i32 twice(&self) { return *self * 2; } }\n")
+        model_uri = self.open(model, "receiver_types.ag")
+        text = "import receiver_types;\ni32 read(Item Item, i32 x) { return Item.field + x.twice(); }\n"
+        uri = self.open(text)
+        self.assertEqual(self.session.result("textDocument/typeDefinition", self.at(uri, text, "Item.field")), {
+            "uri": model_uri, "range": location(model, "Item")})
+        for receiver, member in (("Item", "field"), ("x", "twice")):
+            with self.subTest(member=member):
+                target = self.at(uri, text, member)
+                self.assertEqual(self.session.result("textDocument/definition", target), {
+                    "uri": model_uri, "range": location(model, member)})
+                self.assertEqual(self.session.result("textDocument/references", {
+                    **target, "context": {"includeDeclaration": False}}), [{
+                        "uri": uri, "range": location(text, member)}])
+                self.assertEqual(self.session.result("textDocument/rename", {
+                    **target, "newName": "renamed"}), {"changes": {
+                        model_uri: [{"range": location(model, member), "newText": "renamed"}],
+                        uri: [{"range": location(text, member), "newText": "renamed"}]}})
+                at = text.index(receiver + "." + member) + len(receiver) + 1
+                completions = self.session.result("textDocument/completion", {
+                    "textDocument": {"uri": uri}, "position": position(text, at)})
+                self.assertIn(member, {item["label"] for item in completions["items"]})
+
     def test_generics_and_private_import_visibility(self):
         (self.root / "helper.ag").write_text("private i32 hidden() { return 1; }\ni32 answer(i32 value) { return value; }\n")
         self.session.send("workspace/didChangeWatchedFiles", {"changes": [{"uri": (self.root / "helper.ag").as_uri(), "type": 2}]})
@@ -1049,7 +1195,7 @@ class NativeLsp(unittest.TestCase):
         self.assertIsNotNone(self.session.result("textDocument/hover", self.at(uri, text, "restored")))
 
     def test_installed_sysroot_source_import(self):
-        with tempfile.TemporaryDirectory(prefix="silver-sysroot-") as directory:
+        with tempfile.TemporaryDirectory(prefix="silver-lsp-review-sysroot-") as directory:
             sysroot = Path(directory)
             standard = sysroot / "include" / "silver" / "std"
             standard.mkdir(parents=True)
@@ -1220,6 +1366,84 @@ class NativeLsp(unittest.TestCase):
         self.session.send("textDocument/didClose", {"textDocument": {"uri": imported}})
         self.assertIsNone(self.session.result("textDocument/definition", params))
         self.assertTrue(self.session.diagnostics[uri]["diagnostics"])
+
+    def test_nearer_unsaved_import_rebinds_cached_direct_transitive_and_unused_origins(self):
+        sub = self.root / "sub"
+        sub.mkdir()
+        root_module = ("/// Root answer.\ni32 answer(i32 value) { return value; }\n"
+                       "i32 root_only() { return 1; }\n")
+        (self.root / "helper.ag").write_text(root_module)
+        consumer = "import helper;\ni32 consumer() { return answer(7) + root_only(); }\n"
+        indirect = "import consumer;\ni32 indirect() { return answer(8) + root_only(); }\n"
+        unused = "import helper;\ni32 untouched() { return 0; }\n"
+        for name, text in (("consumer.ag", consumer), ("indirect.ag", indirect), ("unused.ag", unused)):
+            (sub / name).write_text(text)
+        session = Session(self.binary, self.root)
+        self.addCleanup(session.close)
+        capabilities = session.result("initialize", {"rootUri": self.root.as_uri(), "capabilities": {
+            "textDocument": {"diagnostic": {}, "semanticTokens": semantic_capability()}}})["capabilities"]
+        session.send("initialized", {})
+        near_uri = (sub / "helper.ag").as_uri()
+        overlay = "/// Near answer.\ni32 answer = 9;\n"
+        previous_reports = {}
+        previous_tokens = {}
+        for stage, module_uri, module, kind, marker in (
+                ("disk", (self.root / "helper.ag").as_uri(), root_module, "function", "Root answer."),
+                ("open", near_uri, overlay, "variable", "Near answer."),
+                ("close", (self.root / "helper.ag").as_uri(), root_module, "function", "Root answer.")):
+            if stage == "open":
+                session.send("textDocument/didOpen", {"textDocument": {
+                    "uri": near_uri, "languageId": "silver", "version": 1, "text": overlay}})
+            elif stage == "close":
+                session.send("textDocument/didClose", {"textDocument": {"uri": near_uri}})
+            for name, text in (("consumer.ag", consumer), ("indirect.ag", indirect)):
+                uri = (sub / name).as_uri()
+                document = {"textDocument": {"uri": uri}}
+                target = self.at(uri, text, "answer")
+                with self.subTest(stage=stage, name=name, operation="definition"):
+                    self.assertEqual(session.result("textDocument/definition", target), {
+                        "uri": module_uri, "range": location(module, "answer", module.index("i32 answer"))})
+                with self.subTest(stage=stage, name=name, operation="hover"):
+                    self.assertIn(marker, session.result("textDocument/hover", target)["contents"]["value"])
+                tokens = session.result("textDocument/semanticTokens/full", document)
+                with self.subTest(stage=stage, name=name, operation="semantic"):
+                    decoded = decode_tokens(tokens["data"], capabilities["semanticTokensProvider"]["legend"])
+                    at = location(text, "answer")["start"]
+                    self.assertIn((at["line"], at["character"], len("answer"), kind, ()), decoded)
+                if uri in previous_tokens:
+                    previous = previous_tokens[uri]
+                    delta = session.result("textDocument/semanticTokens/full/delta", {
+                        **document, "previousResultId": previous["resultId"]})
+                    reconstructed = previous["data"][:]
+                    for edit in reversed(delta["edits"]):
+                        reconstructed[edit["start"]:edit["start"] + edit["deleteCount"]] = edit.get("data", [])
+                    with self.subTest(stage=stage, name=name, operation="semantic-delta"):
+                        self.assertEqual(reconstructed, tokens["data"])
+                previous_tokens[uri] = tokens
+                previous_id = previous_reports.get(uri)
+                report = session.result("textDocument/diagnostic", {
+                    **document, **({"previousResultId": previous_id} if previous_id else {})})
+                with self.subTest(stage=stage, name=name, operation="diagnostic-cache"):
+                    self.assertEqual(report["kind"], "full")
+                    self.assertNotEqual(report["resultId"], previous_id)
+                complete = session.result("textDocument/diagnostic", document)
+                with self.subTest(stage=stage, name=name, operation="diagnostics"):
+                    errors = [item for item in complete["items"] if item["severity"] == 1]
+                    if stage == "open":
+                        self.assertTrue(any(item["range"] == location(text, "root_only")
+                                            and "root_only" in item["message"] for item in errors), errors)
+                    else:
+                        self.assertEqual(errors, [])
+                previous_reports[uri] = report["resultId"]
+            unused_uri = (sub / "unused.ag").as_uri()
+            with self.subTest(stage=stage, operation="unused-import-link"):
+                links = session.result("textDocument/documentLink", {"textDocument": {"uri": unused_uri}})
+                self.assertEqual([(link["range"], link["target"]) for link in links],
+                                 [(location(unused, "helper"), module_uri)])
+            with self.subTest(stage=stage, operation="unused-import-completion"):
+                completion = session.result("textDocument/completion", {
+                    "textDocument": {"uri": unused_uri}, "position": position(unused, unused.index("0"))})
+                self.assertEqual("root_only" in {item["label"] for item in completion["items"]}, stage != "open")
 
     def test_call_hierarchy_groups_call_sites_and_rejects_stale_items(self):
         text = ("import helper { answer as compute };\n"
@@ -1571,6 +1795,95 @@ class NativeLsp(unittest.TestCase):
             self.assertFalse(any(message.get("method") == "$/progress" for message in session.notifications))
         finally:
             session.close()
+
+    def test_active_progress_cancellation_behind_saturated_edit_pipeline(self):
+        self.check_saturated_analysis(cancel=True)
+
+    def test_active_progress_interruption_behind_saturated_edits_without_cancel(self):
+        self.check_saturated_analysis(cancel=False)
+
+    def test_active_progress_cancellation_behind_saturated_request_pipeline(self):
+        self.check_saturated_analysis(cancel=True, request_prefix=True)
+
+    def check_saturated_analysis(self, *, cancel, request_prefix=False):
+        # A full input queue interrupts analysis so the client can retry. A tail
+        # cancel need not be read before that response; pressure is not a cancel.
+        for index in range(96):
+            (self.root / f"saturation{index}.ag").write_text("\n".join(
+                f"i32 symbol{index}_{item}() {{ return {item}; }}" for item in range(256)))
+        session = Session(self.binary, self.root)
+        self.addCleanup(session.close)
+        session.result("initialize", {"rootUri": self.root.as_uri(), "capabilities": {}})
+        session.send("initialized", {})
+        uri = (self.root / "pipeline.ag").as_uri()
+        text = "i32 pipeline() { return 0; }\n"
+        document = {"textDocument": {"uri": uri}}
+        session.send("textDocument/didOpen", {"textDocument": {
+            "uri": uri, "languageId": "silver", "version": 1, "text": text}})
+        session.result("textDocument/documentSymbol", document)
+        session.notifications.clear()
+        token = "saturated-index"
+        request_id = "active-index"
+        session.send("workspace/symbol", {"query": "absent", "workDoneToken": token}, request_id)
+        started = session.messages.get(timeout=30)
+        self.assertEqual(started.get("method"), "$/progress")
+        self.assertEqual(started["params"]["token"], token)
+        self.assertEqual(started["params"]["value"]["kind"], "begin")
+        self.assertTrue(started["params"]["value"]["cancellable"])
+        queued = []
+        prefix_ids = []
+        expected_name = "pipeline"
+        if request_prefix:
+            for index in range(48):
+                prefix_id = f"queued-unknown-{index}"
+                prefix_ids.append(prefix_id)
+                queued.append({"jsonrpc": "2.0", "id": prefix_id, "method": "silver/unknown", "params": {}})
+        else:
+            for index in range(40):
+                at = len("i32 ") + len(expected_name)
+                suffix = f"_{index}"
+                queued.append({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+                    "textDocument": {"uri": uri, "version": index + 2}, "contentChanges": [{
+                        "range": {"start": position(text, at), "end": position(text, at)}, "text": suffix}]}})
+                text = text[:at] + suffix + text[at:]
+                expected_name += suffix
+        if cancel:
+            queued.append({"jsonrpc": "2.0", "method": "$/cancelRequest", "params": {"id": request_id}})
+        frames = []
+        for message in queued:
+            body = json.dumps(message).encode()
+            frames.append(f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+        session.process.stdin.write(b"".join(frames))
+        session.process.stdin.flush()
+        response = session.wait_response(request_id)
+        error = response.get("error", {})
+        with self.subTest(operation="active-analysis-terminal-response"):
+            self.assertNotIn("result", response)
+            self.assertIn(error.get("code"), (-32800, -32803) if cancel else (-32803,), response)
+            if error.get("code") == -32803:
+                self.assertEqual(error.get("message"),
+                                 "Analysis interrupted because the input queue is full; retry the request")
+        with self.subTest(operation="progress-end"):
+            progress = [message["params"] for message in session.notifications if message.get("method") == "$/progress"]
+            self.assertEqual([(item["token"], item["value"]["kind"]) for item in progress], [(token, "end")])
+            self.assertEqual(progress[0]["value"].get("message"),
+                             "Cancelled" if error.get("code") == -32800 else "Interrupted")
+        with self.subTest(operation="ordered-edits"):
+            session.send("textDocument/documentSymbol", document, request_id)
+            self.assertEqual([item["name"] for item in session.wait_response(request_id)["result"]], [expected_name])
+        with self.subTest(operation="queued-responses-exactly-once"):
+            responses = [message for message in session.notifications if "id" in message]
+            self.assertEqual([message["id"] for message in responses], prefix_ids)
+            for message in responses:
+                self.assertNotIn("result", message)
+                self.assertEqual(message.get("error", {}).get("code"), -32601, message)
+        session.notifications.clear()
+        session.send("workspace/symbol", {"query": "absent", "workDoneToken": token}, request_id)
+        self.assertEqual(session.wait_response(request_id).get("result"), [])
+        progress = [message["params"] for message in session.notifications if message.get("method") == "$/progress"]
+        self.assertEqual([(item["token"], item["value"]["kind"]) for item in progress], [(token, "begin"), (token, "end")])
+        self.assertNotIn(progress[-1]["value"].get("message"), ("Cancelled", "Interrupted"))
+        self.assertFalse(any("id" in message for message in session.notifications), session.notifications)
 
     def test_pull_diagnostics_cache_dependency_changes_and_refresh_acknowledgements(self):
         session = Session(self.binary, self.root)

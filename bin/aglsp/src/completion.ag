@@ -73,12 +73,7 @@ String receiver_owner(Document* doc, i64 separator) {
     i64 i = separator;
     while (i > 0 && (doc.text.data[i - 1] == (u8)' ' || doc.text.data[i - 1] == (u8)'\t')) { i -= 1; }
     if (i == 0) { return String.new(); }
-    SymbolTarget target = resolve_occurrence(doc, doc.analysis.occurrence_at(i - 1));
-    if (target.symbol < 0) { return String.new(); }
-    IdeSymbol* symbol = target.document.analysis.symbols.get_ptr(target.symbol);
-    if (symbol.kind == IdeSymbolKind.Struct || symbol.kind == IdeSymbolKind.Enum
-        || symbol.kind == IdeSymbolKind.Trait) { return symbol.name.clone(); }
-    return ide_owner_name(symbol.type_name.to_str());
+    return symbol_receiver_owner(resolve_occurrence(doc, doc.analysis.occurrence_at(i - 1)));
 }
 
 void completion_symbols(Document* source, Document* active, i64 offset, Span replacement,
