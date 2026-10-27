@@ -208,6 +208,7 @@ void append_auto_imports(DocumentStore* store, Document* doc, Span replacement, 
     while (d < store.docs.len() && !request_interrupted(pending)) {
         Document* candidate = store.docs.get(d);
         if (candidate != doc && candidate.path.ends_with(".ag") && candidate.analysis.diagnostics.is_empty()) {
+            String module = String.new(); bool module_checked = false;
             i64 i = 0;
             while (i < candidate.analysis.symbols.len() && !request_interrupted(pending)) {
                 IdeSymbol* symbol = candidate.analysis.symbols.get_ptr(i);
@@ -219,13 +220,15 @@ void append_auto_imports(DocumentStore* store, Document* doc, Span replacement, 
                     unique.document = candidate; unique.symbol = -1;
                     find_imported_symbol(candidate, name, "", &visited, &unique);
                     if (unique.symbol == i && unique.document == candidate) {
-                        String module = import_module_name(store, doc, candidate);
-                        if (module.len() > 0 && !import_conflicts(doc, candidate, pending)) {
-                            SymbolTarget target; target.document = candidate; target.symbol = i;
-                            IdeSymbol* resolved = target.document.analysis.symbols.get_ptr(target.symbol);
-                            append_completion(out, doc, replacement, name, resolved.signature.to_str(), resolved.documentation.to_str(),
-                                completion_kind(resolved.kind), false, score, client, target, false, first, module.to_str(), true);
+                        // Module resolution and conflicts are shared by all exports in this request.
+                        if (!module_checked) {
+                            module = import_module_name(store, doc, candidate); module_checked = true;
+                            if (module.len() == 0 || import_conflicts(doc, candidate, pending)) { break; }
                         }
+                        SymbolTarget target; target.document = candidate; target.symbol = i;
+                        IdeSymbol* resolved = target.document.analysis.symbols.get_ptr(target.symbol);
+                        append_completion(out, doc, replacement, name, resolved.signature.to_str(), resolved.documentation.to_str(),
+                            completion_kind(resolved.kind), false, score, client, target, false, first, module.to_str(), true);
                     }
                 }
                 i += 1;

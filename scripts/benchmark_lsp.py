@@ -2,12 +2,13 @@
 """Measure native LSP editor latency against a real workspace, in milliseconds."""
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import statistics
 import time
 
-from check_lsp import Session, semantic_capability
+from check_lsp import Session, position, semantic_capability
 
 
 def summarize(samples):
@@ -17,10 +18,13 @@ def summarize(samples):
             "samples_ms": samples}
 
 
-def benchmark(binary, root, runs, semantic_document):
+def benchmark(binary, root, runs, semantic_document, completion_prefix=None):
     samples = {"first_hover": [], "workspace_index_and_search": [], "cached_workspace_search": [], "edited_hover": []}
     if semantic_document:
         samples["semantic_tokens"] = []
+    completion_results = []
+    if completion_prefix:
+        samples["completion"] = []
     text = "i32 main() { i32 value = 7; return value; }\n"
     uri = (root / "__aglsp_benchmark_overlay.ag").as_uri()
     params = {"textDocument": {"uri": uri}, "position": {"line": 0, "character": 35}}
@@ -61,9 +65,32 @@ def benchmark(binary, root, runs, semantic_document):
                 if len(tokens["data"]) <= 1000 or len(tokens["data"]) % 5 != 0:
                     raise RuntimeError("Semantic response did not contain the expected token tuples")
                 samples["semantic_tokens"].append((time.perf_counter() - start) * 1000)
+            if completion_prefix:
+                completion_text = "i32 main() { " + completion_prefix + "; }\n"
+                completion_uri = (root / "__aglsp_completion_overlay.ag").as_uri()
+                session.send("textDocument/didOpen", {"textDocument": {
+                    "uri": completion_uri, "languageId": "silver", "version": 1, "text": completion_text}})
+                # Finish snapshot analysis before timing the completion request itself.
+                session.result("textDocument/documentSymbol", {"textDocument": {"uri": completion_uri}})
+                start = time.perf_counter()
+                result = session.result("textDocument/completion", {
+                    "textDocument": {"uri": completion_uri},
+                    "position": position(completion_text, len("i32 main() { ") + len(completion_prefix))})
+                samples["completion"].append((time.perf_counter() - start) * 1000)
+                items = result["items"]
+                auto_imports = sum("module" in item.get("data", {}) for item in items)
+                providers = {item["data"]["module"] for item in items if "module" in item.get("data", {})}
+                if not auto_imports:
+                    raise RuntimeError("Completion did not offer any source auto-imports")
+                canonical = json.dumps(sorted(items, key=lambda item: json.dumps(item, sort_keys=True)), sort_keys=True)
+                completion_results.append({"items": len(items), "auto_imports": auto_imports, "providers": len(providers),
+                                           "sha256": hashlib.sha256(canonical.encode()).hexdigest()})
         finally:
             session.close()
-    return {name: summarize(values) for name, values in samples.items()}
+    results = {name: summarize(values) for name, values in samples.items()}
+    if completion_results:
+        results["completion"]["responses"] = completion_results
+    return results
 
 
 if __name__ == "__main__":
@@ -72,9 +99,12 @@ if __name__ == "__main__":
     parser.add_argument("--workspace", type=Path, required=True, help="Silver source workspace containing IdeIndex")
     parser.add_argument("--runs", type=int, default=10)
     parser.add_argument("--semantic-document", type=Path, help="Also measure tokens for a source file relative to the workspace")
+    parser.add_argument("--completion-prefix", help="Also measure warmed completion for an unimported source declaration")
     args = parser.parse_args()
     if args.runs < 10:
         parser.error("at least 10 runs are required")
     print(json.dumps({"server": str(args.server.resolve()), "workspace": str(args.workspace.resolve()),
                       "runs": args.runs, "semantic_document": str(args.semantic_document) if args.semantic_document else None,
-                      "results": benchmark(args.server.resolve(), args.workspace.resolve(), args.runs, args.semantic_document)}, indent=2))
+                      "completion_prefix": args.completion_prefix,
+                      "results": benchmark(args.server.resolve(), args.workspace.resolve(), args.runs,
+                                           args.semantic_document, args.completion_prefix)}, indent=2))

@@ -262,9 +262,34 @@ and p95 from 5406.561 ms to 16.422 ms. This measured a fresh token computation;
 subsequent full requests use cached data, and deltas retain one previous result.
 An unknown or older result ID falls back to a complete token response.
 
+A 2026-10-27 comparison used native-compiled `-O2` servers against a frozen
+`772367e` workspace containing 338 `.ag` files and 109,565 lines. Each prefix
+used ten fresh processes per build, alternating build order, with warm filesystem
+caches and one server running at a time. Completion was timed after workspace
+indexing and document analysis. Reusing module resolution and conflict checks
+for each provider within a request reduced repeated import planning.
+
+| Completion prefix | Items | Previous median / p95 | Optimized median / p95 |
+| --- | ---: | ---: | ---: |
+| `sys_` | 480 | 22.922 / 24.664 ms | 8.583 / 11.025 ms |
+| `read` | 192 | 20.295 / 20.947 ms | 10.766 / 11.469 ms |
+| `Str` | 490 | 46.305 / 52.108 ms | 18.653 / 20.942 ms |
+
+Canonical completion-item fingerprints matched across all 60 responses. The
+benchmark records item counts, provider counts, and fingerprints with the latency
+samples. Temporary instrumentation found 482 module resolutions for the
+480 `sys_` choices from 22 providers before this change. Reuse lasts only for
+the current request; later edits and resolver changes are checked again.
+
+Other operations showed mixed small timing changes. Across the 30 runs per
+build, cached workspace-search medians were 1.650 / 1.832 ms and edited-hover
+medians were 0.378 / 0.417 ms before / after. These results establish a completion
+improvement, not an overall server speedup.
+
 ```sh
 python3 scripts/benchmark_lsp.py --server /tmp/aglsp-native --workspace . --runs 10
 python3 scripts/benchmark_lsp.py --server /tmp/aglsp-native --workspace . --runs 10 --semantic-document libs/agc/src/frontend/typecheck_expr.ag
+python3 scripts/benchmark_lsp.py --server /tmp/aglsp-native --workspace . --runs 10 --completion-prefix sys_
 ```
 
 ## Remaining parity gaps
