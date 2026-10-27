@@ -187,10 +187,24 @@ bool rename_conflicts(DocumentStore* store, Document* context, SymbolTarget targ
             }
             j += 1;
         }
-        // A local at a use site could capture a newly renamed imported item.
         j = 0;
         while (j < doc.analysis.occurrences.len()) {
             IdeOccurrence* occurrence = doc.analysis.occurrences.get_ptr(j);
+            if (!occurrence.member && strcmp(occurrence.node.text, name) == 0) {
+                i64 p = 0;
+                while (p < plan.len()) {
+                    SymbolTarget renamed = plan.get(p);
+                    IdeSymbol* declaration = renamed.document.analysis.symbols.get_ptr(renamed.symbol);
+                    if (declaration.local && doc == renamed.document
+                        && declaration.selection.start <= occurrence.node.span.start
+                        && declaration.scope.start <= occurrence.node.span.start
+                        && occurrence.node.span.start < declaration.scope.end) {
+                        SymbolTarget existing = rename_target(resolve_occurrence(doc, j));
+                        if (existing.symbol != -1 && !same_target(existing, renamed)) { return true; }
+                    }
+                    p += 1;
+                }
+            }
             if (strcmp(occurrence.node.text, selected.name.to_str()) != 0) { j += 1; continue; }
             SymbolTarget resolved = rename_target(resolve_occurrence(doc, j));
             if (resolved.symbol == -2) {

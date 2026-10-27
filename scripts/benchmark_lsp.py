@@ -33,24 +33,33 @@ def benchmark(binary, root, runs, semantic_document):
             session.send("initialized", {})
             session.send("textDocument/didOpen", {"textDocument": {
                 "uri": uri, "languageId": "silver", "version": 1, "text": text}})
-            assert "i32 value" in session.result("textDocument/hover", params)["contents"]["value"]
+            hover = session.result("textDocument/hover", params)
+            if "i32 value" not in hover["contents"]["value"]:
+                raise RuntimeError("Initial hover did not resolve the local value")
             samples["first_hover"].append((time.perf_counter() - start) * 1000)
             start = time.perf_counter()
-            assert session.result("workspace/symbol", {"query": "IdeIndex"})
+            symbols = session.result("workspace/symbol", {"query": "IdeIndex"})
+            if not symbols:
+                raise RuntimeError("Workspace search did not find IdeIndex")
             samples["workspace_index_and_search"].append((time.perf_counter() - start) * 1000)
             start = time.perf_counter()
-            assert session.result("workspace/symbol", {"query": "IdeIndex"})
+            symbols = session.result("workspace/symbol", {"query": "IdeIndex"})
+            if not symbols:
+                raise RuntimeError("Cached workspace search did not find IdeIndex")
             samples["cached_workspace_search"].append((time.perf_counter() - start) * 1000)
             start = time.perf_counter()
             session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
                          "contentChanges": [{"text": text.replace("7", "8")}]})
-            assert "i32 value" in session.result("textDocument/hover", params)["contents"]["value"]
+            hover = session.result("textDocument/hover", params)
+            if "i32 value" not in hover["contents"]["value"]:
+                raise RuntimeError("Edited hover did not resolve the local value")
             samples["edited_hover"].append((time.perf_counter() - start) * 1000)
             if semantic_document:
                 start = time.perf_counter()
                 tokens = session.result("textDocument/semanticTokens/full", {
                     "textDocument": {"uri": (root / semantic_document).as_uri()}})
-                assert len(tokens["data"]) > 1000 and len(tokens["data"]) % 5 == 0
+                if len(tokens["data"]) <= 1000 or len(tokens["data"]) % 5 != 0:
+                    raise RuntimeError("Semantic response did not contain the expected token tuples")
                 samples["semantic_tokens"].append((time.perf_counter() - start) * 1000)
         finally:
             session.close()

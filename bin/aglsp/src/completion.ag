@@ -3,6 +3,8 @@ import positions;
 import json_rpc;
 import capabilities;
 import tooling.search;
+import frontend.ast;
+import frontend.lower_expr;
 
 i64 completion_kind(IdeSymbolKind kind) {
     return match kind {
@@ -183,6 +185,27 @@ Result<String, CompletionResolveError> compute_completion_resolve(DocumentStore*
     return Result<String, CompletionResolveError>.ok(move out);
 }
 
+// The frontend helper validates the generic suffix against this document's CST snapshot.
+i64 generic_call_close_token(Document* doc, i64 less_token) {
+    if (less_token < 0 || less_token >= doc.analysis.tokens.len()) { return -1; }
+    Token* less = doc.analysis.tokens.get(less_token);
+    if (less.kind != TokenKind.Less) { return -1; }
+    i64 previous = less_token - 1;
+    while (previous >= 0 && doc.analysis.tokens.get(previous).kind == TokenKind.Comment) { previous -= 1; }
+    if (previous < 0 || doc.analysis.tokens.get(previous).kind != TokenKind.Identifier) { return -1; }
+    i64 occurrence = doc.analysis.occurrence_at(doc.analysis.tokens.get(previous).span.start);
+    if (occurrence < 0) { return -1; }
+    SyntaxNode* less_node = doc.analysis.occurrences.get_ptr(occurrence).node.next_sibling;
+    if (less_node == (SyntaxNode*)0 || less_node.span.start != less.span.start) { return -1; }
+    SyntaxNode* close = lower_find_generic_call_close(less_node);
+    if (close == (SyntaxNode*)0) { return -1; }
+    i64 i = ide_token_at_or_after(&doc.analysis, close.span.start);
+    if (i >= doc.analysis.tokens.len()) { return -1; }
+    Token* token = doc.analysis.tokens.get(i);
+    return token.span.start == close.span.start && token.span.end == close.span.end
+        && token.kind == close.token_kind ? i : -1;
+}
+
 // Delimiter matching uses tokens, so strings and comments cannot affect the call stack.
 i64 call_occurrence(Document* doc, i64 open) {
     i64 previous = open - 1;
@@ -190,7 +213,7 @@ i64 call_occurrence(Document* doc, i64 open) {
     if (previous < 0) { return -1; }
     TokenKind kind = doc.analysis.tokens.get(previous).kind;
     if (kind == TokenKind.Greater || kind == TokenKind.RightShift) {
-        i64 depth = kind == TokenKind.RightShift ? 2 : 1;
+        i64 close = previous; i64 depth = kind == TokenKind.RightShift ? 2 : 1;
         previous -= 1;
         while (previous >= 0 && depth > 0) {
             TokenKind token = doc.analysis.tokens.get(previous).kind;
@@ -199,6 +222,7 @@ i64 call_occurrence(Document* doc, i64 open) {
             else if (token == TokenKind.Less) { depth -= 1; }
             previous -= 1;
         }
+        if (depth != 0 || generic_call_close_token(doc, previous + 1) != close) { return -1; }
     }
     while (previous >= 0 && doc.analysis.tokens.get(previous).kind == TokenKind.Comment) { previous -= 1; }
     if (previous < 0 || doc.analysis.tokens.get(previous).kind != TokenKind.Identifier) { return -1; }
@@ -210,6 +234,13 @@ i64 active_call(Document* doc, i64 offset) {
     while (i < doc.analysis.tokens.len()) {
         Token* token = doc.analysis.tokens.get(i);
         if (token.span.start >= offset) { break; }
+        if (token.kind == TokenKind.Less) {
+            i64 close = generic_call_close_token(doc, i);
+            if (close >= 0) {
+                if (doc.analysis.tokens.get(close).span.start >= offset) { break; }
+                i = close + 1; continue;
+            }
+        }
         if (is_open(token)) { stack.push(i); }
         else if (is_close(token) && stack.len() > 0) { stack.pop(); }
         i += 1;
@@ -283,6 +314,13 @@ String compute_signature_help(Document* doc, i64 offset, ClientOptions* client) 
     while (i < doc.analysis.tokens.len()) {
         Token* token = doc.analysis.tokens.get(i);
         if (token.span.start >= offset) { break; }
+        if (token.kind == TokenKind.Less) {
+            i64 close = generic_call_close_token(doc, i);
+            if (close >= 0) {
+                if (doc.analysis.tokens.get(close).span.start >= offset) { break; }
+                i = close + 1; continue;
+            }
+        }
         if (is_open(token)) { depth += 1; }
         else if (is_close(token)) { depth -= 1; }
         else if (token.kind == TokenKind.Comma && depth == 0) { active += 1; }

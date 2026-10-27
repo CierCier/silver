@@ -72,11 +72,12 @@ The native server provides these features:
   deferred detail/documentation receive them through `completionItem/resolve`.
   Resolve preserves insertion edits and rejects stale symbol revisions.
 - Signature help for nested calls and generic function calls, including comments
-  between the callee and its argument list. Instance methods
+  between the callee and its argument list. Commas in nested generic type arguments
+  do not advance the active function parameter. Instance methods
   omit the implicit receiver from the parameter list. Clients advertising
   `parameterInformation.labelOffsetSupport` receive UTF-16 parameter ranges
   within the displayed signature for precise active-parameter highlighting.
-  Other clients receive parameter strings.
+  Other clients receive parameter strings taken from the displayed signature.
 - Document symbols with name selections and declaration ranges, workspace symbol
   search, semantic tokens with full/delta/range requests, folding ranges, and selection ranges.
   Hierarchical outlines nest trait declarations' methods once under their trait;
@@ -89,7 +90,8 @@ The native server provides these features:
 - Inferred local type hints and parameter name hints, restricted to the requested
   range. Parameter hints omit arguments that already name the parameter, including
   parenthesized, borrowed, and explicitly moved names. Expressions such as
-  `value + 1` retain their hints. Mismatched argument delimiters stop hint scanning
+  `value + 1` retain their hints. Generic type arguments do not advance parameter
+  hints. Mismatched argument delimiters stop hint scanning
   so labels do not spill into later code. Direct lambda initializers currently have no
   inferred-type hints.
 - Versioned diagnostics from the native frontend's name, declared-type, borrow,
@@ -149,6 +151,8 @@ Rename identifies declarations by document and symbol ID rather than spelling.
 Import aliases have independent rename identities. Ambiguous imported names and
 free-function overloads do not resolve to an arbitrary declaration. Rename rejects
 non-ASCII identifiers, keywords, primitive types, and detected binding conflicts.
+Local renames also reject names that would capture existing imported references
+within the local's visible scope.
 Module paths are excluded from symbol references and rename edits. Dot-qualified
 members resolve through visible type declarations and aliases in their defining
 documents, using the same receiver lookup as completion. Chained receivers follow

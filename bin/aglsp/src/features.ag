@@ -263,6 +263,10 @@ String compute_inlay_hints(Document* doc, i64 start, i64 end) {
                 i64 j = i + 1; Vec<i64> opens = Vec<i64>.new(); i64 argument = -1;
                 while (j < doc.analysis.tokens.len()) {
                     Token* token = doc.analysis.tokens.get(j);
+                    if (token.kind == TokenKind.Less) {
+                        i64 close = generic_call_close_token(doc, j);
+                        if (close >= 0) { j = close + 1; continue; }
+                    }
                     bool boundary = opens.len() == 0 && (token.kind == TokenKind.RightParen || token.kind == TokenKind.Comma);
                     if (boundary || token.kind == TokenKind.Eof) {
                         if (argument >= 0 && parameter < symbol.parameter_names.len()) {

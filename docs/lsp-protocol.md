@@ -43,7 +43,7 @@ providers return eager results instead.
 | `textDocument/linkedEditingRange` | C → S | Open | No linked-range provider. |
 | `textDocument/completion` | C → S | Supported | Visible declarations, locals, fields/methods, keywords and primitives; fuzzy ranking and whole-identifier edits. Snippets require client support. Expected-type ranking, auto-import and postfix assists remain open. [Source][completion], [checks][checks]. |
 | `completionItem/resolve` | C → S | Supported | Deferred detail/docs when requested by client capabilities; preserves insertion edits and rejects stale revisions. [Source][completion], [checks][checks]. |
-| `textDocument/signatureHelp` | C → S | Supported | Nested/generic calls and instance receiver omission. Negotiated UTF-16 parameter label offsets support precise highlighting; other clients receive strings. Generic expressions in arguments and overload/generic substitution remain limited. [Source][completion], [checks][checks]. |
+| `textDocument/signatureHelp` | C → S | Supported | Nested/generic calls, generic-aware argument boundaries and instance receiver omission. Negotiated UTF-16 parameter label offsets support precise highlighting; other clients receive strings from the displayed signature. Overload resolution and generic substitution remain limited. [Source][completion], [checks][checks]. |
 | `textDocument/inlineCompletion` | C → S | Open | No inline-completion provider. Added to the stable inventory in 3.18. |
 | `textDocument/documentSymbol` | C → S | Supported | Declaration ranges and name selections; nested symbols or flat fallback according to client capability. [Source][symbols], [checks][checks]. |
 | `workspace/symbol` | C → S | Supported | Eager locations, ranked fuzzy search of active workspace/open files and reachable imports. [Source][symbols], [checks][checks]. |
@@ -158,6 +158,8 @@ include:
   `test_workspace_folder_batches_are_atomic_and_preserve_sysroot_imports`,
   `test_watched_files_refresh_closed_imports`.
 - Navigation/rename: `test_scope_aware_navigation_and_rename`,
+  `test_rename_rejects_capture_of_imported_function_and_preserves_safe_uses`,
+  `test_rename_to_imported_allows_predeclaration_and_outside_block_uses`,
   `test_function_rename_and_references_exclude_import_module_paths`,
   `test_grouped_import_alias_rename_preserves_dotted_module_path`,
   `test_type_qualified_enum_dot_calls_navigate_and_rename`,
@@ -170,6 +172,7 @@ include:
   and the match/lambda scope scenarios.
 - Completion/structure: `test_completion_signature_and_structural_features`,
   `test_signature_parameter_labels_negotiate_exact_utf16_offsets`,
+  `test_generic_commas_comments_and_operators_do_not_shift_call_arguments`,
   `test_call_hints_ignore_comments_between_callee_and_arguments`,
   `test_trait_document_symbols_nest_trait_method_without_duplicating_impl`,
   `test_parameter_hints_distinguish_names_from_expressions`,

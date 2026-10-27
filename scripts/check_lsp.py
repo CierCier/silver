@@ -666,9 +666,9 @@ class NativeLsp(unittest.TestCase):
                                 self.assertIn('😀', label)
                                 self.assertNotEqual(labels[1][0], label.index('i32 tail'))
                         else:
-                            strings = {'unbox': ['Box<i32> value', 'i32 fallback'],
-                                       'apply': ['i32(i32, i32) operation', 'i32 value']}
-                            self.assertEqual(labels, strings.get(name, expected))
+                            for parameter_label in labels:
+                                self.assertIn(parameter_label, label)
+                            self.assertEqual(labels, expected)
 
 
     def test_call_hints_ignore_comments_between_callee_and_arguments(self):
@@ -1064,6 +1064,89 @@ class NativeLsp(unittest.TestCase):
         uri = self.open(text)
         response = self.session.request("textDocument/rename", {**self.at(uri, text, "first", text.index("return")), "newName": "second"})
         self.assertEqual(response["error"]["code"], -32602)
+
+    def test_rename_rejects_capture_of_imported_function_and_preserves_safe_uses(self):
+        self.open("i32 imported(i32 value) { return value; }\n", "rename_capture_helper.ag")
+        text = ("import rename_capture_helper;\n"
+                "i32 before() { return imported(2); }\n"
+                "i32 main() { i32 first = 1; return first + imported(2); }\n"
+                "i32 after() { return imported(3); }\n")
+        uri = self.open(text, "rename-capture-main.ag")
+        first = self.at(uri, text, "first", text.index("return first"))
+        capture = self.session.request("textDocument/rename", {**first, "newName": "imported"})
+        self.assertIn("error", capture)
+        self.assertEqual(capture["error"]["code"], -32602)
+
+        renamed = self.session.result("textDocument/rename", {**first, "newName": "safe_local"})
+        expected = [
+            {"range": location(text, "first"), "newText": "safe_local"},
+            {"range": location(text, "first", text.index("return first")), "newText": "safe_local"},
+        ]
+        self.assertEqual(renamed, {"changes": {uri: expected}})
+        updated = apply_edits(text, renamed["changes"][uri])
+        self.assertEqual(updated, text.replace("first", "safe_local"))
+        self.assertEqual(updated.count("imported"), 3)
+
+    def test_rename_to_imported_allows_predeclaration_and_outside_block_uses(self):
+        self.open("i32 imported(i32 value) { return value; }\n", "rename_safe_helper.ag")
+        text = ("import rename_safe_helper;\n"
+                "i32 main() { i32 before = imported(1); { i32 first = 2; return first; } "
+                "return imported(3); }\n")
+        uri = self.open(text, "rename-capture-safe.ag")
+        first = self.at(uri, text, "first")
+        renamed = self.session.result("textDocument/rename", {**first, "newName": "imported"})
+        expected = [
+            {"range": location(text, "first"), "newText": "imported"},
+            {"range": location(text, "first", text.index("return first")),
+             "newText": "imported"},
+        ]
+        self.assertEqual(renamed, {"changes": {uri: expected}})
+        updated = apply_edits(text, renamed["changes"][uri])
+        self.assertEqual(updated, text.replace("first", "imported"))
+        self.assertEqual(updated.count("imported("), 2)
+
+    def test_generic_commas_comments_and_operators_do_not_shift_call_arguments(self):
+        text = ("struct Pair<A, B> { A first; B second; }\n"
+                "Pair<A, B> make<A, B>() { Pair<A, B> value; return value; }\n"
+                "i32 consume(i32 first, i32 other) { return first + other; }\n"
+                "i32 less(i32 left, i32 right) { return left < right ? left : right; }\n"
+                "i32 shift(i32 value, i32 bits) { return value >> bits; }\n"
+                "i32 main() {\n"
+                " consume(make<Pair<i32, Pair<i32, i32>>, i32>() /* nested */ , 9);\n"
+                " consume(make<void(i32, i32), [i32, i32]>() /* function and tuple types */, 9);\n"
+                " consume(make<i32, i32>(), 9);\n"
+                " consume(1 < 2 ? 3 : 4, 9);\n"
+                " consume(8 >> 1, 9);\n"
+                " return 0;\n}\n")
+        uri = self.open(text, "generic-call-arguments.ag")
+        document = {"textDocument": {"uri": uri}}
+        hints = self.session.result("textDocument/inlayHint", {**document, "range": {
+            "start": position(text, 0), "end": position(text, len(text))}})
+        arguments = ("make<Pair<i32, Pair<i32, i32>>, i32>()",
+                     "make<void(i32, i32), [i32, i32]>()",
+                     "make<i32, i32>()", "1 < 2 ? 3 : 4", "8 >> 1")
+        for argument in arguments:
+            start = text.index(argument)
+            probes = [(start + len(argument), 0), (text.index("9);", start), 1)]
+            if argument.startswith("make<"):
+                probes.append((text.index(",", start) + 1, 0))
+            for offset, active in probes:
+                with self.subTest(argument=argument, signature_position=position(text, offset)):
+                    signature = self.session.result("textDocument/signatureHelp", {
+                        **document, "position": position(text, offset)})
+                    self.assertEqual(signature["activeParameter"], active)
+                    self.assertEqual(signature["signatures"][0]["label"],
+                                     "i32 consume(i32 first, i32 other)")
+
+        expected = []
+        for marker in arguments:
+            start = text.index(marker)
+            expected.append({"position": position(text, start), "kind": 2,
+                             "paddingRight": True, "label": "first:"})
+        for at in [match for match in range(len(text)) if text.startswith("9);", match)]:
+            expected.append({"position": position(text, at), "kind": 2,
+                             "paddingRight": True, "label": "other:"})
+        self.assertCountEqual(hints, expected)
 
     def test_watched_files_refresh_closed_imports(self):
         text = "import helper;\ni32 main() { return answer(42); }\n"

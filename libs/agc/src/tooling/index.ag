@@ -449,9 +449,7 @@ void ide_function(IdeIndex* index, SyntaxNode* start, SyntaxNode* name,
     while (p < bindings.len()) {
         Binding* binding = bindings.get_ptr(p);
         if (p == 0 && strcmp(binding.name, "self") == 0) { symbol.instance = true; }
-        String label = ide_render(binding.type_start, binding.type_end);
-        if (label.len() > 0) { label.push(' '); }
-        label.push_str(binding.name);
+        String label = ide_render(binding.type_start, binding.name_node.next_sibling);
         symbol.parameters.push(move label);
         symbol.parameter_names.push(String.from_str(binding.name));
         p += 1;
