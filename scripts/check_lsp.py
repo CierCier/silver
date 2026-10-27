@@ -870,6 +870,499 @@ class NativeLsp(unittest.TestCase):
         self.assertEqual(self.session.result("textDocument/selectionRange", {**params, "positions": []}), [])
         self.assertEqual(self.session.result("textDocument/selectionRange", {**params, "positions": [valid]}), selections[:1])
 
+    def test_import_path_completion_uses_module_paths_and_replaces_the_full_segment(self):
+        (self.root / "nested").mkdir()
+        (self.root / "nested" / "model.ag").write_text("i32 nested_value() { return 1; }\n")
+        repo = Path(__file__).resolve().parent.parent
+        env = os.environ.copy()
+        env["SILVER_SYSROOT"] = str(repo)
+        session = Session(self.binary, self.root, env=env)
+        self.addCleanup(session.close)
+        session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {}})
+        session.send("initialized", {})
+
+        text = "// 😀 header\r\nimport helSuffix;\r\n"
+        uri = (self.root / "paths.ag").as_uri()
+        session.send("textDocument/didOpen", {"textDocument": {
+            "uri": uri, "languageId": "silver", "version": 1, "text": text}})
+        items = session.result("textDocument/completion", {"textDocument": {"uri": uri},
+            "position": position(text, text.index("helSuffix") + 3)})["items"]
+        self.assertIn("helper", {item["label"] for item in items}, items)
+        helper = next(item for item in items if item["label"] == "helper")
+        self.assertEqual(helper["textEdit"], {"range": location(text, "helSuffix"), "newText": "helper"})
+        self.assertTrue(all(item["kind"] == 9 for item in items))
+        self.assertNotIn("answer", {item["label"] for item in items})
+
+        nested = "import nested.mo;\n"
+        nested_uri = (self.root / "nested-path.ag").as_uri()
+        session.send("textDocument/didOpen", {"textDocument": {
+            "uri": nested_uri, "languageId": "silver", "version": 1, "text": nested}})
+        nested_items = session.result("textDocument/completion", {"textDocument": {"uri": nested_uri},
+            "position": position(nested, len(nested) - 2)})["items"]
+        self.assertIn("model", {item["label"] for item in nested_items}, nested_items)
+        model = next(item for item in nested_items if item["label"] == "model")
+        self.assertEqual(model["textEdit"]["newText"], "model")
+        self.assertEqual(model["textEdit"]["range"], location(nested, "mo"))
+        self.assertTrue(all(item["kind"] == 9 for item in nested_items))
+
+        stdlib = "import std.opt;\n"
+        stdlib_uri = (self.root / "stdlib-path.ag").as_uri()
+        session.send("textDocument/didOpen", {"textDocument": {
+            "uri": stdlib_uri, "languageId": "silver", "version": 1, "text": stdlib}})
+        std_items = session.result("textDocument/completion", {"textDocument": {"uri": stdlib_uri},
+            "position": position(stdlib, len(stdlib) - 2)})["items"]
+        self.assertIn("optional", {item["label"] for item in std_items}, std_items)
+        optional = next(item for item in std_items if item["label"] == "optional")
+        self.assertEqual(optional["textEdit"]["newText"], "optional")
+        self.assertEqual(optional["textEdit"]["range"], location(stdlib, "opt"))
+        self.assertTrue(all(item["kind"] == 9 for item in std_items))
+
+        for index, fragment in enumerate(("", "std.", "std.str")):
+            current = "import " + fragment
+            current_uri = (self.root / f"unfinished-path-{index}.ag").as_uri()
+            session.send("textDocument/didOpen", {"textDocument": {
+                "uri": current_uri, "languageId": "silver", "version": 1, "text": current}})
+            choices = session.result("textDocument/completion", {"textDocument": {"uri": current_uri},
+                "position": position(current, len(current))})["items"]
+            expected = "helper" if index == 0 else "string"
+            self.assertIn(expected, {item["label"] for item in choices}, choices)
+            self.assertTrue(all(item["kind"] == 9 for item in choices))
+
+        overlay_uri = (self.root / "nested" / "only_overlay.ag").as_uri()
+        session.send("textDocument/didOpen", {"textDocument": {
+            "uri": overlay_uri, "languageId": "silver", "version": 1,
+            "text": "i32 overlay_value() { return 1; }\n"}})
+        current = "import nested.only_;"
+        current_uri = (self.root / "overlay-path.ag").as_uri()
+        session.send("textDocument/didOpen", {"textDocument": {
+            "uri": current_uri, "languageId": "silver", "version": 1, "text": current}})
+        params = {"textDocument": {"uri": current_uri}, "position": position(current, current.index(";"))}
+        choices = session.result("textDocument/completion", params)["items"]
+        self.assertIn("only_overlay", {item["label"] for item in choices})
+        session.send("textDocument/didClose", {"textDocument": {"uri": overlay_uri}})
+        self.assertNotIn("only_overlay", {item["label"] for item in session.result("textDocument/completion", params)["items"]})
+
+    def test_selective_import_completion_offers_only_unselected_public_exports(self):
+        module = ("i32 answer(i32 value) { return value; }\n"
+                  "i32 extra() { return 2; }\n"
+                  "private i32 hidden() { return 3; }\n")
+        (self.root / "exports.ag").write_text(module)
+        text = "import exports { answer as calculate, ex };\n"
+        uri = self.open(text)
+        items = self.session.result("textDocument/completion", {"textDocument": {"uri": uri},
+            "position": position(text, text.index("ex };") + 2)})["items"]
+        self.assertIn("extra", {item["label"] for item in items}, items)
+        candidate = next(item for item in items if item["label"] == "extra")
+        self.assertEqual(candidate["textEdit"], {
+            "range": location(text, "ex", text.index("ex };")), "newText": "extra"})
+        self.assertNotIn("answer", {item["label"] for item in items})
+        self.assertNotIn("calculate", {item["label"] for item in items})
+        self.assertNotIn("hidden", {item["label"] for item in items})
+        self.assertEqual(candidate["insertTextFormat"], 1)
+        self.assertNotIn("${", candidate["textEdit"]["newText"])
+
+        later = "import exports { ex, extra as taken };\n"
+        later_uri = self.open(later, "later-selection.ag")
+        later_items = self.session.result("textDocument/completion", {"textDocument": {"uri": later_uri},
+            "position": position(later, later.index("ex,") + 2)})["items"]
+        self.assertNotIn("extra", {item["label"] for item in later_items})
+
+        for index, occupied in enumerate(("answer as extra, ex", "ex, answer as extra")):
+            alias_collision = "import exports { " + occupied + " };\n"
+            collision_uri = self.open(alias_collision, f"selection-alias-collision-{index}.ag")
+            offset = alias_collision.index("ex };") + 2 if index == 0 else alias_collision.index("ex,") + 2
+            collision_items = self.session.result("textDocument/completion", {
+                "textDocument": {"uri": collision_uri}, "position": position(alias_collision, offset)})["items"]
+            self.assertNotIn("extra", {item["label"] for item in collision_items})
+
+        alias_text = "import exports { answer as cal };\n"
+        alias_uri = self.open(alias_text, "alias-import.ag")
+        aliases = self.session.result("textDocument/completion", {"textDocument": {"uri": alias_uri},
+            "position": position(alias_text, len(alias_text) - 3)})["items"]
+        self.assertEqual(aliases, [])
+
+        incomplete_as = "import exports { answer a };\n"
+        incomplete_uri = self.open(incomplete_as, "incomplete-as.ag")
+        as_items = self.session.result("textDocument/completion", {"textDocument": {"uri": incomplete_uri},
+            "position": position(incomplete_as, incomplete_as.index("a };") + 1)})["items"]
+        self.assertIn("as", {item["label"] for item in as_items}, as_items)
+        as_item = next(item for item in as_items if item["label"] == "as")
+        self.assertEqual(as_item["kind"], 14)
+        self.assertEqual(as_item["insertTextFormat"], 1)
+        no_alias = "import exports { answer as };\n"
+        no_alias_uri = self.open(no_alias, "no-alias-completion.ag")
+        aliases = self.session.result("textDocument/completion", {"textDocument": {"uri": no_alias_uri},
+            "position": position(no_alias, no_alias.index("as };") + len("as "))})["items"]
+        self.assertEqual(aliases, [])
+
+        selected_text = "import exports { answer };\ni32 main() { return ans; }\n"
+        selected_uri = self.open(selected_text, "selected-import.ag")
+        selected = self.session.result("textDocument/completion", {"textDocument": {"uri": selected_uri},
+            "position": position(selected_text, selected_text.index("ans;") + 3)})["items"]
+        self.assertIn("answer", {item["label"] for item in selected}, selected)
+        answer = next(item for item in selected if item["label"] == "answer")
+        self.assertFalse(answer.get("additionalTextEdits"))
+
+    def test_import_completion_context_survives_repeated_snapshot_changes(self):
+        source = "i32 first() { return 1; }\ni32 second() { return 2; }\n"
+        source_uri = self.open(source, "repeat_exports.ag")
+        for version in range(1, 33):
+            text = f"import repeat_exports {{ first as item_{version}, se }};\n"
+            uri = self.open(text, "repeat-import.ag", version=version)
+            items = self.session.result("textDocument/completion", {"textDocument": {"uri": uri},
+                "position": position(text, text.index("se };") + 2)})["items"]
+            self.assertEqual([item["label"] for item in items], ["second"])
+            self.assertEqual(items[0]["textEdit"]["newText"], "second")
+            self.assertEqual(self.session.result("textDocument/definition", self.at(uri, text, "first")),
+                             {"uri": source_uri, "range": location(source, "first")})
+
+    def test_keyword_and_type_completions_have_plain_text_kinds_and_respect_context(self):
+        text = "i32 main() { return ca; }\n"
+        uri = self.open(text)
+        items = self.session.result("textDocument/completion", {"textDocument": {"uri": uri},
+            "position": position(text, text.index("ca;") + 2)})["items"]
+        self.assertIn("cast", {item["label"] for item in items}, items)
+        cast = next(item for item in items if item["label"] == "cast")
+        self.assertEqual(cast["kind"], 14)
+        self.assertEqual(cast["insertTextFormat"], 1)
+        type_text = "i32 main() {  return 0; }\n"
+        type_uri = self.open(type_text, "type-keywords.ag")
+        types = self.session.result("textDocument/completion", {"textDocument": {"uri": type_uri},
+            "position": position(type_text, type_text.index("{ ") + 2)})["items"]
+        by_label = {item["label"]: item for item in types}
+        for name in ("c32", "c64", "c80", "Vec", "Optional"):
+            self.assertIn(name, by_label)
+            self.assertEqual(by_label[name]["kind"], 7)
+            self.assertEqual(by_label[name]["insertTextFormat"], 1)
+
+        for index, source in enumerate(("i32 main() { // ca\n return 0; }",
+                                        'i32 main() { str value = "ca"; return 0; }',
+                                        "struct Point { i32 field; } i32 main(Point p) { return p.ca; }",
+                                        "import ca;")):
+            with self.subTest(source=source):
+                context_uri = self.open(source, f"keyword-context-{index}.ag")
+                offset = source.index("ca") + (1 if index == 0 else 2)
+                context = self.session.result("textDocument/completion", {"textDocument": {"uri": context_uri},
+                    "position": position(source, offset)})["items"]
+                self.assertEqual(context, [])
+
+        snippets = Session(self.binary, self.root)
+        self.addCleanup(snippets.close)
+        snippets.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {
+            "textDocument": {"completion": {"completionItem": {"snippetSupport": True}}}}})
+        snippets.send("initialized", {})
+        snippet_uri = (self.root / "snippet-keywords.ag").as_uri()
+        snippets.send("textDocument/didOpen", {"textDocument": {
+            "uri": snippet_uri, "languageId": "silver", "version": 1, "text": text}})
+        snippet_items = snippets.result("textDocument/completion", {"textDocument": {"uri": snippet_uri},
+            "position": position(text, text.index("ca;") + 2)})["items"]
+        self.assertIn("cast", {item["label"] for item in snippet_items}, snippet_items)
+        self.assertEqual(next(item for item in snippet_items if item["label"] == "cast")["insertTextFormat"], 1)
+        type_uri = (self.root / "snippet-types.ag").as_uri()
+        snippets.send("textDocument/didOpen", {"textDocument": {
+            "uri": type_uri, "languageId": "silver", "version": 1, "text": type_text}})
+        snippet_types = snippets.result("textDocument/completion", {"textDocument": {"uri": type_uri},
+            "position": position(type_text, type_text.index("{ ") + 2)})["items"]
+        for name in ("c32", "c64", "c80", "Vec", "Optional"):
+            self.assertIn(name, {item["label"] for item in snippet_types}, snippet_types)
+            self.assertEqual(next(item for item in snippet_types if item["label"] == name)["insertTextFormat"], 1)
+
+    def test_auto_import_completion_applies_primary_and_import_edits_and_resolves(self):
+        (self.root / "provider.ag").write_text("i32 answer() { return 42; }\n")
+        self.session.send("workspace/didChangeWatchedFiles", {"changes": [
+            {"uri": (self.root / "provider.ag").as_uri(), "type": 1}]})
+        variants = [
+            ("i32 main() { return ans(); }\n", "\n"),
+            ("// header\n\ni32 main() { return ans(); }\n", "\n"),
+            ("// header\r\ni32 main() { return ans(); }\r\n", "\r\n"),
+        ]
+        for index, (text, newline) in enumerate(variants):
+            with self.subTest(index=index):
+                uri = self.open(text, f"auto-import-{index}.ag")
+                items = self.session.result("textDocument/completion", {"textDocument": {"uri": uri},
+                    "position": position(text, text.index("ans()") + 3)})["items"]
+                self.assertIn("answer", {item["label"] for item in items}, items)
+                answer = next(item for item in items if item["label"] == "answer" and item["data"].get("module") == "provider")
+                self.assertEqual(answer["kind"], 3)
+                self.assertEqual(answer["textEdit"]["range"], location(text, "ans"))
+                self.assertTrue(answer["additionalTextEdits"])
+                updated = apply_edits(text, [answer["textEdit"], *answer["additionalTextEdits"]])
+                self.assertTrue(updated.startswith("import provider;" + newline), updated)
+                self.assertIn("return answer()", updated)
+                self.session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
+                    "contentChanges": [{"text": updated}]})
+                self.session.send("textDocument/didClose", {"textDocument": {"uri": uri}})
+                self.session.send("textDocument/didOpen", {"textDocument": {
+                    "uri": uri, "languageId": "silver", "version": 3, "text": updated}})
+                self.session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+                self.assertEqual(self.session.diagnostics[uri]["diagnostics"], [])
+                definition = self.session.result("textDocument/definition", self.at(uri, updated, "answer", updated.index("return")))
+                self.assertEqual(definition["uri"], (self.root / "provider.ag").as_uri())
+                again = self.session.result("textDocument/completion", {"textDocument": {"uri": uri},
+                    "position": position(updated, updated.index("return answer") + len("return answer"))})["items"]
+                selected = next(item for item in again if item["label"] == "answer")
+                self.assertNotIn("additionalTextEdits", selected)
+
+    def test_auto_import_at_file_start_combines_edits_without_overlap(self):
+        exported = "struct ExportedType { i32 value; }\n"
+        source_uri = self.open(exported, "types.ag")
+        text = "Expo item;\n"
+        uri = self.open(text)
+        result = self.session.result("textDocument/completion", {
+            "textDocument": {"uri": uri}, "position": position(text, 4)})
+        item = next(item for item in result["items"] if item["label"] == "ExportedType")
+        self.assertFalse(item.get("additionalTextEdits"))
+        self.assertEqual(item["textEdit"], {"range": location(text, "Expo"),
+                                           "newText": "import types;\nExportedType"})
+        updated = apply_edits(text, [item["textEdit"]])
+        self.assertEqual(updated, "import types;\nExportedType item;\n")
+        self.session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
+            "contentChanges": [{"text": updated}]})
+        definition = self.session.result("textDocument/definition", self.at(uri, updated, "ExportedType"))
+        self.assertEqual(definition, {"uri": source_uri, "range": location(exported, "ExportedType")})
+
+    def test_short_code_prefix_requests_new_data_before_auto_imports(self):
+        text = "i32 main() { return a(1); }\n"
+        uri = self.open(text)
+        first = self.session.result("textDocument/completion", {
+            "textDocument": {"uri": uri}, "position": position(text, text.index("a(1)") + 1)})
+        self.assertTrue(first["isIncomplete"])
+        updated = text.replace("a(1)", "ans(1)")
+        self.session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
+            "contentChanges": [{"text": updated}]})
+        complete = self.session.result("textDocument/completion", {
+            "textDocument": {"uri": uri}, "position": position(updated, updated.index("ans(1)") + 3)})
+        self.assertFalse(complete["isIncomplete"])
+        self.assertTrue(any(item["label"] == "answer" and item.get("additionalTextEdits")
+                            for item in complete["items"]))
+
+    def test_auto_import_candidates_preserve_distinct_sources_and_reject_bad_bindings(self):
+        (self.root / "alpha.ag").write_text("i32 answer() { return 1; }\nprivate i32 secret() { return 2; }\n")
+        (self.root / "beta.ag").write_text("i32 answer() { return 3; }\ni32 other() { return 4; }\n")
+        self.session.send("workspace/didChangeWatchedFiles", {"changes": [
+            {"uri": (self.root / name).as_uri(), "type": 1} for name in ("alpha.ag", "beta.ag")]})
+        text = ("struct Box { i32 answer; }\n"
+                "i32 main(Box box, i32 local) { return ans + local + box.answer; }\n")
+        uri = self.open(text)
+        items = self.session.result("textDocument/completion", {"textDocument": {"uri": uri},
+            "position": position(text, text.index("ans +") + 3)})["items"]
+        answers = [item for item in items if item["label"] == "answer" and item["data"].get("module") in ("alpha", "beta")]
+        self.assertEqual(len(answers), 2)
+        details = [item.get("detail") or item.get("labelDetails", {}).get("detail") for item in answers]
+        self.assertEqual(len(set(details)), 2)
+        self.assertTrue(all(isinstance(detail, str) for detail in details), answers)
+        self.assertTrue(any("alpha" in detail for detail in details))
+        self.assertTrue(any("beta" in detail for detail in details))
+        self.assertTrue(all(item.get("additionalTextEdits") for item in answers))
+        self.assertNotIn("secret", {item["label"] for item in items})
+        self.assertNotIn("other", {item["label"] for item in items})
+        self.assertNotIn("local", {item["label"] for item in items})
+
+        for index, detail in enumerate(details):
+            selection_text = "i32 main() { return ans(); }\n"
+            selection_uri = self.open(selection_text, f"provider-selection-{index}.ag")
+            choices = self.session.result("textDocument/completion", {"textDocument": {"uri": selection_uri},
+                "position": position(selection_text, selection_text.index("ans()") + 3)})["items"]
+            selected = next(item for item in choices if item["label"] == "answer"
+                            and (item.get("detail") or item.get("labelDetails", {}).get("detail")) == detail)
+            imported_text = apply_edits(selection_text, [selected["textEdit"], *selected["additionalTextEdits"]])
+            expected_provider = "alpha" if "alpha" in detail else "beta"
+            self.assertIn(f"import {expected_provider};", imported_text)
+            self.session.send("textDocument/didChange", {"textDocument": {"uri": selection_uri, "version": 2},
+                "contentChanges": [{"text": imported_text}]})
+            self.session.result("textDocument/documentSymbol", {"textDocument": {"uri": selection_uri}})
+            definition = self.session.result("textDocument/definition", self.at(
+                selection_uri, imported_text, "answer", imported_text.index("return")))
+            self.assertEqual(definition["uri"], (self.root / f"{expected_provider}.ag").as_uri())
+
+        member = self.session.result("textDocument/completion", {"textDocument": {"uri": uri},
+            "position": position(text, text.index("box.answer") + len("box."))})["items"]
+        self.assertEqual({item["label"] for item in member}, {"answer"})
+        self.assertFalse(any(item.get("additionalTextEdits") for item in member))
+
+        collision_text = "i32 answer() { return 8; }\ni32 main() { return ans; }\n"
+        collision_uri = self.open(collision_text, "auto-import-collision.ag")
+        collision = self.session.result("textDocument/completion", {"textDocument": {"uri": collision_uri},
+            "position": position(collision_text, collision_text.index("ans;") + 3)})["items"]
+        self.assertFalse(any(item["label"] == "answer" and item.get("additionalTextEdits") for item in collision))
+        local_collision = "i32 main() { i32 answer = 0; return ans; }\n"
+        local_uri = self.open(local_collision, "auto-import-local-collision.ag")
+        local_items = self.session.result("textDocument/completion", {"textDocument": {"uri": local_uri},
+            "position": position(local_collision, local_collision.index("ans;") + 3)})["items"]
+        self.assertFalse(any(item["label"] == "answer" and item.get("additionalTextEdits") for item in local_items))
+
+        private_text = "i32 main() { return sec; }\n"
+        private_uri = self.open(private_text, "auto-import-private.ag")
+        private = self.session.result("textDocument/completion", {"textDocument": {"uri": private_uri},
+            "position": position(private_text, private_text.index("sec;") + 3)})["items"]
+        self.assertNotIn("secret", {item["label"] for item in private})
+
+    def test_auto_import_completion_tracks_open_source_modules_and_close_restores_disk_state(self):
+        provider = self.root / "overlay.ag"
+        provider.write_text("i32 disk_only() { return 1; }\n")
+        overlay = "i32 overlay_only() { return 2; }\n"
+        overlay_uri = provider.as_uri()
+        self.session.send("textDocument/didOpen", {"textDocument": {
+            "uri": overlay_uri, "languageId": "silver", "version": 1, "text": overlay}})
+        text = "i32 main() { return over; }\n"
+        uri = self.open(text)
+        items = self.session.result("textDocument/completion", {"textDocument": {"uri": uri},
+            "position": position(text, text.index("over;") + 4)})["items"]
+        self.assertIn("overlay_only", {item["label"] for item in items}, items)
+        candidate = next(item for item in items if item["label"] == "overlay_only")
+        updated = apply_edits(text, [candidate["textEdit"], *candidate["additionalTextEdits"]])
+        self.assertIn("import overlay;", updated)
+        self.session.send("textDocument/didClose", {"textDocument": {"uri": overlay_uri}})
+        closed_text = text.replace("over;", "disk;")
+        self.session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
+            "contentChanges": [{"text": closed_text}]})
+        self.session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+        restored = self.session.result("textDocument/completion", {"textDocument": {"uri": uri},
+            "position": position(closed_text, closed_text.index("disk;") + 4)})["items"]
+        self.assertIn("disk_only", {item["label"] for item in restored})
+        self.assertNotIn("overlay_only", {item["label"] for item in restored})
+
+    def test_auto_import_discovers_source_sysroot_std_modules_outside_the_workspace(self):
+        sysroot_temp = tempfile.TemporaryDirectory(prefix="silver-lsp-sysroot-")
+        self.addCleanup(sysroot_temp.cleanup)
+        sysroot = Path(sysroot_temp.name)
+        std = sysroot / "std"
+        std.mkdir()
+        provider = std / "custom.ag"
+        provider.write_text("i32 unique_std_value() { return 9; }\n")
+        env = os.environ.copy()
+        env["SILVER_SYSROOT"] = str(sysroot)
+        session = Session(self.binary, self.root, env=env)
+        self.addCleanup(session.close)
+        session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(),
+            "capabilities": {}})
+        session.send("initialized", {})
+
+        text = "i32 main() { return uniq(); }\n"
+        uri = (self.root / "sysroot-import.ag").as_uri()
+        session.send("textDocument/didOpen", {"textDocument": {
+            "uri": uri, "languageId": "silver", "version": 1, "text": text}})
+        items = session.result("textDocument/completion", {"textDocument": {"uri": uri},
+            "position": position(text, text.index("uniq()") + 4)})["items"]
+        self.assertIn("unique_std_value", {item["label"] for item in items}, items)
+        answer = next(item for item in items if item["label"] == "unique_std_value")
+        self.assertEqual(answer["kind"], 3)
+        self.assertEqual(answer["textEdit"]["range"], location(text, "uniq"))
+        updated = apply_edits(text, [answer["textEdit"], *answer["additionalTextEdits"]])
+        self.assertTrue(updated.startswith("import std.custom;\n"), updated)
+        session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
+            "contentChanges": [{"text": updated}]})
+        session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+        self.assertEqual(session.diagnostics[uri]["diagnostics"], [])
+        definition = session.result("textDocument/definition", {
+            "textDocument": {"uri": uri},
+            "position": position(updated, updated.index("unique_std_value", updated.index("return")))})
+        self.assertEqual(definition, {"uri": provider.as_uri(), "range": location(provider.read_text(), "unique_std_value")})
+
+    def test_auto_import_resolve_preserves_source_edits_and_rejects_stale_revisions(self):
+        session = Session(self.binary, self.root)
+        self.addCleanup(session.close)
+        session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {
+            "textDocument": {"completion": {"completionItem": {"resolveSupport": {
+                "properties": ["detail", "documentation"]}}}}}})
+        session.send("initialized", {})
+        (self.root / "deferred_provider.ag").write_text("/// Deferred answer.\ni32 answer() { return 42; }\n")
+        session.send("workspace/didChangeWatchedFiles", {"changes": [
+            {"uri": (self.root / "deferred_provider.ag").as_uri(), "type": 1}]})
+        text = "i32 main() { return ans(); }\n"
+        uri = (self.root / "deferred.ag").as_uri()
+        session.send("textDocument/didOpen", {"textDocument": {
+            "uri": uri, "languageId": "silver", "version": 1, "text": text}})
+        params = {"textDocument": {"uri": uri}, "position": position(text, text.index("ans()") + 3)}
+        items = session.result("textDocument/completion", params)["items"]
+        self.assertIn("answer", {item["label"] for item in items}, items)
+        answer = next(item for item in items if item["label"] == "answer" and item["data"].get("module") == "deferred_provider")
+        edits = {key: answer.get(key) for key in ("textEdit", "additionalTextEdits", "data") if key in answer}
+        resolved = session.result("completionItem/resolve", answer)
+        self.assertEqual({key: resolved.get(key) for key in edits}, edits)
+        self.assertIn("Deferred answer.", resolved["documentation"]["value"])
+        stale_source = dict(answer)
+        changed = text.replace("ans", "answer")
+        session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
+            "contentChanges": [{"text": changed}]})
+        session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+        self.assertEqual(session.request("completionItem/resolve", stale_source)["error"]["code"], -32801)
+
+        current = session.result("textDocument/completion", {"textDocument": {"uri": uri},
+            "position": position(changed, changed.index("answer()") + len("answer"))})["items"]
+        self.assertIn("answer", {item["label"] for item in current}, current)
+        source_stale = next(item for item in current if item["label"] == "answer" and item["data"].get("module") == "deferred_provider")
+
+        provider_uri = (self.root / "deferred_provider.ag").as_uri()
+        provider = "/// Deferred answer.\ni32 answer() { return 42; }\n"
+        session.send("textDocument/didOpen", {"textDocument": {
+            "uri": provider_uri, "languageId": "silver", "version": 1, "text": provider}})
+        session.send("textDocument/didChange", {"textDocument": {"uri": provider_uri, "version": 2},
+            "contentChanges": [{"text": provider.replace("42", "43")}]})
+        self.assertEqual(session.request("completionItem/resolve", source_stale)["error"]["code"], -32801)
+
+    def test_auto_import_real_stdlib_string_allows_member_overloads(self):
+        repo = Path(__file__).resolve().parent.parent
+        stdlib = self.stdlib_root or repo / "std"
+        env = dict(os.environ, SILVER_SYSROOT=str(stdlib.parent))
+        session = Session(self.binary, self.root, env=env)
+        self.addCleanup(session.close)
+        session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {}})
+        session.send("initialized", {})
+        for index, header in enumerate(("", "import std.mem.vec;\n")):
+            text = header + 'i32 main() { Str value = String.from_str("silver"); return 0; }\n'
+            uri = (self.root / f"real-string-{index}.ag").as_uri()
+            session.send("textDocument/didOpen", {"textDocument": {
+                "uri": uri, "languageId": "silver", "version": 1, "text": text}})
+            result = session.result("textDocument/completion", {
+                "textDocument": {"uri": uri}, "position": position(text, text.index("Str value") + 3)})
+            strings = [item for item in result["items"] if item["label"] == "String"
+                       and item.get("data", {}).get("module") == "std.string"]
+            self.assertEqual(len(strings), 1, "std.string.String must remain importable alongside Slice overloads")
+            item = strings[0]
+            updated = apply_edits(text, [item["textEdit"], *item.get("additionalTextEdits", [])])
+            session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
+                "contentChanges": [{"text": updated}]})
+            session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+            self.assertFalse(any(d.get("severity") == 1 for d in session.diagnostics[uri]["diagnostics"]))
+            definition = session.result("textDocument/definition", {
+                "textDocument": {"uri": uri}, "position": position(updated, updated.index("String value"))})
+            self.assertEqual(definition["uri"], (stdlib / "string.ag").as_uri())
+
+    def test_symlinked_source_modules_complete_paths_and_auto_imports(self):
+        external = tempfile.TemporaryDirectory(prefix="silver-lsp-linked-")
+        self.addCleanup(external.cleanup)
+        target = Path(external.name) / "actual.ag"
+        source = "i32 linked_answer() { return 1; }\n"
+        target.write_text(source)
+        link = self.root / "provider_link.ag"
+        link.symlink_to(target)
+        session = Session(self.binary, self.root)
+        self.addCleanup(session.close)
+        session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {}})
+        session.send("initialized", {})
+        path_text = "import provider_l;"
+        path_uri = (self.root / "linked-path.ag").as_uri()
+        session.send("textDocument/didOpen", {"textDocument": {
+            "uri": path_uri, "languageId": "silver", "version": 1, "text": path_text}})
+        modules = session.result("textDocument/completion", {"textDocument": {"uri": path_uri},
+            "position": position(path_text, path_text.index(";"))})["items"]
+        self.assertIn("provider_link", {item["label"] for item in modules})
+        text = "i32 main() { return linked_a(); }\n"
+        uri = (self.root / "linked-use.ag").as_uri()
+        session.send("textDocument/didOpen", {"textDocument": {
+            "uri": uri, "languageId": "silver", "version": 1, "text": text}})
+        items = session.result("textDocument/completion", {"textDocument": {"uri": uri},
+            "position": position(text, text.index("linked_a()") + len("linked_a"))})["items"]
+        item = next(item for item in items if item["label"] == "linked_answer")
+        updated = apply_edits(text, [item["textEdit"], *item["additionalTextEdits"]])
+        self.assertTrue(updated.startswith("import provider_link;\n"))
+        session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
+            "contentChanges": [{"text": updated}]})
+        definition = session.result("textDocument/definition", {
+            "textDocument": {"uri": uri}, "position": position(updated, updated.index("linked_answer"))})
+        self.assertEqual(definition, {"uri": link.as_uri(), "range": location(source, "linked_answer")})
+
     def test_fuzzy_completion_ranking_replaces_the_whole_identifier_and_honors_scope(self):
         text = ('i32 get_data() { return 1; }\ni32 GatherDetails() { return 2; }\ni32 gd() { return 0; }\n'
                 'i32 unrelated() { return 3; }\ni32 main() {\n i32 get_data = 4;\n { i32 gone_data = 1; }\n return gdSuffix;\n}\n')

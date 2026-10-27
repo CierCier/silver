@@ -84,7 +84,8 @@ void handle_document_request(DocumentStore* store, WorkspaceIndex* index, Client
         }
     }
     bool workspace_analysis = strcmp(method, "textDocument/references") == 0 || strcmp(method, "textDocument/rename") == 0
-        || strcmp(method, "textDocument/implementation") == 0 || strcmp(method, "textDocument/codeAction") == 0;
+        || strcmp(method, "textDocument/implementation") == 0 || strcmp(method, "textDocument/codeAction") == 0
+        || (strcmp(method, "textDocument/completion") == 0 && completion_needs_workspace(doc, offset));
     if (workspace_analysis && !index_request_workspace(store, index, pending)) {
         complete_response(pending, message.id_raw.to_str(), "null"); return;
     }
@@ -101,7 +102,7 @@ void handle_document_request(DocumentStore* store, WorkspaceIndex* index, Client
         else if (strcmp(method, "textDocument/typeDefinition") == 0) { result = target_location(type_definition_target(target)); }
         else { result = compute_implementations(store, doc, target); }
     }
-    else if (strcmp(method, "textDocument/completion") == 0) { result = compute_completion(doc, offset, client); }
+    else if (strcmp(method, "textDocument/completion") == 0) { result = compute_completion(store, doc, offset, client, pending); }
     else if (strcmp(method, "textDocument/signatureHelp") == 0) { result = compute_signature_help(doc, offset, client); }
     else if (strcmp(method, "textDocument/documentSymbol") == 0) { result = compute_document_symbols(doc, client.hierarchical_symbols); }
     else if (strcmp(method, "textDocument/documentLink") == 0) { result = compute_document_links(store, doc, client.document_link_tooltips); }
@@ -234,7 +235,7 @@ i32 dispatch_message(ServerState* state, PendingMessage* pending) {
             if (update_workspace_folders(store, params)) { *index = workspace_index(store); notify_analysis_change(state); }
         } else if (strcmp(method, "workspace/didChangeWatchedFiles") == 0) { update_watched_files(store, params); notify_analysis_change(state); }
         else if (strcmp(method, "completionItem/resolve") == 0 && message.has_id) {
-            Result<String, CompletionResolveError> resolved = compute_completion_resolve(store, params, client);
+            Result<String, CompletionResolveError> resolved = compute_completion_resolve(store, params, client, pending);
             if (resolved.is_err()) {
                 bool stale = resolved.unwrap_err() == CompletionResolveError.StaleItem;
                 complete_error(pending, message.id_raw.to_str(), stale ? -32801 : -32602, stale ? "Completion item is stale" : "Invalid completion item");

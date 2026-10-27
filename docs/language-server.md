@@ -71,6 +71,18 @@ The native server provides these features:
   existing call parentheses prevent duplicate insertion. Clients advertising
   deferred detail/documentation receive them through `completionItem/resolve`.
   Resolve preserves insertion edits and rejects stale symbol revisions.
+  Import statements receive module-path and public selection completions without
+  call snippets. Path lookup follows source overlays and compiler search order.
+  Selection completion excludes names already selected or bound as aliases on
+  either side of the cursor and offers `as` where an alias can begin.
+  Unqualified prefixes of at least two characters also offer reachable source
+  declarations from the workspace and standard library with import edits.
+  Each provider has a separate item identifying its module. Existing imports,
+  private declarations and detected binding conflicts are excluded.
+  Shorter code prefixes return an incomplete list so clients request new results
+  as typing continues. Auto-import resolution checks both source and caller
+  revisions and preserves the import edit. When the identifier starts at offset
+  zero, the server combines the import with the main edit to avoid overlapping edits.
 - Signature help for nested calls and generic function calls, including comments
   between the callee and its argument list. Commas in nested generic type arguments
   do not advance the active function parameter. Instance methods
@@ -127,9 +139,10 @@ diagnostics for that file and its open dependents. Closing a file clears its dia
 its disk contents for navigation from other files.
 
 The server indexes `.ag` files under `rootUri` and `workspaceFolders`, including
-unopened files. It skips hidden entries, `target`, `node_modules`, symlinks, and
-directories deeper than 32 levels. Import resolution uses the compiler's module
-resolver. Source imports use unsaved open buffers when available.
+unopened files. It follows symlinked source files and skips hidden entries,
+`target`, `node_modules`, symlinked directories, and directories deeper than 32
+levels. Import resolution uses the compiler's module resolver. Source imports use
+unsaved open buffers when available.
 Opening or closing an overlay rebuilds import selections for every cached document,
 including imports that previously resolved to a lower-priority source file.
 An explicit `workspaceFolders` list takes precedence over `rootUri`.
@@ -268,12 +281,13 @@ Member resolution handles named receivers and explicit local types, but does not
 provide general expression-based receiver inference, overload selection, or
 generic substitution. More complex patterns, contextual lambda parameter types,
 and capture ownership/move precision need further semantic work. Binary AGM
-imports are not indexed. Workspace configuration does not yet
-load build targets, cfg values, or package graphs from `silver.toml`.
+module paths can be completed, but their exports are not indexed. Workspace
+configuration does not yet load build targets, cfg values, or package graphs
+from `silver.toml`.
 
 Diagnostic fixes beyond import insertion, refactoring assists, code lenses and
 macro expansion remain unimplemented. Completion still needs
-expected-type ranking, automatic imports and postfix assists. Implicit ownership hints remain
+expected-type ranking and postfix assists. Implicit ownership hints remain
 unimplemented.
 
 ## Implementation references
@@ -306,7 +320,7 @@ It is a work list, not a statement of full support.
 | File operations: `workspace/willCreateFiles`, `didCreateFiles`, `willRenameFiles`, `didRenameFiles`, `willDeleteFiles`, `didDeleteFiles` | Open | Import-preserving edits and disk/overlay invalidation |
 | Navigation: `textDocument/definition`, `declaration`, `typeDefinition`, `implementation` | Implemented for resolved declarations and explicit types | General inferred receivers, generic substitution and overloads |
 | References: `textDocument/references`, `documentHighlight`, `rename`, `prepareRename`, `linkedEditingRange` | First four implemented, with versioned edits and coordinated trait rename | Pattern/capture precision and linked ranges |
-| Completion: `textDocument/completion`, `completionItem/resolve`, `textDocument/signatureHelp`, `textDocument/inlineCompletion` | Scoped fuzzy completion, call snippets, deferred detail/docs, signatures | Type ranking, auto-import, postfix assists, inline completion and generic substitution |
+| Completion: `textDocument/completion`, `completionItem/resolve`, `textDocument/signatureHelp`, `textDocument/inlineCompletion` | Scoped fuzzy completion, module paths, import selections, source auto-import edits, call snippets, deferred detail/docs, signatures | Type ranking, binary artifact exports, postfix assists, inline completion and generic substitution |
 | Inspection: `textDocument/hover`, `inlayHint`, `inlayHint/resolve`, `workspace/inlayHint/refresh` | Signature/docs hover, basic hints and negotiated hint refresh | Expression types, ownership hints and lazy hints |
 | Outline: `textDocument/documentSymbol`, `workspace/symbol`, `workspaceSymbol/resolve` | Eager symbols and ranked fuzzy workspace search | Deferred workspace locations |
 | Structure: `textDocument/foldingRange`, `selectionRange`, `workspace/foldingRange/refresh` | Client folding limits/line-only output and validated selection ranges implemented | Region/import folds and folding refresh |

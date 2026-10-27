@@ -83,6 +83,28 @@ WorkspaceIndex workspace_index(DocumentStore* store) {
         IndexPath path; path.path = store.roots.get_ptr(i).clone(); path.depth = 0; path.directory = true;
         index.paths.push(move path); i += 1;
     }
+    i = 0;
+    while (i < store.include_dirs.len()) {
+        String standard = path_join(store.include_dirs.get_ptr(i).to_str(), "std");
+        bool covered = false; i64 root = 0;
+        while (root < index.paths.len()) {
+            String* existing = &index.paths.get_ptr(root).path;
+            if (standard.equals(existing.to_str()) || (standard.starts_with(existing.to_str())
+                && (existing.ends_with("/") || standard.data[existing.len()] == (u8)'/'))) { covered = true; break; }
+            root += 1;
+        }
+        if (!covered) {
+            Result<Metadata, Error> stat = metadata(standard.to_str());
+            if (stat.is_ok()) {
+                Metadata info = stat.unwrap();
+                if (info.is_dir) {
+                    IndexPath path; path.path = move standard; path.depth = 0; path.directory = true;
+                    index.paths.push(move path);
+                }
+            }
+        }
+        i += 1;
+    }
     return move index;
 }
 
@@ -103,13 +125,17 @@ void index_workspace_step(DocumentStore* store, WorkspaceIndex* index) {
             String child = path_join(path.path.to_str(), name.to_str());
             Result<Metadata, Error> stat = symlink_metadata(child.to_str());
             if (stat.is_ok()) {
-                Metadata metadata = stat.unwrap();
-                if (!metadata.is_symlink) {
-                    if (metadata.is_dir || (metadata.is_file && name.ends_with(".ag"))) {
-                        IndexPath pending; pending.path = move child; pending.depth = path.depth + 1;
-                        pending.directory = metadata.is_dir;
-                        index.paths.push(move pending);
-                    }
+                Metadata info = stat.unwrap();
+                bool directory = info.is_dir && !info.is_symlink;
+                bool file = info.is_file;
+                if (info.is_symlink && name.ends_with(".ag")) {
+                    Result<Metadata, Error> target = metadata(child.to_str());
+                    if (target.is_ok()) { file = target.unwrap().is_file; }
+                }
+                if (directory || (file && name.ends_with(".ag"))) {
+                    IndexPath pending; pending.path = move child; pending.depth = path.depth + 1;
+                    pending.directory = directory;
+                    index.paths.push(move pending);
                 }
             }
         }

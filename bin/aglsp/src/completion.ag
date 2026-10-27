@@ -5,6 +5,8 @@ import capabilities;
 import tooling.search;
 import frontend.ast;
 import frontend.lower_expr;
+import imports;
+import transport;
 
 i64 completion_kind(IdeSymbolKind kind) {
     return match kind {
@@ -31,11 +33,15 @@ bool inside_literal(Document* doc, i64 offset) {
 
 void append_completion(String* out, Document* doc, Span replacement, str name,
                         str detail, str documentation, i64 kind, bool local, i64 score, ClientOptions* client,
-                        SymbolTarget target, bool instance, bool* first) {
+                        SymbolTarget target, bool instance, bool* first, str auto_module, bool snippets) {
     if (!*first) { out.push(','); } *first = false;
     out.push_str("{\"label\":\""); json_escape(name, out);
     out.push_str("\",\"kind\":"); out.push_display(&kind);
-    if (!client.completion_resolve_detail || target.symbol < 0) { out.push_str(",\"detail\":\""); json_escape(detail, out); out.push('"'); }
+    if (!client.completion_resolve_detail || target.symbol < 0 || strlen(auto_module) > 0) {
+        out.push_str(",\"detail\":\""); json_escape(detail, out);
+        if (strlen(auto_module) > 0) { out.push_str(" (import "); json_escape(auto_module, out); out.push(')'); }
+        out.push('"');
+    }
     out.push_str(",\"sortText\":\"");
     if (score > 999999) { score = 999999; }
     i64 divisor = 100000;
@@ -44,7 +50,7 @@ void append_completion(String* out, Document* doc, Span replacement, str name,
     out.push_str("\",\"textEdit\":{\"range\":"); doc.append_range(out, replacement);
     String inserted = String.from_str(name); i64 next = ide_token_at_or_after(&doc.analysis, replacement.end);
     while (next < doc.analysis.tokens.len() && doc.analysis.tokens.get(next).kind == TokenKind.Comment) { next += 1; }
-    bool snippet = client.completion_snippets && target.symbol >= 0 && (kind == 2 || kind == 3)
+    bool snippet = snippets && client.completion_snippets && target.symbol >= 0 && (kind == 2 || kind == 3)
         && (next >= doc.analysis.tokens.len() || (doc.analysis.tokens.get(next).kind != TokenKind.LeftParen
             && doc.analysis.tokens.get(next).kind != TokenKind.Less));
     if (snippet) {
@@ -57,9 +63,23 @@ void append_completion(String* out, Document* doc, Span replacement, str name,
         }
         inserted.push_str(")$0");
     }
+    if (strlen(auto_module) > 0 && replacement.start == 0) {
+        String combined = import_statement(doc, auto_module); combined.push_str(inserted.to_str());
+        inserted = move combined;
+    }
     out.push_str(",\"newText\":\""); json_escape(inserted.to_str(), out); out.push_str("\"}");
     out.push_str(",\"insertTextFormat\":"); out.push_str(snippet ? "2" : "1");
-    if (target.symbol >= 0) {
+    if (strlen(auto_module) > 0) {
+        out.push_str(",\"data\":{\"activeURI\":\""); json_escape(doc.uri.to_str(), out);
+        out.push_str("\",\"activeRevision\":"); out.push_display(&doc.revision);
+        out.push_str(",\"targetURI\":\""); json_escape(target.document.uri.to_str(), out);
+        out.push_str("\",\"targetRevision\":"); out.push_display(&target.document.revision);
+        out.push_str(",\"symbol\":"); out.push_display(&target.symbol);
+        out.push_str(",\"module\":\""); json_escape(auto_module, out); out.push_str("\"}");
+        if (replacement.start > 0) {
+            out.push_str(",\"additionalTextEdits\":["); append_import_edit(out, doc, auto_module); out.push(']');
+        }
+    } else if (target.symbol >= 0) {
         out.push_str(",\"data\":{\"uri\":\""); json_escape(target.document.uri.to_str(), out);
         out.push_str("\",\"revision\":"); out.push_display(&target.document.revision);
         out.push_str(",\"symbol\":"); out.push_display(&target.symbol); out.push('}');
@@ -80,11 +100,12 @@ String receiver_owner(Document* doc, i64 separator) {
 
 void completion_symbols(Document* source, Document* active, i64 offset, Span replacement,
                          str prefix, str owner, bool members, bool instance, ClientOptions* client, Vec<Document*>* visited,
-                         String* out, bool* first) {
+                         Vec<String>* offered, PendingMessage* pending, String* out, bool* first) {
     i64 i = 0;
     while (i < visited.len()) { if (visited.get(i) == source) { return; } i += 1; }
     visited.push(source); i = 0;
     while (i < source.analysis.symbols.len()) {
+        if (request_interrupted(pending)) { return; }
         IdeSymbol* symbol = source.analysis.symbols.get_ptr(i);
         i64 score = ide_match_score(prefix, symbol.name.to_str());
         bool visible = symbol.owner.equals(owner) && score >= 0
@@ -102,66 +123,210 @@ void completion_symbols(Document* source, Document* active, i64 offset, Span rep
             target = follow_import_alias(target);
             IdeSymbol* detail = target.symbol >= 0 ? target.document.analysis.symbols.get_ptr(target.symbol) : symbol;
             append_completion(out, active, replacement, symbol.name.to_str(), detail.signature.to_str(),
-                detail.documentation.to_str(), completion_kind(detail.kind), symbol.local, score, client, target, instance, first);
+                detail.documentation.to_str(), completion_kind(detail.kind), symbol.local, score, client, target, instance, first, "", true);
+            offered.push(symbol.name.clone());
         }
         i += 1;
     }
     i = 0;
     while (i < source.dependencies.len()) {
-        completion_symbols(source.dependencies.get(i), active, offset, replacement, prefix, owner, members, instance, client, visited, out, first);
+        completion_symbols(source.dependencies.get(i), active, offset, replacement, prefix, owner, members, instance, client, visited, offered, pending, out, first);
         i += 1;
     }
 }
 
-String compute_completion(Document* doc, i64 offset, ClientOptions* client) {
+bool completion_offered(Vec<String>* offered, str name) {
+    i64 i = 0;
+    while (i < offered.len()) { if (offered.get_ptr(i).equals(name)) { return true; } i += 1; }
+    return false;
+}
+
+void completion_prefix(Document* doc, i64 offset, Span* replacement, String* prefix) {
+    replacement.start = offset; replacement.end = offset;
+    while (replacement.start > 0 && typecheck_name_continue(doc.text.data[replacement.start - 1])) { replacement.start -= 1; }
+    while (replacement.end < doc.text.len() && typecheck_name_continue(doc.text.data[replacement.end])) { replacement.end += 1; }
+    *prefix = doc.text.substr(replacement.start, offset - replacement.start);
+}
+
+void append_import_context_completions(DocumentStore* store, Document* doc,
+        ImportCompletionContext* context, ClientOptions* client, PendingMessage* pending,
+        String* out, bool* first) {
+    Span replacement = context.replacement;
+    if (context.kind == ImportCompletionKind.Module) {
+        Vec<String> modules = import_modules(store, doc, context.module.to_str(), pending);
+        i64 i = 0;
+        while (i < modules.len() && !request_interrupted(pending)) {
+            String* module = modules.get_ptr(i);
+            i64 score = ide_match_score(context.prefix.to_str(), module.to_str());
+            if (score >= 0) {
+                SymbolTarget target; target.document = doc; target.symbol = -1;
+                append_completion(out, doc, replacement, module.to_str(), "", "", 9, false, score,
+                    client, target, false, first, "", false);
+            }
+            i += 1;
+        }
+    } else if (context.kind == ImportCompletionKind.Selection) {
+        String path = resolve_document_import(store, doc, context.module.to_str());
+        if (!path.ends_with(".ag")) { return; }
+        Document* source = path.len() > 0 ? store.load(path.to_str()) : (Document*)0;
+        if (source == (Document*)0) { return; }
+        store.refresh_imports();
+        i64 i = 0;
+        while (i < source.analysis.symbols.len() && !request_interrupted(pending)) {
+            IdeSymbol* symbol = source.analysis.symbols.get_ptr(i);
+            i64 score = ide_match_score(context.prefix.to_str(), symbol.name.to_str());
+            bool selected = false; i64 j = 0;
+            while (j < context.selected.len()) {
+                if (context.selected.get_ptr(j).equals(symbol.name.to_str())) { selected = true; break; }
+                j += 1;
+            }
+            if (!symbol.local && !symbol.is_private && symbol.owner.len() == 0 && score >= 0 && !selected) {
+                Vec<Document*> visited = Vec<Document*>.new(); SymbolTarget unique;
+                unique.document = source; unique.symbol = -1;
+                find_imported_symbol(source, symbol.name.to_str(), "", &visited, &unique);
+                if (unique.symbol == i && unique.document == source) {
+                    SymbolTarget target; target.document = doc; target.symbol = -1;
+                    append_completion(out, doc, replacement, symbol.name.to_str(), "", "", completion_kind(symbol.kind),
+                        false, score, client, target, false, first, "", false);
+                }
+            }
+            i += 1;
+        }
+    } else if (context.kind == ImportCompletionKind.AliasKeyword) {
+        if (ide_match_score(context.prefix.to_str(), "as") >= 0) {
+            SymbolTarget target; target.document = doc; target.symbol = -1;
+            append_completion(out, doc, replacement, "as", "", "", 14, false,
+                ide_match_score(context.prefix.to_str(), "as"), client, target, false, first, "", false);
+        }
+    }
+}
+
+void append_auto_imports(DocumentStore* store, Document* doc, Span replacement, str prefix,
+        Vec<String>* offered, ClientOptions* client, PendingMessage* pending, String* out, bool* first) {
+    if (prefix[0] == 0 || request_interrupted(pending)) { return; }
+    i64 d = 0;
+    while (d < store.docs.len() && !request_interrupted(pending)) {
+        Document* candidate = store.docs.get(d);
+        if (candidate != doc && candidate.path.ends_with(".ag") && candidate.analysis.diagnostics.is_empty()) {
+            i64 i = 0;
+            while (i < candidate.analysis.symbols.len() && !request_interrupted(pending)) {
+                IdeSymbol* symbol = candidate.analysis.symbols.get_ptr(i);
+                str name = symbol.name.to_str();
+                i64 score = ide_match_score(prefix, name);
+                if (!symbol.local && !symbol.is_private && symbol.owner.len() == 0
+                    && symbol.kind != IdeSymbolKind.ImportAlias && score >= 0 && !completion_offered(offered, name)) {
+                    Vec<Document*> visited = Vec<Document*>.new(); SymbolTarget unique;
+                    unique.document = candidate; unique.symbol = -1;
+                    find_imported_symbol(candidate, name, "", &visited, &unique);
+                    if (unique.symbol == i && unique.document == candidate) {
+                        String module = import_module_name(store, doc, candidate);
+                        if (module.len() > 0 && !import_conflicts(doc, candidate, pending)) {
+                            SymbolTarget target; target.document = candidate; target.symbol = i;
+                            IdeSymbol* resolved = target.document.analysis.symbols.get_ptr(target.symbol);
+                            append_completion(out, doc, replacement, name, resolved.signature.to_str(), resolved.documentation.to_str(),
+                                completion_kind(resolved.kind), false, score, client, target, false, first, module.to_str(), true);
+                        }
+                    }
+                }
+                i += 1;
+            }
+        }
+        d += 1;
+    }
+}
+
+String compute_completion(DocumentStore* store, Document* doc, i64 offset, ClientOptions* client, PendingMessage* pending) {
     String out = String.from_str("{\"isIncomplete\":false,\"items\":["); bool first = true;
     if (!inside_literal(doc, offset)) {
-        Span replacement = Span.synthetic(); replacement.start = offset; replacement.end = offset;
-        while (replacement.start > 0 && typecheck_name_continue(doc.text.data[replacement.start - 1])) { replacement.start -= 1; }
-        while (replacement.end < doc.text.len() && typecheck_name_continue(doc.text.data[replacement.end])) { replacement.end += 1; }
-        String prefix = doc.text.substr(replacement.start, offset - replacement.start);
+        Span replacement = Span.synthetic(); String prefix = String.new();
+        completion_prefix(doc, offset, &replacement, &prefix);
+        Optional<ImportCompletionContext> import_context = import_completion_context(doc, offset);
+        if (import_context.is_some()) {
+            ImportCompletionContext context = import_context.unwrap();
+            append_import_context_completions(store, doc, &context, client, pending, &out, &first);
+            out.push_str("]}"); return move out;
+        }
         i64 separator = replacement.start;
         while (separator > 0 && (doc.text.data[separator - 1] == (u8)' ' || doc.text.data[separator - 1] == (u8)'\t')) { separator -= 1; }
         bool members = separator > 0 && (doc.text.data[separator - 1] == (u8)'.' || doc.text.data[separator - 1] == (u8)':');
+        if (!members && prefix.len() < 2) { out = String.from_str("{\"isIncomplete\":true,\"items\":["); }
         String owner = String.new();
         if (members) {
             separator -= 1;
             if (separator > 0 && doc.text.data[separator] == (u8)':' && doc.text.data[separator - 1] == (u8)':') { separator -= 1; }
             owner = receiver_owner(doc, separator);
         }
-        Vec<Document*> visited = Vec<Document*>.new();
+        Vec<Document*> visited = Vec<Document*>.new(); Vec<String> offered = Vec<String>.new();
         if (!members || owner.len() > 0) {
             bool instance = members && doc.text.data[separator] == (u8)'.';
-            completion_symbols(doc, doc, offset, replacement, prefix.to_str(), owner.to_str(), members, instance, client, &visited, &out, &first);
+            completion_symbols(doc, doc, offset, replacement, prefix.to_str(), owner.to_str(), members, instance, client, &visited, &offered, pending, &out, &first);
         }
         if (!members) {
             TokenStream words = TokenStream.new(); DiagnosticBag ignored = DiagnosticBag.new();
-            lex(String.from_str("let mut const static volatile struct enum impl trait type private if else while for in match break continue return move defer import comptime extern asm macro launch wait true false Self i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 f80 bool char str void"), &words, &ignored);
+            lex(String.from_str("let mut const static volatile struct enum impl trait type private if else while for in match break continue return move defer import comptime cast as extern asm macro launch wait true false Self i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 f80 c32 c64 c80 bool char str void Vec Optional"), &words, &ignored);
             i64 i = 0;
             while (i + 1 < words.len()) {
                 Token* word = words.get(i);
                 i64 score = ide_match_score(prefix.to_str(), word.text.to_str());
-                if (score >= 0) {
+                if (score >= 0 && !completion_offered(&offered, word.text.to_str())) {
                     SymbolTarget target; target.document = doc; target.symbol = -1;
-                    append_completion(&out, doc, replacement, word.text.to_str(), "", "", is_primitive_type_token(word.kind) ? 7 : 14, false, score, client, target, false, &first);
+                    append_completion(&out, doc, replacement, word.text.to_str(), "", "", is_primitive_type_token(word.kind) ? 7 : 14,
+                        false, score, client, target, false, &first, "", false);
+                    offered.push(word.text.clone());
                 }
                 i += 1;
             }
+            if (prefix.len() >= 2) { append_auto_imports(store, doc, replacement, prefix.to_str(), &offered, client, pending, &out, &first); }
         }
     }
     out.push_str("]}"); return move out;
 }
 
+bool completion_needs_workspace(Document* doc, i64 offset) {
+    if (offset < 0 || offset > doc.text.len() || inside_literal(doc, offset)
+        || import_completion_context(doc, offset).is_some()) { return false; }
+    Span replacement = Span.synthetic(); String prefix = String.new(); completion_prefix(doc, offset, &replacement, &prefix);
+    if (prefix.len() < 2) { return false; }
+    i64 separator = replacement.start;
+    while (separator > 0 && (doc.text.data[separator - 1] == (u8)' ' || doc.text.data[separator - 1] == (u8)'\t')) { separator -= 1; }
+    return separator == 0 || (doc.text.data[separator - 1] != (u8)'.' && doc.text.data[separator - 1] != (u8)':');
+}
+
 enum CompletionResolveError { InvalidItem; StaleItem; }
 
-Result<String, CompletionResolveError> compute_completion_resolve(DocumentStore* store, str json, ClientOptions* client) {
+Result<String, CompletionResolveError> compute_completion_resolve(DocumentStore* store, str json, ClientOptions* client, PendingMessage* pending) {
     JsonReader reader = JsonReader.new(json);
     if (!reader.begin_object()) { return Result<String, CompletionResolveError>.err(CompletionResolveError.InvalidItem); }
     String data = json_field(json, "data");
     if (data.len() == 0) { return Result<String, CompletionResolveError>.ok(String.from_str(json)); }
-    String uri = String.new(); i64 revision = 0; i64 id = 0;
-    if (!json_string(data.to_str(), "uri", &uri) || !json_integer(data.to_str(), "revision", &revision)
-        || !json_integer(data.to_str(), "symbol", &id) || id < 0 || revision <= 0) { return Result<String, CompletionResolveError>.err(CompletionResolveError.InvalidItem); }
+    String uri = String.new(); String active_uri = String.new(); String module = String.new();
+    i64 revision = 0; i64 active_revision = 0; i64 id = 0;
+    bool auto_import = json_string(data.to_str(), "activeURI", &active_uri);
+    if (auto_import) {
+        i64 target_revision = 0;
+        if (!json_integer(data.to_str(), "activeRevision", &active_revision)
+            || !json_string(data.to_str(), "targetURI", &uri)
+            || !json_integer(data.to_str(), "targetRevision", &target_revision)
+            || !json_string(data.to_str(), "module", &module)
+            || !json_integer(data.to_str(), "symbol", &id) || id < 0
+            || active_revision <= 0 || target_revision <= 0 || module.len() == 0) {
+            return Result<String, CompletionResolveError>.err(CompletionResolveError.InvalidItem);
+        }
+        revision = target_revision;
+        Document* active = store.get(active_uri.to_str());
+        Document* target = store.get(uri.to_str());
+        if (active == (Document*)0 || active.revision != active_revision || target == (Document*)0
+            || target.revision != revision || id >= target.analysis.symbols.len()) {
+            return Result<String, CompletionResolveError>.err(CompletionResolveError.StaleItem);
+        }
+        String current_module = import_module_name(store, active, target);
+        if (!current_module.equals(module.to_str()) || import_conflicts(active, target, pending)) {
+            return Result<String, CompletionResolveError>.err(CompletionResolveError.StaleItem);
+        }
+    } else if (!json_string(data.to_str(), "uri", &uri) || !json_integer(data.to_str(), "revision", &revision)
+        || !json_integer(data.to_str(), "symbol", &id) || id < 0 || revision <= 0) {
+        return Result<String, CompletionResolveError>.err(CompletionResolveError.InvalidItem);
+    }
     Document* doc = store.get(uri.to_str());
     if (doc == (Document*)0 || doc.revision != revision || id >= doc.analysis.symbols.len()) { return Result<String, CompletionResolveError>.err(CompletionResolveError.StaleItem); }
     IdeSymbol* symbol = doc.analysis.symbols.get_ptr(id);
@@ -180,6 +345,7 @@ Result<String, CompletionResolveError> compute_completion_resolve(DocumentStore*
     if (!reader.end_object() || reader.failed) { return Result<String, CompletionResolveError>.err(CompletionResolveError.InvalidItem); }
     if (comma) { out.push(','); }
     out.push_str("\"detail\":\""); json_escape(symbol.signature.to_str(), &out);
+    if (auto_import) { out.push_str(" (import "); json_escape(module.to_str(), &out); out.push(')'); }
     out.push_str("\",\"documentation\":{\"kind\":\""); out.push_str(client.completion_markdown ? "markdown" : "plaintext");
     out.push_str("\",\"value\":\""); json_escape(symbol.documentation.to_str(), &out); out.push_str("\"}}");
     return Result<String, CompletionResolveError>.ok(move out);

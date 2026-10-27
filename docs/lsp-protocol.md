@@ -41,8 +41,8 @@ providers return eager results instead.
 | `textDocument/prepareRename` | C → S | Supported | Validates the resolved identifier and returns its selection. [Source][symbols], [checks][checks]. |
 | `textDocument/rename` | C → S | Supported | Scoped identities, independent import aliases, coordinated trait methods, conservative conflict checks, negotiated versioned edits. Complex pattern/capture analysis remains limited. [Source][symbols], [checks][checks]. |
 | `textDocument/linkedEditingRange` | C → S | Open | No linked-range provider. |
-| `textDocument/completion` | C → S | Supported | Visible declarations, locals, fields/methods, keywords and primitives; fuzzy ranking and whole-identifier edits. Snippets require client support. Expected-type ranking, auto-import and postfix assists remain open. [Source][completion], [checks][checks]. |
-| `completionItem/resolve` | C → S | Supported | Deferred detail/docs when requested by client capabilities; preserves insertion edits and rejects stale revisions. [Source][completion], [checks][checks]. |
+| `textDocument/completion` | C → S | Supported | Visible declarations, locals, fields/methods, keywords and types; module paths, import selections and source auto-import edits. Fuzzy ranking and whole-identifier edits; snippets require client support. Short code prefixes request new results. Expected-type ranking, artifact exports and postfix assists remain open. [Source][completion], [import planning][imports], [checks][checks]. |
+| `completionItem/resolve` | C → S | Supported | Deferred detail/docs when requested; preserves primary/import edits and rejects stale source or caller revisions and invalidated module mappings. [Source][completion], [checks][checks]. |
 | `textDocument/signatureHelp` | C → S | Supported | Nested/generic calls, generic-aware argument boundaries and instance receiver omission. Negotiated UTF-16 parameter label offsets support precise highlighting; other clients receive strings from the displayed signature. Overload resolution and generic substitution remain limited. [Source][completion], [checks][checks]. |
 | `textDocument/inlineCompletion` | C → S | Open | No inline-completion provider. Added to the stable inventory in 3.18. |
 | `textDocument/documentSymbol` | C → S | Supported | Declaration ranges and name selections; nested symbols or flat fallback according to client capability. [Source][symbols], [checks][checks]. |
@@ -171,6 +171,19 @@ include:
   `test_trait_method_rename_updates_contract_implementations_and_calls`,
   and the match/lambda scope scenarios.
 - Completion/structure: `test_completion_signature_and_structural_features`,
+  `test_import_path_completion_uses_module_paths_and_replaces_the_full_segment`,
+  `test_selective_import_completion_offers_only_unselected_public_exports`,
+  `test_import_completion_context_survives_repeated_snapshot_changes`,
+  `test_keyword_and_type_completions_have_plain_text_kinds_and_respect_context`,
+  `test_auto_import_completion_applies_primary_and_import_edits_and_resolves`,
+  `test_auto_import_at_file_start_combines_edits_without_overlap`,
+  `test_short_code_prefix_requests_new_data_before_auto_imports`,
+  `test_auto_import_candidates_preserve_distinct_sources_and_reject_bad_bindings`,
+  `test_auto_import_completion_tracks_open_source_modules_and_close_restores_disk_state`,
+  `test_auto_import_discovers_source_sysroot_std_modules_outside_the_workspace`,
+  `test_auto_import_real_stdlib_string_allows_member_overloads`,
+  `test_symlinked_source_modules_complete_paths_and_auto_imports`,
+  `test_auto_import_resolve_preserves_source_edits_and_rejects_stale_revisions`,
   `test_signature_parameter_labels_negotiate_exact_utf16_offsets`,
   `test_generic_commas_comments_and_operators_do_not_shift_call_arguments`,
   `test_call_hints_ignore_comments_between_callee_and_arguments`,
@@ -232,6 +245,7 @@ entry; resolve requests and client services must remain visible even when open.
 
 [metamodel]: https://raw.githubusercontent.com/microsoft/language-server-protocol/gh-pages/_specifications/lsp/3.18/metaModel/metaModel.json
 [checks]: ../scripts/check_lsp.py
+[imports]: ../bin/aglsp/src/imports.ag
 [dispatch]: ../bin/aglsp/src/main.ag
 [capabilities]: ../bin/aglsp/src/capabilities.ag
 [document]: ../bin/aglsp/src/document.ag
