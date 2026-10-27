@@ -43,14 +43,14 @@ providers return eager results instead.
 | `textDocument/linkedEditingRange` | C → S | Open | No linked-range provider. |
 | `textDocument/completion` | C → S | Supported | Visible declarations, locals, fields/methods, keywords and primitives; fuzzy ranking and whole-identifier edits. Snippets require client support. Expected-type ranking, auto-import and postfix assists remain open. [Source][completion], [checks][checks]. |
 | `completionItem/resolve` | C → S | Supported | Deferred detail/docs when requested by client capabilities; preserves insertion edits and rejects stale revisions. [Source][completion], [checks][checks]. |
-| `textDocument/signatureHelp` | C → S | Supported | Nested/generic calls and instance receiver omission. Generic expressions in arguments and overload/generic substitution remain limited. [Source][completion], [checks][checks]. |
+| `textDocument/signatureHelp` | C → S | Supported | Nested/generic calls and instance receiver omission. Negotiated UTF-16 parameter label offsets support precise highlighting; other clients receive strings. Generic expressions in arguments and overload/generic substitution remain limited. [Source][completion], [checks][checks]. |
 | `textDocument/inlineCompletion` | C → S | Open | No inline-completion provider. Added to the stable inventory in 3.18. |
 | `textDocument/documentSymbol` | C → S | Supported | Declaration ranges and name selections; nested symbols or flat fallback according to client capability. [Source][symbols], [checks][checks]. |
 | `workspace/symbol` | C → S | Supported | Eager locations, ranked fuzzy search of active workspace/open files and reachable imports. [Source][symbols], [checks][checks]. |
 | `workspaceSymbol/resolve` | C → S | Open | Workspace symbol locations are eager; no resolve provider. |
 | `textDocument/foldingRange` | C → S | Supported | Blocks, parentheses, brackets and multiline comments. Honors `rangeLimit` and `lineFoldingOnly`; line-only folds keep closing lines visible, and character folds stop at the closing delimiter. Import/region folds remain open. [Source][features], [checks][checks]. |
 | `textDocument/selectionRange` | C → S | Supported | Nested CST ranges; validates the complete UTF-16 position batch before computing results and rejects invalid input with `InvalidParams`. [Source][features], [checks][checks]. |
-| `textDocument/inlayHint` | C → S | Supported | Local inferred types and call parameter labels within the requested range. Direct lambda initializers have no inferred-type hints; ownership/move hints remain open. [Source][features], [checks][checks]. |
+| `textDocument/inlayHint` | C → S | Supported | Local inferred types and call parameter labels within the requested range. Redundant matching-name labels are suppressed through parentheses, borrows, and moves; larger expressions retain labels. Direct lambda initializers have no inferred-type hints; ownership/move hints remain open. [Source][features], [checks][checks]. |
 | `inlayHint/resolve` | C → S | Open | Hints are eager; no resolve provider. |
 | `textDocument/semanticTokens/full` | C → S | Conditional | Requires a negotiated full provider and relative format. Cached UTF-16 tokens use a compact supported legend, type fallbacks, and repacked modifier bits. Unsupported kinds are omitted before relative encoding. [Source][capabilities], [tokens][features], [checks][checks]. |
 | `textDocument/semanticTokens/full/delta` | C → S | Conditional | Requires negotiated delta support. One previous generation; unknown/older IDs return full data. Deltas compare arrays encoded with the session's immutable legend. Range queries preserve the full-token cache. [Source][features], [checks][checks]. |
@@ -148,6 +148,7 @@ include:
   `test_active_progress_cancellation_behind_saturated_edit_pipeline`,
   `test_active_progress_interruption_behind_saturated_edits_without_cancel`,
   `test_active_progress_cancellation_behind_saturated_request_pipeline`,
+  `test_stdio_eof_drains_pipelined_lifecycle_responses`,
   `test_exit_stops_reader_with_incomplete_following_frame`.
 - Synchronization/workspace: `test_utf16_incremental_changes_are_atomic_and_versioned`,
   `test_save_republishes_overlay_diagnostics_or_requests_pull_refresh`,
@@ -168,6 +169,11 @@ include:
   `test_trait_method_rename_updates_contract_implementations_and_calls`,
   and the match/lambda scope scenarios.
 - Completion/structure: `test_completion_signature_and_structural_features`,
+  `test_signature_parameter_labels_negotiate_exact_utf16_offsets`,
+  `test_call_hints_ignore_comments_between_callee_and_arguments`,
+  `test_trait_document_symbols_nest_trait_method_without_duplicating_impl`,
+  `test_parameter_hints_distinguish_names_from_expressions`,
+  `test_parameter_hints_stop_at_mismatched_delimiters`,
   `test_fuzzy_completion_ranking_replaces_the_whole_identifier_and_honors_scope`,
   `test_completion_snippets_and_deferred_details_preserve_edits_and_reject_stale_items`,
   `test_folding_honors_line_only_clients_and_range_limits`,
@@ -176,6 +182,7 @@ include:
 - Hierarchies: `test_call_hierarchy_groups_call_sites_and_rejects_stale_items`,
   `test_type_hierarchy_follows_trait_implementations`.
 - Diagnostics/tokens/progress: `test_diagnostics_stay_owned_by_document_and_close_clears`,
+  `test_lint_does_not_treat_generic_type_arguments_as_parameters`,
   `test_lambda_example_diagnostics_and_hints_use_lambda_semantics`,
   `test_push_lambda_diagnostics_report_real_errors_and_clear_after_edits`,
   `test_lambda_diagnostics_use_unsaved_imported_methods_and_invalidate_dependencies`,
@@ -237,3 +244,4 @@ entry; resolve requests and client services must remain visible even when open.
 [analysis]: ../libs/agc/src/tooling/diagnostics.ag
 [actions]: ../bin/aglsp/src/actions.ag
 [format]: ../bin/aglsp/src/format.ag
+[hierarchy]: ../bin/aglsp/src/hierarchy.ag

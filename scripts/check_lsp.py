@@ -195,7 +195,7 @@ class NativeLsp(unittest.TestCase):
     def folder_session(self, folders, env=None):
         session = Session(self.binary, self.root, env=env)
         self.addCleanup(session.close)
-        capabilities = session.result("initialize", {"rootUri": self.root.as_uri(),
+        capabilities = session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(),
             "workspaceFolders": [{"uri": path.as_uri(), "name": path.name} for path in folders],
             "capabilities": {"workspace": {"workspaceFolders": True}, "textDocument": {"diagnostic": {}}}})["capabilities"]
         self.assertEqual(capabilities["workspace"]["workspaceFolders"], {"supported": True, "changeNotifications": True})
@@ -208,7 +208,7 @@ class NativeLsp(unittest.TestCase):
         requested = {"workspace": {"semanticTokens": {"refreshSupport": refresh}}}
         if capability is not ...:
             requested["textDocument"] = {"semanticTokens": capability}
-        capabilities = session.result("initialize", {"rootUri": self.root.as_uri(), "capabilities": requested})["capabilities"]
+        capabilities = session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": requested})["capabilities"]
         session.send("initialized", {})
         return session, capabilities
 
@@ -224,7 +224,7 @@ class NativeLsp(unittest.TestCase):
         if semantic:
             requested["textDocument"]["semanticTokens"] = semantic_capability()
             requested["workspace"]["semanticTokens"] = {"refreshSupport": True}
-        capabilities = session.result("initialize", {"rootUri": self.root.as_uri(), "capabilities": requested})["capabilities"]
+        capabilities = session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": requested})["capabilities"]
         session.send("initialized", {})
         return session, capabilities
 
@@ -433,7 +433,7 @@ class NativeLsp(unittest.TestCase):
         env["SILVER_SYSROOT"] = str(repo)
         session = Session(self.binary, self.root, env=env)
         self.addCleanup(session.close)
-        session.result("initialize", {"rootUri": self.root.as_uri(), "capabilities": {
+        session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {
             "textDocument": {"diagnostic": {}}}})
         session.send("initialized", {})
         uri = (self.root / "lambdas.ag").as_uri()
@@ -497,7 +497,7 @@ class NativeLsp(unittest.TestCase):
         document = {"textDocument": {"uri": uri}}
         session = Session(self.binary, self.root)
         self.addCleanup(session.close)
-        session.result("initialize", {"rootUri": self.root.as_uri(), "capabilities": {
+        session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {
             "textDocument": {"diagnostic": {}}}})
         session.send("initialized", {})
         session.send("textDocument/didOpen", {"textDocument": {
@@ -597,6 +597,101 @@ class NativeLsp(unittest.TestCase):
         self.session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 3}, "contentChanges": [{"text": ""}]})
         self.assertEqual(self.session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}}), [])
 
+    def test_signature_parameter_labels_negotiate_exact_utf16_offsets(self):
+        # Default-value text tests tolerant editor input, not language support for defaults.
+        text = ('struct Point { i32 x; }\n'
+                'impl Point { i32 plus(&self, i32 amount) { return self.x + amount; } '
+                'i32 read(&self) { return self.x; } }\n'
+                'i32 add(i32 left, i32 right) { return left + right; }\n'
+                'T choose<T>(T left, T right) { return left; }\n'
+                'struct Box<T> { T value; }\n'
+                'i32 unbox(Box<i32> value, i32 fallback) { return fallback; }\n'
+                'i32 apply(i32(i32, i32) operation, i32 value) { return value; }\n'
+                'i32 tagged(str value = "😀", i32 tail) { return tail; }\n'
+                'i32 empty() { return 0; }\n'
+                'i32 main() { Point point; Box<i32> boxed; '
+                'add(add(1, 2), point.plus(3)); choose<i32>(4, 5); '
+                'unbox(boxed, 6); apply(add, 7); tagged("", 8); '
+                'point.read(); add(((1 + 2)), 3); return empty(); }\n')
+        uri = (self.root / 'signature-labels.ag').as_uri()
+        cases = [
+            ('point.plus(3)', 'add', ['i32 left', 'i32 right'], 1),
+            ('2), point', 'add', ['i32 left', 'i32 right'], 1),
+            ('3));', 'plus', ['i32 amount'], 0),
+            ('5);', 'choose', ['T left', 'T right'], 1),
+            ('6);', 'unbox', ['Box<i32>value', 'i32 fallback'], 1),
+            ('7);', 'apply', ['i32(i32, i32)operation', 'i32 value'], 1),
+            ('8);', 'tagged', ['str value', 'i32 tail'], 1),
+            ('1 + 2', 'add', ['i32 left', 'i32 right'], 0),
+            ('point.read()', 'read', [], 0),
+            ('empty();', 'empty', [], 0),
+        ]
+        for support in (True, False, ..., 'true', 1, {}):
+            with self.subTest(label_offset_support=support):
+                session = Session(self.binary, self.root)
+                self.addCleanup(session.close)
+                information = {'documentationFormat': ['markdown']}
+                if support is not ...:
+                    information['parameterInformation'] = {'labelOffsetSupport': support}
+                session.result('initialize', {'processId': None, 'rootUri': self.root.as_uri(), 'capabilities': {
+                    'textDocument': {'signatureHelp': {'signatureInformation': information}}}})
+                session.send('initialized', {})
+                session.send('textDocument/didOpen', {'textDocument': {
+                    'uri': uri, 'languageId': 'silver', 'version': 1, 'text': text}})
+                for marker, name, expected, active in cases:
+                    with self.subTest(call=name, marker=marker):
+                        offset = text.index(marker, text.index('i32 main()'))
+                        if not expected:
+                            offset += len(marker.split('(')[0]) + 1
+                        result = session.result('textDocument/signatureHelp', {
+                            'textDocument': {'uri': uri}, 'position': position(text, offset)})
+                        signature = result['signatures'][0]
+                        label = signature['label']
+                        self.assertIn(name + ('<T>' if name == 'choose' else '') + '(', label)
+                        self.assertEqual(signature['documentation']['kind'], 'markdown')
+                        self.assertEqual(result['activeParameter'], active)
+                        labels = [item['label'] for item in signature['parameters']]
+                        if support is True:
+                            ranges = []
+                            for parameter in expected:
+                                start = label.index(parameter)
+                                end = start + len(parameter)
+                                ranges.append([len(label[:start].encode('utf-16-le')) // 2,
+                                               len(label[:end].encode('utf-16-le')) // 2])
+                            self.assertEqual(labels, ranges)
+                            encoded = label.encode('utf-16-le')
+                            self.assertEqual([encoded[start * 2:end * 2].decode('utf-16-le')
+                                              for start, end in labels], expected)
+                            if name == 'tagged':
+                                self.assertIn('😀', label)
+                                self.assertNotEqual(labels[1][0], label.index('i32 tail'))
+                        else:
+                            strings = {'unbox': ['Box<i32> value', 'i32 fallback'],
+                                       'apply': ['i32(i32, i32) operation', 'i32 value']}
+                            self.assertEqual(labels, strings.get(name, expected))
+
+
+    def test_call_hints_ignore_comments_between_callee_and_arguments(self):
+        calls = ['named /*comment*/ (1)', 'named/*comment*/(1)',
+                 'named<i32>/*comment*/(1)', 'named/*comment*/<i32>(1)',
+                 'named/*before*/<i32>/*after*/(1)', 'named // line comment\n (1)']
+        for index, call in enumerate(calls):
+            with self.subTest(call=call):
+                text = ('T named<T>(T value) { return value; }\n'
+                        'i32 main() { return ' + call + '; }\n')
+                uri = self.open(text, f'comment-call-{index}.ag')
+                document = {'textDocument': {'uri': uri}}
+                argument = text.index('1)')
+                result = self.session.result('textDocument/signatureHelp', {
+                    **document, 'position': position(text, argument + 1)})
+                self.assertIsNotNone(result)
+                self.assertEqual(result['signatures'][0]['label'], 'T named<T>(T value)')
+                self.assertEqual(result['activeParameter'], 0)
+                self.assertEqual(self.session.result('textDocument/inlayHint', {
+                    **document, 'range': {'start': position(text, 0), 'end': position(text, len(text))}}),
+                    [{'position': position(text, argument), 'kind': 2,
+                      'paddingRight': True, 'label': 'value:'}])
+
     def test_completion_signature_and_structural_features(self):
         text = ("/* first line\n second line */\nstruct Point { i32 x; }\n"
                 "impl Point { i32 plus(&self, i32 amount) { return self.x + amount; } }\n"
@@ -630,6 +725,99 @@ class NativeLsp(unittest.TestCase):
         self.assertEqual(point["children"][0]["name"], "x")
         self.assertLess(point["range"]["start"]["character"], point["selectionRange"]["start"]["character"])
 
+    def test_trait_document_symbols_nest_trait_method_without_duplicating_impl(self):
+        text = ("trait Read { i32 read(&self); }\n"
+                "struct Meter { i32 value; }\n"
+                "impl Read for Meter { i32 read(&self) { return self.value; } }\n")
+        uri = self.open(text, "trait-outline.ag")
+        document = {"textDocument": {"uri": uri}}
+        outline = self.session.result("textDocument/documentSymbol", document)
+        read_trait = next(item for item in outline if item["name"] == "Read")
+        meter = next(item for item in outline if item["name"] == "Meter")
+        trait_methods = [item for item in read_trait["children"] if item["name"] == "Read.read"]
+        fields = [item for item in meter["children"] if item["name"] == "value"]
+        self.assertEqual(len(trait_methods), 1)
+        self.assertFalse(any(item["name"] == "Read.read" for item in outline))
+        self.assertEqual(trait_methods[0]["selectionRange"], location(text, "read"))
+        self.assertEqual(len(fields), 1)
+        self.assertFalse(any(item["name"] == "value" for item in outline))
+        self.assertEqual(fields[0]["selectionRange"], location(text, "value"))
+        impl_read = [item for item in outline if item["name"] == "Meter.read"]
+        self.assertEqual(len(impl_read), 1)
+        self.assertFalse(any(item["name"] == "Meter.read" for item in meter["children"]))
+        self.assertEqual(impl_read[0]["selectionRange"], location(text, "read", text.index("impl Read")))
+        self.assertEqual([item["name"] for item in outline], ["Read", "Meter", "Meter.read"])
+
+        flat = Session(self.binary, self.root)
+        self.addCleanup(flat.close)
+        flat.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {}})
+        flat.send("initialized", {})
+        flat.send("textDocument/didOpen", {"textDocument": {
+            "uri": uri, "languageId": "silver", "version": 1, "text": text}})
+        flat_symbols = flat.result("textDocument/documentSymbol", document)
+        read_symbols = [item for item in flat_symbols if item["name"] == "read"]
+        self.assertEqual([(item["containerName"], item["location"]["range"]) for item in read_symbols], [
+            ("Read", location(text, "read")),
+            ("Meter", location(text, "read", text.index("impl Read"))),
+        ])
+
+    def test_lint_does_not_treat_generic_type_arguments_as_parameters(self):
+        text = ("struct Marker {}\n"
+                "struct Pair<T, U> { T first; U second; }\n"
+                "i32 inspect(Pair<Marker, i32>* pair, i32 unused_named) { return pair.second; }\n")
+        uri = self.open(text, "generic-parameter-lint.ag")
+        diagnostics = self.session.diagnostics[uri]["diagnostics"]
+        self.assertFalse(any(item["message"].startswith("unused parameter 'Marker'") for item in diagnostics), diagnostics)
+        unused = [item for item in diagnostics if item["message"] ==
+                  "unused parameter 'unused_named' (help: prefix with _ to ignore: '_unused_named')"]
+        self.assertEqual(len(unused), 1, diagnostics)
+        self.assertEqual(unused[0]["range"], location(text, "unused_named"))
+        self.assertEqual(unused[0]["severity"], 2)
+
+    def test_parameter_hints_distinguish_names_from_expressions(self):
+        text = ('i32 named(i32 value) { return value; }\n'
+                'i32 borrowed(&i32 value) { return *value; }\n'
+                'i32 mutable(&mut i32 value) { return *value; }\n'
+                'i32 main() {\n i32 value = 2;\n'
+                ' named(value); named(value + 1); named(value * 2);\n'
+                ' named((value)); named(((value + 1)));\n'
+                ' borrowed(&value); borrowed(&(value)); mutable(&mut value);\n'
+                ' named(move value); named(/*😀*/ value /*same*/);\n'
+                ' named(1); named(named(2)); return 0;\n}\n')
+        uri = self.open(text)
+        document = {"textDocument": {"uri": uri}}
+        hints = self.session.result("textDocument/inlayHint", {**document, "range": {
+            "start": position(text, 0), "end": position(text, len(text))}})
+        expected = [text.index('value + 1'), text.index('value * 2'),
+                    text.index('((value + 1))'), text.index('1);', text.index(' named(1)')),
+                    text.index('named(2)'), text.index('2));')]
+        self.assertEqual(hints, [{"position": position(text, at), "kind": 2,
+                                 "paddingRight": True, "label": "value:"} for at in expected])
+        begin = text.index('value + 1')
+        end = begin + len('value + 1')
+        self.assertEqual(self.session.result("textDocument/inlayHint", {**document, "range": {
+            "start": position(text, begin), "end": position(text, end)}}), [hints[0]])
+        self.session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
+            "contentChanges": [{"text": text.replace('value + 1', 'value')}]})
+        updated = text.replace('value + 1', 'value')
+        after = self.session.result("textDocument/inlayHint", {**document, "range": {
+            "start": position(updated, 0), "end": position(updated, len(updated))}})
+        self.assertEqual([item["position"] for item in after],
+                         [position(updated, updated.index(word)) for word in ['value * 2', '1);', 'named(2)', '2));']])
+
+    def test_parameter_hints_stop_at_mismatched_delimiters(self):
+        declarations = ('i32 f(i32 a, i32 b) { return a + b; }\n'
+                        'i32 g(i32 x) { return x; }\n')
+        for index, expression in enumerate(('f([1), g(2)', 'f({1], g(2)', 'f([1), 9; return g(2)')):
+            with self.subTest(expression=expression):
+                text = declarations + 'i32 main() { ' + expression + '; }\n'
+                uri = self.open(text, f'malformed-call-{index}.ag')
+                hints = self.session.result('textDocument/inlayHint', {
+                    'textDocument': {'uri': uri}, 'range': {
+                        'start': position(text, 0), 'end': position(text, len(text))}})
+                self.assertEqual(hints, [{'position': position(text, text.index('2)')),
+                                         'kind': 2, 'paddingRight': True, 'label': 'x:'}])
+
     def test_folding_honors_line_only_clients_and_range_limits(self):
         text = ('i32 main() {\n if (true) {\n  return 1;\n }\n return 0;\n}\n'
                 '/* comment\n body\n */ i32 after() { return 2; }\n'
@@ -645,7 +833,7 @@ class NativeLsp(unittest.TestCase):
                 options = {"lineFoldingOnly": line_only}
                 if limit is not None:
                     options["rangeLimit"] = limit
-                session.result("initialize", {"rootUri": self.root.as_uri(), "capabilities": {
+                session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {
                     "textDocument": {"foldingRange": options}}})
                 session.send("initialized", {})
                 session.send("textDocument/didOpen", {"textDocument": {
@@ -712,7 +900,7 @@ class NativeLsp(unittest.TestCase):
     def test_completion_snippets_and_deferred_details_preserve_edits_and_reject_stale_items(self):
         session = Session(self.binary, self.root)
         self.addCleanup(session.close)
-        capabilities = session.result("initialize", {"rootUri": self.root.as_uri(), "capabilities": {"textDocument": {
+        capabilities = session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {"textDocument": {
             "completion": {"completionItem": {"snippetSupport": True, "documentationFormat": ["markdown"],
                 "resolveSupport": {"properties": ["detail", "documentation"]}}}}}})["capabilities"]
         self.assertTrue(capabilities["completionProvider"]["resolveProvider"])
@@ -811,7 +999,7 @@ class NativeLsp(unittest.TestCase):
     def test_import_quickfix_uses_versions_and_excludes_legacy_clients(self):
         session = Session(self.binary, self.root)
         self.addCleanup(session.close)
-        caps = session.result("initialize", {"rootUri": self.root.as_uri(), "capabilities": {"workspace": {"workspaceEdit": {"documentChanges": True}},
+        caps = session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {"workspace": {"workspaceEdit": {"documentChanges": True}},
             "textDocument": {"codeAction": {"codeActionLiteralSupport": {"codeActionKind": {"valueSet": ["quickfix"]}}}}}})["capabilities"]
         self.assertIn("codeActionProvider", caps)
         session.send("initialized", {})
@@ -823,7 +1011,7 @@ class NativeLsp(unittest.TestCase):
         self.assertEqual(action["edit"]["documentChanges"][0]["textDocument"], {"uri": uri, "version": 7})
         legacy = Session(self.binary, self.root)
         self.addCleanup(legacy.close)
-        self.assertNotIn("codeActionProvider", legacy.result("initialize", {"rootUri": self.root.as_uri(), "capabilities": {}})["capabilities"])
+        self.assertNotIn("codeActionProvider", legacy.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {}})["capabilities"])
         legacy.send("initialized", {})
         self.assertEqual(legacy.request("textDocument/codeAction", params)["error"]["code"], -32601)
 
@@ -844,7 +1032,7 @@ class NativeLsp(unittest.TestCase):
         self.assertEqual(links[0]["target"], local.as_uri())
         session = Session(self.binary, self.root)
         self.addCleanup(session.close)
-        caps = session.result("initialize", {"rootUri": self.root.as_uri(), "capabilities": {}})["capabilities"]
+        caps = session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {}})["capabilities"]
         self.assertFalse(caps["documentLinkProvider"]["resolveProvider"])
         session.send("initialized", {})
         session.send("textDocument/didOpen", {"textDocument": {"uri": uri, "version": 1, "text": text}})
@@ -1061,7 +1249,7 @@ class NativeLsp(unittest.TestCase):
 
     def test_protocol_errors_and_string_request_ids(self):
         self.assertEqual(self.session.request("unknown/request", {})["error"]["code"], -32601)
-        self.assertEqual(self.session.request("initialize", {"capabilities": {}})["error"]["code"], -32600)
+        self.assertEqual(self.session.request("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {}})["error"]["code"], -32600)
         text = "i32 main() { return 0; }\n"
         uri = self.open(text)
         self.session.send("textDocument/hover", self.at(uri, text, "main"), "request-string-id")
@@ -1203,7 +1391,7 @@ class NativeLsp(unittest.TestCase):
             source.write_text("i32 system_answer() { return 42; }\n")
             session = Session(self.binary, self.root, env=os.environ | {"SILVER_SYSROOT": str(sysroot)})
             try:
-                session.result("initialize", {"rootUri": self.root.as_uri(), "capabilities": {}})
+                session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {}})
                 session.send("initialized", {})
                 text = "import std.sample;\ri32 main() { return system_answer(); }\r"
                 uri = (self.root / "system.ag").as_uri()
@@ -1218,7 +1406,7 @@ class NativeLsp(unittest.TestCase):
             environment.pop("SILVER_SYSROOT", None)
             session = Session(self.binary, self.root, env=environment)
             try:
-                session.result("initialize", {"rootUri": self.root.as_uri(), "capabilities": {}})
+                session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {}})
                 session.send("initialized", {})
                 text = "import std.string;\ni32 main() { String message = String.new(); return 0; }\n"
                 uri = (self.root / "installed.ag").as_uri()
@@ -1244,7 +1432,7 @@ class NativeLsp(unittest.TestCase):
                 f"i32 symbol{index}_{item}() {{ return {item}; }}" for item in range(24)))
         session = Session(self.binary, self.root)
         try:
-            session.result("initialize", {"rootUri": self.root.as_uri(), "capabilities": {}})
+            session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {}})
             session.send("initialized", {})
             messages = [
                 {"jsonrpc": "2.0", "id": "cancel-me", "method": "workspace/symbol", "params": {"query": "symbol"}},
@@ -1276,7 +1464,7 @@ class NativeLsp(unittest.TestCase):
     def test_exit_stops_reader_with_incomplete_following_frame(self):
         session = Session(self.binary, self.root)
         try:
-            session.result("initialize", {"rootUri": self.root.as_uri(), "capabilities": {}})
+            session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {}})
             session.result("shutdown")
             body = json.dumps({"jsonrpc": "2.0", "method": "exit"}).encode()
             # Queue both frames before a fast server can exit.
@@ -1287,6 +1475,41 @@ class NativeLsp(unittest.TestCase):
             self.assertEqual(session.process.returncode, 0)
         finally:
             session.close()
+
+    def test_stdio_eof_drains_pipelined_lifecycle_responses(self):
+        for iteration in range(32):
+            with self.subTest(iteration=iteration):
+                messages = [
+                    {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                        "processId": None, "rootUri": self.root.as_uri(), "capabilities": {}}},
+                    {"jsonrpc": "2.0", "method": "initialized", "params": {}},
+                    {"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": {}},
+                ]
+                if iteration % 2 == 0:
+                    messages.append({"jsonrpc": "2.0", "method": "exit"})
+                payload = b"".join(
+                    f"Content-Length: {len(body)}\r\n\r\n".encode() + body
+                    for body in (json.dumps(message).encode() for message in messages)
+                )
+                completed = subprocess.run([str(self.binary)], cwd=self.root, input=payload,
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+                self.assertEqual(completed.returncode, 0, completed.stderr.decode(errors="replace"))
+                offset = 0
+                responses = []
+                while offset < len(completed.stdout):
+                    header_end = completed.stdout.find(b"\r\n\r\n", offset)
+                    self.assertGreaterEqual(header_end, 0, completed.stdout[offset:])
+                    headers = completed.stdout[offset:header_end].decode("ascii").split("\r\n")
+                    length = int(next(line.split(":", 1)[1] for line in headers
+                                      if line.lower().startswith("content-length:")))
+                    body_start = header_end + 4
+                    body_end = body_start + length
+                    self.assertLessEqual(body_end, len(completed.stdout))
+                    responses.append(json.loads(completed.stdout[body_start:body_end]))
+                    offset = body_end
+                self.assertEqual([message["id"] for message in responses], [1, 2])
+                self.assertNotIn("error", responses[0], responses)
+                self.assertEqual(responses[1], {"jsonrpc": "2.0", "id": 2, "result": None})
 
     def test_diagnostics_invalidate_dependents_without_republishing_unrelated_files(self):
         main = "import helper;\ni32 main() { return answer(1); }\n"
@@ -1380,7 +1603,7 @@ class NativeLsp(unittest.TestCase):
             (sub / name).write_text(text)
         session = Session(self.binary, self.root)
         self.addCleanup(session.close)
-        capabilities = session.result("initialize", {"rootUri": self.root.as_uri(), "capabilities": {
+        capabilities = session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {
             "textDocument": {"diagnostic": {}, "semanticTokens": semantic_capability()}}})["capabilities"]
         session.send("initialized", {})
         near_uri = (sub / "helper.ag").as_uri()
@@ -1571,7 +1794,7 @@ class NativeLsp(unittest.TestCase):
                         self.assertTrue(session.result("textDocument/semanticTokens/" + method, {**document, **extra})["data"])
                     else:
                         self.assertEqual(session.request("textDocument/semanticTokens/" + method, {})["error"]["code"], -32601)
-                self.assertEqual(session.request("initialize", {"capabilities": {}})["error"]["code"], -32600)
+                self.assertEqual(session.request("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {}})["error"]["code"], -32600)
                 self.assertTrue(session.result("textDocument/semanticTokens/" + ("full" if full else "range"), {
                     **document, "range": {"start": {"line": 0, "character": 0}, "end": {"line": 2, "character": 0}},
                 })["data"])
@@ -1731,7 +1954,7 @@ class NativeLsp(unittest.TestCase):
     def test_client_formats_flat_symbols_and_versioned_workspace_edits(self):
         session = Session(self.binary, self.root)
         try:
-            session.result("initialize", {"rootUri": self.root.as_uri(), "capabilities": {
+            session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {
                 "workspace": {"workspaceEdit": {"documentChanges": True}},
                 "textDocument": {"hover": {"contentFormat": ["plaintext", "markdown"]}},
             }})
@@ -1769,7 +1992,7 @@ class NativeLsp(unittest.TestCase):
                 f"i32 symbol{index}_{item}() {{ return {item}; }}" for item in range(256)))
         session = Session(self.binary, self.root)
         try:
-            session.result("initialize", {"rootUri": self.root.as_uri(), "capabilities": {}})
+            session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {}})
             session.send("initialized", {})
             token = "\x00work😀"
             session.send("workspace/symbol", {"query": "symbol", "workDoneToken": token}, "long-index")
@@ -1813,7 +2036,7 @@ class NativeLsp(unittest.TestCase):
                 f"i32 symbol{index}_{item}() {{ return {item}; }}" for item in range(256)))
         session = Session(self.binary, self.root)
         self.addCleanup(session.close)
-        session.result("initialize", {"rootUri": self.root.as_uri(), "capabilities": {}})
+        session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {}})
         session.send("initialized", {})
         uri = (self.root / "pipeline.ag").as_uri()
         text = "i32 pipeline() { return 0; }\n"
@@ -1888,7 +2111,7 @@ class NativeLsp(unittest.TestCase):
     def test_pull_diagnostics_cache_dependency_changes_and_refresh_acknowledgements(self):
         session = Session(self.binary, self.root)
         try:
-            initialized = session.result("initialize", {"rootUri": self.root.as_uri(), "capabilities": {
+            initialized = session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {
                 "textDocument": {"diagnostic": {}, "publishDiagnostics": {"relatedInformation": True}, "semanticTokens": semantic_capability()},
                 "workspace": {"diagnostics": {"refreshSupport": True}, "semanticTokens": {"refreshSupport": True}},
             }})
@@ -1938,7 +2161,7 @@ class NativeLsp(unittest.TestCase):
     def test_client_refresh_requests_coalesce_without_losing_later_changes(self):
         session = Session(self.binary, self.root)
         try:
-            session.result("initialize", {"rootUri": self.root.as_uri(), "capabilities": {
+            session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {
                 "textDocument": {"semanticTokens": semantic_capability()}, "workspace": {"semanticTokens": {"refreshSupport": True}}}})
             session.send("initialized", {})
             uri = (self.root / "refresh.ag").as_uri()
@@ -2142,7 +2365,7 @@ class NativeLsp(unittest.TestCase):
         self.assertEqual(published, [original])
         session = Session(self.binary, self.root)
         self.addCleanup(session.close)
-        session.result("initialize", {"rootUri": self.root.as_uri(), "capabilities": {
+        session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {
             "textDocument": {"diagnostic": {}}, "workspace": {"diagnostics": {"refreshSupport": True}}}})
         session.send("initialized", {})
         session.send("textDocument/didOpen", {"textDocument": {"uri": uri, "languageId": "silver", "version": 7, "text": text}})

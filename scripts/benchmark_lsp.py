@@ -18,7 +18,7 @@ def summarize(samples):
 
 
 def benchmark(binary, root, runs, semantic_document):
-    samples = {"first_hover": [], "workspace_index_and_search": [], "edited_hover": []}
+    samples = {"first_hover": [], "workspace_index_and_search": [], "cached_workspace_search": [], "edited_hover": []}
     if semantic_document:
         samples["semantic_tokens"] = []
     text = "i32 main() { i32 value = 7; return value; }\n"
@@ -27,7 +27,7 @@ def benchmark(binary, root, runs, semantic_document):
     for _ in range(runs):
         session = Session(binary, root)
         try:
-            session.result("initialize", {"rootUri": root.as_uri(), "capabilities": {
+            session.result("initialize", {"processId": None, "rootUri": root.as_uri(), "capabilities": {
                 "textDocument": {"semanticTokens": semantic_capability()}} if semantic_document else {}})
             start = time.perf_counter()
             session.send("initialized", {})
@@ -38,6 +38,9 @@ def benchmark(binary, root, runs, semantic_document):
             start = time.perf_counter()
             assert session.result("workspace/symbol", {"query": "IdeIndex"})
             samples["workspace_index_and_search"].append((time.perf_counter() - start) * 1000)
+            start = time.perf_counter()
+            assert session.result("workspace/symbol", {"query": "IdeIndex"})
+            samples["cached_workspace_search"].append((time.perf_counter() - start) * 1000)
             start = time.perf_counter()
             session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
                          "contentChanges": [{"text": text.replace("7", "8")}]})

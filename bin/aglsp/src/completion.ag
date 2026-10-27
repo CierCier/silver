@@ -186,6 +186,7 @@ Result<String, CompletionResolveError> compute_completion_resolve(DocumentStore*
 // Delimiter matching uses tokens, so strings and comments cannot affect the call stack.
 i64 call_occurrence(Document* doc, i64 open) {
     i64 previous = open - 1;
+    while (previous >= 0 && doc.analysis.tokens.get(previous).kind == TokenKind.Comment) { previous -= 1; }
     if (previous < 0) { return -1; }
     TokenKind kind = doc.analysis.tokens.get(previous).kind;
     if (kind == TokenKind.Greater || kind == TokenKind.RightShift) {
@@ -199,7 +200,8 @@ i64 call_occurrence(Document* doc, i64 open) {
             previous -= 1;
         }
     }
-    if (previous < 0) { return -1; }
+    while (previous >= 0 && doc.analysis.tokens.get(previous).kind == TokenKind.Comment) { previous -= 1; }
+    if (previous < 0 || doc.analysis.tokens.get(previous).kind != TokenKind.Identifier) { return -1; }
     return doc.analysis.occurrence_at(doc.analysis.tokens.get(previous).span.start);
 }
 
@@ -231,7 +233,44 @@ i64 active_call(Document* doc, i64 offset) {
     return -1;
 }
 
-String compute_signature_help(Document* doc, i64 offset, bool markdown) {
+i64 signature_utf16_offset(str text, i64 offset) {
+    i64 units = 0; i64 cursor = 0;
+    while (cursor < offset) {
+        u8 byte = (u8)text[cursor]; units += byte >= 240 ? 2 : 1;
+        cursor += utf8_width(byte);
+    }
+    return units;
+}
+
+Vec<Span> signature_parameter_ranges(Document* doc, IdeSymbol* symbol) {
+    Vec<Span> ranges = Vec<Span>.new();
+    i64 occurrence = doc.analysis.occurrence_at(symbol.selection.start);
+    if (occurrence < 0) { return move ranges; }
+    SyntaxNode* name = doc.analysis.occurrences.get_ptr(occurrence).node;
+    SyntaxNode* params = name.next_sibling;
+    while (params != (SyntaxNode*)0 && params.kind != NodeKind.Parenthesized) { params = params.next_sibling; }
+    if (params == (SyntaxNode*)0) { return move ranges; }
+    SyntaxNode* start = name.parent.first_child;
+    while (start != (SyntaxNode*)0 && start.span.start < symbol.extent.start) { start = start.next_sibling; }
+    String rendered = ide_render(start, params); rendered.push('(');
+    Vec<Binding> bindings = Vec<Binding>.new(); collect_parameter_bindings(params, &bindings);
+    SyntaxNode* cursor = params.first_child; i64 i = 0;
+    while (i < bindings.len()) {
+        Binding* binding = bindings.get_ptr(i);
+        while (cursor != binding.type_start) { ide_append_tokens(cursor, &rendered); cursor = cursor.next_sibling; }
+        i64 begin = rendered.len();
+        while (cursor != binding.name_node.next_sibling) { ide_append_tokens(cursor, &rendered); cursor = cursor.next_sibling; }
+        // Render with the signature's spacing, including the space following a comma.
+        while (begin < rendered.len() && rendered.data[begin] == (u8)' ') { begin += 1; }
+        Span range = Span.synthetic();
+        range.start = signature_utf16_offset(rendered.to_str(), begin);
+        range.end = signature_utf16_offset(rendered.to_str(), rendered.len());
+        ranges.push(range); i += 1;
+    }
+    return move ranges;
+}
+
+String compute_signature_help(Document* doc, i64 offset, ClientOptions* client) {
     i64 call = active_call(doc, offset);
     if (call < 0 || inside_literal(doc, offset)) { return String.from_str("null"); }
     i64 occurrence = call_occurrence(doc, call);
@@ -251,13 +290,19 @@ String compute_signature_help(Document* doc, i64 offset, bool markdown) {
     }
     i64 count = symbol.parameters.len() - skip;
     if (active >= count && count > 0) { active = count - 1; }
+    Vec<Span> ranges = Vec<Span>.new();
+    if (client.signature_label_offsets) { ranges = signature_parameter_ranges(target.document, symbol); }
     String out = String.from_str("{\"signatures\":[{\"label\":\"");
-    json_escape(symbol.signature.to_str(), &out); out.push_str("\",\"documentation\":{\"kind\":\""); out.push_str(markdown ? "markdown" : "plaintext"); out.push_str("\",\"value\":\"");
+    json_escape(symbol.signature.to_str(), &out); out.push_str("\",\"documentation\":{\"kind\":\""); out.push_str(client.signature_markdown ? "markdown" : "plaintext"); out.push_str("\",\"value\":\"");
     json_escape(symbol.documentation.to_str(), &out); out.push_str("\"},\"parameters\":[");
     i = skip;
     while (i < symbol.parameters.len()) {
         if (i > skip) { out.push(','); }
-        out.push_str("{\"label\":\""); json_escape(symbol.parameters.get_ptr(i).to_str(), &out); out.push_str("\"}"); i += 1;
+        out.push_str("{\"label\":");
+        if (i < ranges.len()) {
+            Span range = ranges.get(i); out.push('['); out.push_display(&range.start); out.push(','); out.push_display(&range.end); out.push(']');
+        } else { out.push('"'); json_escape(symbol.parameters.get_ptr(i).to_str(), &out); out.push('"'); }
+        out.push('}'); i += 1;
     }
     out.push_str("]}],\"activeSignature\":0,\"activeParameter\":"); out.push_display(&active); out.push('}'); return move out;
 }

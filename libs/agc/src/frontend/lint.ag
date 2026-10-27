@@ -1,6 +1,7 @@
 import std.mem.vec;
 import std.string;
 import frontend.ast;
+import frontend.bindings;
 import frontend.cfg;
 import frontend.diagnostics;
 import frontend.messages;
@@ -80,20 +81,19 @@ bool lint_same_name(str left, str right) {
 
 void lint_add_parameter_bindings(SyntaxNode* parameters, Vec<LintBinding>* bindings) {
     if (parameters == (SyntaxNode*)0) { return; }
-    SyntaxNode* child = parameters.first_child;
-    while (child != (SyntaxNode*)0) {
-        if (child.kind == NodeKind.Token && child.token_kind == TokenKind.Identifier
-            && (child.next_sibling == (SyntaxNode*)0
-                || child.next_sibling.kind == NodeKind.Token
-                    && child.next_sibling.token_kind == TokenKind.Comma)
-            && !lint_same_name(child.text, "self")) {
+    Vec<Binding> parameter_bindings = Vec<Binding>.new();
+    collect_parameter_bindings(parameters, &parameter_bindings);
+    i64 i = 0;
+    while (i < parameter_bindings.len()) {
+        Binding* parameter = parameter_bindings.get_ptr(i);
+        if (!lint_same_name(parameter.name, "self")) {
             LintBinding binding;
-            binding.declaration = child;
+            binding.declaration = parameter.name_node;
             binding.parameter = true;
             binding.used = false;
             bindings.push(binding);
         }
-        child = child.next_sibling;
+        i += 1;
     }
 }
 

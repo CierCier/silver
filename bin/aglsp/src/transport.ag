@@ -29,7 +29,7 @@ struct Transport {
     RawMutex mutex;
     Vec<PendingMessage*> pending;
     i32 stopping;
-    bool reader_waiting;
+    i32 reader_waiting;
 }
 
 String request_identity(str raw) {
@@ -55,9 +55,7 @@ bool request_interrupted(PendingMessage* message) {
     if (request_cancelled(message)) { return true; }
     if (!message.preemptible) { return false; }
     Transport* transport = message.transport;
-    transport.mutex.lock();
-    if (transport.reader_waiting) { message.pressure_interrupted = true; }
-    transport.mutex.unlock();
+    if (__atomic_load_i32(&transport.reader_waiting, ATOMIC_ACQUIRE) != 0) { message.pressure_interrupted = true; }
     return message.pressure_interrupted;
 }
 
@@ -70,7 +68,7 @@ void seal_message(PendingMessage* message, bool interruptible) {
         message.completion = RequestCompletion.Finished;
         if (interruptible) {
             if (request_cancelled(message)) { message.completion = RequestCompletion.Cancelled; }
-            else if (message.preemptible && (message.pressure_interrupted || transport.reader_waiting)) {
+            else if (message.preemptible && (message.pressure_interrupted || __atomic_load_i32(&transport.reader_waiting, ATOMIC_ACQUIRE) != 0)) {
                 message.pressure_interrupted = true; message.completion = RequestCompletion.Interrupted;
             }
         }
@@ -150,9 +148,9 @@ void read_transport(i64 address) {
         transport.mutex.lock(); transport.pending.push(pending); transport.mutex.unlock();
         if (!transport.messages.try_send(pending)) {
             // Publish pressure before blocking, even if analysis has not started.
-            transport.mutex.lock(); transport.reader_waiting = true; transport.mutex.unlock();
+            __atomic_store_i32(&transport.reader_waiting, 1, ATOMIC_RELEASE);
             bool sent = transport.messages.send(pending);
-            transport.mutex.lock(); transport.reader_waiting = false; transport.mutex.unlock();
+            __atomic_store_i32(&transport.reader_waiting, 0, ATOMIC_RELEASE);
             if (!sent) { break; }
         }
         if (valid && parsed.method.equals("exit")) { break; }
@@ -166,7 +164,7 @@ impl Transport {
         transport.messages = Channel<PendingMessage*>.bounded(32);
         transport.mutex = RawMutex.new(); transport.pending = Vec<PendingMessage*>.new();
         transport.stopping = 0;
-        transport.reader_waiting = false;
+        __atomic_store_i32(&transport.reader_waiting, 0, ATOMIC_RELEASE);
         return move transport;
     }
 

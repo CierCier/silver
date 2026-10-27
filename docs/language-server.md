@@ -71,17 +71,27 @@ The native server provides these features:
   existing call parentheses prevent duplicate insertion. Clients advertising
   deferred detail/documentation receive them through `completionItem/resolve`.
   Resolve preserves insertion edits and rejects stale symbol revisions.
-- Signature help for nested calls and generic function calls. Instance methods
-  omit the implicit receiver from the parameter list.
+- Signature help for nested calls and generic function calls, including comments
+  between the callee and its argument list. Instance methods
+  omit the implicit receiver from the parameter list. Clients advertising
+  `parameterInformation.labelOffsetSupport` receive UTF-16 parameter ranges
+  within the displayed signature for precise active-parameter highlighting.
+  Other clients receive parameter strings.
 - Document symbols with name selections and declaration ranges, workspace symbol
   search, semantic tokens with full/delta/range requests, folding ranges, and selection ranges.
+  Hierarchical outlines nest trait declarations' methods once under their trait;
+  implementation methods remain at the top level. Flat outlines retain both.
   Folding honors client range limits and line-only output, keeping closing lines
   visible. Selection requests validate the full UTF-16 position batch before
   computing nested ranges.
 - Call hierarchies with grouped call sites and type hierarchies over explicit
   trait implementations. Hierarchy follow-up requests reject stale document revisions.
 - Inferred local type hints and parameter name hints, restricted to the requested
-  range. Direct lambda initializers currently have no inferred-type hints.
+  range. Parameter hints omit arguments that already name the parameter, including
+  parenthesized, borrowed, and explicitly moved names. Expressions such as
+  `value + 1` retain their hints. Mismatched argument delimiters stop hint scanning
+  so labels do not spill into later code. Direct lambda initializers currently have no
+  inferred-type hints.
 - Versioned diagnostics from the native frontend's name, declared-type, borrow,
   Send, ownership, expression, and lint checks. Lambda diagnostics use the
   compiler's closure conversion on an owned syntax-tree copy. Source-import
@@ -196,7 +206,8 @@ Present JSON-RPC parameters must be an object or array. Primitive parameters,
 including `null`, produce `InvalidRequest` before lifecycle state can change.
 
 The stdin reader feeds a bounded queue of 32 messages. One dispatcher owns all
-document snapshots and stdout. Background workspace indexing yields after each
+document snapshots and stdout. Closing the input drains queued messages before
+the dispatcher exits. Background workspace indexing yields after each
 file or directory, so local requests can run while indexing remains unfinished.
 Workspace search, references, and rename finish the pending index before
 returning. Cancellation checks stop that traversal between files and return

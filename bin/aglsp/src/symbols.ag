@@ -76,7 +76,12 @@ String compute_document_symbols(Document* doc, bool hierarchical) {
     String out = String.from_str("["); bool first = true; i64 i = 0;
     while (i < doc.analysis.symbols.len()) {
         IdeSymbol* symbol = doc.analysis.symbols.get_ptr(i);
-        if (!symbol.local && (!hierarchical || symbol.owner.len() == 0 || symbol.kind == IdeSymbolKind.Method)) {
+        bool top_level = symbol.owner.len() == 0;
+        if (hierarchical && symbol.kind == IdeSymbolKind.Method) {
+            SymbolTarget target; target.document = doc; target.symbol = i;
+            top_level = containing_implementation(target) != (IdeImplementation*)0;
+        }
+        if (!symbol.local && (!hierarchical || top_level)) {
             if (!first) { out.push(','); } first = false;
             if (hierarchical) { append_document_symbol(&out, doc, i, symbol.kind != IdeSymbolKind.Method); }
             else { append_symbol_information(&out, doc, symbol); }

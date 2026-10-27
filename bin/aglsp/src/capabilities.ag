@@ -86,6 +86,7 @@ struct ClientOptions {
     bool completion_resolve_detail;
     bool completion_resolve_documentation;
     bool signature_markdown;
+    bool signature_label_offsets;
     bool hierarchical_symbols;
     bool versioned_edits;
     bool diagnostic_versions;
@@ -145,6 +146,7 @@ ClientOptions client_options(str params) {
     String snippets = client_field(params, "capabilities.textDocument.completion.completionItem.snippetSupport");
     String resolve = client_field(params, "capabilities.textDocument.completion.completionItem.resolveSupport.properties");
     String signature = client_field(params, "capabilities.textDocument.signatureHelp.signatureInformation.documentationFormat");
+    String signature_offsets = client_field(params, "capabilities.textDocument.signatureHelp.signatureInformation.parameterInformation.labelOffsetSupport");
     String symbols = client_field(params, "capabilities.textDocument.documentSymbol.hierarchicalDocumentSymbolSupport");
     String edits = client_field(params, "capabilities.workspace.workspaceEdit.documentChanges");
     String versions = client_field(params, "capabilities.textDocument.publishDiagnostics.versionSupport");
@@ -160,6 +162,7 @@ ClientOptions client_options(str params) {
     options.completion_resolve_detail = client_property(resolve.to_str(), "detail");
     options.completion_resolve_documentation = client_property(resolve.to_str(), "documentation");
     options.signature_markdown = prefers_markdown(signature.to_str()); options.hierarchical_symbols = symbols.equals("true");
+    options.signature_label_offsets = signature_offsets.equals("true");
     options.versioned_edits = edits.equals("true"); options.diagnostic_versions = versions.equals("true");
     options.related_diagnostics = related.equals("true");
     options.pull_diagnostics = diagnostic.starts_with("{"); options.diagnostic_refresh = diagnostic_refresh.equals("true");

@@ -102,7 +102,7 @@ void handle_document_request(DocumentStore* store, WorkspaceIndex* index, Client
         else { result = compute_implementations(store, doc, target); }
     }
     else if (strcmp(method, "textDocument/completion") == 0) { result = compute_completion(doc, offset, client); }
-    else if (strcmp(method, "textDocument/signatureHelp") == 0) { result = compute_signature_help(doc, offset, client.signature_markdown); }
+    else if (strcmp(method, "textDocument/signatureHelp") == 0) { result = compute_signature_help(doc, offset, client); }
     else if (strcmp(method, "textDocument/documentSymbol") == 0) { result = compute_document_symbols(doc, client.hierarchical_symbols); }
     else if (strcmp(method, "textDocument/documentLink") == 0) { result = compute_document_links(store, doc, client.document_link_tooltips); }
     else if (strcmp(method, "textDocument/codeAction") == 0) {
@@ -293,7 +293,11 @@ i32 main() {
     i32 status = 1;
     while (true) {
         Optional<PendingMessage*> next = transport.messages.try_recv();
-        if (!next.is_some() && transport.messages.is_closed()) { status = state.shutdown ? 0 : 1; break; }
+        if (!next.is_some() && transport.messages.is_closed()) {
+            // The reader can enqueue and close between the first receive and this check.
+            next = transport.messages.try_recv();
+            if (!next.is_some()) { status = state.shutdown ? 0 : 1; break; }
+        }
         if (!next.is_some() && state.index.paths.len() > 0 && !state.shutdown) { index_workspace_step(&state.store, &state.index); continue; }
         if (!next.is_some()) { next = transport.messages.recv(); }
         if (!next.is_some()) { status = state.shutdown ? 0 : 1; break; }
