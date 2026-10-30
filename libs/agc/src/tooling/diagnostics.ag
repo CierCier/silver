@@ -12,6 +12,7 @@ import frontend.ownership;
 import frontend.lint;
 import frontend.lambdas;
 import frontend.symbols;
+import frontend.typecheck;
 import frontend.typecheck_expr;
 
 enum ImportOverloadSafety { Safe; Conflict; Inconclusive; }

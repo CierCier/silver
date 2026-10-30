@@ -79,7 +79,7 @@ String compute_document_symbols(Document* doc, bool hierarchical) {
         bool top_level = symbol.owner.len() == 0;
         if (hierarchical && symbol.kind == IdeSymbolKind.Method) {
             SymbolTarget target; target.document = doc; target.symbol = i;
-            top_level = containing_implementation(target) != (IdeImplementation*)0;
+            top_level = containing_implementation(target) >= 0;
         }
         if (!symbol.local && (!hierarchical || top_level)) {
             if (!first) { out.push(','); } first = false;

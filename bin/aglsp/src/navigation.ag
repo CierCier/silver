@@ -54,16 +54,16 @@ SymbolTarget type_definition_target(SymbolTarget target) {
     target.symbol = -1; return target;
 }
 
-IdeImplementation* containing_implementation(SymbolTarget target) {
-    if (target.symbol < 0) { return (IdeImplementation*)0; }
+i64 containing_implementation(SymbolTarget target) {
+    if (target.symbol < 0) { return -1; }
     target.document.ensure_syntax();
     Span span = target.document.analysis.symbols.get_ptr(target.symbol).extent; i64 i = 0;
     while (i < target.document.analysis.implementations.len()) {
         IdeImplementation* implementation = target.document.analysis.implementations.get_ptr(i);
-        if (implementation.node.span.start <= span.start && span.end <= implementation.node.span.end) { return implementation; }
+        if (implementation.node.span.start <= span.start && span.end <= implementation.node.span.end) { return i; }
         i += 1;
     }
-    return (IdeImplementation*)0;
+    return -1;
 }
 
 SymbolTarget method_in_extent(Document* doc, str name, Span extent) {
@@ -83,8 +83,10 @@ SymbolTarget declaration_target(SymbolTarget target) {
     if (target.symbol < 0) { return target; }
     IdeSymbol* symbol = target.document.analysis.symbols.get_ptr(target.symbol);
     if (symbol.kind != IdeSymbolKind.Method) { return target; }
-    IdeImplementation* implementation = containing_implementation(target);
-    if (implementation == (IdeImplementation*)0 || implementation.trait_name == (SyntaxNode*)0) { return target; }
+    i64 implementation_index = containing_implementation(target);
+    if (implementation_index < 0) { return target; }
+    IdeImplementation* implementation = target.document.analysis.implementations.get_ptr(implementation_index);
+    if (implementation.trait_name == (SyntaxNode*)0) { return target; }
     SymbolTarget trait_target = resolve_occurrence(target.document,
         target.document.analysis.occurrence_at(implementation.trait_name.span.start));
     if (trait_target.symbol < 0) { return trait_target; }
@@ -104,7 +106,9 @@ String compute_implementations(DocumentStore* store, Document* context, SymbolTa
     String out = String.from_str("["); bool first = true;
     if (selected.symbol < 0) { out.push(']'); return move out; }
     IdeSymbol* symbol = selected.document.analysis.symbols.get_ptr(selected.symbol);
-    IdeImplementation* containing = containing_implementation(selected);
+    i64 containing_index = containing_implementation(selected);
+    IdeImplementation* containing = containing_index < 0 ? (IdeImplementation*)0
+        : selected.document.analysis.implementations.get_ptr(containing_index);
     if (symbol.has_body && (symbol.kind == IdeSymbolKind.Function
         || (symbol.kind == IdeSymbolKind.Method && containing != (IdeImplementation*)0 && containing.trait_name == (SyntaxNode*)0))) {
         append_location(&out, selected.document, symbol.selection); out.push(']'); return move out;

@@ -1,3 +1,5 @@
+import std.mem.memory;
+
 u8 ide_search_lower(u8 byte) { return byte >= (u8)'A' && byte <= (u8)'Z' ? byte + (u8)32 : byte; }
 
 // Identifiers are ASCII. Prefer prefixes, then contiguous and word-boundary matches.

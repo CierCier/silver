@@ -1,5 +1,6 @@
 import document;
 import params;
+import json_rpc;
 import project.manifest;
 
 bool add_workspace_root(DocumentStore* store, str uri) {
