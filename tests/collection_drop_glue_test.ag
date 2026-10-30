@@ -18,6 +18,40 @@ struct DropSpy {
 
 struct VecSlot { Vec<DropSpy> values; }
 
+i64 g_parent_drops = 0;
+struct PartialDropParent { DropSpy item; i64 required; }
+struct NestedDropSlot { VecSlot inner; DropSpy sibling; }
+
+impl Drop for PartialDropParent {
+    void drop(*self) {
+        // The counter never reads storage that a partial value may lack.
+        g_parent_drops = g_parent_drops + 1;
+    }
+}
+
+DropSpy new_drop_spy(i64 value) {
+    DropSpy spy;
+    spy.val = value;
+    return move spy;
+}
+
+void early_partial_cleanup() {
+    PartialDropParent parent;
+    parent.item = new_drop_spy(8);
+    return;
+}
+
+void early_nested_cleanup() {
+    NestedDropSlot slot;
+    slot.inner.values = Vec<DropSpy>.new();
+    slot.inner.values.push(new_drop_spy(9));
+    slot.sibling = new_drop_spy(10);
+    Vec<DropSpy> taken = move slot.inner.values;
+    slot.inner.values = Vec<DropSpy>.new();
+    slot.inner.values.push(new_drop_spy(11));
+    return;
+}
+
 impl Drop for DropSpy {
     void drop(*self) {
         g_drops = g_drops + 1;
@@ -72,6 +106,87 @@ void consume_values(Vec<DropSpy> values) {
 
 i32 main() {
     STDOUT.write_str("=== Collection Drop Glue Tests ===\n\n");
+
+    test_start("direct overwrite drops the initialized old value before replacement");
+    g_drops = 0;
+    {
+        DropSpy value = new_drop_spy(1);
+        value = new_drop_spy(2);
+        assert_eq_i64(1, g_drops, "overwrite drops the old value once");
+    }
+    assert_eq_i64(2, g_drops, "replacement drops once at scope exit");
+
+    test_start("empty owned field initialization skips predrop");
+    g_drops = 0;
+    {
+        PartialDropParent parent;
+        parent.item = new_drop_spy(3);
+        assert_eq_i64(0, g_drops, "unset field has no old value");
+    }
+    assert_eq_i64(1, g_drops, "partial parent cascades its initialized field");
+
+    test_start("unset scalar sibling keeps custom Drop parent partial");
+    g_drops = 0;
+    g_parent_drops = 0;
+    {
+        PartialDropParent parent;
+        parent.item = new_drop_spy(4);
+    }
+    assert_eq_i64(0, g_parent_drops, "one owned field does not initialize the parent");
+    assert_eq_i64(1, g_drops, "partial parent cleans the owned field");
+    {
+        PartialDropParent parent;
+        parent.item = new_drop_spy(5);
+        parent.required = 6;
+    }
+    assert_eq_i64(1, g_parent_drops, "all required fields enable the parent destructor");
+    assert_eq_i64(2, g_drops, "complete parent cascades the owned field once");
+
+    test_start("nested field move and reinitialization preserve every owner");
+    g_drops = 0;
+    {
+        NestedDropSlot slot;
+        slot.inner.values = Vec<DropSpy>.new();
+        slot.inner.values.push(new_drop_spy(6));
+        slot.sibling = new_drop_spy(7);
+        Vec<DropSpy> taken = move slot.inner.values;
+        slot.inner.values = Vec<DropSpy>.new();
+        slot.inner.values.push(new_drop_spy(8));
+        assert_eq_i64(0, g_drops, "move transfers the original buffer without dropping it");
+    }
+    assert_eq_i64(3, g_drops, "moved value, reinitialized field, and sibling each drop once");
+
+    test_start("early returns clean partial and reinitialized local owners");
+    g_drops = 0;
+    g_parent_drops = 0;
+    early_partial_cleanup();
+    assert_eq_i64(0, g_parent_drops, "early return skips partial parent destructor");
+    assert_eq_i64(1, g_drops, "early return cleans initialized child");
+    early_nested_cleanup();
+    assert_eq_i64(4, g_drops, "early return cleans moved and reinitialized nested values");
+
+    test_start("declarations reset owner state on each loop iteration and branch");
+    g_drops = 0;
+    g_parent_drops = 0;
+    for (i64 iteration = 0; iteration < 4; iteration = iteration + 1) {
+        PartialDropParent parent;
+        parent.item = new_drop_spy(iteration);
+        if (iteration == 0) { parent.required = 1; }
+    }
+    assert_eq_i64(4, g_drops, "each iteration cleans its initialized child");
+    assert_eq_i64(1, g_parent_drops, "later iterations do not inherit the initialized scalar");
+
+    test_start("fixed array elements keep independent initialization state");
+    g_drops = 0;
+    g_parent_drops = 0;
+    {
+        PartialDropParent parents[2];
+        parents[0].item = new_drop_spy(12);
+        parents[1].item = new_drop_spy(13);
+        parents[1].required = 14;
+    }
+    assert_eq_i64(2, g_drops, "both initialized array children drop once");
+    assert_eq_i64(1, g_parent_drops, "only the complete element runs its parent destructor");
 
     test_start("struct comparisons use overloaded methods");
     {

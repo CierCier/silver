@@ -3367,6 +3367,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                                         ))
                                                     })?;
                                             }
+                                            if let ast::ExpressionKind::Identifier(ident) =
+                                                expression.kind.as_ref()
+                                            {
+                                                self.clear_field_flags(&ident.name)?;
+                                            }
                                             let orig_data = self
                                                 .builder
                                                 .build_struct_gep(

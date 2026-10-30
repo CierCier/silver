@@ -470,6 +470,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     let rhs = self.emit_expression_value(right)?;
                     self.cast_expr_to_ast_type(rhs, Some(right), &target_ty, &right.span)?
                 };
+                self.transfer_owner_value(right)?;
                 // Release the value being overwritten so `x = y` on a
                 // Drop-typed x does not leak the old resource (the scope-exit
                 // drop then frees the new value). Skipped for literal
@@ -2270,6 +2271,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         target_ptr: PointerValue<'ctx>,
         target_ty: &ast::Type,
     ) -> CodegenResult<()> {
+        if let Some((owner, node)) = self.owner_place(left)? {
+            return self.emit_owner_cleanup(&owner, node);
+        }
         match left.kind.as_ref() {
             ast::ExpressionKind::Identifier(_) => {
                 // Wholesale variable overwrite: own drop plus the live
@@ -2408,6 +2412,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// After assigning a whole struct value to `left`, mark every registered
     /// field as live.
     fn set_all_field_flags(&mut self, left: &ast::Expression) -> CodegenResult<()> {
+        if self.transition_owner_expr(left, true)? { return Ok(()); }
         if let ast::ExpressionKind::Identifier(ident) = left.kind.as_ref()
             && let Some(var) = self.lookup_variable(&ident.name)
         {
@@ -2424,6 +2429,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// After assigning a field of `left`, mark that field (and any nested
     /// path extending it) as live, as well as the root container.
     fn set_assigned_field_flags(&mut self, left: &ast::Expression) -> CodegenResult<()> {
+        if self.transition_owner_expr(left, true)? { return Ok(()); }
         let Some((root_name, path)) = self.lvalue_root_and_path(left) else {
             return Ok(());
         };

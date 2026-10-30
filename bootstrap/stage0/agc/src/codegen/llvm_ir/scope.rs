@@ -390,6 +390,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
                 // Execute the deferred action
                 match &entry.action {
+                    DeferAction::OwnerCleanup(owner) => {
+                        self.emit_owner_cleanup(owner, 0)?;
+                    }
                     DeferAction::Statement(stmt) => {
                         self.generate_statement(stmt)?;
                     }
@@ -445,6 +448,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// `MovePathTree` subtree invalidation via `Place::is_prefix_of`; see
     /// `semantic::init::move_out` and `semantic/drop_elaborate.rs` (planned).
     pub(crate) fn clear_field_flags(&mut self, name: &str) -> CodegenResult<()> {
+        if self.transition_owner_path(name, "", false)? { return Ok(()); }
         if let Some(var) = self.lookup_variable(name) {
             for (_, flag) in var.field_flags {
                 self.builder
@@ -473,6 +477,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         root_name: &str,
         path: &str,
     ) -> CodegenResult<()> {
+        if self.transition_owner_path(root_name, path, false)? { return Ok(()); }
         if let Some(var) = self.lookup_variable(root_name) {
             let prefix = format!("{path}.");
             for (p, flag) in &var.field_flags {
@@ -817,7 +822,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(())
     }
 
-    fn type_needs_drop_glue(
+    pub(crate) fn type_needs_drop_glue(
         &mut self,
         ty: &ast::Type,
         active: &mut Vec<String>,

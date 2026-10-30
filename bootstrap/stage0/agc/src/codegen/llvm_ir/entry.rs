@@ -151,6 +151,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             None
         };
         let mut generator = LlvmIrGenerator {
+            ownership: crate::semantic::move_check::analyze_program_with_imports(program, &[]).init_plan,
+            owner_function: None,
+            owner_states: HashMap::default(),
             context: &context,
             module,
             builder,
@@ -266,6 +269,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             debug_info,
             false,
             None,
+            None,
         )
     }
     pub fn generate_with_imports_and_table_and_source_with_leak_check(
@@ -277,6 +281,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         debug_info: bool,
         leak_check: bool,
         target_triple: Option<&str>,
+        ownership: Option<&crate::semantic::init_plan::ProgramInitPlan>,
     ) -> CodegenResult<String> {
         let context = Context::create();
         let module = context.create_module("silver");
@@ -306,6 +311,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             None
         };
         let mut generator = LlvmIrGenerator {
+            ownership: ownership.cloned().unwrap_or_else(|| crate::semantic::move_check::analyze_program_with_imports(program, imported_modules).init_plan),
+            owner_function: None,
+            owner_states: HashMap::default(),
             context: &context,
             module,
             builder,
@@ -443,6 +451,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             false,
             true,
             None,
+            None,
         )
     }
 
@@ -472,6 +481,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             source_text,
             debug_info,
             false,
+            None,
         )
     }
     #[expect(
@@ -489,6 +499,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         source_text: Option<&str>,
         debug_info: bool,
         leak_check: bool,
+        ownership: Option<&crate::semantic::init_plan::ProgramInitPlan>,
     ) -> CodegenResult<()> {
         Self::emit_object_file_with_imports_and_table_and_source_with_leak_check_and_bt(
             program,
@@ -502,6 +513,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             debug_info,
             leak_check,
             true,
+            ownership,
         )
     }
 
@@ -521,6 +533,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         debug_info: bool,
         leak_check: bool,
         emit_bt_tables: bool,
+        ownership: Option<&crate::semantic::init_plan::ProgramInitPlan>,
     ) -> CodegenResult<()> {
         Self::emit_object_file_with_inline_global_owner(
             program,
@@ -535,6 +548,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             leak_check,
             emit_bt_tables,
             None,
+            ownership,
         )
     }
 
@@ -551,6 +565,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         leak_check: bool,
         emit_bt_tables: bool,
         inline_global_owner: Option<&Path>,
+        ownership: Option<&crate::semantic::init_plan::ProgramInitPlan>,
     ) -> CodegenResult<()> {
         Self::emit_target_file_with_imports(
             program,
@@ -566,6 +581,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             leak_check,
             emit_bt_tables,
             inline_global_owner,
+            ownership,
         )
     }
 
@@ -621,6 +637,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             false,
             true,
             None,
+            None,
         )
     }
 
@@ -650,6 +667,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             source_text,
             debug_info,
             false,
+            None,
         )
     }
     #[expect(
@@ -667,6 +685,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         source_text: Option<&str>,
         debug_info: bool,
         leak_check: bool,
+        ownership: Option<&crate::semantic::init_plan::ProgramInitPlan>,
     ) -> CodegenResult<()> {
         Self::emit_target_file_with_imports(
             program,
@@ -682,6 +701,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             leak_check,
             true,
             None,
+            ownership,
         )
     }
 
@@ -714,6 +734,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             false,
             true,
             None,
+            None,
         )
     }
 
@@ -735,6 +756,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         leak_check: bool,
         emit_bt_tables: bool,
         inline_global_owner: Option<&Path>,
+        ownership: Option<&crate::semantic::init_plan::ProgramInitPlan>,
     ) -> CodegenResult<()> {
         let context = Context::create();
         let module = context.create_module("silver");
@@ -761,6 +783,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             None
         };
         let mut generator = LlvmIrGenerator {
+            ownership: ownership.cloned().unwrap_or_else(|| crate::semantic::move_check::analyze_program_with_imports(program, imported_modules).init_plan),
+            owner_function: None,
+            owner_states: HashMap::default(),
             context: &context,
             module,
             builder,

@@ -584,3 +584,6 @@ pub fn c_callback_unsupported() -> &'static str {
 pub fn c_function_value_unsupported() -> &'static str {
     "cannot use this C function as a value: variadic, aggregate, enum, bool, narrow/128-bit integer, and f80 signatures require ABI-aware function pointers"
 }
+pub fn owner_init_plan_error(detail: &str) -> String {
+    format!("invalid owner initialization layout: {detail}")
+}

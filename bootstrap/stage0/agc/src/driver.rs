@@ -1847,12 +1847,12 @@ pub fn run(cli: Cli) {
                     std::process::exit(2);
                 }
 
-                let move_errors = crate::semantic::move_check::check_program_with_imports(
+                let move_report = crate::semantic::move_check::analyze_program_with_imports(
                     &ast,
                     &imported_modules,
                 );
-                if !move_errors.is_empty() {
-                    for error in &move_errors {
+                if !move_report.errors.is_empty() {
+                    for error in &move_report.errors {
                         eprintln!(
                             "{}",
                             diagnostics::render_with_note(
@@ -2074,6 +2074,7 @@ pub fn run(cli: Cli) {
                                 plan.debug_info,
                                 plan.leak_check,
                                 true,
+                                Some(&move_report.init_plan),
                             );
                         if let Err(error) = result {
                             if let Some(span) = error.span {
@@ -2114,6 +2115,7 @@ pub fn run(cli: Cli) {
                                 plan.debug_info,
                                 plan.leak_check,
                                 false,
+                                Some(&move_report.init_plan),
                             );
                         if let Err(error) = result {
                             if let Some(span) = error.span {
@@ -2222,6 +2224,7 @@ pub fn run(cli: Cli) {
                                     Some(&src),
                                     plan.debug_info,
                                     plan.leak_check,
+                                    Some(&move_report.init_plan),
                                 );
                             if let Some(p) = &active_progress {
                                 if result.is_ok() {
@@ -2267,6 +2270,7 @@ pub fn run(cli: Cli) {
                                     Some(&src),
                                     plan.debug_info,
                                     plan.leak_check,
+                                    Some(&move_report.init_plan),
                                 );
                         profiler::end_phase("codegen");
                         if let Err(error) = result {
@@ -2295,6 +2299,7 @@ pub fn run(cli: Cli) {
                                 plan.debug_info,
                                 plan.leak_check,
                                 plan.target.as_deref(),
+                                Some(&move_report.init_plan),
                             );
                         profiler::end_phase("codegen");
                         match output {
@@ -2414,6 +2419,7 @@ pub fn run(cli: Cli) {
                                     Some(&src),
                                     plan.debug_info,
                                     plan.leak_check,
+                                    Some(&move_report.init_plan),
                                 );
                             if let Some(p) = &active_progress {
                                 if result.is_ok() {

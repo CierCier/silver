@@ -1957,6 +1957,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 let saved_value = if let Some(expr) = expr {
                     let expr_span = expr.span;
                     let mut value = self.emit_expression_value(expr)?;
+                    self.transfer_owner_value(expr)?;
                     // Implicit move: `return x;` for a droppable local transfers
                     // ownership to the caller. Clear x's drop flag so the defers
                     // below don't destroy the returned value — identical to

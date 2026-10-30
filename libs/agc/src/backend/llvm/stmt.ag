@@ -110,7 +110,7 @@ void llvm_emit_compound_assignment(LlvmContext* ctx, u32 stmt_id) {
             base_id = llvm_assignment_alias(ctx, base, base_type, target.span, "$compound_base");
             if (temporary_base) {
                 // Index and RHS expressions may return from the enclosing function.
-                llvm_register_local_drops(ctx, ctx.names.intern("$compound_base"), base, base_type, true);
+                llvm_register_local_drops(ctx, ctx.names.intern("$compound_base"), base, base_type, true, target.span);
             }
         }
         LLVMOpaqueValue* index = llvm_emit_expr(ctx, target.inner1);
@@ -392,7 +392,7 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
                 ctx.note_unresolved("local-initializer", var_name);
             }
         }
-        llvm_register_local_drops(ctx, var_name_id, ptr, type_id, stmt.inner1 != 0);
+        llvm_register_local_drops(ctx, var_name_id, ptr, type_id, stmt.inner1 != 0, stmt.span);
         return;
     }
 

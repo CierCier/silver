@@ -2974,7 +2974,9 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         }
         if (diagnostics.is_empty()) {
             profiler_begin_phase("check ownership");
-            check_ownership(&tree, &symbols, &diagnostics, &cfg);
+            OwnershipResult ownership = check_ownership(&tree, &symbols, &diagnostics, &cfg);
+            Vec<InitOwnerPlan> _previous_plans = move symbols.init_owner_plans;
+            symbols.init_owner_plans = move ownership.owner_plans;
             profiler_end_phase("check ownership");
         }
         if (diagnostics.is_empty()) {

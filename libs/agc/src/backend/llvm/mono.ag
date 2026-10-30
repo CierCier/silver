@@ -571,6 +571,28 @@ bool mono_layout_seen(Vec<u32>* layout_ids, u32 type_id) {
     return false;
 }
 
+void mono_enum_payload_types(LlvmContext* ctx, u32 type_id, str variant,
+                              Vec<u32>* payloads) {
+    TypeEntry instance = *ctx.types.get(type_id);
+    str base = ctx.types.names.get(instance.name_id);
+    Vec<u32> parameters = Vec<u32>.new();
+    mono_collect_struct_parameters(ctx.root, base, ctx.types, &parameters);
+    if (parameters.len() != instance.count) {
+        ctx.note_unresolved("enum-payload-type", base);
+        return;
+    }
+    // Bind the enum's parameters before parsing payloads. An enclosing
+    // generic function may use the same parameter names for different types.
+    i64 i = 0;
+    while (i < parameters.len()) {
+        ctx.types.push_subst(parameters.get(i),
+            ctx.types.type_args.get(instance.inner + (u32)i));
+        i += 1;
+    }
+    llvm_enum_payload_types(ctx.types, ctx.root, base, variant, payloads);
+    ctx.types.pop_subst(parameters.len());
+}
+
 u32 mono_resolve_struct_field_type(LlvmContext* ctx, u32 struct_type_id, u32 field_type_id) {
     TypeEntry* struct_type = ctx.types.get(struct_type_id);
     if (struct_type.kind != TypeKind.Named || struct_type.count == 0) {

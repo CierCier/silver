@@ -83,6 +83,7 @@ pub(crate) struct VarInfo<'ctx> {
     reason = "defer payloads are emitted once; boxing adds indirection for no benefit"
 )]
 pub(crate) enum DeferAction<'ctx> {
+    OwnerCleanup(owner_state::RuntimeOwner<'ctx>),
     /// Execute a parsed AST statement (from `defer { }` or `defer stmt;`)
     Statement(ast::Statement),
     /// Call the drop function for a variable: (mangled_fn_name, ptr_to_var)
@@ -102,6 +103,9 @@ pub(crate) struct DeferredEntry<'ctx> {
 }
 
 pub struct LlvmIrGenerator<'ctx> {
+    pub(crate) ownership: crate::semantic::init_plan::ProgramInitPlan,
+    pub(crate) owner_function: Option<crate::semantic::init_plan::FunctionId>,
+    pub(crate) owner_states: HashMap<PointerValue<'ctx>, owner_state::RuntimeOwner<'ctx>>,
     pub(crate) context: &'ctx Context,
     pub(crate) module: Module<'ctx>,
     pub(crate) builder: Builder<'ctx>,
@@ -219,6 +223,7 @@ pub(crate) mod generate;
 pub(crate) mod json;
 pub(crate) mod operators;
 pub(crate) mod scope;
+pub(crate) mod owner_state;
 pub(crate) mod stmt;
 pub(crate) mod symbols;
 pub(crate) mod tasks;

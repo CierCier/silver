@@ -314,6 +314,7 @@ bool llvm_define_method_instance(LlvmContext* ctx, TypeTable* types, Interner* n
     mono_ensure_child_layouts(ctx, ret_type_id, &ctx.generic_layout_ids);
     ctx.current_fn = fn_val;
     ctx.current_return_type = ret_type_id;
+    ctx.current_function_span = body_node.span;
     LLVMOpaqueBasicBlock* entry_bb = LLVMAppendBasicBlockInContext(ctx.ctx, fn_val, "entry");
     LLVMPositionBuilderAtEnd(ctx.builder, entry_bb);
     ctx.push_scope();
@@ -360,7 +361,7 @@ bool llvm_define_method_instance(LlvmContext* ctx, TypeTable* types, Interner* n
         ctx.add_local(param_name_id, alloca_ptr, param_type_id, true);
         // By-value parameters arrive fully initialized: the callee owns them
         // and drops them on exit (the caller's side was cleared at the call).
-        llvm_register_local_drops(ctx, param_name_id, alloca_ptr, param_type_id, true);
+        llvm_register_local_drops(ctx, param_name_id, alloca_ptr, param_type_id, true, param.span);
         dec_str.drop();
         p += 1;
     }
@@ -425,6 +426,7 @@ bool llvm_define_free_function_instance(LlvmContext* ctx, TypeTable* types,
     mono_ensure_child_layouts(ctx, ret_id, &ctx.generic_layout_ids);
     ctx.current_fn = fn_val;
     ctx.current_return_type = ret_id;
+    ctx.current_function_span = body_node.span;
     LLVMOpaqueBasicBlock* entry = LLVMAppendBasicBlockInContext(ctx.ctx, fn_val, "entry");
     LLVMPositionBuilderAtEnd(ctx.builder, entry);
     ctx.push_scope();
@@ -449,7 +451,7 @@ bool llvm_define_free_function_instance(LlvmContext* ctx, TypeTable* types,
         LLVMOpaqueValue* slot = LLVMBuildAlloca(ctx.builder, llvm_ty, param.name);
         LLVMBuildStore(ctx.builder, LLVMGetParam(fn_val, (u32)i), slot);
         ctx.add_local(names.intern(param.name), slot, type_id, true);
-        llvm_register_local_drops(ctx, names.intern(param.name), slot, type_id, true);
+        llvm_register_local_drops(ctx, names.intern(param.name), slot, type_id, true, param.span);
         text.drop();
         i += 1;
     }
@@ -1244,7 +1246,8 @@ impl LlvmGenerator {
                  u32 source_file_id, Vec<u32>* owned_source_ids,
                  Vec<u32>* standalone_source_ids) {
         LlvmContext ctx = LlvmContext.new(self.ctx, self.target_data, self.module, self.builder,
-                                          types, names, pool, tree.root, source_paths, debug_mode);
+                                          types, names, pool, tree.root, source_paths, debug_mode,
+                                          &symbols.init_owner_plans);
         ctx.ownership_diagnostics = &self.ownership_diagnostics;
         if (self.target_data == (LLVMTargetDataRef*)0) {
             ctx.note_unresolved("target-layout", "native target initialization failed");
@@ -2010,6 +2013,7 @@ impl LlvmGenerator {
                         fn_name.to_str(), item.span, source_paths, &bt_function_records);
                     ctx.current_fn = fn_val;
                     ctx.current_return_type = ret_type_id;
+                    ctx.current_function_span = body.span;
 
                     LLVMOpaqueBasicBlock* entry_bb = LLVMAppendBasicBlockInContext(self.ctx, fn_val, "entry");
                     LLVMPositionBuilderAtEnd(self.builder, entry_bb);
@@ -2058,7 +2062,7 @@ impl LlvmGenerator {
                             source_file_id <= 1
                                 || (u32)item.span.file == source_file_id));
                         ctx.add_local(param_name_id, alloca_ptr, param_type_id, true);
-                        llvm_register_local_drops(&ctx, param_name_id, alloca_ptr, param_type_id, true);
+                        llvm_register_local_drops(&ctx, param_name_id, alloca_ptr, param_type_id, true, param.span);
                         infer_env.insert(param_name_id, param_type_id);
                         dec_str.drop();
                         p += 1;
@@ -2237,6 +2241,7 @@ impl LlvmGenerator {
                                             emitted_name, cursor.span, source_paths, &bt_function_records);
                                         ctx.current_fn = fn_val;
                                         ctx.current_return_type = ret_type_id;
+                                        ctx.current_function_span = body_node.span;
 
                                         LLVMOpaqueBasicBlock* entry_bb = LLVMAppendBasicBlockInContext(self.ctx, fn_val, "entry");
                                         LLVMPositionBuilderAtEnd(self.builder, entry_bb);
@@ -2283,7 +2288,7 @@ impl LlvmGenerator {
                                                 source_file_id <= 1
                                                     || (u32)cursor.span.file == source_file_id));
                                             ctx.add_local(param_name_id, alloca_ptr, param_type_id, true);
-                                            llvm_register_local_drops(&ctx, param_name_id, alloca_ptr, param_type_id, true);
+                                            llvm_register_local_drops(&ctx, param_name_id, alloca_ptr, param_type_id, true, param.span);
                                             dec_str.drop();
                                             p += 1;
                                         }

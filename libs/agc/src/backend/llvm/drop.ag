@@ -1,11 +1,7 @@
 // libs/agc/src/backend/llvm/drop.ag — RAII drop elaboration for the native backend.
 //
-// Mirrors stage0's scope/drop-flag design: every live droppable local owns a
-// runtime `i1` drop flag (plus per-field-path flags), and scope exits run
-// guarded drops LIFO. Flags - not static analysis - decide liveness, so
-// conditional moves, partial initialization, and shadowing stay correct.
-// Any case this pass cannot lower is skipped, which leaks exactly as the
-// pre-drop backend did; it never double-drops.
+// Runtime state bytes are authoritative. Legacy flag handles below alias the
+// same node bytes, so moves and cleanup never maintain a second liveness truth.
 import vendor.llvm.llvm;
 import std.string;
 import std.mem.vec;
@@ -13,6 +9,7 @@ import frontend.ast;
 import frontend.ast_expr;
 import frontend.items;
 import frontend.place;
+import frontend.init_plan;
 import frontend.symbols;
 import frontend.types;
 import frontend.typecheck_expr;
@@ -21,6 +18,12 @@ import backend.llvm.context;
 import backend.llvm.types;
 import backend.llvm.mono;
 import backend.llvm.expr;
+import backend.llvm.stmt;
+
+// Shared runtime encoding with the stage0 owner-state lowering.
+const u64 LLVM_INIT_UNINIT = 0;
+const u64 LLVM_INIT_PARTIAL = 1;
+const u64 LLVM_INIT_FULL = 2;
 
 bool llvm_type_needs_drop(LlvmContext* ctx, u32 type_id) {
     if (type_id == TYPE_UNKNOWN || type_id == 0) { return false; }
@@ -28,19 +31,46 @@ bool llvm_type_needs_drop(LlvmContext* ctx, u32 type_id) {
     return props.needs_drop;
 }
 
-LLVMOpaqueValue* llvm_alloca_drop_flag(LlvmContext* ctx, str name, bool init) {
-    LLVMOpaqueType* i1_ty = LLVMInt1TypeInContext(ctx.ctx);
-    LLVMOpaqueValue* flag = LLVMBuildAlloca(ctx.builder, i1_ty, name);
-    u64 bit = init ? (u64)1 : (u64)0;
-    LLVMBuildStore(ctx.builder, LLVMConstInt(i1_ty, bit, 0), flag);
-    return flag;
-}
 
 void llvm_store_drop_flag(LlvmContext* ctx, LLVMOpaqueValue* flag, bool value) {
     if (flag == (LLVMOpaqueValue*)0) { return; }
-    LLVMOpaqueType* i1_ty = LLVMInt1TypeInContext(ctx.ctx);
-    u64 bit = value ? (u64)1 : (u64)0;
-    LLVMBuildStore(ctx.builder, LLVMConstInt(i1_ty, bit, 0), flag);
+    LLVMOpaqueType* state_ty = LLVMInt8TypeInContext(ctx.ctx);
+    LLVMBuildStore(ctx.builder, LLVMConstInt(state_ty,
+        value ? LLVM_INIT_FULL : LLVM_INIT_UNINIT, 0), flag);
+}
+
+void llvm_store_init_node(LlvmContext* ctx, LlvmLocal* local, u32 node_index,
+                          InitState state) {
+    LLVMOpaqueValue* state_ptr = llvm_init_tree_state_ptr(ctx, local, node_index);
+    if (state_ptr == (LLVMOpaqueValue*)0) { return; }
+    u64 value = state == InitState.Init ? LLVM_INIT_FULL
+        : (state == InitState.Partial ? LLVM_INIT_PARTIAL : LLVM_INIT_UNINIT);
+    LLVMBuildStore(ctx.builder,
+        LLVMConstInt(LLVMInt8TypeInContext(ctx.ctx), value, 0), state_ptr);
+}
+
+void llvm_store_init_node_value(LlvmContext* ctx, LlvmLocal* local,
+                                u32 node_index, LLVMOpaqueValue* value) {
+    LLVMOpaqueValue* state_ptr = llvm_init_tree_state_ptr(ctx, local, node_index);
+    if (state_ptr != (LLVMOpaqueValue*)0 && value != (LLVMOpaqueValue*)0) {
+        LLVMBuildStore(ctx.builder, value, state_ptr);
+    }
+}
+
+LLVMOpaqueValue* llvm_load_init_node(LlvmContext* ctx, LlvmLocal* local,
+                                     u32 node_index) {
+    LLVMOpaqueValue* state_ptr = llvm_init_tree_state_ptr(ctx, local, node_index);
+    if (state_ptr == (LLVMOpaqueValue*)0) { return (LLVMOpaqueValue*)0; }
+    return LLVMBuildLoad2(ctx.builder, LLVMInt8TypeInContext(ctx.ctx), state_ptr,
+                          "init_node_state");
+}
+
+LLVMOpaqueValue* llvm_state_is_init(LlvmContext* ctx, LLVMOpaqueValue* state_ptr,
+                                    str name) {
+    LLVMOpaqueType* state_ty = LLVMInt8TypeInContext(ctx.ctx);
+    LLVMOpaqueValue* state = LLVMBuildLoad2(ctx.builder, state_ty, state_ptr, name);
+    return LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntEQ, state,
+        LLVMConstInt(state_ty, LLVM_INIT_FULL, 0), "init_state_is_init");
 }
 
 // Quiet probe: can a `drop` call be emitted for this type? Unlike
@@ -173,8 +203,7 @@ void llvm_emit_guarded_drop_call(LlvmContext* ctx, LLVMOpaqueValue* flag,
     LLVMOpaqueBasicBlock* run_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "drop_run");
     LLVMOpaqueBasicBlock* after_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "drop_after");
     if (flag != (LLVMOpaqueValue*)0) {
-        LLVMOpaqueType* i1_ty = LLVMInt1TypeInContext(ctx.ctx);
-        LLVMOpaqueValue* live = LLVMBuildLoad2(ctx.builder, i1_ty, flag, "drop_flag");
+        LLVMOpaqueValue* live = llvm_state_is_init(ctx, flag, "drop_state");
         LLVMBuildCondBr(ctx.builder, live, run_bb, after_bb);
     } else {
         LLVMBuildBr(ctx.builder, run_bb);
@@ -190,29 +219,6 @@ void llvm_emit_guarded_drop_call(LlvmContext* ctx, LLVMOpaqueValue* flag,
 }
 
 // Compute the address and resolved type of a direct field of a local.
-bool llvm_drop_field_place(LlvmContext* ctx, LLVMOpaqueValue* local_ptr, u32 type_id,
-                           u32 field_name_id, LLVMOpaqueValue** ptr_out, u32* type_out) {
-    u32 resolved = ctx.types.resolve_subst(type_id);
-    str type_name = ctx.types.type_name(resolved);
-    if (strlen(type_name) == 0 || strcmp(type_name, "unknown") == 0) { return false; }
-    LlvmStructDef* def = ctx.find_struct_by_str(type_name);
-    if (def == (LlvmStructDef*)0) { return false; }
-    i32 field_idx = ctx.find_field_index(def, field_name_id);
-    if (field_idx < 0) { return false; }
-    u32 raw_field_ty = ctx.find_field_type(def, field_name_id);
-    u32 field_ty = mono_resolve_struct_field_type(ctx, resolved, raw_field_ty);
-    if (field_ty == TYPE_UNKNOWN || field_ty == 0) { return false; }
-    mono_ensure_type_layout(ctx, resolved, &ctx.generic_layout_ids);
-    LLVMOpaqueType* struct_ty = llvm_lower_type(ctx.ctx, ctx.types, resolved);
-    LLVMOpaqueValue* base_ptr = local_ptr;
-    if (LLVMGetTypeKind(LLVMTypeOf(base_ptr)) != (u32)12) {
-        base_ptr = LLVMBuildIntToPtr(ctx.builder, base_ptr,
-                                     LLVMPointerTypeInContext(ctx.ctx, (u32)0), "drop_gep_cast");
-    }
-    *ptr_out = LLVMBuildStructGEP2(ctx.builder, struct_ty, base_ptr, (u32)field_idx, "drop_field");
-    *type_out = field_ty;
-    return true;
-}
 
 bool llvm_drop_path_matches(LlvmLocal* local, LlvmFieldFlag* entry,
                             Vec<Projection>* path) {
@@ -230,179 +236,28 @@ bool llvm_drop_path_matches(LlvmLocal* local, LlvmFieldFlag* entry,
     return true;
 }
 
-// Check whether entry represents a proper prefix of path (i.e. an intermediate ancestor).
-bool llvm_drop_path_is_proper_prefix(LlvmLocal* local, LlvmFieldFlag* entry,
-                                     Vec<Projection>* path) {
-    if (entry.projections_count == 0 || (i64)entry.projections_count >= path.len()) {
-        return false;
+LLVMOpaqueValue* llvm_init_node_place(LlvmContext* ctx, LlvmLocal* local,
+                                       u32 node_index) {
+    if (node_index == 0) { return local.ptr; }
+    InitNodePlan node = local.init_nodes.get(node_index);
+    InitNodePlan parent = local.init_nodes.get(node.parent_index);
+    LLVMOpaqueValue* base = llvm_init_node_place(ctx, local, node.parent_index);
+    mono_ensure_child_layouts(ctx, parent.type_id, &ctx.generic_layout_ids);
+    LLVMOpaqueType* aggregate = llvm_lower_type(ctx.ctx, ctx.types, parent.type_id);
+    TypeEntry entry = *ctx.types.get(parent.type_id);
+    if (entry.kind == TypeKind.Array) {
+        LLVMOpaqueType* index_type = LLVMInt32TypeInContext(ctx.ctx);
+        Vec<LLVMOpaqueValue*> indices = Vec<LLVMOpaqueValue*>.new();
+        indices.push(LLVMConstInt(index_type, 0, 0));
+        indices.push(LLVMConstInt(index_type, node.field_index, 0));
+        LLVMOpaqueValue* result = LLVMBuildGEP2(ctx.builder, aggregate, base,
+            indices.data, 2, "init_array_place");
+        indices.drop();
+        return result;
     }
-    i64 i = 0;
-    while (i < (i64)entry.projections_count) {
-        Projection* stored = local.drop_projections.get_ptr((i64)entry.projections_start + i);
-        Projection* requested = path.get_ptr(i);
-        if (stored.kind != requested.kind
-            || ((stored.kind == ProjectionKind.Field || stored.kind == ProjectionKind.Index)
-                && stored.field_name_id != requested.field_name_id)) { return false; }
-        i += 1;
-    }
-    return true;
+    return LLVMBuildStructGEP2(ctx.builder, aggregate, base, node.field_index,
+                               "init_field_place");
 }
-
-// Register own-destructor flags in preorder. Pointer-like fields and enums
-// stop traversal because their pointees/payloads have separate ownership rules.
-void llvm_register_struct_drop_paths(LlvmContext* ctx, LlvmLocal* local,
-                                    u32 type_id, bool initialized,
-                                    Vec<Projection>* path, Vec<u32>* active) {
-    u32 resolved = ctx.types.resolve_subst(type_id);
-    if (resolved == TYPE_UNKNOWN || resolved == 0) { return; }
-    TypeEntry* entry = ctx.types.get(resolved);
-    if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) { return; }
-    if (entry.kind == TypeKind.Tuple) {
-        i64 ai = 0;
-        while (ai < active.len()) {
-            if (active.get(ai) == resolved) { return; }
-            ai += 1;
-        }
-        active.push(resolved);
-        i64 i = 0;
-        while (i < entry.count) {
-            u32 element_ty = ctx.types.resolve_subst(
-                ctx.types.type_args.get(entry.inner + (u32)i));
-            if (element_ty != TYPE_UNKNOWN && element_ty != 0) {
-                Projection projection;
-                projection.kind = ProjectionKind.Index;
-                projection.field_name_id = (u32)i;
-                path.push(move projection);
-                bool needs_element_flag = llvm_can_resolve_drop_fn(ctx, element_ty);
-                TypeEntry* element_entry = ctx.types.get(element_ty);
-                if (!needs_element_flag && element_entry.kind == TypeKind.Named) {
-                    str element_name = ctx.types.names.get(element_entry.name_id);
-                    if (find_enum_item(ctx.root, element_name) != (SyntaxNode*)0
-                        && llvm_enum_needs_payload_drop(ctx, element_ty, element_name)) {
-                        needs_element_flag = true;
-                    }
-                }
-                if (needs_element_flag) {
-                    LlvmFieldFlag flag;
-                    flag.projections_start = (u32)local.drop_projections.len();
-                    flag.projections_count = (u32)path.len();
-                    flag.flag = llvm_alloca_drop_flag(ctx, "drop_tuple_flag", initialized);
-                    i64 pi = 0;
-                    while (pi < path.len()) {
-                        local.drop_projections.push(path.get(pi));
-                        pi += 1;
-                    }
-                    local.field_flags.push(move flag);
-                }
-                llvm_register_struct_drop_paths(ctx, local, element_ty,
-                                                initialized, path, active);
-                path.pop();
-            }
-            i += 1;
-        }
-        active.pop();
-        return;
-    }
-    if (entry.kind != TypeKind.Named) { return; }
-    str type_name = ctx.types.names.get(entry.name_id);
-    if (find_enum_item(ctx.root, type_name) != (SyntaxNode*)0) { return; }
-    i64 ai = 0;
-    while (ai < active.len()) {
-        if (active.get(ai) == resolved) { return; }
-        ai += 1;
-    }
-    LlvmStructDef* def = ctx.find_struct_by_str(type_name);
-    if (def == (LlvmStructDef*)0) { return; }
-    active.push(resolved);
-    i64 i = 0;
-    while (i < def.fields.len()) {
-        LlvmFieldInfo* field = def.fields.get_ptr(i);
-        u32 field_name_id = field.name_id;
-        u32 raw_field_ty = field.type_id;
-        u32 field_ty = mono_resolve_struct_field_type(ctx, resolved, raw_field_ty);
-        if (field_ty != TYPE_UNKNOWN && field_ty != 0) {
-            Projection projection;
-            projection.kind = ProjectionKind.Field;
-            projection.field_name_id = field_name_id;
-            path.push(move projection);
-            bool needs_field_flag = llvm_can_resolve_drop_fn(ctx, field_ty);
-            TypeEntry* field_entry = ctx.types.get(field_ty);
-            if (!needs_field_flag && field_entry.kind == TypeKind.Named) {
-                str field_type_name = ctx.types.names.get(field_entry.name_id);
-                if (find_enum_item(ctx.root, field_type_name) != (SyntaxNode*)0
-                    && llvm_enum_needs_payload_drop(ctx, field_ty, field_type_name)) {
-                    needs_field_flag = true;
-                }
-            }
-            if (needs_field_flag) {
-                LlvmFieldFlag flag;
-                flag.projections_start = (u32)local.drop_projections.len();
-                flag.projections_count = (u32)path.len();
-                flag.flag = llvm_alloca_drop_flag(ctx, "drop_field_flag", initialized);
-                i64 pi = 0;
-                while (pi < path.len()) {
-                    local.drop_projections.push(path.get(pi));
-                    pi += 1;
-                }
-                local.field_flags.push(move flag);
-            }
-            llvm_register_struct_drop_paths(ctx, local, field_ty, initialized, path, active);
-            path.pop();
-        }
-        i += 1;
-    }
-    active.pop();
-}
-
-// Compute a nested field address by applying the existing typed GEP helper at
-// each projection so generic field types are resolved at each step.
-bool llvm_drop_projection_place(LlvmContext* ctx, LLVMOpaqueValue* local_ptr,
-                                u32 type_id, LlvmLocal* local, LlvmFieldFlag* entry,
-                                LLVMOpaqueValue** ptr_out, u32* type_out) {
-    LLVMOpaqueValue* ptr = local_ptr;
-    u32 current_type = type_id;
-    u32 i = 0;
-    while (i < entry.projections_count) {
-        Projection* projection = local.drop_projections.get_ptr(
-            (i64)entry.projections_start + (i64)i);
-        LLVMOpaqueValue* next_ptr = (LLVMOpaqueValue*)0;
-        u32 next_type = 0;
-        if (projection.kind == ProjectionKind.Field) {
-            if (!llvm_drop_field_place(ctx, ptr, current_type, projection.field_name_id,
-                                       &next_ptr, &next_type)) {
-                return false;
-            }
-        } else if (projection.kind == ProjectionKind.Index) {
-            u32 resolved = ctx.types.resolve_subst(current_type);
-            TypeEntry* tuple = ctx.types.get(resolved);
-            if (tuple.kind != TypeKind.Tuple || projection.field_name_id >= (u32)tuple.count) {
-                return false;
-            }
-            mono_ensure_child_layouts(ctx, resolved, &ctx.generic_layout_ids);
-            LLVMOpaqueType* tuple_ty = llvm_lower_type(ctx.ctx, ctx.types, resolved);
-            if (LLVMGetTypeKind(LLVMTypeOf(ptr)) != (u32)12) {
-                ptr = LLVMBuildIntToPtr(ctx.builder, ptr,
-                                        LLVMPointerTypeInContext(ctx.ctx, 0), "drop_tuple_cast");
-            }
-            next_ptr = LLVMBuildStructGEP2(ctx.builder, tuple_ty, ptr,
-                                            projection.field_name_id, "drop_tuple_element");
-            next_type = ctx.types.resolve_subst(ctx.types.type_args.get(
-                tuple.inner + projection.field_name_id));
-        } else {
-            return false;
-        }
-        ptr = next_ptr;
-        current_type = next_type;
-        i += 1;
-    }
-    *ptr_out = ptr;
-    *type_out = current_type;
-    return true;
-}
-
-// Tag-dispatched payload drops for an enum value whose whole flag fired:
-// the value is completely live, so present payloads cascade through their
-// own destructors and owned fields.
 void llvm_emit_enum_payload_drop(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 type_id,
                                  str enum_name) {
     LLVMOpaqueType* enum_ty = llvm_lower_type(ctx.ctx, ctx.types, type_id);
@@ -426,13 +281,7 @@ void llvm_emit_enum_payload_drop(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 typ
         str variant = variant_names.get(vi).text;
         i64 tag = variant_tags.get(vi);
         Vec<u32> payload_types = Vec<u32>.new();
-        llvm_enum_payload_types(ctx.types, ctx.root, enum_name, variant, &payload_types);
-        i64 pi = 0;
-        while (pi < payload_types.len()) {
-            u32 resolved = mono_resolve_struct_field_type(ctx, type_id, payload_types.get(pi));
-            payload_types.set(pi, resolved);
-            pi += 1;
-        }
+        mono_enum_payload_types(ctx, type_id, variant, &payload_types);
         i64 di = 0;
         while (di < payload_types.len()) {
             u32 payload_ty = payload_types.get(di);
@@ -607,10 +456,10 @@ bool llvm_enum_needs_payload_drop(LlvmContext* ctx, u32 type_id, str enum_name) 
     i64 vi = 0;
     while (vi < variant_names.len() && !needed) {
         Vec<u32> payload_types = Vec<u32>.new();
-        llvm_enum_payload_types(ctx.types, ctx.root, enum_name, variant_names.get(vi).text, &payload_types);
+        mono_enum_payload_types(ctx, type_id, variant_names.get(vi).text, &payload_types);
         i64 pi = 0;
         while (pi < payload_types.len() && !needed) {
-            u32 payload_ty = mono_resolve_struct_field_type(ctx, type_id, payload_types.get(pi));
+            u32 payload_ty = payload_types.get(pi);
             if (payload_ty != TYPE_UNKNOWN && payload_ty != 0
                 && llvm_type_needs_tracking(ctx, payload_ty)) {
                 needed = true;
@@ -626,22 +475,227 @@ bool llvm_enum_needs_payload_drop(LlvmContext* ctx, u32 type_id, str enum_name) 
     return needed;
 }
 
-// Register drop tracking for a freshly stored local. The whole flag starts
-// live exactly when the local was wholly initialized; reachable droppable
-// fields each get a flag starting the same way. A whole flag exists only
-// when the scope-exit whole entry would do something (own `drop` or enum
-// payload dispatch); field flags exist per reachable droppable field.
-// Registration never fails: untracked values simply leak as before.
+
+
+LLVMOpaqueValue* llvm_init_tree_node_at(LlvmContext* ctx, LlvmLocal* local,
+                                        LLVMOpaqueValue* index) {
+    LLVMOpaqueType* array_type = LLVMArrayType(local.init_node_type,
+                                               (u32)local.init_nodes.len());
+    LLVMOpaqueType* i32_type = LLVMInt32TypeInContext(ctx.ctx);
+    Vec<LLVMOpaqueValue*> indices = Vec<LLVMOpaqueValue*>.new();
+    indices.push(LLVMConstInt(i32_type, 0, 0));
+    indices.push(index);
+    LLVMOpaqueValue* node = LLVMBuildGEP2(ctx.builder, array_type,
+        local.init_tree_storage, indices.data, 2, "init_tree_node");
+    indices.drop();
+    return node;
+}
+
+LLVMOpaqueValue* llvm_init_tree_node_ptr(LlvmContext* ctx, LlvmLocal* local,
+                                         u32 node_index) {
+    if (local.init_tree_storage == (LLVMOpaqueValue*)0
+        || local.init_node_type == (LLVMOpaqueType*)0
+        || node_index >= (u32)local.init_nodes.len()) { return (LLVMOpaqueValue*)0; }
+    return llvm_init_tree_node_at(ctx, local,
+        LLVMConstInt(LLVMInt32TypeInContext(ctx.ctx), node_index, 0));
+}
+
+LLVMOpaqueValue* llvm_init_tree_state_ptr(LlvmContext* ctx, LlvmLocal* local,
+                                          u32 node_index) {
+    LLVMOpaqueValue* node = llvm_init_tree_node_ptr(ctx, local, node_index);
+    if (node == (LLVMOpaqueValue*)0) { return (LLVMOpaqueValue*)0; }
+    return LLVMBuildStructGEP2(ctx.builder, local.init_node_type, node, 3,
+                               "init_tree_state");
+}
+
+// A concrete type has one immutable parent/child layout per LLVM module.
+LLVMOpaqueValue* llvm_init_tree_layout(LlvmContext* ctx, LlvmLocal* local,
+                                       LLVMOpaqueType* record_type) {
+    String name = String.from_str("__silver_init_layout.");
+    append_u32(&name, local.init_nodes.get_ptr(0).type_id);
+    LLVMOpaqueValue* layout = LLVMGetNamedGlobal(ctx.module, name.to_str());
+    if (layout != (LLVMOpaqueValue*)0) { return layout; }
+    LLVMOpaqueType* i32_type = LLVMInt32TypeInContext(ctx.ctx);
+    Vec<LLVMOpaqueValue*> records = Vec<LLVMOpaqueValue*>.new();
+    Vec<LLVMOpaqueValue*> values = Vec<LLVMOpaqueValue*>.new();
+    i64 i = 0;
+    while (i < local.init_nodes.len()) {
+        InitNodePlan node = local.init_nodes.get(i);
+        values.len = 0;
+        values.push(LLVMConstInt(i32_type, node.parent_index, 0));
+        values.push(LLVMConstInt(i32_type, node.first_child_index, 0));
+        values.push(LLVMConstInt(i32_type, node.child_count, 0));
+        records.push(LLVMConstStructInContext(ctx.ctx, values.data, 3, 0));
+        i += 1;
+    }
+    LLVMOpaqueValue* initializer = LLVMConstArray2(record_type, records.data,
+                                                    (u64)records.len());
+    layout = LLVMAddGlobal(ctx.module, LLVMTypeOf(initializer), name.to_str());
+    LLVMSetInitializer(layout, initializer);
+    LLVMSetGlobalConstant(layout, 1);
+    LLVMSetLinkage(layout, LLVMLinkage.LLVMPrivateLinkage);
+    return layout;
+}
+
+// Bulk transitions stay loops so large inline arrays do not produce thousands
+// of stores in one basic block for LLVM's store combiner to compare.
+void llvm_store_init_tree(LlvmContext* ctx, LlvmLocal* local, LLVMOpaqueValue* state) {
+    if (local.init_nodes.len() == 0) { return; }
+    if (local.init_nodes.len() == 1) {
+        LLVMBuildStore(ctx.builder, state, local.drop_flag);
+        return;
+    }
+    LLVMOpaqueType* i32_type = LLVMInt32TypeInContext(ctx.ctx);
+    LLVMOpaqueBasicBlock* before = LLVMGetInsertBlock(ctx.builder);
+    LLVMOpaqueBasicBlock* loop = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn,
+                                                                "init_state_loop");
+    LLVMOpaqueBasicBlock* after = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn,
+                                                                 "init_state_ready");
+    LLVMBuildBr(ctx.builder, loop);
+    LLVMPositionBuilderAtEnd(ctx.builder, loop);
+    LLVMOpaqueValue* index = LLVMBuildPhi(ctx.builder, i32_type, "init_state_index");
+    LLVMOpaqueValue* node = llvm_init_tree_node_at(ctx, local, index);
+    LLVMOpaqueValue* flag = LLVMBuildStructGEP2(ctx.builder, local.init_node_type,
+                                                 node, 3, "init_state_ptr");
+    LLVMBuildStore(ctx.builder, state, flag);
+    LLVMOpaqueValue* next = LLVMBuildAdd(ctx.builder, index,
+        LLVMConstInt(i32_type, 1, 0), "init_state_next");
+    LLVMOpaqueValue* more = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntULT, next,
+        LLVMConstInt(i32_type, (u64)local.init_nodes.len(), 0), "init_state_more");
+    LLVMBuildCondBr(ctx.builder, more, loop, after);
+    Vec<LLVMOpaqueValue*> incoming = Vec<LLVMOpaqueValue*>.new();
+    incoming.push(LLVMConstInt(i32_type, 0, 0));
+    incoming.push(next);
+    Vec<LLVMOpaqueBasicBlock*> blocks = Vec<LLVMOpaqueBasicBlock*>.new();
+    blocks.push(before);
+    blocks.push(loop);
+    LLVMAddIncoming(index, incoming.data, blocks.data, 2);
+    LLVMPositionBuilderAtEnd(ctx.builder, after);
+}
+
+void llvm_init_tree_build(LlvmContext* ctx, LlvmLocal* local, InitOwnerPlan* plan,
+                          bool initialized) {
+    i64 i = 0;
+    while (i < plan.nodes.len()) { local.init_nodes.push(plan.nodes.get(i)); i += 1; }
+    i = 0;
+    while (i < plan.projections.len()) {
+        Projection projection = plan.projections.get(i);
+        local.init_projections.push(projection);
+        local.drop_projections.push(projection);
+        i += 1;
+    }
+
+    LLVMOpaqueType* ptr_type = LLVMPointerTypeInContext(ctx.ctx, 0);
+    LLVMOpaqueType* i32_type = LLVMInt32TypeInContext(ctx.ctx);
+    LLVMOpaqueType* i8_type = LLVMInt8TypeInContext(ctx.ctx);
+    Vec<LLVMOpaqueType*> fields = Vec<LLVMOpaqueType*>.new();
+    fields.push(ptr_type);
+    fields.push(ptr_type);
+    fields.push(i32_type);
+    fields.push(i8_type);
+    local.init_node_type = LLVMStructTypeInContext(ctx.ctx, fields.data,
+        (u32)fields.len(), 0);
+    fields.len = 0;
+    fields.push(i32_type);
+    fields.push(i32_type);
+    fields.push(i32_type);
+    LLVMOpaqueType* record_type = LLVMStructTypeInContext(ctx.ctx, fields.data, 3, 0);
+    fields.drop();
+
+    LLVMOpaqueType* tree_type = LLVMArrayType(local.init_node_type,
+                                               (u32)local.init_nodes.len());
+    local.init_tree_storage = llvm_entry_alloca(ctx, tree_type, "init_tree");
+    LLVMOpaqueValue* layout = llvm_init_tree_layout(ctx, local, record_type);
+    LLVMOpaqueType* layout_type = LLVMGlobalGetValueType(layout);
+    LLVMOpaqueBasicBlock* before = LLVMGetInsertBlock(ctx.builder);
+    LLVMOpaqueBasicBlock* loop = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn,
+                                                                "init_tree_loop");
+    LLVMOpaqueBasicBlock* after = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn,
+                                                                 "init_tree_ready");
+    LLVMBuildBr(ctx.builder, loop);
+    LLVMPositionBuilderAtEnd(ctx.builder, loop);
+    LLVMOpaqueValue* index = LLVMBuildPhi(ctx.builder, i32_type, "init_tree_index");
+    Vec<LLVMOpaqueValue*> indices = Vec<LLVMOpaqueValue*>.new();
+    indices.push(LLVMConstInt(i32_type, 0, 0));
+    indices.push(index);
+    LLVMOpaqueValue* record_ptr = LLVMBuildGEP2(ctx.builder, layout_type, layout,
+        indices.data, 2, "init_layout_ptr");
+    LLVMOpaqueValue* record = LLVMBuildLoad2(ctx.builder, record_type, record_ptr,
+                                              "init_layout_record");
+    LLVMOpaqueValue* parent_index = LLVMBuildExtractValue(ctx.builder, record, 0,
+                                                            "init_parent_index");
+    LLVMOpaqueValue* first_child = LLVMBuildExtractValue(ctx.builder, record, 1,
+                                                           "init_first_child");
+    LLVMOpaqueValue* child_count = LLVMBuildExtractValue(ctx.builder, record, 2,
+                                                           "init_child_count");
+    LLVMOpaqueValue* root = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntEQ,
+        index, LLVMConstInt(i32_type, 0, 0), "init_is_root");
+    LLVMOpaqueValue* leaf = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntEQ,
+        child_count, LLVMConstInt(i32_type, 0, 0), "init_is_leaf");
+    LLVMOpaqueValue* parent_ptr = LLVMBuildSelect(ctx.builder, root,
+        LLVMConstNull(ptr_type), llvm_init_tree_node_at(ctx, local, parent_index),
+        "init_parent_ptr");
+    LLVMOpaqueValue* child_ptr = LLVMBuildSelect(ctx.builder, leaf,
+        LLVMConstNull(ptr_type), llvm_init_tree_node_at(ctx, local, first_child),
+        "init_child_ptr");
+    LLVMOpaqueValue* node = llvm_init_tree_node_at(ctx, local, index);
+    LLVMBuildStore(ctx.builder, parent_ptr,
+        LLVMBuildStructGEP2(ctx.builder, local.init_node_type, node, 0, "init_parent"));
+    LLVMBuildStore(ctx.builder, child_ptr,
+        LLVMBuildStructGEP2(ctx.builder, local.init_node_type, node, 1, "init_children"));
+    LLVMBuildStore(ctx.builder, child_count,
+        LLVMBuildStructGEP2(ctx.builder, local.init_node_type, node, 2, "init_count"));
+    LLVMBuildStore(ctx.builder,
+        LLVMConstInt(i8_type, initialized ? LLVM_INIT_FULL : LLVM_INIT_UNINIT, 0),
+        LLVMBuildStructGEP2(ctx.builder, local.init_node_type, node, 3, "init_state"));
+    LLVMOpaqueValue* next = LLVMBuildAdd(ctx.builder, index,
+        LLVMConstInt(i32_type, 1, 0), "init_tree_next");
+    LLVMOpaqueValue* more = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntULT, next,
+        LLVMConstInt(i32_type, (u64)local.init_nodes.len(), 0), "init_tree_more");
+    LLVMBuildCondBr(ctx.builder, more, loop, after);
+    Vec<LLVMOpaqueValue*> incoming = Vec<LLVMOpaqueValue*>.new();
+    incoming.push(LLVMConstInt(i32_type, 0, 0));
+    incoming.push(next);
+    Vec<LLVMOpaqueBasicBlock*> blocks = Vec<LLVMOpaqueBasicBlock*>.new();
+    blocks.push(before);
+    blocks.push(loop);
+    LLVMAddIncoming(index, incoming.data, blocks.data, 2);
+    LLVMPositionBuilderAtEnd(ctx.builder, after);
+
+    u32 node_index = 0;
+    while (node_index < (u32)local.init_nodes.len()) {
+        InitNodePlan* plan = local.init_nodes.get_ptr(node_index);
+        LLVMOpaqueValue* state_field = llvm_init_tree_state_ptr(ctx, local, node_index);
+        if (node_index > 0) {
+            LlvmFieldFlag flag;
+            flag.projections_start = plan.projections_start;
+            flag.projections_count = plan.projections_count;
+            flag.node_index = node_index;
+            flag.flag = state_field;
+            local.field_flags.push(move flag);
+        } else {
+            local.drop_flag = state_field;
+        }
+        node_index += 1;
+    }
+}
+
+// Every inline child has a state node, including Copy and scalar fields. The
+// tree is fixed-size for the local and its layout is computed by LLVM.
 void llvm_register_local_drops(LlvmContext* ctx, u32 name_id, LLVMOpaqueValue* ptr,
-                               u32 type_id, bool initialized) {
+                               u32 type_id, bool initialized, Span declaration) {
     u32 resolved = ctx.types.resolve_subst(type_id);
     if (resolved == TYPE_UNKNOWN || resolved == 0) { return; }
+    // Copy-only locals have no cleanup. Required Copy children of an owned
+    // parent are still included by that parent's complete initialization plan.
+    if (typecheck_type_is_copy(ctx.root, ctx.types, resolved)
+        && !llvm_can_resolve_drop_fn(ctx, resolved)) { return; }
     TypeEntry* resolved_entry = ctx.types.get(resolved);
     str type_name = ctx.types.type_name(resolved);
     bool named_here = strlen(type_name) > 0 && strcmp(type_name, "unknown") != 0;
     bool is_tuple = resolved_entry.kind == TypeKind.Tuple;
     bool is_enum = named_here && find_enum_item(ctx.root, type_name) != (SyntaxNode*)0;
-    bool can_register_paths = is_tuple
+    bool can_register_paths = is_tuple || resolved_entry.kind == TypeKind.Array
         || (resolved_entry.kind == TypeKind.Named && !is_enum);
     bool enum_payloads = is_enum
         && llvm_enum_needs_payload_drop(ctx, resolved, type_name);
@@ -653,46 +707,100 @@ void llvm_register_local_drops(LlvmContext* ctx, u32 name_id, LLVMOpaqueValue* p
     }
     LlvmLocal* local = ctx.find_local(name_id);
     if (local == (LlvmLocal*)0 || local.ptr != ptr) { return; }
-    // A whole flag exists exactly when the scope-exit whole entry would do
-    // something: the type's own `drop`, or tag-dispatched payload drops for
-    // enums without their own `drop`.
-    bool whole_needed = llvm_can_resolve_drop_fn(ctx, resolved);
-    if (!whole_needed && is_enum) {
-        whole_needed = enum_payloads;
+    i64 plan_index = init_plan_resolve(ctx.init_owner_plans, ctx.types, ctx.names,
+        ctx.root, name_id, resolved, declaration, ctx.current_function_span);
+    if (plan_index < 0) {
+        ctx.ownership_diagnostics.error(declaration, init_plan_unrepresentable());
+        return;
     }
-    if (whole_needed) {
-        local.drop_flag = llvm_alloca_drop_flag(ctx, "drop_flag", initialized);
-    }
-    if (is_enum || (!named_here && !is_tuple)) { return; }
-    Vec<Projection> path = Vec<Projection>.new();
-    Vec<u32> active = Vec<u32>.new();
-    llvm_register_struct_drop_paths(ctx, local, resolved, initialized, &path, &active);
-    path.drop();
-    active.drop();
+    llvm_init_tree_build(ctx, local, ctx.init_owner_plans.get_ptr(plan_index), initialized);
 }
+
+
 
 void llvm_set_local_drop_live(LlvmContext* ctx, u32 name_id, bool live) {
     LlvmLocal* local = ctx.find_local(name_id);
     if (local == (LlvmLocal*)0) { return; }
-    llvm_store_drop_flag(ctx, local.drop_flag, live);
-    i64 i = 0;
-    while (i < local.field_flags.len()) {
-        LlvmFieldFlag* entry = local.field_flags.get_ptr(i);
-        llvm_store_drop_flag(ctx, entry.flag, live);
-        i += 1;
+    llvm_store_init_tree(ctx, local, LLVMConstInt(LLVMInt8TypeInContext(ctx.ctx),
+        live ? LLVM_INIT_FULL : LLVM_INIT_UNINIT, 0));
+}
+
+i64 llvm_init_path_node(LlvmContext* ctx, LlvmLocal* local,
+                        Vec<Projection>* path) {
+    if (local == (LlvmLocal*)0 || local.init_nodes.len() == 0) { return -1; }
+    InitPathResult result = init_plan_project(&local.init_nodes,
+        &local.init_projections, path, ctx.types);
+    if (result.kind == InitPathKind.Indirect) { return -1; }
+    if (result.kind == InitPathKind.Invalid) {
+        ctx.ownership_diagnostics.error(ctx.current_function_span, init_plan_unknown_place());
+        return -1;
     }
+    return (i64)result.node_index;
 }
 
 void llvm_set_path_drop_live(LlvmContext* ctx, LlvmLocal* local,
                              Vec<Projection>* path, bool live) {
-    if (local == (LlvmLocal*)0) { return; }
-    i64 i = 0;
-    while (i < local.field_flags.len()) {
-        LlvmFieldFlag* entry = local.field_flags.get_ptr(i);
-        if (llvm_drop_path_matches(local, entry, path)) {
-            llvm_store_drop_flag(ctx, entry.flag, live);
+    i64 target_index = llvm_init_path_node(ctx, local, path);
+    if (target_index < 0) { return; }
+
+    u32 node_index = 1;
+    while (node_index < (u32)local.init_nodes.len()) {
+        InitNodePlan* node = local.init_nodes.get_ptr(node_index);
+        if (node.projections_count >= path.len()) {
+            bool inside = true;
+            u32 p = 0;
+            while (p < (u32)path.len()) {
+                Projection* stored = local.init_projections.get_ptr(
+                    (i64)node.projections_start + p);
+                Projection* requested = path.get_ptr(p);
+                if (stored.kind != requested.kind
+                    || stored.field_name_id != requested.field_name_id) {
+                    inside = false;
+                    break;
+                }
+                p += 1;
+            }
+            if (inside) {
+                llvm_store_init_node(ctx, local, node_index,
+                    live ? InitState.Init : InitState.Uninit);
+            }
         }
-        i += 1;
+        node_index += 1;
+    }
+
+    InitNodePlan* target = local.init_nodes.get_ptr(target_index);
+    i64 parent_index = target.parent_index;
+    while (parent_index >= 0 && parent_index < local.init_nodes.len()) {
+        InitNodePlan* parent = local.init_nodes.get_ptr(parent_index);
+        if (parent.child_count == 0) { break; }
+        LLVMOpaqueType* bool_ty = LLVMInt1TypeInContext(ctx.ctx);
+        LLVMOpaqueValue* all_init = LLVMConstInt(bool_ty, 1, 0);
+        LLVMOpaqueValue* all_uninit = LLVMConstInt(bool_ty, 1, 0);
+        u32 child_offset = 0;
+        while (child_offset < parent.child_count) {
+            u32 child_index = parent.first_child_index + child_offset;
+            LLVMOpaqueValue* state = llvm_load_init_node(ctx, local, child_index);
+            LLVMOpaqueType* state_ty = LLVMInt8TypeInContext(ctx.ctx);
+            LLVMOpaqueValue* is_init = LLVMBuildICmp(ctx.builder,
+                LLVMIntPredicate.LLVMIntEQ, state, LLVMConstInt(state_ty, LLVM_INIT_FULL, 0),
+                "init_child_is_init");
+            LLVMOpaqueValue* is_uninit = LLVMBuildICmp(ctx.builder,
+                LLVMIntPredicate.LLVMIntEQ, state, LLVMConstInt(state_ty, 0, 0),
+                "init_child_is_uninit");
+            all_init = LLVMBuildAnd(ctx.builder, all_init, is_init, "init_all_children");
+            all_uninit = LLVMBuildAnd(ctx.builder, all_uninit, is_uninit,
+                                      "init_no_children_live");
+            child_offset += 1;
+        }
+        LLVMOpaqueType* state_ty = LLVMInt8TypeInContext(ctx.ctx);
+        LLVMOpaqueValue* partial_or_uninit = LLVMBuildSelect(ctx.builder, all_uninit,
+            LLVMConstInt(state_ty, LLVM_INIT_UNINIT, 0), LLVMConstInt(state_ty, LLVM_INIT_PARTIAL, 0),
+            "init_parent_partial_or_uninit");
+        LLVMOpaqueValue* parent_state = LLVMBuildSelect(ctx.builder, all_init,
+            LLVMConstInt(state_ty, LLVM_INIT_FULL, 0), partial_or_uninit, "init_parent_state");
+        llvm_store_init_node_value(ctx, local, (u32)parent_index, parent_state);
+        if (parent_index == 0) { break; }
+        parent_index = parent.parent_index;
     }
 }
 
@@ -700,18 +808,7 @@ void llvm_set_field_drop_live(LlvmContext* ctx, u32 name_id,
                               Vec<Projection>* path) {
     LlvmLocal* local = ctx.find_local(name_id);
     if (local == (LlvmLocal*)0) { return; }
-    llvm_store_drop_flag(ctx, local.drop_flag, true);
     llvm_set_path_drop_live(ctx, local, path, true);
-    if (path.len() > 1) {
-        i64 i = 0;
-        while (i < local.field_flags.len()) {
-            LlvmFieldFlag* entry = local.field_flags.get_ptr(i);
-            if (llvm_drop_path_is_proper_prefix(local, entry, path)) {
-                llvm_store_drop_flag(ctx, entry.flag, true);
-            }
-            i += 1;
-        }
-    }
 }
 
 // Clear every drop flag of a local: the value was moved out and must not be
@@ -799,12 +896,8 @@ void llvm_push_scrutinee_move(LlvmContext* ctx, u32 binding_name, u32 scrutinee_
 void llvm_set_scrutinee_binding_live(LlvmContext* ctx, i64 local_index, bool live) {
     if (local_index < 0 || local_index >= ctx.locals.len()) { return; }
     LlvmLocal* local = ctx.locals.get_ptr(local_index);
-    llvm_store_drop_flag(ctx, local.drop_flag, live);
-    i64 i = 0;
-    while (i < local.field_flags.len()) {
-        llvm_store_drop_flag(ctx, local.field_flags.get_ptr(i).flag, live);
-        i += 1;
-    }
+    llvm_store_init_tree(ctx, local, LLVMConstInt(LLVMInt8TypeInContext(ctx.ctx),
+        live ? LLVM_INIT_FULL : LLVM_INIT_UNINIT, 0));
 }
 
 // Payload bindings own their copies only after the source has been consumed.
@@ -817,20 +910,16 @@ void llvm_init_scrutinee_binding_drops(LlvmContext* ctx) {
     LlvmLocal* source = ctx.locals.get_ptr(source_index);
     if (source.drop_flag == (LLVMOpaqueValue*)0) { return; }
     LLVMOpaqueType* i1_ty = LLVMInt1TypeInContext(ctx.ctx);
-    LLVMOpaqueValue* source_live = LLVMBuildLoad2(ctx.builder, i1_ty,
-        source.drop_flag, "match_source_live");
+    LLVMOpaqueValue* source_live = llvm_state_is_init(ctx, source.drop_flag,
+        "match_source_live_state");
     LLVMOpaqueValue* binding_live = LLVMBuildXor(ctx.builder, source_live,
         LLVMConstInt(i1_ty, 1, 0), "match_binding_live");
+    LLVMOpaqueType* state_ty = LLVMInt8TypeInContext(ctx.ctx);
+    LLVMOpaqueValue* binding_state = LLVMBuildSelect(ctx.builder, binding_live,
+        LLVMConstInt(state_ty, LLVM_INIT_FULL, 0), LLVMConstInt(state_ty, LLVM_INIT_UNINIT, 0),
+        "match_binding_state");
     LlvmLocal* binding = ctx.locals.get_ptr(entry.local_index);
-    if (binding.drop_flag != (LLVMOpaqueValue*)0) {
-        LLVMBuildStore(ctx.builder, binding_live, binding.drop_flag);
-    }
-    i64 i = 0;
-    while (i < binding.field_flags.len()) {
-        LLVMBuildStore(ctx.builder, binding_live,
-            binding.field_flags.get_ptr(i).flag);
-        i += 1;
-    }
+    llvm_store_init_tree(ctx, binding, binding_state);
 }
 
 // When a binding is moved from a still-owned source, the arm bindings become
@@ -842,9 +931,8 @@ void llvm_promote_scrutinee_bindings(LlvmContext* ctx, i64 move_index) {
     if (source_index < 0 || source_index >= ctx.locals.len()) { return; }
     LlvmLocal* source = ctx.locals.get_ptr(source_index);
     if (source.drop_flag == (LLVMOpaqueValue*)0) { return; }
-    LLVMOpaqueType* i1_ty = LLVMInt1TypeInContext(ctx.ctx);
-    LLVMOpaqueValue* source_live = LLVMBuildLoad2(ctx.builder, i1_ty,
-        source.drop_flag, "match_source_live");
+    LLVMOpaqueValue* source_live = llvm_state_is_init(ctx, source.drop_flag,
+        "match_source_live_state");
     LLVMOpaqueBasicBlock* promote_bb = LLVMAppendBasicBlockInContext(ctx.ctx,
         ctx.current_fn, "match_promote_bindings");
     LLVMOpaqueBasicBlock* after_bb = LLVMAppendBasicBlockInContext(ctx.ctx,
@@ -921,8 +1009,8 @@ void llvm_drop_unmoved_payloads_at(LlvmContext* ctx, u32 scrutinee_expr,
         if (entry.local_index >= 0 && entry.local_index < ctx.locals.len()) {
             LlvmLocal* binding = ctx.locals.get_ptr(entry.local_index);
             if (binding.drop_flag != (LLVMOpaqueValue*)0) {
-                LLVMOpaqueValue* live = LLVMBuildLoad2(ctx.builder, i1_ty,
-                    binding.drop_flag, "payload_live");
+                LLVMOpaqueValue* live = llvm_state_is_init(ctx, binding.drop_flag,
+                    "payload_live_state");
                 LLVMOpaqueValue* moved = LLVMBuildXor(ctx.builder, live,
                     LLVMConstInt(i1_ty, 1, 0), "payload_moved");
                 any_moved = LLVMBuildOr(ctx.builder, any_moved, moved,
@@ -930,8 +1018,9 @@ void llvm_drop_unmoved_payloads_at(LlvmContext* ctx, u32 scrutinee_expr,
             }
             i64 field_index = 0;
             while (field_index < binding.field_flags.len()) {
-                LLVMOpaqueValue* live = LLVMBuildLoad2(ctx.builder, i1_ty,
-                    binding.field_flags.get_ptr(field_index).flag, "payload_field_live");
+                LLVMOpaqueValue* live = llvm_state_is_init(ctx,
+                    binding.field_flags.get_ptr(field_index).flag,
+                    "payload_field_live_state");
                 LLVMOpaqueValue* moved = LLVMBuildXor(ctx.builder, live,
                     LLVMConstInt(i1_ty, 1, 0), "payload_field_moved");
                 any_moved = LLVMBuildOr(ctx.builder, any_moved, moved,
@@ -952,20 +1041,7 @@ void llvm_drop_unmoved_payloads_at(LlvmContext* ctx, u32 scrutinee_expr,
             && entry.local_index < ctx.locals.len()) {
             LlvmLocal* binding = ctx.locals.get_ptr(entry.local_index);
             if (llvm_type_needs_tracking(ctx, binding.type_id)) {
-                llvm_emit_local_whole_drop(ctx, binding);
-                i64 field_index = 0;
-                while (field_index < binding.field_flags.len()) {
-                    llvm_emit_local_field_drop(ctx, binding,
-                                               binding.field_flags.get_ptr(field_index));
-                    field_index += 1;
-                }
-                llvm_store_drop_flag(ctx, binding.drop_flag, false);
-                field_index = 0;
-                while (field_index < binding.field_flags.len()) {
-                    llvm_store_drop_flag(ctx,
-                        binding.field_flags.get_ptr(field_index).flag, false);
-                    field_index += 1;
-                }
+                llvm_emit_init_node_cleanup(ctx, binding, 0);
             }
         }
         i += 1;
@@ -1076,7 +1152,8 @@ u32 llvm_collect_drop_field_path(LlvmContext* ctx, u32 expr_id,
             target = ctx.types.get(target_type);
         }
         AstExpr* index_expr = ctx.pool.get_expr(expr.inner1);
-        if (target.kind != TypeKind.Tuple || index_expr.kind != ExprKind.Literal) {
+        if ((target.kind != TypeKind.Tuple && target.kind != TypeKind.Array)
+            || index_expr.kind != ExprKind.Literal) {
             while (path.len() > old_len) { path.pop(); }
             return 0;
         }
@@ -1095,58 +1172,27 @@ u32 llvm_collect_drop_field_path(LlvmContext* ctx, u32 expr_id,
 bool llvm_validate_drop_field_transfer(LlvmContext* ctx, LlvmLocal* local,
                                       Vec<Projection>* path, u32 expr_id) {
     u32 value_type = llvm_expr_type(ctx, expr_id);
-    if (value_type == TYPE_UNKNOWN || value_type == 0
+    if (value_type == TYPE_UNKNOWN
         || typecheck_type_is_copy(ctx.root, ctx.types, value_type)) { return true; }
-    u32 current_type = ctx.types.resolve_subst(local.type_id);
-    if (current_type == TYPE_UNKNOWN || current_type == 0) { return true; }
-    TypeEntry* root_entry = ctx.types.get(current_type);
-    if (root_entry.kind == TypeKind.Pointer || root_entry.kind == TypeKind.Reference) {
-        return true;
-    }
-    String place = String.from_str(ctx.names.get(local.name_id));
-    i64 i = 0;
-    while (i < path.len()) {
-        place.push_str(".");
-        place.push_str(ctx.names.get(path.get_ptr(i).field_name_id));
-        i += 1;
-    }
-    bool valid = true;
-    i = 0;
-    while (i < path.len()) {
-        TypeEntry* ancestor_entry = ctx.types.get(current_type);
-        if (ancestor_entry.kind == TypeKind.Pointer || ancestor_entry.kind == TypeKind.Reference) {
-            break;
-        }
-        if (typecheck_type_has_drop_impl(ctx.root, ctx.types, current_type)) {
+    i64 target = llvm_init_path_node(ctx, local, path);
+    if (target < 0) { return true; }
+    u32 ancestor = local.init_nodes.get_ptr(target).parent_index;
+    while (true) {
+        u32 ancestor_type = local.init_nodes.get_ptr(ancestor).type_id;
+        if (typecheck_type_has_drop_impl(ctx.root, ctx.types, ancestor_type)) {
             String message = cannot_move_field_out_of_drop_type(
-                place.to_str(), ctx.types.type_name(current_type));
+                ctx.names.get(local.name_id), ctx.types.type_name(ancestor_type));
             ctx.ownership_diagnostics.error(ctx.pool.get_expr(expr_id).span, move message);
-            valid = false;
-            break;
+            return false;
         }
-        Projection* projection = path.get_ptr(i);
-        if (projection.kind == ProjectionKind.Field) {
-            current_type = typecheck_struct_field_type(ctx.types, ctx.root, current_type,
-                                                       ctx.names.get(projection.field_name_id));
-        } else if (projection.kind == ProjectionKind.Index) {
-            TypeEntry* tuple = ctx.types.get(ctx.types.resolve_subst(current_type));
-            if (tuple.kind != TypeKind.Tuple || projection.field_name_id >= (u32)tuple.count) {
-                break;
-            }
-            current_type = ctx.types.resolve_subst(ctx.types.type_args.get(
-                tuple.inner + projection.field_name_id));
-        } else {
-            break;
-        }
-        if (current_type == TYPE_UNKNOWN || current_type == 0) { break; }
-        i += 1;
+        if (ancestor == 0) { break; }
+        ancestor = local.init_nodes.get_ptr(ancestor).parent_index;
     }
-    place.drop();
-    return valid;
+    return true;
 }
 
-// Field transfers clear the selected subtree; indexed places retain the
-// conservative whole-root fallback because no per-element state exists.
+// Statically indexed inline places select exact state nodes. Heap elements
+// retain their container's initialized-length contract.
 void llvm_clear_place_drops_at_local(LlvmContext* ctx, u32 expr_id,
                                      i64 local_index) {
     if (expr_id == 0) { return; }
@@ -1188,12 +1234,8 @@ void llvm_clear_place_drops_at_local(LlvmContext* ctx, u32 expr_id,
         LlvmLocal* local = local_index >= 0 && local_index < ctx.locals.len()
             ? ctx.locals.get_ptr(local_index) : ctx.find_local(expr.aux);
         if (local != (LlvmLocal*)0) {
-            llvm_store_drop_flag(ctx, local.drop_flag, false);
-            i64 i = 0;
-            while (i < local.field_flags.len()) {
-                llvm_store_drop_flag(ctx, local.field_flags.get_ptr(i).flag, false);
-                i += 1;
-            }
+            llvm_store_init_tree(ctx, local,
+                LLVMConstInt(LLVMInt8TypeInContext(ctx.ctx), LLVM_INIT_UNINIT, 0));
         }
     } else if (expr.kind == ExprKind.Move) {
         llvm_clear_place_drops_at_local(ctx, expr.inner0, local_index);
@@ -1265,12 +1307,8 @@ void llvm_emit_local_whole_drop(LlvmContext* ctx, LlvmLocal* local) {
 
 // Emit one field-path entry's destructor or recursively owned enum payload.
 void llvm_emit_local_field_drop(LlvmContext* ctx, LlvmLocal* local, LlvmFieldFlag* entry) {
-    LLVMOpaqueValue* field_ptr = (LLVMOpaqueValue*)0;
-    u32 field_ty = 0;
-    if (!llvm_drop_projection_place(ctx, local.ptr, local.type_id, local, entry,
-                                    &field_ptr, &field_ty)) {
-        return;
-    }
+    LLVMOpaqueValue* field_ptr = llvm_init_node_place(ctx, local, entry.node_index);
+    u32 field_ty = local.init_nodes.get_ptr(entry.node_index).type_id;
     if (llvm_can_resolve_drop_fn(ctx, field_ty)) {
         LLVMOpaqueValue* field_fn = llvm_drop_fn_for_type(ctx, field_ty);
         if (field_fn != (LLVMOpaqueValue*)0) {
@@ -1290,6 +1328,46 @@ void llvm_emit_local_field_drop(LlvmContext* ctx, LlvmLocal* local, LlvmFieldFla
     }
 }
 
+// BFS storage is traversed in declaration-order DFS for destructor cascade.
+// A Partial parent skips its own Drop; each child's authoritative state decides
+// its cleanup. Uninit skips the entire subtree.
+void llvm_emit_init_node_cleanup(LlvmContext* ctx, LlvmLocal* local, u32 node_index) {
+    if (local.init_nodes.len() == 0) { return; }
+    InitNodePlan node = local.init_nodes.get(node_index);
+    // Copy subtrees have no cleanup. Their state still participates in parent
+    // initialization and is reset by assignment or declaration, not by Drop.
+    if (typecheck_type_is_copy(ctx.root, ctx.types, node.type_id)
+        && !llvm_can_resolve_drop_fn(ctx, node.type_id)) { return; }
+    TypeEntry entry = *ctx.types.get(node.type_id);
+    if (node.child_count == 0 && entry.kind != TypeKind.Named) {
+        llvm_store_init_node(ctx, local, node_index, InitState.Uninit);
+        return;
+    }
+    LLVMOpaqueValue* state = llvm_load_init_node(ctx, local, node_index);
+    LLVMOpaqueType* state_ty = LLVMInt8TypeInContext(ctx.ctx);
+    LLVMOpaqueValue* live = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntNE,
+        state, LLVMConstInt(state_ty, 0, 0), "init_node_has_value");
+    LLVMOpaqueBasicBlock* run = LLVMAppendBasicBlockInContext(ctx.ctx,
+        ctx.current_fn, "init_cleanup");
+    LLVMOpaqueBasicBlock* after = LLVMAppendBasicBlockInContext(ctx.ctx,
+        ctx.current_fn, "init_cleanup_after");
+    LLVMBuildCondBr(ctx.builder, live, run, after);
+    LLVMPositionBuilderAtEnd(ctx.builder, run);
+    if (node_index == 0) {
+        llvm_emit_local_whole_drop(ctx, local);
+    } else {
+        llvm_emit_local_field_drop(ctx, local, local.field_flags.get_ptr(node_index - 1));
+    }
+    u32 child = 0;
+    while (child < node.child_count) {
+        llvm_emit_init_node_cleanup(ctx, local, node.first_child_index + child);
+        child += 1;
+    }
+    llvm_store_init_node(ctx, local, node_index, InitState.Uninit);
+    LLVMBuildBr(ctx.builder, after);
+    LLVMPositionBuilderAtEnd(ctx.builder, after);
+}
+
 // Capture the current locals depth as a drop mark, right after pushing a
 // scope: llvm_emit_drops_above with this mark later drops exactly the
 // locals declared inside the scope.
@@ -1299,18 +1377,13 @@ i64 llvm_current_drop_mark(LlvmContext* ctx) {
 
 // Emit scope-exit drops for locals at stack positions [mark, len), newest
 // first. A struct's own destructor runs before its live fields, which drop
-// in declaration order. Each place keeps its independent ownership flag.
+// in declaration order.
 void llvm_emit_drops_above(LlvmContext* ctx, i64 mark) {
     if (ctx.current_fn == (LLVMOpaqueValue*)0) { return; }
     i64 i = (i64)ctx.locals.len() - 1;
     while (i >= mark) {
         LlvmLocal* local = ctx.locals.get_ptr(i);
-        llvm_emit_local_whole_drop(ctx, local);
-        i64 fi = 0;
-        while (fi < local.field_flags.len()) {
-            llvm_emit_local_field_drop(ctx, local, local.field_flags.get_ptr(fi));
-            fi += 1;
-        }
+        llvm_emit_init_node_cleanup(ctx, local, 0);
         i -= 1;
     }
 }
@@ -1327,12 +1400,7 @@ void llvm_emit_assign_predrop(LlvmContext* ctx, u32 target_id, u32 rhs_id) {
     if (target.kind == ExprKind.Var) {
         LlvmLocal* local = ctx.find_local(target.aux);
         if (local == (LlvmLocal*)0) { return; }
-        llvm_emit_local_whole_drop(ctx, local);
-        i64 fi = 0;
-        while (fi < local.field_flags.len()) {
-            llvm_emit_local_field_drop(ctx, local, local.field_flags.get_ptr(fi));
-            fi += 1;
-        }
+        llvm_emit_init_node_cleanup(ctx, local, 0);
         return;
     }
     Vec<Projection> path = Vec<Projection>.new();
@@ -1343,8 +1411,10 @@ void llvm_emit_assign_predrop(LlvmContext* ctx, u32 target_id, u32 rhs_id) {
             i64 fi = 0;
             while (fi < local.field_flags.len()) {
                 LlvmFieldFlag* entry = local.field_flags.get_ptr(fi);
-                if (llvm_drop_path_matches(local, entry, &path)) {
-                    llvm_emit_local_field_drop(ctx, local, entry);
+                if ((i64)entry.projections_count == path.len()
+                    && llvm_drop_path_matches(local, entry, &path)) {
+                    llvm_emit_init_node_cleanup(ctx, local, entry.node_index);
+                    break;
                 }
                 fi += 1;
             }
@@ -1353,8 +1423,7 @@ void llvm_emit_assign_predrop(LlvmContext* ctx, u32 target_id, u32 rhs_id) {
     path.drop();
 }
 
-// Mark the assigned subtree and its intermediate owning ancestors live,
-// and promote the root flag.
+// Initialize the assigned subtree, then summarize every required sibling.
 void llvm_mark_assign_live(LlvmContext* ctx, u32 target_id) {
     if (target_id == 0) { return; }
     AstExpr* target = ctx.pool.get_expr(target_id);
@@ -1375,8 +1444,7 @@ void llvm_emit_guarded_enum_payload_drop(LlvmContext* ctx, LLVMOpaqueValue* flag
                                          LLVMOpaqueValue* ptr, u32 type_id, str enum_name) {
     LLVMOpaqueBasicBlock* run_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "drop_enum_run");
     LLVMOpaqueBasicBlock* after_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "drop_enum_after");
-    LLVMOpaqueType* i1_ty = LLVMInt1TypeInContext(ctx.ctx);
-    LLVMOpaqueValue* live = LLVMBuildLoad2(ctx.builder, i1_ty, flag, "drop_enum_flag");
+    LLVMOpaqueValue* live = llvm_state_is_init(ctx, flag, "drop_enum_state");
     LLVMBuildCondBr(ctx.builder, live, run_bb, after_bb);
     LLVMPositionBuilderAtEnd(ctx.builder, run_bb);
     llvm_emit_enum_payload_drop(ctx, ptr, type_id, enum_name);
