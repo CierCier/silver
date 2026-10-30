@@ -518,5 +518,3 @@ bool workspace_manifest_target_path(ManifestTarget* target, str root, String* pa
     joined.drop();
     return true;
 }
-
-
