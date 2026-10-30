@@ -110,7 +110,8 @@ void offer_completion(CompletionCandidates* candidates, str name, str detail, st
     i64 existing = 0;
     while (existing < candidates.items.len()) {
         CompletionCandidate* offered = candidates.items.get_ptr(existing);
-        if (offered.name.equals(name) && offered.target.document.uri.equals(target.document.uri.to_str())) { return; }
+        if (offered.name.equals(name) && offered.target.document.uri.equals(target.document.uri.to_str())
+            && offered.target.symbol == target.symbol) { return; }
         existing += 1;
     }
     CompletionCandidate item;

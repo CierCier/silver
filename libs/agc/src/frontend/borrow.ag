@@ -2409,8 +2409,8 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
                         i64 result_release = result_binding != (Binding*)0
                             ? last_binding_use(&bindings, &leaves, i + 1, result_binding)
                             : last_use(&leaves, i + 1, result_holder);
-                        i64 source_index = 0;
-                        while (source_index < analyzer.loans.len()) {
+                        i64 source_count = analyzer.loans.len(); i64 source_index = 0;
+                        while (source_index < source_count) {
                             Loan* source = analyzer.loans.get_ptr(source_index);
                             if (source.active && source.persistent
                                 && borrow_is_holder_use(&bindings, source, node)) {

@@ -38,12 +38,24 @@ impl LifetimeDispatchHolder {
     &i64 borrowed_value(&self, i32 index) { return &self.value; }
 }
 
+&i32 identity(&i32 value) { return value; }
+
+i32 borrow_forwarding_assignment() {
+    i32 owner = 1;
+    &i32 view = &owner;
+    view = identity(view);
+    return *view;
+}
+
 if (!@cfg(os.wasi)) {
 extern "C" i32 sprintf(u8* output, str format, ...);
 }
 
 i32 main() {
     STDOUT.write_str("=== Runtime Aggregate Tests ===\n\n");
+
+    assert_eq_i32(1, borrow_forwarding_assignment(),
+        "forwarded reference assignment terminates and preserves the owner");
 
     // Same-arity overloads keep their argument type and receiver identity.
     {

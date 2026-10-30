@@ -1299,6 +1299,18 @@ class NativeLsp(unittest.TestCase):
             "position": position(private_text, private_text.index("sec;") + 3)})["items"]
         self.assertNotIn("secret", {item["label"] for item in private})
 
+    def test_auto_import_completion_preserves_overloads_from_one_provider(self):
+        (self.root / "overloads.ag").write_text(
+            "i32 lookup(i32 key) { return key; }\n"
+            "i32 lookup(str key, bool strict) { return 2; }\n")
+        text = "import overloads;\ni32 main() { return loo; }\n"
+        uri = self.open(text, "overload-completion.ag")
+        items = self.session.result("textDocument/completion", {"textDocument": {"uri": uri},
+            "position": position(text, text.index("loo;") + 3)})["items"]
+        lookups = [item for item in items if item["label"] == "lookup"]
+        self.assertEqual(len(lookups), 2, items)
+        self.assertEqual(len({item["data"].get("symbol") for item in lookups}), 2)
+
     def test_auto_import_completion_tracks_open_source_modules_and_close_restores_disk_state(self):
         provider = self.root / "overlay.ag"
         provider.write_text("i32 disk_only() { return 1; }\n")
