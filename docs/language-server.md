@@ -46,12 +46,55 @@ for a debug bootstrap with an unoptimized native server. Release installs compil
 the native server with `-O2`. If `--bin-dir` is outside the installation prefix,
 set `SILVER_SYSROOT` to the prefix when launching the server.
 
-Check an installation, including automatic stdlib discovery from an unrelated
-working directory, with:
+The installed standard-library root is discovered relative to the server executable
+or configured through `SILVER_SYSROOT`. In source, `DocumentStore.new` registers both
+`<prefix>/include/silver` and `<prefix>/include` (as well as the root prefix when
+`SILVER_SYSROOT` is set):
+
+- The local installation script (`scripts/install.sh`) installs to `<prefix>/include/std`
+  (for example, `~/.local/share/silver/include/std`).
+- Linux bundle packaging (`scripts/create-linux-bundle.sh`) and Nix packaging (`nix/package.nix`)
+  install to `<prefix>/include/silver/std`.
+
+Both layouts are discovered automatically. Check an installation, including automatic stdlib
+discovery from an unrelated working directory, with:
 
 ```sh
 python3 scripts/check_lsp.py --server ~/.local/share/silver/bin/aglsp --stdlib-root ~/.local/share/silver/include/std -v
 ```
+
+Validating automatic sysroot discovery requires either an actual installation or an
+isolated prefix matching one of these directory layouts.
+
+## Neovim completion triggers
+
+The server advertises completion triggers `.` and `:` along with contextual
+import triggers for a space after `import`, an opening selection brace, and
+commas between selections (`triggerCharacters: [".", ":", " ", "{", ","]`).
+Blink blocks space triggers by default. To allow them for Silver without affecting
+other filetypes, add this to Blink's `completion` options:
+
+```lua
+trigger = {
+  show_on_blocked_trigger_characters = function()
+    return vim.bo.filetype == "silver" and { "\n", "\t" } or { " ", "\n", "\t" }
+  end,
+},
+```
+
+Other languages retain Blink's default blocked characters. Silver returns no
+candidates for these import-only triggers in ordinary code, keeping import-context
+triggers language-specific. Typing module names and dots also requests completions;
+manual completion remains available.
+
+The server advertises these triggers in `capabilities.ag` and verifies them in
+`test_import_triggers_are_contextual_and_replace_existing_segments`. In editors
+configured for automatic import workflows (such as Neovim with Blink.cmp), typing
+`import ` triggers module path suggestions such as `std.string`; accepting the module
+candidate inserts `import std.string`. Typing `{` then requests selection suggestions
+such as `String`.
+Autopair plugins must not suppress the follow-up trigger, and space triggers must be
+unblocked for Silver. Trigger parity across general editor configurations remains open.
 
 ## Protocol behavior
 
@@ -75,14 +118,22 @@ The native server provides these features:
   call snippets. Path lookup follows source overlays and compiler search order.
   Selection completion excludes names already selected or bound as aliases on
   either side of the cursor and offers `as` where an alias can begin.
-  Unqualified prefixes of at least two characters also offer reachable source
-  declarations from the workspace and standard library with import edits.
+  Nonempty unqualified prefixes offer reachable indexed source declarations
+  from the workspace and standard library with import edits.
   Each provider has a separate item identifying its module. Existing imports,
-  private declarations and detected binding conflicts are excluded.
-  Shorter code prefixes return an incomplete list so clients request new results
-  as typing continues. Auto-import resolution checks both source and caller
-  revisions and preserves the import edit. When the identifier starts at offset
-  zero, the server combines the import with the main edit to avoid overlapping edits.
+  private declarations, caller-local top-level collisions, and imported non-callable
+  clashes are excluded. Valid imported free-function overloads can be offered;
+  a compiler-backed check suppresses providers introducing new ambiguity at
+  existing local call sites. Generic functions or unsupported constructs in
+  relevant bodies cause conservative suppression (inconclusive). The check does
+  not claim to prove absence of all silent callee changes or macro-generated calls.
+  Completion ranks candidates across providers by fuzzy score and returns the top
+  100 results, marking lists incomplete (`isIncomplete: true`) when truncated or
+  while background workspace indexing is pending. Auto-import resolution checks
+  both source and caller revisions and preserves the import edit. When the identifier
+  starts at offset zero, the server combines the import with the main edit to avoid
+  overlapping edits. Import-only triggers include spaces, opening selection braces,
+  and commas. These triggers return no candidates outside import statements.
 - Signature help for nested calls and generic function calls, including comments
   between the callee and its argument list. Commas in nested generic type arguments
   do not advance the active function parameter. Instance methods
@@ -116,9 +167,13 @@ The native server provides these features:
   selected when the client supports pull diagnostics. Other clients receive push diagnostics.
 - Import quick fixes for unresolved names and types, including unsaved workspace
   modules. The server checks the compiler's search-path precedence, excludes
-  private declarations, and rejects imports that would introduce name collisions.
-  Multiple valid modules remain separate choices. Versioned workspace edits
-  are used when supported. Code actions require client support for action literals.
+  private declarations, and enforces the shared import safety contract: caller-local
+  top-level collisions and imported non-callable clashes are rejected, valid
+  function overloads are permitted, and compiler-backed checks suppress providers
+  introducing new ambiguity at existing local calls (conservatively rejecting generic
+  or unsupported relevant bodies). Multiple valid modules remain separate choices.
+  Versioned workspace edits are used when supported. Code actions require client
+  support for action literals.
 - Structural document, range and multi-range formatting, with block indentation, statement
   layout, tab/space preferences, and preserved line endings. Range formatting
   changes whitespace only inside the selections. Multi-range requests validate
@@ -143,6 +198,19 @@ unopened files. It follows symlinked source files and skips hidden entries,
 `target`, `node_modules`, symlinked directories, and directories deeper than 32
 levels. Import resolution uses the compiler's module resolver. Source imports use
 unsaved open buffers when available.
+Startup indexing also queues standard-library sources and follows `silver.toml`
+target manifests and local dependencies, including packages outside the workspace.
+Standalone parent manifest discovery runs only when neither `rootUri` nor a
+`workspaceFolders` array is declared during initialization; declaring an explicit
+empty folders list (`[]`) or removing the last declared workspace root keeps
+discovery disabled. Manifest change notifications rebuild the package scope.
+
+Closed files retain source text and symbol metadata. Their parse trees, tokens,
+and occurrence tables are released after use. Cross-file navigation restores
+syntax from the cached text one file at a time; opening a file keeps its full
+snapshot available for editing. Cached text remains available until a watched-file
+notification updates or removes it.
+
 Opening or closing an overlay rebuilds import selections for every cached document,
 including imports that previously resolved to a lower-priority source file.
 An explicit `workspaceFolders` list takes precedence over `rootUri`.
@@ -286,34 +354,78 @@ build, cached workspace-search medians were 1.650 / 1.832 ms and edited-hover
 medians were 0.378 / 0.417 ms before / after. These results establish a completion
 improvement, not an overall server speedup.
 
+A separate memory comparison on 2026-10-27 used the installed `-O2` baseline
+and a stage0-built `-O2` server with compact closed snapshots. Both indexed the
+same 339-file Silver workspace plus the installed source stdlib, with
+`SILVER_SYSROOT` set to the installation prefix. Each build ran ten fresh
+processes serially, with a 50% CPU quota and swap disabled. RSS was read from
+the server's `/proc/PID/status` after a cached workspace search.
+
+| Measurement | Baseline median | Compact snapshot median |
+| --- | ---: | ---: |
+| Indexed idle RSS | 460.33 MiB | 67.06 MiB |
+| Initial indexing and search | 3730.60 ms | 4142.03 ms |
+| Cached workspace search | 2.43 ms | 2.50 ms |
+| Hover after an edit | 0.47 ms | 0.42 ms |
+
+Idle RSS fell 85.4%; initial indexing took 11.0% longer. The corresponding
+indexing p95 values were 3924.98 and 4378.58 ms. Closed-file syntax is rebuilt
+for cross-file scans, so this comparison does not establish their latency.
+The protocol suite also checks that repeated workspace analysis, edits, and
+semantic-token refreshes release superseded snapshots. Its edit regression
+reproduces 53.6 MiB of growth over 20 identical edits in the baseline.
+
+### Benchmark tool invocation and options
+
+`scripts/benchmark_lsp.py` supports measuring cold and warm analysis, semantic tokens,
+memory, and first-use completion:
+
 ```sh
+# Basic latency across initial hover, workspace search, cached search, and edited hover
 python3 scripts/benchmark_lsp.py --server /tmp/aglsp-native --workspace . --runs 10
+
+# Semantic token computation latency for a specific source document
 python3 scripts/benchmark_lsp.py --server /tmp/aglsp-native --workspace . --runs 10 --semantic-document libs/agc/src/frontend/typecheck_expr.ag
+
+# Warmed completion latency for a given prefix after workspace indexing finishes
 python3 scripts/benchmark_lsp.py --server /tmp/aglsp-native --workspace . --runs 10 --completion-prefix sys_
+
+# First-use completion before indexing finishes, with expected label verification
+python3 scripts/benchmark_lsp.py --server /tmp/aglsp-native --workspace . --runs 10 --completion-prefix Str --completion-first-use --completion-expect String
+
+# Server resident memory (VmRSS) after indexing completes (requires Linux /proc)
+SILVER_SYSROOT="$HOME/.local/share/silver" python3 scripts/benchmark_lsp.py --server /tmp/aglsp-native --workspace . --runs 10 --memory
 ```
 
-## Remaining parity gaps
+The benchmark options operate as follows:
 
-This implementation does not establish parity with clangd or rust-analyzer.
+- `--completion-first-use`: requires `--completion-prefix`. Runs completion before draining the background workspace index. The first reply (`first_reply`) is measured immediately after opening the completion overlay document. The benchmark then executes a workspace symbol query to drain the index, followed by a second completion request to measure the index-ready (`ready`) response. Output JSON separates `first_reply` and `ready` latencies, item counts, provider counts, auto-imports, `reported_incomplete` and `item_limit_reached` flags, fingerprints, and elapsed sequence times.
+- `--completion-expect LABEL`: repeatable flag (requires `--completion-prefix`). Records whether expected completion labels (such as `String`) appear in `first_reply` and `ready` responses, outputting `expected_present` and `expected_missing`.
+- `--memory`: records resident memory (`VmRSS` in KiB from `/proc/PID/status`) after initial indexing and cached workspace search.
 
-Analysis of an individual file runs synchronously. There is no worker query pool,
-persistent index, or incremental parser. Each changed document gets a new index;
-diagnostic caches are invalidated through import dependencies. Recovery balances missing closing delimiters for
-editor queries, but does not recover every kind of malformed syntax.
+**Measurement scope and limits**:
+- The `--completion-first-use` and `--completion-expect` flags in `scripts/benchmark_lsp.py` evaluate cold partial responses versus index-drained completion; do not claim speedup, latency reductions, or parity without verified runs.
+- Do not compare partial or truncated candidate sets against complete responses, nor equate untruncated candidate lists (such as earlier ~490-item responses) with top-100 capped responses, or compare differing provider payloads (such as single-character `S` returning 38 versus 42 providers). Differing payloads and candidate counts do not represent equal work; state no current verified equal-work speedup. While top-100 truncation and single-character prefix behavior are supported in source, overall clangd parity remains open.
+- All numbers in the performance tables above remain historical baseline evidence from earlier completed and verified runs.
 
-Type inference and diagnostics inherit the native frontend's documented limits.
-Member resolution handles named receivers and explicit local types, but does not
-provide general expression-based receiver inference, overload selection, or
-generic substitution. More complex patterns, contextual lambda parameter types,
-and capture ownership/move precision need further semantic work. Binary AGM
-module paths can be completed, but their exports are not indexed. Workspace
-configuration does not yet load build targets, cfg values, or package graphs
-from `silver.toml`.
+## Clangd 22 default parity comparison
 
-Diagnostic fixes beyond import insertion, refactoring assists, code lenses and
-macro expansion remain unimplemented. Completion still needs
-expected-type ranking and postfix assists. Implicit ownership hints remain
-unimplemented.
+The reference implementation is pinned to upstream
+[LLVM/clangd 22.1.0](https://github.com/llvm/llvm-project/tree/llvmorg-22.1.0/clang-tools-extra/clangd)
+(binary `/nix/store/w3ifgwjmsvy8dwlfir4i4jz17kzxr1xb-clang-22.1.8/bin/clangd`).
+Default configuration options derive from `ClangdMain.cpp` and `ClangdLSPServer.cpp`.
+
+| Area / Feature | Official clangd 22 default | Silver aglsp behavior | Status & evidence | Language mapping & notes |
+| --- | --- | --- | --- | --- |
+| **1. 100 limit cap** | `--limit-results=100`. Returns top 100 scored candidates; sets `isIncomplete: true` when results exceed 100. | In `bin/aglsp/src/completion.ag`, caps candidates to top 100 and sets `isIncomplete: true` when truncated or indexing. | Supported in source; exercised by `test_completion_returns_ranked_top_hundred_and_requeries_truncated_lists` and `test_completion_responds_with_available_data_while_indexing_continues`. | Directly applicable to Silver; prevents UI lockup on broad prefixes. |
+| **2. All-scopes completion** | `--all-scopes-completion=true`. Searches across global and all namespace scopes; inserts qualified names or includes. | Searches workspace and stdlib modules for reachable unimported declarations (`append_auto_imports`), offering auto-import items. | Supported for source files (`test_single_character_prefix_includes_auto_imports_after_indexing`, `test_auto_import_completion_applies_primary_and_import_edits_and_resolves`); binary `.agm` exports open. | Silver uses module paths (`import std.io;`) rather than C++ nested lexical namespaces (`a::b::c`). No lexical namespace qualifiers. |
+| **3. Argument placeholders** | `--function-arg-placeholders=true`. Emits `${1:arg}` placeholders when snippets supported. | Inserts call argument placeholders `${1:param}` when client advertises snippets; omits implicit receiver `self`; suppresses if cursor precedes `(`. | Conditional. Requires client `snippetSupport`. Verified in protocol checks (`test_completion_snippets_and_deferred_details_preserve_edits_and_reject_stale_items`); generic substitution in method signatures open. | Maps function and method signatures to snippet syntax. |
+| **4. Header insertion / Auto-import** | `--header-insertion=iwyu`. Inserts missing `#include <header>` via `additionalTextEdits`. | Inserts `import path;` via `additionalTextEdits`; merges with primary edit if cursor is at offset 0; offers import quick-fixes. | Supported for source `.ag` files (`test_auto_import_at_file_start_combines_edits_without_overlap`, `test_import_quickfix_applies_to_current_source_and_resolves_diagnostics`). Binary `.agm` exports open. | Silver uses module imports instead of C textual preprocessor `#include`. No angle vs quote syntax or IWYU pragmas. |
+| **5. Background index** | `--background-index=true`. Multithreaded background crawler indexes workspace files in worker threads. | Single-threaded cooperative indexing yields between files during event loop. Responds with available data and `isIncomplete: true`. | Partial. Analysis passes themselves are synchronous on the main dispatch thread; no worker thread pool (`test_completion_responds_with_available_data_while_indexing_continues`). | Prevents complete server stall on startup, but long single-file frontend passes remain non-preemptible. |
+| **6. Persistence** | Writes disk index files to `.cache/clangd/index/*.idx` for fast cross-session restarts. | Zero disk persistence. In-memory only. Re-indexes on every LSP startup. Releases ASTs of closed files to conserve memory (~67 MiB idle RSS). | Open / Missing. No on-disk index format or cache directory. Closed-file compaction reduces memory but requires re-parsing on demand. | Clangd stores standalone `.idx` files. Silver currently rebuilds index in RAM every run. |
+| **7. Diagnostics** | Clang compiler frontend diagnostics (parse, template, type, lint, fix-its, notes/related information). | Push diagnostics and LSP 3.17 pull diagnostics (`textDocument/diagnostic`, `workspace/diagnostic`). Emits frontend errors/warnings. | Supported with limits. Lambda analysis uses owned CST. Related locations are strictly document-local; cross-document related locations remain open. | Silver has no C++ templates or SFINAE errors; diagnoses borrow/ownership and nominal generics instead. |
+| **8. Semantic features** | Semantic tokens (modifiers, types), hover, definition, declaration, typeDefinition, implementation, references, rename, hierarchies, inlay hints. | Implemented: tokens (full/delta/range), hover, definition/typeDefinition/implementation, references, rename (trait methods, scope-aware), hierarchies, parameter/type hints. | Partial. General expression-based receiver inference, free-function overloads, macro expansion hover, and code lenses remain open. | Silver method syntax and trait impls map to hierarchies; lack of general receiver inference limits dot-completion on complex expressions. |
+| **9. Editor triggers** | Advertises single characters `.`, `<`, `>`, `:`, `"`, `/`, `*` (in `ClangdLSPServer.cpp`). | Advertises `.`, `:`, ` `, `{`, `,` (`triggerCharacters: [".", ":", " ", "{", ","]`). | Conditional. Advertised in server capabilities and tested in protocol suite (`test_import_triggers_are_contextual_and_replace_existing_segments`). Exercised with Neovim and Blink.cmp, but general client configuration parity remains open. | Maps Silver syntax: `.` (member), `:` (type/enum), ` ` (after `import`), `{` (import selection), `,` (import selection item). Clangd uses `>` as part of `->` and `:` as part of `::`. |
 
 ## Implementation references
 

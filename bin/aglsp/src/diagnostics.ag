@@ -11,6 +11,7 @@ void publish_empty_diagnostics(str uri) {
 }
 
 void diagnostic_dependencies(Document* doc, Vec<SyntaxTree*>* trees) {
+    doc.ensure_syntax();
     SyntaxTree* tree = &doc.analysis.tree;
     i64 i = 0;
     while (i < trees.len()) { if (trees.get(i) == tree) { return; } i += 1; }
@@ -21,6 +22,7 @@ void diagnostic_dependencies(Document* doc, Vec<SyntaxTree*>* trees) {
 
 void update_file_diagnostics(Document* doc, DocumentStore* store, ClientOptions* client) {
     if (!doc.diagnostics_dirty) { return; }
+    doc.ensure_syntax();
     DiagnosticBag semantic = DiagnosticBag.new();
     DiagnosticBag* diagnostics = &doc.analysis.diagnostics;
     if (diagnostics.is_empty()) {
@@ -66,6 +68,7 @@ void update_file_diagnostics(Document* doc, DocumentStore* store, ClientOptions*
         i += 1;
     }
     out.push(']');
+    String _previous_items = move doc.diagnostic_items;
     doc.diagnostic_items = move out; doc.diagnostics_dirty = false; doc.diagnostic_revision += 1;
 }
 

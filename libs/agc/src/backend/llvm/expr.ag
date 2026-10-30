@@ -1490,6 +1490,35 @@ void llvm_pack_variadic_call_args(LlvmContext* ctx, i64 fixed_count,
     target_types.push(slice_type_id);
 }
 
+void llvm_promote_c_variadic_call_args(LlvmContext* ctx, i64 fixed_count,
+                                       Vec<LLVMOpaqueValue*>* call_args,
+                                       Vec<u32>* source_types) {
+    i64 index = fixed_count;
+    while (index < call_args.len()) {
+        u32 source_type = index < source_types.len()
+            ? ctx.types.resolve_subst(source_types.get(index)) : TYPE_UNKNOWN;
+        TypeEntry* entry = ctx.types.get(source_type);
+        LLVMOpaqueValue* value = call_args.get(index);
+        LLVMOpaqueType* value_type = LLVMTypeOf(value);
+        u32 value_kind = LLVMGetTypeKind(value_type);
+        if (entry.kind == TypeKind.F32 && value_kind == (u32)2) {
+            call_args.set(index, LLVMBuildFPExt(ctx.builder, value,
+                LLVMDoubleTypeInContext(ctx.ctx), "vararg.fpext"));
+        } else if ((entry.kind == TypeKind.Bool || entry.kind == TypeKind.I8
+                || entry.kind == TypeKind.U8 || entry.kind == TypeKind.I16
+                || entry.kind == TypeKind.U16)
+            && value_kind == (u32)8
+            && LLVMGetIntTypeWidth(value_type) < 32) {
+            LLVMOpaqueType* promoted_type = LLVMInt32TypeInContext(ctx.ctx);
+            LLVMOpaqueValue* promoted = llvm_type_is_signed(ctx.types, source_type)
+                ? LLVMBuildSExt(ctx.builder, value, promoted_type, "vararg.sext")
+                : LLVMBuildZExt(ctx.builder, value, promoted_type, "vararg.zext");
+            call_args.set(index, promoted);
+        }
+        index += 1;
+    }
+}
+
 i32 llvm_atomic_ordering_from_arg(LlvmContext* ctx, u32 arg_id) {
     if (arg_id == 0) { return 7; }
     AstExpr* arg = ctx.pool.get_expr(arg_id);
@@ -5164,29 +5193,25 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         SyntaxNode* c_extern_params = c_abi_call
             ? item_c_extern_function_parameters(ctx.root, ctx.names.get(callee.aux))
             : (SyntaxNode*)0;
+        SyntaxNode* callee_fn = (SyntaxNode*)0;
+        Vec<Binding> params = Vec<Binding>.new();
+        if (!indirect && callee.kind == ExprKind.Var) {
+            callee_fn = find_function_by_name_and_arity(
+                ctx.root, ctx.names.get(callee.aux), (i64)args_count);
+            if (callee_fn != (SyntaxNode*)0) {
+                collect_parameter_bindings(
+                    binding_function_parameters(callee_fn), &params);
+            } else if (c_extern_params != (SyntaxNode*)0) {
+                collect_parameter_bindings(c_extern_params, &params);
+            }
+        }
         i64 i = 0;
         while (i < (i64)args_count) {
             u32 arg_id = ctx.pool.args.get((i64)args_start + i);
-            SyntaxNode* callee_fn = (SyntaxNode*)0;
-            Vec<Binding> params = Vec<Binding>.new();
             u32 expected_arg_type = TYPE_UNKNOWN;
-            if (!indirect && callee.kind == ExprKind.Var) {
-                callee_fn = find_function_by_name_and_arity(
-                    ctx.root, ctx.names.get(callee.aux), (i64)args_count);
-                if (callee_fn != (SyntaxNode*)0) {
-                    collect_parameter_bindings(
-                        binding_function_parameters(callee_fn), &params);
-                    if (i < params.len()) {
-                        expected_arg_type = typecheck_parameter_type_id(
-                            ctx.types, params.get_ptr(i));
-                    }
-                } else if (c_extern_params != (SyntaxNode*)0) {
-                    collect_parameter_bindings(c_extern_params, &params);
-                    if (i < params.len()) {
-                        expected_arg_type = typecheck_parameter_type_id(
-                            ctx.types, params.get_ptr(i));
-                    }
-                }
+            if (!indirect && callee.kind == ExprKind.Var && i < params.len()) {
+                expected_arg_type = typecheck_parameter_type_id(
+                    ctx.types, params.get_ptr(i));
             }
             u32 actual_arg_type = llvm_expr_type(ctx, arg_id);
             if (actual_arg_type == TYPE_UNKNOWN && c_abi_call
@@ -5268,7 +5293,6 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             } else {
                 call_target_types.push(TYPE_UNKNOWN);
             }
-            params.drop();
             call_args.push(a_val);
             call_arg_types.push(slice_coercion || (c_abi_call
                 && actual_arg_type == expected_arg_type)
@@ -5314,28 +5338,25 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         }
 
         if (!indirect && callee.kind == ExprKind.Var) {
-            SyntaxNode* declaration = find_function_by_name_and_arity(
-                ctx.root, ctx.names.get(callee.aux), (i64)args_count);
-            if (declaration != (SyntaxNode*)0) {
-                Vec<Binding> params = Vec<Binding>.new();
-                collect_parameter_bindings(
-                    binding_function_parameters(declaration), &params);
-                if (params.len() > 0
-                    && binding_is_variadic_parameter(params.get_ptr(params.len() - 1))) {
-                    Binding* variadic = params.get_ptr(params.len() - 1);
-                    u32 element_type = typecheck_parameter_base_type_id(
-                        ctx.types, variadic);
-                    llvm_pack_variadic_call_args(ctx, (i64)(params.len() - 1),
-                        element_type, &call_args, &call_arg_types,
-                        &call_target_types, ctx.names.get(callee.aux));
-                }
-                params.drop();
+            if (callee_fn != (SyntaxNode*)0 && params.len() > 0
+                && binding_is_variadic_parameter(params.get_ptr(params.len() - 1))) {
+                Binding* variadic = params.get_ptr(params.len() - 1);
+                u32 element_type = typecheck_parameter_base_type_id(
+                    ctx.types, variadic);
+                llvm_pack_variadic_call_args(ctx, (i64)(params.len() - 1),
+                    element_type, &call_args, &call_arg_types,
+                    &call_target_types, ctx.names.get(callee.aux));
             }
         }
 
         str call_label = callee.kind == ExprKind.Var ? ctx.names.get(callee.aux) : "";
         llvm_prepare_call_args(ctx, fn_type, &call_args, &call_arg_types,
                               &call_target_types, call_label, c_abi_call);
+        if (c_abi_call && item_c_extern_function_is_variadic(
+                ctx.root, ctx.names.get(callee.aux))) {
+            llvm_promote_c_variadic_call_args(ctx,
+                (i64)LLVMCountParamTypes(fn_type), &call_args, &call_arg_types);
+        }
         LLVMOpaqueValue* res = LLVMBuildCall2(ctx.builder, fn_type, fn_val, call_args.data, (u32)call_args.len(), "");
         u32 result_type = llvm_expr_type(ctx, expr_id);
         if (c_abi_call && result_type == TYPE_UNKNOWN) {

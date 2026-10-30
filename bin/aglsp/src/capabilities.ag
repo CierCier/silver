@@ -194,7 +194,7 @@ String server_capabilities(ClientOptions* client) {
     out.push_str("\"documentFormattingProvider\":true,\"documentRangeFormattingProvider\":{\"rangesSupport\":true},");
     out.push_str("\"documentOnTypeFormattingProvider\":{\"firstTriggerCharacter\":\"\\n\",\"moreTriggerCharacter\":[\"}\",\";\"]},");
     out.push_str("\"foldingRangeProvider\":true,\"selectionRangeProvider\":true,\"inlayHintProvider\":true,");
-    out.push_str("\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"]},\"completionProvider\":{\"resolveProvider\":true,\"triggerCharacters\":[\".\",\":\"]}");
+    out.push_str("\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"]},\"completionProvider\":{\"resolveProvider\":true,\"triggerCharacters\":[\".\",\":\",\" \",\"{\",\",\"]}");
     if (client.pull_diagnostics) { out.push_str(",\"diagnosticProvider\":{\"identifier\":\"silver\",\"interFileDependencies\":true,\"workspaceDiagnostics\":true,\"workDoneProgress\":true}"); }
     if (client.semantic.full != SemanticFullMode.Disabled || client.semantic.range) {
         out.push_str(",\"semanticTokensProvider\":{\"legend\":{\"tokenTypes\":[");

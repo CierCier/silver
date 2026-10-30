@@ -98,6 +98,7 @@ String compute_references(DocumentStore* store, Document* doc, i64 offset, bool 
     while (target.symbol >= 0 && i < documents.len()) {
         Document* candidate = documents.get(i);
         if (highlights && candidate != doc) { i += 1; continue; }
+        candidate.ensure_syntax();
         i64 j = 0;
         while (j < candidate.analysis.occurrences.len()) {
             IdeOccurrence* occurrence = candidate.analysis.occurrences.get_ptr(j);
@@ -112,7 +113,7 @@ String compute_references(DocumentStore* store, Document* doc, i64 offset, bool 
             }
             j += 1;
         }
-        i += 1;
+        candidate.compact(); i += 1;
     }
     out.push(']'); return move out;
 }
@@ -158,6 +159,7 @@ Vec<SymbolTarget> rename_plan(DocumentStore* store, Document* context, SymbolTar
             if (!same_target(candidate, target) && same_target(rename_target(candidate), target)) { plan.push(candidate); }
             symbol = doc.analysis.next_name.get(symbol);
         }
+        store.compact_closed();
         i += 1;
     }
     return move plan;
@@ -170,7 +172,7 @@ bool rename_conflicts(DocumentStore* store, Document* context, SymbolTarget targ
     Vec<Document*> documents = store.query_documents(context);
     i64 i = 0;
     while (i < documents.len()) {
-        Document* doc = documents.get(i); i64 j = 0;
+        Document* doc = documents.get(i); doc.ensure_syntax(); i64 j = 0;
         while (j < doc.analysis.symbols.len()) {
             IdeSymbol* symbol = doc.analysis.symbols.get_ptr(j);
             if (symbol.name.equals(name)) {
@@ -222,7 +224,7 @@ bool rename_conflicts(DocumentStore* store, Document* context, SymbolTarget targ
             }
             j += 1;
         }
-        i += 1;
+        store.compact_closed(); i += 1;
     }
     return false;
 }
@@ -234,7 +236,7 @@ String compute_rename(DocumentStore* store, Document* context, SymbolTarget targ
     Vec<Document*> documents = store.query_documents(context);
     String out = String.from_str(versioned ? "{\"documentChanges\":[" : "{\"changes\":{"); bool first_doc = true; i64 i = 0;
     while (i < documents.len()) {
-        Document* doc = documents.get(i); String edits = String.new(); bool first = true; i64 j = 0;
+        Document* doc = documents.get(i); doc.ensure_syntax(); String edits = String.new(); bool first = true; i64 j = 0;
         while (j < doc.analysis.occurrences.len()) {
             if (strcmp(doc.analysis.occurrences.get_ptr(j).node.text, selected_name) != 0) { j += 1; continue; }
             SymbolTarget resolved = rename_target(resolve_occurrence(doc, j));
@@ -259,7 +261,7 @@ String compute_rename(DocumentStore* store, Document* context, SymbolTarget targ
             out.push_str(edits.to_str()); out.push(']');
             if (versioned) { out.push('}'); }
         }
-        i += 1;
+        store.compact_closed(); i += 1;
     }
     out.push_str(versioned ? "]}" : "}}"); return move out;
 }

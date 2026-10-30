@@ -8,6 +8,12 @@ impl Drop for Payload {
     void drop(*self) { payload_drops += 1; }
 }
 
+&i64* box_slot_view(&i64* slot) { return slot; }
+
+void box_retarget(&mut i64* slot, i64* replacement) {
+    *slot = replacement;
+}
+
 i32 main() {
     {
         Box<i64> number = Box<i64>.new(17);
@@ -15,6 +21,20 @@ i32 main() {
         assert_eq_i64(17, *value, "Box stores its value");
         *value = 42;
         assert_eq_i64(42, *number.get(), "get borrows the stored value");
+    }
+    {
+        Box<i64> first = Box<i64>.new(17);
+        Box<i64> second = Box<i64>.new(23);
+        i64* slot = first.get();
+        {
+            &i64* view = box_slot_view(&slot);
+            assert_eq_i64(17, **view, "forwarded slot reference reads Box pointer");
+        }
+        box_retarget(&mut slot, second.get());
+        assert_eq_i64(23, *slot, "mutable slot reference retargets Box pointer");
+        *slot = 31;
+        assert_eq_i64(17, *first.get(), "retargeting preserves the first Box");
+        assert_eq_i64(31, *second.get(), "retargeted pointer updates the second Box");
     }
     {
         Payload payload = { .value = 9 };

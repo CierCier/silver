@@ -20,6 +20,38 @@ mod lambda;
 
 const MAX_TYPE_CHECK_DEPTH: usize = 32;
 
+pub type CallSiteKey = (u32, usize, usize, u32);
+
+/// Source declaration selected by type checking for a call expression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CallableIdentity {
+    pub file: u32,
+    pub start: usize,
+    pub end: usize,
+    pub expansion: u32,
+    pub is_method: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedCallable {
+    pub identity: CallableIdentity,
+    pub returns_reference: bool,
+    pub returns_mutable: bool,
+    pub reference_parameters: Vec<usize>,
+}
+
+impl CallableIdentity {
+    pub(crate) fn from_decl_span(span: Span, is_method: bool) -> Self {
+        Self {
+            file: span.file,
+            start: span.start,
+            end: span.end,
+            expansion: span.expansion,
+            is_method,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeError {
     pub message: String,
@@ -69,6 +101,11 @@ pub struct TypeChecker {
     /// Expression type cache for LSP hover support.
     /// Maps (start_byte, end_byte) → type string.
     pub expr_types: HashMap<(usize, usize), String>,
+    /// Callable declaration chosen by overload resolution, keyed by source call span.
+    /// The driver may enrich or clone the AST after type checking; this remains
+    /// valid while those changes preserve call spans. A rewrite that changes a
+    /// call's dispatch must type-check that call again before safety analysis.
+    resolved_callables: HashMap<CallSiteKey, ResolvedCallable>,
     /// Resolved iterator types for ForIn expressions, populated during typeck.
     /// Maps (expr start, expr end) → AST type of the IntoIter associated type.
     /// Used to populate the ForIn AST node after typeck for codegen.
@@ -369,6 +406,10 @@ impl TypeChecker {
     /// Consume inferred `let` bindings for post-typeck AST materialization.
     pub fn take_inferred_lets(&mut self) -> HashMap<(usize, usize), (Type, Span)> {
         std::mem::take(&mut self.inferred_lets)
+    }
+
+    pub fn resolved_callables(&self) -> &HashMap<CallSiteKey, ResolvedCallable> {
+        &self.resolved_callables
     }
 
     fn ingest_module(&mut self, module: &ModuleArtifact) {
@@ -3982,6 +4023,22 @@ impl TypeChecker {
         }
 
         let (_, return_type, mapping, candidate) = &best_matches[0];
+        self.resolved_callables.insert(
+            (span.file, span.start, span.end, span.expansion),
+            ResolvedCallable {
+                identity: CallableIdentity::from_decl_span(candidate.source.name.span, false),
+                returns_reference: matches!(return_type, Type::Reference { .. }),
+                returns_mutable: matches!(return_type, Type::Reference { is_mutable: true, .. }),
+                reference_parameters: candidate
+                    .params
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, parameter)| {
+                        matches!(parameter, Type::Reference { .. }).then_some(index)
+                    })
+                    .collect(),
+            },
+        );
         self.record_function_monomorph(candidate, mapping, span);
         if !self.lambdas.frames.is_empty() {
             // Trailing variadic arguments all take the variadic element type.
@@ -4514,6 +4571,22 @@ impl TypeChecker {
         }
 
         let (_, return_type, mapping, candidate) = &best_matches[0];
+        self.resolved_callables.insert(
+            (span.file, span.start, span.end, span.expansion),
+            ResolvedCallable {
+                identity: CallableIdentity::from_decl_span(candidate.source_method.name.span, true),
+                returns_reference: matches!(return_type, Type::Reference { .. }),
+                returns_mutable: matches!(return_type, Type::Reference { is_mutable: true, .. }),
+                reference_parameters: candidate
+                    .params
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, parameter)| {
+                        matches!(parameter, Type::Reference { .. }).then_some(index)
+                    })
+                    .collect(),
+            },
+        );
         self.record_method_monomorph(candidate, mapping, span);
         if !self.lambdas.frames.is_empty() {
             let offset = usize::from(style == MethodCallStyle::Instance);

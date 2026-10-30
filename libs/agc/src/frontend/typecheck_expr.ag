@@ -1318,8 +1318,12 @@ bool typecheck_method_argument_score(AstPool* pool, TypeTable* types,
 
     u32 actual = types.resolve_subst(argument.inferred_type);
     if (actual == TYPE_UNKNOWN || expected == TYPE_UNKNOWN) { return true; }
-    if (types_match(types, expected, actual)) {
+    if (expected == actual) {
         *score = *score + 2;
+        return true;
+    }
+    if (types_match(types, expected, actual)) {
+        *score = *score + 1;
         return true;
     }
     if (expected_entry.kind == TypeKind.Reference && !expected_entry.is_mut

@@ -290,6 +290,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             args.push(BasicMetadataValueEnum::from(slice_val));
         } else {
             for (index, argument) in arguments.iter().enumerate() {
+                let source_type = self.resolve_argument_type(argument);
                 let mut value = self.emit_expression_value(argument)?;
                 if index < declared_param_count {
                     if let Some(signature) = &signature {
@@ -336,7 +337,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         }
                     }
                 } else if is_variadic {
-                    value = self.apply_variadic_default_promotion(value, &argument.span)?;
+                    value = self.apply_variadic_default_promotion(
+                        value,
+                        source_type.as_ref(),
+                        &argument.span,
+                    )?;
                 }
                 args.push(BasicMetadataValueEnum::from(value));
             }
@@ -1219,6 +1224,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             args.push(BasicMetadataValueEnum::from(slice_val));
         } else {
             for (index, argument) in arguments.iter().enumerate() {
+                let source_type = self.resolve_argument_type(argument);
                 let param_index = index + usize::from(inject_receiver);
                 let expects_ref = signature
                     .as_ref()
@@ -1310,7 +1316,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         }
                     }
                 } else if is_variadic {
-                    value = self.apply_variadic_default_promotion(value, &argument.span)?;
+                    value = self.apply_variadic_default_promotion(
+                        value,
+                        source_type.as_ref(),
+                        &argument.span,
+                    )?;
                 }
                 args.push(BasicMetadataValueEnum::from(value));
             }
@@ -1375,11 +1385,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     pub(crate) fn apply_variadic_default_promotion(
         &self,
         value: BasicValueEnum<'ctx>,
+        source_type: Option<&ast::Type>,
         span: &Span,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let Some(source_type) = source_type else {
+            return Ok(value);
+        };
         match value {
             BasicValueEnum::FloatValue(float_value) => {
-                if float_value.get_type() == self.context.f32_type() {
+                if matches!(
+                    source_type.kind.as_ref(),
+                    ast::TypeKind::Primitive(ast::PrimitiveType::F32)
+                ) && float_value.get_type() == self.context.f32_type()
+                {
                     self.builder
                         .build_float_ext(float_value, self.context.f64_type(), "vararg.fpext")
                         .map(|v| v.as_basic_value_enum())
@@ -1394,9 +1412,32 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 }
             }
             BasicValueEnum::IntValue(int_value) => {
+                let signed = match source_type.kind.as_ref() {
+                    ast::TypeKind::Primitive(
+                        ast::PrimitiveType::I8 | ast::PrimitiveType::I16,
+                    ) => true,
+                    ast::TypeKind::Primitive(
+                        ast::PrimitiveType::Bool
+                        | ast::PrimitiveType::U8
+                        | ast::PrimitiveType::U16,
+                    ) => false,
+                    _ => return Ok(value),
+                };
                 if int_value.get_type().get_bit_width() < 32 {
-                    self.builder
-                        .build_int_s_extend(int_value, self.context.i32_type(), "vararg.sext")
+                    let promoted = if signed {
+                        self.builder.build_int_s_extend(
+                            int_value,
+                            self.context.i32_type(),
+                            "vararg.sext",
+                        )
+                    } else {
+                        self.builder.build_int_z_extend(
+                            int_value,
+                            self.context.i32_type(),
+                            "vararg.zext",
+                        )
+                    };
+                    promoted
                         .map(|v| v.as_basic_value_enum())
                         .map_err(|e| {
                             CodegenError::with_span(

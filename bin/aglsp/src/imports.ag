@@ -3,7 +3,9 @@ import params;
 import std.fs;
 import std.path;
 import frontend.ast;
+import frontend.cfg;
 import frontend.module_loader;
+import tooling.diagnostics;
 import tooling.format;
 
 enum ImportCompletionKind { Module; Selection; AliasKeyword; AliasName; Complete; }
@@ -31,8 +33,10 @@ void import_closure(Document* doc, Vec<Document*>* documents) {
 }
 
 bool import_conflicts(Document* active, Document* added, PendingMessage* pending) {
+    active.ensure_syntax();
     Vec<Document*> existing = Vec<Document*>.new(); import_closure(active, &existing);
     Vec<Document*> introduced = Vec<Document*>.new(); import_closure(added, &introduced);
+    Vec<String> callable_overlaps = Vec<String>.new();
     i64 i = 0;
     while (i < introduced.len()) {
         Document* source = introduced.get(i); if (source == active) { return true; }
@@ -45,14 +49,24 @@ bool import_conflicts(Document* active, Document* added, PendingMessage* pending
             // Type and trait members can supply valid overloads without colliding as imported names.
             if (!candidate.local && !candidate.is_private && candidate.owner.len() == 0) {
                 i64 previous = 0;
-                // Imported declarations are non-restrictive, including named selections.
-                while (previous < existing.len()) {
-                    Document* other = existing.get(previous);
+                // The frontend accepts same-name free functions as overloads across imports.
+                while (previous < existing.len() + i) {
+                    bool existing_source = previous < existing.len();
+                    Document* other = existing_source ? existing.get(previous) : introduced.get(previous - existing.len());
                     if (other != source) {
                         i64 name = ide_name_head(&other.analysis, candidate.name.to_str());
                         while (name >= 0) {
                             IdeSymbol* found = other.analysis.symbols.get_ptr(name);
-                            if (!found.local && (other == active || !found.is_private) && found.owner.len() == 0) { return true; }
+                            if (!found.local && (other == active || !found.is_private) && found.owner.len() == 0) {
+                                if (candidate.kind != IdeSymbolKind.Function || found.kind != IdeSymbolKind.Function
+                                    || other == active) { return true; }
+                                i64 overlap = 0;
+                                while (overlap < callable_overlaps.len()
+                                    && !callable_overlaps.get_ptr(overlap).equals(candidate.name.to_str())) { overlap += 1; }
+                                if (overlap == callable_overlaps.len()) {
+                                    callable_overlaps.push(candidate.name.clone());
+                                }
+                            }
                             name = other.analysis.next_name.get(name);
                         }
                     }
@@ -62,6 +76,57 @@ bool import_conflicts(Document* active, Document* added, PendingMessage* pending
             symbol += 1;
         }
         i += 1;
+    }
+    if (callable_overlaps.len() > 0) {
+        if (active.analysis.recovered || !active.analysis.diagnostics.is_empty()) { return true; }
+        i = 0;
+        while (i < existing.len()) {
+            Document* source = existing.get(i);
+            if (source != active && (source.analysis.recovered || !source.analysis.diagnostics.is_empty())) { return true; }
+            i += 1;
+        }
+        i = 0;
+        while (i < introduced.len()) {
+            Document* source = introduced.get(i); bool already_present = false;
+            i64 old = 0;
+            while (old < existing.len()) {
+                if (existing.get(old) == source) { already_present = true; break; }
+                old += 1;
+            }
+            if (source != active && !already_present
+                && (source.analysis.recovered || !source.analysis.diagnostics.is_empty())) { return true; }
+            i += 1;
+        }
+        if (!import_overload_may_affect_source(&active.analysis.tree, &callable_overlaps)) { return false; }
+        Vec<SyntaxTree*> baseline = Vec<SyntaxTree*>.new();
+        Vec<SyntaxTree*> candidate = Vec<SyntaxTree*>.new();
+        i = 0;
+        while (i < existing.len()) {
+            Document* source = existing.get(i);
+            if (source != active) {
+                source.ensure_syntax();
+                baseline.push(&source.analysis.tree);
+                candidate.push(&source.analysis.tree);
+            }
+            i += 1;
+        }
+        i = 0;
+        while (i < introduced.len()) {
+            Document* source = introduced.get(i); bool already_present = false;
+            i64 old = 0;
+            while (old < existing.len()) {
+                if (existing.get(old) == source) { already_present = true; break; }
+                old += 1;
+            }
+            if (source != active && !already_present) {
+                source.ensure_syntax(); candidate.push(&source.analysis.tree);
+            }
+            i += 1;
+        }
+        CfgSet cfg = linux_defaults();
+        ImportOverloadSafety safety = check_import_overload_safety(
+            &active.analysis.tree, &baseline, &candidate, &callable_overlaps, &cfg);
+        if (safety != ImportOverloadSafety.Safe) { return true; }
     }
     return false;
 }
@@ -85,7 +150,7 @@ String import_module_from_base(str base, str path) {
 }
 
 String import_module_name(DocumentStore* store, Document* active, Document* target) {
-    String parent = path_dirname(active.path.to_str()); String root = path_normalize(module_root(active.path.to_str()));
+    String parent = path_dirname(active.path.to_str()); String root = absolute_document_path(module_root(active.path.to_str()).to_str());
     i64 i = -1;
     while (i < store.include_dirs.len() + 1) {
         str base = i == -1 ? parent.to_str() : i == 0 ? root.to_str() : store.include_dirs.get_ptr(i - 1).to_str();
@@ -166,7 +231,13 @@ Optional<ImportCompletionContext> import_completion_context(Document* doc, i64 o
     i = import_index + 1;
     while (i < doc.analysis.tokens.len()) {
         Token* token = doc.analysis.tokens.get(i);
-        if (token.span.start <= offset && offset <= token.span.end) { cursor_token = token; cursor_index = i; break; }
+        if (token.span.start <= offset && offset <= token.span.end) {
+            if (token.span.end == offset && i + 1 < doc.analysis.tokens.len()) {
+                Token* next = doc.analysis.tokens.get(i + 1);
+                if (next.span.start == offset && import_cursor_word(next)) { token = next; i += 1; }
+            }
+            cursor_token = token; cursor_index = i; break;
+        }
         if (token.kind == TokenKind.Semicolon || token.span.start >= offset) { break; }
         i += 1;
     }
@@ -327,7 +398,7 @@ void import_scan_overlays(Vec<String>* modules, DocumentStore* store, Document* 
 
 Vec<String> import_modules(DocumentStore* store, Document* active, str parent_module, PendingMessage* pending) {
     Vec<String> modules = Vec<String>.new();
-    String local = path_dirname(active.path.to_str()); String root = path_normalize(module_root(active.path.to_str()));
+    String local = path_dirname(active.path.to_str()); String root = absolute_document_path(module_root(active.path.to_str()).to_str());
     String parent = String.from_str(parent_module);
     bool standard = parent.equals("std") || parent.starts_with("std.");
     i64 base = 0;

@@ -19,6 +19,25 @@ bool borrow_text_equals(str left, str right) {
     return strcmp(left, right) == 0;
 }
 
+bool borrow_return_is_nested(SyntaxNode* return_node, SyntaxNode* function,
+                             SyntaxNode* body) {
+    SyntaxNode* cursor = return_node;
+    while (cursor != (SyntaxNode*)0 && cursor != function) {
+        if (cursor.kind == NodeKind.Function && cursor != function) { return true; }
+        if (cursor.kind == NodeKind.Block && cursor != body) {
+            SyntaxNode* arrow = binding_previous_sibling(cursor);
+            SyntaxNode* head = arrow != (SyntaxNode*)0
+                ? binding_previous_sibling(arrow) : (SyntaxNode*)0;
+            if (arrow != (SyntaxNode*)0 && arrow.token_kind == TokenKind.FatArrow
+                && head != (SyntaxNode*)0 && head.kind == NodeKind.Parenthesized) {
+                return true;
+            }
+        }
+        cursor = cursor.parent;
+    }
+    return false;
+}
+
 enum LoanKind {
     Shared;
     Mutable;
@@ -28,11 +47,24 @@ struct Loan {
     u32 name_id;
     Place place;
     u32 holder_id;
+    i64 holder_binding_start;
     LoanKind kind;
     bool persistent;
     i64 release_index;
     Span span;
+    SyntaxNode* owner_scope;
     bool active;
+}
+
+struct BorrowReturnOrigin {
+    SyntaxNode* function;
+    i64 parameter_index;
+}
+
+struct BorrowReturnStatus {
+    SyntaxNode* function;
+    bool unknown_internal;
+    bool opaque_external;
 }
 
 struct BorrowAnalyzer {
@@ -47,6 +79,8 @@ impl BorrowAnalyzer {
     BorrowAnalyzer new(DiagnosticBag* diagnostics) {
         BorrowAnalyzer analyzer;
         analyzer.names = Interner.new();
+        // Loan holder id zero is reserved for an absent holder.
+        analyzer.names.intern("");
         analyzer.loans = Vec<Loan>.new();
         analyzer.projections = Vec<Projection>.new();
         analyzer.diagnostics = diagnostics;
@@ -98,10 +132,12 @@ impl BorrowAnalyzer {
         loan.name_id = self.names.intern(name);
         loan.place = move place;
         loan.holder_id = holder_id;
+        loan.holder_binding_start = 0;
         loan.kind = kind;
         loan.persistent = persistent;
         loan.release_index = release_index;
         loan.span = span;
+        loan.owner_scope = (SyntaxNode*)0;
         loan.active = true;
         self.loans.push(move loan);
     }
@@ -367,7 +403,8 @@ bool borrow_in_return_expression(SyntaxNode* node) {
 
 void report_escape(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbols,
                    SyntaxNode* function, str name, Span span) {
-    if (is_reference_parameter(function, name) || borrow_is_global(tree, symbols, name)) {
+    if (is_reference_parameter(function, name)
+        || borrow_is_global(tree, symbols, name)) {
         return;
     }
     String message = String.from_str(ref_does_not_outlive_func());
@@ -495,6 +532,861 @@ str persistent_holder(Vec<SyntaxNode*>* leaves, i64 borrow_index) {
     return "";
 }
 
+u32 borrow_assignment_slot_type(
+    Vec<Binding>* bindings, Vec<u32>* binding_types, TypeTable* types,
+    SyntaxNode* root, Vec<SyntaxNode*>* leaves, i64 borrow_index,
+    Binding* destination) {
+    if (destination == (Binding*)0 || borrow_index < 2
+        || leaves.get(borrow_index - 1).token_kind != TokenKind.Assign) {
+        return TYPE_UNKNOWN;
+    }
+    i64 destination_index = 0;
+    while (destination_index < bindings.len()
+        && bindings.get_ptr(destination_index).name_node != destination.name_node) {
+        destination_index += 1;
+    }
+    u32 type_id = destination_index < binding_types.len()
+        ? binding_types.get(destination_index) : TYPE_UNKNOWN;
+    if (type_id == TYPE_UNKNOWN && destination.kind == BindingKind.Array) {
+        String element_type = binding_declared_type_text(&destination.declared_type);
+        type_id = types.parse_type_name(element_type.to_str());
+        element_type.drop();
+    }
+    i64 root_index = borrow_index - 2;
+    while (root_index >= 0) {
+        SyntaxNode* candidate = leaves.get(root_index);
+        Binding* root_binding = candidate.token_kind == TokenKind.Identifier
+            ? visible_binding(bindings, candidate.text, candidate)
+            : (Binding*)0;
+        if (root_binding == (Binding*)0
+            && candidate.token_kind == TokenKind.Identifier) {
+            root_binding = borrow_unique_prior_binding(bindings,
+                candidate.text, candidate);
+        }
+        if (candidate.token_kind == TokenKind.Identifier
+            && borrow_text_equals(candidate.text, destination.name)
+            && !(root_index > 0
+                && leaves.get(root_index - 1).token_kind == TokenKind.Dot)
+            && root_binding == destination) {
+            break;
+        }
+        root_index -= 1;
+    }
+    if (root_index < 0) { return TYPE_UNKNOWN; }
+    TypeEntry root_entry = *types.get(types.resolve_subst(type_id));
+    bool array_element_type = destination.kind == BindingKind.Array
+        && root_entry.kind != TypeKind.Array && root_entry.kind != TypeKind.Slice;
+    i64 i = root_index + 1;
+    while (i < borrow_index - 1 && type_id != TYPE_UNKNOWN) {
+        SyntaxNode* bracket = borrow_enclosing_bracket(leaves.get(i));
+        if (bracket != (SyntaxNode*)0) {
+            if (array_element_type) {
+                array_element_type = false;
+            } else {
+                TypeEntry entry = *types.get(types.resolve_subst(type_id));
+                if (entry.kind != TypeKind.Array && entry.kind != TypeKind.Slice
+                    && entry.kind != TypeKind.Pointer && entry.kind != TypeKind.Reference) {
+                    return TYPE_UNKNOWN;
+                }
+                type_id = entry.inner;
+            }
+            while (i < borrow_index - 1
+                && borrow_node_within(leaves.get(i), bracket)) { i += 1; }
+        } else if (leaves.get(i).token_kind == TokenKind.Dot
+            && i + 1 < borrow_index - 1
+            && leaves.get(i + 1).token_kind == TokenKind.Identifier) {
+            type_id = typecheck_struct_field_type(
+                types, root, type_id, leaves.get(i + 1).text);
+            i += 2;
+        } else {
+            return TYPE_UNKNOWN;
+        }
+    }
+    return type_id;
+}
+
+Binding* borrow_unique_prior_binding(Vec<Binding>* bindings, str name,
+    SyntaxNode* use) {
+    Binding* selected = (Binding*)0;
+    i64 i = 0;
+    while (i < bindings.len()) {
+        Binding* candidate = bindings.get_ptr(i);
+        if (borrow_text_equals(candidate.name, name)
+            && candidate.name_node != (SyntaxNode*)0
+            && candidate.name_node.span.file == use.span.file
+            && candidate.name_node.span.start <= use.span.start) {
+            if (selected != (Binding*)0) { return (Binding*)0; }
+            selected = candidate;
+        }
+        i += 1;
+    }
+    return selected;
+}
+
+// A call result carries the origins of the borrowed parameters returned by
+// its callee. Keep alternatives: a function may return any reference input.
+bool borrow_body_returns_parameter(SyntaxNode* parameters_node, SyntaxNode* body,
+                                   i64 parameter_index, str* parameter_name) {
+    Vec<Binding> parameters = Vec<Binding>.new();
+    collect_parameter_bindings(parameters_node, &parameters);
+    if (parameter_index < 0 || parameter_index >= parameters.len()) {
+        parameters.drop();
+        return false;
+    }
+    Binding* parameter = parameters.get_ptr(parameter_index);
+    *parameter_name = parameter.name;
+    Vec<Binding> bindings = Vec<Binding>.new();
+    collect_parameter_bindings(parameters_node, &bindings);
+    collect_block_bindings(body, &bindings);
+    Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+    collect_borrow_leaves(body, &leaves);
+    bool returned = false;
+    i64 i = 0;
+    while (!returned && i < leaves.len()) {
+        if (leaves.get(i).token_kind == TokenKind.Return) {
+            if (borrow_return_is_nested(leaves.get(i), body.parent, body)) {
+                i += 1;
+                continue;
+            }
+            i += 1;
+            if (i < leaves.len() && leaves.get(i).token_kind == TokenKind.Move) { i += 1; }
+            if (i < leaves.len() && leaves.get(i).token_kind == TokenKind.BitwiseAnd) {
+                i += 1;
+                if (i < leaves.len() && leaves.get(i).token_kind == TokenKind.Mut) { i += 1; }
+            }
+            if (i < leaves.len() && node_is_identifier(leaves.get(i))) {
+                Binding* actual = visible_binding(&bindings, leaves.get(i).text, leaves.get(i));
+                if (actual != (Binding*)0 && actual.name_node == parameter.name_node) {
+                    returned = true;
+                } else if (actual == (Binding*)0
+                    && borrow_text_equals(leaves.get(i).text, parameter.name)) {
+                    // Impl methods are still represented as sibling CST fragments,
+                    // so their receiver parameter has no Function scope node.
+                    returned = true;
+                }
+            }
+        }
+        i += 1;
+    }
+    leaves.drop();
+    bindings.drop();
+    parameters.drop();
+    return returned;
+}
+
+bool borrow_function_returns_parameter(SyntaxNode* function, i64 parameter_index,
+                                       str* parameter_name) {
+    return borrow_body_returns_parameter(borrow_function_parameters(function),
+        borrow_function_body(function), parameter_index, parameter_name);
+}
+
+SyntaxNode* borrow_call_for_argument(SyntaxNode* argument, i64* argument_index) {
+    SyntaxNode* child = argument;
+    SyntaxNode* parent = child.parent;
+    while (parent != (SyntaxNode*)0) {
+        if (parent.kind == NodeKind.Parenthesized) {
+            SyntaxNode* callee = binding_previous_sibling(parent);
+            if (node_is_identifier(callee)) {
+                SyntaxNode* top = child;
+                while (top != (SyntaxNode*)0 && top.parent != parent) { top = top.parent; }
+                if (top == (SyntaxNode*)0) { return (SyntaxNode*)0; }
+                i64 index = 0;
+                SyntaxNode* part = parent.first_child;
+                while (part != (SyntaxNode*)0 && part != top) {
+                    if (part.token_kind == TokenKind.Comma) { index += 1; }
+                    part = part.next_sibling;
+                }
+                SyntaxNode* before_callee = binding_previous_sibling(callee);
+                if (before_callee != (SyntaxNode*)0
+                    && before_callee.token_kind == TokenKind.Dot) {
+                    index += 1;
+                }
+                *argument_index = index;
+                return callee;
+            }
+        }
+        child = parent;
+        parent = parent.parent;
+    }
+    return (SyntaxNode*)0;
+}
+
+bool borrow_has_return_origin(Vec<BorrowReturnOrigin>* origins,
+                              SyntaxNode* function, i64 parameter_index) {
+    i64 i = 0;
+    while (i < origins.len()) {
+        BorrowReturnOrigin* origin = origins.get_ptr(i);
+        if (origin.function == function && origin.parameter_index == parameter_index) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+BorrowReturnStatus* borrow_return_status(Vec<BorrowReturnStatus>* statuses,
+                                         SyntaxNode* function) {
+    i64 i = 0;
+    while (i < statuses.len()) {
+        BorrowReturnStatus* status = statuses.get_ptr(i);
+        if (status.function == function) { return status; }
+        i += 1;
+    }
+    return (BorrowReturnStatus*)0;
+}
+
+SyntaxNode* borrow_call_argument(SyntaxNode* call, i64 argument_index) {
+    if (call == (SyntaxNode*)0 || call.next_sibling == (SyntaxNode*)0
+        || call.next_sibling.kind != NodeKind.Parenthesized) { return (SyntaxNode*)0; }
+    i64 index = 0;
+    SyntaxNode* part = call.next_sibling.first_child;
+    while (part != (SyntaxNode*)0) {
+        if (index == argument_index && part.token_kind != TokenKind.Comma) { return part; }
+        if (part.token_kind == TokenKind.Comma) { index += 1; }
+        part = part.next_sibling;
+    }
+    return (SyntaxNode*)0;
+}
+
+bool borrow_call_argument_matches(Vec<Binding>* caller_bindings,
+                                  SyntaxNode* call, i64 argument_index,
+                                  Binding* parameter) {
+    SyntaxNode* argument = borrow_call_argument(call, argument_index);
+    if (argument == (SyntaxNode*)0 || parameter == (Binding*)0) { return false; }
+    bool expects_reference = parameter.declared_type.kind == ProjectionTypeKind.Reference;
+    bool explicit_borrow = argument.token_kind == TokenKind.BitwiseAnd;
+    bool mutable_borrow = explicit_borrow && argument.next_sibling != (SyntaxNode*)0
+        && argument.next_sibling.token_kind == TokenKind.Mut;
+    SyntaxNode* value = argument;
+    while (value != (SyntaxNode*)0 && value.kind == NodeKind.Token
+        && (value.token_kind == TokenKind.BitwiseAnd
+            || value.token_kind == TokenKind.Mut
+            || value.token_kind == TokenKind.Move)) {
+        value = value.next_sibling;
+    }
+    if (value == (SyntaxNode*)0 || !node_is_identifier(value)) { return true; }
+    Binding* actual = visible_binding(caller_bindings, value.text, value);
+    if (actual == (Binding*)0) { return true; }
+    TypeProjection* actual_type = &actual.declared_type;
+    if (actual_type.kind == ProjectionTypeKind.Unknown) { return true; }
+    if (actual_type.kind == ProjectionTypeKind.Reference) {
+        if (expects_reference && parameter.declared_type.is_mutable
+            && !actual_type.is_mutable) { return false; }
+        return borrow_text_equals(actual_type.name, parameter.declared_type.name);
+    }
+    if (expects_reference) {
+        return explicit_borrow
+            && borrow_text_equals(actual_type.name, parameter.declared_type.name)
+            && (!parameter.declared_type.is_mutable || mutable_borrow);
+    }
+    return !explicit_borrow
+        && borrow_text_equals(actual_type.name, parameter.declared_type.name);
+}
+
+void borrow_add_return_origin(Vec<BorrowReturnOrigin>* origins,
+                              SyntaxNode* function, i64 parameter_index) {
+    if (borrow_has_return_origin(origins, function, parameter_index)) { return; }
+    BorrowReturnOrigin origin;
+    origin.function = function;
+    origin.parameter_index = parameter_index;
+    origins.push(origin);
+}
+
+SyntaxNode* borrow_return_call(SyntaxNode* return_node) {
+    SyntaxNode* expression = return_node.next_sibling;
+    while (expression != (SyntaxNode*)0
+        && expression.kind == NodeKind.Token
+        && (expression.token_kind == TokenKind.BitwiseAnd
+            || expression.token_kind == TokenKind.Star
+            || expression.token_kind == TokenKind.Move
+            || expression.token_kind == TokenKind.Mut)) {
+        expression = expression.next_sibling;
+    }
+    if (expression != (SyntaxNode*)0 && node_is_identifier(expression)
+        && expression.next_sibling != (SyntaxNode*)0
+        && expression.next_sibling.kind == NodeKind.Parenthesized) {
+        return expression;
+    }
+    return (SyntaxNode*)0;
+}
+
+bool borrow_return_directly_returns_binding(Vec<Binding>* bindings,
+                                            SyntaxNode* return_node,
+                                            Binding* expected) {
+    if (expected == (Binding*)0) { return false; }
+    SyntaxNode* expression = return_node.next_sibling;
+    while (expression != (SyntaxNode*)0
+        && expression.kind == NodeKind.Token
+        && (expression.token_kind == TokenKind.BitwiseAnd
+            || expression.token_kind == TokenKind.Star
+            || expression.token_kind == TokenKind.Move
+            || expression.token_kind == TokenKind.Mut)) {
+        expression = expression.next_sibling;
+    }
+    if (expression == (SyntaxNode*)0 || !node_is_identifier(expression)) { return false; }
+    Binding* actual = visible_binding(bindings, expression.text, expression);
+    return actual != (Binding*)0 && actual.name_node == expected.name_node;
+}
+
+i64 borrow_call_arity(SyntaxNode* call) {
+    if (call == (SyntaxNode*)0 || call.next_sibling == (SyntaxNode*)0
+        || call.next_sibling.kind != NodeKind.Parenthesized) { return -1; }
+    SyntaxNode* arguments = call.next_sibling;
+    if (arguments.first_child == (SyntaxNode*)0) { return 0; }
+    i64 count = 1;
+    i64 depth = 0;
+    SyntaxNode* child = arguments.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Token
+            && (child.token_kind == TokenKind.LeftParen
+                || child.token_kind == TokenKind.LeftBracket
+                || child.token_kind == TokenKind.LeftBrace)) { depth += 1; }
+        else if (child.kind == NodeKind.Token
+            && (child.token_kind == TokenKind.RightParen
+                || child.token_kind == TokenKind.RightBracket
+                || child.token_kind == TokenKind.RightBrace)) { depth -= 1; }
+        else if (depth == 0 && child.token_kind == TokenKind.Comma) { count += 1; }
+        child = child.next_sibling;
+    }
+    return count;
+}
+
+bool borrow_call_returns_argument(Vec<BorrowReturnOrigin>* origins,
+                                  SyntaxNode* call, i64 argument_index,
+                                  i64 argument_count, SyntaxNode* root,
+                                  Vec<BorrowReturnStatus>* statuses,
+                                  Vec<Binding>* caller_bindings) {
+    if (call == (SyntaxNode*)0) { return false; }
+    SyntaxNode* function = root.first_child;
+    while (function != (SyntaxNode*)0) {
+        if (function.kind == NodeKind.Function) {
+            SyntaxNode* name = function_identifier(function);
+            if (name != (SyntaxNode*)0 && borrow_text_equals(name.text, call.text)) {
+                Vec<Binding> parameters = Vec<Binding>.new();
+                collect_parameter_bindings(borrow_function_parameters(function), &parameters);
+                bool matches = parameters.len() == argument_count
+                    && argument_index >= 0 && argument_index < parameters.len()
+                    && parameters.get_ptr(argument_index).declared_type.kind
+                        == ProjectionTypeKind.Reference
+                    && borrow_call_argument_matches(caller_bindings, call,
+                        argument_index, parameters.get_ptr(argument_index))
+                    && (borrow_has_return_origin(origins, function, argument_index)
+                        || (borrow_return_status(statuses, function) != (BorrowReturnStatus*)0
+                            && borrow_return_status(statuses, function).unknown_internal));
+                parameters.drop();
+                if (matches) { return true; }
+            }
+        }
+        function = function.next_sibling;
+    }
+    return item_is_c_extern_function(root, call.text);
+}
+
+SyntaxNode* borrow_lift_forwarded_call(Vec<BorrowReturnOrigin>* origins,
+                                      SyntaxNode* call, i64* argument_index,
+                                      SyntaxNode* root,
+                                      Vec<BorrowReturnStatus>* statuses,
+                                      Vec<Binding>* caller_bindings) {
+    SyntaxNode* current = call;
+    while (current != (SyntaxNode*)0 && current.parent != (SyntaxNode*)0
+        && current.parent.kind == NodeKind.Parenthesized) {
+        SyntaxNode* argument_group = current.parent;
+        SyntaxNode* outer = binding_previous_sibling(argument_group);
+        if (!node_is_identifier(outer) || outer.next_sibling != argument_group) { break; }
+        SyntaxNode* top = current;
+        while (top != (SyntaxNode*)0 && top.parent != argument_group) { top = top.parent; }
+        if (top == (SyntaxNode*)0) { break; }
+        i64 index = 0;
+        SyntaxNode* part = argument_group.first_child;
+        while (part != (SyntaxNode*)0 && part != top) {
+            if (part.token_kind == TokenKind.Comma) { index += 1; }
+            part = part.next_sibling;
+        }
+        i64 count = borrow_call_arity(outer);
+        if (!borrow_call_returns_argument(origins, outer, index, count, root,
+            statuses, caller_bindings)) { return (SyntaxNode*)0; }
+        current = outer;
+        *argument_index = index;
+    }
+    return current;
+}
+
+bool borrow_return_arg_is_parameter(Vec<Binding>* bindings,
+                                    SyntaxNode* arguments, i64 argument_index,
+                                    Binding* parameter) {
+    if (arguments == (SyntaxNode*)0 || parameter == (Binding*)0) { return false; }
+    i64 index = 0;
+    SyntaxNode* part = arguments.first_child;
+    while (part != (SyntaxNode*)0) {
+        if (index == argument_index) {
+            SyntaxNode* value = part;
+            while (value != (SyntaxNode*)0 && value.kind == NodeKind.Token
+                && (value.token_kind == TokenKind.BitwiseAnd
+                    || value.token_kind == TokenKind.Mut
+                    || value.token_kind == TokenKind.Move)) {
+                value = value.next_sibling;
+            }
+            if (value == (SyntaxNode*)0 || !node_is_identifier(value)) { return false; }
+            Binding* actual = visible_binding(bindings, value.text, value);
+            return actual != (Binding*)0 && actual.name_node == parameter.name_node;
+        }
+        if (part.token_kind == TokenKind.Comma) { index += 1; }
+        part = part.next_sibling;
+    }
+    return false;
+}
+
+bool borrow_binding_aliases_parameter(Vec<Binding>* bindings,
+                                      Vec<SyntaxNode*>* leaves,
+                                      Binding* binding, Binding* parameter,
+                                      i64 return_index) {
+    Binding* current = binding;
+    i64 depth = 0;
+    while (current != (Binding*)0 && depth <= bindings.len()) {
+        if (current.name_node == parameter.name_node) { return true; }
+        i64 declaration = 0;
+        while (declaration < leaves.len()
+            && leaves.get(declaration) != current.name_node) { declaration += 1; }
+        if (declaration >= leaves.len()) { return false; }
+        i64 assign = declaration + 1;
+        while (assign < return_index && assign < leaves.len()
+            && leaves.get(assign).token_kind != TokenKind.Assign
+            && leaves.get(assign).token_kind != TokenKind.Semicolon) {
+            assign += 1;
+        }
+        if (assign >= return_index || assign >= leaves.len()
+            || leaves.get(assign).token_kind != TokenKind.Assign) { return false; }
+        i64 value = assign + 1;
+        while (value < return_index && value < leaves.len()
+            && (leaves.get(value).token_kind == TokenKind.BitwiseAnd
+                || leaves.get(value).token_kind == TokenKind.Move
+                || leaves.get(value).token_kind == TokenKind.Mut)) { value += 1; }
+        if (value >= return_index || value >= leaves.len()
+            || !node_is_identifier(leaves.get(value))) { return false; }
+        Binding* source = visible_binding(bindings, leaves.get(value).text, leaves.get(value));
+        if (source == (Binding*)0) { return false; }
+        i64 later = value + 1;
+        while (later + 1 < return_index && later + 1 < leaves.len()) {
+            if (leaves.get(later).token_kind == TokenKind.Identifier
+                && borrow_text_equals(leaves.get(later).text, current.name)
+                && visible_binding(bindings, current.name, leaves.get(later)) == current
+                && leaves.get(later + 1).token_kind == TokenKind.Assign) {
+                return false;
+            }
+            later += 1;
+        }
+        current = source;
+        depth += 1;
+    }
+    return false;
+}
+
+bool borrow_return_matches_any_parameter(Vec<Binding>* bindings,
+                                         Vec<Binding>* parameters,
+                                         Vec<SyntaxNode*>* leaves,
+                                         SyntaxNode* return_node,
+                                         i64 return_index) {
+    i64 i = 0;
+    while (i < parameters.len()) {
+        Binding* parameter = parameters.get_ptr(i);
+        if (parameter.declared_type.kind == ProjectionTypeKind.Reference) {
+            if (borrow_return_directly_returns_binding(bindings, return_node, parameter)) {
+                return true;
+            }
+            SyntaxNode* value = return_node.next_sibling;
+            while (value != (SyntaxNode*)0 && value.kind == NodeKind.Token
+                && (value.token_kind == TokenKind.BitwiseAnd
+                    || value.token_kind == TokenKind.Star
+                    || value.token_kind == TokenKind.Move
+                    || value.token_kind == TokenKind.Mut)) { value = value.next_sibling; }
+            if (value != (SyntaxNode*)0 && node_is_identifier(value)) {
+                Binding* returned = visible_binding(bindings, value.text, value);
+                if (borrow_binding_aliases_parameter(bindings, leaves,
+                    returned, parameter, return_index)) { return true; }
+            }
+        }
+        i += 1;
+    }
+    return false;
+}
+
+void borrow_collect_return_statuses(SyntaxNode* root, SyntaxTree* tree,
+                                    SymbolTable* symbols,
+                                    Vec<BorrowReturnStatus>* statuses) {
+    SyntaxNode* function = root.first_child;
+    while (function != (SyntaxNode*)0) {
+        if (function.kind == NodeKind.Function) {
+            BorrowReturnStatus status;
+            status.function = function;
+            status.unknown_internal = false;
+            status.opaque_external = false;
+            statuses.push(status);
+        }
+        function = function.next_sibling;
+    }
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        i64 state_index = 0;
+        while (state_index < statuses.len()) {
+            BorrowReturnStatus* state = statuses.get_ptr(state_index);
+            SyntaxNode* owner = state.function;
+            SyntaxNode* body = borrow_function_body(owner);
+            Vec<Binding> bindings = Vec<Binding>.new();
+            collect_function_bindings(owner, &bindings);
+            Vec<Binding> parameters = Vec<Binding>.new();
+            collect_parameter_bindings(borrow_function_parameters(owner), &parameters);
+            Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+            collect_borrow_leaves(body, &leaves);
+            i64 leaf_index = 0;
+            while (leaf_index < leaves.len()) {
+                SyntaxNode* node = leaves.get(leaf_index);
+                if (node.token_kind == TokenKind.Return
+                    && !borrow_return_is_nested(node, owner, body)
+                    && !borrow_return_matches_any_parameter(&bindings, &parameters,
+                        &leaves, node, leaf_index)) {
+                    bool unknown_internal = false;
+                    bool opaque_external = false;
+                    SyntaxNode* call = borrow_return_call(node);
+                    if (call != (SyntaxNode*)0) {
+                        i64 arity = borrow_call_arity(call);
+                        i64 candidate_count = 0;
+                        SyntaxNode* candidate = root.first_child;
+                        while (candidate != (SyntaxNode*)0) {
+                            if (candidate.kind == NodeKind.Function) {
+                                SyntaxNode* name = function_identifier(candidate);
+                                Vec<Binding> candidate_parameters = Vec<Binding>.new();
+                                collect_parameter_bindings(
+                                    borrow_function_parameters(candidate),
+                                    &candidate_parameters);
+                                bool applicable = name != (SyntaxNode*)0
+                                    && borrow_text_equals(name.text, call.text)
+                                    && candidate_parameters.len() == arity;
+                                i64 argument = 0;
+                                while (applicable && argument < arity) {
+                                    if (!borrow_call_argument_matches(&bindings,
+                                        call, argument,
+                                        candidate_parameters.get_ptr(argument))) {
+                                        applicable = false;
+                                    }
+                                    argument += 1;
+                                }
+                                if (applicable) {
+                                    candidate_count += 1;
+                                    BorrowReturnStatus* candidate_status =
+                                        borrow_return_status(statuses, candidate);
+                                    if (candidate_status != (BorrowReturnStatus*)0
+                                        && candidate_status.unknown_internal) {
+                                        unknown_internal = true;
+                                    }
+                                    if (candidate_status != (BorrowReturnStatus*)0
+                                        && candidate_status.opaque_external) {
+                                        opaque_external = true;
+                                    }
+                                }
+                                candidate_parameters.drop();
+                            }
+                            candidate = candidate.next_sibling;
+                        }
+                        if (candidate_count == 0) {
+                            if (item_is_c_extern_function(root, call.text)) {
+                                opaque_external = true;
+                            } else {
+                                unknown_internal = true;
+                            }
+                        }
+                    } else {
+                        SyntaxNode* value = node.next_sibling;
+                        while (value != (SyntaxNode*)0 && value.kind == NodeKind.Token
+                            && (value.token_kind == TokenKind.BitwiseAnd
+                                || value.token_kind == TokenKind.Mut)) {
+                            value = value.next_sibling;
+                        }
+                        if (value == (SyntaxNode*)0 || !node_is_identifier(value)
+                            || !borrow_is_global(tree, symbols, value.text)) {
+                            unknown_internal = true;
+                        }
+                    }
+                    if (unknown_internal && !state.unknown_internal) {
+                        state.unknown_internal = true;
+                        changed = true;
+                    }
+                    if (opaque_external && !state.opaque_external) {
+                        state.opaque_external = true;
+                        changed = true;
+                    }
+                }
+                leaf_index += 1;
+            }
+            leaves.drop();
+            parameters.drop();
+            bindings.drop();
+            state_index += 1;
+        }
+    }
+}
+
+void borrow_collect_return_origins(SyntaxNode* root,
+                                   Vec<BorrowReturnOrigin>* origins,
+                                   Vec<BorrowReturnStatus>* statuses) {
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        SyntaxNode* function = root.first_child;
+        while (function != (SyntaxNode*)0) {
+            if (function.kind == NodeKind.Function) {
+                Vec<Binding> bindings = Vec<Binding>.new();
+                collect_function_bindings(function, &bindings);
+                Vec<Binding> parameters = Vec<Binding>.new();
+                collect_parameter_bindings(borrow_function_parameters(function), &parameters);
+                Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+                collect_borrow_leaves(borrow_function_body(function), &leaves);
+                i64 parameter_index = 0;
+                while (parameter_index < parameters.len()) {
+                    Binding* parameter = parameters.get_ptr(parameter_index);
+                    if (parameter.declared_type.kind == ProjectionTypeKind.Reference
+                        && !borrow_has_return_origin(origins, function, parameter_index)) {
+                        bool returned = false;
+                        i64 leaf_index = 0;
+                        while (!returned && leaf_index < leaves.len()) {
+                            SyntaxNode* node = leaves.get(leaf_index);
+                            if (node.token_kind == TokenKind.Return
+                                && !borrow_return_is_nested(node, function,
+                                    borrow_function_body(function))) {
+                                if (borrow_return_directly_returns_binding(&bindings,
+                                    node, parameter)) {
+                                    returned = true;
+                                } else {
+                                    SyntaxNode* value = node.next_sibling;
+                                    while (value != (SyntaxNode*)0
+                                        && value.kind == NodeKind.Token
+                                        && (value.token_kind == TokenKind.BitwiseAnd
+                                            || value.token_kind == TokenKind.Star
+                                            || value.token_kind == TokenKind.Move
+                                            || value.token_kind == TokenKind.Mut)) {
+                                        value = value.next_sibling;
+                                    }
+                                    if (value != (SyntaxNode*)0 && node_is_identifier(value)) {
+                                        Binding* returned_binding = visible_binding(
+                                            &bindings, value.text, value);
+                                        if (borrow_binding_aliases_parameter(&bindings,
+                                            &leaves, returned_binding, parameter, leaf_index)) {
+                                            returned = true;
+                                        }
+                                    }
+                                }
+                                if (!returned) {
+                                    SyntaxNode* call = borrow_return_call(node);
+                                    i64 argument_count = borrow_call_arity(call);
+                                    i64 argument_index = 0;
+                                    SyntaxNode* arguments = call != (SyntaxNode*)0
+                                        ? call.next_sibling : (SyntaxNode*)0;
+                                    while (!returned && argument_index < argument_count) {
+                                        if (borrow_return_arg_is_parameter(&bindings,
+                                            arguments, argument_index, parameter)
+                                            && borrow_call_returns_argument(origins, call,
+                                                argument_index, argument_count, root,
+                                                statuses,
+                                                &bindings)) {
+                                            returned = true;
+                                        }
+                                        argument_index += 1;
+                                    }
+                                }
+                            }
+                            leaf_index += 1;
+                        }
+                        if (returned) {
+                            borrow_add_return_origin(origins, function, parameter_index);
+                            changed = true;
+                        }
+                    }
+                    parameter_index += 1;
+                }
+                leaves.drop();
+                parameters.drop();
+                bindings.drop();
+            }
+            function = function.next_sibling;
+        }
+    }
+}
+
+bool borrow_method_returns_receiver(SyntaxNode* root, str receiver_type,
+                                    SyntaxNode* method,
+                                    Vec<Binding>* caller_bindings,
+                                    TypeTable* types) {
+    SyntaxNode* item = root.first_child;
+    i64 best_score = -1;
+    bool returns_receiver = false;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Impl) {
+            SyntaxNode* target = impl_target_identifier(item);
+            if (target != (SyntaxNode*)0
+                && borrow_text_equals(target.text, receiver_type)) {
+                SyntaxNode* block = item.first_child;
+                while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+                    block = block.next_sibling;
+                }
+                SyntaxNode* member = block != (SyntaxNode*)0
+                    ? block.first_child : (SyntaxNode*)0;
+                while (member != (SyntaxNode*)0) {
+                    if (member.kind == NodeKind.Token
+                        && member.token_kind == TokenKind.Semicolon) {
+                        member = member.next_sibling;
+                        continue;
+                    }
+                    SyntaxNode* params = (SyntaxNode*)0;
+                    SyntaxNode* body = (SyntaxNode*)0;
+                    SyntaxNode* scan = member;
+                    while (scan != (SyntaxNode*)0
+                        && !(scan.kind == NodeKind.Token
+                            && scan.token_kind == TokenKind.Semicolon)) {
+                        if (scan.kind == NodeKind.Parenthesized) { params = scan; }
+                        else if (params != (SyntaxNode*)0 && scan.kind == NodeKind.Block) {
+                            body = scan;
+                            break;
+                        }
+                        scan = scan.next_sibling;
+                    }
+                    SyntaxNode* name = item_method_name(member, params);
+                    if (name != (SyntaxNode*)0 && params != (SyntaxNode*)0
+                        && body != (SyntaxNode*)0
+                        && borrow_text_equals(name.text, method.text)) {
+                        Vec<Binding> method_parameters = Vec<Binding>.new();
+                        collect_parameter_bindings(params, &method_parameters);
+                        i64 call_arity = borrow_call_arity(method);
+                        bool applicable = method_parameters.len() > 0
+                            && method_parameters.get_ptr(0).declared_type.kind
+                                == ProjectionTypeKind.Reference;
+                        i64 arg = 0;
+                        i64 fixed_count = method_parameters.len();
+                        bool variadic = method_parameters.len() > 0
+                            && binding_is_variadic_parameter(
+                                method_parameters.get_ptr(method_parameters.len() - 1));
+                        if (variadic) { fixed_count -= 1; }
+                        applicable = applicable && (variadic
+                            ? call_arity >= fixed_count - 1
+                            : method_parameters.len() == call_arity + 1);
+                        i64 score = 0;
+                        while (applicable && arg < call_arity) {
+                            i64 parameter_index = arg + 1;
+                            if (variadic && parameter_index >= fixed_count) {
+                                parameter_index = method_parameters.len() - 1;
+                            }
+                            Binding* parameter = method_parameters.get_ptr(parameter_index);
+                            SyntaxNode* argument = borrow_call_argument(method, arg);
+                            bool explicit_borrow = argument != (SyntaxNode*)0
+                                && argument.token_kind == TokenKind.BitwiseAnd;
+                            bool mutable_borrow = explicit_borrow
+                                && argument.next_sibling != (SyntaxNode*)0
+                                && argument.next_sibling.token_kind == TokenKind.Mut;
+                            SyntaxNode* value = argument;
+                            while (value != (SyntaxNode*)0 && value.kind == NodeKind.Token
+                                && (value.token_kind == TokenKind.BitwiseAnd
+                                    || value.token_kind == TokenKind.Mut
+                                    || value.token_kind == TokenKind.Move)) {
+                                value = value.next_sibling;
+                            }
+                            u32 expected = types.parse_type_name(parameter.declared_type.name);
+                            u32 actual = TYPE_UNKNOWN;
+                            Binding* actual_binding = value != (SyntaxNode*)0
+                                && node_is_identifier(value)
+                                ? visible_binding(caller_bindings, value.text, value)
+                                : (Binding*)0;
+                            if (actual_binding != (Binding*)0) {
+                                actual = types.parse_type_name(actual_binding.declared_type.name);
+                                if (actual_binding.declared_type.kind == ProjectionTypeKind.Reference) {
+                                    TypeEntry* actual_entry = types.get(actual);
+                                    actual = actual_entry.kind == TypeKind.Reference
+                                        ? actual_entry.inner : actual;
+                                }
+                            }
+                            bool expects_reference = parameter.declared_type.kind
+                                == ProjectionTypeKind.Reference;
+                            if (actual_binding != (Binding*)0
+                                && ((!expects_reference && explicit_borrow)
+                                    || (expects_reference && actual_binding.declared_type.kind
+                                        != ProjectionTypeKind.Reference && !explicit_borrow)
+                                    || (expects_reference && parameter.declared_type.is_mutable
+                                        && (!mutable_borrow
+                                            || (actual_binding.declared_type.kind
+                                                == ProjectionTypeKind.Reference
+                                                && !actual_binding.declared_type.is_mutable))))) {
+                                applicable = false;
+                            } else if (expected != TYPE_UNKNOWN && actual != TYPE_UNKNOWN
+                                && !types_match(types, expected, actual)) {
+                                applicable = false;
+                            } else if (expected != TYPE_UNKNOWN && expected == actual) {
+                                score += 2;
+                            } else if (expected != TYPE_UNKNOWN && actual != TYPE_UNKNOWN) {
+                                score += 1;
+                            }
+                            arg += 1;
+                        }
+                        if (applicable) {
+                            str receiver_name = "";
+                            bool returns = borrow_body_returns_parameter(
+                                params, body, 0, &receiver_name);
+                            u32 receiver_type_id = types.parse_type_name(receiver_type);
+                            u32 result_type = typecheck_method_decl_return_type(
+                                types, member, name);
+                            result_type = resolve_generic_member_type(
+                                types, root, receiver_type_id, result_type);
+                            bool carries_receiver_borrow = result_type == TYPE_UNKNOWN;
+                            if (result_type != TYPE_UNKNOWN) {
+                                TypeEntry result = *types.get(types.resolve_subst(result_type));
+                                carries_receiver_borrow = result.kind == TypeKind.Reference
+                                    || borrow_type_contains_reference(
+                                        types, root, result_type, 0);
+                            }
+                            returns = returns && carries_receiver_borrow;
+                            if (score > best_score) {
+                                best_score = score;
+                                returns_receiver = returns;
+                            } else if (score == best_score && returns) {
+                                returns_receiver = true;
+                            }
+                        }
+                        method_parameters.drop();
+                    }
+                    member = body != (SyntaxNode*)0 ? body.next_sibling
+                        : scan != (SyntaxNode*)0 ? scan.next_sibling : (SyntaxNode*)0;
+                }
+            }
+        }
+        item = item.next_sibling;
+    }
+    return best_score >= 0 && returns_receiver;
+}
+
+str borrow_call_result_holder(Vec<Binding>* bindings, Vec<u32>* binding_types,
+                              Vec<SyntaxNode*>* leaves,
+                              SyntaxNode* call, SyntaxNode* argument,
+                              TypeTable* table, SyntaxNode* root) {
+    // Aggregate initializers own the stored reference for their full lifetime.
+    str aggregate = borrow_aggregate_holder(bindings, binding_types, table, root, argument);
+    if (strlen(aggregate) > 0) { return aggregate; }
+    i64 call_index = 0;
+    while (call_index < leaves.len() && leaves.get(call_index) != call) { call_index += 1; }
+    if (call_index == leaves.len()) { return ""; }
+    i64 i = call_index - 1;
+    while (i >= 0 && leaves.get(i).token_kind != TokenKind.Assign
+        && leaves.get(i).token_kind != TokenKind.Semicolon
+        && leaves.get(i).token_kind != TokenKind.LeftBrace) {
+        i -= 1;
+    }
+    if (i <= 0 || leaves.get(i).token_kind != TokenKind.Assign
+        || leaves.get(i - 1).token_kind != TokenKind.Identifier) {
+        return "";
+    }
+    if (i >= 3 && leaves.get(i - 2).token_kind == TokenKind.Dot
+        && leaves.get(i - 3).token_kind == TokenKind.Identifier) {
+        return leaves.get(i - 3).text;
+    }
+    return leaves.get(i - 1).text;
+}
+
 i64 last_use(Vec<SyntaxNode*>* leaves, i64 start, str holder) {
     i64 last = -1;
     i64 i = start;
@@ -506,6 +1398,32 @@ i64 last_use(Vec<SyntaxNode*>* leaves, i64 start, str holder) {
         i += 1;
     }
     return last;
+}
+
+i64 last_binding_use(Vec<Binding>* bindings, Vec<SyntaxNode*>* leaves,
+                     i64 start, Binding* holder) {
+    if (holder == (Binding*)0) { return -1; }
+    i64 last = -1;
+    i64 i = start;
+    while (i < leaves.len()) {
+        SyntaxNode* node = leaves.get(i);
+        if (node.token_kind == TokenKind.Identifier
+            && borrow_text_equals(node.text, holder.name)
+            && visible_binding(bindings, holder.name, node) == holder) {
+            last = i;
+        }
+        i += 1;
+    }
+    return last;
+}
+
+bool borrow_is_holder_use(Vec<Binding>* bindings, Loan* loan, SyntaxNode* node) {
+    if (loan.holder_binding_start <= 0 || node.token_kind != TokenKind.Identifier) {
+        return false;
+    }
+    Binding* visible = visible_binding(bindings, node.text, node);
+    return visible != (Binding*)0
+        && visible.span.start == loan.holder_binding_start;
 }
 
 
@@ -532,6 +1450,14 @@ void collect_borrow_release_points(SyntaxNode* node, Vec<SyntaxNode*>* leaves, V
         collect_borrow_release_points(child, leaves, points);
         child = child.next_sibling;
     }
+}
+
+bool borrow_scope_ends_after(Vec<SyntaxNode*>* leaves, i64 index,
+                             SyntaxNode* scope) {
+    if (index < 0 || index >= leaves.len() || !borrow_node_within(leaves.get(index), scope)) {
+        return false;
+    }
+    return index + 1 >= leaves.len() || !borrow_node_within(leaves.get(index + 1), scope);
 }
 
 void append_projection(BorrowAnalyzer* analyzer, ProjectionKind kind, str field, u16* count) {
@@ -1120,7 +2046,9 @@ i64 borrow_method_receiver_kind(SyntaxTree* tree, str method) {
 }
 
 void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbols,
-                  SyntaxNode* function, CfgSet* cfg, MethodReceiverTable* receiver_table) {
+                  SyntaxNode* function, CfgSet* cfg, MethodReceiverTable* receiver_table,
+                  Vec<BorrowReturnOrigin>* return_origins,
+                  Vec<BorrowReturnStatus>* return_statuses) {
     SyntaxNode* body = borrow_function_body(function);
     if (body == (SyntaxNode*)0) {
         return;
@@ -1254,6 +2182,37 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
                 LoanKind receiver_kind = receiver_mode == 2 ? LoanKind.Mutable : LoanKind.Shared;
                 analyzer.add(move receiver, leaves.get(receiver_root).text, leaves.get(receiver_root).span,
                     receiver_kind, false, (u32)0, i);
+                if (borrow_method_returns_receiver(tree.root, receiver_type, node,
+                    &bindings, &symbols.types)) {
+                    str result_holder = borrow_call_result_holder(&bindings,
+                        &binding_types, &leaves, node, leaves.get(receiver_root),
+                        &symbols.types, tree.root);
+                    if (strlen(result_holder) > 0) {
+                        Place forwarded = borrow_place(analyzer, &leaves, receiver_root, i - 1);
+                        u32 forwarded_holder = analyzer.names.intern(result_holder);
+                        Binding* result_binding = visible_binding(&bindings,
+                            result_holder, node);
+                        i64 forwarded_release = result_binding != (Binding*)0
+                            ? last_binding_use(&bindings, &leaves, i + 1, result_binding)
+                            : last_use(&leaves, i + 1, result_holder);
+                        analyzer.add(move forwarded, leaves.get(receiver_root).text,
+                            leaves.get(receiver_root).span, receiver_kind, true,
+                            forwarded_holder, forwarded_release >= 0 ? forwarded_release : i);
+                        i64 added = analyzer.loans.len() - 1;
+                        if (result_binding != (Binding*)0) {
+                            analyzer.loans.get_ptr(added).holder_binding_start = result_binding.span.start;
+                        }
+                        Binding* owner = visible_binding(&bindings,
+                            leaves.get(receiver_root).text, leaves.get(receiver_root));
+                        if (owner != (Binding*)0 && owner.kind != BindingKind.Parameter) {
+                            analyzer.loans.get_ptr(added).owner_scope = binding_visibility_scope(owner);
+                        }
+                        if (borrow_is_global(tree, symbols, result_holder)) {
+                            report_escape(analyzer, tree, symbols, function,
+                                leaves.get(receiver_root).text, leaves.get(receiver_root).span);
+                        }
+                    }
+                }
             }
         }
         if (node.token_kind == TokenKind.Return) {
@@ -1299,19 +2258,64 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
                     str name = leaves.get(j).text;
                     if (borrow_in_return_expression(node)
                         && borrow_function_returns_indirect(function, symbols)) {
-                        report_escape(analyzer, tree, symbols, function, name, leaves.get(j).span);
+                        i64 return_argument_index = 0;
+                        SyntaxNode* return_call = borrow_call_for_argument(
+                            leaves.get(j), &return_argument_index);
+                        bool returned = return_call == (SyntaxNode*)0;
+                        if (return_call != (SyntaxNode*)0) {
+                            return_call = borrow_lift_forwarded_call(return_origins,
+                                return_call, &return_argument_index, tree.root,
+                                return_statuses, &bindings);
+                            returned = return_call != (SyntaxNode*)0
+                                && borrow_call_returns_argument(return_origins,
+                                return_call, return_argument_index,
+                                borrow_call_arity(return_call), tree.root,
+                                return_statuses, &bindings);
+                        }
+                        if (returned) {
+                            report_escape(analyzer, tree, symbols, function,
+                                name, leaves.get(j).span);
+                        }
                     }
                     Place place = borrow_place(analyzer, &leaves, j, leaves.len());
                     bool persistent = i > 0 && borrow_text_equals(leaves.get(i - 1).text, "=");
                     str aggregate_holder = borrow_aggregate_holder(&bindings,
                         &binding_types, &symbols.types, tree.root, node);
                     persistent = persistent || strlen(aggregate_holder) > 0;
+                    Binding* source_binding = visible_binding(&bindings, name, leaves.get(j));
+                    if (source_binding == (Binding*)0) {
+                        source_binding = borrow_unique_prior_binding(&bindings,
+                            name, leaves.get(j));
+                    }
+                    u32 source_type = typecheck_resolved_binding_type(
+                        &bindings, &binding_types, source_binding);
+                    bool unchecked_pointer_access = source_type != TYPE_UNKNOWN
+                        && symbols.types.get(
+                            symbols.types.resolve_subst(source_type)).kind == TypeKind.Pointer
+                        && place.projections_count > 0;
+                    if (unchecked_pointer_access) { persistent = false; }
                     LoanKind kind = LoanKind.Shared;
                     if (mutable) {
                         kind = LoanKind.Mutable;
                     }
                     u32 holder_id = (u32)0;
                     i64 release_index = leaves.len();
+                    if (persistent) {
+                        str holder = strlen(aggregate_holder) > 0
+                            ? aggregate_holder : persistent_holder(&leaves, i);
+                        Binding* destination = visible_binding(&bindings, holder, node);
+                        u32 slot_type = borrow_assignment_slot_type(
+                            &bindings, &binding_types, &symbols.types,
+                            tree.root, &leaves, i, destination);
+                        bool pointer_slot = slot_type != TYPE_UNKNOWN
+                            && symbols.types.get(
+                                symbols.types.resolve_subst(slot_type)).kind
+                                    == TypeKind.Pointer;
+                        if (pointer_slot) {
+                            persistent = false;
+                            unchecked_pointer_access = true;
+                        }
+                    }
                     if (persistent) {
                         str holder = strlen(aggregate_holder) > 0
                             ? aggregate_holder : persistent_holder(&leaves, i);
@@ -1328,12 +2332,139 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
                         && borrow_is_global(tree, symbols, leaves.get(i - 2).text)) {
                         report_escape(analyzer, tree, symbols, function, name, leaves.get(j).span);
                     }
-                    analyzer.add(move place, name, leaves.get(j).span, kind, persistent, holder_id, release_index);
+                    if (!unchecked_pointer_access) {
+                        analyzer.add(move place, name, leaves.get(j).span,
+                            kind, persistent, holder_id, release_index);
+                    }
+                    if (persistent && holder_id > 0) {
+                        i64 added = analyzer.loans.len() - 1;
+                        Binding* holder = visible_binding(&bindings,
+                            analyzer.names.get(holder_id), node);
+                        if (holder != (Binding*)0) {
+                            analyzer.loans.get_ptr(added).holder_binding_start = holder.span.start;
+                        }
+                        Binding* owner = source_binding;
+                        if (owner != (Binding*)0 && owner.kind != BindingKind.Parameter) {
+                            analyzer.loans.get_ptr(added).owner_scope = binding_visibility_scope(owner);
+                        }
+                    }
+
+                    // Passing a borrow to a function that returns that input
+                    // transfers the loan to the call result's binding.
+                    i64 argument_index = 0;
+                    SyntaxNode* call = borrow_call_for_argument(leaves.get(j), &argument_index);
+                    call = borrow_lift_forwarded_call(return_origins,
+                        call, &argument_index, tree.root, return_statuses, &bindings);
+                    if (call != (SyntaxNode*)0
+                        && borrow_call_returns_argument(return_origins, call,
+                            argument_index, borrow_call_arity(call), tree.root,
+                            return_statuses,
+                            &bindings)) {
+                        str result_holder = borrow_call_result_holder(&bindings,
+                            &binding_types, &leaves, call, node, &symbols.types, tree.root);
+                        if (strlen(result_holder) > 0
+                            && !borrow_in_return_expression(node)) {
+                            Place forwarded = borrow_place(analyzer, &leaves, j, leaves.len());
+                            u32 forwarded_holder = analyzer.names.intern(result_holder);
+                            Binding* result_binding = visible_binding(&bindings,
+                                result_holder, call);
+                            i64 forwarded_release = result_binding != (Binding*)0
+                                ? last_binding_use(&bindings, &leaves, i + 1, result_binding)
+                                : last_use(&leaves, i + 1, result_holder);
+                            analyzer.add(move forwarded, name, leaves.get(j).span, kind, true,
+                                forwarded_holder, forwarded_release >= 0 ? forwarded_release : i);
+                            Binding* owner = visible_binding(&bindings, name, leaves.get(j));
+                            i64 added = analyzer.loans.len() - 1;
+                            if (result_binding != (Binding*)0) {
+                                analyzer.loans.get_ptr(added).holder_binding_start = result_binding.span.start;
+                            }
+                            if (owner != (Binding*)0 && owner.kind != BindingKind.Parameter) {
+                                analyzer.loans.get_ptr(added).owner_scope = binding_visibility_scope(owner);
+                            }
+                            if (borrow_is_global(tree, symbols, result_holder)) {
+                                report_escape(analyzer, tree, symbols, function, name,
+                                    leaves.get(j).span);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (node.token_kind == TokenKind.Identifier) {
+            i64 argument_index = 0;
+            SyntaxNode* call = borrow_call_for_argument(node, &argument_index);
+            call = borrow_lift_forwarded_call(return_origins,
+                call, &argument_index, tree.root, return_statuses, &bindings);
+            i64 argument_count = borrow_call_arity(call);
+            if (call != (SyntaxNode*)0 && borrow_call_returns_argument(
+                return_origins, call, argument_index, argument_count,
+                tree.root, return_statuses, &bindings)) {
+                Binding* source_binding = visible_binding(&bindings, node.text, node);
+                if (source_binding != (Binding*)0) {
+                    str result_holder = borrow_call_result_holder(&bindings,
+                        &binding_types, &leaves, call, node, &symbols.types, tree.root);
+                    if (strlen(result_holder) > 0) {
+                        Binding* result_binding = visible_binding(&bindings,
+                            result_holder, call);
+                        i64 result_release = result_binding != (Binding*)0
+                            ? last_binding_use(&bindings, &leaves, i + 1, result_binding)
+                            : last_use(&leaves, i + 1, result_holder);
+                        i64 source_index = 0;
+                        while (source_index < analyzer.loans.len()) {
+                            Loan* source = analyzer.loans.get_ptr(source_index);
+                            if (source.active && source.persistent
+                                && borrow_is_holder_use(&bindings, source, node)) {
+                                Place forwarded = source.place;
+                                str origin_name = analyzer.names.get(source.place.local_id);
+                                Span origin_span = source.span;
+                                LoanKind origin_kind = source.kind;
+                                SyntaxNode* owner_scope = source.owner_scope;
+                                analyzer.add(move forwarded, origin_name, origin_span,
+                                    origin_kind, true,
+                                    analyzer.names.intern(result_holder),
+                                    result_release >= 0 ? result_release : i);
+                                i64 added = analyzer.loans.len() - 1;
+                                if (result_binding != (Binding*)0) {
+                                    analyzer.loans.get_ptr(added).holder_binding_start = result_binding.span.start;
+                                }
+                                analyzer.loans.get_ptr(added).owner_scope = owner_scope;
+                                if (borrow_is_global(tree, symbols, result_holder)) {
+                                    report_escape(analyzer, tree, symbols, function,
+                                        origin_name, node.span);
+                                }
+                            }
+                            source_index += 1;
+                        }
+                    }
                 }
             }
         }
         if (node.token_kind == TokenKind.Semicolon) {
             analyzer.end_statement();
+        }
+        i64 loan_index = 0;
+        while (loan_index < analyzer.loans.len()) {
+            Loan* loan = analyzer.loans.get_ptr(loan_index);
+            if (loan.active && loan.persistent && loan.owner_scope != (SyntaxNode*)0
+                && borrow_scope_ends_after(&leaves, i, loan.owner_scope)
+                && loan.release_index > i) {
+                i64 use_index = i + 1;
+                while (use_index <= loan.release_index && use_index < leaves.len()
+                    && (loan.holder_binding_start > 0
+                        ? !borrow_is_holder_use(&bindings, loan, leaves.get(use_index))
+                        : (leaves.get(use_index).token_kind != TokenKind.Identifier
+                            || !borrow_text_equals(leaves.get(use_index).text,
+                                analyzer.names.get(loan.holder_id))))) {
+                    use_index += 1;
+                }
+                if (use_index <= loan.release_index && use_index < leaves.len()) {
+                    String message = String.from_str(ref_does_not_outlive_func());
+                    analyzer.diagnostics.error(leaves.get(use_index).span, move message);
+                    analyzer.failed = true;
+                }
+                loan.active = false;
+            }
+            loan_index += 1;
         }
         i64 point = 0;
         while (point < release_points.len()) {
@@ -1355,6 +2486,11 @@ bool check_borrows(SyntaxTree* tree, SymbolTable* symbols, DiagnosticBag* diagno
     Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
     cfg_collect_items(tree.root, cfg, diagnostics, &items);
 
+    Vec<BorrowReturnStatus> return_statuses = Vec<BorrowReturnStatus>.new();
+    borrow_collect_return_statuses(tree.root, tree, symbols, &return_statuses);
+    Vec<BorrowReturnOrigin> return_origins = Vec<BorrowReturnOrigin>.new();
+    borrow_collect_return_origins(tree.root, &return_origins, &return_statuses);
+
     MethodReceiverTable receiver_table = MethodReceiverTable.new();
     i64 idx = 0;
     while (idx < items.len()) {
@@ -1369,7 +2505,8 @@ bool check_borrows(SyntaxTree* tree, SymbolTable* symbols, DiagnosticBag* diagno
     while (i < items.len()) {
         if (items.get(i).kind == NodeKind.Function) {
             BorrowAnalyzer analyzer = BorrowAnalyzer.new(diagnostics);
-            scan_borrows(&analyzer, tree, symbols, items.get(i), cfg, &receiver_table);
+            scan_borrows(&analyzer, tree, symbols, items.get(i), cfg,
+                &receiver_table, &return_origins, &return_statuses);
             if (analyzer.failed) {
                 ok = false;
             }
@@ -1377,5 +2514,7 @@ bool check_borrows(SyntaxTree* tree, SymbolTable* symbols, DiagnosticBag* diagno
         i += 1;
     }
     items.drop();
+    return_origins.drop();
+    return_statuses.drop();
     return ok;
 }

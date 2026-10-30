@@ -7,6 +7,7 @@ import frontend.ast;
 import frontend.lower_expr;
 import imports;
 import transport;
+import std.map;
 
 i64 completion_kind(IdeSymbolKind kind) {
     return match kind {
@@ -16,6 +17,132 @@ i64 completion_kind(IdeSymbolKind kind) {
         IdeSymbolKind.Field : 5, IdeSymbolKind.Variant : 20,
         _ : 6,
     };
+}
+
+struct CompletionCandidate {
+    String name;
+    String detail;
+    String documentation;
+    String auto_module;
+    SymbolTarget target;
+    i64 kind;
+    i64 score;
+    bool local;
+    bool instance;
+    bool snippets;
+}
+
+struct CompletionCandidates {
+    Vec<CompletionCandidate> items;
+    Vec<String> visible_names;
+    bool truncated;
+}
+
+CompletionCandidates completion_candidates() {
+    CompletionCandidates candidates;
+    candidates.items = Vec<CompletionCandidate>.new();
+    candidates.visible_names = Vec<String>.new();
+    candidates.truncated = false;
+    return candidates;
+}
+
+bool completion_visible(CompletionCandidates* candidates, str name) {
+    i64 i = 0;
+    while (i < candidates.visible_names.len()) {
+        if (candidates.visible_names.get_ptr(i).equals(name)) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+void completion_provider_exports(Document* provider, HashMap<String, i64>* exports) {
+    Vec<Document*> closure = Vec<Document*>.new();
+    closure.push(provider);
+    i64 i = 0;
+    while (i < closure.len()) {
+        Document* source = closure.get(i);
+        i64 dependency = 0;
+        while (dependency < source.dependencies.len()) {
+            Document* next = source.dependencies.get(dependency);
+            i64 existing = 0;
+            while (existing < closure.len() && closure.get(existing) != next) { existing += 1; }
+            if (existing == closure.len()) { closure.push(next); }
+            dependency += 1;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < closure.len()) {
+        Document* source = closure.get(i);
+        i64 symbol_index = 0;
+        while (symbol_index < source.analysis.symbols.len()) {
+            IdeSymbol* symbol = source.analysis.symbols.get_ptr(symbol_index);
+            if (!symbol.local && !symbol.is_private && symbol.owner.len() == 0) {
+                str name = symbol.name.to_str();
+                Optional<i64> previous = exports.get_opt(String.from_str(name));
+                if (previous.is_some()) {
+                    if (previous.unwrap() != -2) { exports.insert(String.from_str(name), -2); }
+                } else {
+                    exports.insert(String.from_str(name), source == provider ? symbol_index + 1 : 0);
+                }
+            }
+            symbol_index += 1;
+        }
+        i += 1;
+    }
+}
+
+bool completion_precedes(CompletionCandidate* left, CompletionCandidate* right) {
+    if (left.score != right.score) { return left.score < right.score; }
+    if (left.local != right.local) { return left.local; }
+    if (strcmp(left.name.to_str(), right.name.to_str()) != 0) { return strcmp(left.name.to_str(), right.name.to_str()) < 0; }
+    str left_provider = left.target.document.uri.to_str();
+    str right_provider = right.target.document.uri.to_str();
+    if (strcmp(left_provider, right_provider) != 0) { return strcmp(left_provider, right_provider) < 0; }
+    return left.target.symbol < right.target.symbol;
+}
+
+void offer_completion(CompletionCandidates* candidates, str name, str detail, str documentation,
+        i64 kind, bool local, i64 score, SymbolTarget target, bool instance, str auto_module, bool snippets) {
+    if (strlen(auto_module) == 0 && !completion_visible(candidates, name)) {
+        candidates.visible_names.push(String.from_str(name));
+    }
+    i64 existing = 0;
+    while (existing < candidates.items.len()) {
+        CompletionCandidate* offered = candidates.items.get_ptr(existing);
+        if (offered.name.equals(name) && offered.target.document.uri.equals(target.document.uri.to_str())) { return; }
+        existing += 1;
+    }
+    CompletionCandidate item;
+    item.name = String.from_str(name);
+    item.detail = String.from_str(detail);
+    item.documentation = String.from_str(documentation);
+    item.auto_module = String.from_str(auto_module);
+    item.target = target; item.kind = kind; item.local = local; item.score = score;
+    item.instance = instance; item.snippets = snippets;
+    if (candidates.items.len() < 100) { candidates.items.push(move item); return; }
+    candidates.truncated = true;
+    i64 worst = 0; i64 i = 1;
+    while (i < candidates.items.len()) {
+        if (completion_precedes(candidates.items.get_ptr(worst), candidates.items.get_ptr(i))) { worst = i; }
+        i += 1;
+    }
+    if (completion_precedes(&item, candidates.items.get_ptr(worst))) {
+        CompletionCandidate _removed = candidates.items.take(worst);
+        candidates.items.push(move item);
+    }
+}
+
+void sort_completions(CompletionCandidates* candidates) {
+    i64 i = 0;
+    while (i < candidates.items.len()) {
+        i64 best = i; i64 j = i + 1;
+        while (j < candidates.items.len()) {
+            if (completion_precedes(candidates.items.get_ptr(j), candidates.items.get_ptr(best))) { best = j; }
+            j += 1;
+        }
+        candidates.items.swap(i, best); i += 1;
+    }
 }
 
 bool inside_literal(Document* doc, i64 offset) {
@@ -31,9 +158,11 @@ bool inside_literal(Document* doc, i64 offset) {
     return false;
 }
 
-void append_completion(String* out, Document* doc, Span replacement, str name,
-                        str detail, str documentation, i64 kind, bool local, i64 score, ClientOptions* client,
-                        SymbolTarget target, bool instance, bool* first, str auto_module, bool snippets) {
+void append_completion(String* out, Document* doc, Span replacement, CompletionCandidate* item, ClientOptions* client, bool* first) {
+    str name = item.name.to_str(); str detail = item.detail.to_str();
+    str documentation = item.documentation.to_str(); str auto_module = item.auto_module.to_str();
+    i64 kind = item.kind; i64 score = item.score; bool local = item.local;
+    SymbolTarget target = item.target; bool instance = item.instance;
     if (!*first) { out.push(','); } *first = false;
     out.push_str("{\"label\":\""); json_escape(name, out);
     out.push_str("\",\"kind\":"); out.push_display(&kind);
@@ -47,10 +176,12 @@ void append_completion(String* out, Document* doc, Span replacement, str name,
     i64 divisor = 100000;
     while (divisor > 0) { out.push((u8)'0' + (u8)((score / divisor) % 10)); divisor /= 10; }
     out.push_str(local ? "0" : "1"); json_escape(name, out);
+    out.push('|'); json_escape(target.document.uri.to_str(), out);
+    out.push('|'); out.push_display(&target.symbol);
     out.push_str("\",\"textEdit\":{\"range\":"); doc.append_range(out, replacement);
     String inserted = String.from_str(name); i64 next = ide_token_at_or_after(&doc.analysis, replacement.end);
     while (next < doc.analysis.tokens.len() && doc.analysis.tokens.get(next).kind == TokenKind.Comment) { next += 1; }
-    bool snippet = snippets && client.completion_snippets && target.symbol >= 0 && (kind == 2 || kind == 3)
+    bool snippet = item.snippets && client.completion_snippets && target.symbol >= 0 && (kind == 2 || kind == 3)
         && (next >= doc.analysis.tokens.len() || (doc.analysis.tokens.get(next).kind != TokenKind.LeftParen
             && doc.analysis.tokens.get(next).kind != TokenKind.Less));
     if (snippet) {
@@ -98,9 +229,9 @@ String receiver_owner(Document* doc, i64 separator) {
     return symbol_receiver_owner(resolve_occurrence(doc, doc.analysis.occurrence_at(i - 1)));
 }
 
-void completion_symbols(Document* source, Document* active, i64 offset, Span replacement,
-                         str prefix, str owner, bool members, bool instance, ClientOptions* client, Vec<Document*>* visited,
-                         Vec<String>* offered, PendingMessage* pending, String* out, bool* first) {
+void completion_symbols(Document* source, Document* active, i64 offset, str prefix,
+                         str owner, bool members, bool instance, Vec<Document*>* visited,
+                         PendingMessage* pending, CompletionCandidates* candidates) {
     i64 i = 0;
     while (i < visited.len()) { if (visited.get(i) == source) { return; } i += 1; }
     visited.push(source); i = 0;
@@ -122,23 +253,18 @@ void completion_symbols(Document* source, Document* active, i64 offset, Span rep
             SymbolTarget target; target.document = source; target.symbol = i;
             target = follow_import_alias(target);
             IdeSymbol* detail = target.symbol >= 0 ? target.document.analysis.symbols.get_ptr(target.symbol) : symbol;
-            append_completion(out, active, replacement, symbol.name.to_str(), detail.signature.to_str(),
-                detail.documentation.to_str(), completion_kind(detail.kind), symbol.local, score, client, target, instance, first, "", true);
-            offered.push(symbol.name.clone());
+            offer_completion(candidates, symbol.name.to_str(), detail.signature.to_str(),
+                detail.documentation.to_str(), completion_kind(detail.kind), symbol.local, score,
+                target, instance, "", true);
         }
         i += 1;
     }
     i = 0;
     while (i < source.dependencies.len()) {
-        completion_symbols(source.dependencies.get(i), active, offset, replacement, prefix, owner, members, instance, client, visited, offered, pending, out, first);
+        completion_symbols(source.dependencies.get(i), active, offset, prefix, owner, members,
+            instance, visited, pending, candidates);
         i += 1;
     }
-}
-
-bool completion_offered(Vec<String>* offered, str name) {
-    i64 i = 0;
-    while (i < offered.len()) { if (offered.get_ptr(i).equals(name)) { return true; } i += 1; }
-    return false;
 }
 
 void completion_prefix(Document* doc, i64 offset, Span* replacement, String* prefix) {
@@ -149,9 +275,8 @@ void completion_prefix(Document* doc, i64 offset, Span* replacement, String* pre
 }
 
 void append_import_context_completions(DocumentStore* store, Document* doc,
-        ImportCompletionContext* context, ClientOptions* client, PendingMessage* pending,
-        String* out, bool* first) {
-    Span replacement = context.replacement;
+        ImportCompletionContext* context, PendingMessage* pending,
+        CompletionCandidates* candidates) {
     if (context.kind == ImportCompletionKind.Module) {
         Vec<String> modules = import_modules(store, doc, context.module.to_str(), pending);
         i64 i = 0;
@@ -160,8 +285,8 @@ void append_import_context_completions(DocumentStore* store, Document* doc,
             i64 score = ide_match_score(context.prefix.to_str(), module.to_str());
             if (score >= 0) {
                 SymbolTarget target; target.document = doc; target.symbol = -1;
-                append_completion(out, doc, replacement, module.to_str(), "", "", 9, false, score,
-                    client, target, false, first, "", false);
+                offer_completion(candidates, module.to_str(), "", "", 9, false, score,
+                    target, false, "", false);
             }
             i += 1;
         }
@@ -186,8 +311,8 @@ void append_import_context_completions(DocumentStore* store, Document* doc,
                 find_imported_symbol(source, symbol.name.to_str(), "", &visited, &unique);
                 if (unique.symbol == i && unique.document == source) {
                     SymbolTarget target; target.document = doc; target.symbol = -1;
-                    append_completion(out, doc, replacement, symbol.name.to_str(), "", "", completion_kind(symbol.kind),
-                        false, score, client, target, false, first, "", false);
+                    offer_completion(candidates, symbol.name.to_str(), "", "", completion_kind(symbol.kind),
+                        false, score, target, false, "", false);
                 }
             }
             i += 1;
@@ -195,40 +320,52 @@ void append_import_context_completions(DocumentStore* store, Document* doc,
     } else if (context.kind == ImportCompletionKind.AliasKeyword) {
         if (ide_match_score(context.prefix.to_str(), "as") >= 0) {
             SymbolTarget target; target.document = doc; target.symbol = -1;
-            append_completion(out, doc, replacement, "as", "", "", 14, false,
-                ide_match_score(context.prefix.to_str(), "as"), client, target, false, first, "", false);
+            offer_completion(candidates, "as", "", "", 14, false,
+                ide_match_score(context.prefix.to_str(), "as"), target, false, "", false);
         }
     }
 }
 
-void append_auto_imports(DocumentStore* store, Document* doc, Span replacement, str prefix,
-        Vec<String>* offered, ClientOptions* client, PendingMessage* pending, String* out, bool* first) {
+void append_auto_imports(DocumentStore* store, Document* doc, str prefix,
+        PendingMessage* pending, CompletionCandidates* candidates) {
     if (prefix[0] == 0 || request_interrupted(pending)) { return; }
     i64 d = 0;
     while (d < store.docs.len() && !request_interrupted(pending)) {
         Document* candidate = store.docs.get(d);
         if (candidate != doc && candidate.path.ends_with(".ag") && candidate.analysis.diagnostics.is_empty()) {
             String module = String.new(); bool module_checked = false;
+            HashMap<String, i64> unique_exports = HashMap<String, i64>.new(); bool exports_indexed = false;
             i64 i = 0;
             while (i < candidate.analysis.symbols.len() && !request_interrupted(pending)) {
                 IdeSymbol* symbol = candidate.analysis.symbols.get_ptr(i);
                 str name = symbol.name.to_str();
                 i64 score = ide_match_score(prefix, name);
                 if (!symbol.local && !symbol.is_private && symbol.owner.len() == 0
-                    && symbol.kind != IdeSymbolKind.ImportAlias && score >= 0 && !completion_offered(offered, name)) {
-                    Vec<Document*> visited = Vec<Document*>.new(); SymbolTarget unique;
-                    unique.document = candidate; unique.symbol = -1;
-                    find_imported_symbol(candidate, name, "", &visited, &unique);
-                    if (unique.symbol == i && unique.document == candidate) {
+                    && symbol.kind != IdeSymbolKind.ImportAlias && score >= 0 && !completion_visible(candidates, name)) {
+                    bool unique_provider_symbol = false;
+                    if (exports_indexed) {
+                        Optional<i64> unique = unique_exports.get_opt(String.from_str(name));
+                        unique_provider_symbol = unique.is_some() && unique.unwrap() == i + 1;
+                    } else {
+                        Vec<Document*> visited = Vec<Document*>.new(); SymbolTarget unique;
+                        unique.document = candidate; unique.symbol = -1;
+                        find_imported_symbol(candidate, name, "", &visited, &unique);
+                        unique_provider_symbol = unique.symbol == i && unique.document == candidate;
+                    }
+                    if (unique_provider_symbol) {
                         // Module resolution and conflicts are shared by all exports in this request.
                         if (!module_checked) {
                             module = import_module_name(store, doc, candidate); module_checked = true;
                             if (module.len() == 0 || import_conflicts(doc, candidate, pending)) { break; }
                         }
+                        if (!exports_indexed) {
+                            completion_provider_exports(candidate, &unique_exports);
+                            exports_indexed = true;
+                        }
                         SymbolTarget target; target.document = candidate; target.symbol = i;
                         IdeSymbol* resolved = target.document.analysis.symbols.get_ptr(target.symbol);
-                        append_completion(out, doc, replacement, name, resolved.signature.to_str(), resolved.documentation.to_str(),
-                            completion_kind(resolved.kind), false, score, client, target, false, first, module.to_str(), true);
+                        offer_completion(candidates, name, resolved.signature.to_str(), resolved.documentation.to_str(),
+                            completion_kind(resolved.kind), false, score, target, false, module.to_str(), true);
                     }
                 }
                 i += 1;
@@ -238,61 +375,64 @@ void append_auto_imports(DocumentStore* store, Document* doc, Span replacement, 
     }
 }
 
-String compute_completion(DocumentStore* store, Document* doc, i64 offset, ClientOptions* client, PendingMessage* pending) {
-    String out = String.from_str("{\"isIncomplete\":false,\"items\":["); bool first = true;
-    if (!inside_literal(doc, offset)) {
-        Span replacement = Span.synthetic(); String prefix = String.new();
-        completion_prefix(doc, offset, &replacement, &prefix);
-        Optional<ImportCompletionContext> import_context = import_completion_context(doc, offset);
-        if (import_context.is_some()) {
-            ImportCompletionContext context = import_context.unwrap();
-            append_import_context_completions(store, doc, &context, client, pending, &out, &first);
-            out.push_str("]}"); return move out;
-        }
-        i64 separator = replacement.start;
-        while (separator > 0 && (doc.text.data[separator - 1] == (u8)' ' || doc.text.data[separator - 1] == (u8)'\t')) { separator -= 1; }
-        bool members = separator > 0 && (doc.text.data[separator - 1] == (u8)'.' || doc.text.data[separator - 1] == (u8)':');
-        if (!members && prefix.len() < 2) { out = String.from_str("{\"isIncomplete\":true,\"items\":["); }
-        String owner = String.new();
-        if (members) {
-            separator -= 1;
-            if (separator > 0 && doc.text.data[separator] == (u8)':' && doc.text.data[separator - 1] == (u8)':') { separator -= 1; }
-            owner = receiver_owner(doc, separator);
-        }
-        Vec<Document*> visited = Vec<Document*>.new(); Vec<String> offered = Vec<String>.new();
-        if (!members || owner.len() > 0) {
-            bool instance = members && doc.text.data[separator] == (u8)'.';
-            completion_symbols(doc, doc, offset, replacement, prefix.to_str(), owner.to_str(), members, instance, client, &visited, &offered, pending, &out, &first);
-        }
-        if (!members) {
-            TokenStream words = TokenStream.new(); DiagnosticBag ignored = DiagnosticBag.new();
-            lex(String.from_str("let mut const static volatile struct enum impl trait type private if else while for in match break continue return move defer import comptime cast as extern asm macro launch wait true false Self i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 f80 c32 c64 c80 bool char str void Vec Optional"), &words, &ignored);
-            i64 i = 0;
-            while (i + 1 < words.len()) {
-                Token* word = words.get(i);
-                i64 score = ide_match_score(prefix.to_str(), word.text.to_str());
-                if (score >= 0 && !completion_offered(&offered, word.text.to_str())) {
-                    SymbolTarget target; target.document = doc; target.symbol = -1;
-                    append_completion(&out, doc, replacement, word.text.to_str(), "", "", is_primitive_type_token(word.kind) ? 7 : 14,
-                        false, score, client, target, false, &first, "", false);
-                    offered.push(word.text.clone());
-                }
-                i += 1;
-            }
-            if (prefix.len() >= 2) { append_auto_imports(store, doc, replacement, prefix.to_str(), &offered, client, pending, &out, &first); }
-        }
+String render_completions(Document* doc, Span replacement, CompletionCandidates* candidates,
+        ClientOptions* client, bool incomplete) {
+    sort_completions(candidates);
+    String out = String.new(); out.push_str(incomplete || candidates.truncated
+        ? "{\"isIncomplete\":true,\"items\":[" : "{\"isIncomplete\":false,\"items\":[");
+    bool first = true; i64 i = 0;
+    while (i < candidates.items.len()) {
+        append_completion(&out, doc, replacement, candidates.items.get_ptr(i), client, &first);
+        i += 1;
     }
     out.push_str("]}"); return move out;
 }
 
-bool completion_needs_workspace(Document* doc, i64 offset) {
-    if (offset < 0 || offset > doc.text.len() || inside_literal(doc, offset)
-        || import_completion_context(doc, offset).is_some()) { return false; }
-    Span replacement = Span.synthetic(); String prefix = String.new(); completion_prefix(doc, offset, &replacement, &prefix);
-    if (prefix.len() < 2) { return false; }
+String compute_completion(DocumentStore* store, Document* doc, i64 offset, ClientOptions* client,
+        PendingMessage* pending, bool index_pending) {
+    CompletionCandidates candidates = completion_candidates();
+    Span replacement = Span.synthetic(); String prefix = String.new();
+    completion_prefix(doc, offset, &replacement, &prefix);
+    if (inside_literal(doc, offset)) { return render_completions(doc, replacement, &candidates, client, false); }
+    Optional<ImportCompletionContext> import_context = import_completion_context(doc, offset);
+    if (import_context.is_some()) {
+        ImportCompletionContext context = import_context.unwrap();
+        replacement = context.replacement;
+        append_import_context_completions(store, doc, &context, pending, &candidates);
+        return render_completions(doc, replacement, &candidates, client, false);
+    }
     i64 separator = replacement.start;
     while (separator > 0 && (doc.text.data[separator - 1] == (u8)' ' || doc.text.data[separator - 1] == (u8)'\t')) { separator -= 1; }
-    return separator == 0 || (doc.text.data[separator - 1] != (u8)'.' && doc.text.data[separator - 1] != (u8)':');
+    bool members = separator > 0 && (doc.text.data[separator - 1] == (u8)'.' || doc.text.data[separator - 1] == (u8)':');
+    String owner = String.new();
+    if (members) {
+        separator -= 1;
+        if (separator > 0 && doc.text.data[separator] == (u8)':' && doc.text.data[separator - 1] == (u8)':') { separator -= 1; }
+        owner = receiver_owner(doc, separator);
+    }
+    Vec<Document*> visited = Vec<Document*>.new();
+    if (!members || owner.len() > 0) {
+        bool instance = members && doc.text.data[separator] == (u8)'.';
+        completion_symbols(doc, doc, offset, prefix.to_str(), owner.to_str(), members, instance,
+            &visited, pending, &candidates);
+    }
+    if (!members) {
+        TokenStream words = TokenStream.new(); DiagnosticBag ignored = DiagnosticBag.new();
+        lex(String.from_str("let mut const static volatile struct enum impl trait type private if else while for in match break continue return move defer import comptime cast as extern asm macro launch wait true false Self i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 f80 c32 c64 c80 bool char str void Vec Optional"), &words, &ignored);
+        i64 i = 0;
+        while (i + 1 < words.len()) {
+            Token* word = words.get(i);
+            i64 score = ide_match_score(prefix.to_str(), word.text.to_str());
+            if (score >= 0) {
+                SymbolTarget target; target.document = doc; target.symbol = -1;
+                offer_completion(&candidates, word.text.to_str(), "", "", is_primitive_type_token(word.kind) ? 7 : 14,
+                    false, score, target, false, "", false);
+            }
+            i += 1;
+        }
+        append_auto_imports(store, doc, prefix.to_str(), pending, &candidates);
+    }
+    return render_completions(doc, replacement, &candidates, client, !members && index_pending);
 }
 
 enum CompletionResolveError { InvalidItem; StaleItem; }
@@ -475,6 +615,7 @@ String compute_signature_help(Document* doc, i64 offset, ClientOptions* client) 
     if (call < 0 || inside_literal(doc, offset)) { return String.from_str("null"); }
     i64 occurrence = call_occurrence(doc, call);
     SymbolTarget target = follow_import_alias(resolve_occurrence(doc, occurrence));
+    target.document.ensure_syntax();
     IdeSymbol* symbol = target.document.analysis.symbols.get_ptr(target.symbol);
     IdeOccurrence* selected = doc.analysis.occurrences.get_ptr(occurrence);
     SyntaxNode* separator = binding_previous_sibling(selected.node);

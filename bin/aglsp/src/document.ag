@@ -49,21 +49,68 @@ struct DocumentStore {
     Vec<Document*> docs;
     Vec<String> roots;
     Vec<String> include_dirs;
+    Vec<String> manifest_dirs;
+    Vec<String> project_roots;
     Vec<String> overlay_paths;
+    bool discover_open_projects;
 }
 
-bool workspace_document(DocumentStore* store, Document* doc) {
-    if (doc.open) { return true; } i64 i = 0;
-    while (i < store.roots.len()) {
-        String* root = store.roots.get_ptr(i); i64 length = root.len();
-        if (length > 0 && doc.path.starts_with(root.to_str()) && (doc.path.len() == length
-            || root.data[length - 1] == (u8)'/' || doc.path.data[length] == (u8)'/')) { return true; }
+bool path_within_roots(Vec<String>* roots, str path) {
+    i64 i = 0;
+    while (i < roots.len()) {
+        String* root = roots.get_ptr(i);
+        i64 length = root.len();
+        if (length > 0 && module_text_starts_with(path, root.to_str()) && (strlen(path) == length
+            || root.data[length - 1] == (u8)'/' || path[length] == '/')) { return true; }
         i += 1;
     }
     return false;
 }
 
+bool workspace_document(DocumentStore* store, Document* doc) {
+    return doc.open || path_within_roots(&store.roots, doc.path.to_str())
+        || path_within_roots(&store.project_roots, doc.path.to_str());
+}
+
 impl Document {
+    // Closed files keep stable symbol IDs and source text, not a full parse tree.
+    void compact(Document* self) {
+        if (self.open || self.analysis.tree.root == (SyntaxNode*)0) { return; }
+        // Pointer field overwrites lack drop glue; locals own the discarded buffers.
+        NodePool pool = move self.analysis.pool;
+        self.analysis.pool = NodePool.new();
+        self.analysis.tree.root = (SyntaxNode*)0;
+        TokenStream _tokens = move self.analysis.tokens;
+        self.analysis.tokens = TokenStream.new();
+        Vec<IdeOccurrence> _occurrences = move self.analysis.occurrences;
+        self.analysis.occurrences = Vec<IdeOccurrence>.new();
+        Vec<i64> _definitions = move self.analysis.definitions;
+        self.analysis.definitions = Vec<i64>.new();
+        Vec<IdeImplementation> _implementations = move self.analysis.implementations;
+        self.analysis.implementations = Vec<IdeImplementation>.new();
+        pool.destroy();
+    }
+
+    void ensure_syntax(Document* self) {
+        if (self.analysis.tree.root != (SyntaxNode*)0) { return; }
+        // Requests can hold symbol pointers while restoring another file's syntax.
+        Vec<IdeSymbol> retained = move self.analysis.symbols;
+        self.analysis.symbols = Vec<IdeSymbol>.new();
+        IdeIndex _previous = move self.analysis;
+        self.analysis = IdeIndex.new(self.text.to_str());
+        Vec<IdeSymbol> _rebuilt = move self.analysis.symbols;
+        self.analysis.symbols = move retained;
+    }
+
+    void replace_text(Document* self, str text) {
+        String _previous_text = move self.text;
+        LspLineIndex _previous_lines = move self.lines;
+        IdeIndex _previous_analysis = move self.analysis;
+        self.text = String.from_str(text);
+        self.lines = LspLineIndex.new(self.text.to_str());
+        self.analysis = IdeIndex.new(self.text.to_str());
+    }
+
     LspPosition position(Document* self, i64 offset) { return self.lines.position(self.text.to_str(), offset); }
 
     bool offset(Document* self, i64 line, i64 character, i64* result) {
@@ -103,7 +150,10 @@ impl DocumentStore {
         store.docs = Vec<Document*>.new();
         store.roots = Vec<String>.new();
         store.include_dirs = Vec<String>.new();
+        store.manifest_dirs = Vec<String>.new();
+        store.project_roots = Vec<String>.new();
         store.overlay_paths = Vec<String>.new();
+        store.discover_open_projects = true;
         Optional<String> sysroot = var("SILVER_SYSROOT");
         if (sysroot.is_some()) {
             String configured = sysroot.unwrap(); String root = absolute_document_path(configured.to_str());
@@ -136,7 +186,7 @@ impl DocumentStore {
     Document* set(DocumentStore* self, str uri, str text, i64 version, bool open) {
         Document* doc = self.get(uri);
         if (doc == (Document*)0) {
-            // Field replacement drops old values, so the initial snapshot must be zeroed.
+            // Snapshot replacement takes ownership of the previous fields, even on first load.
             doc = alloc<Document>(1);
             doc.store_id = self.docs.len();
             doc.uri = String.from_str(uri);
@@ -146,16 +196,15 @@ impl DocumentStore {
         } else if (doc.open && version <= doc.version) {
             return (Document*)0;
         } else { self.invalidate_dependents(doc); }
-        if (open) { doc.uri = String.from_str(uri); }
-        doc.text = String.from_str(text);
-        doc.lines = LspLineIndex.new(text);
+        if (open) { String _previous_uri = move doc.uri; doc.uri = String.from_str(uri); }
+        doc.replace_text(text);
         doc.version = version;
         doc.revision += 1;
         doc.open = open;
         doc.imports_dirty = true;
         doc.diagnostics_dirty = true;
         doc.semantic_dirty = true;
-        doc.analysis = IdeIndex.new(text);
+        doc.compact();
         return doc;
     }
 
@@ -184,6 +233,7 @@ impl DocumentStore {
             overlay += 1;
         }
         changed = changed || overlay_paths.len() != self.overlay_paths.len();
+        Vec<String> _previous_overlay_paths = move self.overlay_paths;
         self.overlay_paths = move overlay_paths;
         if (changed) {
             i64 dirty = 0;
@@ -230,17 +280,20 @@ impl DocumentStore {
             if (loaded.is_ok()) {
                 String text = loaded.unwrap();
                 if (text.len() == strlen(text.to_str()) && (text.len() == 0 || text.is_valid_utf8())) {
-                    doc.text = move text;
-                    doc.lines = LspLineIndex.new(doc.text.to_str());
-                    doc.analysis = IdeIndex.new(doc.text.to_str());
+                    doc.replace_text(text.to_str());
+                    doc.compact();
                     return;
                 }
             }
         }
-        doc.text = String.new();
-        doc.lines = LspLineIndex.new("");
-        doc.analysis = IdeIndex.new("");
+        doc.replace_text("");
         doc.dependencies.clear();
+        doc.compact();
+    }
+
+    void compact_closed(DocumentStore* self) {
+        i64 i = 0;
+        while (i < self.docs.len()) { self.docs.get(i).compact(); i += 1; }
     }
 
     void invalidate_dependents(DocumentStore* self, Document* changed) {

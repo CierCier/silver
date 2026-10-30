@@ -314,6 +314,23 @@ SyntaxNode* item_c_extern_function_parameters(SyntaxNode* root, str function_nam
     return signature.parameter_list;
 }
 
+bool item_node_has_variadic_ellipsis(SyntaxNode* parameters) {
+    if (parameters == (SyntaxNode*)0) { return false; }
+    SyntaxNode* child = parameters.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Token && child.token_kind == TokenKind.DotDotDot) {
+            return true;
+        }
+        child = child.next_sibling;
+    }
+    return false;
+}
+
+bool item_c_extern_function_is_variadic(SyntaxNode* root, str function_name) {
+    SyntaxNode* parameters = item_c_extern_function_parameters(root, function_name);
+    return item_node_has_variadic_ellipsis(parameters);
+}
+
 u32 item_c_extern_function_return_type_id(TypeTable* types, SyntaxNode* root,
                                           str function_name) {
     ExternFunctionSignature signature = item_find_c_extern_function(root, function_name);

@@ -1,11 +1,13 @@
 import document;
 import params;
+import project.manifest;
 
 bool add_workspace_root(DocumentStore* store, str uri) {
     String path = document_path(uri); if (path.len() == 0) { return false; } i64 i = 0;
     while (i < store.roots.len()) { if (store.roots.get_ptr(i).equals(path.to_str())) { return false; } i += 1; }
     store.include_dirs.push(path.clone());
     store.roots.push(move path);
+    store.discover_open_projects = false;
     return true;
 }
 
@@ -48,18 +50,17 @@ bool update_workspace_folders(DocumentStore* store, str json) {
     while (i < removals.len()) { if (remove_workspace_root(store, removals.get_ptr(i).to_str())) { changed = true; } i += 1; }
     i = 0;
     while (i < additions.len()) { if (add_workspace_root(store, additions.get_ptr(i).to_str())) { changed = true; } i += 1; }
-    if (changed) {
-        i = 0; while (i < store.docs.len()) { store.docs.get(i).imports_dirty = true; i += 1; }
-        store.refresh_imports();
-    }
     return changed;
 }
 
 void configure_workspace(DocumentStore* store, str json) {
+    store.discover_open_projects = false;
     String uri = String.new();
     String folders = json_field(json, "workspaceFolders"); JsonReader reader = JsonReader.new(folders.to_str());
     if (!reader.begin_array()) {
-        if (json_string(json, "rootUri", &uri)) { add_workspace_root(store, uri.to_str()); } return;
+        if (json_string(json, "rootUri", &uri)) { add_workspace_root(store, uri.to_str()); }
+        else { store.discover_open_projects = true; }
+        return;
     }
     reader.skip_whitespace();
     while (!reader.failed && reader.index < reader.length && reader.input[reader.index] != ']') {
@@ -75,32 +76,157 @@ struct IndexPath { String path; i64 depth; bool directory; }
 
 struct WorkspaceIndex {
     Vec<IndexPath> paths;
+    Vec<String> seen_paths;
+    Vec<String> manifests;
+}
+
+struct ManifestPath { String path; i64 depth; }
+
+void enqueue_index_path(WorkspaceIndex* index, str source, i64 depth, bool directory) {
+    String path = path_normalize(source); i64 i = 0;
+    while (i < index.seen_paths.len()) {
+        if (index.seen_paths.get_ptr(i).equals(path.to_str())) { return; } i += 1;
+    }
+    index.seen_paths.push(path.clone());
+    IndexPath pending; pending.path = move path; pending.depth = depth; pending.directory = directory;
+    index.paths.push(move pending);
+}
+
+String project_manifest(str source) {
+    Result<Metadata, Error> stat = metadata(source);
+    bool directory = false; if (stat.is_ok()) { directory = stat.unwrap().is_dir; }
+    String path = directory ? String.from_str(source) : path_dirname(source);
+    while (true) {
+        String manifest = path_join(path.to_str(), MANIFEST_FILE);
+        if (file_exists(manifest.to_str())) { return move manifest; }
+        String parent = path_dirname(path.to_str());
+        if (parent.equals(path.to_str())) { break; }
+        path = move parent;
+    }
+    return String.new();
+}
+
+void project_preload_error(str path, str detail) {
+    String out = String.from_str("{\"type\":2,\"message\":\"");
+    json_escape(path, &out); out.push_str(": "); json_escape(detail, &out); out.push_str("\"}");
+    send_notification("window/logMessage", out.to_str());
+}
+
+void enqueue_manifest(WorkspaceIndex* index, Vec<ManifestPath>* pending, str source, i64 depth) {
+    if (strlen(source) == 0) { return; }
+    if (depth > 64) { project_preload_error(source, "package manifest reference chain is too deep"); return; }
+    String path = path_normalize(source); i64 i = 0;
+    while (i < index.manifests.len()) {
+        if (index.manifests.get_ptr(i).equals(path.to_str())) { return; } i += 1;
+    }
+    index.manifests.push(path.clone());
+    ManifestPath entry; entry.path = move path; entry.depth = depth; pending.push(move entry);
+}
+
+void add_manifest_directory(DocumentStore* store, str source) {
+    String path = path_normalize(source); i64 i = 0;
+    while (i < store.include_dirs.len()) {
+        if (store.include_dirs.get_ptr(i).equals(path.to_str())) { return; } i += 1;
+    }
+    store.manifest_dirs.push(path.clone()); store.include_dirs.push(move path);
+}
+
+void preload_project_manifests(DocumentStore* store, WorkspaceIndex* index) {
+    i64 i = 0;
+    while (i < store.manifest_dirs.len()) {
+        String* directory = store.manifest_dirs.get_ptr(i); i64 include = store.include_dirs.len() - 1;
+        while (include >= 0) {
+            if (store.include_dirs.get_ptr(include).equals(directory.to_str())) { store.include_dirs.take(include); break; }
+            include -= 1;
+        }
+        i += 1;
+    }
+    store.manifest_dirs.clear(); store.project_roots.clear();
+    Vec<ManifestPath> pending = Vec<ManifestPath>.new(); i = 0;
+    while (i < store.roots.len()) {
+        String manifest = project_manifest(store.roots.get_ptr(i).to_str());
+        enqueue_manifest(index, &pending, manifest.to_str(), 0); i += 1;
+    }
+    i = 0;
+    while (i < store.docs.len()) {
+        Document* doc = store.docs.get(i);
+        if (doc.open && doc.path.len() > 0 && (store.discover_open_projects
+            || path_within_roots(&store.roots, doc.path.to_str()))) {
+            String manifest = project_manifest(doc.path.to_str());
+            enqueue_manifest(index, &pending, manifest.to_str(), 0);
+        }
+        i += 1;
+    }
+    load_project_manifests(store, index, &pending);
+}
+
+void load_project_manifests(DocumentStore* store, WorkspaceIndex* index, Vec<ManifestPath>* pending) {
+    i64 i = 0;
+    while (pending.len() > 0) {
+        ManifestPath entry = pending.take(0);
+        PackageManifest manifest; workspace_manifest_init(&manifest, "", ""); String error = String.new();
+        if (!workspace_read_manifest(entry.path.to_str(), &manifest, &error)) {
+            project_preload_error(entry.path.to_str(), error.to_str()); continue;
+        }
+        store.project_roots.push(String.from_str(manifest.root));
+        add_manifest_directory(store, manifest.root);
+        String src = path_join(manifest.root, "src"); add_manifest_directory(store, src.to_str());
+        String lib = path_join(manifest.root, "lib/silver"); add_manifest_directory(store, lib.to_str());
+        enqueue_index_path(index, manifest.root, 0, true);
+        i64 target = 0;
+        while (target < manifest.targets.len()) {
+            ManifestTarget* item = manifest.targets.get_ptr(target); String path = String.new();
+            if (module_text_starts_with(item.manifest, "git+")) {
+                project_preload_error(entry.path.to_str(), "Git package targets are not supported");
+            } else if (!workspace_manifest_target_path(item, manifest.root, &path, &error)) {
+                project_preload_error(entry.path.to_str(), error.to_str());
+            } else if (item.has_entry) {
+                if (!path_within_roots(&store.project_roots, path.to_str())) { store.project_roots.push(path.clone()); }
+                enqueue_index_path(index, path.to_str(), 0, false);
+            }
+            else { enqueue_manifest(index, pending, path.to_str(), entry.depth + 1); }
+            target += 1;
+        }
+        i64 dependency = 0;
+        while (dependency < manifest.dependencies.len()) {
+            ManifestDependency* item = manifest.dependencies.get_ptr(dependency);
+            if (module_text_starts_with(item.manifest, "git+")) {
+                project_preload_error(entry.path.to_str(), "Git package dependencies are not supported");
+            } else {
+                String path = path_join(manifest.root, item.manifest); path = path_normalize(path.to_str());
+                if (is_dir(path.to_str())) { path = path_join(path.to_str(), MANIFEST_FILE); }
+                enqueue_manifest(index, pending, path.to_str(), entry.depth + 1);
+            }
+            dependency += 1;
+        }
+    }
+    i = 0;
+    while (i < store.docs.len()) {
+        Document* doc = store.docs.get(i);
+        doc.imports_dirty = true; doc.diagnostics_dirty = true; doc.semantic_dirty = true; i += 1;
+    }
+    store.refresh_imports();
 }
 
 WorkspaceIndex workspace_index(DocumentStore* store) {
-    WorkspaceIndex index; index.paths = Vec<IndexPath>.new(); i64 i = 0;
+    WorkspaceIndex index; index.paths = Vec<IndexPath>.new();
+    index.seen_paths = Vec<String>.new(); index.manifests = Vec<String>.new(); i64 i = 0;
     while (i < store.roots.len()) {
-        IndexPath path; path.path = store.roots.get_ptr(i).clone(); path.depth = 0; path.directory = true;
-        index.paths.push(move path); i += 1;
+        String* root = store.roots.get_ptr(i); Result<Metadata, Error> stat = metadata(root.to_str());
+        bool directory = true; if (stat.is_ok()) { directory = stat.unwrap().is_dir; }
+        if (directory || root.ends_with(".ag")) { enqueue_index_path(&index, root.to_str(), 0, directory); }
+        i += 1;
     }
+    preload_project_manifests(store, &index);
     i = 0;
     while (i < store.include_dirs.len()) {
         String standard = path_join(store.include_dirs.get_ptr(i).to_str(), "std");
-        bool covered = false; i64 root = 0;
-        while (root < index.paths.len()) {
-            String* existing = &index.paths.get_ptr(root).path;
-            if (standard.equals(existing.to_str()) || (standard.starts_with(existing.to_str())
-                && (existing.ends_with("/") || standard.data[existing.len()] == (u8)'/'))) { covered = true; break; }
-            root += 1;
-        }
-        if (!covered) {
-            Result<Metadata, Error> stat = metadata(standard.to_str());
-            if (stat.is_ok()) {
-                Metadata info = stat.unwrap();
-                if (info.is_dir) {
-                    IndexPath path; path.path = move standard; path.depth = 0; path.directory = true;
-                    index.paths.push(move path);
-                }
+        Result<Metadata, Error> stat = metadata(standard.to_str());
+        if (stat.is_ok()) {
+            Metadata info = stat.unwrap();
+            if (info.is_dir) {
+                // The stack loads std first, even when a project root contains it.
+                enqueue_index_path(&index, standard.to_str(), 0, true);
             }
         }
         i += 1;
@@ -128,14 +254,16 @@ void index_workspace_step(DocumentStore* store, WorkspaceIndex* index) {
                 Metadata info = stat.unwrap();
                 bool directory = info.is_dir && !info.is_symlink;
                 bool file = info.is_file;
-                if (info.is_symlink && name.ends_with(".ag")) {
+                if (info.is_symlink && (name.ends_with(".ag") || name.equals(MANIFEST_FILE))) {
                     Result<Metadata, Error> target = metadata(child.to_str());
                     if (target.is_ok()) { file = target.unwrap().is_file; }
                 }
-                if (directory || (file && name.ends_with(".ag"))) {
-                    IndexPath pending; pending.path = move child; pending.depth = path.depth + 1;
-                    pending.directory = directory;
-                    index.paths.push(move pending);
+                if (file && name.equals(MANIFEST_FILE)) {
+                    Vec<ManifestPath> pending = Vec<ManifestPath>.new();
+                    enqueue_manifest(index, &pending, child.to_str(), 0);
+                    if (pending.len() > 0) { load_project_manifests(store, index, &pending); }
+                } else if (directory || (file && name.ends_with(".ag"))) {
+                    enqueue_index_path(index, child.to_str(), path.depth + 1, directory);
                 }
             }
         }
@@ -143,24 +271,30 @@ void index_workspace_step(DocumentStore* store, WorkspaceIndex* index) {
     }
 }
 
-void update_watched_files(DocumentStore* store, str json) {
+bool update_watched_files(DocumentStore* store, str json) {
     String changes = json_field(json, "changes"); JsonReader reader = JsonReader.new(changes.to_str());
-    if (!reader.begin_array()) { return; }
+    if (!reader.begin_array()) { return false; }
+    bool manifest_changed = false;
     reader.skip_whitespace();
     while (!reader.failed && reader.index < reader.length && reader.input[reader.index] != ']') {
         i64 start = reader.index;
         if (!reader.skip_value()) { break; }
         String change = changes.substr(start, reader.index - start); String uri = String.new();
         if (json_string(change.to_str(), "uri", &uri)) {
+            String path = document_path(uri.to_str()); String name = path_basename(path.to_str());
+            if (name.equals(MANIFEST_FILE)) { manifest_changed = true; }
+            else if (path.ends_with(".ag")) {
             Document* doc = store.get(uri.to_str());
             if (doc == (Document*)0) {
                 Optional<String> decoded = file_uri_to_path(uri.to_str());
                 if (decoded.is_some()) { String path = decoded.unwrap(); store.load(path.to_str()); }
             } else if (!doc.open) { store.close(uri.to_str()); }
+            }
         }
         if (!skip_comma_if_present(&reader)) { break; } reader.skip_whitespace();
     }
     i64 i = 0;
     while (i < store.docs.len()) { store.docs.get(i).imports_dirty = true; i += 1; }
     store.refresh_imports();
+    return manifest_changed;
 }

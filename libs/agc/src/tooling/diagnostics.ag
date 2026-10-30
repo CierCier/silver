@@ -1,12 +1,20 @@
 // Synchronous diagnostics over borrowed editor snapshots. Only this scratch CST
 // is rewritten; token text remains borrowed until the check returns.
+import frontend.ast;
+import frontend.cfg;
 import frontend.hir;
+import frontend.items;
+import frontend.lower_expr;
 import frontend.names;
 import frontend.borrow;
 import frontend.send;
 import frontend.ownership;
 import frontend.lint;
 import frontend.lambdas;
+import frontend.symbols;
+import frontend.typecheck_expr;
+
+enum ImportOverloadSafety { Safe; Conflict; Inconclusive; }
 
 struct DiagnosticTree {
     NodePool pool;
@@ -72,7 +80,8 @@ void diagnostic_register_types(SymbolTable* symbols, SyntaxTree* tree, CfgSet* c
 }
 
 void diagnostic_add_snapshot(DiagnosticTree* scratch, SyntaxTree* dependency,
-                             i64 file, SymbolTable* symbols, CfgSet* cfg) {
+                             i64 file, SymbolTable* symbols, CfgSet* cfg,
+                             DiagnosticBag* report) {
     Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
     cfg_collect_items(dependency.root, cfg, (DiagnosticBag*)0, &items);
     SyntaxTree signatures;
@@ -90,8 +99,7 @@ void diagnostic_add_snapshot(DiagnosticTree* scratch, SyntaxTree* dependency,
         }
         i += 1;
     }
-    DiagnosticBag ignored = DiagnosticBag.new();
-    collect_symbols(symbols, &ignored, &signatures, cfg);
+    collect_symbols(symbols, report, &signatures, cfg);
     SyntaxNode* item = signatures.root.first_child;
     while (item != (SyntaxNode*)0) {
         SyntaxNode* next = item.next_sibling;
@@ -128,10 +136,12 @@ DiagnosticBag check_snapshot_diagnostics(SyntaxTree* source, Vec<SyntaxTree*>* d
     if (!diagnostics.is_empty()) { return move diagnostics; }
     SymbolTable symbols = SymbolTable.new();
     collect_symbols(&symbols, &diagnostics, &scratch.tree, cfg);
+    DiagnosticBag ignored_imports = DiagnosticBag.new();
     i64 i = 0;
     while (i < dependencies.len()) {
         // Lexer snapshots all start at file 1. Reserve it for local subjects.
-        diagnostic_add_snapshot(&scratch, dependencies.get(i), i + 2, &symbols, cfg);
+        diagnostic_add_snapshot(&scratch, dependencies.get(i), i + 2, &symbols, cfg,
+                                &ignored_imports);
         i += 1;
     }
     diagnostic_register_types(&symbols, &scratch.tree, cfg);
@@ -162,4 +172,162 @@ DiagnosticBag check_snapshot_diagnostics(SyntaxTree* source, Vec<SyntaxTree*>* d
     DiagnosticBag local = DiagnosticBag.new();
     diagnostic_append_local(&local, &diagnostics);
     return move local;
+}
+
+bool diagnostic_name_in(Vec<String>* names, str name) {
+    i64 i = 0;
+    while (i < names.len()) {
+        if (names.get_ptr(i).equals(name)) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+bool diagnostic_body_mentions_name(SyntaxNode* node, Vec<String>* names) {
+    if (node == (SyntaxNode*)0) { return false; }
+    if (node.kind == NodeKind.Token && diagnostic_name_in(names, node.text)) { return true; }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (diagnostic_body_mentions_name(child, names)) { return true; }
+        child = child.next_sibling;
+    }
+    return false;
+}
+
+bool import_overload_may_affect_source(SyntaxTree* source, Vec<String>* names) {
+    SyntaxNode* node = source.root;
+    if (node == (SyntaxNode*)0) { return true; }
+    Vec<SyntaxNode*> pending = Vec<SyntaxNode*>.new();
+    pending.push(node);
+    while (pending.len() > 0) {
+        SyntaxNode* current = pending.pop();
+        if (current.kind == NodeKind.Token && current.token_kind == TokenKind.Identifier
+            && diagnostic_name_in(names, current.text)) { return true; }
+        SyntaxNode* child = current.first_child;
+        while (child != (SyntaxNode*)0) {
+            pending.push(child);
+            child = child.next_sibling;
+        }
+    }
+    return false;
+}
+
+bool diagnostic_overload_message(Diagnostic* diagnostic, Vec<String>* names, String* matched_name) {
+    i64 i = 0;
+    while (i < names.len()) {
+        String expected = String.from_str("call to overloaded function '");
+        expected.push_str(names.get_ptr(i).to_str());
+        expected.push_str("' is ambiguous");
+        bool matches = diagnostic.message.equals(expected.to_str());
+        expected.drop();
+        if (matches) { *matched_name = names.get_ptr(i).clone(); return true; }
+        i += 1;
+    }
+    return false;
+}
+
+bool diagnostic_has_overload_at(DiagnosticBag* diagnostics, Vec<String>* names,
+                                String* name, Span span) {
+    i64 i = 0;
+    while (i < diagnostics.len()) {
+        Diagnostic* diagnostic = diagnostics.get(i);
+        String matched = String.new();
+        bool same = diagnostic.span.file == span.file && diagnostic.span.start == span.start
+            && diagnostic.span.end == span.end
+            && diagnostic_overload_message(diagnostic, names, &matched)
+            && matched.equals(name.to_str());
+        matched.drop();
+        if (same) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+ImportOverloadSafety diagnostic_probe_import_overloads(
+    SyntaxTree* source, Vec<SyntaxTree*>* dependencies, Vec<String>* names, CfgSet* cfg,
+    DiagnosticBag* overloads) {
+    DiagnosticTree scratch = DiagnosticTree.new(source);
+    DiagnosticBag preparation = DiagnosticBag.new();
+    SymbolTable symbols = SymbolTable.new();
+    collect_symbols(&symbols, &preparation, &scratch.tree, cfg);
+    if (!preparation.is_empty()) { return ImportOverloadSafety.Inconclusive; }
+    i64 dependency = 0;
+    while (dependency < dependencies.len()) {
+        diagnostic_add_snapshot(&scratch, dependencies.get(dependency), dependency + 2,
+                                &symbols, cfg, &preparation);
+        if (!preparation.is_empty()) { return ImportOverloadSafety.Inconclusive; }
+        dependency += 1;
+    }
+    diagnostic_register_types(&symbols, &scratch.tree, cfg);
+    DiagnosticBag lowering = DiagnosticBag.new();
+    lower_lambdas(&scratch.tree, &scratch.pool, &symbols, &lowering, cfg);
+    if (!lowering.is_empty()) { return ImportOverloadSafety.Inconclusive; }
+
+    Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
+    cfg_collect_items(scratch.tree.root, cfg, &preparation, &items);
+    if (!preparation.is_empty()) { return ImportOverloadSafety.Inconclusive; }
+    i64 index = 0;
+    while (index < items.len()) {
+        SyntaxNode* function = items.get(index);
+        if (function.span.file == 1 && function.kind != NodeKind.Function
+            && diagnostic_body_mentions_name(function, names)) {
+            return ImportOverloadSafety.Inconclusive;
+        }
+        if (function.kind == NodeKind.Function && function.span.file == 1) {
+            SyntaxNode* body = find_function_body(function);
+            bool relevant = diagnostic_body_mentions_name(body, names);
+            if (relevant && typecheck_is_generic_function(function)) {
+                return ImportOverloadSafety.Inconclusive;
+            }
+            if (relevant) {
+                DiagnosticBag checked = DiagnosticBag.new();
+                AstPool expressions = AstPool.new();
+                bool ok = true; bool unsupported = false;
+                typecheck_function_statements_scoped(&expressions, &symbols.types, &symbols,
+                    scratch.tree.root, function, &checked, &ok, &unsupported);
+                if (unsupported) { return ImportOverloadSafety.Inconclusive; }
+                i64 diagnostic = 0;
+                while (diagnostic < checked.len()) {
+                    Diagnostic* item = checked.get(diagnostic);
+                    String name = String.new();
+                    if (diagnostic_overload_message(item, names, &name)) {
+                        overloads.push(item.span, item.severity, item.message.clone());
+                    }
+                    name.drop();
+                    diagnostic += 1;
+                }
+            }
+        }
+        index += 1;
+    }
+    return ImportOverloadSafety.Safe;
+}
+
+// Compare the compiler's overload diagnostics at existing local call sites.
+// Name resolution is intentionally omitted so unrelated unresolved names do
+// not prevent the expression checker from reaching those calls.
+ImportOverloadSafety check_import_overload_safety(
+    SyntaxTree* source, Vec<SyntaxTree*>* baseline_dependencies,
+    Vec<SyntaxTree*>* candidate_dependencies, Vec<String>* names, CfgSet* cfg) {
+    DiagnosticBag baseline = DiagnosticBag.new();
+    ImportOverloadSafety baseline_state = diagnostic_probe_import_overloads(
+        source, baseline_dependencies, names, cfg, &baseline);
+    if (baseline_state != ImportOverloadSafety.Safe) { return baseline_state; }
+    DiagnosticBag candidate = DiagnosticBag.new();
+    ImportOverloadSafety candidate_state = diagnostic_probe_import_overloads(
+        source, candidate_dependencies, names, cfg, &candidate);
+    if (candidate_state != ImportOverloadSafety.Safe) { return candidate_state; }
+    i64 i = 0;
+    while (i < candidate.len()) {
+        Diagnostic* diagnostic = candidate.get(i);
+        String name = String.new();
+        if (diagnostic_overload_message(diagnostic, names, &name)
+            && !diagnostic_has_overload_at(&baseline, names, &name, diagnostic.span)) {
+            name.drop();
+            return ImportOverloadSafety.Conflict;
+        }
+        name.drop();
+        i += 1;
+    }
+    return ImportOverloadSafety.Safe;
 }

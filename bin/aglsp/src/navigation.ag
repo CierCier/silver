@@ -56,6 +56,7 @@ SymbolTarget type_definition_target(SymbolTarget target) {
 
 IdeImplementation* containing_implementation(SymbolTarget target) {
     if (target.symbol < 0) { return (IdeImplementation*)0; }
+    target.document.ensure_syntax();
     Span span = target.document.analysis.symbols.get_ptr(target.symbol).extent; i64 i = 0;
     while (i < target.document.analysis.implementations.len()) {
         IdeImplementation* implementation = target.document.analysis.implementations.get_ptr(i);
@@ -114,7 +115,7 @@ String compute_implementations(DocumentStore* store, Document* context, SymbolTa
     Vec<Document*> documents = store.query_documents(context);
     i64 i = 0;
     while (i < documents.len()) {
-        Document* candidate = documents.get(i); i64 j = 0;
+        Document* candidate = documents.get(i); candidate.ensure_syntax(); i64 j = 0;
         while (j < candidate.analysis.implementations.len()) {
             IdeImplementation* implementation = candidate.analysis.implementations.get_ptr(j);
             SyntaxNode* match_node = symbol.kind == IdeSymbolKind.Trait || method ? implementation.trait_name : implementation.target;
@@ -134,7 +135,7 @@ String compute_implementations(DocumentStore* store, Document* context, SymbolTa
             }
             j += 1;
         }
-        i += 1;
+        candidate.compact(); i += 1;
     }
     out.push(']'); return move out;
 }

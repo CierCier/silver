@@ -82,6 +82,7 @@ String semantic_result_id(Document* doc, i64 generation) {
 void update_semantic_data(Document* doc, &SemanticTokenOptions options) {
     if (!doc.semantic_dirty) { return; }
     doc.previous_semantic_generation = doc.semantic_generation;
+    Vec<i64> _previous_data = move doc.previous_semantic_data;
     doc.previous_semantic_data = move doc.semantic_data;
     doc.semantic_data = semantic_data(doc, options, 0, doc.text.len());
     doc.semantic_generation += 1; doc.semantic_dirty = false;

@@ -1984,7 +1984,8 @@ void native_make_unit_plans(Vec<String>* source_paths,
                         source_paths, aliases);
                     if (source_import.parent_file_id == parent_id && child_id > 0) {
                         // Artifact closure may contain inline sources below standalone modules.
-                        if (native_source_module_inlined(source_import,
+                        if (source_file_id == 1
+                            && native_source_module_inlined(source_import,
                             source_paths, aliases)
                             && !native_source_id_seen(&plan.owned_source_ids, child_id)) {
                             plan.owned_source_ids.push(child_id);

@@ -942,6 +942,25 @@ class NativeLsp(unittest.TestCase):
         session.send("textDocument/didClose", {"textDocument": {"uri": overlay_uri}})
         self.assertNotIn("only_overlay", {item["label"] for item in session.result("textDocument/completion", params)["items"]})
 
+    def test_import_completion_uses_absolute_compiler_search_roots(self):
+        std = self.root / "std"
+        std.mkdir()
+        (std / "io.ag").write_text("")
+        (std / "custom.ag").write_text("i32 custom_answer() { return 1; }\n")
+        with tempfile.TemporaryDirectory(prefix="silver-source-outside-cwd-") as outside:
+            session = Session(self.binary, self.root)
+            self.addCleanup(session.close)
+            session.result("initialize", {"processId": None, "workspaceFolders": [], "capabilities": {}})
+            session.send("initialized", {})
+            text = "import std.cus;"
+            uri = (Path(outside) / "main.ag").as_uri()
+            session.send("textDocument/didOpen", {"textDocument": {
+                "uri": uri, "languageId": "silver", "version": 1, "text": text}})
+            items = session.result("textDocument/completion", {"textDocument": {"uri": uri},
+                "position": position(text, text.index(";"))})["items"]
+            item = next(item for item in items if item["label"] == "custom")
+            self.assertEqual(apply_edits(text, [item["textEdit"]]), "import std.custom;")
+
     def test_selective_import_completion_offers_only_unselected_public_exports(self):
         module = ("i32 answer(i32 value) { return value; }\n"
                   "i32 extra() { return 2; }\n"
@@ -1121,20 +1140,103 @@ class NativeLsp(unittest.TestCase):
         definition = self.session.result("textDocument/definition", self.at(uri, updated, "ExportedType"))
         self.assertEqual(definition, {"uri": source_uri, "range": location(exported, "ExportedType")})
 
-    def test_short_code_prefix_requests_new_data_before_auto_imports(self):
+    def test_single_character_prefix_includes_auto_imports_after_indexing(self):
+        self.session.result("workspace/symbol", {"query": "answer"})
         text = "i32 main() { return a(1); }\n"
         uri = self.open(text)
         first = self.session.result("textDocument/completion", {
             "textDocument": {"uri": uri}, "position": position(text, text.index("a(1)") + 1)})
-        self.assertTrue(first["isIncomplete"])
+        self.assertTrue(any(item["label"] == "answer" and item.get("additionalTextEdits")
+                            for item in first["items"]))
         updated = text.replace("a(1)", "ans(1)")
         self.session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
             "contentChanges": [{"text": updated}]})
         complete = self.session.result("textDocument/completion", {
             "textDocument": {"uri": uri}, "position": position(updated, updated.index("ans(1)") + 3)})
-        self.assertFalse(complete["isIncomplete"])
         self.assertTrue(any(item["label"] == "answer" and item.get("additionalTextEdits")
                             for item in complete["items"]))
+
+    def test_completion_returns_ranked_top_hundred_and_requeries_truncated_lists(self):
+        declarations = "\n".join(f"i32 candidate_{index:03d}() {{ return {index}; }}" for index in range(180))
+        text = declarations + "\ni32 candidate() { return 0; }\ni32 main() { return candidate; }\n"
+        uri = self.open(text, "bounded-completions.ag")
+        self.session.result("workspace/symbol", {"query": "candidate"})
+        params = {"textDocument": {"uri": uri}, "position": position(text, text.rindex("candidate") + len("candidate"))}
+        result = self.session.result("textDocument/completion", params)
+        self.assertEqual(len(result["items"]), 100)
+        self.assertTrue(result["isIncomplete"])
+        self.assertEqual(result["items"][0]["label"], "candidate")
+        self.assertEqual([item["sortText"] for item in result["items"]],
+                         sorted(item["sortText"] for item in result["items"]))
+        updated = text[:text.rindex("candidate")] + "candidate_179; }\n"
+        self.session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
+            "contentChanges": [{"text": updated}]})
+        narrowed = self.session.result("textDocument/completion", {"textDocument": {"uri": uri},
+            "position": position(updated, updated.rindex("candidate_179") + len("candidate_179"))})
+        self.assertFalse(narrowed["isIncomplete"])
+        self.assertEqual([item["label"] for item in narrowed["items"]], ["candidate_179"])
+
+    def test_completion_responds_with_available_data_while_indexing_continues(self):
+        with tempfile.TemporaryDirectory(prefix="silver-completion-pending-") as directory:
+            root = Path(directory)
+            for index in range(64):
+                (root / f"provider_{index}.ag").write_text(f"i32 exported_{index}() {{ return {index}; }}\n")
+            session = Session(self.binary, root)
+            self.addCleanup(session.close)
+            session.result("initialize", {"processId": None, "rootUri": root.as_uri(), "capabilities": {}})
+            text = "i32 main() { ret; }\n"
+            uri = (root / "main.ag").as_uri()
+            session.send("initialized", {})
+            session.send("textDocument/didOpen", {"textDocument": {
+                "uri": uri, "languageId": "silver", "version": 1, "text": text}})
+            params = {"textDocument": {"uri": uri}, "position": position(text, text.index("ret;") + 3)}
+            first = session.result("textDocument/completion", params)
+            self.assertTrue(first["isIncomplete"])
+            self.assertIn("return", {item["label"] for item in first["items"]})
+            indexed = session.result("workspace/symbol", {"query": "exported_"})
+            self.assertEqual(len(indexed), 64)
+            refreshed_text = "i32 main() { return exported_; }\n"
+            refreshed_uri = (root / "main.ag").as_uri()
+            session.send("textDocument/didChange", {"textDocument": {"uri": refreshed_uri, "version": 2},
+                              "contentChanges": [{"text": refreshed_text}]})
+            refreshed = session.result("textDocument/completion", {
+                "textDocument": {"uri": refreshed_uri},
+                "position": position(refreshed_text, refreshed_text.index("exported_") + len("exported_"))})
+            self.assertEqual({item["label"] for item in refreshed["items"]},
+                             {f"exported_{index}" for index in range(64)})
+
+    def test_import_triggers_are_contextual_and_replace_existing_segments(self):
+        triggers = self.capabilities["completionProvider"]["triggerCharacters"]
+        self.assertTrue({".", " ", "{", ","}.issubset(triggers))
+        for index, (text, character, label) in enumerate((
+                ("import ", " ", "helper"),
+                ("import helper {", "{", "answer"),
+                ("import helper { answer as calculate,", ",", None))):
+            with self.subTest(text=text):
+                uri = self.open(text, f"import-trigger-{index}.ag")
+                result = self.session.result("textDocument/completion", {"textDocument": {"uri": uri},
+                    "position": position(text, len(text)), "context": {"triggerKind": 2, "triggerCharacter": character}})
+                if label is not None:
+                    self.assertIn(label, {item["label"] for item in result["items"]})
+                self.assertFalse(any(item["label"] == "return" for item in result["items"]))
+        for index, text in enumerate(("i32 main() { ", "i32 main() {", "i32 call(i32 value,")):
+            character = (" ", "{", ",")[index]
+            uri = self.open(text, f"code-trigger-{index}.ag")
+            self.assertEqual(self.session.result("textDocument/completion", {"textDocument": {"uri": uri},
+                "position": position(text, len(text)), "context": {"triggerKind": 2, "triggerCharacter": character}})["items"], [])
+        text = "import std.string;\n"
+        uri = self.open(text, "replace-module-start.ag")
+        env_root = self.stdlib_root or Path(__file__).resolve().parent.parent / "std"
+        session = Session(self.binary, self.root, env=dict(os.environ, SILVER_SYSROOT=str(env_root.parent)))
+        self.addCleanup(session.close)
+        session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {}})
+        session.send("initialized", {})
+        session.send("textDocument/didOpen", {"textDocument": {"uri": uri, "languageId": "silver", "version": 1, "text": text}})
+        choices = session.result("textDocument/completion", {"textDocument": {"uri": uri},
+            "position": position(text, text.index("string"))})["items"]
+        item = next(item for item in choices if item["label"] == "slice")
+        self.assertEqual(item["textEdit"]["range"], location(text, "string"))
+        self.assertEqual(apply_edits(text, [item["textEdit"]]), "import std.slice;\n")
 
     def test_auto_import_candidates_preserve_distinct_sources_and_reject_bad_bindings(self):
         (self.root / "alpha.ag").write_text("i32 answer() { return 1; }\nprivate i32 secret() { return 2; }\n")
@@ -1222,6 +1324,141 @@ class NativeLsp(unittest.TestCase):
         self.assertIn("disk_only", {item["label"] for item in restored})
         self.assertNotIn("overlay_only", {item["label"] for item in restored})
 
+    def test_startup_preloads_std_and_transitive_manifest_packages(self):
+        external = tempfile.TemporaryDirectory(prefix="silver-lsp-packages-")
+        self.addCleanup(external.cleanup)
+        packages = Path(external.name)
+        for name in ("dep", "leaf", "sysroot/std"):
+            (packages / name).mkdir(parents=True)
+        app = self.root / "app"
+        (app / "src").mkdir(parents=True)
+        (self.root / "silver.toml").write_text(
+            'name = "root"\nversion = "1"\n[bin."app"]\nmanifest = "app"\n'
+            f'[dependencies.dep]\nmanifest = "{packages / "dep"}"\n')
+        (app / "silver.toml").write_text(
+            'name = "app"\nversion = "1"\n[bin."app"]\nentry = "src/main.ag"\n')
+        (app / "src/main.ag").write_text('i32 main() { return 0; }\n')
+        (packages / "dep/silver.toml").write_text(
+            'name = "dep"\nversion = "1"\n[lib."dep"]\nentry = "dep_api.ag"\n'
+            '[dependencies.leaf]\nmanifest = "../leaf"\n')
+        (packages / "leaf/silver.toml").write_text(
+            'name = "leaf"\nversion = "1"\n[lib."leaf"]\nentry = "leaf_api.ag"\n'
+            '[dependencies.cycle]\nmanifest = "../dep"\n')
+        dep = packages / "dep/dep_api.ag"
+        leaf = packages / "leaf/leaf_api.ag"
+        dep.write_text('import leaf_api;\ni32 dep_value() { return leaf_value(); }\n')
+        leaf_text = 'i32 leaf_value() { return 7; }\n'
+        leaf.write_text(leaf_text)
+        standard = packages / "sysroot/std/cached.ag"
+        standard.write_text('i32 warm_std_value() { return 8; }\n')
+        session = self.folder_session([self.root], env=dict(os.environ, SILVER_SYSROOT=str(packages / "sysroot")))
+        symbols = session.result("workspace/symbol", {"query": "leaf_value"})
+        self.assertEqual([item["location"]["uri"] for item in symbols], [leaf.as_uri()])
+        # A query of the graph drains startup preloading before the backing files disappear.
+        for source, name in ((leaf, "leaf_value"), (standard, "warm_std_value")):
+            source.unlink()
+            cached = session.result("textDocument/documentSymbol", {"textDocument": {"uri": source.as_uri()}})
+            self.assertEqual([item["name"] for item in cached], [name])
+        text = 'import dep_api;\ni32 main() { return dep_value(); }\n'
+        uri = (app / "src/main.ag").as_uri()
+        session.send("textDocument/didOpen", {"textDocument": {
+            "uri": uri, "languageId": "silver", "version": 1, "text": text}})
+        target = session.result("textDocument/definition", {"textDocument": {"uri": uri},
+            "position": position(text, text.index("dep_value"))})
+        self.assertEqual(target, {"uri": dep.as_uri(), "range": location(dep.read_text(), "dep_value")})
+        session.send("workspace/didChangeWatchedFiles", {"changes": [{"uri": standard.as_uri(), "type": 3}]})
+        self.assertEqual(session.result("textDocument/documentSymbol", {"textDocument": {"uri": standard.as_uri()}}), [])
+        self.assertFalse(any(message.get("method") == "window/logMessage" for message in session.notifications))
+
+    def test_manifest_changes_rebuild_package_scope_and_recover_from_invalid_input(self):
+        external = tempfile.TemporaryDirectory(prefix="silver-lsp-manifest-change-")
+        self.addCleanup(external.cleanup)
+        packages = Path(external.name)
+        for name in ("old", "new"):
+            directory = packages / name
+            directory.mkdir()
+            (directory / "silver.toml").write_text(
+                f'name = "{name}"\nversion = "1"\n[lib."{name}"]\nentry = "api.ag"\n')
+            (directory / "api.ag").write_text(f'i32 {name}_package_value() {{ return 1; }}\n')
+        manifest = self.root / "silver.toml"
+        def configure(name):
+            manifest.write_text('name = "project"\nversion = "1"\n'
+                                f'[dependencies.package]\nmanifest = "{packages / name}"\n')
+        configure("old")
+        session = self.folder_session([self.root])
+        self.assertEqual(len(session.result("workspace/symbol", {"query": "old_package_value"})), 1)
+        configure("new")
+        session.send("workspace/didChangeWatchedFiles", {"changes": [{"uri": manifest.as_uri(), "type": 2}]})
+        self.assertEqual(session.result("workspace/symbol", {"query": "old_package_value"}), [])
+        self.assertEqual(len(session.result("workspace/symbol", {"query": "new_package_value"})), 1)
+        manifest.write_text('name =\n')
+        session.send("workspace/didChangeWatchedFiles", {"changes": [{"uri": manifest.as_uri(), "type": 2}]})
+        self.assertEqual(session.result("workspace/symbol", {"query": "new_package_value"}), [])
+        self.assertTrue(any(message.get("method") == "window/logMessage"
+                            and str(manifest) in message["params"]["message"] for message in session.notifications))
+        configure("old")
+        session.send("workspace/didChangeWatchedFiles", {"changes": [{"uri": manifest.as_uri(), "type": 2}]})
+        self.assertEqual(len(session.result("workspace/symbol", {"query": "old_package_value"})), 1)
+        uri = (self.root / "main.ag").as_uri()
+        session.send("textDocument/didOpen", {"textDocument": {
+            "uri": uri, "languageId": "silver", "version": 1,
+            "text": "i32 remain_open() { return 0; }\n"}})
+        session.send("workspace/didChangeWorkspaceFolders", {"event": {
+            "added": [], "removed": [{"uri": self.root.as_uri(), "name": self.root.name}]}})
+        self.assertEqual(session.result("workspace/symbol", {"query": "old_package_value"}), [])
+        self.assertEqual(len(session.result("workspace/symbol", {"query": "remain_open"})), 1)
+
+    def test_nested_manifest_discovers_external_packages_during_preload(self):
+        external = tempfile.TemporaryDirectory(prefix="silver-lsp-nested-package-")
+        self.addCleanup(external.cleanup)
+        dependency = Path(external.name) / "library"
+        dependency.mkdir()
+        (dependency / "silver.toml").write_text(
+            'name = "dependency"\nversion = "1"\n[lib."dependency"]\nentry = "api.ag"\n')
+        api = dependency / "api.ag"
+        api.write_text('i32 nested_package_value() { return 4; }\n')
+        project = self.root / "nested"
+        project.mkdir()
+        entry = Path(external.name) / "outside_entry.ag"
+        entry.write_text('i32 external_entry_value() { return 5; }\n')
+        (project / "silver.toml").write_text(
+            'name = "nested"\nversion = "1"\n'
+            f'[bin."nested"]\nentry = "{os.path.relpath(entry, project)}"\n'
+            f'[dependencies.library]\nmanifest = "{dependency}"\n')
+        session = self.folder_session([self.root])
+        symbols = session.result("workspace/symbol", {"query": "nested_package_value"})
+        self.assertEqual([item["location"]["uri"] for item in symbols], [api.as_uri()])
+        symbols = session.result("workspace/symbol", {"query": "external_entry_value"})
+        self.assertEqual([item["location"]["uri"] for item in symbols], [entry.as_uri()])
+
+    def test_open_file_discovers_parent_manifest_without_workspace_folders(self):
+        project = self.root / ("a" * 100) / ("b" * 100)
+        source = project / "src"
+        source.mkdir(parents=True)
+        (project / "silver.toml").write_text(
+            'name = "project"\nversion = "1"\n[lib."project"]\nentry = "src/api.ag"\n')
+        api = source / "api.ag"
+        api_text = 'i32 boot_value() { return 9; }\n'
+        api.write_text(api_text)
+        session = Session(self.binary, self.root)
+        self.addCleanup(session.close)
+        session.result("initialize", {"processId": None, "rootUri": None, "capabilities": {}})
+        session.send("initialized", {})
+        text = 'i32 main() { return boot_v(); }\n'
+        uri = (source / "main.ag").as_uri()
+        session.send("textDocument/didOpen", {"textDocument": {
+            "uri": uri, "languageId": "silver", "version": 1, "text": text}})
+        session.result("workspace/symbol", {"query": "boot_value"})
+        result = session.result("textDocument/completion", {"textDocument": {"uri": uri},
+            "position": position(text, text.index("boot_v") + 6)})
+        selected = next(item for item in result["items"] if item["label"] == "boot_value")
+        updated = apply_edits(text, [selected["textEdit"], *selected["additionalTextEdits"]])
+        self.assertTrue(updated.startswith('import api;\n'))
+        symbols = session.result("workspace/symbol", {"query": "boot_value"})
+        self.assertEqual([item["location"]["uri"] for item in symbols], [api.as_uri()])
+        session.send("textDocument/didClose", {"textDocument": {"uri": uri}})
+        self.assertEqual(session.result("workspace/symbol", {"query": "boot_value"}), [])
+
     def test_auto_import_discovers_source_sysroot_std_modules_outside_the_workspace(self):
         sysroot_temp = tempfile.TemporaryDirectory(prefix="silver-lsp-sysroot-")
         self.addCleanup(sysroot_temp.cleanup)
@@ -1242,6 +1479,7 @@ class NativeLsp(unittest.TestCase):
         uri = (self.root / "sysroot-import.ag").as_uri()
         session.send("textDocument/didOpen", {"textDocument": {
             "uri": uri, "languageId": "silver", "version": 1, "text": text}})
+        session.result("workspace/symbol", {"query": "unique_std_value"})
         items = session.result("textDocument/completion", {"textDocument": {"uri": uri},
             "position": position(text, text.index("uniq()") + 4)})["items"]
         self.assertIn("unique_std_value", {item["label"] for item in items}, items)
@@ -1309,6 +1547,7 @@ class NativeLsp(unittest.TestCase):
         self.addCleanup(session.close)
         session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {}})
         session.send("initialized", {})
+        session.result("workspace/symbol", {"query": "String"})
         for index, header in enumerate(("", "import std.mem.vec;\n")):
             text = header + 'i32 main() { Str value = String.from_str("silver"); return 0; }\n'
             uri = (self.root / f"real-string-{index}.ag").as_uri()
@@ -1342,6 +1581,7 @@ class NativeLsp(unittest.TestCase):
         session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {}})
         session.send("initialized", {})
         path_text = "import provider_l;"
+        session.result("workspace/symbol", {"query": "linked_answer"})
         path_uri = (self.root / "linked-path.ag").as_uri()
         session.send("textDocument/didOpen", {"textDocument": {
             "uri": path_uri, "languageId": "silver", "version": 1, "text": path_text}})
@@ -1468,6 +1708,153 @@ class NativeLsp(unittest.TestCase):
         actions = self.session.result("textDocument/codeAction", {"textDocument": {"uri": uri},
             "range": location('i32 main() { return answer(1); }', "answer"), "context": {"diagnostics": []}})
         self.assertEqual(actions, [])
+
+    def test_import_suggestions_reject_conflicting_types_in_new_dependencies(self):
+        sources = {"left.ag": "struct Collision { i32 left; }\n",
+                   "right.ag": "struct Collision { i32 right; }\n",
+                   "provider.ag": "import left;\nimport right;\ni32 wanted() { return 1; }\n"}
+        for name, source in sources.items():
+            (self.root / name).write_text(source)
+        self.session.send("workspace/didChangeWatchedFiles", {"changes": [
+            {"uri": (self.root / name).as_uri(), "type": 1} for name in sources]})
+        text = "i32 main() { return wanted(); }\n"
+        uri = self.open(text, "dependency-collision.ag")
+        items = self.session.result("textDocument/completion", {"textDocument": {"uri": uri},
+            "position": position(text, text.index("wanted") + len("wanted"))})["items"]
+        self.assertFalse(any(item["label"] == "wanted" for item in items))
+        actions = self.session.result("textDocument/codeAction", {"textDocument": {"uri": uri},
+            "range": location(text, "wanted"), "context": {"diagnostics": []}})
+        self.assertEqual(actions, [])
+
+        callables = self.root / "callables"
+        callables.mkdir()
+        raw = callables / "raw.ag"
+        linux = callables / "os_linux.ag"
+        provider = callables / "provider.ag"
+        raw.write_text("i64 sys_openat(i64 path) { return path; }\n")
+        linux.write_text("i64 sys_openat(str path) { return 0; }\n")
+        provider.write_text("import raw;\nimport os_linux;\ni64 sys_openat(bool path) { return 0; }\ni32 wanted() { return 1; }\nstruct String {}\n")
+        self.session.send("workspace/didChangeWatchedFiles", {"changes": [
+            {"uri": path.as_uri(), "type": 1} for path in (raw, linux, provider)]})
+
+        text = "import callables.raw;\ni64 existing() { return sys_openat(1); }\ni32 main() { return wanted(); }\n"
+        uri = self.open(text, "callable-overlap.ag")
+        items = self.session.result("textDocument/completion", {"textDocument": {"uri": uri},
+            "position": position(text, text.index("wanted") + len("wanted"))})["items"]
+        wanted = next(item for item in items if item["label"] == "wanted"
+                      and item.get("data", {}).get("module") == "callables.provider")
+        updated = apply_edits(text, [wanted["textEdit"], *wanted.get("additionalTextEdits", [])])
+        self.session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
+            "contentChanges": [{"text": updated}]})
+        self.assertEqual(self.session.result("textDocument/definition", {
+            "textDocument": {"uri": uri}, "position": position(updated, updated.index("wanted()"))})["uri"],
+            provider.as_uri())
+        self.assertFalse(any(d.get("severity") == 1 for d in self.session.diagnostics[uri]["diagnostics"]))
+
+        text = "import callables.raw;\ni64 existing() { return sys_openat(1); }\ni32 main() { return wanted(); }\n"
+        uri = self.open(text, "callable-overlap-quickfix.ag")
+        actions = self.session.result("textDocument/codeAction", {"textDocument": {"uri": uri},
+            "range": location(text, "wanted"), "context": {"diagnostics": []}})
+        action = next(action for action in actions if action["title"] == "Import wanted from callables.provider")
+        updated = apply_edits(text, action["edit"]["changes"][uri])
+        self.session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
+            "contentChanges": [{"text": updated}]})
+        self.session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+        self.assertEqual(self.session.result("textDocument/definition", {
+            "textDocument": {"uri": uri}, "position": position(updated, updated.index("wanted()"))})["uri"],
+            provider.as_uri())
+        self.assertFalse(any(d.get("severity") == 1 for d in self.session.diagnostics[uri]["diagnostics"]))
+
+        text = ("import callables.raw;\n"
+                "i32 main() { sys_openat(1); return want() + missing(); }\n")
+        uri = self.open(text, "callable-overlap-unresolved-positive.ag")
+        self.assertEqual(self.session.result("textDocument/definition", {
+            "textDocument": {"uri": uri},
+            "position": position(text, text.index("sys_openat(1)") + len("sys_openat"))})["uri"],
+            raw.as_uri())
+        items = self.session.result("textDocument/completion", {"textDocument": {"uri": uri},
+            "position": position(text, text.index("want()") + len("want"))})["items"]
+        wanted = next(item for item in items if item["label"] == "wanted"
+                      and item.get("data", {}).get("module") == "callables.provider")
+        updated = apply_edits(text, [wanted["textEdit"], *wanted.get("additionalTextEdits", [])])
+        self.session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
+            "contentChanges": [{"text": updated}]})
+        self.assertEqual(self.session.result("textDocument/definition", {
+            "textDocument": {"uri": uri}, "position": position(updated, updated.index("wanted()"))})["uri"],
+            provider.as_uri())
+        self.assertTrue(any("missing" in d.get("message", "")
+                            for d in self.session.diagnostics[uri]["diagnostics"]))
+
+        quickfix_text = ("import callables.raw;\n"
+                         "i32 main() { sys_openat(1); return wanted() + missing(); }\n")
+        uri = self.open(quickfix_text, "callable-overlap-unresolved-positive-quickfix.ag")
+        actions = self.session.result("textDocument/codeAction", {"textDocument": {"uri": uri},
+            "range": location(quickfix_text, "wanted"), "context": {"diagnostics": []}})
+        action = next(action for action in actions
+                      if action["title"] == "Import wanted from callables.provider")
+        updated = apply_edits(quickfix_text, action["edit"]["changes"][uri])
+        self.session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
+            "contentChanges": [{"text": updated}]})
+        self.session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+        self.assertEqual(self.session.result("textDocument/definition", {
+            "textDocument": {"uri": uri}, "position": position(updated, updated.index("wanted()"))})["uri"],
+            provider.as_uri())
+
+        text = "i32 main() { String value; return 0; }\n"
+        uri = self.open(text, "callable-overlap-string.ag")
+        items = self.session.result("textDocument/completion", {"textDocument": {"uri": uri},
+            "position": position(text, text.index("String") + len("String"))})["items"]
+        string = next(item for item in items if item["label"] == "String"
+                      and item.get("data", {}).get("module") == "callables.provider")
+        updated = apply_edits(text, [string["textEdit"], *string.get("additionalTextEdits", [])])
+        self.session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
+            "contentChanges": [{"text": updated}]})
+        self.assertEqual(self.session.result("textDocument/definition", {
+            "textDocument": {"uri": uri}, "position": position(updated, updated.index("String value"))})["uri"],
+            provider.as_uri())
+        self.assertFalse(any(d.get("severity") == 1 for d in self.session.diagnostics[uri]["diagnostics"]))
+
+    def test_import_suggestions_reject_callable_overloads_that_make_existing_calls_ambiguous(self):
+        callables = self.root / "integer_overloads"
+        callables.mkdir()
+        raw = callables / "raw.ag"
+        provider = callables / "provider.ag"
+        raw.write_text("u32 open_at(u32 path) { return path; }\n")
+        provider.write_text("import raw;\nu64 open_at(u64 path) { return path; }\ni32 wanted() { return 1; }\n")
+        self.session.send("workspace/didChangeWatchedFiles", {"changes": [
+            {"uri": path.as_uri(), "type": 1} for path in (raw, provider)]})
+
+        text = ("import integer_overloads.raw;\n"
+                "u32 main() { open_at(1); return want() + missing(); }\n")
+        uri = self.open(text, "unsafe-callable-overlap.ag")
+        resolved = self.session.result("textDocument/definition", {
+            "textDocument": {"uri": uri},
+            "position": position(text, text.index("open_at(1)") + len("open_at"))})
+        self.assertEqual(resolved["uri"], raw.as_uri())
+        params = {"textDocument": {"uri": uri},
+                  "position": position(text, text.index("want()") + len("want"))}
+        items = self.session.result("textDocument/completion", params)["items"]
+        self.assertFalse(any(item["label"] == "wanted" for item in items), items)
+        actions = self.session.result("textDocument/codeAction", {"textDocument": {"uri": uri},
+            "range": location(text, "want"), "context": {"diagnostics": []}})
+        self.assertFalse(any(action["title"] == "Import wanted from integer_overloads.provider"
+                             for action in actions), actions)
+
+        control = ("import integer_overloads.raw;\nimport integer_overloads.provider;\n"
+                   "u32 main() { open_at(1); return wanted(); }\n")
+        control_uri = self.open(control, "manual-callable-import-control.ag", version=1)
+        report = self.session.diagnostics[control_uri]
+        self.assertEqual(report["version"], 1)
+        errors = [item for item in report["diagnostics"] if item["severity"] == 1]
+        self.assertTrue(any("open_at" in item["message"] and "ambiguous" in item["message"]
+                            for item in errors), errors)
+
+        unresolved = ("import integer_overloads.raw;\nimport integer_overloads.provider;\n"
+                      "u32 main() { open_at(1); return wanted() + missing(); }\n")
+        unresolved_uri = self.open(unresolved, "unresolved-callable-import-control.ag")
+        unresolved_errors = [item for item in self.session.diagnostics[unresolved_uri]["diagnostics"]
+                             if item["severity"] == 1]
+        self.assertTrue(any("missing" in item["message"] for item in unresolved_errors), unresolved_errors)
 
     def test_import_quickfix_preserves_multiple_choices_and_finds_types_in_unsaved_modules(self):
         self.open('i32 choose() { return 1; }', "first.ag")
@@ -1972,6 +2359,7 @@ class NativeLsp(unittest.TestCase):
                 text = "import std.sample;\ri32 main() { return system_answer(); }\r"
                 uri = (self.root / "system.ag").as_uri()
                 session.send("textDocument/didOpen", {"textDocument": {"uri": uri, "languageId": "silver", "version": 1, "text": text}})
+                session.result("workspace/symbol", {"query": "system_answer"})
                 definition = session.result("textDocument/definition", self.at(uri, text, "system_answer"))
                 self.assertEqual(definition["uri"], source.as_uri())
                 self.assertIn("i32 main", session.result("textDocument/hover", self.at(uri, text, "main"))["contents"]["value"])
@@ -1987,6 +2375,7 @@ class NativeLsp(unittest.TestCase):
                 text = "import std.string;\ni32 main() { String message = String.new(); return 0; }\n"
                 uri = (self.root / "installed.ag").as_uri()
                 session.send("textDocument/didOpen", {"textDocument": {"uri": uri, "languageId": "silver", "version": 1, "text": text}})
+                session.result("workspace/symbol", {"query": "String"})
                 definition = session.result("textDocument/definition", self.at(uri, text, "String message"))
                 self.assertEqual(definition["uri"], (self.stdlib_root / "string.ag").as_uri())
             finally:
@@ -2243,6 +2632,75 @@ class NativeLsp(unittest.TestCase):
                 completion = session.result("textDocument/completion", {
                     "textDocument": {"uri": unused_uri}, "position": position(unused, unused.index("0"))})
                 self.assertEqual("root_only" in {item["label"] for item in completion["items"]}, stage != "open")
+
+    def test_closed_source_rehydrates_without_invalidating_completion_or_hierarchy(self):
+        session = Session(self.binary, self.root)
+        self.addCleanup(session.close)
+        session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {
+            "textDocument": {"signatureHelp": {"signatureInformation": {
+                "parameterInformation": {"labelOffsetSupport": True}}}}}})
+        session.send("initialized", {})
+        session.result("workspace/symbol", {"query": "answer"})
+        helper = self.root / "helper.ag"
+        text = "import helper;\ni32 main() { return answer(1); }\n"
+        uri = (self.root / "main.ag").as_uri()
+        session.send("textDocument/didOpen", {"textDocument": {
+            "uri": uri, "languageId": "silver", "version": 1, "text": text}})
+        session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+        helper.unlink()
+        at = self.at(uri, text, "answer")
+        completion = session.result("textDocument/completion", {
+            **at, "position": position(text, text.index("answer") + len("answer"))})
+        saved = next(item for item in completion["items"] if item["label"] == "answer")
+        item = session.result("textDocument/prepareCallHierarchy", at)[0]
+        for _ in range(3):
+            signature = session.result("textDocument/signatureHelp", {
+                **at, "position": position(text, text.index("1)"))})["signatures"][0]
+            begin = signature["label"].index("i32 value")
+            self.assertEqual(signature["parameters"][0]["label"], [begin, begin + len("i32 value")])
+            self.assertIn("answer", session.result("completionItem/resolve", saved)["detail"])
+            incoming = session.result("callHierarchy/incomingCalls", {"item": item})
+            self.assertEqual({call["from"]["name"] for call in incoming}, {"main", "other"})
+            references = session.result("textDocument/references", {
+                **at, "context": {"includeDeclaration": True}})
+            self.assertEqual({entry["uri"] for entry in references}, {
+                uri, helper.as_uri(), (self.root / "other.ag").as_uri()})
+
+    @unittest.skipUnless(Path("/proc/self/status").is_file(), "RSS regression requires Linux /proc")
+    def test_repeated_closed_workspace_analysis_releases_discarded_snapshots(self):
+        for file in range(20):
+            (self.root / f"cached_{file}.ag").write_text("".join(
+                f"i32 item_{file}_{item}(i32 value) {{ return value; }}\n" for item in range(100)))
+        self.session.result("workspace/symbol", {"query": "item_0_0"})
+        source = self.root / "cached_0.ag"
+        target = self.at(source.as_uri(), source.read_text(), "item_0_0")
+
+        def rss():
+            status = Path(f"/proc/{self.session.process.pid}/status").read_text()
+            return int(next(line.split()[1] for line in status.splitlines() if line.startswith("VmRSS:")))
+
+        baseline = None
+        for iteration in range(6):
+            references = self.session.result("textDocument/references", {
+                **target, "context": {"includeDeclaration": True}})
+            self.assertEqual(references, [{"uri": source.as_uri(), "range": location(source.read_text(), "item_0_0")}])
+            self.session.result("workspace/symbol", {"query": "item_0_0"})
+            if iteration == 0:
+                baseline = rss()
+        self.assertLess(rss() - baseline, 8 * 1024, "closed snapshots accumulate across identical requests")
+
+        text = "".join(f"i32 edited_{item}(i32 value) {{ return value; }}\n" for item in range(500))
+        uri = self.open(text, "edited.ag")
+        self.session.result("textDocument/semanticTokens/full", {"textDocument": {"uri": uri}})
+        baseline = rss()
+        for version in range(2, 22):
+            self.session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": version},
+                              "contentChanges": [{"text": text}]})
+            symbols = self.session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+            self.assertEqual(len(symbols), 500)
+            tokens = self.session.result("textDocument/semanticTokens/full", {"textDocument": {"uri": uri}})
+            self.assertTrue(tokens["data"])
+        self.assertLess(rss() - baseline, 8 * 1024, "replacing open snapshots leaks the previous analysis")
 
     def test_call_hierarchy_groups_call_sites_and_rejects_stale_items(self):
         text = ("import helper { answer as compute };\n"

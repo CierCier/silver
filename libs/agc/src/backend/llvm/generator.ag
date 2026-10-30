@@ -1624,7 +1624,11 @@ impl LlvmGenerator {
                             collect_parameter_bindings(params_node, &params);
                             Vec<LLVMOpaqueType*> param_types = llvm_param_types(
                                 &ctx, types, &params, (str)0, c_abi);
-                            LLVMOpaqueType* fn_type = LLVMFunctionType(ret_llvm_type, param_types.data, (u32)param_types.len(), 0);
+                            bool variadic = c_abi
+                                && item_c_extern_function_is_variadic(tree.root, fn_name);
+                            LLVMOpaqueType* fn_type = LLVMFunctionType(
+                                ret_llvm_type, param_types.data,
+                                (u32)param_types.len(), variadic ? 1 : 0);
                             String link_name = item_attribute_string(
                                 block == (SyntaxNode*)0 ? item.first_child : declaration_start,
                                 fn_name_node, "link_name");

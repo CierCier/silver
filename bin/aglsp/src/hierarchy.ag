@@ -40,6 +40,7 @@ i64 hierarchy_target(DocumentStore* store, str params, bool calls, SymbolTarget*
         || !json_integer(data.to_str(), "selection", &selection) || selection < 0) { return -32602; }
     Document* doc = store.get(uri.to_str());
     if (doc == (Document*)0 || doc.revision != revision) { return -32801; }
+    doc.ensure_syntax();
     Span span = Span.synthetic(); span.start = selection;
     i64 symbol = ide_find_definition(&doc.analysis, span);
     if (symbol < 0) { return -32801; }
@@ -71,6 +72,7 @@ String compute_call_hierarchy(DocumentStore* store, SymbolTarget selected, bool 
     while (i < documents.len() && !request_interrupted(pending)) {
         Document* doc = documents.get(i); i64 token = 0;
         if (!incoming && doc != selected.document) { i += 1; continue; }
+        doc.ensure_syntax();
         while (token < doc.analysis.tokens.len() && !request_interrupted(pending)) {
             if (doc.analysis.tokens.get(token).kind == TokenKind.LeftParen) {
                 i64 occurrence = call_occurrence(doc, token);
@@ -91,7 +93,7 @@ String compute_call_hierarchy(DocumentStore* store, SymbolTarget selected, bool 
             }
             token += 1;
         }
-        i += 1;
+        doc.compact(); i += 1;
     }
     String out = String.from_str("["); i = 0;
     while (i < groups.len() && !request_interrupted(pending)) {
@@ -113,7 +115,7 @@ String compute_type_hierarchy(DocumentStore* store, SymbolTarget selected, bool 
     Vec<SymbolTarget> targets = Vec<SymbolTarget>.new(); i64 i = 0;
     Vec<Document*> documents = store.query_documents(selected.document);
     while (i < documents.len() && !request_interrupted(pending)) {
-        Document* doc = documents.get(i); i64 j = 0;
+        Document* doc = documents.get(i); doc.ensure_syntax(); i64 j = 0;
         while (j < doc.analysis.implementations.len() && !request_interrupted(pending)) {
             IdeImplementation* implementation = doc.analysis.implementations.get_ptr(j);
             if (implementation.trait_name != (SyntaxNode*)0) {
@@ -130,7 +132,7 @@ String compute_type_hierarchy(DocumentStore* store, SymbolTarget selected, bool 
             }
             j += 1;
         }
-        i += 1;
+        doc.compact(); i += 1;
     }
     String out = String.from_str("["); i = 0;
     while (i < targets.len() && !request_interrupted(pending)) { if (i > 0) { out.push(','); } append_hierarchy_item(&out, targets.get(i)); i += 1; }

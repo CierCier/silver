@@ -70,6 +70,7 @@ void handle_document_request(DocumentStore* store, WorkspaceIndex* index, Client
         if (path.len() > 0) { doc = store.load(path.to_str()); store.refresh_imports(); }
     }
     if (doc == (Document*)0) { complete_error(pending, message.id_raw.to_str(), -32602, "Document not found"); return; }
+    doc.ensure_syntax();
     if (positioned && !doc.offset(line, column, &offset)) {
         complete_error(pending, message.id_raw.to_str(), -32602, "Invalid UTF-16 position"); return;
     }
@@ -83,9 +84,17 @@ void handle_document_request(DocumentStore* store, WorkspaceIndex* index, Client
             complete_error(pending, message.id_raw.to_str(), -32602, "Invalid code action parameters"); return;
         }
     }
+    if (strcmp(method, "textDocument/completion") == 0) {
+        String context = json_field(params, "context"); String trigger = String.new(); i64 kind = 0;
+        if (json_integer(context.to_str(), "triggerKind", &kind) && kind == 2
+            && json_string(context.to_str(), "triggerCharacter", &trigger)
+            && (trigger.equals(" ") || trigger.equals("{") || trigger.equals(","))
+            && !import_completion_context(doc, offset).is_some()) {
+            complete_response(pending, message.id_raw.to_str(), "{\"isIncomplete\":false,\"items\":[]}"); return;
+        }
+    }
     bool workspace_analysis = strcmp(method, "textDocument/references") == 0 || strcmp(method, "textDocument/rename") == 0
-        || strcmp(method, "textDocument/implementation") == 0 || strcmp(method, "textDocument/codeAction") == 0
-        || (strcmp(method, "textDocument/completion") == 0 && completion_needs_workspace(doc, offset));
+        || strcmp(method, "textDocument/implementation") == 0 || strcmp(method, "textDocument/codeAction") == 0;
     if (workspace_analysis && !index_request_workspace(store, index, pending)) {
         complete_response(pending, message.id_raw.to_str(), "null"); return;
     }
@@ -102,7 +111,7 @@ void handle_document_request(DocumentStore* store, WorkspaceIndex* index, Client
         else if (strcmp(method, "textDocument/typeDefinition") == 0) { result = target_location(type_definition_target(target)); }
         else { result = compute_implementations(store, doc, target); }
     }
-    else if (strcmp(method, "textDocument/completion") == 0) { result = compute_completion(store, doc, offset, client, pending); }
+    else if (strcmp(method, "textDocument/completion") == 0) { result = compute_completion(store, doc, offset, client, pending, index.paths.len() > 0); }
     else if (strcmp(method, "textDocument/signatureHelp") == 0) { result = compute_signature_help(doc, offset, client); }
     else if (strcmp(method, "textDocument/documentSymbol") == 0) { result = compute_document_symbols(doc, client.hierarchical_symbols); }
     else if (strcmp(method, "textDocument/documentLink") == 0) { result = compute_document_links(store, doc, client.document_link_tooltips); }
@@ -208,7 +217,16 @@ i32 dispatch_message(ServerState* state, PendingMessage* pending) {
             String uri = String.new(); String text = String.new(); i64 version = 0;
             if (parse_did_open_params(params, &uri, &text, &version)) {
                 Document* doc = store.set(uri.to_str(), text.to_str(), version, true);
-                if (doc != (Document*)0) { store.refresh_imports(); notify_analysis_change(state); }
+                if (doc != (Document*)0) {
+                    bool discover = store.discover_open_projects || path_within_roots(&store.roots, doc.path.to_str());
+                    String manifest = discover && doc.path.len() > 0 ? project_manifest(doc.path.to_str()) : String.new(); i64 known = 0;
+                    while (known < index.manifests.len() && !index.manifests.get_ptr(known).equals(manifest.to_str())) { known += 1; }
+                    if (manifest.len() > 0 && known == index.manifests.len()) { *index = workspace_index(store); }
+                    else if (store.discover_open_projects && doc.path.len() > 0) {
+                        String directory = path_dirname(doc.path.to_str()); enqueue_index_path(index, directory.to_str(), 0, true);
+                    }
+                    store.refresh_imports(); notify_analysis_change(state);
+                }
             }
         } else if (strcmp(method, "textDocument/didChange") == 0) {
             String uri = String.new();
@@ -219,6 +237,7 @@ i32 dispatch_message(ServerState* state, PendingMessage* pending) {
             String uri = String.new();
             if (parse_document_uri_param(params, &uri)) {
                 store.close(uri.to_str()); store.refresh_imports();
+                if (store.discover_open_projects && index.manifests.len() > 0) { *index = workspace_index(store); }
                 if (!client.pull_diagnostics) { publish_empty_diagnostics(uri.to_str()); }
                 notify_analysis_change(state);
             }
@@ -233,7 +252,10 @@ i32 dispatch_message(ServerState* state, PendingMessage* pending) {
             }
         } else if (strcmp(method, "workspace/didChangeWorkspaceFolders") == 0) {
             if (update_workspace_folders(store, params)) { *index = workspace_index(store); notify_analysis_change(state); }
-        } else if (strcmp(method, "workspace/didChangeWatchedFiles") == 0) { update_watched_files(store, params); notify_analysis_change(state); }
+        } else if (strcmp(method, "workspace/didChangeWatchedFiles") == 0) {
+            if (update_watched_files(store, params)) { *index = workspace_index(store); }
+            notify_analysis_change(state);
+        }
         else if (strcmp(method, "completionItem/resolve") == 0 && message.has_id) {
             Result<String, CompletionResolveError> resolved = compute_completion_resolve(store, params, client, pending);
             if (resolved.is_err()) {
@@ -306,6 +328,7 @@ i32 main() {
         i32 result = dispatch_message(&state, pending);
         finish_progress(pending);
         release_message(&transport, pending);
+        state.store.compact_closed();
         if (result >= 0) { status = result; break; }
     }
     transport.stop(); thread_join(reader);

@@ -1824,9 +1824,17 @@ pub fn run(cli: Cli) {
                 profiler::begin_phase("safety");
                 // Move-out checker: use-after-move of non-copyable values is
                 // a use-after-free, reported alongside type errors.
-                let escape_errors = crate::semantic::escape_check::check_program(&ast);
-                if !escape_errors.is_empty() {
-                    for error in &escape_errors {
+                // Typeck's lambda, inferred-let, constructor, and monomorph
+                // passes preserve source call spans; generated bodies are
+                // checked before this point. A rewrite that changes call
+                // dispatch must refresh the typecheck-owned resolution map.
+                let resolved_callables = checker.resolved_callables();
+                let escape_report = crate::semantic::escape_check::analyze_program_with_callables(
+                    &ast,
+                    resolved_callables,
+                );
+                if !escape_report.errors.is_empty() {
+                    for error in &escape_report.errors {
                         eprintln!(
                             "{}",
                             diagnostics::render(
@@ -1859,7 +1867,11 @@ pub fn run(cli: Cli) {
                     std::process::exit(2);
                 }
 
-                let borrow_errors = crate::semantic::borrow_check::check_program(&ast);
+                let borrow_errors = crate::semantic::borrow_check::check_program_with_resolved_calls(
+                    &ast,
+                    &escape_report.return_origins,
+                    resolved_callables,
+                );
                 if !borrow_errors.is_empty() {
                     for error in &borrow_errors {
                         eprintln!(
