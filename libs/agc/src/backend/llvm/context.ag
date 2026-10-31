@@ -20,14 +20,21 @@ struct LlvmLocal {
     bool is_mut;
     bool is_string_literal_backed;
     LLVMOpaqueValue* drop_flag;
+    LLVMOpaqueValue* init_tree_storage;
+    LLVMOpaqueValue* owner_state_map;
+    LLVMOpaqueType* init_node_type;
     u32 assignment_source;
+    bool borrowed_owner;
     Vec<LlvmFieldFlag> field_flags;
     Vec<Projection> drop_projections;
+    Vec<InitNodePlan> init_nodes;
+    Vec<Projection> init_projections;
 }
 
 struct LlvmFieldFlag {
     u32 projections_start;
     u32 projections_count;
+    u32 node_index;
     LLVMOpaqueValue* flag;
 }
 
@@ -92,6 +99,7 @@ struct LlvmContext {
     Vec<String>* source_paths;
     bool debug_mode;
     LLVMOpaqueValue* current_fn;
+    Span current_function_span;
     u32 current_return_type;
     u32 expected_type_id;
     i64 defer_emission_depth;
@@ -107,6 +115,7 @@ struct LlvmContext {
     Vec<LLVMOpaqueValue*> loop_stack_saves;
     Vec<ScrutineeMove> scrutinee_moves;
     Vec<LlvmTypeBinding> type_subst;
+    Vec<InitOwnerPlan>* init_owner_plans;
     i64 unresolved_calls;
     i64 launch_trampoline_count;
     DiagnosticBag* ownership_diagnostics;
@@ -120,7 +129,8 @@ impl LlvmContext {
     LlvmContext new(LLVMOpaqueContext* ctx, LLVMTargetDataRef* target_data,
                     LLVMOpaqueModule* module, LLVMOpaqueBuilder* builder,
                     TypeTable* types, Interner* names, AstPool* pool, SyntaxNode* root,
-                    Vec<String>* source_paths, bool debug_mode) {
+                    Vec<String>* source_paths, bool debug_mode,
+                    Vec<InitOwnerPlan>* init_owner_plans) {
         LlvmContext c;
         c.ctx = ctx;
         c.target_data = target_data;
@@ -133,6 +143,7 @@ impl LlvmContext {
         c.source_paths = source_paths;
         c.debug_mode = debug_mode;
         c.current_fn = (LLVMOpaqueValue*)0;
+        c.current_function_span = Span.synthetic();
         c.current_return_type = TYPE_VOID;
         c.expected_type_id = 0;
         c.defer_emission_depth = 0;
@@ -148,6 +159,7 @@ impl LlvmContext {
         c.loop_stack_saves = Vec<LLVMOpaqueValue*>.new();
         c.scrutinee_moves = Vec<ScrutineeMove>.new();
         c.type_subst = Vec<LlvmTypeBinding>.new();
+        c.init_owner_plans = init_owner_plans;
         c.unresolved_calls = 0;
         c.launch_trampoline_count = 0;
         c.ownership_diagnostics = (DiagnosticBag*)0;
@@ -397,9 +409,15 @@ impl LlvmContext {
         local.is_mut = is_mut;
         local.is_string_literal_backed = false;
         local.drop_flag = (LLVMOpaqueValue*)0;
+        local.init_tree_storage = (LLVMOpaqueValue*)0;
+        local.owner_state_map = (LLVMOpaqueValue*)0;
+        local.init_node_type = (LLVMOpaqueType*)0;
         local.assignment_source = 0;
+        local.borrowed_owner = false;
         local.field_flags = Vec<LlvmFieldFlag>.new();
         local.drop_projections = Vec<Projection>.new();
+        local.init_nodes = Vec<InitNodePlan>.new();
+        local.init_projections = Vec<Projection>.new();
         self.locals.push(move local);
     }
 

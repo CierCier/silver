@@ -1181,6 +1181,10 @@ impl<'a> ParallelGraphExecutor<'a> {
             .map_err(|e| format!("failed to encode .agm: {e}"))?;
 
         let pid = std::process::id();
+        let ownership = crate::semantic::move_check::analyze_program_with_imports(&ast, &import_lowering.module_artifacts);
+        if let Some(error) = ownership.errors.first() {
+            return Err(error.message.clone());
+        }
         let temp_o = std::env::temp_dir().join(format!("par_mod_{pid}_{}.o", key.hash_hex));
         crate::codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_inline_global_owner(
             &ast,
@@ -1195,6 +1199,7 @@ impl<'a> ParallelGraphExecutor<'a> {
             self.loader.leak_check,
             false,
             Some(&node.source_path),
+            Some(&ownership.init_plan),
         )
         .map_err(|e| {
             eprint!("\r\x1b[2K");

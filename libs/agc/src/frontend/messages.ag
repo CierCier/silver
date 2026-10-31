@@ -2,6 +2,14 @@
 import std.mem.vec;
 import std.string;
 
+String init_plan_unrepresentable(str type_name) {
+    return @format("cannot represent owner initialization plan for '{}': unresolved inline layout or more than 65536 nodes / 256 projection levels", type_name);
+}
+
+String init_plan_unknown_place() {
+    return String.from_str("owner initialization update has no resolved inline place");
+}
+
 String enum_discriminant_overflow(str name) {
     return @format("enum variant '{}' discriminant or automatic successor exceeds the supported integer range", name);
 }

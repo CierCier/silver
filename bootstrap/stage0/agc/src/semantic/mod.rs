@@ -7,6 +7,7 @@ pub mod linter;
 pub mod macro_expand;
 pub mod monomorph;
 pub mod init;
+pub mod init_plan;
 pub mod move_check;
 pub mod move_path;
 pub mod place;

@@ -831,3 +831,28 @@ bool binding_is_const(Binding* binding) {
     }
     return false;
 }
+
+bool bindings_need_borrow_owner_state(SyntaxNode* body, Vec<Binding>* params,
+                                      str function_name) {
+    str lambda_prefix = "__silver_lambda_";
+    i64 prefix_index = 0;
+    while (function_name[prefix_index] != (u8)0
+        && lambda_prefix[prefix_index] != (u8)0
+        && function_name[prefix_index] == lambda_prefix[prefix_index]) {
+        prefix_index += 1;
+    }
+    if (body == (SyntaxNode*)0
+        || lambda_prefix[prefix_index] == (u8)0) { return false; }
+    Vec<str> borrowed_names = Vec<str>.new();
+    i64 i = 0;
+    while (i < params.len()) {
+        Binding* param = params.get_ptr(i);
+        if (param.declared_type.kind == ProjectionTypeKind.Reference) {
+            borrowed_names.push(param.name);
+        }
+        i += 1;
+    }
+    bool needed = syntax_changes_borrowed_state(body, &borrowed_names);
+    borrowed_names.drop();
+    return needed;
+}

@@ -30,6 +30,82 @@ SyntaxNode* find_enum_item(SyntaxNode* root, str name) {
     return find_item_by_name(root, NodeKind.Enum, name);
 }
 
+void collect_syntax_tokens(SyntaxNode* node, Vec<SyntaxNode*>* tokens) {
+    if (node == (SyntaxNode*)0) { return; }
+    if (node.kind == NodeKind.Token) {
+        if (node.token_kind != TokenKind.Comment) { tokens.push(node); }
+        return;
+    }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        collect_syntax_tokens(child, tokens);
+        child = child.next_sibling;
+    }
+}
+
+bool syntax_changes_borrowed_state(SyntaxNode* body, Vec<str>* names) {
+    if (body == (SyntaxNode*)0 || names.len() == 0) { return false; }
+    Vec<SyntaxNode*> tokens = Vec<SyntaxNode*>.new();
+    collect_syntax_tokens(body, &tokens);
+    i64 i = 0;
+    while (i < tokens.len()) {
+        SyntaxNode* token = tokens.get(i);
+        if (token.token_kind == TokenKind.Identifier) {
+            bool is_borrowed_name = false;
+            i64 n = 0;
+            while (n < names.len()) {
+                if (strcmp(token.text, names.get(n)) == 0) {
+                    is_borrowed_name = true;
+                    break;
+                }
+                n += 1;
+            }
+            if (is_borrowed_name) {
+                i64 next = i + 1;
+                bool projected = false;
+                while (next < tokens.len()) {
+                    TokenKind kind = tokens.get(next).token_kind;
+                    if (kind == TokenKind.Dot) {
+                        projected = true;
+                        next += 2;
+                    } else if (kind == TokenKind.LeftBracket) {
+                        projected = true;
+                        next += 1;
+                        while (next < tokens.len()
+                            && tokens.get(next).token_kind != TokenKind.RightBracket) {
+                            next += 1;
+                        }
+                        if (next < tokens.len()) { next += 1; }
+                    } else {
+                        break;
+                    }
+                }
+                bool moved = i > 0
+                    && tokens.get(i - 1).token_kind == TokenKind.Move;
+                if (projected && moved) {
+                    tokens.drop();
+                    return true;
+                }
+                if (projected && next < tokens.len()) {
+                    TokenKind op = tokens.get(next).token_kind;
+                    if (moved || op == TokenKind.Assign || op == TokenKind.PlusAssign
+                        || op == TokenKind.MinusAssign || op == TokenKind.StarAssign
+                        || op == TokenKind.SlashAssign || op == TokenKind.PercentAssign
+                        || op == TokenKind.BitwiseAndAssign || op == TokenKind.BitwiseOrAssign
+                        || op == TokenKind.BitwiseXorAssign || op == TokenKind.LeftShiftAssign
+                        || op == TokenKind.RightShiftAssign) {
+                        tokens.drop();
+                        return true;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    tokens.drop();
+    return false;
+}
+
 bool item_has_attribute(SyntaxNode* item, str name) {
     if (item == (SyntaxNode*)0) { return false; }
     SyntaxNode* child = item.first_child;
@@ -312,6 +388,23 @@ ExternFunctionSignature item_find_c_extern_function(SyntaxNode* root,
 SyntaxNode* item_c_extern_function_parameters(SyntaxNode* root, str function_name) {
     ExternFunctionSignature signature = item_find_c_extern_function(root, function_name);
     return signature.parameter_list;
+}
+
+bool item_node_has_variadic_ellipsis(SyntaxNode* parameters) {
+    if (parameters == (SyntaxNode*)0) { return false; }
+    SyntaxNode* child = parameters.first_child;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind == NodeKind.Token && child.token_kind == TokenKind.DotDotDot) {
+            return true;
+        }
+        child = child.next_sibling;
+    }
+    return false;
+}
+
+bool item_c_extern_function_is_variadic(SyntaxNode* root, str function_name) {
+    SyntaxNode* parameters = item_c_extern_function_parameters(root, function_name);
+    return item_node_has_variadic_ellipsis(parameters);
 }
 
 u32 item_c_extern_function_return_type_id(TypeTable* types, SyntaxNode* root,
@@ -687,7 +780,9 @@ u32 struct_field_type_id(TypeTable* types, SyntaxNode* item, str field_name) {
             String type_text = String.new();
             SyntaxNode* scan = start;
             while (scan != name && scan != (SyntaxNode*)0) {
-                append_node_tokens(scan, &type_text);
+                if (scan.kind != NodeKind.Token || scan.token_kind != TokenKind.Private) {
+                    append_node_tokens(scan, &type_text);
+                }
                 scan = scan.next_sibling;
             }
             u32 type_id = type_id_from_declarator(types, type_text.to_str(), name.next_sibling);

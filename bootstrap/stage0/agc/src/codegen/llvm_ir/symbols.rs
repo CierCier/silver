@@ -423,11 +423,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 expression,
             } => {
                 let inner_ty = self.resolve_argument_type(expression)?;
+                if matches!(inner_ty.kind.as_ref(), ast::TypeKind::Reference(_)) {
+                    return Some(inner_ty);
+                }
                 Some(ast::Type {
-                    kind: Box::new(ast::TypeKind::Pointer(ast::PointerType {
+                    kind: Box::new(ast::TypeKind::Reference(ast::ReferenceType {
                         inner: Box::new(inner_ty),
                         is_mutable: *is_mutable,
-                        is_volatile: false,
+                        lifetime: None,
                     })),
                     span: expr.span,
                 })
@@ -445,6 +448,26 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     kind: Box::new(ast::TypeKind::Primitive(prim)),
                     span: expr.span,
                 })
+            }
+            ast::ExpressionKind::Match { expression, arms } => {
+                let scrutinee_ty = self.resolve_argument_type(expression);
+                let mut result = None;
+                for arm in arms {
+                    let mut bindings = HashMap::default();
+                    if let Some(scrutinee_ty) = &scrutinee_ty {
+                        self.collect_match_pattern_types(&arm.pattern, scrutinee_ty, &mut bindings);
+                    } else if Self::match_pattern_binds(&arm.pattern) {
+                        return None;
+                    }
+                    self.argument_type_scopes.push(bindings);
+                    let arm_ty = self.resolve_argument_type(&arm.body);
+                    self.argument_type_scopes.pop();
+                    let arm_ty = arm_ty?;
+                    if result.is_none() {
+                        result = Some(arm_ty);
+                    }
+                }
+                result
             }
             ast::ExpressionKind::Call { function, .. } => {
                 if let ast::ExpressionKind::Identifier(ident) = function.kind.as_ref()
@@ -559,7 +582,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     _ => None,
                 }
             }
-            ast::ExpressionKind::Binary { left, .. } => self.resolve_argument_type(left),
+            ast::ExpressionKind::Binary { left, operator, .. } => {
+                if matches!(operator,
+                    ast::BinaryOperator::Equal | ast::BinaryOperator::NotEqual
+                    | ast::BinaryOperator::Less | ast::BinaryOperator::Greater
+                    | ast::BinaryOperator::LessEqual | ast::BinaryOperator::GreaterEqual
+                    | ast::BinaryOperator::LogicalAnd | ast::BinaryOperator::LogicalOr)
+                {
+                    Some(ast::Type {
+                        kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::Bool)),
+                        span: expr.span,
+                    })
+                } else { self.resolve_argument_type(left) }
+            }
             ast::ExpressionKind::Unary { operand, operator } => match operator {
                 ast::UnaryOperator::Not => Some(ast::Type {
                     kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::Bool)),
@@ -580,6 +615,88 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 self.resolve_argument_type(inner)
             }
             _ => None,
+        }
+    }
+
+    fn match_pattern_binds(pattern: &ast::Pattern) -> bool {
+        match &pattern.kind {
+            ast::PatternKind::Identifier(_) | ast::PatternKind::Move(_) => true,
+            ast::PatternKind::Tuple(patterns) => patterns.iter().any(Self::match_pattern_binds),
+            ast::PatternKind::Enum { data, .. } => {
+                data.as_deref().is_some_and(Self::match_pattern_binds)
+            }
+            ast::PatternKind::Struct { fields, .. } => fields
+                .iter()
+                .any(|field| field.pattern.as_ref().is_none_or(Self::match_pattern_binds)),
+            _ => false,
+        }
+    }
+
+    fn collect_match_pattern_types(
+        &self,
+        pattern: &ast::Pattern,
+        ty: &ast::Type,
+        bindings: &mut HashMap<String, ast::Type>,
+    ) {
+        match &pattern.kind {
+            ast::PatternKind::Identifier(identifier) | ast::PatternKind::Move(identifier) => {
+                bindings.insert(identifier.name.clone(), ty.clone());
+            }
+            ast::PatternKind::Tuple(patterns) => {
+                if let ast::TypeKind::Tuple(types) = ty.kind.as_ref() {
+                    for (pattern, ty) in patterns.iter().zip(types) {
+                        self.collect_match_pattern_types(pattern, ty, bindings);
+                    }
+                }
+            }
+            ast::PatternKind::Enum { variant, data, .. } => {
+                let Some(named) = Self::extract_named_type_owned(ty) else {
+                    return;
+                };
+                let enum_name = Self::named_type_name(&named);
+                let Some(payload_types) = self
+                    .enum_variant_payload_types
+                    .get(&enum_name)
+                    .and_then(|variants| variants.get(&variant.name))
+                    .cloned()
+                else {
+                    return;
+                };
+                let substitutions: HashMap<String, ast::Type> = if let Some(params) =
+                    self.struct_generics.get(&enum_name)
+                    && let Some(args) = &named.generics
+                    && params.len() == args.len()
+                {
+                    params.iter().cloned().zip(args.iter().cloned()).collect()
+                } else {
+                    HashMap::default()
+                };
+                let payload_types: Vec<ast::Type> = payload_types
+                    .iter()
+                    .map(|ty| {
+                        if substitutions.is_empty() {
+                            ty.clone()
+                        } else {
+                            Self::substitute_generic_type(ty, &substitutions)
+                        }
+                    })
+                    .collect();
+                if let Some(data) = data {
+                    match &data.kind {
+                        ast::PatternKind::Tuple(patterns) => {
+                            for (pattern, ty) in patterns.iter().zip(&payload_types) {
+                                self.collect_match_pattern_types(pattern, ty, bindings);
+                            }
+                        }
+                        _ => {
+                            if let Some(ty) = payload_types.first() {
+                                self.collect_match_pattern_types(data, ty, bindings);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1748,11 +1865,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 expression,
             } => {
                 let inner_ty = self.resolve_receiver_type(expression)?;
+                if matches!(inner_ty.kind.as_ref(), ast::TypeKind::Reference(_)) {
+                    return Some(inner_ty);
+                }
                 Some(ast::Type {
-                    kind: Box::new(ast::TypeKind::Pointer(ast::PointerType {
+                    kind: Box::new(ast::TypeKind::Reference(ast::ReferenceType {
                         inner: Box::new(inner_ty),
                         is_mutable: *is_mutable,
-                        is_volatile: false,
+                        lifetime: None,
                     })),
                     span: expr.span,
                 })
@@ -1823,7 +1943,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 }
                 return_ty
             }
-            ast::ExpressionKind::Binary { left, .. } => self.resolve_receiver_type(left),
+            ast::ExpressionKind::Binary { left, operator, .. } => {
+                if matches!(operator,
+                    ast::BinaryOperator::Equal | ast::BinaryOperator::NotEqual
+                    | ast::BinaryOperator::Less | ast::BinaryOperator::Greater
+                    | ast::BinaryOperator::LessEqual | ast::BinaryOperator::GreaterEqual
+                    | ast::BinaryOperator::LogicalAnd | ast::BinaryOperator::LogicalOr)
+                {
+                    Some(ast::Type {
+                        kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::Bool)),
+                        span: expr.span,
+                    })
+                } else { self.resolve_receiver_type(left) }
+            }
             ast::ExpressionKind::Unary { operand, operator } => match operator {
                 ast::UnaryOperator::Not => Some(ast::Type {
                     kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::Bool)),

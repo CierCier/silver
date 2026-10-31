@@ -83,6 +83,7 @@ pub(crate) struct VarInfo<'ctx> {
     reason = "defer payloads are emitted once; boxing adds indirection for no benefit"
 )]
 pub(crate) enum DeferAction<'ctx> {
+    OwnerCleanup(owner_state::RuntimeOwner<'ctx>),
     /// Execute a parsed AST statement (from `defer { }` or `defer stmt;`)
     Statement(ast::Statement),
     /// Call the drop function for a variable: (mangled_fn_name, ptr_to_var)
@@ -102,12 +103,18 @@ pub(crate) struct DeferredEntry<'ctx> {
 }
 
 pub struct LlvmIrGenerator<'ctx> {
+    pub(crate) ownership: crate::semantic::init_plan::ProgramInitPlan,
+    pub(crate) owner_function: Option<crate::semantic::init_plan::FunctionId>,
+    pub(crate) owner_states: HashMap<PointerValue<'ctx>, owner_state::RuntimeOwner<'ctx>>,
+    /// Lowered aliases of initialized atomic payloads; these do not own cleanup.
+    pub(crate) borrowed_binding_states: HashMap<PointerValue<'ctx>, PointerValue<'ctx>>,
     pub(crate) context: &'ctx Context,
     pub(crate) module: Module<'ctx>,
     pub(crate) builder: Builder<'ctx>,
     pub(crate) current_fn: Option<FunctionValue<'ctx>>,
     pub(crate) current_return_type: Option<ast::Type>,
     pub(crate) variables: Vec<HashMap<String, VarInfo<'ctx>>>,
+    pub(crate) argument_type_scopes: Vec<HashMap<String, ast::Type>>,
     pub(crate) function_sigs: HashMap<SymbolId, FunctionSig>,
     pub(crate) function_name_to_symbol: HashMap<String, SymbolId>,
     /// Distinct full signatures per source function name (params + return +
@@ -219,6 +226,8 @@ pub(crate) mod generate;
 pub(crate) mod json;
 pub(crate) mod operators;
 pub(crate) mod scope;
+pub(crate) mod owner_state;
+pub(crate) mod reference;
 pub(crate) mod stmt;
 pub(crate) mod symbols;
 pub(crate) mod tasks;

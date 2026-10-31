@@ -1,3 +1,4 @@
+// compile_flags: -lc
 // tests/runtime_test.ag — end-to-end tests for the Runtime aggregate.
 //
 // Port of silver_runtime/src/runtime/tests.rs: covers heap allocation,
@@ -15,8 +16,95 @@ import std.rt.heap;
 import std.rt.methods;
 import std.rt.runtime;
 import std.rt.types;
+
+i32 dispatch_probe(i32 value) { return value + 100; }
+i32 dispatch_probe(i64 value) { return (i32)value + 200; }
+
+struct DispatchPrimary { i32 value; }
+struct DispatchSecondary { i32 value; }
+struct MatchOther { i32 value; }
+
+i32 match_dispatch_probe(i32 value) { return value + 300; }
+i32 match_dispatch_probe(MatchOther value) { return value.value + 400; }
+
+impl DispatchPrimary {
+    i32 dispatch_probe(&self, i32 value) { return self.value + value + 10; }
+    i32 dispatch_probe(&self, i64 value) { return self.value + (i32)value + 20; }
+}
+
+impl DispatchSecondary {
+    i32 dispatch_probe(&self, i64 value) { return self.value + (i32)value + 30; }
+}
+
+struct LifetimeDispatchHolder { i64 value; }
+
+impl LifetimeDispatchHolder {
+    &i64 borrowed_value(&self, i32 index) { return &self.value; }
+}
+
+&i32 identity(&i32 value) { return value; }
+
+i32 borrow_forwarding_assignment() {
+    i32 owner = 1;
+    &i32 view = &owner;
+    view = identity(view);
+    return *view;
+}
+
+if (!@cfg(os.wasi)) {
+extern "C" i32 sprintf(u8* output, str format, ...);
+}
+
 i32 main() {
     STDOUT.write_str("=== Runtime Aggregate Tests ===\n\n");
+
+    assert_eq_i32(1, borrow_forwarding_assignment(),
+        "forwarded reference assignment terminates and preserves the owner");
+
+    // Same-arity overloads keep their argument type and receiver identity.
+    {
+        DispatchPrimary primary;
+        primary.value = 100;
+        DispatchSecondary secondary;
+        secondary.value = 200;
+        i32 narrow = 3;
+        i64 wide = 3;
+        assert_eq_i32(113, primary.dispatch_probe(narrow),
+            "method overload selects i32 argument body");
+        assert_eq_i32(123, primary.dispatch_probe(wide),
+            "method overload selects i64 argument body");
+        assert_eq_i32(233, secondary.dispatch_probe(wide),
+            "same method name stays isolated by receiver type");
+        assert_eq_i32(103, dispatch_probe(narrow),
+            "same-named free i32 overload stays distinct");
+        assert_eq_i32(203, dispatch_probe(wide),
+            "same-named free i64 overload stays distinct");
+        MatchOther bound;
+        bound.value = 9;
+        assert_eq_i32(303, match_dispatch_probe(match 3 { bound: bound, }),
+            "match binding type shadows an outer variable during overload lookup");
+    }
+
+    // A converted argument still tracks the receiver borrow while it is live.
+    {
+        LifetimeDispatchHolder holder;
+        holder.value = 47;
+        i64 index = 0;
+        &i64 borrowed = holder.borrowed_value(index);
+        assert_eq_i64(47, *borrowed,
+            "converted method call keeps a live receiver borrow");
+    }
+
+    if (!@cfg(os.wasi)) {
+        // Observe C default promotions through sprintf's va_list consumer.
+        u8 formatted[64];
+        i32 formatted_len = sprintf(&formatted[0], "%d %d %d %d %d %d %.1f %s",
+            true, false, (u8)200, (u16)40000, (i8)-17, (i16)-1234,
+            (f32)2.5, "ok");
+        assert_eq_i32(30, formatted_len, "C variadic output length");
+        assert_eq_str("1 0 200 40000 -17 -1234 2.5 ok", (str)&formatted[0],
+            "C variadic bool, integer, float, and pointer promotions");
+    }
 
     // --- Test 1: Heap alloc and free are safe --------------------------------
     STDOUT.write_str("--- heap_alloc_and_free_are_safe ---\n");

@@ -3,26 +3,28 @@ set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 dist_dir="$root_dir/dist"
-target_triple="${TARGET_TRIPLE:-x86_64-unknown-linux-gnu}"
 release_name="${1:-$(git -C "$root_dir" describe --tags --exact-match 2>/dev/null || git -C "$root_dir" rev-parse --short HEAD)}"
 bundle_name="silver-linux-x86_64-${release_name}"
 stage_dir="$dist_dir/$bundle_name"
 archive_path="$dist_dir/$bundle_name.tar.gz"
 
 echo "Building compiler and tools..."
-cargo build --release -p agc -p aglsp -p agsm
+cd "$root_dir"
+cargo build --locked --release -p agc -p agsm
 
 # Cargo workspace root is the repo root, so target/ stays at the top level
 # even though the crates moved under bootstrap/.
 target_dir="$root_dir/target"
+"$target_dir/release/agc" build silver.toml --bin aglsp --no-cache -O2 \
+  -o "$target_dir/release/aglsp"
 
 echo "Preparing Linux bundle at $archive_path"
 rm -rf "$stage_dir"
 mkdir -p "$stage_dir/bin" "$stage_dir/include/silver/std" "$stage_dir/lib"
 
 cp "$target_dir/release/agc" "$stage_dir/bin/agc"
-[ -f "$target_dir/release/aglsp" ] && cp "$target_dir/release/aglsp" "$stage_dir/bin/aglsp"
-[ -f "$target_dir/release/agsm" ] && cp "$target_dir/release/agsm" "$stage_dir/bin/agsm"
+cp "$target_dir/release/aglsp" "$stage_dir/bin/aglsp"
+cp "$target_dir/release/agsm" "$stage_dir/bin/agsm"
 cp -R "$root_dir/std/"* "$stage_dir/include/silver/std/"
 cp "$root_dir/README.md" "$stage_dir/README.md"
 cp "$root_dir/LICENSE" "$stage_dir/LICENSE"

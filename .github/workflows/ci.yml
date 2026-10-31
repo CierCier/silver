@@ -48,10 +48,8 @@ jobs:
       - name: Build bootstrap tools and Rust FFI
         run: cargo build --release --workspace
 
-      - name: Build Silver compiler and language server
-        run: |
-          target/release/agc build silver.toml --bin agc --no-cache -o "$RUNNER_TEMP/agc-stage1"
-          target/release/agc build silver.toml --bin aglsp --no-cache -o "$RUNNER_TEMP/aglsp-stage1"
+      - name: Build Silver compiler
+        run: target/release/agc build silver.toml --bin agc --no-cache -o "$RUNNER_TEMP/agc-stage1"
 
       - name: Run stdlib suite with stage0
         run: python3 tests/run_tests.py --release --no-tui --jobs 4

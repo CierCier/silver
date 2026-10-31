@@ -206,6 +206,22 @@ void mono_collect_struct_parameters(SyntaxNode* root, str base, TypeTable* types
     }
 }
 
+// Bind a source declaration before parsing its member types. Parsing first can
+// resolve a same-named parameter from the enclosing function instead.
+bool mono_push_owner_type_arguments(SyntaxNode* root, TypeTable* types, u32 type_id,
+                                     Vec<u32>* parameters) {
+    TypeEntry owner = *types.get(type_id);
+    if (owner.kind != TypeKind.Named) { return false; }
+    mono_collect_struct_parameters(root, types.names.get(owner.name_id), types, parameters);
+    if (parameters.len() != owner.count) { return false; }
+    i64 i = 0;
+    while (i < parameters.len()) {
+        types.push_subst(parameters.get(i), types.type_args.get(owner.inner + (u32)i));
+        i += 1;
+    }
+    return true;
+}
+
 // Find an impl block for `base` defining `method`, matching type arguments `arg_ids`.
 // Collects the impl-level type parameter names (deduped, in order) for substitution.
 // For specialized concrete impls, param_ids will be empty (no substitution needed).

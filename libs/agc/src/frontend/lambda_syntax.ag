@@ -1,0 +1,38 @@
+import frontend.ast;
+import std.optional;
+
+struct LambdaSyntax {
+    SyntaxNode* body;
+    SyntaxNode* end;
+    bool expression_body;
+    Span extent;
+}
+
+bool lambda_start(SyntaxNode* node) {
+    return node != (SyntaxNode*)0 && node.kind == NodeKind.Parenthesized
+        && node.next_sibling != (SyntaxNode*)0
+        && node.next_sibling.kind == NodeKind.Token
+        && node.next_sibling.token_kind == TokenKind.FatArrow;
+}
+
+/// Borrow a lambda's body and following sibling from the caller-owned CST.
+/// Incomplete heads or missing bodies produce none without changing the tree.
+Optional<LambdaSyntax> lambda_syntax(SyntaxNode* head) {
+    if (!lambda_start(head)) { return Optional<LambdaSyntax>.none(); }
+    SyntaxNode* start = head.next_sibling.next_sibling;
+    if (start == (SyntaxNode*)0 || start.token_kind == TokenKind.Semicolon || start.token_kind == TokenKind.Comma) {
+        return Optional<LambdaSyntax>.none();
+    }
+    LambdaSyntax syntax; syntax.body = start; syntax.end = start.next_sibling;
+    syntax.expression_body = start.kind != NodeKind.Block;
+    if (syntax.expression_body) {
+        syntax.end = start;
+        while (syntax.end != (SyntaxNode*)0 && syntax.end.token_kind != TokenKind.Comma && syntax.end.token_kind != TokenKind.Semicolon) {
+            syntax.end = syntax.end.next_sibling;
+        }
+    }
+    SyntaxNode* last = start;
+    while (last.next_sibling != syntax.end && last.next_sibling != (SyntaxNode*)0) { last = last.next_sibling; }
+    syntax.extent = head.span.extend(last.span);
+    return Optional<LambdaSyntax>.some(syntax);
+}

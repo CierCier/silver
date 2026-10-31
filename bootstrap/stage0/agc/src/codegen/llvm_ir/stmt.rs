@@ -33,6 +33,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         if function.count_basic_blocks() > 0 {
             return Ok(());
         }
+        self.ownership.ensure_function(parameters, return_type, body).map_err(CodegenError::new)?;
 
         // Keep a frame pointer in every function so the runtime backtrace
         // walker can follow the rbp chain at any opt level.
@@ -91,6 +92,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         self.set_debug_location(fn_span);
 
         let saved_return_type = self.current_return_type.clone();
+        let saved_owner_function = self.owner_function.replace(crate::semantic::init_plan::FunctionId::for_body(parameters, return_type, body));
         self.current_fn = Some(function);
         self.current_return_type = return_type.cloned();
         self.push_scope();
@@ -171,6 +173,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         param.name.name
                     ))
                 })?;
+            if self.register_owner_state(&param.name, &ty_for_drop, alloca, true)? {
+                continue;
+            }
             self.register_drop_flag(&param.name.name, &ty_for_drop, alloca)?;
             // A by-value param is initialized with the caller's value: its
             // fields hold live resources, so mark them live for the cascade.
@@ -222,6 +227,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         self.pop_scope();
         self.current_fn = None;
         self.current_return_type = saved_return_type;
+        self.owner_function = saved_owner_function;
         self.static_local_counter = 0;
         if let Some(debug) = &mut self.debug {
             debug.current_subprogram = None;
@@ -715,6 +721,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 self.loop_defers_base.push(self.defers.len());
                 self.builder.position_at_end(body_bb);
 
+                self.push_scope();
                 let mut found_ast_ty = _item_type.cloned();
                 let _item_llvm_ty = {
                     let owners = self.receiver_owner_candidates(&iter_expr);
@@ -771,7 +778,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         binding.name.clone(),
                         VarInfo {
                             ptr: var_ptr,
-                            ty: ast_ty,
+                            ty: ast_ty.clone(),
                             is_mutable,
                             is_volatile: false,
                             drop_flag: None,
@@ -780,6 +787,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     );
                 }
                 self.emit_debug_variable(&binding.name, &debug_ty, &binding.span, var_ptr, None)?;
+                if !self.register_owner_state(binding, &ast_ty, var_ptr, true)? {
+                    self.register_drop_flag(&binding.name, &ast_ty, var_ptr)?;
+                }
 
                 self.generate_block(body)?;
 
@@ -789,10 +799,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .and_then(|bb| bb.get_terminator())
                     .is_some();
                 if !body_terminated {
+                    self.emit_defers(1)?;
                     self.builder
                         .build_unconditional_branch(advance_bb)
                         .map_err(|e| CodegenError::new(format!("failed to advance for-in: {e}")))?;
                 }
+                self.pop_scope();
 
                 self.builder.position_at_end(advance_bb);
                 let next_val2 = self
@@ -915,6 +927,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     return Ok(());
                 }
 
+                if let Some(initializer) = &let_stmt.initializer { self.transfer_owner_value(initializer)?; }
                 self.bind_local_variable(
                     function,
                     identifier,
@@ -1023,6 +1036,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok(());
         }
 
+        if self.register_owner_state(identifier, &ty_for_drop, alloca, has_initializer)? {
+            return Ok(());
+        }
         self.register_drop_flag(&identifier.name, &ty_for_drop, alloca)?;
         if let Some(var) = self.lookup_variable(&init_identifier) {
             if has_initializer {
@@ -1511,11 +1527,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                                 },
                                             );
                                         }
-                                        self.register_drop_flag(
-                                            &binding.name,
-                                            &concrete_pt,
-                                            alloca,
-                                        )?;
+                                        if is_move {
+                                            if !self.register_owner_state(binding, &concrete_pt, alloca, true)? {
+                                                self.register_drop_flag(&binding.name, &concrete_pt, alloca)?;
+                                            }
+                                        } else {
+                                            self.borrowed_binding_states.insert(
+                                                alloca, self.initialized_reference_state(),
+                                            );
+                                        }
                                         if is_move
                                             && let Ok((orig_ptr, _)) =
                                                 self.resolve_lvalue_ptr(expression)
@@ -1537,6 +1557,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                                             "clear moved-out flag: {e}"
                                                         ))
                                                     })?;
+                                            }
+                                            if let ast::ExpressionKind::Identifier(ident) =
+                                                expression.kind.as_ref()
+                                            {
+                                                self.clear_field_flags(&ident.name)?;
                                             }
                                             let orig_data = self
                                                 .builder

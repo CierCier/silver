@@ -1,118 +1,679 @@
-// bin/aglsp/src/completion.ag — Code completion provider for aglsp.
-import std.mem.alloc;
-import std.string;
-import agc;
+import document;
+import positions;
 import json_rpc;
+import capabilities;
+import tooling.search;
+import frontend.ast;
+import frontend.lower_expr;
+import imports;
+import transport;
+import std.map;
 
-void append_completion_item(String* out, str label, i64 kind, str detail, bool* is_first) {
-    if (!*is_first) {
-        out.push(',');
+i64 completion_kind(IdeSymbolKind kind) {
+    return match kind {
+        IdeSymbolKind.Function : 3, IdeSymbolKind.Method : 2,
+        IdeSymbolKind.Struct : 22, IdeSymbolKind.Enum : 13,
+        IdeSymbolKind.Trait : 8, IdeSymbolKind.TypeAlias : 7,
+        IdeSymbolKind.Field : 5, IdeSymbolKind.Variant : 20,
+        _ : 6,
+    };
+}
+
+struct CompletionCandidate {
+    String name;
+    String detail;
+    String documentation;
+    String auto_module;
+    SymbolTarget target;
+    i64 kind;
+    i64 score;
+    bool local;
+    bool instance;
+    bool snippets;
+}
+
+struct CompletionCandidates {
+    Vec<CompletionCandidate> items;
+    Vec<String> visible_names;
+    bool truncated;
+}
+
+CompletionCandidates completion_candidates() {
+    CompletionCandidates candidates;
+    candidates.items = Vec<CompletionCandidate>.new();
+    candidates.visible_names = Vec<String>.new();
+    candidates.truncated = false;
+    return candidates;
+}
+
+bool completion_visible(CompletionCandidates* candidates, str name) {
+    i64 i = 0;
+    while (i < candidates.visible_names.len()) {
+        if (candidates.visible_names.get_ptr(i).equals(name)) { return true; }
+        i += 1;
     }
-    *is_first = false;
+    return false;
+}
 
-    out.push_str("{\"label\":\"");
-    json_escape(label, out);
-    out.push_str("\",\"kind\":");
-    out.push_display(&kind);
+void completion_provider_exports(Document* provider, HashMap<String, i64>* exports) {
+    Vec<Document*> closure = Vec<Document*>.new();
+    closure.push(provider);
+    i64 i = 0;
+    while (i < closure.len()) {
+        Document* source = closure.get(i);
+        i64 dependency = 0;
+        while (dependency < source.dependencies.len()) {
+            Document* next = source.dependencies.get(dependency);
+            i64 existing = 0;
+            while (existing < closure.len() && closure.get(existing) != next) { existing += 1; }
+            if (existing == closure.len()) { closure.push(next); }
+            dependency += 1;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < closure.len()) {
+        Document* source = closure.get(i);
+        i64 symbol_index = 0;
+        while (symbol_index < source.analysis.symbols.len()) {
+            IdeSymbol* symbol = source.analysis.symbols.get_ptr(symbol_index);
+            if (!symbol.local && !symbol.is_private && symbol.owner.len() == 0) {
+                str name = symbol.name.to_str();
+                Optional<i64> previous = exports.get_opt(String.from_str(name));
+                if (previous.is_some()) {
+                    if (previous.unwrap() != -2) { exports.insert(String.from_str(name), -2); }
+                } else {
+                    exports.insert(String.from_str(name), source == provider ? symbol_index + 1 : 0);
+                }
+            }
+            symbol_index += 1;
+        }
+        i += 1;
+    }
+}
 
-    if (strlen(detail) > 0) {
-        out.push_str(",\"detail\":\"");
-        json_escape(detail, out);
+bool completion_precedes(CompletionCandidate* left, CompletionCandidate* right) {
+    if (left.score != right.score) { return left.score < right.score; }
+    if (left.local != right.local) { return left.local; }
+    if (strcmp(left.name.to_str(), right.name.to_str()) != 0) { return strcmp(left.name.to_str(), right.name.to_str()) < 0; }
+    str left_provider = left.target.document.uri.to_str();
+    str right_provider = right.target.document.uri.to_str();
+    if (strcmp(left_provider, right_provider) != 0) { return strcmp(left_provider, right_provider) < 0; }
+    return left.target.symbol < right.target.symbol;
+}
+
+void offer_completion(CompletionCandidates* candidates, str name, str detail, str documentation,
+        i64 kind, bool local, i64 score, SymbolTarget target, bool instance, str auto_module, bool snippets) {
+    if (strlen(auto_module) == 0 && !completion_visible(candidates, name)) {
+        candidates.visible_names.push(String.from_str(name));
+    }
+    i64 existing = 0;
+    while (existing < candidates.items.len()) {
+        CompletionCandidate* offered = candidates.items.get_ptr(existing);
+        if (offered.name.equals(name) && offered.target.document.uri.equals(target.document.uri.to_str())
+            && offered.target.symbol == target.symbol) { return; }
+        existing += 1;
+    }
+    CompletionCandidate item;
+    item.name = String.from_str(name);
+    item.detail = String.from_str(detail);
+    item.documentation = String.from_str(documentation);
+    item.auto_module = String.from_str(auto_module);
+    item.target = target; item.kind = kind; item.local = local; item.score = score;
+    item.instance = instance; item.snippets = snippets;
+    if (candidates.items.len() < 100) { candidates.items.push(move item); return; }
+    candidates.truncated = true;
+    i64 worst = 0; i64 i = 1;
+    while (i < candidates.items.len()) {
+        if (completion_precedes(candidates.items.get_ptr(worst), candidates.items.get_ptr(i))) { worst = i; }
+        i += 1;
+    }
+    if (completion_precedes(&item, candidates.items.get_ptr(worst))) {
+        CompletionCandidate _removed = candidates.items.take(worst);
+        candidates.items.push(move item);
+    }
+}
+
+void sort_completions(CompletionCandidates* candidates) {
+    i64 i = 0;
+    while (i < candidates.items.len()) {
+        i64 best = i; i64 j = i + 1;
+        while (j < candidates.items.len()) {
+            if (completion_precedes(candidates.items.get_ptr(j), candidates.items.get_ptr(best))) { best = j; }
+            j += 1;
+        }
+        candidates.items.swap(i, best); i += 1;
+    }
+}
+
+bool inside_literal(Document* doc, i64 offset) {
+    i64 i = 0;
+    while (i < doc.analysis.tokens.len()) {
+        Token* token = doc.analysis.tokens.get(i);
+        if (token.span.start < offset && offset < token.span.end) {
+            return token.kind == TokenKind.Comment || token.kind == TokenKind.StringLiteral
+                || token.kind == TokenKind.CharLiteral;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+void append_completion(String* out, Document* doc, Span replacement, CompletionCandidate* item, ClientOptions* client, bool* first) {
+    str name = item.name.to_str(); str detail = item.detail.to_str();
+    str documentation = item.documentation.to_str(); str auto_module = item.auto_module.to_str();
+    i64 kind = item.kind; i64 score = item.score; bool local = item.local;
+    SymbolTarget target = item.target; bool instance = item.instance;
+    if (!*first) { out.push(','); } *first = false;
+    out.push_str("{\"label\":\""); json_escape(name, out);
+    out.push_str("\",\"kind\":"); out.push_display(&kind);
+    if (!client.completion_resolve_detail || target.symbol < 0 || strlen(auto_module) > 0) {
+        out.push_str(",\"detail\":\""); json_escape(detail, out);
+        if (strlen(auto_module) > 0) { out.push_str(" (import "); json_escape(auto_module, out); out.push(')'); }
         out.push('"');
+    }
+    out.push_str(",\"sortText\":\"");
+    if (score > 999999) { score = 999999; }
+    i64 divisor = 100000;
+    while (divisor > 0) { out.push((u8)'0' + (u8)((score / divisor) % 10)); divisor /= 10; }
+    out.push_str(local ? "0" : "1"); json_escape(name, out);
+    out.push('|'); json_escape(target.document.uri.to_str(), out);
+    out.push('|'); out.push_display(&target.symbol);
+    out.push_str("\",\"textEdit\":{\"range\":"); doc.append_range(out, replacement);
+    String inserted = String.from_str(name); i64 next = ide_token_at_or_after(&doc.analysis, replacement.end);
+    while (next < doc.analysis.tokens.len() && doc.analysis.tokens.get(next).kind == TokenKind.Comment) { next += 1; }
+    bool snippet = item.snippets && client.completion_snippets && target.symbol >= 0 && (kind == 2 || kind == 3)
+        && (next >= doc.analysis.tokens.len() || (doc.analysis.tokens.get(next).kind != TokenKind.LeftParen
+            && doc.analysis.tokens.get(next).kind != TokenKind.Less));
+    if (snippet) {
+        IdeSymbol* symbol = target.document.analysis.symbols.get_ptr(target.symbol);
+        inserted.push('('); i64 skip = instance && symbol.instance ? 1 : 0; i64 i = skip;
+        while (i < symbol.parameter_names.len()) {
+            if (i > skip) { inserted.push_str(", "); }
+            i64 tab = i - skip + 1; inserted.push_str("${"); inserted.push_display(&tab); inserted.push(':');
+            inserted.push_str(symbol.parameter_names.get_ptr(i).to_str()); inserted.push('}'); i += 1;
+        }
+        inserted.push_str(")$0");
+    }
+    if (strlen(auto_module) > 0 && replacement.start == 0) {
+        String combined = import_statement(doc, auto_module); combined.push_str(inserted.to_str());
+        inserted = move combined;
+    }
+    out.push_str(",\"newText\":\""); json_escape(inserted.to_str(), out); out.push_str("\"}");
+    out.push_str(",\"insertTextFormat\":"); out.push_str(snippet ? "2" : "1");
+    if (strlen(auto_module) > 0) {
+        out.push_str(",\"data\":{\"activeURI\":\""); json_escape(doc.uri.to_str(), out);
+        out.push_str("\",\"activeRevision\":"); out.push_display(&doc.revision);
+        out.push_str(",\"targetURI\":\""); json_escape(target.document.uri.to_str(), out);
+        out.push_str("\",\"targetRevision\":"); out.push_display(&target.document.revision);
+        out.push_str(",\"symbol\":"); out.push_display(&target.symbol);
+        out.push_str(",\"module\":\""); json_escape(auto_module, out); out.push_str("\"}");
+        if (replacement.start > 0) {
+            out.push_str(",\"additionalTextEdits\":["); append_import_edit(out, doc, auto_module); out.push(']');
+        }
+    } else if (target.symbol >= 0) {
+        out.push_str(",\"data\":{\"uri\":\""); json_escape(target.document.uri.to_str(), out);
+        out.push_str("\",\"revision\":"); out.push_display(&target.document.revision);
+        out.push_str(",\"symbol\":"); out.push_display(&target.symbol); out.push('}');
+    }
+    if (strlen(documentation) > 0 && (!client.completion_resolve_documentation || target.symbol < 0)) {
+        out.push_str(",\"documentation\":{\"kind\":\""); out.push_str(client.completion_markdown ? "markdown" : "plaintext"); out.push_str("\",\"value\":\"");
+        json_escape(documentation, out); out.push_str("\"}");
     }
     out.push('}');
 }
 
-String compute_completion(str text, i64 _line, i64 _character) {
-    String out = String.from_str("{\"isIncomplete\":false,\"items\":[");
-    bool first = true;
+String receiver_owner(Document* doc, i64 separator) {
+    i64 i = separator;
+    while (i > 0 && (doc.text.data[i - 1] == (u8)' ' || doc.text.data[i - 1] == (u8)'\t')) { i -= 1; }
+    if (i == 0) { return String.new(); }
+    return symbol_receiver_owner(resolve_occurrence(doc, doc.analysis.occurrence_at(i - 1)));
+}
 
-    // 1. Silver keywords
-    append_completion_item(&out, "let", 14, "keyword", &first);
-    append_completion_item(&out, "mut", 14, "keyword", &first);
-    append_completion_item(&out, "struct", 14, "keyword", &first);
-    append_completion_item(&out, "enum", 14, "keyword", &first);
-    append_completion_item(&out, "impl", 14, "keyword", &first);
-    append_completion_item(&out, "trait", 14, "keyword", &first);
-    append_completion_item(&out, "type", 14, "keyword", &first);
-    append_completion_item(&out, "private", 14, "keyword", &first);
-    append_completion_item(&out, "const", 14, "keyword", &first);
-    append_completion_item(&out, "static", 14, "keyword", &first);
-    append_completion_item(&out, "if", 14, "keyword", &first);
-    append_completion_item(&out, "else", 14, "keyword", &first);
-    append_completion_item(&out, "while", 14, "keyword", &first);
-    append_completion_item(&out, "for", 14, "keyword", &first);
-    append_completion_item(&out, "match", 14, "keyword", &first);
-    append_completion_item(&out, "break", 14, "keyword", &first);
-    append_completion_item(&out, "continue", 14, "keyword", &first);
-    append_completion_item(&out, "return", 14, "keyword", &first);
-    append_completion_item(&out, "move", 14, "keyword", &first);
-    append_completion_item(&out, "defer", 14, "keyword", &first);
-    append_completion_item(&out, "import", 14, "keyword", &first);
-    append_completion_item(&out, "comptime", 14, "keyword", &first);
-    append_completion_item(&out, "true", 14, "keyword", &first);
-    append_completion_item(&out, "false", 14, "keyword", &first);
-
-    // 2. Builtin primitive types
-    append_completion_item(&out, "i8", 7, "primitive type", &first);
-    append_completion_item(&out, "i16", 7, "primitive type", &first);
-    append_completion_item(&out, "i32", 7, "primitive type", &first);
-    append_completion_item(&out, "i64", 7, "primitive type", &first);
-    append_completion_item(&out, "i128", 7, "primitive type", &first);
-    append_completion_item(&out, "u8", 7, "primitive type", &first);
-    append_completion_item(&out, "u16", 7, "primitive type", &first);
-    append_completion_item(&out, "u32", 7, "primitive type", &first);
-    append_completion_item(&out, "u64", 7, "primitive type", &first);
-    append_completion_item(&out, "u128", 7, "primitive type", &first);
-    append_completion_item(&out, "f32", 7, "primitive type", &first);
-    append_completion_item(&out, "f64", 7, "primitive type", &first);
-    append_completion_item(&out, "bool", 7, "primitive type", &first);
-    append_completion_item(&out, "char", 7, "primitive type", &first);
-    append_completion_item(&out, "str", 7, "primitive type", &first);
-    append_completion_item(&out, "void", 7, "primitive type", &first);
-    append_completion_item(&out, "String", 7, "std.string", &first);
-    append_completion_item(&out, "Vec", 7, "std.mem.vec", &first);
-    append_completion_item(&out, "Result", 7, "std.result", &first);
-    append_completion_item(&out, "Optional", 7, "std.optional", &first);
-
-    // 3. Document symbols
-    TokenStream stream = TokenStream.new();
-    DiagnosticBag diagnostics = DiagnosticBag.new();
-    String source = String.from_str(text);
-    lex(move source, &stream, &diagnostics);
-
-    NodePool pool = NodePool.new();
-    SyntaxTree tree;
-    parse(&stream, &diagnostics, &pool, &tree);
-
-    CfgSet cfg = linux_defaults();
-    SymbolTable symbols = SymbolTable.new();
-    collect_symbols(&symbols, &diagnostics, &tree, &cfg);
-
-    i64 idx = 0;
-    while (idx < symbols.len()) {
-        Symbol* sym = symbols.get(idx);
-        str sym_name = symbols.names.get(sym.name_id);
-        i64 sym_kind = 6; // Variable
-        str detail = "";
-        if (sym.kind == SymbolKind.Function) {
-            sym_kind = 3; // Function
-            detail = "function";
-        } else if (sym.kind == SymbolKind.Struct) {
-            sym_kind = 7; // Struct
-            detail = "struct";
-        } else if (sym.kind == SymbolKind.Enum) {
-            sym_kind = 13; // Enum
-            detail = "enum";
-        } else if (sym.kind == SymbolKind.Trait) {
-            sym_kind = 8; // Interface
-            detail = "trait";
+void completion_symbols(Document* source, Document* active, i64 offset, str prefix,
+                         str owner, bool members, bool instance, Vec<Document*>* visited,
+                         PendingMessage* pending, CompletionCandidates* candidates) {
+    i64 i = 0;
+    while (i < visited.len()) { if (visited.get(i) == source) { return; } i += 1; }
+    visited.push(source); i = 0;
+    while (i < source.analysis.symbols.len()) {
+        if (request_interrupted(pending)) { return; }
+        IdeSymbol* symbol = source.analysis.symbols.get_ptr(i);
+        i64 score = ide_match_score(prefix, symbol.name.to_str());
+        bool visible = symbol.owner.equals(owner) && score >= 0
+            && (source == active || !symbol.is_private);
+        if (symbol.local) {
+            visible = visible && !members && source == active
+                && ide_resolve_local(&source.analysis, symbol.name.to_str(), offset) == i;
+        } else if (!members && source == active) {
+            visible = visible && ide_resolve_local(&source.analysis, symbol.name.to_str(), offset) == i;
+        } else if (!members && active != source) {
+            visible = visible && ide_resolve_local(&active.analysis, symbol.name.to_str(), offset) == -1;
         }
-        append_completion_item(&out, sym_name, sym_kind, detail, &first);
-        idx += 1;
+        if (visible) {
+            SymbolTarget target; target.document = source; target.symbol = i;
+            target = follow_import_alias(target);
+            IdeSymbol* detail = target.symbol >= 0 ? target.document.analysis.symbols.get_ptr(target.symbol) : symbol;
+            offer_completion(candidates, symbol.name.to_str(), detail.signature.to_str(),
+                detail.documentation.to_str(), completion_kind(detail.kind), symbol.local, score,
+                target, instance, "", true);
+        }
+        i += 1;
     }
+    i = 0;
+    while (i < source.dependencies.len()) {
+        completion_symbols(source.dependencies.get(i), active, offset, prefix, owner, members,
+            instance, visited, pending, candidates);
+        i += 1;
+    }
+}
 
-    pool.destroy();
-    out.push_str("]}");
-    return move out;
+void completion_prefix(Document* doc, i64 offset, Span* replacement, String* prefix) {
+    replacement.start = offset; replacement.end = offset;
+    while (replacement.start > 0 && typecheck_name_continue(doc.text.data[replacement.start - 1])) { replacement.start -= 1; }
+    while (replacement.end < doc.text.len() && typecheck_name_continue(doc.text.data[replacement.end])) { replacement.end += 1; }
+    *prefix = doc.text.substr(replacement.start, offset - replacement.start);
+}
+
+void append_import_context_completions(DocumentStore* store, Document* doc,
+        ImportCompletionContext* context, PendingMessage* pending,
+        CompletionCandidates* candidates) {
+    if (context.kind == ImportCompletionKind.Module) {
+        Vec<String> modules = import_modules(store, doc, context.module.to_str(), pending);
+        i64 i = 0;
+        while (i < modules.len() && !request_interrupted(pending)) {
+            String* module = modules.get_ptr(i);
+            i64 score = ide_match_score(context.prefix.to_str(), module.to_str());
+            if (score >= 0) {
+                SymbolTarget target; target.document = doc; target.symbol = -1;
+                offer_completion(candidates, module.to_str(), "", "", 9, false, score,
+                    target, false, "", false);
+            }
+            i += 1;
+        }
+    } else if (context.kind == ImportCompletionKind.Selection) {
+        String path = resolve_document_import(store, doc, context.module.to_str());
+        if (!path.ends_with(".ag")) { return; }
+        Document* source = path.len() > 0 ? store.load(path.to_str()) : (Document*)0;
+        if (source == (Document*)0) { return; }
+        store.refresh_imports();
+        i64 i = 0;
+        while (i < source.analysis.symbols.len() && !request_interrupted(pending)) {
+            IdeSymbol* symbol = source.analysis.symbols.get_ptr(i);
+            i64 score = ide_match_score(context.prefix.to_str(), symbol.name.to_str());
+            bool selected = false; i64 j = 0;
+            while (j < context.selected.len()) {
+                if (context.selected.get_ptr(j).equals(symbol.name.to_str())) { selected = true; break; }
+                j += 1;
+            }
+            if (!symbol.local && !symbol.is_private && symbol.owner.len() == 0 && score >= 0 && !selected) {
+                Vec<Document*> visited = Vec<Document*>.new(); SymbolTarget unique;
+                unique.document = source; unique.symbol = -1;
+                find_imported_symbol(source, symbol.name.to_str(), "", &visited, &unique);
+                if (unique.symbol == i && unique.document == source) {
+                    SymbolTarget target; target.document = doc; target.symbol = -1;
+                    offer_completion(candidates, symbol.name.to_str(), "", "", completion_kind(symbol.kind),
+                        false, score, target, false, "", false);
+                }
+            }
+            i += 1;
+        }
+    } else if (context.kind == ImportCompletionKind.AliasKeyword) {
+        if (ide_match_score(context.prefix.to_str(), "as") >= 0) {
+            SymbolTarget target; target.document = doc; target.symbol = -1;
+            offer_completion(candidates, "as", "", "", 14, false,
+                ide_match_score(context.prefix.to_str(), "as"), target, false, "", false);
+        }
+    }
+}
+
+void append_auto_imports(DocumentStore* store, Document* doc, str prefix,
+        PendingMessage* pending, CompletionCandidates* candidates) {
+    if (prefix[0] == 0 || request_interrupted(pending)) { return; }
+    Vec<Document*> documents = store.query_documents(doc);
+    Vec<bool> included = Vec<bool>.new(); i64 i = 0;
+    while (i < store.docs.len() && !request_interrupted(pending)) {
+        included.push(false); i += 1;
+    }
+    if (request_interrupted(pending)) { return; }
+    i = 0;
+    while (i < documents.len() && !request_interrupted(pending)) {
+        included.set(documents.get(i).store_id, true);
+        i += 1;
+    }
+    i64 cached = 0;
+    while (cached < store.docs.len() && !request_interrupted(pending)) {
+        Document* candidate = store.docs.get(cached);
+        if (!included.get(candidate.store_id)
+            && path_within_roots(&store.include_dirs, candidate.path.to_str())) {
+            included.set(candidate.store_id, true);
+            documents.push(candidate);
+        }
+        cached += 1;
+    }
+    i64 d = 0;
+    while (d < documents.len() && !request_interrupted(pending)) {
+        Document* candidate = documents.get(d);
+        if (candidate != doc && auto_import_document(store, candidate)
+            && candidate.path.ends_with(".ag") && candidate.analysis.diagnostics.is_empty()) {
+            String module = String.new(); bool module_checked = false;
+            HashMap<String, i64> unique_exports = HashMap<String, i64>.new(); bool exports_indexed = false;
+            i64 i = 0;
+            while (i < candidate.analysis.symbols.len() && !request_interrupted(pending)) {
+                IdeSymbol* symbol = candidate.analysis.symbols.get_ptr(i);
+                str name = symbol.name.to_str();
+                i64 score = ide_match_score(prefix, name);
+                if (!symbol.local && !symbol.is_private && symbol.owner.len() == 0
+                    && symbol.kind != IdeSymbolKind.ImportAlias && score >= 0 && !completion_visible(candidates, name)) {
+                    bool unique_provider_symbol = false;
+                    if (exports_indexed) {
+                        Optional<i64> unique = unique_exports.get_opt(String.from_str(name));
+                        unique_provider_symbol = unique.is_some() && unique.unwrap() == i + 1;
+                    } else {
+                        Vec<Document*> visited = Vec<Document*>.new(); SymbolTarget unique;
+                        unique.document = candidate; unique.symbol = -1;
+                        find_imported_symbol(candidate, name, "", &visited, &unique);
+                        unique_provider_symbol = unique.symbol == i && unique.document == candidate;
+                    }
+                    if (unique_provider_symbol) {
+                        // Module resolution and conflicts are shared by all exports in this request.
+                        if (!module_checked) {
+                            module = import_module_name(store, doc, candidate); module_checked = true;
+                            if (module.len() == 0 || import_conflicts(doc, candidate, pending)) { break; }
+                        }
+                        if (!exports_indexed) {
+                            completion_provider_exports(candidate, &unique_exports);
+                            exports_indexed = true;
+                        }
+                        SymbolTarget target; target.document = candidate; target.symbol = i;
+                        IdeSymbol* resolved = target.document.analysis.symbols.get_ptr(target.symbol);
+                        offer_completion(candidates, name, resolved.signature.to_str(), resolved.documentation.to_str(),
+                            completion_kind(resolved.kind), false, score, target, false, module.to_str(), true);
+                    }
+                }
+                i += 1;
+            }
+        }
+        d += 1;
+    }
+}
+
+String render_completions(Document* doc, Span replacement, CompletionCandidates* candidates,
+        ClientOptions* client, bool incomplete) {
+    sort_completions(candidates);
+    String out = String.new(); out.push_str(incomplete || candidates.truncated
+        ? "{\"isIncomplete\":true,\"items\":[" : "{\"isIncomplete\":false,\"items\":[");
+    bool first = true; i64 i = 0;
+    while (i < candidates.items.len()) {
+        append_completion(&out, doc, replacement, candidates.items.get_ptr(i), client, &first);
+        i += 1;
+    }
+    out.push_str("]}"); return move out;
+}
+
+String compute_completion(DocumentStore* store, Document* doc, i64 offset, ClientOptions* client,
+        PendingMessage* pending, bool index_pending) {
+    CompletionCandidates candidates = completion_candidates();
+    Span replacement = Span.synthetic(); String prefix = String.new();
+    completion_prefix(doc, offset, &replacement, &prefix);
+    if (inside_literal(doc, offset)) { return render_completions(doc, replacement, &candidates, client, false); }
+    Optional<ImportCompletionContext> import_context = import_completion_context(doc, offset);
+    if (import_context.is_some()) {
+        ImportCompletionContext context = import_context.unwrap();
+        replacement = context.replacement;
+        append_import_context_completions(store, doc, &context, pending, &candidates);
+        return render_completions(doc, replacement, &candidates, client, false);
+    }
+    i64 separator = replacement.start;
+    while (separator > 0 && (doc.text.data[separator - 1] == (u8)' ' || doc.text.data[separator - 1] == (u8)'\t')) { separator -= 1; }
+    bool members = separator > 0 && (doc.text.data[separator - 1] == (u8)'.' || doc.text.data[separator - 1] == (u8)':');
+    String owner = String.new();
+    if (members) {
+        separator -= 1;
+        if (separator > 0 && doc.text.data[separator] == (u8)':' && doc.text.data[separator - 1] == (u8)':') { separator -= 1; }
+        owner = receiver_owner(doc, separator);
+    }
+    Vec<Document*> visited = Vec<Document*>.new();
+    if (!members || owner.len() > 0) {
+        bool instance = members && doc.text.data[separator] == (u8)'.';
+        completion_symbols(doc, doc, offset, prefix.to_str(), owner.to_str(), members, instance,
+            &visited, pending, &candidates);
+    }
+    if (!members) {
+        TokenStream words = TokenStream.new(); DiagnosticBag ignored = DiagnosticBag.new();
+        lex(String.from_str("let mut const static volatile struct enum impl trait type private if else while for in match break continue return move defer import comptime cast as extern asm macro launch wait true false Self i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 f80 c32 c64 c80 bool char str void Vec Optional"), &words, &ignored);
+        i64 i = 0;
+        while (i + 1 < words.len()) {
+            Token* word = words.get(i);
+            i64 score = ide_match_score(prefix.to_str(), word.text.to_str());
+            if (score >= 0) {
+                SymbolTarget target; target.document = doc; target.symbol = -1;
+                offer_completion(&candidates, word.text.to_str(), "", "", is_primitive_type_token(word.kind) ? 7 : 14,
+                    false, score, target, false, "", false);
+            }
+            i += 1;
+        }
+        append_auto_imports(store, doc, prefix.to_str(), pending, &candidates);
+    }
+    return render_completions(doc, replacement, &candidates, client, !members && index_pending);
+}
+
+enum CompletionResolveError { InvalidItem; StaleItem; }
+
+Result<String, CompletionResolveError> compute_completion_resolve(DocumentStore* store, str json, ClientOptions* client, PendingMessage* pending) {
+    JsonReader reader = JsonReader.new(json);
+    if (!reader.begin_object()) { return Result<String, CompletionResolveError>.err(CompletionResolveError.InvalidItem); }
+    String data = json_field(json, "data");
+    if (data.len() == 0) { return Result<String, CompletionResolveError>.ok(String.from_str(json)); }
+    String uri = String.new(); String active_uri = String.new(); String module = String.new();
+    i64 revision = 0; i64 active_revision = 0; i64 id = 0;
+    bool auto_import = json_string(data.to_str(), "activeURI", &active_uri);
+    if (auto_import) {
+        i64 target_revision = 0;
+        if (!json_integer(data.to_str(), "activeRevision", &active_revision)
+            || !json_string(data.to_str(), "targetURI", &uri)
+            || !json_integer(data.to_str(), "targetRevision", &target_revision)
+            || !json_string(data.to_str(), "module", &module)
+            || !json_integer(data.to_str(), "symbol", &id) || id < 0
+            || active_revision <= 0 || target_revision <= 0 || module.len() == 0) {
+            return Result<String, CompletionResolveError>.err(CompletionResolveError.InvalidItem);
+        }
+        revision = target_revision;
+        Document* active = store.get(active_uri.to_str());
+        Document* target = store.get(uri.to_str());
+        if (active == (Document*)0 || active.revision != active_revision || target == (Document*)0
+            || target.revision != revision || id >= target.analysis.symbols.len()) {
+            return Result<String, CompletionResolveError>.err(CompletionResolveError.StaleItem);
+        }
+        String current_module = import_module_name(store, active, target);
+        if (!current_module.equals(module.to_str()) || import_conflicts(active, target, pending)) {
+            return Result<String, CompletionResolveError>.err(CompletionResolveError.StaleItem);
+        }
+    } else if (!json_string(data.to_str(), "uri", &uri) || !json_integer(data.to_str(), "revision", &revision)
+        || !json_integer(data.to_str(), "symbol", &id) || id < 0 || revision <= 0) {
+        return Result<String, CompletionResolveError>.err(CompletionResolveError.InvalidItem);
+    }
+    Document* doc = store.get(uri.to_str());
+    if (doc == (Document*)0 || doc.revision != revision || id >= doc.analysis.symbols.len()) { return Result<String, CompletionResolveError>.err(CompletionResolveError.StaleItem); }
+    IdeSymbol* symbol = doc.analysis.symbols.get_ptr(id);
+    String out = String.from_str("{"); bool comma = false; reader.skip_whitespace();
+    while (!reader.failed && reader.index < reader.length && reader.input[reader.index] != '}') {
+        String key = reader.read_string(); if (!reader.expect((u8)':')) { return Result<String, CompletionResolveError>.err(CompletionResolveError.InvalidItem); }
+        reader.skip_whitespace(); i64 start = reader.index;
+        if (!reader.skip_value()) { return Result<String, CompletionResolveError>.err(CompletionResolveError.InvalidItem); }
+        if (!key.equals("detail") && !key.equals("documentation")) {
+            if (comma) { out.push(','); } comma = true;
+            out.push('"'); json_escape(key.to_str(), &out); out.push_str("\":");
+            out.push_bytes((u8*)json + start, reader.index - start);
+        }
+        if (!skip_comma_if_present(&reader)) { break; } reader.skip_whitespace();
+    }
+    if (!reader.end_object() || reader.failed) { return Result<String, CompletionResolveError>.err(CompletionResolveError.InvalidItem); }
+    if (comma) { out.push(','); }
+    out.push_str("\"detail\":\""); json_escape(symbol.signature.to_str(), &out);
+    if (auto_import) { out.push_str(" (import "); json_escape(module.to_str(), &out); out.push(')'); }
+    out.push_str("\",\"documentation\":{\"kind\":\""); out.push_str(client.completion_markdown ? "markdown" : "plaintext");
+    out.push_str("\",\"value\":\""); json_escape(symbol.documentation.to_str(), &out); out.push_str("\"}}");
+    return Result<String, CompletionResolveError>.ok(move out);
+}
+
+// The frontend helper validates the generic suffix against this document's CST snapshot.
+i64 generic_call_close_token(Document* doc, i64 less_token) {
+    if (less_token < 0 || less_token >= doc.analysis.tokens.len()) { return -1; }
+    Token* less = doc.analysis.tokens.get(less_token);
+    if (less.kind != TokenKind.Less) { return -1; }
+    i64 previous = less_token - 1;
+    while (previous >= 0 && doc.analysis.tokens.get(previous).kind == TokenKind.Comment) { previous -= 1; }
+    if (previous < 0 || doc.analysis.tokens.get(previous).kind != TokenKind.Identifier) { return -1; }
+    i64 occurrence = doc.analysis.occurrence_at(doc.analysis.tokens.get(previous).span.start);
+    if (occurrence < 0) { return -1; }
+    SyntaxNode* less_node = doc.analysis.occurrences.get_ptr(occurrence).node.next_sibling;
+    if (less_node == (SyntaxNode*)0 || less_node.span.start != less.span.start) { return -1; }
+    SyntaxNode* close = lower_find_generic_call_close(less_node);
+    if (close == (SyntaxNode*)0) { return -1; }
+    i64 i = ide_token_at_or_after(&doc.analysis, close.span.start);
+    if (i >= doc.analysis.tokens.len()) { return -1; }
+    Token* token = doc.analysis.tokens.get(i);
+    return token.span.start == close.span.start && token.span.end == close.span.end
+        && token.kind == close.token_kind ? i : -1;
+}
+
+// Delimiter matching uses tokens, so strings and comments cannot affect the call stack.
+i64 call_occurrence(Document* doc, i64 open) {
+    i64 previous = open - 1;
+    while (previous >= 0 && doc.analysis.tokens.get(previous).kind == TokenKind.Comment) { previous -= 1; }
+    if (previous < 0) { return -1; }
+    TokenKind kind = doc.analysis.tokens.get(previous).kind;
+    if (kind == TokenKind.Greater || kind == TokenKind.RightShift) {
+        i64 close = previous; i64 depth = kind == TokenKind.RightShift ? 2 : 1;
+        previous -= 1;
+        while (previous >= 0 && depth > 0) {
+            TokenKind token = doc.analysis.tokens.get(previous).kind;
+            if (token == TokenKind.Greater) { depth += 1; }
+            else if (token == TokenKind.RightShift) { depth += 2; }
+            else if (token == TokenKind.Less) { depth -= 1; }
+            previous -= 1;
+        }
+        if (depth != 0 || generic_call_close_token(doc, previous + 1) != close) { return -1; }
+    }
+    while (previous >= 0 && doc.analysis.tokens.get(previous).kind == TokenKind.Comment) { previous -= 1; }
+    if (previous < 0 || doc.analysis.tokens.get(previous).kind != TokenKind.Identifier) { return -1; }
+    return doc.analysis.occurrence_at(doc.analysis.tokens.get(previous).span.start);
+}
+
+i64 active_call(Document* doc, i64 offset) {
+    Vec<i64> stack = Vec<i64>.new(); i64 i = 0;
+    while (i < doc.analysis.tokens.len()) {
+        Token* token = doc.analysis.tokens.get(i);
+        if (token.span.start >= offset) { break; }
+        if (token.kind == TokenKind.Less) {
+            i64 close = generic_call_close_token(doc, i);
+            if (close >= 0) {
+                if (doc.analysis.tokens.get(close).span.start >= offset) { break; }
+                i = close + 1; continue;
+            }
+        }
+        if (is_open(token)) { stack.push(i); }
+        else if (is_close(token) && stack.len() > 0) { stack.pop(); }
+        i += 1;
+    }
+    i = stack.len() - 1;
+    while (i >= 0) {
+        i64 at = stack.get(i);
+        Token* token = doc.analysis.tokens.get(at);
+        if (token.kind == TokenKind.LeftParen && at > 0) {
+            i64 occurrence = call_occurrence(doc, at);
+            if (occurrence >= 0 && !doc.analysis.occurrences.get_ptr(occurrence).definition) {
+                SymbolTarget target = follow_import_alias(resolve_occurrence(doc, occurrence));
+                if (target.symbol >= 0) {
+                    IdeSymbolKind kind = target.document.analysis.symbols.get_ptr(target.symbol).kind;
+                    if (kind == IdeSymbolKind.Function || kind == IdeSymbolKind.Method) { return at; }
+                }
+            }
+        }
+        i -= 1;
+    }
+    return -1;
+}
+
+i64 signature_utf16_offset(str text, i64 offset) {
+    i64 units = 0; i64 cursor = 0;
+    while (cursor < offset) {
+        u8 byte = (u8)text[cursor]; units += byte >= 240 ? 2 : 1;
+        cursor += utf8_width(byte);
+    }
+    return units;
+}
+
+Vec<Span> signature_parameter_ranges(Document* doc, IdeSymbol* symbol) {
+    Vec<Span> ranges = Vec<Span>.new();
+    i64 occurrence = doc.analysis.occurrence_at(symbol.selection.start);
+    if (occurrence < 0) { return move ranges; }
+    SyntaxNode* name = doc.analysis.occurrences.get_ptr(occurrence).node;
+    SyntaxNode* params = name.next_sibling;
+    while (params != (SyntaxNode*)0 && params.kind != NodeKind.Parenthesized) { params = params.next_sibling; }
+    if (params == (SyntaxNode*)0) { return move ranges; }
+    SyntaxNode* start = name.parent.first_child;
+    while (start != (SyntaxNode*)0 && start.span.start < symbol.extent.start) { start = start.next_sibling; }
+    String rendered = ide_render(start, params); rendered.push('(');
+    Vec<Binding> bindings = Vec<Binding>.new(); collect_parameter_bindings(params, &bindings);
+    SyntaxNode* cursor = params.first_child; i64 i = 0;
+    while (i < bindings.len()) {
+        Binding* binding = bindings.get_ptr(i);
+        while (cursor != binding.type_start) { ide_append_tokens(cursor, &rendered); cursor = cursor.next_sibling; }
+        i64 begin = rendered.len();
+        while (cursor != binding.name_node.next_sibling) { ide_append_tokens(cursor, &rendered); cursor = cursor.next_sibling; }
+        // Render with the signature's spacing, including the space following a comma.
+        while (begin < rendered.len() && rendered.data[begin] == (u8)' ') { begin += 1; }
+        Span range = Span.synthetic();
+        range.start = signature_utf16_offset(rendered.to_str(), begin);
+        range.end = signature_utf16_offset(rendered.to_str(), rendered.len());
+        ranges.push(range); i += 1;
+    }
+    return move ranges;
+}
+
+String compute_signature_help(Document* doc, i64 offset, ClientOptions* client) {
+    i64 call = active_call(doc, offset);
+    if (call < 0 || inside_literal(doc, offset)) { return String.from_str("null"); }
+    i64 occurrence = call_occurrence(doc, call);
+    SymbolTarget target = follow_import_alias(resolve_occurrence(doc, occurrence));
+    target.document.ensure_syntax();
+    IdeSymbol* symbol = target.document.analysis.symbols.get_ptr(target.symbol);
+    IdeOccurrence* selected = doc.analysis.occurrences.get_ptr(occurrence);
+    SyntaxNode* separator = binding_previous_sibling(selected.node);
+    i64 skip = symbol.instance && separator != (SyntaxNode*)0 && separator.token_kind == TokenKind.Dot ? 1 : 0;
+    i64 active = 0; i64 depth = 0; i64 i = call + 1;
+    while (i < doc.analysis.tokens.len()) {
+        Token* token = doc.analysis.tokens.get(i);
+        if (token.span.start >= offset) { break; }
+        if (token.kind == TokenKind.Less) {
+            i64 close = generic_call_close_token(doc, i);
+            if (close >= 0) {
+                if (doc.analysis.tokens.get(close).span.start >= offset) { break; }
+                i = close + 1; continue;
+            }
+        }
+        if (is_open(token)) { depth += 1; }
+        else if (is_close(token)) { depth -= 1; }
+        else if (token.kind == TokenKind.Comma && depth == 0) { active += 1; }
+        i += 1;
+    }
+    i64 count = symbol.parameters.len() - skip;
+    if (active >= count && count > 0) { active = count - 1; }
+    Vec<Span> ranges = Vec<Span>.new();
+    if (client.signature_label_offsets) { ranges = signature_parameter_ranges(target.document, symbol); }
+    String out = String.from_str("{\"signatures\":[{\"label\":\"");
+    json_escape(symbol.signature.to_str(), &out); out.push_str("\",\"documentation\":{\"kind\":\""); out.push_str(client.signature_markdown ? "markdown" : "plaintext"); out.push_str("\",\"value\":\"");
+    json_escape(symbol.documentation.to_str(), &out); out.push_str("\"},\"parameters\":[");
+    i = skip;
+    while (i < symbol.parameters.len()) {
+        if (i > skip) { out.push(','); }
+        out.push_str("{\"label\":");
+        if (i < ranges.len()) {
+            Span range = ranges.get(i); out.push('['); out.push_display(&range.start); out.push(','); out.push_display(&range.end); out.push(']');
+        } else { out.push('"'); json_escape(symbol.parameters.get_ptr(i).to_str(), &out); out.push('"'); }
+        out.push('}'); i += 1;
+    }
+    out.push_str("]}],\"activeSignature\":0,\"activeParameter\":"); out.push_display(&active); out.push('}'); return move out;
 }

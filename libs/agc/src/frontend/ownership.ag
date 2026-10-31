@@ -12,6 +12,8 @@ import frontend.cfg;
 import frontend.messages;
 import frontend.module_loader;
 import frontend.typecheck_expr;
+import frontend.symbols;
+import frontend.init_plan;
 const u32 MAX_OWNERSHIP_SCAN_DEPTH = 256;
 
 
@@ -26,6 +28,11 @@ struct OwnershipVar {
     u32 type_id;
     Span declaration_span;
     Span scope;
+}
+
+struct OwnershipResult {
+    bool valid;
+    Vec<InitOwnerPlan> owner_plans;
 }
 
 struct MoveOrigin {
@@ -108,6 +115,7 @@ struct OwnershipAnalyzer {
     Vec<str>* drop_types;
     TypeTable* type_table;
     Vec<OwnershipVar> variables;
+    Vec<InitOwnerPlan>* owner_plans;
     Vec<EnumPayload>* enum_payloads;
     DiagnosticBag* diagnostics;
     bool failed;
@@ -135,13 +143,15 @@ bool ownership_place_is_within(str place, str parent) {
 }
 
 impl OwnershipAnalyzer {
-    OwnershipAnalyzer new(DiagnosticBag* diagnostics, OwnershipTypeInfo* type_info) {
+    OwnershipAnalyzer new(DiagnosticBag* diagnostics, OwnershipTypeInfo* type_info,
+                           Vec<InitOwnerPlan>* owner_plans) {
         OwnershipAnalyzer analyzer;
         analyzer.names = Interner.new();
         analyzer.moved_set = BitSet.new();
         analyzer.move_origins = Vec<MoveOrigin>.new();
         analyzer.type_table = &type_info.type_table;
         analyzer.variables = Vec<OwnershipVar>.new();
+        analyzer.owner_plans = owner_plans;
         analyzer.observed_set = BitSet.new();
         analyzer.drop_types = &type_info.drop_types;
         analyzer.enum_payloads = &type_info.enum_payloads;
@@ -744,6 +754,8 @@ void collect_ownership_variables(OwnershipAnalyzer* analyzer, SyntaxNode* functi
     collect_function_bindings(function, &bindings);
     Vec<u32> binding_types = Vec<u32>.new();
     typecheck_binding_types(symbols, analyzer.type_table, root, &bindings, &binding_types);
+    Vec<u32> plan_types = Vec<u32>.new();
+    typecheck_binding_types(symbols, &symbols.types, root, &bindings, &plan_types);
     i64 i = 0;
     while (i < bindings.len()) {
         Binding* binding = bindings.get_ptr(i);
@@ -755,9 +767,20 @@ void collect_ownership_variables(OwnershipAnalyzer* analyzer, SyntaxNode* functi
             variable.declaration_span = binding.span;
             variable.scope = ownership_binding_scope(binding.name_node, function);
             analyzer.variables.push(variable);
+            InitOwnerPlan plan = InitOwnerPlan.new(symbols.names.intern(binding.name),
+                plan_types.get(i), binding.span, ownership_function_body(function).span);
+            if (!init_plan_build(&plan, &symbols.types, &symbols.names, root)) {
+                // A generic declaration is specialized after its types are resolved.
+                plan.nodes.len = 0;
+                plan.projections.len = 0;
+            }
+            analyzer.owner_plans.push(move plan);
         }
         i += 1;
     }
+    plan_types.drop();
+    binding_types.drop();
+    bindings.drop();
 }
 
 void check_move_sequences(OwnershipAnalyzer* analyzer, SyntaxNode* function, CfgSet* cfg,
@@ -920,15 +943,25 @@ SyntaxNode* ownership_function_body(SyntaxNode* function) {
     return (SyntaxNode*)0;
 }
 
-bool check_ownership(SyntaxTree* tree, SymbolTable* symbols, DiagnosticBag* diagnostics, CfgSet* cfg) {
+OwnershipResult check_ownership(SyntaxTree* tree, SymbolTable* symbols,
+                                DiagnosticBag* diagnostics, CfgSet* cfg) {
     bool ok = true;
+    Vec<InitOwnerPlan> owner_plans = Vec<InitOwnerPlan>.new();
     Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
     cfg_collect_items(tree.root, cfg, diagnostics, &items);
 
+    i64 layout_index = 0;
+    while (layout_index < items.len()) {
+        SyntaxNode* item = items.get(layout_index);
+        if (item.kind == NodeKind.Struct) {
+            module_register_source_struct(&symbols.types, item);
+        }
+        layout_index += 1;
+    }
     OwnershipTypeInfo type_info = OwnershipTypeInfo.new(&symbols.types);
     collect_type_information(&type_info, &items);
 
-    OwnershipAnalyzer analyzer = OwnershipAnalyzer.new(diagnostics, &type_info);
+    OwnershipAnalyzer analyzer = OwnershipAnalyzer.new(diagnostics, &type_info, &owner_plans);
 
     i64 i = 0;
     while (i < items.len()) {
@@ -948,5 +981,8 @@ bool check_ownership(SyntaxTree* tree, SymbolTable* symbols, DiagnosticBag* diag
         i += 1;
     }
     items.drop();
-    return ok;
+    OwnershipResult result;
+    result.valid = ok;
+    result.owner_plans = move owner_plans;
+    return move result;
 }

@@ -1,0 +1,67 @@
+import document;
+import imports;
+import params;
+import json_rpc;
+import capabilities;
+
+bool action_quickfix_context(str json, bool* allowed) {
+    String diagnostics = json_field(json, "diagnostics"); JsonReader reader = JsonReader.new(diagnostics.to_str());
+    if (!reader.begin_array()) { return false; }
+    String only = json_field(json, "only"); *allowed = only.len() == 0;
+    if (only.len() == 0) { return true; }
+    reader = JsonReader.new(only.to_str()); if (!reader.begin_array()) { return false; }
+    reader.skip_whitespace();
+    while (!reader.failed && reader.index < reader.length && reader.input[reader.index] != ']') {
+        String kind = reader.read_string(); if (reader.failed) { return false; }
+        if (kind.equals("") || kind.equals("quickfix")) { *allowed = true; }
+        if (!skip_comma_if_present(&reader)) { break; } reader.skip_whitespace();
+    }
+    return reader.end_array() && !reader.failed;
+}
+
+void append_import_action(String* out, Document* active, str module_name, str name, bool versioned) {
+    out.push_str("{\"title\":\"Import "); json_escape(name, out); out.push_str(" from "); json_escape(module_name, out);
+    out.push_str("\",\"kind\":\"quickfix\",\"edit\":");
+    out.push_str(versioned ? "{\"documentChanges\":[{\"textDocument\":{\"uri\":\"" : "{\"changes\":{\"");
+    json_escape(active.uri.to_str(), out);
+    if (versioned) {
+        out.push_str("\",\"version\":"); if (active.open) { out.push_display(&active.version); } else { out.push_str("null"); }
+        out.push_str("},\"edits\":[");
+    } else { out.push_str("\":["); }
+    append_import_edit(out, active, module_name);
+    out.push_str(versioned ? "]}]}" : "]}}"); out.push('}');
+}
+
+String compute_import_actions(DocumentStore* store, Document* active, Span selection, bool allowed, ClientOptions* client, PendingMessage* pending) {
+    Vec<Document*> documents = store.query_documents(active);
+    String out = String.from_str("["); bool comma = false; Vec<String> offered = Vec<String>.new(); i64 occurrence = 0;
+    while (allowed && occurrence < active.analysis.occurrences.len() && !request_interrupted(pending)) {
+        IdeOccurrence* selected = active.analysis.occurrences.get_ptr(occurrence); Span span = selected.node.span;
+        bool intersects = span.start <= selection.end && span.end >= selection.start;
+        if (!selected.definition && !selected.member && intersects && resolve_occurrence(active, occurrence).symbol == -1) {
+            i64 doc = 0;
+            while (doc < documents.len() && !request_interrupted(pending)) {
+                Document* candidate = documents.get(doc);
+                if (candidate != active && candidate.path.len() > 0 && candidate.analysis.diagnostics.is_empty()) {
+                    Vec<Document*> visited = Vec<Document*>.new(); SymbolTarget target; target.document = candidate; target.symbol = -1;
+                    find_imported_symbol(candidate, selected.node.text, "", &visited, &target);
+                    if (target.symbol >= 0 && target.document == candidate
+                        && candidate.analysis.symbols.get_ptr(target.symbol).kind != IdeSymbolKind.ImportAlias) {
+                        String module_name = import_module_name(store, active, candidate);
+                        if (module_name.len() > 0) {
+                            String key = module_name.clone(); key.push(':'); key.push_str(selected.node.text); i64 existing = 0;
+                            while (existing < offered.len() && !offered.get_ptr(existing).equals(key.to_str())) { existing += 1; }
+                            if (existing == offered.len() && !import_conflicts(active, candidate, pending)) {
+                                offered.push(move key); if (comma) { out.push(','); } comma = true;
+                                append_import_action(&out, active, module_name.to_str(), selected.node.text, client.versioned_edits);
+                            }
+                        }
+                    }
+                }
+                doc += 1;
+            }
+        }
+        occurrence += 1;
+    }
+    out.push(']'); return move out;
+}

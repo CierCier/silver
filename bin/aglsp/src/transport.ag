@@ -1,0 +1,181 @@
+import json_rpc;
+import params;
+import std.channel;
+import std.thread;
+
+enum RequestCompletion { Finished; Cancelled; Interrupted; }
+
+struct PendingMessage {
+    Transport* transport;
+    String body;
+    String id;
+    String progress_id;
+    String progress_token;
+    bool progress_started;
+    bool valid_encoding;
+    // Only observed client cancellation sets this atomic.
+    i32 cancelled;
+    // Analysis flags belong to the dispatcher; sealing excludes reader cancels.
+    bool preemptible;
+    bool pressure_interrupted;
+    bool sealed;
+    RequestCompletion completion;
+}
+
+// Only the dispatcher owns documents and writes stdout. The reader owns stdin;
+// the mutex protects live request identities, including the active request.
+struct Transport {
+    Channel<PendingMessage*> messages;
+    RawMutex mutex;
+    Vec<PendingMessage*> pending;
+    i32 stopping;
+    i32 reader_waiting;
+}
+
+String request_identity(str raw) {
+    if (strlen(raw) == 0) { return String.new(); }
+    if (raw[0] == '"') {
+        JsonReader reader = JsonReader.new(raw); String decoded = reader.read_string();
+        String key = String.from_str("s:"); str digits = "0123456789abcdef"; i64 i = 0;
+        while (i < decoded.len()) {
+            u8 byte = decoded.data[i]; key.push(digits[byte / 16]); key.push(digits[byte % 16]); i += 1;
+        }
+        return move key;
+    }
+    JsonReader reader = JsonReader.new(raw); i64 id = 0;
+    if (!reader.read_i64(&id) || reader.failed || reader.index != reader.length) { return String.new(); }
+    String key = String.from_str("n:"); key.push_display(&id); return move key;
+}
+
+bool request_cancelled(PendingMessage* message) {
+    return __atomic_load_i32(&message.cancelled, ATOMIC_ACQUIRE) != 0;
+}
+
+bool request_interrupted(PendingMessage* message) {
+    if (request_cancelled(message)) { return true; }
+    if (!message.preemptible) { return false; }
+    Transport* transport = message.transport;
+    if (__atomic_load_i32(&transport.reader_waiting, ATOMIC_ACQUIRE) != 0) { message.pressure_interrupted = true; }
+    return message.pressure_interrupted;
+}
+
+// Explicit errors and lifecycle responses retain their own result. Successful
+// analysis responses freeze cancellation and pressure before any terminal output.
+void seal_message(PendingMessage* message, bool interruptible) {
+    Transport* transport = message.transport;
+    transport.mutex.lock();
+    if (!message.sealed) {
+        message.completion = RequestCompletion.Finished;
+        if (interruptible) {
+            if (request_cancelled(message)) { message.completion = RequestCompletion.Cancelled; }
+            else if (message.preemptible && (message.pressure_interrupted || __atomic_load_i32(&transport.reader_waiting, ATOMIC_ACQUIRE) != 0)) {
+                message.pressure_interrupted = true; message.completion = RequestCompletion.Interrupted;
+            }
+        }
+        message.sealed = true;
+    }
+    transport.mutex.unlock();
+}
+
+void complete_response(PendingMessage* message, str id, str result) {
+    seal_message(message, true);
+    finish_progress(message);
+    if (message.completion == RequestCompletion.Cancelled) { send_error(id, -32800, "Request cancelled"); }
+    else if (message.completion == RequestCompletion.Interrupted) {
+        send_error(id, -32803, "Analysis interrupted because the input queue is full; retry the request");
+    }
+    else { send_response(id, result); }
+}
+
+void finish_progress(PendingMessage* message) {
+    seal_message(message, false);
+    if (!message.progress_started) { return; }
+    message.progress_started = false;
+    String out = String.from_str("{\"token\":"); out.push_str(message.progress_token.to_str());
+    out.push_str(",\"value\":{\"kind\":\"end\",\"message\":\"");
+    out.push_str(message.completion == RequestCompletion.Cancelled ? "Cancelled"
+        : (message.completion == RequestCompletion.Interrupted ? "Interrupted" : "Finished")); out.push_str("\"}}");
+    send_notification("$/progress", out.to_str());
+}
+
+void complete_error(PendingMessage* pending, str id, i64 code, str message) {
+    seal_message(pending, code == -32800);
+    finish_progress(pending); send_error(id, code, message);
+}
+
+void release_message(Transport* transport, PendingMessage* message) {
+    seal_message(message, false);
+    transport.mutex.lock();
+    i64 i = 0;
+    while (i < transport.pending.len()) {
+        if (transport.pending.get(i) == message) { transport.pending.swap_remove(i); break; }
+        i += 1;
+    }
+    transport.mutex.unlock();
+    @drop_in_place(message, 1); free(message);
+}
+
+void read_transport(i64 address) {
+    Transport* transport = (Transport*)address;
+    ByteStream stream = ByteStream.stdin(); String body = String.new();
+    while (read_rpc_message(&stream, &body, &transport.stopping)) {
+        JsonRpcMessage parsed = JsonRpcMessage.new();
+        bool valid_encoding = body.len() == strlen(body.to_str()) && body.is_valid_utf8();
+        bool valid = valid_encoding && parse_rpc_request(body.to_str(), &parsed);
+        bool request_cancel = parsed.method.equals("$/cancelRequest");
+        bool progress_cancel = parsed.method.equals("window/workDoneProgress/cancel");
+        if (valid && !parsed.has_id && (request_cancel || progress_cancel)) {
+            String raw = json_field(parsed.params_json.to_str(), request_cancel ? "id" : "token"); String id = request_identity(raw.to_str());
+            transport.mutex.lock(); i64 i = 0;
+            while (id.len() > 0 && i < transport.pending.len()) {
+                PendingMessage* pending = transport.pending.get(i);
+                String* key = request_cancel ? &pending.id : &pending.progress_id;
+                if (!pending.sealed && key.equals(id.to_str())) { __atomic_store_i32(&pending.cancelled, 1, ATOMIC_RELEASE); }
+                i += 1;
+            }
+            transport.mutex.unlock();
+            continue;
+        }
+        PendingMessage* pending = alloc<PendingMessage>(1);
+        pending.transport = transport;
+        pending.valid_encoding = valid_encoding;
+        pending.body = move body; body = String.new();
+        if (valid && parsed.has_id) {
+            pending.id = request_identity(parsed.id_raw.to_str());
+            pending.progress_token = json_field(parsed.params_json.to_str(), "workDoneToken");
+            pending.progress_id = request_identity(pending.progress_token.to_str());
+        }
+        transport.mutex.lock(); transport.pending.push(pending); transport.mutex.unlock();
+        if (!transport.messages.try_send(pending)) {
+            // Publish pressure before blocking, even if analysis has not started.
+            __atomic_store_i32(&transport.reader_waiting, 1, ATOMIC_RELEASE);
+            bool sent = transport.messages.send(pending);
+            __atomic_store_i32(&transport.reader_waiting, 0, ATOMIC_RELEASE);
+            if (!sent) { break; }
+        }
+        if (valid && parsed.method.equals("exit")) { break; }
+    }
+    transport.messages.close();
+}
+
+impl Transport {
+    Transport new() {
+        Transport transport;
+        transport.messages = Channel<PendingMessage*>.bounded(32);
+        transport.mutex = RawMutex.new(); transport.pending = Vec<PendingMessage*>.new();
+        transport.stopping = 0;
+        __atomic_store_i32(&transport.reader_waiting, 0, ATOMIC_RELEASE);
+        return move transport;
+    }
+
+    void stop(Transport* self) {
+        __atomic_store_i32(&self.stopping, 1, ATOMIC_RELEASE);
+        self.messages.close();
+    }
+}
+
+impl Drop for Transport {
+    void drop(*self) {
+        while (self.pending.len() > 0) { release_message(self, self.pending.get(self.pending.len() - 1)); }
+    }
+}

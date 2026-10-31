@@ -17,7 +17,7 @@ Silver Compiler Installer
 
 Usage: install.sh [OPTIONS]
 
-Installs the Silver compiler (agc), Language Server (aglsp),
+Installs the Silver compiler (agc), native Silver Language Server (aglsp),
 Submodule Generator (agsm), and the standard & vendor include files.
 
 Options:
@@ -76,8 +76,15 @@ fi
 
 include_dir="$prefix/include"
 
+cd "$root_dir"
 echo "=== Building Silver Toolchain ($build_profile) ==="
-cargo build "${cargo_flags[@]}" -p agc -p aglsp -p agsm
+cargo build --locked "${cargo_flags[@]}" -p agc -p agsm
+native_flags=(-O2)
+if [[ "$build_profile" == "debug" ]]; then
+  native_flags=(-O0)
+fi
+"$root_dir/target/$build_profile/agc" build silver.toml --bin aglsp \
+  --no-cache "${native_flags[@]}" -o "$root_dir/target/$build_profile/aglsp"
 
 echo "=== Installing to $prefix ==="
 mkdir -p "$bin_dir"
@@ -87,13 +94,9 @@ mkdir -p "$include_dir"
 for bin_name in agc aglsp agsm; do
   src_bin="$root_dir/target/$build_profile/$bin_name"
   dest_bin="$bin_dir/$bin_name"
-  if [[ -f "$src_bin" ]]; then
-    echo "  Installing binary: $dest_bin"
-    cp --remove-destination "$src_bin" "$dest_bin"
-    chmod +x "$dest_bin"
-  else
-    echo "  warning: binary not found at $src_bin" >&2
-  fi
+  echo "  Installing binary: $dest_bin"
+  cp --remove-destination "$src_bin" "$dest_bin"
+  chmod +x "$dest_bin"
 done
 
 # 2. Install includes (std and vendor)

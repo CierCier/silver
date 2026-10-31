@@ -36,7 +36,7 @@ silver/
 │   │   ├── agc/                 # The Silver compiler source code (Rust crate, uses Elise)
 │   │   │   ├── src/
 │   │   │   │   ├── main.rs          # Compiler driver, CLI options parsing, and build orchestrator
-│   │   │   │   ├── lib.rs           # Exported frontend modules (for reuse by tooling/LSP)
+│   │   │   │   ├── lib.rs           # Exported bootstrap compiler modules
 │   │   │   │   ├── lexer.rs         # Token definition, lexical scanner, and spans
 │   │   │   │   ├── parser/          # Syntactic analysis and import resolution
 │   │   │   │   ├── semantic/        # Semantic analysis, type checking, and monomorphization
@@ -47,13 +47,11 @@ silver/
 │   │   │   │   │   ├── drop_elaborate.rs # Drop elaboration + hybrid flag plan
 │   │   │   │   │   ├── move_check.rs / borrow_check.rs # Place-based analyses
 │   │   │   │   ├── symbol_table.rs  # Phase-aware compiler symbol registration & scopes
-│   │   │   │   ├── symbol_index.rs  # LSP symbol index + move/copy inlay hints
 │   │   │   │   ├── diagnostics/     # Centralized message catalog and error visualizer
 │   │   │   │   └── profiler.rs      # Phase timing instrumenter
 │   │   │   └── Cargo.toml
 │   │   ├── agsm/                # Bootstrap source maps/module artifact generator
 │   │   └── ffi-rust/            # Optional Rust implementation behind Silver's versioned C ABI
-│   └── aglsp/                   # Language Server Protocol server (Rust, driven by stage0)
 ├── target/                      # Default Rust build output (cargo)
 ├── std/                         # Silver standard library sources
 │   ├── mem/                     # Allocator, smart pointers (Box, Rc, Vec, Arena)
@@ -240,7 +238,11 @@ flowchart TD
 - `Place {local, projections}` with `is_prefix_of` / `overlaps` (Index `v[i]` vs `v[j]` conservative, `v` overlaps `v[i]`).
 - `TypeProperties {is_copy, needs_drop}`: primitives/ptr/all-Copy struct = Copy, `String`/`Vec`/`HashMap`/`HashSet`/`Deque` = Move.
 - `MovePathTree` + `InitState` + `move_out`/`copy_from`/`initialize`/`read`; field-granular `x.a` vs `x.b`, reinit `x.a = make()`.
-- `Borrow {place, kind}` via `places_overlap`; drop elaboration hybrid flags (static `Init`→direct drop, `Uninit`→elided, `Partial`→guard).
+- `Borrow {place, kind}` via `places_overlap`.
+- `init_plan.rs` carries typed owner layouts and resolved places from move
+  analysis to LLVM. Concrete generic instances complete their plans through the
+  same semantic layout resolver. The native frontend uses `init_plan.ag` and
+  returns owner plans with its ownership result.
 
 #### 8. Monomorphization (`semantic/monomorph.rs`)
 - Runs a fixpoint generation loop:
@@ -283,7 +285,8 @@ flowchart TD
 
 ## 6. Memory & Ownership Conventions
 
-The Silver compiler implements a lightweight deterministic memory and resource control protocol using a drop-flag stack machine.
+The compiler tracks initialization of local owned places and uses that state
+for overwrite and scope-exit cleanup.
 
 ### Critical Invariants
 
@@ -294,9 +297,10 @@ The Silver compiler implements a lightweight deterministic memory and resource c
      including nested fields. Whole-value moves and Copy field reads are allowed.
    - The `drop` method is for cleaning up non-field resources (e.g., freeing pointers, closing fds).
      ```silver
-     void drop(HasInner* self) {
-         // inner is dropped automatically by the compiler — no explicit call needed.
-         outer_drop_count = outer_drop_count + 1;
+     impl Drop for HasInner {
+         void drop(*self) {
+             outer_drop_count = outer_drop_count + 1;
+         }
      }
      ```
 2. **Pointer/Reference Exemption**:
@@ -304,19 +308,37 @@ The Silver compiler implements a lightweight deterministic memory and resource c
    - Pointers (`T*`) and reference types are assumed to be non-owning views and are never automatically dropped.
 3. **Explicit Move Semantics (`move`)**:
    - Marking a variable transfer with `move x` invalidates the local resource inside the caller's stack frame.
-   - Under the hood, LLVM codegen allocates a 1-bit drop flag (`{var_name}.drop`) for each tracked local variable, initialized to `true` (1).
-   - A `move` expression sets this drop flag to `false` (0).
+   - Each tracked local has one tree of initialization nodes. Nodes hold parent
+     and child links and a state byte: `Uninit = 0`, `Partial = 1`, `Init = 2`.
+     LLVM's target layout determines storage alignment and field addresses.
+   - A move marks the source subtree uninitialized and recomputes ancestor
+     states. Direct assignment initializes the target subtree after the store.
 4. **Deferred Cleanup Stack (`defers`)**:
    - Scope exit drops are placed on a deferred stack.
-   - When exiting a block, the compiler emits code to check the corresponding drop flags. If `true`, the destructor is called. If `false` (i.e. moved), the destructor call is skipped.
-5. **Return and Exit Handling (Bug A/B/C Invariants)**:
+   - Cleanup skips `Uninit`. A full value runs its own destructor and then its
+     field cascade. A partial value skips its own destructor and cleans only
+     initialized descendants in declaration order.
+5. **Return and Exit Handling**:
    - When executing `return expr;`, the compiler evaluates the expression value first, saves it in a temporary register, runs all pending `defers` up to the function scope level, and then issues the final return instruction. This avoids use-after-free conditions.
-   - Function parameter variables receive drop-flag allocations and are dropped on function exit.
-   - *Known Design Limitation (Bug C)*: Local variables declared but not initialized have their drop flags set to `true` by default, which can cause spurious drops on zero-initialized fields if the type does not perform pointer-null checks in its `drop` method.
-6. **Per-Field Drop Flags**: each Drop-typed struct field has its own i1 flag (initialized `false` = "no live value yet"), set on field assignment / struct init / by-value params, cleared on move. The scope-exit field cascade checks per-field flags, so uninitialized fields are never destructed; overwriting a field (`x.f = y`) releases the old value (guarded by the field flag).
+   - By-value owned parameters begin initialized. Uninitialized local declarations
+     begin empty; declaration execution resets their state on each loop entry.
+6. **Inline Owner State**: plans include every required inline child, including
+   scalar and Copy fields. A struct's own destructor cannot run until all those
+   fields are initialized. Legacy native flag handles alias these state bytes;
+   they do not maintain separate liveness. Copy-only locals need no runtime
+   cleanup tree. Direct local overwrite cleans the target subtree before the
+   replacement store. Stage0 references carry owner-state metadata and borrowed
+   assignments update it; the native backend does not yet transport it across
+   calls. Indirect owned-field overwrite cleanup remains unimplemented. Heap
+   containers retain their own mutation contracts.
+   The native backend shares a read-only node-layout table for each concrete
+   type in a module. Node initialization and whole-tree state changes emit
+   bounded loops rather than a store sequence for every inline child.
 7. **Enum Payload Ownership**: constructing a variant with an owned payload requires `move` (`Res.Ok(move i)` — a bare `Res.Ok(i)` is a compile error). Enums WITHOUT a Drop impl of their own get a tag-aware payload cascade: the active variant's Drop-typed payload is dropped at scope exit (so a never-unwrapped `Result<Owned, E>` does not leak). Extract owned payloads with a `move` binding — `match r { Ok(move v) : v, ... }` — which transfers ownership and zeroes the enum's slot (freeing via a plain binding copy now double-frees, since the cascade still runs). Enums WITH a Drop impl manage their payloads in the drop body and get no cascade.
 8. **Place & Overlap**: `Place {local, projections=[Field/Index/Deref]}` with `is_prefix_of` (x is prefix of x.a) and `overlaps` (x overlaps x.a, x.a vs x.b disjoint, `v` overlaps `v[i]`, `v[i]` vs `v[j]` conservative). Borrow/move/init/drop all share this.
-9. **Copy vs Move**: `TypeProperties {is_copy, needs_drop}` central; primitives/`T*`/all-Copy struct = Copy (`copy_from` — read without invalidate), `String`/`Vec`/`HashMap`/`HashSet`/`Deque` = Move (`move_out` — invalidate, `v[i]=move old[i]` via tmp, hybrid flags: `Init`→direct drop, `Uninit`→elided, `Partial`→guard).
+9. **Copy vs Move**: `TypeProperties {is_copy, needs_drop}` distinguishes reads
+   that preserve a source from transfers that invalidate it. Copy classification
+   does not remove scalar children from an owned parent's initialization plan.
 
 ### Lambda lowering
 
@@ -355,8 +377,7 @@ Compiler diagnostic messages are rendered using the `diagnostics::render` utilit
 - **Compiler Warning System & Linter**: Configured via `-Wall`, `-Werror` (treat warnings as errors), `-Wunused`, `-Wunreachable-code`, and `-Wno-*` flags. Detects unused variables/parameters (suppressed with `_` prefix) and unreachable statements following unconditional returns/breaks/continues.
 - **Fuzzy Typo Suggestions ("Did you mean ...?")**: Levenshtein distance matching generates suggestion suffixes (`did you mean '...'?`) across unknown identifiers, struct fields, methods, types/enums, traits, and compiler-builtin macros.
 - **In-Memory Formatting (`@format`)**: Builtin macro `@format("...", args...)` builds a formatted heap string into an owned `String` instance.
-- **LSP Inlay Hints (`textDocument/inlayHint`)**: `agc::symbol_index` records `CallSite { open_paren, args, callee }` for every buffer-local `Call`/`MethodCall` (receiver `self` param skipped for instance methods) plus `MoveHint {span, Move|Copy}` for every place `let`/`assign`/`return`/call-arg (`String a = b`→`move` before `b`, `i64 y = x`→`copy` before `x`; explicit `move` excluded, `v[i]` via `tmp`); `aglsp/src/inlay_hints.rs` renders `name:` and `move`/`copy` hints before each argument/place.
-- **LSP Formatting (`textDocument/formatting`)**: `aglsp/src/format.rs` is a conservative whitespace-only formatter (strip trailing whitespace, collapse blank runs, single trailing newline) that cannot corrupt code.
+- **Native Silver LSP**: `libs/agc/src/tooling/index.ag` records declarations, lexical scopes, and identifier occurrences for `bin/aglsp`. The native server provides parameter and type hints and checks lexer-token preservation before formatting. See [native LSP setup, capabilities, and limits](language-server.md).
 ## 7.1 Debugging Support (DWARF by default)
 
 DWARF is emitted by default for non-release builds (no `-O` / `-O0`) and

@@ -1,0 +1,218 @@
+import std.string;
+import params;
+
+enum SemanticFullMode { Disabled; Full; Delta; }
+
+struct SemanticTokenOptions {
+    SemanticFullMode full;
+    bool range;
+    Vec<str> types;
+    Vec<str> modifiers;
+    i64 type_map[17];
+    i64 modifier_map[3];
+}
+
+str semantic_type_name(i64 kind) {
+    return match kind {
+        0 : "namespace", 1 : "type", 2 : "struct", 3 : "enum", 4 : "enumMember",
+        5 : "typeParameter", 6 : "parameter", 7 : "variable", 8 : "property",
+        9 : "function", 10 : "method", 11 : "macro", 12 : "keyword", 13 : "comment",
+        14 : "string", 15 : "number", 16 : "operator", _ : "",
+    };
+}
+
+str semantic_modifier_name(i64 bit) {
+    return match bit { 0 : "declaration", 1 : "definition", 2 : "readonly", _ : "" };
+}
+
+bool client_string_array(str json) {
+    JsonReader reader = JsonReader.new(json);
+    if (!reader.begin_array()) { return false; }
+    reader.skip_whitespace();
+    if (reader.index < reader.length && reader.input[reader.index] == ']') { return reader.end_array(); }
+    while (!reader.failed) {
+        String name = reader.read_string();
+        if (reader.failed || name.len() != strlen(name.to_str())) { return false; }
+        if (!skip_comma_if_present(&reader)) { break; }
+    }
+    if (!reader.end_array() || reader.failed) { return false; }
+    reader.skip_whitespace(); return reader.index == reader.length;
+}
+
+SemanticTokenOptions semantic_options(str params) {
+    SemanticTokenOptions options;
+    options.full = SemanticFullMode.Disabled;
+    i64 i = 0; while (i < 17) { options.type_map[i] = -1; i += 1; }
+    String capability = client_field(params, "capabilities.textDocument.semanticTokens");
+    String types = json_field(capability.to_str(), "tokenTypes");
+    String modifiers = json_field(capability.to_str(), "tokenModifiers");
+    String formats = json_field(capability.to_str(), "formats");
+    if (!client_string_array(types.to_str()) || !client_string_array(modifiers.to_str())
+        || !client_string_array(formats.to_str()) || !client_property(formats.to_str(), "relative")) { return move options; }
+    i = 0;
+    while (i < 17) {
+        str name = semantic_type_name(i);
+        if (client_property(types.to_str(), name)) { options.type_map[i] = options.types.len(); options.types.push(name); }
+        i += 1;
+    }
+    if (options.types.len() == 0) { return move options; }
+    i = 0;
+    while (i < 3) {
+        str name = semantic_modifier_name(i);
+        if (client_property(modifiers.to_str(), name)) { options.modifier_map[i] = 1 << options.modifiers.len(); options.modifiers.push(name); }
+        i += 1;
+    }
+    i = 0;
+    while (i < 17) {
+        i64 fallback = match i { 2 : 1, 3 : 1, 5 : 1, 10 : 9, 6 : 7, 8 : 7, 4 : 7, _ : -1 };
+        if (options.type_map[i] < 0 && fallback >= 0) { options.type_map[i] = options.type_map[fallback]; }
+        i += 1;
+    }
+    String requests = json_field(capability.to_str(), "requests");
+    String full = json_field(requests.to_str(), "full");
+    String range = json_field(requests.to_str(), "range");
+    if (full.equals("true") || full.starts_with("{")) {
+        String delta = json_field(full.to_str(), "delta");
+        options.full = delta.equals("true") ? SemanticFullMode.Delta : SemanticFullMode.Full;
+    }
+    options.range = range.equals("true") || range.starts_with("{");
+    return move options;
+}
+
+struct ClientOptions {
+    bool hover_markdown;
+    bool completion_markdown;
+    bool completion_snippets;
+    bool completion_resolve_detail;
+    bool completion_resolve_documentation;
+    bool signature_markdown;
+    bool signature_label_offsets;
+    bool hierarchical_symbols;
+    bool versioned_edits;
+    bool diagnostic_versions;
+    bool related_diagnostics;
+    bool pull_diagnostics;
+    bool diagnostic_refresh;
+    SemanticTokenOptions semantic;
+    bool semantic_refresh;
+    bool inlay_refresh;
+    bool code_action_literals;
+    bool document_link_tooltips;
+    bool folding_line_only;
+    i64 folding_range_limit;
+}
+
+String client_field(str json, str path) {
+    String value = String.from_str(json); i64 begin = 0; i64 i = 0;
+    while (true) {
+        if (path[i] == '.' || path[i] == (u8)0) {
+            String key = String.new(); key.push_bytes((u8*)path + begin, i - begin);
+            value = json_field(value.to_str(), key.to_str());
+            if (path[i] == (u8)0) { break; } begin = i + 1;
+        }
+        i += 1;
+    }
+    return move value;
+}
+
+bool prefers_markdown(str json) {
+    JsonReader reader = JsonReader.new(json);
+    if (!reader.begin_array()) { return false; }
+    reader.skip_whitespace();
+    while (!reader.failed && reader.index < reader.length && reader.input[reader.index] != ']') {
+        String format = reader.read_string();
+        if (format.equals("markdown")) { return true; }
+        if (format.equals("plaintext")) { return false; }
+        if (!skip_comma_if_present(&reader)) { break; } reader.skip_whitespace();
+    }
+    return false;
+}
+
+bool client_property(str json, str property) {
+    JsonReader reader = JsonReader.new(json);
+    if (!reader.begin_array()) { return false; }
+    reader.skip_whitespace();
+    while (!reader.failed && reader.index < reader.length && reader.input[reader.index] != ']') {
+        String value = reader.read_string(); if (value.equals(property)) { return true; }
+        if (!skip_comma_if_present(&reader)) { break; } reader.skip_whitespace();
+    }
+    return false;
+}
+
+ClientOptions client_options(str params) {
+    ClientOptions options;
+    String hover = client_field(params, "capabilities.textDocument.hover.contentFormat");
+    String completion = client_field(params, "capabilities.textDocument.completion.completionItem.documentationFormat");
+    String snippets = client_field(params, "capabilities.textDocument.completion.completionItem.snippetSupport");
+    String resolve = client_field(params, "capabilities.textDocument.completion.completionItem.resolveSupport.properties");
+    String signature = client_field(params, "capabilities.textDocument.signatureHelp.signatureInformation.documentationFormat");
+    String signature_offsets = client_field(params, "capabilities.textDocument.signatureHelp.signatureInformation.parameterInformation.labelOffsetSupport");
+    String symbols = client_field(params, "capabilities.textDocument.documentSymbol.hierarchicalDocumentSymbolSupport");
+    String edits = client_field(params, "capabilities.workspace.workspaceEdit.documentChanges");
+    String versions = client_field(params, "capabilities.textDocument.publishDiagnostics.versionSupport");
+    String related = client_field(params, "capabilities.textDocument.publishDiagnostics.relatedInformation");
+    String diagnostic = client_field(params, "capabilities.textDocument.diagnostic");
+    String diagnostic_refresh = client_field(params, "capabilities.workspace.diagnostics.refreshSupport");
+    String actions = client_field(params, "capabilities.textDocument.codeAction.codeActionLiteralSupport.codeActionKind.valueSet");
+    String link_tooltips = client_field(params, "capabilities.textDocument.documentLink.tooltipSupport");
+    String folding = client_field(params, "capabilities.textDocument.foldingRange");
+    String line_only = json_field(folding.to_str(), "lineFoldingOnly");
+    options.hover_markdown = prefers_markdown(hover.to_str()); options.completion_markdown = prefers_markdown(completion.to_str());
+    options.completion_snippets = snippets.equals("true");
+    options.completion_resolve_detail = client_property(resolve.to_str(), "detail");
+    options.completion_resolve_documentation = client_property(resolve.to_str(), "documentation");
+    options.signature_markdown = prefers_markdown(signature.to_str()); options.hierarchical_symbols = symbols.equals("true");
+    options.signature_label_offsets = signature_offsets.equals("true");
+    options.versioned_edits = edits.equals("true"); options.diagnostic_versions = versions.equals("true");
+    options.related_diagnostics = related.equals("true");
+    options.pull_diagnostics = diagnostic.starts_with("{"); options.diagnostic_refresh = diagnostic_refresh.equals("true");
+    options.semantic = semantic_options(params);
+    String semantic_refresh = client_field(params, "capabilities.workspace.semanticTokens.refreshSupport");
+    options.semantic_refresh = (options.semantic.full != SemanticFullMode.Disabled || options.semantic.range) && semantic_refresh.equals("true");
+    String inlay_refresh = client_field(params, "capabilities.workspace.inlayHint.refreshSupport");
+    options.inlay_refresh = inlay_refresh.equals("true");
+    options.code_action_literals = actions.starts_with("[");
+    options.document_link_tooltips = link_tooltips.equals("true");
+    options.folding_line_only = line_only.equals("true");
+    i64 fold_limit = 0; options.folding_range_limit = 2147483647;
+    if (json_integer(folding.to_str(), "rangeLimit", &fold_limit) && fold_limit >= 0 && fold_limit <= 2147483647) {
+        options.folding_range_limit = fold_limit;
+    }
+    return move options;
+}
+
+String server_capabilities(ClientOptions* client) {
+    String out = String.from_str("{\"capabilities\":{\"positionEncoding\":\"utf-16\",");
+    out.push_str("\"workspace\":{\"workspaceFolders\":{\"supported\":true,\"changeNotifications\":true}},");
+    out.push_str("\"textDocumentSync\":{\"openClose\":true,\"change\":2,\"save\":true},");
+    out.push_str("\"hoverProvider\":true,\"documentSymbolProvider\":true,\"workspaceSymbolProvider\":{\"workDoneProgress\":true},");
+    out.push_str("\"documentLinkProvider\":{\"resolveProvider\":false},");
+    out.push_str("\"definitionProvider\":true,\"declarationProvider\":true,\"typeDefinitionProvider\":true,\"implementationProvider\":{\"workDoneProgress\":true},");
+    out.push_str("\"referencesProvider\":{\"workDoneProgress\":true},\"documentHighlightProvider\":true,\"renameProvider\":{\"prepareProvider\":true,\"workDoneProgress\":true},");
+    out.push_str("\"callHierarchyProvider\":{\"workDoneProgress\":true},\"typeHierarchyProvider\":{\"workDoneProgress\":true},");
+    if (client.code_action_literals) { out.push_str("\"codeActionProvider\":{\"codeActionKinds\":[\"quickfix\"],\"workDoneProgress\":true},"); }
+    out.push_str("\"documentFormattingProvider\":true,\"documentRangeFormattingProvider\":{\"rangesSupport\":true},");
+    out.push_str("\"documentOnTypeFormattingProvider\":{\"firstTriggerCharacter\":\"\\n\",\"moreTriggerCharacter\":[\"}\",\";\"]},");
+    out.push_str("\"foldingRangeProvider\":true,\"selectionRangeProvider\":true,\"inlayHintProvider\":true,");
+    out.push_str("\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"]},\"completionProvider\":{\"resolveProvider\":true,\"triggerCharacters\":[\".\",\":\",\" \",\"{\",\",\"]}");
+    if (client.pull_diagnostics) { out.push_str(",\"diagnosticProvider\":{\"identifier\":\"silver\",\"interFileDependencies\":true,\"workspaceDiagnostics\":true,\"workDoneProgress\":true}"); }
+    if (client.semantic.full != SemanticFullMode.Disabled || client.semantic.range) {
+        out.push_str(",\"semanticTokensProvider\":{\"legend\":{\"tokenTypes\":[");
+        i64 i = 0;
+        while (i < client.semantic.types.len()) {
+            if (i > 0) { out.push(','); } out.push('"'); out.push_str(client.semantic.types.get(i)); out.push('"'); i += 1;
+        }
+        out.push_str("],\"tokenModifiers\":["); i = 0;
+        while (i < client.semantic.modifiers.len()) {
+            if (i > 0) { out.push(','); } out.push('"'); out.push_str(client.semantic.modifiers.get(i)); out.push('"'); i += 1;
+        }
+        out.push_str("]}");
+        if (client.semantic.full == SemanticFullMode.Full) { out.push_str(",\"full\":true"); }
+        else if (client.semantic.full == SemanticFullMode.Delta) { out.push_str(",\"full\":{\"delta\":true}"); }
+        if (client.semantic.range) { out.push_str(",\"range\":true"); }
+        out.push('}');
+    }
+    out.push_str("},");
+    out.push_str("\"serverInfo\":{\"name\":\"aglsp\",\"version\":\"0.2.6\"}}");
+    return move out;
+}

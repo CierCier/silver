@@ -14,7 +14,6 @@ use inkwell::values::{
 use crate::codegen::SilverGenerator;
 use crate::codegen::llvm_ir::LlvmIrGenerator;
 use crate::codegen::llvm_ir::VarInfo;
-use crate::codegen::llvm_ir::{DeferAction, DeferredEntry};
 use crate::codegen::{CodegenError, CodegenResult};
 use crate::diagnostics::messages as msg;
 use crate::lexer::Span;
@@ -763,6 +762,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let llvm_name = self.effective_function_symbol(name);
                 let func = self.module.get_function(llvm_name);
                 if let Some(f) = func {
+                    let signature = self.signature_for_name(name)
+                        .or_else(|| self.signature_for_name(llvm_name));
+                    let f = if let Some(signature) = signature {
+                        self.imported_reference_function_value(f, name, &signature)?
+                    } else { f };
                     return Ok(f.as_global_value().as_pointer_value().as_basic_value_enum());
                 }
                 Err(CodegenError::with_span(
@@ -813,12 +817,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                     value_ty = *pointer.inner.clone();
                                 }
                                 ast::TypeKind::Reference(reference) => {
-                                    let llvm_ty = self.lower_basic_type(&value_ty)?;
+                                    let llvm_ty = self.lower_basic_type(&reference.inner)?;
+                                    let data = self.reference_data(value, object.span)?;
                                     value = self
                                         .builder
                                         .build_load(
                                             llvm_ty,
-                                            value.into_pointer_value(),
+                                            data,
                                             "str.ref.load",
                                         )
                                         .map_err(|e| {
@@ -1078,11 +1083,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         )
                     })
                 } else {
-                    if self.expression_is_unsigned(expression) {
-                        self.cast_unsigned_value_to_ast_type(source, target_type, &expr.span)
-                    } else {
-                        self.cast_value_to_ast_type(source, target_type, &expr.span)
-                    }
+                    self.cast_expr_to_ast_type(source, Some(expression), target_type, &expr.span)
                 }
             }
             ast::ExpressionKind::If {
@@ -1128,6 +1129,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .map(|t| matches!(t.kind.as_ref(), ast::TypeKind::Pointer(_)))
                     .unwrap_or(false);
                 if is_pointer {
+                    let fallback = ast::Expression {
+                        kind: Box::new(ast::ExpressionKind::Cast {
+                            expression: fallback.clone(),
+                            target_type: Box::new(
+                                val_ty.clone().expect("resolved pointer result type"),
+                            ),
+                        }),
+                        span: fallback.span,
+                    };
                     let null_expr = ast::Expression {
                         kind: Box::new(ast::ExpressionKind::Literal(ast::Literal::Integer(0))),
                         span: value.span,
@@ -1149,7 +1159,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     };
                     let else_block = ast::Block {
                         statements: vec![ast::Statement {
-                            kind: ast::StatementKind::Expression((**fallback).clone()),
+                            kind: ast::StatementKind::Expression(fallback.clone()),
                             span: fallback.span,
                         }],
                         span: fallback.span,
@@ -1297,10 +1307,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 // For pointer types, use resolve_lvalue_ptr (load the pointer, GEP)
                 let object_ty = self.resolve_receiver_type(object);
                 if let Some(ty) = &object_ty
-                    && matches!(
-                        ty.kind.as_ref(),
-                        ast::TypeKind::Pointer(_) | ast::TypeKind::Array(_) | ast::TypeKind::Tuple(_)
-                    )
+                    && Self::has_builtin_place_index(ty)
                 {
                     if let Ok((ptr, ty)) = self.resolve_lvalue_ptr(expr) {
                         let llvm_ty = self.lower_basic_type(&ty)?;
@@ -1415,7 +1422,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     }
 
                     if let ast::TypeKind::Array(array) = actual_kind {
-                        let (base_ptr, _) = self.resolve_lvalue_ptr(object)?;
+                        let place = self.resolve_lvalue_place(object)?;
+                        let place = self.dereference_reference_place(place, object.span)?;
+                        let base_ptr = place.ptr;
                         let elem_ty = self.lower_basic_type(&array.element_type)?;
                         let len_val = i64_ty.const_int(array.size as u64, false);
                         return self.emit_slice_construct(
@@ -1431,6 +1440,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
                     if matches!(actual_kind, ast::TypeKind::Primitive(ast::PrimitiveType::Str)) {
                         let base_val = self.emit_expression_value(object)?;
+                        let base_val = self.load_reference_value(base_val, ty.clone(), object.span)?;
                         let base_ptr = base_val.into_pointer_value();
                         let elem_ty = self.context.i8_type().as_basic_type_enum();
                         let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -1465,6 +1475,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
                     if let ast::TypeKind::Slice(slice) = actual_kind {
                         let slice_val = self.emit_expression_value(object)?;
+                        let slice_val = self.load_reference_value(slice_val, ty.clone(), object.span)?;
                         let slice_struct = slice_val.into_struct_value();
                         let base_ptr = self
                             .builder
@@ -1519,31 +1530,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 result.ok_or_else(|| CodegenError::with_span("__slice_get returned void", expr.span))
             }
             ast::ExpressionKind::Reference { expression, .. } => {
-                let (ptr, operand_ty) = self.resolve_lvalue_ptr(expression)?;
-                // Reborrow: `&` of an already-reference-typed place passes the
-                // stored pointer through. Taking the slot address would hand
-                // the callee a pointer-to-pointer it reads as the referent.
-                if matches!(
-                    operand_ty.kind.as_ref(),
-                    ast::TypeKind::Reference(_)
-                ) {
-                    let ptr_ty = self.context.ptr_type(AddressSpace::default());
-                    if self.lvalue_is_volatile(expression) {
-                        return self.emit_volatile_load(
-                            ptr_ty.as_basic_type_enum(),
-                            ptr,
-                            "reborrow",
-                        );
-                    }
-                    let loaded = self.builder.build_load(ptr_ty, ptr, "reborrow").map_err(|e| {
-                        CodegenError::with_span(
-                            format!("failed to reborrow reference: {e}"),
-                            expr.span,
-                        )
-                    })?;
-                    return Ok(loaded.as_basic_value_enum());
-                }
-                Ok(ptr.as_basic_value_enum())
+                let place = self.resolve_lvalue_place(expression)?;
+                // Taking the reference slot's address would change the
+                // referent. Reborrows preserve the stored address and node.
+                let volatile = self.lvalue_is_volatile(expression);
+                self.reference_to_place(place, expr.span, volatile)
             }
             ast::ExpressionKind::MacroCall { name, args } => {
                 if let Some(result) =
@@ -1561,6 +1552,22 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 expr.span,
             )),
             ast::ExpressionKind::Move(inner) => {
+                if self.owner_place(inner)?.is_none() {
+                    let place = self.resolve_lvalue_place(inner)?;
+                    let value_type = self.lower_basic_type(&place.ty)?;
+                    let value = if self.lvalue_is_volatile(inner) {
+                        self.emit_volatile_load(value_type, place.ptr, "move.value")?
+                    } else {
+                        self.builder.build_load(value_type, place.ptr, "move.value")
+                            .map_err(|e| CodegenError::with_span(e.to_string(), inner.span))?
+                    };
+                    if let Some(state) = place.state {
+                        self.move_borrowed_place(place.ptr, &place.ty, state, inner.span)?;
+                    }
+                    // Match payload bindings can still carry a legacy drop flag.
+                    self.clear_drop_flag_of(inner)?;
+                    return Ok(value);
+                }
                 let value = self.emit_expression_value(inner)?;
                 if let ast::ExpressionKind::Identifier(ident) = inner.kind.as_ref() {
                     if let Some(flag_ptr) =
@@ -2051,7 +2058,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::I64)),
                 span: *span,
             };
-            let i64_val = self.cast_value_to_ast_type(value, &i64_ty_ast, span)?;
+            let i64_val = self.cast_expr_to_ast_type(value, Some(input), &i64_ty_ast, span)?;
             args.push(BasicMetadataValueEnum::from(i64_val));
         }
 
@@ -3329,11 +3336,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                             );
                                         }
                                         if is_move {
-                                            self.register_drop_flag(
-                                                &binding.name,
-                                                &concrete_pt,
-                                                alloca,
-                                            )?;
+                                            if !self.register_owner_state(binding, &concrete_pt, alloca, true)? {
+                                                self.register_drop_flag(&binding.name, &concrete_pt, alloca)?;
+                                            }
+                                        } else {
+                                            // The selected tag guarantees an initialized payload;
+                                            // the matched enum retains ownership of it.
+                                            self.borrowed_binding_states.insert(
+                                                alloca, self.initialized_reference_state(),
+                                            );
                                         }
                                         // Move-out: null the payload slot in the
                                         // ORIGINAL scrutinee storage so ownership
@@ -3366,6 +3377,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                                             "clear moved-out flag: {e}"
                                                         ))
                                                     })?;
+                                            }
+                                            if let ast::ExpressionKind::Identifier(ident) =
+                                                expression.kind.as_ref()
+                                            {
+                                                self.clear_field_flags(&ident.name)?;
                                             }
                                             let orig_data = self
                                                 .builder
@@ -3483,7 +3499,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     )
                 })?;
 
-                let inferred = self.infer_ast_type_from_value(&scrutinee, &identifier.span);
+                let inferred = self
+                    .resolve_argument_type(expression)
+                    .unwrap_or_else(|| self.infer_ast_type_from_value(&scrutinee, &identifier.span));
                 if let Some(scope) = self.variables.last_mut() {
                     scope.insert(
                         identifier.name.clone(),
@@ -3624,10 +3642,26 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         &mut self,
         expr: &ast::Expression,
     ) -> CodegenResult<(PointerValue<'ctx>, ast::Type)> {
+        let place = self.resolve_lvalue_place(expr)?;
+        Ok((place.ptr, place.ty))
+    }
+
+    pub(crate) fn resolve_lvalue_place(
+        &mut self,
+        expr: &ast::Expression,
+    ) -> CodegenResult<super::reference::ResolvedPlace<'ctx>> {
+        use super::reference::ResolvedPlace;
         match expr.kind.as_ref() {
             ast::ExpressionKind::Identifier(identifier) => {
-                if let Some(storage) = self.lookup_storage(&identifier.name) {
-                    return Ok(storage);
+                if let Some((ptr, ty)) = self.lookup_storage(&identifier.name) {
+                    let mut state = self.owner_node_for_expression(expr)?
+                        .or_else(|| self.owner_node_for_storage(ptr));
+                    if state.is_none() && self.lookup_variable(&identifier.name).is_none()
+                        && self.global_variables.contains_key(&identifier.name)
+                    {
+                        state = Some(self.initialized_reference_state());
+                    }
+                    return Ok(ResolvedPlace { ptr, ty, state, raw: false });
                 }
                 let name = &identifier.name;
                 let llvm_name = self.effective_function_symbol(name);
@@ -3649,7 +3683,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         })),
                         span: identifier.span,
                     };
-                    return Ok((f.as_global_value().as_pointer_value(), fn_ty));
+                    return Ok(ResolvedPlace { ptr: f.as_global_value().as_pointer_value(), ty: fn_ty, state: None, raw: false });
                 }
                 Err(CodegenError::with_span(
                     format!("unknown variable `{}`", identifier.name),
@@ -3657,8 +3691,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 ))
             }
             ast::ExpressionKind::FieldAccess { object, field } => {
-                let (object_ptr, object_ty) = match self.resolve_lvalue_ptr(object) {
-                    Ok(res) => res,
+                let (object_ptr, object_ty, mut object_state, mut object_raw) = match self.resolve_lvalue_place(object) {
+                    Ok(res) => (res.ptr, res.ty, res.state, res.raw),
                     Err(_) => {
                         let value = self.emit_expression_value(object)?;
                         let ty = self
@@ -3684,30 +3718,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 object.span,
                             )
                         })?;
-                        if let Some(drop_fn_name) = self.get_drop_function_name(&ty)? {
-                            let flag_name = format!("field.rvalue.tmp.{}.drop", self.temp_counter);
-                            self.temp_counter += 1;
-                            let flag_alloca = self.create_entry_alloca(
-                                function_ctx,
-                                &flag_name,
-                                self.context.bool_type().as_basic_type_enum(),
-                            )?;
-                            self.builder
-                                .build_store(
-                                    flag_alloca,
-                                    self.context.bool_type().const_int(1, false),
-                                )
-                                .map_err(|e| {
-                                    CodegenError::new(format!("failed to init temp drop flag: {e}"))
-                                })?;
-                            if let Some(scope) = self.defers.last_mut() {
-                                scope.push(DeferredEntry {
-                                    action: DeferAction::DropCall(drop_fn_name, temp),
-                                    flag: Some(flag_alloca),
-                                });
-                            }
-                        }
-                        (temp, ty)
+                        let name = format!("field.rvalue.tmp.{}", self.temp_counter);
+                        self.temp_counter += 1;
+                        self.register_owner_state(
+                            &ast::Identifier { name, span: object.span }, &ty, temp, true,
+                        )?;
+                        let state = self.owner_node_for_storage(temp);
+                        (temp, ty, state, false)
                     }
                 };
                 // Fast path for builtin Slice<T> pseudo-fields `data` and `len`.
@@ -3720,9 +3737,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             let loaded = self.builder.build_load(ref_llvm_ty, object_ptr, "field.ref.load").map_err(|e| {
                                 CodegenError::with_span(format!("failed to load reference receiver: {e}"), object.span)
                             })?;
-                            let BasicValueEnum::PointerValue(struct_ptr) = loaded else {
-                                return Err(CodegenError::with_span("reference receiver did not lower to a pointer", object.span));
-                            };
+                            let struct_ptr = self.reference_data(loaded, object.span)?;
+                            object_state = Some(self.reference_state(loaded, object.span)?);
+                            object_raw = false;
                             Some((struct_ptr, slice.element_type.clone(), true))
                         } else { None }
                     }
@@ -3760,7 +3777,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     let field_ptr = self.builder.build_struct_gep(struct_ty, slice_ptr, field_index, &field.name).map_err(|e| {
                         CodegenError::with_span(format!("failed struct field access: {e}"), field.span)
                     })?;
-                    return Ok((field_ptr, field_ty));
+                    return Ok(ResolvedPlace { ptr: field_ptr, ty: field_ty, state: None, raw: object_raw });
                 }
                 let (struct_ptr, named) = match object_ty.kind.as_ref() {
                     ast::TypeKind::Named(named) => (object_ptr, named),
@@ -3781,15 +3798,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                     object.span,
                                 )
                             })?;
-                        let BasicValueEnum::PointerValue(struct_ptr) = loaded else {
-                            return Err(CodegenError::with_span(
-                                "reference receiver did not lower to a pointer",
-                                object.span,
-                            ));
-                        };
+                        let struct_ptr = self.reference_data(loaded, object.span)?;
+                        object_state = Some(self.reference_state(loaded, object.span)?);
+                        object_raw = false;
                         (struct_ptr, named)
                     }
                     ast::TypeKind::Pointer(pointer) => {
+                        object_state = None;
+                        object_raw = true;
                         let ast::TypeKind::Named(named) = pointer.inner.kind.as_ref() else {
                             return Err(CodegenError::with_span(
                                 "field access on pointer requires a struct pointee",
@@ -3861,7 +3877,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         })?
                 };
 
-                Ok((field_ptr, field_ty.clone()))
+                let field_ty = field_ty.clone();
+                let state = object_state.map(|node| self.project_reference_state(
+                    node, self.context.i32_type().const_int(field_index as u64, false),
+                )).transpose()?;
+                Ok(ResolvedPlace { ptr: field_ptr, ty: field_ty, state, raw: object_raw })
             }
             ast::ExpressionKind::Unary {
                 operator: ast::UnaryOperator::Dereference,
@@ -3874,10 +3894,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     )
                 })?;
                 let loaded_ptr = self.emit_expression_value(operand)?;
-                let BasicValueEnum::PointerValue(ptr) = loaded_ptr else {
+                let ptr = if matches!(operand_ty.kind.as_ref(), ast::TypeKind::Reference(_)) {
+                    self.reference_data(loaded_ptr, operand.span)?
+                } else if let BasicValueEnum::PointerValue(ptr) = loaded_ptr {
+                    ptr
+                } else {
                     return Err(CodegenError::with_span(
-                        "dereference operand must be a pointer or reference value",
-                        expr.span,
+                        "dereference operand must be a pointer or reference value", expr.span,
                     ));
                 };
                 let inner_ty = match operand_ty.kind.as_ref() {
@@ -3890,10 +3913,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         ));
                     }
                 };
-                Ok((ptr, inner_ty))
+                let state = if matches!(operand_ty.kind.as_ref(), ast::TypeKind::Reference(_)) {
+                    Some(self.reference_state(loaded_ptr, operand.span)?)
+                } else { None };
+                Ok(ResolvedPlace { ptr, ty: inner_ty, state, raw: state.is_none() })
             }
             ast::ExpressionKind::Index { object, index } => {
-                let (object_ptr, object_ty) = self.resolve_lvalue_ptr(object)?;
+                let object_place = self.resolve_lvalue_place(object)?;
+                let object_place = self.dereference_reference_place(object_place, object.span)?;
+                let (object_ptr, object_ty, object_state) = (object_place.ptr, object_place.ty, object_place.state);
                 match object_ty.kind.as_ref() {
                     ast::TypeKind::Slice(_slice) => Err(CodegenError::with_span(
                         "indexing Slice through resolve_lvalue_ptr is not supported — use the trait path (__index_get)",
@@ -3951,7 +3979,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 index.span,
                             )
                         })?;
-                        Ok((element_ptr, (*pointer.inner).clone()))
+                        Ok(ResolvedPlace { ptr: element_ptr, ty: (*pointer.inner).clone(), state: None, raw: true })
                     }
                     ast::TypeKind::Array(array) => {
                         let index_value = self.emit_expression_value(index)?;
@@ -4025,7 +4053,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 index.span,
                             )
                         })?;
-                        Ok((element_ptr, (*array.element_type).clone()))
+                        let state = object_state.map(|node| self.project_reference_state(node, index_i64)).transpose()?;
+                        Ok(ResolvedPlace { ptr: element_ptr, ty: (*array.element_type).clone(), state, raw: object_place.raw })
                     }
                     ast::TypeKind::Tuple(types) => {
                         let idx = match index.kind.as_ref() {
@@ -4066,7 +4095,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                     index.span,
                                 )
                             })?;
-                        Ok((element_ptr, types[idx as usize].clone()))
+                        let state = object_state.map(|node| self.project_reference_state(
+                            node, self.context.i32_type().const_int(idx as u64, false),
+                        )).transpose()?;
+                        Ok(ResolvedPlace { ptr: element_ptr, ty: types[idx as usize].clone(), state, raw: object_place.raw })
                     }
                     _ => Err(CodegenError::with_span(
                         "index access currently supports only array, pointer, and tuple values",

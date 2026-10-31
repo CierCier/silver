@@ -1824,9 +1824,17 @@ pub fn run(cli: Cli) {
                 profiler::begin_phase("safety");
                 // Move-out checker: use-after-move of non-copyable values is
                 // a use-after-free, reported alongside type errors.
-                let escape_errors = crate::semantic::escape_check::check_program(&ast);
-                if !escape_errors.is_empty() {
-                    for error in &escape_errors {
+                // Typeck's lambda, inferred-let, constructor, and monomorph
+                // passes preserve source call spans; generated bodies are
+                // checked before this point. A rewrite that changes call
+                // dispatch must refresh the typecheck-owned resolution map.
+                let resolved_callables = checker.resolved_callables();
+                let escape_report = crate::semantic::escape_check::analyze_program_with_callables(
+                    &ast,
+                    resolved_callables,
+                );
+                if !escape_report.errors.is_empty() {
+                    for error in &escape_report.errors {
                         eprintln!(
                             "{}",
                             diagnostics::render(
@@ -1839,12 +1847,12 @@ pub fn run(cli: Cli) {
                     std::process::exit(2);
                 }
 
-                let move_errors = crate::semantic::move_check::check_program_with_imports(
+                let move_report = crate::semantic::move_check::analyze_program_with_imports(
                     &ast,
                     &imported_modules,
                 );
-                if !move_errors.is_empty() {
-                    for error in &move_errors {
+                if !move_report.errors.is_empty() {
+                    for error in &move_report.errors {
                         eprintln!(
                             "{}",
                             diagnostics::render_with_note(
@@ -1859,7 +1867,11 @@ pub fn run(cli: Cli) {
                     std::process::exit(2);
                 }
 
-                let borrow_errors = crate::semantic::borrow_check::check_program(&ast);
+                let borrow_errors = crate::semantic::borrow_check::check_program_with_resolved_calls(
+                    &ast,
+                    &escape_report.return_origins,
+                    resolved_callables,
+                );
                 if !borrow_errors.is_empty() {
                     for error in &borrow_errors {
                         eprintln!(
@@ -2062,6 +2074,7 @@ pub fn run(cli: Cli) {
                                 plan.debug_info,
                                 plan.leak_check,
                                 true,
+                                Some(&move_report.init_plan),
                             );
                         if let Err(error) = result {
                             if let Some(span) = error.span {
@@ -2102,6 +2115,7 @@ pub fn run(cli: Cli) {
                                 plan.debug_info,
                                 plan.leak_check,
                                 false,
+                                Some(&move_report.init_plan),
                             );
                         if let Err(error) = result {
                             if let Some(span) = error.span {
@@ -2210,6 +2224,7 @@ pub fn run(cli: Cli) {
                                     Some(&src),
                                     plan.debug_info,
                                     plan.leak_check,
+                                    Some(&move_report.init_plan),
                                 );
                             if let Some(p) = &active_progress {
                                 if result.is_ok() {
@@ -2255,6 +2270,7 @@ pub fn run(cli: Cli) {
                                     Some(&src),
                                     plan.debug_info,
                                     plan.leak_check,
+                                    Some(&move_report.init_plan),
                                 );
                         profiler::end_phase("codegen");
                         if let Err(error) = result {
@@ -2283,6 +2299,7 @@ pub fn run(cli: Cli) {
                                 plan.debug_info,
                                 plan.leak_check,
                                 plan.target.as_deref(),
+                                Some(&move_report.init_plan),
                             );
                         profiler::end_phase("codegen");
                         match output {
@@ -2402,6 +2419,7 @@ pub fn run(cli: Cli) {
                                     Some(&src),
                                     plan.debug_info,
                                     plan.leak_check,
+                                    Some(&move_report.init_plan),
                                 );
                             if let Some(p) = &active_progress {
                                 if result.is_ok() {

@@ -1,0 +1,145 @@
+import document;
+import json_rpc;
+
+void append_location(String* out, Document* doc, Span span) {
+    out.push_str("{\"uri\":\""); json_escape(doc.uri.to_str(), out);
+    out.push_str("\",\"range\":"); doc.append_range(out, span); out.push('}');
+}
+
+String compute_document_links(DocumentStore* store, Document* doc, bool tooltip) {
+    CfgSet cfg = linux_defaults(); Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
+    cfg_collect_items(doc.analysis.tree.root, &cfg, (DiagnosticBag*)0, &items);
+    String out = String.from_str("["); bool comma = false; i64 i = 0;
+    while (i < items.len()) {
+        SyntaxNode* item = items.get(i);
+        if (item.kind == NodeKind.Import) {
+            String name = cfg_import_name_from_item(item);
+            String path = resolve_document_import(store, doc, name.to_str());
+            if (name.len() > 0 && path.len() > 0 && !path.ends_with(".agm")) {
+                SyntaxNode* part = item.first_child;
+                while (part != (SyntaxNode*)0 && part.token_kind != TokenKind.Import) { part = part.next_sibling; }
+                part = part == (SyntaxNode*)0 ? (SyntaxNode*)0 : part.next_sibling;
+                Span range = Span.synthetic(); bool started = false;
+                while (part != (SyntaxNode*)0 && part.kind == NodeKind.Token
+                    && (part.token_kind == TokenKind.Identifier || part.token_kind == TokenKind.Dot)) {
+                    if (!started) { range = part.span; started = true; } else { range.end = part.span.end; }
+                    part = part.next_sibling;
+                }
+                if (started) {
+                    if (comma) { out.push(','); } comma = true;
+                    out.push_str("{\"range\":"); doc.append_range(&out, range);
+                    String uri = path_to_file_uri(path.to_str()); out.push_str(",\"target\":\""); json_escape(uri.to_str(), &out); out.push('"');
+                    if (tooltip) { out.push_str(",\"tooltip\":\"Open module "); json_escape(name.to_str(), &out); out.push('"'); }
+                    out.push('}');
+                }
+            }
+        }
+        i += 1;
+    }
+    out.push(']'); return move out;
+}
+
+bool same_target(SymbolTarget left, SymbolTarget right) {
+    return left.symbol >= 0 && left.symbol == right.symbol && left.document == right.document;
+}
+
+SymbolTarget type_definition_target(SymbolTarget target) {
+    if (target.symbol < 0) { return target; }
+    IdeSymbol* symbol = target.document.analysis.symbols.get_ptr(target.symbol);
+    if (ide_type_symbol(symbol.kind) && symbol.kind != IdeSymbolKind.TypeAlias) { return target; }
+    if (symbol.type_owner.len() > 0) {
+        target = visible_type_name(target.document, symbol.type_owner.to_str(), symbol.selection.start);
+        if (target.symbol >= 0 && ide_type_symbol(target.document.analysis.symbols.get_ptr(target.symbol).kind)) { return target; }
+    }
+    target.symbol = -1; return target;
+}
+
+i64 containing_implementation(SymbolTarget target) {
+    if (target.symbol < 0) { return -1; }
+    target.document.ensure_syntax();
+    Span span = target.document.analysis.symbols.get_ptr(target.symbol).extent; i64 i = 0;
+    while (i < target.document.analysis.implementations.len()) {
+        IdeImplementation* implementation = target.document.analysis.implementations.get_ptr(i);
+        if (implementation.node.span.start <= span.start && span.end <= implementation.node.span.end) { return i; }
+        i += 1;
+    }
+    return -1;
+}
+
+SymbolTarget method_in_extent(Document* doc, str name, Span extent) {
+    SymbolTarget target; target.document = doc; target.symbol = -1;
+    i64 i = ide_name_head(&doc.analysis, name);
+    while (i >= 0) {
+        IdeSymbol* method = doc.analysis.symbols.get_ptr(i);
+        if (method.kind == IdeSymbolKind.Method && extent.start <= method.extent.start && method.extent.end <= extent.end) {
+            if (target.symbol == -1) { target.symbol = i; } else { target.symbol = -2; }
+        }
+        i = doc.analysis.next_name.get(i);
+    }
+    return target;
+}
+
+SymbolTarget declaration_target(SymbolTarget target) {
+    if (target.symbol < 0) { return target; }
+    IdeSymbol* symbol = target.document.analysis.symbols.get_ptr(target.symbol);
+    if (symbol.kind != IdeSymbolKind.Method) { return target; }
+    i64 implementation_index = containing_implementation(target);
+    if (implementation_index < 0) { return target; }
+    IdeImplementation* implementation = target.document.analysis.implementations.get_ptr(implementation_index);
+    if (implementation.trait_name == (SyntaxNode*)0) { return target; }
+    SymbolTarget trait_target = resolve_occurrence(target.document,
+        target.document.analysis.occurrence_at(implementation.trait_name.span.start));
+    if (trait_target.symbol < 0) { return trait_target; }
+    IdeSymbol* trait_symbol = trait_target.document.analysis.symbols.get_ptr(trait_target.symbol);
+    if (trait_symbol.kind != IdeSymbolKind.Trait) { trait_target.symbol = -1; return trait_target; }
+    return method_in_extent(trait_target.document, symbol.name.to_str(), trait_symbol.extent);
+}
+
+String target_location(SymbolTarget target) {
+    if (target.symbol < 0) { return String.from_str("null"); }
+    String out = String.new(); append_location(&out, target.document, target.document.analysis.symbols.get_ptr(target.symbol).selection);
+    return move out;
+}
+
+String compute_implementations(DocumentStore* store, Document* context, SymbolTarget selected) {
+    selected = declaration_target(selected);
+    String out = String.from_str("["); bool first = true;
+    if (selected.symbol < 0) { out.push(']'); return move out; }
+    IdeSymbol* symbol = selected.document.analysis.symbols.get_ptr(selected.symbol);
+    i64 containing_index = containing_implementation(selected);
+    IdeImplementation* containing = containing_index < 0 ? (IdeImplementation*)0
+        : selected.document.analysis.implementations.get_ptr(containing_index);
+    if (symbol.has_body && (symbol.kind == IdeSymbolKind.Function
+        || (symbol.kind == IdeSymbolKind.Method && containing != (IdeImplementation*)0 && containing.trait_name == (SyntaxNode*)0))) {
+        append_location(&out, selected.document, symbol.selection); out.push(']'); return move out;
+    }
+    SymbolTarget trait_target = selected;
+    bool method = symbol.kind == IdeSymbolKind.Method;
+    if (method) { trait_target = visible_name(selected.document, symbol.owner.to_str(), symbol.selection.start); }
+    Vec<Document*> documents = store.query_documents(context);
+    i64 i = 0;
+    while (i < documents.len()) {
+        Document* candidate = documents.get(i); candidate.ensure_syntax(); i64 j = 0;
+        while (j < candidate.analysis.implementations.len()) {
+            IdeImplementation* implementation = candidate.analysis.implementations.get_ptr(j);
+            SyntaxNode* match_node = symbol.kind == IdeSymbolKind.Trait || method ? implementation.trait_name : implementation.target;
+            if (match_node != (SyntaxNode*)0) {
+                SymbolTarget resolved = resolve_occurrence(candidate, candidate.analysis.occurrence_at(match_node.span.start));
+                if (same_target(resolved, method ? trait_target : selected)) {
+                    Span location = implementation.target.span; bool found = true;
+                    if (method) {
+                        SymbolTarget implemented = method_in_extent(candidate, symbol.name.to_str(), implementation.node.span);
+                        found = implemented.symbol >= 0;
+                        if (found) { location = candidate.analysis.symbols.get_ptr(implemented.symbol).selection; }
+                    }
+                    if (found) {
+                        if (!first) { out.push(','); } first = false; append_location(&out, candidate, location);
+                    }
+                }
+            }
+            j += 1;
+        }
+        candidate.compact(); i += 1;
+    }
+    out.push(']'); return move out;
+}

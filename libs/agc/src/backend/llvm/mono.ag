@@ -265,6 +265,8 @@ LLVMOpaqueValue* mono_ensure_free_function(LlvmContext* ctx, str base, Vec<u32>*
     LLVMOpaqueType* ret_ty = llvm_lower_type(ctx.ctx, ctx.types, ret_id);
     Vec<Binding> params = Vec<Binding>.new();
     collect_parameter_bindings(template.params_node, &params);
+    bool owner_state_abi = bindings_need_borrow_owner_state(
+        template.body_node, &params, template.name_node.text);
     Vec<LLVMOpaqueType*> param_types = Vec<LLVMOpaqueType*>.new();
     i = 0;
     while (i < params.len()) {
@@ -281,6 +283,16 @@ LLVMOpaqueValue* mono_ensure_free_function(LlvmContext* ctx, str base, Vec<u32>*
         param_types.push(llvm_lower_type(ctx.ctx, ctx.types, type_id));
         param_text.drop();
         i += 1;
+    }
+    if (owner_state_abi) {
+        LLVMOpaqueType* state_map_type = LLVMPointerTypeInContext(ctx.ctx, 0);
+        i = 0;
+        while (i < params.len()) {
+            if (params.get_ptr(i).declared_type.kind == ProjectionTypeKind.Reference) {
+                param_types.push(state_map_type);
+            }
+            i += 1;
+        }
     }
     params.drop();
     LLVMOpaqueType* fn_type = LLVMFunctionType(ret_ty, param_types.data, (u32)param_types.len(), 0);
@@ -569,6 +581,19 @@ bool mono_layout_seen(Vec<u32>* layout_ids, u32 type_id) {
         i += 1;
     }
     return false;
+}
+
+void mono_enum_payload_types(LlvmContext* ctx, u32 type_id, str variant,
+                              Vec<u32>* payloads) {
+    TypeEntry instance = *ctx.types.get(type_id);
+    str base = ctx.types.names.get(instance.name_id);
+    Vec<u32> parameters = Vec<u32>.new();
+    if (!mono_push_owner_type_arguments(ctx.root, ctx.types, type_id, &parameters)) {
+        ctx.note_unresolved("enum-payload-type", base);
+        return;
+    }
+    llvm_enum_payload_types(ctx.types, ctx.root, base, variant, payloads);
+    ctx.types.pop_subst(parameters.len());
 }
 
 u32 mono_resolve_struct_field_type(LlvmContext* ctx, u32 struct_type_id, u32 field_type_id) {

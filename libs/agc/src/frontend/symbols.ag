@@ -9,6 +9,7 @@ import frontend.ast;
 import frontend.diagnostics;
 import frontend.cfg;
 import frontend.types;
+import frontend.place;
 
 enum SymbolKind {
     Function;
@@ -34,6 +35,7 @@ struct SymbolTable {
     Vec<Symbol> symbols;
     TypeTable types;
     Vec<i64> index_by_name_id;
+    Vec<InitOwnerPlan> init_owner_plans;
 }
 
 impl SymbolTable {
@@ -43,6 +45,7 @@ impl SymbolTable {
         table.symbols = Vec<Symbol>.new();
         table.types = TypeTable.new();
         table.index_by_name_id = Vec<i64>.new();
+        table.init_owner_plans = Vec<InitOwnerPlan>.new();
         return move table;
     }
 
@@ -60,6 +63,12 @@ impl SymbolTable {
         i = 0;
         while (i < self.index_by_name_id.len()) {
             copy.index_by_name_id.push(self.index_by_name_id.get(i));
+            i += 1;
+        }
+        copy.init_owner_plans = Vec<InitOwnerPlan>.with_capacity(self.init_owner_plans.len());
+        i = 0;
+        while (i < self.init_owner_plans.len()) {
+            copy.init_owner_plans.push(self.init_owner_plans.get_ptr(i).clone());
             i += 1;
         }
         return move copy;

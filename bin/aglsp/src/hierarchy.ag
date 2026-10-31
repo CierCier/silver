@@ -1,0 +1,140 @@
+import navigation;
+import symbols;
+import completion;
+import params;
+import transport;
+
+bool callable_symbol(IdeSymbolKind kind) {
+    return kind == IdeSymbolKind.Function || kind == IdeSymbolKind.Method;
+}
+
+void append_hierarchy_item(String* out, SymbolTarget target) {
+    Document* doc = target.document; IdeSymbol* symbol = doc.analysis.symbols.get_ptr(target.symbol);
+    out.push_str("{\"name\":\"");
+    if (symbol.owner.len() > 0) { json_escape(symbol.owner.to_str(), out); out.push('.'); }
+    json_escape(symbol.name.to_str(), out); out.push_str("\",\"kind\":");
+    i64 kind = symbol_kind(symbol.kind); out.push_display(&kind);
+    out.push_str(",\"detail\":\""); json_escape(symbol.signature.to_str(), out);
+    out.push_str("\",\"uri\":\""); json_escape(doc.uri.to_str(), out);
+    out.push_str("\",\"range\":"); doc.append_range(out, symbol.extent);
+    out.push_str(",\"selectionRange\":"); doc.append_range(out, symbol.selection);
+    out.push_str(",\"data\":{\"uri\":\""); json_escape(doc.uri.to_str(), out);
+    out.push_str("\",\"revision\":"); out.push_display(&doc.revision);
+    out.push_str(",\"selection\":"); out.push_display(&symbol.selection.start); out.push_str("}}");
+}
+
+String prepare_hierarchy(Document* doc, i64 offset, bool calls) {
+    SymbolTarget target = follow_import_alias(resolve_occurrence(doc, doc.analysis.occurrence_at(offset)));
+    if (!calls) { target = type_definition_target(target); }
+    if (target.symbol < 0 || (calls && !callable_symbol(target.document.analysis.symbols.get_ptr(target.symbol).kind))) {
+        return String.from_str("null");
+    }
+    String out = String.from_str("["); append_hierarchy_item(&out, target); out.push(']'); return move out;
+}
+
+i64 hierarchy_target(DocumentStore* store, str params, bool calls, SymbolTarget* target) {
+    String item = json_field(params, "item"); String data = json_field(item.to_str(), "data");
+    String uri = String.new(); String item_uri = String.new(); i64 revision = 0; i64 selection = 0;
+    if (!json_string(data.to_str(), "uri", &uri) || !json_string(item.to_str(), "uri", &item_uri)
+        || !uri.equals(item_uri.to_str()) || !json_integer(data.to_str(), "revision", &revision)
+        || !json_integer(data.to_str(), "selection", &selection) || selection < 0) { return -32602; }
+    Document* doc = store.get(uri.to_str());
+    if (doc == (Document*)0 || doc.revision != revision) { return -32801; }
+    doc.ensure_syntax();
+    Span span = Span.synthetic(); span.start = selection;
+    i64 symbol = ide_find_definition(&doc.analysis, span);
+    if (symbol < 0) { return -32801; }
+    IdeSymbolKind kind = doc.analysis.symbols.get_ptr(symbol).kind;
+    if (calls ? !callable_symbol(kind) : !ide_type_symbol(kind)) { return -32602; }
+    target.document = doc; target.symbol = symbol; return 0;
+}
+
+SymbolTarget enclosing_callable(Document* doc, i64 offset) {
+    SymbolTarget target; target.document = doc; target.symbol = -1; i64 i = 0;
+    while (i < doc.analysis.symbols.len()) {
+        IdeSymbol* symbol = doc.analysis.symbols.get_ptr(i);
+        if (callable_symbol(symbol.kind) && symbol.has_body && symbol.extent.start <= offset && offset < symbol.extent.end) {
+            if (target.symbol < 0 || symbol.extent.end - symbol.extent.start
+                < doc.analysis.symbols.get_ptr(target.symbol).extent.end - doc.analysis.symbols.get_ptr(target.symbol).extent.start) {
+                target.symbol = i;
+            }
+        }
+        i += 1;
+    }
+    return target;
+}
+
+struct CallGroup { SymbolTarget target; Vec<Span> ranges; }
+
+String compute_call_hierarchy(DocumentStore* store, SymbolTarget selected, bool incoming, PendingMessage* pending) {
+    Vec<CallGroup> groups = Vec<CallGroup>.new(); i64 i = 0;
+    Vec<Document*> documents = store.query_documents(selected.document);
+    while (i < documents.len() && !request_interrupted(pending)) {
+        Document* doc = documents.get(i); i64 token = 0;
+        if (!incoming && doc != selected.document) { i += 1; continue; }
+        doc.ensure_syntax();
+        while (token < doc.analysis.tokens.len() && !request_interrupted(pending)) {
+            if (doc.analysis.tokens.get(token).kind == TokenKind.LeftParen) {
+                i64 occurrence = call_occurrence(doc, token);
+                if (occurrence >= 0 && !doc.analysis.occurrences.get_ptr(occurrence).definition) {
+                    SymbolTarget callee = follow_import_alias(resolve_occurrence(doc, occurrence));
+                    Span call = doc.analysis.occurrences.get_ptr(occurrence).node.span;
+                    SymbolTarget caller = enclosing_callable(doc, call.start);
+                    if (callee.symbol >= 0 && callable_symbol(callee.document.analysis.symbols.get_ptr(callee.symbol).kind)
+                        && caller.symbol >= 0 && same_target(incoming ? callee : caller, selected)) {
+                        SymbolTarget grouped = incoming ? caller : callee; i64 group = 0;
+                        while (group < groups.len() && !same_target(groups.get_ptr(group).target, grouped)) { group += 1; }
+                        if (group == groups.len()) {
+                            CallGroup added; added.target = grouped; added.ranges = Vec<Span>.new(); groups.push(move added);
+                        }
+                        groups.get_ptr(group).ranges.push(call);
+                    }
+                }
+            }
+            token += 1;
+        }
+        doc.compact(); i += 1;
+    }
+    String out = String.from_str("["); i = 0;
+    while (i < groups.len() && !request_interrupted(pending)) {
+        CallGroup* group = groups.get_ptr(i);
+        if (i > 0) { out.push(','); }
+        out.push_str(incoming ? "{\"from\":" : "{\"to\":"); append_hierarchy_item(&out, group.target);
+        out.push_str(",\"fromRanges\":["); i64 range = 0;
+        Document* caller = incoming ? group.target.document : selected.document;
+        while (range < group.ranges.len() && !request_interrupted(pending)) {
+            if (range > 0) { out.push(','); }
+            caller.append_range(&out, group.ranges.get(range)); range += 1;
+        }
+        out.push_str("]}"); i += 1;
+    }
+    out.push(']'); return move out;
+}
+
+String compute_type_hierarchy(DocumentStore* store, SymbolTarget selected, bool supers, PendingMessage* pending) {
+    Vec<SymbolTarget> targets = Vec<SymbolTarget>.new(); i64 i = 0;
+    Vec<Document*> documents = store.query_documents(selected.document);
+    while (i < documents.len() && !request_interrupted(pending)) {
+        Document* doc = documents.get(i); doc.ensure_syntax(); i64 j = 0;
+        while (j < doc.analysis.implementations.len() && !request_interrupted(pending)) {
+            IdeImplementation* implementation = doc.analysis.implementations.get_ptr(j);
+            if (implementation.trait_name != (SyntaxNode*)0) {
+                SymbolTarget type_target = resolve_occurrence(doc, doc.analysis.occurrence_at(implementation.target.span.start));
+                SymbolTarget trait_target = resolve_occurrence(doc, doc.analysis.occurrence_at(implementation.trait_name.span.start));
+                if (same_target(supers ? type_target : trait_target, selected)) {
+                    SymbolTarget target = supers ? trait_target : type_target;
+                    if (target.symbol >= 0 && ide_type_symbol(target.document.analysis.symbols.get_ptr(target.symbol).kind)) {
+                        i64 previous = 0;
+                        while (previous < targets.len() && !same_target(targets.get(previous), target)) { previous += 1; }
+                        if (previous == targets.len()) { targets.push(target); }
+                    }
+                }
+            }
+            j += 1;
+        }
+        doc.compact(); i += 1;
+    }
+    String out = String.from_str("["); i = 0;
+    while (i < targets.len() && !request_interrupted(pending)) { if (i > 0) { out.push(','); } append_hierarchy_item(&out, targets.get(i)); i += 1; }
+    out.push(']'); return move out;
+}

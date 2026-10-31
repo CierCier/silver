@@ -72,7 +72,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 object.span,
             );
             if temporary {
-                self.register_drop_flag("$compound.object", object_ty, object_ptr)?;
+                if !self.register_owner_state(
+                    &ast::Identifier { name: "$compound.object".to_string(), span: object.span },
+                    object_ty, object_ptr, true,
+                )? {
+                    self.register_drop_flag("$compound.object", object_ty, object_ptr)?;
+                }
                 self.set_all_field_flags(&object_alias)?;
             }
             let index_ty = self
@@ -230,7 +235,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     }
                 };
                 let pointer_value = self.emit_expression_value(operand)?;
-                let BasicValueEnum::PointerValue(ptr_value) = pointer_value else {
+                let ptr_value = if matches!(operand_ty.kind.as_ref(), ast::TypeKind::Reference(_)) {
+                    self.reference_data(pointer_value, operand.span)?
+                } else if let BasicValueEnum::PointerValue(pointer) = pointer_value {
+                    pointer
+                } else {
                     return Err(CodegenError::with_span(
                         "dereference operand did not lower to a pointer",
                         whole_expr.span,
@@ -438,12 +447,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 // For Index on a non-pointer type, emit __index_set instead of direct store
                 if let ast::ExpressionKind::Index { object, index } = left.kind.as_ref() {
                     let object_ty = self.resolve_receiver_type(object);
-                    if !object_ty.is_some_and(|ty| {
-                        matches!(
-                            ty.kind.as_ref(),
-                            ast::TypeKind::Pointer(_) | ast::TypeKind::Array(_) | ast::TypeKind::Tuple(_)
-                        )
-                    }) {
+                    if !object_ty.is_some_and(|ty| Self::has_builtin_place_index(&ty)) {
                         self.check_assignment_mutability(left)?;
                         let method_ident = ast::Identifier {
                             name: "__index_set".to_string(),
@@ -462,7 +466,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     }
                 }
                 self.check_assignment_mutability(left)?;
-                let (target_ptr, target_ty) = self.resolve_lvalue_ptr(left)?;
+                let target_place = self.resolve_lvalue_place(left)?;
+                let (target_ptr, target_ty) = (target_place.ptr, target_place.ty);
+                let projected_state = if self.owner_place(left)?.is_none() {
+                    target_place.state
+                } else { None };
                 let value = if let ast::ExpressionKind::Initializer { items } = right.kind.as_ref()
                 {
                     self.emit_typed_initializer_value(items, &target_ty, &right.span)?
@@ -470,6 +478,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     let rhs = self.emit_expression_value(right)?;
                     self.cast_expr_to_ast_type(rhs, Some(right), &target_ty, &right.span)?
                 };
+                self.transfer_owner_value(right)?;
                 // Release the value being overwritten so `x = y` on a
                 // Drop-typed x does not leak the old resource (the scope-exit
                 // drop then frees the new value). Skipped for literal
@@ -481,7 +490,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     _ => false,
                 };
                 if !is_self_assign {
-                    self.emit_assignment_pre_drop(left, target_ptr, &target_ty)?;
+                    if let Some(state) = projected_state {
+                        self.emit_borrowed_cleanup(target_ptr, &target_ty, state, left.span)?;
+                    } else {
+                        self.emit_assignment_pre_drop(left, target_ptr, &target_ty)?;
+                    }
                 }
                 if self.lvalue_is_volatile(left) {
                     self.emit_volatile_store(target_ptr, value)?;
@@ -493,7 +506,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 // The incoming value now lives in the target: mark the
                 // overwritten field(s) as live so the scope-exit cascade
                 // drops them.
-                match left.kind.as_ref() {
+                if let Some(state) = projected_state {
+                    self.initialize_borrowed_place(target_ptr, &target_ty, state, left.span)?;
+                } else { match left.kind.as_ref() {
                     ast::ExpressionKind::FieldAccess { .. } | ast::ExpressionKind::Index { .. } => {
                         self.set_assigned_field_flags(left)?;
                     }
@@ -501,7 +516,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         self.set_all_field_flags(left)?;
                     }
                     _ => {}
-                }
+                } }
                 Ok(value)
             }
             ast::BinaryOperator::AddAssign
@@ -541,7 +556,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         object, index, &object_ty, &bin_op, right, whole_expr,
                     );
                 }
-                let (target_ptr, target_ty) = self.resolve_lvalue_ptr(left)?;
+                let target_place = self.resolve_lvalue_place(left)?;
+                let (target_ptr, target_ty) = (target_place.ptr, target_place.ty.clone());
                 let llvm_ty = self.lower_basic_type(&target_ty)?;
                 let lhs = if self.lvalue_is_volatile(left) {
                     self.emit_volatile_load(llvm_ty, target_ptr, "assign.load")?
@@ -563,7 +579,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             std::slice::from_ref(right),
                             false,
                             &whole_expr.span,
-                            Some((target_ptr, lhs)),
+                            Some((target_place, lhs)),
                         )?;
                         if let Some(val) = result {
                             val
@@ -1390,6 +1406,28 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .map_err(|e| CodegenError::new(format!("pointer compare failed: {e}")))?;
                 Ok(value.as_basic_value_enum())
             }
+            (BasicValueEnum::StructValue(lhs), BasicValueEnum::StructValue(rhs))
+                if matches!(operator, ast::BinaryOperator::Equal | ast::BinaryOperator::NotEqual) =>
+            {
+                let reference_operands = if let ast::ExpressionKind::Binary { left, right, .. } =
+                    whole_expr.kind.as_ref()
+                {
+                    self.resolve_argument_type(left).is_some_and(|ty|
+                        matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_)))
+                        && self.resolve_argument_type(right).is_some_and(|ty|
+                            matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_)))
+                } else { false };
+                if !reference_operands {
+                    return Err(CodegenError::with_span(
+                        "comparison requires matching numeric types", whole_expr.span,
+                    ));
+                }
+                let lhs_data = self.builder.build_extract_value(*lhs, 0, "reference.cmp.lhs")
+                    .map_err(|e| CodegenError::with_span(e.to_string(), whole_expr.span))?;
+                let rhs_data = self.builder.build_extract_value(*rhs, 0, "reference.cmp.rhs")
+                    .map_err(|e| CodegenError::with_span(e.to_string(), whole_expr.span))?;
+                self.emit_compare_values(&lhs_data, operator, &rhs_data, whole_expr, is_unsigned)
+            }
             _ => Err(CodegenError::with_span(
                 "comparison requires matching numeric types",
                 whole_expr.span,
@@ -1761,6 +1799,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 if let ast::TypeKind::Reference(r) = src_ty.kind.as_ref() {
                     is_ref = true;
                     inner_ty = &r.inner;
+                    value = self.reference_data(value, *span)?.as_basic_value_enum();
                 } else if let ast::TypeKind::Pointer(p) = src_ty.kind.as_ref() {
                     is_ref = true;
                     inner_ty = &p.inner;
@@ -2014,6 +2053,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         span: &Span,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
         let target = self.lower_basic_type(target_type)?;
+        let value = if (target.is_pointer_type() || target.is_int_type())
+            && source_expr.and_then(|expr| self.resolve_argument_type(expr))
+                .is_some_and(|ty| matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_)))
+        {
+            self.reference_data(value, *span)?.as_basic_value_enum()
+        } else {
+            value
+        };
         if let BasicTypeEnum::StructType(target_struct_ty) = target {
             if let Some(coerced) =
                 self.try_coerce_to_slice(value, source_expr, target_struct_ty, span)?
@@ -2270,6 +2317,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         target_ptr: PointerValue<'ctx>,
         target_ty: &ast::Type,
     ) -> CodegenResult<()> {
+        if let Some((owner, node)) = self.owner_place(left)? {
+            return self.emit_owner_cleanup(&owner, node);
+        }
         match left.kind.as_ref() {
             ast::ExpressionKind::Identifier(_) => {
                 // Wholesale variable overwrite: own drop plus the live
@@ -2408,6 +2458,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// After assigning a whole struct value to `left`, mark every registered
     /// field as live.
     fn set_all_field_flags(&mut self, left: &ast::Expression) -> CodegenResult<()> {
+        if self.transition_owner_expr(left, true)? { return Ok(()); }
         if let ast::ExpressionKind::Identifier(ident) = left.kind.as_ref()
             && let Some(var) = self.lookup_variable(&ident.name)
         {
@@ -2424,6 +2475,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// After assigning a field of `left`, mark that field (and any nested
     /// path extending it) as live, as well as the root container.
     fn set_assigned_field_flags(&mut self, left: &ast::Expression) -> CodegenResult<()> {
+        if self.transition_owner_expr(left, true)? { return Ok(()); }
         let Some((root_name, path)) = self.lvalue_root_and_path(left) else {
             return Ok(());
         };

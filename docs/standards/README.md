@@ -19,3 +19,9 @@ This directory contains dedicated compliance tables for every networking standar
 | **WebSocket** | Full-Duplex Bidirectional Framing | RFC 6455 | [websocket.md](file:///home/cier/Projects/silver/docs/standards/websocket.md) | **Full** |
 | **Server-Sent Events** | Unidirectional Server Streaming | W3C / WHATWG HTML Living Standard | [sse.md](file:///home/cier/Projects/silver/docs/standards/sse.md) | **Full** |
 | **UUID** | Universally Unique Identifier (v4, v7, Nil, Max) | RFC 9562, RFC 4122 | [uuid.md](file:///home/cier/Projects/silver/docs/standards/uuid.md) | **Full** |
+
+## Editor protocols
+
+| Protocol | Implementation | Support reference |
+| --- | --- | --- |
+| Language Server Protocol 3.18 | Native Silver `aglsp` | [Method-by-method support ledger](../lsp-protocol.md), including supported, conditional, partial and open methods, limits and verification. See [setup](../language-server.md) for installation. |
