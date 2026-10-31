@@ -3499,7 +3499,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     )
                 })?;
 
-                let inferred = self.infer_ast_type_from_value(&scrutinee, &identifier.span);
+                let inferred = self
+                    .resolve_argument_type(expression)
+                    .unwrap_or_else(|| self.infer_ast_type_from_value(&scrutinee, &identifier.span));
                 if let Some(scope) = self.variables.last_mut() {
                     scope.insert(
                         identifier.name.clone(),
