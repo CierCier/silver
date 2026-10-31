@@ -451,10 +451,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             ast::ExpressionKind::Match { arms, .. } => {
                 // Match codegen verifies that every value-producing arm has
-                // the same LLVM type; retain an arm's source type for checks
-                // that distinguish reference carriers from ordinary structs.
-                arms.first()
-                    .and_then(|arm| self.resolve_argument_type(&arm.body))
+                // the same LLVM type; confirm each arm before retaining its
+                // source type for reference-carrier checks.
+                let mut result = None;
+                for arm in arms {
+                    let arm_ty = self.resolve_argument_type(&arm.body)?;
+                    if !matches!(arm_ty.kind.as_ref(), ast::TypeKind::Reference(_)) {
+                        return None;
+                    }
+                    if result.is_none() {
+                        result = Some(arm_ty);
+                    }
+                }
+                result
             }
             ast::ExpressionKind::Call { function, .. } => {
                 if let ast::ExpressionKind::Identifier(ident) = function.kind.as_ref()
