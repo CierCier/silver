@@ -327,9 +327,10 @@ for overwrite and scope-exit cleanup.
    fields are initialized. Legacy native flag handles alias these state bytes;
    they do not maintain separate liveness. Copy-only locals need no runtime
    cleanup tree. Direct local overwrite cleans the target subtree before the
-   replacement store. Pointer/reference edges stop the tree: references do not
-   yet transport this metadata, and indirect owned-field overwrite cleanup
-   remains unimplemented. Heap containers retain their own mutation contracts.
+   replacement store. Stage0 references carry owner-state metadata and borrowed
+   assignments update it; the native backend does not yet transport it across
+   calls. Indirect owned-field overwrite cleanup remains unimplemented. Heap
+   containers retain their own mutation contracts.
    The native backend shares a read-only node-layout table for each concrete
    type in a module. Node initialization and whole-tree state changes emit
    bounded loops rather than a store sequence for every inline child.

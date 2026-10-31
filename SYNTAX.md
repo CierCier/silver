@@ -1065,11 +1065,12 @@ state. An empty field has no old value to drop. Reinitializing a moved field
 restores its subtree without changing initialized siblings.
 
 This state currently belongs to local owners and their inline fields and fixed
-elements. References retain their existing representation and do not yet carry
-owner initialization state across calls. Replacement through a pointer or borrow
-still has the known missing-overwrite-cleanup limitation. Heap elements use
-their container's mutation and initialized-length contracts. Existing extern-C
-`&T` and `&mut T` signatures retain their thin-pointer ABI.
+elements. Stage0 references carry a data pointer and owner-state pointer, so
+borrowed assignments can update the caller's initialization state; the native
+backend does not yet transport that state across calls. Replacement through a
+pointer or borrow still has the known missing-overwrite-cleanup limitation. Heap
+elements use their container's mutation and initialized-length contracts.
+Extern-C `&T` and `&mut T` signatures retain their thin-pointer ABI.
 
 ## 9. Concurrency & Threading
 
