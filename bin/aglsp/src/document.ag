@@ -75,6 +75,7 @@ bool workspace_document(DocumentStore* store, Document* doc) {
 bool auto_import_document(DocumentStore* store, Document* doc) {
     return path_within_roots(&store.roots, doc.path.to_str())
         || path_within_roots(&store.project_roots, doc.path.to_str())
+        || path_within_roots(&store.include_dirs, doc.path.to_str())
         || (store.discover_open_projects && doc.open);
 }
 
