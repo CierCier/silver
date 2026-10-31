@@ -333,7 +333,8 @@ void append_auto_imports(DocumentStore* store, Document* doc, str prefix,
     i64 d = 0;
     while (d < store.docs.len() && !request_interrupted(pending)) {
         Document* candidate = store.docs.get(d);
-        if (candidate != doc && candidate.path.ends_with(".ag") && candidate.analysis.diagnostics.is_empty()) {
+        if (candidate != doc && auto_import_document(store, candidate)
+            && candidate.path.ends_with(".ag") && candidate.analysis.diagnostics.is_empty()) {
             String module = String.new(); bool module_checked = false;
             HashMap<String, i64> unique_exports = HashMap<String, i64>.new(); bool exports_indexed = false;
             i64 i = 0;

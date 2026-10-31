@@ -72,6 +72,12 @@ bool workspace_document(DocumentStore* store, Document* doc) {
         || path_within_roots(&store.project_roots, doc.path.to_str());
 }
 
+bool auto_import_document(DocumentStore* store, Document* doc) {
+    return path_within_roots(&store.roots, doc.path.to_str())
+        || path_within_roots(&store.project_roots, doc.path.to_str())
+        || (store.discover_open_projects && doc.open);
+}
+
 impl Document {
     // Closed files keep stable symbol IDs and source text, not a full parse tree.
     void compact(Document* self) {
