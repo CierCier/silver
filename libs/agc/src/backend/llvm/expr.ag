@@ -5230,7 +5230,7 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         bool owner_state_abi = !c_abi_call && !indirect
             && callee_fn != (SyntaxNode*)0
             && bindings_need_borrow_owner_state(find_function_body(callee_fn),
-                &params);
+                &params, ctx.names.get(callee.aux));
         i64 i = 0;
         while (i < (i64)args_count) {
             u32 arg_id = ctx.pool.args.get((i64)args_start + i);

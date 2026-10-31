@@ -457,7 +457,7 @@ bool llvm_define_free_function_instance(LlvmContext* ctx, TypeTable* types,
     Vec<Binding> params = Vec<Binding>.new();
     collect_parameter_bindings(params_node, &params);
     bool owner_state_abi = bindings_need_borrow_owner_state(
-        body_node, &params);
+        body_node, &params, name_node.text);
     i64 i = 0;
     while (i < params.len()) {
         Binding* param = params.get_ptr(i);
@@ -1437,7 +1437,7 @@ impl LlvmGenerator {
                     Vec<Binding> params = Vec<Binding>.new();
                     collect_parameter_bindings(binding_function_parameters(item), &params);
                     bool owner_state_abi = bindings_need_borrow_owner_state(
-                        find_function_body(item), &params);
+                        find_function_body(item), &params, fn_name.to_str());
                     Vec<LLVMOpaqueType*> param_types = llvm_param_types(
                         &ctx, types, &params, (str)0, fn_name.to_str(),
                         false, owner_state_abi);
@@ -2065,7 +2065,7 @@ impl LlvmGenerator {
                     Vec<Binding> params = Vec<Binding>.new();
                     collect_parameter_bindings(binding_function_parameters(item), &params);
                     bool owner_state_abi = bindings_need_borrow_owner_state(
-                        body, &params);
+                        body, &params, fn_name.to_str());
                     Vec<LLVMOpaqueValue*> bt_arg_records = Vec<LLVMOpaqueValue*>.new();
                     LLVMOpaqueValue* frame_pointer = (LLVMOpaqueValue*)0;
                     if (params.len() > 0) {
