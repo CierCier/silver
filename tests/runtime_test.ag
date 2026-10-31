@@ -100,7 +100,7 @@ i32 main() {
         u8 formatted[64];
         i32 formatted_len = sprintf(&formatted[0], "%d %d %d %d %d %d %.1f %s",
             true, false, (u8)200, (u16)40000, (i8)-17, (i16)-1234,
-            (f32)2.5, "ok");
+            match true { true: (f32)2.5, false: (f32)3.5, }, "ok");
         assert_eq_i32(30, formatted_len, "C variadic output length");
         assert_eq_str("1 0 200 40000 -17 -1234 2.5 ok", (str)&formatted[0],
             "C variadic bool, integer, float, and pointer promotions");
