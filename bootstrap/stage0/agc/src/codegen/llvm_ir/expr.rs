@@ -1132,7 +1132,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     let fallback = ast::Expression {
                         kind: Box::new(ast::ExpressionKind::Cast {
                             expression: fallback.clone(),
-                            target_type: val_ty.clone().expect("resolved pointer result type"),
+                            target_type: Box::new(
+                                val_ty.clone().expect("resolved pointer result type"),
+                            ),
                         }),
                         span: fallback.span,
                     };
