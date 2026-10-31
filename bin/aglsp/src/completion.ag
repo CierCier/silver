@@ -332,7 +332,10 @@ void append_auto_imports(DocumentStore* store, Document* doc, str prefix,
     if (prefix[0] == 0 || request_interrupted(pending)) { return; }
     Vec<Document*> documents = store.query_documents(doc);
     Vec<bool> included = Vec<bool>.new(); i64 i = 0;
-    while (i < store.docs.len()) { included.push(false); i += 1; }
+    while (i < store.docs.len() && !request_interrupted(pending)) {
+        included.push(false); i += 1;
+    }
+    if (request_interrupted(pending)) { return; }
     i = 0;
     while (i < documents.len() && !request_interrupted(pending)) {
         included.set(documents.get(i).store_id, true);
