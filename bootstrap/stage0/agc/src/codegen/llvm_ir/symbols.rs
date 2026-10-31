@@ -455,11 +455,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 for arm in arms {
                     let mut bindings = HashMap::default();
                     if let Some(scrutinee_ty) = &scrutinee_ty {
-                        self.collect_match_pattern_types(
-                            &arm.pattern,
-                            scrutinee_ty,
-                            &mut bindings,
-                        );
+                        self.collect_match_pattern_types(&arm.pattern, scrutinee_ty, &mut bindings);
                     } else if Self::match_pattern_binds(&arm.pattern) {
                         return None;
                     }
@@ -626,12 +622,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         match &pattern.kind {
             ast::PatternKind::Identifier(_) | ast::PatternKind::Move(_) => true,
             ast::PatternKind::Tuple(patterns) => patterns.iter().any(Self::match_pattern_binds),
-            ast::PatternKind::Enum { data, .. } => data
-                .as_deref()
-                .is_some_and(Self::match_pattern_binds),
-            ast::PatternKind::Struct { fields, .. } => fields.iter().any(|field| {
-                field.pattern.as_ref().is_none_or(Self::match_pattern_binds)
-            }),
+            ast::PatternKind::Enum { data, .. } => {
+                data.as_deref().is_some_and(Self::match_pattern_binds)
+            }
+            ast::PatternKind::Struct { fields, .. } => fields
+                .iter()
+                .any(|field| field.pattern.as_ref().is_none_or(Self::match_pattern_binds)),
             _ => false,
         }
     }
