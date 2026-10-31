@@ -649,9 +649,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     }
                 }
             }
-            ast::PatternKind::Enum {
-                variant, data, ..
-            } => {
+            ast::PatternKind::Enum { variant, data, .. } => {
                 let Some(named) = Self::extract_named_type_owned(ty) else {
                     return;
                 };
@@ -664,15 +662,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 else {
                     return;
                 };
-                let substitutions: HashMap<String, ast::Type> =
-                    if let Some(params) = self.struct_generics.get(&enum_name)
-                        && let Some(args) = &named.generics
-                        && params.len() == args.len()
-                    {
-                        params.iter().cloned().zip(args.iter().cloned()).collect()
-                    } else {
-                        HashMap::default()
-                    };
+                let substitutions: HashMap<String, ast::Type> = if let Some(params) =
+                    self.struct_generics.get(&enum_name)
+                    && let Some(args) = &named.generics
+                    && params.len() == args.len()
+                {
+                    params.iter().cloned().zip(args.iter().cloned()).collect()
+                } else {
+                    HashMap::default()
+                };
                 let payload_types: Vec<ast::Type> = payload_types
                     .iter()
                     .map(|ty| {
