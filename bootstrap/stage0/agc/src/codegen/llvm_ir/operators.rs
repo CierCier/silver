@@ -1409,6 +1409,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             (BasicValueEnum::StructValue(lhs), BasicValueEnum::StructValue(rhs))
                 if matches!(operator, ast::BinaryOperator::Equal | ast::BinaryOperator::NotEqual) =>
             {
+                let reference_operands = if let ast::ExpressionKind::Binary { left, right, .. } =
+                    whole_expr.kind.as_ref()
+                {
+                    self.resolve_argument_type(left).is_some_and(|ty|
+                        matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_)))
+                        && self.resolve_argument_type(right).is_some_and(|ty|
+                            matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_)))
+                } else { false };
+                if !reference_operands {
+                    return Err(CodegenError::with_span(
+                        "comparison requires matching numeric types", whole_expr.span,
+                    ));
+                }
                 let lhs_data = self.builder.build_extract_value(*lhs, 0, "reference.cmp.lhs")
                     .map_err(|e| CodegenError::with_span(e.to_string(), whole_expr.span))?;
                 let rhs_data = self.builder.build_extract_value(*rhs, 0, "reference.cmp.rhs")
