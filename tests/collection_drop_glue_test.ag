@@ -138,6 +138,10 @@ i32 main() {
         assert_true(left_ref == same_ref, "references to the same place compare equal");
         assert_true(left_ref != other_ref, "references to different places compare unequal");
         assert_true(same_reference(left_ref, same_ref), "reference equality works in functions");
+        assert_true((match true { true: left_ref, false: other_ref, }) == same_ref,
+            "reference equality accepts a match expression on the left");
+        assert_true(same_ref == (match true { true: left_ref, false: other_ref, }),
+            "reference equality accepts a match expression on the right");
     }
 
     test_start("borrowed replacement updates the original owner's cleanup state");

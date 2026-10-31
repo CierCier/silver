@@ -449,6 +449,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     span: expr.span,
                 })
             }
+            ast::ExpressionKind::Match { arms, .. } => {
+                // Match codegen verifies that every value-producing arm has
+                // the same LLVM type; retain an arm's source type for checks
+                // that distinguish reference carriers from ordinary structs.
+                arms.first()
+                    .and_then(|arm| self.resolve_argument_type(&arm.body))
+            }
             ast::ExpressionKind::Call { function, .. } => {
                 if let ast::ExpressionKind::Identifier(ident) = function.kind.as_ref()
                     && let Some(sig) = self.signature_for_name(&ident.name)
