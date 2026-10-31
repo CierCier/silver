@@ -225,8 +225,10 @@ document identities for imports found through the working directory.
 The client must send those notifications; the server has no filesystem watcher.
 
 Import search includes workspace roots, `SILVER_SYSROOT`, and include directories
-beside the executable's installation prefix. A sysroot can contain `std` directly,
-under `include`, or under `include/silver`.
+beside the executable's installation prefix. Indexing also includes an existing
+`std` directory beneath each include directory unless a workspace root already
+covers it. A sysroot can contain `std` directly, under `include`, or under
+`include/silver`.
 
 Rename identifies declarations by document and symbol ID rather than spelling.
 Import aliases have independent rename identities. Ambiguous imported names and

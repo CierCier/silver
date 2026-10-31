@@ -330,9 +330,23 @@ void append_import_context_completions(DocumentStore* store, Document* doc,
 void append_auto_imports(DocumentStore* store, Document* doc, str prefix,
         PendingMessage* pending, CompletionCandidates* candidates) {
     if (prefix[0] == 0 || request_interrupted(pending)) { return; }
+    Vec<Document*> documents = store.query_documents(doc);
+    i64 cached = 0;
+    while (cached < store.docs.len()) {
+        Document* candidate = store.docs.get(cached);
+        if (path_within_roots(&store.include_dirs, candidate.path.to_str())) {
+            bool included = false; i64 i = 0;
+            while (i < documents.len()) {
+                if (documents.get(i) == candidate) { included = true; break; }
+                i += 1;
+            }
+            if (!included) { documents.push(candidate); }
+        }
+        cached += 1;
+    }
     i64 d = 0;
-    while (d < store.docs.len() && !request_interrupted(pending)) {
-        Document* candidate = store.docs.get(d);
+    while (d < documents.len() && !request_interrupted(pending)) {
+        Document* candidate = documents.get(d);
         if (candidate != doc && auto_import_document(store, candidate)
             && candidate.path.ends_with(".ag") && candidate.analysis.diagnostics.is_empty()) {
             String module = String.new(); bool module_checked = false;
