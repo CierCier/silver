@@ -125,6 +125,10 @@ bool same_reference(&i32 left, &i32 right) {
     return left == right;
 }
 
+bool same_reference_from_ternary_match(bool pick, &i32 left, &i32 right) {
+    return (match (pick ? 1 : 2) { 1: left, _: right, }) == left;
+}
+
 i32 main() {
     STDOUT.write_str("=== Collection Drop Glue Tests ===\n\n");
 
@@ -142,6 +146,10 @@ i32 main() {
             "reference equality accepts a match expression on the left");
         assert_true(same_ref == (match true { true: left_ref, false: other_ref, }),
             "reference equality accepts a match expression on the right");
+        assert_true(same_reference_from_ternary_match(true, left_ref, other_ref),
+            "reference equality resolves match arms when scrutinee type is unknown");
+        assert_true(!same_reference_from_ternary_match(false, left_ref, other_ref),
+            "reference equality follows the selected ternary match arm");
     }
 
     test_start("borrowed replacement updates the original owner's cleanup state");

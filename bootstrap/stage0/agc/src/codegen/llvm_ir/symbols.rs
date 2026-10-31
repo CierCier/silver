@@ -450,15 +450,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 })
             }
             ast::ExpressionKind::Match { expression, arms } => {
-                let scrutinee_ty = self.resolve_argument_type(expression)?;
+                let scrutinee_ty = self.resolve_argument_type(expression);
                 let mut result = None;
                 for arm in arms {
                     let mut bindings = HashMap::default();
-                    self.collect_match_pattern_types(
-                        &arm.pattern,
-                        &scrutinee_ty,
-                        &mut bindings,
-                    );
+                    if let Some(scrutinee_ty) = &scrutinee_ty {
+                        self.collect_match_pattern_types(
+                            &arm.pattern,
+                            scrutinee_ty,
+                            &mut bindings,
+                        );
+                    } else if Self::match_pattern_binds(&arm.pattern) {
+                        return None;
+                    }
                     self.argument_type_scopes.push(bindings);
                     let arm_ty = self.resolve_argument_type(&arm.body);
                     self.argument_type_scopes.pop();
@@ -615,6 +619,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 self.resolve_argument_type(inner)
             }
             _ => None,
+        }
+    }
+
+    fn match_pattern_binds(pattern: &ast::Pattern) -> bool {
+        match &pattern.kind {
+            ast::PatternKind::Identifier(_) | ast::PatternKind::Move(_) => true,
+            ast::PatternKind::Tuple(patterns) => patterns.iter().any(Self::match_pattern_binds),
+            ast::PatternKind::Enum { data, .. } => data
+                .as_deref()
+                .is_some_and(Self::match_pattern_binds),
+            ast::PatternKind::Struct { fields, .. } => fields.iter().any(|field| {
+                field.pattern.as_ref().is_none_or(Self::match_pattern_binds)
+            }),
+            _ => false,
         }
     }
 
