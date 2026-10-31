@@ -522,8 +522,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     }
 
     pub(crate) fn lookup_value_type(&self, name: &str) -> Option<ast::Type> {
-        self.lookup_variable(name)
-            .map(|info| info.ty)
+        self.argument_type_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).cloned())
+            .or_else(|| self.lookup_variable(name).map(|info| info.ty))
             .or_else(|| self.global_variables.get(name).cloned())
             .or_else(|| self.extern_globals.get(name).cloned())
     }

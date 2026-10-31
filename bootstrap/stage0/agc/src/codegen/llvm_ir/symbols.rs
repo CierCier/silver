@@ -449,16 +449,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     span: expr.span,
                 })
             }
-            ast::ExpressionKind::Match { arms, .. } => {
-                // Match codegen verifies that every value-producing arm has
-                // the same LLVM type; confirm each arm before retaining its
-                // source type for reference-carrier checks.
+            ast::ExpressionKind::Match { expression, arms } => {
+                let scrutinee_ty = self.resolve_argument_type(expression)?;
                 let mut result = None;
                 for arm in arms {
-                    let arm_ty = self.resolve_argument_type(&arm.body)?;
-                    if !matches!(arm_ty.kind.as_ref(), ast::TypeKind::Reference(_)) {
-                        return None;
-                    }
+                    let mut bindings = HashMap::default();
+                    self.collect_match_pattern_types(
+                        &arm.pattern,
+                        &scrutinee_ty,
+                        &mut bindings,
+                    );
+                    self.argument_type_scopes.push(bindings);
+                    let arm_ty = self.resolve_argument_type(&arm.body);
+                    self.argument_type_scopes.pop();
+                    let arm_ty = arm_ty?;
                     if result.is_none() {
                         result = Some(arm_ty);
                     }
@@ -611,6 +615,76 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 self.resolve_argument_type(inner)
             }
             _ => None,
+        }
+    }
+
+    fn collect_match_pattern_types(
+        &self,
+        pattern: &ast::Pattern,
+        ty: &ast::Type,
+        bindings: &mut HashMap<String, ast::Type>,
+    ) {
+        match &pattern.kind {
+            ast::PatternKind::Identifier(identifier) | ast::PatternKind::Move(identifier) => {
+                bindings.insert(identifier.name.clone(), ty.clone());
+            }
+            ast::PatternKind::Tuple(patterns) => {
+                if let ast::TypeKind::Tuple(types) = ty.kind.as_ref() {
+                    for (pattern, ty) in patterns.iter().zip(types) {
+                        self.collect_match_pattern_types(pattern, ty, bindings);
+                    }
+                }
+            }
+            ast::PatternKind::Enum {
+                variant, data, ..
+            } => {
+                let Some(named) = Self::extract_named_type_owned(ty) else {
+                    return;
+                };
+                let enum_name = Self::named_type_name(&named);
+                let Some(payload_types) = self
+                    .enum_variant_payload_types
+                    .get(&enum_name)
+                    .and_then(|variants| variants.get(&variant.name))
+                    .cloned()
+                else {
+                    return;
+                };
+                let substitutions: HashMap<String, ast::Type> =
+                    if let Some(params) = self.struct_generics.get(&enum_name)
+                        && let Some(args) = &named.generics
+                        && params.len() == args.len()
+                    {
+                        params.iter().cloned().zip(args.iter().cloned()).collect()
+                    } else {
+                        HashMap::default()
+                    };
+                let payload_types: Vec<ast::Type> = payload_types
+                    .iter()
+                    .map(|ty| {
+                        if substitutions.is_empty() {
+                            ty.clone()
+                        } else {
+                            Self::substitute_generic_type(ty, &substitutions)
+                        }
+                    })
+                    .collect();
+                if let Some(data) = data {
+                    match &data.kind {
+                        ast::PatternKind::Tuple(patterns) => {
+                            for (pattern, ty) in patterns.iter().zip(&payload_types) {
+                                self.collect_match_pattern_types(pattern, ty, bindings);
+                            }
+                        }
+                        _ => {
+                            if let Some(ty) = payload_types.first() {
+                                self.collect_match_pattern_types(data, ty, bindings);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 

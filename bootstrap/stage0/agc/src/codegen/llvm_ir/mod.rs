@@ -114,6 +114,7 @@ pub struct LlvmIrGenerator<'ctx> {
     pub(crate) current_fn: Option<FunctionValue<'ctx>>,
     pub(crate) current_return_type: Option<ast::Type>,
     pub(crate) variables: Vec<HashMap<String, VarInfo<'ctx>>>,
+    pub(crate) argument_type_scopes: Vec<HashMap<String, ast::Type>>,
     pub(crate) function_sigs: HashMap<SymbolId, FunctionSig>,
     pub(crate) function_name_to_symbol: HashMap<String, SymbolId>,
     /// Distinct full signatures per source function name (params + return +

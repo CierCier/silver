@@ -22,6 +22,10 @@ i32 dispatch_probe(i64 value) { return (i32)value + 200; }
 
 struct DispatchPrimary { i32 value; }
 struct DispatchSecondary { i32 value; }
+struct MatchOther { i32 value; }
+
+i32 match_dispatch_probe(i32 value) { return value + 300; }
+i32 match_dispatch_probe(MatchOther value) { return value.value + 400; }
 
 impl DispatchPrimary {
     i32 dispatch_probe(&self, i32 value) { return self.value + value + 10; }
@@ -75,6 +79,10 @@ i32 main() {
             "same-named free i32 overload stays distinct");
         assert_eq_i32(203, dispatch_probe(wide),
             "same-named free i64 overload stays distinct");
+        MatchOther bound;
+        bound.value = 9;
+        assert_eq_i32(303, match_dispatch_probe(match 3 { bound: bound, }),
+            "match binding type shadows an outer variable during overload lookup");
     }
 
     // A converted argument still tracks the receiver borrow while it is live.
