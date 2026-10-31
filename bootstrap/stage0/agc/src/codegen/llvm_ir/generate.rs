@@ -1690,6 +1690,9 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         let link_name = function_link_name(attributes);
         let llvm_name = link_name.unwrap_or(&item.name.name);
 
+        // Aliases may expose the same C symbol using semantic references or
+        // raw pointers. Preserve the original symbol's source signature.
+        if llvm_name == item.name.name || self.signature_for_name(llvm_name).is_none() {
         self.register_function_signature(
             llvm_name,
             FunctionSig {
@@ -1707,6 +1710,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
             Some(item.name.span),
             SymbolKind::ExternFunction,
         );
+        }
         // Also register under source name so callers using it can resolve, and
         // record the source → linked-symbol mapping so call sites emit the
         // renamed symbol.

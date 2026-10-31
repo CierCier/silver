@@ -18,9 +18,26 @@ struct DropSpy {
 
 struct VecSlot { Vec<DropSpy> values; }
 
+void replace_borrowed_values(&mut VecSlot slot, Vec<DropSpy> replacement) {
+    slot.values = move replacement;
+}
+
 i64 g_parent_drops = 0;
 struct PartialDropParent { DropSpy item; i64 required; }
 struct NestedDropSlot { VecSlot inner; DropSpy sibling; }
+struct BorrowedDropSlot { DropSpy item; }
+
+void transfer_borrowed_item(&mut BorrowedDropSlot target, &mut BorrowedDropSlot source) {
+    target.item = move source.item;
+}
+
+void initialize_borrowed_item(&mut PartialDropParent parent) {
+    parent.item = new_drop_spy(22);
+}
+
+void initialize_borrowed_scalar(&mut PartialDropParent parent) {
+    parent.required = 1;
+}
 
 impl Drop for PartialDropParent {
     void drop(*self) {
@@ -106,6 +123,49 @@ void consume_values(Vec<DropSpy> values) {
 
 i32 main() {
     STDOUT.write_str("=== Collection Drop Glue Tests ===\n\n");
+
+    test_start("borrowed replacement updates the original owner's cleanup state");
+    g_drops = 0;
+    {
+        VecSlot slot;
+        slot.values = Vec<DropSpy>.new();
+        slot.values.push(new_drop_spy(20));
+        Vec<DropSpy> replacement = Vec<DropSpy>.new();
+        replacement.push(new_drop_spy(21));
+        replace_borrowed_values(&mut slot, move replacement);
+        assert_eq_i64(1, g_drops, "borrowed overwrite drops the old element immediately");
+    }
+    assert_eq_i64(2, g_drops, "caller cleanup drops the replacement once");
+
+    test_start("borrowed moves clear the source owner's field state");
+    g_drops = 0;
+    {
+        BorrowedDropSlot target;
+        target.item = new_drop_spy(23);
+        BorrowedDropSlot source;
+        source.item = new_drop_spy(24);
+        transfer_borrowed_item(&mut target, &mut source);
+        assert_eq_i64(1, g_drops, "old target drops after ownership transfer");
+    }
+    assert_eq_i64(2, g_drops, "moved source does not drop twice");
+
+    test_start("borrowed initialization preserves partial custom Drop parents");
+    g_drops = 0;
+    g_parent_drops = 0;
+    {
+        PartialDropParent parent;
+        initialize_borrowed_item(&mut parent);
+        assert_eq_i64(0, g_drops, "empty borrowed field skips predrop");
+    }
+    assert_eq_i64(1, g_drops, "caller cleans the initialized borrowed child");
+    assert_eq_i64(0, g_parent_drops, "missing scalar keeps parent partial");
+    {
+        PartialDropParent parent;
+        initialize_borrowed_item(&mut parent);
+        initialize_borrowed_scalar(&mut parent);
+    }
+    assert_eq_i64(2, g_drops, "both borrowed child values drop once");
+    assert_eq_i64(1, g_parent_drops, "borrowed scalar initialization enables parent Drop");
 
     test_start("direct overwrite drops the initialized old value before replacement");
     g_drops = 0;

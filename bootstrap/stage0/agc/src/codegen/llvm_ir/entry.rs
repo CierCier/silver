@@ -154,6 +154,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ownership: crate::semantic::move_check::analyze_program_with_imports(program, &[]).init_plan,
             owner_function: None,
             owner_states: HashMap::default(),
+            borrowed_binding_states: HashMap::default(),
             context: &context,
             module,
             builder,
@@ -314,6 +315,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ownership: ownership.cloned().unwrap_or_else(|| crate::semantic::move_check::analyze_program_with_imports(program, imported_modules).init_plan),
             owner_function: None,
             owner_states: HashMap::default(),
+            borrowed_binding_states: HashMap::default(),
             context: &context,
             module,
             builder,
@@ -786,6 +788,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ownership: ownership.cloned().unwrap_or_else(|| crate::semantic::move_check::analyze_program_with_imports(program, imported_modules).init_plan),
             owner_function: None,
             owner_states: HashMap::default(),
+            borrowed_binding_states: HashMap::default(),
             context: &context,
             module,
             builder,
@@ -2234,7 +2237,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok(self.context.i64_type().const_zero().into());
         }
 
-        let ptr_val = self.emit_expression_value(ptr_expr)?.into_pointer_value();
+        let pointer_value = self.emit_expression_value(ptr_expr)?;
+        let semantic_reference = self.resolve_argument_type(ptr_expr)
+            .is_some_and(|ty| matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_)));
+        let reference_state = if semantic_reference {
+            Some(self.reference_state(pointer_value, ptr_expr.span)?)
+        } else { None };
+        let ptr_val = if semantic_reference {
+            self.reference_data(pointer_value, ptr_expr.span)?
+        } else { pointer_value.into_pointer_value() };
         let count_val = self.emit_expression_value(count_expr)?.into_int_value();
         let i64_type = self.context.i64_type();
         let function = self
@@ -2284,7 +2295,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .map_err(|e| CodegenError::new(format!("{e}")))?
         };
 
-        self.emit_value_drop_at_ptr(&elem_ty, elem_ptr)?;
+        if let Some(state) = reference_state {
+            let state = self.reference_range_node(state, i_val)?;
+            self.emit_borrowed_cleanup(elem_ptr, &elem_ty, state, expr.span)?;
+        } else {
+            self.emit_value_drop_at_ptr(&elem_ty, elem_ptr)?;
+        }
 
         let i_next = self
             .builder
@@ -2415,7 +2431,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 name.clone(),
                 VarInfo {
                     ptr: tmp,
-                    ty: ast_ty,
+                    ty: ast_ty.clone(),
                     is_mutable: false,
                     is_volatile: false,
                     drop_flag: None,
@@ -2423,6 +2439,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 },
             );
         }
+        self.register_owner_state(
+            &ast::Identifier { name: name.clone(), span: *span }, &ast_ty, tmp, true,
+        )?;
         Ok(ast::Expression {
             kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
                 name,
@@ -2718,6 +2737,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 })?;
                 let writer_tmp =
                     self.create_entry_alloca(fn_ctx, "sprint.writer", buf_writer_llvm_ty)?;
+                self.builder.build_store(writer_tmp, buf_writer_llvm_ty.const_zero())
+                    .map_err(|e| CodegenError::with_span(e.to_string(), expr.span))?;
 
                 let zero_i64 = self.context.i64_type().const_int(0, false);
                 let neg_one_i32 = self.context.i32_type().const_int(u64::MAX, true);
@@ -2838,6 +2859,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         },
                     );
                 }
+                self.register_owner_state(
+                    &ast::Identifier { name: "__sprint_writer".to_string(), span: expr.span },
+                    &buf_writer_type, writer_tmp, true,
+                )?;
                 let w_ident = ast::Expression {
                     kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
                         name: "__sprint_writer".to_string(),
@@ -2967,6 +2992,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 span: expr.span,
             };
             self.emit_method_call_expression(&writer_expr, &promote_method, &[], true, &expr.span)?;
+            // Ownership of the promoted allocation passes to the macro result.
+            self.clear_drop_flag_of(&writer_expr)?;
 
             // Load `data` from the stack BufWriter
             let buf_writer_type = ast::Type {

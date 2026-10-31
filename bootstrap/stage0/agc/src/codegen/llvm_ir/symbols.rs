@@ -423,11 +423,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 expression,
             } => {
                 let inner_ty = self.resolve_argument_type(expression)?;
+                if matches!(inner_ty.kind.as_ref(), ast::TypeKind::Reference(_)) {
+                    return Some(inner_ty);
+                }
                 Some(ast::Type {
-                    kind: Box::new(ast::TypeKind::Pointer(ast::PointerType {
+                    kind: Box::new(ast::TypeKind::Reference(ast::ReferenceType {
                         inner: Box::new(inner_ty),
                         is_mutable: *is_mutable,
-                        is_volatile: false,
+                        lifetime: None,
                     })),
                     span: expr.span,
                 })
@@ -1748,11 +1751,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 expression,
             } => {
                 let inner_ty = self.resolve_receiver_type(expression)?;
+                if matches!(inner_ty.kind.as_ref(), ast::TypeKind::Reference(_)) {
+                    return Some(inner_ty);
+                }
                 Some(ast::Type {
-                    kind: Box::new(ast::TypeKind::Pointer(ast::PointerType {
+                    kind: Box::new(ast::TypeKind::Reference(ast::ReferenceType {
                         inner: Box::new(inner_ty),
                         is_mutable: *is_mutable,
-                        is_volatile: false,
+                        lifetime: None,
                     })),
                     span: expr.span,
                 })
