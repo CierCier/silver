@@ -331,16 +331,20 @@ void append_auto_imports(DocumentStore* store, Document* doc, str prefix,
         PendingMessage* pending, CompletionCandidates* candidates) {
     if (prefix[0] == 0 || request_interrupted(pending)) { return; }
     Vec<Document*> documents = store.query_documents(doc);
+    Vec<bool> included = Vec<bool>.new(); i64 i = 0;
+    while (i < store.docs.len()) { included.push(false); i += 1; }
+    i = 0;
+    while (i < documents.len() && !request_interrupted(pending)) {
+        included.set(documents.get(i).store_id, true);
+        i += 1;
+    }
     i64 cached = 0;
-    while (cached < store.docs.len()) {
+    while (cached < store.docs.len() && !request_interrupted(pending)) {
         Document* candidate = store.docs.get(cached);
-        if (path_within_roots(&store.include_dirs, candidate.path.to_str())) {
-            bool included = false; i64 i = 0;
-            while (i < documents.len()) {
-                if (documents.get(i) == candidate) { included = true; break; }
-                i += 1;
-            }
-            if (!included) { documents.push(candidate); }
+        if (!included.get(candidate.store_id)
+            && path_within_roots(&store.include_dirs, candidate.path.to_str())) {
+            included.set(candidate.store_id, true);
+            documents.push(candidate);
         }
         cached += 1;
     }
