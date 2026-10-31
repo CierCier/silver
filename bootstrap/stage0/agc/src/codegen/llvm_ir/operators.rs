@@ -1406,6 +1406,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .map_err(|e| CodegenError::new(format!("pointer compare failed: {e}")))?;
                 Ok(value.as_basic_value_enum())
             }
+            (BasicValueEnum::StructValue(lhs), BasicValueEnum::StructValue(rhs))
+                if matches!(operator, ast::BinaryOperator::Equal | ast::BinaryOperator::NotEqual) =>
+            {
+                let lhs_data = self.builder.build_extract_value(*lhs, 0, "reference.cmp.lhs")
+                    .map_err(|e| CodegenError::with_span(e.to_string(), whole_expr.span))?;
+                let rhs_data = self.builder.build_extract_value(*rhs, 0, "reference.cmp.rhs")
+                    .map_err(|e| CodegenError::with_span(e.to_string(), whole_expr.span))?;
+                self.emit_compare_values(&lhs_data, operator, &rhs_data, whole_expr, is_unsigned)
+            }
             _ => Err(CodegenError::with_span(
                 "comparison requires matching numeric types",
                 whole_expr.span,

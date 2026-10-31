@@ -121,8 +121,24 @@ void consume_values(Vec<DropSpy> values) {
     assert_eq_i64(1, values.len(), "consuming call receives the Vec");
 }
 
+bool same_reference(&i32 left, &i32 right) {
+    return left == right;
+}
+
 i32 main() {
     STDOUT.write_str("=== Collection Drop Glue Tests ===\n\n");
+
+    test_start("reference equality compares referent addresses");
+    {
+        i32 left = 1;
+        i32 right = 1;
+        &i32 left_ref = &left;
+        &i32 same_ref = &left;
+        &i32 other_ref = &right;
+        assert_true(left_ref == same_ref, "references to the same place compare equal");
+        assert_true(left_ref != other_ref, "references to different places compare unequal");
+        assert_true(same_reference(left_ref, same_ref), "reference equality works in functions");
+    }
 
     test_start("borrowed replacement updates the original owner's cleanup state");
     g_drops = 0;

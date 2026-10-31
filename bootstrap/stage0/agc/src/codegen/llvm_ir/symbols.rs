@@ -562,7 +562,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     _ => None,
                 }
             }
-            ast::ExpressionKind::Binary { left, .. } => self.resolve_argument_type(left),
+            ast::ExpressionKind::Binary { left, operator, .. } => {
+                if matches!(operator,
+                    ast::BinaryOperator::Equal | ast::BinaryOperator::NotEqual
+                    | ast::BinaryOperator::Less | ast::BinaryOperator::Greater
+                    | ast::BinaryOperator::LessEqual | ast::BinaryOperator::GreaterEqual
+                    | ast::BinaryOperator::LogicalAnd | ast::BinaryOperator::LogicalOr)
+                {
+                    Some(ast::Type {
+                        kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::Bool)),
+                        span: expr.span,
+                    })
+                } else { self.resolve_argument_type(left) }
+            }
             ast::ExpressionKind::Unary { operand, operator } => match operator {
                 ast::UnaryOperator::Not => Some(ast::Type {
                     kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::Bool)),
@@ -1829,7 +1841,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 }
                 return_ty
             }
-            ast::ExpressionKind::Binary { left, .. } => self.resolve_receiver_type(left),
+            ast::ExpressionKind::Binary { left, operator, .. } => {
+                if matches!(operator,
+                    ast::BinaryOperator::Equal | ast::BinaryOperator::NotEqual
+                    | ast::BinaryOperator::Less | ast::BinaryOperator::Greater
+                    | ast::BinaryOperator::LessEqual | ast::BinaryOperator::GreaterEqual
+                    | ast::BinaryOperator::LogicalAnd | ast::BinaryOperator::LogicalOr)
+                {
+                    Some(ast::Type {
+                        kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::Bool)),
+                        span: expr.span,
+                    })
+                } else { self.resolve_receiver_type(left) }
+            }
             ast::ExpressionKind::Unary { operand, operator } => match operator {
                 ast::UnaryOperator::Not => Some(ast::Type {
                     kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::Bool)),
