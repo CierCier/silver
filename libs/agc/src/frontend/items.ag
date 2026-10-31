@@ -43,7 +43,7 @@ void collect_syntax_tokens(SyntaxNode* node, Vec<SyntaxNode*>* tokens) {
     }
 }
 
-bool syntax_has_projected_assignment(SyntaxNode* body, Vec<str>* names) {
+bool syntax_changes_borrowed_state(SyntaxNode* body, Vec<str>* names) {
     if (body == (SyntaxNode*)0 || names.len() == 0) { return false; }
     Vec<SyntaxNode*> tokens = Vec<SyntaxNode*>.new();
     collect_syntax_tokens(body, &tokens);
@@ -80,9 +80,15 @@ bool syntax_has_projected_assignment(SyntaxNode* body, Vec<str>* names) {
                         break;
                     }
                 }
+                bool moved = i > 0
+                    && tokens.get(i - 1).token_kind == TokenKind.Move;
+                if (projected && moved) {
+                    tokens.drop();
+                    return true;
+                }
                 if (projected && next < tokens.len()) {
                     TokenKind op = tokens.get(next).token_kind;
-                    if (op == TokenKind.Assign || op == TokenKind.PlusAssign
+                    if (moved || op == TokenKind.Assign || op == TokenKind.PlusAssign
                         || op == TokenKind.MinusAssign || op == TokenKind.StarAssign
                         || op == TokenKind.SlashAssign || op == TokenKind.PercentAssign
                         || op == TokenKind.BitwiseAndAssign || op == TokenKind.BitwiseOrAssign

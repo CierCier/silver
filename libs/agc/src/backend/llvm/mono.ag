@@ -266,7 +266,7 @@ LLVMOpaqueValue* mono_ensure_free_function(LlvmContext* ctx, str base, Vec<u32>*
     Vec<Binding> params = Vec<Binding>.new();
     collect_parameter_bindings(template.params_node, &params);
     bool owner_state_abi = bindings_need_borrow_owner_state(
-        template.body_node, &params, template.name_node.text);
+        template.body_node, &params);
     Vec<LLVMOpaqueType*> param_types = Vec<LLVMOpaqueType*>.new();
     i = 0;
     while (i < params.len()) {

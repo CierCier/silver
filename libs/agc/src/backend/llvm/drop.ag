@@ -1523,6 +1523,7 @@ void llvm_emit_assign_predrop(LlvmContext* ctx, u32 target_id, u32 rhs_id) {
     if (target.kind == ExprKind.Var) {
         LlvmLocal* local = ctx.find_local(target.aux);
         if (local == (LlvmLocal*)0) { return; }
+        if (local.borrowed_owner) { return; }
         llvm_emit_init_node_cleanup(ctx, local, 0);
         return;
     }
@@ -1551,6 +1552,8 @@ void llvm_mark_assign_live(LlvmContext* ctx, u32 target_id) {
     if (target_id == 0) { return; }
     AstExpr* target = ctx.pool.get_expr(target_id);
     if (target.kind == ExprKind.Var) {
+        LlvmLocal* local = ctx.find_local(target.aux);
+        if (local != (LlvmLocal*)0 && local.borrowed_owner) { return; }
         llvm_set_local_drop_live(ctx, target.aux, true);
         return;
     }
