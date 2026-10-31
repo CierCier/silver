@@ -5349,6 +5349,47 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
             }
         }
 
+        if (!c_abi_call && !indirect) {
+            i = 0;
+            while (i < (i64)args_count) {
+                u32 expected_type = i < call_target_types.len()
+                    ? call_target_types.get(i) : TYPE_UNKNOWN;
+                if (expected_type == TYPE_UNKNOWN && indirect && i < signature_count) {
+                    expected_type = ctx.types.type_args.get(signature_start + 1 + (u32)i);
+                } else if (expected_type == TYPE_UNKNOWN && i < params.len()) {
+                    expected_type = typecheck_parameter_type_id(ctx.types,
+                        params.get_ptr(i));
+                }
+                expected_type = ctx.types.resolve_subst(expected_type);
+                TypeEntry* expected_entry = ctx.types.get(expected_type);
+                bool reference_parameter = expected_entry.kind == TypeKind.Reference;
+                u32 pointee_type = reference_parameter
+                    ? expected_entry.inner : expected_type;
+                if (!indirect && i < params.len()
+                    && params.get_ptr(i).declared_type.kind
+                        == ProjectionTypeKind.Reference) {
+                    reference_parameter = true;
+                    while (ctx.types.get(pointee_type).kind == TypeKind.Pointer
+                        || ctx.types.get(pointee_type).kind == TypeKind.Reference) {
+                        pointee_type = ctx.types.get(pointee_type).inner;
+                    }
+                }
+                if (reference_parameter) {
+                    u32 arg_id = ctx.pool.args.get((i64)args_start + i);
+                    LLVMOpaqueValue* state_map = llvm_build_owner_state_map(
+                        ctx, arg_id, pointee_type);
+                    if (state_map == (LLVMOpaqueValue*)0) {
+                        state_map = LLVMConstNull(
+                            LLVMPointerTypeInContext(ctx.ctx, 0));
+                    }
+                    call_args.push(state_map);
+                    call_arg_types.push(TYPE_UNKNOWN);
+                    call_target_types.push(TYPE_UNKNOWN);
+                }
+                i += 1;
+            }
+        }
+
         str call_label = callee.kind == ExprKind.Var ? ctx.names.get(callee.aux) : "";
         llvm_prepare_call_args(ctx, fn_type, &call_args, &call_arg_types,
                               &call_target_types, call_label, c_abi_call);

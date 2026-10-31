@@ -21,8 +21,10 @@ struct LlvmLocal {
     bool is_string_literal_backed;
     LLVMOpaqueValue* drop_flag;
     LLVMOpaqueValue* init_tree_storage;
+    LLVMOpaqueValue* owner_state_map;
     LLVMOpaqueType* init_node_type;
     u32 assignment_source;
+    bool borrowed_owner;
     Vec<LlvmFieldFlag> field_flags;
     Vec<Projection> drop_projections;
     Vec<InitNodePlan> init_nodes;
@@ -408,8 +410,10 @@ impl LlvmContext {
         local.is_string_literal_backed = false;
         local.drop_flag = (LLVMOpaqueValue*)0;
         local.init_tree_storage = (LLVMOpaqueValue*)0;
+        local.owner_state_map = (LLVMOpaqueValue*)0;
         local.init_node_type = (LLVMOpaqueType*)0;
         local.assignment_source = 0;
+        local.borrowed_owner = false;
         local.field_flags = Vec<LlvmFieldFlag>.new();
         local.drop_projections = Vec<Projection>.new();
         local.init_nodes = Vec<InitNodePlan>.new();

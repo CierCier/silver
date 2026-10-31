@@ -7,6 +7,7 @@ import std.string;
 import std.mem.vec;
 import frontend.ast;
 import frontend.ast_expr;
+import frontend.lexer;
 import frontend.items;
 import frontend.place;
 import frontend.init_plan;
@@ -238,7 +239,12 @@ bool llvm_drop_path_matches(LlvmLocal* local, LlvmFieldFlag* entry,
 
 LLVMOpaqueValue* llvm_init_node_place(LlvmContext* ctx, LlvmLocal* local,
                                        u32 node_index) {
-    if (node_index == 0) { return local.ptr; }
+    if (node_index == 0) {
+        if (!local.borrowed_owner) { return local.ptr; }
+        return LLVMBuildLoad2(ctx.builder,
+            llvm_lower_type(ctx.ctx, ctx.types, local.type_id), local.ptr,
+            "borrowed_owner_place");
+    }
     InitNodePlan node = local.init_nodes.get(node_index);
     InitNodePlan parent = local.init_nodes.get(node.parent_index);
     LLVMOpaqueValue* base = llvm_init_node_place(ctx, local, node.parent_index);
@@ -502,6 +508,18 @@ LLVMOpaqueValue* llvm_init_tree_node_ptr(LlvmContext* ctx, LlvmLocal* local,
 
 LLVMOpaqueValue* llvm_init_tree_state_ptr(LlvmContext* ctx, LlvmLocal* local,
                                           u32 node_index) {
+    if (local.owner_state_map != (LLVMOpaqueValue*)0) {
+        if (node_index >= (u32)local.init_nodes.len()) { return (LLVMOpaqueValue*)0; }
+        LLVMOpaqueType* ptr_type = LLVMPointerTypeInContext(ctx.ctx, 0);
+        LLVMOpaqueType* map_type = LLVMArrayType(ptr_type, (u32)local.init_nodes.len());
+        Vec<LLVMOpaqueValue*> indices = Vec<LLVMOpaqueValue*>.new();
+        indices.push(LLVMConstInt(LLVMInt32TypeInContext(ctx.ctx), 0, 0));
+        indices.push(LLVMConstInt(LLVMInt32TypeInContext(ctx.ctx), node_index, 0));
+        LLVMOpaqueValue* map_slot = LLVMBuildGEP2(ctx.builder, map_type,
+            local.owner_state_map, indices.data, 2, "owner_state_slot");
+        indices.drop();
+        return LLVMBuildLoad2(ctx.builder, ptr_type, map_slot, "owner_state_ptr");
+    }
     LLVMOpaqueValue* node = llvm_init_tree_node_ptr(ctx, local, node_index);
     if (node == (LLVMOpaqueValue*)0) { return (LLVMOpaqueValue*)0; }
     return LLVMBuildStructGEP2(ctx.builder, local.init_node_type, node, 3,
@@ -717,7 +735,37 @@ void llvm_register_local_drops(LlvmContext* ctx, u32 name_id, LLVMOpaqueValue* p
     llvm_init_tree_build(ctx, local, ctx.init_owner_plans.get_ptr(plan_index), initialized);
 }
 
-
+void llvm_register_borrowed_local_drops(LlvmContext* ctx, u32 name_id,
+                                        LLVMOpaqueValue* ptr, u32 pointee_type,
+                                        LLVMOpaqueValue* owner_state_map,
+                                        Span declaration) {
+    if (owner_state_map == (LLVMOpaqueValue*)0) { return; }
+    u32 resolved = ctx.types.resolve_subst(pointee_type);
+    if (resolved == TYPE_UNKNOWN || resolved == 0
+        || !llvm_type_needs_tracking(ctx, resolved)) { return; }
+    LlvmLocal* local = ctx.find_local(name_id);
+    if (local == (LlvmLocal*)0 || local.ptr != ptr) { return; }
+    i64 plan_index = init_plan_resolve(ctx.init_owner_plans, ctx.types,
+        ctx.names, ctx.root, name_id, resolved, declaration,
+        ctx.current_function_span);
+    if (plan_index < 0) { return; }
+    llvm_init_tree_build(ctx, local, ctx.init_owner_plans.get_ptr(plan_index), true);
+    local.owner_state_map = owner_state_map;
+    local.borrowed_owner = true;
+    local.drop_flag = llvm_init_tree_state_ptr(ctx, local, 0);
+    local.field_flags.len = 0;
+    u32 node_index = 1;
+    while (node_index < (u32)local.init_nodes.len()) {
+        InitNodePlan* plan = local.init_nodes.get_ptr(node_index);
+        LlvmFieldFlag flag;
+        flag.projections_start = plan.projections_start;
+        flag.projections_count = plan.projections_count;
+        flag.node_index = node_index;
+        flag.flag = llvm_init_tree_state_ptr(ctx, local, node_index);
+        local.field_flags.push(move flag);
+        node_index += 1;
+    }
+}
 
 void llvm_set_local_drop_live(LlvmContext* ctx, u32 name_id, bool live) {
     LlvmLocal* local = ctx.find_local(name_id);
@@ -1170,6 +1218,73 @@ u32 llvm_collect_drop_field_path(LlvmContext* ctx, u32 expr_id,
     return root_name;
 }
 
+LLVMOpaqueValue* llvm_build_owner_state_map(LlvmContext* ctx, u32 expr_id,
+                                             u32 pointee_type) {
+    if (expr_id == 0) { return (LLVMOpaqueValue*)0; }
+    AstExpr* argument = ctx.pool.get_expr(expr_id);
+    u32 place_id = expr_id;
+    if (argument.kind == ExprKind.Unary
+        && argument.aux == (u32)TokenKind.BitwiseAnd) {
+        place_id = argument.inner0;
+    }
+    while (place_id != 0 && ctx.pool.get_expr(place_id).kind == ExprKind.Move) {
+        place_id = ctx.pool.get_expr(place_id).inner0;
+    }
+    Vec<Projection> borrow_path = Vec<Projection>.new();
+    u32 root_name = llvm_collect_drop_field_path(ctx, place_id, &borrow_path);
+    LlvmLocal* owner = root_name == 0 ? (LlvmLocal*)0 : ctx.find_local(root_name);
+    if (owner == (LlvmLocal*)0 || owner.init_nodes.len() == 0) {
+        borrow_path.drop();
+        return (LLVMOpaqueValue*)0;
+    }
+    i64 plan_index = init_plan_resolve(ctx.init_owner_plans, ctx.types,
+        ctx.names, ctx.root, root_name, ctx.types.resolve_subst(pointee_type),
+        ctx.pool.get_expr(place_id).span, ctx.current_function_span);
+    if (plan_index < 0) {
+        borrow_path.drop();
+        return (LLVMOpaqueValue*)0;
+    }
+    InitOwnerPlan* borrowed_plan = ctx.init_owner_plans.get_ptr(plan_index);
+    LLVMOpaqueType* ptr_type = LLVMPointerTypeInContext(ctx.ctx, 0);
+    LLVMOpaqueType* map_type = LLVMArrayType(ptr_type,
+        (u32)borrowed_plan.nodes.len());
+    LLVMOpaqueValue* map = llvm_entry_alloca(ctx, map_type, "borrow_owner_state_map");
+    LLVMOpaqueType* i32_type = LLVMInt32TypeInContext(ctx.ctx);
+    u32 borrowed_node = 0;
+    while (borrowed_node < (u32)borrowed_plan.nodes.len()) {
+        Vec<Projection> full_path = Vec<Projection>.new();
+        i64 p = 0;
+        while (p < borrow_path.len()) {
+            full_path.push(borrow_path.get(p));
+            p += 1;
+        }
+        InitNodePlan* plan_node = borrowed_plan.nodes.get_ptr(borrowed_node);
+        u32 projection = 0;
+        while (projection < plan_node.projections_count) {
+            full_path.push(borrowed_plan.projections.get(
+                (i64)plan_node.projections_start + projection));
+            projection += 1;
+        }
+        i64 owner_node = llvm_init_path_node(ctx, owner, &full_path);
+        full_path.drop();
+        if (owner_node < 0) {
+            borrow_path.drop();
+            return (LLVMOpaqueValue*)0;
+        }
+        Vec<LLVMOpaqueValue*> indices = Vec<LLVMOpaqueValue*>.new();
+        indices.push(LLVMConstInt(i32_type, 0, 0));
+        indices.push(LLVMConstInt(i32_type, borrowed_node, 0));
+        LLVMOpaqueValue* map_slot = LLVMBuildGEP2(ctx.builder, map_type,
+            map, indices.data, 2, "borrow_owner_state_slot");
+        indices.drop();
+        LLVMBuildStore(ctx.builder,
+            llvm_init_tree_state_ptr(ctx, owner, (u32)owner_node), map_slot);
+        borrowed_node += 1;
+    }
+    borrow_path.drop();
+    return map;
+}
+
 bool llvm_validate_drop_field_transfer(LlvmContext* ctx, LlvmLocal* local,
                                       Vec<Projection>* path, u32 expr_id) {
     u32 value_type = llvm_expr_type(ctx, expr_id);
@@ -1217,8 +1332,9 @@ void llvm_clear_place_drops_at_local(LlvmContext* ctx, u32 expr_id,
             u32 root_ty = ctx.types.resolve_subst(local.type_id);
             if (root_ty != TYPE_UNKNOWN && root_ty != 0) {
                 TypeEntry* root_entry = ctx.types.get(root_ty);
-                if (root_entry.kind != TypeKind.Pointer
-                    && root_entry.kind != TypeKind.Reference) {
+                if (local.owner_state_map != (LLVMOpaqueValue*)0
+                    || (root_entry.kind != TypeKind.Pointer
+                        && root_entry.kind != TypeKind.Reference)) {
                     llvm_set_path_drop_live(ctx, local, &path, false);
                 }
             }
@@ -1280,10 +1396,12 @@ void llvm_clear_place_drops(LlvmContext* ctx, u32 expr_id) {
 // implicit payload cleanup. The whole flag skips moved-out values.
 void llvm_emit_local_whole_drop(LlvmContext* ctx, LlvmLocal* local) {
     if (local.drop_flag == (LLVMOpaqueValue*)0) { return; }
-    u32 local_ty = ctx.types.resolve_subst(local.type_id);
+    u32 local_type = local.borrowed_owner && local.init_nodes.len() > 0
+        ? local.init_nodes.get_ptr(0).type_id : local.type_id;
+    u32 local_ty = ctx.types.resolve_subst(local_type);
     LLVMOpaqueValue* own_fn = (LLVMOpaqueValue*)0;
-    if (llvm_can_resolve_drop_fn(ctx, local.type_id)) {
-        own_fn = llvm_drop_fn_for_type(ctx, local.type_id);
+    if (llvm_can_resolve_drop_fn(ctx, local_type)) {
+        own_fn = llvm_drop_fn_for_type(ctx, local_type);
     }
     bool is_enum = false;
     str enum_name = "";
@@ -1298,10 +1416,12 @@ void llvm_emit_local_whole_drop(LlvmContext* ctx, LlvmLocal* local) {
         && llvm_enum_needs_payload_drop(ctx, local_ty, enum_name);
     if (own_fn == (LLVMOpaqueValue*)0 && !payloads) { return; }
     if (own_fn != (LLVMOpaqueValue*)0) {
-        llvm_emit_guarded_drop_call(ctx, local.drop_flag, own_fn, local.ptr);
+        llvm_emit_guarded_drop_call(ctx, local.drop_flag, own_fn,
+            llvm_init_node_place(ctx, local, 0));
     }
     if (payloads) {
-        llvm_emit_guarded_enum_payload_drop(ctx, local.drop_flag, local.ptr,
+        llvm_emit_guarded_enum_payload_drop(ctx, local.drop_flag,
+                                            llvm_init_node_place(ctx, local, 0),
                                             local_ty, enum_name);
     }
 }
@@ -1384,7 +1504,9 @@ void llvm_emit_drops_above(LlvmContext* ctx, i64 mark) {
     i64 i = (i64)ctx.locals.len() - 1;
     while (i >= mark) {
         LlvmLocal* local = ctx.locals.get_ptr(i);
-        llvm_emit_init_node_cleanup(ctx, local, 0);
+        if (!local.borrowed_owner) {
+            llvm_emit_init_node_cleanup(ctx, local, 0);
+        }
         i -= 1;
     }
 }

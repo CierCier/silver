@@ -282,6 +282,14 @@ LLVMOpaqueValue* mono_ensure_free_function(LlvmContext* ctx, str base, Vec<u32>*
         param_text.drop();
         i += 1;
     }
+    LLVMOpaqueType* state_map_type = LLVMPointerTypeInContext(ctx.ctx, 0);
+    i = 0;
+    while (i < params.len()) {
+        if (params.get_ptr(i).declared_type.kind == ProjectionTypeKind.Reference) {
+            param_types.push(state_map_type);
+        }
+        i += 1;
+    }
     params.drop();
     LLVMOpaqueType* fn_type = LLVMFunctionType(ret_ty, param_types.data, (u32)param_types.len(), 0);
     LLVMOpaqueValue* fn_val = LLVMAddFunction(ctx.module, mangled.to_str(), fn_type);
