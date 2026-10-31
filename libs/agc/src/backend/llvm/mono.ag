@@ -265,6 +265,8 @@ LLVMOpaqueValue* mono_ensure_free_function(LlvmContext* ctx, str base, Vec<u32>*
     LLVMOpaqueType* ret_ty = llvm_lower_type(ctx.ctx, ctx.types, ret_id);
     Vec<Binding> params = Vec<Binding>.new();
     collect_parameter_bindings(template.params_node, &params);
+    bool owner_state_abi = bindings_need_borrow_owner_state(
+        template.body_node, &params, template.name_node.text);
     Vec<LLVMOpaqueType*> param_types = Vec<LLVMOpaqueType*>.new();
     i = 0;
     while (i < params.len()) {
@@ -282,13 +284,15 @@ LLVMOpaqueValue* mono_ensure_free_function(LlvmContext* ctx, str base, Vec<u32>*
         param_text.drop();
         i += 1;
     }
-    LLVMOpaqueType* state_map_type = LLVMPointerTypeInContext(ctx.ctx, 0);
-    i = 0;
-    while (i < params.len()) {
-        if (params.get_ptr(i).declared_type.kind == ProjectionTypeKind.Reference) {
-            param_types.push(state_map_type);
+    if (owner_state_abi) {
+        LLVMOpaqueType* state_map_type = LLVMPointerTypeInContext(ctx.ctx, 0);
+        i = 0;
+        while (i < params.len()) {
+            if (params.get_ptr(i).declared_type.kind == ProjectionTypeKind.Reference) {
+                param_types.push(state_map_type);
+            }
+            i += 1;
         }
-        i += 1;
     }
     params.drop();
     LLVMOpaqueType* fn_type = LLVMFunctionType(ret_ty, param_types.data, (u32)param_types.len(), 0);
