@@ -26,6 +26,7 @@ i64 g_parent_drops = 0;
 struct PartialDropParent { DropSpy item; i64 required; }
 struct NestedDropSlot { VecSlot inner; DropSpy sibling; }
 struct BorrowedDropSlot { DropSpy item; }
+struct BorrowedVecSlot { Vec<DropSpy> item; }
 
 void transfer_borrowed_item(&mut BorrowedDropSlot target, &mut BorrowedDropSlot source) {
     target.item = move source.item;
@@ -176,6 +177,20 @@ i32 main() {
         assert_eq_i64(1, g_drops, "old target drops after ownership transfer");
     }
     assert_eq_i64(2, g_drops, "moved source does not drop twice");
+
+    test_start("borrowed lambda moves update the original owner's cleanup state");
+    g_drops = 0;
+    {
+        BorrowedVecSlot slot;
+        slot.item = Vec<DropSpy>.new();
+        slot.item.push(new_drop_spy(19));
+        Vec<DropSpy>(&mut BorrowedVecSlot) take =
+            (&mut borrowed) => move borrowed.item;
+        Vec<DropSpy> received = take(&mut slot);
+        assert_eq_i64(1, received.len(), "lambda returns the borrowed field");
+        received.drop();
+    }
+    assert_eq_i64(1, g_drops, "moved borrowed field is not dropped by its old owner");
 
     test_start("borrowed initialization preserves partial custom Drop parents");
     g_drops = 0;
