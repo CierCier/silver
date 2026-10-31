@@ -2,8 +2,8 @@
 import std.mem.vec;
 import std.string;
 
-String init_plan_unrepresentable() {
-    return String.from_str("cannot represent owner initialization plan: unresolved inline layout or more than 65536 nodes / 256 projection levels");
+String init_plan_unrepresentable(str type_name) {
+    return @format("cannot represent owner initialization plan for '{}': unresolved inline layout or more than 65536 nodes / 256 projection levels", type_name);
 }
 
 String init_plan_unknown_place() {

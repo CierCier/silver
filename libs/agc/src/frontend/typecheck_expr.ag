@@ -854,8 +854,14 @@ u32 typecheck_struct_field_type(TypeTable* types, SyntaxNode* root,
         }
         return TYPE_UNKNOWN;
     }
+    Vec<u32> parameters = Vec<u32>.new();
+    if (!mono_push_owner_type_arguments(root, types, owner_type, &parameters)) {
+        return TYPE_UNKNOWN;
+    }
     u32 member_type = struct_field_type_id(types, item, field_name);
-    return resolve_generic_member_type(types, root, owner_type, member_type);
+    u32 resolved_member = types.resolve_subst(member_type);
+    types.pop_subst(parameters.len());
+    return resolved_member;
 }
 
 bool typecheck_type_has_drop_impl(SyntaxNode* root, TypeTable* types, u32 type_id) {
@@ -920,6 +926,15 @@ bool typecheck_type_is_copy_inner(SyntaxNode* root, TypeTable* types, u32 type_i
     if (kind == TypeKind.Array) {
         return typecheck_type_is_copy_inner(root, types, inner, depth + 1);
     }
+    if (kind == TypeKind.Tuple) {
+        i64 i = 0;
+        while (i < count) {
+            if (!typecheck_type_is_copy_inner(root, types,
+                    types.type_args.get(inner + (u32)i), depth + 1)) { return false; }
+            i += 1;
+        }
+        return true;
+    }
     if (kind == TypeKind.TypeParam || kind == TypeKind.Unknown || kind == TypeKind.Void) {
         return false;
     }
@@ -931,6 +946,10 @@ bool typecheck_type_is_copy_inner(SyntaxNode* root, TypeTable* types, u32 type_i
     }
     SyntaxNode* enum_item = find_enum_item(root, type_name);
     if (enum_item != (SyntaxNode*)0) {
+        Vec<u32> parameters = Vec<u32>.new();
+        if (!mono_push_owner_type_arguments(root, types, resolved, &parameters)) {
+            return false;
+        }
         Vec<SyntaxNode*> variants = Vec<SyntaxNode*>.new();
         Vec<i64> tags = Vec<i64>.new();
         Vec<i64> arities = Vec<i64>.new();
@@ -943,6 +962,7 @@ bool typecheck_type_is_copy_inner(SyntaxNode* root, TypeTable* types, u32 type_i
                 String payload_text = String.new();
                 if (!enum_payload_type_text(root, types.names.get(name_id),
                                             variants.get(vi).text, pi, &payload_text)) {
+                    types.pop_subst(parameters.len());
                     payload_text.drop();
                     payload_types.drop();
                     variants.drop();
@@ -952,13 +972,13 @@ bool typecheck_type_is_copy_inner(SyntaxNode* root, TypeTable* types, u32 type_i
                 }
                 u32 payload_type = type_id_from_text(types, payload_text.to_str());
                 payload_text.drop();
-                payload_type = resolve_generic_member_type(types, root, resolved, payload_type);
                 payload_types.push(payload_type);
                 pi += 1;
             }
             pi = 0;
             while (pi < payload_types.len()) {
                 if (!typecheck_type_is_copy_inner(root, types, payload_types.get(pi), depth + 1)) {
+                    types.pop_subst(parameters.len());
                     payload_types.drop();
                     variants.drop();
                     tags.drop();
@@ -973,6 +993,7 @@ bool typecheck_type_is_copy_inner(SyntaxNode* root, TypeTable* types, u32 type_i
         variants.drop();
         tags.drop();
         arities.drop();
+        types.pop_subst(parameters.len());
         return true;
     }
     if (find_item_by_name(root, NodeKind.Struct, type_name) != (SyntaxNode*)0) {
@@ -995,21 +1016,9 @@ bool typecheck_type_is_copy_inner(SyntaxNode* root, TypeTable* types, u32 type_i
                 name_index -= 1;
             }
             if (name_index >= start) {
-                String field_type_text = String.new();
-                i64 i = start;
-                while (i < name_index) {
-                    field_type_text.push_str(tokens.get(i).text);
-                    i += 1;
-                }
-                i = name_index + 1;
-                while (i < end) {
-                    field_type_text.push_str(tokens.get(i).text);
-                    i += 1;
-                }
-                u32 field_type = type_id_from_text(types, field_type_text.to_str());
-                field_type = resolve_generic_member_type(types, root, resolved, field_type);
+                u32 field_type = typecheck_struct_field_type(types, root, resolved,
+                                                            tokens.get(name_index).text);
                 bool field_copy = typecheck_type_is_copy_inner(root, types, field_type, depth + 1);
-                field_type_text.drop();
                 if (!field_copy) {
                     tokens.drop();
                     return false;

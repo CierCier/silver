@@ -704,7 +704,9 @@ u32 struct_field_type_id(TypeTable* types, SyntaxNode* item, str field_name) {
             String type_text = String.new();
             SyntaxNode* scan = start;
             while (scan != name && scan != (SyntaxNode*)0) {
-                append_node_tokens(scan, &type_text);
+                if (scan.kind != NodeKind.Token || scan.token_kind != TokenKind.Private) {
+                    append_node_tokens(scan, &type_text);
+                }
                 scan = scan.next_sibling;
             }
             u32 type_id = type_id_from_declarator(types, type_text.to_str(), name.next_sibling);

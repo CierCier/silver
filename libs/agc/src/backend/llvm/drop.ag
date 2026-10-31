@@ -710,7 +710,8 @@ void llvm_register_local_drops(LlvmContext* ctx, u32 name_id, LLVMOpaqueValue* p
     i64 plan_index = init_plan_resolve(ctx.init_owner_plans, ctx.types, ctx.names,
         ctx.root, name_id, resolved, declaration, ctx.current_function_span);
     if (plan_index < 0) {
-        ctx.ownership_diagnostics.error(declaration, init_plan_unrepresentable());
+        ctx.ownership_diagnostics.error(declaration,
+            init_plan_unrepresentable(ctx.types.type_name(resolved)));
         return;
     }
     llvm_init_tree_build(ctx, local, ctx.init_owner_plans.get_ptr(plan_index), initialized);

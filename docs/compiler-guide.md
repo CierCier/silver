@@ -330,6 +330,9 @@ for overwrite and scope-exit cleanup.
    replacement store. Pointer/reference edges stop the tree: references do not
    yet transport this metadata, and indirect owned-field overwrite cleanup
    remains unimplemented. Heap containers retain their own mutation contracts.
+   The native backend shares a read-only node-layout table for each concrete
+   type in a module. Node initialization and whole-tree state changes emit
+   bounded loops rather than a store sequence for every inline child.
 7. **Enum Payload Ownership**: constructing a variant with an owned payload requires `move` (`Res.Ok(move i)` — a bare `Res.Ok(i)` is a compile error). Enums WITHOUT a Drop impl of their own get a tag-aware payload cascade: the active variant's Drop-typed payload is dropped at scope exit (so a never-unwrapped `Result<Owned, E>` does not leak). Extract owned payloads with a `move` binding — `match r { Ok(move v) : v, ... }` — which transfers ownership and zeroes the enum's slot (freeing via a plain binding copy now double-frees, since the cascade still runs). Enums WITH a Drop impl manage their payloads in the drop body and get no cascade.
 8. **Place & Overlap**: `Place {local, projections=[Field/Index/Deref]}` with `is_prefix_of` (x is prefix of x.a) and `overlaps` (x overlaps x.a, x.a vs x.b disjoint, `v` overlaps `v[i]`, `v[i]` vs `v[j]` conservative). Borrow/move/init/drop all share this.
 9. **Copy vs Move**: `TypeProperties {is_copy, needs_drop}` distinguishes reads
