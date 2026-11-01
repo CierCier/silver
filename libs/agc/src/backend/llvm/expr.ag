@@ -1019,6 +1019,9 @@ LLVMOpaqueValue* llvm_emit_lvalue(LlvmContext* ctx, u32 expr_id) {
         LLVMOpaqueValue* index_val = llvm_emit_expr(ctx, expr.inner1);
         if (target_ptr != (LLVMOpaqueValue*)0 && index_val != (LLVMOpaqueValue*)0) {
             if (LLVMGetTypeKind(LLVMTypeOf(target_ptr)) != (u32)12) {
+                if (LLVMGetTypeKind(LLVMTypeOf(target_ptr)) != (u32)8) {
+                    return (LLVMOpaqueValue*)0;
+                }
                 target_ptr = LLVMBuildIntToPtr(ctx.builder, target_ptr, LLVMPointerTypeInContext(ctx.ctx, (u32)0), "idx_ptr");
             }
             if (is_array) {

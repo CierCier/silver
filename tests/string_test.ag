@@ -9,7 +9,22 @@ void drop_vec_strings(Vec<String>* v) {
     v.drop();
 }
 
+u8 first_byte(&str text) {
+    return text[0];
+}
+
+u8 first_byte_mut(&mut str text) {
+    return text[0];
+}
+
 i32 main(){
+    test_start("str views index through borrowed references");
+    {
+        str text = "hello";
+        assert_eq_i64(104, (i64)first_byte(&text), "borrowed str index reads the first byte");
+        assert_eq_i64(104, (i64)first_byte_mut(&mut text), "mutable borrowed str index reads the first byte");
+    }
+
     // -- Existing tests ---------------------------------------------------
     String s = String.new();
     assert_eq_i64(s.len, 0, "New string has length 0");

@@ -1351,41 +1351,113 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             });
                     }
                 }
-                // str is a byte pointer: s[i] loads the i-th byte.
+                // `&str` sugar parses as a builtin byte slice: index its data pointer.
                 if let Some(ty) = &object_ty
-                    && matches!(
-                        ty.kind.as_ref(),
-                        ast::TypeKind::Primitive(ast::PrimitiveType::Str)
-                    )
+                    && matches!(ty.kind.as_ref(), ast::TypeKind::Slice(_))
                 {
-                    let base = self.emit_expression_value(object)?;
+                    let slice = self.emit_expression_value(object)?;
+                    let BasicValueEnum::StructValue(slice) = slice else {
+                        return Err(CodegenError::with_span(
+                            "expected struct value for slice indexing",
+                            object.span,
+                        ));
+                    };
+                    let data = self
+                        .builder
+                        .build_extract_value(slice, 0, "slice.data")
+                        .map_err(|e| {
+                            CodegenError::with_span(
+                                format!("failed to read slice data: {e}"),
+                                object.span,
+                            )
+                        })?;
                     let idx = self.emit_expression_value(index)?;
                     let element_ty = self.context.i8_type();
                     let ptr = unsafe {
                         self.builder
                             .build_gep(
                                 element_ty,
-                                base.into_pointer_value(),
+                                data.into_pointer_value(),
                                 &[idx.into_int_value()],
-                                "str.index",
+                                "slice.index",
                             )
                             .map_err(|e| {
                                 CodegenError::with_span(
-                                    format!("failed to index string: {e}"),
+                                    format!("failed to index slice: {e}"),
                                     expr.span,
                                 )
                             })?
                     };
                     return self
                         .builder
-                        .build_load(element_ty, ptr, "str.byte")
+                        .build_load(element_ty, ptr, "slice.byte")
                         .map(|v| v.as_basic_value_enum())
                         .map_err(|e| {
                             CodegenError::with_span(
-                                format!("failed to load string byte: {e}"),
+                                format!("failed to load slice byte: {e}"),
                                 expr.span,
                             )
                         });
+                }
+                // str is a byte pointer: s[i] loads the i-th byte. A borrowed
+                // str addresses the stored pointer, so load it before indexing.
+                if let Some(ty) = &object_ty {
+                    let mut str_ty = (*ty).clone();
+                    let mut borrowed = false;
+                    while let ast::TypeKind::Reference(reference) = str_ty.kind.as_ref() {
+                        borrowed = true;
+                        str_ty = (*reference.inner).clone();
+                    }
+                    if matches!(
+                        str_ty.kind.as_ref(),
+                        ast::TypeKind::Primitive(ast::PrimitiveType::Str)
+                    ) {
+                        let mut base = self.emit_expression_value(object)?;
+                        if borrowed {
+                            let data = self.reference_data(base, object.span)?;
+                            base = self
+                                .builder
+                                .build_load(
+                                    self.context.ptr_type(AddressSpace::default()),
+                                    data,
+                                    "str.reference",
+                                )
+                                .map(|v| v.as_basic_value_enum())
+                                .map_err(|e| {
+                                    CodegenError::with_span(
+                                        format!("failed to load borrowed string: {e}"),
+                                        object.span,
+                                    )
+                                })?;
+                        }
+                        let idx = self.emit_expression_value(index)?;
+                        let element_ty = self.context.i8_type();
+                        let ptr = unsafe {
+                            self.builder
+                                .build_gep(
+                                    element_ty,
+                                    base.into_pointer_value(),
+                                    &[idx.into_int_value()],
+                                    "str.index",
+                                )
+                                .map_err(|e| {
+                                    CodegenError::with_span(
+                                        format!("failed to index string: {e}"),
+                                        expr.span,
+                                    )
+                                })?
+                        };
+                        return self
+                            .builder
+                            .build_load(element_ty, ptr, "str.byte")
+                            .map(|v| v.as_basic_value_enum())
+                            .map_err(|e| {
+                                CodegenError::with_span(
+                                    format!("failed to load string byte: {e}"),
+                                    expr.span,
+                                )
+                            });
+                    }
                 }
                 // For non-pointer types (struct, slice), use the trait path (__index_get)
                 let method_ident = ast::Identifier {

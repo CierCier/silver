@@ -244,7 +244,8 @@ LlvmPlace llvm_emit_reference_place(LlvmContext* ctx, u32 expr_id) {
             base_type = ctx.types.resolve_subst(entry.inner);
             entry = *ctx.types.get(base_type);
         }
-        if (entry.kind != TypeKind.Array && entry.kind != TypeKind.Tuple && entry.kind != TypeKind.Pointer) {
+        if (entry.kind != TypeKind.Array && entry.kind != TypeKind.Tuple
+            && entry.kind != TypeKind.Pointer && entry.kind != TypeKind.Str) {
             return place;
         }
         LlvmPlace base = llvm_emit_reference_place(ctx, expression.inner0);
@@ -278,6 +279,20 @@ LlvmPlace llvm_emit_reference_place(LlvmContext* ctx, u32 expr_id) {
         }
         LLVMOpaqueValue* index = llvm_emit_expr(ctx, expression.inner1);
         if (index == (LLVMOpaqueValue*)0) { return place; }
+        if (entry.kind == TypeKind.Str) {
+            // The place addresses the stored byte pointer, so load it before
+            // computing the byte address.
+            base.data = LLVMBuildLoad2(ctx.builder, LLVMPointerTypeInContext(ctx.ctx, 0),
+                base.data, "reference_index_str");
+            index = llvm_slice_bound_i64(ctx, expression.inner1, index, "reference_str_index");
+            if (index == (LLVMOpaqueValue*)0) { return place; }
+            place.type_id = TYPE_U8;
+            place.data = LLVMBuildGEP2(ctx.builder, LLVMInt8TypeInContext(ctx.ctx),
+                base.data, &index, 1, "reference_str_byte");
+            place.raw = base.raw;
+            place.borrowed = base.borrowed;
+            return place;
+        }
         if (entry.kind == TypeKind.Pointer) {
             base.data = LLVMBuildLoad2(ctx.builder, LLVMPointerTypeInContext(ctx.ctx, 0),
                 base.data, "reference_index_pointer");

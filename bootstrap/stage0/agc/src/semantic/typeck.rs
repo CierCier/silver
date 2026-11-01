@@ -2662,6 +2662,19 @@ impl TypeChecker {
                         }
                     },
                     Type::Reference { inner, .. } => match &**inner {
+                        Type::Primitive(ast::PrimitiveType::Str) => {
+                            // A borrowed str is a byte view: s[i] reads the i-th byte.
+                            if !is_integer(&index_ty) {
+                                self.error(
+                                    format!(
+                                        "string index must be integer, found {}",
+                                        index_ty
+                                    ),
+                                    index.span,
+                                );
+                            }
+                            Type::Primitive(ast::PrimitiveType::U8)
+                        }
                         Type::Slice { element } => {
                             if !is_integer(&index_ty) {
                                 self.error(
