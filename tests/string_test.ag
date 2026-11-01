@@ -411,6 +411,11 @@ i32 main(){
         assert_true(s_c > s_a, "String > comparison ('world' > 'hello')");
         assert_true(s_a <= s_b, "String <= comparison (same)");
         assert_true(s_a >= s_b, "String >= comparison (same)");
+        Slice<u8> view = s_a.as_slice();
+        assert_true(view == "hello", "byte slice equality selects str overload");
+        assert_false(view == "world", "byte slice str equality compares content");
+        assert_true(view == s_b, "byte slice equality selects String overload");
+        assert_false(view == s_c, "byte slice String equality compares content");
         s_a.drop();
         s_b.drop();
         s_c.drop();

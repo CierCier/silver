@@ -3,7 +3,7 @@ use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::targets::TargetData;
 use inkwell::types::{AnyType, BasicType, BasicTypeEnum};
 use inkwell::values::{
-    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue,
+    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue,
 };
 use inkwell::{AtomicOrdering, AtomicRMWBinOp};
 
@@ -47,7 +47,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
     pub(crate) fn emit_indirect_call_expression(
         &mut self,
-        fn_ptr_val: PointerValue<'ctx>,
+        fn_ptr_val: BasicValueEnum<'ctx>,
         func_type: &ast::FunctionType,
         arguments: &[ast::Expression],
         allow_void: bool,
@@ -85,12 +85,17 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     )?;
                 }
             }
-            args.push(BasicMetadataValueEnum::from(value));
+            args.push(value);
         }
+
+        if Self::function_has_reference_abi(&func_type.parameters, Some(&func_type.return_type)) {
+            return self.emit_carried_indirect_call(fn_ptr_val, func_type, &args);
+        }
+        let args: Vec<BasicMetadataValueEnum<'ctx>> = args.into_iter().map(Into::into).collect();
 
         let call = self
             .builder
-            .build_indirect_call(fn_type, fn_ptr_val, &args, "calltmp")
+            .build_indirect_call(fn_type, fn_ptr_val.into_pointer_value(), &args, "calltmp")
             .map_err(|e| CodegenError::new(format!("failed to emit indirect call: {e}")))?;
 
         if let Some(value) = call.try_as_basic_value().basic() {
@@ -143,9 +148,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         if let Some(func_type) = is_indirect {
             let fn_ptr = self.emit_expression_value(function_expr)?;
-            let fn_ptr_val = fn_ptr.into_pointer_value();
             return self.emit_indirect_call_expression(
-                fn_ptr_val, &func_type, arguments, allow_void, span,
+                fn_ptr, &func_type, arguments, allow_void, span,
             );
         }
 
@@ -350,6 +354,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         value,
                         source_type.as_ref(),
                         &argument.span,
+                        signature.as_ref().and_then(|sig| sig.linkage.as_ref()),
                     )?;
                 }
                 args.push(BasicMetadataValueEnum::from(value));
@@ -1365,6 +1370,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         value,
                         source_type.as_ref(),
                         &argument.span,
+                        signature.as_ref().and_then(|sig| sig.linkage.as_ref()),
                     )?;
                 }
                 args.push(BasicMetadataValueEnum::from(value));
@@ -1428,11 +1434,21 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     }
 
     pub(crate) fn apply_variadic_default_promotion(
-        &self,
+        &mut self,
         value: BasicValueEnum<'ctx>,
         source_type: Option<&ast::Type>,
         span: &Span,
+        linkage: Option<&ast::ExternLinkage>,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        if matches!(linkage, Some(ast::ExternLinkage::C)) {
+            if value.get_type() == self.reference_type().into() {
+                self.require_initialized_c_reference(value, *span)?;
+                return self.reference_data(value, *span).map(Into::into);
+            }
+            if value.get_type() == self.callable_type().into() {
+                return self.callable_entry(value, true).map(Into::into);
+            }
+        }
         let Some(source_type) = source_type else {
             return Ok(value);
         };

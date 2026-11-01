@@ -19,6 +19,38 @@ pub(crate) struct ResolvedPlace<'ctx> {
 const INITIALIZED_CAPABILITY: u64 = 1;
 
 impl<'ctx> LlvmIrGenerator<'ctx> {
+    pub(crate) fn require_initialized_c_reference(&mut self, value: BasicValueEnum<'ctx>, span: Span)
+        -> CodegenResult<()> {
+        let node = self.reference_state(value, span)?;
+        if node == self.initialized_reference_state() { return Ok(()); }
+        let function = self.current_fn.ok_or_else(|| CodegenError::new("C reference outside function"))?;
+        let tracked = self.context.append_basic_block(function, "c.reference.tracked");
+        let initialized = self.context.append_basic_block(function, "c.reference.initialized");
+        let invalid = self.context.append_basic_block(function, "c.reference.uninitialized");
+        let foreign = self.builder.build_int_compare(inkwell::IntPredicate::EQ, node,
+            self.initialized_reference_state(), "c.reference.foreign")
+            .map_err(|e| CodegenError::new(e.to_string()))?;
+        self.builder.build_conditional_branch(foreign, initialized, tracked)
+            .map_err(|e| CodegenError::new(e.to_string()))?;
+        self.builder.position_at_end(tracked);
+        let state = self.builder.build_struct_gep(self.owner_node_type(), node, 3, "c.reference.state")
+            .map_err(|e| CodegenError::new(e.to_string()))?;
+        let state = self.builder.build_load(self.context.i8_type(), state, "c.reference.state.value")
+            .map_err(|e| CodegenError::new(e.to_string()))?.into_int_value();
+        let full = self.builder.build_int_compare(inkwell::IntPredicate::EQ, state,
+            self.context.i8_type().const_int(super::owner_state::INIT, false), "c.reference.full")
+            .map_err(|e| CodegenError::new(e.to_string()))?;
+        self.builder.build_conditional_branch(full, initialized, invalid)
+            .map_err(|e| CodegenError::new(e.to_string()))?;
+        self.builder.position_at_end(invalid);
+        let trap = self.module.get_function("llvm.trap").unwrap_or_else(|| self.module.add_function(
+            "llvm.trap", self.context.void_type().fn_type(&[], false), None));
+        self.builder.build_call(trap, &[], "").map_err(|e| CodegenError::new(e.to_string()))?;
+        self.builder.build_unreachable().map_err(|e| CodegenError::new(e.to_string()))?;
+        self.builder.position_at_end(initialized);
+        Ok(())
+    }
+
     pub(crate) fn has_builtin_place_index(ty: &ast::Type) -> bool {
         match ty.kind.as_ref() {
             ast::TypeKind::Pointer(_) | ast::TypeKind::Array(_) | ast::TypeKind::Tuple(_) => true,
@@ -68,8 +100,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         signature: &super::FunctionSig,
     ) -> CodegenResult<FunctionValue<'ctx>> {
         if !matches!(signature.linkage, Some(ast::ExternLinkage::C))
-            || !signature.params.iter().chain(signature.return_type.iter())
-                .any(|ty| matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_)))
+            || !Self::function_has_reference_abi(&signature.params, signature.return_type.as_ref())
         {
             return Ok(function);
         }

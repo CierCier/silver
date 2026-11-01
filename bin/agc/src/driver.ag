@@ -656,7 +656,7 @@ bool artifact_source_function(SyntaxNode* item, ArtifactExport* out) {
 
 i32 emit_artifact_fixture(str output_path) {
     Artifact artifact = Artifact.new();
-    artifact.version = (u8)11;
+    artifact.version = (u8)12;
     artifact.module_name = String.from_str("artifact_fixture");
     artifact.module_path = String.from_str("artifact_fixture");
     artifact.source_path = String.from_str("artifact_fixture.ag");
@@ -853,7 +853,7 @@ i32 emit_source_artifact(str source_path, str output_path, bool require_complete
         return 2;
     }
     Artifact artifact = Artifact.new();
-    artifact.version = (u8)11;
+    artifact.version = (u8)12;
     artifact.module_name = String.from_str(source_path);
     artifact.module_path = String.from_str(source_path);
     artifact.source_path = String.from_str(source_path);

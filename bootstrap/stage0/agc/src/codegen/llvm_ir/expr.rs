@@ -764,9 +764,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 if let Some(f) = func {
                     let signature = self.signature_for_name(name)
                         .or_else(|| self.signature_for_name(llvm_name));
-                    let f = if let Some(signature) = signature {
-                        self.imported_reference_function_value(f, name, &signature)?
-                    } else { f };
+                    if let Some(signature) = signature {
+                        return self.named_callable_value(f, name, &signature);
+                    }
                     return Ok(f.as_global_value().as_pointer_value().as_basic_value_enum());
                 }
                 Err(CodegenError::with_span(
@@ -1937,6 +1937,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             .map_err(|e| CodegenError::new(format!("GEP enum field: {e}")))?
                         };
                         let mut val = self.emit_expression_value(arg)?;
+                        if self.type_needs_drop_glue(payload_type, &mut Vec::new())? {
+                            self.clear_drop_flag_of(arg)?;
+                        }
                         if val.get_type() != target_llvm_ty
                             && !val.is_struct_value()
                             && !target_llvm_ty.is_struct_type()
@@ -1958,6 +1961,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     }
                 } else if arguments.len() == 1 {
                     let val = self.emit_expression_value(&arguments[0])?;
+                    self.clear_drop_flag_of(&arguments[0])?;
                     let val_ptr = self
                         .builder
                         .build_pointer_cast(

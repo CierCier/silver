@@ -21,10 +21,9 @@ struct LlvmLocal {
     bool is_string_literal_backed;
     LLVMOpaqueValue* drop_flag;
     LLVMOpaqueValue* init_tree_storage;
-    LLVMOpaqueValue* owner_state_map;
+    LLVMOpaqueValue* init_node_map;
     LLVMOpaqueType* init_node_type;
     u32 assignment_source;
-    bool borrowed_owner;
     Vec<LlvmFieldFlag> field_flags;
     Vec<Projection> drop_projections;
     Vec<InitNodePlan> init_nodes;
@@ -36,6 +35,27 @@ struct LlvmFieldFlag {
     u32 projections_count;
     u32 node_index;
     LLVMOpaqueValue* flag;
+}
+
+impl LlvmLocal {
+    LlvmLocal new(u32 name_id, LLVMOpaqueValue* ptr, u32 type_id, bool is_mut) {
+        LlvmLocal local;
+        local.name_id = name_id;
+        local.ptr = ptr;
+        local.type_id = type_id;
+        local.is_mut = is_mut;
+        local.is_string_literal_backed = false;
+        local.drop_flag = (LLVMOpaqueValue*)0;
+        local.init_tree_storage = (LLVMOpaqueValue*)0;
+        local.init_node_map = (LLVMOpaqueValue*)0;
+        local.init_node_type = (LLVMOpaqueType*)0;
+        local.assignment_source = 0;
+        local.field_flags = Vec<LlvmFieldFlag>.new();
+        local.drop_projections = Vec<Projection>.new();
+        local.init_nodes = Vec<InitNodePlan>.new();
+        local.init_projections = Vec<Projection>.new();
+        return move local;
+    }
 }
 
 // One payload binding of a match arm and the scrutinee expression it was
@@ -402,23 +422,7 @@ impl LlvmContext {
     }
 
     void add_local(LlvmContext* self, u32 name_id, LLVMOpaqueValue* ptr, u32 type_id, bool is_mut) {
-        LlvmLocal local;
-        local.name_id = name_id;
-        local.ptr = ptr;
-        local.type_id = type_id;
-        local.is_mut = is_mut;
-        local.is_string_literal_backed = false;
-        local.drop_flag = (LLVMOpaqueValue*)0;
-        local.init_tree_storage = (LLVMOpaqueValue*)0;
-        local.owner_state_map = (LLVMOpaqueValue*)0;
-        local.init_node_type = (LLVMOpaqueType*)0;
-        local.assignment_source = 0;
-        local.borrowed_owner = false;
-        local.field_flags = Vec<LlvmFieldFlag>.new();
-        local.drop_projections = Vec<Projection>.new();
-        local.init_nodes = Vec<InitNodePlan>.new();
-        local.init_projections = Vec<Projection>.new();
-        self.locals.push(move local);
+        self.locals.push(LlvmLocal.new(name_id, ptr, type_id, is_mut));
     }
 
     LLVMOpaqueValue* save_stack(LlvmContext* self) {

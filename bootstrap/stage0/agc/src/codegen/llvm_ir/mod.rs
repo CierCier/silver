@@ -228,6 +228,7 @@ pub(crate) mod operators;
 pub(crate) mod scope;
 pub(crate) mod owner_state;
 pub(crate) mod reference;
+pub(crate) mod function_abi;
 pub(crate) mod stmt;
 pub(crate) mod symbols;
 pub(crate) mod tasks;

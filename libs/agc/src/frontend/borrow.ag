@@ -1380,11 +1380,18 @@ str borrow_call_result_holder(Vec<Binding>* bindings, Vec<u32>* binding_types,
         || leaves.get(i - 1).token_kind != TokenKind.Identifier) {
         return "";
     }
+    str holder = leaves.get(i - 1).text;
     if (i >= 3 && leaves.get(i - 2).token_kind == TokenKind.Dot
         && leaves.get(i - 3).token_kind == TokenKind.Identifier) {
-        return leaves.get(i - 3).text;
+        holder = leaves.get(i - 3).text;
     }
-    return leaves.get(i - 1).text;
+    Binding* destination = visible_binding(bindings, holder, call);
+    u32 slot_type = borrow_assignment_slot_type(bindings, binding_types,
+        table, root, leaves, i + 1, destination);
+    // Scalar and raw-pointer results cannot retain a semantic reference loan.
+    if (slot_type != TYPE_UNKNOWN
+        && !borrow_type_contains_reference(table, root, slot_type, 0)) { return ""; }
+    return holder;
 }
 
 i64 last_use(Vec<SyntaxNode*>* leaves, i64 start, str holder) {

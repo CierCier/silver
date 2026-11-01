@@ -2,6 +2,10 @@
 import std.mem.vec;
 import std.string;
 
+String reference_state_unavailable() {
+    return String.from_str("cannot borrow owned storage without its initialization-state capability");
+}
+
 String init_plan_unrepresentable(str type_name) {
     return @format("cannot represent owner initialization plan for '{}': unresolved inline layout or more than 65536 nodes / 256 projection levels", type_name);
 }

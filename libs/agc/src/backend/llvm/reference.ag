@@ -1,0 +1,560 @@
+import vendor.llvm.llvm;
+import std.mem.vec;
+import std.string;
+import frontend.ast_expr;
+import frontend.bindings;
+import frontend.items;
+import frontend.lexer;
+import frontend.messages;
+import frontend.init_plan;
+import frontend.place;
+import frontend.types;
+import frontend.typecheck_expr;
+import backend.llvm.context;
+import backend.llvm.types;
+import backend.llvm.expr;
+import backend.llvm.drop;
+import backend.llvm.mono;
+import backend.llvm.stmt;
+import backend.llvm.function_abi;
+
+struct LlvmPlace {
+    LLVMOpaqueValue* data;
+    LLVMOpaqueValue* node;
+    u32 type_id;
+    bool raw;
+    bool borrowed;
+}
+
+enum BorrowedTransition { Cleanup; Initialize; Move; }
+
+LLVMOpaqueValue* llvm_import_reference_function_value(LlvmContext* ctx,
+    LLVMOpaqueValue* function, str source_name) {
+    SyntaxNode* parameters = item_c_extern_function_parameters(ctx.root, source_name);
+    if (parameters == (SyntaxNode*)0) { return function; }
+    Vec<Binding> bindings = Vec<Binding>.new();
+    collect_parameter_bindings(parameters, &bindings);
+    Vec<u32> parameter_ids = Vec<u32>.new();
+    Vec<LLVMOpaqueType*> parameter_types = Vec<LLVMOpaqueType*>.new();
+    u32 result_id = item_c_extern_function_return_type_id(ctx.types, ctx.root, source_name);
+    bool needs_adapter = llvm_type_has_reference_abi(ctx.types, result_id);
+    i64 i = 0;
+    while (i < bindings.len()) {
+        u32 type_id = ctx.types.resolve_subst(typecheck_parameter_type_id(ctx.types, bindings.get_ptr(i)));
+        parameter_ids.push(type_id);
+        parameter_types.push(llvm_lower_type(ctx.ctx, ctx.types, type_id));
+        if (llvm_type_has_reference_abi(ctx.types, type_id)) { needs_adapter = true; }
+        i += 1;
+    }
+    if (!needs_adapter) { return function; }
+    String name = String.from_str("__silver_c_reference_adapter.");
+    name.push_str(source_name);
+    LLVMOpaqueValue* adapter = LLVMGetNamedFunction(ctx.module, name.to_str());
+    if (adapter != (LLVMOpaqueValue*)0) { return adapter; }
+    LLVMOpaqueType* result_type = llvm_lower_type(ctx.ctx, ctx.types, result_id);
+    LLVMOpaqueType* signature = LLVMFunctionType(result_type, parameter_types.data,
+        (u32)parameter_types.len(), 0);
+    adapter = LLVMAddFunction(ctx.module, name.to_str(), signature);
+    LLVMSetLinkage(adapter, LLVMLinkage.LLVMInternalLinkage);
+    LLVMOpaqueBuilder* saved_builder = ctx.builder;
+    LLVMOpaqueValue* saved_function = ctx.current_fn;
+    u32 saved_return = ctx.current_return_type;
+    ctx.builder = LLVMCreateBuilderInContext(ctx.ctx);
+    ctx.current_fn = adapter;
+    ctx.current_return_type = result_id;
+    LLVMPositionBuilderAtEnd(ctx.builder, LLVMAppendBasicBlockInContext(ctx.ctx, adapter, "entry"));
+    Vec<LLVMOpaqueValue*> arguments = Vec<LLVMOpaqueValue*>.new();
+    i = 0;
+    while (i < parameter_ids.len()) {
+        arguments.push(LLVMGetParam(adapter, (u32)i));
+        i += 1;
+    }
+    LLVMOpaqueType* foreign_signature = LLVMGlobalGetValueType(function);
+    llvm_prepare_call_args(ctx, foreign_signature, &arguments, &parameter_ids,
+        &parameter_ids, source_name, true);
+    LLVMOpaqueValue* result = LLVMBuildCall2(ctx.builder, foreign_signature, function,
+        arguments.data, (u32)arguments.len(), "");
+    if (result_id == TYPE_VOID) {
+        LLVMBuildRetVoid(ctx.builder);
+    } else {
+        result = llvm_value_from_c_abi(ctx, result, result_id);
+        LLVMBuildRet(ctx.builder, result);
+    }
+    LLVMDisposeBuilder(ctx.builder);
+    ctx.builder = saved_builder;
+    ctx.current_fn = saved_function;
+    ctx.current_return_type = saved_return;
+    return adapter;
+}
+
+bool llvm_place_has_borrow(LlvmContext* ctx, u32 expr_id) {
+    AstExpr expression = *ctx.pool.get_expr(expr_id);
+    if (expression.kind == ExprKind.Unary && expression.aux == (u32)TokenKind.Star) {
+        return ctx.types.get(ctx.types.resolve_subst(llvm_expr_type(ctx, expression.inner0))).kind
+            == TypeKind.Reference;
+    }
+    if (expression.kind != ExprKind.Field && expression.kind != ExprKind.Index) { return false; }
+    TypeEntry entry = *ctx.types.get(ctx.types.resolve_subst(llvm_expr_type(ctx, expression.inner0)));
+    bool indirect = false;
+    bool borrowed = false;
+    while (entry.kind == TypeKind.Reference || entry.kind == TypeKind.Pointer) {
+        indirect = true;
+        borrowed = entry.kind == TypeKind.Reference;
+        entry = *ctx.types.get(ctx.types.resolve_subst(entry.inner));
+    }
+    return indirect ? borrowed : llvm_place_has_borrow(ctx, expression.inner0);
+}
+
+LLVMOpaqueValue* llvm_emit_pointer_operand(LlvmContext* ctx, u32 expr_id) {
+    LLVMOpaqueValue* value = llvm_emit_expr(ctx, expr_id);
+    if (value != (LLVMOpaqueValue*)0 && LLVMTypeOf(value) == llvm_reference_type(ctx.ctx)) {
+        return llvm_reference_data(ctx.builder, value);
+    }
+    return value;
+}
+
+LLVMOpaqueType* llvm_reference_node_type(LLVMOpaqueContext* ctx) {
+    LLVMOpaqueType* node_type = LLVMGetTypeByName2(ctx, "__silver_init_node");
+    if (node_type != (LLVMOpaqueType*)0) { return node_type; }
+    node_type = LLVMStructCreateNamed(ctx, "__silver_init_node");
+    Vec<LLVMOpaqueType*> fields = Vec<LLVMOpaqueType*>.new();
+    fields.push(LLVMPointerTypeInContext(ctx, 0));
+    fields.push(LLVMPointerTypeInContext(ctx, 0));
+    fields.push(LLVMInt32TypeInContext(ctx));
+    fields.push(LLVMInt8TypeInContext(ctx));
+    LLVMStructSetBody(node_type, fields.data, 4, 0);
+    return node_type;
+}
+
+LLVMOpaqueValue* llvm_reference_child(LlvmContext* ctx, LLVMOpaqueValue* node,
+                                      LLVMOpaqueValue* index) {
+    LLVMOpaqueValue* initialized = llvm_reference_initialized(ctx.ctx);
+    if (node == initialized) { return node; }
+    LLVMOpaqueBasicBlock* before = LLVMGetInsertBlock(ctx.builder);
+    LLVMOpaqueBasicBlock* tracked = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn,
+                                                                 "reference_project");
+    LLVMOpaqueBasicBlock* after = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn,
+                                                               "reference_projected");
+    LLVMOpaqueValue* external = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntEQ,
+                                             node, initialized, "reference_external");
+    LLVMBuildCondBr(ctx.builder, external, after, tracked);
+    LLVMPositionBuilderAtEnd(ctx.builder, tracked);
+    LLVMOpaqueType* ptr_type = LLVMPointerTypeInContext(ctx.ctx, 0);
+    LLVMOpaqueType* node_type = llvm_reference_node_type(ctx.ctx);
+    LLVMOpaqueValue* children = LLVMBuildLoad2(ctx.builder, ptr_type,
+        LLVMBuildStructGEP2(ctx.builder, node_type, node, 1, "reference_children_slot"),
+        "reference_children");
+    LLVMOpaqueValue* child = LLVMBuildGEP2(ctx.builder, node_type, children, &index, 1,
+                                          "reference_child");
+    LLVMBuildBr(ctx.builder, after);
+    LLVMPositionBuilderAtEnd(ctx.builder, after);
+    LLVMOpaqueValue* result = LLVMBuildPhi(ctx.builder, ptr_type, "reference_projected_node");
+    Vec<LLVMOpaqueValue*> values = Vec<LLVMOpaqueValue*>.new();
+    values.push(node);
+    values.push(child);
+    Vec<LLVMOpaqueBasicBlock*> blocks = Vec<LLVMOpaqueBasicBlock*>.new();
+    blocks.push(before);
+    blocks.push(tracked);
+    LLVMAddIncoming(result, values.data, blocks.data, 2);
+    return result;
+}
+
+LlvmPlace llvm_reference_deref_place(LlvmContext* ctx, LlvmPlace place) {
+    TypeEntry entry = *ctx.types.get(ctx.types.resolve_subst(place.type_id));
+    while (place.data != (LLVMOpaqueValue*)0
+        && (entry.kind == TypeKind.Reference || entry.kind == TypeKind.Pointer)) {
+        LLVMOpaqueValue* value = LLVMBuildLoad2(ctx.builder,
+            llvm_lower_type(ctx.ctx, ctx.types, place.type_id), place.data, "reference_base");
+        if (entry.kind == TypeKind.Reference) {
+            place.data = llvm_reference_data(ctx.builder, value);
+            place.node = llvm_reference_node(ctx.builder, value);
+            place.raw = false;
+            place.borrowed = true;
+        } else {
+            place.data = value;
+            place.node = (LLVMOpaqueValue*)0;
+            place.raw = true;
+            place.borrowed = false;
+        }
+        place.type_id = ctx.types.resolve_subst(entry.inner);
+        entry = *ctx.types.get(place.type_id);
+    }
+    return place;
+}
+
+// Resolve address and capability together so receiver/index effects run once.
+LlvmPlace llvm_emit_reference_place(LlvmContext* ctx, u32 expr_id) {
+    LlvmPlace place;
+    place.data = (LLVMOpaqueValue*)0;
+    place.node = (LLVMOpaqueValue*)0;
+    place.type_id = llvm_lvalue_type(ctx, expr_id);
+    place.raw = false;
+    place.borrowed = false;
+    if (expr_id == 0) { return place; }
+    AstExpr expression = *ctx.pool.get_expr(expr_id);
+    if (expression.kind == ExprKind.Var) {
+        LlvmLocal* local = ctx.find_local(expression.aux);
+        if (local != (LlvmLocal*)0) {
+            place.data = local.ptr;
+            place.type_id = ctx.types.resolve_subst(local.type_id);
+            place.node = llvm_init_tree_node_ptr(ctx, local, 0);
+        } else {
+            place.data = LLVMGetNamedGlobal(ctx.module, ctx.names.get(expression.aux));
+            if (place.data != (LLVMOpaqueValue*)0) {
+                place.node = llvm_reference_initialized(ctx.ctx);
+            }
+        }
+        return place;
+    }
+    if (expression.kind == ExprKind.Unary && expression.aux == (u32)TokenKind.Star) {
+        u32 source_type = ctx.types.resolve_subst(llvm_expr_type(ctx, expression.inner0));
+        TypeEntry source = *ctx.types.get(source_type);
+        LLVMOpaqueValue* value = llvm_emit_expr(ctx, expression.inner0);
+        if (value == (LLVMOpaqueValue*)0) { return place; }
+        if (source.kind == TypeKind.Reference) {
+            place.data = llvm_reference_data(ctx.builder, value);
+            place.node = llvm_reference_node(ctx.builder, value);
+            place.borrowed = true;
+        } else if (source.kind == TypeKind.Pointer) {
+            place.data = value;
+            place.raw = true;
+        }
+        return place;
+    }
+    if (expression.kind == ExprKind.Call || expression.kind == ExprKind.MethodCall
+        || expression.kind == ExprKind.StructLit || expression.kind == ExprKind.Block
+        || expression.kind == ExprKind.Ternary || expression.kind == ExprKind.Slice) {
+        LLVMOpaqueValue* value = llvm_emit_expr(ctx, expr_id);
+        if (value == (LLVMOpaqueValue*)0) { return place; }
+        place.type_id = llvm_expr_type(ctx, expr_id);
+        place.data = llvm_entry_alloca(ctx, LLVMTypeOf(value), "reference_temporary");
+        LLVMBuildStore(ctx.builder, value, place.data);
+        String name = String.from_str("__reference_temporary_");
+        append_u32(&name, (u32)ctx.locals.len());
+        u32 name_id = ctx.names.intern(name.to_str());
+        ctx.add_local(name_id, place.data, place.type_id, true);
+        llvm_register_local_drops(ctx, name_id, place.data, place.type_id, true, expression.span);
+        place.node = llvm_init_tree_node_ptr(ctx, ctx.find_local(name_id), 0);
+        return place;
+    }
+    if (expression.kind == ExprKind.Index) {
+        u32 base_type = ctx.types.resolve_subst(llvm_expr_type(ctx, expression.inner0));
+        TypeEntry entry = *ctx.types.get(base_type);
+        while (entry.kind == TypeKind.Reference) {
+            base_type = ctx.types.resolve_subst(entry.inner);
+            entry = *ctx.types.get(base_type);
+        }
+        if (entry.kind != TypeKind.Array && entry.kind != TypeKind.Tuple && entry.kind != TypeKind.Pointer) {
+            return place;
+        }
+        LlvmPlace base = llvm_emit_reference_place(ctx, expression.inner0);
+        if (base.data == (LLVMOpaqueValue*)0) { return place; }
+        TypeEntry source = *ctx.types.get(ctx.types.resolve_subst(base.type_id));
+        while (source.kind == TypeKind.Reference) {
+            LLVMOpaqueValue* value = LLVMBuildLoad2(ctx.builder, llvm_reference_type(ctx.ctx),
+                base.data, "indexed_reference");
+            base.data = llvm_reference_data(ctx.builder, value);
+            base.node = llvm_reference_node(ctx.builder, value);
+            base.borrowed = true;
+            base.raw = false;
+            base.type_id = ctx.types.resolve_subst(source.inner);
+            source = *ctx.types.get(base.type_id);
+        }
+        if (entry.kind == TypeKind.Tuple) {
+            AstExpr index_expr = *ctx.pool.get_expr(expression.inner1);
+            if (index_expr.kind != ExprKind.Literal) { return place; }
+            i64 index = parse_int_literal(ctx.names.get(index_expr.inner0));
+            if (index < 0 || index >= entry.count) { return place; }
+            place.type_id = ctx.types.resolve_subst(ctx.types.type_args.get(entry.inner + (u32)index));
+            place.data = LLVMBuildStructGEP2(ctx.builder,
+                llvm_lower_type(ctx.ctx, ctx.types, base_type), base.data, (u32)index, "reference_tuple_field");
+            if (base.node != (LLVMOpaqueValue*)0) {
+                place.node = llvm_reference_child(ctx, base.node,
+                    LLVMConstInt(LLVMInt32TypeInContext(ctx.ctx), (u64)index, 0));
+            }
+            place.raw = base.raw;
+            place.borrowed = base.borrowed;
+            return place;
+        }
+        LLVMOpaqueValue* index = llvm_emit_expr(ctx, expression.inner1);
+        if (index == (LLVMOpaqueValue*)0) { return place; }
+        if (entry.kind == TypeKind.Pointer) {
+            base.data = LLVMBuildLoad2(ctx.builder, LLVMPointerTypeInContext(ctx.ctx, 0),
+                base.data, "reference_index_pointer");
+            base.node = (LLVMOpaqueValue*)0;
+            base.raw = true;
+            base.borrowed = false;
+        } else {
+            index = llvm_slice_bound_i64(ctx, expression.inner1, index, "reference_array_index");
+            LLVMOpaqueValue* valid = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntULT,
+                index, LLVMConstInt(LLVMInt64TypeInContext(ctx.ctx), (u64)entry.count, 0), "reference_array_valid");
+            LLVMOpaqueBasicBlock* ready = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "reference_array_ready");
+            LLVMOpaqueBasicBlock* failed = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "reference_array_failed");
+            LLVMBuildCondBr(ctx.builder, valid, ready, failed);
+            LLVMPositionBuilderAtEnd(ctx.builder, failed);
+            LLVMOpaqueType* abort_type = LLVMFunctionType(LLVMVoidTypeInContext(ctx.ctx), (LLVMOpaqueType**)0, 0, 0);
+            LLVMOpaqueValue* abort_fn = LLVMGetNamedFunction(ctx.module, "abort");
+            if (abort_fn == (LLVMOpaqueValue*)0) { abort_fn = LLVMAddFunction(ctx.module, "abort", abort_type); }
+            LLVMBuildCall2(ctx.builder, abort_type, abort_fn, (LLVMOpaqueValue**)0, 0, "");
+            LLVMBuildUnreachable(ctx.builder);
+            LLVMPositionBuilderAtEnd(ctx.builder, ready);
+        }
+        place.type_id = ctx.types.resolve_subst(entry.inner);
+        place.data = LLVMBuildGEP2(ctx.builder, llvm_lower_type(ctx.ctx, ctx.types, place.type_id),
+            base.data, &index, 1, "reference_index_element");
+        place.raw = base.raw;
+        place.borrowed = base.borrowed;
+        if (base.node != (LLVMOpaqueValue*)0) { place.node = llvm_reference_child(ctx, base.node, index); }
+        return place;
+    }
+    if (expression.kind == ExprKind.Field) {
+        LlvmPlace base = llvm_emit_reference_place(ctx, expression.inner0);
+        base = llvm_reference_deref_place(ctx, base);
+        if (base.data == (LLVMOpaqueValue*)0) { return place; }
+        LlvmStructDef* definition = ctx.find_struct_by_str(ctx.types.type_name(base.type_id));
+        if (definition == (LlvmStructDef*)0) { return place; }
+        i32 field = ctx.find_field_index(definition, expression.aux);
+        if (field < 0) { return place; }
+        mono_ensure_type_layout(ctx, base.type_id, &ctx.generic_layout_ids);
+        place.data = LLVMBuildStructGEP2(ctx.builder,
+            llvm_lower_type(ctx.ctx, ctx.types, base.type_id), base.data, (u32)field, "reference_field");
+        place.raw = base.raw;
+        place.borrowed = base.borrowed;
+        if (base.node != (LLVMOpaqueValue*)0) {
+            place.node = llvm_reference_child(ctx, base.node,
+                LLVMConstInt(LLVMInt32TypeInContext(ctx.ctx), (u64)field, 0));
+        }
+    }
+    return place;
+}
+
+LLVMOpaqueValue* llvm_emit_reference(LlvmContext* ctx, u32 expr_id) {
+    u32 type_id = llvm_expr_type(ctx, expr_id);
+    TypeEntry entry = *ctx.types.get(ctx.types.resolve_subst(type_id));
+    if (entry.kind == TypeKind.Reference) { return llvm_emit_expr(ctx, expr_id); }
+    LlvmPlace place = llvm_emit_reference_place(ctx, expr_id);
+    if (place.data == (LLVMOpaqueValue*)0) {
+        place.data = llvm_emit_lvalue(ctx, expr_id);
+    }
+    if (place.node == (LLVMOpaqueValue*)0) {
+        if (place.raw || !llvm_type_needs_drop(ctx, type_id)
+            || (typecheck_type_is_copy(ctx.root, ctx.types, type_id)
+                && !llvm_can_resolve_drop_fn(ctx, type_id))) {
+            place.node = llvm_reference_initialized(ctx.ctx);
+        } else {
+            ctx.ownership_diagnostics.error(ctx.pool.get_expr(expr_id).span,
+                reference_state_unavailable());
+            return (LLVMOpaqueValue*)0;
+        }
+    }
+    if (place.data == (LLVMOpaqueValue*)0) { return (LLVMOpaqueValue*)0; }
+    return llvm_reference_build(ctx.ctx, ctx.builder, place.data, place.node);
+}
+
+LLVMOpaqueValue* llvm_emit_reference_argument(LlvmContext* ctx, u32 expr_id, u32 expected_type) {
+    TypeEntry actual = *ctx.types.get(ctx.types.resolve_subst(llvm_expr_type(ctx, expr_id)));
+    TypeEntry expected = *ctx.types.get(ctx.types.resolve_subst(expected_type));
+    // A pointer argument may refer to the expected object. Explicit &pointer
+    // formation instead borrows the pointer variable's slot.
+    if (actual.kind == TypeKind.Pointer && expected.kind == TypeKind.Reference
+        && ctx.types.resolve_subst(actual.inner) == ctx.types.resolve_subst(expected.inner)) {
+        LLVMOpaqueValue* data = llvm_emit_expr(ctx, expr_id);
+        if (data == (LLVMOpaqueValue*)0) { return data; }
+        return llvm_reference_build(ctx.ctx, ctx.builder, data, llvm_reference_initialized(ctx.ctx));
+    }
+    return llvm_emit_reference(ctx, expr_id);
+}
+
+// Reuse the canonical typed plan while addressing the original caller's nodes.
+LlvmLocal llvm_borrowed_local(LlvmContext* ctx, LlvmPlace place, Span span) {
+    LlvmLocal local = LlvmLocal.new(0, place.data, place.type_id, true);
+    i64 plan_index = init_plan_resolve(ctx.init_owner_plans, ctx.types, ctx.names,
+        ctx.root, 0, place.type_id, span, ctx.current_function_span);
+    if (plan_index < 0) {
+        ctx.ownership_diagnostics.error(span, init_plan_unrepresentable(ctx.types.type_name(place.type_id)));
+        return move local;
+    }
+    InitOwnerPlan* plan = ctx.init_owner_plans.get_ptr(plan_index);
+    i64 i = 0;
+    while (i < plan.nodes.len()) {
+        local.init_nodes.push(plan.nodes.get(i));
+        i += 1;
+    }
+    i = 0;
+    while (i < plan.projections.len()) {
+        local.init_projections.push(plan.projections.get(i));
+        local.drop_projections.push(plan.projections.get(i));
+        i += 1;
+    }
+    LLVMOpaqueType* ptr_type = LLVMPointerTypeInContext(ctx.ctx, 0);
+    LLVMOpaqueType* i32_type = LLVMInt32TypeInContext(ctx.ctx);
+    local.init_node_type = llvm_reference_node_type(ctx.ctx);
+    local.init_node_map = llvm_entry_alloca(ctx,
+        LLVMArrayType(ptr_type, (u32)local.init_nodes.len()), "borrowed_nodes");
+    LLVMBuildStore(ctx.builder, place.node, local.init_node_map);
+    i = 1;
+    while (i < local.init_nodes.len()) {
+        InitNodePlan node = local.init_nodes.get(i);
+        InitNodePlan parent = local.init_nodes.get(node.parent_index);
+        LLVMOpaqueValue* parent_node = llvm_init_tree_node_ptr(ctx, &local, node.parent_index);
+        LLVMOpaqueValue* children_slot = LLVMBuildStructGEP2(ctx.builder,
+            local.init_node_type, parent_node, 1, "borrowed_children_slot");
+        LLVMOpaqueValue* children = LLVMBuildLoad2(ctx.builder, ptr_type,
+            children_slot, "borrowed_children");
+        LLVMOpaqueValue* offset = LLVMConstInt(i32_type, (u64)((u32)i - parent.first_child_index), 0);
+        LLVMOpaqueValue* actual = LLVMBuildGEP2(ctx.builder, local.init_node_type,
+            children, &offset, 1, "borrowed_actual_node");
+        LLVMOpaqueValue* index = LLVMConstInt(i32_type, (u64)i, 0);
+        LLVMOpaqueValue* slot = LLVMBuildGEP2(ctx.builder, ptr_type,
+            local.init_node_map, &index, 1, "borrowed_node_slot");
+        LLVMBuildStore(ctx.builder, actual, slot);
+        i += 1;
+    }
+    local.drop_flag = llvm_init_tree_state_ptr(ctx, &local, 0);
+    i = 1;
+    while (i < local.init_nodes.len()) {
+        InitNodePlan node = local.init_nodes.get(i);
+        LlvmFieldFlag flag;
+        flag.projections_start = node.projections_start;
+        flag.projections_count = node.projections_count;
+        flag.node_index = (u32)i;
+        flag.flag = llvm_init_tree_state_ptr(ctx, &local, (u32)i);
+        local.field_flags.push(flag);
+        i += 1;
+    }
+    return move local;
+}
+
+private void llvm_reference_refresh_body(LlvmContext* ctx, LLVMOpaqueValue* node) {
+    LLVMOpaqueType* ptr_type = LLVMPointerTypeInContext(ctx.ctx, 0);
+    LLVMOpaqueType* node_type = llvm_reference_node_type(ctx.ctx);
+    LLVMOpaqueType* i32_type = LLVMInt32TypeInContext(ctx.ctx);
+    LLVMOpaqueType* i8_type = LLVMInt8TypeInContext(ctx.ctx);
+    LLVMOpaqueType* bool_type = LLVMInt1TypeInContext(ctx.ctx);
+    LLVMOpaqueBasicBlock* before = LLVMGetInsertBlock(ctx.builder);
+    LLVMOpaqueValue* initial_parent = LLVMBuildLoad2(ctx.builder, ptr_type,
+        LLVMBuildStructGEP2(ctx.builder, node_type, node, 0, "borrowed_parent_slot"), "borrowed_parent");
+    LLVMOpaqueBasicBlock* header = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "borrowed_ancestors");
+    LLVMOpaqueBasicBlock* prepare = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "borrowed_siblings");
+    LLVMOpaqueBasicBlock* children = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "borrowed_child_states");
+    LLVMOpaqueBasicBlock* summarize = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "borrowed_parent_state");
+    LLVMOpaqueBasicBlock* after = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "borrowed_ancestors_done");
+    LLVMBuildBr(ctx.builder, header);
+    LLVMPositionBuilderAtEnd(ctx.builder, header);
+    LLVMOpaqueValue* parent = LLVMBuildPhi(ctx.builder, ptr_type, "borrowed_ancestor");
+    LLVMOpaqueValue* exists = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntNE,
+        parent, LLVMConstNull(ptr_type), "borrowed_has_parent");
+    LLVMBuildCondBr(ctx.builder, exists, prepare, after);
+    LLVMPositionBuilderAtEnd(ctx.builder, prepare);
+    LLVMOpaqueValue* count = LLVMBuildLoad2(ctx.builder, i32_type,
+        LLVMBuildStructGEP2(ctx.builder, node_type, parent, 2, "borrowed_count_slot"), "borrowed_count");
+    LLVMOpaqueValue* first = LLVMBuildLoad2(ctx.builder, ptr_type,
+        LLVMBuildStructGEP2(ctx.builder, node_type, parent, 1, "borrowed_first_slot"), "borrowed_first");
+    LLVMOpaqueValue* has_children = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntNE,
+        count, LLVMConstInt(i32_type, 0, 0), "borrowed_has_children");
+    LLVMBuildCondBr(ctx.builder, has_children, children, summarize);
+    LLVMPositionBuilderAtEnd(ctx.builder, children);
+    LLVMOpaqueValue* index = LLVMBuildPhi(ctx.builder, i32_type, "borrowed_child_index");
+    LLVMOpaqueValue* all = LLVMBuildPhi(ctx.builder, bool_type, "borrowed_all_initialized");
+    LLVMOpaqueValue* any = LLVMBuildPhi(ctx.builder, bool_type, "borrowed_any_initialized");
+    LLVMOpaqueValue* child = LLVMBuildGEP2(ctx.builder, node_type, first, &index, 1, "borrowed_sibling");
+    LLVMOpaqueValue* state = LLVMBuildLoad2(ctx.builder, i8_type,
+        LLVMBuildStructGEP2(ctx.builder, node_type, child, 3, "borrowed_child_state_slot"), "borrowed_child_state");
+    LLVMOpaqueValue* next_all = LLVMBuildAnd(ctx.builder, all,
+        LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntEQ, state,
+            LLVMConstInt(i8_type, LLVM_INIT_FULL, 0), "borrowed_child_full"), "borrowed_next_all");
+    LLVMOpaqueValue* next_any = LLVMBuildOr(ctx.builder, any,
+        LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntNE, state,
+            LLVMConstInt(i8_type, 0, 0), "borrowed_child_live"), "borrowed_next_any");
+    LLVMOpaqueValue* next_index = LLVMBuildAdd(ctx.builder, index, LLVMConstInt(i32_type, 1, 0), "borrowed_next_child");
+    LLVMBuildCondBr(ctx.builder,
+        LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntULT, next_index, count, "borrowed_more_children"),
+        children, summarize);
+    Vec<LLVMOpaqueBasicBlock*> edges = Vec<LLVMOpaqueBasicBlock*>.new();
+    edges.push(prepare);
+    edges.push(children);
+    Vec<LLVMOpaqueValue*> values = Vec<LLVMOpaqueValue*>.new();
+    values.push(LLVMConstInt(i32_type, 0, 0)); values.push(next_index);
+    LLVMAddIncoming(index, values.data, edges.data, 2);
+    values.len = 0;
+    values.push(LLVMConstInt(bool_type, 1, 0)); values.push(next_all);
+    LLVMAddIncoming(all, values.data, edges.data, 2);
+    values.len = 0;
+    values.push(LLVMConstInt(bool_type, 0, 0)); values.push(next_any);
+    LLVMAddIncoming(any, values.data, edges.data, 2);
+    LLVMPositionBuilderAtEnd(ctx.builder, summarize);
+    LLVMOpaqueValue* full = LLVMBuildPhi(ctx.builder, bool_type, "borrowed_parent_full");
+    LLVMOpaqueValue* live = LLVMBuildPhi(ctx.builder, bool_type, "borrowed_parent_live");
+    values.len = 0;
+    values.push(LLVMConstInt(bool_type, 1, 0)); values.push(next_all);
+    LLVMAddIncoming(full, values.data, edges.data, 2);
+    values.len = 0;
+    values.push(LLVMConstInt(bool_type, 0, 0)); values.push(next_any);
+    LLVMAddIncoming(live, values.data, edges.data, 2);
+    LLVMOpaqueValue* partial = LLVMBuildSelect(ctx.builder, live,
+        LLVMConstInt(i8_type, LLVM_INIT_PARTIAL, 0), LLVMConstInt(i8_type, LLVM_INIT_UNINIT, 0), "borrowed_partial");
+    LLVMOpaqueValue* parent_state = LLVMBuildSelect(ctx.builder, full,
+        LLVMConstInt(i8_type, LLVM_INIT_FULL, 0), partial, "borrowed_summary");
+    LLVMBuildStore(ctx.builder, parent_state,
+        LLVMBuildStructGEP2(ctx.builder, node_type, parent, 3, "borrowed_parent_state_slot"));
+    LLVMOpaqueValue* next_parent = LLVMBuildLoad2(ctx.builder, ptr_type,
+        LLVMBuildStructGEP2(ctx.builder, node_type, parent, 0, "borrowed_next_parent_slot"), "borrowed_next_parent");
+    LLVMBuildBr(ctx.builder, header);
+    values.len = 0; edges.len = 0;
+    values.push(initial_parent); values.push(next_parent);
+    edges.push(before); edges.push(summarize);
+    LLVMAddIncoming(parent, values.data, edges.data, 2);
+    LLVMPositionBuilderAtEnd(ctx.builder, after);
+}
+
+void llvm_reference_refresh_parents(LlvmContext* ctx, LLVMOpaqueValue* node) {
+    LLVMOpaqueType* pointer = LLVMPointerTypeInContext(ctx.ctx, 0);
+    LLVMOpaqueType* signature = LLVMFunctionType(LLVMVoidTypeInContext(ctx.ctx), &pointer, 1, 0);
+    LLVMOpaqueValue* helper = LLVMGetNamedFunction(ctx.module, "__silver_refresh_init_parents");
+    if (helper == (LLVMOpaqueValue*)0) {
+        helper = LLVMAddFunction(ctx.module, "__silver_refresh_init_parents", signature);
+        LLVMSetLinkage(helper, LLVMLinkage.LLVMInternalLinkage);
+        LLVMOpaqueBuilder* saved_builder = ctx.builder;
+        LLVMOpaqueValue* saved_function = ctx.current_fn;
+        ctx.builder = LLVMCreateBuilderInContext(ctx.ctx);
+        ctx.current_fn = helper;
+        LLVMPositionBuilderAtEnd(ctx.builder, LLVMAppendBasicBlockInContext(ctx.ctx, helper, "entry"));
+        llvm_reference_refresh_body(ctx, LLVMGetParam(helper, 0));
+        LLVMBuildRetVoid(ctx.builder);
+        LLVMDisposeBuilder(ctx.builder);
+        ctx.builder = saved_builder;
+        ctx.current_fn = saved_function;
+    }
+    LLVMBuildCall2(ctx.builder, signature, helper, &node, 1, "");
+}
+
+void llvm_reference_update(LlvmContext* ctx, LlvmPlace place, Span span, BorrowedTransition transition) {
+    if (place.node == (LLVMOpaqueValue*)0) { return; }
+    LLVMOpaqueValue* external = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntEQ,
+        place.node, llvm_reference_initialized(ctx.ctx), "borrowed_external");
+    LLVMOpaqueBasicBlock* initialized = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "borrowed_initialized");
+    LLVMOpaqueBasicBlock* tracked = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "borrowed_tracked");
+    LLVMOpaqueBasicBlock* after = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "borrowed_update_done");
+    LLVMBuildCondBr(ctx.builder, external, initialized, tracked);
+    LLVMPositionBuilderAtEnd(ctx.builder, initialized);
+    if (transition == BorrowedTransition.Move) {
+        LLVMOpaqueValue* trap = LLVMGetNamedFunction(ctx.module, "llvm.trap");
+        LLVMOpaqueType* trap_type = LLVMFunctionType(LLVMVoidTypeInContext(ctx.ctx), (LLVMOpaqueType**)0, 0, 0);
+        if (trap == (LLVMOpaqueValue*)0) { trap = LLVMAddFunction(ctx.module, "llvm.trap", trap_type); }
+        LLVMBuildCall2(ctx.builder, trap_type, trap, (LLVMOpaqueValue**)0, 0, "");
+        LLVMBuildUnreachable(ctx.builder);
+    } else {
+        if (transition == BorrowedTransition.Cleanup) { llvm_emit_value_drop_at_ptr(ctx, place.data, place.type_id); }
+        LLVMBuildBr(ctx.builder, after);
+    }
+    LLVMPositionBuilderAtEnd(ctx.builder, tracked);
+    LlvmLocal local = llvm_borrowed_local(ctx, place, span);
+    if (local.init_nodes.len() > 0) {
+        if (transition == BorrowedTransition.Cleanup) { llvm_emit_init_node_cleanup(ctx, &local, 0); }
+        llvm_store_init_tree(ctx, &local, LLVMConstInt(LLVMInt8TypeInContext(ctx.ctx),
+            transition == BorrowedTransition.Initialize ? LLVM_INIT_FULL : LLVM_INIT_UNINIT, 0));
+        llvm_reference_refresh_parents(ctx, place.node);
+    }
+    LLVMBuildBr(ctx.builder, after);
+    LLVMPositionBuilderAtEnd(ctx.builder, after);
+}

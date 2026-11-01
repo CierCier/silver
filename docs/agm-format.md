@@ -1,12 +1,12 @@
 # AGM module artifact format
 
-Stage1 reads every format version listed below and publishes **v11 only**. A format change must add a new six-byte magic/version, update the stage0 encoder and decoder plus the stage1 supported-version predicates and field gates, and add a concrete cross-stage roundtrip fixture before the new version is published. Never reinterpret an existing version's record layout or silently write an older version for compatibility.
+Both compilers read and publish **v12 only**. This version requires the internal borrow-state reference ABI. Rebuild older modules and their compiled objects before importing them. The metadata record layout is unchanged from v11; the new header prevents linking objects whose references use the old thin internal ABI. Extern-C references retain their thin-pointer ABI.
 
 All integers are little-endian. Strings are `u32 byte_length` followed by exactly that many UTF-8 bytes (no terminator). Optional strings are a one-byte tag (`0` absent, `1` present) followed by a string for tag `1`. Counts are `u32`. Boolean fields occupy one byte.
 
-The current v11 file is laid out as:
+The current v12 file is laid out as:
 
-1. Six bytes `41 47 4d 00 00 0b` (`AGM\0\0\x0b`).
+1. Six bytes `41 47 4d 00 00 0c` (`AGM\0\0\x0c`).
 2. Module name, module path, source path strings.
 3. Source FNV-1a-64 hash as a little-endian `u64`.
 4. Compiler-version and target-triple strings.
@@ -21,18 +21,18 @@ arguments, owner parameters, and bounds, including implementations with no metho
 Bound checking uses these templates rather than inferring an implementation from
 the optional trait name on a method export.
 
-For older supported versions the decoder uses explicit per-version gates, not numeric ranges: v2 has no field tags, packed bit, constants/globals, library paths, or generic templates; v6 adds field tags; v7 adds library paths; v8 adds constant/global data; v9 adds no new record fields; v10 adds the packed-layout bit; v11 adds implementation-trait provenance and generic templates. Unsupported versions are rejected.
-
-Stage0's v9 reader accepts a legacy four-byte all-zero trailer present in the
-vendored v9 artifacts. Stage1 accepts exactly that v9-only trailer; other
-trailing bytes remain invalid.
+Versions through v11 are rejected, including their historical trailer variants.
+Stage0 cache keys include `borrow-state-abi1`; native object cache keys use
+`silver-stage1-native-object-v4-borrow-state-abi1`. Neither compiler may reuse an
+object compiled with the earlier internal reference ABI.
 
 The current stage1 writer publishes free, non-generic function exports with
 primitive scalar or unit parameter and result types. It emits the
-reader-compatible v11 envelope, sorts exports by kind/name/signature, and writes
+reader-compatible v12 envelope, sorts exports by kind/name/signature, and writes
 empty/default values only for function fields that stage1 does not yet model.
-Unsupported signatures, export kinds, and generic parameters fail publication
-rather than producing misleading artifacts. This is not yet a lossless writer
+`artifact-source` rejects unsupported signatures, export kinds, and generic
+parameters. `build --emit=module` omits unsupported exports from this projection
+while still emitting the compiled object. This is not yet a lossless writer
 for stage0's rich struct/enum/ABI/native-library metadata; consumers needing
 those fields must continue to use stage0-produced artifacts.
 

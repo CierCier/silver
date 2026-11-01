@@ -210,18 +210,28 @@ bool is_primitive_type_token(TokenKind kind) {
 SyntaxNode* function_identifier(SyntaxNode* item) {
     SyntaxNode* child = item.first_child;
     SyntaxNode* candidate = (SyntaxNode*)0;
+    SyntaxNode* function_name = (SyntaxNode*)0;
     i64 angle_depth = 0;
-    while (child != (SyntaxNode*)0 && child.kind != NodeKind.Parenthesized) {
+    while (child != (SyntaxNode*)0 && child.kind != NodeKind.Block) {
+        if (child.kind == NodeKind.Token
+            && (child.token_kind == TokenKind.Semicolon || child.token_kind == TokenKind.LeftBrace
+                || strcmp(child.text, "where") == 0)) {
+            break;
+        }
         if (child.kind == NodeKind.Token && child.text == "<") {
             angle_depth += 1;
         } else if (child.kind == NodeKind.Token && child.text == ">" && angle_depth > 0) {
             angle_depth -= 1;
         } else if (angle_depth == 0 && node_is_identifier(child)) {
             candidate = child;
+        } else if (angle_depth == 0 && child.kind == NodeKind.Parenthesized
+            && candidate != (SyntaxNode*)0) {
+            // A function-valued return type may have an earlier parameter group.
+            function_name = candidate;
         }
         child = child.next_sibling;
     }
-    return candidate;
+    return function_name;
 }
 
 SyntaxNode* item_identifier(SyntaxNode* item) {

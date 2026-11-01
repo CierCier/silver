@@ -139,7 +139,7 @@ providers return eager results instead.
 
 [Protocol checks][checks] exercise real framed stdio sessions against the built
 server, not source-text checks or capability flags alone. The test suite contains
-114 distinct test scenarios in `scripts/check_lsp.py`:
+115 distinct test scenarios in `scripts/check_lsp.py`:
 
 - Lifecycle/transport: `test_protocol_errors_and_string_request_ids`,
   `test_jsonrpc_params_must_be_structured_and_invalid_shutdown_does_not_stop_server`,
@@ -197,6 +197,7 @@ server, not source-text checks or capability flags alone. The test suite contain
   `test_import_completion_context_survives_repeated_snapshot_changes`,
   `test_keyword_and_type_completions_have_plain_text_kinds_and_respect_context`,
   `test_auto_import_completion_applies_primary_and_import_edits_and_resolves`,
+  `test_auto_import_completion_preserves_overloads_from_one_provider`,
   `test_auto_import_at_file_start_combines_edits_without_overlap`,
   `test_single_character_prefix_includes_auto_imports_after_indexing`,
   `test_completion_returns_ranked_top_hundred_and_requeries_truncated_lists`,

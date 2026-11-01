@@ -1064,13 +1064,26 @@ storing the replacement, then updates the containing value's initialization
 state. An empty field has no old value to drop. Reinitializing a moved field
 restores its subtree without changing initialized siblings.
 
-This state currently belongs to local owners and their inline fields and fixed
-elements. Stage0 references carry a data pointer and owner-state pointer, so
-borrowed assignments can update the caller's initialization state; the native
-backend does not yet transport that state across calls. Replacement through a
-pointer or borrow still has the known missing-overwrite-cleanup limitation. Heap
-elements use their container's mutation and initialized-length contracts.
-Extern-C `&T` and `&mut T` signatures retain their thin-pointer ABI.
+This state belongs to local owners and their inline fields and fixed elements.
+Both backends carry a data pointer and projected owner-state pointer in internal
+references. Reborrows, stored references, returned references and indirect calls
+preserve that state. Assignment through a mutable borrow drops an initialized
+old value, stores the replacement and updates the original owner's state.
+Raw-pointer stores do not acquire owner state; their callers manage pointee
+initialization and cleanup. Heap elements use their container's mutation and
+initialized-length contracts.
+
+Extern-C `&T` and `&mut T` signatures retain their thin-pointer ABI. Adapters also
+preserve thin C callback signatures. Internally, a function value whose signature
+requires reference adaptation carries internal and foreign entry points. A
+reference arriving from C denotes initialized foreign storage; it cannot transfer
+ownership by moving out, because C supplies no owner-state capability. A value
+passed through a tracked reference must be fully initialized before that reference
+crosses into C; a failed initialization guard traps before the foreign call.
+Raw-pointer APIs retain their explicit initialization contract. Types
+containing internal reference or adapted function values have Silver layouts;
+use raw pointers and C-compatible fields for shared foreign records. AGM modules
+compiled with the old internal reference ABI must be rebuilt.
 
 ## 9. Concurrency & Threading
 

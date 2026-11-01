@@ -12,7 +12,7 @@ use crate::semantic::init_plan::{LayoutProjection, OwnerLocalId, OwnerLocalPlan}
 
 const UNINIT: u64 = 0;
 const PARTIAL: u64 = 1;
-const INIT: u64 = 2;
+pub(crate) const INIT: u64 = 2;
 
 #[derive(Clone)]
 pub(crate) struct RuntimeOwner<'ctx> {

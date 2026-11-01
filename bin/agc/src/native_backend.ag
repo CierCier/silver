@@ -580,7 +580,7 @@ String native_object_cache_path(Vec<String>* arguments, CliMatches* cli,
         return String.new();
     }
     String identity = String.new();
-    identity.push_str("silver-stage1-native-object-v3");
+    identity.push_str("silver-stage1-native-object-v4-borrow-state-abi1");
     identity.push((u8)0);
     identity.push_str(default_name);
     identity.push((u8)0);

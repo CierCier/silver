@@ -218,7 +218,7 @@ flowchart TD
 #### 3. Import Lowering (`parser/import_hook.rs`)
 - Resolves module import directives (`import std.io;`) recursively:
   - **Source File Imports**: The target `.ag` file is parsed, its imports recursively lowered, and its AST items are **fully inlined** into the importing program's item list.
-  - **Precompiled Module Imports**: Reads compiled `.agm` binary artifacts (current writer header `AGM\x00\x00\x0B`; stage1 also validates the supported v2/v6-v10 layouts). These exports are cached as type signatures in `module_imports` and not merged directly into the AST items.
+  - **Precompiled Module Imports**: Reads compiled `.agm` binary artifacts with header `AGM\x00\x00\x0C`. Both compilers reject older headers whose reference ABI differs. These exports are cached as type signatures in `module_imports` and not merged directly into the AST items.
 
 #### 4. Symbol Table Init (`symbol_table.rs`)
 - Registers top-level functions, structs, globals, and traits.
@@ -327,13 +327,26 @@ for overwrite and scope-exit cleanup.
    fields are initialized. Legacy native flag handles alias these state bytes;
    they do not maintain separate liveness. Copy-only locals need no runtime
    cleanup tree. Direct local overwrite cleans the target subtree before the
-   replacement store. Stage0 references carry owner-state metadata and borrowed
-   assignments update it; the native backend does not yet transport it across
-   calls. Indirect owned-field overwrite cleanup remains unimplemented. Heap
-   containers retain their own mutation contracts.
+   replacement store. Both backends lower internal references to data and
+   projected-node pointers. Borrowed overwrite, initialization and moves update
+   the original nodes and summarize their ancestors. Reborrows and stored,
+   returned or indirectly passed references preserve that capability. Raw stores
+   retain their explicit pointee-management contract; heap containers retain
+   their mutation and initialized-length contracts.
+   C references remain thin. Entry-point adapters wrap incoming references with
+   an initialized foreign capability and unwrap outgoing references. Foreign
+   capabilities permit initialized replacement but trap an ownership move.
+   Exporting a tracked reference to C also checks its whole-node initialized
+   state, since the thin ABI cannot represent a partial value. Raw-pointer
+   parameters keep their separate explicit initialization contract.
+   Reference-bearing function signatures use internal/foreign entry-point pairs
+   inside Silver, with thin callback pointers at the C boundary. AGM readers
+   require v12 module headers, and cache identities include the internal ABI revision.
    The native backend shares a read-only node-layout table for each concrete
    type in a module. Node initialization and whole-tree state changes emit
-   bounded loops rather than a store sequence for every inline child.
+   bounded loops shared within the module rather than a store sequence for every
+   inline child. C variadic arguments also unwrap reference and callback carriers
+   before applying the platform's ordinary argument promotions.
 7. **Enum Payload Ownership**: constructing a variant with an owned payload requires `move` (`Res.Ok(move i)` — a bare `Res.Ok(i)` is a compile error). Enums WITHOUT a Drop impl of their own get a tag-aware payload cascade: the active variant's Drop-typed payload is dropped at scope exit (so a never-unwrapped `Result<Owned, E>` does not leak). Extract owned payloads with a `move` binding — `match r { Ok(move v) : v, ... }` — which transfers ownership and zeroes the enum's slot (freeing via a plain binding copy now double-frees, since the cascade still runs). Enums WITH a Drop impl manage their payloads in the drop body and get no cascade.
 8. **Place & Overlap**: `Place {local, projections=[Field/Index/Deref]}` with `is_prefix_of` (x is prefix of x.a) and `overlaps` (x overlaps x.a, x.a vs x.b disjoint, `v` overlaps `v[i]`, `v[i]` vs `v[j]` conservative). Borrow/move/init/drop all share this.
 9. **Copy vs Move**: `TypeProperties {is_copy, needs_drop}` distinguishes reads

@@ -585,37 +585,33 @@ bool artifact_reader_trait_items(ArtifactReader* self, Vec<ArtifactTraitItem>* o
 }
 
 bool artifact_supported_version(u8 version) {
-    return version == (u8)2 || version == (u8)6 || version == (u8)7
-        || version == (u8)8 || version == (u8)9 || version == (u8)10
-        || version == (u8)11;
+    return version == (u8)12;
 }
 
 // The format gained fields in separate releases; numeric version order is
 // not a valid shorthand for the record layout.
 bool artifact_has_field_tags(u8 version) {
-    return version == (u8)6 || version == (u8)7 || version == (u8)8
-        || version == (u8)9 || version == (u8)10 || version == (u8)11;
+    return version == (u8)12;
 }
 
 bool artifact_has_packed(u8 version) {
-    return version == (u8)10 || version == (u8)11;
+    return version == (u8)12;
 }
 
 bool artifact_has_constants_and_globals(u8 version) {
-    return version == (u8)8 || version == (u8)9 || version == (u8)11;
+    return version == (u8)12;
 }
 
 bool artifact_has_lib_paths(u8 version) {
-    return version == (u8)7 || version == (u8)8 || version == (u8)9
-        || version == (u8)11;
+    return version == (u8)12;
 }
 
 bool artifact_has_generic_templates(u8 version) {
-    return version == (u8)11;
+    return version == (u8)12;
 }
 
 bool artifact_has_impl_trait(u8 version) {
-    return version == (u8)11;
+    return version == (u8)12;
 }
 
 bool artifact_reader_magic(ArtifactReader* self, u8* version) {
@@ -706,26 +702,8 @@ bool artifact_reader_export(ArtifactReader* self, u8 version, ArtifactExport* ou
     return true;
 }
 
-// Stage0's v9 reader accepts a legacy empty four-byte trailer.
 bool artifact_reader_finish(ArtifactReader* self, u8 version) {
-    if (self.failed) {
-        return false;
-    }
-    if (self.cursor == self.length) {
-        return true;
-    }
-    if (version != (u8)9 || self.length - self.cursor != 4) {
-        return false;
-    }
-    i64 i = 0;
-    while (i < 4) {
-        if (self.data[self.cursor + i] != (u8)0) {
-            return false;
-        }
-        i += 1;
-    }
-    self.cursor += 4;
-    return true;
+    return !self.failed && artifact_supported_version(version) && self.cursor == self.length;
 }
 
 bool read_artifact(str path, Artifact* out) {
@@ -953,12 +931,12 @@ bool artifact_order_contains(Vec<i64>* order, i64 index) {
     return false;
 }
 
-// AGM v11 export metadata is deliberately emitted in stable kind/name/signature
+// AGM v12 export metadata is deliberately emitted in stable kind/name/signature
 // order, independent of hash-table or parser traversal order.
 bool artifact_to_bytes(Artifact* artifact, String* out) {
     Vec<i64> order = Vec<i64>.new();
     i64 count = artifact.exports.len();
-    if (artifact.version != 0 && artifact.version != (u8)11) {
+    if (artifact.version != 0 && artifact.version != (u8)12) {
         order.drop();
         return false;
     }
@@ -998,7 +976,7 @@ bool artifact_to_bytes(Artifact* artifact, String* out) {
     out.push((u8)77);
     out.push((u8)0);
     out.push((u8)0);
-    out.push((u8)11);
+    out.push((u8)12);
     artifact_write_string(out, artifact.module_name.to_str());
     artifact_write_string(out, artifact.module_path.to_str());
     artifact_write_string(out, artifact.source_path.to_str());
