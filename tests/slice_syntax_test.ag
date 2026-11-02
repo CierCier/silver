@@ -5,6 +5,10 @@ import std.mem.vec;
 import std.string;
 import std.bytes;
 
+i32 second_i32([i32] values) {
+    return values[1];
+}
+
 i32 main() {
     test_start("Array slicing");
     {
@@ -226,6 +230,24 @@ i32 main() {
         Slice<u8> b_neg = b[:-1];
         assert_eq_i64(10, b_neg.len, "b[:-1].len == 10");
         assert_eq_i64(101, (i64)b_neg[9], "b_neg[9] == 'e'");
+    }
+
+    test_start("Bracket slice syntax indexes by element width");
+    {
+        i32 numbers[3];
+        numbers[0] = 10;
+        numbers[1] = 20;
+        numbers[2] = 30;
+        [i32] view = numbers;
+        assert_eq_i64(20, view[1], "[i32] view reads the second integer");
+        assert_eq_i64(30, view[2], "[i32] view reads the third integer");
+        assert_eq_i64(20, second_i32(&view), "[i32] parameter indexes by element width");
+
+        u8 bytes[2];
+        bytes[0] = (u8)7;
+        bytes[1] = (u8)9;
+        [u8] byte_view = bytes;
+        assert_eq_i64(9, (i64)byte_view[1], "[u8] view reads the second byte");
     }
 
     return done();
