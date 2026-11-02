@@ -188,7 +188,7 @@ String server_capabilities(ClientOptions* client) {
     String out = String.from_str("{\"capabilities\":{\"positionEncoding\":\"utf-16\",");
     out.push_str("\"workspace\":{\"workspaceFolders\":{\"supported\":true,\"changeNotifications\":true}");
     if (client.file_operations) {
-        out.push_str(",\"fileOperations\":{\"willRename\":{\"filters\":[{\"scheme\":\"file\",\"pattern\":{\"glob\":\"**/*.ag\"}}]}}");
+        out.push_str(",\"fileOperations\":{\"willRename\":{\"filters\":[{\"scheme\":\"file\",\"pattern\":{\"glob\":\"**/*.ag\"}},{\"scheme\":\"file\",\"pattern\":{\"glob\":\"**\",\"matches\":\"folder\"}}]}}");
     }
     out.push_str("},");
     out.push_str("\"textDocumentSync\":{\"openClose\":true,\"change\":2,\"save\":true},");
