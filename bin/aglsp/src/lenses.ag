@@ -29,16 +29,21 @@ String compute_code_lenses(Document* doc) {
     return move out;
 }
 
-i64 count_references(DocumentStore* store, SymbolTarget target, PendingMessage* pending) {
+i64 collect_references(DocumentStore* store, SymbolTarget target, PendingMessage* pending,
+                       String* locations) {
     Vec<Document*> documents = store.query_documents(target.document);
-    i64 count = 0; i64 i = 0;
+    i64 count = 0; i64 i = 0; bool first = true;
     while (i < documents.len() && !request_interrupted(pending)) {
         Document* candidate = documents.get(i);
         candidate.ensure_syntax();
         i64 j = 0;
         while (j < candidate.analysis.occurrences.len()) {
             IdeOccurrence* occurrence = candidate.analysis.occurrences.get_ptr(j);
-            if (!occurrence.definition && same_target(resolve_occurrence(candidate, j), target)) { count += 1; }
+            if (!occurrence.definition && same_target(resolve_occurrence(candidate, j), target)) {
+                if (!first) { locations.push(','); } first = false;
+                append_location(locations, candidate, occurrence.node.span);
+                count += 1;
+            }
             j += 1;
         }
         candidate.compact(); i += 1;
@@ -58,11 +63,18 @@ String compute_code_lens_resolve(DocumentStore* store, str json, PendingMessage*
         return String.from_str("null");
     }
     SymbolTarget target; target.document = doc; target.symbol = symbol;
-    i64 count = count_references(store, target, pending);
+    String locations = String.from_str("[");
+    i64 count = collect_references(store, target, pending, &locations);
+    locations.push(']');
     String out = String.from_str("{\"range\":"); doc.append_range(&out, doc.analysis.symbols.get_ptr(symbol).selection);
     out.push_str(",\"command\":{\"title\":\"");
     if (count == 1) { out.push_str("1 reference"); }
     else { out.push_display(&count); out.push_str(" references"); }
-    out.push_str("\"}}");
+    // `editor.action.showReferences` is the VS Code command rust-analyzer and
+    // gopls use; other clients still render the title.
+    out.push_str("\",\"command\":\"editor.action.showReferences\",\"arguments\":[\"");
+    json_escape(doc.uri.to_str(), &out);
+    out.push_str("\","); append_position(&out, doc.position(doc.analysis.symbols.get_ptr(symbol).selection.start));
+    out.push(','); out.push_str(locations.to_str()); out.push_str("]}}");
     return move out;
 }
