@@ -14,6 +14,7 @@ import capabilities;
 import progress;
 import client_requests;
 import actions;
+import file_operations;
 
 struct ServerState {
     DocumentStore store;
@@ -283,6 +284,16 @@ i32 dispatch_message(ServerState* state, PendingMessage* pending) {
                     complete_response(pending, message.id_raw.to_str(), "null"); return -1;
                 }
                 String result = compute_workspace_symbols(store, query.to_str(), pending);
+                complete_response(pending, message.id_raw.to_str(), result.to_str());
+            }
+        }
+        else if (strcmp(method, "workspace/willRenameFiles") == 0 && message.has_id) {
+            if (!client.file_operations) { complete_error(pending, message.id_raw.to_str(), -32601, "Method not found"); }
+            else {
+                if (!index_request_workspace(store, index, pending)) {
+                    complete_response(pending, message.id_raw.to_str(), "null"); return -1;
+                }
+                String result = compute_file_rename_edits(store, params, client, pending);
                 complete_response(pending, message.id_raw.to_str(), result.to_str());
             }
         } else if (message.has_id) {
