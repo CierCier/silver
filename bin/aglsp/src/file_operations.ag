@@ -83,16 +83,27 @@ String renamed_path(str path, str old_path, str new_path) {
 }
 
 // Recompute the module name from the base that produced the current one, so a
-// rename keeps the import style the author already used.
-String import_module_for_path(DocumentStore* store, Document* doc, str old_path,
+// rename keeps the import style the author already used. When that base cannot
+// express the new path, fall back to any base that can.
+String import_module_for_path(DocumentStore* store, str doc_path, str old_path,
                               str new_path, str name) {
-    String parent = path_dirname(doc.path.to_str());
-    String root = absolute_document_path(module_root(doc.path.to_str()).to_str());
+    String parent = path_dirname(doc_path);
+    String root = absolute_document_path(module_root(doc_path).to_str());
     i64 i = -1;
     while (i < store.include_dirs.len() + 1) {
         str base = i == -1 ? parent.to_str() : i == 0 ? root.to_str() : store.include_dirs.get_ptr(i - 1).to_str();
         String existing = import_module_from_base(base, old_path);
-        if (existing.equals(name)) { return import_module_from_base(base, new_path); }
+        if (existing.equals(name)) {
+            String renamed = import_module_from_base(base, new_path);
+            if (renamed.len() > 0) { return move renamed; }
+        }
+        i += 1;
+    }
+    i = -1;
+    while (i < store.include_dirs.len() + 1) {
+        str base = i == -1 ? parent.to_str() : i == 0 ? root.to_str() : store.include_dirs.get_ptr(i - 1).to_str();
+        String renamed = import_module_from_base(base, new_path);
+        if (renamed.len() > 0) { return move renamed; }
         i += 1;
     }
     return String.new();
@@ -109,6 +120,15 @@ String compute_file_rename_edits(DocumentStore* store, str params, ClientOptions
         Document* doc = documents.get(d);
         if (doc.path.len() > 0) {
             doc.ensure_syntax();
+            // A document that is itself moving resolves imports from its new home.
+            String effective_path = doc.path.clone();
+            i64 moved = 0;
+            while (moved < renames.len()) {
+                FileRename* rename = renames.get_ptr(moved);
+                String target = renamed_path(effective_path.to_str(), rename.old_path.to_str(), rename.new_path.to_str());
+                if (target.len() > 0) { effective_path = move target; break; }
+                moved += 1;
+            }
             Vec<SyntaxNode*> imports = Vec<SyntaxNode*>.new();
             collect_import_nodes(doc.analysis.tree.root, &imports);
             String edits = String.new(); bool first = true; i64 i = 0;
@@ -122,7 +142,7 @@ String compute_file_rename_edits(DocumentStore* store, str params, ClientOptions
                         FileRename* rename = renames.get_ptr(r);
                         String target = renamed_path(resolved.to_str(), rename.old_path.to_str(), rename.new_path.to_str());
                         if (target.len() > 0) {
-                            String new_name = import_module_for_path(store, doc, resolved.to_str(), target.to_str(), name.to_str());
+                            String new_name = import_module_for_path(store, effective_path.to_str(), resolved.to_str(), target.to_str(), name.to_str());
                             if (new_name.len() > 0 && !new_name.equals(name.to_str())) {
                                 if (!first) { edits.push(','); } first = false;
                                 edits.push_str("{\"range\":"); doc.append_range(&edits, span);
@@ -149,6 +169,7 @@ String compute_file_rename_edits(DocumentStore* store, str params, ClientOptions
                 if (client.versioned_edits) { out.push('}'); }
             }
         }
+        doc.compact();
         d += 1;
     }
     if (first_doc) { return String.from_str("null"); }
