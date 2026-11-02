@@ -1351,9 +1351,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             });
                     }
                 }
-                // `&str` sugar parses as a builtin byte slice: index its data pointer.
+                // `&str` sugar parses as a builtin byte slice, so index the
+                // slice data pointer directly. The element type scales the
+                // address and the load, not a fixed byte width.
                 if let Some(ty) = &object_ty
-                    && matches!(ty.kind.as_ref(), ast::TypeKind::Slice(_))
+                    && let ast::TypeKind::Slice(slice) = ty.kind.as_ref()
                 {
                     let slice = self.emit_expression_value(object)?;
                     let BasicValueEnum::StructValue(slice) = slice else {
@@ -1372,7 +1374,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             )
                         })?;
                     let idx = self.emit_expression_value(index)?;
-                    let element_ty = self.context.i8_type();
+                    let element_ty = self.lower_basic_type(&slice.element_type)?;
                     let ptr = unsafe {
                         self.builder
                             .build_gep(
