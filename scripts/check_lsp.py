@@ -2045,6 +2045,20 @@ class NativeLsp(unittest.TestCase):
         uri = (self.root / "pkg" / "main.ag").as_uri()
         self.assertEqual(changes[uri], [{"range": location(text, "pkg.helper"), "newText": "lib.helper"}])
 
+    def test_file_move_skips_names_shadowed_by_a_nearer_file(self):
+        (self.root / "pkg" / "shared").mkdir(parents=True)
+        (self.root / "shared").mkdir()
+        (self.root / "pkg" / "helper.ag").write_text("i32 answer() { return 7; }\n")
+        (self.root / "pkg" / "shared" / "helper.ag").write_text("i32 answer() { return 9; }\n")
+        text = "import helper;\n\ni32 use_answer() { return answer(); }\n"
+        (self.root / "pkg" / "main.ag").write_text(text)
+        session, _ = self.file_operation_session()
+        edit = session.result("workspace/willRenameFiles", {"files": [
+            {"oldUri": (self.root / "pkg" / "helper.ag").as_uri(),
+             "newUri": (self.root / "shared" / "helper.ag").as_uri()}]})
+        changes = {change["textDocument"]["uri"]: change["edits"] for change in edit["documentChanges"]}
+        self.assertNotIn((self.root / "pkg" / "main.ag").as_uri(), changes)
+
     def test_file_rename_requires_client_capability(self):
         self.assertNotIn("fileOperations", self.capabilities["workspace"])
         response = self.session.request("workspace/willRenameFiles", {"files": []})
