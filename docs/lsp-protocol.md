@@ -80,7 +80,7 @@ providers return eager results instead.
 | `textDocument/colorPresentation` | C → S | Unmapped | Requires the color model above. |
 | `textDocument/willSaveWaitUntil` | C → S | Open | No save-time edit participation. |
 | `workspace/willCreateFiles` | C → S | Open | No file-operation edits. |
-| `workspace/willRenameFiles` | C → S | Open | No import-preserving file-rename edits. |
+| `workspace/willRenameFiles` | C → S | Conditional | Requires `workspace.fileOperations.willRename`. Rewrites import module paths for renamed files and directories, preserving the base that produced the original name and any selection block or alias. Versioned `documentChanges` when negotiated. [Source][file-operations], [checks][checks]. |
 | `workspace/willDeleteFiles` | C → S | Open | No file-operation edits. |
 | `workspace/textDocumentContent` | C → S | Open | No virtual document content provider. Added to the stable inventory in 3.18. |
 
@@ -294,3 +294,4 @@ entry; resolve requests and client services must remain visible even when open.
 [actions]: ../bin/aglsp/src/actions.ag
 [format]: ../bin/aglsp/src/format.ag
 [hierarchy]: ../bin/aglsp/src/hierarchy.ag
+[file-operations]: ../bin/aglsp/src/file_operations.ag
