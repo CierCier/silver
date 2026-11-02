@@ -1351,9 +1351,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             });
                     }
                 }
-                // `&str` sugar parses as a builtin byte slice: index its data pointer.
+                // `&str` sugar parses as a builtin byte slice: index its data
+                // pointer. Other element types keep the bounds-checked
+                // `__index_get` path.
                 if let Some(ty) = &object_ty
-                    && matches!(ty.kind.as_ref(), ast::TypeKind::Slice(_))
+                    && let ast::TypeKind::Slice(slice) = ty.kind.as_ref()
+                    && matches!(
+                        slice.element_type.kind.as_ref(),
+                        ast::TypeKind::Primitive(ast::PrimitiveType::U8)
+                    )
                 {
                     let slice = self.emit_expression_value(object)?;
                     let BasicValueEnum::StructValue(slice) = slice else {
