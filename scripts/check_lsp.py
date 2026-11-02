@@ -1960,6 +1960,12 @@ class NativeLsp(unittest.TestCase):
                          [location(text, "helper"), location(text, "main")])
         titles = [self.session.result("codeLens/resolve", lens)["command"]["title"] for lens in lenses]
         self.assertEqual(titles, ["2 references", "0 references"])
+        resolved = self.session.result("codeLens/resolve", lenses[0])["command"]
+        self.assertEqual(resolved["command"], "editor.action.showReferences")
+        self.assertEqual(resolved["arguments"][0], uri)
+        self.assertEqual([entry["range"] for entry in resolved["arguments"][2]],
+                         [location(text, "helper", text.index("helper(1)")),
+                          location(text, "helper", text.index("helper(2)"))])
 
     def test_code_lens_resolve_rejects_stale_revision(self):
         text = "i32 helper() { return 1; }\n"
