@@ -268,8 +268,13 @@ i32 dispatch_message(ServerState* state, PendingMessage* pending) {
             } else { String result = resolved.unwrap(); complete_response(pending, message.id_raw.to_str(), result.to_str()); }
         }
         else if (strcmp(method, "codeLens/resolve") == 0 && message.has_id) {
-            String result = compute_code_lens_resolve(store, params, pending);
-            complete_response(pending, message.id_raw.to_str(), result.to_str());
+            // Counts must see unopened callers, so finish the pending index first.
+            if (!index_request_workspace(store, index, pending)) {
+                complete_response(pending, message.id_raw.to_str(), "null");
+            } else {
+                String result = compute_code_lens_resolve(store, params, pending);
+                complete_response(pending, message.id_raw.to_str(), result.to_str());
+            }
         }
         else if (strcmp(method, "workspace/diagnostic") == 0 && message.has_id) {
             Vec<PreviousDiagnostic> previous = Vec<PreviousDiagnostic>.new();
