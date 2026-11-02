@@ -1,0 +1,68 @@
+import std.string;
+import document;
+import params;
+import json_rpc;
+import transport;
+import navigation;
+import tooling.index;
+
+// One lens per non-local declaration. Reference counts are deferred to
+// `codeLens/resolve` so a document request stays proportional to its symbols.
+String compute_code_lenses(Document* doc) {
+    doc.ensure_syntax();
+    String out = String.from_str("[");
+    bool first = true; i64 i = 0;
+    while (i < doc.analysis.symbols.len()) {
+        IdeSymbol* symbol = doc.analysis.symbols.get_ptr(i);
+        if (!symbol.local && symbol.kind != IdeSymbolKind.ImportAlias) {
+            if (!first) { out.push(','); } first = false;
+            out.push_str("{\"range\":"); doc.append_range(&out, symbol.selection);
+            out.push_str(",\"data\":{\"uri\":\""); json_escape(doc.uri.to_str(), &out);
+            out.push_str("\",\"symbol\":"); out.push_display(&i);
+            i64 revision = doc.revision;
+            out.push_str(",\"revision\":"); out.push_display(&revision);
+            out.push_str("}}");
+        }
+        i += 1;
+    }
+    out.push(']');
+    return move out;
+}
+
+i64 count_references(DocumentStore* store, SymbolTarget target, PendingMessage* pending) {
+    Vec<Document*> documents = store.query_documents(target.document);
+    i64 count = 0; i64 i = 0;
+    while (i < documents.len() && !request_interrupted(pending)) {
+        Document* candidate = documents.get(i);
+        candidate.ensure_syntax();
+        i64 j = 0;
+        while (j < candidate.analysis.occurrences.len()) {
+            IdeOccurrence* occurrence = candidate.analysis.occurrences.get_ptr(j);
+            if (!occurrence.definition && same_target(resolve_occurrence(candidate, j), target)) { count += 1; }
+            j += 1;
+        }
+        candidate.compact(); i += 1;
+    }
+    return count;
+}
+
+String compute_code_lens_resolve(DocumentStore* store, str json, PendingMessage* pending) {
+    String data = json_field(json, "data");
+    String uri = String.new(); i64 symbol = -1; i64 revision = 0;
+    if (!json_string(data.to_str(), "uri", &uri) || !json_integer(data.to_str(), "symbol", &symbol)
+        || !json_integer(data.to_str(), "revision", &revision) || symbol < 0) {
+        return String.from_str("null");
+    }
+    Document* doc = store.get(uri.to_str());
+    if (doc == (Document*)0 || doc.revision != revision || symbol >= doc.analysis.symbols.len()) {
+        return String.from_str("null");
+    }
+    SymbolTarget target; target.document = doc; target.symbol = symbol;
+    i64 count = count_references(store, target, pending);
+    String out = String.from_str("{\"range\":"); doc.append_range(&out, doc.analysis.symbols.get_ptr(symbol).selection);
+    out.push_str(",\"command\":{\"title\":\"");
+    if (count == 1) { out.push_str("1 reference"); }
+    else { out.push_display(&count); out.push_str(" references"); }
+    out.push_str("\"}}");
+    return move out;
+}

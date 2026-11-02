@@ -15,6 +15,7 @@ import progress;
 import client_requests;
 import actions;
 import file_operations;
+import lenses;
 
 struct ServerState {
     DocumentStore store;
@@ -59,7 +60,7 @@ void handle_document_request(DocumentStore* store, WorkspaceIndex* index, Client
         || (client.semantic.full == SemanticFullMode.Delta && strcmp(method, "textDocument/semanticTokens/full/delta") == 0)
         || (client.semantic.range && strcmp(method, "textDocument/semanticTokens/range") == 0)
         || strcmp(method, "textDocument/foldingRange") == 0 || strcmp(method, "textDocument/selectionRange") == 0
-        || strcmp(method, "textDocument/inlayHint") == 0;
+        || strcmp(method, "textDocument/inlayHint") == 0 || strcmp(method, "textDocument/codeLens") == 0;
     supported = supported || strcmp(method, "textDocument/diagnostic") == 0 || strcmp(method, "textDocument/documentLink") == 0;
     supported = supported || (client.code_action_literals && strcmp(method, "textDocument/codeAction") == 0);
     if (!supported) { complete_error(pending, message.id_raw.to_str(), -32601, "Method not found"); return; }
@@ -178,6 +179,8 @@ void handle_document_request(DocumentStore* store, WorkspaceIndex* index, Client
             complete_error(pending, message.id_raw.to_str(), -32602, "Invalid hint range"); return;
         }
         result = compute_inlay_hints(doc, range.start, range.end);
+    } else if (strcmp(method, "textDocument/codeLens") == 0) {
+        result = compute_code_lenses(doc);
     } else { complete_error(pending, message.id_raw.to_str(), -32601, "Method not found"); return; }
     complete_response(pending, message.id_raw.to_str(), result.to_str());
 }
