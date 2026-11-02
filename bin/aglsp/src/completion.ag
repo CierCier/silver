@@ -386,26 +386,26 @@ void append_auto_imports(DocumentStore* store, Document* doc, str prefix,
                 i64 score = ide_match_score(prefix, name);
                 if (!symbol.local && !symbol.is_private && symbol.owner.len() == 0
                     && symbol.kind != IdeSymbolKind.ImportAlias && score >= 0 && !completion_visible(candidates, name)) {
-                bool unique_provider_symbol = false;
-                if (exports_indexed) {
-                    Optional<i64> unique = unique_exports.get_opt(String.from_str(name));
-                    unique_provider_symbol = unique.is_some() && unique.unwrap() == i + 1;
-                } else {
-                    Vec<Document*> visited = Vec<Document*>.new(); SymbolTarget unique;
-                    unique.document = candidate; unique.symbol = -1;
-                    find_imported_symbol(candidate, name, "", &visited, &unique);
-                    unique_provider_symbol = unique.symbol == i && unique.document == candidate;
-                }
-                if (unique_provider_symbol) {
-                    // Module resolution and conflicts are shared by all exports in this request.
-                    if (!module_checked) {
-                        module = import_module_name(store, doc, candidate); module_checked = true;
-                        if (module.len() == 0 || import_conflicts(doc, candidate, pending)) { break; }
+                    bool unique_provider_symbol = false;
+                    if (exports_indexed) {
+                        Optional<i64> unique = unique_exports.get_opt(String.from_str(name));
+                        unique_provider_symbol = unique.is_some() && unique.unwrap() == i + 1;
+                    } else {
+                        Vec<Document*> visited = Vec<Document*>.new(); SymbolTarget unique;
+                        unique.document = candidate; unique.symbol = -1;
+                        find_imported_symbol(candidate, name, "", &visited, &unique);
+                        unique_provider_symbol = unique.symbol == i && unique.document == candidate;
                     }
-                    if (!exports_indexed) {
-                        completion_provider_exports(candidate, &unique_exports);
-                        exports_indexed = true;
-                    }
+                    if (unique_provider_symbol) {
+                        // Module resolution and conflicts are shared by all exports in this request.
+                        if (!module_checked) {
+                            module = import_module_name(store, doc, candidate); module_checked = true;
+                            if (module.len() == 0 || import_conflicts(doc, candidate, pending)) { break; }
+                        }
+                        if (!exports_indexed) {
+                            completion_provider_exports(candidate, &unique_exports);
+                            exports_indexed = true;
+                        }
                         SymbolTarget target; target.document = candidate; target.symbol = i;
                         IdeSymbol* resolved = target.document.analysis.symbols.get_ptr(target.symbol);
                         offer_completion(candidates, name, resolved.signature.to_str(), resolved.documentation.to_str(),
