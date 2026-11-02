@@ -1951,6 +1951,24 @@ class NativeLsp(unittest.TestCase):
         self.assertIn("local", {item["label"] for item in completion["items"]})
         self.assertEqual(self.session.result("textDocument/definition", self.at(uri, text, "local", text.index("return add")))["range"], location(text, "local"))
 
+    def test_code_lens_reports_reference_counts(self):
+        text = "i32 helper(i32 v) { return v; }\n\ni32 main() { return helper(1) + helper(2); }\n"
+        uri = self.open(text)
+        self.assertEqual(self.capabilities["codeLensProvider"], {"resolveProvider": True})
+        lenses = self.session.result("textDocument/codeLens", {"textDocument": {"uri": uri}})
+        self.assertEqual([lens["range"] for lens in lenses],
+                         [location(text, "helper"), location(text, "main")])
+        titles = [self.session.result("codeLens/resolve", lens)["command"]["title"] for lens in lenses]
+        self.assertEqual(titles, ["2 references", "0 references"])
+
+    def test_code_lens_resolve_rejects_stale_revision(self):
+        text = "i32 helper() { return 1; }\n"
+        uri = self.open(text)
+        lens = self.session.result("textDocument/codeLens", {"textDocument": {"uri": uri}})[0]
+        self.session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
+            "contentChanges": [{"text": text + "\ni32 extra() { return 2; }\n"}]})
+        self.assertIsNone(self.session.result("codeLens/resolve", lens))
+
     def file_operation_session(self):
         session = Session(self.binary, self.root)
         self.addCleanup(session.close)
