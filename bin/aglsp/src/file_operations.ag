@@ -1,4 +1,6 @@
 import std.string;
+import std.fs;
+import std.path;
 import document;
 import imports;
 import params;
@@ -82,11 +84,45 @@ String renamed_path(str path, str old_path, str new_path) {
     return String.new();
 }
 
+String apply_renames(str path, Vec<FileRename>* renames) {
+    i64 i = 0;
+    while (i < renames.len()) {
+        FileRename* rename = renames.get_ptr(i);
+        String mapped = renamed_path(path, rename.old_path.to_str(), rename.new_path.to_str());
+        if (mapped.len() > 0) { return move mapped; }
+        i += 1;
+    }
+    return String.from_str(path);
+}
+
+// True when `name` resolves to `new_path` from `doc_path` after the renames, so
+// an earlier search base cannot shadow it with a different file.
+bool import_name_resolves_to(DocumentStore* store, str doc_path, str name, str new_path,
+                             Vec<FileRename>* renames) {
+    String relative = String.from_str(name);
+    String slashed = relative.replace(".", "/");
+    String parent = path_dirname(doc_path);
+    String root = absolute_document_path(module_root(doc_path).to_str());
+    i64 i = -1;
+    while (i < store.include_dirs.len() + 1) {
+        str base = i == -1 ? parent.to_str() : i == 0 ? root.to_str() : store.include_dirs.get_ptr(i - 1).to_str();
+        String candidate = path_join(base, slashed.to_str());
+        String source = String.from_str(candidate.to_str()); source.push_str(".ag");
+        String mapped = apply_renames(source.to_str(), renames);
+        if (mapped.equals(new_path) || file_exists(mapped.to_str())) { return mapped.equals(new_path); }
+        String artifact = String.from_str(candidate.to_str()); artifact.push_str(".agm");
+        mapped = apply_renames(artifact.to_str(), renames);
+        if (mapped.equals(new_path) || file_exists(mapped.to_str())) { return mapped.equals(new_path); }
+        i += 1;
+    }
+    return false;
+}
+
 // Recompute the module name from the base that produced the current one, so a
 // rename keeps the import style the author already used. When that base cannot
 // express the new path, fall back to any base that can.
 String import_module_for_path(DocumentStore* store, str doc_path, str old_path,
-                              str new_path, str name) {
+                              str new_path, str name, Vec<FileRename>* renames) {
     String parent = path_dirname(doc_path);
     String root = absolute_document_path(module_root(doc_path).to_str());
     i64 i = -1;
@@ -95,7 +131,10 @@ String import_module_for_path(DocumentStore* store, str doc_path, str old_path,
         String existing = import_module_from_base(base, old_path);
         if (existing.equals(name)) {
             String renamed = import_module_from_base(base, new_path);
-            if (renamed.len() > 0) { return move renamed; }
+            if (renamed.len() > 0
+                && import_name_resolves_to(store, doc_path, renamed.to_str(), new_path, renames)) {
+                return move renamed;
+            }
         }
         i += 1;
     }
@@ -103,7 +142,10 @@ String import_module_for_path(DocumentStore* store, str doc_path, str old_path,
     while (i < store.include_dirs.len() + 1) {
         str base = i == -1 ? parent.to_str() : i == 0 ? root.to_str() : store.include_dirs.get_ptr(i - 1).to_str();
         String renamed = import_module_from_base(base, new_path);
-        if (renamed.len() > 0) { return move renamed; }
+        if (renamed.len() > 0
+            && import_name_resolves_to(store, doc_path, renamed.to_str(), new_path, renames)) {
+            return move renamed;
+        }
         i += 1;
     }
     return String.new();
@@ -142,7 +184,7 @@ String compute_file_rename_edits(DocumentStore* store, str params, ClientOptions
                         FileRename* rename = renames.get_ptr(r);
                         String target = renamed_path(resolved.to_str(), rename.old_path.to_str(), rename.new_path.to_str());
                         if (target.len() > 0) {
-                            String new_name = import_module_for_path(store, effective_path.to_str(), resolved.to_str(), target.to_str(), name.to_str());
+                            String new_name = import_module_for_path(store, effective_path.to_str(), resolved.to_str(), target.to_str(), name.to_str(), &renames);
                             if (new_name.len() > 0 && !new_name.equals(name.to_str())) {
                                 if (!first) { edits.push(','); } first = false;
                                 edits.push_str("{\"range\":"); doc.append_range(&edits, span);

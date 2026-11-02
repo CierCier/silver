@@ -122,7 +122,7 @@ void offer_completion(CompletionCandidates* candidates, str name, str detail, st
     // items still record their names for auto-import suppression.
     if (strlen(auto_module) > 0 && candidates.items.len() >= 100) {
         if (candidates.worst_score < 0) { candidates.worst_score = completion_worst_score(candidates); }
-        if (score > candidates.worst_score) { return; }
+        if (score > candidates.worst_score) { candidates.truncated = true; return; }
     }
     if (strlen(auto_module) == 0 && !completion_visible(candidates, name)) {
         candidates.visible_names.push(String.from_str(name));
