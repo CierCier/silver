@@ -1995,6 +1995,8 @@ class NativeLsp(unittest.TestCase):
         (self.root / "aliased.ag").write_text(aliased)
         session, capabilities = self.file_operation_session()
         self.assertEqual(capabilities["workspace"]["fileOperations"]["willRename"]["filters"][0]["pattern"]["glob"], "**/*.ag")
+        self.assertEqual(capabilities["workspace"]["fileOperations"]["willRename"]["filters"][1],
+                         {"scheme": "file", "pattern": {"glob": "**", "matches": "folder"}})
         edit = session.result("workspace/willRenameFiles", {"files": [
             {"oldUri": (self.root / "renamed_source.ag").as_uri(),
              "newUri": (self.root / "renamed_target.ag").as_uri()}]})
@@ -2016,6 +2018,32 @@ class NativeLsp(unittest.TestCase):
         uri = (self.root / "uses_pkg.ag").as_uri()
         self.assertEqual(changes[uri], [{"range": location(text, "pkg.inner"), "newText": "lib.inner"}])
         self.assertEqual(apply_edits(text, changes[uri]), text.replace("pkg.inner", "lib.inner"))
+
+    def test_file_move_across_directories_rewrites_import(self):
+        (self.root / "pkg").mkdir()
+        (self.root / "shared").mkdir()
+        (self.root / "pkg" / "helper.ag").write_text("i32 answer() { return 7; }\n")
+        text = "import helper;\n\ni32 use_answer() { return answer(); }\n"
+        (self.root / "pkg" / "main.ag").write_text(text)
+        session, _ = self.file_operation_session()
+        edit = session.result("workspace/willRenameFiles", {"files": [
+            {"oldUri": (self.root / "pkg" / "helper.ag").as_uri(),
+             "newUri": (self.root / "shared" / "helper.ag").as_uri()}]})
+        changes = {change["textDocument"]["uri"]: change["edits"] for change in edit["documentChanges"]}
+        uri = (self.root / "pkg" / "main.ag").as_uri()
+        self.assertEqual(changes[uri], [{"range": location(text, "helper"), "newText": "shared.helper"}])
+
+    def test_directory_move_rewrites_imports_from_the_new_home(self):
+        (self.root / "pkg").mkdir()
+        (self.root / "pkg" / "helper.ag").write_text("i32 answer() { return 7; }\n")
+        text = "import pkg.helper;\n\ni32 use_answer() { return answer(); }\n"
+        (self.root / "pkg" / "main.ag").write_text(text)
+        session, _ = self.file_operation_session()
+        edit = session.result("workspace/willRenameFiles", {"files": [
+            {"oldUri": (self.root / "pkg").as_uri(), "newUri": (self.root / "lib").as_uri()}]})
+        changes = {change["textDocument"]["uri"]: change["edits"] for change in edit["documentChanges"]}
+        uri = (self.root / "pkg" / "main.ag").as_uri()
+        self.assertEqual(changes[uri], [{"range": location(text, "pkg.helper"), "newText": "lib.helper"}])
 
     def test_file_rename_requires_client_capability(self):
         self.assertNotIn("fileOperations", self.capabilities["workspace"])
