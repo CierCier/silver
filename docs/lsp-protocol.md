@@ -60,8 +60,8 @@ providers return eager results instead.
 | `textDocument/codeAction` | C → S | Conditional | Import quick fixes require action-literal support. Honors `context.only`, compiler path precedence, callable overload safety, ambiguity/privacy/conflict checks and negotiated versioned edits. Other fixes and refactorings remain open. [Source][actions], [checks][checks]. |
 | `codeAction/resolve` | C → S | Open | Import edits are eager; no lazy action resolution. |
 | `workspace/executeCommand` | C → S | Open | No command provider or command-based action fallback. |
-| `textDocument/codeLens` | C → S | Open | No reference/implementation or runnable-target lenses. |
-| `codeLens/resolve` | C → S | Open | No lens provider. |
+| `textDocument/codeLens` | C → S | Supported | One lens per non-local declaration, carrying the document URI, symbol index and revision. Counts are deferred to resolve. Runnable-target and implementation lenses remain open. [Source][lenses], [checks][checks]. |
+| `codeLens/resolve` | C → S | Supported | Counts references across the workspace and returns an `N references` title; stale revisions and unknown symbols resolve to `null`. [Source][lenses], [checks][checks]. |
 | `textDocument/documentLink` | C → S | Supported | Eager source-import links, compiler search precedence and overlays; tooltips require client support. Missing/inactive imports and AGM artifacts have no link. [Source][navigation], [checks][checks]. |
 | `documentLink/resolve` | C → S | Open | Import link targets are eager; no resolve provider. |
 | `textDocument/formatting` | C → S | Supported | Token-preserving structural whitespace layout; tabs/spaces, final newline preference and line endings. Invalid syntax produces no edits. Rich wrapping/alignment remains open. [Source][format], [checks][checks]. |
