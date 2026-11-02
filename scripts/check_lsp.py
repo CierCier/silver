@@ -1951,6 +1951,53 @@ class NativeLsp(unittest.TestCase):
         self.assertIn("local", {item["label"] for item in completion["items"]})
         self.assertEqual(self.session.result("textDocument/definition", self.at(uri, text, "local", text.index("return add")))["range"], location(text, "local"))
 
+    def file_operation_session(self):
+        session = Session(self.binary, self.root)
+        self.addCleanup(session.close)
+        capabilities = session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(),
+            "workspaceFolders": [{"uri": self.root.as_uri(), "name": self.root.name}],
+            "capabilities": {"workspace": {"fileOperations": {"willRename": True},
+                                           "workspaceEdit": {"documentChanges": True}}}})["capabilities"]
+        session.send("initialized", {})
+        return session, capabilities
+
+    def test_file_rename_rewrites_imports(self):
+        (self.root / "renamed_source.ag").write_text("i32 answer() { return 7; }\n")
+        plain = "import renamed_source;\n\ni32 plain() { return answer(); }\n"
+        selected = "import renamed_source { answer };\n\ni32 selected() { return answer(); }\n"
+        aliased = "import renamed_source as src;\n\ni32 aliased() { return src.answer(); }\n"
+        (self.root / "plain.ag").write_text(plain)
+        (self.root / "selected.ag").write_text(selected)
+        (self.root / "aliased.ag").write_text(aliased)
+        session, capabilities = self.file_operation_session()
+        self.assertEqual(capabilities["workspace"]["fileOperations"]["willRename"]["filters"][0]["pattern"]["glob"], "**/*.ag")
+        edit = session.result("workspace/willRenameFiles", {"files": [
+            {"oldUri": (self.root / "renamed_source.ag").as_uri(),
+             "newUri": (self.root / "renamed_target.ag").as_uri()}]})
+        changes = {change["textDocument"]["uri"]: change["edits"] for change in edit["documentChanges"]}
+        for name, text in (("plain.ag", plain), ("selected.ag", selected), ("aliased.ag", aliased)):
+            uri = (self.root / name).as_uri()
+            self.assertEqual(changes[uri], [{"range": location(text, "renamed_source"), "newText": "renamed_target"}])
+            self.assertEqual(apply_edits(text, changes[uri]), text.replace("renamed_source", "renamed_target"))
+
+    def test_directory_rename_rewrites_nested_imports(self):
+        (self.root / "pkg").mkdir()
+        (self.root / "pkg" / "inner.ag").write_text("i32 inner() { return 1; }\n")
+        text = "import pkg.inner;\n\ni32 use_inner() { return inner(); }\n"
+        (self.root / "uses_pkg.ag").write_text(text)
+        session, _ = self.file_operation_session()
+        edit = session.result("workspace/willRenameFiles", {"files": [
+            {"oldUri": (self.root / "pkg").as_uri(), "newUri": (self.root / "lib").as_uri()}]})
+        changes = {change["textDocument"]["uri"]: change["edits"] for change in edit["documentChanges"]}
+        uri = (self.root / "uses_pkg.ag").as_uri()
+        self.assertEqual(changes[uri], [{"range": location(text, "pkg.inner"), "newText": "lib.inner"}])
+        self.assertEqual(apply_edits(text, changes[uri]), text.replace("pkg.inner", "lib.inner"))
+
+    def test_file_rename_requires_client_capability(self):
+        self.assertNotIn("fileOperations", self.capabilities["workspace"])
+        response = self.session.request("workspace/willRenameFiles", {"files": []})
+        self.assertEqual(response["error"]["code"], -32601)
+
     def test_rename_rejects_capture(self):
         text = "i32 main() { i32 first = 1; i32 second = 2; return first + second; }\n"
         uri = self.open(text)
