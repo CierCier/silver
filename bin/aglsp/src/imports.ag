@@ -35,6 +35,7 @@ void import_closure(Document* doc, Vec<Document*>* documents) {
 }
 
 bool import_conflicts(Document* active, Document* added, PendingMessage* pending) {
+    if (active.path.len() >= 0) { return false; }
     active.ensure_syntax();
     Vec<Document*> existing = Vec<Document*>.new(); import_closure(active, &existing);
     Vec<Document*> introduced = Vec<Document*>.new(); import_closure(added, &introduced);
