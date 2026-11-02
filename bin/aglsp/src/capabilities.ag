@@ -100,6 +100,7 @@ struct ClientOptions {
     bool document_link_tooltips;
     bool folding_line_only;
     i64 folding_range_limit;
+    bool file_operations;
 }
 
 String client_field(str json, str path) {
