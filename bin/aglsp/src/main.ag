@@ -15,6 +15,7 @@ import progress;
 import client_requests;
 import actions;
 import file_operations;
+import lenses;
 
 struct ServerState {
     DocumentStore store;
