@@ -100,6 +100,7 @@ struct ClientOptions {
     bool document_link_tooltips;
     bool folding_line_only;
     i64 folding_range_limit;
+    bool file_operations;
 }
 
 String client_field(str json, str path) {
@@ -174,6 +175,8 @@ ClientOptions client_options(str params) {
     options.code_action_literals = actions.starts_with("[");
     options.document_link_tooltips = link_tooltips.equals("true");
     options.folding_line_only = line_only.equals("true");
+    String file_operations = client_field(params, "capabilities.workspace.fileOperations.willRename");
+    options.file_operations = file_operations.equals("true");
     i64 fold_limit = 0; options.folding_range_limit = 2147483647;
     if (json_integer(folding.to_str(), "rangeLimit", &fold_limit) && fold_limit >= 0 && fold_limit <= 2147483647) {
         options.folding_range_limit = fold_limit;
