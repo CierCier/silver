@@ -77,7 +77,8 @@ void completion_provider_exports(Document* provider, HashMap<String, i64>* expor
         i64 symbol_index = 0;
         while (symbol_index < source.analysis.symbols.len()) {
             IdeSymbol* symbol = source.analysis.symbols.get_ptr(symbol_index);
-            if (!symbol.local && !symbol.is_private && symbol.owner.len() == 0) {
+            if (!symbol.local && !symbol.is_private && symbol.owner.len() == 0
+                && symbol.kind != IdeSymbolKind.ImportAlias) {
                 str name = symbol.name.to_str();
                 Optional<i64> previous = exports.get_opt(String.from_str(name));
                 if (previous.is_some()) {
