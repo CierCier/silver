@@ -36,6 +36,8 @@ struct CompletionCandidates {
     Vec<CompletionCandidate> items;
     Vec<String> visible_names;
     bool truncated;
+    // Score of the worst kept item once the list is full; -1 while it is not.
+    i64 worst_score;
 }
 
 CompletionCandidates completion_candidates() {
@@ -43,6 +45,7 @@ CompletionCandidates completion_candidates() {
     candidates.items = Vec<CompletionCandidate>.new();
     candidates.visible_names = Vec<String>.new();
     candidates.truncated = false;
+    candidates.worst_score = -1;
     return candidates;
 }
 
@@ -77,7 +80,8 @@ void completion_provider_exports(Document* provider, HashMap<String, i64>* expor
         i64 symbol_index = 0;
         while (symbol_index < source.analysis.symbols.len()) {
             IdeSymbol* symbol = source.analysis.symbols.get_ptr(symbol_index);
-            if (!symbol.local && !symbol.is_private && symbol.owner.len() == 0) {
+            if (!symbol.local && !symbol.is_private && symbol.owner.len() == 0
+                && symbol.kind != IdeSymbolKind.ImportAlias) {
                 str name = symbol.name.to_str();
                 Optional<i64> previous = exports.get_opt(String.from_str(name));
                 if (previous.is_some()) {
@@ -102,8 +106,20 @@ bool completion_precedes(CompletionCandidate* left, CompletionCandidate* right) 
     return left.target.symbol < right.target.symbol;
 }
 
+i64 completion_worst_score(CompletionCandidates* candidates) {
+    i64 worst = 0; i64 i = 1;
+    while (i < candidates.items.len()) {
+        if (completion_precedes(candidates.items.get_ptr(worst), candidates.items.get_ptr(i))) { worst = i; }
+        i += 1;
+    }
+    return candidates.items.get_ptr(worst).score;
+}
+
 void offer_completion(CompletionCandidates* candidates, str name, str detail, str documentation,
         i64 kind, bool local, i64 score, SymbolTarget target, bool instance, str auto_module, bool snippets) {
+    // Score is the primary ordering key, so a worse score cannot displace the
+    // worst kept item. This keeps broad auto-import scans off the O(100) path.
+    if (candidates.items.len() >= 100 && candidates.worst_score >= 0 && score > candidates.worst_score) { return; }
     if (strlen(auto_module) == 0 && !completion_visible(candidates, name)) {
         candidates.visible_names.push(String.from_str(name));
     }
@@ -121,7 +137,11 @@ void offer_completion(CompletionCandidates* candidates, str name, str detail, st
     item.auto_module = String.from_str(auto_module);
     item.target = target; item.kind = kind; item.local = local; item.score = score;
     item.instance = instance; item.snippets = snippets;
-    if (candidates.items.len() < 100) { candidates.items.push(move item); return; }
+    if (candidates.items.len() < 100) {
+        candidates.items.push(move item);
+        if (candidates.items.len() == 100) { candidates.worst_score = completion_worst_score(candidates); }
+        return;
+    }
     candidates.truncated = true;
     i64 worst = 0; i64 i = 1;
     while (i < candidates.items.len()) {
@@ -131,6 +151,7 @@ void offer_completion(CompletionCandidates* candidates, str name, str detail, st
     if (completion_precedes(&item, candidates.items.get_ptr(worst))) {
         CompletionCandidate _removed = candidates.items.take(worst);
         candidates.items.push(move item);
+        candidates.worst_score = completion_worst_score(candidates);
     }
 }
 
@@ -365,26 +386,26 @@ void append_auto_imports(DocumentStore* store, Document* doc, str prefix,
                 i64 score = ide_match_score(prefix, name);
                 if (!symbol.local && !symbol.is_private && symbol.owner.len() == 0
                     && symbol.kind != IdeSymbolKind.ImportAlias && score >= 0 && !completion_visible(candidates, name)) {
-                    bool unique_provider_symbol = false;
-                    if (exports_indexed) {
-                        Optional<i64> unique = unique_exports.get_opt(String.from_str(name));
-                        unique_provider_symbol = unique.is_some() && unique.unwrap() == i + 1;
-                    } else {
-                        Vec<Document*> visited = Vec<Document*>.new(); SymbolTarget unique;
-                        unique.document = candidate; unique.symbol = -1;
-                        find_imported_symbol(candidate, name, "", &visited, &unique);
-                        unique_provider_symbol = unique.symbol == i && unique.document == candidate;
+                bool unique_provider_symbol = false;
+                if (exports_indexed) {
+                    Optional<i64> unique = unique_exports.get_opt(String.from_str(name));
+                    unique_provider_symbol = unique.is_some() && unique.unwrap() == i + 1;
+                } else {
+                    Vec<Document*> visited = Vec<Document*>.new(); SymbolTarget unique;
+                    unique.document = candidate; unique.symbol = -1;
+                    find_imported_symbol(candidate, name, "", &visited, &unique);
+                    unique_provider_symbol = unique.symbol == i && unique.document == candidate;
+                }
+                if (unique_provider_symbol) {
+                    // Module resolution and conflicts are shared by all exports in this request.
+                    if (!module_checked) {
+                        module = import_module_name(store, doc, candidate); module_checked = true;
+                        if (module.len() == 0 || import_conflicts(doc, candidate, pending)) { break; }
                     }
-                    if (unique_provider_symbol) {
-                        // Module resolution and conflicts are shared by all exports in this request.
-                        if (!module_checked) {
-                            module = import_module_name(store, doc, candidate); module_checked = true;
-                            if (module.len() == 0 || import_conflicts(doc, candidate, pending)) { break; }
-                        }
-                        if (!exports_indexed) {
-                            completion_provider_exports(candidate, &unique_exports);
-                            exports_indexed = true;
-                        }
+                    if (!exports_indexed) {
+                        completion_provider_exports(candidate, &unique_exports);
+                        exports_indexed = true;
+                    }
                         SymbolTarget target; target.document = candidate; target.symbol = i;
                         IdeSymbol* resolved = target.document.analysis.symbols.get_ptr(target.symbol);
                         offer_completion(candidates, name, resolved.signature.to_str(), resolved.documentation.to_str(),
