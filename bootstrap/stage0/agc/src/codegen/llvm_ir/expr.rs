@@ -1351,12 +1351,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             });
                     }
                 }
-                // `&str` sugar parses as a builtin byte slice: index its data pointer.
+                // `&str` sugar parses as a builtin byte slice, so index the
+                // slice data pointer directly. The element type scales the
+                // address and the load, not a fixed byte width.
                 if let Some(ty) = &object_ty
-                    && matches!(ty.kind.as_ref(), ast::TypeKind::Slice(_))
+                    && let ast::TypeKind::Slice(slice) = ty.kind.as_ref()
                 {
-                    let slice = self.emit_expression_value(object)?;
-                    let BasicValueEnum::StructValue(slice) = slice else {
+                    let slice_value = self.emit_expression_value(object)?;
+                    let BasicValueEnum::StructValue(slice_value) = slice_value else {
                         return Err(CodegenError::with_span(
                             "expected struct value for slice indexing",
                             object.span,
@@ -1364,7 +1366,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     };
                     let data = self
                         .builder
-                        .build_extract_value(slice, 0, "slice.data")
+                        .build_extract_value(slice_value, 0, "slice.data")
                         .map_err(|e| {
                             CodegenError::with_span(
                                 format!("failed to read slice data: {e}"),
@@ -1372,7 +1374,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             )
                         })?;
                     let idx = self.emit_expression_value(index)?;
-                    let element_ty = self.context.i8_type();
+                    let element_ty = self.lower_basic_type(&slice.element_type)?;
                     let ptr = unsafe {
                         self.builder
                             .build_gep(
