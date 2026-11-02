@@ -92,7 +92,11 @@ String import_module_for_path(DocumentStore* store, Document* doc, str old_path,
     while (i < store.include_dirs.len() + 1) {
         str base = i == -1 ? parent.to_str() : i == 0 ? root.to_str() : store.include_dirs.get_ptr(i - 1).to_str();
         String existing = import_module_from_base(base, old_path);
-        if (existing.equals(name)) { return import_module_from_base(base, new_path); }
+        if (existing.equals(name)) {
+            // The new path may not be expressible from this base; keep looking.
+            String renamed = import_module_from_base(base, new_path);
+            if (renamed.len() > 0) { return move renamed; }
+        }
         i += 1;
     }
     return String.new();
@@ -149,6 +153,7 @@ String compute_file_rename_edits(DocumentStore* store, str params, ClientOptions
                 if (client.versioned_edits) { out.push('}'); }
             }
         }
+        doc.compact();
         d += 1;
     }
     if (first_doc) { return String.from_str("null"); }
