@@ -8,6 +8,9 @@ enum RequestCompletion { Finished; Cancelled; Interrupted; }
 struct PendingMessage {
     Transport* transport;
     String body;
+    // Recorded by the reader so the dispatcher can detect a newer request for
+    // the same feature without re-parsing queued bodies.
+    String method;
     String id;
     String progress_id;
     String progress_token;
@@ -138,6 +141,7 @@ void read_transport(i64 address) {
         }
         PendingMessage* pending = alloc<PendingMessage>(1);
         pending.transport = transport;
+        pending.method = String.new();
         pending.valid_encoding = valid_encoding;
         pending.body = move body; body = String.new();
         if (valid && parsed.has_id) {
@@ -145,6 +149,7 @@ void read_transport(i64 address) {
             pending.progress_token = json_field(parsed.params_json.to_str(), "workDoneToken");
             pending.progress_id = request_identity(pending.progress_token.to_str());
         }
+        if (valid) { pending.method = parsed.method.clone(); }
         transport.mutex.lock(); transport.pending.push(pending); transport.mutex.unlock();
         if (!transport.messages.try_send(pending)) {
             // Publish pressure before blocking, even if analysis has not started.
