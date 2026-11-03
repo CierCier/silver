@@ -293,6 +293,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .const_to_pointer(self.context.ptr_type(AddressSpace::default()))
     }
 
+    /// A reference with no owner node carries no tracked state, so it behaves
+    /// like the external capability token: nothing to project and nothing to
+    /// drop. Treating a null node as tracked dereferences it.
+    pub(crate) fn external_reference_state(&self, state: PointerValue<'ctx>) -> bool {
+        state.is_null() || state == self.initialized_reference_state()
+    }
+
     pub(crate) fn build_reference(
         &self,
         data: PointerValue<'ctx>,
