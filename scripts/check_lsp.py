@@ -1951,6 +1951,34 @@ class NativeLsp(unittest.TestCase):
         self.assertIn("local", {item["label"] for item in completion["items"]})
         self.assertEqual(self.session.result("textDocument/definition", self.at(uri, text, "local", text.index("return add")))["range"], location(text, "local"))
 
+    def test_extract_variable_refactor(self):
+        text = ("i32 add(i32 a, i32 b) { return a + b; }\n\n"
+                "i32 main() {\n    i32 total = add(1, 2) + add(3, 4);\n    return total;\n}\n")
+        uri = self.open(text)
+        self.assertEqual(self.capabilities["codeActionProvider"]["codeActionKinds"],
+                         ["quickfix", "refactor.extract"])
+        start = text.index("add(1, 2)")
+        selection = {"start": position(text, start), "end": position(text, start + len("add(1, 2)"))}
+        actions = self.session.result("textDocument/codeAction", {
+            "textDocument": {"uri": uri}, "range": selection,
+            "context": {"diagnostics": [], "only": ["refactor.extract"]}})
+        self.assertEqual([action["kind"] for action in actions], ["refactor.extract"])
+        self.assertEqual(actions[0]["title"], "Extract to variable")
+        updated = apply_edits(text, actions[0]["edit"]["changes"][uri])
+        self.assertEqual(updated, text.replace(
+            "    i32 total = add(1, 2) + add(3, 4);",
+            "    let extracted = add(1, 2);\n    i32 total = extracted + add(3, 4);"))
+
+    def test_extract_variable_skips_quickfix_only_requests(self):
+        text = "i32 main() {\n    i32 total = 1 + 2;\n    return total;\n}\n"
+        uri = self.open(text)
+        start = text.index("1 + 2")
+        actions = self.session.result("textDocument/codeAction", {
+            "textDocument": {"uri": uri},
+            "range": {"start": position(text, start), "end": position(text, start + 5)},
+            "context": {"diagnostics": [], "only": ["quickfix"]}})
+        self.assertEqual([action for action in actions if action["kind"].startswith("refactor")], [])
+
     def test_code_lens_reports_reference_counts(self):
         text = "i32 helper(i32 v) { return v; }\n\ni32 main() { return helper(1) + helper(2); }\n"
         uri = self.open(text)
