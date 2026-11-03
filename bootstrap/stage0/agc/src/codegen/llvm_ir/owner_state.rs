@@ -573,6 +573,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let function = self
             .current_fn
             .ok_or_else(|| CodegenError::new("owner cleanup outside function"))?;
+        let run = self.context.append_basic_block(function, "owner.cleanup");
+        let after = self.context.append_basic_block(function, "owner.after");
+        // A local declared in a branch that did not run has no owner node on
+        // this path; there is no state to consult, so skip its cleanup.
+        let check = self.context.append_basic_block(function, "owner.check");
+        let missing = self
+            .builder
+            .build_is_null(owner.nodes[node], "owner.missing")
+            .map_err(|e| CodegenError::new(e.to_string()))?;
+        self.builder
+            .build_conditional_branch(missing, after, check)
+            .map_err(|e| CodegenError::new(e.to_string()))?;
+        self.builder.position_at_end(check);
         let state = self
             .builder
             .build_load(
@@ -582,8 +595,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             )
             .map_err(|e| CodegenError::new(e.to_string()))?
             .into_int_value();
-        let run = self.context.append_basic_block(function, "owner.cleanup");
-        let after = self.context.append_basic_block(function, "owner.after");
         let present = self
             .builder
             .build_int_compare(
