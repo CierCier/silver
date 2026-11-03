@@ -368,12 +368,17 @@ void append_auto_imports(DocumentStore* store, Document* doc, str prefix,
     i64 score_counts[512]; i64 bucket = 0;
     while (bucket < 512) { score_counts[bucket] = 0; bucket += 1; }
     i64 matching = 0;
+    // Best matching score per candidate, so the loop can visit the strongest
+    // providers first and stop once the result list is full.
+    Vec<Document*> ranked = Vec<Document*>.new();
+    Vec<i64> ranked_best = Vec<i64>.new();
+    Vec<bool> ranked_done = Vec<bool>.new();
     i64 p = 0;
     while (p < documents.len() && !request_interrupted(pending)) {
         Document* probe = documents.get(p);
         if (probe != doc && auto_import_document(store, probe)
             && probe.path.ends_with(".ag") && probe.analysis.diagnostics.is_empty()) {
-            i64 s = 0;
+            i64 s = 0; i64 best = -1;
             while (s < probe.analysis.symbols.len()) {
                 IdeSymbol* symbol = probe.analysis.symbols.get_ptr(s);
                 if (completion_exported_symbol(symbol)) {
@@ -381,9 +386,13 @@ void append_auto_imports(DocumentStore* store, Document* doc, str prefix,
                     if (score >= 0) {
                         i64 slot = score > 511 ? 511 : score;
                         score_counts[slot] += 1; matching += 1;
+                        if (best < 0 || score < best) { best = score; }
                     }
                 }
                 s += 1;
+            }
+            if (best >= 0) {
+                ranked.push(probe); ranked_best.push(best); ranked_done.push(false);
             }
         }
         p += 1;
