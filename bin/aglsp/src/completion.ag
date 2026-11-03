@@ -368,12 +368,17 @@ void append_auto_imports(DocumentStore* store, Document* doc, str prefix,
     i64 score_counts[512]; i64 bucket = 0;
     while (bucket < 512) { score_counts[bucket] = 0; bucket += 1; }
     i64 matching = 0;
+    // Best matching score per candidate, so the loop can visit the strongest
+    // providers first and stop once the result list is full.
+    Vec<Document*> ranked = Vec<Document*>.new();
+    Vec<i64> ranked_best = Vec<i64>.new();
+    Vec<bool> ranked_done = Vec<bool>.new();
     i64 p = 0;
     while (p < documents.len() && !request_interrupted(pending)) {
         Document* probe = documents.get(p);
         if (probe != doc && auto_import_document(store, probe)
             && probe.path.ends_with(".ag") && probe.analysis.diagnostics.is_empty()) {
-            i64 s = 0;
+            i64 s = 0; i64 best = -1;
             while (s < probe.analysis.symbols.len()) {
                 IdeSymbol* symbol = probe.analysis.symbols.get_ptr(s);
                 if (completion_exported_symbol(symbol)) {
@@ -381,9 +386,13 @@ void append_auto_imports(DocumentStore* store, Document* doc, str prefix,
                     if (score >= 0) {
                         i64 slot = score > 511 ? 511 : score;
                         score_counts[slot] += 1; matching += 1;
+                        if (best < 0 || score < best) { best = score; }
                     }
                 }
                 s += 1;
+            }
+            if (best >= 0) {
+                ranked.push(probe); ranked_best.push(best); ranked_done.push(false);
             }
         }
         p += 1;
@@ -401,10 +410,20 @@ void append_auto_imports(DocumentStore* store, Document* doc, str prefix,
             k += 1;
         }
     }
-    while (d < documents.len() && !request_interrupted(pending)) {
-        Document* candidate = documents.get(d);
-        if (candidate != doc && auto_import_document(store, candidate)
-            && candidate.path.ends_with(".ag") && candidate.analysis.diagnostics.is_empty()) {
+    i64 offered = 0;
+    while (d < ranked.len() && !request_interrupted(pending)) {
+        // Visit the strongest provider next so the best items are offered first
+        // and the loop can stop as soon as the list is full.
+        i64 pick = -1; i64 pick_score = 2147483647;
+        i64 r = 0;
+        while (r < ranked.len()) {
+            if (!ranked_done.get(r) && ranked_best.get(r) < pick_score) { pick = r; pick_score = ranked_best.get(r); }
+            r += 1;
+        }
+        if (pick < 0) { break; }
+        ranked_done.set(pick, true);
+        Document* candidate = ranked.get(pick);
+        if (true) {
             String module = String.new(); bool module_checked = false;
             Vec<Document*> closure = Vec<Document*>.new();
             import_closure(candidate, &closure);
@@ -427,11 +446,13 @@ void append_auto_imports(DocumentStore* store, Document* doc, str prefix,
                         IdeSymbol* resolved = target.document.analysis.symbols.get_ptr(target.symbol);
                         offer_completion(candidates, name, resolved.signature.to_str(), resolved.documentation.to_str(),
                             completion_kind(resolved.kind), false, score, target, false, module.to_str(), true);
+                        offered += 1;
                     }
                 }
                 i += 1;
             }
         }
+        if (offered >= needed) { break; }
         d += 1;
     }
 }
