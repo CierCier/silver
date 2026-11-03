@@ -432,11 +432,33 @@ String render_completions(Document* doc, Span replacement, CompletionCandidates*
     out.push_str("]}"); return move out;
 }
 
+import std.time;
+
+Instant __probe_start;
+bool __probe_on = false;
+
+void probe_phase(str label) {
+    if (!__probe_on) { return; }
+    Instant now = Instant.now();
+    i64 ns = now.elapsed_ns(__probe_start);
+    String line = String.from_str("[probe] ");
+    line.push_str(label);
+    line.push_str(" ");
+    line.push_display(&(ns / 1000));
+    line.push_str("us");
+    eprintln(line.to_str());
+    line.drop();
+    __probe_start = now;
+}
+
 String compute_completion(DocumentStore* store, Document* doc, i64 offset, ClientOptions* client,
         PendingMessage* pending, bool index_pending) {
+    __probe_on = var("AGLSP_PROBE").is_some();
+    if (__probe_on) { __probe_start = Instant.now(); }
     CompletionCandidates candidates = completion_candidates();
     Span replacement = Span.synthetic(); String prefix = String.new();
     completion_prefix(doc, offset, &replacement, &prefix);
+    probe_phase("prefix");
     if (inside_literal(doc, offset)) { return render_completions(doc, replacement, &candidates, client, false); }
     Optional<ImportCompletionContext> import_context = import_completion_context(doc, offset);
     if (import_context.is_some()) {
@@ -460,6 +482,7 @@ String compute_completion(DocumentStore* store, Document* doc, i64 offset, Clien
         completion_symbols(doc, doc, offset, prefix.to_str(), owner.to_str(), members, instance,
             &visited, pending, &candidates);
     }
+    probe_phase("in-scope symbols");
     if (!members) {
         TokenStream words = TokenStream.new(); DiagnosticBag ignored = DiagnosticBag.new();
         lex(String.from_str("let mut const static volatile struct enum impl trait type private if else while for in match break continue return move defer import comptime cast as extern asm macro launch wait true false Self i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 f80 c32 c64 c80 bool char str void Vec Optional"), &words, &ignored);
@@ -474,9 +497,13 @@ String compute_completion(DocumentStore* store, Document* doc, i64 offset, Clien
             }
             i += 1;
         }
+        probe_phase("keywords");
         append_auto_imports(store, doc, prefix.to_str(), pending, &candidates);
+        probe_phase("auto-imports");
     }
-    return render_completions(doc, replacement, &candidates, client, !members && index_pending);
+    String rendered = render_completions(doc, replacement, &candidates, client, !members && index_pending);
+    probe_phase("render");
+    return move rendered;
 }
 
 enum CompletionResolveError { InvalidItem; StaleItem; }
