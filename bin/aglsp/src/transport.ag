@@ -8,6 +8,9 @@ enum RequestCompletion { Finished; Cancelled; Interrupted; }
 struct PendingMessage {
     Transport* transport;
     String body;
+    // Method recorded by the reader so the dispatcher can detect a newer
+    // request for the same feature without re-parsing queued bodies.
+    String method;
     String id;
     String progress_id;
     String progress_token;
