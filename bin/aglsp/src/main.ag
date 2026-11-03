@@ -51,6 +51,9 @@ bool index_request_workspace(DocumentStore* store, WorkspaceIndex* index, Pendin
 
 void handle_document_request(DocumentStore* store, WorkspaceIndex* index, ClientOptions* client, JsonRpcMessage* message, PendingMessage* pending) {
     str method = message.method.to_str(); str params = message.params_json.to_str();
+    // Keystroke-rate completion: a newer request aborts this one at its next
+    // checkpoint instead of finishing a workspace scan the client discards.
+    if (strcmp(method, "textDocument/completion") == 0) { pending.preemptible = true; }
     String uri = String.new(); i64 line = 0; i64 column = 0; i64 offset = 0;
     bool positioned = request_uses_position(method);
     bool supported = positioned || strcmp(method, "textDocument/documentSymbol") == 0
