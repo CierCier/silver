@@ -43,6 +43,10 @@ struct Document {
     Vec<i64> previous_semantic_data;
     IdeIndex analysis;
     Vec<Document*> dependencies;
+    // Exported names of this document's import closure, built on demand for
+    // auto-import completion. Rebuilding it per keystroke dominated latency.
+    HashMap<String, i64> export_cache;
+    bool export_cache_valid;
 }
 
 struct DocumentStore {
