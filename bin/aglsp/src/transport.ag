@@ -8,6 +8,9 @@ enum RequestCompletion { Finished; Cancelled; Interrupted; }
 struct PendingMessage {
     Transport* transport;
     String body;
+    // Recorded by the reader so the dispatcher can detect a newer request for
+    // the same feature without re-parsing queued bodies.
+    String method;
     String id;
     String progress_id;
     String progress_token;
@@ -20,6 +23,9 @@ struct PendingMessage {
     bool pressure_interrupted;
     bool sealed;
     RequestCompletion completion;
+    // Completion generation this request was queued in; a newer generation
+    // means the client has already moved on.
+    i32 completion_epoch;
 }
 
 // Only the dispatcher owns documents and writes stdout. The reader owns stdin;
@@ -30,6 +36,7 @@ struct Transport {
     Vec<PendingMessage*> pending;
     i32 stopping;
     i32 reader_waiting;
+    i32 completion_epoch;
 }
 
 String request_identity(str raw) {
@@ -55,6 +62,11 @@ bool request_interrupted(PendingMessage* message) {
     if (request_cancelled(message)) { return true; }
     if (!message.preemptible) { return false; }
     Transport* transport = message.transport;
+    // A newer completion request makes this one stale; stop scanning the
+    // workspace for an answer the client will discard.
+    if (__atomic_load_i32(&transport.completion_epoch, ATOMIC_ACQUIRE) > message.completion_epoch) {
+        message.pressure_interrupted = true;
+    }
     if (__atomic_load_i32(&transport.reader_waiting, ATOMIC_ACQUIRE) != 0) { message.pressure_interrupted = true; }
     return message.pressure_interrupted;
 }
@@ -138,12 +150,17 @@ void read_transport(i64 address) {
         }
         PendingMessage* pending = alloc<PendingMessage>(1);
         pending.transport = transport;
+        pending.method = String.new();
         pending.valid_encoding = valid_encoding;
         pending.body = move body; body = String.new();
         if (valid && parsed.has_id) {
             pending.id = request_identity(parsed.id_raw.to_str());
             pending.progress_token = json_field(parsed.params_json.to_str(), "workDoneToken");
             pending.progress_id = request_identity(pending.progress_token.to_str());
+        }
+        if (valid) { pending.method = parsed.method.clone(); }
+        if (valid && strcmp(parsed.method.to_str(), "textDocument/completion") == 0) {
+            pending.completion_epoch = __atomic_fetch_add_i32(&transport.completion_epoch, 1, ATOMIC_ACQ_REL) + 1;
         }
         transport.mutex.lock(); transport.pending.push(pending); transport.mutex.unlock();
         if (!transport.messages.try_send(pending)) {
@@ -164,6 +181,7 @@ impl Transport {
         transport.messages = Channel<PendingMessage*>.bounded(32);
         transport.mutex = RawMutex.new(); transport.pending = Vec<PendingMessage*>.new();
         transport.stopping = 0;
+        transport.completion_epoch = 0;
         __atomic_store_i32(&transport.reader_waiting, 0, ATOMIC_RELEASE);
         return move transport;
     }
