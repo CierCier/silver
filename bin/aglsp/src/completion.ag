@@ -388,12 +388,16 @@ void append_auto_imports(DocumentStore* store, Document* doc, str prefix,
         }
         p += 1;
     }
+    // In-scope items already occupy part of the 100-item budget, so only that
+    // many auto-imports can be shown.
+    i64 needed = 100 - candidates.items.len();
+    if (needed < 1) { needed = 1; }
     i64 cutoff = 2147483647;
-    if (matching > 100) {
+    if (matching > needed) {
         i64 running = 0; i64 k = 0;
         while (k < 512) {
             running += score_counts[k];
-            if (running >= 100) { cutoff = k; break; }
+            if (running >= needed) { cutoff = k; break; }
             k += 1;
         }
     }
