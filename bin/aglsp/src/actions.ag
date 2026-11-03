@@ -19,6 +19,126 @@ bool action_quickfix_context(str json, bool* allowed) {
     return reader.end_array() && !reader.failed;
 }
 
+// Parse `context.only` into the action families the client asked for. Quick
+// fixes are always offered; refactors are opt-in so a plain lightbulb request
+// keeps returning only fixes.
+bool action_context(str json, bool* quickfix, bool* refactor) {
+    *quickfix = true; *refactor = false;
+    String only = json_field(json, "only");
+    if (only.len() == 0) { return true; }
+    *quickfix = false;
+    JsonReader reader = JsonReader.new(only.to_str());
+    if (!reader.begin_array()) { *quickfix = true; return false; }
+    reader.skip_whitespace();
+    while (!reader.failed && reader.index < reader.length && reader.input[reader.index] != ']') {
+        String kind = reader.read_string();
+        if (reader.failed) { return false; }
+        if (kind.equals("") || kind.equals("quickfix")) { *quickfix = true; }
+        if (kind.equals("refactor") || kind.equals("refactor.extract")) { *refactor = true; }
+        if (!skip_comma_if_present(&reader)) { break; }
+        reader.skip_whitespace();
+    }
+    return reader.end_array() && !reader.failed;
+}
+
+i64 action_line_start(Document* doc, i64 offset) {
+    i64 start = offset;
+    while (start > 0 && doc.text.data[start - 1] != (u8)'\n') { start -= 1; }
+    return start;
+}
+
+// A name that does not already appear in the document, so the new binding
+// cannot capture or shadow an existing one.
+String action_fresh_name(Document* doc, str base) {
+    String name = String.from_str(base);
+    i64 suffix = 1;
+    bool searching = true;
+    while (searching) {
+        bool taken = false;
+        i64 i = 0;
+        while (i + name.len() <= doc.text.len()) {
+            if (doc.text.data[i] == (u8)name.data[0]) {
+                bool same = true; i64 j = 1;
+                while (j < name.len()) {
+                    if (doc.text.data[i + j] != (u8)name.data[j]) { same = false; break; }
+                    j += 1;
+                }
+                if (same) { taken = true; break; }
+            }
+            i += 1;
+        }
+        if (!taken) { searching = false; }
+        if (searching) {
+        name = String.from_str(base);
+        name.push('_');
+        name.push_display(&suffix);
+        suffix += 1;
+        }
+    }
+    return move name;
+}
+
+// Offer `let name = <selection>;` on the line above the selection and replace
+// the selection with the new binding. `let` infers the type, so no annotation
+// is needed.
+String extract_variable_action(Document* doc, Span selection) {
+    if (selection.start >= selection.end || selection.end > doc.text.len()) { return String.new(); }
+    String selected = doc.text.substr(selection.start, selection.end - selection.start);
+    if (selected.len() == 0 || selected.len() != strlen(selected.to_str())) { return String.new(); }
+    // A multi-line selection is a statement or declaration, not an expression.
+    i64 scan = 0;
+    while (scan < selected.len()) {
+        if (selected.data[scan] == (u8)'\n') { return String.new(); }
+        scan += 1;
+    }
+    i64 line = action_line_start(doc, selection.start);
+    String indent = String.new();
+    i64 cursor = line;
+    while (cursor < doc.text.len() && (doc.text.data[cursor] == (u8)' ' || doc.text.data[cursor] == (u8)'\t')) {
+        indent.push(doc.text.data[cursor]);
+        cursor += 1;
+    }
+    String name = action_fresh_name(doc, "extracted");
+    String inserted = String.from_str("let ");
+    inserted.push_str(name.to_str());
+    inserted.push_str(" = ");
+    inserted.push_str(selected.to_str());
+    inserted.push_str(";\n");
+    inserted.push_str(indent.to_str());
+    String out = String.from_str("{\"title\":\"Extract to variable\",\"kind\":\"refactor.extract\",\"edit\":");
+    out.push_str("{\"changes\":{\"");
+    json_escape(doc.uri.to_str(), &out);
+    out.push_str("\":[{\"range\":");
+    // Insert after the line's indentation so the new statement lines up with
+    // the one it precedes.
+    Span at_line = Span.synthetic(); at_line.start = cursor; at_line.end = cursor;
+    doc.append_range(&out, at_line);
+    out.push_str(",\"newText\":\""); json_escape(inserted.to_str(), &out);
+    out.push_str("\"},{\"range\":"); doc.append_range(&out, selection);
+    out.push_str(",\"newText\":\""); json_escape(name.to_str(), &out);
+    out.push_str("\"}]}}}");
+    return move out;
+}
+
+String compute_code_actions(DocumentStore* store, Document* active, Span selection,
+        bool quickfix, bool refactor, ClientOptions* client, PendingMessage* pending) {
+    String imports = compute_import_actions(store, active, selection, quickfix, client, pending);
+    String out = String.from_str("[");
+    bool comma = false;
+    i64 i = 1;
+    while (i + 1 < imports.len()) { out.push(imports.data[i]); i += 1; }
+    if (imports.len() > 2) { comma = true; }
+    if (refactor) {
+        String extra = extract_variable_action(active, selection);
+        if (extra.len() > 0) {
+            if (comma) { out.push(','); }
+            out.push_str(extra.to_str());
+        }
+    }
+    out.push(']');
+    return move out;
+}
+
 void append_import_action(String* out, Document* active, str module_name, str name, bool versioned) {
     out.push_str("{\"title\":\"Import "); json_escape(name, out); out.push_str(" from "); json_escape(module_name, out);
     out.push_str("\",\"kind\":\"quickfix\",\"edit\":");

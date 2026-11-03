@@ -197,7 +197,7 @@ String server_capabilities(ClientOptions* client) {
     out.push_str("\"definitionProvider\":true,\"declarationProvider\":true,\"typeDefinitionProvider\":true,\"implementationProvider\":{\"workDoneProgress\":true},");
     out.push_str("\"referencesProvider\":{\"workDoneProgress\":true},\"documentHighlightProvider\":true,\"renameProvider\":{\"prepareProvider\":true,\"workDoneProgress\":true},");
     out.push_str("\"callHierarchyProvider\":{\"workDoneProgress\":true},\"typeHierarchyProvider\":{\"workDoneProgress\":true},");
-    if (client.code_action_literals) { out.push_str("\"codeActionProvider\":{\"codeActionKinds\":[\"quickfix\"],\"workDoneProgress\":true},"); }
+    if (client.code_action_literals) { out.push_str("\"codeActionProvider\":{\"codeActionKinds\":[\"quickfix\",\"refactor.extract\"],\"workDoneProgress\":true},"); }
     out.push_str("\"documentFormattingProvider\":true,\"documentRangeFormattingProvider\":{\"rangesSupport\":true},");
     out.push_str("\"documentOnTypeFormattingProvider\":{\"firstTriggerCharacter\":\"\\n\",\"moreTriggerCharacter\":[\"}\",\";\"]},");
     out.push_str("\"foldingRangeProvider\":true,\"selectionRangeProvider\":true,\"inlayHintProvider\":true,");

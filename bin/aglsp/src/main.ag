@@ -76,13 +76,17 @@ void handle_document_request(DocumentStore* store, WorkspaceIndex* index, Client
     if (positioned && !doc.offset(line, column, &offset)) {
         complete_error(pending, message.id_raw.to_str(), -32602, "Invalid UTF-16 position"); return;
     }
-    String name = String.new(); Span action_range = Span.synthetic(); bool actions_allowed = false;
+    String name = String.new(); Span action_range = Span.synthetic();
+    bool actions_allowed = false; bool refactors_allowed = false;
     if (strcmp(method, "textDocument/rename") == 0 && (!json_string(params, "newName", &name) || !valid_rename(name.to_str()))) {
         complete_error(pending, message.id_raw.to_str(), -32602, "Rename requires a Silver identifier"); return;
     }
     if (strcmp(method, "textDocument/codeAction") == 0) {
         String json_range = json_field(params, "range"); String context = json_field(params, "context");
-        if (!parse_document_range(doc, json_range.to_str(), &action_range) || !action_quickfix_context(context.to_str(), &actions_allowed)) {
+        if (!parse_document_range(doc, json_range.to_str(), &action_range)) {
+            complete_error(pending, message.id_raw.to_str(), -32602, "Invalid code action parameters"); return;
+        }
+        if (!action_context(context.to_str(), &actions_allowed, &refactors_allowed)) {
             complete_error(pending, message.id_raw.to_str(), -32602, "Invalid code action parameters"); return;
         }
     }
@@ -119,7 +123,7 @@ void handle_document_request(DocumentStore* store, WorkspaceIndex* index, Client
     else if (strcmp(method, "textDocument/documentSymbol") == 0) { result = compute_document_symbols(doc, client.hierarchical_symbols); }
     else if (strcmp(method, "textDocument/documentLink") == 0) { result = compute_document_links(store, doc, client.document_link_tooltips); }
     else if (strcmp(method, "textDocument/codeAction") == 0) {
-        result = compute_import_actions(store, doc, action_range, actions_allowed, client, pending);
+        result = compute_code_actions(store, doc, action_range, actions_allowed, refactors_allowed, client, pending);
     }
     else if (strcmp(method, "textDocument/diagnostic") == 0) {
         String previous = String.new();
