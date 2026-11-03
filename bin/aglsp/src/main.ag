@@ -88,10 +88,11 @@ void handle_document_request(DocumentStore* store, WorkspaceIndex* index, Client
     }
     if (strcmp(method, "textDocument/completion") == 0) {
         String context = json_field(params, "context"); String trigger = String.new(); i64 kind = 0;
+        Optional<ImportCompletionContext> import_context = import_completion_context(doc, offset);
         if (json_integer(context.to_str(), "triggerKind", &kind) && kind == 2
             && json_string(context.to_str(), "triggerCharacter", &trigger)
             && (trigger.equals(" ") || trigger.equals("{") || trigger.equals(","))
-            && !import_completion_context(doc, offset).is_some()) {
+            && !import_context.is_some()) {
             complete_response(pending, message.id_raw.to_str(), "{\"isIncomplete\":false,\"items\":[]}"); return;
         }
     }
