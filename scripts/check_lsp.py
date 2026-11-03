@@ -1953,6 +1953,31 @@ class NativeLsp(unittest.TestCase):
         self.assertIn("local", {item["label"] for item in completion["items"]})
         self.assertEqual(self.session.result("textDocument/definition", self.at(uri, text, "local", text.index("return add")))["range"], location(text, "local"))
 
+    def test_superseded_completions_are_abandoned(self):
+        text = "i32 helper(i32 v) { return v; }\n\ni32 main() { helper(1); }\n"
+        uri = self.open(text)
+        position = location(text, "helper", text.index("helper(1)"))["start"]
+        params = {"textDocument": {"uri": uri}, "position": position}
+        # Pipeline several keystroke-rate requests; only the newest may be answered.
+        for request_id in range(500, 505):
+            self.session.send("textDocument/completion", params, request_id=request_id)
+        responses = [self.session.wait_response(request_id, "completion")
+                     for request_id in range(500, 505)]
+        answered = [response for response in responses if "result" in response]
+        abandoned = [response for response in responses if "error" in response]
+        self.assertEqual(len(answered), 1, responses)
+        self.assertEqual([response["error"]["code"] for response in abandoned], [-32803] * 4)
+        self.assertIn("items", answered[0]["result"])
+
+    def test_sequential_completions_are_not_abandoned(self):
+        text = "i32 helper(i32 v) { return v; }\n\ni32 main() { helper(1); }\n"
+        uri = self.open(text)
+        params = {"textDocument": {"uri": uri},
+                  "position": location(text, "helper", text.index("helper(1)"))["start"]}
+        for _ in range(3):
+            result = self.session.result("textDocument/completion", params)
+            self.assertIn("items", result)
+
     def test_extract_variable_refactor(self):
         text = ("i32 add(i32 a, i32 b) { return a + b; }\n\n"
                 "i32 main() {\n    i32 total = add(1, 2) + add(3, 4);\n    return total;\n}\n")
