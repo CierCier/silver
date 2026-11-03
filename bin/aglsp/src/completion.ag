@@ -432,11 +432,32 @@ String render_completions(Document* doc, Span replacement, CompletionCandidates*
     out.push_str("]}"); return move out;
 }
 
+import std.time;
+
+i64 __probe_start = 0;
+bool __probe_on = false;
+
+void probe_phase(str label) {
+    if (!__probe_on) { return; }
+    Instant now = Instant.now();
+    String line = String.from_str("[probe] ");
+    line.push_str(label);
+    line.push_str(" ");
+    line.push_display(&now.elapsed_ns(Instant.from_nanos(__probe_start)));
+    line.push_str("ns");
+    eprintln(line.to_str());
+    line.drop();
+    __probe_start = now.elapsed_since_epoch_ns();
+}
+
 String compute_completion(DocumentStore* store, Document* doc, i64 offset, ClientOptions* client,
         PendingMessage* pending, bool index_pending) {
+    __probe_on = var("AGLSP_PROBE").is_some();
+    if (__probe_on) { __probe_start = Instant.now().elapsed_since_epoch_ns(); }
     CompletionCandidates candidates = completion_candidates();
     Span replacement = Span.synthetic(); String prefix = String.new();
     completion_prefix(doc, offset, &replacement, &prefix);
+    probe_phase("prefix");
     if (inside_literal(doc, offset)) { return render_completions(doc, replacement, &candidates, client, false); }
     Optional<ImportCompletionContext> import_context = import_completion_context(doc, offset);
     if (import_context.is_some()) {
