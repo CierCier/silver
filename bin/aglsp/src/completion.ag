@@ -58,7 +58,12 @@ bool completion_visible(CompletionCandidates* candidates, str name) {
     return false;
 }
 
-void completion_provider_exports(Document* provider, HashMap<String, i64>* exports) {
+// Exported names of the provider's import closure, cached on the document.
+// Candidate documents do not change while the user types, so the closure walk
+// is paid once per workspace change instead of once per keystroke.
+HashMap<String, i64>* completion_provider_exports(Document* provider) {
+    if (provider.export_cache_valid) { return &provider.export_cache; }
+    HashMap<String, i64>* exports = &provider.export_cache;
     Vec<Document*> closure = Vec<Document*>.new();
     closure.push(provider);
     i64 i = 0;
@@ -94,6 +99,8 @@ void completion_provider_exports(Document* provider, HashMap<String, i64>* expor
         }
         i += 1;
     }
+    provider.export_cache_valid = true;
+    return exports;
 }
 
 bool completion_precedes(CompletionCandidate* left, CompletionCandidate* right) {
