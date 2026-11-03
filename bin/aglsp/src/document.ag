@@ -43,6 +43,10 @@ struct Document {
     Vec<i64> previous_semantic_data;
     IdeIndex analysis;
     Vec<Document*> dependencies;
+    // Exported names of this document's import closure, built on demand for
+    // auto-import completion. Rebuilding it per keystroke dominated latency.
+    HashMap<String, i64> export_cache;
+    bool export_cache_valid;
 }
 
 struct DocumentStore {
@@ -100,6 +104,7 @@ impl Document {
 
     void ensure_syntax(Document* self) {
         if (self.analysis.tree.root != (SyntaxNode*)0) { return; }
+        self.export_cache_valid = false;
         // Requests can hold symbol pointers while restoring another file's syntax.
         Vec<IdeSymbol> retained = move self.analysis.symbols;
         self.analysis.symbols = Vec<IdeSymbol>.new();
@@ -110,6 +115,7 @@ impl Document {
     }
 
     void replace_text(Document* self, str text) {
+        self.export_cache_valid = false;
         String _previous_text = move self.text;
         LspLineIndex _previous_lines = move self.lines;
         IdeIndex _previous_analysis = move self.analysis;
@@ -199,6 +205,8 @@ impl DocumentStore {
             doc.uri = String.from_str(uri);
             doc.path = document_path(uri);
             doc.dependencies = Vec<Document*>.new();
+            doc.export_cache = HashMap<String, i64>.new();
+            doc.export_cache_valid = false;
             self.docs.push(doc);
         } else if (doc.open && version <= doc.version) {
             return (Document*)0;
@@ -258,6 +266,7 @@ impl DocumentStore {
             doc.diagnostics_dirty = true;
             doc.semantic_dirty = true;
             doc.dependencies.clear();
+            doc.export_cache_valid = false;
             if (doc.path.len() > 0) {
                 i64 j = 0;
                 while (j < doc.analysis.imports.len()) {
