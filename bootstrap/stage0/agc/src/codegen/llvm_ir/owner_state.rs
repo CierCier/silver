@@ -47,19 +47,40 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         )
     }
 
+    /// Address of a node's state byte. A null node has no state, so the
+    /// projection is redirected to scratch storage instead of dereferencing
+    /// address 20. Non-inbounds GEP keeps the null arithmetic well defined.
+    fn node_state_ptr(&self, node: PointerValue<'ctx>) -> CodegenResult<PointerValue<'ctx>> {
+        let zero = self.context.i32_type().const_zero();
+        let three = self.context.i32_type().const_int(3, false);
+        let projected = unsafe {
+            self.builder.build_gep(self.owner_node_type(), node, &[zero, three], "node.state.ptr")
+        }
+        .map_err(|e| CodegenError::new(format!("node state projection: {e}")))?;
+        let function = self
+            .current_fn
+            .ok_or_else(|| CodegenError::new("node state outside a function"))?;
+        let scratch = self.create_entry_alloca(
+            function,
+            "node.state.scratch",
+            self.context.i8_type().as_basic_type_enum(),
+        )?;
+        let missing = self
+            .builder
+            .build_is_null(node, "node.missing")
+            .map_err(|e| CodegenError::new(e.to_string()))?;
+        self.builder
+            .build_select(missing, scratch, projected, "node.state.safe")
+            .map(|value| value.into_pointer_value())
+            .map_err(|e| CodegenError::new(e.to_string()))
+    }
+
     fn owner_state_ptr(
         &self,
         owner: &RuntimeOwner<'ctx>,
         node: usize,
     ) -> CodegenResult<PointerValue<'ctx>> {
-        self.builder
-            .build_struct_gep(
-                self.owner_node_type(),
-                owner.nodes[node],
-                3,
-                "owner.state.ptr",
-            )
-            .map_err(|e| CodegenError::new(format!("owner state projection: {e}")))
+        self.node_state_ptr(owner.nodes[node])
     }
 
     pub(crate) fn register_owner_state(
@@ -573,6 +594,19 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let function = self
             .current_fn
             .ok_or_else(|| CodegenError::new("owner cleanup outside function"))?;
+        let run = self.context.append_basic_block(function, "owner.cleanup");
+        let after = self.context.append_basic_block(function, "owner.after");
+        // A local declared in a branch that did not run has no owner node on
+        // this path; there is no state to consult, so skip its cleanup.
+        let check = self.context.append_basic_block(function, "owner.check");
+        let missing = self
+            .builder
+            .build_is_null(owner.nodes[node], "owner.missing")
+            .map_err(|e| CodegenError::new(e.to_string()))?;
+        self.builder
+            .build_conditional_branch(missing, after, check)
+            .map_err(|e| CodegenError::new(e.to_string()))?;
+        self.builder.position_at_end(check);
         let state = self
             .builder
             .build_load(
@@ -582,8 +616,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             )
             .map_err(|e| CodegenError::new(e.to_string()))?
             .into_int_value();
-        let run = self.context.append_basic_block(function, "owner.cleanup");
-        let after = self.context.append_basic_block(function, "owner.after");
         let present = self
             .builder
             .build_int_compare(

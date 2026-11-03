@@ -22,7 +22,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     pub(crate) fn require_initialized_c_reference(&mut self, value: BasicValueEnum<'ctx>, span: Span)
         -> CodegenResult<()> {
         let node = self.reference_state(value, span)?;
-        if node == self.initialized_reference_state() { return Ok(()); }
+        if self.external_reference_state(node) { return Ok(()); }
         let function = self.current_fn.ok_or_else(|| CodegenError::new("C reference outside function"))?;
         let tracked = self.context.append_basic_block(function, "c.reference.tracked");
         let initialized = self.context.append_basic_block(function, "c.reference.initialized");
@@ -224,7 +224,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         state: PointerValue<'ctx>,
         index: IntValue<'ctx>,
     ) -> CodegenResult<PointerValue<'ctx>> {
-        if state == self.initialized_reference_state() { return Ok(state); }
+        if self.external_reference_state(state) {
+            return Ok(if state.is_null() { self.initialized_reference_state() } else { state });
+        }
         let initialized = self.builder.build_int_compare(
             inkwell::IntPredicate::EQ, state, self.initialized_reference_state(), "reference.initialized",
         ).map_err(|e| CodegenError::new(e.to_string()))?;
@@ -269,7 +271,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         state: PointerValue<'ctx>,
         index: IntValue<'ctx>,
     ) -> CodegenResult<PointerValue<'ctx>> {
-        if state == self.initialized_reference_state() { return Ok(state); }
+        if self.external_reference_state(state) {
+            return Ok(if state.is_null() { self.initialized_reference_state() } else { state });
+        }
         let external = self.builder.build_int_compare(inkwell::IntPredicate::EQ,
             state, self.initialized_reference_state(), "reference.range.external")
             .map_err(|e| CodegenError::new(e.to_string()))?;
@@ -291,6 +295,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     pub(crate) fn initialized_reference_state(&self) -> PointerValue<'ctx> {
         self.context.i64_type().const_int(INITIALIZED_CAPABILITY, false)
             .const_to_pointer(self.context.ptr_type(AddressSpace::default()))
+    }
+
+    /// A reference with no owner node carries no tracked state, so it behaves
+    /// like the external capability token: nothing to project and nothing to
+    /// drop. Treating a null node as tracked dereferences it.
+    pub(crate) fn external_reference_state(&self, state: PointerValue<'ctx>) -> bool {
+        state.is_null() || state == self.initialized_reference_state()
     }
 
     pub(crate) fn build_reference(
