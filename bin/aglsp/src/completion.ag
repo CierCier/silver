@@ -58,42 +58,41 @@ bool completion_visible(CompletionCandidates* candidates, str name) {
     return false;
 }
 
-void completion_provider_exports(Document* provider, HashMap<String, i64>* exports) {
-    Vec<Document*> closure = Vec<Document*>.new();
-    closure.push(provider);
-    i64 i = 0;
-    while (i < closure.len()) {
-        Document* source = closure.get(i);
-        i64 dependency = 0;
-        while (dependency < source.dependencies.len()) {
-            Document* next = source.dependencies.get(dependency);
-            i64 existing = 0;
-            while (existing < closure.len() && closure.get(existing) != next) { existing += 1; }
-            if (existing == closure.len()) { closure.push(next); }
-            dependency += 1;
-        }
-        i += 1;
-    }
-    i = 0;
-    while (i < closure.len()) {
-        Document* source = closure.get(i);
-        i64 symbol_index = 0;
-        while (symbol_index < source.analysis.symbols.len()) {
-            IdeSymbol* symbol = source.analysis.symbols.get_ptr(symbol_index);
-            if (!symbol.local && !symbol.is_private && symbol.owner.len() == 0
-                && symbol.kind != IdeSymbolKind.ImportAlias) {
-                str name = symbol.name.to_str();
-                Optional<i64> previous = exports.get_opt(String.from_str(name));
-                if (previous.is_some()) {
-                    if (previous.unwrap() != -2) { exports.insert(String.from_str(name), -2); }
-                } else {
-                    exports.insert(String.from_str(name), source == provider ? symbol_index + 1 : 0);
-                }
+bool completion_exported_symbol(IdeSymbol* symbol) {
+    return !symbol.local && !symbol.is_private && symbol.owner.len() == 0
+        && symbol.kind != IdeSymbolKind.ImportAlias;
+}
+
+struct AutoImportItem {
+    i64 score;
+    i64 symbol;
+    Document* document;
+}
+
+impl Lt<AutoImportItem> for AutoImportItem {
+    bool __lt(&self, &AutoImportItem other) { return self.score < other.score; }
+}
+
+// True when `name` is exported by `provider` at `index` and by no other
+// declaration in its import closure. Scanning symbols directly avoids the
+// String allocation and hash insert per symbol that a closure-wide export map
+// needed, which dominated completion latency on large workspaces.
+bool completion_unique_export(Vec<Document*>* closure, Document* provider,
+                              str name, i64 index) {
+    i64 c = 0;
+    while (c < closure.len()) {
+        Document* doc = closure.get(c);
+        i64 s = 0;
+        while (s < doc.analysis.symbols.len()) {
+            if (!(doc == provider && s == index)) {
+                IdeSymbol* symbol = doc.analysis.symbols.get_ptr(s);
+                if (completion_exported_symbol(symbol) && symbol.name.equals(name)) { return false; }
             }
-            symbol_index += 1;
+            s += 1;
         }
-        i += 1;
+        c += 1;
     }
+    return true;
 }
 
 bool completion_precedes(CompletionCandidate* left, CompletionCandidate* right) {
@@ -372,50 +371,92 @@ void append_auto_imports(DocumentStore* store, Document* doc, str prefix,
         }
         cached += 1;
     }
+    // One pass over the candidate set: how many documents export each name. A
+    // name exported exactly once is unique without walking any import closure,
+    // which is the common case for a typed prefix.
+    HashMap<String, i64> export_counts = HashMap<String, i64>.new();
+    i64 e = 0;
+    while (e < documents.len() && !request_interrupted(pending)) {
+        Document* source = documents.get(e);
+        i64 s = 0;
+        while (s < source.analysis.symbols.len()) {
+            IdeSymbol* symbol = source.analysis.symbols.get_ptr(s);
+            if (completion_exported_symbol(symbol)) {
+                String key = String.from_str(symbol.name.to_str());
+                Optional<i64> seen = export_counts.get_opt(String.from_str(symbol.name.to_str()));
+                if (seen.is_some()) {
+                    if (seen.unwrap() == 1) { export_counts.insert(key, 2); }
+                } else { export_counts.insert(key, 1); }
+            }
+            s += 1;
+        }
+        e += 1;
+    }
+    // Collect matches first, then resolve modules and conflicts only for the
+    // items that can be offered. Conflict analysis walks both import closures,
+    // so running it once per candidate dominated completion latency.
+    Vec<AutoImportItem> matches = Vec<AutoImportItem>.new();
     i64 d = 0;
     while (d < documents.len() && !request_interrupted(pending)) {
         Document* candidate = documents.get(d);
         if (candidate != doc && auto_import_document(store, candidate)
             && candidate.path.ends_with(".ag") && candidate.analysis.diagnostics.is_empty()) {
-            String module = String.new(); bool module_checked = false;
-            HashMap<String, i64> unique_exports = HashMap<String, i64>.new(); bool exports_indexed = false;
+            Vec<Document*> closure = Vec<Document*>.new();
+            import_closure(candidate, &closure);
             i64 i = 0;
             while (i < candidate.analysis.symbols.len() && !request_interrupted(pending)) {
                 IdeSymbol* symbol = candidate.analysis.symbols.get_ptr(i);
                 str name = symbol.name.to_str();
                 i64 score = ide_match_score(prefix, name);
-                if (!symbol.local && !symbol.is_private && symbol.owner.len() == 0
-                    && symbol.kind != IdeSymbolKind.ImportAlias && score >= 0 && !completion_visible(candidates, name)) {
-                    bool unique_provider_symbol = false;
-                    if (exports_indexed) {
-                        Optional<i64> unique = unique_exports.get_opt(String.from_str(name));
-                        unique_provider_symbol = unique.is_some() && unique.unwrap() == i + 1;
-                    } else {
-                        Vec<Document*> visited = Vec<Document*>.new(); SymbolTarget unique;
-                        unique.document = candidate; unique.symbol = -1;
-                        find_imported_symbol(candidate, name, "", &visited, &unique);
-                        unique_provider_symbol = unique.symbol == i && unique.document == candidate;
-                    }
-                    if (unique_provider_symbol) {
-                        // Module resolution and conflicts are shared by all exports in this request.
-                        if (!module_checked) {
-                            module = import_module_name(store, doc, candidate); module_checked = true;
-                            if (module.len() == 0 || import_conflicts(doc, candidate, pending)) { break; }
-                        }
-                        if (!exports_indexed) {
-                            completion_provider_exports(candidate, &unique_exports);
-                            exports_indexed = true;
-                        }
-                        SymbolTarget target; target.document = candidate; target.symbol = i;
-                        IdeSymbol* resolved = target.document.analysis.symbols.get_ptr(target.symbol);
-                        offer_completion(candidates, name, resolved.signature.to_str(), resolved.documentation.to_str(),
-                            completion_kind(resolved.kind), false, score, target, false, module.to_str(), true);
+                if (completion_exported_symbol(symbol) && score >= 0 && !completion_visible(candidates, name)) {
+                    Optional<i64> count = export_counts.get_opt(String.from_str(name));
+                    bool unique = count.is_some() && count.unwrap() == 1;
+                    if (!unique) { unique = completion_unique_export(&closure, candidate, name, i); }
+                    if (unique) {
+                        AutoImportItem item; item.score = score; item.symbol = i; item.document = candidate;
+                        matches.push(move item);
                     }
                 }
                 i += 1;
             }
         }
         d += 1;
+    }
+    // sort<AutoImportItem>(&matches);
+    eprintln("[dbg] sorted");
+    // Resolve each provider once, in match order, so the best items are checked
+    // first and a conflicting document is skipped wholesale.
+    Vec<Document*> resolved_docs = Vec<Document*>.new();
+    Vec<String> resolved_modules = Vec<String>.new();
+    i64 m = 0;
+    while (m < matches.len() && !request_interrupted(pending)) {
+        AutoImportItem* item = matches.get_ptr(m);
+        if (candidates.items.len() >= 100 && candidates.worst_score >= 0
+            && item.score > candidates.worst_score) { break; }
+        Document* candidate = item.document;
+        i64 slot = 0;
+        while (slot < resolved_docs.len() && resolved_docs.get(slot) != candidate) { slot += 1; }
+        if (slot == resolved_docs.len()) {
+            String __p = String.from_str("[dbg] module ");
+            __p.push_str(candidate.path.to_str());
+            eprintln(__p.to_str());
+            __p.drop();
+            String module = import_module_name(store, doc, candidate);
+            eprintln("[dbg] conflicts");
+            if (module.len() == 0 || import_conflicts(doc, candidate, pending)) { module.clear(); }
+            eprintln("[dbg] resolved");
+            resolved_docs.push(candidate);
+            resolved_modules.push(move module);
+        }
+        if (resolved_modules.get(slot).len() > 0) {
+            eprintln("[dbg] offer");
+            IdeSymbol* resolved = candidate.analysis.symbols.get_ptr(item.symbol);
+            SymbolTarget target; target.document = candidate; target.symbol = item.symbol;
+            offer_completion(candidates, resolved.name.to_str(), resolved.signature.to_str(),
+                resolved.documentation.to_str(), completion_kind(resolved.kind), false, item.score,
+                target, false, resolved_modules.get(slot).to_str(), true);
+        }
+        m += 1;
     }
 }
 
