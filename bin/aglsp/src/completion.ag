@@ -373,10 +373,15 @@ void append_auto_imports(DocumentStore* store, Document* doc, str prefix,
         cached += 1;
     }
     i64 d = 0;
+    i64 __t_scan = 0; i64 __t_find = 0; i64 __t_module = 0; i64 __t_conflict = 0; i64 __t_offer = 0;
+    i64 __t_all = 0;
+    Instant __mark = now();
+    i64 __n_candidates = 0; i64 __n_matches = 0; i64 __n_offered = 0;
     while (d < documents.len() && !request_interrupted(pending)) {
         Document* candidate = documents.get(d);
         if (candidate != doc && auto_import_document(store, candidate)
             && candidate.path.ends_with(".ag") && candidate.analysis.diagnostics.is_empty()) {
+            __n_candidates += 1;
             String module = String.new(); bool module_checked = false;
             HashMap<String, i64> unique_exports = HashMap<String, i64>.new(); bool exports_indexed = false;
             i64 i = 0;
@@ -391,16 +396,24 @@ void append_auto_imports(DocumentStore* store, Document* doc, str prefix,
                         Optional<i64> unique = unique_exports.get_opt(String.from_str(name));
                         unique_provider_symbol = unique.is_some() && unique.unwrap() == i + 1;
                     } else {
+                        __n_matches += 1;
                         Vec<Document*> visited = Vec<Document*>.new(); SymbolTarget unique;
                         unique.document = candidate; unique.symbol = -1;
+                        Instant __m0 = now();
                         find_imported_symbol(candidate, name, "", &visited, &unique);
+                        __t_find += now().elapsed_ns(__m0);
                         unique_provider_symbol = unique.symbol == i && unique.document == candidate;
                     }
                     if (unique_provider_symbol) {
                         // Module resolution and conflicts are shared by all exports in this request.
                         if (!module_checked) {
+                            Instant __m1 = now();
                             module = import_module_name(store, doc, candidate); module_checked = true;
-                            if (module.len() == 0 || import_conflicts(doc, candidate, pending)) { break; }
+                            __t_module += now().elapsed_ns(__m1);
+                            Instant __m2 = now();
+                            bool __conflict = module.len() == 0 || import_conflicts(doc, candidate, pending);
+                            __t_conflict += now().elapsed_ns(__m2);
+                            if (__conflict) { break; }
                         }
                         if (!exports_indexed) {
                             completion_provider_exports(candidate, &unique_exports);
@@ -408,14 +421,37 @@ void append_auto_imports(DocumentStore* store, Document* doc, str prefix,
                         }
                         SymbolTarget target; target.document = candidate; target.symbol = i;
                         IdeSymbol* resolved = target.document.analysis.symbols.get_ptr(target.symbol);
+                        Instant __m3 = now();
                         offer_completion(candidates, name, resolved.signature.to_str(), resolved.documentation.to_str(),
                             completion_kind(resolved.kind), false, score, target, false, module.to_str(), true);
+                        __t_offer += now().elapsed_ns(__m3);
+                        __n_offered += 1;
                     }
                 }
                 i += 1;
             }
         }
         d += 1;
+    }
+    if (__probe_on) {
+        i64 __total = now().elapsed_ns(__mark);
+        i64 __us_total = __total / 1000;
+        i64 __us_find = __t_find / 1000;
+        i64 __us_module = __t_module / 1000;
+        i64 __us_conflict = __t_conflict / 1000;
+        i64 __us_offer = __t_offer / 1000;
+        String __line = String.from_str("[probe]   docs=");
+        __line.push_display(&__n_candidates);
+        __line.push_str(" find_calls="); __line.push_display(&__n_matches);
+        __line.push_str(" offered="); __line.push_display(&__n_offered);
+        __line.push_str(" total="); __line.push_display(&__us_total);
+        __line.push_str("us find="); __line.push_display(&__us_find);
+        __line.push_str("us module="); __line.push_display(&__us_module);
+        __line.push_str("us conflict="); __line.push_display(&__us_conflict);
+        __line.push_str("us offer="); __line.push_display(&__us_offer);
+        __line.push_str("us");
+        eprintln(__line.to_str());
+        __line.drop();
     }
 }
 
@@ -432,11 +468,34 @@ String render_completions(Document* doc, Span replacement, CompletionCandidates*
     out.push_str("]}"); return move out;
 }
 
+import std.time;
+
+Instant __probe_start;
+bool __probe_on = false;
+
+void probe_phase(str label) {
+    if (!__probe_on) { return; }
+    Instant current = now();
+    i64 ns = current.elapsed_ns(__probe_start);
+    String line = String.from_str("[probe] ");
+    line.push_str(label);
+    line.push_str(" ");
+    i64 micros = ns / 1000;
+    line.push_display(&micros);
+    line.push_str("us");
+    eprintln(line.to_str());
+    line.drop();
+    __probe_start = current;
+}
+
 String compute_completion(DocumentStore* store, Document* doc, i64 offset, ClientOptions* client,
         PendingMessage* pending, bool index_pending) {
+    __probe_on = var("AGLSP_PROBE").is_some();
+    if (__probe_on) { __probe_start = now(); }
     CompletionCandidates candidates = completion_candidates();
     Span replacement = Span.synthetic(); String prefix = String.new();
     completion_prefix(doc, offset, &replacement, &prefix);
+    probe_phase("prefix");
     if (inside_literal(doc, offset)) { return render_completions(doc, replacement, &candidates, client, false); }
     Optional<ImportCompletionContext> import_context = import_completion_context(doc, offset);
     if (import_context.is_some()) {
@@ -460,6 +519,7 @@ String compute_completion(DocumentStore* store, Document* doc, i64 offset, Clien
         completion_symbols(doc, doc, offset, prefix.to_str(), owner.to_str(), members, instance,
             &visited, pending, &candidates);
     }
+    probe_phase("in-scope symbols");
     if (!members) {
         TokenStream words = TokenStream.new(); DiagnosticBag ignored = DiagnosticBag.new();
         lex(String.from_str("let mut const static volatile struct enum impl trait type private if else while for in match break continue return move defer import comptime cast as extern asm macro launch wait true false Self i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 f80 c32 c64 c80 bool char str void Vec Optional"), &words, &ignored);
@@ -474,9 +534,13 @@ String compute_completion(DocumentStore* store, Document* doc, i64 offset, Clien
             }
             i += 1;
         }
+        probe_phase("keywords");
         append_auto_imports(store, doc, prefix.to_str(), pending, &candidates);
+        probe_phase("auto-imports");
     }
-    return render_completions(doc, replacement, &candidates, client, !members && index_pending);
+    String rendered = render_completions(doc, replacement, &candidates, client, !members && index_pending);
+    probe_phase("render");
+    return move rendered;
 }
 
 enum CompletionResolveError { InvalidItem; StaleItem; }
