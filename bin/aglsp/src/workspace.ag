@@ -108,9 +108,10 @@ String project_manifest(str source) {
 }
 
 void project_preload_error(str path, str detail) {
-    String out = String.from_str("{\"type\":2,\"message\":\"");
-    json_escape(path, &out); out.push_str(": "); json_escape(detail, &out); out.push_str("\"}");
-    send_notification("window/logMessage", out.to_str());
+    String message = String.from_str(path);
+    message.push_str(": ");
+    message.push_str(detail);
+    send_log_message(2, message.to_str());
 }
 
 void enqueue_manifest(WorkspaceIndex* index, Vec<ManifestPath>* pending, str source, i64 depth) {

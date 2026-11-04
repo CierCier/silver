@@ -47,36 +47,41 @@ bool json_integer(str json, str field, i64* output) {
     return reader.read_i64(output) && !reader.failed && reader.index == reader.length;
 }
 
-// Decode a raw JSON string value (not an object field).
+// Decode a raw JSON string value (not an object field); the whole input must
+// be exactly one string.
 bool json_string_value(str json, String* output) {
     JsonReader reader = JsonReader.new(json);
     String decoded = reader.read_string();
-    if (reader.failed || decoded.len() != strlen(decoded.to_str()) || (decoded.len() > 0 && !decoded.is_valid_utf8())) {
+    if (reader.failed || reader.index != reader.length
+        || decoded.len() != strlen(decoded.to_str()) || (decoded.len() > 0 && !decoded.is_valid_utf8())) {
         return false;
     }
     *output = move decoded;
     return true;
 }
 
-// Return the raw JSON of element `index` in a JSON array.
+// Return the raw JSON of element `index` in a JSON array. The whole array must
+// parse; the element is captured while scanning.
 bool json_array_element(str json, i64 index, String* output) {
     JsonReader reader = JsonReader.new(json);
     if (!reader.begin_array()) { return false; }
     reader.skip_whitespace();
-    i64 i = 0;
+    bool found = false; i64 i = 0;
     while (!reader.failed && reader.index < reader.length && reader.input[reader.index] != ']') {
         i64 start = reader.index;
         if (!reader.skip_value()) { return false; }
         if (i == index) {
             output.clear();
             output.push_bytes((u8*)json + start, reader.index - start);
-            return true;
+            found = true;
         }
         i += 1;
         if (!skip_comma_if_present(&reader)) { break; }
         reader.skip_whitespace();
     }
-    return false;
+    if (!reader.end_array() || reader.failed) { return false; }
+    reader.skip_whitespace();
+    return found && reader.index == reader.length;
 }
 
 // Validate a client/(un)registerCapability payload: an array of objects that
