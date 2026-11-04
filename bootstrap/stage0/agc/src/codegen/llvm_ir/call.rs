@@ -3,7 +3,7 @@ use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::targets::TargetData;
 use inkwell::types::{AnyType, BasicType, BasicTypeEnum};
 use inkwell::values::{
-    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue,
+    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue,
 };
 use inkwell::{AtomicOrdering, AtomicRMWBinOp};
 
@@ -47,7 +47,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
     pub(crate) fn emit_indirect_call_expression(
         &mut self,
-        fn_ptr_val: PointerValue<'ctx>,
+        fn_ptr_val: BasicValueEnum<'ctx>,
         func_type: &ast::FunctionType,
         arguments: &[ast::Expression],
         allow_void: bool,
@@ -64,7 +64,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         let mut args = Vec::with_capacity(arguments.len());
         for (index, argument) in arguments.iter().enumerate() {
-            let mut value = self.emit_expression_value(argument)?;
+            let semantic_reference = func_type.parameters.get(index)
+                .is_some_and(|ty| matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_)));
+            let mut value = if semantic_reference { self.emit_reference_argument(argument)? }
+                else { self.emit_expression_value(argument)? };
             if index < declared_param_count {
                 if let Some(casted) = self.try_apply_user_cast(
                     value,
@@ -82,12 +85,17 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     )?;
                 }
             }
-            args.push(BasicMetadataValueEnum::from(value));
+            args.push(value);
         }
+
+        if Self::function_has_reference_abi(&func_type.parameters, Some(&func_type.return_type)) {
+            return self.emit_carried_indirect_call(fn_ptr_val, func_type, &args);
+        }
+        let args: Vec<BasicMetadataValueEnum<'ctx>> = args.into_iter().map(Into::into).collect();
 
         let call = self
             .builder
-            .build_indirect_call(fn_type, fn_ptr_val, &args, "calltmp")
+            .build_indirect_call(fn_type, fn_ptr_val.into_pointer_value(), &args, "calltmp")
             .map_err(|e| CodegenError::new(format!("failed to emit indirect call: {e}")))?;
 
         if let Some(value) = call.try_as_basic_value().basic() {
@@ -140,9 +148,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         if let Some(func_type) = is_indirect {
             let fn_ptr = self.emit_expression_value(function_expr)?;
-            let fn_ptr_val = fn_ptr.into_pointer_value();
             return self.emit_indirect_call_expression(
-                fn_ptr_val, &func_type, arguments, allow_void, span,
+                fn_ptr, &func_type, arguments, allow_void, span,
             );
         }
 
@@ -224,8 +231,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             )
         })?;
         let signature = self
-            .signature_for_name(&llvm_name)
-            .or_else(|| self.signature_for_name(&fn_name));
+            .signature_for_name(&fn_name)
+            .or_else(|| self.signature_for_name(&llvm_name));
         let declared_param_count = signature
             .as_ref()
             .map(|sig| sig.params.len())
@@ -244,9 +251,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         if is_slice_variadic {
             let fixed_count = declared_param_count.saturating_sub(1);
             for (index, argument) in arguments.iter().take(fixed_count).enumerate() {
-                let mut value = self.emit_expression_value(argument)?;
+                let semantic_reference = signature.as_ref().and_then(|sig| sig.params.get(index))
+                    .is_some_and(|ty| matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_)));
+                let mut value = if semantic_reference { self.emit_reference_argument(argument)? }
+                    else { self.emit_expression_value(argument)? };
                 if let Some(signature) = &signature {
-                    if signature.linkage.is_none() {
+                    if signature.linkage.is_none() && !semantic_reference {
                         let arg_drops = if let Some(arg_ty) = self.resolve_argument_type(argument) {
                             self.param_type_drops_on_exit(&arg_ty).unwrap_or(false)
                         } else if index < signature.params.len() {
@@ -290,14 +300,18 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             args.push(BasicMetadataValueEnum::from(slice_val));
         } else {
             for (index, argument) in arguments.iter().enumerate() {
-                let mut value = self.emit_expression_value(argument)?;
+                let source_type = self.resolve_argument_type(argument);
+                let semantic_reference = signature.as_ref().and_then(|sig| sig.params.get(index))
+                    .is_some_and(|ty| matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_)));
+                let mut value = if semantic_reference { self.emit_reference_argument(argument)? }
+                    else { self.emit_expression_value(argument)? };
                 if index < declared_param_count {
                     if let Some(signature) = &signature {
                         // By-value argument of a Drop type: the callee's
                         // parameter destructor runs on exit, transferring
                         // ownership. Clear the caller's flag to avoid a
                         // double free; extern functions never drop params.
-                        if signature.linkage.is_none() {
+                        if signature.linkage.is_none() && !semantic_reference {
                             let arg_drops =
                                 if let Some(arg_ty) = self.resolve_argument_type(argument) {
                                     self.param_type_drops_on_exit(&arg_ty).unwrap_or(false)
@@ -336,7 +350,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         }
                     }
                 } else if is_variadic {
-                    value = self.apply_variadic_default_promotion(value, &argument.span)?;
+                    value = self.apply_variadic_default_promotion(
+                        value,
+                        source_type.as_ref(),
+                        &argument.span,
+                        signature.as_ref().and_then(|sig| sig.linkage.as_ref()),
+                    )?;
                 }
                 args.push(BasicMetadataValueEnum::from(value));
             }
@@ -754,7 +773,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         arguments: &[ast::Expression],
         allow_void: bool,
         span: &Span,
-        prepared: Option<(PointerValue<'ctx>, BasicValueEnum<'ctx>)>,
+        prepared: Option<(super::reference::ResolvedPlace<'ctx>, BasicValueEnum<'ctx>)>,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let owners = self.receiver_owner_candidates(receiver);
         let mut candidates = Vec::new();
@@ -929,6 +948,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         let mut args = Vec::with_capacity(arguments.len() + usize::from(inject_receiver));
         if inject_receiver {
+            let semantic_reference = signature.as_ref().and_then(|sig| sig.params.first())
+                .is_some_and(|ty| matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_)));
             let receiver_ty = self.resolve_receiver_type(receiver);
             let receiver_is_pointer = receiver_ty
                 .as_ref()
@@ -969,9 +990,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 None
             };
 
-            let receiver_arg = if let Some((ptr, value)) = prepared {
+            let receiver_arg = if let Some((place, value)) = prepared {
                 if expects_ref {
-                    ptr.as_basic_value_enum()
+                    if semantic_reference {
+                        let volatile = self.lvalue_is_volatile(receiver);
+                        self.reference_to_place(place, receiver.span, volatile)?
+                    } else { place.ptr.as_basic_value_enum() }
                 } else {
                     if signature.as_ref().is_some_and(|sig| sig.linkage.is_none())
                         && receiver_ty.as_ref().is_some_and(|ty| {
@@ -984,10 +1008,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 }
             } else if expects_ref {
                 if receiver_is_pointer {
-                    self.emit_expression_value(receiver)?
+                    let value = self.emit_expression_value(receiver)?;
+                    if semantic_reference && value.is_pointer_value() {
+                        self.build_reference(value.into_pointer_value(), self.initialized_reference_state())?
+                    } else { value }
                 } else {
-                    if let Ok((ptr, _)) = self.resolve_lvalue_ptr(receiver) {
-                        ptr.as_basic_value_enum()
+                    if let Ok(place) = self.resolve_lvalue_place(receiver) {
+                        if semantic_reference {
+                            let volatile = self.lvalue_is_volatile(receiver);
+                            self.reference_to_place(place, receiver.span, volatile)?
+                        } else { place.ptr.as_basic_value_enum() }
                     } else {
                         let value = self.emit_expression_value(receiver)?;
                         let function_ctx = self.current_fn.ok_or_else(|| {
@@ -1011,6 +1041,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         // intermediate String buffers.
                         if let Some(ref receiver_ty) = receiver_ty
                             && !receiver_is_pointer
+                            && !semantic_reference
                             && let Some(drop_fn_name) = self.get_drop_function_name(receiver_ty)?
                         {
                             let flag_name = format!("method.recv.tmp.{}.drop", self.temp_counter);
@@ -1036,13 +1067,29 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             }
                         }
 
-                        temp.as_basic_value_enum()
+                        if semantic_reference {
+                            let ty = receiver_ty.as_ref().ok_or_else(|| CodegenError::with_span(
+                                crate::diagnostics::messages::reference_state_unavailable(), receiver.span,
+                            ))?;
+                            let name = format!("method.recv.owner.{}", self.temp_counter);
+                            self.temp_counter += 1;
+                            let identifier = ast::Identifier { name, span: receiver.span };
+                            self.register_owner_state(&identifier, ty, temp, true)?;
+                            let state = self.owner_node_for_storage(temp)
+                                .unwrap_or_else(|| self.initialized_reference_state());
+                            self.build_reference(temp, state)?
+                        } else { temp.as_basic_value_enum() }
                     }
                 }
             } else {
                 if receiver_is_pointer {
                     let receiver_value = self.emit_expression_value(receiver)?;
-                    let BasicValueEnum::PointerValue(receiver_ptr) = receiver_value else {
+                    let receiver_ptr = if receiver_ty.as_ref()
+                        .is_some_and(|ty| matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_))) {
+                        self.reference_data(receiver_value, receiver.span)?
+                    } else if let BasicValueEnum::PointerValue(pointer) = receiver_value {
+                        pointer
+                    } else {
                         return Err(CodegenError::with_span(
                             "pointer receiver did not lower to a pointer",
                             receiver.span,
@@ -1138,7 +1185,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         )
                     })
                     .unwrap_or(false);
-                let mut value = if expects_ref
+                let semantic_reference = signature.as_ref().and_then(|sig| sig.params.get(param_index))
+                    .is_some_and(|ty| matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_)));
+                let mut value = if semantic_reference {
+                    self.emit_reference_argument(argument)?
+                } else if expects_ref
                     && self
                         .resolve_argument_type(argument)
                         .map(|t| {
@@ -1219,6 +1270,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             args.push(BasicMetadataValueEnum::from(slice_val));
         } else {
             for (index, argument) in arguments.iter().enumerate() {
+                let source_type = self.resolve_argument_type(argument);
                 let param_index = index + usize::from(inject_receiver);
                 let expects_ref = signature
                     .as_ref()
@@ -1230,7 +1282,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         )
                     })
                     .unwrap_or(false);
-                let mut value = if expects_ref
+                let semantic_reference = signature.as_ref().and_then(|sig| sig.params.get(param_index))
+                    .is_some_and(|ty| matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_)));
+                let mut value = if semantic_reference {
+                    self.emit_reference_argument(argument)?
+                } else if expects_ref
                     && self
                         .resolve_argument_type(argument)
                         .map(|t| {
@@ -1310,7 +1366,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         }
                     }
                 } else if is_variadic {
-                    value = self.apply_variadic_default_promotion(value, &argument.span)?;
+                    value = self.apply_variadic_default_promotion(
+                        value,
+                        source_type.as_ref(),
+                        &argument.span,
+                        signature.as_ref().and_then(|sig| sig.linkage.as_ref()),
+                    )?;
                 }
                 args.push(BasicMetadataValueEnum::from(value));
             }
@@ -1373,13 +1434,31 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     }
 
     pub(crate) fn apply_variadic_default_promotion(
-        &self,
+        &mut self,
         value: BasicValueEnum<'ctx>,
+        source_type: Option<&ast::Type>,
         span: &Span,
+        linkage: Option<&ast::ExternLinkage>,
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        if matches!(linkage, Some(ast::ExternLinkage::C)) {
+            if value.get_type() == self.reference_type().into() {
+                self.require_initialized_c_reference(value, *span)?;
+                return self.reference_data(value, *span).map(Into::into);
+            }
+            if value.get_type() == self.callable_type().into() {
+                return self.callable_entry(value, true).map(Into::into);
+            }
+        }
+        let Some(source_type) = source_type else {
+            return Ok(value);
+        };
         match value {
             BasicValueEnum::FloatValue(float_value) => {
-                if float_value.get_type() == self.context.f32_type() {
+                if matches!(
+                    source_type.kind.as_ref(),
+                    ast::TypeKind::Primitive(ast::PrimitiveType::F32)
+                ) && float_value.get_type() == self.context.f32_type()
+                {
                     self.builder
                         .build_float_ext(float_value, self.context.f64_type(), "vararg.fpext")
                         .map(|v| v.as_basic_value_enum())
@@ -1394,9 +1473,32 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 }
             }
             BasicValueEnum::IntValue(int_value) => {
+                let signed = match source_type.kind.as_ref() {
+                    ast::TypeKind::Primitive(
+                        ast::PrimitiveType::I8 | ast::PrimitiveType::I16,
+                    ) => true,
+                    ast::TypeKind::Primitive(
+                        ast::PrimitiveType::Bool
+                        | ast::PrimitiveType::U8
+                        | ast::PrimitiveType::U16,
+                    ) => false,
+                    _ => return Ok(value),
+                };
                 if int_value.get_type().get_bit_width() < 32 {
-                    self.builder
-                        .build_int_s_extend(int_value, self.context.i32_type(), "vararg.sext")
+                    let promoted = if signed {
+                        self.builder.build_int_s_extend(
+                            int_value,
+                            self.context.i32_type(),
+                            "vararg.sext",
+                        )
+                    } else {
+                        self.builder.build_int_z_extend(
+                            int_value,
+                            self.context.i32_type(),
+                            "vararg.zext",
+                        )
+                    };
+                    promoted
                         .map(|v| v.as_basic_value_enum())
                         .map_err(|e| {
                             CodegenError::with_span(
@@ -1462,10 +1564,17 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         };
 
         // Emit all argument values; arity/type correctness is enforced by typeck.
-        let values: Vec<BasicValueEnum<'ctx>> = arguments
+        let mut values: Vec<BasicValueEnum<'ctx>> = arguments
             .iter()
             .map(|a| self.emit_expression_value(a))
             .collect::<CodegenResult<_>>()?;
+
+        if op != "fence"
+            && arguments.first().and_then(|arg| self.resolve_argument_type(arg))
+                .is_some_and(|ty| matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_)))
+        {
+            values[0] = self.reference_data(values[0], arguments[0].span)?.as_basic_value_enum();
+        }
 
         // `order` (and the two cmpxchg orders) must be compile-time constants.
         // Accept an integer literal or a reference to an immutable global

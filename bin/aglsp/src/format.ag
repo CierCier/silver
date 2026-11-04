@@ -1,94 +1,130 @@
-// bin/aglsp/src/format.ag — Conservative whitespace-only document formatter for aglsp.
-import std.mem.alloc;
-import std.string;
+import document;
 import json_rpc;
+import params;
+import completion;
+import tooling.format;
+import std.algo.sort;
 
-String format_silver(str text) {
-    i64 len = strlen(text);
-    if (len == 0) {
-        return String.new();
+struct FormatSelection { i64 start; i64 end; }
+
+impl Lt<FormatSelection> for FormatSelection {
+    bool __lt(&self, &FormatSelection other) {
+        return self.start != other.start ? self.start < other.start : self.end < other.end;
     }
-
-    String out = String.new();
-    bool pending_blank = false;
-    bool any_content = false;
-    i64 pos = 0;
-
-    while (pos < len) {
-        i64 line_start = pos;
-        while (pos < len && text[pos] != '\n') {
-            pos += 1;
-        }
-        i64 line_end = pos;
-        if (pos < len && text[pos] == '\n') {
-            pos += 1;
-        }
-
-        // Trim trailing whitespace (spaces, tabs, carriage returns)
-        while (line_end > line_start) {
-            u8 c = (u8)text[line_end - 1];
-            if (c == (u8)32 || c == (u8)9 || c == (u8)13) {
-                line_end -= 1;
-            } else {
-                break;
-            }
-        }
-
-        if (line_end == line_start) {
-            if (any_content) {
-                pending_blank = true;
-            }
-            continue;
-        }
-
-        if (pending_blank) {
-            out.push('\n');
-        }
-
-        i64 k = line_start;
-        while (k < line_end) {
-            out.push(text[k]);
-            k += 1;
-        }
-        out.push('\n');
-        any_content = true;
-        pending_blank = false;
-    }
-
-    return move out;
 }
 
-String compute_formatting(str text) {
-    String formatted = format_silver(text);
-    if (strcmp(formatted.to_str(), text) == 0) {
-        formatted.drop();
-        return String.from_str("[]");
+bool parse_format_selections(Document* doc, str params, bool multiple, Vec<FormatSelection>* selections) {
+    if (!multiple) {
+        String json = json_field(params, "range"); Span range = Span.synthetic();
+        if (!parse_document_range(doc, json.to_str(), &range)) { return false; }
+        FormatSelection selection; selection.start = range.start; selection.end = range.end;
+        selections.push(selection); return true;
     }
-
-    i64 len = strlen(text);
-    i64 end_line = 0;
-    i64 last_line_len = 0;
-    i64 i = 0;
-    while (i < len) {
-        if (text[i] == '\n') {
-            end_line += 1;
-            last_line_len = 0;
-        } else {
-            last_line_len += 1;
-        }
+    String json = json_field(params, "ranges"); JsonReader reader = JsonReader.new(json.to_str());
+    if (!reader.begin_array()) { return false; }
+    Vec<FormatSelection> sorted = Vec<FormatSelection>.new(); reader.skip_whitespace();
+    while (!reader.failed && reader.index < reader.length && reader.input[reader.index] != ']') {
+        i64 start = reader.index; if (!reader.skip_value()) { return false; }
+        String item = json.substr(start, reader.index - start); Span range = Span.synthetic();
+        if (!parse_document_range(doc, item.to_str(), &range)) { return false; }
+        FormatSelection selection; selection.start = range.start; selection.end = range.end; sorted.push(selection);
+        if (!skip_comma_if_present(&reader)) { break; } reader.skip_whitespace();
+    }
+    if (!reader.end_array() || reader.failed) { return false; }
+    sort<FormatSelection>(&sorted); i64 i = 0;
+    while (i < sorted.len()) {
+        FormatSelection selection = sorted.get(i);
+        if (selections.len() > 0 && selection.start <= selections.get_ptr(selections.len() - 1).end) {
+            FormatSelection* previous = selections.get_ptr(selections.len() - 1);
+            if (selection.end > previous.end) { previous.end = selection.end; }
+        } else { selections.push(selection); }
         i += 1;
     }
+    return true;
+}
 
-    String out = String.from_str("[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":");
-    out.push_display(&end_line);
+bool parse_format_options(str params, SourceFormatOptions* options) {
+    String json = json_field(params, "options");
+    String spaces = json_field(json.to_str(), "insertSpaces");
+    String newline = json_field(json.to_str(), "insertFinalNewline");
+    if (!json_integer(json.to_str(), "tabSize", &options.tab_size) || options.tab_size <= 0 || options.tab_size > 256
+        || (!spaces.equals("true") && !spaces.equals("false"))
+        || (newline.len() > 0 && !newline.equals("true") && !newline.equals("false"))) { return false; }
+    options.insert_spaces = spaces.equals("true"); options.insert_final_newline = !newline.equals("false");
+    return true;
+}
 
-    out.push_str(",\"character\":");
-    out.push_display(&last_line_len);
+void append_format_edit(String* out, Document* doc, Span range, str replacement) {
+    out.push_str("{\"range\":"); doc.append_range(out, range);
+    out.push_str(",\"newText\":\""); json_escape(replacement, out); out.push_str("\"}");
+}
 
-    out.push_str("}},\"newText\":\"");
-    json_escape(formatted.to_str(), &out);
-    out.push_str("\"}]");
+Result<String, SourceFormatError> compute_formatting(Document* doc, SourceFormatOptions* options, bool ranged, Vec<FormatSelection>* selections) {
+    if (ranged && selections.len() == 0) { return Result<String, SourceFormatError>.ok(String.from_str("[]")); }
+    Result<String, SourceFormatError> formatted = format_source(doc.text.to_str(), options);
+    if (formatted.is_err()) {
+        SourceFormatError error = formatted.unwrap_err();
+        if (error == SourceFormatError.InvalidSyntax) { return Result<String, SourceFormatError>.ok(String.from_str("[]")); }
+        return Result<String, SourceFormatError>.err(error);
+    }
+    String text = formatted.unwrap(); String out = String.from_str("[");
+    if (!text.equals(doc.text.to_str())) {
+        if (!ranged) {
+            Span whole = Span.synthetic(); whole.end = doc.text.len(); append_format_edit(&out, doc, whole, text.to_str());
+        } else {
+            TokenStream after = TokenStream.new(); DiagnosticBag errors = DiagnosticBag.new();
+            lex(text.clone(), &after, &errors);
+            i64 old_begin = 0; i64 new_begin = 0; i64 i = 0; i64 selected = 0; bool comma = false;
+            while (i < after.len()) {
+                Token* old_token = doc.analysis.tokens.get(i); Token* new_token = after.get(i);
+                i64 old_length = old_token.span.start - old_begin; i64 new_length = new_token.span.start - new_begin;
+                i64 prefix = 0; i64 suffix = 0;
+                while (prefix < old_length && prefix < new_length && doc.text.data[old_begin + prefix] == text.data[new_begin + prefix]) { prefix += 1; }
+                // CRLF must remain one line boundary in LSP positions.
+                if (prefix > 0 && prefix < old_length && doc.text.data[old_begin + prefix] == (u8)'\n'
+                    && doc.text.data[old_begin + prefix - 1] == (u8)'\r') { prefix -= 1; }
+                while (suffix < old_length - prefix && suffix < new_length - prefix
+                    && doc.text.data[old_begin + old_length - suffix - 1] == text.data[new_begin + new_length - suffix - 1]) { suffix += 1; }
+                if (suffix > 0 && suffix < old_length && doc.text.data[old_begin + old_length - suffix] == (u8)'\n'
+                    && doc.text.data[old_begin + old_length - suffix - 1] == (u8)'\r') { suffix -= 1; }
+                Span range = Span.synthetic(); range.start = old_begin + prefix; range.end = old_begin + old_length - suffix;
+                i64 replacement_length = new_length - prefix - suffix;
+                while (selected < selections.len() && selections.get_ptr(selected).end < range.start) { selected += 1; }
+                bool inside = selected < selections.len() && range.start >= selections.get_ptr(selected).start && range.end <= selections.get_ptr(selected).end;
+                if ((range.start < range.end || replacement_length > 0) && inside) {
+                    if (comma) { out.push(','); } comma = true;
+                    String replacement = text.substr(new_begin + prefix, replacement_length);
+                    append_format_edit(&out, doc, range, replacement.to_str());
+                }
+                old_begin = old_token.span.end; new_begin = new_token.span.end; i += 1;
+            }
+        }
+    }
+    out.push(']'); return Result<String, SourceFormatError>.ok(move out);
+}
 
-    formatted.drop();
-    return move out;
+Result<String, SourceFormatError> compute_on_type_formatting(Document* doc, i64 offset, SourceFormatOptions* options) {
+    TokenStream tokens = TokenStream.new(); DiagnosticBag errors = DiagnosticBag.new();
+    lex(doc.text.clone(), &tokens, &errors);
+    if (!errors.is_empty()) { return Result<String, SourceFormatError>.ok(String.from_str("[]")); }
+    LspPosition position = doc.position(offset);
+    i64 start = doc.lines.starts.get(position.line); i64 first = start;
+    while (first < doc.text.len() && (doc.text.data[first] == (u8)' ' || doc.text.data[first] == (u8)'\t')) { first += 1; }
+    if (inside_literal(doc, first)) { return Result<String, SourceFormatError>.ok(String.from_str("[]")); }
+    i64 depth = 0; i64 i = 0;
+    while (i < doc.analysis.tokens.len()) {
+        Token* token = doc.analysis.tokens.get(i);
+        if (token.span.start >= first) { break; }
+        if (token.kind == TokenKind.LeftBrace) { depth += 1; }
+        else if (token.kind == TokenKind.RightBrace && depth > 0) { depth -= 1; }
+        i += 1;
+    }
+    if (first < doc.text.len() && doc.text.data[first] == (u8)'}' && depth > 0) { depth -= 1; }
+    i64 count = options.insert_spaces ? depth * options.tab_size : depth;
+    if (count > FORMAT_MAX_BYTES) { return Result<String, SourceFormatError>.err(SourceFormatError.OutputLimit); }
+    String indentation = String.new(); i = 0;
+    while (i < count) { indentation.push(options.insert_spaces ? ' ' : '\t'); i += 1; }
+    String old = doc.text.substr(start, first - start); String out = String.from_str("[");
+    if (!indentation.equals(old.to_str())) { Span range = Span.synthetic(); range.start = start; range.end = first; append_format_edit(&out, doc, range, indentation.to_str()); }
+    out.push(']'); return Result<String, SourceFormatError>.ok(move out);
 }

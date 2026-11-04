@@ -1,0 +1,520 @@
+// Shared package manifest syntax used by the compiler driver and editor tooling.
+import std.error;
+import std.fs;
+import std.io.file;
+import std.mem.alloc;
+import std.mem.vec;
+import std.path;
+import std.result;
+import std.string;
+
+enum TargetKind {
+    Bin;
+    Lib;
+    Test;
+}
+
+struct ManifestDependency {
+    str name;
+    str manifest;
+}
+
+struct ManifestTarget {
+    str name;
+    TargetKind kind;
+    str entry;
+    str manifest;
+    bool has_entry;
+    bool has_manifest;
+    bool is_default;
+}
+
+struct PackageManifest {
+    u8* text;
+    i64 text_capacity;
+    i64 text_used;
+    str manifest_path;
+    str root;
+    str name;
+    str version;
+    str url;
+    str default_target;
+    Vec<ManifestTarget> targets;
+    Vec<ManifestDependency> dependencies;
+}
+
+impl Drop for PackageManifest {
+    void drop(PackageManifest* self) {
+        if (self.text != (u8*)0) {
+            free(self.text);
+            self.text = (u8*)0;
+        }
+        self.text_capacity = 0;
+        self.text_used = 0;
+    }
+}
+
+const str MANIFEST_FILE = "silver.toml";
+
+void workspace_manifest_init(PackageManifest* manifest, str manifest_path, str root) {
+    manifest.text = (u8*)0;
+    manifest.text_capacity = 0;
+    manifest.text_used = 0;
+    manifest.manifest_path = manifest_path;
+    manifest.root = root;
+    manifest.name = "";
+    manifest.version = "";
+    manifest.url = "";
+    manifest.default_target = "";
+    manifest.targets = Vec<ManifestTarget>.new();
+    manifest.dependencies = Vec<ManifestDependency>.new();
+}
+
+str workspace_intern_raw(PackageManifest* manifest, str value) {
+    i64 length = strlen(value);
+    if (manifest.text_used + length + 1 > manifest.text_capacity) {
+        return "";
+    }
+    u8* result = &manifest.text[manifest.text_used];
+    memcpy((void*)result, (const void*)value, length);
+    result[length] = (u8)0;
+    manifest.text_used += length + 1;
+    return (str)result;
+}
+
+str workspace_intern_bytes(PackageManifest* manifest, u8* bytes, i64 start, i64 end) {
+    while (start < end && workspace_byte_space(bytes[start])) { start += 1; }
+    while (end > start && workspace_byte_space(bytes[end - 1])) { end -= 1; }
+    if (start >= end) { return ""; }
+    if (manifest.text_used + end - start + 1 > manifest.text_capacity) { return ""; }
+    u8* result = &manifest.text[manifest.text_used];
+    i64 out = 0;
+    if (workspace_byte_quote(bytes[start]) && bytes[end - 1] == bytes[start]) {
+        i64 i = start + 1;
+        while (i < end - 1) {
+            u8 ch = bytes[i];
+            if (ch == (u8)92 && i + 1 < end - 1) {
+                u8 next = bytes[i + 1];
+                if (next == (u8)110) { ch = (u8)10; }
+                else if (next == (u8)114) { ch = (u8)13; }
+                else if (next == (u8)116) { ch = (u8)9; }
+                else { ch = next; }
+                i += 2;
+            } else {
+                i += 1;
+            }
+            result[out] = ch;
+            out += 1;
+        }
+    } else {
+        while (start < end) {
+            result[out] = bytes[start];
+            out += 1;
+            start += 1;
+        }
+    }
+    result[out] = (u8)0;
+    manifest.text_used += out + 1;
+    return (str)result;
+}
+
+void workspace_manifest_set_text(PackageManifest* manifest, str source, str manifest_path, str root) {
+    i64 source_len = strlen(source);
+    // Interned paths can be much longer than a small manifest's contents.
+    i64 capacity = source_len * 2 + strlen(manifest_path) + strlen(root) + 256;
+    manifest.text = alloc<u8>(capacity);
+    manifest.text_capacity = capacity;
+    memcpy((void*)manifest.text, (const void*)source, source_len);
+    manifest.text[source_len] = (u8)0;
+    manifest.text_used = source_len + 1;
+    manifest.manifest_path = workspace_intern_raw(manifest, manifest_path);
+    manifest.root = workspace_intern_raw(manifest, root);
+}
+
+void workspace_error(String* error, str text) {
+    error.clear();
+    error.push_str(text);
+}
+
+void workspace_error_value(String* error, str prefix, str value, str suffix) {
+    error.clear();
+    error.push_str(prefix);
+    error.push_str(value);
+    error.push_str(suffix);
+}
+
+bool workspace_byte_space(u8 ch) {
+    return ch == (u8)32 || ch == (u8)9 || ch == (u8)13;
+}
+
+bool workspace_byte_quote(u8 ch) {
+    return ch == (u8)34 || ch == (u8)39;
+}
+
+bool workspace_kind_from_name(str name, TargetKind* kind) {
+    if (strcmp(name, "bin") == 0) { *kind = TargetKind.Bin; return true; }
+    if (strcmp(name, "lib") == 0) { *kind = TargetKind.Lib; return true; }
+    if (strcmp(name, "test") == 0) { *kind = TargetKind.Test; return true; }
+    return false;
+}
+
+ManifestTarget* workspace_find_target(Vec<ManifestTarget>* targets, TargetKind kind, str name) {
+    i64 i = 0;
+    while (i < targets.len()) {
+        ManifestTarget* target = targets.get_ptr(i);
+        if (target.kind == kind && strcmp(target.name, name) == 0) {
+            return target;
+        }
+        i += 1;
+    }
+    return (ManifestTarget*)0;
+}
+
+ManifestTarget* workspace_ensure_target(PackageManifest* manifest, TargetKind kind, str name) {
+    ManifestTarget* existing = workspace_find_target(&manifest.targets, kind, name);
+    if (existing != (ManifestTarget*)0) { return existing; }
+    ManifestTarget target;
+    target.name = workspace_intern_raw(manifest, name);
+    target.kind = kind;
+    target.entry = "";
+    target.manifest = "";
+    target.has_entry = false;
+    target.has_manifest = false;
+    target.is_default = false;
+    manifest.targets.push(target);
+    return manifest.targets.get_ptr(manifest.targets.len - 1);
+}
+
+ManifestDependency* workspace_ensure_dependency(PackageManifest* manifest, str name) {
+    i64 i = 0;
+    while (i < manifest.dependencies.len()) {
+        ManifestDependency* dependency = manifest.dependencies.get_ptr(i);
+        if (strcmp(dependency.name, name) == 0) { return dependency; }
+        i += 1;
+    }
+    ManifestDependency dependency;
+    dependency.name = workspace_intern_raw(manifest, name);
+    dependency.manifest = "";
+    manifest.dependencies.push(dependency);
+    return manifest.dependencies.get_ptr(manifest.dependencies.len - 1);
+}
+
+bool workspace_slice_equals(u8* bytes, i64 start, i64 end, str expected) {
+    i64 length = strlen(expected);
+    if (end - start != length) { return false; }
+    i64 i = 0;
+    while (i < length) {
+        if (bytes[start + i] != expected[i]) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+void workspace_trim_slice(u8* bytes, i64* start, i64* end) {
+    while (*start < *end && workspace_byte_space(bytes[*start])) { *start += 1; }
+    while (*end > *start && workspace_byte_space(bytes[*end - 1])) { *end -= 1; }
+}
+
+bool workspace_quoted_slice(u8* bytes, i64 start, i64 end) {
+    workspace_trim_slice(bytes, &start, &end);
+    return end - start >= 2 && workspace_byte_quote(bytes[start])
+        && bytes[end - 1] == bytes[start];
+}
+
+i64 workspace_find_equals(u8* bytes, i64 start, i64 end) {
+    u8 quote = (u8)0;
+    bool escaped = false;
+    i64 i = start;
+    while (i < end) {
+        u8 ch = bytes[i];
+        if (quote != (u8)0) {
+            if (escaped) { escaped = false; }
+            else if (ch == (u8)92) { escaped = true; }
+            else if (ch == quote) { quote = (u8)0; }
+        } else if (workspace_byte_quote(ch)) {
+            quote = ch;
+        } else if (ch == (u8)61) {
+            return i;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+bool workspace_parse_header_slice(PackageManifest* manifest, u8* bytes, i64 start, i64 end, i64* section, TargetKind* kind, str* target_name, str* dependency_name) {
+    workspace_trim_slice(bytes, &start, &end);
+    if (end - start < 2 || bytes[start] != (u8)91 || bytes[end - 1] != (u8)93) {
+        return false;
+    }
+    i64 dot = -1;
+    u8 quote = (u8)0;
+    bool escaped = false;
+    i64 i = start + 1;
+    while (i < end - 1) {
+        u8 ch = bytes[i];
+        if (quote != (u8)0) {
+            if (escaped) { escaped = false; }
+            else if (ch == (u8)92) { escaped = true; }
+            else if (ch == quote) { quote = (u8)0; }
+        } else if (workspace_byte_quote(ch)) {
+            quote = ch;
+        } else if (ch == (u8)46) {
+            dot = i;
+            break;
+        }
+        i += 1;
+    }
+    if (dot < 0) { return false; }
+    str first = workspace_intern_bytes(manifest, bytes, start + 1, dot);
+    str second = workspace_intern_bytes(manifest, bytes, dot + 1, end - 1);
+    if (strlen(second) == 0) { return false; }
+    *section = 0;
+    *target_name = "";
+    *dependency_name = "";
+    if (strcmp(first, "dependencies") == 0) {
+        *section = 2;
+        *dependency_name = second;
+        return true;
+    }
+    TargetKind parsed_kind = TargetKind.Bin;
+    if (!workspace_kind_from_name(first, &parsed_kind)) { return false; }
+    *section = 1;
+    *kind = parsed_kind;
+    *target_name = second;
+    workspace_ensure_target(manifest, parsed_kind, second);
+    return true;
+}
+
+bool workspace_parse_manifest_text(str manifest_path, str source, PackageManifest* manifest, String* error) {
+    String root = path_dirname(manifest_path);
+    workspace_manifest_init(manifest, "", "");
+    workspace_manifest_set_text(manifest, source, manifest_path, root.to_str());
+    root.drop();
+
+    u8* bytes = (u8*)source;
+    i64 source_len = strlen(source);
+    i64 line_start = 0;
+    i64 section = 0;
+    TargetKind current_kind = TargetKind.Bin;
+    str current_target = "";
+    str current_dependency = "";
+    while (line_start <= source_len) {
+        i64 line_end = line_start;
+        while (line_end < source_len && bytes[line_end] != (u8)10) { line_end += 1; }
+        i64 effective_end = line_end;
+        u8 quote = (u8)0;
+        bool escaped = false;
+        i64 comment = line_start;
+        while (comment < effective_end) {
+            u8 ch = bytes[comment];
+            if (quote != (u8)0) {
+                if (escaped) { escaped = false; }
+                else if (ch == (u8)92) { escaped = true; }
+                else if (ch == quote) { quote = (u8)0; }
+            } else if (workspace_byte_quote(ch)) {
+                quote = ch;
+            } else if (ch == (u8)35) {
+                effective_end = comment;
+                break;
+            }
+            comment += 1;
+        }
+        i64 start = line_start;
+        workspace_trim_slice(bytes, &start, &effective_end);
+        if (start < effective_end) {
+            if (bytes[start] == (u8)91) {
+                if (!workspace_parse_header_slice(manifest, bytes, start, effective_end, &section, &current_kind, &current_target, &current_dependency)) {
+                    workspace_error(error, "invalid package manifest table header");
+                    return false;
+                }
+            } else {
+                i64 equals = workspace_find_equals(bytes, start, effective_end);
+                if (equals < 0) {
+                    workspace_error(error, "invalid package manifest assignment");
+                    return false;
+                }
+                i64 key_start = start;
+                i64 key_end = equals;
+                i64 value_start = equals + 1;
+                i64 value_end = effective_end;
+                workspace_trim_slice(bytes, &key_start, &key_end);
+                workspace_trim_slice(bytes, &value_start, &value_end);
+                if (key_start >= key_end || value_start >= value_end) {
+                    workspace_error(error, "invalid package manifest assignment");
+                    return false;
+                }
+                if (section == 0) {
+                    if (workspace_slice_equals(bytes, key_start, key_end, "name")) {
+                        if (strlen(manifest.name) > 0) {
+                            workspace_error(error, "duplicate package manifest field `name`");
+                            return false;
+                        }
+                        if (!workspace_quoted_slice(bytes, value_start, value_end)) {
+                            workspace_error(error, "package manifest `name` must be a string");
+                            return false;
+                        }
+                        manifest.name = workspace_intern_bytes(manifest, bytes, value_start, value_end);
+                    } else if (workspace_slice_equals(bytes, key_start, key_end, "version")) {
+                        if (strlen(manifest.version) > 0) {
+                            workspace_error(error, "duplicate package manifest field `version`");
+                            return false;
+                        }
+                        if (!workspace_quoted_slice(bytes, value_start, value_end)) {
+                            workspace_error(error, "package manifest `version` must be a string");
+                            return false;
+                        }
+                        manifest.version = workspace_intern_bytes(manifest, bytes, value_start, value_end);
+                    } else if (workspace_slice_equals(bytes, key_start, key_end, "url")) {
+                        if (strlen(manifest.url) > 0) {
+                            workspace_error(error, "duplicate package manifest field `url`");
+                            return false;
+                        }
+                        if (!workspace_quoted_slice(bytes, value_start, value_end)) {
+                            workspace_error(error, "package manifest `url` must be a string");
+                            return false;
+                        }
+                        manifest.url = workspace_intern_bytes(manifest, bytes, value_start, value_end);
+                    } else if (workspace_slice_equals(bytes, key_start, key_end, "default_target")
+                        || workspace_slice_equals(bytes, key_start, key_end, "default-target")
+                        || workspace_slice_equals(bytes, key_start, key_end, "default")) {
+                        if (strlen(manifest.default_target) > 0) {
+                            workspace_error(error, "duplicate package manifest field `default_target`");
+                            return false;
+                        }
+                        if (!workspace_quoted_slice(bytes, value_start, value_end)) {
+                            workspace_error(error, "package manifest `default_target` must be a string");
+                            return false;
+                        }
+                        manifest.default_target = workspace_intern_bytes(manifest, bytes, value_start, value_end);
+                    } else {
+                        workspace_error(error, "unsupported package manifest key");
+                        return false;
+                    }
+                } else if (section == 1 && strlen(current_target) > 0) {
+                    ManifestTarget* target = workspace_ensure_target(manifest, current_kind, current_target);
+                    if (workspace_slice_equals(bytes, key_start, key_end, "entry")) {
+                        if (target.has_entry) {
+                            workspace_error(error, "duplicate package target field `entry`");
+                            return false;
+                        }
+                        if (!workspace_quoted_slice(bytes, value_start, value_end)) {
+                            workspace_error(error, "package target `entry` must be a string");
+                            return false;
+                        }
+                        target.entry = workspace_intern_bytes(manifest, bytes, value_start, value_end);
+                        target.has_entry = true;
+                    } else if (workspace_slice_equals(bytes, key_start, key_end, "manifest")) {
+                        if (target.has_manifest) {
+                            workspace_error(error, "duplicate package target field `manifest`");
+                            return false;
+                        }
+                        if (!workspace_quoted_slice(bytes, value_start, value_end)) {
+                            workspace_error(error, "package target `manifest` must be a string");
+                            return false;
+                        }
+                        target.manifest = workspace_intern_bytes(manifest, bytes, value_start, value_end);
+                        target.has_manifest = true;
+                    } else if (workspace_slice_equals(bytes, key_start, key_end, "default")) {
+                        if (workspace_slice_equals(bytes, value_start, value_end, "true")) {
+                            target.is_default = true;
+                        } else if (workspace_slice_equals(bytes, value_start, value_end, "false")) {
+                            target.is_default = false;
+                        } else {
+                            workspace_error(error, "package target `default` must be a boolean");
+                            return false;
+                        }
+                    } else {
+                        workspace_error(error, "unsupported package target key");
+                        return false;
+                    }
+                } else if (section == 2 && strlen(current_dependency) > 0) {
+                    if (workspace_slice_equals(bytes, key_start, key_end, "manifest")) {
+                        if (!workspace_quoted_slice(bytes, value_start, value_end)) {
+                            workspace_error(error, "package dependency `manifest` must be a string");
+                            return false;
+                        }
+                        ManifestDependency* dependency = workspace_ensure_dependency(manifest, current_dependency);
+                        dependency.manifest = workspace_intern_bytes(manifest, bytes, value_start, value_end);
+                    } else {
+                        workspace_error(error, "unsupported package dependency key");
+                        return false;
+                    }
+                }
+            }
+        }
+        if (line_end >= source_len) { break; }
+        line_start = line_end + 1;
+    }
+
+    if (strlen(manifest.name) == 0 || strlen(manifest.version) == 0) {
+        workspace_error(error, "package manifest requires non-empty `name` and `version` fields");
+        return false;
+    }
+    i64 i = 0;
+    while (i < manifest.targets.len()) {
+        ManifestTarget target = manifest.targets.get(i);
+        if (target.has_entry == target.has_manifest) {
+            workspace_error(error, "each package target must specify exactly one of `entry` or `manifest`");
+            return false;
+        }
+        if (strlen(target.name) == 0) {
+            workspace_error(error, "package target name must not be empty");
+            return false;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < manifest.dependencies.len()) {
+        ManifestDependency dependency = manifest.dependencies.get(i);
+        if (strlen(dependency.manifest) == 0) {
+            workspace_error(error, "each package dependency must specify `manifest`");
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+bool workspace_read_manifest(str path, PackageManifest* manifest, String* error) {
+    Result<String, Error> loaded = String.from_file(path);
+    if (loaded.is_err()) {
+        workspace_error_value(error, "failed to read package manifest `", path, "`");
+        return false;
+    }
+    String source = loaded.unwrap();
+    bool ok = workspace_parse_manifest_text(path, source.to_str(), manifest, error);
+    source.drop();
+    return ok;
+}
+
+void workspace_set_string(String* destination, str source) {
+    destination.clear();
+    destination.push_str(source);
+}
+
+
+
+bool workspace_is_absolute(str path) {
+    return strlen(path) > 0 && path[0] == (u8)47;
+}
+
+
+bool workspace_manifest_target_path(ManifestTarget* target, str root, String* path, String* error) {
+    str relative = strlen(target.entry) > 0 ? target.entry : target.manifest;
+    if (workspace_is_absolute(relative)) {
+        workspace_error(error, "package target paths must be relative to the manifest");
+        return false;
+    }
+    String joined = path_join(root, relative);
+    String normalized_path = path_normalize(joined.to_str());
+    if (!target.has_entry && is_dir(normalized_path.to_str())) {
+        String manifest_path = path_join(normalized_path.to_str(), MANIFEST_FILE);
+        workspace_set_string(path, manifest_path.to_str());
+        manifest_path.drop();
+    } else {
+        workspace_set_string(path, normalized_path.to_str());
+    }
+    normalized_path.drop();
+    joined.drop();
+    return true;
+}

@@ -624,7 +624,7 @@ i64 sys_list_dir(i64 path, u8* buf, i64 cap) {
             if (bpos + 24 + namlen > (i64)bufused) {
                 break; // truncated trailing entry: re-read from `cookie`
             }
-            u8* name = &db[0] + bpos + 24;
+            u8* name = (u8*)&db[0] + bpos + 24;
             bool dot = namlen == 1 && name[0] == (u8)46;
             bool dotdot = namlen == 2 && name[0] == (u8)46 && name[1] == (u8)46;
             if (!dot && !dotdot) {
@@ -693,7 +693,7 @@ i64 sys_nanosleep(i64 req, i64 rem) {
     // subscription { userdata u64, type u8, ..., clock { id u32, ..., timeout u64, precision u64, flags u16 } }
     wasi_st64(sub, 0, 1);              // userdata
     sub[8] = (u8)0;                    // type = clock
-    i32* idp = (i32*)(&sub[0] + 16);
+    i32* idp = (i32*)((u8*)&sub[0] + 16);
     idp[0] = 1;                        // MONOTONIC
     wasi_st64(sub, 24, timeout);
     wasi_st64(sub, 32, 1000);          // precision

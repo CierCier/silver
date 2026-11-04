@@ -1,61 +1,472 @@
-// bin/aglsp/src/document.ag — In-memory document tracking for LSP buffers.
 import std.mem.vec;
+import std.mem.alloc;
+import std.mem.memory;
 import std.string;
+import std.path;
+import std.fs;
+import std.env;
+import std.sys.raw.fs;
+import tooling.index;
+import positions;
+
+String absolute_document_path(str source) {
+    String path = String.from_str(source);
+    if (!path.starts_with("/")) {
+        String cwd = current_dir(); path = path_join(cwd.to_str(), path.to_str());
+    }
+    return path_normalize(path.to_str());
+}
+
+String document_path(str uri) {
+    Optional<String> decoded = file_uri_to_path(uri);
+    if (!decoded.is_some()) { return String.new(); }
+    String path = decoded.unwrap(); return absolute_document_path(path.to_str());
+}
 
 struct Document {
+    i64 store_id;
     String uri;
+    String path;
     String text;
+    LspLineIndex lines;
     i64 version;
+    i64 revision;
+    bool open;
+    bool imports_dirty;
+    bool diagnostics_dirty;
+    String diagnostic_items;
+    i64 diagnostic_revision;
+    bool semantic_dirty;
+    i64 semantic_generation;
+    i64 previous_semantic_generation;
+    Vec<i64> semantic_data;
+    Vec<i64> previous_semantic_data;
+    IdeIndex analysis;
+    Vec<Document*> dependencies;
 }
 
 struct DocumentStore {
-    Vec<Document> docs;
+    Vec<Document*> docs;
+    Vec<String> roots;
+    Vec<String> include_dirs;
+    Vec<String> manifest_dirs;
+    Vec<String> project_roots;
+    Vec<String> overlay_paths;
+    bool discover_open_projects;
+}
+
+bool path_within_roots(Vec<String>* roots, str path) {
+    i64 i = 0;
+    while (i < roots.len()) {
+        String* root = roots.get_ptr(i);
+        i64 length = root.len();
+        if (length > 0 && module_text_starts_with(path, root.to_str()) && (strlen(path) == length
+            || root.data[length - 1] == (u8)'/' || path[length] == '/')) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+bool workspace_document(DocumentStore* store, Document* doc) {
+    return doc.open || path_within_roots(&store.roots, doc.path.to_str())
+        || path_within_roots(&store.project_roots, doc.path.to_str());
+}
+
+bool auto_import_document(DocumentStore* store, Document* doc) {
+    return path_within_roots(&store.roots, doc.path.to_str())
+        || path_within_roots(&store.project_roots, doc.path.to_str())
+        || path_within_roots(&store.include_dirs, doc.path.to_str())
+        || (store.discover_open_projects && doc.open);
+}
+
+impl Document {
+    // Closed files keep stable symbol IDs and source text, not a full parse tree.
+    void compact(Document* self) {
+        if (self.open || self.analysis.tree.root == (SyntaxNode*)0) { return; }
+        // Pointer field overwrites lack drop glue; locals own the discarded buffers.
+        NodePool pool = move self.analysis.pool;
+        self.analysis.pool = NodePool.new();
+        self.analysis.tree.root = (SyntaxNode*)0;
+        TokenStream _tokens = move self.analysis.tokens;
+        self.analysis.tokens = TokenStream.new();
+        Vec<IdeOccurrence> _occurrences = move self.analysis.occurrences;
+        self.analysis.occurrences = Vec<IdeOccurrence>.new();
+        Vec<i64> _definitions = move self.analysis.definitions;
+        self.analysis.definitions = Vec<i64>.new();
+        Vec<IdeImplementation> _implementations = move self.analysis.implementations;
+        self.analysis.implementations = Vec<IdeImplementation>.new();
+        pool.destroy();
+    }
+
+    void ensure_syntax(Document* self) {
+        if (self.analysis.tree.root != (SyntaxNode*)0) { return; }
+        // Requests can hold symbol pointers while restoring another file's syntax.
+        Vec<IdeSymbol> retained = move self.analysis.symbols;
+        self.analysis.symbols = Vec<IdeSymbol>.new();
+        IdeIndex _previous = move self.analysis;
+        self.analysis = IdeIndex.new(self.text.to_str());
+        Vec<IdeSymbol> _rebuilt = move self.analysis.symbols;
+        self.analysis.symbols = move retained;
+    }
+
+    void replace_text(Document* self, str text) {
+        String _previous_text = move self.text;
+        LspLineIndex _previous_lines = move self.lines;
+        IdeIndex _previous_analysis = move self.analysis;
+        self.text = String.from_str(text);
+        self.lines = LspLineIndex.new(self.text.to_str());
+        self.analysis = IdeIndex.new(self.text.to_str());
+    }
+
+    LspPosition position(Document* self, i64 offset) { return self.lines.position(self.text.to_str(), offset); }
+
+    bool offset(Document* self, i64 line, i64 character, i64* result) {
+        return self.lines.offset(self.text.to_str(), line, character, result);
+    }
+
+    void append_range(Document* self, String* out, Span span) {
+        out.push_str("{\"start\":"); append_position(out, self.position(span.start));
+        out.push_str(",\"end\":"); append_position(out, self.position(span.end)); out.push('}');
+    }
 }
 
 impl DocumentStore {
+    /// Return an owned list borrowing the current workspace/import graph.
+    /// An explicit target also participates when it is outside the workspace.
+    Vec<Document*> query_documents(DocumentStore* self, Document* selected) {
+        Vec<Document*> documents = Vec<Document*>.new(); Vec<bool> included = Vec<bool>.new(); i64 i = 0;
+        while (i < self.docs.len()) {
+            Document* doc = self.docs.get(i); bool include = doc == selected || workspace_document(self, doc);
+            included.push(include); if (include) { documents.push(doc); } i += 1;
+        }
+        i = 0;
+        while (i < documents.len()) {
+            Document* doc = documents.get(i); i64 dependency = 0;
+            while (dependency < doc.dependencies.len()) {
+                Document* imported = doc.dependencies.get(dependency);
+                if (!included.get(imported.store_id)) { included.set(imported.store_id, true); documents.push(imported); }
+                dependency += 1;
+            }
+            i += 1;
+        }
+        return move documents;
+    }
+
     DocumentStore new() {
         DocumentStore store;
-        store.docs = Vec<Document>.new();
+        store.docs = Vec<Document*>.new();
+        store.roots = Vec<String>.new();
+        store.include_dirs = Vec<String>.new();
+        store.manifest_dirs = Vec<String>.new();
+        store.project_roots = Vec<String>.new();
+        store.overlay_paths = Vec<String>.new();
+        store.discover_open_projects = true;
+        Optional<String> sysroot = var("SILVER_SYSROOT");
+        if (sysroot.is_some()) {
+            String configured = sysroot.unwrap(); String root = absolute_document_path(configured.to_str());
+            store.include_dirs.push(path_join(root.to_str(), "include/silver"));
+            store.include_dirs.push(path_join(root.to_str(), "include"));
+            store.include_dirs.push(move root);
+        }
+        u8 executable[4096];
+        i64 length = sys_readlink((i64)"/proc/self/exe", (i64)&executable[0], 4096);
+        if (length > 0 && length < 4096) {
+            String path = String.new(); path.push_bytes(&executable[0], length);
+            String bin = path_dirname(path.to_str()); String prefix = path_dirname(bin.to_str());
+            store.include_dirs.push(path_join(prefix.to_str(), "include/silver"));
+            store.include_dirs.push(path_join(prefix.to_str(), "include"));
+        }
         return move store;
     }
 
     Document* get(DocumentStore* self, str uri) {
+        String path = document_path(uri);
         i64 i = 0;
         while (i < self.docs.len()) {
-            Document* doc = self.docs.get_ptr(i);
-            if (doc.uri.equals(uri)) {
-                return doc;
-            }
+            Document* doc = self.docs.get(i);
+            if (doc.uri.equals(uri) || (path.len() > 0 && doc.path.equals(path.to_str()))) { return doc; }
             i += 1;
         }
         return (Document*)0;
     }
 
-    void set(DocumentStore* self, str uri, str text, i64 version) {
-        Document* existing = self.get(uri);
-        if (existing != (Document*)0) {
-            existing.text = String.from_str(text);
-            existing.version = version;
-            return;
-        }
-        Document doc;
-        doc.uri = String.from_str(uri);
-        doc.text = String.from_str(text);
+    Document* set(DocumentStore* self, str uri, str text, i64 version, bool open) {
+        Document* doc = self.get(uri);
+        if (doc == (Document*)0) {
+            // Snapshot replacement takes ownership of the previous fields, even on first load.
+            doc = alloc<Document>(1);
+            doc.store_id = self.docs.len();
+            doc.uri = String.from_str(uri);
+            doc.path = document_path(uri);
+            doc.dependencies = Vec<Document*>.new();
+            self.docs.push(doc);
+        } else if (doc.open && version <= doc.version) {
+            return (Document*)0;
+        } else { self.invalidate_dependents(doc); }
+        if (open) { String _previous_uri = move doc.uri; doc.uri = String.from_str(uri); }
+        doc.replace_text(text);
         doc.version = version;
-        self.docs.push(move doc);
+        doc.revision += 1;
+        doc.open = open;
+        doc.imports_dirty = true;
+        doc.diagnostics_dirty = true;
+        doc.semantic_dirty = true;
+        doc.compact();
+        return doc;
     }
 
-    void remove(DocumentStore* self, str uri) {
+    Document* load(DocumentStore* self, str path) {
+        String normalized = absolute_document_path(path);
+        String uri = path_to_file_uri(normalized.to_str());
+        Document* doc = self.get(uri.to_str());
+        if (doc != (Document*)0) { return doc; }
+        Result<String, Error> loaded = String.from_file(normalized.to_str());
+        if (loaded.is_err()) { return (Document*)0; }
+        String source = loaded.unwrap();
+        if (source.len() != strlen(source.to_str()) || (source.len() > 0 && !source.is_valid_utf8())) { return (Document*)0; }
+        return self.set(uri.to_str(), source.to_str(), 0, false);
+    }
+
+    void refresh_imports(DocumentStore* self) {
+        Vec<String> overlay_paths = Vec<String>.new(); i64 overlay = 0; bool changed = false;
+        while (overlay < self.docs.len()) {
+            Document* doc = self.docs.get(overlay);
+            if (doc.open && doc.path.len() > 0) {
+                i64 previous = 0;
+                while (previous < self.overlay_paths.len() && !self.overlay_paths.get_ptr(previous).equals(doc.path.to_str())) { previous += 1; }
+                if (previous == self.overlay_paths.len()) { changed = true; }
+                overlay_paths.push(doc.path.clone());
+            }
+            overlay += 1;
+        }
+        changed = changed || overlay_paths.len() != self.overlay_paths.len();
+        Vec<String> _previous_overlay_paths = move self.overlay_paths;
+        self.overlay_paths = move overlay_paths;
+        if (changed) {
+            i64 dirty = 0;
+            while (dirty < self.docs.len()) {
+                Document* doc = self.docs.get(dirty);
+                doc.imports_dirty = true; doc.diagnostics_dirty = true; doc.semantic_dirty = true;
+                dirty += 1;
+            }
+        }
         i64 i = 0;
         while (i < self.docs.len()) {
-            Document* doc = self.docs.get_ptr(i);
-            if (doc.uri.equals(uri)) {
-                Document removed = self.docs.swap_remove(i);
-                removed.uri.drop();
-                removed.text.drop();
-                return;
+            Document* doc = self.docs.get(i);
+            if (!doc.imports_dirty) { i += 1; continue; }
+            doc.imports_dirty = false;
+            doc.diagnostics_dirty = true;
+            doc.semantic_dirty = true;
+            doc.dependencies.clear();
+            if (doc.path.len() > 0) {
+                i64 j = 0;
+                while (j < doc.analysis.imports.len()) {
+                    String path = resolve_document_import(self, doc, doc.analysis.imports.get_ptr(j).to_str());
+                    if (path.len() > 0 && !path.ends_with(".agm")) {
+                        Document* imported = self.load(path.to_str());
+                        if (imported != (Document*)0 && imported != doc) { doc.dependencies.push(imported); }
+                    }
+                    j += 1;
+                }
             }
             i += 1;
         }
     }
+
+    void close(DocumentStore* self, str uri) {
+        Document* doc = self.get(uri);
+        if (doc == (Document*)0) { return; }
+        self.invalidate_dependents(doc);
+        doc.open = false;
+        doc.revision += 1;
+        doc.imports_dirty = true;
+        doc.diagnostics_dirty = true;
+        doc.semantic_dirty = true;
+        if (doc.path.len() > 0) {
+            Result<String, Error> loaded = String.from_file(doc.path.to_str());
+            if (loaded.is_ok()) {
+                String text = loaded.unwrap();
+                if (text.len() == strlen(text.to_str()) && (text.len() == 0 || text.is_valid_utf8())) {
+                    doc.replace_text(text.to_str());
+                    doc.compact();
+                    return;
+                }
+            }
+        }
+        doc.replace_text("");
+        doc.dependencies.clear();
+        doc.compact();
+    }
+
+    void compact_closed(DocumentStore* self) {
+        i64 i = 0;
+        while (i < self.docs.len()) { self.docs.get(i).compact(); i += 1; }
+    }
+
+    void invalidate_dependents(DocumentStore* self, Document* changed) {
+        Vec<Document*> affected = Vec<Document*>.new(); affected.push(changed); i64 next = 0;
+        while (next < affected.len()) {
+            Document* dependency = affected.get(next); dependency.diagnostics_dirty = true; dependency.semantic_dirty = true;
+            i64 i = 0;
+            while (i < self.docs.len()) {
+                Document* candidate = self.docs.get(i); bool depends = false; i64 j = 0;
+                while (j < candidate.dependencies.len()) {
+                    if (candidate.dependencies.get(j) == dependency) { depends = true; break; } j += 1;
+                }
+                if (depends) {
+                    candidate.imports_dirty = true;
+                    j = 0;
+                    while (j < affected.len() && affected.get(j) != candidate) { j += 1; }
+                    if (j == affected.len()) { affected.push(candidate); }
+                }
+                i += 1;
+            }
+            next += 1;
+        }
+    }
+}
+
+String resolve_document_import(DocumentStore* store, Document* doc, str name) {
+    String module = module_root(doc.path.to_str()); String root = absolute_document_path(module.to_str()); String config = String.new();
+    return resolve_module_path_with_sources(doc.path.to_str(), root.to_str(), name,
+        &store.include_dirs, &config, &store.overlay_paths);
+}
+
+impl Drop for DocumentStore {
+    void drop(*self) {
+        i64 i = 0;
+        while (i < self.docs.len()) {
+            Document* doc = self.docs.get(i);
+            @drop_in_place(doc, 1);
+            free(doc);
+            i += 1;
+        }
+    }
+}
+
+struct SymbolTarget { Document* document; i64 symbol; }
+
+void find_imported_symbol(Document* doc, str name, str owner, Vec<Document*>* visited, SymbolTarget* target) {
+    i64 i = 0;
+    while (i < visited.len()) { if (visited.get(i) == doc) { return; } i += 1; }
+    visited.push(doc);
+    i = ide_name_head(&doc.analysis, name);
+    while (i >= 0) {
+        IdeSymbol* symbol = doc.analysis.symbols.get_ptr(i);
+        if (!symbol.local && !symbol.is_private && symbol.name.equals(name) && symbol.owner.equals(owner)) {
+            if (target.symbol == -1) { target.document = doc; target.symbol = i; }
+            else { target.symbol = -2; }
+        }
+        i = doc.analysis.next_name.get(i);
+    }
+    i = 0;
+    while (i < doc.dependencies.len()) {
+        find_imported_symbol(doc.dependencies.get(i), name, owner, visited, target);
+        i += 1;
+    }
+}
+
+SymbolTarget resolve_occurrence(Document* doc, i64 occurrence) {
+    SymbolTarget target;
+    target.document = doc;
+    target.symbol = -1;
+    if (occurrence < 0) { return target; }
+    IdeOccurrence* selected = doc.analysis.occurrences.get_ptr(occurrence);
+    if (selected.symbol >= 0) { target.symbol = selected.symbol; return target; }
+    if (selected.symbol == -2) { target.symbol = -2; return target; }
+    String owner = selected.owner.clone();
+    if (selected.member) {
+        SyntaxNode* separator = binding_previous_sibling(selected.node);
+        if (separator != (SyntaxNode*)0 && separator.token_kind == TokenKind.Dot) {
+            SyntaxNode* receiver = binding_previous_sibling(separator);
+            if (receiver == (SyntaxNode*)0 || !node_is_identifier(receiver)) { return target; }
+            i64 receiver_occurrence = doc.analysis.occurrence_at(receiver.span.start);
+            if (receiver_occurrence < 0 || receiver_occurrence >= occurrence) { return target; }
+            owner = symbol_receiver_owner(resolve_occurrence(doc, receiver_occurrence));
+            if (owner.len() == 0) { return target; }
+            i64 local = ide_name_head(&doc.analysis, selected.node.text);
+            while (local >= 0) {
+                IdeSymbol* symbol = doc.analysis.symbols.get_ptr(local);
+                if (symbol.owner.equals(owner.to_str())) {
+                    if (target.symbol == -1) { target.symbol = local; }
+                    else { target.symbol = -2; }
+                }
+                local = doc.analysis.next_name.get(local);
+            }
+            if (target.symbol != -1) { return target; }
+        }
+    }
+    if (selected.member && owner.len() == 0) { return target; }
+    Vec<Document*> visited = Vec<Document*>.new();
+    visited.push(doc);
+    i64 i = 0;
+    while (i < doc.dependencies.len()) {
+        find_imported_symbol(doc.dependencies.get(i), selected.node.text, owner.to_str(), &visited, &target);
+        i += 1;
+    }
+    return target;
+}
+
+SymbolTarget follow_import_alias(SymbolTarget target) {
+    if (target.symbol < 0) { return target; }
+    IdeSymbol* symbol = target.document.analysis.symbols.get_ptr(target.symbol);
+    if (symbol.kind != IdeSymbolKind.ImportAlias) { return target; }
+    Document* doc = target.document;
+    Vec<Document*> visited = Vec<Document*>.new(); visited.push(doc);
+    target.symbol = -1;
+    i64 i = 0;
+    while (i < doc.dependencies.len()) {
+        find_imported_symbol(doc.dependencies.get(i), symbol.type_name.to_str(), "", &visited, &target);
+        i += 1;
+    }
+    return target;
+}
+
+SymbolTarget visible_name(Document* doc, str name, i64 offset) {
+    SymbolTarget target; target.document = doc;
+    target.symbol = ide_resolve_local(&doc.analysis, name, offset);
+    if (target.symbol != -1) { return follow_import_alias(target); }
+    Vec<Document*> visited = Vec<Document*>.new(); visited.push(doc); i64 i = 0;
+    while (i < doc.dependencies.len()) {
+        find_imported_symbol(doc.dependencies.get(i), name, "", &visited, &target); i += 1;
+    }
+    return follow_import_alias(target);
+}
+
+SymbolTarget visible_type_name(Document* doc, str name, i64 offset) {
+    SymbolTarget target; target.document = doc;
+    target.symbol = ide_resolve_type(&doc.analysis, name, offset);
+    if (target.symbol == -1) {
+        Vec<Document*> visited = Vec<Document*>.new(); visited.push(doc); i64 i = 0;
+        while (i < doc.dependencies.len()) {
+            find_imported_symbol(doc.dependencies.get(i), name, "", &visited, &target); i += 1;
+        }
+    }
+    target = follow_import_alias(target);
+    if (target.symbol >= 0 && !ide_type_symbol(target.document.analysis.symbols.get_ptr(target.symbol).kind)) { target.symbol = -1; }
+    return target;
+}
+
+String symbol_receiver_owner(SymbolTarget target) {
+    target = follow_import_alias(target);
+    Vec<SymbolTarget> visited = Vec<SymbolTarget>.new();
+    while (target.symbol >= 0) {
+        i64 i = 0;
+        while (i < visited.len()) {
+            SymbolTarget previous = visited.get(i);
+            if (previous.document == target.document && previous.symbol == target.symbol) { return String.new(); }
+            i += 1;
+        }
+        visited.push(target);
+        IdeSymbol* symbol = target.document.analysis.symbols.get_ptr(target.symbol);
+        if (symbol.kind == IdeSymbolKind.Struct || symbol.kind == IdeSymbolKind.Enum
+            || symbol.kind == IdeSymbolKind.Trait) { return symbol.name.clone(); }
+        if (symbol.kind == IdeSymbolKind.Function || symbol.kind == IdeSymbolKind.Method) { return String.new(); }
+        if (symbol.type_owner.len() == 0 || (visited.len() > 1 && symbol.kind != IdeSymbolKind.TypeAlias)) { return String.new(); }
+        if (is_primitive_type_token(Lexer.keyword_kind(symbol.type_owner.data, 0, symbol.type_owner.len()))) {
+            return symbol.type_owner.clone();
+        }
+        target = visible_type_name(target.document, symbol.type_owner.to_str(), symbol.selection.start);
+    }
+    return String.new();
 }

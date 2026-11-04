@@ -7,13 +7,8 @@ use crate::lexer::{self, Span};
 use crate::parser;
 use crate::parser::ast;
 use crate::types::{Type, TypeContext, TypeLayout, parse_struct_attributes, struct_layout};
-const MODULE_MAGIC_V2: &[u8; 6] = b"AGM\x00\x00\x02";
-const MODULE_MAGIC_V6: &[u8; 6] = b"AGM\x00\x00\x06";
-const MODULE_MAGIC_V7: &[u8; 6] = b"AGM\x00\x00\x07";
-const MODULE_MAGIC_V8: &[u8; 6] = b"AGM\x00\x00\x08";
-const MODULE_MAGIC_V9: &[u8; 6] = b"AGM\x00\x00\x09";
-const MODULE_MAGIC_V10: &[u8; 6] = b"AGM\x00\x00\x0A";
-const MODULE_MAGIC: &[u8; 6] = b"AGM\x00\x00\x0B"; // v11: trait provenance on method exports
+// v12 preserves the v11 metadata layout but requires borrow-state reference ABI.
+const MODULE_MAGIC: &[u8; 6] = b"AGM\x00\x00\x0C";
 
 #[derive(Debug, Clone)]
 pub struct ModuleArtifact {
@@ -327,23 +322,9 @@ impl ModuleArtifact {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         let mut cursor = 0;
         let magic = read_exact(bytes, &mut cursor, MODULE_MAGIC.len())?;
-        let has_field_tags = if magic == MODULE_MAGIC
-            || magic == MODULE_MAGIC_V9
-            || magic == MODULE_MAGIC_V8
-            || magic == MODULE_MAGIC_V7
-            || magic == MODULE_MAGIC_V6
-        {
-            true
-        } else if magic == MODULE_MAGIC_V2 {
-            false
-        } else {
+        if magic != MODULE_MAGIC {
             return Err("invalid module interface header".to_string());
-        };
-        let has_packed = magic == MODULE_MAGIC || magic == MODULE_MAGIC_V10;
-        let has_impl_trait = magic == MODULE_MAGIC;
-        let has_lib_paths = magic == MODULE_MAGIC || magic == MODULE_MAGIC_V9 || magic == MODULE_MAGIC_V8 || magic == MODULE_MAGIC_V7;
-        let has_constants_and_globals = magic == MODULE_MAGIC || magic == MODULE_MAGIC_V9 || magic == MODULE_MAGIC_V8;
-        let has_generic_templates = magic == MODULE_MAGIC;
+        }
         let module_name = read_string(bytes, &mut cursor)?;
         let module_path = read_string(bytes, &mut cursor)?;
         let source_path = read_string(bytes, &mut cursor)?;
@@ -409,10 +390,10 @@ impl ModuleArtifact {
                 fields.push(ModuleField {
                     name: read_string(bytes, &mut cursor)?,
                     type_key: read_string(bytes, &mut cursor)?,
-                    tags: read_tags(bytes, &mut cursor, has_field_tags)?,
+                    tags: read_tags(bytes, &mut cursor, true)?,
                 });
             }
-            let layout = read_layout(bytes, &mut cursor, has_packed)?;
+            let layout = read_layout(bytes, &mut cursor, true)?;
             let enum_backing_type = read_optional_string(bytes, &mut cursor)?;
             let variants_len = read_len(bytes, &mut cursor)? as usize;
             let mut enum_variants = Vec::with_capacity(variants_len);
@@ -424,7 +405,7 @@ impl ModuleArtifact {
                 for _ in 0..payload_len {
                     payload_types.push(read_string(bytes, &mut cursor)?);
                 }
-                let payload_fields = if has_field_tags {
+                let payload_fields = {
                     let fields_len = read_len(bytes, &mut cursor)? as usize;
                     let mut fields = Vec::with_capacity(fields_len);
                     for _ in 0..fields_len {
@@ -435,8 +416,6 @@ impl ModuleArtifact {
                         });
                     }
                     fields
-                } else {
-                    Vec::new()
                 };
                 enum_variants.push(ModuleEnumVariant {
                     name,
@@ -453,19 +432,9 @@ impl ModuleArtifact {
                     signature: read_string(bytes, &mut cursor)?,
                 });
             }
-            let (const_value, is_mutable) = if has_constants_and_globals {
-                (
-                    read_optional_string(bytes, &mut cursor)?,
-                    read_u8(bytes, &mut cursor)? != 0,
-                )
-            } else {
-                (None, false)
-            };
-            let impl_trait = if has_impl_trait {
-                read_optional_string(bytes, &mut cursor)?
-            } else {
-                None
-            };
+            let const_value = read_optional_string(bytes, &mut cursor)?;
+            let is_mutable = read_u8(bytes, &mut cursor)? != 0;
+            let impl_trait = read_optional_string(bytes, &mut cursor)?;
             exports.push(ModuleExport {
                 kind,
                 name,
@@ -490,26 +459,25 @@ impl ModuleArtifact {
         for _ in 0..libs_len {
             native_libs.push(read_string(bytes, &mut cursor)?);
         }
-        let native_lib_paths = if has_lib_paths {
+        let native_lib_paths = {
             let paths_len = read_len(bytes, &mut cursor)? as usize;
             let mut paths = Vec::with_capacity(paths_len);
             for _ in 0..paths_len {
                 paths.push(read_string(bytes, &mut cursor)?);
             }
             paths
-        } else {
-            Vec::new()
         };
-        let generic_templates = if has_generic_templates {
+        let generic_templates = {
             let templates_len = read_len(bytes, &mut cursor)? as usize;
             let mut templates = Vec::with_capacity(templates_len);
             for _ in 0..templates_len {
                 templates.push(read_string(bytes, &mut cursor)?);
             }
             templates
-        } else {
-            Vec::new()
         };
+        if cursor != bytes.len() {
+            return Err("trailing bytes in module interface".to_string());
+        }
         Ok(Self {
             module_name,
             module_path,
@@ -1595,5 +1563,36 @@ fn collect_implicit_type_params(ty: &ast::Type, params: &mut Vec<String>) {
         ast::TypeKind::Optional(inner) => collect_implicit_type_params(inner, params),
         ast::TypeKind::Array(arr) => collect_implicit_type_params(&arr.element_type, params),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod reference_abi_tests {
+    use super::*;
+
+    #[test]
+    fn current_artifacts_roundtrip_and_old_abi_headers_are_rejected() {
+        let artifact = ModuleArtifact::from_program(
+            "transport".into(), "transport".into(), "transport.ag".into(), "",
+            &ast::Program {
+                attributes: Vec::new(), items: Vec::new(), comments: Vec::new(),
+                span: Span::default(),
+            },
+            "unknown".into(), ModuleCodeArtifacts::default(),
+            vec!["dependency".into()], Vec::new(), vec!["native".into()],
+        );
+        let bytes = artifact.to_bytes().expect("encode current artifact");
+        let decoded = ModuleArtifact::from_bytes(&bytes).expect("decode current artifact");
+        assert_eq!(decoded.module_name, artifact.module_name);
+        assert_eq!(decoded.module_deps, artifact.module_deps);
+        assert_eq!(decoded.native_libs, artifact.native_libs);
+        for version in [2, 6, 7, 8, 9, 10, 11] {
+            let mut old = bytes.clone();
+            old[5] = version;
+            assert!(ModuleArtifact::from_bytes(&old).is_err(), "accepted ABI v{version}");
+        }
+        let mut trailing = bytes;
+        trailing.extend_from_slice(&[0; 4]);
+        assert!(ModuleArtifact::from_bytes(&trailing).is_err());
     }
 }

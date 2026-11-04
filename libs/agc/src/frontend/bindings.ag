@@ -673,7 +673,8 @@ void collect_block_bindings(SyntaxNode* block, Vec<Binding>* bindings) {
 }
 
 SyntaxNode* binding_function_parameters(SyntaxNode* function) {
-    SyntaxNode* child = function.first_child;
+    SyntaxNode* name = function_identifier(function);
+    SyntaxNode* child = name == (SyntaxNode*)0 ? (SyntaxNode*)0 : name.next_sibling;
     while (child != (SyntaxNode*)0) {
         if (child.kind == NodeKind.Parenthesized) {
             return child;

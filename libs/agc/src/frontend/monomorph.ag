@@ -206,6 +206,22 @@ void mono_collect_struct_parameters(SyntaxNode* root, str base, TypeTable* types
     }
 }
 
+// Bind a source declaration before parsing its member types. Parsing first can
+// resolve a same-named parameter from the enclosing function instead.
+bool mono_push_owner_type_arguments(SyntaxNode* root, TypeTable* types, u32 type_id,
+                                     Vec<u32>* parameters) {
+    TypeEntry owner = *types.get(type_id);
+    if (owner.kind != TypeKind.Named) { return false; }
+    mono_collect_struct_parameters(root, types.names.get(owner.name_id), types, parameters);
+    if (parameters.len() != owner.count) { return false; }
+    i64 i = 0;
+    while (i < parameters.len()) {
+        types.push_subst(parameters.get(i), types.type_args.get(owner.inner + (u32)i));
+        i += 1;
+    }
+    return true;
+}
+
 // Find an impl block for `base` defining `method`, matching type arguments `arg_ids`.
 // Collects the impl-level type parameter names (deduped, in order) for substitution.
 // For specialized concrete impls, param_ids will be empty (no substitution needed).
@@ -479,11 +495,11 @@ bool mono_unify_free_parameter(TypeTable* types, u32 formal_id, u32 actual_id,
 
 // Receiver arguments occupy the prefix; method arguments follow in declaration
 // order. Concrete impl targets have zero placeholders in the binding-name list.
-bool mono_resolve_generic_method(AstPool* pool, SyntaxNode* root, TypeTable* types,
+bool mono_resolve_method_call(AstPool* pool, SyntaxNode* root, TypeTable* types,
                                  u32 receiver_type, str method, u32 args_start,
                                  bool static_method, MonoMethodTemplate* template,
                                  Vec<u32>* param_ids, Vec<u32>* arg_ids,
-                                 String* failure) {
+                                 String* failure, bool generic_only) {
     if (pool == (AstPool*)0 || root == (SyntaxNode*)0) { return false; }
     receiver_type = types.resolve_subst(receiver_type);
     TypeEntry* receiver = types.get(receiver_type);
@@ -510,10 +526,19 @@ bool mono_resolve_generic_method(AstPool* pool, SyntaxNode* root, TypeTable* typ
             arg_ids, template, param_ids, (i64)pool.args.get((i64)args_start), static_method,
             pool, args_start, (SyntaxNode*)0);
     }
-    if (!found || !item_method_is_generic(template.name_node)) { return false; }
+    if (!found || (generic_only && !item_method_is_generic(template.name_node))) { return false; }
     mono_match_method_call(pool, root, types, receiver_type, args_start,
         static_method, template, param_ids, arg_ids, failure);
     return true;
+}
+
+bool mono_resolve_generic_method(AstPool* pool, SyntaxNode* root, TypeTable* types,
+                                 u32 receiver_type, str method, u32 args_start,
+                                 bool static_method, MonoMethodTemplate* template,
+                                 Vec<u32>* param_ids, Vec<u32>* arg_ids,
+                                 String* failure) {
+    return mono_resolve_method_call(pool, root, types, receiver_type, method,
+        args_start, static_method, template, param_ids, arg_ids, failure, true);
 }
 
 i64 mono_type_specificity(TypeTable* types, u32 type_id, Vec<u32>* method_params) {

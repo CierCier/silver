@@ -8,6 +8,38 @@ import frontend.symbols;
 import frontend.types;
 import backend.llvm.context;
 
+bool llvm_type_has_reference_abi(TypeTable* types, u32 type_id) {
+    TypeEntry entry = *types.get(types.resolve_subst(type_id));
+    if (entry.kind == TypeKind.Reference) { return true; }
+    if (entry.kind != TypeKind.Function) { return false; }
+    i64 i = 0;
+    while (i <= entry.count) {
+        if (llvm_type_has_reference_abi(types, types.type_args.get(entry.inner + (u32)i))) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+LLVMOpaqueType* llvm_callable_type(LLVMOpaqueContext* ctx) {
+    LLVMOpaqueType* callable_type = LLVMGetTypeByName2(ctx, "__silver_callable");
+    if (callable_type != (LLVMOpaqueType*)0) { return callable_type; }
+    callable_type = LLVMStructCreateNamed(ctx, "__silver_callable");
+    Vec<LLVMOpaqueType*> fields = Vec<LLVMOpaqueType*>.new();
+    fields.push(LLVMPointerTypeInContext(ctx, 0));
+    fields.push(LLVMPointerTypeInContext(ctx, 0));
+    LLVMStructSetBody(callable_type, fields.data, 2, 0);
+    return callable_type;
+}
+
+LLVMOpaqueValue* llvm_callable_build(LlvmContext* ctx, LLVMOpaqueValue* internal,
+                                     LLVMOpaqueValue* foreign) {
+    LLVMOpaqueValue* value = LLVMConstNull(llvm_callable_type(ctx.ctx));
+    value = LLVMBuildInsertValue(ctx.builder, value, internal, 0, "callable_internal");
+    return LLVMBuildInsertValue(ctx.builder, value, foreign, 1, "callable_foreign");
+}
+
 u64 llvm_struct_field_type(SyntaxNode* root, str struct_name, i64 field_index, TypeTable* types) {
     SyntaxNode* item = find_item_by_name(root, NodeKind.Struct, struct_name);
     if (item == (SyntaxNode*)0) {
@@ -343,6 +375,37 @@ str llvm_concrete_type_name(TypeTable* types, u32 type_id) {
     return types.names.get(name_id);
 }
 
+LLVMOpaqueType* llvm_reference_type(LLVMOpaqueContext* ctx) {
+    LLVMOpaqueType* result = LLVMGetTypeByName2(ctx, "__silver_reference");
+    if (result != (LLVMOpaqueType*)0) { return result; }
+    result = LLVMStructCreateNamed(ctx, "__silver_reference");
+    Vec<LLVMOpaqueType*> fields = Vec<LLVMOpaqueType*>.new();
+    fields.push(LLVMPointerTypeInContext(ctx, 0));
+    fields.push(LLVMPointerTypeInContext(ctx, 0));
+    LLVMStructSetBody(result, fields.data, 2, 0);
+    return result;
+}
+
+LLVMOpaqueValue* llvm_reference_initialized(LLVMOpaqueContext* ctx) {
+    return LLVMConstIntToPtr(LLVMConstInt(LLVMInt64TypeInContext(ctx), 1, 0),
+                             LLVMPointerTypeInContext(ctx, 0));
+}
+
+LLVMOpaqueValue* llvm_reference_build(LLVMOpaqueContext* ctx, LLVMOpaqueBuilder* builder,
+                                     LLVMOpaqueValue* data, LLVMOpaqueValue* node) {
+    LLVMOpaqueValue* value = LLVMBuildInsertValue(builder,
+        LLVMConstNull(llvm_reference_type(ctx)), data, 0, "reference_data");
+    return LLVMBuildInsertValue(builder, value, node, 1, "reference_node");
+}
+
+LLVMOpaqueValue* llvm_reference_data(LLVMOpaqueBuilder* builder, LLVMOpaqueValue* value) {
+    return LLVMBuildExtractValue(builder, value, 0, "reference_data");
+}
+
+LLVMOpaqueValue* llvm_reference_node(LLVMOpaqueBuilder* builder, LLVMOpaqueValue* value) {
+    return LLVMBuildExtractValue(builder, value, 1, "reference_node");
+}
+
 LLVMOpaqueType* llvm_lower_type(LLVMOpaqueContext* ctx, TypeTable* types, u32 type_id) {
     TypeEntry* entry = types.get(type_id);
     if (entry.kind == TypeKind.Array) {
@@ -404,8 +467,9 @@ LLVMOpaqueType* llvm_lower_type(LLVMOpaqueContext* ctx, TypeTable* types, u32 ty
         TypeKind.F64 : LLVMDoubleTypeInContext(ctx),
         TypeKind.Str : LLVMPointerTypeInContext(ctx, (u32)0),
         TypeKind.Pointer : LLVMPointerTypeInContext(ctx, (u32)0),
-        TypeKind.Reference : LLVMPointerTypeInContext(ctx, (u32)0),
-        TypeKind.Function : LLVMPointerTypeInContext(ctx, (u32)0),
+        TypeKind.Reference : llvm_reference_type(ctx),
+        TypeKind.Function : llvm_type_has_reference_abi(types, type_id)
+            ? llvm_callable_type(ctx) : LLVMPointerTypeInContext(ctx, (u32)0),
         _ : LLVMInt64TypeInContext(ctx),
     };
 }
@@ -456,6 +520,10 @@ bool llvm_unit_enum_has_negative_tag(SyntaxNode* root, TypeTable* types, u32 typ
 
 LLVMOpaqueType* llvm_lower_c_abi_type(LLVMOpaqueContext* ctx, TypeTable* types,
                                       SyntaxNode* root, u32 type_id) {
+    TypeKind kind = types.get(types.resolve_subst(type_id)).kind;
+    if (kind == TypeKind.Reference || kind == TypeKind.Function) {
+        return LLVMPointerTypeInContext(ctx, 0);
+    }
     if (llvm_type_is_unit_enum(root, types, type_id)) {
         return LLVMInt32TypeInContext(ctx);
     }

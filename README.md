@@ -61,6 +61,12 @@ nix run github:CierCier/silver -- run path/to/file.ag
 nix develop
 ```
 
+Nix support files live in [`nix/`](nix/); only `flake.nix` and `flake.lock`
+stay at the repository root. The flake and legacy entry points share the same
+package and development shell. For the legacy entry points, run
+`nix-build nix -A silver` or `nix-shell nix/shell.nix` from the root. Both use
+the Nixpkgs revision pinned in `flake.lock`.
+
 ### Prebuilt binaries
 
 Download prebuilt archives from the [Releases](https://github.com/CierCier/silver/releases) page. Extract the archive and add the binary directory to your `PATH`.
@@ -81,7 +87,7 @@ cd silver
 # Build compiler in release mode
 cargo build --release -p agc
 
-# Or install to ~/.local with
+# Install compiler, native Silver LSP, and includes
 ./scripts/install.sh
 ```
 
@@ -138,6 +144,7 @@ python3 tests/run_tests.py --no-tui --jobs 4
 # Build the Silver compiler and language server
 target/debug/agc build silver.toml --bin agc --no-cache -o /tmp/agc-stage1
 target/debug/agc build silver.toml --bin aglsp --no-cache -o /tmp/aglsp-stage1
+python3 scripts/check_lsp.py --server /tmp/aglsp-stage1
 
 # Run the same stdlib suite with the native Silver compiler
 python3 tests/run_tests.py --compiler /tmp/agc-stage1 --no-tui --jobs 4
@@ -152,9 +159,8 @@ features; separate compiler unit, parity, and self-host test suites are retired.
 - `bootstrap/stage0/agc/`: Rust bootstrap compiler (stage0): driver, frontend, and LLVM backend, using [Elise](https://github.com/CierCier/elise) for parsing
 - `bootstrap/stage0/agsm/`: Source maps and module artifact generator
 - `bootstrap/stage0/ffi-rust/`: Optional Rust implementation behind Silver's versioned C ABI
-- `bootstrap/aglsp/`: Rust Language Server Protocol server
 - `bin/agc/`: Stage1 self-hosting compiler driver in Silver; see the [compiler guide](docs/compiler-guide.md)
-- `bin/aglsp/`: Silver language-server binary package
+- `bin/aglsp/`: Silver language-server binary package; see [native LSP setup](docs/language-server.md) and the [protocol support ledger](docs/lsp-protocol.md)
 - `bin/agc/src/agsm.ag`: AGSM command integrated into the stage1 compiler driver
 - `libs/agc/`: Reusable stage1 compiler frontend library (Silver)
 - `silver.toml`: Silver workspace manifest for the self-host root

@@ -12,6 +12,7 @@ cargo build --workspace
 python3 tests/run_tests.py --no-tui --jobs 4
 target/debug/agc build silver.toml --bin agc --no-cache -o /tmp/agc-stage1
 target/debug/agc build silver.toml --bin aglsp --no-cache -o /tmp/aglsp-stage1
+python3 scripts/check_lsp.py --server /tmp/aglsp-stage1
 python3 tests/run_tests.py --compiler /tmp/agc-stage1 --no-tui --jobs 4
 ```
 
@@ -20,6 +21,10 @@ status. Name filters select a subset. `--compiler` uses an existing compiler;
 `--release` selects the release Cargo compiler without disabling test-program
 assertions. `--timeout` and `--compile-timeout` bound execution and compilation.
 Compilation and execution times are reported separately.
+
+The [native LSP protocol checks](../scripts/check_lsp.py) run separately over
+stdio with temporary workspaces. See [LSP setup](../docs/language-server.md)
+and the [protocol support ledger](../docs/lsp-protocol.md) for coverage and remaining limits.
 
 Use `--verbose` to print separate compile/run times on each result line. Timeout
 failures retain elapsed time, the command, and partial stdout/stderr; their time

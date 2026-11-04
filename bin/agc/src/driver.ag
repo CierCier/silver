@@ -396,7 +396,9 @@ i32 emit_check(str path, CfgSet* cfg, Vec<String>* include_dirs, LintConfig* lin
                     check_send(&tree, &diagnostics, cfg);
                 }
                 if (diagnostics.is_empty()) {
-                    check_ownership(&tree, &symbols, &diagnostics, cfg);
+                    OwnershipResult ownership = check_ownership(&tree, &symbols, &diagnostics, cfg);
+                    Vec<InitOwnerPlan> _previous_plans = move symbols.init_owner_plans;
+                    symbols.init_owner_plans = move ownership.owner_plans;
                 }
                 if (diagnostics.is_empty()) {
                     AstPool check_pool = AstPool.new();
@@ -654,7 +656,7 @@ bool artifact_source_function(SyntaxNode* item, ArtifactExport* out) {
 
 i32 emit_artifact_fixture(str output_path) {
     Artifact artifact = Artifact.new();
-    artifact.version = (u8)11;
+    artifact.version = (u8)12;
     artifact.module_name = String.from_str("artifact_fixture");
     artifact.module_path = String.from_str("artifact_fixture");
     artifact.source_path = String.from_str("artifact_fixture.ag");
@@ -851,7 +853,7 @@ i32 emit_source_artifact(str source_path, str output_path, bool require_complete
         return 2;
     }
     Artifact artifact = Artifact.new();
-    artifact.version = (u8)11;
+    artifact.version = (u8)12;
     artifact.module_name = String.from_str(source_path);
     artifact.module_path = String.from_str(source_path);
     artifact.source_path = String.from_str(source_path);

@@ -11,6 +11,7 @@ import frontend.cfg;
 import frontend.diagnostics;
 import frontend.items;
 import frontend.lexer;
+import frontend.lambda_syntax;
 import frontend.lower_expr;
 import frontend.messages;
 import frontend.module_loader;
@@ -130,13 +131,6 @@ TypeEnv lambda_clone_env(TypeEnv* source) {
         i += 1;
     }
     return move result;
-}
-
-bool lambda_start(SyntaxNode* node) {
-    return node.kind == NodeKind.Parenthesized
-        && node.next_sibling != (SyntaxNode*)0
-        && node.next_sibling.kind == NodeKind.Token
-        && node.next_sibling.token_kind == TokenKind.FatArrow;
 }
 
 bool lambda_removed_delimiter(SyntaxNode* node, SyntaxNode* previous) {
@@ -658,32 +652,24 @@ impl LambdaLowering {
         }
         append_child(generated, parameters);
         SyntaxNode* start = head.next_sibling.next_sibling;
-        if (start == (SyntaxNode*)0 || start.token_kind == TokenKind.Semicolon
-            || start.token_kind == TokenKind.Comma) {
+        Optional<LambdaSyntax> projected = lambda_syntax(head);
+        if (!projected.is_some()) {
             self.diagnostics.error(head.span, lambda_body_expected());
             return start;
         }
-        SyntaxNode* end = start.next_sibling;
-        bool expression_body = start.kind != NodeKind.Block;
+        LambdaSyntax syntax = projected.unwrap();
+        SyntaxNode* end = syntax.end;
+        bool expression_body = syntax.expression_body;
         SyntaxNode* body = (SyntaxNode*)0;
         if (!expression_body) {
             body = lambda_clone_node(self.nodes, start, false);
         } else {
-            end = start;
-            while (end != (SyntaxNode*)0 && end.token_kind != TokenKind.Comma
-                && end.token_kind != TokenKind.Semicolon) {
-                end = end.next_sibling;
-            }
             body = self.nodes.create(NodeKind.Block, head.span, "");
             append_child(body, self.token(TokenKind.Return, "return", head.span));
             lambda_clone_range(self.nodes, body, start, end);
             append_child(body, self.token(TokenKind.Semicolon, ";", head.span));
         }
-        SyntaxNode* last = start;
-        while (last.next_sibling != end && last.next_sibling != (SyntaxNode*)0) {
-            last = last.next_sibling;
-        }
-        generated.span = head.span.extend(last.span);
+        generated.span = syntax.extent;
         if (expression_body) { body.span = generated.span; }
         append_child(generated, body);
         self.walk(body, generated, "", &outer);

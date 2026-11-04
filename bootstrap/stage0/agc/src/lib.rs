@@ -1,4 +1,4 @@
-// Silver compiler frontend library — reusable by LSP and other tools.
+// Silver bootstrap compiler library.
 pub mod ast_tree;
 pub mod attributes;
 pub mod build_graph;
@@ -9,7 +9,6 @@ pub mod codegen;
 pub mod debug_info;
 pub mod diagnostics;
 pub mod driver;
-pub mod format;
 pub mod intrinsics;
 pub mod grammar;
 pub mod lexer;
@@ -21,7 +20,6 @@ pub mod parser;
 pub mod package;
 pub mod profiler;
 pub mod semantic;
-pub mod symbol_index;
 pub mod symbol_table;
 pub mod traits;
 pub mod types;

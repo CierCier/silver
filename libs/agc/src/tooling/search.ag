@@ -1,0 +1,25 @@
+import std.mem.memory;
+
+u8 ide_search_lower(u8 byte) { return byte >= (u8)'A' && byte <= (u8)'Z' ? byte + (u8)32 : byte; }
+
+// Identifiers are ASCII. Prefer prefixes, then contiguous and word-boundary matches.
+i64 ide_match_score(str query, str name) {
+    i64 wanted = strlen(query); i64 length = strlen(name);
+    if (wanted == 0) { return 0; }
+    i64 q = 0; i64 n = 0; i64 cost = 0; i64 previous = -1; bool prefix = true;
+    while (q < wanted && n < length) {
+        if (ide_search_lower(query[q]) == ide_search_lower(name[n])) {
+            if (query[q] != name[n]) { cost += 1; }
+            if (n != q) { prefix = false; }
+            bool boundary = n == 0 || name[n - 1] == '_'
+                || (name[n] >= 'A' && name[n] <= 'Z' && name[n - 1] >= 'a' && name[n - 1] <= 'z');
+            if (n > previous + 1) { cost += (n - previous - 1) * 8; }
+            if (!boundary && n != previous + 1) { cost += 16; }
+            previous = n; q += 1;
+        }
+        n += 1;
+    }
+    if (q != wanted) { return -1; }
+    if (prefix && wanted == length && cost == 0) { return 0; }
+    return (prefix ? 8 : 64) + cost;
+}

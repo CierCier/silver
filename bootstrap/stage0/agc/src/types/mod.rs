@@ -49,6 +49,17 @@ pub enum Type {
 }
 
 impl Type {
+    /// Internal reference adaptation changes both reference and callable storage.
+    pub(crate) fn uses_reference_abi(&self) -> bool {
+        match self {
+            Type::Reference { .. } => true,
+            Type::Function { params, return_type } => {
+                params.iter().any(Self::uses_reference_abi) || return_type.uses_reference_abi()
+            }
+            _ => false,
+        }
+    }
+
     /// True when the type mentions 80-bit floats (`f80`/`c80`) anywhere,
     /// including nested positions (`Vec<f80>`, `f80*`, `f80` return types).
     /// Used by the WebAssembly target gate: wasm has no 80-bit float type.
@@ -144,7 +155,13 @@ impl TypeContext {
                     size: None,
                     align: None,
                 }),
-            Type::Reference { .. } | Type::Pointer { .. } | Type::Function { .. } => {
+            Type::Reference { .. } => {
+                TypeLayout::known(2 * self.pointer_size, self.pointer_align)
+            }
+            Type::Function { .. } if ty.uses_reference_abi() => {
+                TypeLayout::known(2 * self.pointer_size, self.pointer_align)
+            }
+            Type::Pointer { .. } | Type::Function { .. } => {
                 TypeLayout::known(self.pointer_size, self.pointer_align)
             }
             Type::Optional { inner } => {
@@ -1052,6 +1069,36 @@ fn tuple_layout(ctx: &TypeContext, items: &[Type]) -> TypeLayout {
 
     let total = align_to(offset, max_align);
     TypeLayout::known(total, max_align)
+}
+
+#[cfg(test)]
+mod reference_layout_tests {
+    use super::*;
+
+    #[test]
+    fn carrier_layouts_follow_target_pointer_size() {
+        let reference = Type::Reference {
+            is_mutable: true, inner: Box::new(Type::Primitive(ast::PrimitiveType::I64)),
+        };
+        let callback = Type::Function {
+            params: vec![reference.clone()], return_type: Box::new(Type::Unit),
+        };
+        let plain = Type::Function { params: Vec::new(), return_type: Box::new(Type::Unit) };
+        let pointer = Type::Pointer {
+            is_mutable: true, is_volatile: false, inner: Box::new(callback.clone()),
+        };
+        for size in [4, 8] {
+            let context = TypeContext::new(size);
+            assert_eq!(context.layout_of(&reference), TypeLayout::known(2 * size, size));
+            assert_eq!(context.layout_of(&callback), TypeLayout::known(2 * size, size));
+            assert_eq!(context.layout_of(&plain), TypeLayout::known(size, size));
+            assert_eq!(context.layout_of(&pointer), TypeLayout::known(size, size));
+            let record = struct_layout(&context,
+                &[Type::Primitive(ast::PrimitiveType::U8), reference.clone(), callback.clone(), pointer.clone()],
+                &StructAttributes::default());
+            assert_eq!(record, TypeLayout::known(6 * size, size));
+        }
+    }
 }
 
 fn align_to(value: usize, align: usize) -> usize {

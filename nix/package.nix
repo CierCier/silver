@@ -20,28 +20,28 @@ rustPlatform.buildRustPackage {
   version = "0.2.6";
 
   src = fs.toSource {
-    root = ./.;
+    root = ../.;
     fileset = fs.difference
       (fs.unions [
-        ./Cargo.toml
-        ./Cargo.lock
-        ./clippy.toml
-        ./bootstrap
-        ./bin
-        ./libs
-        ./silver.toml
-        ./std
-        ./vendor
-        ./examples
-        ./tests
-        ./LICENSE
-        ./README.md
+        ../Cargo.toml
+        ../Cargo.lock
+        ../clippy.toml
+        ../bootstrap
+        ../bin
+        ../libs
+        ../silver.toml
+        ../std
+        ../vendor
+        ../examples
+        ../tests
+        ../LICENSE
+        ../README.md
       ])
-      (fs.maybeMissing ./tests/__pycache__);
+      (fs.maybeMissing ../tests/__pycache__);
   };
 
   cargoLock = {
-    lockFile = ./Cargo.lock;
+    lockFile = ../Cargo.lock;
     outputHashes = {
       "elise-core-0.1.0" = "sha256-Fc8asqXxetC49IF1GXzryvbivJHWvCoyBepcrOUwHeU=";
     };
@@ -50,6 +50,7 @@ rustPlatform.buildRustPackage {
   nativeBuildInputs = [
     pkg-config
     llvmPackages_22.llvm.dev
+    llvmPackages_22.lld
     makeWrapper
   ];
 
@@ -65,7 +66,6 @@ rustPlatform.buildRustPackage {
 
   nativeCheckInputs = [
     git
-    llvmPackages_22.lld
     openssl
   ];
 
@@ -85,6 +85,8 @@ rustPlatform.buildRustPackage {
   '';
 
   postInstall = ''
+    $out/bin/agc build silver.toml --bin aglsp --no-cache -O2 -o $out/bin/aglsp
+
     # Install standard library and vendor headers
     mkdir -p $out/include/silver
     cp -r std $out/include/silver/std
@@ -114,6 +116,6 @@ rustPlatform.buildRustPackage {
     homepage = "https://github.com/CierCier/silver";
     license = lib.licenses.mit;
     mainProgram = "agc";
-    platforms = lib.platforms.unix;
+    platforms = [ "x86_64-linux" ];
   };
 }

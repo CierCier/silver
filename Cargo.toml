@@ -6,7 +6,6 @@ members = [
     "bootstrap/stage0/agc",
     "bootstrap/stage0/agsm",
     "bootstrap/stage0/ffi-rust",
-    "bootstrap/aglsp",
 ]
 
 [profile.profiling]

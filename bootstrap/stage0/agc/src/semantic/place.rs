@@ -27,6 +27,8 @@ pub struct Place {
 pub enum Projection {
     Field(FieldId),
     TupleField(usize),
+    /// A resolved inline fixed-array element; dynamic indexing remains opaque.
+    ArrayElement(usize),
     Index, // `v[i]` — value opaque, `v[i]` overlaps `v[j]`
     Deref,
 }

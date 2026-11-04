@@ -412,10 +412,16 @@ fn place_from_expr(expr: &ast::Expression) -> Option<Place> {
 type State = FxHashMap<String, VarState>;
 
 /// Scope entry: (name, previous state, previous type) so shadowing restores.
-type ScopeEntry = (String, Option<VarState>, Option<ast::Type>);
+type ScopeEntry = (
+    String,
+    Option<VarState>,
+    Option<ast::Type>,
+    Option<super::init_plan::OwnerLocalId>,
+);
 /// Facts for move classification. TODO(Phase 5): centralize via `type_properties::{is_copy,needs_drop}`.
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 struct Facts {
+    opaque_owners: FxHashSet<String>,
     /// Base type names that implement `Drop`.
     drop_owners: FxHashSet<String>,
     /// (owner, method) pairs whose receiver is by-value (`InstanceValue`).
@@ -428,6 +434,7 @@ struct Facts {
     struct_fields: FxHashMap<String, StructInfo>,
 }
 
+#[derive(Clone, Debug)]
 struct StructInfo {
     generic_params: Vec<String>,
     fields: Vec<(String, ast::Type)>,
@@ -476,6 +483,7 @@ impl Facts {
                 );
             }
             ast::ItemKind::Enum(enumeration) => {
+                self.opaque_owners.insert(enumeration.name.name.clone());
                 let fields = enumeration
                     .variants
                     .iter()
@@ -578,6 +586,7 @@ impl Facts {
                     );
                 }
                 ExportKind::Enum => {
+                    self.opaque_owners.insert(export.name.clone());
                     let fields = export
                         .enum_variants
                         .iter()
@@ -759,24 +768,48 @@ pub fn check_program_with_imports(
     program: &ast::Program,
     imported_modules: &[ModuleArtifact],
 ) -> Vec<MoveError> {
+    analyze_program_with_imports(program, imported_modules).errors
+}
+
+pub struct MoveReport {
+    pub errors: Vec<MoveError>,
+    pub init_plan: super::init_plan::ProgramInitPlan,
+}
+
+pub fn analyze_program_with_imports(
+    program: &ast::Program,
+    imported_modules: &[ModuleArtifact],
+) -> MoveReport {
     let facts = Facts::build(program, imported_modules);
     let mut checker = MoveChecker {
+        layouts: OwnerLayouts(facts.clone()),
         facts,
         errors: Vec::new(),
+        functions: FxHashMap::default(),
+        current_plan: super::init_plan::FunctionInitPlan::default(),
+        owner_bindings: FxHashMap::default(),
     };
     for item in &program.items {
         match &item.kind {
             ast::ItemKind::Function(func) => {
-                checker.check_function(&func.parameters, &func.body);
+                checker.check_function(&func.parameters, func.return_type.as_ref(), &func.body);
             }
             ast::ItemKind::Impl(imp) => {
                 for member in &imp.items {
                     match member {
                         ast::ImplItemKind::Function(func) => {
-                            checker.check_function(&func.parameters, &func.body);
+                            checker.check_function(
+                                &func.parameters,
+                                func.return_type.as_ref(),
+                                &func.body,
+                            );
                         }
                         ast::ImplItemKind::Cast(cast) => {
-                            checker.check_function(&cast.parameters, &cast.body);
+                            checker.check_function(
+                                &cast.parameters,
+                                Some(&cast.target_type),
+                                &cast.body,
+                            );
                         }
                         ast::ImplItemKind::AssociatedType(_) => {}
                     }
@@ -785,12 +818,176 @@ pub fn check_program_with_imports(
             _ => {}
         }
     }
-    checker.errors
+    MoveReport {
+        errors: checker.errors,
+        init_plan: super::init_plan::ProgramInitPlan {
+            functions: checker.functions,
+            layouts: checker.layouts,
+        },
+    }
 }
 
 struct MoveChecker {
     facts: Facts,
     errors: Vec<MoveError>,
+    layouts: OwnerLayouts,
+    functions: FxHashMap<super::init_plan::FunctionId, super::init_plan::FunctionInitPlan>,
+    current_plan: super::init_plan::FunctionInitPlan,
+    owner_bindings: FxHashMap<String, super::init_plan::OwnerLocalId>,
+}
+
+/// Layout completion belongs to the semantic ownership boundary. All required
+/// fields participate, including Copy scalars read by a parent's destructor.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct OwnerLayouts(Facts);
+
+impl OwnerLayouts {
+    pub(crate) fn analyze_body(
+        &self,
+        parameters: &[ast::Parameter],
+        return_type: Option<&ast::Type>,
+        body: &ast::Block,
+    ) -> Result<super::init_plan::FunctionInitPlan, String> {
+        let mut checker = MoveChecker {
+            facts: self.0.clone(),
+            errors: Vec::new(),
+            layouts: self.clone(),
+            functions: FxHashMap::default(),
+            current_plan: Default::default(),
+            owner_bindings: FxHashMap::default(),
+        };
+        checker.check_function(parameters, return_type, body);
+        if let Some(error) = checker.errors.first() {
+            return Err(error.message.clone());
+        }
+        Ok(checker
+            .functions
+            .remove(&super::init_plan::FunctionId::for_body(
+                parameters,
+                return_type,
+                body,
+            ))
+            .expect("analyzed function plan"))
+    }
+    pub(crate) fn owner(
+        &self,
+        id: super::init_plan::OwnerLocalId,
+        ty: &ast::Type,
+        initialized: bool,
+    ) -> Result<super::init_plan::OwnerLocalPlan, super::init_plan::InitPlanError> {
+        use super::init_plan::MAX_OWNER_NODES as MAX_NODES;
+        use super::init_plan::{InitNodePlan, InitPlanError, LayoutProjection, OwnerLocalPlan};
+        let state = if initialized {
+            InitState::Initialized
+        } else {
+            InitState::Uninitialized
+        };
+        let mut nodes = vec![InitNodePlan {
+            place: Place::new(&id.name),
+            ty: ty.clone(),
+            parent: None,
+            first_child: 0,
+            child_count: 0,
+            initial_state: state,
+            projection: None,
+        }];
+        let mut index = 0;
+        while index < nodes.len() {
+            let node_ty = nodes[index].ty.clone();
+            let mut parent = nodes[index].parent;
+            while let Some(p) = parent {
+                if crate::types::Type::from_ast(&nodes[p].ty).canonical_key()
+                    == crate::types::Type::from_ast(&node_ty).canonical_key()
+                {
+                    return Err(InitPlanError::RecursiveLayout);
+                }
+                parent = nodes[p].parent;
+            }
+            let children: Vec<(Projection, LayoutProjection, ast::Type)> =
+                match node_ty.kind.as_ref() {
+                    ast::TypeKind::Tuple(types) => types
+                        .iter()
+                        .enumerate()
+                        .map(|(i, t)| {
+                            (
+                                Projection::TupleField(i),
+                                LayoutProjection::Field(i as u32),
+                                t.clone(),
+                            )
+                        })
+                        .collect(),
+                    ast::TypeKind::Array(array) => {
+                        if array.size as usize > MAX_NODES {
+                            return Err(InitPlanError::TooManyNodes);
+                        }
+                        (0..array.size)
+                            .map(|i| {
+                                (
+                                    Projection::ArrayElement(i as usize),
+                                    LayoutProjection::Element(i as u32),
+                                    (*array.element_type).clone(),
+                                )
+                            })
+                            .collect()
+                    }
+                    ast::TypeKind::Named(_)
+                        if !self.0.opaque_owners.contains(&Facts::owner_key(&node_ty)) =>
+                    {
+                        self.0
+                            .struct_fields
+                            .get(&Facts::owner_key(&node_ty))
+                            .map(|info| {
+                                let substitutions =
+                                    MoveChecker::generic_substitutions(&node_ty, info);
+                                info.fields
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, (name, t))| {
+                                        (
+                                            Projection::Field(name.clone()),
+                                            LayoutProjection::Field(i as u32),
+                                            MoveChecker::substitute_type(t, &substitutions),
+                                        )
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    }
+                    _ => Vec::new(),
+                };
+            if nodes
+                .len()
+                .checked_add(children.len())
+                .is_none_or(|n| n > MAX_NODES)
+            {
+                return Err(InitPlanError::TooManyNodes);
+            }
+            nodes[index].first_child = nodes.len();
+            nodes[index].child_count = children.len() as u32;
+            for (projection, layout, child_ty) in children {
+                let mut place = nodes[index].place.clone();
+                place.push_projection(projection);
+                nodes.push(InitNodePlan {
+                    place,
+                    ty: child_ty,
+                    parent: Some(index),
+                    first_child: 0,
+                    child_count: 0,
+                    initial_state: state,
+                    projection: Some(layout),
+                });
+            }
+            index += 1;
+        }
+        let plan = OwnerLocalPlan {
+            id,
+            ty: ty.clone(),
+            nodes,
+            initialized_at_declaration: initialized,
+        };
+        plan.validate()?;
+        Ok(plan)
+    }
 }
 
 impl MoveChecker {
@@ -923,6 +1120,7 @@ impl MoveChecker {
         scopes: &mut Vec<Vec<ScopeEntry>>,
         var_types: &mut FxHashMap<String, ast::Type>,
     ) {
+        self.record_place(expr);
         match expr.kind.as_ref() {
             ast::ExpressionKind::FieldAccess { object, .. } => {
                 self.check_place_operands(object, state, scopes, var_types);
@@ -956,14 +1154,22 @@ impl MoveChecker {
         }
     }
 
-    fn check_function(&mut self, parameters: &[ast::Parameter], body: &ast::Block) {
+    fn check_function(
+        &mut self,
+        parameters: &[ast::Parameter],
+        return_type: Option<&ast::Type>,
+        body: &ast::Block,
+    ) {
+        let id = super::init_plan::FunctionId::for_body(parameters, return_type, body);
+        self.current_plan = super::init_plan::FunctionInitPlan::default();
         let mut state = State::default();
         let mut scopes: Vec<Vec<ScopeEntry>> = Vec::new();
         let mut var_types: FxHashMap<String, ast::Type> = FxHashMap::default();
         scopes.push(Vec::new());
         for param in parameters {
+            self.record_owner(&param.name, &param.param_type, true);
             self.declare(
-                &param.name.name,
+                &param.name,
                 Some(&param.param_type),
                 &mut state,
                 &mut scopes,
@@ -971,6 +1177,59 @@ impl MoveChecker {
             );
         }
         self.check_block(body, &mut state, &mut scopes, &mut var_types);
+        self.functions
+            .insert(id, std::mem::take(&mut self.current_plan));
+    }
+
+    fn record_owner(&mut self, name: &ast::Identifier, ty: &ast::Type, initialized: bool) {
+        if !self.is_tracked(ty) {
+            return;
+        }
+        let id = super::init_plan::OwnerLocalId {
+            declaration: name.span.into(),
+            name: name.name.clone(),
+        };
+        match self.layouts.owner(id, ty, initialized) {
+            Ok(owner) => self.current_plan.owners.push(owner),
+            Err(error) => self.error(msg::owner_init_plan_error(&format!("{error:?}")), name.span),
+        }
+    }
+
+    fn record_place(&mut self, expr: &ast::Expression) {
+        let Some(place) = place_from_expr(expr) else {
+            return;
+        };
+        let Some(id) = self.owner_bindings.get(&place.local) else {
+            return;
+        };
+        let Some(owner) = self.current_plan.owner(id) else {
+            return;
+        };
+        if let Some(node) = owner.resolve_expression(expr) {
+            self.current_plan.places.insert(
+                expr.span.into(),
+                super::init_plan::ResolvedOwnerPlace {
+                    owner: id.clone(),
+                    node,
+                },
+            );
+        }
+    }
+
+    fn record_transfer(&mut self, expr: &ast::Expression) {
+        self.record_place(expr);
+        if let Some(resolved) = self.current_plan.places.get(&expr.span.into())
+            && let Some(owner) = self.current_plan.owner(&resolved.owner)
+        {
+            let place = owner.nodes[resolved.node].place.clone();
+            self.current_plan
+                .transitions
+                .push(super::init_plan::OwnerTransition {
+                    site: expr.span.into(),
+                    place,
+                    state: InitState::Uninitialized,
+                });
+        }
     }
 
     /// Tracked if Drop-owned (or `Task` handle). TODO(Phase 5): `type_properties::{is_copy,needs_drop}`.
@@ -1022,7 +1281,8 @@ impl MoveChecker {
                     };
                     continue;
                 }
-            } else if let ast::TypeKind::Primitive(ast::PrimitiveType::Str) = curr_ty.kind.as_ref() {
+            } else if let ast::TypeKind::Primitive(ast::PrimitiveType::Str) = curr_ty.kind.as_ref()
+            {
                 if segment == "len" {
                     curr_ty = ast::Type {
                         kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::I64)),
@@ -1163,23 +1423,43 @@ impl MoveChecker {
 
     fn declare(
         &mut self,
-        name: &str,
+        identifier: &ast::Identifier,
         ty: Option<&ast::Type>,
         state: &mut State,
         scopes: &mut [Vec<ScopeEntry>],
         var_types: &mut FxHashMap<String, ast::Type>,
     ) {
+        let name = &identifier.name;
         if let Some(ty) = ty {
+            let old_owner = self.owner_bindings.remove(name);
+            let id = super::init_plan::OwnerLocalId {
+                declaration: identifier.span.into(),
+                name: name.clone(),
+            };
+            if self.current_plan.owner(&id).is_some() {
+                self.owner_bindings.insert(name.clone(), id);
+            }
             let old_state = state.get(name).cloned();
             let old_type = var_types.get(name).cloned();
             if self.is_tracked(ty) {
-                state.insert(name.to_string(), VarState::new_live());
+                let mut var = VarState::new_live();
+                if let Some(owner) = self
+                    .owner_bindings
+                    .get(name)
+                    .and_then(|id| self.current_plan.owner(id))
+                {
+                    for node in &owner.nodes {
+                        var.tree.insert(node.place.clone());
+                    }
+                }
+                state.insert(name.to_string(), var);
             }
             var_types.insert(name.to_string(), ty.clone());
             scopes.last_mut().expect("scope stack is non-empty").push((
                 name.to_string(),
                 old_state,
                 old_type,
+                old_owner,
             ));
         }
     }
@@ -1194,7 +1474,7 @@ impl MoveChecker {
     ) {
         match &pattern.kind {
             ast::PatternKind::Identifier(ident) => {
-                self.declare(&ident.name, ty, state, scopes, var_types);
+                self.declare(ident, ty, state, scopes, var_types);
             }
             ast::PatternKind::Tuple(items) => {
                 let elem_annotations = match ty.and_then(|a| match a.kind.as_ref() {
@@ -1220,7 +1500,11 @@ impl MoveChecker {
         var_types: &mut FxHashMap<String, ast::Type>,
     ) {
         if let Some(scope) = scopes.pop() {
-            for (name, old_state, old_type) in scope {
+            for (name, old_state, old_type, old_owner) in scope {
+                self.owner_bindings.remove(&name);
+                if let Some(owner) = old_owner {
+                    self.owner_bindings.insert(name.clone(), owner);
+                }
                 match old_state {
                     Some(v) => {
                         state.insert(name.clone(), v);
@@ -1291,6 +1575,11 @@ impl MoveChecker {
                 self.check_block(block, state, scopes, var_types);
             }
             ast::StatementKind::Let(let_stmt) => {
+                if let ast::PatternKind::Identifier(name) = &let_stmt.pattern.kind
+                    && let Some(ty) = &let_stmt.type_annotation
+                {
+                    self.record_owner(name, ty, let_stmt.initializer.is_some());
+                }
                 if let Some(init) = &let_stmt.initializer {
                     if let Some((root_name, path)) = expr_root_and_path(init)
                         && !path.is_empty()
@@ -1304,6 +1593,7 @@ impl MoveChecker {
                             &root_name, &path, init.span, var_types,
                         ) && let Some(var) = state.get_mut(&root_name)
                         {
+                            self.record_transfer(init);
                             var.mark_place_moved(
                                 &place_from_root_and_path(&root_name, &path),
                                 init.span,
@@ -1348,6 +1638,7 @@ impl MoveChecker {
                                 return;
                             }
                             if let Some(var) = state.get_mut(&root_name) {
+                                self.record_transfer(expr);
                                 var.mark_place_moved(
                                     &place_from_root_and_path(&root_name, &path),
                                     expr.span,
@@ -1384,6 +1675,7 @@ impl MoveChecker {
         scopes: &mut Vec<Vec<ScopeEntry>>,
         var_types: &mut FxHashMap<String, ast::Type>,
     ) {
+        self.record_place(expr);
         match expr.kind.as_ref() {
             ast::ExpressionKind::Identifier(ident) => {
                 if let Some(var) = state.get(&ident.name) {
@@ -1586,12 +1878,7 @@ impl MoveChecker {
                     _ => None,
                 };
                 for (i, arg) in arguments.iter().enumerate() {
-                    if self.is_value_call_argument(
-                        function,
-                        fn_name.as_deref(),
-                        i,
-                        var_types,
-                    ) {
+                    if self.is_value_call_argument(function, fn_name.as_deref(), i, var_types) {
                         self.move_value_argument(
                             arg,
                             msg::note_value_moved_into_param(),
@@ -1823,6 +2110,7 @@ impl MoveChecker {
                             &root_name, &path, right.span, var_types,
                         ) && let Some(var) = state.get_mut(&root_name)
                         {
+                            self.record_transfer(right);
                             var.mark_place_moved(
                                 &place_from_root_and_path(&root_name, &path),
                                 right.span,

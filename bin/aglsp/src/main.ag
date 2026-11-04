@@ -1,157 +1,576 @@
-// bin/aglsp/src/main.ag — Self-hosted Silver Language Server (aglsp).
-import std.io;
-import std.io.byte_stream;
-import std.string;
-import agc;
 import json_rpc;
+import std.path;
 import document;
 import diagnostics;
 import symbols;
 import format;
 import completion;
+import features;
 import params;
+import workspace;
+import transport;
+import navigation;
+import hierarchy;
+import capabilities;
+import progress;
+import client_requests;
+import actions;
+import file_operations;
+import lenses;
 
-i32 main() {
-    DocumentStore store = DocumentStore.new();
-    ByteStream stream = ByteStream.stdin();
-    String body = String.new();
-    JsonRpcMessage msg = JsonRpcMessage.new();
+struct ServerState {
+    DocumentStore store;
+    WorkspaceIndex index;
+    ClientOptions client;
+    ClientRequests requests;
+    bool initialized;
+    bool shutdown;
+    i64 trace;
+    bool index_progress;
+    Transport* transport_ptr;
+}
 
-    while (true) {
-        if (!read_rpc_message(&stream, &body)) {
-            break;
+// A fresh index starts a new indexing session; a cancel for the previous one
+// must not stop it.
+void begin_index_session(ServerState* state) {
+    __atomic_store_i32(&state.transport_ptr.index_cancelled, 0, ATOMIC_RELEASE);
+}
+
+void notify_analysis_change(ServerState* state) {
+    if (!state.client.pull_diagnostics) { publish_open_diagnostics(&state.store, &state.client); }
+    else if (state.client.diagnostic_refresh) { state.requests.refresh(ClientRequestKind.DiagnosticRefresh); }
+    if (state.client.semantic_refresh) { state.requests.refresh(ClientRequestKind.SemanticRefresh); }
+    if (state.client.inlay_refresh) { state.requests.refresh(ClientRequestKind.InlayHintRefresh); }
+    if (state.client.code_lens_refresh) { state.requests.refresh(ClientRequestKind.CodeLensRefresh); }
+    if (state.client.folding_refresh) { state.requests.refresh(ClientRequestKind.FoldingRefresh); }
+}
+
+bool request_uses_position(str method) {
+    return strcmp(method, "textDocument/hover") == 0 || strcmp(method, "textDocument/definition") == 0
+        || strcmp(method, "textDocument/declaration") == 0 || strcmp(method, "textDocument/typeDefinition") == 0
+        || strcmp(method, "textDocument/implementation") == 0
+        || strcmp(method, "textDocument/prepareCallHierarchy") == 0 || strcmp(method, "textDocument/prepareTypeHierarchy") == 0
+        || strcmp(method, "textDocument/references") == 0 || strcmp(method, "textDocument/documentHighlight") == 0
+        || strcmp(method, "textDocument/rename") == 0 || strcmp(method, "textDocument/prepareRename") == 0
+        || strcmp(method, "textDocument/completion") == 0 || strcmp(method, "textDocument/signatureHelp") == 0
+        || strcmp(method, "textDocument/moniker") == 0 || strcmp(method, "textDocument/inlineCompletion") == 0;
+}
+
+bool index_request_workspace(DocumentStore* store, WorkspaceIndex* index, PendingMessage* pending) {
+    pending.preemptible = true;
+    while (index.paths.len() > 0 && !request_interrupted(pending)) { index_workspace_step(store, index); }
+    return !request_interrupted(pending);
+}
+
+void handle_document_request(DocumentStore* store, WorkspaceIndex* index, ClientOptions* client, JsonRpcMessage* message, PendingMessage* pending) {
+    str method = message.method.to_str(); str params = message.params_json.to_str();
+    // Keystroke-rate completion: a newer request aborts this one at its next
+    // checkpoint instead of finishing a workspace scan the client discards.
+    if (strcmp(method, "textDocument/completion") == 0) { pending.preemptible = true; }
+    String uri = String.new(); i64 line = 0; i64 column = 0; i64 offset = 0;
+    bool positioned = request_uses_position(method);
+    bool supported = positioned || strcmp(method, "textDocument/documentSymbol") == 0
+        || strcmp(method, "textDocument/formatting") == 0 || strcmp(method, "textDocument/rangeFormatting") == 0
+        || strcmp(method, "textDocument/rangesFormatting") == 0 || strcmp(method, "textDocument/onTypeFormatting") == 0
+        || (client.semantic.full != SemanticFullMode.Disabled && strcmp(method, "textDocument/semanticTokens/full") == 0)
+        || (client.semantic.full == SemanticFullMode.Delta && strcmp(method, "textDocument/semanticTokens/full/delta") == 0)
+        || (client.semantic.range && strcmp(method, "textDocument/semanticTokens/range") == 0)
+        || strcmp(method, "textDocument/foldingRange") == 0 || strcmp(method, "textDocument/selectionRange") == 0
+        || strcmp(method, "textDocument/inlayHint") == 0 || strcmp(method, "textDocument/codeLens") == 0;
+    supported = supported || strcmp(method, "textDocument/diagnostic") == 0 || strcmp(method, "textDocument/documentLink") == 0;
+    supported = supported || (client.code_action_literals && strcmp(method, "textDocument/codeAction") == 0);
+    if (!supported) { complete_error(pending, message.id_raw.to_str(), -32601, "Method not found"); return; }
+    bool valid = positioned ? parse_position_params(params, &uri, &line, &column) : parse_document_uri_param(params, &uri);
+    if (!valid) { complete_error(pending, message.id_raw.to_str(), -32602, "Invalid document parameters"); return; }
+    Document* doc = store.get(uri.to_str());
+    if (doc == (Document*)0) {
+        String path = document_path(uri.to_str());
+        if (path.len() > 0) { doc = store.load(path.to_str()); store.refresh_imports(); }
+    }
+    if (doc == (Document*)0) { complete_error(pending, message.id_raw.to_str(), -32602, "Document not found"); return; }
+    doc.ensure_syntax();
+    if (positioned && !doc.offset(line, column, &offset)) {
+        complete_error(pending, message.id_raw.to_str(), -32602, "Invalid UTF-16 position"); return;
+    }
+    String name = String.new(); Span action_range = Span.synthetic();
+    bool actions_allowed = false; bool refactors_allowed = false;
+    if (strcmp(method, "textDocument/rename") == 0 && (!json_string(params, "newName", &name) || !valid_rename(name.to_str()))) {
+        complete_error(pending, message.id_raw.to_str(), -32602, "Rename requires a Silver identifier"); return;
+    }
+    if (strcmp(method, "textDocument/codeAction") == 0) {
+        String json_range = json_field(params, "range"); String context = json_field(params, "context");
+        if (!parse_document_range(doc, json_range.to_str(), &action_range)) {
+            complete_error(pending, message.id_raw.to_str(), -32602, "Invalid code action parameters"); return;
         }
-
-        if (!parse_rpc_request(body.to_str(), &msg)) {
-            continue;
-        }
-
-        str method = msg.method.to_str();
-
-        if (strcmp(method, "initialize") == 0) {
-            str caps = "{\"capabilities\":{\"textDocumentSync\":1,\"hoverProvider\":true,\"documentSymbolProvider\":true,\"definitionProvider\":true,\"documentFormattingProvider\":true,\"completionProvider\":{\"triggerCharacters\":[\".\",\":\"]}},\"serverInfo\":{\"name\":\"aglsp\",\"version\":\"0.1.0\"}}";
-            send_response(msg.id_raw.to_str(), caps);
-        } else if (strcmp(method, "initialized") == 0) {
-            // Notification no-op
-        } else if (strcmp(method, "textDocument/didOpen") == 0) {
-            String uri = String.new();
-            String text = String.new();
-            i64 ver = 0;
-            if (parse_did_open_params(msg.params_json.to_str(), &uri, &text, &ver)) {
-                store.set(uri.to_str(), text.to_str(), ver);
-                publish_file_diagnostics(uri.to_str(), text.to_str());
-            }
-            uri.drop();
-            text.drop();
-        } else if (strcmp(method, "textDocument/didChange") == 0) {
-            String uri = String.new();
-            String text = String.new();
-            i64 ver = 0;
-            if (parse_did_change_params(msg.params_json.to_str(), &uri, &text, &ver)) {
-                store.set(uri.to_str(), text.to_str(), ver);
-                publish_file_diagnostics(uri.to_str(), text.to_str());
-            }
-            uri.drop();
-            text.drop();
-        } else if (strcmp(method, "textDocument/didClose") == 0) {
-            String uri = String.new();
-            if (parse_document_uri_param(msg.params_json.to_str(), &uri)) {
-                store.remove(uri.to_str());
-                publish_empty_diagnostics(uri.to_str());
-            }
-            uri.drop();
-        } else if (strcmp(method, "textDocument/hover") == 0) {
-            String uri = String.new();
-            i64 line = 0;
-            i64 col = 0;
-            if (parse_position_params(msg.params_json.to_str(), &uri, &line, &col)) {
-                Document* doc = store.get(uri.to_str());
-                if (doc != (Document*)0) {
-                    String hover_res = compute_hover(doc.text.to_str(), line, col);
-                    send_response(msg.id_raw.to_str(), hover_res.to_str());
-                    hover_res.drop();
-                } else {
-                    send_response(msg.id_raw.to_str(), "null");
-                }
-            } else {
-                send_response(msg.id_raw.to_str(), "null");
-            }
-            uri.drop();
-        } else if (strcmp(method, "textDocument/definition") == 0) {
-            String uri = String.new();
-            i64 line = 0;
-            i64 col = 0;
-            if (parse_position_params(msg.params_json.to_str(), &uri, &line, &col)) {
-                Document* doc = store.get(uri.to_str());
-                if (doc != (Document*)0) {
-                    String def_res = compute_definition(doc.text.to_str(), uri.to_str(), line, col);
-                    send_response(msg.id_raw.to_str(), def_res.to_str());
-                    def_res.drop();
-                } else {
-                    send_response(msg.id_raw.to_str(), "null");
-                }
-            } else {
-                send_response(msg.id_raw.to_str(), "null");
-            }
-            uri.drop();
-        } else if (strcmp(method, "textDocument/formatting") == 0) {
-            String uri = String.new();
-            if (parse_document_uri_param(msg.params_json.to_str(), &uri)) {
-                Document* doc = store.get(uri.to_str());
-                if (doc != (Document*)0) {
-                    String format_res = compute_formatting(doc.text.to_str());
-                    send_response(msg.id_raw.to_str(), format_res.to_str());
-                    format_res.drop();
-                } else {
-                    send_response(msg.id_raw.to_str(), "[]");
-                }
-            } else {
-                send_response(msg.id_raw.to_str(), "[]");
-            }
-            uri.drop();
-        } else if (strcmp(method, "textDocument/completion") == 0) {
-            String uri = String.new();
-            i64 line = 0;
-            i64 col = 0;
-            if (parse_position_params(msg.params_json.to_str(), &uri, &line, &col)) {
-                Document* doc = store.get(uri.to_str());
-                if (doc != (Document*)0) {
-                    String comp_res = compute_completion(doc.text.to_str(), line, col);
-                    send_response(msg.id_raw.to_str(), comp_res.to_str());
-                    comp_res.drop();
-                } else {
-                    send_response(msg.id_raw.to_str(), "{\"isIncomplete\":false,\"items\":[]}");
-                }
-            } else {
-                send_response(msg.id_raw.to_str(), "{\"isIncomplete\":false,\"items\":[]}");
-            }
-            uri.drop();
-        } else if (strcmp(method, "textDocument/documentSymbol") == 0) {
-            String uri = String.new();
-            if (parse_document_uri_param(msg.params_json.to_str(), &uri)) {
-                Document* doc = store.get(uri.to_str());
-                if (doc != (Document*)0) {
-                    String syms = compute_document_symbols(doc.text.to_str());
-                    send_response(msg.id_raw.to_str(), syms.to_str());
-                    syms.drop();
-                } else {
-                    send_response(msg.id_raw.to_str(), "[]");
-                }
-            } else {
-                send_response(msg.id_raw.to_str(), "[]");
-            }
-            uri.drop();
-        } else if (strcmp(method, "shutdown") == 0) {
-            send_response(msg.id_raw.to_str(), "null");
-        } else if (strcmp(method, "exit") == 0) {
-            break;
-        } else {
-            if (msg.has_id) {
-                send_error(msg.id_raw.to_str(), -32601, "Method not found");
-            }
+        if (!action_context(context.to_str(), &actions_allowed, &refactors_allowed)) {
+            complete_error(pending, message.id_raw.to_str(), -32602, "Invalid code action parameters"); return;
         }
     }
+    if (strcmp(method, "textDocument/completion") == 0) {
+        String context = json_field(params, "context"); String trigger = String.new(); i64 kind = 0;
+        Optional<ImportCompletionContext> import_context = import_completion_context(doc, offset);
+        if (json_integer(context.to_str(), "triggerKind", &kind) && kind == 2
+            && json_string(context.to_str(), "triggerCharacter", &trigger)
+            && (trigger.equals(" ") || trigger.equals("{") || trigger.equals(","))
+            && !import_context.is_some()) {
+            complete_response(pending, message.id_raw.to_str(), "{\"isIncomplete\":false,\"items\":[]}"); return;
+        }
+    }
+    bool workspace_analysis = strcmp(method, "textDocument/references") == 0 || strcmp(method, "textDocument/rename") == 0
+        || strcmp(method, "textDocument/implementation") == 0 || strcmp(method, "textDocument/codeAction") == 0;
+    if (workspace_analysis && !index_request_workspace(store, index, pending)) {
+        complete_response(pending, message.id_raw.to_str(), "null"); return;
+    }
+    String result = String.new();
+    if (strcmp(method, "textDocument/hover") == 0) { result = compute_hover(doc, offset, client.hover_markdown); }
+    else if (strcmp(method, "textDocument/definition") == 0) { result = compute_definition(doc, offset); }
+    else if (strcmp(method, "textDocument/prepareCallHierarchy") == 0 || strcmp(method, "textDocument/prepareTypeHierarchy") == 0) {
+        result = prepare_hierarchy(doc, offset, strcmp(method, "textDocument/prepareCallHierarchy") == 0);
+    }
+    else if (strcmp(method, "textDocument/declaration") == 0 || strcmp(method, "textDocument/typeDefinition") == 0
+        || strcmp(method, "textDocument/implementation") == 0) {
+        SymbolTarget target = follow_import_alias(resolve_occurrence(doc, doc.analysis.occurrence_at(offset)));
+        if (strcmp(method, "textDocument/declaration") == 0) { result = target_location(declaration_target(target)); }
+        else if (strcmp(method, "textDocument/typeDefinition") == 0) { result = target_location(type_definition_target(target)); }
+        else { result = compute_implementations(store, doc, target); }
+    }
+    else if (strcmp(method, "textDocument/completion") == 0) { result = compute_completion(store, doc, offset, client, pending, index.paths.len() > 0); }
+    else if (strcmp(method, "textDocument/signatureHelp") == 0) { result = compute_signature_help(doc, offset, client); }
+    else if (strcmp(method, "textDocument/documentSymbol") == 0) { result = compute_document_symbols(doc, client.hierarchical_symbols); }
+    else if (strcmp(method, "textDocument/documentLink") == 0) { result = compute_document_links(store, doc, client.document_link_tooltips); }
+    else if (strcmp(method, "textDocument/codeAction") == 0) {
+        result = compute_code_actions(store, doc, action_range, actions_allowed, refactors_allowed, client, pending);
+    }
+    else if (strcmp(method, "textDocument/diagnostic") == 0) {
+        String previous = String.new();
+        if (!diagnostic_identifier(params) || !previous_diagnostic_result(params, &previous)) {
+            complete_error(pending, message.id_raw.to_str(), -32602, "Invalid diagnostic report parameters"); return;
+        }
+        result = compute_document_diagnostics(doc, store, client, previous.to_str());
+    }
+    else if (strcmp(method, "textDocument/formatting") == 0 || strcmp(method, "textDocument/rangeFormatting") == 0
+        || strcmp(method, "textDocument/rangesFormatting") == 0 || strcmp(method, "textDocument/onTypeFormatting") == 0) {
+        SourceFormatOptions options; Vec<FormatSelection> selections = Vec<FormatSelection>.new();
+        bool multiple = strcmp(method, "textDocument/rangesFormatting") == 0;
+        bool ranged = multiple || strcmp(method, "textDocument/rangeFormatting") == 0;
+        bool on_type = strcmp(method, "textDocument/onTypeFormatting") == 0;
+        if (!parse_format_options(params, &options)) { complete_error(pending, message.id_raw.to_str(), -32602, "Invalid formatting options"); return; }
+        String trigger = String.new();
+        if ((ranged && !parse_format_selections(doc, params, multiple, &selections))
+            || (on_type && (!parse_position_params(params, &uri, &line, &column) || !doc.offset(line, column, &offset)
+                || !json_string(params, "ch", &trigger) || (!trigger.equals("\n") && !trigger.equals("}") && !trigger.equals(";"))))) {
+            complete_error(pending, message.id_raw.to_str(), -32602, "Invalid formatting range or trigger"); return;
+        }
+        Result<String, SourceFormatError> formatted = on_type ? compute_on_type_formatting(doc, offset, &options) : compute_formatting(doc, &options, ranged, &selections);
+        if (formatted.is_err()) { complete_error(pending, message.id_raw.to_str(), -32803, "Formatting could not preserve the source safely"); return; }
+        result = formatted.unwrap();
+    }
+    else if (strcmp(method, "textDocument/semanticTokens/full") == 0) { result = compute_semantic_tokens(doc, &client.semantic); }
+    else if (strcmp(method, "textDocument/semanticTokens/full/delta") == 0) {
+        String previous = String.new();
+        if (!json_string(params, "previousResultId", &previous)) { complete_error(pending, message.id_raw.to_str(), -32602, "Missing semantic token result ID"); return; }
+        result = compute_semantic_delta(doc, &client.semantic, previous.to_str());
+    } else if (strcmp(method, "textDocument/semanticTokens/range") == 0) {
+        String json_range = json_field(params, "range"); Span range = Span.synthetic();
+        if (!parse_document_range(doc, json_range.to_str(), &range)) { complete_error(pending, message.id_raw.to_str(), -32602, "Invalid semantic token range"); return; }
+        result = compute_semantic_range(doc, &client.semantic, range.start, range.end);
+    }
+    else if (strcmp(method, "textDocument/foldingRange") == 0) { result = compute_folding(doc, client); }
+    else if (strcmp(method, "textDocument/selectionRange") == 0) {
+        Vec<i64> offsets = Vec<i64>.new();
+        if (!parse_selection_offsets(doc, params, &offsets)) {
+            complete_error(pending, message.id_raw.to_str(), -32602, "Invalid selection positions"); return;
+        }
+        result = compute_selection_ranges(doc, &offsets);
+    }
+    else if (strcmp(method, "textDocument/prepareRename") == 0) { result = compute_prepare_rename(doc, offset); }
+    else if (strcmp(method, "textDocument/references") == 0 || strcmp(method, "textDocument/documentHighlight") == 0) {
+        bool highlights = strcmp(method, "textDocument/documentHighlight") == 0;
+        String context = json_field(params, "context"); String declaration = json_field(context.to_str(), "includeDeclaration");
+        result = compute_references(store, doc, offset, highlights || declaration.equals("true"), highlights);
+    } else if (strcmp(method, "textDocument/rename") == 0) {
+        SymbolTarget target = resolve_occurrence(doc, doc.analysis.occurrence_at(offset));
+        if (target.symbol < 0) { result = String.from_str("null"); }
+        else if (rename_conflicts(store, doc, target, name.to_str())) {
+            complete_error(pending, message.id_raw.to_str(), -32602, "Rename would conflict with an existing binding"); return;
+        } else { result = compute_rename(store, doc, target, name.to_str(), client.versioned_edits); }
+    } else if (strcmp(method, "textDocument/inlayHint") == 0) {
+        String json_range = json_field(params, "range"); Span range = Span.synthetic();
+        if (!parse_document_range(doc, json_range.to_str(), &range)) {
+            complete_error(pending, message.id_raw.to_str(), -32602, "Invalid hint range"); return;
+        }
+        result = compute_inlay_hints(doc, range.start, range.end);
+    } else if (strcmp(method, "textDocument/codeLens") == 0) {
+        result = compute_code_lenses(doc);
+    }
+    else if (strcmp(method, "textDocument/moniker") == 0) { result = compute_moniker(doc, offset); }
+    else if (strcmp(method, "textDocument/inlineCompletion") == 0) {
+        result = compute_inline_completion(store, doc, offset, client, pending, index.paths.len() > 0);
+    }
+    else { complete_error(pending, message.id_raw.to_str(), -32601, "Method not found"); return; }
+    complete_response(pending, message.id_raw.to_str(), result.to_str());
+}
 
-    body.drop();
-    return 0;
+// workspace/executeCommand: `silver.extractVariable` re-runs the extract
+// refactor for command arguments [uri, range, name?]. With client applyEdit
+// support the edit is handed to the client and this request is answered when
+// the applyEdit response arrives; otherwise the WorkspaceEdit is the result.
+void handle_extract_command(ServerState* state, PendingMessage* pending, JsonRpcMessage* message) {
+    str params = message.params_json.to_str(); str id = message.id_raw.to_str();
+    String arguments = json_field(params, "arguments");
+    String arg0 = String.new(); String arg2 = String.new();
+    String uri = String.new(); String name = String.new();
+    bool ok = json_array_element(arguments.to_str(), 0, &arg0) && json_string_value(arg0.to_str(), &uri);
+    String range_raw = String.new();
+    if (ok) { ok = json_array_element(arguments.to_str(), 1, &range_raw); }
+    if (json_array_element(arguments.to_str(), 2, &arg2)) { json_string_value(arg2.to_str(), &name); }
+    if (!ok || uri.len() == 0) { complete_error(pending, id, -32602, "extractVariable requires [uri, range, name?]"); return; }
+    DocumentStore* store = &state.store; ClientOptions* client = &state.client;
+    Document* doc = store.get(uri.to_str());
+    if (doc == (Document*)0) {
+        String path = document_path(uri.to_str());
+        if (path.len() > 0) { doc = store.load(path.to_str()); store.refresh_imports(); }
+    }
+    if (doc == (Document*)0) { complete_error(pending, id, -32602, "Document not found"); return; }
+    doc.ensure_syntax();
+    Span selection = Span.synthetic();
+    if (!parse_document_range(doc, range_raw.to_str(), &selection)) {
+        complete_error(pending, id, -32602, "Invalid extract range"); return;
+    }
+    String action = extract_variable_action(doc, selection, name.to_str());
+    if (action.len() == 0) { complete_error(pending, id, -32602, "Selection is not an extractable expression"); return; }
+    String edit = json_field(action.to_str(), "edit");
+    if (client.apply_edit) { state.requests.apply_edit("Extract to variable", edit.to_str(), id); }
+    else { complete_response(pending, id, edit.to_str()); }
+}
+
+// workspace/executeCommand: `silver.openDocument` asks the client to reveal a
+// document, optionally with a selection, via window/showDocument.
+void handle_open_document_command(ServerState* state, PendingMessage* pending, JsonRpcMessage* message) {
+    str params = message.params_json.to_str(); str id = message.id_raw.to_str();
+    String arguments = json_field(params, "arguments");
+    String arg0 = String.new(); String uri = String.new();
+    if (!json_array_element(arguments.to_str(), 0, &arg0) || !json_string_value(arg0.to_str(), &uri)) {
+        complete_error(pending, id, -32602, "openDocument requires [uri, range?]"); return;
+    }
+    String range_raw = String.new();
+    json_array_element(arguments.to_str(), 1, &range_raw);
+    if (!state.client.show_document) { complete_response(pending, id, "null"); return; }
+    state.requests.show_document_request(uri.to_str(), range_raw.to_str(), id);
+}
+
+// Returns -1 to continue, or the exit status after an exit notification.
+i32 dispatch_message(ServerState* state, PendingMessage* pending) {
+        DocumentStore* store = &state.store; WorkspaceIndex* index = &state.index;
+        ClientOptions* client = &state.client; bool* initialized = &state.initialized; bool* shutdown = &state.shutdown;
+        str body = pending.body.to_str(); JsonRpcMessage message = JsonRpcMessage.new();
+        if (!pending.valid_encoding) { complete_error(pending, "null", -32700, "Parse error"); return -1; }
+        JsonReader validation = JsonReader.new(body);
+        bool valid_json = validation.skip_value(); validation.skip_whitespace();
+        if (!valid_json || validation.failed || validation.index != validation.length) {
+            complete_error(pending, "null", -32700, "Parse error"); return -1;
+        }
+        ResponseSink sink; sink.store = store; sink.index = index; sink.client = client; sink.trace = &state.trace;
+        if (state.requests.accept_response(body, &sink)) { return -1; }
+        if (!parse_rpc_request(body, &message)) {
+            complete_error(pending, "null", -32600, "Invalid Request"); return -1;
+        }
+        str method = message.method.to_str(); str params = message.params_json.to_str();
+        if (state.trace > 0) {
+            String line = String.from_str("C→S ");
+            line.push_str(method);
+            send_trace(line.to_str(), state.trace == 2 ? params : "");
+        }
+        if (*initialized && !*shutdown && message.has_id && !request_cancelled(pending) && progress_request(method) && !begin_progress(pending)) {
+            complete_error(pending, message.id_raw.to_str(), -32602, "Invalid work-done progress token"); return -1;
+        }
+        if (strcmp(method, "exit") == 0) { return *shutdown ? 0 : 1; }
+        if (*shutdown) {
+            if (message.has_id) { complete_error(pending, message.id_raw.to_str(), -32600, "Server has shut down"); }
+        } else if (strcmp(method, "initialize") == 0 && message.has_id) {
+            if (*initialized) { complete_error(pending, message.id_raw.to_str(), -32600, "Already initialized"); return -1; }
+            configure_workspace(store, params); *client = client_options(params); *initialized = true;
+            String result = server_capabilities(client); seal_message(pending, false); send_response(message.id_raw.to_str(), result.to_str());
+        } else if (!*initialized) {
+            if (message.has_id) { complete_error(pending, message.id_raw.to_str(), -32002, "Server not initialized"); }
+        } else if (strcmp(method, "shutdown") == 0 && message.has_id) {
+            if (client.telemetry) { send_telemetry("{\"event\":\"shutdown\",\"server\":\"aglsp\"}"); }
+            *shutdown = true; seal_message(pending, false); send_response(message.id_raw.to_str(), "null");
+        } else if (message.has_id && request_cancelled(pending)) { complete_error(pending, message.id_raw.to_str(), -32800, "Request cancelled"); }
+        else if (strcmp(method, "initialized") == 0) {
+            begin_index_session(state);
+            *index = workspace_index(store);
+            if (client.work_done_progress) { state.requests.create_progress(); }
+            if (client.telemetry) { send_telemetry("{\"event\":\"startup\",\"server\":\"aglsp\",\"version\":\"0.2.6\"}"); }
+            if (client.folders_query && store.discover_open_projects && store.roots.len() == 0) {
+                state.requests.request_folders();
+            }
+        }
+        else if (strcmp(method, "textDocument/didOpen") == 0) {
+            String uri = String.new(); String text = String.new(); i64 version = 0;
+            if (parse_did_open_params(params, &uri, &text, &version)) {
+                Document* doc = store.set(uri.to_str(), text.to_str(), version, true);
+                if (doc != (Document*)0) {
+                    bool discover = store.discover_open_projects || path_within_roots(&store.roots, doc.path.to_str());
+                    String manifest = discover && doc.path.len() > 0 ? project_manifest(doc.path.to_str()) : String.new(); i64 known = 0;
+                    while (known < index.manifests.len() && !index.manifests.get_ptr(known).equals(manifest.to_str())) { known += 1; }
+                    if (manifest.len() > 0 && known == index.manifests.len()) { begin_index_session(state); *index = workspace_index(store); }
+                    else if (store.discover_open_projects && doc.path.len() > 0) {
+                        String directory = path_dirname(doc.path.to_str()); enqueue_index_path(index, directory.to_str(), 0, true);
+                    }
+                    store.refresh_imports(); notify_analysis_change(state);
+                }
+            }
+        } else if (strcmp(method, "textDocument/didChange") == 0) {
+            String uri = String.new();
+            if (apply_document_changes(store, params, &uri)) {
+                store.refresh_imports(); notify_analysis_change(state);
+            }
+        } else if (strcmp(method, "textDocument/didClose") == 0) {
+            String uri = String.new();
+            if (parse_document_uri_param(params, &uri)) {
+                store.close(uri.to_str()); store.refresh_imports();
+                if (store.discover_open_projects && index.manifests.len() > 0) { begin_index_session(state); *index = workspace_index(store); }
+                if (!client.pull_diagnostics) { publish_empty_diagnostics(uri.to_str()); }
+                notify_analysis_change(state);
+            }
+        } else if (strcmp(method, "textDocument/didSave") == 0) {
+            String uri = String.new();
+            if (parse_document_uri_param(params, &uri)) {
+                Document* doc = store.get(uri.to_str());
+                if (doc != (Document*)0 && doc.open) {
+                    String saved = String.new();
+                    if (client.save_include_text && json_string(params, "text", &saved) && !saved.equals(doc.text.to_str())) {
+                        doc = store.set(uri.to_str(), saved.to_str(), doc.version + 1, true);
+                        store.refresh_imports(); notify_analysis_change(state);
+                    }
+                    if (doc != (Document*)0) {
+                        if (!client.pull_diagnostics) { publish_file_diagnostics(doc, store, client); }
+                        else if (client.diagnostic_refresh) { state.requests.refresh(ClientRequestKind.DiagnosticRefresh); }
+                    }
+                }
+            }
+        } else if (strcmp(method, "workspace/didChangeWorkspaceFolders") == 0) {
+            if (update_workspace_folders(store, params)) { begin_index_session(state); *index = workspace_index(store); notify_analysis_change(state); }
+        } else if (strcmp(method, "workspace/didChangeWatchedFiles") == 0) {
+            if (update_watched_files(store, params)) {
+                begin_index_session(state);
+                *index = workspace_index(store);
+                // Prompt when any changed entry is a package manifest.
+                String changes = json_field(params, "changes");
+                JsonReader reader = JsonReader.new(changes.to_str());
+                bool ask = false;
+                if (reader.begin_array()) {
+                    reader.skip_whitespace();
+                    while (!reader.failed && !ask && reader.index < reader.length && reader.input[reader.index] != ']') {
+                        i64 start = reader.index;
+                        if (!reader.skip_value()) { break; }
+                        String change = changes.substr(start, reader.index - start);
+                        String uri = String.new();
+                        if (json_string(change.to_str(), "uri", &uri)) {
+                            String path = document_path(uri.to_str());
+                            if (path_basename(path.to_str()).equals("silver.toml")) { ask = true; }
+                        }
+                        if (!skip_comma_if_present(&reader)) { break; }
+                        reader.skip_whitespace();
+                    }
+                }
+                if (ask) {
+                    send_show_message(2, "A package manifest changed on disk");
+                    state.requests.ask_manifest_reload("silver.toml");
+                }
+            }
+            notify_analysis_change(state);
+        }
+        else if (strcmp(method, "$/setTrace") == 0) {
+            String value = String.new();
+            if (json_string(params, "value", &value)) {
+                i64 level = trace_level(value.to_str());
+                if (level >= 0) { state.trace = level; }
+            }
+        }
+        else if (strcmp(method, "textDocument/willSave") == 0) {
+            // Accepted; didSave republishes analysis for the saved text.
+        }
+        else if (strcmp(method, "workspace/didChangeConfiguration") == 0) {
+            if (client.configuration && store.roots.len() > 0) {
+                String scope = path_to_file_uri(store.roots.get_ptr(0).to_str());
+                state.requests.request_configuration(scope.to_str());
+            }
+            notify_analysis_change(state);
+        }
+        else if (strcmp(method, "workspace/didCreateFiles") == 0) {
+            handle_did_create_files(store, index, params); notify_analysis_change(state);
+        }
+        else if (strcmp(method, "workspace/didDeleteFiles") == 0) {
+            handle_did_delete_files(store, index, params); notify_analysis_change(state);
+        }
+        else if (strcmp(method, "workspace/didRenameFiles") == 0) {
+            handle_did_rename_files(store, index, params); notify_analysis_change(state);
+        }
+        else if (strcmp(method, "completionItem/resolve") == 0 && message.has_id) {
+            Result<String, CompletionResolveError> resolved = compute_completion_resolve(store, params, client, pending);
+            if (resolved.is_err()) {
+                bool stale = resolved.unwrap_err() == CompletionResolveError.StaleItem;
+                complete_error(pending, message.id_raw.to_str(), stale ? -32801 : -32602, stale ? "Completion item is stale" : "Invalid completion item");
+            } else { String result = resolved.unwrap(); complete_response(pending, message.id_raw.to_str(), result.to_str()); }
+        }
+        else if (strcmp(method, "codeLens/resolve") == 0 && message.has_id) {
+            // Counts must see unopened callers, so finish the pending index first.
+            if (!index_request_workspace(store, index, pending)) {
+                complete_response(pending, message.id_raw.to_str(), "null");
+            } else {
+                String result = compute_code_lens_resolve(store, params, pending);
+                complete_response(pending, message.id_raw.to_str(), result.to_str());
+            }
+        }
+        else if (strcmp(method, "workspace/diagnostic") == 0 && message.has_id) {
+            Vec<PreviousDiagnostic> previous = Vec<PreviousDiagnostic>.new();
+            if (!diagnostic_identifier(params) || !parse_previous_diagnostics(params, &previous)) {
+                complete_error(pending, message.id_raw.to_str(), -32602, "Invalid workspace diagnostic parameters");
+            } else {
+                if (!index_request_workspace(store, index, pending)) {
+                    complete_response(pending, message.id_raw.to_str(), "null"); return -1;
+                }
+                String result = compute_workspace_diagnostics(store, client, &previous, pending);
+                complete_response(pending, message.id_raw.to_str(), result.to_str());
+            }
+        }
+        else if (strcmp(method, "workspace/symbol") == 0 && message.has_id) {
+            String query = String.new();
+            if (!json_string(params, "query", &query)) { complete_error(pending, message.id_raw.to_str(), -32602, "Missing symbol query"); }
+            else {
+                if (!index_request_workspace(store, index, pending)) {
+                    complete_response(pending, message.id_raw.to_str(), "null"); return -1;
+                }
+                String result = compute_workspace_symbols(store, query.to_str(), pending);
+                complete_response(pending, message.id_raw.to_str(), result.to_str());
+            }
+        }
+        else if (strcmp(method, "workspace/willRenameFiles") == 0 && message.has_id) {
+            if (!client.file_operations) { complete_error(pending, message.id_raw.to_str(), -32601, "Method not found"); }
+            else {
+                if (!index_request_workspace(store, index, pending)) {
+                    complete_response(pending, message.id_raw.to_str(), "null"); return -1;
+                }
+                String result = compute_file_rename_edits(store, params, client, pending);
+                complete_response(pending, message.id_raw.to_str(), result.to_str());
+            }
+        }
+        else if (strcmp(method, "workspace/willCreateFiles") == 0 && message.has_id) {
+            Vec<String> uris = Vec<String>.new();
+            if (!client.will_create) { complete_error(pending, message.id_raw.to_str(), -32601, "Method not found"); }
+            else if (!parse_file_uris(params, &uris)) { complete_error(pending, message.id_raw.to_str(), -32602, "Invalid file operation parameters"); }
+            else { complete_response(pending, message.id_raw.to_str(), "null"); }
+        }
+        else if (strcmp(method, "workspace/willDeleteFiles") == 0 && message.has_id) {
+            Vec<String> uris = Vec<String>.new();
+            if (!client.will_delete) { complete_error(pending, message.id_raw.to_str(), -32601, "Method not found"); }
+            else if (!parse_file_uris(params, &uris)) { complete_error(pending, message.id_raw.to_str(), -32602, "Invalid file operation parameters"); }
+            else { complete_response(pending, message.id_raw.to_str(), "null"); }
+        }
+        else if (strcmp(method, "textDocument/willSaveWaitUntil") == 0 && message.has_id) {
+            String uri = String.new();
+            if (!parse_document_uri_param(params, &uri)) { complete_error(pending, message.id_raw.to_str(), -32602, "Invalid document parameters"); }
+            else { complete_response(pending, message.id_raw.to_str(), "null"); }
+        }
+        else if (strcmp(method, "client/registerCapability") == 0 && message.has_id) {
+            if (!valid_registrations(params, "registrations", true)) {
+                complete_error(pending, message.id_raw.to_str(), -32602, "Invalid capability registrations");
+            } else { complete_response(pending, message.id_raw.to_str(), "null"); }
+        }
+        else if (strcmp(method, "client/unregisterCapability") == 0 && message.has_id) {
+            if (!valid_registrations(params, "unregisterations", false)) {
+                complete_error(pending, message.id_raw.to_str(), -32602, "Invalid capability unregistrations");
+            } else { complete_response(pending, message.id_raw.to_str(), "null"); }
+        }
+        else if (strcmp(method, "workspace/executeCommand") == 0 && message.has_id) {
+            String command = String.new();
+            if (!json_string(params, "command", &command)) {
+                complete_error(pending, message.id_raw.to_str(), -32602, "Missing command");
+            } else if (command.equals("silver.extractVariable")) { handle_extract_command(state, pending, &message); }
+            else if (command.equals("silver.openDocument")) { handle_open_document_command(state, pending, &message); }
+            else { complete_error(pending, message.id_raw.to_str(), -32602, "Unknown command"); }
+        }
+        else if (message.has_id) {
+            bool calls = strcmp(method, "callHierarchy/incomingCalls") == 0 || strcmp(method, "callHierarchy/outgoingCalls") == 0;
+            bool types = strcmp(method, "typeHierarchy/supertypes") == 0 || strcmp(method, "typeHierarchy/subtypes") == 0;
+            if (request_cancelled(pending)) { complete_error(pending, message.id_raw.to_str(), -32800, "Request cancelled"); }
+            else if (calls || types) {
+                SymbolTarget target; i64 error = hierarchy_target(store, params, calls, &target);
+                if (error != 0) { complete_error(pending, message.id_raw.to_str(), error, error == -32801 ? "Hierarchy item is stale" : "Invalid hierarchy item"); }
+                else {
+                    if (!index_request_workspace(store, index, pending)) {
+                        complete_response(pending, message.id_raw.to_str(), "null"); return -1;
+                    }
+                    String result = calls ? compute_call_hierarchy(store, target, strcmp(method, "callHierarchy/incomingCalls") == 0, pending)
+                        : compute_type_hierarchy(store, target, strcmp(method, "typeHierarchy/supertypes") == 0, pending);
+                    complete_response(pending, message.id_raw.to_str(), result.to_str());
+                }
+            }
+            else { handle_document_request(store, index, client, &message, pending); }
+        }
+        return -1;
+}
+
+i32 main() {
+    ServerState state; state.store = DocumentStore.new(); state.index.paths = Vec<IndexPath>.new();
+    state.client = client_options("{}"); state.initialized = false; state.shutdown = false;
+    state.trace = 0; state.index_progress = false;
+    state.requests = ClientRequests.new();
+    Transport transport = Transport.new();
+    state.transport_ptr = &transport;
+    TaskRecord* reader = thread_spawn(read_transport, (i64)&transport);
+    if (reader == (TaskRecord*)0) { return 1; }
+    i32 status = 1;
+    while (true) {
+        Optional<PendingMessage*> next = transport.messages.try_recv();
+        if (!next.is_some() && transport.messages.is_closed()) {
+            // The reader can enqueue and close between the first receive and this check.
+            next = transport.messages.try_recv();
+            if (!next.is_some()) { status = state.shutdown ? 0 : 1; break; }
+        }
+        if (!next.is_some() && !state.shutdown
+            && (state.index.paths.len() > 0 || state.index_progress)) {
+            // A client cancel of the server-created indexing token stops the scan.
+            if (__atomic_load_i32(&transport.index_cancelled, ATOMIC_ACQUIRE) != 0) {
+                state.index.paths.clear();
+                __atomic_store_i32(&transport.index_cancelled, 0, ATOMIC_RELEASE);
+                if (state.index_progress) {
+                    state.requests.progress_value("end", "Indexing cancelled");
+                    state.index_progress = false;
+                }
+                continue;
+            }
+            if (state.index.paths.len() > 0) {
+                if (state.requests.progress_created) {
+                    if (!state.index_progress) {
+                        state.requests.progress_value("begin", "Indexing workspace");
+                        state.index_progress = true;
+                    }
+                    String report = String.from_str("Indexing workspace (");
+                    i64 remaining = state.index.paths.len();
+                    report.push_display(&remaining);
+                    report.push_str(" paths left)");
+                    state.requests.progress_value("report", report.to_str());
+                }
+                index_workspace_step(&state.store, &state.index);
+            }
+            if (state.index.paths.len() == 0 && state.index_progress) {
+                state.requests.progress_value("end", "Indexing finished");
+                state.index_progress = false;
+            }
+            continue;
+        }
+        if (!next.is_some()) { next = transport.messages.recv(); }
+        if (!next.is_some()) { status = state.shutdown ? 0 : 1; break; }
+        PendingMessage* pending = next.unwrap();
+        i32 result = dispatch_message(&state, pending);
+        finish_progress(pending);
+        release_message(&transport, pending);
+        state.store.compact_closed();
+        if (result >= 0) { status = result; break; }
+    }
+    transport.stop(); thread_join(reader);
+    return status;
 }

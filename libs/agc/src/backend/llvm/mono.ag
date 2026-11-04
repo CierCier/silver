@@ -275,7 +275,9 @@ LLVMOpaqueValue* mono_ensure_free_function(LlvmContext* ctx, str base, Vec<u32>*
         if (!exact_function_type
             && (param.declared_type.kind == ProjectionTypeKind.Pointer
                 || param.declared_type.kind == ProjectionTypeKind.Reference || type_id == TYPE_VOID)) {
-            type_id = ctx.types.get_pointer(type_id, true);
+            type_id = param.declared_type.kind == ProjectionTypeKind.Reference
+                ? ctx.types.get_reference(type_id, param.declared_type.is_mutable)
+                : ctx.types.get_pointer(type_id, true);
         }
         mono_ensure_child_layouts(ctx, type_id, &ctx.generic_layout_ids);
         param_types.push(llvm_lower_type(ctx.ctx, ctx.types, type_id));
@@ -375,7 +377,9 @@ LLVMOpaqueValue* mono_declare_specialized(LlvmContext* ctx, str base, MonoMethod
         if (!exact_function_type
             && (param.declared_type.kind == ProjectionTypeKind.Pointer
                 || param.declared_type.kind == ProjectionTypeKind.Reference || param_type_id == TYPE_VOID)) {
-            param_type_id = ctx.types.get_pointer(param_type_id, true);
+            param_type_id = param.declared_type.kind == ProjectionTypeKind.Reference
+                ? ctx.types.get_reference(param_type_id, param.declared_type.is_mutable)
+                : ctx.types.get_pointer(param_type_id, true);
         }
         mono_ensure_child_layouts(ctx, param_type_id, &ctx.generic_layout_ids);
         param_types.push(llvm_lower_type(ctx.ctx, ctx.types, param_type_id));
@@ -400,9 +404,13 @@ LLVMOpaqueValue* mono_ensure_generic_method_call(LlvmContext* ctx, u32 receiver_
     Vec<u32> param_ids = Vec<u32>.new();
     Vec<u32> arg_ids = Vec<u32>.new();
     String failure = String.new();
-    bool found = mono_resolve_generic_method(ctx.pool, ctx.root, ctx.types,
+    TypeEntry receiver_entry = *ctx.types.get(ctx.types.resolve_subst(receiver_type));
+    while (receiver_entry.kind == TypeKind.Pointer || receiver_entry.kind == TypeKind.Reference) {
+        receiver_entry = *ctx.types.get(receiver_entry.inner);
+    }
+    bool found = mono_resolve_method_call(ctx.pool, ctx.root, ctx.types,
         receiver_type, method, args_start, static_method, &template, &param_ids,
-        &arg_ids, &failure);
+        &arg_ids, &failure, receiver_entry.count == 0);
     LLVMOpaqueValue* fn_val = (LLVMOpaqueValue*)0;
     if (found && failure.len() == 0) {
         TypeEntry* receiver = ctx.types.get(ctx.types.resolve_subst(receiver_type));
@@ -569,6 +577,19 @@ bool mono_layout_seen(Vec<u32>* layout_ids, u32 type_id) {
         i += 1;
     }
     return false;
+}
+
+void mono_enum_payload_types(LlvmContext* ctx, u32 type_id, str variant,
+                              Vec<u32>* payloads) {
+    TypeEntry instance = *ctx.types.get(type_id);
+    str base = ctx.types.names.get(instance.name_id);
+    Vec<u32> parameters = Vec<u32>.new();
+    if (!mono_push_owner_type_arguments(ctx.root, ctx.types, type_id, &parameters)) {
+        ctx.note_unresolved("enum-payload-type", base);
+        return;
+    }
+    llvm_enum_payload_types(ctx.types, ctx.root, base, variant, payloads);
+    ctx.types.pop_subst(parameters.len());
 }
 
 u32 mono_resolve_struct_field_type(LlvmContext* ctx, u32 struct_type_id, u32 field_type_id) {
