@@ -89,6 +89,42 @@ void send_notification(str method, str params_json) {
     notif.drop();
 }
 
+void send_typed_message(str method, i64 message_type, str text) {
+    String out = String.from_str("{\"type\":");
+    out.push_display(&message_type);
+    out.push_str(",\"message\":\"");
+    json_escape(text, &out);
+    out.push_str("\"}");
+    send_notification(method, out.to_str());
+    out.drop();
+}
+
+void send_log_message(i64 message_type, str text) {
+    send_typed_message("window/logMessage", message_type, text);
+}
+
+void send_show_message(i64 message_type, str text) {
+    send_typed_message("window/showMessage", message_type, text);
+}
+
+void send_telemetry(str payload) {
+    send_notification("telemetry/event", payload);
+}
+
+void send_trace(str message, str verbose) {
+    String out = String.from_str("{\"message\":\"");
+    json_escape(message, &out);
+    out.push('"');
+    if (strlen(verbose) > 0) {
+        out.push_str(",\"verbose\":\"");
+        json_escape(verbose, &out);
+        out.push('"');
+    }
+    out.push('}');
+    send_notification("$/logTrace", out.to_str());
+    out.drop();
+}
+
 void send_error(str id_json, i64 code, str message) {
     if (strlen(id_json) == 0) { return; }
     String resp = String.from_str("{\"jsonrpc\":\"2.0\",\"id\":");

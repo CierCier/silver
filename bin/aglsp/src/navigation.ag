@@ -1,5 +1,6 @@
 import document;
 import json_rpc;
+import tooling.index;
 
 void append_location(String* out, Document* doc, Span span) {
     out.push_str("{\"uri\":\""); json_escape(doc.uri.to_str(), out);
@@ -142,4 +143,35 @@ String compute_implementations(DocumentStore* store, Document* context, SymbolTa
         candidate.compact(); i += 1;
     }
     out.push(']'); return move out;
+}
+
+// LSP SymbolKind values for moniker results.
+i64 moniker_symbol_kind(IdeSymbolKind kind) {
+    return match kind {
+        IdeSymbolKind.Function : 12, IdeSymbolKind.Method : 6, IdeSymbolKind.Struct : 23,
+        IdeSymbolKind.Enum : 10, IdeSymbolKind.Trait : 11, IdeSymbolKind.Global : 13,
+        IdeSymbolKind.TypeAlias : 12, IdeSymbolKind.Field : 8, IdeSymbolKind.Variant : 22,
+        IdeSymbolKind.Parameter : 13, IdeSymbolKind.Local : 13, IdeSymbolKind.ImportAlias : 2,
+        IdeSymbolKind.TypeParameter : 26, _ : 12,
+    };
+}
+
+// A moniker is a stable, client-independent identity for the symbol at the
+// position: scheme "silver", project-unique, keyed by document URI and name.
+String compute_moniker(Document* doc, i64 offset) {
+    doc.ensure_syntax();
+    SymbolTarget target = resolve_occurrence(doc, doc.analysis.occurrence_at(offset));
+    if (target.symbol < 0 || target.document == (Document*)0) { return String.from_str("null"); }
+    IdeSymbol* symbol = target.document.analysis.symbols.get_ptr(target.symbol);
+    String identifier = String.from_str(target.document.uri.to_str());
+    identifier.push('#');
+    identifier.push_str(symbol.name.to_str());
+    if (symbol.owner.len() > 0) { identifier.push('.'); identifier.push_str(symbol.owner.to_str()); }
+    String out = String.from_str("[{\"scheme\":\"silver\",\"identifier\":\"");
+    json_escape(identifier.to_str(), &out);
+    out.push_str("\",\"unique\":\"project\",\"kind\":");
+    i64 kind = moniker_symbol_kind(symbol.kind);
+    out.push_display(&kind);
+    out.push_str("}]");
+    return move out;
 }

@@ -7,6 +7,8 @@ import params;
 import json_rpc;
 import transport;
 import capabilities;
+import workspace;
+import project.manifest;
 import frontend.ast;
 import frontend.lexer;
 
@@ -39,6 +41,78 @@ Vec<FileRename> parse_file_renames(str params) {
         reader.skip_whitespace();
     }
     return move renames;
+}
+
+// Parse the `files` array of a create/delete file-operation request or a
+// didCreate/didDelete notification: plain `{ "uri": ... }` entries.
+bool parse_file_uris(str params, Vec<String>* uris) {
+    String files = json_field(params, "files");
+    JsonReader reader = JsonReader.new(files.to_str());
+    if (!reader.begin_array()) { return false; }
+    reader.skip_whitespace();
+    while (!reader.failed && reader.index < reader.length && reader.input[reader.index] != ']') {
+        i64 start = reader.index;
+        if (!reader.skip_value()) { break; }
+        String item = files.substr(start, reader.index - start);
+        String uri = String.new();
+        if (!json_string(item.to_str(), "uri", &uri) || uri.len() == 0) { return false; }
+        uris.push(move uri);
+        if (!skip_comma_if_present(&reader)) { break; }
+        reader.skip_whitespace();
+    }
+    return reader.end_array() && !reader.failed;
+}
+
+void mark_imports_dirty(DocumentStore* store) {
+    i64 i = 0;
+    while (i < store.docs.len()) { store.docs.get(i).imports_dirty = true; i += 1; }
+    store.refresh_imports();
+}
+
+// New files enter the background index; new manifests rebuild the scope.
+void handle_did_create_files(DocumentStore* store, WorkspaceIndex* index, str params) {
+    Vec<String> uris = Vec<String>.new();
+    if (!parse_file_uris(params, &uris)) { return; }
+    bool manifest = false; i64 i = 0;
+    while (i < uris.len()) {
+        String path = document_path(uris.get_ptr(i).to_str());
+        if (path.len() > 0) {
+            if (path_basename(path.to_str()).equals(MANIFEST_FILE)) { manifest = true; }
+            else if (path.ends_with(".ag")) { enqueue_index_path(index, path.to_str(), 0, false); }
+        }
+        i += 1;
+    }
+    mark_imports_dirty(store);
+    if (manifest) { *index = workspace_index(store); }
+}
+
+void handle_did_delete_files(DocumentStore* store, WorkspaceIndex* _index, str params) {
+    Vec<String> uris = Vec<String>.new();
+    if (!parse_file_uris(params, &uris)) { return; }
+    i64 i = 0;
+    while (i < uris.len()) {
+        Document* doc = store.get(uris.get_ptr(i).to_str());
+        if (doc != (Document*)0 && !doc.open) { store.close(uris.get_ptr(i).to_str()); }
+        i += 1;
+    }
+    mark_imports_dirty(store);
+}
+
+void handle_did_rename_files(DocumentStore* store, WorkspaceIndex* index, str params) {
+    Vec<FileRename> renames = parse_file_renames(params);
+    bool manifest = false; i64 i = 0;
+    while (i < renames.len()) {
+        FileRename* rename = renames.get_ptr(i);
+        String old_uri = path_to_file_uri(rename.old_path.to_str());
+        Document* doc = store.get(old_uri.to_str());
+        if (doc != (Document*)0 && !doc.open) { store.close(old_uri.to_str()); }
+        if (path_basename(rename.new_path.to_str()).equals(MANIFEST_FILE)) { manifest = true; }
+        else if (rename.new_path.ends_with(".ag")) { enqueue_index_path(index, rename.new_path.to_str(), 0, false); }
+        old_uri.drop();
+        i += 1;
+    }
+    mark_imports_dirty(store);
+    if (manifest) { *index = workspace_index(store); }
 }
 
 void collect_import_nodes(SyntaxNode* node, Vec<SyntaxNode*>* imports) {

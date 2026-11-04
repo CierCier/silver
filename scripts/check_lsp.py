@@ -136,6 +136,22 @@ class Session:
             raise AssertionError(f"{method}: {response['error']}")
         return response["result"]
 
+    def wait_notification(self, method):
+        """Wait for a server-sent message with the given method (request or notification)."""
+        while True:
+            try:
+                message = self.messages.get(timeout=30)
+            except queue.Empty as error:
+                raise AssertionError(f"timeout waiting for {method}") from error
+            if isinstance(message, Exception):
+                self.stderr.seek(0)
+                raise AssertionError(f"{method}: {message}\n{self.stderr.read().decode(errors='replace')}")
+            if message.get("method") == method:
+                return message
+            self.notifications.append(message)
+            if message.get("method") == "textDocument/publishDiagnostics":
+                self.diagnostics[message["params"]["uri"]] = message["params"]
+
     def close(self):
         try:
             if self.process.poll() is None:
@@ -3664,6 +3680,273 @@ class NativeLsp(unittest.TestCase):
             self.session.send("textDocument/didClose", {"textDocument": {"uri": uri}})
             if imported:
                 self.session.send("textDocument/didClose", {"textDocument": {"uri": model_uri}})
+
+
+    def capable_session(self, text=None, workspace=None, window=None, init_options=None, with_root=True):
+        """A session whose initialize advertises extra client capabilities."""
+        session = Session(self.binary, self.root)
+        self.addCleanup(session.close)
+        capabilities = {"textDocument": {
+            "hover": {"contentFormat": ["markdown", "plaintext"]},
+            "completion": {"completionItem": {"documentationFormat": ["markdown"]}},
+            "signatureHelp": {"signatureInformation": {"documentationFormat": ["markdown"]}},
+            "documentSymbol": {"hierarchicalDocumentSymbolSupport": True},
+            "codeAction": {"codeActionLiteralSupport": {"codeActionKind": {"valueSet": ["quickfix", "refactor"]}}},
+            "documentLink": {"tooltipSupport": True},
+            "publishDiagnostics": {"versionSupport": True, "relatedInformation": True},
+            "semanticTokens": semantic_capability(),
+        }, "workspace": {"workspaceFolders": True}}
+        if text:
+            capabilities["textDocument"].update(text)
+        if workspace:
+            capabilities["workspace"].update(workspace)
+        if window:
+            capabilities["window"] = window
+        params = {"processId": None, "capabilities": capabilities}
+        if with_root:
+            params["rootUri"] = self.root.as_uri()
+        if init_options is not None:
+            params["initializationOptions"] = init_options
+        advertised = session.result("initialize", params)["capabilities"]
+        session.send("initialized", {})
+        return session, advertised
+
+    def open_in(self, session, text, name="main.ag", version=1):
+        uri = (self.root / name).as_uri()
+        session.send("textDocument/didOpen", {"textDocument": {
+            "uri": uri, "languageId": "silver", "version": version, "text": text,
+        }})
+        session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+        return uri
+
+    def test_save_will_save_and_include_text(self):
+        session, caps = self.capable_session(text={
+            "synchronization": {"willSave": True, "willSaveWaitUntil": True},
+            "save": {"includeText": True},
+        })
+        sync = caps["textDocumentSync"]
+        self.assertEqual(sync["save"], {"includeText": True})
+        self.assertIs(sync["willSave"], True)
+        self.assertIs(sync["willSaveWaitUntil"], True)
+        text = "i32 main() { return 1; }\n"
+        uri = self.open_in(session, text)
+        session.send("textDocument/willSave", {"textDocument": {"uri": uri}, "reason": 1})
+        self.assertIsNone(session.result("textDocument/willSaveWaitUntil", {"textDocument": {"uri": uri}, "reason": 1}))
+        saved = text + "i32 saved_marker() { return 2; }\n"
+        session.send("textDocument/didSave", {"textDocument": {"uri": uri}, "text": saved})
+        names = [item["name"] for item in session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})]
+        self.assertIn("saved_marker", names)
+        # Without includeText the sync capability stays a plain boolean.
+        plain, plain_caps = self.capable_session()
+        self.assertIs(plain_caps["textDocumentSync"]["save"], True)
+        self.assertNotIn("willSave", plain_caps["textDocumentSync"])
+
+    def test_dynamic_capability_registration_roundtrip(self):
+        session, _ = self.capable_session()
+        self.assertIsNone(session.result("client/registerCapability", {"registrations": [
+            {"id": "watch-1", "method": "workspace/didChangeWatchedFiles",
+             "registerOptions": {"watchers": [{"globPattern": "**/*.ag"}]}},
+            {"id": "cfg-1", "method": "workspace/didChangeConfiguration"},
+        ]}))
+        self.assertIsNone(session.result("client/unregisterCapability",
+                                          {"unregisterations": [{"id": "watch-1"}, {"id": "cfg-1"}]}))
+        for bad in ({"registrations": [{"id": 1, "method": "x"}]},
+                    {"registrations": [{"id": "x"}]},
+                    {"registrations": "no"}):
+            self.assertEqual(session.request("client/registerCapability", bad)["error"]["code"], -32602)
+        self.assertEqual(session.request("client/unregisterCapability", {"unregisterations": "no"})["error"]["code"], -32602)
+
+    def test_file_operation_will_requests_and_did_notifications(self):
+        session, caps = self.capable_session(workspace={"fileOperations": {
+            "willCreate": True, "willDelete": True, "willRename": True,
+            "didCreate": True, "didRename": True, "didDelete": True,
+        }})
+        operations = caps["workspace"]["fileOperations"]
+        self.assertIn("willCreate", operations)
+        self.assertIn("willDelete", operations)
+        self.assertIn("willRename", operations)
+        self.assertIs(operations["didCreate"], True)
+        self.assertIs(operations["didRename"], True)
+        self.assertIs(operations["didDelete"], True)
+        created = self.root / "created.ag"
+        uri = created.as_uri()
+        self.assertIsNone(session.result("workspace/willCreateFiles", {"files": [{"uri": uri}]}))
+        self.assertIsNone(session.result("workspace/willDeleteFiles", {"files": [{"uri": uri}]}))
+        self.assertEqual(session.request("workspace/willCreateFiles", {"files": "no"})["error"]["code"], -32602)
+        # Without the client capability the requests are not advertised.
+        self.assertEqual(self.session.request("workspace/willCreateFiles", {"files": [{"uri": uri}]})["error"]["code"], -32601)
+        created.write_text("i32 created_marker() { return 1; }\n")
+        session.send("workspace/didCreateFiles", {"files": [{"uri": uri}]})
+        self.assertEqual([s["name"] for s in session.result("workspace/symbol", {"query": "created_marker"})],
+                         ["created_marker"])
+        renamed = self.root / "renamed.ag"
+        os.rename(created, renamed)
+        session.send("workspace/didRenameFiles", {"files": [{"oldUri": uri, "newUri": renamed.as_uri()}]})
+        self.assertEqual(len(session.result("workspace/symbol", {"query": "created_marker"})), 1)
+        os.unlink(renamed)
+        session.send("workspace/didDeleteFiles", {"files": [{"uri": renamed.as_uri()}]})
+        self.assertEqual(session.result("workspace/symbol", {"query": "created_marker"}), [])
+
+    def test_execute_command_extract_variable_returns_workspace_edit(self):
+        self.assertEqual(self.capabilities["workspace"]["executeCommandProvider"]["commands"],
+                         ["silver.extractVariable", "silver.openDocument"])
+        text = "i32 main() { return 40 + 2; }\n"
+        uri = self.open(text)
+        selection = location(text, "40 + 2")
+        result = self.session.result("workspace/executeCommand", {
+            "command": "silver.extractVariable",
+            "arguments": [uri, {"start": selection["start"], "end": selection["end"]}, "total"],
+        })
+        self.assertEqual(apply_edits(text, result["changes"][uri]),
+                         "let total = 40 + 2;\ni32 main() { return total; }\n")
+        # Without a name a fresh one is minted.
+        default = self.session.result("workspace/executeCommand", {
+            "command": "silver.extractVariable",
+            "arguments": [uri, {"start": selection["start"], "end": selection["end"]}],
+        })
+        self.assertIn("extracted", apply_edits(text, default["changes"][uri]))
+        self.assertEqual(self.session.request("workspace/executeCommand",
+                                               {"command": "silver.nope", "arguments": []})["error"]["code"], -32602)
+        self.assertEqual(self.session.request("workspace/executeCommand", {"arguments": []})["error"]["code"], -32602)
+
+    def test_execute_command_apply_edit_and_show_document(self):
+        session, _ = self.capable_session(workspace={"applyEdit": True}, window={"showDocument": {"support": True}})
+        text = "i32 main() { return 40 + 2; }\n"
+        uri = self.open_in(session, text)
+        selection = location(text, "40 + 2")
+        session.send("workspace/executeCommand", {
+            "command": "silver.extractVariable",
+            "arguments": [uri, {"start": selection["start"], "end": selection["end"]}, "total"],
+        }, request_id=900)
+        apply_request = session.wait_notification("workspace/applyEdit")
+        self.assertEqual(apply_request["params"]["label"], "Extract to variable")
+        session.respond(apply_request["id"], {"applied": True})
+        self.assertIsNone(session.wait_response(900, "executeCommand")["result"])
+        session.send("workspace/executeCommand", {
+            "command": "silver.extractVariable",
+            "arguments": [uri, {"start": selection["start"], "end": selection["end"]}, "total"],
+        }, request_id=901)
+        declined = session.wait_notification("workspace/applyEdit")
+        session.respond(declined["id"], {"applied": False})
+        self.assertEqual(session.wait_response(901, "executeCommand")["error"]["code"], -32802)
+        session.send("workspace/executeCommand", {"command": "silver.openDocument", "arguments": [uri]}, request_id=902)
+        shown = session.wait_notification("window/showDocument")
+        self.assertEqual(shown["params"]["uri"], uri)
+        session.respond(shown["id"], {"success": True})
+        self.assertEqual(session.wait_response(902, "executeCommand")["result"], {"success": True})
+
+    def test_moniker_and_inline_completion(self):
+        session, caps = self.capable_session(text={"moniker": True, "inlineCompletion": True})
+        self.assertIs(caps["monikerProvider"], True)
+        self.assertIn("inlineCompletionProvider", caps)
+        text = "import helper;\ni32 main() { return answer(7); }\n"
+        uri = self.open_in(session, text)
+        monikers = session.result("textDocument/moniker", {
+            "textDocument": {"uri": uri}, "position": position(text, text.index("answer"))})
+        self.assertEqual(monikers[0]["scheme"], "silver")
+        self.assertEqual(monikers[0]["kind"], 12)
+        self.assertTrue(monikers[0]["identifier"].endswith("#answer"))
+        self.assertIsNone(session.result("textDocument/moniker", {
+            "textDocument": {"uri": uri}, "position": position(text, text.index("\n"))}))
+        inline = session.result("textDocument/inlineCompletion", {
+            "textDocument": {"uri": uri}, "position": position(text, text.index("ans") + 3)})
+        self.assertEqual(len(inline["items"]), 1)
+        offered = json.dumps(inline["items"][0])
+        self.assertIn("answer", offered)
+
+    def test_work_done_progress_create_and_indexing_reports(self):
+        for index in range(60):
+            (self.root / f"bulk{index}.ag").write_text(f"i32 bulk_marker_{index}() {{ return {index}; }}\n")
+        session, _ = self.capable_session(window={"workDoneProgress": True})
+        create = session.wait_notification("window/workDoneProgress/create")
+        self.assertEqual(create["params"]["token"], "silver/index")
+        session.respond(create["id"], None)
+        first = session.wait_notification("$/progress")
+        self.assertEqual(first["params"]["token"], "silver/index")
+        self.assertEqual(first["params"]["value"]["kind"], "begin")
+        self.assertEqual(len(session.result("workspace/symbol", {"query": "bulk_marker_59"})), 1)
+        # Reports emitted while a request drains the queue land in notifications;
+        # wait for the terminal end message on top of those.
+        ended = False
+        for _ in range(500):
+            message = session.wait_notification("$/progress")
+            if message["params"]["token"] == "silver/index" and message["params"]["value"]["kind"] == "end":
+                ended = True
+                break
+        progress = [first] + [m for m in session.notifications if m.get("method") == "$/progress"]
+        kinds = [m["params"]["value"]["kind"] for m in progress if m["params"]["token"] == "silver/index"]
+        self.assertIn("report", kinds)
+        self.assertTrue(ended)
+
+    def test_configuration_request_and_trace_levels(self):
+        session, _ = self.capable_session(workspace={"configuration": True})
+        text = "i32 main() { return 1; }\n"
+        uri = self.open_in(session, text)
+        session.send("workspace/didChangeConfiguration", {"settings": {}})
+        request = session.wait_notification("workspace/configuration")
+        self.assertEqual(request["params"]["items"][0]["section"], "silver")
+        session.respond(request["id"], [{"trace": "verbose"}])
+        session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+        traces = [m for m in session.notifications if m.get("method") == "$/logTrace"]
+        self.assertTrue(any("documentSymbol" in m["params"]["message"] for m in traces))
+        session.send("$/setTrace", {"value": "off"})
+        # Drain the trace entry for the $/setTrace message itself, then verify
+        # that later requests are no longer traced.
+        session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+        session.notifications.clear()
+        session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+        self.assertFalse(any(m.get("method") == "$/logTrace" for m in session.notifications))
+        session.send("$/setTrace", {"value": "bogus"})
+        session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+        session.notifications.clear()
+        session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+        self.assertFalse(any(m.get("method") == "$/logTrace" for m in session.notifications))
+
+    def test_workspace_folders_request_when_no_root_supplied(self):
+        session = Session(self.binary, self.root)
+        self.addCleanup(session.close)
+        session.result("initialize", {"processId": None,
+                                      "capabilities": {"workspace": {"workspaceFolders": True}}})
+        session.send("initialized", {})
+        request = session.wait_notification("workspace/workspaceFolders")
+        session.respond(request["id"], [{"uri": self.root.as_uri(), "name": self.root.name}])
+        self.assertEqual([s["name"] for s in session.result("workspace/symbol", {"query": "answer"})], ["answer"])
+
+    def test_telemetry_events_when_opted_in(self):
+        session, _ = self.capable_session(init_options={"telemetry": True})
+        startup = session.wait_notification("telemetry/event")
+        self.assertEqual(startup["params"]["event"], "startup")
+        session.result("shutdown")
+        session.send("exit")
+        session.process.wait(timeout=10)
+        events = [m for m in session.notifications if m.get("method") == "telemetry/event"]
+        self.assertEqual(events[-1]["params"]["event"], "shutdown")
+        # Without the opt-in no telemetry is sent.
+        plain, _ = self.capable_session()
+        plain.result("workspace/symbol", {"query": "answer"})
+        self.assertFalse(any(m.get("method") == "telemetry/event" for m in plain.notifications))
+
+    def test_code_lens_and_folding_refresh_requests(self):
+        session, _ = self.capable_session(workspace={
+            "codeLens": {"refreshSupport": True}, "foldingRange": {"refreshSupport": True}})
+        self.open_in(session, "i32 main() { return 1; }\n")
+        methods = [m["method"] for m in session.notifications if str(m.get("method", "")).endswith("/refresh")]
+        self.assertIn("workspace/codeLens/refresh", methods)
+        self.assertIn("workspace/foldingRange/refresh", methods)
+
+    def test_manifest_change_prompts_reload_via_show_message_request(self):
+        manifest = self.root / "silver.toml"
+        manifest.write_text('name = "project"\nversion = "1"\n')
+        (self.root / "api.ag").write_text("i32 prompted_marker() { return 1; }\n")
+        session = self.folder_session([self.root])
+        self.assertEqual(len(session.result("workspace/symbol", {"query": "prompted_marker"})), 1)
+        manifest.write_text('name = "project"\nversion = "2"\n')
+        session.send("workspace/didChangeWatchedFiles", {"changes": [{"uri": manifest.as_uri(), "type": 2}]})
+        prompt = session.wait_notification("window/showMessageRequest")
+        self.assertIn("manifest", prompt["params"]["message"])
+        self.assertTrue(any(m.get("method") == "window/showMessage" for m in session.notifications))
+        session.respond(prompt["id"], {"title": "Reload workspace"})
+        self.assertEqual(len(session.result("workspace/symbol", {"query": "prompted_marker"})), 1)
 
 
 if __name__ == "__main__":

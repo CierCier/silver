@@ -2,6 +2,7 @@ import document;
 import positions;
 import json_rpc;
 import capabilities;
+import params;
 import tooling.search;
 import frontend.ast;
 import frontend.lower_expr;
@@ -733,4 +734,47 @@ String compute_signature_help(Document* doc, i64 offset, ClientOptions* client) 
         out.push('}'); i += 1;
     }
     out.push_str("]}],\"activeSignature\":0,\"activeParameter\":"); out.push_display(&active); out.push('}'); return move out;
+}
+
+bool inline_ident_char(u8 ch) {
+    return (ch >= (u8)'a' && ch <= (u8)'z') || (ch >= (u8)'A' && ch <= (u8)'Z')
+        || (ch >= (u8)'0' && ch <= (u8)'9') || ch == (u8)'_';
+}
+
+// Ghost-text completion: run the normal completion engine at the cursor and
+// offer its strongest item as a single inline completion. Items that carry
+// their own textEdit keep it; otherwise the text replaces the current word.
+String compute_inline_completion(DocumentStore* store, Document* doc, i64 offset, ClientOptions* client,
+                                 PendingMessage* pending, bool index_pending) {
+    String result = compute_completion(store, doc, offset, client, pending, index_pending);
+    String out = String.from_str("{\"items\":[");
+    String items = json_field(result.to_str(), "items");
+    String item = String.new();
+    if (json_array_element(items.to_str(), 0, &item) && item.starts_with("{")) {
+        String label = String.new(); String insert = String.new();
+        json_string(item.to_str(), "label", &label);
+        json_string(item.to_str(), "insertText", &insert);
+        String text_edit = json_field(item.to_str(), "textEdit");
+        String filter = label.clone();
+        bool has_insert = insert.len() > 0;
+        String text = has_insert ? move insert : move label;
+        if (text_edit.len() > 0) {
+            out.push_str("{\"textEdit\":");
+            out.push_str(text_edit.to_str());
+            out.push('}');
+        } else if (text.len() > 0) {
+            i64 word_start = offset;
+            while (word_start > 0 && inline_ident_char(doc.text.data[word_start - 1])) { word_start -= 1; }
+            Span word = Span.synthetic(); word.start = word_start; word.end = offset;
+            out.push_str("{\"range\":");
+            doc.append_range(&out, word);
+            out.push_str(",\"insertText\":\"");
+            json_escape(text.to_str(), &out);
+            out.push_str("\",\"filterText\":\"");
+            json_escape(filter.to_str(), &out);
+            out.push_str("\"}");
+        }
+    }
+    out.push_str("]}");
+    return move out;
 }

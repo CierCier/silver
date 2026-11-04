@@ -37,6 +37,10 @@ struct Transport {
     i32 stopping;
     i32 reader_waiting;
     i32 completion_epoch;
+    // Identity of the server-created indexing progress token, so a client
+    // workDoneProgress/cancel for it stops background indexing.
+    String index_identity;
+    i32 index_cancelled;
 }
 
 String request_identity(str raw) {
@@ -148,6 +152,9 @@ void read_transport(i64 address) {
                 i += 1;
             }
             transport.mutex.unlock();
+            if (!request_cancel && id.len() > 0 && id.equals(transport.index_identity.to_str())) {
+                __atomic_store_i32(&transport.index_cancelled, 1, ATOMIC_RELEASE);
+            }
             continue;
         }
         PendingMessage* pending = alloc<PendingMessage>(1);
@@ -184,6 +191,8 @@ impl Transport {
         transport.mutex = RawMutex.new(); transport.pending = Vec<PendingMessage*>.new();
         transport.stopping = 0;
         transport.completion_epoch = 0;
+        transport.index_identity = request_identity("\"silver/index\"");
+        __atomic_store_i32(&transport.index_cancelled, 0, ATOMIC_RELEASE);
         __atomic_store_i32(&transport.reader_waiting, 0, ATOMIC_RELEASE);
         return move transport;
     }
@@ -197,5 +206,6 @@ impl Transport {
 impl Drop for Transport {
     void drop(*self) {
         while (self.pending.len() > 0) { release_message(self, self.pending.get(self.pending.len() - 1)); }
+        self.index_identity.drop();
     }
 }

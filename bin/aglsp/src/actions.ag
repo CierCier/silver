@@ -3,6 +3,7 @@ import imports;
 import params;
 import json_rpc;
 import capabilities;
+import symbols;
 
 bool action_quickfix_context(str json, bool* allowed) {
     String diagnostics = json_field(json, "diagnostics"); JsonReader reader = JsonReader.new(diagnostics.to_str());
@@ -80,8 +81,9 @@ String action_fresh_name(Document* doc, str base) {
 
 // Offer `let name = <selection>;` on the line above the selection and replace
 // the selection with the new binding. `let` infers the type, so no annotation
-// is needed.
-String extract_variable_action(Document* doc, Span selection) {
+// is needed. A valid `preferred` name (from an executeCommand argument) is
+// used when it does not collide; otherwise a fresh name is minted.
+String extract_variable_action(Document* doc, Span selection, str preferred) {
     if (selection.start >= selection.end || selection.end > doc.text.len()) { return String.new(); }
     String selected = doc.text.substr(selection.start, selection.end - selection.start);
     if (selected.len() == 0 || selected.len() != strlen(selected.to_str())) { return String.new(); }
@@ -98,7 +100,9 @@ String extract_variable_action(Document* doc, Span selection) {
         indent.push(doc.text.data[cursor]);
         cursor += 1;
     }
-    String name = action_fresh_name(doc, "extracted");
+    String name = String.new();
+    if (strlen(preferred) > 0 && valid_rename(preferred)) { name = action_fresh_name(doc, preferred); }
+    else { name = action_fresh_name(doc, "extracted"); }
     String inserted = String.from_str("let ");
     inserted.push_str(name.to_str());
     inserted.push_str(" = ");
@@ -129,7 +133,7 @@ String compute_code_actions(DocumentStore* store, Document* active, Span selecti
     while (i + 1 < imports.len()) { out.push(imports.data[i]); i += 1; }
     if (imports.len() > 2) { comma = true; }
     if (refactor) {
-        String extra = extract_variable_action(active, selection);
+        String extra = extract_variable_action(active, selection, "");
         if (extra.len() > 0) {
             if (comma) { out.push(','); }
             out.push_str(extra.to_str());

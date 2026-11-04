@@ -1,15 +1,72 @@
 import capabilities;
 import json_rpc;
+import params;
+import document;
+import workspace;
 
-enum ClientRequestKind { DiagnosticRefresh; SemanticRefresh; InlayHintRefresh; }
+enum ClientRequestKind { DiagnosticRefresh; SemanticRefresh; InlayHintRefresh; CodeLensRefresh; FoldingRefresh; }
 
 struct ClientRequest { String id; ClientRequestKind kind; bool repeat; }
 
-struct ClientRequests { Vec<ClientRequest> pending; i64 next_id; }
+// An executeCommand waiting on a server-to-client request (applyEdit or
+// showDocument). Keyed by the server request id so pipelined commands each
+// complete from their own response.
+struct PendingCommand { String server_id; String command_id; }
+
+// Dispatcher-owned context so server-request responses can act on the
+// workspace (rebuild the index, apply configuration) when they arrive.
+struct ResponseSink {
+    DocumentStore* store;
+    WorkspaceIndex* index;
+    ClientOptions* client;
+    i64* trace;
+}
+
+struct ClientRequests {
+    Vec<ClientRequest> pending;
+    Vec<PendingCommand> commands;
+    i64 next_id;
+    bool progress_requested;
+    bool progress_created;
+}
+
+i64 trace_level(str value) {
+    if (strcmp(value, "off") == 0) { return 0; }
+    if (strcmp(value, "messages") == 0) { return 1; }
+    if (strcmp(value, "verbose") == 0) { return 2; }
+    return -1;
+}
 
 impl ClientRequests {
     ClientRequests new() {
-        ClientRequests requests; requests.pending = Vec<ClientRequest>.new(); requests.next_id = 0; return move requests;
+        ClientRequests requests;
+        requests.pending = Vec<ClientRequest>.new();
+        requests.commands = Vec<PendingCommand>.new();
+        requests.next_id = 0;
+        requests.progress_requested = false;
+        requests.progress_created = false;
+        return move requests;
+    }
+
+    // Send a server-to-client request with a `silver/<prefix>/<n>` id and return
+    // that id. One-shot requests are routed by id in accept_response; refresh
+    // requests are tracked in pending so acknowledgements can be matched.
+    String send_server_request(ClientRequests* self, str prefix, str method, str params_json) {
+        self.next_id += 1;
+        String id = String.from_str("silver/");
+        id.push_str(prefix);
+        id.push('/');
+        id.push_display(&self.next_id);
+        String out = String.from_str("{\"jsonrpc\":\"2.0\",\"id\":\"");
+        json_escape(id.to_str(), &out);
+        out.push_str("\",\"method\":\"");
+        out.push_str(method);
+        out.push_str("\",\"params\":");
+        out.push_str(params_json);
+        out.push('}');
+        send_raw_payload(out.to_str());
+        out.drop();
+        return move id;
     }
 
     void refresh(ClientRequests* self, ClientRequestKind kind) {
@@ -26,27 +83,167 @@ impl ClientRequests {
             ClientRequestKind.DiagnosticRefresh : "workspace/diagnostic/refresh",
             ClientRequestKind.SemanticRefresh : "workspace/semanticTokens/refresh",
             ClientRequestKind.InlayHintRefresh : "workspace/inlayHint/refresh",
+            ClientRequestKind.CodeLensRefresh : "workspace/codeLens/refresh",
+            ClientRequestKind.FoldingRefresh : "workspace/foldingRange/refresh",
         };
         out.push_str("\",\"method\":\""); out.push_str(method);
         out.push_str("\"}"); self.pending.push(move request); send_raw_payload(out.to_str());
+        out.drop();
     }
 
-    bool accept_response(ClientRequests* self, str body, ClientOptions* client) {
+    // Ask the client to create the server-owned indexing progress token. The
+    // token is only used after the client acknowledges the create request.
+    void create_progress(ClientRequests* self) {
+        if (self.progress_requested) { return; }
+        self.progress_requested = true;
+        self.send_server_request("progress", "window/workDoneProgress/create", "{\"token\":\"silver/index\"}");
+    }
+
+    void progress_value(ClientRequests* self, str kind, str message) {
+        if (!self.progress_created) { return; }
+        String out = String.from_str("{\"token\":\"silver/index\",\"value\":{\"kind\":\"");
+        out.push_str(kind);
+        out.push_str("\",\"message\":\"");
+        json_escape(message, &out);
+        out.push_str("\"}}");
+        send_notification("$/progress", out.to_str());
+        out.drop();
+    }
+
+    void request_folders(ClientRequests* self) {
+        self.send_server_request("folders", "workspace/workspaceFolders", "{}");
+    }
+
+    void request_configuration(ClientRequests* self, str scope_uri) {
+        String params = String.from_str("{\"items\":[{\"scopeUri\":\"");
+        json_escape(scope_uri, &params);
+        params.push_str("\",\"section\":\"silver\"}]}");
+        self.send_server_request("config", "workspace/configuration", params.to_str());
+        params.drop();
+    }
+
+    // Hand a workspace edit to the client; the originating executeCommand is
+    // answered when the applyEdit response arrives.
+    void apply_edit(ClientRequests* self, str label, str edit_json, str command_id_raw) {
+        String params = String.from_str("{\"label\":\"");
+        json_escape(label, &params);
+        params.push_str("\",\"edit\":");
+        params.push_str(edit_json);
+        params.push('}');
+        String server_id = self.send_server_request("applyedit", "workspace/applyEdit", params.to_str());
+        params.drop();
+        PendingCommand entry; entry.server_id = move server_id; entry.command_id = String.from_str(command_id_raw);
+        self.commands.push(move entry);
+    }
+
+    void show_document_request(ClientRequests* self, str uri, str selection_json, str command_id_raw) {
+        String params = String.from_str("{\"uri\":\"");
+        json_escape(uri, &params);
+        params.push_str("\",\"takeFocus\":false");
+        if (strlen(selection_json) > 0) { params.push_str(",\"selection\":"); params.push_str(selection_json); }
+        params.push('}');
+        String server_id = self.send_server_request("showdocument", "window/showDocument", params.to_str());
+        params.drop();
+        PendingCommand entry; entry.server_id = move server_id; entry.command_id = String.from_str(command_id_raw);
+        self.commands.push(move entry);
+    }
+
+    // A watched package manifest changed; offer to rebuild the workspace scope.
+    void ask_manifest_reload(ClientRequests* self, str path) {
+        String params = String.from_str("{\"type\":2,\"message\":\"Package manifest changed: ");
+        json_escape(path, &params);
+        params.push_str(". Reload the workspace?\",\"actions\":[{\"title\":\"Reload workspace\"},{\"title\":\"Ignore\"}]}");
+        self.send_server_request("showmessage", "window/showMessageRequest", params.to_str());
+        params.drop();
+    }
+
+    // Answer the executeCommand that is waiting on server request `server_id`.
+    void complete_pending_command(ClientRequests* self, str server_id, str result_json, bool failed) {
+        i64 i = 0;
+        while (i < self.commands.len()) {
+            if (self.commands.get_ptr(i).server_id.equals(server_id)) {
+                String id = move self.commands.get_ptr(i).command_id;
+                self.commands.swap_remove(i);
+                if (failed) { send_error(id.to_str(), -32802, "Client did not apply the requested edit"); }
+                else if (strlen(result_json) > 0) { send_response(id.to_str(), result_json); }
+                else { send_response(id.to_str(), "null"); }
+                id.drop();
+                return;
+            }
+            i += 1;
+        }
+    }
+
+    bool accept_response(ClientRequests* self, str body, ResponseSink* sink) {
         String method = json_field(body, "method"); String id = json_field(body, "id");
         String result = json_field(body, "result"); String error = json_field(body, "error");
         if (method.len() > 0 || id.len() == 0 || (result.len() == 0 && error.len() == 0)) { return false; }
         String version = String.new(); String decoded_id = String.new();
         if (!json_string(body, "jsonrpc", &version) || !version.equals("2.0") || !json_string(body, "id", &decoded_id)
             || (result.len() > 0 && error.len() > 0)) { return true; }
+        str rid = decoded_id.to_str();
+        if (decoded_id.starts_with("silver/progress/")) {
+            self.progress_created = error.len() == 0;
+            return true;
+        }
+        if (decoded_id.starts_with("silver/folders/")) {
+            Vec<String> uris = Vec<String>.new();
+            if (error.len() == 0 && workspace_folder_uris(result.to_str(), &uris)) {
+                i64 i = 0; bool changed = false;
+                while (i < uris.len()) {
+                    if (add_workspace_root(sink.store, uris.get_ptr(i).to_str())) { changed = true; }
+                    i += 1;
+                }
+                if (changed) { *sink.index = workspace_index(sink.store); }
+            }
+            return true;
+        }
+        if (decoded_id.starts_with("silver/config/")) {
+            if (error.len() == 0) {
+                String item = String.new();
+                if (json_array_element(result.to_str(), 0, &item)) {
+                    String trace = String.new();
+                    if (json_string(item.to_str(), "trace", &trace)) {
+                        i64 level = trace_level(trace.to_str());
+                        if (level >= 0) { *sink.trace = level; }
+                    }
+                }
+            }
+            return true;
+        }
+        if (decoded_id.starts_with("silver/applyedit/")) {
+            if (error.len() > 0) { self.complete_pending_command(rid, "", true); }
+            else {
+                String applied = json_field(result.to_str(), "applied");
+                if (!applied.equals("true")) { self.complete_pending_command(rid, "", true); }
+                else { self.complete_pending_command(rid, "null", false); }
+            }
+            return true;
+        }
+        if (decoded_id.starts_with("silver/showdocument/")) {
+            if (error.len() > 0) { self.complete_pending_command(rid, "", true); }
+            else { self.complete_pending_command(rid, result.to_str(), false); }
+            return true;
+        }
+        if (decoded_id.starts_with("silver/showmessage/")) {
+            String title = String.new();
+            if (error.len() == 0 && json_string(result.to_str(), "title", &title) && title.equals("Reload workspace")) {
+                *sink.index = workspace_index(sink.store);
+                sink.store.refresh_imports();
+            }
+            return true;
+        }
         i64 i = 0;
         while (i < self.pending.len()) {
-            if (self.pending.get_ptr(i).id.equals(decoded_id.to_str())) {
+            if (self.pending.get_ptr(i).id.equals(rid)) {
                 ClientRequest completed = self.pending.take(i);
                 if (error.len() > 0) {
                     match completed.kind {
-                        ClientRequestKind.DiagnosticRefresh : { client.diagnostic_refresh = false; },
-                        ClientRequestKind.SemanticRefresh : { client.semantic_refresh = false; },
-                        ClientRequestKind.InlayHintRefresh : { client.inlay_refresh = false; },
+                        ClientRequestKind.DiagnosticRefresh : { sink.client.diagnostic_refresh = false; },
+                        ClientRequestKind.SemanticRefresh : { sink.client.semantic_refresh = false; },
+                        ClientRequestKind.InlayHintRefresh : { sink.client.inlay_refresh = false; },
+                        ClientRequestKind.CodeLensRefresh : { sink.client.code_lens_refresh = false; },
+                        ClientRequestKind.FoldingRefresh : { sink.client.folding_refresh = false; },
                     }
                 } else if (completed.repeat) { self.refresh(completed.kind); }
                 break;

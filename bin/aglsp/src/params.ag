@@ -47,6 +47,58 @@ bool json_integer(str json, str field, i64* output) {
     return reader.read_i64(output) && !reader.failed && reader.index == reader.length;
 }
 
+// Decode a raw JSON string value (not an object field).
+bool json_string_value(str json, String* output) {
+    JsonReader reader = JsonReader.new(json);
+    String decoded = reader.read_string();
+    if (reader.failed || decoded.len() != strlen(decoded.to_str()) || (decoded.len() > 0 && !decoded.is_valid_utf8())) {
+        return false;
+    }
+    *output = move decoded;
+    return true;
+}
+
+// Return the raw JSON of element `index` in a JSON array.
+bool json_array_element(str json, i64 index, String* output) {
+    JsonReader reader = JsonReader.new(json);
+    if (!reader.begin_array()) { return false; }
+    reader.skip_whitespace();
+    i64 i = 0;
+    while (!reader.failed && reader.index < reader.length && reader.input[reader.index] != ']') {
+        i64 start = reader.index;
+        if (!reader.skip_value()) { return false; }
+        if (i == index) {
+            output.clear();
+            output.push_bytes((u8*)json + start, reader.index - start);
+            return true;
+        }
+        i += 1;
+        if (!skip_comma_if_present(&reader)) { break; }
+        reader.skip_whitespace();
+    }
+    return false;
+}
+
+// Validate a client/(un)registerCapability payload: an array of objects that
+// each carry string `id` and (for registrations) `method` fields.
+bool valid_registrations(str json, str field, bool require_method) {
+    String registrations = json_field(json, field);
+    JsonReader reader = JsonReader.new(registrations.to_str());
+    if (!reader.begin_array()) { return false; }
+    reader.skip_whitespace();
+    while (!reader.failed && reader.index < reader.length && reader.input[reader.index] != ']') {
+        i64 start = reader.index;
+        if (!reader.skip_value()) { return false; }
+        String item = registrations.substr(start, reader.index - start);
+        String id = String.new(); String method = String.new();
+        if (!json_string(item.to_str(), "id", &id) || id.len() == 0) { return false; }
+        if (require_method && !json_string(item.to_str(), "method", &method)) { return false; }
+        if (!skip_comma_if_present(&reader)) { break; }
+        reader.skip_whitespace();
+    }
+    return reader.end_array() && !reader.failed;
+}
+
 bool parse_document_uri_param(str json, String* uri) {
     String document = json_field(json, "textDocument");
     return json_string(document.to_str(), "uri", uri) && uri.len() > 0;

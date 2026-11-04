@@ -101,6 +101,24 @@ struct ClientOptions {
     bool folding_line_only;
     i64 folding_range_limit;
     bool file_operations;
+    bool will_create;
+    bool will_delete;
+    bool did_create;
+    bool did_rename;
+    bool did_delete;
+    bool work_done_progress;
+    bool show_document;
+    bool apply_edit;
+    bool configuration;
+    bool code_lens_refresh;
+    bool folding_refresh;
+    bool folders_query;
+    bool save_include_text;
+    bool will_save;
+    bool will_save_wait_until;
+    bool moniker;
+    bool inline_completion;
+    bool telemetry;
 }
 
 String client_field(str json, str path) {
@@ -177,6 +195,28 @@ ClientOptions client_options(str params) {
     options.folding_line_only = line_only.equals("true");
     String file_operations = client_field(params, "capabilities.workspace.fileOperations.willRename");
     options.file_operations = file_operations.equals("true");
+    String operations = client_field(params, "capabilities.workspace.fileOperations");
+    options.will_create = json_field(operations.to_str(), "willCreate").equals("true");
+    options.will_delete = json_field(operations.to_str(), "willDelete").equals("true");
+    options.did_create = json_field(operations.to_str(), "didCreate").equals("true");
+    options.did_rename = json_field(operations.to_str(), "didRename").equals("true");
+    options.did_delete = json_field(operations.to_str(), "didDelete").equals("true");
+    options.work_done_progress = client_field(params, "capabilities.window.workDoneProgress").equals("true");
+    options.show_document = client_field(params, "capabilities.window.showDocument.support").equals("true");
+    options.apply_edit = client_field(params, "capabilities.workspace.applyEdit").equals("true");
+    options.configuration = client_field(params, "capabilities.workspace.configuration").equals("true");
+    options.code_lens_refresh = client_field(params, "capabilities.workspace.codeLens.refreshSupport").equals("true");
+    options.folding_refresh = client_field(params, "capabilities.workspace.foldingRange.refreshSupport").equals("true");
+    options.folders_query = client_field(params, "capabilities.workspace.workspaceFolders").equals("true");
+    options.save_include_text = client_field(params, "capabilities.textDocument.save.includeText").equals("true");
+    String synchronization = client_field(params, "capabilities.textDocument.synchronization");
+    options.will_save = json_field(synchronization.to_str(), "willSave").equals("true");
+    options.will_save_wait_until = json_field(synchronization.to_str(), "willSaveWaitUntil").equals("true");
+    // Moniker and inline-completion providers are advertised statically: the
+    // protocol defines no client capability that gates them.
+    options.moniker = true;
+    options.inline_completion = true;
+    options.telemetry = json_field(json_field(params, "initializationOptions").to_str(), "telemetry").equals("true");
     i64 fold_limit = 0; options.folding_range_limit = 2147483647;
     if (json_integer(folding.to_str(), "rangeLimit", &fold_limit) && fold_limit >= 0 && fold_limit <= 2147483647) {
         options.folding_range_limit = fold_limit;
@@ -187,13 +227,37 @@ ClientOptions client_options(str params) {
 String server_capabilities(ClientOptions* client) {
     String out = String.from_str("{\"capabilities\":{\"positionEncoding\":\"utf-16\",");
     out.push_str("\"workspace\":{\"workspaceFolders\":{\"supported\":true,\"changeNotifications\":true}");
-    if (client.file_operations) {
-        out.push_str(",\"fileOperations\":{\"willRename\":{\"filters\":[{\"scheme\":\"file\",\"pattern\":{\"glob\":\"**/*.ag\"}},{\"scheme\":\"file\",\"pattern\":{\"glob\":\"**\",\"matches\":\"folder\"}}]}}");
+    out.push_str(",\"executeCommandProvider\":{\"commands\":[\"silver.extractVariable\",\"silver.openDocument\"]}");
+    if (client.file_operations || client.will_create || client.will_delete
+        || client.did_create || client.did_rename || client.did_delete) {
+        out.push_str(",\"fileOperations\":{");
+        bool first_operation = true;
+        if (client.will_create) {
+            out.push_str("\"willCreate\":{\"filters\":[{\"scheme\":\"file\",\"pattern\":{\"glob\":\"**/*.ag\"}}]}");
+            first_operation = false;
+        }
+        if (client.file_operations) {
+            if (!first_operation) { out.push(','); } first_operation = false;
+            out.push_str("\"willRename\":{\"filters\":[{\"scheme\":\"file\",\"pattern\":{\"glob\":\"**/*.ag\"}},{\"scheme\":\"file\",\"pattern\":{\"glob\":\"**\",\"matches\":\"folder\"}}]}");
+        }
+        if (client.will_delete) {
+            if (!first_operation) { out.push(','); } first_operation = false;
+            out.push_str("\"willDelete\":{\"filters\":[{\"scheme\":\"file\",\"pattern\":{\"glob\":\"**/*.ag\"}},{\"scheme\":\"file\",\"pattern\":{\"glob\":\"**\",\"matches\":\"folder\"}}]}");
+        }
+        if (client.did_create) { if (!first_operation) { out.push(','); } first_operation = false; out.push_str("\"didCreate\":true"); }
+        if (client.did_rename) { if (!first_operation) { out.push(','); } first_operation = false; out.push_str("\"didRename\":true"); }
+        if (client.did_delete) { if (!first_operation) { out.push(','); } out.push_str("\"didDelete\":true"); }
+        out.push_str("}");
     }
     out.push_str("},");
-    out.push_str("\"textDocumentSync\":{\"openClose\":true,\"change\":2,\"save\":true},");
+    out.push_str("\"textDocumentSync\":{\"openClose\":true,\"change\":2,\"save\":");
+    if (client.save_include_text) { out.push_str("{\"includeText\":true}"); } else { out.push_str("true"); }
+    if (client.will_save) { out.push_str(",\"willSave\":true"); }
+    if (client.will_save_wait_until) { out.push_str(",\"willSaveWaitUntil\":true"); }
+    out.push_str("},");
     out.push_str("\"hoverProvider\":true,\"documentSymbolProvider\":true,\"workspaceSymbolProvider\":{\"workDoneProgress\":true},");
     out.push_str("\"documentLinkProvider\":{\"resolveProvider\":false},");
+    out.push_str("\"monikerProvider\":true,");
     out.push_str("\"definitionProvider\":true,\"declarationProvider\":true,\"typeDefinitionProvider\":true,\"implementationProvider\":{\"workDoneProgress\":true},");
     out.push_str("\"referencesProvider\":{\"workDoneProgress\":true},\"documentHighlightProvider\":true,\"renameProvider\":{\"prepareProvider\":true,\"workDoneProgress\":true},");
     out.push_str("\"callHierarchyProvider\":{\"workDoneProgress\":true},\"typeHierarchyProvider\":{\"workDoneProgress\":true},");
@@ -203,6 +267,7 @@ String server_capabilities(ClientOptions* client) {
     out.push_str("\"foldingRangeProvider\":true,\"selectionRangeProvider\":true,\"inlayHintProvider\":true,");
     out.push_str("\"codeLensProvider\":{\"resolveProvider\":true},");
     out.push_str("\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"]},\"completionProvider\":{\"resolveProvider\":true,\"triggerCharacters\":[\".\",\":\",\" \",\"{\",\",\"]}");
+    out.push_str(",\"inlineCompletionProvider\":true");
     if (client.pull_diagnostics) { out.push_str(",\"diagnosticProvider\":{\"identifier\":\"silver\",\"interFileDependencies\":true,\"workspaceDiagnostics\":true,\"workDoneProgress\":true}"); }
     if (client.semantic.full != SemanticFullMode.Disabled || client.semantic.range) {
         out.push_str(",\"semanticTokensProvider\":{\"legend\":{\"tokenTypes\":[");

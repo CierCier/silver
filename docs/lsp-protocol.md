@@ -20,10 +20,10 @@ can be narrower, as recorded below.
 | Open | No handler or outgoing request/notification. Ignoring a notification does not count as support. |
 | Unmapped | Not provided; a Silver language, library, or document model must be defined first. |
 
-Capabilities are statically advertised by [capabilities.ag][capabilities].
-Requests without handlers return `MethodNotFound`. The server does not dynamically
-register capabilities. Resolve requests marked open are not advertised; their
-providers return eager results instead.
+Capabilities are advertised by [capabilities.ag][capabilities], and the server
+accepts dynamic `client/registerCapability`/`client/unregisterCapability`
+requests. Requests without handlers return `MethodNotFound`. Resolve requests
+marked open are not advertised; their providers return eager results instead.
 
 ## Client-to-server requests
 
@@ -44,7 +44,7 @@ providers return eager results instead.
 | `textDocument/completion` | C → S | Supported | Visible declarations, locals, fields/methods, keywords and types; module paths, import selections and source auto-import edits. Contextual import triggers, fuzzy ranking, callable overload ambiguity checks, and whole-identifier edits; snippets require client support. Best 100 results; incomplete while truncated or background workspace indexing is pending. Expected-type ranking, artifact exports and postfix assists remain open. [Source][completion], [import planning][imports], [checks][checks]. |
 | `completionItem/resolve` | C → S | Supported | Deferred detail/docs when requested; preserves primary/import edits and rejects stale source or caller revisions and invalidated module mappings. [Source][completion], [checks][checks]. |
 | `textDocument/signatureHelp` | C → S | Supported | Nested/generic calls, generic-aware argument boundaries and instance receiver omission. Negotiated UTF-16 parameter label offsets support precise highlighting; other clients receive strings from the displayed signature. Overload resolution and generic substitution remain limited. [Source][completion], [checks][checks]. |
-| `textDocument/inlineCompletion` | C → S | Open | No inline-completion provider. Added to the stable inventory in 3.18. |
+| `textDocument/inlineCompletion` | C → S | Supported | Statically advertised (`inlineCompletionProvider`). Offers the strongest completion item as a single inline edit (its own `textEdit` when present, otherwise the current word replaced). [Source][completion], [checks][checks]. |
 | `textDocument/documentSymbol` | C → S | Supported | Declaration ranges and name selections; nested symbols or flat fallback according to client capability. [Source][symbols], [checks][checks]. |
 | `workspace/symbol` | C → S | Supported | Eager locations, ranked fuzzy search of active workspace/open files and reachable imports. [Source][symbols], [checks][checks]. |
 | `workspaceSymbol/resolve` | C → S | Open | Workspace symbol locations are eager; no resolve provider. |
@@ -59,7 +59,7 @@ providers return eager results instead.
 | `workspace/diagnostic` | C → S | Conditional | Pull-diagnostic sessions; workspace/open-file reports, previous result IDs and removal reports. No partial-result streaming. [Source][diagnostics], [checks][checks]. |
 | `textDocument/codeAction` | C → S | Conditional | Import quick fixes require action-literal support. Honors `context.only`, compiler path precedence, callable overload safety, ambiguity/privacy/conflict checks and negotiated versioned edits. `refactor.extract` offers extract-to-variable for a single-line expression selection; refactors are opt-in through `context.only`. Other fixes and refactorings remain open. [Source][actions], [checks][checks]. |
 | `codeAction/resolve` | C → S | Open | Import edits are eager; no lazy action resolution. |
-| `workspace/executeCommand` | C → S | Open | No command provider or command-based action fallback. |
+| `workspace/executeCommand` | C → S | Supported | Commands `silver.extractVariable` (arguments `[uri, range, name?]`, answered via `workspace/applyEdit` when the client supports it, else the `WorkspaceEdit` is the result) and `silver.openDocument` (answers through `window/showDocument` when supported). Unknown commands return `-32602`. [Source][dispatch], [checks][checks]. |
 | `textDocument/codeLens` | C → S | Supported | One lens per non-local declaration, carrying the document URI, symbol index and revision. Counts are deferred to resolve. Runnable-target and implementation lenses remain open. [Source][lenses], [checks][checks]. |
 | `codeLens/resolve` | C → S | Supported | Counts references across the workspace and returns an `N references` title; stale revisions and unknown symbols resolve to `null`. [Source][lenses], [checks][checks]. |
 | `textDocument/documentLink` | C → S | Supported | Eager source-import links, compiler search precedence and overlays; tooltips require client support. Missing/inactive imports and AGM artifacts have no link. [Source][navigation], [checks][checks]. |
@@ -75,13 +75,13 @@ providers return eager results instead.
 | `typeHierarchy/supertypes` | C → S | Supported | Explicit implemented traits; stale items rejected. Generic bounds/substitution remain open. [Source][hierarchy], [checks][checks]. |
 | `typeHierarchy/subtypes` | C → S | Supported | Explicit implementing types; stale items rejected. Generic bounds/substitution remain open. [Source][hierarchy], [checks][checks]. |
 | `textDocument/inlineValue` | C → S | Open | Debugger-visible binding/expression scopes are not provided. |
-| `textDocument/moniker` | C → S | Open | No persistent package/symbol identity contract. |
+| `textDocument/moniker` | C → S | Supported | Statically advertised (`monikerProvider`). Resolves the symbol at the position and returns a `silver`-scheme, project-unique moniker keyed by document URI and qualified name; `null` off-symbol. [Source][navigation], [checks][checks]. |
 | `textDocument/documentColor` | C → S | Unmapped | No general Silver color literal; library-specific color APIs need an explicit mapping. |
 | `textDocument/colorPresentation` | C → S | Unmapped | Requires the color model above. |
-| `textDocument/willSaveWaitUntil` | C → S | Open | No save-time edit participation. |
-| `workspace/willCreateFiles` | C → S | Open | No file-operation edits. |
+| `textDocument/willSaveWaitUntil` | C → S | Conditional | Advertised with `willSaveWaitUntil` client support; always answers `null` (no save-time edits). [Source][dispatch], [checks][checks]. |
+| `workspace/willCreateFiles` | C → S | Conditional | Requires `workspace.fileOperations.willCreate`; validates the `files` array and answers `null` (no edits needed on create). [Source][file-operations], [checks][checks]. |
 | `workspace/willRenameFiles` | C → S | Conditional | Requires `workspace.fileOperations.willRename`. Rewrites import module paths for renamed files and directories, preserving the base that produced the original name and any selection block or alias. Versioned `documentChanges` when negotiated. [Source][file-operations], [checks][checks]. |
-| `workspace/willDeleteFiles` | C → S | Open | No file-operation edits. |
+| `workspace/willDeleteFiles` | C → S | Conditional | Requires `workspace.fileOperations.willDelete`; validates the `files` array and answers `null`. [Source][file-operations], [checks][checks]. |
 | `workspace/textDocumentContent` | C → S | Open | No virtual document content provider. Added to the stable inventory in 3.18. |
 
 ## Server-to-client requests
@@ -90,19 +90,19 @@ providers return eager results instead.
 | --- | --- | --- | --- |
 | `workspace/diagnostic/refresh` | S → C | Conditional | Pull-diagnostic sessions with `workspace.diagnostics.refreshSupport`. Coalesces requests; changes during an outstanding request schedule another. Client errors disable further requests of this kind. [Source][client-requests], [checks][checks]. |
 | `workspace/semanticTokens/refresh` | S → C | Conditional | Requires an enabled semantic-token provider and `workspace.semanticTokens.refreshSupport`; dependency invalidation, coalescing and acknowledgement/error handling. [Source][client-requests], [checks][checks]. |
-| `workspace/foldingRange/refresh` | S → C | Open | No folding refresh request. Added to the stable inventory in 3.18. |
+| `workspace/foldingRange/refresh` | S → C | Conditional | Requires `workspace.foldingRange.refreshSupport`; coalesced like other refresh kinds and disabled alone on client error. [Source][client-requests], [checks][checks]. |
 | `workspace/inlayHint/refresh` | S → C | Conditional | Requires `workspace.inlayHint.refreshSupport`. Analysis changes ask editors to recompute hints from current snapshots, including imported signatures. Coalesces requests, repeats after acknowledgement when needed, and disables only this kind on client error. [Source][client-requests], [checks][checks]. |
-| `workspace/codeLens/refresh` | S → C | Open | No lens provider or refresh request. |
+| `workspace/codeLens/refresh` | S → C | Conditional | Requires `workspace.codeLens.refreshSupport`; sent on analysis changes alongside the other refresh kinds. [Source][client-requests], [checks][checks]. |
 | `workspace/inlineValue/refresh` | S → C | Open | No inline-value provider or refresh request. |
 | `workspace/textDocumentContent/refresh` | S → C | Open | No virtual content provider or refresh request. Added to the stable inventory in 3.18. |
-| `workspace/workspaceFolders` | S → C | Open | Initial folders and folder-change notifications are supported; the server does not request the folder list. |
-| `workspace/configuration` | S → C | Open | No client settings request or package/target/cfg configuration. |
-| `workspace/applyEdit` | S → C | Open | Rename and import actions return edits directly; the server does not ask the client to apply edits. |
-| `client/registerCapability` | S → C | Open | Static capability negotiation only. Watched-file notifications must be supplied by the client without server registration. |
-| `client/unregisterCapability` | S → C | Open | No dynamic registrations. |
-| `window/workDoneProgress/create` | S → C | Open | Only client-supplied request progress tokens are used; no server-created background progress. |
-| `window/showMessageRequest` | S → C | Open | No interactive client message requests. |
-| `window/showDocument` | S → C | Open | No client document-opening requests. |
+| `workspace/workspaceFolders` | S → C | Conditional | Sent once after `initialized` when the client supports `workspace.workspaceFolders` and `initialize` carried neither `rootUri` nor `workspaceFolders`; the response adds roots and rebuilds the index. [Source][client-requests], [checks][checks]. |
+| `workspace/configuration` | S → C | Conditional | Requires `workspace.configuration`; requested for section `silver` on `workspace/didChangeConfiguration`. The `trace` key sets the trace level. [Source][client-requests], [checks][checks]. |
+| `workspace/applyEdit` | S → C | Conditional | Requires `workspace.applyEdit`; used by `workspace/executeCommand` (`silver.extractVariable`) to hand the edit to the client. The originating command is answered from the applyEdit response; a decline returns `-32802`. [Source][client-requests], [checks][checks]. |
+| `client/registerCapability` | C → S | Supported | Validates `registrations` (string `id` and `method` per entry) and answers `null`; watched-file handling already runs without registration. [Source][dispatch], [checks][checks]. |
+| `client/unregisterCapability` | C → S | Supported | Validates `unregisterations` and answers `null`. [Source][dispatch], [checks][checks]. |
+| `window/workDoneProgress/create` | S → C | Conditional | Requires `window.workDoneProgress`; sent once after `initialized` to create the `silver/index` token. Background indexing then reports begin/report/end `$/progress` on that token, and `window/workDoneProgress/cancel` for it stops the scan. [Source][client-requests], [checks][checks]. |
+| `window/showMessageRequest` | S → C | Conditional | Sent when a watched package manifest changes, offering `Reload workspace`/`Ignore`; `Reload workspace` rebuilds the index. Responses to other server requests are consumed without action. [Source][client-requests], [checks][checks]. |
+| `window/showDocument` | S → C | Conditional | Requires `window.showDocumentSupport`; sent by the `silver.openDocument` command with an optional selection. [Source][client-requests], [checks][checks]. |
 
 ## Notifications
 
@@ -111,25 +111,25 @@ providers return eager results instead.
 | `initialized` | C → S | Supported | Starts background workspace indexing after initialization. [Source][dispatch], [checks][checks]. |
 | `exit` | C → S | Supported | Stops the reader and process, including an incomplete following frame. [Source][dispatch], [checks][checks]. |
 | `$/cancelRequest` | Both | Partial | Incoming cancellation of queued/running requests; IDs are reusable after completion. Unknown IDs are discarded. A full input queue interrupts eligible analysis with `RequestFailed` so intake can resume; this is distinct from observed client cancellation. No outgoing cancellation of client requests. Checks occur between files/items, not inside frontend passes. [Source][transport], [checks][checks]. |
-| `$/progress` | Both | Partial | Outgoing begin/end for client-supplied work-done tokens on selected queries. No incoming progress consumer, partial-result streaming, percentages or server-created tokens. [Source][progress], [checks][checks]. |
-| `$/setTrace` | C → S | Open | No trace-level handling. |
-| `$/logTrace` | S → C | Open | No trace notifications. |
+| `$/progress` | Both | Partial | Outgoing begin/report/end for client-supplied tokens on selected queries and for the server-created `silver/index` indexing token. No incoming progress consumer, partial-result streaming or percentages. [Source][progress], [checks][checks]. |
+| `$/setTrace` | C → S | Supported | Stores `off`/`messages`/`verbose`; unknown values are ignored. The level can also be set through the `silver` configuration section. [Source][dispatch], [checks][checks]. |
+| `$/logTrace` | S → C | Conditional | Sent for each incoming message while the trace level is `messages` or above; `verbose` includes the params payload. [Source][json-rpc], [checks][checks]. |
 | `textDocument/didOpen` | C → S | Supported | Unsaved overlay snapshots, analysis and dependency invalidation. [Source][document], [checks][checks]. |
 | `textDocument/didChange` | C → S | Supported | Sequential UTF-16 incremental edits, atomic batches and monotonic document versions. Invalid batches preserve the snapshot. [Source][document], [checks][checks]. |
 | `textDocument/didClose` | C → S | Supported | Clears push diagnostics and restores disk contents for dependent navigation. [Source][dispatch], [checks][checks]. |
 | `textDocument/didSave` | C → S | Supported | Refreshes analysis/diagnostics; optional save text is not requested. [Source][dispatch], [checks][checks]. |
-| `textDocument/willSave` | C → S | Open | No save participation. |
+| `textDocument/willSave` | C → S | Conditional | Advertised with `willSave` client support; accepted without a response (`didSave` republishes analysis, including `includeText` save text). [Source][dispatch], [checks][checks]. |
 | `textDocument/publishDiagnostics` | S → C | Conditional | Push mode for clients without pull diagnostics; negotiated versions and related locations. Native frontend analysis limits apply. [Source][diagnostics], [checks][checks]. |
 | `workspace/didChangeWorkspaceFolders` | C → S | Supported | Atomic normalized add/remove batches; refreshes imports and indexing. Removed closed files leave workspace queries; open files and reachable imports remain available. [Source][workspace], [checks][checks]. |
 | `workspace/didChangeWatchedFiles` | C → S | Supported | Client-sent disk refreshes for closed files; preserves open overlays. No native filesystem watcher or dynamic watcher registration. [Source][dispatch], [checks][checks]. |
-| `workspace/didChangeConfiguration` | C → S | Open | No settings/configuration invalidation handler. |
-| `workspace/didCreateFiles` | C → S | Open | No file-operation notification handler; watched-file handling is separate. |
-| `workspace/didRenameFiles` | C → S | Open | No file-operation notification handler. |
-| `workspace/didDeleteFiles` | C → S | Open | No file-operation notification handler. |
+| `workspace/didChangeConfiguration` | C → S | Supported | Requests the `silver` configuration section when the client supports `workspace/configuration`, then invalidates analysis like other change notifications. [Source][dispatch], [checks][checks]. |
+| `workspace/didCreateFiles` | C → S | Supported | New `.ag` files join the background index; new `silver.toml` manifests rebuild the workspace scope. [Source][file-operations], [checks][checks]. |
+| `workspace/didRenameFiles` | C → S | Supported | Drops closed documents for the old URI and indexes the new path; manifests rebuild the scope. Import rewrites stay with `workspace/willRenameFiles`. [Source][file-operations], [checks][checks]. |
+| `workspace/didDeleteFiles` | C → S | Supported | Removes closed documents for deleted URIs and invalidates imports. [Source][file-operations], [checks][checks]. |
 | `window/workDoneProgress/cancel` | C → S | Supported | Cancels the operation associated with a client-supplied request progress token. [Source][transport], [checks][checks]. |
-| `window/showMessage` | S → C | Open | No client message notifications. |
-| `window/logMessage` | S → C | Open | No client log notifications. |
-| `telemetry/event` | S → C | Open | No telemetry notifications. |
+| `window/showMessage` | S → C | Supported | Sent as a warning when a watched package manifest changes. [Source][json-rpc], [checks][checks]. |
+| `window/logMessage` | S → C | Supported | Sent for package-manifest preload errors. [Source][json-rpc], [checks][checks]. |
+| `telemetry/event` | S → C | Conditional | Sent on `initialized` and `shutdown` only when `initializationOptions.telemetry` is true. [Source][json-rpc], [checks][checks]. |
 | `notebookDocument/didOpen` | C → S | Unmapped | No Silver notebook/cell execution or synchronization model. |
 | `notebookDocument/didChange` | C → S | Unmapped | Requires a notebook document model. |
 | `notebookDocument/didSave` | C → S | Unmapped | Requires a notebook document model. |
@@ -139,7 +139,7 @@ providers return eager results instead.
 
 [Protocol checks][checks] exercise real framed stdio sessions against the built
 server, not source-text checks or capability flags alone. The test suite contains
-115 distinct test scenarios in `scripts/check_lsp.py`:
+139 distinct test scenarios in `scripts/check_lsp.py`:
 
 - Lifecycle/transport: `test_protocol_errors_and_string_request_ids`,
   `test_jsonrpc_params_must_be_structured_and_invalid_shutdown_does_not_stop_server`,
