@@ -1,6 +1,7 @@
 // Stage1 command-line frontend. Native commands are handled by stage1.
 import std.args;
 import std.error;
+import std.fs;
 import std.fmt;
 import std.io;
 import std.mem.vec;
@@ -931,6 +932,11 @@ i32 run_frontend() {
         arguments.drop();
         return result;
     }
+    if (cli.command.equals("init")) {
+        i32 result = workspace_init_command(&cli);
+        arguments.drop();
+        return result;
+    }
     bool native_command = cli.command.equals("build") || cli.command.equals("run")
         || cli.command.equals("test") || cli.command.len() == 0;
     if (native_command && !native_validate_target(&cli)) {
@@ -1017,6 +1023,16 @@ i32 run_frontend() {
         }
         native_source.drop();
         STDERR.write_str("agc: error: stage1 backend could not handle this command or source\n");
+        Optional<String> first_positional = cli.positional(0);
+        if (first_positional.is_some()) {
+            String candidate = first_positional.unwrap();
+            if (!candidate.ends_with(".ag") && !candidate.ends_with(".agm")
+                && !exists(candidate.to_str())) {
+                STDERR.write_str("agc: hint: '");
+                STDERR.write_str(candidate.to_str());
+                STDERR.write_str("' is not a known command and no such file exists; see `agc --help`\n");
+            }
+        }
         arguments.drop();
         return 2;
     }

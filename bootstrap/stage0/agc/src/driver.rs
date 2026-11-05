@@ -53,6 +53,7 @@ Commands:
   check, c    Analyze source files and report errors without codegen or linking
   clean       Remove cached compiler build artifacts
   test, t     Compile and run tests for a package or file
+  cache       Inspect or prune the compiler cache (cache info, cache prune)
 
 {all-args}{after-help}",
     styles = Styles::styled()
@@ -153,6 +154,15 @@ pub struct Cli {
         help_heading = "Package"
     )]
     lib: Option<String>,
+
+    /// Build the package described by this manifest (silver.toml).
+    #[arg(
+        long = "manifest",
+        value_name = "PATH",
+        conflicts_with = "inputs",
+        help_heading = "Package"
+    )]
+    manifest: Option<PathBuf>,
 
     /// Initialize a package in the current directory or a target directory.
     #[arg(long = "init", action = ArgAction::SetTrue, hide = true)]
@@ -328,9 +338,9 @@ pub(crate) enum EmitKind {
     Asm,
     /// Emit LLVM IR (.ll).
     LlvmIr,
-    /// (Future) Dump lexer tokens.
+    /// Dump lexer tokens.
     Tokens,
-    /// (Future) Dump parsed AST.
+    /// Dump parsed AST.
     Ast,
     /// Dump parser grammar.
     Grammar,
@@ -502,6 +512,30 @@ fn default_output_for(emit: EmitKind, inputs: &[PathBuf], target: Option<&str>) 
     }
 }
 
+/// Read an input source file, hinting when the path looks like a mistyped command.
+fn read_input_source(input: &Path) -> String {
+    match std::fs::read_to_string(input) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "agc: {}: failed to read {}: {e}",
+                "error".red().bold(),
+                input.display()
+            );
+            let looks_like_command = input.extension().is_none()
+                && input.components().count() == 1
+                && !input.exists();
+            if looks_like_command {
+                eprintln!(
+                    "agc: hint: '{}' is not a known command and no such file exists; see `agc --help`",
+                    input.display()
+                );
+            }
+            std::process::exit(2);
+        }
+    }
+}
+
 fn with_ext_or_default(inputs: &[PathBuf], ext: &str) -> PathBuf {
     let Some(first) = inputs.first() else {
         return PathBuf::from(format!("out.{ext}"));
@@ -531,6 +565,10 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
     }
 
     let mut inputs = cli.inputs;
+    if let Some(manifest) = &cli.manifest {
+        // Same package candidate as the positional `build silver.toml` form.
+        inputs.push(manifest.clone());
+    }
     let explicit_root = cli.root;
     let current_dir = env::current_dir()
         .map_err(|e| format!("failed to determine current working directory: {e}"))?;
@@ -675,6 +713,12 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
                 );
             }
         }
+    }
+
+    if cli.output.as_deref() == Some(Path::new("-"))
+        && !matches!(emit, EmitKind::LlvmIr | EmitKind::Tokens | EmitKind::Ast)
+    {
+        return Err("`-o -` (stdout) is only supported for text emissions (--emit-llvm, --emit=tokens, --emit=ast)".to_string());
     }
 
     let auto_output = cli.output.is_none();
@@ -1293,17 +1337,7 @@ pub fn run(cli: Cli) {
 
             if plan.emit == EmitKind::Tokens {
                 for input in &plan.inputs {
-                    let src = match std::fs::read_to_string(input) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            eprintln!(
-                                "agc: {}: failed to read {}: {e}",
-                                "error".red().bold(),
-                                input.display()
-                            );
-                            std::process::exit(2);
-                        }
-                    };
+                    let src = read_input_source(input);
 
                     match lexer::lex(&src) {
                         Ok(tokens) => {
@@ -1358,17 +1392,7 @@ pub fn run(cli: Cli) {
 
             if plan.emit == EmitKind::Ast {
                 for input in &plan.inputs {
-                    let src = match std::fs::read_to_string(input) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            eprintln!(
-                                "agc: {}: failed to read {}: {e}",
-                                "error".red().bold(),
-                                input.display()
-                            );
-                            std::process::exit(2);
-                        }
-                    };
+                    let src = read_input_source(input);
 
                     let graph = crate::grammar::parse_ag(&src);
                     let ast = crate::grammar::lower_source_graph(&graph, 0);
@@ -1521,17 +1545,7 @@ pub fn run(cli: Cli) {
 
             for input in &plan.inputs {
                 profiler::begin_phase("read source");
-                let src = match std::fs::read_to_string(input) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!(
-                            "agc: {}: failed to read {}: {e}",
-                            "error".red().bold(),
-                            input.display()
-                        );
-                        std::process::exit(2);
-                    }
-                };
+                let src = read_input_source(input);
                 profiler::end_phase("read source");
 
                 // Register the input source so diagnostic spans resolve to this
@@ -2468,7 +2482,16 @@ pub fn run(cli: Cli) {
                     eprintln!("agc: {}: no LLVM IR units generated", "error".red().bold());
                     std::process::exit(2);
                 };
-                if let Err(e) = std::fs::write(&plan.output, ir) {
+                if plan.output.as_os_str() == std::ffi::OsStr::new("-") {
+                    use std::io::Write as _;
+                    if let Err(e) = std::io::stdout().lock().write_all(ir.as_bytes()) {
+                        eprintln!(
+                            "agc: {}: failed to write to stdout: {e}",
+                            "error".red().bold()
+                        );
+                        std::process::exit(2);
+                    }
+                } else if let Err(e) = std::fs::write(&plan.output, ir) {
                     eprintln!(
                         "agc: {}: failed to write {}: {e}",
                         "error".red().bold(),
