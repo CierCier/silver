@@ -12,10 +12,24 @@ and notification, its direction, support status, limits and verification.
 Run these commands from the repository root in `nix develop`:
 
 ```sh
-cargo build --workspace
+cargo build -p agc
 target/debug/agc build silver.toml --bin aglsp --no-cache -o /tmp/aglsp-native
 python3 scripts/check_lsp.py --server /tmp/aglsp-native -v
 ```
+
+Or use the wrapper, which runs the same chain (plus `bench`/`list`):
+
+```sh
+scripts/dev-lsp.sh check            # build + full protocol suite
+scripts/dev-lsp.sh check -k moniker # build + scenarios matching "moniker"
+scripts/dev-lsp.sh list             # print all scenario names, no build
+scripts/dev-lsp.sh bench            # build + scripts/benchmark_lsp.py --workspace .
+```
+
+`check_lsp.py` forwards extra arguments to unittest, so `-k <substring>` runs
+matching scenarios only and `-v` prints each scenario as it runs. The binary
+itself supports `--help` and `--version`; any other argument is reported on
+stderr and ignored.
 
 To build the server with the native compiler:
 

@@ -18,7 +18,7 @@ pub const MANIFEST_FILE: &str = "silver.toml";
 const DEFAULT_PACKAGE_VERSION: &str = "0.1.0";
 const DEFAULT_ENTRY: &str = "src/main.ag";
 const DEFAULT_ENTRY_SOURCE: &str =
-    "i32 main() {\n    @println(\"Her De Der, Theres silver in this vein!\");\n    return 0;\n}\n";
+    "i32 main() {\n    @println(\"Hello, Silver!\");\n    return 0;\n}\n";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitializedPackage {

@@ -3719,6 +3719,14 @@ class NativeLsp(unittest.TestCase):
         session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
         return uri
 
+    def test_server_help_and_version_flags(self):
+        for flag, needle in (("--help", "Usage: aglsp"), ("-h", "Usage: aglsp"),
+                             ("--version", "aglsp 0.2.6"), ("-V", "aglsp 0.2.6")):
+            with self.subTest(flag=flag):
+                out = subprocess.run([str(self.binary), flag], capture_output=True, text=True, timeout=10)
+                self.assertEqual(out.returncode, 0, (flag, out.stderr))
+                self.assertIn(needle, out.stdout)
+
     def test_save_will_save_and_include_text(self):
         session, caps = self.capable_session(text={
             "synchronization": {"willSave": True, "willSaveWaitUntil": True},
@@ -3950,10 +3958,22 @@ class NativeLsp(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--server", type=Path, required=True)
+    parser = argparse.ArgumentParser(description=__doc__, epilog=(
+        "Extra arguments are forwarded to unittest: `-k <substring>` runs only matching "
+        "scenarios, `-v` prints each scenario as it runs. `--list` prints every scenario "
+        "name and exits without starting a server."))
+    parser.add_argument("--server", type=Path, help="Path to the aglsp binary under test")
     parser.add_argument("--stdlib-root", type=Path, help="Also check discovery of an installed stdlib without SILVER_SYSROOT")
+    parser.add_argument("--list", action="store_true", help="List protocol scenarios and exit")
     args, rest = parser.parse_known_args()
+    if args.list:
+        names = sorted(name for name in dir(NativeLsp) if name.startswith("test_"))
+        print(f"{len(names)} scenarios:")
+        for name in names:
+            print(f"  {name}")
+        raise SystemExit(0)
+    if args.server is None:
+        parser.error("--server is required unless --list is given")
     NativeLsp.binary = args.server.resolve(strict=True)
     if args.stdlib_root is not None:
         NativeLsp.stdlib_root = args.stdlib_root.resolve(strict=True)

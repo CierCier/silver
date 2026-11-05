@@ -75,7 +75,9 @@ package dependencies.
 | Build bootstrap tools and Rust FFI | `cargo build --workspace` |
 | Check a file | `cargo run -p agc -- check path/to/file.ag` |
 | Run a file | `cargo run -p agc -- run path/to/file.ag` |
-| Build Silver driver | `cargo run -p agc -- build silver.toml --bin agc -o /tmp/agc-stage1` |
+| Build Silver driver | `cargo run -p agc -- build silver.toml --bin agc --no-cache -o /tmp/agc-stage1` |
+| Build language server | `target/debug/agc build silver.toml --bin aglsp --no-cache -o /tmp/aglsp-native` |
+| Language-server protocol suite | `python3 scripts/check_lsp.py --server /tmp/aglsp-native` (add `-k <name>` for one scenario, `--list` to enumerate) |
 | Stdlib suite | `python3 tests/run_tests.py --no-tui --jobs 4` |
 | Focused stdlib tests | `python3 tests/run_tests.py --no-tui string vec collection_drop_glue` |
 | Stdlib suite with native stage1 | `python3 tests/run_tests.py --no-tui --jobs 4 --compiler /tmp/agc-stage1` |

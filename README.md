@@ -105,9 +105,19 @@ agc run path/to/file.ag -- input.txt
 # Frontend type checking only
 agc check path/to/file.ag
 
+# Compile and run a single test file (stage0)
+agc test path/to/test_file.ag
+
+# Create a new package (silver.toml + src/main.ag)
+agc init myapp
+
 # Stage0: run with allocation leak tracking
 agc run path/to/file.ag --leak-check
 ```
+
+Default output names: executables land in `./a.out` (package builds in
+`./<target name>`), `-c`/`-S`/`--emit-llvm` in `./<stem>.<ext>`, and
+`--emit-llvm -o -` streams the IR to stdout.
 
 ### Modules and packaging
 

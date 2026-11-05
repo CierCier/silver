@@ -1,4 +1,6 @@
 import json_rpc;
+import std.io;
+import std.env;
 import std.path;
 import document;
 import diagnostics;
@@ -514,6 +516,26 @@ i32 dispatch_message(ServerState* state, PendingMessage* pending) {
 }
 
 i32 main() {
+    // Editors launch the server with no arguments; make stray flags visible
+    // instead of silently starting a protocol loop.
+    Vec<String> arguments = args();
+    if (arguments.len() > 1) {
+        str flag = arguments.get(1).to_str();
+        if (strcmp(flag, "-h") == 0 || strcmp(flag, "--help") == 0) {
+            STDOUT.write_str("aglsp — Silver language server 0.2.6\n\nUsage: aglsp\n\nSpeaks LSP (JSON-RPC over stdio); launch with no arguments.\n\n  -h, --help     Print this help and exit\n  -V, --version  Print the version and exit\n");
+            STDOUT.flush();
+            return 0;
+        }
+        if (strcmp(flag, "-V") == 0 || strcmp(flag, "--version") == 0) {
+            STDOUT.write_str("aglsp 0.2.6\n");
+            STDOUT.flush();
+            return 0;
+        }
+        STDERR.write_str("aglsp: ignoring unknown argument '");
+        STDERR.write_str(flag);
+        STDERR.write_str("' (this server takes no arguments; try --help)\n");
+        STDERR.flush();
+    }
     ServerState state; state.store = DocumentStore.new(); state.index.paths = Vec<IndexPath>.new();
     state.client = client_options("{}"); state.initialized = false; state.shutdown = false;
     state.trace = 0; state.index_progress = false;

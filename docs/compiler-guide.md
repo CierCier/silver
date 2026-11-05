@@ -89,6 +89,18 @@ silver/
    ```bash
    cargo run -p agc -- run path/to/file.ag [args...]
    ```
+6. **Run a single test file (stage0)**:
+   ```bash
+   cargo run -p agc -- test path/to/test_file.ag
+   ```
+7. **Create a package**:
+   ```bash
+   cargo run -p agc -- init myapp
+   ```
+
+Default output names: executables land in `./a.out` (package builds in
+`./<target name>`), `-c`/`-S`/`--emit-llvm` in `./<stem>.<ext>`; `-o -` is
+accepted for text emissions and streams them to stdout.
 
 ---
 
