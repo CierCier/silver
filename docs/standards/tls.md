@@ -1,8 +1,8 @@
 # TLS & ALPN Standard Compliance
 
 - **Primary Specifications**: [RFC 8446 (The Transport Layer Security (TLS) Protocol Version 1.3)](https://datatracker.ietf.org/doc/html/rfc8446), [RFC 5246 (TLS 1.2)](https://datatracker.ietf.org/doc/html/rfc5246), [RFC 7301 (Transport Layer Security (TLS) Application-Layer Protocol Negotiation Extension)](https://datatracker.ietf.org/doc/html/rfc7301), [RFC 6066 (Server Name Indication)](https://datatracker.ietf.org/doc/html/rfc6066).
-- **Implementation**: [`std/net/tls.ag`](file:///home/cier/Projects/silver/std/net/tls.ag) (`TlsStream`, `tls_init`), [`std/net/transport.ag`](file:///home/cier/Projects/silver/std/net/transport.ag) (`StreamIo`, `TlsProvider`).
-- **Test Suite**: [`tests/tls_test.ag`](file:///home/cier/Projects/silver/tests/tls_test.ag), [`tests/http2_tls_test.ag`](file:///home/cier/Projects/silver/tests/http2_tls_test.ag).
+- **Implementation**: [`std/net/tls.ag`](../../std/net/tls.ag) (`TlsStream`, `tls_init`), [`std/net/transport.ag`](../../std/net/transport.ag) (`StreamIo`, `TlsProvider`).
+- **Test Suite**: [`tests/tls_test.ag`](../../tests/tls_test.ag), [`tests/http2_tls_test.ag`](../../tests/http2_tls_test.ag).
 
 ## Compliance Table
 

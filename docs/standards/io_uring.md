@@ -1,8 +1,8 @@
 # Linux io_uring Asynchronous I/O Compliance
 
 - **Primary Specifications**: [io_uring(7) Linux Programmer's Manual](https://man7.org/linux/man-pages/man7/io_uring.7.html), [io_uring_setup(2)](https://man7.org/linux/man-pages/man2/io_uring_setup.2.html), [io_uring_enter(2)](https://man7.org/linux/man-pages/man2/io_uring_enter.2.html), [io_uring_register(2)](https://man7.org/linux/man-pages/man2/io_uring_register.2.html).
-- **Implementation**: [`std/sys/io_uring.ag`](file:///home/cier/Projects/silver/std/sys/io_uring.ag) (`IoUring`, `IoUringSqe`, `IoUringCqe`, `IoUringParams`, `try_io_uring_setup`, `try_io_uring_enter`, `try_io_uring_register`).
-- **Test Suite**: [`tests/io_uring_test.ag`](file:///home/cier/Projects/silver/tests/io_uring_test.ag).
+- **Implementation**: [`std/sys/io_uring.ag`](../../std/sys/io_uring.ag) (`IoUring`, `IoUringSqe`, `IoUringCqe`, `IoUringParams`, `try_io_uring_setup`, `try_io_uring_enter`, `try_io_uring_register`).
+- **Test Suite**: [`tests/io_uring_test.ag`](../../tests/io_uring_test.ag).
 
 ## Compliance & Capability Table
 

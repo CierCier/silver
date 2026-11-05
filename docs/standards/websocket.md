@@ -1,8 +1,8 @@
 # WebSocket Protocol Standard Compliance
 
 - **Primary Specifications**: [RFC 6455 (The WebSocket Protocol)](https://datatracker.ietf.org/doc/html/rfc6455).
-- **Implementation**: [`std/net/websocket.ag`](file:///home/cier/Projects/silver/std/net/websocket.ag) (`WebSocket`, `WebSocketFrame`).
-- **Test Suite**: [`tests/websocket_test.ag`](file:///home/cier/Projects/silver/tests/websocket_test.ag).
+- **Implementation**: [`std/net/websocket.ag`](../../std/net/websocket.ag) (`WebSocket`, `WebSocketFrame`).
+- **Test Suite**: [`tests/websocket_test.ag`](../../tests/websocket_test.ag).
 
 ## Compliance Table
 
