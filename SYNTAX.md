@@ -55,6 +55,21 @@ Silver source files use UTF-8 encoding and the `.ag` extension.
    spanning multiple lines */
 ```
 
+Doc comments (`///` lines or `/** ... */` blocks) attach to the item directly
+below them; an empty line between the block and the item detaches it. They show
+up in editor hover for functions, variables, and macros:
+
+```silver
+/// Adds two values.
+/// $1 : the first addend
+/// $2 : the second addend
+i32 add(i32 a, i32 b) { return a + b; }
+```
+
+Inside a doc block, `$n : description` annotates the n-th parameter. The
+language server renders these as a Parameters section in hover, mapped onto
+the actual parameter names (`a`, `b` above).
+
 ### Identifiers
 
 Identifiers match `[a-zA-Z_][a-zA-Z0-9_]*`.

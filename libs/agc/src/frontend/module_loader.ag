@@ -2,13 +2,16 @@
 // the small import subset used by the repository and records declarations with
 // an explicit worklist.
 import std.args;
+import std.env;
 import std.error;
 import std.fs;
 import std.io;
+import std.mem.alloc;
 import std.mem.memory;
 import std.mem.vec;
 import std.path;
 import std.result;
+import std.sys.raw.fs;
 import frontend.artifacts;
 import frontend.ast;
 import frontend.diagnostics;
@@ -142,6 +145,124 @@ void enqueue_module(ModuleLoader* loader, str path) {
     }
     String owned = String.from_str(path);
     loader.pending.push(move owned);
+}
+
+void module_add_dir_unique(Vec<String>* dirs, str dir) {
+    i64 i = 0;
+    while (i < dirs.len()) {
+        if (dirs.get_ptr(i).equals(dir)) { return; }
+        i += 1;
+    }
+    dirs.push(String.from_str(dir));
+}
+
+// Sysroot layout: include/silver + include (installed layouts), plus the bare
+// root and lib/ only when they look like a real Silver tree (std/ resp.
+// lib/silver present) so filesystem roots like "/" are never scanned.
+void module_add_sysroot_candidates(Vec<String>* dirs, str root, bool explicit) {
+    // An explicit root is always searched directly; a discovered root only
+    // when it looks like a real Silver tree, so "/" is never scanned.
+    String std_dir = path_join(root, "std");
+    if (explicit || is_dir(std_dir.to_str())) { module_add_dir_unique(dirs, root); }
+    std_dir.drop();
+    String inc_silver = path_join(root, "include/silver");
+    if (is_dir(inc_silver.to_str())) { module_add_dir_unique(dirs, inc_silver.to_str()); }
+    inc_silver.drop();
+    String inc = path_join(root, "include");
+    module_add_dir_unique(dirs, inc.to_str());
+    inc.drop();
+    String lib_silver = path_join(root, "lib/silver");
+    if (is_dir(lib_silver.to_str())) {
+        module_add_dir_unique(dirs, lib_silver.to_str());
+        String lib = path_join(root, "lib");
+        module_add_dir_unique(dirs, lib.to_str());
+        lib.drop();
+    }
+    lib_silver.drop();
+}
+
+// The stage0-compatible sysroot cascade: --sysroot CLI flag, SILVER_SYSROOT,
+// the executable-relative prefix, the user data dir, and system share dirs.
+// Later entries are fallbacks; callers keep their own -I/root entries first.
+Vec<String> module_sysroot_include_dirs() {
+    Vec<String> dirs = Vec<String>.new();
+    Vec<String> arguments = args();
+    i64 index = 1;
+    while (index < arguments.len()) {
+        String* argument = arguments.get_ptr(index);
+        if (argument.equals("--sysroot") && index + 1 < arguments.len()) {
+            module_add_sysroot_candidates(&dirs, arguments.get_ptr(index + 1).to_str(), true);
+            index += 2;
+            continue;
+        }
+        if (argument.starts_with("--sysroot=")) {
+            String value = argument.strip_prefix("--sysroot=");
+            module_add_sysroot_candidates(&dirs, value.to_str(), true);
+            value.drop();
+        }
+        index += 1;
+    }
+    arguments.drop();
+    String env_value = String.new();
+    if (module_env_value("SILVER_SYSROOT", &env_value) && env_value.len() > 0) {
+        module_add_sysroot_candidates(&dirs, env_value.to_str(), true);
+    }
+    // Executable-relative prefix, e.g. <prefix>/bin/agc -> <prefix>.
+    u8* executable = alloc<u8>(4097);
+    i64 length = sys_readlink((i64)"/proc/self/exe", (i64)executable, 4096);
+    if (length > 0 && length < 4096) {
+        executable[length] = 0;
+        String path = String.from_str((str)executable);
+        String bin = path_dirname(path.to_str());
+        String prefix = path_dirname(bin.to_str());
+        module_add_sysroot_candidates(&dirs, prefix.to_str(), false);
+    }
+    free(executable);
+    if (module_env_value("XDG_DATA_HOME", &env_value) && env_value.len() > 0) {
+        String user = path_join(env_value.to_str(), "silver");
+        module_add_sysroot_candidates(&dirs, user.to_str(), false);
+        user.drop();
+    } else if (module_env_value("HOME", &env_value) && env_value.len() > 0) {
+        String user = path_join(env_value.to_str(), ".local/share/silver");
+        module_add_sysroot_candidates(&dirs, user.to_str(), false);
+        user.drop();
+    }
+    env_value.drop();
+    module_add_sysroot_candidates(&dirs, "/usr/local/share/silver", false);
+    module_add_sysroot_candidates(&dirs, "/usr/share/silver", false);
+    return move dirs;
+}
+
+// Read KEY from /proc/self/environ (NUL-separated KEY=VALUE entries). Uses a
+// plain file read instead of the envp global, which is unreliable in some
+// stage1-built binaries.
+bool module_env_value(str key, String* out) {
+    out.clear();
+    Result<String, Error> content = read_file("/proc/self/environ");
+    if (content.is_err()) { return false; }
+    String data = content.unwrap();
+    i64 key_len = strlen(key);
+    i64 i = 0;
+    while (i < data.len()) {
+        i64 stop = i;
+        while (stop < data.len() && data.data[stop] != 0) { stop += 1; }
+        if (stop - i > key_len && data.data[i + key_len] == 61) {
+            bool matches = true;
+            i64 j = 0;
+            while (matches && j < key_len) {
+                if (data.data[i + j] != (u8)key[j]) { matches = false; }
+                j += 1;
+            }
+            if (matches) {
+                out.push_bytes(&data.data[i + key_len + 1], stop - i - key_len - 1);
+                data.drop();
+                return true;
+            }
+        }
+        i = stop + 1;
+    }
+    data.drop();
+    return false;
 }
 
 void collect_include_dirs(ModuleLoader* loader) {

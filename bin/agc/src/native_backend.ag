@@ -2862,6 +2862,15 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         }
         arg_idx += 1;
     }
+    // Sysroot fallback cascade (--sysroot, SILVER_SYSROOT, exe-relative, user
+    // and system data dirs) so installed stage1 builds resolve std anywhere.
+    Vec<String> sysroot_dirs = module_sysroot_include_dirs();
+    i64 si = 0;
+    while (si < sysroot_dirs.len()) {
+        module_add_dir_unique(&includes, sysroot_dirs.get_ptr(si).to_str());
+        si += 1;
+    }
+    sysroot_dirs.drop();
 
     profiler_begin_phase("hir");
     check_hir(&tree, &cfg, &diagnostics);

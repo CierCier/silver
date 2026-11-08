@@ -175,12 +175,21 @@ class NativeLsp(unittest.TestCase):
     binary = None
     stdlib_root = None
 
+    def clean_env(self):
+        # Keep sessions hermetic: the server's sysroot cascade must not pick
+        # up the host's installed Silver via HOME/XDG_DATA_HOME. Tests that
+        # need a stdlib set SILVER_SYSROOT explicitly.
+        env = {key: value for key, value in os.environ.items()
+               if key not in ("SILVER_SYSROOT", "XDG_DATA_HOME")}
+        env["HOME"] = str(self.root)
+        return env
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix="silver-lsp-review- ")
         self.root = Path(self.directory.name)
         (self.root / "helper.ag").write_text("/// The answer.\ni32 answer(i32 value) { return value; }\n")
         (self.root / "other.ag").write_text("import helper;\ni32 other() { return answer(7); }\n")
-        self.session = Session(self.binary, self.root)
+        self.session = Session(self.binary, self.root, env=self.clean_env())
         self.addCleanup(self.directory.cleanup)
         self.addCleanup(self.session.close)
         self.capabilities = self.session.result("initialize", {
@@ -209,7 +218,7 @@ class NativeLsp(unittest.TestCase):
         return {"textDocument": {"uri": uri}, "position": location(text, word, start)["start"]}
 
     def folder_session(self, folders, env=None):
-        session = Session(self.binary, self.root, env=env)
+        session = Session(self.binary, self.root, env=env if env is not None else self.clean_env())
         self.addCleanup(session.close)
         capabilities = session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(),
             "workspaceFolders": [{"uri": path.as_uri(), "name": path.name} for path in folders],
@@ -219,7 +228,7 @@ class NativeLsp(unittest.TestCase):
         return session
 
     def semantic_session(self, capability=..., refresh=False):
-        session = Session(self.binary, self.root)
+        session = Session(self.binary, self.root, env=self.clean_env())
         self.addCleanup(session.close)
         requested = {"workspace": {"semanticTokens": {"refreshSupport": refresh}}}
         if capability is not ...:
@@ -229,7 +238,7 @@ class NativeLsp(unittest.TestCase):
         return session, capabilities
 
     def inlay_session(self, refresh=..., pull=False, semantic=False):
-        session = Session(self.binary, self.root)
+        session = Session(self.binary, self.root, env=self.clean_env())
         self.addCleanup(session.close)
         requested = {"workspace": {"inlayHint": {}}, "textDocument": {}}
         if refresh is not ...:
@@ -511,7 +520,7 @@ class NativeLsp(unittest.TestCase):
                 ' let read = (&Gauge item) => item.read();\n return read(&gauge);\n}\n')
         uri = (self.root / "imported-lambda.ag").as_uri()
         document = {"textDocument": {"uri": uri}}
-        session = Session(self.binary, self.root)
+        session = Session(self.binary, self.root, env=self.clean_env())
         self.addCleanup(session.close)
         session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {
             "textDocument": {"diagnostic": {}}}})
@@ -1468,7 +1477,7 @@ class NativeLsp(unittest.TestCase):
         api = source / "api.ag"
         api_text = 'i32 boot_value() { return 9; }\n'
         api.write_text(api_text)
-        session = Session(self.binary, self.root)
+        session = Session(self.binary, self.root, env=self.clean_env())
         self.addCleanup(session.close)
         session.result("initialize", {"processId": None, "rootUri": None, "capabilities": {}})
         session.send("initialized", {})
@@ -1526,7 +1535,7 @@ class NativeLsp(unittest.TestCase):
         self.assertEqual(definition, {"uri": provider.as_uri(), "range": location(provider.read_text(), "unique_std_value")})
 
     def test_auto_import_resolve_preserves_source_edits_and_rejects_stale_revisions(self):
-        session = Session(self.binary, self.root)
+        session = Session(self.binary, self.root, env=self.clean_env())
         self.addCleanup(session.close)
         session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {
             "textDocument": {"completion": {"completionItem": {"resolveSupport": {
@@ -1604,7 +1613,7 @@ class NativeLsp(unittest.TestCase):
         target.write_text(source)
         link = self.root / "provider_link.ag"
         link.symlink_to(target)
-        session = Session(self.binary, self.root)
+        session = Session(self.binary, self.root, env=self.clean_env())
         self.addCleanup(session.close)
         session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {}})
         session.send("initialized", {})
@@ -1659,7 +1668,7 @@ class NativeLsp(unittest.TestCase):
         self.assertEqual(exact[0]["name"], "get_data")
 
     def test_completion_snippets_and_deferred_details_preserve_edits_and_reject_stale_items(self):
-        session = Session(self.binary, self.root)
+        session = Session(self.binary, self.root, env=self.clean_env())
         self.addCleanup(session.close)
         capabilities = session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {"textDocument": {
             "completion": {"completionItem": {"snippetSupport": True, "documentationFormat": ["markdown"],
@@ -1907,7 +1916,7 @@ class NativeLsp(unittest.TestCase):
         self.assertEqual(self.session.diagnostics[uri]["diagnostics"], [])
 
     def test_import_quickfix_uses_versions_and_excludes_legacy_clients(self):
-        session = Session(self.binary, self.root)
+        session = Session(self.binary, self.root, env=self.clean_env())
         self.addCleanup(session.close)
         caps = session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {"workspace": {"workspaceEdit": {"documentChanges": True}},
             "textDocument": {"codeAction": {"codeActionLiteralSupport": {"codeActionKind": {"valueSet": ["quickfix"]}}}}}})["capabilities"]
@@ -1940,7 +1949,7 @@ class NativeLsp(unittest.TestCase):
         links = self.session.result("textDocument/documentLink", {"textDocument": {"uri": uri}})
         self.assertEqual(len(links), 1)
         self.assertEqual(links[0]["target"], local.as_uri())
-        session = Session(self.binary, self.root)
+        session = Session(self.binary, self.root, env=self.clean_env())
         self.addCleanup(session.close)
         caps = session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {}})["capabilities"]
         self.assertFalse(caps["documentLinkProvider"]["resolveProvider"])
@@ -2047,7 +2056,7 @@ class NativeLsp(unittest.TestCase):
         self.assertIsNone(self.session.result("codeLens/resolve", lens))
 
     def file_operation_session(self):
-        session = Session(self.binary, self.root)
+        session = Session(self.binary, self.root, env=self.clean_env())
         self.addCleanup(session.close)
         capabilities = session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(),
             "workspaceFolders": [{"uri": self.root.as_uri(), "name": self.root.name}],
@@ -2761,7 +2770,7 @@ class NativeLsp(unittest.TestCase):
         unused = "import helper;\ni32 untouched() { return 0; }\n"
         for name, text in (("consumer.ag", consumer), ("indirect.ag", indirect), ("unused.ag", unused)):
             (sub / name).write_text(text)
-        session = Session(self.binary, self.root)
+        session = Session(self.binary, self.root, env=self.clean_env())
         self.addCleanup(session.close)
         capabilities = session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {
             "textDocument": {"diagnostic": {}, "semanticTokens": semantic_capability()}}})["capabilities"]
@@ -2829,7 +2838,7 @@ class NativeLsp(unittest.TestCase):
                 self.assertEqual("root_only" in {item["label"] for item in completion["items"]}, stage != "open")
 
     def test_closed_source_rehydrates_without_invalidating_completion_or_hierarchy(self):
-        session = Session(self.binary, self.root)
+        session = Session(self.binary, self.root, env=self.clean_env())
         self.addCleanup(session.close)
         session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {
             "textDocument": {"signatureHelp": {"signatureInformation": {
@@ -3263,7 +3272,7 @@ class NativeLsp(unittest.TestCase):
         for index in range(96):
             (self.root / f"saturation{index}.ag").write_text("\n".join(
                 f"i32 symbol{index}_{item}() {{ return {item}; }}" for item in range(256)))
-        session = Session(self.binary, self.root)
+        session = Session(self.binary, self.root, env=self.clean_env())
         self.addCleanup(session.close)
         session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {}})
         session.send("initialized", {})
@@ -3592,7 +3601,7 @@ class NativeLsp(unittest.TestCase):
         published = [message["params"] for message in self.session.notifications
                      if message.get("method") == "textDocument/publishDiagnostics"]
         self.assertEqual(published, [original])
-        session = Session(self.binary, self.root)
+        session = Session(self.binary, self.root, env=self.clean_env())
         self.addCleanup(session.close)
         session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {
             "textDocument": {"diagnostic": {}}, "workspace": {"diagnostics": {"refreshSupport": True}}}})
@@ -3684,7 +3693,7 @@ class NativeLsp(unittest.TestCase):
 
     def capable_session(self, text=None, workspace=None, window=None, init_options=None, with_root=True):
         """A session whose initialize advertises extra client capabilities."""
-        session = Session(self.binary, self.root)
+        session = Session(self.binary, self.root, env=self.clean_env())
         self.addCleanup(session.close)
         capabilities = {"textDocument": {
             "hover": {"contentFormat": ["markdown", "plaintext"]},
@@ -3718,6 +3727,64 @@ class NativeLsp(unittest.TestCase):
         }})
         session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
         return uri
+
+    def test_hover_docstrings_param_annotations_and_attachment_rule(self):
+        text = (
+            "/// Adds two values.\n"
+            "/// $1 : the first addend\n"
+            "/// $2 : the second addend\n"
+            "i32 add(i32 a, i32 b) { return a + b; }\n"
+            "\n"
+            "/// A documented global.\n"
+            "i32 counter = 0;\n"
+            "\n"
+            "/// Detached block.\n"
+            "\n"
+            "i32 detached() { return 0; }\n"
+        )
+        uri = self.open(text)
+        var_hover = self.session.result("textDocument/hover", self.at(uri, text, "counter"))["contents"]["value"]
+        self.assertIn("A documented global.", var_hover)
+        hover = self.session.result("textDocument/hover", self.at(uri, text, "add", text.index("i32 add")))
+        value = hover["contents"]["value"]
+        self.assertIn("```silver\ni32 add(i32 a, i32 b)\n```", value)
+        self.assertIn("Adds two values.", value)
+        # $n annotations map onto parameter names in a Parameters section.
+        self.assertIn("**Parameters**\n- `a` — the first addend\n- `b` — the second addend", value)
+        # An empty line between the comment block and the item detaches it.
+        detached = self.session.result("textDocument/hover", self.at(uri, text, "detached"))["contents"]["value"]
+        self.assertNotIn("Detached block", detached)
+
+    def test_macro_completion_and_builtin_macro_hover(self):
+        text = ('macro twice(i32 v) { return v + v; }\n'
+                'i32 main() {\n'
+                '    @println("x");\n'
+                '    @tw\n'
+                '    return 0;\n'
+                '}\n')
+        uri = self.open(text)
+        at_macro = text.index("@tw")
+        completion = self.session.result("textDocument/completion", {
+            "textDocument": {"uri": uri}, "position": position(text, at_macro + 3)})
+        labels = {item["label"] for item in completion["items"]}
+        self.assertEqual(labels, {"@twice"})  # user macro from the same document
+        item = completion["items"][0]
+        # The '@' is part of the replaced span, so the edit yields a single '@'.
+        self.assertEqual(item["textEdit"]["newText"], "@twice")
+        self.assertEqual(item["textEdit"]["range"]["start"], position(text, at_macro))
+        # With an empty prefix right after '@', every builtin macro is offered.
+        at_at = text.index("@println")
+        all_macros = self.session.result("textDocument/completion", {
+            "textDocument": {"uri": uri}, "position": position(text, at_at + 1)})
+        builtin_labels = {item["label"] for item in all_macros["items"]}
+        self.assertIn("@println", builtin_labels)
+        self.assertIn("@assert", builtin_labels)
+        self.assertIn("@twice", builtin_labels)
+        hover = self.session.result("textDocument/hover", {
+            "textDocument": {"uri": uri}, "position": position(text, text.index("println") + 2)})
+        value = hover["contents"]["value"]
+        self.assertIn("@println(...)", value)
+        self.assertIn("Print a format string to stdout", value)
 
     def test_server_help_and_version_flags(self):
         for flag, needle in (("--help", "Usage: aglsp"), ("-h", "Usage: aglsp"),
@@ -3911,7 +3978,7 @@ class NativeLsp(unittest.TestCase):
         self.assertFalse(any(m.get("method") == "$/logTrace" for m in session.notifications))
 
     def test_workspace_folders_request_when_no_root_supplied(self):
-        session = Session(self.binary, self.root)
+        session = Session(self.binary, self.root, env=self.clean_env())
         self.addCleanup(session.close)
         session.result("initialize", {"processId": None,
                                       "capabilities": {"workspace": {"workspaceFolders": True}}})

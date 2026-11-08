@@ -1,0 +1,46 @@
+// Builtin `@macro` names, mirroring the lowering table in
+// frontend/lower_expr.ag, with one-line documentation for hover and
+// completion items.
+import std.string;
+
+str builtin_macro_names[19] = {
+    "align", "assert", "cfg", "column", "dbg", "drop_in_place", "eprint",
+    "eprintln", "file", "format", "fprint", "hash", "line", "memcpy",
+    "memmove", "memset", "print", "println", "size",
+};
+
+i64 builtin_macro_count() {
+    return 19;
+}
+
+str builtin_macro_doc(str name) {
+    if (strcmp(name, "println") == 0) { return "Print a format string to stdout with a trailing newline."; }
+    if (strcmp(name, "print") == 0) { return "Print a format string to stdout."; }
+    if (strcmp(name, "eprintln") == 0) { return "Print a format string to stderr with a trailing newline."; }
+    if (strcmp(name, "eprint") == 0) { return "Print a format string to stderr."; }
+    if (strcmp(name, "format") == 0) { return "Build a formatted string value."; }
+    if (strcmp(name, "fprint") == 0) { return "Write a formatted string to a writer such as STDOUT or STDERR."; }
+    if (strcmp(name, "dbg") == 0) { return "Print a value with its type and source location for debugging."; }
+    if (strcmp(name, "assert") == 0) { return "Abort with a message when the condition is false."; }
+    if (strcmp(name, "size") == 0) { return "Size in bytes of a type, as a constant."; }
+    if (strcmp(name, "align") == 0) { return "Alignment in bytes of a type, as a constant."; }
+    if (strcmp(name, "hash") == 0) { return "Hash a value at compile time."; }
+    if (strcmp(name, "line") == 0) { return "Current source line as a constant."; }
+    if (strcmp(name, "column") == 0) { return "Current source column as a constant."; }
+    if (strcmp(name, "file") == 0) { return "Current source file path as a constant."; }
+    if (strcmp(name, "memcpy") == 0) { return "Copy bytes between raw pointers."; }
+    if (strcmp(name, "memmove") == 0) { return "Copy bytes between possibly overlapping raw pointers."; }
+    if (strcmp(name, "memset") == 0) { return "Fill a byte region of a raw pointer with a value."; }
+    if (strcmp(name, "drop_in_place") == 0) { return "Run the destructor of a raw pointer's pointee."; }
+    if (strcmp(name, "cfg") == 0) { return "Evaluate a cfg condition at compile time."; }
+    return "";
+}
+
+bool is_builtin_macro(str name) {
+    i64 i = 0;
+    while (i < builtin_macro_count()) {
+        if (strcmp(builtin_macro_names[i], name) == 0) { return true; }
+        i += 1;
+    }
+    return false;
+}

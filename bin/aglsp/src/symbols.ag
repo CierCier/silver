@@ -5,6 +5,7 @@ import navigation;
 import tooling.search;
 import std.algo.sort;
 import transport;
+import macros;
 
 i64 symbol_kind(IdeSymbolKind kind) {
     return match kind {
@@ -16,7 +17,109 @@ i64 symbol_kind(IdeSymbolKind kind) {
     };
 }
 
+// Split a doc block into prose lines and `$n : description` parameter
+// annotations (1-based positions into the parameter list). Only the comment
+// block directly above an item is attached, so a blank line already ended the
+// block before this runs.
+void split_doc_annotations(str documentation, String* body, Vec<i64>* positions, Vec<String>* texts) {
+    body.clear();
+    i64 total = strlen(documentation);
+    i64 start = 0;
+    while (start <= total) {
+        i64 end = start;
+        while (end < total && documentation[end] != (u8)'\n') { end += 1; }
+        String line = String.new();
+        line.push_bytes((u8*)documentation + start, end - start);
+        String trimmed = line.trim();
+        bool annotation = trimmed.len() > 1 && trimmed.data[0] == (u8)'$';
+        i64 value = 0; i64 digits = 0; i64 i = 1;
+        while (annotation && i < trimmed.len()
+            && trimmed.data[i] >= (u8)'0' && trimmed.data[i] <= (u8)'9') {
+            value = value * 10 + (i64)(trimmed.data[i] - (u8)'0');
+            digits += 1; i += 1;
+        }
+        if (annotation && digits > 0) {
+            while (i < trimmed.len() && (trimmed.data[i] == (u8)' ' || trimmed.data[i] == (u8)'\t')) { i += 1; }
+            annotation = i < trimmed.len() && trimmed.data[i] == (u8)':';
+        }
+        if (annotation && value > 0) {
+            i += 1;
+            String text = trimmed.substr(i, trimmed.len() - i).trim();
+            positions.push(value);
+            texts.push(move text);
+        } else {
+            if (body.len() > 0) { body.push((u8)'\n'); }
+            body.push_str(trimmed.to_str());
+        }
+        trimmed.drop();
+        line.drop();
+        if (end >= total) { break; }
+        start = end + 1;
+    }
+}
+
+// Append the doc block to a hover body: prose first, then a Parameters section
+// that maps each `$n : ...` annotation onto the n-th parameter name.
+void append_hover_documentation(String* content, IdeSymbol* symbol, bool markdown) {
+    if (symbol.documentation.len() == 0) { return; }
+    String body = String.new();
+    Vec<i64> positions = Vec<i64>.new();
+    Vec<String> texts = Vec<String>.new();
+    split_doc_annotations(symbol.documentation.to_str(), &body, &positions, &texts);
+    if (body.len() > 0) { content.push_str("\n\n"); content.push_str(body.to_str()); }
+    if (positions.len() > 0 && symbol.parameter_names.len() > 0) {
+        if (markdown) { content.push_str("\n\n**Parameters**\n"); }
+        else { content.push_str("\n\nParameters:\n"); }
+        i64 skip = symbol.instance ? 1 : 0;
+        i64 p = 0;
+        while (p < positions.len()) {
+            i64 n = positions.get(p);
+            String desc = texts.get(p).clone();
+            String label = String.new();
+            if (n >= 1 && n + skip - 1 < symbol.parameter_names.len() && n + skip - 1 >= 0) {
+                label = symbol.parameter_names.get(n + skip - 1).clone();
+            } else {
+                label.push((u8)'$');
+                label.push_display(&n);
+            }
+            if (markdown) {
+                content.push_str("- `"); content.push_str(label.to_str()); content.push_str("` — ");
+            } else {
+                content.push_str("  "); content.push_str(label.to_str()); content.push_str(": ");
+            }
+            content.push_str(desc.to_str());
+            content.push((u8)'\n');
+            p += 1;
+        }
+    }
+}
+
 String compute_hover(Document* doc, i64 offset, bool markdown) {
+    // `@name` macro invocations hover over the builtin documentation table.
+    // Text scan (not the token stream) so the name is always current.
+    i64 word_start = offset;
+    while (word_start > 0 && typecheck_name_continue(doc.text.data[word_start - 1])) { word_start -= 1; }
+    if (word_start > 0 && doc.text.data[word_start - 1] == (u8)'@') {
+        i64 word_end = offset;
+        while (word_end < doc.text.len() && typecheck_name_continue(doc.text.data[word_end])) { word_end += 1; }
+        String name = doc.text.substr(word_start, word_end - word_start);
+        if (is_builtin_macro(name.to_str())) {
+            str doc_text = builtin_macro_doc(name.to_str());
+            String content = String.new();
+            if (markdown) { content.push_str("```silver\n@"); } else { content.push_str("@"); }
+            content.push_str(name.to_str());
+            content.push_str("(...)");
+            if (markdown) { content.push_str("\n```"); }
+            if (strlen(doc_text) > 0) { content.push_str("\n\n"); content.push_str(doc_text); }
+            Span macro_span = Span.synthetic();
+            macro_span.start = word_start - 1;
+            macro_span.end = word_end;
+            String out = String.from_str("{\"contents\":{\"kind\":\""); out.push_str(markdown ? "markdown" : "plaintext"); out.push_str("\",\"value\":\"");
+            json_escape(content.to_str(), &out); out.push_str("\"},\"range\":");
+            doc.append_range(&out, macro_span);
+            out.push('}'); return move out;
+        }
+    }
     i64 occurrence = doc.analysis.occurrence_at(offset);
     SymbolTarget target = follow_import_alias(resolve_occurrence(doc, occurrence));
     if (target.symbol < 0) { return String.from_str("null"); }
@@ -25,7 +128,7 @@ String compute_hover(Document* doc, i64 offset, bool markdown) {
     if (markdown) { content.push_str("```silver\n"); }
     content.push_str(symbol.signature.to_str());
     if (markdown) { content.push_str("\n```"); }
-    if (symbol.documentation.len() > 0) { content.push_str("\n\n"); content.push_str(symbol.documentation.to_str()); }
+    append_hover_documentation(&content, symbol, markdown);
     String out = String.from_str("{\"contents\":{\"kind\":\""); out.push_str(markdown ? "markdown" : "plaintext"); out.push_str("\",\"value\":\"");
     json_escape(content.to_str(), &out); out.push_str("\"},\"range\":");
     doc.append_range(&out, doc.analysis.occurrences.get_ptr(occurrence).node.span);

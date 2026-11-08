@@ -501,6 +501,13 @@ i32 run_workspace_check(Vec<String>* arguments, WorkspacePlan* plan) {
     Vec<String> include_dirs = Vec<String>.new();
     LintConfig lint_config = lint_config_default();
     collect_workspace_check_options(arguments, &cfg, &include_dirs, plan, &lint_config);
+    Vec<String> sysroot_dirs = module_sysroot_include_dirs();
+    i64 si = 0;
+    while (si < sysroot_dirs.len()) {
+        module_add_dir_unique(&include_dirs, sysroot_dirs.get_ptr(si).to_str());
+        si += 1;
+    }
+    sysroot_dirs.drop();
     i32 result = emit_check(plan.entry.to_str(), &cfg, &include_dirs, &lint_config);
     include_dirs.drop();
     return result;

@@ -4,8 +4,7 @@ import std.mem.memory;
 import std.string;
 import std.path;
 import std.fs;
-import std.env;
-import std.sys.raw.fs;
+import frontend.module_loader;
 import tooling.index;
 import positions;
 
@@ -161,21 +160,20 @@ impl DocumentStore {
         store.project_roots = Vec<String>.new();
         store.overlay_paths = Vec<String>.new();
         store.discover_open_projects = true;
-        Optional<String> sysroot = var("SILVER_SYSROOT");
-        if (sysroot.is_some()) {
-            String configured = sysroot.unwrap(); String root = absolute_document_path(configured.to_str());
-            store.include_dirs.push(path_join(root.to_str(), "include/silver"));
-            store.include_dirs.push(path_join(root.to_str(), "include"));
-            store.include_dirs.push(move root);
+        // Same sysroot fallback cascade as the compiler: SILVER_SYSROOT,
+        // executable-relative prefix, user data dir, and system share dirs.
+        Vec<String> sysroot_dirs = module_sysroot_include_dirs();
+        i64 si = 0;
+        while (si < sysroot_dirs.len()) {
+            String absolute = absolute_document_path(sysroot_dirs.get_ptr(si).to_str());
+            i64 existing = 0;
+            while (existing < store.include_dirs.len()
+                && !store.include_dirs.get_ptr(existing).equals(absolute.to_str())) { existing += 1; }
+            if (existing == store.include_dirs.len()) { store.include_dirs.push(move absolute); }
+            else { absolute.drop(); }
+            si += 1;
         }
-        u8 executable[4096];
-        i64 length = sys_readlink((i64)"/proc/self/exe", (i64)&executable[0], 4096);
-        if (length > 0 && length < 4096) {
-            String path = String.new(); path.push_bytes(&executable[0], length);
-            String bin = path_dirname(path.to_str()); String prefix = path_dirname(bin.to_str());
-            store.include_dirs.push(path_join(prefix.to_str(), "include/silver"));
-            store.include_dirs.push(path_join(prefix.to_str(), "include"));
-        }
+        sysroot_dirs.drop();
         return move store;
     }
 

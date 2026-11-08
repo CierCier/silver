@@ -9,6 +9,7 @@ import frontend.lower_expr;
 import imports;
 import transport;
 import std.map;
+import macros;
 
 i64 completion_kind(IdeSymbolKind kind) {
     return match kind {
@@ -469,6 +470,61 @@ String render_completions(Document* doc, Span replacement, CompletionCandidates*
     out.push_str("]}"); return move out;
 }
 
+// Collect `macro name(...)` declarations in the document.
+void collect_user_macros(SyntaxNode* node, Vec<String>* names) {
+    if (node == (SyntaxNode*)0) { return; }
+    if (node.kind == NodeKind.Macro && node.first_child != (SyntaxNode*)0
+        && node.first_child.kind == NodeKind.Token
+        && node.first_child.token_kind == TokenKind.Macro) {
+        SyntaxNode* name = node.first_child.next_sibling;
+        if (name != (SyntaxNode*)0 && name.kind == NodeKind.Token
+            && name.token_kind == TokenKind.Identifier) {
+            names.push(String.from_str(name.text));
+        }
+    }
+    collect_user_macros(node.first_child, names);
+    collect_user_macros(node.next_sibling, names);
+}
+
+// Offer builtin `@macro` calls plus user macros declared in the document.
+void append_macro_completions(Document* doc, str prefix, CompletionCandidates* candidates) {
+    doc.ensure_syntax();
+    i64 i = 0;
+    while (i < builtin_macro_count()) {
+        str name = builtin_macro_names[i];
+        i64 score = ide_match_score(prefix, name);
+        if (score >= 0) {
+            String label = String.from_str("@");
+            label.push_str(name);
+            str doc_text = builtin_macro_doc(name);
+            SymbolTarget target; target.document = doc; target.symbol = -1;
+            offer_completion(candidates, label.to_str(), "macro", doc_text, 3, false, score,
+                target, false, "", false);
+            label.drop();
+        }
+        i += 1;
+    }
+    Vec<String> user_macros = Vec<String>.new();
+    collect_user_macros(doc.analysis.tree.root, &user_macros);
+    i = 0;
+    while (i < user_macros.len()) {
+        String* name = user_macros.get_ptr(i);
+        if (!is_builtin_macro(name.to_str())) {
+            i64 score = ide_match_score(prefix, name.to_str());
+            if (score >= 0) {
+                String label = String.from_str("@");
+                label.push_str(name.to_str());
+                SymbolTarget target; target.document = doc; target.symbol = -1;
+                offer_completion(candidates, label.to_str(), "user macro", "", 3, false, score,
+                    target, false, "", false);
+                label.drop();
+            }
+        }
+        i += 1;
+    }
+    user_macros.drop();
+}
+
 String compute_completion(DocumentStore* store, Document* doc, i64 offset, ClientOptions* client,
         PendingMessage* pending, bool index_pending) {
     CompletionCandidates candidates = completion_candidates();
@@ -480,6 +536,12 @@ String compute_completion(DocumentStore* store, Document* doc, i64 offset, Clien
         ImportCompletionContext context = import_context.unwrap();
         replacement = context.replacement;
         append_import_context_completions(store, doc, &context, pending, &candidates);
+        return render_completions(doc, replacement, &candidates, client, false);
+    }
+    // `@` starts a macro call: complete macro names, replacing the '@' too.
+    if (replacement.start > 0 && doc.text.data[replacement.start - 1] == (u8)'@') {
+        replacement.start -= 1;
+        append_macro_completions(doc, prefix.to_str(), &candidates);
         return render_completions(doc, replacement, &candidates, client, false);
     }
     i64 separator = replacement.start;
