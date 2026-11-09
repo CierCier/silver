@@ -74,10 +74,10 @@ void append_hover_documentation(String* content, IdeSymbol* symbol, bool markdow
         i64 p = 0;
         while (p < positions.len()) {
             i64 n = positions.get(p);
-            String desc = texts.get(p).clone();
+            String desc = texts.get_ptr(p).clone();
             String label = String.new();
             if (n >= 1 && n + skip - 1 < symbol.parameter_names.len() && n + skip - 1 >= 0) {
-                label = symbol.parameter_names.get(n + skip - 1).clone();
+                label = symbol.parameter_names.get_ptr(n + skip - 1).clone();
             } else {
                 label.push((u8)'$');
                 label.push_display(&n);
@@ -99,10 +99,33 @@ String compute_hover(Document* doc, i64 offset, bool markdown) {
     // Text scan (not the token stream) so the name is always current.
     i64 word_start = offset;
     while (word_start > 0 && typecheck_name_continue(doc.text.data[word_start - 1])) { word_start -= 1; }
-    if (word_start > 0 && doc.text.data[word_start - 1] == (u8)'@') {
+    if (word_start > 0 && doc.text.data[word_start - 1] == (u8)'@' && !inside_literal(doc, offset)) {
         i64 word_end = offset;
         while (word_end < doc.text.len() && typecheck_name_continue(doc.text.data[word_end])) { word_end += 1; }
         String name = doc.text.substr(word_start, word_end - word_start);
+        if (!is_builtin_macro(name.to_str())) {
+            // User macro declared in this document: hover shows its doc block.
+            i64 s = 0;
+            while (s < doc.analysis.symbols.len()) {
+                IdeSymbol* sym = doc.analysis.symbols.get_ptr(s);
+                if (sym.kind == IdeSymbolKind.Function && sym.name.equals(name.to_str())
+                    && sym.signature.starts_with("macro ")) {
+                    String content = String.new();
+                    if (markdown) { content.push_str("```silver\n"); }
+                    content.push_str(sym.signature.to_str());
+                    if (markdown) { content.push_str("\n```"); }
+                    append_hover_documentation(&content, sym, markdown);
+                    Span macro_span = Span.synthetic();
+                    macro_span.start = word_start - 1;
+                    macro_span.end = word_end;
+                    String out = String.from_str("{\"contents\":{\"kind\":\""); out.push_str(markdown ? "markdown" : "plaintext"); out.push_str("\",\"value\":\"");
+                    json_escape(content.to_str(), &out); out.push_str("\"},\"range\":");
+                    doc.append_range(&out, macro_span);
+                    out.push('}'); return move out;
+                }
+                s += 1;
+            }
+        }
         if (is_builtin_macro(name.to_str())) {
             str doc_text = builtin_macro_doc(name.to_str());
             String content = String.new();

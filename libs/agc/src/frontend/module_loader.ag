@@ -190,6 +190,8 @@ Vec<String> module_sysroot_include_dirs() {
     i64 index = 1;
     while (index < arguments.len()) {
         String* argument = arguments.get_ptr(index);
+        if (argument.equals("--")) { break; }  // everything after -- is program args
+        if (argument.equals("--run-arg") && index + 1 < arguments.len()) { index += 2; continue; }
         if (argument.equals("--sysroot") && index + 1 < arguments.len()) {
             module_add_sysroot_candidates(&dirs, arguments.get_ptr(index + 1).to_str(), true);
             index += 2;

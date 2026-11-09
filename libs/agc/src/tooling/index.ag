@@ -603,6 +603,29 @@ void ide_collect(IdeIndex* index) {
                 index.implementations.push(implementation);
                 ide_members(index, item, target.text, true, &table);
             }
+        } else if (item.kind == NodeKind.Macro && item.first_child != (SyntaxNode*)0
+                   && item.first_child.kind == NodeKind.Token
+                   && item.first_child.token_kind == TokenKind.Macro) {
+            // `macro name(params) { ... }` declaration: index it like a function
+            // so hover shows its doc block and `$n` parameter annotations.
+            SyntaxNode* name = item.first_child.next_sibling;
+            if (name != (SyntaxNode*)0 && node_is_identifier(name)) {
+                i64 id = ide_add_symbol(index, name, IdeSymbolKind.Function, "", item.span, item.span, false);
+                IdeSymbol* sym = index.symbols.get_ptr(id);
+                sym.signature = ide_render(item.first_child, binding_function_body(item));
+                SyntaxNode* params = name.next_sibling;
+                while (params != (SyntaxNode*)0 && params.kind != NodeKind.Parenthesized) { params = params.next_sibling; }
+                if (params != (SyntaxNode*)0) {
+                    Vec<Binding> macro_bindings = Vec<Binding>.new();
+                    collect_parameter_bindings(params, &macro_bindings);
+                    i64 p = 0;
+                    while (p < macro_bindings.len()) {
+                        sym.parameter_names.push(String.from_str(macro_bindings.get_ptr(p).name));
+                        p += 1;
+                    }
+                    macro_bindings.drop();
+                }
+            }
         } else if (name != (SyntaxNode*)0) {
             IdeSymbolKind kind = IdeSymbolKind.Global;
             if (item.kind == NodeKind.Struct) { kind = IdeSymbolKind.Struct; }

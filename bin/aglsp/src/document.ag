@@ -8,6 +8,20 @@ import frontend.module_loader;
 import tooling.index;
 import positions;
 
+// True when the offset sits inside a string, char, or comment literal.
+bool inside_literal(Document* doc, i64 offset) {
+    i64 i = 0;
+    while (i < doc.analysis.tokens.len()) {
+        Token* token = doc.analysis.tokens.get(i);
+        if (token.span.start < offset && offset < token.span.end) {
+            return token.kind == TokenKind.Comment || token.kind == TokenKind.StringLiteral
+                || token.kind == TokenKind.CharLiteral;
+        }
+        i += 1;
+    }
+    return false;
+}
+
 String absolute_document_path(str source) {
     String path = String.from_str(source);
     if (!path.starts_with("/")) {

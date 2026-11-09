@@ -1232,7 +1232,7 @@ class NativeLsp(unittest.TestCase):
 
     def test_import_triggers_are_contextual_and_replace_existing_segments(self):
         triggers = self.capabilities["completionProvider"]["triggerCharacters"]
-        self.assertTrue({".", " ", "{", ","}.issubset(triggers))
+        self.assertTrue({".", " ", "{", ",", "@"}.issubset(triggers))
         for index, (text, character, label) in enumerate((
                 ("import ", " ", "helper"),
                 ("import helper {", "{", "answer"),
@@ -3785,6 +3785,23 @@ class NativeLsp(unittest.TestCase):
         value = hover["contents"]["value"]
         self.assertIn("@println(...)", value)
         self.assertIn("Print a format string to stdout", value)
+        # No macro hover inside string literals.
+        literal_uri = self.open('i32 main() { str s = "email @println"; return 0; }\n', "literal.ag")
+        literal = 'i32 main() { str s = "email @println"; return 0; }\n'
+        self.assertIsNone(self.session.result("textDocument/hover", {
+            "textDocument": {"uri": literal_uri}, "position": position(literal, literal.index("println") + 2)}))
+        # A documented user macro hovers with its doc block and $n annotations.
+        macro_doc_uri = self.open(
+            "/// Doubles a value.\n/// $1 : the value to double\nmacro twice(i32 v) { return v + v; }\n"
+            "i32 main() { return @twice(2); }\n", "macrodoc.ag")
+        macro_doc = ("/// Doubles a value.\n/// $1 : the value to double\n"
+                     "macro twice(i32 v) { return v + v; }\ni32 main() { return @twice(2); }\n")
+        macro_hover = self.session.result("textDocument/hover", {
+            "textDocument": {"uri": macro_doc_uri}, "position": position(macro_doc, macro_doc.index("twice", macro_doc.index("@twice")) + 2)})
+        macro_value = macro_hover["contents"]["value"]
+        self.assertIn("macro twice(i32 v)", macro_value)
+        self.assertIn("Doubles a value.", macro_value)
+        self.assertIn("**Parameters**\n- `v` — the value to double", macro_value)
 
     def test_server_help_and_version_flags(self):
         for flag, needle in (("--help", "Usage: aglsp"), ("-h", "Usage: aglsp"),

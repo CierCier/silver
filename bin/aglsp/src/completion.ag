@@ -158,19 +158,6 @@ void sort_completions(CompletionCandidates* candidates) {
     }
 }
 
-bool inside_literal(Document* doc, i64 offset) {
-    i64 i = 0;
-    while (i < doc.analysis.tokens.len()) {
-        Token* token = doc.analysis.tokens.get(i);
-        if (token.span.start < offset && offset < token.span.end) {
-            return token.kind == TokenKind.Comment || token.kind == TokenKind.StringLiteral
-                || token.kind == TokenKind.CharLiteral;
-        }
-        i += 1;
-    }
-    return false;
-}
-
 void append_completion(String* out, Document* doc, Span replacement, CompletionCandidate* item, ClientOptions* client, bool* first) {
     str name = item.name.to_str(); str detail = item.detail.to_str();
     str documentation = item.documentation.to_str(); str auto_module = item.auto_module.to_str();

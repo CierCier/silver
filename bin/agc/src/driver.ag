@@ -1114,6 +1114,13 @@ i32 run_frontend() {
         }
         option += 1;
     }
+    Vec<String> sysroot_dirs = module_sysroot_include_dirs();
+    i64 si = 0;
+    while (si < sysroot_dirs.len()) {
+        module_add_dir_unique(&include_dirs, sysroot_dirs.get_ptr(si).to_str());
+        si += 1;
+    }
+    sysroot_dirs.drop();
     if (cli.positionals.len() == 0) {
         STDERR.write_str("usage: agc <lex|parse|check> <source.ag> [--cfg key=value,...] [-I dir] [-O2]\n");
         include_dirs.drop();
