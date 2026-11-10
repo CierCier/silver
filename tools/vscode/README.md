@@ -55,8 +55,10 @@ code --install-extension silver.vsix
 ## Integration test
 
 `npm run test:integration` opens `test/integration/workspace/main.ag` in a
-real VS Code and checks that the extension starts `aglsp` and returns document
-symbols and a doc-comment hover. It needs `aglsp` on `PATH` and a display (use
+real VS Code twice. With `aglsp` on `PATH`, it checks document symbols, a
+doc-comment hover, and that overlapping restarts leave one server. Without
+`aglsp`, it checks that activation and restart still complete. It needs `aglsp`
+on `PATH` and a display (use
 `xvfb-run` on a headless machine). Set `VSCODE_EXECUTABLE` to an installed
 editor binary to skip the VS Code download; on NixOS, point it at VSCodium's
 Electron binary (`lib/vscode/codium`), not its `bin/codium` launcher.

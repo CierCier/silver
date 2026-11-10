@@ -43,4 +43,7 @@ see [`vscode/README.md`](vscode/README.md#integration-test).
 3. Commit the grammar and its generated `src/`.
 4. Set `rev` in `zed/extension.toml` to that commit, and commit again.
 
-Zed fetches the grammar by `rev`, so step 4 needs a separate commit.
+Zed fetches the grammar by `rev`, so step 4 needs a separate commit. A squash
+merge leaves `rev` on no branch. GitHub still serves it by SHA through the
+pull request, and `check.sh` fetches it that way. Still, point `rev` at the
+squash commit in a follow-up.

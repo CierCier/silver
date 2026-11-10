@@ -111,11 +111,17 @@ jobs:
         with:
           # tools/check.sh compares the Zed grammar rev with the current grammar.
           fetch-depth: 0
+          # check.sh runs npm install scripts; they must not see the token.
+          persist-credentials: false
 
       - name: Set up node
         uses: actions/setup-node@v5
         with:
           node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            tools/tree-sitter-silver/package-lock.json
+            tools/vscode/package-lock.json
 
       - name: Check grammar, Zed, and VS Code extensions
         run: tools/check.sh

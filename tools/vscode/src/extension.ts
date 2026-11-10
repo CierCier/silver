@@ -64,13 +64,18 @@ async function start(output: vscode.LogOutputChannel): Promise<void> {
   const config = vscode.workspace.getConfiguration("silver");
   const command = resolveServer(config.get<string>("server.path", ""));
   if (command === undefined) {
-    const choice = await vscode.window.showErrorMessage(
-      "Silver: `aglsp` was not found. Install the Silver toolchain or set `silver.server.path`.",
-      "Open Settings",
-    );
-    if (choice === "Open Settings") {
-      await vscode.commands.executeCommand("workbench.action.openSettings", "silver.server.path");
-    }
+    // Not awaited: the prompt resolves only when dismissed, and activation and
+    // later restarts must not wait on it.
+    void vscode.window
+      .showErrorMessage(
+        "Silver: `aglsp` was not found. Install the Silver toolchain or set `silver.server.path`.",
+        "Open Settings",
+      )
+      .then((choice) => {
+        if (choice === "Open Settings") {
+          void vscode.commands.executeCommand("workbench.action.openSettings", "silver.server.path");
+        }
+      });
     return;
   }
 
@@ -90,13 +95,15 @@ async function start(output: vscode.LogOutputChannel): Promise<void> {
     outputChannel: output,
   };
 
-  client = new LanguageClient("silver", "Silver Language Server", serverOptions, clientOptions);
+  const created = new LanguageClient("silver", "Silver Language Server", serverOptions, clientOptions);
+  client = created;
   try {
-    await client.start();
+    await created.start();
   } catch (error) {
     output.error(`Failed to start ${command}: ${String(error)}`);
     void vscode.window.showErrorMessage(`Silver: failed to start ${command}. See the output channel for details.`);
-    client = undefined;
+    if (client === created) client = undefined;
+    await created.dispose().catch(() => undefined);
   }
 }
 

@@ -182,8 +182,8 @@
           ]
         },
         {
-          "comment": "A function definition: the name directly before `(` or `<...>(` after a type.",
-          "match": "(?<=[A-Za-z0-9_>*&\\]])\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(?=(<[^<>()]*(<[^<>()]*>[^<>()]*)*>)?\\s*\\()",
+          "comment": "A function definition: a name after a type and before `(` or `<...>(`. Neither the name nor the word before it is a keyword, and `*`/`&` count only when attached to the type.",
+          "match": "(?<=[A-Za-z0-9_>\\]]|[A-Za-z0-9_>\\]][*&]|[A-Za-z0-9_>\\]][*&]{2})(?<!\\b(?:return|else|if|while|for|match|in|as|move|cast|let|defer|launch|wait|comptime|asm|break|continue|import|static|const|mut|volatile|private|extern|macro))\\s+(?!(?:return|else|if|while|for|match|in|as|move|cast|let|defer|launch|wait|comptime|asm|break|continue|import|static|const|mut|volatile|private|extern|macro|true|false)\\b)([A-Za-z_][A-Za-z0-9_]*)\\s*(?=(<[^<>()]*(<[^<>()]*>[^<>()]*)*>)?\\s*\\()",
           "captures": { "1": { "name": "entity.name.function.silver" } }
         }
       ]

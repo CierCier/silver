@@ -58,3 +58,16 @@ i32 add(i32 left, &Point right) {
 
 struct Ref<'a> { &'a str text; }
 //         ^^ storage.modifier.lifetime.silver
+
+void flow() {
+    if (y) { } else if (x) { return twice(3); }
+//                  ^^ keyword.control.silver
+//                                  ^^^^^ entity.name.function.call.silver
+    i64 n = a * foo(b);
+//              ^^^ entity.name.function.call.silver
+}
+
+i32* make(i32 v);
+//   ^^^^ entity.name.function.silver
+Vec<T> build<T>(T v);
+//     ^^^^^ entity.name.function.silver

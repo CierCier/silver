@@ -31,18 +31,26 @@ npx tree-sitter test
 step "tree-sitter: every .ag file in the repository parses without errors"
 list="$(mktemp)"
 trap 'rm -f "$list"' EXIT
-git -C "$repo" ls-files -z '*.ag' | xargs -0 -I{} printf '%s\n' "$repo/{}" > "$list"
-npx tree-sitter parse --quiet --stat --paths "$list" | grep "^Total parses"
-if npx tree-sitter parse --quiet --paths "$list" | grep -q .; then
-  npx tree-sitter parse --quiet --paths "$list" | head -n 20
+git -C "$repo" ls-files -z '*.ag' | while IFS= read -r -d '' file; do
+  printf '%s\n' "$repo/$file"
+done > "$list"
+# `tree-sitter parse` exits non-zero when any file has an ERROR or MISSING node.
+if ! parsed="$(npx tree-sitter parse --quiet --stat --paths "$list")"; then
+  printf '%s\n' "$parsed" | grep -E '\((ERROR|MISSING)' | head -n 20
   echo "error: the files above do not parse cleanly" >&2
   exit 1
 fi
+printf '%s\n' "$parsed" | grep '^Total parses' || true
 
 step "zed: grammar rev contains the current grammar"
 rev="$(sed -n 's/^rev = "\([0-9a-f]*\)"$/\1/p' "$tools/zed/extension.toml")"
+# After a squash merge the pinned commit is on no branch, but GitHub still
+# serves it by SHA (through the pull request ref), as Zed fetches it.
 if ! git -C "$repo" cat-file -e "$rev^{commit}" 2>/dev/null; then
-  echo "error: tools/zed/extension.toml rev $rev is not a commit in this clone." >&2
+  git -C "$repo" fetch --quiet --no-tags origin "$rev" 2>/dev/null || true
+fi
+if ! git -C "$repo" cat-file -e "$rev^{commit}" 2>/dev/null; then
+  echo "error: tools/zed/extension.toml rev $rev is not a commit in this clone or on origin." >&2
   exit 1
 fi
 if ! git -C "$repo" diff --quiet "$rev" -- tools/tree-sitter-silver/grammar.js tools/tree-sitter-silver/src; then
