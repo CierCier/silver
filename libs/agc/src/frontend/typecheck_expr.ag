@@ -16,8 +16,10 @@ import frontend.messages;
 import frontend.monomorph;
 import frontend.types;
 import frontend.cfg;
+/// Nesting limit for expression type checking; deeper code reports an error.
 const u32 MAX_TYPE_CHECK_DEPTH = 256;
 
+/// Returns true when `s` starts with `prefix`; false for null.
 bool typecheck_str_starts_with(str s, str prefix) {
     if (s == (str)0 || prefix == (str)0) { return false; }
     i64 slen = strlen(s);
@@ -32,11 +34,14 @@ bool typecheck_str_starts_with(str s, str prefix) {
 }
 
 
+/// One local in scope: interned name and type id.
 struct LocalVar {
     u32 name_id;
     u32 type_id;
 }
 
+/// The locals in scope during expression checking, innermost last, plus
+/// the current nesting depth.
 struct TypeEnv {
     Vec<LocalVar> locals;
     u32 expression_depth;
@@ -44,6 +49,7 @@ struct TypeEnv {
 }
 
 impl TypeEnv {
+    /// Creates an empty environment.
     TypeEnv new() {
         TypeEnv env;
         env.locals = Vec<LocalVar>.new();
@@ -52,6 +58,7 @@ impl TypeEnv {
         return move env;
     }
 
+    /// Binds `name_id` to `type_id`, replacing an existing binding.
     void insert(TypeEnv* self, u32 name_id, u32 type_id) {
         i64 i = 0;
         while (i < self.locals.len()) {
@@ -68,6 +75,7 @@ impl TypeEnv {
         self.locals.push(move var);
     }
 
+    /// Returns the innermost type bound to `name_id`, or `TYPE_UNKNOWN`.
     u32 lookup(TypeEnv* self, u32 name_id) {
         i64 i = self.locals.len() - 1;
         while (i >= 0) {
@@ -81,6 +89,7 @@ impl TypeEnv {
     }
 }
 
+/// Returns true for 8-bit integer types (byte buffers). `char` is excluded.
 bool type_is_byte_like(u32 id) {
     // `char` is a 32-bit Unicode scalar, not a byte: accepting it here would
     // let a `u8*` pass as a `char*` and a char store would write four bytes
@@ -88,10 +97,12 @@ bool type_is_byte_like(u32 id) {
     return id == TYPE_U8 || id == TYPE_I8;
 }
 
+/// Returns true for numeric types and `char`.
 bool type_is_numeric_or_char(u32 id) {
     return type_is_numeric(id) || id == TYPE_CHAR;
 }
 
+/// Parses a decimal literal index; returns -1 when malformed.
 i64 typecheck_literal_index(str text) {
     i64 value = 0;
     i64 i = 0;
@@ -102,6 +113,9 @@ i64 typecheck_literal_index(str text) {
     return i > 0 && text[i] == 0 ? value : -1;
 }
 
+/// Returns true when `actual` is acceptable where `expected` is required.
+/// Unknown types always match, as do pointers or references where either
+/// side points to `void` or an unknown type.
 bool types_match(TypeTable* types, u32 expected, u32 actual) {
     if (expected == TYPE_UNKNOWN || actual == TYPE_UNKNOWN) {
         return true;
@@ -164,6 +178,8 @@ bool types_match(TypeTable* types, u32 expected, u32 actual) {
     return false;
 }
 
+/// Returns true when a user `cast` block converts `actual_type` to
+/// `expected_type`.
 bool has_user_cast(SyntaxNode* root, TypeTable* types, u32 actual_type, u32 expected_type) {
     if (root == (SyntaxNode*)0 || actual_type == TYPE_UNKNOWN || expected_type == TYPE_UNKNOWN) {
         return false;
@@ -214,6 +230,8 @@ bool has_user_cast(SyntaxNode* root, TypeTable* types, u32 actual_type, u32 expe
     return false;
 }
 
+/// Like `types_match`, but integer and float literals also fold into any
+/// width of the same kind.
 bool types_match_value(TypeTable* types, u32 expected, u32 actual, bool actual_is_literal) {
     if (types_match(types, expected, actual)) {
         return true;
@@ -232,6 +250,8 @@ bool types_match_value(TypeTable* types, u32 expected, u32 actual, bool actual_i
     return false;
 }
 
+/// Returns true when an array or vector argument coerces to a slice
+/// parameter.
 bool typecheck_slice_argument_coercion(TypeTable* types, u32 expected, u32 actual) {
     expected = types.resolve_subst(expected);
     actual = types.resolve_subst(actual);
@@ -264,12 +284,16 @@ bool typecheck_slice_argument_coercion(TypeTable* types, u32 expected, u32 actua
     return false;
 }
 
+/// Returns true when a call argument fits its parameter (value matching or
+/// slice coercion).
 bool typecheck_call_argument_matches(TypeTable* types, u32 expected, u32 actual,
                                      bool actual_is_literal) {
     return types_match_value(types, expected, actual, actual_is_literal)
         || typecheck_slice_argument_coercion(types, expected, actual);
 }
 
+/// Reports passing a byte pointer where a `char*` is expected (or the
+/// reverse); the element widths differ.
 void typecheck_char_pointer_argument(TypeTable* types, u32 expected, u32 actual,
                                      Span span, DiagnosticBag* diagnostics, bool* ok) {
     TypeEntry* expected_entry = types.get(types.resolve_subst(expected));
@@ -291,6 +315,7 @@ void typecheck_char_pointer_argument(TypeTable* types, u32 expected, u32 actual,
     }
 }
 
+/// Returns true when expression `expr_id` is a literal.
 bool expr_is_literal(AstPool* pool, u32 expr_id) {
     if (expr_id == 0) {
         return false;
@@ -298,6 +323,7 @@ bool expr_is_literal(AstPool* pool, u32 expr_id) {
     return pool.get_expr(expr_id).kind == ExprKind.Literal;
 }
 
+/// Returns the promotion rank of a numeric type (0 for non-numeric).
 u32 numeric_rank(u32 id) {
     if (id == TYPE_BOOL) { return 1; }
     if (id == TYPE_I8) { return 10; }
@@ -320,6 +346,7 @@ u32 numeric_rank(u32 id) {
     return 0;
 }
 
+/// Returns the wider of two numeric types by rank, or the known one.
 u32 common_numeric_type(u32 left, u32 right) {
     if (left == right) { return left; }
     if (type_is_numeric(left) && type_is_numeric(right)) {
@@ -328,6 +355,8 @@ u32 common_numeric_type(u32 left, u32 right) {
     return left != TYPE_UNKNOWN ? left : right;
 }
 
+/// Returns the first function item named `name` with `arity` parameters
+/// (any arity when -1), or null.
 SyntaxNode* find_function_by_name_and_arity(SyntaxNode* root, str name, i64 arity) {
     if (root == (SyntaxNode*)0) { return (SyntaxNode*)0; }
     SyntaxNode* child = root.first_child;
@@ -357,10 +386,13 @@ SyntaxNode* find_function_by_name_and_arity(SyntaxNode* root, str name, i64 arit
     return fallback;
 }
 
+/// Returns the first function item named `name`, or null.
 SyntaxNode* find_function_by_name(SyntaxNode* root, str name) {
     return find_function_by_name_and_arity(root, name, -1);
 }
 
+/// Returns a function item's declared return type id (`TYPE_VOID` when
+/// omitted).
 u32 function_return_type_id(TypeTable* types, SyntaxNode* function) {
     if (function == (SyntaxNode*)0) { return TYPE_VOID; }
     SyntaxNode* parameters = binding_function_parameters(function);
@@ -395,6 +427,7 @@ u32 function_return_type_id(TypeTable* types, SyntaxNode* function) {
     return ret_type;
 }
 
+/// Returns true when a function item declares type parameters.
 bool typecheck_is_generic_function(SyntaxNode* function) {
     SyntaxNode* id = function_identifier(function);
     if (id == (SyntaxNode*)0) { return false; }
@@ -406,6 +439,7 @@ bool typecheck_is_generic_function(SyntaxNode* function) {
     return false;
 }
 
+/// Returns a stable canonical spelling of type `type_id` for signature keys.
 String typecheck_canonical_type(TypeTable* types, u32 type_id, u32 depth) {
     if (depth >= 64 || (i64)type_id >= types.types.len()) {
         return String.from_str("unknown");
@@ -468,6 +502,7 @@ String typecheck_canonical_type(TypeTable* types, u32 type_id, u32 depth) {
     return String.from_str(types.names.get(entry.name_id));
 }
 
+/// Returns true when a function's last parameter is variadic.
 bool typecheck_function_is_variadic(SyntaxNode* function) {
     SyntaxNode* params = binding_function_parameters(function);
     if (params == (SyntaxNode*)0) { return false; }
@@ -479,6 +514,7 @@ bool typecheck_function_is_variadic(SyntaxNode* function) {
     return false;
 }
 
+/// Returns the `name(param types)` key that identifies one overload.
 String typecheck_free_signature_key(TypeTable* types, str name, SyntaxNode* function) {
     Vec<Binding> params = Vec<Binding>.new();
     collect_parameter_bindings(binding_function_parameters(function), &params);
@@ -503,6 +539,7 @@ String typecheck_free_signature_key(TypeTable* types, str name, SyntaxNode* func
     return move key;
 }
 
+/// Returns the 64-bit FNV-1a hash of `value`.
 u64 typecheck_fnv1a64(str value) {
     u64 hash = (u64)-3750763034362895579;
     i64 i = 0;
@@ -513,6 +550,8 @@ u64 typecheck_fnv1a64(str value) {
     return hash;
 }
 
+/// Returns `name__<16 hex digits>`, the symbol of one free-function
+/// overload, from the hash of its signature key.
 String typecheck_overloaded_free_symbol(TypeTable* types, str name, SyntaxNode* function) {
     String key = typecheck_free_signature_key(types, name, function);
     u64 hash = typecheck_fnv1a64(key.to_str());
@@ -531,6 +570,7 @@ String typecheck_overloaded_free_symbol(TypeTable* types, str name, SyntaxNode* 
     return move symbol;
 }
 
+/// Returns true when two function items have the same name and parameters.
 bool typecheck_same_free_signature(TypeTable* types, SyntaxNode* left, SyntaxNode* right) {
     SyntaxNode* left_id = function_identifier(left);
     SyntaxNode* right_id = function_identifier(right);
@@ -543,6 +583,7 @@ bool typecheck_same_free_signature(TypeTable* types, SyntaxNode* left, SyntaxNod
     return same;
 }
 
+/// Returns true when `name` has more than one distinct free overload.
 bool typecheck_has_free_overloads(TypeTable* types, SyntaxNode* root, str name) {
     SyntaxNode* first = (SyntaxNode*)0;
     SyntaxNode* item = root.first_child;
@@ -559,6 +600,7 @@ bool typecheck_has_free_overloads(TypeTable* types, SyntaxNode* root, str name) 
     return false;
 }
 
+/// Returns a parameter's type id, ignoring variadic wrapping.
 u32 typecheck_parameter_base_type_id(TypeTable* types, Binding* param) {
     if (param.declared_type.kind == ProjectionTypeKind.Array) {
         String element = binding_declared_type_text(&param.declared_type);
@@ -584,6 +626,7 @@ u32 typecheck_parameter_base_type_id(TypeTable* types, Binding* param) {
     return type_id;
 }
 
+/// Returns a parameter's type id; a variadic parameter becomes a slice.
 u32 typecheck_parameter_type_id(TypeTable* types, Binding* param) {
     u32 type_id = typecheck_parameter_base_type_id(types, param);
     if (!binding_is_variadic_parameter(param) || type_id == TYPE_UNKNOWN) {
@@ -599,6 +642,7 @@ u32 typecheck_parameter_type_id(TypeTable* types, Binding* param) {
     return slice_id;
 }
 
+/// Returns the interned symbol id of an overload's mangled name.
 u32 typecheck_overload_symbol_id(TypeTable* types, Interner* names, str name,
                                  SyntaxNode* function) {
     String symbol = typecheck_overloaded_free_symbol(types, name, function);
@@ -607,6 +651,9 @@ u32 typecheck_overload_symbol_id(TypeTable* types, Interner* names, str name,
     return symbol_id;
 }
 
+/// Resolves a free-function call to the overload whose parameters fit its
+/// arguments. Returns null when none fits or several do; sets `*overloaded`
+/// and `*ambiguous` for the caller to report.
 SyntaxNode* typecheck_resolve_free_function(AstPool* pool, TypeTable* types,
                                            SymbolTable* symbols, SyntaxNode* root,
                                            TypeEnv* env, str name, AstExpr* call,
@@ -700,6 +747,7 @@ SyntaxNode* typecheck_resolve_free_function(AstPool* pool, TypeTable* types,
     return selected;
 }
 
+/// Appends every leaf token under `node`.
 void typecheck_expr_collect_tokens(SyntaxNode* node, Vec<SyntaxNode*>* tokens) {
     if (node == (SyntaxNode*)0) {
         return;
@@ -715,6 +763,8 @@ void typecheck_expr_collect_tokens(SyntaxNode* node, Vec<SyntaxNode*>* tokens) {
     }
 }
 
+/// Returns true when struct `type_name` has field `field_name`; otherwise
+/// collects its field names into `candidates`.
 bool typecheck_expr_struct_has_field(SyntaxNode* root, str type_name, str field_name,
                                      Vec<str>* candidates) {
     SyntaxNode* item = find_item_by_name(root, NodeKind.Struct, type_name);
@@ -754,6 +804,7 @@ bool typecheck_expr_struct_has_field(SyntaxNode* root, str type_name, str field_
     return found;
 }
 
+/// Substitutes a generic composite's type arguments into a member type.
 u32 resolve_generic_member_type(TypeTable* types, SyntaxNode* root, u32 composite_type_id, u32 member_type_id) {
     u32 actual_composite_id = composite_type_id;
     TypeEntry* comp = types.get(actual_composite_id);
@@ -805,6 +856,8 @@ u32 resolve_generic_member_type(TypeTable* types, SyntaxNode* root, u32 composit
     return resolved;
 }
 
+/// Returns the type of `field_name` on `composite_type_id` (generic
+/// arguments applied), or `TYPE_UNKNOWN`.
 u32 typecheck_struct_field_type(TypeTable* types, SyntaxNode* root,
                                 u32 composite_type_id, str field_name) {
     u32 owner_type = types.resolve_subst(composite_type_id);
@@ -864,6 +917,7 @@ u32 typecheck_struct_field_type(TypeTable* types, SyntaxNode* root,
     return resolved_member;
 }
 
+/// Returns true when the type has a user `Drop` impl.
 bool typecheck_type_has_drop_impl(SyntaxNode* root, TypeTable* types, u32 type_id) {
     u32 resolved = types.resolve_subst(type_id);
     TypeEntry* entry = types.get(resolved);
@@ -909,6 +963,7 @@ bool typecheck_type_has_drop_impl(SyntaxNode* root, TypeTable* types, u32 type_i
     return false;
 }
 
+/// Internal: `typecheck_type_is_copy` with a depth limit.
 bool typecheck_type_is_copy_inner(SyntaxNode* root, TypeTable* types, u32 type_id, u32 depth) {
     if (depth >= MAX_TYPE_CHECK_DEPTH) { return false; }
     u32 resolved = types.resolve_subst(type_id);
@@ -1072,10 +1127,14 @@ bool typecheck_type_is_copy_inner(SyntaxNode* root, TypeTable* types, u32 type_i
     return types.is_copy(resolved);
 }
 
+/// Returns true when values of `type_id` copy implicitly (no Drop, no
+/// owned fields).
 bool typecheck_type_is_copy(SyntaxNode* root, TypeTable* types, u32 type_id) {
     return typecheck_type_is_copy_inner(root, types, type_id, 0);
 }
 
+/// Collects a place's field path into `fields`; returns its root local
+/// expression id.
 u32 typecheck_collect_place(AstPool* pool, u32 expr_id, Vec<u32>* fields) {
     if (expr_id == 0) { return 0; }
     AstExpr* expr = pool.get_expr(expr_id);
@@ -1089,6 +1148,7 @@ u32 typecheck_collect_place(AstPool* pool, u32 expr_id, Vec<u32>* fields) {
     return root_name;
 }
 
+/// Returns the type of place expression `place_id`.
 u32 typecheck_place_type(AstPool* pool, TypeTable* types, SymbolTable* symbols,
                          SyntaxNode* root, TypeEnv* env, u32 place_id) {
     Vec<u32> fields = Vec<u32>.new();
@@ -1119,6 +1179,8 @@ u32 typecheck_place_type(AstPool* pool, TypeTable* types, SymbolTable* symbols,
     return place_type;
 }
 
+/// Reports moving a field out of a value whose type implements Drop.
+/// Returns true when it reported.
 bool typecheck_reject_partial_drop_move(AstPool* pool, TypeTable* types, SymbolTable* symbols,
                                         SyntaxNode* root, TypeEnv* env, u32 place_id,
                                         DiagnosticBag* diagnostics, bool* ok) {
@@ -1212,6 +1274,7 @@ bool typecheck_reject_partial_drop_move(AstPool* pool, TypeTable* types, SymbolT
     return false;
 }
 
+/// Returns true when the method parameter takes its argument by value.
 bool typecheck_method_parameter_is_value(SyntaxNode* root, TypeTable* types,
                                          u32 receiver_type, str method_name,
                                          i64 param_count, i64 parameter_index,
@@ -1294,6 +1357,7 @@ bool typecheck_method_parameter_is_value(SyntaxNode* root, TypeTable* types,
     return types.method_param_is_value(owner_name, method_name, param_count, parameter_index, arg_type);
 }
 
+/// Returns true when the method takes `self` by value.
 bool typecheck_method_has_value_receiver(SyntaxNode* root, TypeTable* types,
                                          u32 receiver_type, str method_name,
                                          i64 param_count) {
@@ -1302,6 +1366,8 @@ bool typecheck_method_has_value_receiver(SyntaxNode* root, TypeTable* types,
                                                receiver_type);
 }
 
+/// Returns true when an argument fits a method parameter for overload
+/// scoring.
 bool typecheck_method_argument_score(AstPool* pool, TypeTable* types,
                                      SyntaxNode* root, u32 receiver_type,
                                      u32 arg_id, u32 expected_type,
@@ -1351,6 +1417,7 @@ bool typecheck_method_argument_score(AstPool* pool, TypeTable* types,
     return false;
 }
 
+/// Returns a method declaration's return type id.
 u32 typecheck_method_decl_return_type(TypeTable* types, SyntaxNode* ret_start,
                                       SyntaxNode* method_name_node) {
     String return_text = String.new();
@@ -1378,6 +1445,7 @@ u32 typecheck_method_decl_return_type(TypeTable* types, SyntaxNode* ret_start,
     return return_type;
 }
 
+/// Returns true when an impl declares several methods named `method_name`.
 bool typecheck_method_has_overloads(SyntaxNode* method_name_node,
                                     str method_name) {
     i64 method_count = 0;
@@ -1448,6 +1516,7 @@ bool typecheck_method_has_overloads(SyntaxNode* method_name_node,
     return method_count > 1;
 }
 
+/// Returns the symbol of `owner_name.method_name`, mangled when overloaded.
 String typecheck_method_symbol(TypeTable* types, str owner_name,
                                str method_name,
                                SyntaxNode* ret_start,
@@ -1501,6 +1570,7 @@ String typecheck_method_symbol(TypeTable* types, str owner_name,
     return move symbol;
 }
 
+/// Returns the symbol of the method a call resolves to.
 String typecheck_method_symbol_for_call(AstPool* pool, SyntaxNode* root,
                                         TypeTable* types, u32 receiver_type,
                                         str method_name, u32 args_start,
@@ -1619,6 +1689,7 @@ String typecheck_method_symbol_for_call(AstPool* pool, SyntaxNode* root,
                                    best_ret_start, best_name, best_params);
 }
 
+/// Returns the return type of the method a call resolves to.
 u32 typecheck_method_return_type_for_call(AstPool* pool, SyntaxNode* root,
                                           TypeTable* types, u32 receiver_type,
                                           str method_name, i64 param_count,
@@ -1760,6 +1831,7 @@ u32 typecheck_method_return_type_for_call(AstPool* pool, SyntaxNode* root,
     return best_return_type;
 }
 
+/// Returns the return type of `method_name` on `receiver_type`.
 u32 typecheck_method_return_type(SyntaxNode* root, TypeTable* types,
                                  u32 receiver_type, str method_name,
                                  i64 param_count) {
@@ -1767,6 +1839,7 @@ u32 typecheck_method_return_type(SyntaxNode* root, TypeTable* types,
         receiver_type, method_name, param_count, 0, false);
 }
 
+/// Returns the expected type of argument `index` of a method call.
 u32 typecheck_method_parameter_type_for_call(AstPool* pool, SyntaxNode* root,
                                              TypeTable* types, u32 receiver_type,
                                              str method_name, i64 param_count,
@@ -1916,6 +1989,7 @@ u32 typecheck_method_parameter_type_for_call(AstPool* pool, SyntaxNode* root,
         ? best_parameter_type : fallback_parameter_type;
 }
 
+/// Returns the return type of a generic method call after inference.
 u32 typecheck_generic_method_type(AstPool* pool, SyntaxNode* root, TypeTable* types,
                                   u32 receiver_type, str method_name, u32 args_start,
                                   bool static_method, i64 parameter_index) {
@@ -1961,6 +2035,7 @@ u32 typecheck_generic_method_type(AstPool* pool, SyntaxNode* root, TypeTable* ty
     return result;
 }
 
+/// Returns the element slice type produced by slicing `target_type`.
 u32 typecheck_slice_result_type(TypeTable* types, SyntaxNode* root, u32 target_type) {
     TypeEntry* target = types.get(types.resolve_subst(target_type));
     while (target.kind == TypeKind.Pointer || target.kind == TypeKind.Reference) {
@@ -1984,6 +2059,8 @@ u32 typecheck_slice_result_type(TypeTable* types, SyntaxNode* root, u32 target_t
     return typecheck_method_return_type(root, types, target_type, "__slice_get", 3);
 }
 
+/// Infers and records the type of expression `expr_id`, reporting type
+/// errors. Caches the result in the expression.
 u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode* root,
                TypeEnv* env, u32 expr_id, DiagnosticBag* diagnostics, bool* ok) {
     if (expr_id == 0) { return TYPE_UNKNOWN; }
@@ -2953,6 +3030,7 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
     return inferred;
 }
 
+/// Reports `return`, `break`, and `continue` inside a `defer` body.
 void typecheck_reject_defer_control(AstPool* pool, u32 node_id, bool is_stmt,
                                     DiagnosticBag* diagnostics, bool* ok) {
     if (node_id == 0) { return; }
@@ -3081,6 +3159,7 @@ void typecheck_reject_defer_control(AstPool* pool, u32 node_id, bool is_stmt,
 
 // Resolve local initializers with the same expression checker as function bodies.
 // The environment is supplied by the caller's scope model.
+/// Returns the type of a declaration initializer.
 u32 typecheck_initializer_type(SymbolTable* symbols, TypeTable* types, SyntaxNode* root,
                               SyntaxNode* name, TypeEnv* env) {
     SyntaxNode* assign = name.next_sibling;
@@ -3095,6 +3174,7 @@ u32 typecheck_initializer_type(SymbolTable* symbols, TypeTable* types, SyntaxNod
 }
 
 // Entries follow binding order; visibility excludes shadowed and sibling locals.
+/// Resolves the declared types of `bindings`.
 void typecheck_binding_types(SymbolTable* symbols, TypeTable* types, SyntaxNode* root,
                              Vec<Binding>* bindings, Vec<u32>* resolved) {
     i64 i = 0;
@@ -3120,6 +3200,7 @@ void typecheck_binding_types(SymbolTable* symbols, TypeTable* types, SyntaxNode*
     }
 }
 
+/// Returns the resolved type of the binding named `name_id`.
 u32 typecheck_resolved_binding_type(Vec<Binding>* bindings, Vec<u32>* resolved,
                                     Binding* binding) {
     i64 i = 0;
@@ -3130,6 +3211,7 @@ u32 typecheck_resolved_binding_type(Vec<Binding>* bindings, Vec<u32>* resolved,
     return TYPE_UNKNOWN;
 }
 
+/// Type-checks one statement and its children.
 void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
                          SyntaxNode* root, TypeEnv* env, u32 expected_return,
                          u32 stmt_id, DiagnosticBag* diagnostics, bool* ok) {
@@ -3283,6 +3365,7 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
     }
 }
 
+/// Returns true for a "cannot move ... because it implements Drop" message.
 bool typecheck_is_drop_ancestor_error(str message) {
     str prefix = "cannot move '";
     str suffix = "' because it implements Drop";
@@ -3301,6 +3384,7 @@ bool typecheck_is_drop_ancestor_error(str message) {
     return true;
 }
 
+/// Rechecks drop-ownership errors in generic call instantiations.
 void typecheck_generic_call_drop_ownership(
     AstPool* caller_pool, TypeTable* types, SymbolTable* symbols, SyntaxNode* root,
     TypeEnv* caller_env, SyntaxNode* function, u32 call_id,
@@ -3400,12 +3484,14 @@ void typecheck_generic_call_drop_ownership(
     }
 }
 
+/// Type-checks every statement of a function body.
 void typecheck_function_statements(AstPool* pool, TypeTable* types, SymbolTable* symbols,
                                   SyntaxNode* root, SyntaxNode* function,
                                   DiagnosticBag* diagnostics, bool* ok) {
     typecheck_function_statements_scoped(pool, types, symbols, root, function, diagnostics, ok, (bool*)0);
 }
 
+/// Type-checks a function body with an outer environment.
 void typecheck_function_statements_scoped(AstPool* pool, TypeTable* types, SymbolTable* symbols,
                                           SyntaxNode* root, SyntaxNode* function,
                                           DiagnosticBag* diagnostics, bool* ok, bool* unsupported_out) {
@@ -3454,6 +3540,8 @@ void typecheck_function_statements_scoped(AstPool* pool, TypeTable* types, Symbo
     stmt_ids.drop();
 }
 
+/// Type-checks cfg-active non-generic functions, only those from file
+/// `file_id_filter` when it is nonzero.
 bool typecheck_expressions_scoped(AstPool* pool, SymbolTable* symbols, SyntaxTree* tree,
                                   CfgSet* cfg, DiagnosticBag* diagnostics, u32 file_id_filter) {
     bool ok = true;
@@ -3507,6 +3595,9 @@ bool typecheck_expressions_scoped(AstPool* pool, SymbolTable* symbols, SyntaxTre
     return ok;
 }
 
+/// Type-checks the whole program, checking imported extern items for C ABI
+/// issues. Temporarily appends the imported items to `tree`'s root so
+/// lookups see them, restoring the list before returning.
 bool typecheck_expressions(AstPool* pool, SymbolTable* symbols, SyntaxTree* tree,
                            CfgSet* cfg, DiagnosticBag* diagnostics, SyntaxNode* imported_root) {
     SyntaxNode* local_last = tree.root.last_child;
