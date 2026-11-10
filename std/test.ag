@@ -10,19 +10,29 @@ import std.mem.memory;
 import std.io.file;
 import std.time;
 
+/// Number of passed checks recorded by the assertion helpers.
 i32 tests_passed = 0;
+/// Number of failed checks. Assertions abort on failure, so this stays 0
+/// unless a test increments it directly.
 i32 tests_failed = 0;
 
+/// Maximum number of `test_start` cases timed; later cases still run but are
+/// not listed in the timing table.
 const i64 TEST_MAX_CASES = 256;
 
+/// Internal: one timed test case (name truncated to 63 bytes).
 struct TestCaseTiming {
     u8 name[64];
     i64 elapsed_us;
 }
 
+/// Internal: timing table filled by `test_start`.
 TestCaseTiming g_case_times[256]; // TEST_MAX_CASES
+/// Internal: number of used `g_case_times` entries.
 i64 g_case_count = 0;
+/// Internal: start time of the open case.
 Instant g_case_start;
+/// Internal: whether a case timer is running.
 bool g_case_open = false;
 
 /// Print a section header and start the case timer.
@@ -62,6 +72,7 @@ void test_close_case() {
 // "assertion failed at <file>:<line>: <msg>" report on stderr. In release
 // builds (@assert pruned) the helpers still record a pass for bookkeeping.
 // A scratch buffer carries the expected/got detail into the abort message.
+/// Internal: scratch buffer for assertion failure messages. Not thread-safe.
 u8 g_assert_scratch[256];
 
 /// "<msg> (expected <e>, got <a>)" in the scratch buffer.

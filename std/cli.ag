@@ -16,6 +16,8 @@ enum CliStyle {
     Muted;
 }
 
+/// Whether an option takes a value: never (`Flag`), always (`Required`), or
+/// only when written as `--name=value` (`OptionalValue`).
 enum CliValueKind {
     Flag;
     Required;
@@ -30,6 +32,8 @@ enum CliError {
     RepeatedOption(String);
 }
 
+/// One declared option: long and short names, help text, and value rules.
+/// `hidden` options parse normally but are left out of generated help.
 struct CliOptionSpec {
     String name;
     String short_name;
@@ -40,17 +44,20 @@ struct CliOptionSpec {
     bool hidden;
 }
 
+/// One declared subcommand with an optional alias and help text.
 struct CliCommandSpec {
     String name;
     String alias;
     String help;
 }
 
+/// An alternate complete spelling (`token`) for the long option `name`.
 struct CliOptionAlias {
     String name;
     String token;
 }
 
+/// One parsed option occurrence. `value` is empty when `has_value` is false.
 struct CliOptionValue {
     String name;
     String value;
@@ -76,6 +83,7 @@ struct CliParser {
     bool color;
 }
 
+/// Returns the SGR parameter string (such as "1;36") for `style`.
 str cli_style_code(CliStyle style) {
     return match style {
         CliStyle.Title : "1;36",
@@ -99,6 +107,8 @@ void cli_write_styled(BufWriter* output, str value, CliStyle style, bool color) 
     if (color) { output.write_str("\x1b[0m"); }
 }
 
+/// Appends `value` to `output`, wrapped in SGR codes for `style` when `color`
+/// is true.
 void cli_append_styled(&mut String output, str value, CliStyle style, bool color) {
     if (color) {
         output.push_str("\x1b[");
@@ -109,6 +119,7 @@ void cli_append_styled(&mut String output, str value, CliStyle style, bool color
     if (color) { output.push_str("\x1b[0m"); }
 }
 
+/// Appends spaces to pad a column from `current` to `width`, always at least two.
 void cli_append_padding(&mut String output, i64 width, i64 current) {
     i64 spaces = width - current;
     if (spaces < 2) { spaces = 2; }
@@ -118,6 +129,7 @@ void cli_append_padding(&mut String output, i64 width, i64 current) {
     }
 }
 
+/// Builds an option spec with copies of every string. Does not validate.
 CliOptionSpec cli_option_spec(str name, str short_name, str value_name, str help,
     CliValueKind kind, bool repeatable) {
     CliOptionSpec spec;
@@ -131,6 +143,7 @@ CliOptionSpec cli_option_spec(str name, str short_name, str value_name, str help
     return spec;
 }
 
+/// Builds a command spec with copies of every string. Does not validate.
 CliCommandSpec cli_command_spec(str name, str alias, str help) {
     CliCommandSpec spec;
     spec.name = String.from_str(name);
@@ -139,6 +152,7 @@ CliCommandSpec cli_command_spec(str name, str alias, str help) {
     return spec;
 }
 
+/// Builds a parsed option value with copies of `name` and `value`.
 CliOptionValue cli_option_value(str name, str value, bool has_value) {
     CliOptionValue result;
     result.name = String.from_str(name);
@@ -147,6 +161,7 @@ CliOptionValue cli_option_value(str name, str value, bool has_value) {
     return result;
 }
 
+/// Creates an empty match set.
 CliMatches cli_matches_new() {
     CliMatches matches;
     matches.command = String.new();
@@ -204,6 +219,9 @@ impl CliParser {
             CliValueKind.OptionalValue, repeatable);
     }
 
+    /// Registers an option. Returns false, adding nothing, when `name` is empty or
+    /// starts with `-`, `short_name` is not one non-dash character, or either name
+    /// is already taken.
     bool add_option_spec(&mut self, str name, str short_name, str value_name, str help,
         CliValueKind kind, bool repeatable) {
         if (name == (str)0 || strlen(name) == 0 || name[0] == (u8)'-') { return false; }
@@ -250,6 +268,7 @@ impl CliParser {
         return true;
     }
 
+    /// Returns the index of the option named `name`, or -1.
     i64 find_long_option(&self, str name) {
         i64 i = 0;
         while (i < self.options.len()) {
@@ -259,6 +278,7 @@ impl CliParser {
         return -1;
     }
 
+    /// Returns the index of the option with one-character `short_name`, or -1.
     i64 find_short_option(&self, str short_name) {
         i64 i = 0;
         while (i < self.options.len()) {
@@ -269,6 +289,7 @@ impl CliParser {
         return -1;
     }
 
+    /// Returns the index of the command whose name or alias is `name`, or -1.
     i64 find_command(&self, str name) {
         i64 i = 0;
         while (i < self.commands.len()) {
@@ -281,6 +302,7 @@ impl CliParser {
         return -1;
     }
 
+    /// Returns the option index that alias `token` maps to, or -1.
     i64 find_alias(&self, str token) {
         i64 i = 0;
         while (i < self.aliases.len()) {
@@ -292,6 +314,7 @@ impl CliParser {
         return -1;
     }
 
+    /// Returns true when `name` is a declared command name or alias.
     bool command_token(&self, str name) {
         return self.find_command(name) >= 0;
     }
@@ -641,6 +664,8 @@ impl CliParser {
         return Result<CliMatches, CliError>.Ok(move matches);
     }
 
+    /// Returns true when option `spec_index` may be recorded again: it is
+    /// repeatable or not yet present in `matches`.
     bool can_add(&self, &CliMatches matches, i64 spec_index) {
         if (self.options.get_ptr(spec_index).repeatable) { return true; }
         String* name = &self.options.get_ptr(spec_index).name;

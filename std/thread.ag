@@ -41,11 +41,11 @@ i64 thread_available_parallelism() {
     return count;
 }
 
-// Raw clone flags for a thread that shares the process address space:
-// CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID.
+/// Raw clone flags for a thread that shares the process address space:
+/// CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID.
 const i64 THREAD_CLONE_FLAGS = 19205888;
 
-// Dedicated stack size per thread (16-byte aligned top, 2MB).
+/// Dedicated stack size per thread (16-byte aligned top, 2MB).
 const i64 THREAD_STACK_SIZE = 2097152;
 
 // Raw clone shim. Spawns a thread running fn(arg) on a fresh stack_top.
@@ -55,9 +55,11 @@ const i64 THREAD_STACK_SIZE = 2097152;
 // The clone+trampoline asm lives in std.sys.os (thread_spawn_raw), which
 // thread.ag cannot import back — it owns the OS spawn seam.
 
-// Child entry. arg is a TaskRecord* owned by the parent registry. Calls the
-// user function, signals completion (release store + futex wake so a joining
-// thread sleeps instead of spinning), then exits the thread.
+/// Child entry. arg is a TaskRecord* owned by the parent registry. Calls the
+/// user function, signals completion (release store + futex wake so a joining
+/// thread sleeps instead of spinning), then exits the thread.
+/// Internal: the spawn trampoline target; not for direct calls. It never
+/// returns, and it also flushes this thread's allocator cache.
 void thread_entry(i64 arg) {
     TaskRecord* rec = (TaskRecord*)arg;
     void(i64) fn = (void(i64))rec.fn;

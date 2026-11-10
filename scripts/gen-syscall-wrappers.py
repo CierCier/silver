@@ -84,6 +84,16 @@ SYSCALL_GROUPS: dict[str, set[str]] = {
 }
 
 
+# std/sys/os_linux.ag defines typed `sys_<name>` seam functions with these
+# names, so their generated wrappers keep a `raw_` prefix to stay unambiguous.
+RAW_PREFIXED: set[str] = {
+    "access", "clock_gettime", "close", "exit", "exit_group", "futex",
+    "getpid", "getrandom", "kill", "lseek", "mkdir", "mmap", "mprotect",
+    "munmap", "nanosleep", "open", "read", "rename", "rmdir", "stat",
+    "unlink", "write",
+}
+
+
 def parse_kernel_header(path: str) -> dict[str, int]:
     """Parse unistd_64.h and return syscall_name -> syscall_number."""
     syscalls: dict[str, int] = {}
@@ -145,7 +155,13 @@ def generate_header(syscall_count: int) -> list[str]:
 
 
 def generate_enum(syscalls: dict[str, int], enum_name: str) -> list[str]:
-    lines = [f"// Syscall number constants", f"enum {enum_name} {{"]
+    lines = [
+        "/// Every Linux x86_64 syscall number."
+        if enum_name == "SYSCALL"
+        else f"/// Linux x86_64 syscall numbers for the `{enum_name}` family.",
+        "/// Each variant's value is the kernel's `__NR_<name>` number.",
+        f"enum {enum_name} {{",
+    ]
     for name in sorted(syscalls, key=syscalls.get):
         lines.append(f"    {name.upper()} = {syscalls[name]};")
     lines.extend(["}", ""])
@@ -179,12 +195,28 @@ def generate_wrappers(
                 + [f"a{i}" for i in range(1, n + 1)]
             )
             comment = ""
-        lines.append(f"i64 sys_{name}({params}) {{")
+        prefix = "raw_sys_" if name in RAW_PREFIXED else "sys_"
+        lines += wrapper_doc(name, syscalls[name], arg_count)
+        lines.append(f"i64 {prefix}{name}({params}) {{")
         lines.append(f"    return syscall{n}({call_args});{comment}")
         lines.append("}")
         lines.append("")
-    lines.append("}")
-    return "\n".join(lines)
+    lines[-1] = "}"
+    return "\n".join(lines) + "\n"
+
+
+def wrapper_doc(name: str, number: int, arg_count: int | None) -> list[str]:
+    lines = [
+        f"/// Raw `{name}` syscall (number {number}). Arguments pass through",
+        "/// unchanged in the syscall registers; the caller owns any pointed-to memory.",
+        "/// Returns the kernel result: non-negative on success, `-errno` on failure.",
+        "/// Does not set errno and does not retry on EINTR.",
+    ]
+    if arg_count is None:
+        lines.append("/// The argument count is unknown, so all six registers are passed.")
+    if name in RAW_PREFIXED:
+        lines.append(f"/// Prefer the typed `sys_{name}` seam in std/sys/os_linux.ag.")
+    return lines
 
 
 def grouped_syscalls(syscalls: dict[str, int]) -> dict[str, dict[str, int]]:
@@ -226,8 +258,8 @@ def generate_split(
     (raw_dir / "numbers.ag").write_text(
         "\n".join(generate_header(len(syscalls)))
         + "if (@cfg(os.linux)) {\n"
-        + "\n".join(generate_enum(syscalls, "SYSCALL"))
-        + "}\n"
+        + "\n".join(generate_enum(syscalls, "SYSCALL")[:-1])
+        + "\n}\n"
     )
     groups = sorted(grouped)
     for group in groups:

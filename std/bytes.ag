@@ -5,6 +5,8 @@ import std.ops;
 import std.iter;
 import std.optional;
 import std.slice;
+/// A growable, owned byte buffer. Not NUL-terminated. Dropping it frees the
+/// buffer. Raw pointers into it are invalidated by any call that grows it.
 struct Bytes {
     u8* data;
     i64 len;
@@ -12,10 +14,12 @@ struct Bytes {
 }
 
 impl Bytes {
+    /// Creates an empty buffer without allocating.
     Bytes new() {
         return Bytes.with_capacity(0);
     }
 
+    /// Creates a buffer holding a copy of `text`'s bytes (without the NUL).
     Bytes from_str(str text) {
         i64 n = strlen((const u8*)text);
         Bytes b = Bytes.with_capacity(n);
@@ -26,6 +30,7 @@ impl Bytes {
         return b;
     }
 
+    /// Creates an empty buffer with room for `capacity` bytes (uninitialized).
     Bytes with_capacity(i64 capacity) {
         Bytes b;
         b.len = 0;
@@ -38,6 +43,7 @@ impl Bytes {
         return b;
     }
 
+    /// Returns the number of bytes stored.
     i64 len(&self) {
         return self.len;
     }
@@ -47,6 +53,7 @@ impl Bytes {
         return self.len == 0;
     }
 
+    /// Returns the allocated capacity in bytes.
     i64 capacity(&self) {
         return self.cap;
     }
@@ -66,6 +73,7 @@ impl Bytes {
         return out;
     }
 
+    /// Appends one byte, growing the buffer (at least doubling) when full.
     void push(&mut self, u8 byte) {
         if (self.len + 1 > self.cap) {
             i64 new_cap = self.cap * 2;
@@ -79,6 +87,9 @@ impl Bytes {
         self.len = self.len + 1;
     }
 
+    /// Appends `src_len` bytes copied from `src`. `src` may point into this
+    /// buffer; the copy stays correct across a reallocation. Null or
+    /// non-positive lengths are ignored.
     void extend(&mut self, u8* src, i64 src_len) {
         if (src_len <= 0 || src == (u8*)0) {
             return;
@@ -192,10 +203,13 @@ impl Bytes {
     void set_unchecked(&mut self, i64 index, u8 value) {
         self.data[index] = value;
     }
+    /// Returns the data pointer (null when nothing was allocated). Invalidated by
+    /// any call that grows the buffer.
     u8* as_ptr(&self) {
         return self.data;
     }
 
+    /// Sets the length to 0 and keeps the allocation.
     void clear(&mut self) {
         self.len = 0;
     }
@@ -225,6 +239,8 @@ impl IndexedAccess for Bytes {
 }
 
 
+/// A borrowing iterator over a buffer's bytes. Do not grow or drop the buffer
+/// while iterating.
 struct BytesIter {
     u8* data;
     i64 len;
@@ -243,6 +259,7 @@ impl Iterator for BytesIter {
     }
 }
 
+/// A consuming iterator over bytes; owns and frees the buffer when dropped.
 struct BytesIntoIter {
     u8* data;
     i64 len;
@@ -288,6 +305,7 @@ impl IntoIterator for Bytes {
 }
 
 impl Bytes {
+    /// Returns a borrowing iterator over the bytes.
     BytesIter iter(&self) {
         BytesIter it;
         it.data = self.data;

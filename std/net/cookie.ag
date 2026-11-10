@@ -21,23 +21,29 @@ import std.string;
 import std.sys.raw.time;
 import std.time;
 
+/// `CLOCK_REALTIME` id used to read wall-clock time for cookie expiry.
 const i64 HTTP_CLOCK_REALTIME = 0;
 
+/// Three-letter weekday names, Sunday first, for RFC 1123 dates.
 const str HTTP_RFC1123_WEEKDAYS = "SunMonTueWedThuFriSat";
+/// Three-letter month names, January first, for RFC 1123 dates.
 const str HTTP_RFC1123_MONTHS = "JanFebMarAprMayJunJulAugSepOctNovDec";
 
 // --- Shared HTTP byte helpers ---------------------------------------------
 // Silver's `char` is 4 bytes wide, so protocol bytes are compared as u8
 // against self-documenting (u8)'x' literals rather than raw ASCII numbers.
 
+/// Returns true for HTTP optional whitespace (space or tab).
 bool http_is_space(u8 ch) {
     return ch == (u8)' ' || ch == (u8)'\t';
 }
 
+/// Returns true for an ASCII decimal digit.
 bool http_is_digit(u8 ch) {
     return ch >= (u8)'0' && ch <= (u8)'9';
 }
 
+/// Lowercases an ASCII letter; other bytes are returned unchanged.
 u8 http_lower(u8 ch) {
     if (ch >= (u8)'A' && ch <= (u8)'Z') { return ch - (u8)'A' + (u8)'a'; }
     return ch;
@@ -94,6 +100,9 @@ enum SameSite {
     None = 4;
 }
 
+/// One HTTP cookie with its Set-Cookie attributes (Go net/http semantics).
+/// Owns its strings. `expires` is unix seconds or -1 for a session cookie;
+/// `max_age` is 0 when absent and negative for a deletion marker.
 struct Cookie {
     String name;
     String value;
@@ -119,6 +128,8 @@ impl Display for Cookie {
 }
 
 impl Cookie {
+    /// Creates a session cookie with copies of `name` and `value` and no
+    /// attributes. Does not validate the name or value.
     Cookie new(str name, str value) {
         Cookie cookie;
         cookie.name = String.from_str(name);
@@ -135,6 +146,8 @@ impl Cookie {
         return move cookie;
     }
 
+    /// Returns true when the cookie has an expiry at or before `now` (unix
+    /// seconds). Session cookies never expire by this test.
     bool is_expired(*self, i64 now) {
         return self.expires >= 0 && self.expires <= now;
     }
@@ -523,12 +536,15 @@ void http_format_rfc1123(String* out, i64 unix_seconds) {
 
 // --- CookieJar (Go net/http/cookiejar semantics) --------------------------
 
+/// An in-memory cookie store with Go net/http/cookiejar semantics. Owns its
+/// cookies. Not thread-safe; there is no public-suffix list.
 struct CookieJar {
     Vec<Cookie> cookies;
     i64 next_seq; // Go's jar sequence: monotonic per-jar ordering tiebreak
 }
 
 impl CookieJar {
+    /// Creates an empty jar.
     CookieJar new() {
         CookieJar jar;
         jar.cookies = Vec<Cookie>.new();

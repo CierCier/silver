@@ -32,13 +32,14 @@ import std.mem.vec;
 import std.rt.type_info;
 import std.string;
 
-// Largest i64 value; used for the C-style discriminant autofill overflow check.
+/// Largest i64 value; used for the C-style discriminant autofill overflow check.
 const i64 RT_I64_MAX = 9223372036854775807;
 
 // ---------------------------------------------------------------------------
 // TYPE_ERR — mirrors silver_runtime's TypeError variants
 // ---------------------------------------------------------------------------
 
+/// Type-registry error kinds, mirroring silver_runtime's `TypeError`.
 enum TYPE_ERR {
     NONE = 0;
     DUPLICATE_TYPE_NAME = 1;
@@ -53,6 +54,8 @@ enum TYPE_ERR {
 // TypeResult — ok flag + TypeId value + TYPE_ERR code + owned message
 // ---------------------------------------------------------------------------
 
+/// The outcome of a registry operation: a `TypeId` on success, or a
+/// `TYPE_ERR` code and owned message. Dropping it frees the message.
 struct TypeResult {
     bool ok;
     TypeId id;
@@ -61,6 +64,7 @@ struct TypeResult {
 }
 
 impl TypeResult {
+    /// Builds a successful result carrying `id`.
     TypeResult ok_id(TypeId id) {
         TypeResult r;
         r.ok = true;
@@ -70,6 +74,7 @@ impl TypeResult {
         return r;
     }
 
+    /// Builds a failed result with `TYPE_ERR` code `err`, taking `msg`.
     TypeResult error(i32 err, String msg) {
         TypeResult r;
         r.ok = false;
@@ -79,10 +84,12 @@ impl TypeResult {
         return r;
     }
 
+    /// Returns true on success.
     bool is_ok(*self) {
         return self.ok;
     }
 
+    /// Returns true on failure.
     bool is_err(*self) {
         return !self.ok;
     }
@@ -111,14 +118,15 @@ impl Drop for TypeResult {
 // Definition inputs (Rust used tuples; Silver uses small POD-ish structs)
 // ---------------------------------------------------------------------------
 
-// One struct field definition: borrowed name + field type.
-// Owns nothing — the registry deep-copies the name.
+/// One struct field definition: borrowed name + field type.
+/// Owns nothing — the registry deep-copies the name.
 struct FieldDef {
     str name;
     TypeId ty;
 }
 
 impl FieldDef {
+    /// Builds a field definition borrowing `name`.
     FieldDef new(str name, TypeId ty) {
         FieldDef f;
         f.name = name;
@@ -127,10 +135,10 @@ impl FieldDef {
     }
 }
 
-// One enum variant definition: borrowed name, optional explicit discriminant
-// (has_discriminant == Option::is_some), and an OWNED payload Vec of TypeIds.
-// The define_enum* entry points consume the payload Vec (moving it into the
-// registry on success, freeing it on error).
+/// One enum variant definition: borrowed name, optional explicit discriminant
+/// (has_discriminant == Option::is_some), and an OWNED payload Vec of TypeIds.
+/// The define_enum* entry points consume the payload Vec (moving it into the
+/// registry on success, freeing it on error).
 struct VariantDef {
     str name;
     i64 discriminant;
@@ -165,6 +173,8 @@ impl VariantDef {
 // element-dropped), and error paths free payloads exactly once via
 // rt_free_variant_defs.
 
+/// Frees each definition's payload vector. The `defs` vector itself is not
+/// freed; its owner still drops it.
 void rt_free_variant_defs(Vec<VariantDef>* defs) {
     i64 i = 0;
     while (i < defs.len()) {
@@ -178,6 +188,9 @@ void rt_free_variant_defs(Vec<VariantDef>* defs) {
 // TypeRegistry
 // ---------------------------------------------------------------------------
 
+/// The canonical runtime type table: id-indexed types plus name, vec,
+/// optional, and function-type caches. Owns every interned type and name;
+/// dropping it releases them. Not thread-safe.
 struct TypeRegistry {
     Vec<Type> types;               // id -> Type (index == TypeId.raw)
     HashMap<str, u32> by_name;     // display name -> raw id (keys point into types[i].name)
@@ -188,6 +201,8 @@ struct TypeRegistry {
 }
 
 impl TypeRegistry {
+    /// Creates a registry preloaded with the builtin types, in their fixed id
+    /// order.
     TypeRegistry new() {
         TypeRegistry r;
         r.types = Vec<Type>.new();
@@ -230,11 +245,13 @@ impl TypeRegistry {
         return raw;
     }
 
+    /// Internal: interns a builtin type of `kind` without a duplicate check.
     void add_builtin(*self, str name, i32 kind) {
         Type ty = Type.new(rt_type_str_owned(name), kind);
         self.intern(move ty);
     }
 
+    /// Internal: interns a builtin integer type.
     void add_builtin_int(*self, str name, u16 bits, bool is_signed) {
         Type ty = Type.new(rt_type_str_owned(name), (i32)TYPE_KIND.INT);
         ty.bits = bits;
@@ -242,6 +259,7 @@ impl TypeRegistry {
         self.intern(move ty);
     }
 
+    /// Internal: interns a builtin float type.
     void add_builtin_float(*self, str name, u16 bits) {
         Type ty = Type.new(rt_type_str_owned(name), (i32)TYPE_KIND.FLOAT);
         ty.bits = bits;
@@ -261,6 +279,7 @@ impl TypeRegistry {
         return TypeResult.ok_id(TypeId.from_raw(raw));
     }
 
+    /// Builds an `UNKNOWN_TYPE_ID` error naming `raw`.
     TypeResult unknown_type_id_error(*self, u32 raw) {
         String m = rt_type_str_owned("unknown type id: ");
         rt_type_append_u32(&m, raw);
@@ -505,7 +524,9 @@ impl TypeRegistry {
         return self.define_enum_core(name, move variants);
     }
 
-    // Shared define_enum tail: validates, then transfers payload ownership.
+    /// Shared define_enum tail: validates, then transfers payload ownership.
+    /// Consumes `defs`: payloads move into the registry on success and are freed
+    /// on every error path.
     TypeResult define_enum_core(*self, str name, Vec<VariantDef> defs) {
         if (self.by_name.contains_key(name)) {
             rt_free_variant_defs(&defs);

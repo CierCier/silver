@@ -1,12 +1,17 @@
 // Shared recursion budget for recursive compiler and runtime walkers.
+/// Depth limit used when a `DepthBudget` is created with a non-positive limit.
 const i64 DEFAULT_MAX_RECURSION_DEPTH = 256;
 
+/// A recursion depth counter for recursive walkers. Pair each successful
+/// `enter` with one `leave`.
 struct DepthBudget {
     i64 limit;
     i64 depth;
 }
 
 impl DepthBudget {
+    /// Creates a budget at depth 0. A non-positive `limit` uses
+    /// `DEFAULT_MAX_RECURSION_DEPTH`.
     DepthBudget new(i64 limit) {
         DepthBudget budget;
         budget.limit = limit;
@@ -17,6 +22,8 @@ impl DepthBudget {
         return budget;
     }
 
+    /// Increments the depth and returns true, or returns false without changing
+    /// it when the limit is reached.
     bool enter(DepthBudget* self) {
         if (self.depth >= self.limit) {
             return false;
@@ -25,16 +32,19 @@ impl DepthBudget {
         return true;
     }
 
+    /// Decrements the depth; does nothing at depth 0.
     void leave(DepthBudget* self) {
         if (self.depth > 0) {
             self.depth -= 1;
         }
     }
 
+    /// Returns true when the depth has reached the limit.
     bool exceeded(&self) {
         return self.depth >= self.limit;
     }
 
+    /// Returns the current depth.
     i64 current(&self) {
         return self.depth;
     }

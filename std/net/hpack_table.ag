@@ -7,6 +7,8 @@
 // Static table (Appendix A): index 0 is an unused placeholder; indices
 // 1..61 mirror RFC 7541 Appendix A.
 
+/// HPACK Huffman codes (RFC 7541 Appendix B), indexed by symbol; 256 is EOS.
+/// Each code is right-aligned; its bit length is in `hpack_huff_lens`.
 u32 hpack_huff_codes[257] = {
     0x1ff8, 0x7fffd8, 0xfffffe2, 0xfffffe3, 0xfffffe4, 0xfffffe5, 0xfffffe6, 0xfffffe7,
     0xfffffe8, 0xffffea, 0x3ffffffc, 0xfffffe9, 0xfffffea, 0x3ffffffd, 0xfffffeb, 0xfffffec,
@@ -43,6 +45,7 @@ u32 hpack_huff_codes[257] = {
     0x3fffffff
 };
 
+/// Bit length of each `hpack_huff_codes` entry.
 u16 hpack_huff_lens[257] = {
     13, 23, 28, 28, 28, 28, 28, 28,
     28, 24, 30, 28, 28, 30, 28, 28,
@@ -79,6 +82,7 @@ u16 hpack_huff_lens[257] = {
     30
 };
 
+/// HPACK static table header names (RFC 7541 Appendix A); index 0 is unused.
 str hpack_static_names[62] = {
     "", ":authority", ":method", ":method",
     ":path", ":path", ":scheme", ":scheme",
@@ -98,6 +102,8 @@ str hpack_static_names[62] = {
     "via", "www-authenticate"
 };
 
+/// HPACK static table header values, parallel to `hpack_static_names`.
+/// An empty string means the entry has no predefined value.
 str hpack_static_values[62] = {
     "", "", "GET", "POST",
     "/", "/index.html", "http", "https",

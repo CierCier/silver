@@ -5,6 +5,7 @@
 // classifies codes by class (2xx, 3xx, ...), maps codes to their standard
 // reason phrases, and encodes the RFC 7230/7231 body rules.
 
+/// Standard HTTP status codes. Each variant's value is its numeric code.
 enum HttpStatus {
     // 1xx Informational
     Continue = 100;

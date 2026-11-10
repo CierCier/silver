@@ -11,12 +11,18 @@ import std.sys.raw.memory;
 
 if (@cfg(os.linux)) {
 // Linux UAPI: dma-heap.h and dma-buf.h, generic ioctl encoding on x86_64.
+/// `DMA_HEAP_IOCTL_ALLOC` request (linux/dma-heap.h, x86_64 encoding).
 const i64 DMA_HEAP_IOCTL_ALLOC = 0xc0184800;
+/// `DMA_BUF_IOCTL_SYNC` request (linux/dma-buf.h, x86_64 encoding).
 const i64 DMA_BUF_IOCTL_SYNC = 0x40086200;
+/// fcntl `F_DUPFD_CLOEXEC` command.
 const i64 DMA_F_DUPFD_CLOEXEC = 1030;
+/// DMA-BUF sync flags: CPU read and write access.
 const u64 DMA_BUF_SYNC_RW = 3;
+/// DMA-BUF sync flag: end a CPU access window (otherwise it starts one).
 const u64 DMA_BUF_SYNC_END = 4;
 
+/// Linux `struct dma_heap_allocation_data`; the kernel writes `fd` on success.
 struct DmaHeapAllocation {
     u64 len;
     u32 fd;
@@ -31,7 +37,9 @@ struct DmaBuffer {
     private i64 size;
 }
 
-// EINTR and EAGAIN require retrying the same coherency operation.
+/// Issues `DMA_BUF_IOCTL_SYNC` with `flags` on `fd`. Retries on EINTR and
+/// EAGAIN, which require repeating the same coherency operation.
+/// Returns 0 or `-errno`.
 i64 dma_sync(i32 fd, u64 flags) {
     i64 result = sys_ioctl((i64)fd, DMA_BUF_IOCTL_SYNC, (i64)&flags);
     while (result == -EINTR || result == -EAGAIN) {
@@ -77,6 +85,7 @@ impl DmaBuffer {
     /// Borrow the descriptor for a device-specific import. Do not close it.
     i32 fd(&self) { return self.descriptor; }
 
+    /// Returns the buffer size in bytes.
     i64 len(&self) { return self.size; }
 
     /// Run a fallible callback on a mapped byte slice, with read/write cache coherency.

@@ -205,6 +205,8 @@ impl<T> Drop for BinaryHeap<T> {
         self.cap = 0;
     }
 }
+/// A consuming iterator that yields heap elements greatest first.
+/// Dropping it drops any elements not yet yielded.
 struct BinaryHeapIntoIter<T> {
     BinaryHeap<T> heap;
 }

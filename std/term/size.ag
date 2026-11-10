@@ -8,7 +8,9 @@ import std.sys.raw.fs;
 import std.error;
 import std.result;
 
+/// Linux ioctl request that reads a terminal's window size.
 const i64 TIOCGWINSZ = 0x5413;
+/// Linux ioctl request that sets a terminal's window size.
 const i64 TIOCSWINSZ = 0x5414;
 
 /// Linux `struct winsize`: rows, cols, and pixel sizes, all u16 (8 bytes).
@@ -25,6 +27,7 @@ struct TermSize {
     i64 cols;
 }
 
+/// Builds a terminal size from row and column counts.
 TermSize TermSize_new(i64 rows, i64 cols) {
     TermSize s;
     s.rows = rows;
@@ -32,6 +35,8 @@ TermSize TermSize_new(i64 rows, i64 cols) {
     return s;
 }
 
+/// Returns the window size of the terminal on `fd`. Fails with the OS error
+/// when `fd` is not a terminal.
 Result<TermSize, Error> term_get_size(i32 fd) {
     i64 rows = 0;
     i64 cols = 0;
@@ -43,6 +48,9 @@ Result<TermSize, Error> term_get_size(i32 fd) {
 }
 
 if (@cfg(os.linux)) {
+    /// Sets the window size of the terminal on `fd` (typically a pty master),
+    /// which sends SIGWINCH to the foreground process group. Values above 65535
+    /// are truncated. Returns 0 on success.
     Result<i64, Error> term_set_size(i32 fd, i64 rows, i64 cols) {
         Winsize w;
         w.rows = (u16)rows;
@@ -58,6 +66,7 @@ if (@cfg(os.linux)) {
 } else {
     // No portable console-resize primitive behind the seam yet; the Linux
     // pty path (the only in-tree caller) never runs here.
+    /// Not supported on this platform; always fails with ENOSYS (38).
     Result<i64, Error> term_set_size(i32 fd, i64 rows, i64 cols) {
         return Err(38, "terminal resize not supported on this platform");
     }

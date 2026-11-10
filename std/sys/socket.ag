@@ -10,22 +10,26 @@ import std.sys.raw.socket;
 import std.sys.result;
 
 if (@cfg(os.linux)) {
+/// Socket address families (`AF_*`).
 enum AddressFamily {
     UNIX = 1;
     INET = 2;
     INET6 = 10;
 }
 
+/// Socket types (`SOCK_*`). Combine with `SOCK_CLOEXEC`/`SOCK_NONBLOCK` flags.
 enum SocketType {
     STREAM = 1;
     DGRAM = 2;
 }
 
+/// setsockopt/getsockopt levels (`SOL_SOCKET`, `IPPROTO_TCP`).
 enum SocketOptionLevel {
     SOCKET = 1;
     TCP = 6;
 }
 
+/// `SOL_SOCKET` option names (`SO_*`).
 enum SocketOption {
     REUSEADDR = 2;
     SO_ERROR = 4;
@@ -36,85 +40,113 @@ enum SocketOption {
     SNDTIMEO = 21;
 }
 
+/// `IPPROTO_TCP` option names (`TCP_*`).
 enum TcpOption {
     NODELAY = 1;
     CORK = 3;
     QUICKACK = 12;
 }
 
+/// Which half of a connection `shutdown` closes.
 enum ShutdownHow {
     RD = 0;
     WR = 1;
     RDWR = 2;
 }
 
+/// Socket type flag: close the descriptor on exec.
 const i64 SOCK_CLOEXEC = 524288;
+/// Socket type flag: non-blocking I/O.
 const i64 SOCK_NONBLOCK = 2048; // == O_NONBLOCK on Linux
 
+/// socket(2): creates a socket and returns its fd. The caller owns the fd.
 Result<i64, Error> try_socket(AddressFamily domain, SocketType ty, i64 flags, i64 protocol) {
     i64 socket_type = (i64)ty | flags;
     return Result<i64, Error>.from_raw(sys_socket((i64)domain, socket_type, protocol));
 }
 
+/// bind(2): binds `fd` to the `addr_len`-byte address at `addr`.
 Result<i64, Error> try_bind(i32 fd, void* addr, i64 addr_len) {
     return Result<i64, Error>.from_raw(sys_bind((i64)fd, (i64)addr, addr_len));
 }
 
+/// listen(2): marks `fd` as a listening socket with the given backlog.
 Result<i64, Error> try_listen(i32 fd, i64 backlog) {
     return Result<i64, Error>.from_raw(sys_listen((i64)fd, backlog));
 }
 
+/// accept4(2): accepts a connection and returns the new fd, which the caller
+/// owns. `addr`/`addr_len` may be null. Blocks unless `fd` is non-blocking.
 Result<i64, Error> try_accept4(i32 fd, void* addr, u32* addr_len, i64 flags) {
     return Result<i64, Error>.from_raw(sys_accept4((i64)fd, (i64)addr, (i64)addr_len, flags));
 }
 
+/// connect(2): connects `fd` to `addr`. Blocks unless `fd` is non-blocking,
+/// in which case it fails with EINPROGRESS while the connect continues.
 Result<i64, Error> try_connect(i32 fd, void* addr, i64 addr_len) {
     return Result<i64, Error>.from_raw(sys_connect((i64)fd, (i64)addr, addr_len));
 }
 
+/// shutdown(2): closes one or both directions without closing the fd.
 Result<i64, Error> try_shutdown(i32 fd, ShutdownHow how) {
     return Result<i64, Error>.from_raw(sys_shutdown((i64)fd, (i64)how));
 }
 
+/// setsockopt(2): sets option `optname` from `optlen` bytes at `optval`.
 Result<i64, Error> try_setsockopt(i32 fd, SocketOptionLevel level, SocketOption optname, void* optval, i64 optlen) {
     return Result<i64, Error>.from_raw(sys_setsockopt((i64)fd, (i64)level, (i64)optname, (i64)optval, optlen));
 }
 
+/// getsockopt(2): reads option `optname` into `optval`; `optlen` is an
+/// in/out `u32` byte count.
 Result<i64, Error> try_getsockopt(i32 fd, SocketOptionLevel level, SocketOption optname, void* optval, void* optlen) {
     return Result<i64, Error>.from_raw(sys_getsockopt((i64)fd, (i64)level, (i64)optname, (i64)optval, (i64)optlen));
 }
 
+/// getsockname(2): writes the local address of `fd`.
 Result<i64, Error> try_getsockname(i32 fd, void* addr, u32* addr_len) {
     return Result<i64, Error>.from_raw(sys_getsockname((i64)fd, (i64)addr, (i64)addr_len));
 }
 
+/// getpeername(2): writes the peer address of a connected `fd`.
 Result<i64, Error> try_getpeername(i32 fd, void* addr, u32* addr_len) {
     return Result<i64, Error>.from_raw(sys_getpeername((i64)fd, (i64)addr, (i64)addr_len));
 }
 
+/// sendto(2): sends up to `len` bytes and returns the count sent, which may be
+/// short. Without MSG_NOSIGNAL in `flags`, a closed peer raises SIGPIPE.
 Result<i64, Error> try_sendto(i32 fd, void* buf, i64 len, i64 flags, void* addr, i64 addr_len) {
     return Result<i64, Error>.from_raw(sys_sendto((i64)fd, (i64)buf, len, flags, (i64)addr, addr_len));
 }
 
+/// recvfrom(2): receives up to `len` bytes and returns the count; 0 means the
+/// stream peer closed. `addr`/`addr_len` may be null.
 Result<i64, Error> try_recvfrom(i32 fd, void* buf, i64 len, i64 flags, void* addr, u32* addr_len) {
     return Result<i64, Error>.from_raw(sys_recvfrom((i64)fd, (i64)buf, len, flags, (i64)addr, (i64)addr_len));
 }
 
-// poll(2) file-descriptor descriptor. Layout matches the kernel's struct
-// pollfd (int fd; short events; short revents) — 8 bytes on x86_64.
+/// poll(2) file-descriptor descriptor. Layout matches the kernel's struct
+/// pollfd (int fd; short events; short revents) — 8 bytes on x86_64.
 struct PollFd {
     i32 fd;
     i16 events;
     i16 revents;
 }
 
+/// poll event: data to read.
 const i64 POLLIN = 1;
+/// poll event: urgent data to read.
 const i64 POLLPRI = 2;
+/// poll event: writing will not block.
 const i64 POLLOUT = 4;
+/// poll event: error condition (output only).
 const i64 POLLERR = 8;
+/// poll event: hang-up (output only).
 const i64 POLLHUP = 16;
 
-// poll(2): wait for events on `fds`. Ok value: ready fd count (0 = timeout).
+/// poll(2): wait for events on `fds`. Ok value: ready fd count (0 = timeout).
+/// Blocks up to `timeout_ms` milliseconds; a negative timeout waits forever.
+/// EINTR is returned as an error, not retried.
 Result<i64, Error> try_poll(PollFd* fds, i64 nfds, i64 timeout_ms) {
     return Result<i64, Error>.from_raw(sys_poll((i64)fds, nfds, timeout_ms));
 }

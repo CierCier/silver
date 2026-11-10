@@ -10,18 +10,24 @@
 import std.error;
 import std.sys.result;
 
+/// A byte-stream endpoint as a context pointer plus read and write callbacks.
+/// Does not own `ctx`; the provider that built it keeps it alive.
 struct StreamIo {
     void* ctx;
     Result<i64, Error>(void*, u8*, i64) read;
     Result<i64, Error>(void*, u8*, i64) write;
 }
 
+/// Reads up to `len` bytes into `buf` through `io`. Returns the count, 0 at
+/// end of stream, or the transport error. May block.
 #[inline(always)]
 Result<i64, Error> transport_read(StreamIo* io, u8* buf, i64 len) {
     Result<i64, Error>(void*, u8*, i64) f = io.read;
     return f(io.ctx, buf, len);
 }
 
+/// Writes up to `len` bytes from `buf` through `io`. May write fewer bytes
+/// than requested; returns the count or the transport error. May block.
 #[inline(always)]
 Result<i64, Error> transport_write(StreamIo* io, u8* buf, i64 len) {
     Result<i64, Error>(void*, u8*, i64) f = io.write;
@@ -33,8 +39,11 @@ Result<i64, Error> transport_write(StreamIo* io, u8* buf, i64 len) {
 // HTTP client (std.net.tls casts it to its TlsStream). A zero table means
 // TLS is unavailable.
 
+/// Size in bytes of the opaque per-connection TLS state blob.
 const i64 TRANSPORT_TLS_STATE_SIZE = 64;
 
+/// The TLS implementation's callback table, installed by
+/// `tls_provider_register`. All fields are null until registration.
 struct TlsProvider {
     bool(void*, i32, str, bool, str, Error*) handshake;
     Result<i64, Error>(void*, u8*, i64) read;
@@ -45,6 +54,8 @@ struct TlsProvider {
     str(void*) version;
 }
 
+/// Internal: the registered TLS provider; zeroed (TLS unavailable) by default.
+/// Written once at init; not synchronized with concurrent connections.
 TlsProvider g_tls_provider;
 
 /// Install a TLS transport provider (called by std.net.tls's tls_init).
@@ -63,12 +74,17 @@ void tls_provider_register(bool(void*, i32, str, bool, str, Error*) handshake,
     g_tls_provider.accept = accept;
     g_tls_provider.version = version;
 }
+/// Returns true when the TLS session negotiated HTTP/2 via ALPN. False when
+/// no provider is registered.
 bool transport_tls_is_h2(void* state) {
     bool(void*) f = g_tls_provider.is_h2;
     if ((i64)f != 0) { return f(state); }
     return false;
 }
 
+/// Runs a client TLS handshake on socket `fd` for `host`, storing session
+/// state in `state`. Returns false and writes `*err` on failure, including
+/// when no provider is registered (code -7). Blocks until done.
 bool transport_tls_handshake(void* state, i32 fd, str host, bool verify, str ca_file, Error* err) {
     bool(void*, i32, str, bool, str, Error*) f = g_tls_provider.handshake;
     if ((i64)f == 0) {
@@ -78,6 +94,8 @@ bool transport_tls_handshake(void* state, i32 fd, str host, bool verify, str ca_
     return f(state, fd, host, verify, ca_file, err);
 }
 
+/// Returns a stream endpoint that reads and writes through the TLS session in
+/// `state`. Must only be used after a successful handshake or accept.
 StreamIo transport_tls_io(void* state) {
     StreamIo io;
     io.ctx = state;
@@ -86,11 +104,16 @@ StreamIo transport_tls_io(void* state) {
     return io;
 }
 
+/// Closes the TLS session in `state` (sends close_notify and frees provider
+/// resources). Does not close the socket. No-op without a provider.
 void transport_tls_close(void* state) {
     void(void*) f = g_tls_provider.close;
     if ((i64)f != 0) { f(state); }
 }
 
+/// Runs a server TLS handshake on accepted socket `fd`, loading the PEM
+/// certificate and key files. Returns false and writes `*err` on failure,
+/// including when no provider is registered (code -7). Blocks until done.
 bool transport_tls_accept(void* state, i32 fd, str cert_file, str key_file, Error* err) {
     bool(void*, i32, str, str, Error*) f = g_tls_provider.accept;
     if ((i64)f == 0) {
@@ -100,6 +123,7 @@ bool transport_tls_accept(void* state, i32 fd, str cert_file, str key_file, Erro
     return f(state, fd, cert_file, key_file, err);
 }
 
+/// Returns the negotiated TLS version name, or "" without a provider.
 str transport_tls_version(void* state) {
     str(void*) f = g_tls_provider.version;
     if ((i64)f != 0) { return f(state); }

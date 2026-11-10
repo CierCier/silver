@@ -61,6 +61,8 @@ import std.string;
 // parallel fields on CastKindInfo, same layout idiom as std/rt/type_info.ag)
 // ---------------------------------------------------------------------------
 
+/// Classification of a cast between two runtime types; `NONE` means the pair
+/// is not a numeric cast.
 enum CAST_KIND {
     NONE = 0;          // not a numeric cast (Rust: Ok(None))
     IDENTITY = 1;
@@ -82,6 +84,7 @@ struct CastKindInfo {
 }
 
 impl CastKindInfo {
+    /// Returns the `NONE` classification.
     CastKindInfo none() {
         CastKindInfo k;
         k.kind = (i32)CAST_KIND.NONE;
@@ -154,6 +157,7 @@ bool can_cast(TypeRegistry* reg, TypeId from, TypeId to) {
 // FLOAT       float_val (+ ty)
 // ---------------------------------------------------------------------------
 
+/// Which payload field of a `CastValue` is meaningful.
 enum CAST_VALUE_KIND {
     BOOL = 0;
     INT = 1;
@@ -161,6 +165,8 @@ enum CAST_VALUE_KIND {
     FLOAT = 3;
 }
 
+/// A tagged numeric value for runtime casts: `kind` selects the payload
+/// field and `ty` holds the specific builtin type id.
 struct CastValue {
     i32 kind;
     u32 ty;          // raw TypeId of the payload's specific type
@@ -171,6 +177,7 @@ struct CastValue {
 }
 
 impl CastValue {
+    /// Returns `false` as a BOOL value, the zero value used on error paths.
     CastValue blank() {
         CastValue v;
         v.kind = (i32)CAST_VALUE_KIND.BOOL;
@@ -182,6 +189,7 @@ impl CastValue {
         return v;
     }
 
+    /// Wraps a bool.
     CastValue from_bool(bool value) {
         CastValue v = CastValue.blank();
         v.kind = (i32)CAST_VALUE_KIND.BOOL;
@@ -227,6 +235,7 @@ impl CastValue {
 // CAST_ERR — mirrors the Rust error variants casts can produce
 // ---------------------------------------------------------------------------
 
+/// Cast error kinds, mirroring the Rust runtime's error variants.
 enum CAST_ERR {
     NONE = 0;
     CAST_NOT_FOUND = 1;   // RuntimeError::CastNotFound
@@ -245,6 +254,7 @@ struct CastResult {
 }
 
 impl CastResult {
+    /// Builds a successful result carrying `value`.
     CastResult ok_value(CastValue value) {
         CastResult r;
         r.ok = true;
@@ -254,6 +264,7 @@ impl CastResult {
         return r;
     }
 
+    /// Builds a failed result with `CAST_ERR` code `err`, taking `msg`.
     CastResult error(i32 err, String msg) {
         CastResult r;
         r.ok = false;
@@ -263,10 +274,12 @@ impl CastResult {
         return r;
     }
 
+    /// Returns true on success.
     bool is_ok(*self) {
         return self.ok;
     }
 
+    /// Returns true on failure.
     bool is_err(*self) {
         return !self.ok;
     }
@@ -283,14 +296,17 @@ impl Drop for CastResult {
 // is_float_type), plus bits/signed tables over raw builtin ids
 // ---------------------------------------------------------------------------
 
+/// Returns true for a builtin signed integer type id (i8..i128).
 bool rt_cast_is_int_type(u32 ty) {
     return ty >= 2 && ty <= 6;   // I8..I128
 }
 
+/// Returns true for a builtin unsigned integer type id (u8..u128).
 bool rt_cast_is_uint_type(u32 ty) {
     return ty >= 7 && ty <= 11;  // U8..U128
 }
 
+/// Returns true for a builtin float type id (f32, f64).
 bool rt_cast_is_float_type(u32 ty) {
     return ty == 12 || ty == 13; // F32, F64
 }
@@ -401,6 +417,9 @@ u128 rt_cast_f64_to_unsigned(f64 v, u16 bits) {
 // int width wrapping through the rt_cast_* helpers above).
 // ---------------------------------------------------------------------------
 
+/// Converts `value` to builtin numeric type `to` with Rust `as` semantics:
+/// integers wrap to the target width, floats truncate toward zero when
+/// converted to integers, and bool becomes 1 or 0.
 CastValue rt_cast_exec_numeric(CastValue value, u32 to) {
     // -> float
     if (rt_cast_is_float_type(to)) {
@@ -509,10 +528,12 @@ CastValue rt_cast_exec_opcode(i32 opcode, u32 from, CastValue value) {
 // CastRegistry — port of runtime/casts.rs CastRegistry
 // ---------------------------------------------------------------------------
 
+/// The registered numeric cast table, keyed by (from, to) type ids.
 struct CastRegistry {
     HashMap<u64, i32> by_type;   // packed (from << 32) | to  ->  opcode
 }
 
+/// Packs a (from, to) type id pair into one registry key.
 u64 rt_cast_key(u32 from, u32 to) {
     return ((u64)from * (u64)4294967296) + (u64)to; // (from << 32) | to
 }
@@ -638,6 +659,9 @@ impl Drop for CastRegistry {
 // payload kind disagrees with the classification.
 // ---------------------------------------------------------------------------
 
+/// Casts `value` to `to` using the registry's type metadata, without the
+/// cast table. Returns `CANNOT_CAST` for a non-numeric pair and
+/// `TYPE_MISMATCH` when the payload kind disagrees with its type.
 CastResult rt_cast_value(TypeRegistry* reg, CastValue value, TypeId to) {
     TypeId from = TypeId.from_raw(value.type_id());
     if (from.eq(to)) {

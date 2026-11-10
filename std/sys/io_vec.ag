@@ -17,6 +17,8 @@ struct IoVec {
 }
 
 impl IoVec {
+    /// Describes `len` bytes at `base` for vectored I/O. Does not copy or own the
+    /// buffer; it must stay valid for the duration of the syscall that uses it.
     IoVec new(void* base, i64 len) {
         IoVec iov;
         iov.base = base;

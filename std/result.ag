@@ -9,36 +9,46 @@ import std.display;
 import std.io.file;
 
 /// Terminates the process with SIGABRT, like C `abort()`.
+/// Internal helper for `Result.unwrap`; not part of the public API.
 void __result_abort() {
     abort();
 }
 
+/// The outcome of a fallible operation: `Ok(T)` on success or `Err(E)` on
+/// failure. Extracting the wrong variant (`unwrap` on `Err`, `unwrap_err` on
+/// `Ok`) prints to stderr and aborts the process.
 enum Result<T, E> {
     Ok(T);
     Err(E);
 }
 
 impl Result<T, E> {
+    /// Wraps a success value.
     Result<T, E> ok(T value) {
         return Result.Ok(move value);
     }
 
+    /// Wraps an error value.
     Result<T, E> err(E error) {
         return Result.Err(move error);
     }
 
+    /// Returns true for `Ok`. Does not consume the result.
     bool is_ok(&self) {
         return match *self { Ok(v) : true, Err(e) : false };
     }
 
+    /// Returns true for `Err`. Does not consume the result.
     bool is_err(&self) {
         return match *self { Ok(v) : false, Err(e) : true };
     }
 
+    /// Same as `is_ok`.
     bool success(&self) {
         return self.is_ok();
     }
 
+    /// Same as `is_err`.
     bool failed(&self) {
         return self.is_err();
     }
@@ -57,6 +67,8 @@ impl Result<T, E> {
         }
     }
 
+    /// Consumes the result and returns its value, or `fallback` on `Err`. The
+    /// error payload is dropped. `fallback` is evaluated even on `Ok`.
     T unwrap_or(self, T fallback) {
         return match self { Ok(move v) : v, Err(e) : fallback };
     }
@@ -99,6 +111,7 @@ impl Result<T, E> {
         }
     }
 
+    /// Same as `unwrap_err`: consumes the result and aborts when it is `Ok`.
     E get_error(self) {
         return self.unwrap_err();
     }
