@@ -1,5 +1,6 @@
 // Opens a Silver file and checks that aglsp answers through the extension.
 const assert = require("node:assert/strict");
+const { execFileSync } = require("node:child_process");
 const path = require("node:path");
 const vscode = require("vscode");
 
@@ -12,6 +13,12 @@ async function eventually(probe, timeoutMs, what) {
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
+}
+
+/** Counts aglsp processes started by this extension host. */
+function serverProcesses() {
+  const output = execFileSync("ps", ["-o", "comm=", "--ppid", String(process.pid)], { encoding: "utf8" });
+  return output.split("\n").filter((name) => name.trim() === "aglsp").length;
 }
 
 async function run() {
@@ -38,7 +45,20 @@ async function run() {
   const hoverText = hovers.flatMap((hover) => hover.contents.map((part) => part.value ?? String(part))).join("\n");
   assert.match(hoverText, /Doubles a value\./, "hover shows the doc comment");
 
-  console.log(`aglsp answered: symbols=${names.join(",")}`);
+  // Overlapping restarts must leave exactly one server running.
+  await Promise.all([
+    vscode.commands.executeCommand("silver.restartServer"),
+    vscode.commands.executeCommand("silver.restartServer"),
+    vscode.commands.executeCommand("silver.restartServer"),
+  ]);
+  await eventually(async () => {
+    const result = await vscode.commands.executeCommand("vscode.executeDocumentSymbolProvider", file);
+    return Array.isArray(result) && result.length > 0;
+  }, 30000, "document symbols after restarts");
+  const servers = serverProcesses();
+  assert.equal(servers, 1, `expected one aglsp child process, found ${servers}`);
+
+  console.log(`aglsp answered: symbols=${names.join(",")}; servers after restarts=${servers}`);
 }
 
 module.exports = { run };

@@ -13,6 +13,14 @@ import {
 const SERVER_BINARY = process.platform === "win32" ? "aglsp.exe" : "aglsp";
 
 let client: LanguageClient | undefined;
+// Starts and stops run one at a time, so overlapping restarts cannot leave a
+// second server running.
+let lifecycle: Promise<void> = Promise.resolve();
+
+function serialize(step: () => Promise<void>): Promise<void> {
+  lifecycle = lifecycle.then(step, step);
+  return lifecycle;
+}
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const output = vscode.window.createOutputChannel("Silver Language Server", { log: true });
@@ -28,16 +36,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // A workspace that becomes trusted can now run the server.
     vscode.workspace.onDidGrantWorkspaceTrust(() => restart(output)),
   );
-  await start(output);
+  await serialize(() => start(output));
 }
 
-export async function deactivate(): Promise<void> {
-  await stop();
+export function deactivate(): Promise<void> {
+  return serialize(stop);
 }
 
-async function restart(output: vscode.LogOutputChannel): Promise<void> {
-  await stop();
-  await start(output);
+function restart(output: vscode.LogOutputChannel): Promise<void> {
+  return serialize(async () => {
+    await stop();
+    await start(output);
+  });
 }
 
 async function stop(): Promise<void> {
