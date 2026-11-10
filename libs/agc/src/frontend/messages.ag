@@ -2,76 +2,113 @@
 import std.mem.vec;
 import std.string;
 
+/// Diagnostic text: "cannot borrow owned storage without its
+/// initialization-state capability". Returns an owned string.
 String reference_state_unavailable() {
     return String.from_str("cannot borrow owned storage without its initialization-state capability");
 }
 
+/// Diagnostic text: "cannot represent owner initialization plan for '{}':
+/// unresolved inline layout or more than 65536 nodes / 256 projection
+/// levels". Returns an owned string.
 String init_plan_unrepresentable(str type_name) {
     return @format("cannot represent owner initialization plan for '{}': unresolved inline layout or more than 65536 nodes / 256 projection levels", type_name);
 }
 
+/// Diagnostic text: "owner initialization update has no resolved inline
+/// place". Returns an owned string.
 String init_plan_unknown_place() {
     return String.from_str("owner initialization update has no resolved inline place");
 }
 
+/// Diagnostic text: "enum variant '{}' discriminant or automatic successor
+/// exceeds the supported integer range". Returns an owned string.
 String enum_discriminant_overflow(str name) {
     return @format("enum variant '{}' discriminant or automatic successor exceeds the supported integer range", name);
 }
 
+/// Diagnostic text: "enum discriminant exceeds the supported 16-bit tag range
+/// {}", with the signed or unsigned range. Returns an owned string.
 String enum_tag_out_of_range(bool signed_tag) {
     str range = signed_tag ? "-32768..32767" : "0..65535";
     return @format("enum discriminant exceeds the supported 16-bit tag range {}", range);
 }
 
+/// Diagnostic text: "payload enum variant '{}' has duplicate discriminant
+/// {}". Returns an owned string.
 String enum_payload_duplicate_discriminant(str name, i64 value) {
     return @format("payload enum variant '{}' has duplicate discriminant {}", name, value);
 }
 
+/// Diagnostic text: "cannot infer lambda parameter '{}'; add a type or a
+/// function-type context". Returns an owned string.
 String lambda_parameter_type(str name) {
     return @format("cannot infer lambda parameter '{}'; add a type or a function-type context", name);
 }
 
+/// Diagnostic text: "cannot index into zero-size array". Returns an owned
+/// string.
 String zero_size_array_index() {
     return String.from_str("cannot index into zero-size array");
 }
 
+/// Diagnostic text: "expected a lambda parameter list before '=>'". Returns
+/// an owned string.
 String lambda_parameter_list() {
     return String.from_str("expected a lambda parameter list before '=>'");
 }
 
+/// Diagnostic text: "expected an expression or block after '=>'". Returns an
+/// owned string.
 String lambda_body_expected() {
     return String.from_str("expected an expression or block after '=>'");
 }
 
+/// Diagnostic text: "cannot infer lambda return type". Returns an owned
+/// string.
 String lambda_return_type() {
     return String.from_str("cannot infer lambda return type");
 }
 
+/// Diagnostic text: "lambdas inside generic functions or impls are not
+/// supported yet". Returns an owned string.
 String lambda_generic_scope() {
     return String.from_str("lambdas inside generic functions or impls are not supported yet");
 }
 
+/// Diagnostic text: "lambda parameter count mismatch: expected {}, found {}".
+/// Returns an owned string.
 String lambda_parameter_count(i64 expected, i64 actual) {
     return @format("lambda parameter count mismatch: expected {}, found {}", expected, actual);
 }
 
+/// Diagnostic text: "capturing lambda cannot be stored in a function pointer;
+/// use an inferred 'let' binding". Returns an owned string.
 String lambda_capturing_function_pointer() {
     return String.from_str("capturing lambda cannot be stored in a function pointer; use an inferred 'let' binding");
 }
 
+/// Diagnostic text: "cannot move '{}' because it is borrowed". Returns an
+/// owned string.
 String cannot_move_borrowed(str name) {
     return @format("cannot move '{}' because it is borrowed", name);
 }
 
+/// Diagnostic text: "macro '@{}' expects [at least ]{} argument(s), got {}".
+/// Returns an owned string.
 String macro_arity(str name, i64 fixed, bool variadic, i64 got) {
     str qualifier = variadic ? "at least " : "";
     return @format("macro '@{}' expects {}{} argument(s), got {}", name, qualifier, fixed, got);
 }
 
+/// Diagnostic text: "macro '@{}' requires its variadic parameter to be last".
+/// Returns an owned string.
 String macro_variadic_must_be_last(str name) {
     return @format("macro '@{}' requires its variadic parameter to be last", name);
 }
 
+/// Diagnostic text: "invalid optimization level '{}'; expected 0, 1, 2, 3, s,
+/// z, or fast". Returns an owned string.
 String invalid_optimization_level(str level) {
     String message = String.from_str("invalid optimization level '");
     message.push_str(level);
@@ -79,12 +116,14 @@ String invalid_optimization_level(str level) {
     return move message;
 }
 
+/// Diagnostic text: "LLVM optimization failed: {}". Returns an owned string.
 String llvm_optimization_failed(str detail) {
     String message = String.from_str("LLVM optimization failed: ");
     message.push_str(detail);
     return move message;
 }
 
+/// Returns the suffix ", did you mean '{}'?" for appending to a message.
 String did_you_mean(str suggestion) {
     String s = String.from_str(", did you mean '");
     s.push_str(suggestion);
@@ -92,6 +131,7 @@ String did_you_mean(str suggestion) {
     return move s;
 }
 
+/// Diagnostic text: "unknown type '{}'". Returns an owned string.
 String unknown_type(str name) {
     String s = String.from_str("unknown type '");
     s.push_str(name);
@@ -99,6 +139,7 @@ String unknown_type(str name) {
     return move s;
 }
 
+/// Diagnostic text: "unknown identifier '{}'". Returns an owned string.
 String unknown_identifier(str name) {
     String s = String.from_str("unknown identifier '");
     s.push_str(name);
@@ -106,6 +147,7 @@ String unknown_identifier(str name) {
     return move s;
 }
 
+/// Diagnostic text: "unknown function '{}'". Returns an owned string.
 String unknown_function(str name) {
     String s = String.from_str("unknown function '");
     s.push_str(name);
@@ -113,6 +155,7 @@ String unknown_function(str name) {
     return move s;
 }
 
+/// Diagnostic text: "unknown field '{}' on type {}". Returns an owned string.
 String unknown_field(str field, str ty) {
     String s = String.from_str("unknown field '");
     s.push_str(field);
@@ -121,6 +164,7 @@ String unknown_field(str field, str ty) {
     return move s;
 }
 
+/// Diagnostic text: "duplicate symbol '{}'". Returns an owned string.
 String duplicate_symbol(str name) {
     String s = String.from_str("duplicate symbol '");
     s.push_str(name);
@@ -128,6 +172,8 @@ String duplicate_symbol(str name) {
     return move s;
 }
 
+/// Diagnostic text: "import '{}' could not be resolved". Returns an owned
+/// string.
 String unresolved_import(str name) {
     String message = String.from_str("import `");
     message.push_str(name);
@@ -135,6 +181,9 @@ String unresolved_import(str name) {
     return move message;
 }
 
+/// Diagnostic text: "import '{}' has submodule config '{}', but prebuilt
+/// artifact '{}' is missing; stage1 requires a prebuilt .agm artifact".
+/// Returns an owned string.
 String missing_submodule_artifact(str name, str config_path, str artifact_path) {
     String message = String.from_str("import `");
     message.push_str(name);
@@ -146,6 +195,8 @@ String missing_submodule_artifact(str name, str config_path, str artifact_path) 
     return move message;
 }
 
+/// Diagnostic text: "type mismatch: expected {}, found {}". Returns an owned
+/// string.
 String type_mismatch(str expected, str found) {
     String s = String.from_str("type mismatch: expected ");
     s.push_str(expected);
@@ -154,18 +205,26 @@ String type_mismatch(str expected, str found) {
     return move s;
 }
 
+/// Diagnostic text: "pointer argument type mismatch: expected {}, found {}".
+/// Returns an owned string.
 String pointer_argument_type_mismatch(str expected, str found) {
     return @format("pointer argument type mismatch: expected {}, found {}", expected, found);
 }
 
+/// Diagnostic text: "generic method arguments cannot be inferred from the
+/// call". Returns static text.
 str generic_method_inference_failed() {
     return "generic method arguments cannot be inferred from the call";
 }
 
+/// Diagnostic text: "generic method bound is not supported by native stage1".
+/// Returns static text.
 str generic_method_unsupported_bound() {
     return "generic method bound is not supported by native stage1";
 }
 
+/// Diagnostic text: "generic method bound requires '{}' to implement '{}'".
+/// Returns an owned string.
 String generic_method_bound_failed(str type_name, str trait_name) {
     String message = String.from_str("generic method bound requires '");
     message.push_str(type_name);
@@ -175,6 +234,8 @@ String generic_method_bound_failed(str type_name, str trait_name) {
     return move message;
 }
 
+/// Diagnostic text: "cannot move '{}' out of '{}' because it implements
+/// Drop". Returns an owned string.
 String cannot_move_field_out_of_drop_type(str place, str owner) {
     String s = String.from_str("cannot move '");
     s.push_str(place);
@@ -184,6 +245,8 @@ String cannot_move_field_out_of_drop_type(str place, str owner) {
     return move s;
 }
 
+/// Diagnostic text: "return type mismatch: expected {}, found {}". Returns an
+/// owned string.
 String return_type_mismatch(str expected, str found) {
     String s = String.from_str("return type mismatch: expected ");
     s.push_str(expected);
@@ -192,22 +255,31 @@ String return_type_mismatch(str expected, str found) {
     return move s;
 }
 
+/// Diagnostic text: "void function cannot return a value". Returns static
+/// text.
 str void_func_cannot_return_value() {
     return "void function cannot return a value";
 }
 
+/// Diagnostic text: "return statement is not allowed inside a defer block".
+/// Returns static text.
 str return_not_allowed_in_defer() {
     return "return statement is not allowed inside a defer block";
 }
 
+/// Diagnostic text: "break statement is not allowed inside a defer block".
+/// Returns static text.
 str break_not_allowed_in_defer() {
     return "break statement is not allowed inside a defer block";
 }
 
+/// Diagnostic text: "continue statement is not allowed inside a defer block".
+/// Returns static text.
 str continue_not_allowed_in_defer() {
     return "continue statement is not allowed inside a defer block";
 }
 
+/// Diagnostic text: "use of moved value '{}'". Returns an owned string.
 String use_of_moved_value(str name) {
     String s = String.from_str("use of moved value '");
     s.push_str(name);
@@ -215,6 +287,8 @@ String use_of_moved_value(str name) {
     return move s;
 }
 
+/// Diagnostic text: "cannot assign to moved value '{}'". Returns an owned
+/// string.
 String cannot_assign_to_moved_value(str name) {
     String s = String.from_str("cannot assign to moved value '");
     s.push_str(name);
@@ -222,6 +296,8 @@ String cannot_assign_to_moved_value(str name) {
     return move s;
 }
 
+/// Diagnostic text: "cannot assign to const variable '{}'". Returns an owned
+/// string.
 String cannot_assign_const(str name) {
     String s = String.from_str("cannot assign to const variable '");
     s.push_str(name);
@@ -229,6 +305,8 @@ String cannot_assign_const(str name) {
     return move s;
 }
 
+/// Diagnostic text: "cannot assign to field of const variable '{}'". Returns
+/// an owned string.
 String cannot_assign_const_field(str name) {
     String s = String.from_str("cannot assign to field of const variable '");
     s.push_str(name);
@@ -236,10 +314,13 @@ String cannot_assign_const_field(str name) {
     return move s;
 }
 
+/// Diagnostic text: "value explicitly moved here". Returns static text.
 str note_value_explicitly_moved() {
     return "value explicitly moved here";
 }
 
+/// Diagnostic text: "cannot borrow '{}' as mutable because it is already
+/// borrowed as shared". Returns an owned string.
 String cannot_borrow_as_mutable_while_shared(str name) {
     String s = String.from_str("cannot borrow '");
     s.push_str(name);
@@ -247,6 +328,8 @@ String cannot_borrow_as_mutable_while_shared(str name) {
     return move s;
 }
 
+/// Diagnostic text: "cannot borrow '{}' as mutable more than once at a time".
+/// Returns an owned string.
 String cannot_borrow_as_mutable_more_than_once(str name) {
     String s = String.from_str("cannot borrow '");
     s.push_str(name);
@@ -254,6 +337,8 @@ String cannot_borrow_as_mutable_more_than_once(str name) {
     return move s;
 }
 
+/// Diagnostic text: "cannot borrow '{}' as shared because it is already
+/// borrowed as mutable". Returns an owned string.
 String cannot_borrow_as_shared_while_mutable(str name) {
     String s = String.from_str("cannot borrow '");
     s.push_str(name);
@@ -261,6 +346,8 @@ String cannot_borrow_as_shared_while_mutable(str name) {
     return move s;
 }
 
+/// Diagnostic text: "cannot assign to '{}' because it is borrowed". Returns
+/// an owned string.
 String cannot_assign_borrowed(str name) {
     String s = String.from_str("cannot assign to '");
     s.push_str(name);
@@ -268,33 +355,46 @@ String cannot_assign_borrowed(str name) {
     return move s;
 }
 
+/// Diagnostic text: "returned reference does not outlive the function (it
+/// borrows a local value; return a reference to a global or a reference
+/// parameter instead)". Returns static text.
 str ref_does_not_outlive_func() {
     return "returned reference does not outlive the function (it borrows a local value; return a reference to a global or a reference parameter instead)";
 }
+/// Diagnostic text: "value moved by return". Returns static text.
 str note_value_moved_by_return() {
     return "value moved by return";
 }
 
+/// Diagnostic text: "value consumed by by-value method call". Returns static
+/// text.
 str note_value_consumed_by_method() {
     return "value consumed by by-value method call";
 }
 
+/// Diagnostic text: "value moved into by-value parameter". Returns static
+/// text.
 str note_value_moved_into_param() {
     return "value moved into by-value parameter";
 }
 
+/// Diagnostic text: "value moved into thread launch". Returns static text.
 str note_value_moved_into_launch() {
     return "value moved into thread launch";
 }
 
+/// Diagnostic text: "task handle consumed by wait". Returns static text.
 str note_task_handle_consumed() {
     return "task handle consumed by wait";
 }
 
+/// Diagnostic text: "value moved here". Returns static text.
 str note_value_moved_here() {
     return "value moved here";
 }
 
+/// Diagnostic text: "cannot move out of '{}' because it is borrowed". Returns
+/// an owned string.
 String cannot_move_out_of_borrowed(str name) {
     String s = String.from_str("cannot move out of '");
     s.push_str(name);
@@ -302,6 +402,8 @@ String cannot_move_out_of_borrowed(str name) {
     return move s;
 }
 
+/// Diagnostic text: "argument {} borrow occurs here". Returns an owned
+/// string.
 String note_argument_borrow_here(str kind) {
     String s = String.from_str("argument ");
     s.push_str(kind);
@@ -309,6 +411,8 @@ String note_argument_borrow_here(str kind) {
     return move s;
 }
 
+/// Diagnostic text: "previous {} borrow occurs here". Returns an owned
+/// string.
 String note_previous_borrow_here(str kind) {
     String s = String.from_str("previous ");
     s.push_str(kind);
@@ -316,6 +420,8 @@ String note_previous_borrow_here(str kind) {
     return move s;
 }
 
+/// Diagnostic text: "unused variable '{}' (help: prefix with _ to ignore:
+/// '_{}')". Returns an owned string.
 String unused_variable(str name) {
     String s = String.from_str("unused variable '");
     s.push_str(name);
@@ -325,6 +431,8 @@ String unused_variable(str name) {
     return move s;
 }
 
+/// Diagnostic text: "unused parameter '{}' (help: prefix with _ to ignore:
+/// '_{}')". Returns an owned string.
 String unused_parameter(str name) {
     String s = String.from_str("unused parameter '");
     s.push_str(name);
@@ -334,10 +442,12 @@ String unused_parameter(str name) {
     return move s;
 }
 
+/// Diagnostic text: "unreachable statement". Returns static text.
 str unreachable_statement() {
     return "unreachable statement";
 }
 
+/// Diagnostic text: "duplicate variable '{}'". Returns an owned string.
 String duplicate_variable(str name) {
     String s = String.from_str("duplicate variable '");
     s.push_str(name);
@@ -345,6 +455,7 @@ String duplicate_variable(str name) {
     return move s;
 }
 
+/// `unknown_type`, plus a "did you mean" suffix when `suggestion` is non-empty.
 String unknown_type_with_suggestion(str name, str suggestion) {
     String s = unknown_type(name);
     if (strlen(suggestion) > 0) {
@@ -353,6 +464,8 @@ String unknown_type_with_suggestion(str name, str suggestion) {
     return move s;
 }
 
+/// `unknown_identifier`, plus a "did you mean" suffix when `suggestion` is
+/// non-empty.
 String unknown_identifier_with_suggestion(str name, str suggestion) {
     String s = unknown_identifier(name);
     if (strlen(suggestion) > 0) {
@@ -361,6 +474,8 @@ String unknown_identifier_with_suggestion(str name, str suggestion) {
     return move s;
 }
 
+/// `unknown_function`, plus a "did you mean" suffix when `suggestion` is
+/// non-empty.
 String unknown_function_with_suggestion(str name, str suggestion) {
     String s = unknown_function(name);
     if (strlen(suggestion) > 0) {
@@ -369,6 +484,7 @@ String unknown_function_with_suggestion(str name, str suggestion) {
     return move s;
 }
 
+/// `unknown_field`, plus a "did you mean" suffix when `suggestion` is non-empty.
 String unknown_field_with_suggestion(str field, str ty, str suggestion) {
     String s = unknown_field(field, ty);
     if (strlen(suggestion) > 0) {
@@ -377,6 +493,7 @@ String unknown_field_with_suggestion(str field, str ty, str suggestion) {
     return move s;
 }
 
+/// Returns the smallest of three values.
 i64 min3(i64 a, i64 b, i64 c) {
     i64 m = a;
     if (b < m) { m = b; }
@@ -384,6 +501,8 @@ i64 min3(i64 a, i64 b, i64 c) {
     return m;
 }
 
+/// Returns the Levenshtein edit distance between `s1` and `s2` (byte-wise).
+/// Strings longer than 48 bytes return 999, meaning "too far".
 i64 levenshtein(str s1, str s2) {
     i64 l1 = strlen(s1);
     i64 l2 = strlen(s2);
@@ -414,6 +533,9 @@ i64 levenshtein(str s1, str s2) {
     return d[l1 * 50 + l2];
 }
 
+/// Returns the candidate closest to `target` within `max_dist` edits (the
+/// first one on ties), or "" when none is close enough. Borrows the result
+/// from `candidates`.
 str fuzzy_suggest(str target, Vec<str>* candidates, i64 max_dist) {
     i64 best_dist = max_dist + 1;
     str best_cand = "";
@@ -433,10 +555,16 @@ str fuzzy_suggest(str target, Vec<str>* candidates, i64 max_dist) {
     return "";
 }
 
+/// Diagnostic text: "unsupported C callback signature: use ABI-compatible
+/// scalars (not bool, narrow/128-bit integers, or f80), or pointers to
+/// aggregates". Returns an owned string.
 String c_callback_unsupported() {
     return String.from_str("unsupported C callback signature: use ABI-compatible scalars (not bool, narrow/128-bit integers, or f80), or pointers to aggregates");
 }
 
+/// Diagnostic text: "cannot use this C function as a value: variadic,
+/// aggregate, enum, bool, narrow/128-bit integer, and f80 signatures require
+/// ABI-aware function pointers". Returns an owned string.
 String c_function_value_unsupported() {
     return String.from_str("cannot use this C function as a value: variadic, aggregate, enum, bool, narrow/128-bit integer, and f80 signatures require ABI-aware function pointers");
 }
