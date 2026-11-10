@@ -148,7 +148,7 @@ String compute_implementations(DocumentStore* store, Document* context, SymbolTa
 // LSP SymbolKind values for moniker results.
 i64 moniker_symbol_kind(IdeSymbolKind kind) {
     return match kind {
-        IdeSymbolKind.Function : 12, IdeSymbolKind.Method : 6, IdeSymbolKind.Struct : 23,
+        IdeSymbolKind.Function : 12, IdeSymbolKind.Macro : 12, IdeSymbolKind.Method : 6, IdeSymbolKind.Struct : 23,
         IdeSymbolKind.Enum : 10, IdeSymbolKind.Trait : 11, IdeSymbolKind.Global : 13,
         IdeSymbolKind.TypeAlias : 12, IdeSymbolKind.Field : 8, IdeSymbolKind.Variant : 22,
         IdeSymbolKind.Parameter : 13, IdeSymbolKind.Local : 13, IdeSymbolKind.ImportAlias : 2,

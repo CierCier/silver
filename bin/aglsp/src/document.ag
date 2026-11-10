@@ -365,7 +365,8 @@ void find_imported_symbol(Document* doc, str name, str owner, Vec<Document*>* vi
     i = ide_name_head(&doc.analysis, name);
     while (i >= 0) {
         IdeSymbol* symbol = doc.analysis.symbols.get_ptr(i);
-        if (!symbol.local && !symbol.is_private && symbol.name.equals(name) && symbol.owner.equals(owner)) {
+        if (!symbol.local && !symbol.is_private && symbol.kind != IdeSymbolKind.Macro
+            && symbol.name.equals(name) && symbol.owner.equals(owner)) {
             if (target.symbol == -1) { target.document = doc; target.symbol = i; }
             else { target.symbol = -2; }
         }
@@ -386,6 +387,9 @@ SymbolTarget resolve_occurrence(Document* doc, i64 occurrence) {
     IdeOccurrence* selected = doc.analysis.occurrences.get_ptr(occurrence);
     if (selected.symbol >= 0) { target.symbol = selected.symbol; return target; }
     if (selected.symbol == -2) { target.symbol = -2; return target; }
+    // An `@name` use only names a macro declared in this file; it never falls
+    // back to an ordinary imported symbol of the same name.
+    if (ide_macro_use(selected.node)) { return target; }
     String owner = selected.owner.clone();
     if (selected.member) {
         SyntaxNode* separator = binding_previous_sibling(selected.node);

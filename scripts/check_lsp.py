@@ -3805,6 +3805,29 @@ class NativeLsp(unittest.TestCase):
         self.assertIn("macro twice(i32 v)", macro_value)
         self.assertIn("Doubles a value.", macro_value)
         self.assertIn("**Parameters**\n- `v` — the value to double", macro_value)
+        # A macro and a function may share a name: `@twice` resolves to the
+        # macro, a plain `twice` call to the function, and neither hides the other.
+        shared = ("/// Doubles a value.\nmacro twice(i32 v) { return v + v; }\n"
+                  "/// An ordinary function.\ni32 twice(i32 v) { return v * 2; }\n"
+                  "i32 main() { i32 a = @twice(2); return twice(3) + a; }\n")
+        shared_uri = self.open(shared, "macro-shared-name.ag")
+        plain_call = self.at(shared_uri, shared, "twice", shared.index("twice(3)"))
+        function_hover = self.session.result("textDocument/hover", plain_call)["contents"]["value"]
+        self.assertIn("i32 twice(i32 v)", function_hover)
+        self.assertIn("An ordinary function.", function_hover)
+        self.assertEqual(self.session.result("textDocument/definition", plain_call)["range"],
+                         location(shared, "twice", shared.index("i32 twice")))
+        macro_call = self.at(shared_uri, shared, "twice", shared.index("@twice"))
+        self.assertIn("macro twice(i32 v)", self.session.result("textDocument/hover", macro_call)["contents"]["value"])
+        self.assertEqual(self.session.result("textDocument/definition", macro_call)["range"],
+                         location(shared, "twice", shared.index("macro twice")))
+        labels = [item["label"] for item in self.session.result("textDocument/completion", {
+            "textDocument": {"uri": shared_uri}, "position": position(shared, shared.index("twice(3)") + 2)})["items"]]
+        self.assertEqual(labels.count("twice"), 1)
+        # Signature help inside a macro call lists the macro's parameters.
+        help_result = self.session.result("textDocument/signatureHelp", {
+            "textDocument": {"uri": shared_uri}, "position": position(shared, shared.index("@twice(") + len("@twice("))})
+        self.assertEqual([p["label"] for p in help_result["signatures"][0]["parameters"]], ["i32 v"])
 
     def test_server_help_and_version_flags(self):
         for flag, needle in (("--help", "Usage: aglsp"), ("-h", "Usage: aglsp"),

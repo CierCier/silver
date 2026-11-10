@@ -9,7 +9,7 @@ import macros;
 
 i64 symbol_kind(IdeSymbolKind kind) {
     return match kind {
-        IdeSymbolKind.Function : 12, IdeSymbolKind.Method : 6,
+        IdeSymbolKind.Function : 12, IdeSymbolKind.Macro : 12, IdeSymbolKind.Method : 6,
         IdeSymbolKind.Struct : 23, IdeSymbolKind.Enum : 10,
         IdeSymbolKind.Trait : 11, IdeSymbolKind.TypeAlias : 5,
         IdeSymbolKind.Field : 8, IdeSymbolKind.Variant : 22,
@@ -110,8 +110,7 @@ String compute_hover(Document* doc, i64 offset, bool markdown) {
             i64 s = 0;
             while (s < doc.analysis.symbols.len()) {
                 IdeSymbol* sym = doc.analysis.symbols.get_ptr(s);
-                if (sym.kind == IdeSymbolKind.Function && sym.name.equals(name.to_str())
-                    && sym.signature.starts_with("macro ")) {
+                if (sym.kind == IdeSymbolKind.Macro && sym.name.equals(name.to_str())) {
                     String content = String.new();
                     if (markdown) { content.push_str("```silver\n"); }
                     content.push_str(sym.signature.to_str());

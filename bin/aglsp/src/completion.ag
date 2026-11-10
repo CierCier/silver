@@ -13,7 +13,7 @@ import macros;
 
 i64 completion_kind(IdeSymbolKind kind) {
     return match kind {
-        IdeSymbolKind.Function : 3, IdeSymbolKind.Method : 2,
+        IdeSymbolKind.Function : 3, IdeSymbolKind.Macro : 3, IdeSymbolKind.Method : 2,
         IdeSymbolKind.Struct : 22, IdeSymbolKind.Enum : 13,
         IdeSymbolKind.Trait : 8, IdeSymbolKind.TypeAlias : 7,
         IdeSymbolKind.Field : 5, IdeSymbolKind.Variant : 20,
@@ -239,7 +239,8 @@ void completion_symbols(Document* source, Document* active, i64 offset, str pref
         if (request_interrupted(pending)) { return; }
         IdeSymbol* symbol = source.analysis.symbols.get_ptr(i);
         i64 score = ide_match_score(prefix, symbol.name.to_str());
-        bool visible = symbol.owner.equals(owner) && score >= 0
+        // Macros are offered only after `@`, by append_macro_completions.
+        bool visible = symbol.kind != IdeSymbolKind.Macro && symbol.owner.equals(owner) && score >= 0
             && (source == active || !symbol.is_private);
         if (symbol.local) {
             visible = visible && !members && source == active
@@ -694,7 +695,8 @@ i64 active_call(Document* doc, i64 offset) {
                 SymbolTarget target = follow_import_alias(resolve_occurrence(doc, occurrence));
                 if (target.symbol >= 0) {
                     IdeSymbolKind kind = target.document.analysis.symbols.get_ptr(target.symbol).kind;
-                    if (kind == IdeSymbolKind.Function || kind == IdeSymbolKind.Method) { return at; }
+                    if (kind == IdeSymbolKind.Function || kind == IdeSymbolKind.Method
+                        || kind == IdeSymbolKind.Macro) { return at; }
                 }
             }
         }

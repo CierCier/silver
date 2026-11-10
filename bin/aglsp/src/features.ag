@@ -7,7 +7,7 @@ import capabilities;
 
 i64 semantic_kind(IdeSymbolKind kind) {
     return match kind {
-        IdeSymbolKind.Function : 9, IdeSymbolKind.Method : 10,
+        IdeSymbolKind.Function : 9, IdeSymbolKind.Method : 10, IdeSymbolKind.Macro : 11,
         IdeSymbolKind.Struct : 2, IdeSymbolKind.Enum : 3,
         IdeSymbolKind.Trait : 1, IdeSymbolKind.TypeAlias : 1,
         IdeSymbolKind.Field : 8, IdeSymbolKind.Variant : 4,
