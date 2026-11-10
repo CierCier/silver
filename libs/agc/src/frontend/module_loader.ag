@@ -22,6 +22,9 @@ import frontend.bindings;
 import frontend.messages;
 import frontend.callback_abi;
 
+/// Declarations retained from imported modules: their token streams and a
+/// synthetic `Program` root holding the imported items. Owns the node pool,
+/// so imported syntax nodes live as long as this value.
 struct ImportedDeclarations {
     bool loaded;
     NodePool pool;
@@ -30,6 +33,7 @@ struct ImportedDeclarations {
 }
 
 impl ImportedDeclarations {
+    /// Creates an empty set with a fresh synthetic root.
     ImportedDeclarations new() {
         ImportedDeclarations declarations;
         declarations.loaded = false;
@@ -46,6 +50,8 @@ impl Drop for ImportedDeclarations {
     }
 }
 
+/// Import worklist state: visited and pending module paths, include
+/// directories, and the symbol table imports are declared into.
 struct ModuleLoader {
     SymbolTable* symbols;
     ImportedDeclarations* declarations;
@@ -56,6 +62,7 @@ struct ModuleLoader {
 }
 
 impl ModuleLoader {
+    /// Creates a loader over borrowed `symbols` and `declarations`.
     ModuleLoader new(SymbolTable* symbols, ImportedDeclarations* declarations) {
         ModuleLoader loader;
         loader.symbols = symbols;
@@ -68,10 +75,12 @@ impl ModuleLoader {
     }
 }
 
+/// Returns true when the strings are equal.
 bool module_text_equals(str left, str right) {
     return strcmp(left, right) == 0;
 }
 
+/// Returns true when `path` has already been loaded.
 bool module_seen(ModuleLoader* loader, str path) {
     i64 i = 0;
     while (i < loader.visited.len()) {
@@ -83,6 +92,7 @@ bool module_seen(ModuleLoader* loader, str path) {
     return false;
 }
 
+/// Returns true when `path` is queued.
 bool module_pending(ModuleLoader* loader, str path) {
     i64 i = 0;
     while (i < loader.pending.len()) {
@@ -94,6 +104,7 @@ bool module_pending(ModuleLoader* loader, str path) {
     return false;
 }
 
+/// Returns true when `path` ends in `.agm` (a prebuilt artifact).
 bool module_path_is_artifact(str path) {
     i64 length = strlen(path);
     return length >= 4 && path[length - 4] == (u8)46
@@ -102,6 +113,8 @@ bool module_path_is_artifact(str path) {
         && path[length - 1] == (u8)109;
 }
 
+/// Reports an unresolved import and marks the load failed. A null
+/// `diagnostics` only marks failure.
 void report_unresolved_import(ModuleLoader* loader, DiagnosticBag* diagnostics, str module_name) {
     loader.failed = true;
     if (diagnostics == (DiagnosticBag*)0) {
@@ -111,6 +124,8 @@ void report_unresolved_import(ModuleLoader* loader, DiagnosticBag* diagnostics, 
     diagnostics.error(Span.synthetic(), move message);
 }
 
+/// Reports an import whose submodule config exists but whose prebuilt
+/// artifact is missing, and marks the load failed.
 void report_submodule_artifact_missing(
     ModuleLoader* loader,
     DiagnosticBag* diagnostics,
@@ -126,6 +141,7 @@ void report_submodule_artifact_missing(
     diagnostics.error(Span.synthetic(), move message);
 }
 
+/// Reports a module read or parse error for `path` and marks the load failed.
 void report_module_error(ModuleLoader* loader, DiagnosticBag* diagnostics, str path, str detail) {
     loader.failed = true;
     if (diagnostics == (DiagnosticBag*)0) {
@@ -138,6 +154,7 @@ void report_module_error(ModuleLoader* loader, DiagnosticBag* diagnostics, str p
     diagnostics.error(Span.synthetic(), move message);
 }
 
+/// Queues `path` for loading unless it is empty, visited, or queued.
 void enqueue_module(ModuleLoader* loader, str path) {
     if (strlen(path) == 0 || module_seen(loader, path) || module_pending(loader, path)) {
         return;
@@ -146,6 +163,7 @@ void enqueue_module(ModuleLoader* loader, str path) {
     loader.pending.push(move owned);
 }
 
+/// Appends `dir` unless already present.
 void module_add_dir_unique(Vec<String>* dirs, str dir) {
     i64 i = 0;
     while (i < dirs.len()) {
@@ -155,9 +173,9 @@ void module_add_dir_unique(Vec<String>* dirs, str dir) {
     dirs.push(String.from_str(dir));
 }
 
-// Sysroot layout: include/silver + include (installed layouts), plus lib/ only
-// when lib/silver exists. An explicit root is also searched directly; a
-// discovered root only when it holds std/, so "/" is never scanned.
+/// Sysroot layout: include/silver + include (installed layouts), plus lib/ only
+/// when lib/silver exists. An explicit root is also searched directly; a
+/// discovered root only when it holds std/, so "/" is never scanned.
 void module_add_sysroot_candidates(Vec<String>* dirs, str root, bool explicit) {
     String std_dir = path_join(root, "std");
     if (explicit || is_dir(std_dir.to_str())) { module_add_dir_unique(dirs, root); }
@@ -178,9 +196,10 @@ void module_add_sysroot_candidates(Vec<String>* dirs, str root, bool explicit) {
     lib_silver.drop();
 }
 
-// The stage0-compatible sysroot cascade: --sysroot CLI flag, SILVER_SYSROOT,
-// the executable-relative prefix, the user data dir, and system share dirs.
-// Later entries are fallbacks; callers keep their own -I/root entries first.
+/// The stage0-compatible sysroot cascade: --sysroot CLI flag, SILVER_SYSROOT,
+/// the executable-relative prefix, the user data dir, and system share dirs.
+/// Later entries are fallbacks; callers keep their own -I/root entries first.
+/// Reads the process command line (`--sysroot`) and the environment.
 Vec<String> module_sysroot_include_dirs() {
     Vec<String> dirs = Vec<String>.new();
     Vec<String> arguments = args();
@@ -228,6 +247,8 @@ Vec<String> module_sysroot_include_dirs() {
     return move dirs;
 }
 
+/// Appends every `-I <dir>` from the process command line (`args()`), not
+/// from a compiler options value, to the loader's include directories.
 void collect_include_dirs(ModuleLoader* loader) {
     Vec<String> arguments = args();
     i64 index = 1;
@@ -244,6 +265,9 @@ void collect_include_dirs(ModuleLoader* loader) {
     arguments.drop();
 }
 
+/// Returns the project root used for `std` imports: the current directory if
+/// it holds `std/io.ag`, else the nearest ancestor of `input_path` that does,
+/// else ".".
 String module_root(str input_path) {
     String root = String.from_str(".");
     String probe = path_join(root.to_str(), "std/io.ag");
@@ -274,6 +298,7 @@ String module_root(str input_path) {
     return root;
 }
 
+/// Returns true when `text` starts with `prefix`.
 bool module_text_starts_with(str text, str prefix) {
     i64 text_len = strlen(text);
     i64 prefix_len = strlen(prefix);
@@ -290,12 +315,14 @@ bool module_text_starts_with(str text, str prefix) {
     return true;
 }
 
+/// Returns `base_path/relative_path` plus `extension`.
 String module_candidate(str base_path, str relative_path, str extension) {
     String candidate = path_join(base_path, relative_path);
     candidate.push_str(extension);
     return move candidate;
 }
 
+/// Returns true when `path` exists on disk or in the in-memory `sources`.
 bool module_source_available(str path, Vec<String>* sources) {
     if (file_exists(path)) { return true; }
     if (sources.len() > 0) {
@@ -307,6 +334,9 @@ bool module_source_available(str path, Vec<String>* sources) {
     return false;
 }
 
+/// Returns the first existing `<base>/<relative>.ag` or `.agm`, or "" when
+/// neither exists. Records a `.submodule.toml` sibling in `*submodule_config`
+/// the first time one is seen.
 String resolve_from_base(str base, str relative, String* submodule_config, Vec<String>* sources) {
     String source = module_candidate(base, relative, ".ag");
     if (module_source_available(source.to_str(), sources)) {
@@ -329,6 +359,8 @@ String resolve_from_base(str base, str relative, String* submodule_config, Vec<S
     return String.new();
 }
 
+/// Resolves `module_name` (see `resolve_module_path_with_sources`) using
+/// only files on disk.
 String resolve_module_path_with_config(
     str owner_path,
     str root_path,
@@ -341,8 +373,11 @@ String resolve_module_path_with_config(
         submodule_config, &sources);
 }
 
-// Source overlays participate at their normal search-path priority. Artifact
-// and submodule lookup retain the on-disk compiler behavior.
+/// Source overlays participate at their normal search-path priority. Artifact
+/// and submodule lookup retain the on-disk compiler behavior.
+/// `std` modules resolve against `root_path` first; others against the
+/// importing file's directory, then the root, then each include directory.
+/// Returns "" when unresolved.
 String resolve_module_path_with_sources(
     str owner_path, str root_path, str module_name, Vec<String>* include_dirs,
     String* submodule_config, Vec<String>* sources
@@ -403,6 +438,7 @@ String resolve_module_path_with_sources(
     return String.new();
 }
 
+/// Resolves `module_name` on disk, ignoring submodule configs.
 String resolve_module_path(str owner_path, str root_path, str module_name, Vec<String>* include_dirs) {
     String config = String.new();
     String resolved = resolve_module_path_with_config(
@@ -412,6 +448,8 @@ String resolve_module_path(str owner_path, str root_path, str module_name, Vec<S
     return resolved;
 }
 
+/// Reports an unresolved import, or the missing-artifact error when a
+/// submodule config was found.
 void report_missing_import(
     ModuleLoader* loader,
     DiagnosticBag* diagnostics,
@@ -429,6 +467,7 @@ void report_missing_import(
     artifact.drop();
 }
 
+/// Returns the symbol kind for an artifact export kind.
 SymbolKind artifact_symbol_kind(ArtifactExportKind kind) {
     return match kind {
         ArtifactExportKind.Function : SymbolKind.Function,
@@ -441,6 +480,7 @@ SymbolKind artifact_symbol_kind(ArtifactExportKind kind) {
     };
 }
 
+/// Records by-value method parameter facts from an artifact method export.
 void module_register_artifact_method_params(TypeTable* types, ArtifactExport* export) {
     str name_str = export.name.to_str();
     i64 name_len = strlen(name_str);
@@ -556,6 +596,8 @@ void module_register_artifact_method_params(TypeTable* types, ArtifactExport* ex
     method.drop();
 }
 
+/// Parses artifact type key text `[first, last)` into a type id, up to
+/// nesting depth 64.
 u32 module_canonical_type(TypeTable* types, str text, i64 first, i64 last, i64 depth) {
     if (depth > 64) { return TYPE_UNKNOWN; }
     while (first < last && (text[first] == (u8)' ' || text[first] == (u8)'\t')) { first += 1; }
@@ -632,6 +674,8 @@ u32 module_canonical_type(TypeTable* types, str text, i64 first, i64 last, i64 d
     return result;
 }
 
+/// Retains a C function export as a synthesized extern declaration so later
+/// passes see its signature.
 void module_retain_artifact_c_declaration(ModuleLoader* loader, DiagnosticBag* diagnostics,
                                           ArtifactExport* export, u32 type_id) {
     if (loader.declarations == (ImportedDeclarations*)0) { return; }
@@ -687,6 +731,8 @@ void module_retain_artifact_c_declaration(ModuleLoader* loader, DiagnosticBag* d
     }
 }
 
+/// Loads a prebuilt `.agm` artifact: declares its exports and records type
+/// facts. Reports read failures.
 void load_artifact_module(ModuleLoader* loader, DiagnosticBag* diagnostics, str path) {
     if (module_seen(loader, path)) {
         return;
@@ -837,6 +883,7 @@ void load_artifact_module(ModuleLoader* loader, DiagnosticBag* diagnostics, str 
     artifact_drop(&artifact);
 }
 
+/// Returns the symbol kind for a source item kind.
 SymbolKind source_item_symbol_kind(NodeKind kind) {
     return match kind {
         NodeKind.Function : SymbolKind.Function,
@@ -848,6 +895,7 @@ SymbolKind source_item_symbol_kind(NodeKind kind) {
     };
 }
 
+/// Appends every leaf token under `node`.
 void module_collect_tokens(SyntaxNode* node, Vec<SyntaxNode*>* tokens) {
     if (node == (SyntaxNode*)0) { return; }
     if (node.kind == NodeKind.Token) {
@@ -861,6 +909,7 @@ void module_collect_tokens(SyntaxNode* node, Vec<SyntaxNode*>* tokens) {
     }
 }
 
+/// Collects the type parameter names between an item name and its body.
 void module_collect_type_params(TypeTable* types, SyntaxNode* name, SyntaxNode* body,
                                 Vec<u32>* generic_params) {
     SyntaxNode* cursor = name.next_sibling;
@@ -892,6 +941,7 @@ void module_collect_type_params(TypeTable* types, SyntaxNode* name, SyntaxNode* 
     }
 }
 
+/// Records a source struct's fields and type parameters in `types`.
 void module_register_source_struct(TypeTable* types, SyntaxNode* item) {
     SyntaxNode* name = item_identifier(item);
     if (name == (SyntaxNode*)0) { return; }
@@ -936,6 +986,7 @@ void module_register_source_struct(TypeTable* types, SyntaxNode* item) {
     generic_params.drop();
 }
 
+/// Records a source enum's payload facts in `types`.
 void module_register_source_enum(TypeTable* types, SyntaxNode* root, SyntaxNode* item) {
     SyntaxNode* name = item_identifier(item);
     if (name == (SyntaxNode*)0) { return; }
@@ -973,6 +1024,7 @@ void module_register_source_enum(TypeTable* types, SyntaxNode* root, SyntaxNode*
     generic_params.drop();
 }
 
+/// Marks the target of an `impl Drop for T` item as needing drop.
 void module_register_source_drop_impl(TypeTable* types, SyntaxNode* item) {
     bool saw_drop = false;
     bool saw_for_after_drop = false;
@@ -994,6 +1046,7 @@ void module_register_source_drop_impl(TypeTable* types, SyntaxNode* item) {
     }
 }
 
+/// Records by-value method parameter facts from a source impl block.
 void module_register_source_impl(TypeTable* types, SyntaxNode* item) {
     SyntaxNode* target = impl_target_identifier(item);
     if (target == (SyntaxNode*)0) { return; }
@@ -1067,6 +1120,7 @@ void module_register_source_impl(TypeTable* types, SyntaxNode* item) {
     }
 }
 
+/// Declares a source item's name as visible.
 void add_visible_source_item(ModuleLoader* loader, SyntaxNode* item) {
     SyntaxNode* name = item_identifier(item);
     if (name == (SyntaxNode*)0) {
@@ -1082,6 +1136,8 @@ void add_visible_source_item(ModuleLoader* loader, SyntaxNode* item) {
     loader.symbols.declare_typed(name_id, kind, name.span, (SyntaxNode*)0, type_id);
 }
 
+/// Lexes and parses source module `path`, declares its cfg-active items, and
+/// queues its imports. Reports I/O and syntax errors.
 void load_source_module(ModuleLoader* loader, DiagnosticBag* diagnostics, str path, str root_path, CfgSet* cfg, Vec<String>* include_dirs) {
     if (module_seen(loader, path)) {
         return;
@@ -1186,6 +1242,7 @@ void load_source_module(ModuleLoader* loader, DiagnosticBag* diagnostics, str pa
     pool.destroy();
 }
 
+/// Loads `path` as an artifact or a source module by its extension.
 void load_module(ModuleLoader* loader, DiagnosticBag* diagnostics, str path, str root_path, CfgSet* cfg, Vec<String>* include_dirs) {
     if (module_path_is_artifact(path)) {
         load_artifact_module(loader, diagnostics, path);
@@ -1194,6 +1251,9 @@ void load_module(ModuleLoader* loader, DiagnosticBag* diagnostics, str path, str
     }
 }
 
+/// Loads every module imported (transitively) by `tree` and declares their
+/// items into `symbols`, retaining syntax in `declarations`. Returns false
+/// when any import failed.
 bool load_imported_declarations(SymbolTable* symbols, DiagnosticBag* diagnostics, SyntaxTree* tree,
                                 str owner_path, CfgSet* cfg, Vec<String>* include_dirs,
                                 ImportedDeclarations* declarations) {
