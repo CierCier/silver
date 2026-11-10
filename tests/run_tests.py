@@ -582,7 +582,9 @@ class TestDashboard:
 def main():
     parser = argparse.ArgumentParser(description="Silver standard-library test runner")
     parser.add_argument("filters", nargs="*", default=[], help="Run only tests matching these filters/names")
-    parser.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 4, help="Number of concurrent workers")
+    parser.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 4,
+                        help="Number of concurrent workers (default: CPU count, or 4)")
+    parser.add_argument("--list", action="store_true", help="List discovered test names and exit (honors filters)")
     parser.add_argument("--release", action="store_true", help="Use release compiler build")
     parser.add_argument("--debug", action="store_true", help="Use debug compiler build (default)")
     parser.add_argument("--no-tui", action="store_true", help="Disable live interactive TUI")
@@ -599,6 +601,34 @@ def main():
     root = Path(__file__).resolve().parent.parent
     compiler = args.compiler.resolve() if args.compiler is not None else None
     os.chdir(root)
+
+    # Collect test files (before any build so --list is instant)
+    tests_dir = root / "tests"
+    all_test_files = sorted(tests_dir.glob("*.ag"))
+    if len(all_test_files) > MAX_STDLIB_TESTS:
+        parser.error(f"stdlib suite has {len(all_test_files)} programs; limit is {MAX_STDLIB_TESTS}. Extend an existing module test.")
+    selected_tests: List[Path] = []
+
+    filters = [f.strip().removesuffix(".ag").lower() for f in args.filters if f.strip()]
+    is_explicit = bool(filters)
+
+    for p in all_test_files:
+        stem = p.stem
+        if is_explicit:
+            if any(f in stem.lower() for f in filters):
+                selected_tests.append(p)
+        else:
+            selected_tests.append(p)
+
+    if args.list:
+        print(f"{len(selected_tests)} of {len(all_test_files)} tests selected:")
+        for p in selected_tests:
+            print(f"  {p.stem}")
+        sys.exit(0)
+
+    if not selected_tests:
+        print(f"{C_RED}error: no tests matched {args.filters}{C_RESET}")
+        sys.exit(1)
 
     mode = "release" if args.release else "debug"
     if compiler is None:
@@ -621,28 +651,6 @@ def main():
 
     if not agc_bin.is_file():
         print(f"{C_RED}error: agc binary not found at {agc_bin}{C_RESET}")
-        sys.exit(1)
-
-    # Collect test files
-    tests_dir = root / "tests"
-    all_test_files = sorted(tests_dir.glob("*.ag"))
-    if len(all_test_files) > MAX_STDLIB_TESTS:
-        parser.error(f"stdlib suite has {len(all_test_files)} programs; limit is {MAX_STDLIB_TESTS}. Extend an existing module test.")
-    selected_tests: List[Path] = []
-
-    filters = [f.strip().removesuffix(".ag").lower() for f in args.filters if f.strip()]
-    is_explicit = bool(filters)
-
-    for p in all_test_files:
-        stem = p.stem
-        if is_explicit:
-            if any(f in stem.lower() for f in filters):
-                selected_tests.append(p)
-        else:
-            selected_tests.append(p)
-
-    if not selected_tests:
-        print(f"{C_RED}error: no tests matched {args.filters}{C_RESET}")
         sys.exit(1)
 
     target = args.target or None

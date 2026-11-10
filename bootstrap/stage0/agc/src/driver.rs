@@ -53,6 +53,7 @@ Commands:
   check, c    Analyze source files and report errors without codegen or linking
   clean       Remove cached compiler build artifacts
   test, t     Compile and run tests for a package or file
+  cache       Inspect or prune the compiler cache (cache info, cache prune)
 
 {all-args}{after-help}",
     styles = Styles::styled()
@@ -153,6 +154,15 @@ pub struct Cli {
         help_heading = "Package"
     )]
     lib: Option<String>,
+
+    /// Build the package described by this manifest (silver.toml).
+    #[arg(
+        long = "manifest",
+        value_name = "PATH",
+        conflicts_with = "inputs",
+        help_heading = "Package"
+    )]
+    manifest: Option<PathBuf>,
 
     /// Initialize a package in the current directory or a target directory.
     #[arg(long = "init", action = ArgAction::SetTrue, hide = true)]
@@ -328,9 +338,9 @@ pub(crate) enum EmitKind {
     Asm,
     /// Emit LLVM IR (.ll).
     LlvmIr,
-    /// (Future) Dump lexer tokens.
+    /// Dump lexer tokens.
     Tokens,
-    /// (Future) Dump parsed AST.
+    /// Dump parsed AST.
     Ast,
     /// Dump parser grammar.
     Grammar,
@@ -502,6 +512,30 @@ fn default_output_for(emit: EmitKind, inputs: &[PathBuf], target: Option<&str>) 
     }
 }
 
+/// Read an input source file, hinting when the path looks like a mistyped command.
+fn read_input_source(input: &Path) -> String {
+    match std::fs::read_to_string(input) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "agc: {}: failed to read {}: {e}",
+                "error".red().bold(),
+                input.display()
+            );
+            let looks_like_command = input.extension().is_none()
+                && input.components().count() == 1
+                && !input.exists();
+            if looks_like_command {
+                eprintln!(
+                    "agc: hint: '{}' is not a known command and no such file exists; see `agc --help`",
+                    input.display()
+                );
+            }
+            std::process::exit(2);
+        }
+    }
+}
+
 fn with_ext_or_default(inputs: &[PathBuf], ext: &str) -> PathBuf {
     let Some(first) = inputs.first() else {
         return PathBuf::from(format!("out.{ext}"));
@@ -531,6 +565,10 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
     }
 
     let mut inputs = cli.inputs;
+    if let Some(manifest) = &cli.manifest {
+        // Same package candidate as the positional `build silver.toml` form.
+        inputs.push(manifest.clone());
+    }
     let explicit_root = cli.root;
     let current_dir = env::current_dir()
         .map_err(|e| format!("failed to determine current working directory: {e}"))?;
@@ -675,6 +713,12 @@ fn derive_plan(cli: Cli) -> Result<CompilePlan, String> {
                 );
             }
         }
+    }
+
+    if cli.output.as_deref() == Some(Path::new("-"))
+        && !matches!(emit, EmitKind::LlvmIr | EmitKind::Tokens | EmitKind::Ast)
+    {
+        return Err("`-o -` (stdout) is only supported for text emissions (--emit-llvm, --emit=tokens, --emit=ast)".to_string());
     }
 
     let auto_output = cli.output.is_none();
@@ -1293,17 +1337,7 @@ pub fn run(cli: Cli) {
 
             if plan.emit == EmitKind::Tokens {
                 for input in &plan.inputs {
-                    let src = match std::fs::read_to_string(input) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            eprintln!(
-                                "agc: {}: failed to read {}: {e}",
-                                "error".red().bold(),
-                                input.display()
-                            );
-                            std::process::exit(2);
-                        }
-                    };
+                    let src = read_input_source(input);
 
                     match lexer::lex(&src) {
                         Ok(tokens) => {
@@ -1358,17 +1392,7 @@ pub fn run(cli: Cli) {
 
             if plan.emit == EmitKind::Ast {
                 for input in &plan.inputs {
-                    let src = match std::fs::read_to_string(input) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            eprintln!(
-                                "agc: {}: failed to read {}: {e}",
-                                "error".red().bold(),
-                                input.display()
-                            );
-                            std::process::exit(2);
-                        }
-                    };
+                    let src = read_input_source(input);
 
                     let graph = crate::grammar::parse_ag(&src);
                     let ast = crate::grammar::lower_source_graph(&graph, 0);
@@ -1521,17 +1545,7 @@ pub fn run(cli: Cli) {
 
             for input in &plan.inputs {
                 profiler::begin_phase("read source");
-                let src = match std::fs::read_to_string(input) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!(
-                            "agc: {}: failed to read {}: {e}",
-                            "error".red().bold(),
-                            input.display()
-                        );
-                        std::process::exit(2);
-                    }
-                };
+                let src = read_input_source(input);
                 profiler::end_phase("read source");
 
                 // Register the input source so diagnostic spans resolve to this
@@ -1824,9 +1838,17 @@ pub fn run(cli: Cli) {
                 profiler::begin_phase("safety");
                 // Move-out checker: use-after-move of non-copyable values is
                 // a use-after-free, reported alongside type errors.
-                let escape_errors = crate::semantic::escape_check::check_program(&ast);
-                if !escape_errors.is_empty() {
-                    for error in &escape_errors {
+                // Typeck's lambda, inferred-let, constructor, and monomorph
+                // passes preserve source call spans; generated bodies are
+                // checked before this point. A rewrite that changes call
+                // dispatch must refresh the typecheck-owned resolution map.
+                let resolved_callables = checker.resolved_callables();
+                let escape_report = crate::semantic::escape_check::analyze_program_with_callables(
+                    &ast,
+                    resolved_callables,
+                );
+                if !escape_report.errors.is_empty() {
+                    for error in &escape_report.errors {
                         eprintln!(
                             "{}",
                             diagnostics::render(
@@ -1839,12 +1861,12 @@ pub fn run(cli: Cli) {
                     std::process::exit(2);
                 }
 
-                let move_errors = crate::semantic::move_check::check_program_with_imports(
+                let move_report = crate::semantic::move_check::analyze_program_with_imports(
                     &ast,
                     &imported_modules,
                 );
-                if !move_errors.is_empty() {
-                    for error in &move_errors {
+                if !move_report.errors.is_empty() {
+                    for error in &move_report.errors {
                         eprintln!(
                             "{}",
                             diagnostics::render_with_note(
@@ -1859,7 +1881,11 @@ pub fn run(cli: Cli) {
                     std::process::exit(2);
                 }
 
-                let borrow_errors = crate::semantic::borrow_check::check_program(&ast);
+                let borrow_errors = crate::semantic::borrow_check::check_program_with_resolved_calls(
+                    &ast,
+                    &escape_report.return_origins,
+                    resolved_callables,
+                );
                 if !borrow_errors.is_empty() {
                     for error in &borrow_errors {
                         eprintln!(
@@ -2062,6 +2088,7 @@ pub fn run(cli: Cli) {
                                 plan.debug_info,
                                 plan.leak_check,
                                 true,
+                                Some(&move_report.init_plan),
                             );
                         if let Err(error) = result {
                             if let Some(span) = error.span {
@@ -2102,6 +2129,7 @@ pub fn run(cli: Cli) {
                                 plan.debug_info,
                                 plan.leak_check,
                                 false,
+                                Some(&move_report.init_plan),
                             );
                         if let Err(error) = result {
                             if let Some(span) = error.span {
@@ -2210,6 +2238,7 @@ pub fn run(cli: Cli) {
                                     Some(&src),
                                     plan.debug_info,
                                     plan.leak_check,
+                                    Some(&move_report.init_plan),
                                 );
                             if let Some(p) = &active_progress {
                                 if result.is_ok() {
@@ -2255,6 +2284,7 @@ pub fn run(cli: Cli) {
                                     Some(&src),
                                     plan.debug_info,
                                     plan.leak_check,
+                                    Some(&move_report.init_plan),
                                 );
                         profiler::end_phase("codegen");
                         if let Err(error) = result {
@@ -2283,6 +2313,7 @@ pub fn run(cli: Cli) {
                                 plan.debug_info,
                                 plan.leak_check,
                                 plan.target.as_deref(),
+                                Some(&move_report.init_plan),
                             );
                         profiler::end_phase("codegen");
                         match output {
@@ -2402,6 +2433,7 @@ pub fn run(cli: Cli) {
                                     Some(&src),
                                     plan.debug_info,
                                     plan.leak_check,
+                                    Some(&move_report.init_plan),
                                 );
                             if let Some(p) = &active_progress {
                                 if result.is_ok() {
@@ -2450,7 +2482,16 @@ pub fn run(cli: Cli) {
                     eprintln!("agc: {}: no LLVM IR units generated", "error".red().bold());
                     std::process::exit(2);
                 };
-                if let Err(e) = std::fs::write(&plan.output, ir) {
+                if plan.output.as_os_str() == std::ffi::OsStr::new("-") {
+                    use std::io::Write as _;
+                    if let Err(e) = std::io::stdout().lock().write_all(ir.as_bytes()) {
+                        eprintln!(
+                            "agc: {}: failed to write to stdout: {e}",
+                            "error".red().bold()
+                        );
+                        std::process::exit(2);
+                    }
+                } else if let Err(e) = std::fs::write(&plan.output, ir) {
                     eprintln!(
                         "agc: {}: failed to write {}: {e}",
                         "error".red().bold(),

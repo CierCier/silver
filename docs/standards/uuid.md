@@ -1,8 +1,8 @@
 # Universally Unique Identifier (UUID) Standard Compliance
 
 - **Primary Specification**: [RFC 9562 (Universally Unique IDentifiers (UUIDs))](https://www.rfc-editor.org/rfc/rfc9562.html) (obsoletes RFC 4122).
-- **Implementation**: [`std/uuid.ag`](file:///home/cier/Projects/silver/std/uuid.ag) (`Uuid`).
-- **Test Suite**: [`tests/uuid_test.ag`](file:///home/cier/Projects/silver/tests/uuid_test.ag).
+- **Implementation**: [`std/uuid.ag`](../../std/uuid.ag) (`Uuid`).
+- **Test Suite**: [`tests/uuid_test.ag`](../../tests/uuid_test.ag).
 
 ## Overview
 

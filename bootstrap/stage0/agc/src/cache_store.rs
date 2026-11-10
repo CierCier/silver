@@ -203,11 +203,11 @@ pub struct CacheKeyBuilder {
 }
 
 /// Compiler identity for cache keys and artifact compatibility: the crate
-/// version plus the git SHA, so codegen fixes invalidate cached artifacts
-/// even when the version number has not changed.
+/// version, git SHA and internal ABI revision. The ABI revision also invalidates
+/// objects built from a dirty tree at the same commit before an ABI migration.
 pub fn compiler_cache_version() -> String {
     format!(
-        "{}+{}",
+        "{}+{}+borrow-state-abi1",
         env!("CARGO_PKG_VERSION"),
         option_env!("GIT_SHA").unwrap_or("unknown")
     )

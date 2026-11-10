@@ -1,6 +1,7 @@
 // Stage1 command-line frontend. Native commands are handled by stage1.
 import std.args;
 import std.error;
+import std.fs;
 import std.fmt;
 import std.io;
 import std.mem.vec;
@@ -396,7 +397,9 @@ i32 emit_check(str path, CfgSet* cfg, Vec<String>* include_dirs, LintConfig* lin
                     check_send(&tree, &diagnostics, cfg);
                 }
                 if (diagnostics.is_empty()) {
-                    check_ownership(&tree, &symbols, &diagnostics, cfg);
+                    OwnershipResult ownership = check_ownership(&tree, &symbols, &diagnostics, cfg);
+                    Vec<InitOwnerPlan> _previous_plans = move symbols.init_owner_plans;
+                    symbols.init_owner_plans = move ownership.owner_plans;
                 }
                 if (diagnostics.is_empty()) {
                     AstPool check_pool = AstPool.new();
@@ -498,6 +501,13 @@ i32 run_workspace_check(Vec<String>* arguments, WorkspacePlan* plan) {
     Vec<String> include_dirs = Vec<String>.new();
     LintConfig lint_config = lint_config_default();
     collect_workspace_check_options(arguments, &cfg, &include_dirs, plan, &lint_config);
+    Vec<String> sysroot_dirs = module_sysroot_include_dirs();
+    i64 si = 0;
+    while (si < sysroot_dirs.len()) {
+        module_add_dir_unique(&include_dirs, sysroot_dirs.get_ptr(si).to_str());
+        si += 1;
+    }
+    sysroot_dirs.drop();
     i32 result = emit_check(plan.entry.to_str(), &cfg, &include_dirs, &lint_config);
     include_dirs.drop();
     return result;
@@ -654,7 +664,7 @@ bool artifact_source_function(SyntaxNode* item, ArtifactExport* out) {
 
 i32 emit_artifact_fixture(str output_path) {
     Artifact artifact = Artifact.new();
-    artifact.version = (u8)11;
+    artifact.version = (u8)12;
     artifact.module_name = String.from_str("artifact_fixture");
     artifact.module_path = String.from_str("artifact_fixture");
     artifact.source_path = String.from_str("artifact_fixture.ag");
@@ -851,7 +861,7 @@ i32 emit_source_artifact(str source_path, str output_path, bool require_complete
         return 2;
     }
     Artifact artifact = Artifact.new();
-    artifact.version = (u8)11;
+    artifact.version = (u8)12;
     artifact.module_name = String.from_str(source_path);
     artifact.module_path = String.from_str(source_path);
     artifact.source_path = String.from_str(source_path);
@@ -926,6 +936,11 @@ i32 run_frontend() {
     if (cli.command.equals("cache") || cli.command.equals("clean")
         || cli.has("clean") || cli.has("cache-info") || cli.has("cache-prune")) {
         i32 result = native_cache_command(&cli, parser.color);
+        arguments.drop();
+        return result;
+    }
+    if (cli.command.equals("init")) {
+        i32 result = workspace_init_command(&cli);
         arguments.drop();
         return result;
     }
@@ -1015,6 +1030,16 @@ i32 run_frontend() {
         }
         native_source.drop();
         STDERR.write_str("agc: error: stage1 backend could not handle this command or source\n");
+        Optional<String> first_positional = cli.positional(0);
+        if (first_positional.is_some()) {
+            String candidate = first_positional.unwrap();
+            if (!candidate.ends_with(".ag") && !candidate.ends_with(".agm")
+                && !exists(candidate.to_str())) {
+                STDERR.write_str("agc: hint: '");
+                STDERR.write_str(candidate.to_str());
+                STDERR.write_str("' is not a known command and no such file exists; see `agc --help`\n");
+            }
+        }
         arguments.drop();
         return 2;
     }
@@ -1089,6 +1114,13 @@ i32 run_frontend() {
         }
         option += 1;
     }
+    Vec<String> sysroot_dirs = module_sysroot_include_dirs();
+    i64 si = 0;
+    while (si < sysroot_dirs.len()) {
+        module_add_dir_unique(&include_dirs, sysroot_dirs.get_ptr(si).to_str());
+        si += 1;
+    }
+    sysroot_dirs.drop();
     if (cli.positionals.len() == 0) {
         STDERR.write_str("usage: agc <lex|parse|check> <source.ag> [--cfg key=value,...] [-I dir] [-O2]\n");
         include_dirs.drop();

@@ -238,13 +238,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 Ok(struct_ty.as_basic_type_enum())
             }
             ast::TypeKind::Reference(_reference) => {
-                // Note: we do NOT recursively lower the inner type here,
-                // for the same reason as Pointer — it prevents infinite
-                // recursion with recursive structs.
-                Ok(self
-                    .context
-                    .ptr_type(AddressSpace::default())
-                    .as_basic_type_enum())
+                Ok(self.reference_type().as_basic_type_enum())
             }
             ast::TypeKind::Pointer(_pointer) => {
                 // Note: we do NOT recursively lower the inner type here.
@@ -308,6 +302,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .as_basic_type_enum())
             }
             ast::TypeKind::Function(function) => {
+                if Self::function_has_reference_abi(&function.parameters, Some(&function.return_type)) {
+                    return Ok(self.callable_type().as_basic_type_enum());
+                }
                 if !Self::is_void_primitive(&function.return_type) {
                     let _ = self.lower_basic_type(&function.return_type)?;
                 }
@@ -341,6 +338,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             ));
         }
 
+        if matches!(linkage, ast::ExternLinkage::C)
+            && matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_) | ast::TypeKind::Function(_))
+        {
+            return Ok(self.context.ptr_type(AddressSpace::default()).as_basic_type_enum());
+        }
         let lowered = self.lower_basic_type(ty)?;
         if !matches!(linkage, ast::ExternLinkage::C) {
             return Ok(lowered);
@@ -375,6 +377,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
         if !matches!(linkage, ast::ExternLinkage::C) {
             return Ok(value);
+        }
+
+        if matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_)) {
+            self.require_initialized_c_reference(value, ty.span)?;
+            return self.reference_data(value, ty.span).map(|v| v.as_basic_value_enum());
+        }
+        if let ast::TypeKind::Function(function) = ty.kind.as_ref()
+            && Self::function_has_reference_abi(&function.parameters, Some(&function.return_type))
+        {
+            return self.callable_entry(value, true).map(|v| v.as_basic_value_enum());
         }
 
         let abi_ty = self.lower_abi_type(ty, linkage)?;
@@ -447,7 +459,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         if !matches!(linkage, ast::ExternLinkage::C) {
             return Ok(value);
         }
+        if matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_)) {
+            let BasicValueEnum::PointerValue(data) = value else {
+                return Err(CodegenError::with_span(
+                    crate::diagnostics::messages::reference_carrier_expected(), ty.span,
+                ));
+            };
+            return self.build_reference(data, self.initialized_reference_state());
+        }
         let native_ty = self.lower_basic_type(ty)?;
+        if let ast::TypeKind::Function(function) = ty.kind.as_ref()
+            && Self::function_has_reference_abi(&function.parameters, Some(&function.return_type))
+        {
+            return self.build_callable(self.context.ptr_type(AddressSpace::default()).const_null(), value.into_pointer_value());
+        }
         if native_ty == value.get_type() {
             return Ok(value);
         }
@@ -712,6 +737,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             && !Self::is_void_primitive(ret)
             && let Some(link) = &linkage
             && matches!(link, ast::ExternLinkage::C)
+            && !matches!(ret.kind.as_ref(), ast::TypeKind::Reference(_) | ast::TypeKind::Function(_))
         {
             let lowered_ret = self.lower_basic_type(ret)?;
             if let BasicTypeEnum::StructType(struct_ty) = lowered_ret {

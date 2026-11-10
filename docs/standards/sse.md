@@ -1,8 +1,8 @@
 # Server-Sent Events (SSE) Standard Compliance
 
 - **Primary Specifications**: [WHATWG HTML Living Standard §9.2 (Server-sent events)](https://html.spec.whatwg.org/multipage/server-sent-events.html), W3C Server-Sent Events Recommendation.
-- **Implementation**: [`std/net/sse.ag`](file:///home/cier/Projects/silver/std/net/sse.ag) (`SseReader`, `SseEvent`).
-- **Test Suite**: [`tests/sse_test.ag`](file:///home/cier/Projects/silver/tests/sse_test.ag).
+- **Implementation**: [`std/net/sse.ag`](../../std/net/sse.ag) (`SseReader`, `SseEvent`).
+- **Test Suite**: [`tests/sse_test.ag`](../../tests/sse_test.ag).
 
 ## Compliance Table
 

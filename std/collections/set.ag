@@ -651,7 +651,7 @@ impl<K> Iterator for HashSetIntoIter<K> {
             if (ctrl < (u8)0x80) {
                 K k = move self.keys[self.idx];
                 self.idx = self.idx + 1;
-                return Some(k);
+                return Some(move k);
             }
             self.idx = self.idx + 1;
         }

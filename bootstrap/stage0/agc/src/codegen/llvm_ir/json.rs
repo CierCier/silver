@@ -126,7 +126,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         self.builder
             .build_store(ptr, value)
             .map_err(|e| CodegenError::with_span(format!("JsonWriter store failed: {e}"), *span))?;
-        self.insert_json_variable("__json_writer", ptr, "JsonWriter", *span);
+        self.insert_json_variable("__json_writer", ptr, "JsonWriter", *span)?;
         Ok((
             Self::json_identifier_expression("__json_writer", *span),
             ptr,
@@ -156,7 +156,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         self.builder
             .build_store(ptr, value)
             .map_err(|e| CodegenError::with_span(format!("JsonReader store failed: {e}"), *span))?;
-        self.insert_json_variable("__json_reader", ptr, "JsonReader", *span);
+        self.insert_json_variable("__json_reader", ptr, "JsonReader", *span)?;
         Ok((
             Self::json_identifier_expression("__json_reader", *span),
             ptr,
@@ -179,7 +179,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         ptr: PointerValue<'ctx>,
         type_name: &str,
         span: crate::lexer::Span,
-    ) {
+    ) -> CodegenResult<()> {
         if let Some(scope) = self.variables.last_mut() {
             scope.insert(
                 name.to_string(),
@@ -193,6 +193,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 },
             );
         }
+        self.register_owner_state(
+            &Self::json_identifier(name, span), &Self::json_type(type_name, span), ptr, true,
+        )?;
+        Ok(())
     }
     fn json_reference(expression: &ast::Expression) -> ast::Expression {
         ast::Expression {

@@ -1,8 +1,8 @@
 # HTTP State Management (Cookies) Standard Compliance
 
 - **Primary Specifications**: [RFC 6265 (HTTP State Management Mechanism)](https://datatracker.ietf.org/doc/html/rfc6265).
-- **Implementation**: [`std/net/cookie.ag`](file:///home/cier/Projects/silver/std/net/cookie.ag) (`CookieJar`, `Cookie`).
-- **Test Suite**: [`tests/cookie_test.ag`](file:///home/cier/Projects/silver/tests/cookie_test.ag).
+- **Implementation**: [`std/net/cookie.ag`](../../std/net/cookie.ag) (`CookieJar`, `Cookie`).
+- **Test Suite**: [`tests/cookie_test.ag`](../../tests/cookie_test.ag).
 
 ## Compliance Table
 

@@ -5,6 +5,18 @@
 
 use std::fmt::Display;
 
+pub fn reference_carrier_expected() -> &'static str {
+    "internal reference requires a data pointer and initialization-state capability"
+}
+
+pub fn reference_state_unavailable() -> &'static str {
+    "cannot borrow owned storage without its initialization-state capability"
+}
+
+pub fn reference_move_requires_owner_state() -> &'static str {
+    "cannot move an owned value through a reference without mutable owner initialization state"
+}
+
 pub fn lambda_parameter_needs_type(name: &str) -> String {
     format!("cannot infer lambda parameter '{name}'; add a type or provide a function-type context")
 }
@@ -583,4 +595,7 @@ pub fn c_callback_unsupported() -> &'static str {
 
 pub fn c_function_value_unsupported() -> &'static str {
     "cannot use this C function as a value: variadic, aggregate, enum, bool, narrow/128-bit integer, and f80 signatures require ABI-aware function pointers"
+}
+pub fn owner_init_plan_error(detail: &str) -> String {
+    format!("invalid owner initialization layout: {detail}")
 }

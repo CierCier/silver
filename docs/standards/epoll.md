@@ -2,11 +2,11 @@
 
 - **Primary Specifications**: [epoll(7) Linux Programmer's Manual](https://man7.org/linux/man-pages/man7/epoll.7.html), [eventfd(2)](https://man7.org/linux/man-pages/man2/eventfd.2.html), [writev(2) / readv(2)](https://man7.org/linux/man-pages/man2/writev.2.html), [sendfile(2)](https://man7.org/linux/man-pages/man2/sendfile.2.html), POSIX.1-2017 Socket API.
 - **Implementations**:
-  - [`std/sys/epoll.ag`](file:///home/cier/Projects/silver/std/sys/epoll.ag) (`Epoll`, `EpollEvent`, `try_epoll_create1`, `try_epoll_ctl`, `try_epoll_wait`)
-  - [`std/sys/eventfd.ag`](file:///home/cier/Projects/silver/std/sys/eventfd.ag) (`EventFd`, `try_eventfd`)
-  - [`std/sys/io_vec.ag`](file:///home/cier/Projects/silver/std/sys/io_vec.ag) (`IoVec`, `try_writev`, `try_readv`, `try_sendfile`)
-  - [`std/net/tcp.ag`](file:///home/cier/Projects/silver/std/net/tcp.ag) (`bind_reuse_port`, `set_nodelay`, `set_quickack`, `set_cork`, `set_keepalive`, `set_nonblocking`, `writev`, `readv`, `sendfile`)
-- **Test Suite**: [`tests/server_raw_test.ag`](file:///home/cier/Projects/silver/tests/server_raw_test.ag).
+  - [`std/sys/epoll.ag`](../../std/sys/epoll.ag) (`Epoll`, `EpollEvent`, `try_epoll_create1`, `try_epoll_ctl`, `try_epoll_wait`)
+  - [`std/sys/eventfd.ag`](../../std/sys/eventfd.ag) (`EventFd`, `try_eventfd`)
+  - [`std/sys/io_vec.ag`](../../std/sys/io_vec.ag) (`IoVec`, `try_writev`, `try_readv`, `try_sendfile`)
+  - [`std/net/tcp.ag`](../../std/net/tcp.ag) (`bind_reuse_port`, `set_nodelay`, `set_quickack`, `set_cork`, `set_keepalive`, `set_nonblocking`, `writev`, `readv`, `sendfile`)
+- **Test Suite**: [`tests/server_raw_test.ag`](../../tests/server_raw_test.ag).
 
 ## Compliance & Capability Table
 
