@@ -8,15 +8,17 @@ import diagnostic_cache;
 import check_pool;
 import std.time;
 
-// How often the dispatcher looks for client messages and progress while the
-// check pool runs; short enough that a hover is not noticeably delayed.
+/// How often the dispatcher looks for client messages and progress while the
+/// check pool runs; short enough that a hover is not noticeably delayed.
 const i64 CHECK_POLL_MS = 5;
 
+/// Sends an empty `publishDiagnostics` notification for `uri` to the client.
 void publish_empty_diagnostics(str uri) {
     String out = String.from_str("{\"uri\":\""); json_escape(uri, &out);
     out.push_str("\",\"diagnostics\":[]}"); send_notification("textDocument/publishDiagnostics", out.to_str());
 }
 
+/// Collects the syntax trees of a document's imports, for checking.
 void diagnostic_dependencies(Document* doc, Vec<SyntaxTree*>* trees) {
     doc.ensure_syntax();
     SyntaxTree* tree = &doc.analysis.tree;
@@ -27,7 +29,7 @@ void diagnostic_dependencies(Document* doc, Vec<SyntaxTree*>* trees) {
     while (i < doc.dependencies.len()) { diagnostic_dependencies(doc.dependencies.get(i), trees); i += 1; }
 }
 
-// A cache hit skips parsing and checking; a restart re-checks only what changed.
+/// A cache hit skips parsing and checking; a restart re-checks only what changed.
 bool reuse_file_diagnostics(Document* doc, str key) {
     String cached = String.new();
     if (!load_cached_diagnostics(doc, key, &cached)) { return false; }
@@ -36,8 +38,8 @@ bool reuse_file_diagnostics(Document* doc, str key) {
     return true;
 }
 
-// Parses `doc` and its imports for a semantic check and collects the import
-// trees. False when the file's parse errors are its whole report.
+/// Parses `doc` and its imports for a semantic check and collects the import
+/// trees. False when the file's parse errors are its whole report.
 bool prepare_file_check(Document* doc, Vec<SyntaxTree*>* trees) {
     doc.ensure_syntax();
     if (!doc.analysis.diagnostics.is_empty()) { return false; }
@@ -51,6 +53,8 @@ bool prepare_file_check(Document* doc, Vec<SyntaxTree*>* trees) {
     return true;
 }
 
+/// Recomputes a dirty document's diagnostics, reusing the cache when its
+/// text and dependencies are unchanged.
 void update_file_diagnostics(Document* doc, DocumentStore* store, ClientOptions* client) {
     if (!doc.diagnostics_dirty) { return; }
     String cache_key = diagnostic_cache_key(doc, client.related_diagnostics);
@@ -65,8 +69,8 @@ void update_file_diagnostics(Document* doc, DocumentStore* store, ClientOptions*
     finish_file_diagnostics(doc, store, client, &semantic, cache_key.to_str());
 }
 
-// Renders and caches a file's report: `semantic` from a check, or null when
-// the parse errors stand alone. Runs on the dispatcher; it resolves imports.
+/// Renders and caches a file's report: `semantic` from a check, or null when
+/// the parse errors stand alone. Runs on the dispatcher; it resolves imports.
 void finish_file_diagnostics(Document* doc, DocumentStore* store, ClientOptions* client,
                              DiagnosticBag* semantic, str cache_key) {
     DiagnosticBag* diagnostics = &doc.analysis.diagnostics;
@@ -107,6 +111,7 @@ void finish_file_diagnostics(Document* doc, DocumentStore* store, ClientOptions*
     doc.diagnostic_items = move out; doc.diagnostics_dirty = false; doc.diagnostic_revision += 1;
 }
 
+/// Updates and sends `publishDiagnostics` for one document (writes stdout).
 void publish_file_diagnostics(Document* doc, DocumentStore* store, ClientOptions* client) {
     update_file_diagnostics(doc, store, client);
     String out = String.from_str("{\"uri\":\""); json_escape(doc.uri.to_str(), &out);
@@ -117,6 +122,7 @@ void publish_file_diagnostics(Document* doc, DocumentStore* store, ClientOptions
     send_notification("textDocument/publishDiagnostics", out.to_str());
 }
 
+/// Publishes diagnostics for every open document.
 void publish_open_diagnostics(DocumentStore* store, ClientOptions* client) {
     i64 i = 0;
     while (i < store.docs.len()) {
@@ -126,20 +132,25 @@ void publish_open_diagnostics(DocumentStore* store, ClientOptions* client) {
     }
 }
 
+/// Returns the document's diagnostic report id (`<uri>#diagnostic/<rev>`).
 String diagnostic_result_id(Document* doc) {
     String id = doc.uri.clone(); id.push_str("#diagnostic/"); id.push_display(&doc.diagnostic_revision); return move id;
 }
 
+/// Returns true when the pull request targets the `silver` identifier (or
+/// names none).
 bool diagnostic_identifier(str params) {
     String field = json_field(params, "identifier"); String id = String.new();
     return field.len() == 0 || (json_string(params, "identifier", &id) && id.equals("silver"));
 }
 
+/// Reads the request's `previousResultId`; false when malformed.
 bool previous_diagnostic_result(str params, String* previous) {
     String field = json_field(params, "previousResultId");
     return field.len() == 0 || json_string(params, "previousResultId", previous);
 }
 
+/// Appends a full or `unchanged` diagnostic report for `doc`.
 void append_diagnostic_report(String* out, Document* doc, str previous, bool workspace) {
     String id = diagnostic_result_id(doc); out.push('{');
     if (workspace) {
@@ -153,13 +164,16 @@ void append_diagnostic_report(String* out, Document* doc, str previous, bool wor
     out.push('}');
 }
 
+/// Computes the `textDocument/diagnostic` response for `doc`.
 String compute_document_diagnostics(Document* doc, DocumentStore* store, ClientOptions* client, str previous) {
     update_file_diagnostics(doc, store, client); String out = String.new();
     append_diagnostic_report(&out, doc, previous, false); return move out;
 }
 
+/// A result id the client already has, for workspace diagnostic pulls.
 struct PreviousDiagnostic { String uri; String id; bool reported; }
 
+/// Reads `previousResultIds` from workspace diagnostic params.
 bool parse_previous_diagnostics(str params, Vec<PreviousDiagnostic>* previous) {
     String values = json_field(params, "previousResultIds"); JsonReader reader = JsonReader.new(values.to_str());
     if (!reader.begin_array()) { return false; } reader.skip_whitespace();
@@ -175,21 +189,23 @@ bool parse_previous_diagnostics(str params, Vec<PreviousDiagnostic>* previous) {
     return reader.end_array() && !reader.failed;
 }
 
+/// Returns true when `doc` is in `docs`.
 bool contains_document(Vec<Document*>* docs, Document* doc) {
     i64 i = 0;
     while (i < docs.len()) { if (docs.get(i) == doc) { return true; } i += 1; }
     return false;
 }
 
+/// Adds `doc` and everything it imports to `reached`.
 void collect_import_closure(Document* doc, Vec<Document*>* reached) {
     if (contains_document(reached, doc)) { return; }
     reached.push(doc); i64 i = 0;
     while (i < doc.dependencies.len()) { collect_import_closure(doc.dependencies.get(i), reached); i += 1; }
 }
 
-// Workspace reports cover what the project builds or the user opened:
-// manifest target entries, open files, and their imports. Loose files that
-// nothing imports (examples, fixtures, scratch files) stay indexed but unreported.
+/// Workspace reports cover what the project builds or the user opened:
+/// manifest target entries, open files, and their imports. Loose files that
+/// nothing imports (examples, fixtures, scratch files) stay indexed but unreported.
 Vec<Document*> reported_documents(DocumentStore* store) {
     Vec<Document*> reached = Vec<Document*>.new(); i64 i = 0;
     while (i < store.docs.len()) {
@@ -203,16 +219,17 @@ Vec<Document*> reported_documents(DocumentStore* store) {
     return move reached;
 }
 
+/// Reports workspace check progress ("Checking files: done/total").
 void report_check_progress(ServerStatus* status, i64 done, i64 total) {
     String message = String.from_str("Checking files: "); message.push_display(&done);
     message.push('/'); message.push_display(&total);
     status.report(false, message.to_str());
 }
 
-// Brings every dirty file in `docs` up to date. Cache hits and parse-error
-// files finish on the dispatcher; semantic checks run on the check pool. A
-// queued client message stops the pool after the files in hand, and every
-// finished result is kept, so a retried pull resumes rather than restarts.
+/// Brings every dirty file in `docs` up to date. Cache hits and parse-error
+/// files finish on the dispatcher; semantic checks run on the check pool. A
+/// queued client message stops the pool after the files in hand, and every
+/// finished result is kept, so a retried pull resumes rather than restarts.
 void check_dirty_files(DocumentStore* store, ClientOptions* client, Vec<Document*>* docs, PendingMessage* pending) {
     ServerStatus* status = &pending.transport.status;
     CheckPool pool = CheckPool.new(&store.include_dirs);
@@ -247,6 +264,8 @@ void check_dirty_files(DocumentStore* store, ClientOptions* client, Vec<Document
     }
 }
 
+/// Computes the `workspace/diagnostic` response for every reported
+/// document. Cancellable through `pending`.
 String compute_workspace_diagnostics(DocumentStore* store, ClientOptions* client,
                                      Vec<PreviousDiagnostic>* previous, PendingMessage* pending) {
     String out = String.from_str("{\"items\":["); bool first = true; i64 i = 0;
