@@ -27,56 +27,85 @@
 
 extern "C" {
     // --- strings ---
+    /// libc `strlen`: byte length of a NUL-terminated string. Null is undefined.
     #[link_name("strlen")]
     i64 c_strlen(str s);
+    /// libc `strcmp`: compares two C strings (<0, 0, >0).
     #[link_name("strcmp")]
     i32 c_strcmp(str a, str b);
+    /// libc `strncmp`: compares at most `n` bytes.
     #[link_name("strncmp")]
     i32 c_strncmp(str a, str b, i64 n);
+    /// libc `strchr`: first occurrence of byte `ch`, or null.
     #[link_name("strchr")]
     str c_strchr(str s, i32 ch);
+    /// libc `strstr`: first occurrence of `needle`, or null.
     #[link_name("strstr")]
     str c_strstr(str haystack, str needle);
+    /// libc `strcpy`: copies `src` with its NUL into `dst`, which must be large
+    /// enough. Returns `dst`.
     #[link_name("strcpy")]
     str c_strcpy(str dst, str src);
+    /// libc `strcat`: appends `src` to `dst`, which must be large enough.
     #[link_name("strcat")]
     str c_strcat(str dst, str src);
+    /// libc `atoi`: parses a decimal int; 0 on failure, undefined on overflow.
     #[link_name("atoi")]
     i32 c_atoi(str s);
+    /// libc `strtod`: parses a double; `*endptr` (when non-null) is set to the
+    /// first unparsed byte.
     #[link_name("strtod")]
     f64 c_strtod(str s, str* endptr);
 
     // --- stdio ---
+    /// libc `puts`: writes `s` and a newline to libc stdout (buffered).
     #[link_name("puts")]
     i32 c_puts(str s);
+    /// libc `printf`: formatted output to libc stdout (buffered; see the flush
+    /// note above).
     #[link_name("printf")]
     i32 c_printf(str fmt, ...);
+    /// libc `fprintf`: formatted output to a `FILE*`.
     #[link_name("fprintf")]
     i32 c_fprintf(void* stream, str fmt, ...);
+    /// libc `fopen`: opens a `FILE*`, or null on failure. Close with `c_fclose`.
     #[link_name("fopen")]
     void* c_fopen(str path, str mode);
+    /// libc `fclose`: flushes and closes a `FILE*`.
     #[link_name("fclose")]
     i32 c_fclose(void* stream);
+    /// libc `fread`: reads up to `count` items of `size` bytes; returns items read.
     #[link_name("fread")]
     i64 c_fread(void* ptr, i64 size, i64 count, void* stream);
+    /// libc `fwrite`: writes up to `count` items of `size` bytes; returns items
+    /// written.
     #[link_name("fwrite")]
     i64 c_fwrite(void* ptr, i64 size, i64 count, void* stream);
+    /// libc `fgets`: reads one line (keeping the newline) into `buf`; null at EOF.
     #[link_name("fgets")]
     str c_fgets(str buf, i32 size, void* stream);
+    /// libc `fflush`: flushes `stream`, or every stream when null.
     #[link_name("fflush")]
     i32 c_fflush(void* stream);
+    /// libc `getchar`: next byte from libc stdin, or -1 at EOF.
     #[link_name("getchar")]
     i32 c_getchar();
 
     // --- environment ---
+    /// libc `getenv`: the value of `name`, or null. Reads libc's environment,
+    /// not changes made through std.env.
     #[link_name("getenv")]
     str c_getenv(str name);
+    /// libc `setenv`: sets `name` in libc's environment (not seen by std.env).
     #[link_name("setenv")]
     i32 c_setenv(str name, str value, i32 overwrite);
 
     // --- time ---
+    /// libc `time`: seconds since the epoch, also stored in `*result` when
+    /// non-null.
     #[link_name("time")]
     i64 c_time(i64* result);
+    /// libc `clock`: processor time used, in `CLOCKS_PER_SEC` units.
     #[link_name("clock")]
     i64 c_clock();
 }
