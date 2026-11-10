@@ -2,6 +2,7 @@
 // the small import subset used by the repository and records declarations with
 // an explicit worklist.
 import std.args;
+import std.env;
 import std.error;
 import std.fs;
 import std.io;
@@ -9,6 +10,7 @@ import std.mem.memory;
 import std.mem.vec;
 import std.path;
 import std.result;
+import std.sys.raw.fs;
 import frontend.artifacts;
 import frontend.ast;
 import frontend.diagnostics;
@@ -144,6 +146,88 @@ void enqueue_module(ModuleLoader* loader, str path) {
     loader.pending.push(move owned);
 }
 
+void module_add_dir_unique(Vec<String>* dirs, str dir) {
+    i64 i = 0;
+    while (i < dirs.len()) {
+        if (dirs.get_ptr(i).equals(dir)) { return; }
+        i += 1;
+    }
+    dirs.push(String.from_str(dir));
+}
+
+// Sysroot layout: include/silver + include (installed layouts), plus lib/ only
+// when lib/silver exists. An explicit root is also searched directly; a
+// discovered root only when it holds std/, so "/" is never scanned.
+void module_add_sysroot_candidates(Vec<String>* dirs, str root, bool explicit) {
+    String std_dir = path_join(root, "std");
+    if (explicit || is_dir(std_dir.to_str())) { module_add_dir_unique(dirs, root); }
+    std_dir.drop();
+    String inc_silver = path_join(root, "include/silver");
+    if (is_dir(inc_silver.to_str())) { module_add_dir_unique(dirs, inc_silver.to_str()); }
+    inc_silver.drop();
+    String inc = path_join(root, "include");
+    module_add_dir_unique(dirs, inc.to_str());
+    inc.drop();
+    String lib_silver = path_join(root, "lib/silver");
+    if (is_dir(lib_silver.to_str())) {
+        module_add_dir_unique(dirs, lib_silver.to_str());
+        String lib = path_join(root, "lib");
+        module_add_dir_unique(dirs, lib.to_str());
+        lib.drop();
+    }
+    lib_silver.drop();
+}
+
+// The stage0-compatible sysroot cascade: --sysroot CLI flag, SILVER_SYSROOT,
+// the executable-relative prefix, the user data dir, and system share dirs.
+// Later entries are fallbacks; callers keep their own -I/root entries first.
+Vec<String> module_sysroot_include_dirs() {
+    Vec<String> dirs = Vec<String>.new();
+    Vec<String> arguments = args();
+    i64 index = 1;
+    while (index < arguments.len()) {
+        String* argument = arguments.get_ptr(index);
+        if (argument.equals("--")) { break; }  // everything after -- is program args
+        if (argument.equals("--run-arg") && index + 1 < arguments.len()) { index += 2; continue; }
+        if (argument.equals("--sysroot") && index + 1 < arguments.len()) {
+            module_add_sysroot_candidates(&dirs, arguments.get_ptr(index + 1).to_str(), true);
+            index += 2;
+            continue;
+        }
+        if (argument.starts_with("--sysroot=")) {
+            String value = argument.strip_prefix("--sysroot=");
+            module_add_sysroot_candidates(&dirs, value.to_str(), true);
+            value.drop();
+        }
+        index += 1;
+    }
+    arguments.drop();
+    String sysroot = var("SILVER_SYSROOT").unwrap_or(String.new());
+    if (sysroot.len() > 0) { module_add_sysroot_candidates(&dirs, sysroot.to_str(), true); }
+    // Executable-relative prefix, e.g. <prefix>/bin/agc -> <prefix>.
+    u8 executable[4096];
+    i64 length = sys_readlink((i64)"/proc/self/exe", (i64)&executable[0], 4096);
+    if (length > 0 && length < 4096) {
+        String path = String.new();
+        path.push_bytes(&executable[0], length);
+        String bin = path_dirname(path.to_str());
+        String prefix = path_dirname(bin.to_str());
+        module_add_sysroot_candidates(&dirs, prefix.to_str(), false);
+    }
+    String xdg_data = var("XDG_DATA_HOME").unwrap_or(String.new());
+    String home = var("HOME").unwrap_or(String.new());
+    if (xdg_data.len() > 0) {
+        String user = path_join(xdg_data.to_str(), "silver");
+        module_add_sysroot_candidates(&dirs, user.to_str(), false);
+    } else if (home.len() > 0) {
+        String user = path_join(home.to_str(), ".local/share/silver");
+        module_add_sysroot_candidates(&dirs, user.to_str(), false);
+    }
+    module_add_sysroot_candidates(&dirs, "/usr/local/share/silver", false);
+    module_add_sysroot_candidates(&dirs, "/usr/share/silver", false);
+    return move dirs;
+}
+
 void collect_include_dirs(ModuleLoader* loader) {
     Vec<String> arguments = args();
     i64 index = 1;
@@ -212,9 +296,20 @@ String module_candidate(str base_path, str relative_path, str extension) {
     return move candidate;
 }
 
-String resolve_from_base(str base, str relative, String* submodule_config) {
+bool module_source_available(str path, Vec<String>* sources) {
+    if (file_exists(path)) { return true; }
+    if (sources.len() > 0) {
+        String normalized = path_normalize(path); i64 i = 0;
+        while (i < sources.len()) {
+            if (sources.get_ptr(i).equals(normalized.to_str())) { return true; } i += 1;
+        }
+    }
+    return false;
+}
+
+String resolve_from_base(str base, str relative, String* submodule_config, Vec<String>* sources) {
     String source = module_candidate(base, relative, ".ag");
-    if (file_exists(source.to_str())) {
+    if (module_source_available(source.to_str(), sources)) {
         return source;
     }
     source.drop();
@@ -241,6 +336,17 @@ String resolve_module_path_with_config(
     Vec<String>* include_dirs,
     String* submodule_config
 ) {
+    Vec<String> sources = Vec<String>.new();
+    return resolve_module_path_with_sources(owner_path, root_path, module_name, include_dirs,
+        submodule_config, &sources);
+}
+
+// Source overlays participate at their normal search-path priority. Artifact
+// and submodule lookup retain the on-disk compiler behavior.
+String resolve_module_path_with_sources(
+    str owner_path, str root_path, str module_name, Vec<String>* include_dirs,
+    String* submodule_config, Vec<String>* sources
+) {
     String module_text = String.from_str(module_name);
     String relative = module_text.replace(".", "/");
     module_text.drop();
@@ -252,7 +358,7 @@ String resolve_module_path_with_config(
         base = path_dirname(owner_path);
     }
 
-    String resolved = resolve_from_base(base.to_str(), relative.to_str(), &config);
+    String resolved = resolve_from_base(base.to_str(), relative.to_str(), &config, sources);
     base.drop();
     if (resolved.len() > 0) {
         config.drop();
@@ -262,7 +368,7 @@ String resolve_module_path_with_config(
     resolved.drop();
 
     String local_base = path_dirname(owner_path);
-    resolved = resolve_from_base(local_base.to_str(), relative.to_str(), &config);
+    resolved = resolve_from_base(local_base.to_str(), relative.to_str(), &config, sources);
     local_base.drop();
     if (resolved.len() > 0) {
         config.drop();
@@ -271,7 +377,7 @@ String resolve_module_path_with_config(
     }
     resolved.drop();
 
-    resolved = resolve_from_base(root_path, relative.to_str(), &config);
+    resolved = resolve_from_base(root_path, relative.to_str(), &config, sources);
     if (resolved.len() > 0) {
         config.drop();
         relative.drop();
@@ -282,7 +388,7 @@ String resolve_module_path_with_config(
     i64 include_index = 0;
     while (include_index < include_dirs.len()) {
         String include_base = String.from_str(include_dirs.get_ptr(include_index).to_str());
-        resolved = resolve_from_base(include_base.to_str(), relative.to_str(), &config);
+        resolved = resolve_from_base(include_base.to_str(), relative.to_str(), &config, sources);
         include_base.drop();
         if (resolved.len() > 0) {
             config.drop();

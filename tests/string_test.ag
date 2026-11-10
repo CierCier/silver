@@ -9,7 +9,22 @@ void drop_vec_strings(Vec<String>* v) {
     v.drop();
 }
 
+u8 first_byte(&str text) {
+    return text[0];
+}
+
+u8 first_byte_mut(&mut str text) {
+    return text[0];
+}
+
 i32 main(){
+    test_start("str views index through borrowed references");
+    {
+        str text = "hello";
+        assert_eq_i64(104, (i64)first_byte(&text), "borrowed str index reads the first byte");
+        assert_eq_i64(104, (i64)first_byte_mut(&mut text), "mutable borrowed str index reads the first byte");
+    }
+
     // -- Existing tests ---------------------------------------------------
     String s = String.new();
     assert_eq_i64(s.len, 0, "New string has length 0");
@@ -411,6 +426,11 @@ i32 main(){
         assert_true(s_c > s_a, "String > comparison ('world' > 'hello')");
         assert_true(s_a <= s_b, "String <= comparison (same)");
         assert_true(s_a >= s_b, "String >= comparison (same)");
+        Slice<u8> view = s_a.as_slice();
+        assert_true(view == "hello", "byte slice equality selects str overload");
+        assert_false(view == "world", "byte slice str equality compares content");
+        assert_true(view == s_b, "byte slice equality selects String overload");
+        assert_false(view == s_c, "byte slice String equality compares content");
         s_a.drop();
         s_b.drop();
         s_c.drop();

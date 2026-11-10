@@ -55,6 +55,21 @@ Silver source files use UTF-8 encoding and the `.ag` extension.
    spanning multiple lines */
 ```
 
+Doc comments (`///` lines or `/** ... */` blocks) attach to the item directly
+below them; an empty line between the block and the item detaches it. They show
+up in editor hover for functions, variables, and macros:
+
+```silver
+/// Adds two values.
+/// $1 : the first addend
+/// $2 : the second addend
+i32 add(i32 a, i32 b) { return a + b; }
+```
+
+Inside a doc block, `$n : description` annotates the n-th parameter. The
+language server renders these as a Parameters section in hover, mapped onto
+the actual parameter names (`a`, `b` above).
+
 ### Identifiers
 
 Identifiers match `[a-zA-Z_][a-zA-Z0-9_]*`.
@@ -158,6 +173,11 @@ References are the **enforced** indirection mechanism.  A parameter declared
 pointer a function returns derives only from its `&`-marked parameters or
 from independent data (globals, heap values, raw-pointer pointees).
 Returning a reference to a local is a compile error.
+
+A semantic reference to a raw-pointer variable, such as `&slot` or `&mut slot`,
+borrows that variable's storage. It cannot outlive the variable, and a live mutable
+borrow prevents reassignment of the slot. Access through a raw pointee, such as
+`&raw[index]`, retains the raw-pointer contract described below.
 
 ```silver
 i64 read(&Pair p) { return *p.method(); }   // &T borrow origin
@@ -982,8 +1002,8 @@ impl Iterator<RangeIter> for RangeIter {
 
 ## 8. Memory Management & Ownership Model
 
-Silver uses a stack-machine resource tracking architecture with explicit move
-semantics and drop flags.
+Silver uses explicit moves and compiler-generated initialization state to
+control cleanup of local owned values.
 
 ### Core Memory Rules
 
@@ -993,8 +1013,10 @@ semantics and drop flags.
    causes a double-drop.  `drop()` is for cleaning up non-field resources
    (pointers, file descriptors).
 
-2. **Move semantics**: `move x` clears the source variable's drop flag.  At
-   scope exit, destructors only fire if the drop flag is `true (1)`.
+2. **Move semantics**: `move x` marks the source place uninitialized. At scope
+   exit, cleanup skips moved or uninitialized places. A partially initialized
+   struct cleans only its initialized descendants. Its own `Drop` method runs
+   only after every required field is initialized, including scalar fields.
 
 3. **Borrows are enforced, raw pointers are not**: A parameter of type
    `&T` or `&mut T` is a borrow origin.  The escape checker proves that any
@@ -1051,6 +1073,32 @@ String s = move v[0]; // conservatively moves the Index place; later v[1] access
 ```
 
 Borrow origins interact with places: `&x` vs `move x` conflicts; `&x.a` vs `move x.b` is allowed (disjoint fields); `&mut x.a` vs `move x.a` conflicts.
+
+Direct assignment to a local owned place drops its initialized old value before
+storing the replacement, then updates the containing value's initialization
+state. An empty field has no old value to drop. Reinitializing a moved field
+restores its subtree without changing initialized siblings.
+
+This state belongs to local owners and their inline fields and fixed elements.
+Both backends carry a data pointer and projected owner-state pointer in internal
+references. Reborrows, stored references, returned references and indirect calls
+preserve that state. Assignment through a mutable borrow drops an initialized
+old value, stores the replacement and updates the original owner's state.
+Raw-pointer stores do not acquire owner state; their callers manage pointee
+initialization and cleanup. Heap elements use their container's mutation and
+initialized-length contracts.
+
+Extern-C `&T` and `&mut T` signatures retain their thin-pointer ABI. Adapters also
+preserve thin C callback signatures. Internally, a function value whose signature
+requires reference adaptation carries internal and foreign entry points. A
+reference arriving from C denotes initialized foreign storage; it cannot transfer
+ownership by moving out, because C supplies no owner-state capability. A value
+passed through a tracked reference must be fully initialized before that reference
+crosses into C; a failed initialization guard traps before the foreign call.
+Raw-pointer APIs retain their explicit initialization contract. Types
+containing internal reference or adapted function values have Silver layouts;
+use raw pointers and C-compatible fields for shared foreign records. AGM modules
+compiled with the old internal reference ABI must be rebuilt.
 
 ## 9. Concurrency & Threading
 

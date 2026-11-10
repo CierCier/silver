@@ -1,0 +1,179 @@
+import vendor.llvm.llvm;
+import std.mem.vec;
+import std.string;
+import frontend.ast;
+import frontend.bindings;
+import frontend.items;
+import frontend.types;
+import frontend.typecheck_expr;
+import backend.llvm.context;
+import backend.llvm.types;
+import backend.llvm.mono;
+import backend.llvm.reference;
+import backend.llvm.drop;
+import backend.llvm.expr;
+
+void llvm_require_initialized_c_reference(LlvmContext* ctx, LLVMOpaqueValue* value) {
+    LLVMOpaqueValue* node = llvm_reference_node(ctx.builder, value);
+    if (node == llvm_reference_initialized(ctx.ctx)) { return; }
+    LLVMOpaqueBasicBlock* tracked = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "c_reference_tracked");
+    LLVMOpaqueBasicBlock* initialized = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "c_reference_initialized");
+    LLVMOpaqueBasicBlock* invalid = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "c_reference_uninitialized");
+    LLVMBuildCondBr(ctx.builder, LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntEQ,
+        node, llvm_reference_initialized(ctx.ctx), "c_reference_foreign"), initialized, tracked);
+    LLVMPositionBuilderAtEnd(ctx.builder, tracked);
+    LLVMOpaqueType* state_type = LLVMInt8TypeInContext(ctx.ctx);
+    LLVMOpaqueValue* state = LLVMBuildLoad2(ctx.builder, state_type,
+        LLVMBuildStructGEP2(ctx.builder, llvm_reference_node_type(ctx.ctx), node, 3, "c_reference_state"),
+        "c_reference_state_value");
+    LLVMBuildCondBr(ctx.builder, LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntEQ,
+        state, LLVMConstInt(state_type, LLVM_INIT_FULL, 0), "c_reference_full"), initialized, invalid);
+    LLVMPositionBuilderAtEnd(ctx.builder, invalid);
+    LLVMOpaqueType* trap_type = LLVMFunctionType(LLVMVoidTypeInContext(ctx.ctx), (LLVMOpaqueType**)0, 0, 0);
+    LLVMOpaqueValue* trap = LLVMGetNamedFunction(ctx.module, "llvm.trap");
+    if (trap == (LLVMOpaqueValue*)0) { trap = LLVMAddFunction(ctx.module, "llvm.trap", trap_type); }
+    LLVMBuildCall2(ctx.builder, trap_type, trap, (LLVMOpaqueValue**)0, 0, "");
+    LLVMBuildUnreachable(ctx.builder);
+    LLVMPositionBuilderAtEnd(ctx.builder, initialized);
+}
+
+LLVMOpaqueValue* llvm_value_from_c_abi(LlvmContext* ctx, LLVMOpaqueValue* value, u32 type_id) {
+    TypeEntry entry = *ctx.types.get(ctx.types.resolve_subst(type_id));
+    if (entry.kind == TypeKind.Reference) {
+        return llvm_reference_build(ctx.ctx, ctx.builder, value, llvm_reference_initialized(ctx.ctx));
+    }
+    if (entry.kind == TypeKind.Function && llvm_type_has_reference_abi(ctx.types, type_id)) {
+        return llvm_callable_build(ctx, LLVMConstNull(LLVMPointerTypeInContext(ctx.ctx, 0)), value);
+    }
+    if (llvm_type_is_unit_enum(ctx.root, ctx.types, type_id)) {
+        LLVMOpaqueValue* tag = LLVMBuildTrunc(ctx.builder, value, LLVMInt16TypeInContext(ctx.ctx), "callback_enum_tag");
+        return LLVMBuildInsertValue(ctx.builder, LLVMConstNull(llvm_lower_type(ctx.ctx, ctx.types, type_id)),
+            tag, 0, "callback_enum_value");
+    }
+    return value;
+}
+
+LLVMOpaqueValue* llvm_value_to_c_abi(LlvmContext* ctx, LLVMOpaqueValue* value, u32 type_id) {
+    TypeEntry entry = *ctx.types.get(ctx.types.resolve_subst(type_id));
+    if (entry.kind == TypeKind.Reference) {
+        llvm_require_initialized_c_reference(ctx, value);
+        return llvm_reference_data(ctx.builder, value);
+    }
+    if (entry.kind == TypeKind.Function && llvm_type_has_reference_abi(ctx.types, type_id)) {
+        return LLVMBuildExtractValue(ctx.builder, value, 1, "callback_foreign_entry");
+    }
+    if (llvm_type_is_unit_enum(ctx.root, ctx.types, type_id)) {
+        LLVMOpaqueValue* tag = LLVMBuildExtractValue(ctx.builder, value, 0, "callback_enum_tag");
+        return llvm_unit_enum_has_negative_tag(ctx.root, ctx.types, type_id)
+            ? LLVMBuildSExt(ctx.builder, tag, LLVMInt32TypeInContext(ctx.ctx), "callback_enum_sext")
+            : LLVMBuildZExt(ctx.builder, tag, LLVMInt32TypeInContext(ctx.ctx), "callback_enum_zext");
+    }
+    return value;
+}
+
+LLVMOpaqueType* llvm_callable_signature(LlvmContext* ctx, u32 type_id, bool foreign) {
+    TypeEntry entry = *ctx.types.get(ctx.types.resolve_subst(type_id));
+    Vec<LLVMOpaqueType*> parameters = Vec<LLVMOpaqueType*>.new();
+    i64 i = 0;
+    while (i < entry.count) {
+        u32 parameter = ctx.types.type_args.get(entry.inner + 1 + (u32)i);
+        parameters.push(foreign ? llvm_lower_c_abi_type(ctx.ctx, ctx.types, ctx.root, parameter)
+            : llvm_lower_type(ctx.ctx, ctx.types, parameter));
+        i += 1;
+    }
+    u32 result = ctx.types.type_args.get(entry.inner);
+    LLVMOpaqueType* result_type = foreign ? llvm_lower_c_abi_type(ctx.ctx, ctx.types, ctx.root, result)
+        : llvm_lower_type(ctx.ctx, ctx.types, result);
+    return LLVMFunctionType(result_type, parameters.data, (u32)parameters.len(), 0);
+}
+
+LLVMOpaqueValue* llvm_named_callable_value(LlvmContext* ctx, LLVMOpaqueValue* function, str name) {
+    u32 type_id = mono_function_value_type(ctx, name);
+    if (type_id == TYPE_UNKNOWN) {
+        SyntaxNode* parameters = item_c_extern_function_parameters(ctx.root, name);
+        if (parameters == (SyntaxNode*)0) { return function; }
+        Vec<Binding> bindings = Vec<Binding>.new();
+        collect_parameter_bindings(parameters, &bindings);
+        Vec<u32> types = Vec<u32>.new();
+        i64 i = 0;
+        while (i < bindings.len()) {
+            types.push(typecheck_parameter_type_id(ctx.types, bindings.get_ptr(i)));
+            i += 1;
+        }
+        type_id = ctx.types.get_function(item_c_extern_function_return_type_id(ctx.types, ctx.root, name), &types);
+    }
+    if (!llvm_type_has_reference_abi(ctx.types, type_id)) { return function; }
+    if (item_is_c_extern_function(ctx.root, name)) {
+        LLVMOpaqueValue* internal = llvm_import_reference_function_value(ctx, function, name);
+        return llvm_callable_build(ctx, internal, function);
+    }
+    String adapter_name = String.from_str("__silver_reference_callback.");
+    adapter_name.push_str(name);
+    LLVMOpaqueValue* adapter = LLVMGetNamedFunction(ctx.module, adapter_name.to_str());
+    if (adapter == (LLVMOpaqueValue*)0) {
+        adapter = LLVMAddFunction(ctx.module, adapter_name.to_str(), llvm_callable_signature(ctx, type_id, true));
+        LLVMSetLinkage(adapter, LLVMLinkage.LLVMInternalLinkage);
+        LLVMOpaqueBuilder* saved = ctx.builder;
+        LLVMOpaqueValue* saved_function = ctx.current_fn;
+        ctx.builder = LLVMCreateBuilderInContext(ctx.ctx);
+        ctx.current_fn = adapter;
+        LLVMPositionBuilderAtEnd(ctx.builder, LLVMAppendBasicBlockInContext(ctx.ctx, adapter, "entry"));
+        TypeEntry signature = *ctx.types.get(type_id);
+        Vec<LLVMOpaqueValue*> arguments = Vec<LLVMOpaqueValue*>.new();
+        i64 i = 0;
+        while (i < signature.count) {
+            arguments.push(llvm_value_from_c_abi(ctx, LLVMGetParam(adapter, (u32)i),
+                ctx.types.type_args.get(signature.inner + 1 + (u32)i)));
+            i += 1;
+        }
+        LLVMOpaqueValue* result = LLVMBuildCall2(ctx.builder, LLVMGlobalGetValueType(function), function,
+            arguments.data, (u32)arguments.len(), "");
+        u32 result_type = ctx.types.type_args.get(signature.inner);
+        if (result_type == TYPE_VOID) { LLVMBuildRetVoid(ctx.builder); }
+        else { LLVMBuildRet(ctx.builder, llvm_value_to_c_abi(ctx, result, result_type)); }
+        LLVMDisposeBuilder(ctx.builder);
+        ctx.builder = saved;
+        ctx.current_fn = saved_function;
+    }
+    return llvm_callable_build(ctx, function, adapter);
+}
+
+LLVMOpaqueValue* llvm_emit_callable_call(LlvmContext* ctx, LLVMOpaqueValue* callable,
+                                         u32 type_id, Vec<LLVMOpaqueValue*>* arguments) {
+    LLVMOpaqueValue* internal = LLVMBuildExtractValue(ctx.builder, callable, 0, "callable_internal");
+    LLVMOpaqueValue* foreign = LLVMBuildExtractValue(ctx.builder, callable, 1, "callable_foreign");
+    LLVMOpaqueBasicBlock* local = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "callable_internal_call");
+    LLVMOpaqueBasicBlock* external = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "callable_foreign_call");
+    LLVMOpaqueBasicBlock* after = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "callable_result");
+    LLVMBuildCondBr(ctx.builder, LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntNE,
+        internal, LLVMConstNull(LLVMPointerTypeInContext(ctx.ctx, 0)), "callable_has_internal"), local, external);
+    LLVMPositionBuilderAtEnd(ctx.builder, local);
+    LLVMOpaqueValue* result = LLVMBuildCall2(ctx.builder, llvm_callable_signature(ctx, type_id, false),
+        internal, arguments.data, (u32)arguments.len(), "");
+    LLVMBuildBr(ctx.builder, after);
+    LLVMOpaqueBasicBlock* local_end = LLVMGetInsertBlock(ctx.builder);
+    LLVMPositionBuilderAtEnd(ctx.builder, external);
+    TypeEntry signature = *ctx.types.get(type_id);
+    Vec<LLVMOpaqueValue*> foreign_args = Vec<LLVMOpaqueValue*>.new();
+    i64 i = 0;
+    while (i < arguments.len()) {
+        foreign_args.push(llvm_value_to_c_abi(ctx, arguments.get(i),
+            ctx.types.type_args.get(signature.inner + 1 + (u32)i)));
+        i += 1;
+    }
+    LLVMOpaqueValue* foreign_result = LLVMBuildCall2(ctx.builder, llvm_callable_signature(ctx, type_id, true),
+        foreign, foreign_args.data, (u32)foreign_args.len(), "");
+    u32 result_type = ctx.types.type_args.get(signature.inner);
+    if (result_type != TYPE_VOID) { foreign_result = llvm_value_from_c_abi(ctx, foreign_result, result_type); }
+    LLVMBuildBr(ctx.builder, after);
+    LLVMOpaqueBasicBlock* external_end = LLVMGetInsertBlock(ctx.builder);
+    LLVMPositionBuilderAtEnd(ctx.builder, after);
+    if (result_type == TYPE_VOID) { return (LLVMOpaqueValue*)0; }
+    LLVMOpaqueValue* merged = LLVMBuildPhi(ctx.builder, LLVMTypeOf(result), "callable_value");
+    Vec<LLVMOpaqueValue*> values = Vec<LLVMOpaqueValue*>.new();
+    values.push(result); values.push(foreign_result);
+    Vec<LLVMOpaqueBasicBlock*> blocks = Vec<LLVMOpaqueBasicBlock*>.new();
+    blocks.push(local_end); blocks.push(external_end);
+    LLVMAddIncoming(merged, values.data, blocks.data, 2);
+    return merged;
+}

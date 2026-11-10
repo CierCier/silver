@@ -1,7 +1,7 @@
 # HTTP/1.0 & HTTP/1.1 Standard Compliance
 
 - **Primary Specifications**: [RFC 9110 (HTTP Semantics)](https://datatracker.ietf.org/doc/html/rfc9110), [RFC 9112 (HTTP/1.1 Framing)](https://datatracker.ietf.org/doc/html/rfc9112).
-- **Implementation**: [`std/net/http.ag`](file:///home/cier/Projects/silver/std/net/http.ag) (`HttpClient`, `HttpServer`, `ResponseWriter`, `ServeMux`, `HttpRequest`, `HttpResponse`, `HttpStream`, `HttpConnection`).
+- **Implementation**: [`std/net/http.ag`](../../std/net/http.ag) (`HttpClient`, `HttpServer`, `ResponseWriter`, `ServeMux`, `HttpRequest`, `HttpResponse`, `HttpStream`, `HttpConnection`).
 - **Test Suite**: [`http_test.ag`](../../tests/http_test.ag), [`http_server_test.ag`](../../tests/http_server_test.ag), [`stream_test.ag`](../../tests/stream_test.ag), [`pool_test.ag`](../../tests/pool_test.ag).
 
 ## Client Compliance Table

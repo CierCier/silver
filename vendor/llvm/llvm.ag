@@ -195,6 +195,7 @@ extern "C" {
     void LLVMPositionBuilderBefore(LLVMOpaqueBuilder* builder, LLVMOpaqueValue* instruction);
     LLVMOpaqueBasicBlock* LLVMGetEntryBasicBlock(LLVMOpaqueValue* function);
     LLVMOpaqueValue* LLVMGetFirstInstruction(LLVMOpaqueBasicBlock* block);
+    LLVMOpaqueValue* LLVMGetNextInstruction(LLVMOpaqueValue* instruction);
     LLVMOpaqueValue* LLVMBuildPhi(LLVMOpaqueBuilder* p0, LLVMOpaqueType* p1, i8* p2);
     void LLVMAddIncoming(LLVMOpaqueValue* p0, LLVMOpaqueValue** p1, LLVMOpaqueBasicBlock** p2, u32 p3);
     void LLVMSetCurrentDebugLocation2(LLVMOpaqueBuilder* p0, LLVMOpaqueMetadata* p1);

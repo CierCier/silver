@@ -1,8 +1,8 @@
 # HTTP/2 Standard Compliance
 
 - **Primary Specifications**: [RFC 9113 (HTTP/2)](https://datatracker.ietf.org/doc/html/rfc9113).
-- **Implementation**: [`std/net/http2.ag`](file:///home/cier/Projects/silver/std/net/http2.ag) (`H2Connection`, `H2Stream`, `H2Response`), [`std/net/http.ag`](file:///home/cier/Projects/silver/std/net/http.ag) (`HttpServer`, `ResponseWriter`, `h2_serve_conn`).
-- **Test Suite**: [`tests/http2_test.ag`](file:///home/cier/Projects/silver/tests/http2_test.ag), [`tests/http2_server_test.ag`](file:///home/cier/Projects/silver/tests/http2_server_test.ag), [`tests/http2_tls_test.ag`](file:///home/cier/Projects/silver/tests/http2_tls_test.ag).
+- **Implementation**: [`std/net/http2.ag`](../../std/net/http2.ag) (`H2Connection`, `H2Stream`, `H2Response`), [`std/net/http.ag`](../../std/net/http.ag) (`HttpServer`, `ResponseWriter`, `h2_serve_conn`).
+- **Test Suite**: [`tests/http2_test.ag`](../../tests/http2_test.ag), [`tests/http2_server_test.ag`](../../tests/http2_server_test.ag), [`tests/http2_tls_test.ag`](../../tests/http2_tls_test.ag).
 
 ## Client Compliance Table
 

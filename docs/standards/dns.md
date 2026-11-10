@@ -1,8 +1,8 @@
 # DNS Standard Compliance
 
 - **Primary Specifications**: [RFC 1034 (Domain Names - Concepts and Facilities)](https://datatracker.ietf.org/doc/html/rfc1034), [RFC 1035 (Domain Names - Implementation and Specification)](https://datatracker.ietf.org/doc/html/rfc1035).
-- **Implementation**: [`std/net/dns.ag`](file:///home/cier/Projects/silver/std/net/dns.ag) (`dns_resolve`, `dns_build_query`, `dns_parse_a`).
-- **Test Suite**: [`tests/net_dns_test.ag`](file:///home/cier/Projects/silver/tests/net_dns_test.ag).
+- **Implementation**: [`std/net/dns.ag`](../../std/net/dns.ag) (`dns_resolve`, `dns_build_query`, `dns_parse_a`).
+- **Test Suite**: [`tests/net_dns_test.ag`](../../tests/net_dns_test.ag).
 
 ## Compliance Table
 

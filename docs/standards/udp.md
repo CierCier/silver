@@ -1,8 +1,8 @@
 # UDP Standard Compliance
 
 - **Primary Specifications**: [RFC 768 (User Datagram Protocol)](https://datatracker.ietf.org/doc/html/rfc768), POSIX.1-2017 Socket API, [RFC 8200 (IPv6 Specification)](https://datatracker.ietf.org/doc/html/rfc8200).
-- **Implementation**: [`std/net/socket.ag`](file:///home/cier/Projects/silver/std/net/socket.ag) (`UdpSocket`) and [`std/sys/socket.ag`](file:///home/cier/Projects/silver/std/sys/socket.ag).
-- **Test Suite**: [`tests/net_udp_test.ag`](file:///home/cier/Projects/silver/tests/net_udp_test.ag), [`tests/udp_test.ag`](file:///home/cier/Projects/silver/tests/udp_test.ag).
+- **Implementation**: [`std/net/socket.ag`](../../std/net/socket.ag) (`UdpSocket`) and [`std/sys/socket.ag`](../../std/sys/socket.ag).
+- **Test Suite**: [`tests/net_udp_test.ag`](../../tests/net_udp_test.ag), [`tests/udp_test.ag`](../../tests/udp_test.ag).
 
 ## Compliance Table
 

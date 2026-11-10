@@ -1,0 +1,156 @@
+// Typed owner-local storage plan. Children are contiguous in breadth-first order.
+import frontend.ast;
+import frontend.items;
+import frontend.place;
+import frontend.types;
+import frontend.typecheck_expr;
+import frontend.module_loader;
+import std.intern;
+import std.mem.vec;
+
+const u32 MAX_INIT_PLAN_NODES = 65536;
+const u32 MAX_INIT_PLAN_DEPTH = 256;
+
+enum InitPathKind { Node; Indirect; Invalid; }
+struct InitPathResult { InitPathKind kind; u32 node_index; }
+
+InitPathResult init_plan_project(Vec<InitNodePlan>* nodes,
+                                 Vec<Projection>* projections,
+                                 Vec<Projection>* path, TypeTable* types) {
+    InitPathResult result;
+    result.kind = InitPathKind.Invalid;
+    result.node_index = 0;
+    if (nodes.len() == 0) { return result; }
+    i64 p = 0;
+    while (p < path.len()) {
+        InitNodePlan parent = nodes.get(result.node_index);
+        TypeEntry entry = *types.get(parent.type_id);
+        if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference
+            || entry.kind == TypeKind.Slice) {
+            result.kind = InitPathKind.Indirect;
+            return result;
+        }
+        Projection requested = path.get(p);
+        u32 offset = 0;
+        bool found = false;
+        while (offset < parent.child_count) {
+            u32 child_index = parent.first_child_index + offset;
+            InitNodePlan child = nodes.get(child_index);
+            Projection selected = projections.get(child.projections_start + child.projections_count - 1);
+            if (selected.kind == requested.kind && selected.field_name_id == requested.field_name_id) {
+                result.node_index = child_index;
+                found = true;
+                break;
+            }
+            offset += 1;
+        }
+        if (!found) { return result; }
+        p += 1;
+    }
+    result.kind = InitPathKind.Node;
+    return result;
+}
+
+bool init_plan_build(InitOwnerPlan* plan, TypeTable* types, Interner* names,
+                     SyntaxNode* root) {
+    plan.nodes.len = 0;
+    plan.projections.len = 0;
+    InitNodePlan first;
+    first.parent_index = 0;
+    first.first_child_index = 0;
+    first.child_count = 0;
+    first.projections_start = 0;
+    first.projections_count = 0;
+    first.type_id = types.resolve_subst(plan.type_id);
+    first.field_index = 0;
+    plan.nodes.push(first);
+    u32 cursor = 0;
+    while (cursor < (u32)plan.nodes.len()) {
+        InitNodePlan parent = plan.nodes.get(cursor);
+        if (parent.type_id == TYPE_UNKNOWN) { return false; }
+        TypeEntry entry = *types.get(parent.type_id);
+        if (entry.kind == TypeKind.Unknown || entry.kind == TypeKind.TypeParam) { return false; }
+        u32 count = 0;
+        u32 field_names_start = 0;
+        if (entry.kind == TypeKind.Tuple || entry.kind == TypeKind.Array) {
+            if (entry.count < 0 || entry.count > (i64)MAX_INIT_PLAN_NODES) { return false; }
+            count = (u32)entry.count;
+        } else if (entry.kind == TypeKind.Named) {
+            str name = types.names.get(entry.name_id);
+            // Task is a builtin handle; enum payload liveness is tag-selected.
+            if (strcmp(name, "Task") != 0 && find_enum_item(root, name) == (SyntaxNode*)0) {
+                i64 definition_index = 0;
+                while (definition_index < types.struct_properties.len()
+                    && types.struct_properties.get_ptr(definition_index).name_id != entry.name_id) {
+                    definition_index += 1;
+                }
+                if (definition_index == types.struct_properties.len()) { return false; }
+                TypeStructProperties definition = types.struct_properties.get(definition_index);
+                if (definition.field_count != definition.field_name_count) { return false; }
+                count = definition.field_count;
+                field_names_start = definition.field_name_start;
+            }
+        }
+        if (count > MAX_INIT_PLAN_NODES - (u32)plan.nodes.len()
+            || (count > 0 && parent.projections_count >= MAX_INIT_PLAN_DEPTH)) { return false; }
+        u32 first_child = (u32)plan.nodes.len();
+        u32 offset = 0;
+        while (offset < count) {
+            Projection projection;
+            u32 child_type = TYPE_UNKNOWN;
+            if (entry.kind == TypeKind.Named) {
+                str field = types.names.get(types.struct_field_names.get(field_names_start + offset));
+                projection.kind = ProjectionKind.Field;
+                projection.field_name_id = names.intern(field);
+                child_type = typecheck_struct_field_type(types, root, parent.type_id, field);
+            } else {
+                projection.kind = ProjectionKind.Index;
+                projection.field_name_id = offset;
+                child_type = types.resolve_subst(entry.kind == TypeKind.Array
+                    ? entry.inner : types.type_args.get(entry.inner + offset));
+            }
+            InitNodePlan child;
+            child.parent_index = cursor;
+            child.first_child_index = 0;
+            child.child_count = 0;
+            child.projections_start = (u32)plan.projections.len();
+            child.projections_count = parent.projections_count + 1;
+            child.type_id = child_type;
+            child.field_index = offset;
+            u32 p = 0;
+            while (p < parent.projections_count) {
+                plan.projections.push(plan.projections.get(parent.projections_start + p));
+                p += 1;
+            }
+            plan.projections.push(projection);
+            plan.nodes.push(child);
+            offset += 1;
+        }
+        plan.nodes.get_ptr(cursor).first_child_index = first_child;
+        plan.nodes.get_ptr(cursor).child_count = count;
+        cursor += 1;
+    }
+    return true;
+}
+
+// Resolve a concrete instantiation using its original function and declaration.
+// Generic bindings are completed here after substitution, with the same builder
+// used by ownership checking. No LLVM or destructor policy enters this pass.
+i64 init_plan_resolve(Vec<InitOwnerPlan>* plans, TypeTable* types, Interner* names,
+                      SyntaxNode* root, u32 owner, u32 type_id,
+                      Span declaration, Span function) {
+    i64 i = 0;
+    while (i < plans.len()) {
+        InitOwnerPlan* plan = plans.get_ptr(i);
+        if (plan.owner_local_id == owner && plan.type_id == type_id
+            && plan.function.file == function.file && plan.function.start == function.start
+            && plan.declaration.file == declaration.file
+            && plan.declaration.start >= declaration.start
+            && plan.declaration.end <= declaration.end && plan.nodes.len() > 0) { return i; }
+        i += 1;
+    }
+    InitOwnerPlan plan = InitOwnerPlan.new(owner, type_id, declaration, function);
+    if (!init_plan_build(&plan, types, names, root)) { return -1; }
+    plans.push(move plan);
+    return plans.len() - 1;
+}

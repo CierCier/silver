@@ -1,8 +1,8 @@
 # TCP Standard Compliance
 
 - **Primary Specifications**: [RFC 9293 (Transmission Control Protocol)](https://datatracker.ietf.org/doc/html/rfc9293), POSIX.1-2017 Socket API.
-- **Implementation**: [`std/net/tcp.ag`](file:///home/cier/Projects/silver/std/net/tcp.ag) (`TcpStream`, `TcpListener`), [`std/sys/socket.ag`](file:///home/cier/Projects/silver/std/sys/socket.ag).
-- **Test Suite**: [`tests/net_test.ag`](file:///home/cier/Projects/silver/tests/net_test.ag), [`tests/dial_timeout_test.ag`](file:///home/cier/Projects/silver/tests/dial_timeout_test.ag).
+- **Implementation**: [`std/net/tcp.ag`](../../std/net/tcp.ag) (`TcpStream`, `TcpListener`), [`std/sys/socket.ag`](../../std/sys/socket.ag).
+- **Test Suite**: [`tests/net_test.ag`](../../tests/net_test.ag), [`tests/dial_timeout_test.ag`](../../tests/dial_timeout_test.ag).
 
 ## Compliance Table
 

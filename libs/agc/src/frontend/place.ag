@@ -1,6 +1,7 @@
 // libs/agc/src/frontend/place.ag — Place and projection representation for ownership and borrowing.
 import std.intern;
 import std.mem.vec;
+import frontend.diagnostics;
 
 enum ProjectionKind {
     Field;
@@ -17,6 +18,57 @@ struct Place {
     u32 local_id;
     u32 projections_start;
     u16 projections_count;
+}
+
+enum InitState {
+    Uninit;
+    Init;
+    Partial;
+}
+
+struct InitNodePlan {
+    u32 parent_index;
+    u32 first_child_index;
+    u32 child_count;
+    u32 projections_start;
+    u32 projections_count;
+    u32 type_id;
+    u32 field_index;
+}
+
+struct InitOwnerPlan {
+    u32 owner_local_id;
+    u32 type_id;
+    Span declaration;
+    Span function;
+    Vec<InitNodePlan> nodes;
+    Vec<Projection> projections;
+}
+
+impl InitOwnerPlan {
+    InitOwnerPlan new(u32 owner, u32 type_id, Span declaration, Span function) {
+        InitOwnerPlan plan;
+        plan.owner_local_id = owner;
+        plan.type_id = type_id;
+        plan.declaration = declaration;
+        plan.function = function;
+        plan.nodes = Vec<InitNodePlan>.new();
+        plan.projections = Vec<Projection>.new();
+        return move plan;
+    }
+
+    InitOwnerPlan clone(&self) {
+        InitOwnerPlan copy = InitOwnerPlan.new(self.owner_local_id, self.type_id,
+                                               self.declaration, self.function);
+        i64 i = 0;
+        while (i < self.nodes.len()) { copy.nodes.push(self.nodes.get(i)); i += 1; }
+        i = 0;
+        while (i < self.projections.len()) {
+            copy.projections.push(self.projections.get(i));
+            i += 1;
+        }
+        return move copy;
+    }
 }
 
 impl Place {

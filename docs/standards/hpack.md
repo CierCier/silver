@@ -1,8 +1,8 @@
 # HPACK Header Compression Standard Compliance
 
 - **Primary Specifications**: [RFC 7541 (HPACK: Header Compression for HTTP/2)](https://datatracker.ietf.org/doc/html/rfc7541).
-- **Implementation**: [`std/net/hpack.ag`](file:///home/cier/Projects/silver/std/net/hpack.ag) (`HpackContext`, `HpackField`, `hpack_decode`, `hpack_encode`).
-- **Test Suite**: [`tests/hpack_test.ag`](file:///home/cier/Projects/silver/tests/hpack_test.ag).
+- **Implementation**: [`std/net/hpack.ag`](../../std/net/hpack.ag) (`HpackContext`, `HpackField`, `hpack_decode`, `hpack_encode`).
+- **Test Suite**: [`tests/hpack_test.ag`](../../tests/hpack_test.ag).
 
 ## Compliance Table
 

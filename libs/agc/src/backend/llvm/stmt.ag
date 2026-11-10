@@ -13,6 +13,7 @@ import backend.llvm.drop;
 import backend.llvm.expr;
 import backend.llvm.types;
 import backend.llvm.mono;
+import backend.llvm.reference;
 
 LLVMOpaqueValue* llvm_entry_alloca(LlvmContext* ctx, LLVMOpaqueType* llvm_type, str name) {
     LLVMOpaqueBasicBlock* entry = LLVMGetEntryBasicBlock(ctx.current_fn);
@@ -110,7 +111,7 @@ void llvm_emit_compound_assignment(LlvmContext* ctx, u32 stmt_id) {
             base_id = llvm_assignment_alias(ctx, base, base_type, target.span, "$compound_base");
             if (temporary_base) {
                 // Index and RHS expressions may return from the enclosing function.
-                llvm_register_local_drops(ctx, ctx.names.intern("$compound_base"), base, base_type, true);
+                llvm_register_local_drops(ctx, ctx.names.intern("$compound_base"), base, base_type, true, target.span);
             }
         }
         LLVMOpaqueValue* index = llvm_emit_expr(ctx, target.inner1);
@@ -179,6 +180,8 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
             if (user_cast != (LLVMOpaqueValue*)0) {
                 val = user_cast;
             } else {
+                val = llvm_compat_value(ctx, val, from_type, ctx.current_return_type);
+                if (LLVMTypeOf(val) != ret_ty) {
                 u32 v_kind = LLVMGetTypeKind(LLVMTypeOf(val));
                 u32 r_kind = LLVMGetTypeKind(ret_ty);
                 if (r_kind == (u32)8 && v_kind == (u32)8) {
@@ -210,6 +213,7 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
                 } else {
                     ctx.note_unresolved("return-type", "expression");
                     val = LLVMConstNull(ret_ty);
+                }
                 }
             }
         }
@@ -392,7 +396,7 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
                 ctx.note_unresolved("local-initializer", var_name);
             }
         }
-        llvm_register_local_drops(ctx, var_name_id, ptr, type_id, stmt.inner1 != 0);
+        llvm_register_local_drops(ctx, var_name_id, ptr, type_id, stmt.inner1 != 0, stmt.span);
         return;
     }
 
@@ -439,7 +443,9 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
                 return;
             }
         }
-        LLVMOpaqueValue* target_ptr = llvm_emit_lvalue(ctx, stmt.inner0);
+        LlvmPlace target_place = llvm_emit_reference_place(ctx, stmt.inner0);
+        LLVMOpaqueValue* target_ptr = target_place.data;
+        if (target_ptr == (LLVMOpaqueValue*)0) { target_ptr = llvm_emit_lvalue(ctx, stmt.inner0); }
         u32 saved_expected = ctx.expected_type_id;
         ctx.expected_type_id = llvm_lvalue_type(ctx, stmt.inner0);
         LLVMOpaqueValue* val = llvm_emit_expr(ctx, stmt.inner1);
@@ -465,12 +471,16 @@ void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
             // RHS transfers ownership to the target; the source stays
             // readable but no longer drops.
             llvm_clear_copy_source(ctx, stmt.inner1, true);
-            llvm_emit_assign_predrop(ctx, stmt.inner0, stmt.inner1);
+            if (target_place.borrowed && target_place.node != (LLVMOpaqueValue*)0) {
+                llvm_reference_update(ctx, target_place, stmt.span, BorrowedTransition.Cleanup);
+            } else { llvm_emit_assign_predrop(ctx, stmt.inner0, stmt.inner1); }
             LLVMOpaqueValue* store = LLVMBuildStore(ctx.builder, val, target_ptr);
             if (llvm_expr_may_be_unaligned(ctx, stmt.inner0)) {
                 LLVMSetAlignment(store, 1);
             }
-            llvm_mark_assign_live(ctx, stmt.inner0);
+            if (target_place.borrowed && target_place.node != (LLVMOpaqueValue*)0) {
+                llvm_reference_update(ctx, target_place, stmt.span, BorrowedTransition.Initialize);
+            } else { llvm_mark_assign_live(ctx, stmt.inner0); }
             if (target_expr.kind == ExprKind.Var) {
                 LlvmLocal* local = ctx.find_local(target_expr.aux);
                 if (local != (LlvmLocal*)0) {

@@ -1,0 +1,294 @@
+import std.string;
+import std.fs;
+import std.path;
+import document;
+import imports;
+import params;
+import json_rpc;
+import transport;
+import capabilities;
+import workspace;
+import project.manifest;
+import frontend.ast;
+import frontend.lexer;
+
+struct FileRename {
+    String old_path;
+    String new_path;
+}
+
+// Parse the `files` array of a workspace file-operation request.
+Vec<FileRename> parse_file_renames(str params) {
+    Vec<FileRename> renames = Vec<FileRename>.new();
+    String files = json_field(params, "files");
+    JsonReader reader = JsonReader.new(files.to_str());
+    if (!reader.begin_array()) { return move renames; }
+    reader.skip_whitespace();
+    while (!reader.failed && reader.index < reader.length && reader.input[reader.index] != ']') {
+        i64 start = reader.index;
+        if (!reader.skip_value()) { break; }
+        String item = files.substr(start, reader.index - start);
+        String old_uri = String.new(); String new_uri = String.new();
+        if (json_string(item.to_str(), "oldUri", &old_uri) && json_string(item.to_str(), "newUri", &new_uri)) {
+            String old_path = document_path(old_uri.to_str());
+            String new_path = document_path(new_uri.to_str());
+            if (old_path.len() > 0 && new_path.len() > 0 && !old_path.equals(new_path.to_str())) {
+                FileRename rename; rename.old_path = move old_path; rename.new_path = move new_path;
+                renames.push(move rename);
+            }
+        }
+        if (!skip_comma_if_present(&reader)) { break; }
+        reader.skip_whitespace();
+    }
+    return move renames;
+}
+
+// Parse the `files` array of a create/delete file-operation request or a
+// didCreate/didDelete notification: plain `{ "uri": ... }` entries.
+bool parse_file_uris(str params, Vec<String>* uris) {
+    String files = json_field(params, "files");
+    JsonReader reader = JsonReader.new(files.to_str());
+    if (!reader.begin_array()) { return false; }
+    reader.skip_whitespace();
+    while (!reader.failed && reader.index < reader.length && reader.input[reader.index] != ']') {
+        i64 start = reader.index;
+        if (!reader.skip_value()) { break; }
+        String item = files.substr(start, reader.index - start);
+        String uri = String.new();
+        if (!json_string(item.to_str(), "uri", &uri) || uri.len() == 0) { return false; }
+        uris.push(move uri);
+        if (!skip_comma_if_present(&reader)) { break; }
+        reader.skip_whitespace();
+    }
+    return reader.end_array() && !reader.failed;
+}
+
+void mark_imports_dirty(DocumentStore* store) {
+    i64 i = 0;
+    while (i < store.docs.len()) { store.docs.get(i).imports_dirty = true; i += 1; }
+    store.refresh_imports();
+}
+
+// New files enter the background index; new manifests rebuild the scope.
+void handle_did_create_files(DocumentStore* store, WorkspaceIndex* index, str params) {
+    Vec<String> uris = Vec<String>.new();
+    if (!parse_file_uris(params, &uris)) { return; }
+    bool manifest = false; i64 i = 0;
+    while (i < uris.len()) {
+        String path = document_path(uris.get_ptr(i).to_str());
+        if (path.len() > 0) {
+            if (path_basename(path.to_str()).equals(MANIFEST_FILE)) { manifest = true; }
+            else if (path.ends_with(".ag")) { enqueue_index_path(index, path.to_str(), 0, false); }
+        }
+        i += 1;
+    }
+    mark_imports_dirty(store);
+    if (manifest) { *index = workspace_index(store); }
+}
+
+void handle_did_delete_files(DocumentStore* store, WorkspaceIndex* _index, str params) {
+    Vec<String> uris = Vec<String>.new();
+    if (!parse_file_uris(params, &uris)) { return; }
+    i64 i = 0;
+    while (i < uris.len()) {
+        Document* doc = store.get(uris.get_ptr(i).to_str());
+        if (doc != (Document*)0 && !doc.open) { store.close(uris.get_ptr(i).to_str()); }
+        i += 1;
+    }
+    mark_imports_dirty(store);
+}
+
+void handle_did_rename_files(DocumentStore* store, WorkspaceIndex* index, str params) {
+    Vec<FileRename> renames = parse_file_renames(params);
+    bool manifest = false; i64 i = 0;
+    while (i < renames.len()) {
+        FileRename* rename = renames.get_ptr(i);
+        String old_uri = path_to_file_uri(rename.old_path.to_str());
+        Document* doc = store.get(old_uri.to_str());
+        if (doc != (Document*)0 && !doc.open) { store.close(old_uri.to_str()); }
+        if (path_basename(rename.new_path.to_str()).equals(MANIFEST_FILE)) { manifest = true; }
+        else if (rename.new_path.ends_with(".ag")) { enqueue_index_path(index, rename.new_path.to_str(), 0, false); }
+        old_uri.drop();
+        i += 1;
+    }
+    mark_imports_dirty(store);
+    if (manifest) { *index = workspace_index(store); }
+}
+
+void collect_import_nodes(SyntaxNode* node, Vec<SyntaxNode*>* imports) {
+    if (node == (SyntaxNode*)0) { return; }
+    if (node.kind == NodeKind.Import) { imports.push(node); return; }
+    SyntaxNode* child = node.first_child;
+    while (child != (SyntaxNode*)0) {
+        collect_import_nodes(child, imports);
+        child = child.next_sibling;
+    }
+}
+
+// The module path of an import is the leading dotted identifier run; a
+// selection block or `as` alias follows it.
+bool import_module_span(SyntaxNode* item, Span* span) {
+    SyntaxNode* child = item.first_child;
+    bool started = false;
+    i64 start = 0; i64 end = 0;
+    while (child != (SyntaxNode*)0) {
+        if (child.kind != NodeKind.Token) { break; }
+        if (child.token_kind == TokenKind.Identifier) {
+            if (!started) { start = child.span.start; started = true; }
+            end = child.span.end;
+        } else if (started && child.token_kind != TokenKind.Dot) {
+            break;
+        }
+        child = child.next_sibling;
+    }
+    if (!started) { return false; }
+    *span = item.span; span.start = start; span.end = end;
+    return true;
+}
+
+// Map a resolved path through a rename, including files under a renamed directory.
+String renamed_path(str path, str old_path, str new_path) {
+    if (strcmp(path, old_path) == 0) { return String.from_str(new_path); }
+    i64 length = strlen(old_path);
+    if (strlen(path) > length && module_text_starts_with(path, old_path) && path[length] == '/') {
+        String result = String.from_str(new_path);
+        result.push_bytes((u8*)path + length, strlen(path) - length);
+        return move result;
+    }
+    return String.new();
+}
+
+String apply_renames(str path, Vec<FileRename>* renames) {
+    i64 i = 0;
+    while (i < renames.len()) {
+        FileRename* rename = renames.get_ptr(i);
+        String mapped = renamed_path(path, rename.old_path.to_str(), rename.new_path.to_str());
+        if (mapped.len() > 0) { return move mapped; }
+        i += 1;
+    }
+    return String.from_str(path);
+}
+
+// True when `name` resolves to `new_path` from `doc_path` after the renames, so
+// an earlier search base cannot shadow it with a different file.
+bool import_name_resolves_to(DocumentStore* store, str doc_path, str name, str new_path,
+                             Vec<FileRename>* renames) {
+    String relative = String.from_str(name);
+    String slashed = relative.replace(".", "/");
+    String parent = path_dirname(doc_path);
+    String root = absolute_document_path(module_root(doc_path).to_str());
+    i64 i = -1;
+    while (i < store.include_dirs.len() + 1) {
+        str base = i == -1 ? parent.to_str() : i == 0 ? root.to_str() : store.include_dirs.get_ptr(i - 1).to_str();
+        String candidate = path_join(base, slashed.to_str());
+        String source = String.from_str(candidate.to_str()); source.push_str(".ag");
+        String mapped = apply_renames(source.to_str(), renames);
+        if (mapped.equals(new_path) || file_exists(mapped.to_str())) { return mapped.equals(new_path); }
+        String artifact = String.from_str(candidate.to_str()); artifact.push_str(".agm");
+        mapped = apply_renames(artifact.to_str(), renames);
+        if (mapped.equals(new_path) || file_exists(mapped.to_str())) { return mapped.equals(new_path); }
+        i += 1;
+    }
+    return false;
+}
+
+// Recompute the module name from the base that produced the current one, so a
+// rename keeps the import style the author already used. When that base cannot
+// express the new path, fall back to any base that can.
+String import_module_for_path(DocumentStore* store, str doc_path, str old_path,
+                              str new_path, str name, Vec<FileRename>* renames) {
+    String parent = path_dirname(doc_path);
+    String root = absolute_document_path(module_root(doc_path).to_str());
+    i64 i = -1;
+    while (i < store.include_dirs.len() + 1) {
+        str base = i == -1 ? parent.to_str() : i == 0 ? root.to_str() : store.include_dirs.get_ptr(i - 1).to_str();
+        String existing = import_module_from_base(base, old_path);
+        if (existing.equals(name)) {
+            String renamed = import_module_from_base(base, new_path);
+            if (renamed.len() > 0
+                && import_name_resolves_to(store, doc_path, renamed.to_str(), new_path, renames)) {
+                return move renamed;
+            }
+        }
+        i += 1;
+    }
+    i = -1;
+    while (i < store.include_dirs.len() + 1) {
+        str base = i == -1 ? parent.to_str() : i == 0 ? root.to_str() : store.include_dirs.get_ptr(i - 1).to_str();
+        String renamed = import_module_from_base(base, new_path);
+        if (renamed.len() > 0
+            && import_name_resolves_to(store, doc_path, renamed.to_str(), new_path, renames)) {
+            return move renamed;
+        }
+        i += 1;
+    }
+    return String.new();
+}
+
+String compute_file_rename_edits(DocumentStore* store, str params, ClientOptions* client,
+                                 PendingMessage* pending) {
+    Vec<FileRename> renames = parse_file_renames(params);
+    if (renames.len() == 0) { return String.from_str("null"); }
+    Vec<Document*> documents = store.query_documents((Document*)0);
+    String out = String.from_str(client.versioned_edits ? "{\"documentChanges\":[" : "{\"changes\":{");
+    bool first_doc = true; i64 d = 0;
+    while (d < documents.len() && !request_interrupted(pending)) {
+        Document* doc = documents.get(d);
+        if (doc.path.len() > 0) {
+            doc.ensure_syntax();
+            // A document that is itself moving resolves imports from its new home.
+            String effective_path = doc.path.clone();
+            i64 moved = 0;
+            while (moved < renames.len()) {
+                FileRename* rename = renames.get_ptr(moved);
+                String target = renamed_path(effective_path.to_str(), rename.old_path.to_str(), rename.new_path.to_str());
+                if (target.len() > 0) { effective_path = move target; break; }
+                moved += 1;
+            }
+            Vec<SyntaxNode*> imports = Vec<SyntaxNode*>.new();
+            collect_import_nodes(doc.analysis.tree.root, &imports);
+            String edits = String.new(); bool first = true; i64 i = 0;
+            while (i < imports.len() && !request_interrupted(pending)) {
+                Span span;
+                if (import_module_span(imports.get(i), &span)) {
+                    String name = doc.text.substr(span.start, span.end - span.start);
+                    String resolved = resolve_document_import(store, doc, name.to_str());
+                    i64 r = 0;
+                    while (r < renames.len() && resolved.len() > 0) {
+                        FileRename* rename = renames.get_ptr(r);
+                        String target = renamed_path(resolved.to_str(), rename.old_path.to_str(), rename.new_path.to_str());
+                        if (target.len() > 0) {
+                            String new_name = import_module_for_path(store, effective_path.to_str(), resolved.to_str(), target.to_str(), name.to_str(), &renames);
+                            if (new_name.len() > 0 && !new_name.equals(name.to_str())) {
+                                if (!first) { edits.push(','); } first = false;
+                                edits.push_str("{\"range\":"); doc.append_range(&edits, span);
+                                edits.push_str(",\"newText\":\""); json_escape(new_name.to_str(), &edits); edits.push_str("\"}");
+                            }
+                            break;
+                        }
+                        r += 1;
+                    }
+                }
+                i += 1;
+            }
+            if (!first) {
+                if (!first_doc) { out.push(','); } first_doc = false;
+                if (client.versioned_edits) { out.push_str("{\"textDocument\":{\"uri\":\""); }
+                else { out.push('"'); }
+                json_escape(doc.uri.to_str(), &out);
+                if (client.versioned_edits) {
+                    out.push_str("\",\"version\":");
+                    if (doc.open) { out.push_display(&doc.version); } else { out.push_str("null"); }
+                    out.push_str("},\"edits\":[");
+                } else { out.push_str("\":["); }
+                out.push_str(edits.to_str()); out.push(']');
+                if (client.versioned_edits) { out.push('}'); }
+            }
+        }
+        doc.compact();
+        d += 1;
+    }
+    if (first_doc) { return String.from_str("null"); }
+    out.push_str(client.versioned_edits ? "]}" : "}}");
+    return move out;
+}
