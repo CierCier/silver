@@ -43,6 +43,16 @@ bool parse_format_selections(Document* doc, str params, bool multiple, Vec<Forma
     return true;
 }
 
+/// Options for requests that carry no formatting settings, such as
+/// `textDocument/willSaveWaitUntil`.
+SourceFormatOptions default_format_options() {
+    SourceFormatOptions options;
+    options.tab_size = 4;
+    options.insert_spaces = true;
+    options.insert_final_newline = true;
+    return move options;
+}
+
 bool parse_format_options(str params, SourceFormatOptions* options) {
     String json = json_field(params, "options");
     String spaces = json_field(json.to_str(), "insertSpaces");

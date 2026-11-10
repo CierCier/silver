@@ -478,7 +478,24 @@ i32 dispatch_message(ServerState* state, PendingMessage* pending) {
         else if (strcmp(method, "textDocument/willSaveWaitUntil") == 0 && message.has_id) {
             String uri = String.new();
             if (!parse_document_uri_param(params, &uri)) { complete_error(pending, message.id_raw.to_str(), -32602, "Invalid document parameters"); }
-            else { complete_response(pending, message.id_raw.to_str(), "null"); }
+            else {
+                Document* doc = store.get(uri.to_str());
+                if (doc == (Document*)0) {
+                    String path = document_path(uri.to_str());
+                    if (path.len() > 0) { doc = store.load(path.to_str()); store.refresh_imports(); }
+                }
+                if (doc == (Document*)0) { complete_error(pending, message.id_raw.to_str(), -32602, "Document not found"); }
+                else {
+                    // Format-on-save: this request carries no formatting settings,
+                    // so use the server defaults instead of skipping the edit.
+                    doc.ensure_syntax();
+                    SourceFormatOptions options = default_format_options();
+                    Vec<FormatSelection> selections = Vec<FormatSelection>.new();
+                    Result<String, SourceFormatError> formatted = compute_formatting(doc, &options, false, &selections);
+                    if (formatted.is_err()) { complete_error(pending, message.id_raw.to_str(), -32803, "Formatting could not preserve the source safely"); }
+                    else { String edits = formatted.unwrap(); complete_response(pending, message.id_raw.to_str(), edits.to_str()); }
+                }
+            }
         }
         else if (strcmp(method, "client/registerCapability") == 0 && message.has_id) {
             if (!valid_registrations(params, "registrations", true)) {

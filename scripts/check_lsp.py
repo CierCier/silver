@@ -2514,6 +2514,24 @@ class NativeLsp(unittest.TestCase):
             {"start": middle, "end": position(indented, len(indented))}])
         self.assertEqual(apply_edits(indented, self.session.result("textDocument/rangesFormatting", params)), 'i32 first() {\r\n  return 1;\r\n}\r\n')
 
+    def test_will_save_wait_until_formats_document(self):
+        text = "i32 main(){\nreturn 1;\n}\n"
+        uri = self.open(text)
+        self.assertTrue(self.capabilities["willSaveWaitUntilProvider"])
+        edits = self.session.result("textDocument/willSaveWaitUntil",
+                                    {"textDocument": {"uri": uri}, "reason": 1})
+        self.assertEqual(apply_edits(text, edits), "i32 main() {\n    return 1;\n}\n")
+        # A document that is already formatted needs no save-time edits.
+        clean = "i32 main() {\n    return 1;\n}\n"
+        self.session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
+            "contentChanges": [{"text": clean}]})
+        self.assertEqual(self.session.result("textDocument/willSaveWaitUntil",
+                                             {"textDocument": {"uri": uri}, "reason": 2}), [])
+
+    def test_will_save_wait_until_rejects_invalid_parameters(self):
+        response = self.session.request("textDocument/willSaveWaitUntil", {"reason": 1})
+        self.assertEqual(response["error"]["code"], -32602)
+
     def test_on_type_formatting_indents_and_dedents_without_touching_literals(self):
         text = 'i32 main() {\nreturn 0;\n    }\n'
         uri = self.open(text)
@@ -3892,7 +3910,9 @@ class NativeLsp(unittest.TestCase):
         text = "i32 main() { return 1; }\n"
         uri = self.open_in(session, text)
         session.send("textDocument/willSave", {"textDocument": {"uri": uri}, "reason": 1})
-        self.assertIsNone(session.result("textDocument/willSaveWaitUntil", {"textDocument": {"uri": uri}, "reason": 1}))
+        # Format-on-save expands the single-line body into the canonical layout.
+        save_edits = session.result("textDocument/willSaveWaitUntil", {"textDocument": {"uri": uri}, "reason": 1})
+        self.assertEqual(apply_edits(text, save_edits), "i32 main() {\n    return 1;\n}\n")
         saved = text + "i32 saved_marker() { return 2; }\n"
         session.send("textDocument/didSave", {"textDocument": {"uri": uri}, "text": saved})
         names = [item["name"] for item in session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})]
