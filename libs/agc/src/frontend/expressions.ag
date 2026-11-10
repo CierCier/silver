@@ -76,12 +76,15 @@ bool projection_token_text(SyntaxNode* node, str text) {
     return node != (SyntaxNode*)0 && strcmp(node.text, text) == 0;
 }
 
+// Keywords that may precede a type without being part of it; `move` marks an
+// ownership-taking parameter such as `move String value`.
 bool projection_is_qualifier(SyntaxNode* node) {
     return node != (SyntaxNode*)0 && node.kind == NodeKind.Token
         && (node.token_kind == TokenKind.Const
             || node.token_kind == TokenKind.Static
             || node.token_kind == TokenKind.Volatile
-            || node.token_kind == TokenKind.Mut);
+            || node.token_kind == TokenKind.Mut
+            || node.token_kind == TokenKind.Move);
 }
 
 void projection_skip_qualifiers(ProjectionTypeParser* parser) {
