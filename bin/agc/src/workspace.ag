@@ -638,26 +638,18 @@ bool workspace_package_arguments(Vec<String>* arguments, CliMatches* cli, Worksp
     String input = String.new();
     bool found = false;
     if (cli.command.equals("build")) {
-        if (cli.positional_count() > 0) {
-            Optional<String> first_positional = cli.positional(0);
-            if (!cli.has("manifest") && first_positional.is_some()) {
-                String source = first_positional.unwrap();
-                if (source.ends_with(".ag")) {
-                    source.drop();
-                    input.drop();
-                    return true;
-                }
-                // Positional manifest form: `agc build silver.toml ...`.
-                bool is_manifest = workspace_manifest_input(source.to_str(), &input);
-                source.drop();
-                if (is_manifest) { return true; }
-            }
-            workspace_error(error, "build manifests must be selected with `--manifest PATH` or given as the positional manifest");
-            input.drop();
-            return false;
-        }
+        Optional<String> first_positional = cli.positional(0);
         Optional<String> manifest_option = cli.value("manifest");
-        if (manifest_option.is_some()) {
+        if (first_positional.is_some()) {
+            String source = first_positional.unwrap();
+            if (!cli.has("manifest") && source.ends_with(".ag")) { return true; }
+            // Positional manifest form: `agc build silver.toml ...`.
+            found = !cli.has("manifest") && workspace_manifest_input(source.to_str(), &input);
+            if (!found) {
+                workspace_error(error, "build manifests must be selected with `--manifest PATH` or given as the positional manifest");
+                return false;
+            }
+        } else if (manifest_option.is_some()) {
             String manifest_path = manifest_option.unwrap();
             found = workspace_manifest_input(manifest_path.to_str(), &input);
             if (!found) {
@@ -741,13 +733,9 @@ String workspace_toml_escape(str value) {
     return move out;
 }
 
-// True when `dir` or one of its ancestors holds a `.git` entry.
+// True when the absolute directory `dir` or one of its ancestors holds a `.git` entry.
 bool workspace_inside_git_repo(str dir) {
     String current = String.from_str(dir);
-    if (!current.starts_with("/")) {
-        String cwd = current_dir();
-        current = path_join(cwd.to_str(), dir);
-    }
     while (current.len() > 0) {
         String marker = path_join(current.to_str(), ".git");
         if (exists(marker.to_str())) { return true; }
@@ -768,7 +756,12 @@ i32 workspace_init_command(CliMatches* cli) {
         Optional<String> first = cli.positional(0);
         if (first.is_some()) { target = first.unwrap(); }
     }
-    if (target.len() == 0) { target = current_dir(); }
+    // Resolve against the current directory first, so `.` and `..` name the
+    // real directory instead of becoming the package name.
+    if (!target.starts_with("/")) {
+        String cwd = current_dir();
+        target = path_join(cwd.to_str(), target.to_str());
+    }
     target = path_normalize(target.to_str());
     if (exists(target.to_str()) && !is_dir(target.to_str())) {
         STDERR.write_str("agc: error: package target `");
@@ -791,6 +784,15 @@ i32 workspace_init_command(CliMatches* cli) {
         STDERR.write_str("agc: error: could not detect a package name from the target directory; pass `--name NAME`\n");
         return 2;
     }
+    i64 name_index = 0;
+    while (name_index < name.len()) {
+        u8 ch = name.data[name_index];
+        if (ch < 32 || ch == 127) {
+            STDERR.write_str("agc: error: package name must not contain control characters; pass `--name NAME`\n");
+            return 2;
+        }
+        name_index += 1;
+    }
     String escaped = workspace_toml_escape(name.to_str());
     String manifest = String.from_str("name = \"");
     manifest.push_str(escaped.to_str());
@@ -799,21 +801,32 @@ i32 workspace_init_command(CliMatches* cli) {
     manifest.push_str("\"]\nentry = \"src/main.ag\"\n");
     escaped.drop();
     String src_dir = path_join(target.to_str(), "src");
-    if (!workspace_mkdir_p(target.to_str()) || !workspace_mkdir_p(src_dir.to_str())
-        || !write_file(manifest_path.to_str(), manifest.to_str())) {
+    String entry_path = path_join(src_dir.to_str(), "main.ag");
+    if (exists(entry_path.to_str()) && !is_file(entry_path.to_str())) {
+        STDERR.write_str("agc: error: package entry `");
+        STDERR.write_str(entry_path.to_str());
+        STDERR.write_str("` exists and is not a file\n");
+        return 2;
+    }
+    if (!workspace_mkdir_p(target.to_str()) || !workspace_mkdir_p(src_dir.to_str())) {
         STDERR.write_str("agc: error: failed to create package in `");
         STDERR.write_str(target.to_str());
         STDERR.write_str("`\n");
         return 2;
     }
-    String entry_path = path_join(src_dir.to_str(), "main.ag");
-    if (!exists(entry_path.to_str())) {
-        if (!write_file(entry_path.to_str(), INIT_ENTRY_SOURCE)) {
-            STDERR.write_str("agc: error: failed to write package entry `");
-            STDERR.write_str(entry_path.to_str());
-            STDERR.write_str("`\n");
-            return 2;
-        }
+    // The manifest is written last: a failed init leaves no manifest behind,
+    // so a retry is not rejected as "already exists".
+    if (!exists(entry_path.to_str()) && !write_file(entry_path.to_str(), INIT_ENTRY_SOURCE)) {
+        STDERR.write_str("agc: error: failed to write package entry `");
+        STDERR.write_str(entry_path.to_str());
+        STDERR.write_str("`\n");
+        return 2;
+    }
+    if (!write_file(manifest_path.to_str(), manifest.to_str())) {
+        STDERR.write_str("agc: error: failed to write package manifest `");
+        STDERR.write_str(manifest_path.to_str());
+        STDERR.write_str("`\n");
+        return 2;
     }
     // Best effort, like stage0: start a git repository when git is on PATH and
     // the package is not already inside one. execve needs a resolved path, so
