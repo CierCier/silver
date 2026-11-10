@@ -1,0 +1,89 @@
+import document;
+import std.env;
+import std.fs;
+import std.hash;
+import std.path;
+import std.process;
+
+// Diagnostics persisted across server restarts. An entry is reused only when
+// the file's text, every file in its import closure, the client's rendering
+// option, and the aglsp executable are all unchanged; anything else misses.
+
+String diagnostic_cache_directory() {
+    String root = String.new();
+    Optional<String> configured = var("SILVER_CACHE_DIR");
+    if (configured.is_some()) { root = configured.unwrap(); }
+    else {
+        configured = var("XDG_CACHE_HOME");
+        if (configured.is_some()) { root = configured.unwrap(); root.push_str("/silver"); }
+        else {
+            configured = var("HOME");
+            if (!configured.is_some()) { return move root; }
+            root = configured.unwrap(); root.push_str("/.cache/silver");
+        }
+    }
+    root.push_str("/aglsp-diagnostics-v1");
+    return move root;
+}
+
+bool create_directories(str path) {
+    if (is_dir(path)) { return true; }
+    String parent = path_dirname(path);
+    if (!parent.equals(path) && !create_directories(parent.to_str())) { return false; }
+    return create_dir(path) || is_dir(path);
+}
+
+void push_closure_hashes(Document* doc, Vec<Document*>* visited, String* key) {
+    i64 i = 0;
+    while (i < visited.len()) { if (visited.get(i) == doc) { return; } i += 1; }
+    visited.push(doc);
+    key.push_str(doc.path.to_str()); key.push(':'); key.push_display(&doc.text_hash); key.push(';');
+    i = 0;
+    while (i < doc.dependencies.len()) { push_closure_hashes(doc.dependencies.get(i), visited, key); i += 1; }
+}
+
+// Empty when the server cannot identify its own executable, which disables caching.
+String diagnostic_cache_key(Document* doc, bool related_information) {
+    Result<Metadata, Error> executable = metadata("/proc/self/exe");
+    if (executable.is_err() || doc.path.len() == 0) { return String.new(); }
+    Metadata stamp = executable.unwrap();
+    String key = String.new();
+    key.push_display(&stamp.size); key.push(':'); key.push_display(&stamp.mtime_sec); key.push(':');
+    key.push_display(&stamp.mtime_nsec); key.push(related_information ? '1' : '0'); key.push(';');
+    Vec<Document*> visited = Vec<Document*>.new();
+    push_closure_hashes(doc, &visited, &key);
+    i64 hashed = hash_bytes(key.data, key.len());
+    String out = String.new(); out.push_display(&hashed); return move out;
+}
+
+String diagnostic_cache_entry(str directory, Document* doc) {
+    i64 name = hash_bytes(doc.path.data, doc.path.len());
+    String file = String.new(); file.push_display(&name); file.push_str(".json");
+    return path_join(directory, file.to_str());
+}
+
+// The entry holds the key on its first line and the rendered items after it.
+bool load_cached_diagnostics(Document* doc, str key, String* items) {
+    String directory = diagnostic_cache_directory();
+    if (directory.len() == 0 || strlen(key) == 0) { return false; }
+    String entry = diagnostic_cache_entry(directory.to_str(), doc);
+    Result<String, Error> content = read_file(entry.to_str());
+    if (content.is_err()) { return false; }
+    String text = content.unwrap(); i64 newline = text.find("\n");
+    if (newline <= 0) { return false; }
+    String stored = text.substr(0, newline);
+    if (!stored.equals(key)) { return false; }
+    *items = text.substr(newline + 1, text.len() - newline - 1);
+    return items.starts_with("[");
+}
+
+void store_cached_diagnostics(Document* doc, str key, str items) {
+    String directory = diagnostic_cache_directory();
+    if (directory.len() == 0 || strlen(key) == 0 || !create_directories(directory.to_str())) { return; }
+    String entry = diagnostic_cache_entry(directory.to_str(), doc);
+    // A per-process temporary keeps concurrent servers from interleaving writes.
+    i64 pid = getpid();
+    String temporary = entry.clone(); temporary.push('.'); temporary.push_display(&pid); temporary.push_str(".tmp");
+    String content = String.from_str(key); content.push('\n'); content.push_str(items);
+    if (write_file(temporary.to_str(), content.to_str())) { rename(temporary.to_str(), entry.to_str()); }
+}

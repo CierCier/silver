@@ -3,6 +3,7 @@ import params;
 
 // Keep in step with the workspace version in silver.toml.
 const str AGLSP_VERSION = "0.2.6";
+const str INDEXED_FILE_FILTERS = "{\"filters\":[{\"scheme\":\"file\",\"pattern\":{\"glob\":\"**/*.ag\"}},{\"scheme\":\"file\",\"pattern\":{\"glob\":\"**/silver.toml\"}}]}";
 
 enum SemanticFullMode { Disabled; Full; Delta; }
 
@@ -110,6 +111,7 @@ struct ClientOptions {
     bool did_rename;
     bool did_delete;
     bool work_done_progress;
+    bool server_status;
     bool show_document;
     bool apply_edit;
     bool configuration;
@@ -206,6 +208,7 @@ ClientOptions client_options(str params) {
     options.did_delete = json_field(operations.to_str(), "didDelete").equals("true");
     options.work_done_progress = client_field(params, "capabilities.window.workDoneProgress").equals("true");
     options.show_document = client_field(params, "capabilities.window.showDocument.support").equals("true");
+    options.server_status = client_field(params, "capabilities.experimental.serverStatusNotification").equals("true");
     options.apply_edit = client_field(params, "capabilities.workspace.applyEdit").equals("true");
     options.configuration = client_field(params, "capabilities.workspace.configuration").equals("true");
     options.code_lens_refresh = client_field(params, "capabilities.workspace.codeLens.refreshSupport").equals("true");
@@ -247,9 +250,11 @@ String server_capabilities(ClientOptions* client) {
             if (!first_operation) { out.push(','); } first_operation = false;
             out.push_str("\"willDelete\":{\"filters\":[{\"scheme\":\"file\",\"pattern\":{\"glob\":\"**/*.ag\"}},{\"scheme\":\"file\",\"pattern\":{\"glob\":\"**\",\"matches\":\"folder\"}}]}");
         }
-        if (client.did_create) { if (!first_operation) { out.push(','); } first_operation = false; out.push_str("\"didCreate\":true"); }
-        if (client.did_rename) { if (!first_operation) { out.push(','); } first_operation = false; out.push_str("\"didRename\":true"); }
-        if (client.did_delete) { if (!first_operation) { out.push(','); } out.push_str("\"didDelete\":true"); }
+        // Each value must be FileOperationRegistrationOptions; strict clients
+        // such as Zed reject a bare `true`. Sources reindex, manifests rescope.
+        if (client.did_create) { if (!first_operation) { out.push(','); } first_operation = false; out.push_str("\"didCreate\":"); out.push_str(INDEXED_FILE_FILTERS); }
+        if (client.did_rename) { if (!first_operation) { out.push(','); } first_operation = false; out.push_str("\"didRename\":"); out.push_str(INDEXED_FILE_FILTERS); }
+        if (client.did_delete) { if (!first_operation) { out.push(','); } out.push_str("\"didDelete\":"); out.push_str(INDEXED_FILE_FILTERS); }
         out.push_str("}");
     }
     out.push_str("},");

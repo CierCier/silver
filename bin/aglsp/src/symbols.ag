@@ -151,7 +151,8 @@ String compute_hover(Document* doc, i64 offset, bool markdown) {
     IdeSymbol* symbol = target.document.analysis.symbols.get_ptr(target.symbol);
     String content = String.new();
     if (markdown) { content.push_str("```silver\n"); }
-    content.push_str(symbol.signature.to_str());
+    String signature = concrete_signature(doc, occurrence, target);
+    content.push_str(signature.to_str());
     if (markdown) { content.push_str("\n```"); }
     append_hover_documentation(&content, symbol, markdown);
     String out = String.from_str("{\"contents\":{\"kind\":\""); out.push_str(markdown ? "markdown" : "plaintext"); out.push_str("\",\"value\":\"");

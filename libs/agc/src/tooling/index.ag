@@ -154,7 +154,9 @@ void ide_append_tokens(SyntaxNode* node, String* text) {
     if (node.kind == NodeKind.Token) {
         if (text.len() > 0 && strlen(node.text) > 0) {
             u8 previous = text.data[text.len() - 1];
-            if ((typecheck_name_continue(previous) && typecheck_name_continue((u8)node.text[0]))
+            bool name = typecheck_name_continue((u8)node.text[0]);
+            // `Vec<T> items` and `Document* self`: a name after a closed type stays separate.
+            if ((name && (typecheck_name_continue(previous) || previous == (u8)'>' || previous == (u8)'*'))
                 || previous == (u8)',') { text.push(' '); }
         }
         text.push_str(node.text);
@@ -255,6 +257,18 @@ String ide_owner_name(str text) {
         i += 1;
     }
     return String.new();
+}
+
+// True when a member name is followed by call arguments, as in `value.len()`.
+bool ide_member_call(SyntaxNode* node) {
+    SyntaxNode* next = node.next_sibling;
+    return next != (SyntaxNode*)0 && next.kind == NodeKind.Parenthesized;
+}
+
+// `String` has both a `len` field and a `len()` method. Call syntax prefers
+// the method; a bare member prefers the field or variant.
+bool ide_member_preferred(IdeSymbolKind kind, bool call) {
+    return call == (kind == IdeSymbolKind.Method);
 }
 
 bool ide_type_symbol(IdeSymbolKind kind) {
@@ -511,10 +525,16 @@ void ide_members(IdeIndex* index, SyntaxNode* item, str owner, bool methods, Sym
         SyntaxNode* name = (SyntaxNode*)0;
         SyntaxNode* params = (SyntaxNode*)0;
         SyntaxNode* body = (SyntaxNode*)0;
+        // Identifiers inside `<...>` belong to type arguments or generic
+        // parameters: `void push_display<T: Display>(...)` is named `push_display`.
+        i64 depth = 0;
         while (cursor != (SyntaxNode*)0 && cursor.token_kind != TokenKind.Semicolon) {
             if (cursor.kind == NodeKind.Parenthesized && params == (SyntaxNode*)0) { params = cursor; }
             if (cursor.kind == NodeKind.Block) { body = cursor; break; }
-            if (node_is_identifier(cursor) && params == (SyntaxNode*)0) { name = cursor; }
+            if (cursor.token_kind == TokenKind.Less) { depth += 1; }
+            else if (cursor.token_kind == TokenKind.Greater) { depth -= 1; }
+            else if (cursor.token_kind == TokenKind.RightShift) { depth -= 2; }
+            else if (node_is_identifier(cursor) && params == (SyntaxNode*)0 && depth <= 0) { name = cursor; }
             cursor = cursor.next_sibling;
         }
         SyntaxNode* end = cursor == (SyntaxNode*)0 ? (SyntaxNode*)0 : cursor.next_sibling;
@@ -570,15 +590,20 @@ void ide_collect_nodes(IdeIndex* index, SyntaxNode* node, bool import_selection)
                     }
                 }
             }
+            bool call = ide_member_call(node); i64 preferred = -1;
             i64 i = ide_name_head(index, node.text);
             while (i >= 0 && occurrence.owner.len() > 0) {
                 IdeSymbol* symbol = index.symbols.get_ptr(i);
                 if (symbol.owner.equals(occurrence.owner.to_str()) && symbol.name.equals(node.text)) {
                     if (occurrence.symbol == -1) { occurrence.symbol = i; }
                     else { occurrence.symbol = -2; }
+                    if (ide_member_preferred(symbol.kind, call)) {
+                        if (preferred == -1) { preferred = i; } else { preferred = -2; }
+                    }
                 }
                 i = index.next_name.get(i);
             }
+            if (preferred != -1) { occurrence.symbol = preferred; }
         }
         index.occurrences.push(move occurrence);
     }

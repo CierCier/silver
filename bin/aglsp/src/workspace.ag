@@ -79,6 +79,39 @@ struct WorkspaceIndex {
     Vec<IndexPath> paths;
     Vec<String> seen_paths;
     Vec<String> manifests;
+    // Directories the walk skips, from workspace roots' `.gitignore`: bare
+    // names (`dist/`) match anywhere, anchored entries (`/playground/`) one path.
+    Vec<String> ignored_names;
+    Vec<String> ignored_paths;
+}
+
+// Reads the plain directory entries of `root/.gitignore`. Globs and negations
+// are left to git; skipping fewer directories only costs indexing time.
+void read_ignored_directories(WorkspaceIndex* index, str root) {
+    String file = path_join(root, ".gitignore");
+    Result<Vec<String>, Error> lines = read_lines(file.to_str());
+    if (lines.is_err()) { return; }
+    Vec<String> entries = lines.unwrap(); i64 i = 0;
+    while (i < entries.len()) {
+        String line = entries.get_ptr(i).trim(); i += 1;
+        if (line.len() < 2 || !line.ends_with("/") || line.starts_with("#") || line.starts_with("!")
+            || line.contains("*") || line.contains("?") || line.contains("[")) { continue; }
+        bool anchored = line.starts_with("/");
+        String name = line.substr(anchored ? 1 : 0, line.len() - (anchored ? 2 : 1));
+        if (name.len() == 0) { continue; }
+        if (anchored) { String path = path_join(root, name.to_str()); index.ignored_paths.push(path_normalize(path.to_str())); }
+        else if (!name.contains("/")) { index.ignored_names.push(move name); }
+    }
+}
+
+bool ignored_directory(WorkspaceIndex* index, str name, str path) {
+    i64 i = 0;
+    while (i < index.ignored_names.len()) { if (index.ignored_names.get_ptr(i).equals(name)) { return true; } i += 1; }
+    i = 0;
+    while (i < index.ignored_paths.len()) { if (index.ignored_paths.get_ptr(i).equals(path)) { return true; } i += 1; }
+    // A nested repository (such as an editor's grammar checkout) is not this project.
+    String git = path_join(path, ".git");
+    return file_exists(git.to_str()) || is_dir(git.to_str());
 }
 
 struct ManifestPath { String path; i64 depth; }
@@ -143,7 +176,7 @@ void preload_project_manifests(DocumentStore* store, WorkspaceIndex* index) {
         }
         i += 1;
     }
-    store.manifest_dirs.clear(); store.project_roots.clear();
+    store.manifest_dirs.clear(); store.project_roots.clear(); store.project_entries.clear();
     Vec<ManifestPath> pending = Vec<ManifestPath>.new(); i = 0;
     while (i < store.roots.len()) {
         String manifest = project_manifest(store.roots.get_ptr(i).to_str());
@@ -159,10 +192,12 @@ void preload_project_manifests(DocumentStore* store, WorkspaceIndex* index) {
         }
         i += 1;
     }
-    load_project_manifests(store, index, &pending);
+    load_project_manifests(store, index, &pending, true);
 }
 
-void load_project_manifests(DocumentStore* store, WorkspaceIndex* index, Vec<ManifestPath>* pending) {
+// `entries` records target entries as diagnostic roots. Manifests found while
+// walking folders (nested checkouts, playgrounds) are indexed but not reported.
+void load_project_manifests(DocumentStore* store, WorkspaceIndex* index, Vec<ManifestPath>* pending, bool entries) {
     i64 i = 0;
     while (pending.len() > 0) {
         ManifestPath entry = pending.take(0);
@@ -184,6 +219,7 @@ void load_project_manifests(DocumentStore* store, WorkspaceIndex* index, Vec<Man
                 project_preload_error(entry.path.to_str(), error.to_str());
             } else if (item.has_entry) {
                 if (!path_within_roots(&store.project_roots, path.to_str())) { store.project_roots.push(path.clone()); }
+                if (entries) { store.project_entries.push(path.clone()); }
                 enqueue_index_path(index, path.to_str(), 0, false);
             }
             else { enqueue_manifest(index, pending, path.to_str(), entry.depth + 1); }
@@ -213,9 +249,11 @@ void load_project_manifests(DocumentStore* store, WorkspaceIndex* index, Vec<Man
 WorkspaceIndex workspace_index(DocumentStore* store) {
     WorkspaceIndex index; index.paths = Vec<IndexPath>.new();
     index.seen_paths = Vec<String>.new(); index.manifests = Vec<String>.new(); i64 i = 0;
+    index.ignored_names = Vec<String>.new(); index.ignored_paths = Vec<String>.new();
     while (i < store.roots.len()) {
         String* root = store.roots.get_ptr(i); Result<Metadata, Error> stat = metadata(root.to_str());
         bool directory = true; if (stat.is_ok()) { directory = stat.unwrap().is_dir; }
+        if (directory) { read_ignored_directories(&index, root.to_str()); }
         if (directory || root.ends_with(".ag")) { enqueue_index_path(&index, root.to_str(), 0, directory); }
         i += 1;
     }
@@ -263,8 +301,9 @@ void index_workspace_step(DocumentStore* store, WorkspaceIndex* index) {
                 if (file && name.equals(MANIFEST_FILE)) {
                     Vec<ManifestPath> pending = Vec<ManifestPath>.new();
                     enqueue_manifest(index, &pending, child.to_str(), 0);
-                    if (pending.len() > 0) { load_project_manifests(store, index, &pending); }
-                } else if (directory || (file && name.ends_with(".ag"))) {
+                    if (pending.len() > 0) { load_project_manifests(store, index, &pending, false); }
+                } else if ((directory && !ignored_directory(index, name.to_str(), child.to_str()))
+                           || (file && name.ends_with(".ag"))) {
                     enqueue_index_path(index, child.to_str(), path.depth + 1, directory);
                 }
             }

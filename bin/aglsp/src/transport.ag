@@ -21,11 +21,44 @@ struct PendingMessage {
     // Analysis flags belong to the dispatcher; sealing excludes reader cancels.
     bool preemptible;
     bool pressure_interrupted;
+    // Background work (workspace diagnostics) stops for any queued message so
+    // hovers and edits are not stuck behind a whole-workspace scan.
+    bool yields;
     bool sealed;
     RequestCompletion completion;
     // Completion generation this request was queued in; a newer generation
     // means the client has already moved on.
     i32 completion_epoch;
+}
+
+// Rust-analyzer's `experimental/serverStatus` notification, which Zed shows
+// under the server in its language server menu. Only clients that advertise
+// `experimental.serverStatusNotification` receive it; repeats are dropped.
+struct ServerStatus {
+    bool enabled;
+    bool busy;
+    String last;
+    // A workspace diagnostic pull yielded and its retry has not finished.
+    bool pull_pending;
+    // Latest finished workspace diagnostic pull, for the idle summary (-1: none).
+    i64 checked;
+    i64 failing;
+}
+
+impl ServerStatus {
+    ServerStatus new() {
+        ServerStatus status; status.enabled = false; status.busy = false; status.last = String.new();
+        status.pull_pending = false; status.checked = -1; status.failing = 0; return move status;
+    }
+
+    void report(ServerStatus* self, bool quiescent, str message) {
+        self.busy = !quiescent;
+        if (!self.enabled || self.last.equals(message)) { return; }
+        self.last = String.from_str(message);
+        String out = String.from_str("{\"health\":\"ok\",\"quiescent\":"); out.push_str(quiescent ? "true" : "false");
+        out.push_str(",\"message\":\""); json_escape(message, &out); out.push_str("\"}");
+        send_notification("experimental/serverStatus", out.to_str());
+    }
 }
 
 // Only the dispatcher owns documents and writes stdout. The reader owns stdin;
@@ -41,6 +74,8 @@ struct Transport {
     // workDoneProgress/cancel for it stops background indexing.
     String index_identity;
     i32 index_cancelled;
+    // Dispatcher-only, like stdout.
+    ServerStatus status;
 }
 
 String request_identity(str raw) {
@@ -74,6 +109,7 @@ bool request_interrupted(PendingMessage* message) {
         message.pressure_interrupted = true;
     }
     if (__atomic_load_i32(&transport.reader_waiting, ATOMIC_ACQUIRE) != 0) { message.pressure_interrupted = true; }
+    if (message.yields && transport.messages.len() > 0) { message.pressure_interrupted = true; }
     return message.pressure_interrupted;
 }
 
@@ -102,7 +138,7 @@ void complete_response(PendingMessage* message, str id, str result) {
     else if (message.completion == RequestCompletion.Interrupted) {
         // ServerCancelled with retriggerRequest: clients re-send the request
         // (diagnostic pulls included) instead of reporting a failure.
-        send_error_with_data(id, -32802, "Analysis interrupted because the input queue is full; retry the request",
+        send_error_with_data(id, -32802, "Analysis interrupted by newer client messages; retry the request",
             "{\"retriggerRequest\":true}");
     }
     else { send_response(id, result); }
@@ -195,6 +231,7 @@ impl Transport {
         transport.stopping = 0;
         transport.completion_epoch = 0;
         transport.index_identity = request_identity("\"silver/index\"");
+        transport.status = ServerStatus.new();
         __atomic_store_i32(&transport.index_cancelled, 0, ATOMIC_RELEASE);
         __atomic_store_i32(&transport.reader_waiting, 0, ATOMIC_RELEASE);
         return move transport;

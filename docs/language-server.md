@@ -226,6 +226,24 @@ Standalone parent manifest discovery runs only when neither `rootUri` nor a
 `workspaceFolders` array is declared during initialization; declaring an explicit
 empty folders list (`[]`) or removing the last declared workspace root keeps
 discovery disabled. Manifest change notifications rebuild the package scope.
+The folder walk skips plain directory entries in a workspace root's `.gitignore`
+(`dist/`, `/playground/`; glob patterns are not interpreted) and nested
+repositories that contain their own `.git`. Files opened from those directories
+are still analyzed.
+
+Workspace diagnostics cover what the project builds or the user opened: target
+entry files from the `silver.toml` chain, open files, and their imports.
+Manifests found while walking folders are indexed but do not add entries.
+Results persist in `$SILVER_CACHE_DIR/aglsp-diagnostics-v1` (default
+`$XDG_CACHE_HOME/silver`, then `~/.cache/silver`). An entry is reused only when the
+file, every file in its import closure, and the `aglsp` executable are unchanged,
+so a restart re-checks only what changed.
+
+Files that miss the cache are checked on worker threads: half the CPUs the
+process may use by default, or `AGLSP_JOBS` when set. Parsing, import
+resolution, and rendering stay on the dispatcher thread. A client message that
+arrives during the check stops the workers after the files in hand; finished
+results are kept, and the pull is retried with `retriggerRequest`.
 
 Closed files retain source text and symbol metadata. Their parse trees, tokens,
 and occurrence tables are released after use. Cross-file navigation restores
