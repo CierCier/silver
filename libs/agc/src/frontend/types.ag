@@ -3,29 +3,52 @@ import std.intern;
 import std.mem.vec;
 import std.string;
 
+/// Type id for a type that has not been resolved.
 const u32 TYPE_UNKNOWN = 0;
+/// Type id of the builtin `void`.
 const u32 TYPE_VOID = 1;
+/// Type id of the builtin `bool`.
 const u32 TYPE_BOOL = 2;
+/// Type id of the builtin `i8`.
 const u32 TYPE_I8 = 3;
+/// Type id of the builtin `i16`.
 const u32 TYPE_I16 = 4;
+/// Type id of the builtin `i32`.
 const u32 TYPE_I32 = 5;
+/// Type id of the builtin `i64`.
 const u32 TYPE_I64 = 6;
+/// Type id of the builtin `i128`.
 const u32 TYPE_I128 = 7;
+/// Type id of the builtin `u8`.
 const u32 TYPE_U8 = 8;
+/// Type id of the builtin `u16`.
 const u32 TYPE_U16 = 9;
+/// Type id of the builtin `u32`.
 const u32 TYPE_U32 = 10;
+/// Type id of the builtin `u64`.
 const u32 TYPE_U64 = 11;
+/// Type id of the builtin `u128`.
 const u32 TYPE_U128 = 12;
+/// Type id of the builtin `f32`.
 const u32 TYPE_F32 = 13;
+/// Type id of the builtin `f64`.
 const u32 TYPE_F64 = 14;
+/// Type id of the builtin `f80`.
 const u32 TYPE_F80 = 15;
+/// Type id of the builtin `c32`.
 const u32 TYPE_C32 = 16;
+/// Type id of the builtin `c64`.
 const u32 TYPE_C64 = 17;
+/// Type id of the builtin `c80`.
 const u32 TYPE_C80 = 18;
+/// Type id of the builtin `str`.
 const u32 TYPE_STR = 19;
+/// Type id of the builtin `char`.
 const u32 TYPE_CHAR = 20;
+/// Largest builtin type id; ids above it are interned compound types.
 const u32 TYPE_PRIMITIVE_MAX = 20;
 
+/// The shape of a `TypeEntry`.
 enum TypeKind {
     Unknown;
     Void;
@@ -58,11 +81,14 @@ enum TypeKind {
     Tuple;
 }
 
+/// Whether values of a type copy implicitly and whether they need drop glue.
 struct TypeProperties {
     bool is_copy;
     bool needs_drop;
 }
 
+/// Returns true for stdlib type names known to own resources (String, Vec,
+/// HashMap, and similar), before user `Drop` impls are known.
 bool type_name_needs_drop(str name) {
     return strcmp(name, "String") == 0 || strcmp(name, "Vec") == 0
         || strcmp(name, "VecIter") == 0 || strcmp(name, "Bytes") == 0
@@ -79,11 +105,14 @@ bool type_name_needs_drop(str name) {
         || strcmp(name, "Set") == 0 || strcmp(name, "Map") == 0;
 }
 
+/// Returns true for types that must never copy implicitly (`Task`).
 bool type_name_is_move_only(str name) {
     return strcmp(name, "Task") == 0;
 }
 
 
+/// One interned type. `inner` is the pointee/element type, or the start of
+/// its arguments in `type_args`; `count` is the array length or argument count.
 struct TypeEntry {
     TypeKind kind;
     u32 inner;
@@ -92,11 +121,14 @@ struct TypeEntry {
     bool is_mut;
 }
 
+/// One active generic substitution: type parameter `name_id` means `type_id`.
 struct TypeSubst {
     u32 name_id;
     u32 type_id;
 }
 
+/// Layout facts recorded for a named struct: field types, field names, type
+/// parameters (as ranges into shared vectors), and whether it needs drop.
 struct TypeStructProperties {
     u32 name_id;
     u32 field_start;
@@ -108,6 +140,8 @@ struct TypeStructProperties {
     bool needs_drop;
 }
 
+/// Whether a method parameter takes its argument by value, keyed by owner,
+/// method, arity, and parameter index.
 struct TypeMethodParam {
     u32 owner_name_id;
     u32 method_name_id;
@@ -117,6 +151,9 @@ struct TypeMethodParam {
     bool is_value;
 }
 
+/// The canonical type table: interned types addressed by `u32` id, plus
+/// struct facts, method parameter facts, and the generic substitution stack.
+/// Interning uses a linear scan, so lookups are O(number of types).
 struct TypeTable {
     Interner names;
     Vec<TypeEntry> types;
@@ -129,6 +166,8 @@ struct TypeTable {
     Vec<u32> packed_structs;
     Vec<TypeMethodParam> method_params;
 }
+/// Computes copy/drop properties of type `id`, recursing into fields and
+/// elements up to depth 256 (deeper types report neither).
 TypeProperties type_properties_at(TypeTable* table, u32 id, u32 depth) {
     TypeProperties properties;
     properties.is_copy = false;
@@ -200,6 +239,7 @@ TypeProperties type_properties_at(TypeTable* table, u32 id, u32 depth) {
     return properties;
 }
 
+/// Returns true for an identifier byte in a type name.
 bool type_is_ident_char(u8 c) {
     return (c >= (u8)'a' && c <= (u8)'z')
         || (c >= (u8)'A' && c <= (u8)'Z')
@@ -208,6 +248,7 @@ bool type_is_ident_char(u8 c) {
 }
 
 impl TypeTable {
+    /// Creates a table preloaded with the builtin types at their fixed ids.
     TypeTable new() {
         TypeTable table;
         table.names = Interner.new();
@@ -254,6 +295,7 @@ impl TypeTable {
         return move table;
     }
 
+    /// Returns a deep copy.
     TypeTable clone(&self) {
         TypeTable copy;
         copy.names = self.names.clone();
@@ -287,6 +329,7 @@ impl TypeTable {
         return move copy;
     }
 
+    /// Internal: appends a builtin type entry.
     void add_prim(TypeTable* self, TypeKind kind, str name) {
         TypeEntry entry;
         entry.kind = kind;
@@ -297,6 +340,7 @@ impl TypeTable {
         self.types.push(move entry);
     }
 
+    /// Returns the interned id of a pointer to `inner`, adding it when new.
     u32 get_pointer(TypeTable* self, u32 inner, bool is_mut) {
         i64 i = (i64)(TYPE_PRIMITIVE_MAX + 1);
         while (i < self.types.len()) {
@@ -316,6 +360,7 @@ impl TypeTable {
         return (u32)(self.types.len() - 1);
     }
 
+    /// Returns the interned id of a reference to `inner`, adding it when new.
     u32 get_reference(TypeTable* self, u32 inner, bool is_mut) {
         i64 i = (i64)(TYPE_PRIMITIVE_MAX + 1);
         while (i < self.types.len()) {
@@ -335,6 +380,7 @@ impl TypeTable {
         return (u32)(self.types.len() - 1);
     }
 
+    /// Returns the interned id of an array of `count` elements of `inner`.
     u32 get_array(TypeTable* self, u32 inner, i64 count) {
         i64 i = (i64)(TYPE_PRIMITIVE_MAX + 1);
         while (i < self.types.len()) {
@@ -354,6 +400,7 @@ impl TypeTable {
         return (u32)(self.types.len() - 1);
     }
 
+    /// Returns the interned id of the tuple type with `elements`.
     u32 get_tuple(TypeTable* self, Vec<u32>* elements) {
         i64 i = (i64)(TYPE_PRIMITIVE_MAX + 1);
         while (i < self.types.len()) {
@@ -387,6 +434,7 @@ impl TypeTable {
         return (u32)(self.types.len() - 1);
     }
 
+    /// Returns the interned id of a function type.
     u32 get_function(TypeTable* self, u32 result_type, Vec<u32>* parameters) {
         String signature = String.from_str(self.type_name(result_type));
         signature.push((u8)'(');
@@ -429,6 +477,7 @@ impl TypeTable {
     // specialized generic instance, type parameters resolve to concrete ids.
     // Method inference and native specialization scope these bindings around
     // a template query, then restore the caller's substitution stack.
+    /// Pushes a generic substitution; pair with `pop_subst`.
     void push_subst(TypeTable* self, u32 name_id, u32 type_id) {
         TypeSubst binding;
         binding.name_id = name_id;
@@ -436,6 +485,7 @@ impl TypeTable {
         self.subst.push(move binding);
     }
 
+    /// Pops the last `count` generic substitutions.
     void pop_subst(TypeTable* self, i64 count) {
         while (count > 0 && self.subst.len() > 0) {
             self.subst.pop();
@@ -443,6 +493,8 @@ impl TypeTable {
         }
     }
 
+    /// Returns `id` with active substitutions applied, rebuilding compound types
+    /// whose parts change.
     u32 resolve_subst(TypeTable* self, u32 id) {
         if ((i64)id >= self.types.len()) { return id; }
         TypeEntry* source = self.types.get_ptr((i64)id);
@@ -525,6 +577,7 @@ impl TypeTable {
         return id;
     }
 
+    /// Returns the interned id of non-generic named type `name`.
     u32 get_named(TypeTable* self, str name) {
         u32 name_id = self.names.intern(name);
         i64 i = (i64)(TYPE_PRIMITIVE_MAX + 1);
@@ -545,6 +598,7 @@ impl TypeTable {
         return (u32)(self.types.len() - 1);
     }
 
+    /// Returns the interned id of named type `name` with type arguments `args`.
     u32 get_named_args(TypeTable* self, str name, Vec<u32>* args) {
         u32 name_id = self.names.intern(name);
         i64 i = (i64)(TYPE_PRIMITIVE_MAX + 1);
@@ -580,6 +634,7 @@ impl TypeTable {
         return (u32)(self.types.len() - 1);
     }
 
+    /// Returns the interned id of type parameter `name`.
     u32 get_type_param(TypeTable* self, str name) {
         u32 name_id = self.names.intern(name);
         i64 i = (i64)(TYPE_PRIMITIVE_MAX + 1);
@@ -600,6 +655,8 @@ impl TypeTable {
         return (u32)(self.types.len() - 1);
     }
 
+    /// Parses a type spelling (such as `Vec<i32>*` or `[u8; 4]`) into an
+    /// interned id, or `TYPE_UNKNOWN` when it cannot be parsed.
     u32 parse_type_name(TypeTable* self, str name) {
         if (name == (str)0) { return TYPE_UNKNOWN; }
         i64 len = strlen(name);
@@ -940,6 +997,7 @@ impl TypeTable {
         return self.get_named(name);
     }
 
+    /// Returns entry `id`. Invalidated when the table grows.
     TypeEntry* get(TypeTable* self, u32 id) {
         if ((i64)id >= self.types.len()) {
             return self.types.get_ptr(0);
@@ -947,6 +1005,8 @@ impl TypeTable {
         return self.types.get_ptr((i64)id);
     }
 
+    /// Returns the display name of type `id`, interned in the table and valid
+    /// while it lives; "unknown" for an out-of-range id.
     str type_name(TypeTable* self, u32 id) {
         if ((i64)id >= self.types.len()) {
             return "unknown";
@@ -1053,9 +1113,11 @@ impl TypeTable {
         return "unknown";
     }
 
+    /// Returns the copy/drop properties of type `id`.
     TypeProperties properties(TypeTable* self, u32 id) {
         return type_properties_at(self, id, 0);
     }
+    /// Records the field types of struct `name`.
     void register_struct_properties(TypeTable* self, str name, Vec<u32>* fields) {
         u32 name_id = self.names.intern(name);
         u32 start = (u32)self.struct_fields.len();
@@ -1086,6 +1148,7 @@ impl TypeTable {
         self.struct_properties.push(definition);
     }
 
+    /// Marks struct `name` as packed (no padding).
     void mark_struct_packed(TypeTable* self, str name) {
         u32 name_id = self.names.intern(name);
         i64 i = 0;
@@ -1096,6 +1159,7 @@ impl TypeTable {
         self.packed_structs.push(name_id);
     }
 
+    /// Returns true when struct `name` is packed.
     bool struct_is_packed(TypeTable* self, str name) {
         u32 name_id = self.names.intern(name);
         i64 i = 0;
@@ -1105,6 +1169,7 @@ impl TypeTable {
         }
         return false;
     }
+    /// Records the field names of struct `name`.
     void register_struct_field_names(TypeTable* self, str name, Vec<u32>* names) {
         u32 name_id = self.names.intern(name);
         u32 start = (u32)self.struct_field_names.len();
@@ -1124,6 +1189,7 @@ impl TypeTable {
             i += 1;
         }
     }
+    /// Records the type parameters of generic struct `name`.
     void register_struct_type_params(TypeTable* self, str name, Vec<u32>* params) {
         u32 name_id = self.names.intern(name);
         u32 start = (u32)self.struct_type_params.len();
@@ -1143,6 +1209,7 @@ impl TypeTable {
             i += 1;
         }
     }
+    /// Marks type `name` as needing drop glue (it has a `Drop` impl).
     void mark_type_needs_drop(TypeTable* self, str name) {
         u32 name_id = self.names.intern(name);
         i64 i = 0;
@@ -1166,6 +1233,7 @@ impl TypeTable {
         self.struct_properties.push(definition);
     }
 
+    /// Records whether a method parameter takes its argument by value.
     void register_method_param(TypeTable* self, str owner, str method,
                                i64 param_count, i64 index, u32 param_type,
                                bool is_value) {
@@ -1204,6 +1272,8 @@ impl TypeTable {
         self.method_params.push(param);
     }
 
+    /// Returns true when the parameter takes `arg_type` by value. Generic owner
+    /// arguments (`Vec<T>`) are ignored when matching the owner.
     bool method_param_is_value(TypeTable* self, str owner, str method,
                                i64 param_count, i64 index, u32 arg_type) {
         String base_owner = String.new();
@@ -1256,35 +1326,43 @@ impl TypeTable {
     }
 
 
+    /// Returns true when type `id` copies implicitly.
     bool is_copy(TypeTable* self, u32 id) {
         return self.properties(id).is_copy;
     }
 }
 
+/// Returns true for a builtin type id.
 bool type_is_primitive(u32 id) {
     return id >= TYPE_VOID && id <= TYPE_PRIMITIVE_MAX;
 }
 
+/// Returns true for a builtin integer type id.
 bool type_is_integer(u32 id) {
     return id >= TYPE_I8 && id <= TYPE_U128;
 }
 
+/// Returns true for a builtin signed integer type id.
 bool type_is_signed_integer(u32 id) {
     return id >= TYPE_I8 && id <= TYPE_I128;
 }
 
+/// Returns true for a builtin unsigned integer type id.
 bool type_is_unsigned_integer(u32 id) {
     return id >= TYPE_U8 && id <= TYPE_U128;
 }
 
+/// Returns true for a builtin float type id.
 bool type_is_float(u32 id) {
     return id >= TYPE_F32 && id <= TYPE_F80;
 }
 
+/// Returns true for a builtin integer, float, or complex type id.
 bool type_is_numeric(u32 id) {
     return id >= TYPE_I8 && id <= TYPE_C80;
 }
 
+/// Returns true for a builtin type spelling such as `i32` or `str`.
 bool types_is_primitive_name(str name) {
     if (strlen(name) == 0) { return false; }
     if (strcmp(name, "void") == 0 || strcmp(name, "bool") == 0

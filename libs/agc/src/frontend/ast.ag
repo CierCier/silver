@@ -8,6 +8,8 @@ import std.intern;
 import frontend.diagnostics;
 import frontend.lexer;
 
+/// The kind of a syntax tree node. `Token` nodes are leaves; the rest group
+/// children (items, delimited groups, and expression shapes).
 enum NodeKind {
     Program;
     Item;
@@ -45,6 +47,10 @@ enum NodeKind {
     Token;
 }
 
+/// One node of the lossless syntax tree. Children form a singly linked list
+/// through `first_child`/`next_sibling`. Nodes are owned by their `NodePool`
+/// and `text` points into the source or the pool's interner, so a tree must
+/// not outlive either.
 struct SyntaxNode {
     NodeKind kind;
     TokenKind token_kind;
@@ -57,15 +63,20 @@ struct SyntaxNode {
     SyntaxNode* pool_next;
 }
 
+/// Owns every `SyntaxNode` allocated for one tree, plus interned text for
+/// synthesized tokens. Freed explicitly with `destroy`, not by drop.
 struct NodePool {
     SyntaxNode* head;
     Interner generated_text;
 }
 
+/// A parsed source file; `root` is the `Program` node, owned by a `NodePool`.
 struct SyntaxTree {
     SyntaxNode* root;
 }
 
+/// Parser state over a borrowed token stream: cursor, nesting budget, and
+/// where diagnostics go. `failed` stops parsing after an unrecoverable error.
 struct Parser {
     TokenStream* tokens;
     DiagnosticBag* diagnostics;
@@ -77,6 +88,7 @@ struct Parser {
 }
 
 impl NodePool {
+    /// Creates an empty pool.
     NodePool new() {
         NodePool pool;
         pool.head = (SyntaxNode*)0;
@@ -84,6 +96,8 @@ impl NodePool {
         return pool;
     }
 
+    /// Allocates a token leaf whose text is interned in the pool, so `text` need
+    /// not outlive the call.
     SyntaxNode* create_token(NodePool* self, TokenKind kind, Span span, str text) {
         str retained = self.generated_text.get(self.generated_text.intern(text));
         SyntaxNode* node = self.create(NodeKind.Token, span, retained);
@@ -91,6 +105,8 @@ impl NodePool {
         return node;
     }
 
+    /// Allocates a node and links it into the pool. `text` is borrowed. Returns
+    /// null when allocation fails.
     SyntaxNode* create(NodePool* self, NodeKind kind, Span span, str text) {
         SyntaxNode* node = (SyntaxNode*)alloc<SyntaxNode>();
         if (node == (SyntaxNode*)0) {
@@ -109,6 +125,7 @@ impl NodePool {
         return node;
     }
 
+    /// Frees every node in the pool. Pointers into its trees dangle afterwards.
     void destroy(NodePool* self) {
         SyntaxNode* node = self.head;
         while (node != (SyntaxNode*)0) {
@@ -120,6 +137,8 @@ impl NodePool {
     }
 }
 
+/// Appends `child` as the last child of `parent` and sets its parent link.
+/// Null arguments are ignored. O(number of existing children).
 void append_child(SyntaxNode* parent, SyntaxNode* child) {
     if (parent == (SyntaxNode*)0 || child == (SyntaxNode*)0) {
         return;
@@ -135,10 +154,12 @@ void append_child(SyntaxNode* parent, SyntaxNode* child) {
     }
 }
 
+/// Returns the number of tokens in the stream.
 i64 token_count(TokenStream* self) {
     return self.len();
 }
 
+/// Returns token `index`, or null when out of range.
 Token* token_at(TokenStream* self, i64 index) {
     if (index < 0 || index >= self.len()) {
         return (Token*)0;
@@ -146,6 +167,7 @@ Token* token_at(TokenStream* self, i64 index) {
     return self.get(index);
 }
 
+/// Returns true for a comment token; false for null.
 bool is_comment(Token* token) {
     if (token == (Token*)0) {
         return false;
@@ -153,10 +175,12 @@ bool is_comment(Token* token) {
     return (i64)token.kind == (i64)TokenKind.Comment;
 }
 
+/// Returns true for the end-of-file token.
 bool is_eof(Token* token) {
     return token != (Token*)0 && (i64)token.kind == (i64)TokenKind.Eof;
 }
 
+/// Returns true for `(`, `{`, or `[`.
 bool is_open(Token* token) {
     if (token == (Token*)0) {
         return false;
@@ -169,6 +193,7 @@ bool is_open(Token* token) {
     };
 }
 
+/// Returns true for `)`, `}`, or `]`.
 bool is_close(Token* token) {
     if (token == (Token*)0) {
         return false;
@@ -181,10 +206,12 @@ bool is_close(Token* token) {
     };
 }
 
+/// Returns true for `;`.
 bool is_semicolon(Token* token) {
     return token != (Token*)0 && (i64)token.kind == (i64)TokenKind.Semicolon;
 }
 
+/// Returns true when `close` is the closing delimiter for `open`.
 bool matching_open(Token* open, Token* close) {
     if (open == (Token*)0 || close == (Token*)0) {
         return false;
@@ -197,6 +224,7 @@ bool matching_open(Token* open, Token* close) {
     };
 }
 
+/// Returns a span from the start of `first` to the end of `last`.
 Span span_between(Span first, Span last) {
     Span result = first;
     result.end = last.end;
@@ -205,6 +233,7 @@ Span span_between(Span first, Span last) {
     return result;
 }
 
+/// Advances the cursor past comment tokens.
 void skip_comments(Parser* self) {
     while (self.cursor < token_count(self.tokens)) {
         Token* token = token_at(self.tokens, self.cursor);
@@ -216,6 +245,8 @@ void skip_comments(Parser* self) {
     }
 }
 
+/// Returns the index of the delimiter that closes the one at `open_index`,
+/// or -1 when it is not an opener or is never closed.
 i64 matching_index(Parser* self, i64 open_index) {
     Token* open = token_at(self.tokens, open_index);
     if (!is_open(open)) {
@@ -243,6 +274,7 @@ i64 matching_index(Parser* self, i64 open_index) {
     return -1;
 }
 
+/// Returns the node kind for a delimited group opened by `token`.
 NodeKind group_kind(Token* token) {
     return match token.kind {
         TokenKind.LeftBrace : NodeKind.Block,
@@ -252,6 +284,7 @@ NodeKind group_kind(Token* token) {
     };
 }
 
+/// Returns the span covering tokens `[start, end)`, or a synthetic span.
 Span region_span(Parser* self, i64 start, i64 end) {
     Token* first = token_at(self.tokens, start);
     Token* last = token_at(self.tokens, end - 1);
@@ -261,6 +294,8 @@ Span region_span(Parser* self, i64 start, i64 end) {
     return span_between(first.span, last.span);
 }
 
+/// Builds leaves and delimited groups for tokens `[start, end)` under
+/// `parent`, reporting unclosed or stray delimiters and depth overflow.
 void build_token_region(Parser* self, SyntaxNode* parent, i64 start, i64 end) {
     i64 i = start;
     while (i < end) {
@@ -313,6 +348,7 @@ void build_token_region(Parser* self, SyntaxNode* parent, i64 start, i64 end) {
     }
 }
 
+/// Returns the first non-comment token at or after `start`, or null at EOF.
 Token* first_code_token(Parser* self, i64 start) {
     i64 i = start;
     while (i < token_count(self.tokens)) {
@@ -325,6 +361,8 @@ Token* first_code_token(Parser* self, i64 start) {
     return (Token*)0;
 }
 
+/// Returns true when tokens `[start, end)` contain a top-level `=` before
+/// the first top-level `{` (an initialized global rather than a body).
 bool has_top_level_assign_before_brace(Parser* self, i64 start, i64 end) {
     i64 depth = 0;
     i64 i = start;
@@ -342,6 +380,8 @@ bool has_top_level_assign_before_brace(Parser* self, i64 start, i64 end) {
     return false;
 }
 
+/// Returns the token index just past the item starting at `start`: after
+/// its terminating `;` or the `}` closing its body.
 i64 item_boundary(Parser* self, i64 start) {
     Token* first = first_code_token(self, start);
     if (first == (Token*)0) {
@@ -398,6 +438,8 @@ i64 item_boundary(Parser* self, i64 start) {
     return token_count(self.tokens);
 }
 
+/// Returns the first token of the declaration in `[start, end)`, skipping
+/// comments and attributes.
 Token* first_declaration_token(Parser* self, i64 start, i64 end) {
     i64 i = start;
     while (i < end) {
@@ -432,6 +474,7 @@ Token* first_declaration_token(Parser* self, i64 start, i64 end) {
     return (Token*)0;
 }
 
+/// Classifies the item in `[start, end)` by its leading keyword.
 NodeKind item_kind(Parser* self, i64 start, i64 end) {
     Token* first = first_declaration_token(self, start, end);
     if (first == (Token*)0) {
@@ -452,6 +495,7 @@ NodeKind item_kind(Parser* self, i64 start, i64 end) {
     return NodeKind.Function;
 }
 
+/// Returns true when the last code token before `end` is `;`.
 bool ends_with_semicolon(Parser* self, i64 end) {
     i64 i = end - 1;
     while (i >= 0 && is_comment(token_at(self.tokens, i))) {
@@ -460,6 +504,7 @@ bool ends_with_semicolon(Parser* self, i64 end) {
     return i >= 0 && is_semicolon(token_at(self.tokens, i));
 }
 
+/// Returns the index of the first `{` in `[start, end)`, or -1.
 i64 first_brace_before(Parser* self, i64 start, i64 end) {
     i64 i = start;
     while (i < end) {
@@ -472,6 +517,7 @@ i64 first_brace_before(Parser* self, i64 start, i64 end) {
     return -1;
 }
 
+/// Reports `message` at token `index` (or a synthetic span) as an error.
 void report_unbalanced(Parser* self, i64 index, String message) {
     Token* token = token_at(self.tokens, index);
     Span span = Span.synthetic();
@@ -482,6 +528,7 @@ void report_unbalanced(Parser* self, i64 index, String message) {
     self.failed = true;
 }
 
+/// Parses items up to `end_index` into children of `parent`.
 void parse_items(Parser* self, SyntaxNode* parent, i64 end_index) {
     while (self.cursor < end_index && !self.failed) {
         skip_comments(self);
@@ -517,6 +564,8 @@ void parse_items(Parser* self, SyntaxNode* parent, i64 end_index) {
     }
 }
 
+/// Returns the index of the token in `[start, end)` starting at `span.start`,
+/// or -1.
 i64 token_index_at_span_start(Parser* self, i64 start, i64 end, Span span) {
     i64 i = start;
     while (i < end) {
@@ -529,6 +578,7 @@ i64 token_index_at_span_start(Parser* self, i64 start, i64 end, Span span) {
     return -1;
 }
 
+/// Parses the items inside a top-level `if (@cfg(...)) { ... }` block.
 void parse_cfg_block_items(Parser* self, SyntaxNode* item, i64 start, i64 end) {
     if (!self.budget.enter()) {
         self.diagnostics.error(item.span, String.from_str("maximum syntax nesting depth exceeded"));
@@ -558,6 +608,8 @@ void parse_cfg_block_items(Parser* self, SyntaxNode* item, i64 start, i64 end) {
     self.budget.leave();
 }
 
+/// Parses `tokens` into `tree`, allocating nodes in `pool` and reporting
+/// errors to `diagnostics`. The tree borrows the tokens' text.
 void parse(TokenStream* tokens, DiagnosticBag* diagnostics, NodePool* pool, SyntaxTree* tree) {
     Parser parser;
     parser.tokens = tokens;
