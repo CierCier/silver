@@ -8,6 +8,13 @@ accepted.
 The [protocol support ledger](lsp-protocol.md) records every stable LSP request
 and notification, its direction, support status, limits and verification.
 
+## Editor setup
+
+[`tools/`](../tools) holds the editor packages: a [Zed extension](../tools/zed),
+a [VS Code extension](../tools/vscode), and the
+[tree-sitter grammar](../tools/tree-sitter-silver) they share with other
+tree-sitter editors. Each one starts the installed `aglsp`.
+
 ## Build and check
 
 Run these commands from the repository root in `nix develop`:

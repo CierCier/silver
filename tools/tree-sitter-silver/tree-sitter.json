@@ -1,0 +1,21 @@
+{
+  "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/config.schema.json",
+  "grammars": [
+    {
+      "name": "silver",
+      "camelcase": "Silver",
+      "scope": "source.silver",
+      "path": ".",
+      "file-types": ["ag"],
+      "highlights": "../zed/languages/silver/highlights.scm"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "Silver grammar for tree-sitter",
+    "links": {
+      "repository": "https://github.com/CierCier/silver"
+    }
+  }
+}

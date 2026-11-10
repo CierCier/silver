@@ -1,0 +1,136 @@
+================================================================================
+Nested block comments
+================================================================================
+
+/* outer /* inner */ still outer */
+i32 x;
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (block_comment)
+  (variable_declaration
+    (primitive_type)
+    (identifier)))
+
+================================================================================
+Characters and lifetimes
+================================================================================
+
+void f() { char a = 'a'; char n = '\n'; char q = '\''; }
+struct Ref<'a> { &'a str text; }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    (primitive_type)
+    (identifier)
+    (parameters)
+    (block
+      (primitive_type)
+      (identifier)
+      (char_literal)
+      (primitive_type)
+      (identifier)
+      (char_literal)
+      (primitive_type)
+      (identifier)
+      (char_literal)))
+  (struct_definition
+    (identifier)
+    (type_parameters
+      (type_parameter
+        (lifetime)))
+    (field_list
+      (field_declaration
+        (reference_type
+          (lifetime)
+          (primitive_type))
+        (identifier)))))
+
+================================================================================
+Strings with escapes
+================================================================================
+
+void f() { str s = "tab\t \x1b[0m \u{1F600} \"quoted\""; }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    (primitive_type)
+    (identifier)
+    (parameters)
+    (block
+      (primitive_type)
+      (identifier)
+      (string_literal
+        (escape_sequence)
+        (escape_sequence)
+        (escape_sequence)
+        (escape_sequence)
+        (escape_sequence)))))
+
+================================================================================
+Numbers
+================================================================================
+
+void f() { let a = 0x1F; let b = 0b1010; let c = 0o755; let d = 1_000; let e = 1.0e-5; let g = 3.5i; }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    (primitive_type)
+    (identifier)
+    (parameters)
+    (block
+      (identifier)
+      (number_literal)
+      (identifier)
+      (number_literal)
+      (identifier)
+      (number_literal)
+      (identifier)
+      (number_literal)
+      (identifier)
+      (number_literal)
+      (identifier)
+      (number_literal))))
+
+================================================================================
+Body tokens stay balanced groups
+================================================================================
+
+i32 main() {
+    let f = (i32 x) => x + 1;
+    if (a < b && b >> 2 == 0) { return v[1:]; }
+    return 0;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    (primitive_type)
+    (identifier)
+    (parameters)
+    (block
+      (identifier)
+      (parenthesized
+        (primitive_type)
+        (identifier))
+      (identifier)
+      (number_literal)
+      (parenthesized
+        (identifier)
+        (identifier)
+        (identifier)
+        (number_literal)
+        (number_literal))
+      (block
+        (identifier)
+        (bracketed
+          (number_literal)))
+      (number_literal))))
