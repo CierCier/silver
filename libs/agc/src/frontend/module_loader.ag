@@ -6,7 +6,6 @@ import std.env;
 import std.error;
 import std.fs;
 import std.io;
-import std.mem.alloc;
 import std.mem.memory;
 import std.mem.vec;
 import std.path;
@@ -156,12 +155,10 @@ void module_add_dir_unique(Vec<String>* dirs, str dir) {
     dirs.push(String.from_str(dir));
 }
 
-// Sysroot layout: include/silver + include (installed layouts), plus the bare
-// root and lib/ only when they look like a real Silver tree (std/ resp.
-// lib/silver present) so filesystem roots like "/" are never scanned.
+// Sysroot layout: include/silver + include (installed layouts), plus lib/ only
+// when lib/silver exists. An explicit root is also searched directly; a
+// discovered root only when it holds std/, so "/" is never scanned.
 void module_add_sysroot_candidates(Vec<String>* dirs, str root, bool explicit) {
-    // An explicit root is always searched directly; a discovered root only
-    // when it looks like a real Silver tree, so "/" is never scanned.
     String std_dir = path_join(root, "std");
     if (explicit || is_dir(std_dir.to_str())) { module_add_dir_unique(dirs, root); }
     std_dir.drop();
@@ -205,66 +202,30 @@ Vec<String> module_sysroot_include_dirs() {
         index += 1;
     }
     arguments.drop();
-    String env_value = String.new();
-    if (module_env_value("SILVER_SYSROOT", &env_value) && env_value.len() > 0) {
-        module_add_sysroot_candidates(&dirs, env_value.to_str(), true);
-    }
+    String sysroot = var("SILVER_SYSROOT").unwrap_or(String.new());
+    if (sysroot.len() > 0) { module_add_sysroot_candidates(&dirs, sysroot.to_str(), true); }
     // Executable-relative prefix, e.g. <prefix>/bin/agc -> <prefix>.
-    u8* executable = alloc<u8>(4097);
-    i64 length = sys_readlink((i64)"/proc/self/exe", (i64)executable, 4096);
+    u8 executable[4096];
+    i64 length = sys_readlink((i64)"/proc/self/exe", (i64)&executable[0], 4096);
     if (length > 0 && length < 4096) {
-        executable[length] = 0;
-        String path = String.from_str((str)executable);
+        String path = String.new();
+        path.push_bytes(&executable[0], length);
         String bin = path_dirname(path.to_str());
         String prefix = path_dirname(bin.to_str());
         module_add_sysroot_candidates(&dirs, prefix.to_str(), false);
     }
-    free(executable);
-    if (module_env_value("XDG_DATA_HOME", &env_value) && env_value.len() > 0) {
-        String user = path_join(env_value.to_str(), "silver");
+    String xdg_data = var("XDG_DATA_HOME").unwrap_or(String.new());
+    String home = var("HOME").unwrap_or(String.new());
+    if (xdg_data.len() > 0) {
+        String user = path_join(xdg_data.to_str(), "silver");
         module_add_sysroot_candidates(&dirs, user.to_str(), false);
-        user.drop();
-    } else if (module_env_value("HOME", &env_value) && env_value.len() > 0) {
-        String user = path_join(env_value.to_str(), ".local/share/silver");
+    } else if (home.len() > 0) {
+        String user = path_join(home.to_str(), ".local/share/silver");
         module_add_sysroot_candidates(&dirs, user.to_str(), false);
-        user.drop();
     }
-    env_value.drop();
     module_add_sysroot_candidates(&dirs, "/usr/local/share/silver", false);
     module_add_sysroot_candidates(&dirs, "/usr/share/silver", false);
     return move dirs;
-}
-
-// Read KEY from /proc/self/environ (NUL-separated KEY=VALUE entries). Uses a
-// plain file read instead of the envp global, which is unreliable in some
-// stage1-built binaries.
-bool module_env_value(str key, String* out) {
-    out.clear();
-    Result<String, Error> content = read_file("/proc/self/environ");
-    if (content.is_err()) { return false; }
-    String data = content.unwrap();
-    i64 key_len = strlen(key);
-    i64 i = 0;
-    while (i < data.len()) {
-        i64 stop = i;
-        while (stop < data.len() && data.data[stop] != 0) { stop += 1; }
-        if (stop - i > key_len && data.data[i + key_len] == 61) {
-            bool matches = true;
-            i64 j = 0;
-            while (matches && j < key_len) {
-                if (data.data[i + j] != (u8)key[j]) { matches = false; }
-                j += 1;
-            }
-            if (matches) {
-                out.push_bytes(&data.data[i + key_len + 1], stop - i - key_len - 1);
-                data.drop();
-                return true;
-            }
-        }
-        i = stop + 1;
-    }
-    data.drop();
-    return false;
 }
 
 void collect_include_dirs(ModuleLoader* loader) {

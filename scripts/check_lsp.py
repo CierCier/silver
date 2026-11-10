@@ -3736,6 +3736,7 @@ class NativeLsp(unittest.TestCase):
             "i32 add(i32 a, i32 b) { return a + b; }\n"
             "\n"
             "/// A documented global.\n"
+            "/// $1 : an annotation with no parameter\n"
             "i32 counter = 0;\n"
             "\n"
             "/// Detached block.\n"
@@ -3745,6 +3746,8 @@ class NativeLsp(unittest.TestCase):
         uri = self.open(text)
         var_hover = self.session.result("textDocument/hover", self.at(uri, text, "counter"))["contents"]["value"]
         self.assertIn("A documented global.", var_hover)
+        # An annotation with no matching parameter keeps its `$n` label.
+        self.assertIn("- `$1` — an annotation with no parameter", var_hover)
         hover = self.session.result("textDocument/hover", self.at(uri, text, "add", text.index("i32 add")))
         value = hover["contents"]["value"]
         self.assertIn("```silver\ni32 add(i32 a, i32 b)\n```", value)

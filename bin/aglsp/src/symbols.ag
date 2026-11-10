@@ -67,7 +67,9 @@ void append_hover_documentation(String* content, IdeSymbol* symbol, bool markdow
     Vec<String> texts = Vec<String>.new();
     split_doc_annotations(symbol.documentation.to_str(), &body, &positions, &texts);
     if (body.len() > 0) { content.push_str("\n\n"); content.push_str(body.to_str()); }
-    if (positions.len() > 0 && symbol.parameter_names.len() > 0) {
+    // Annotations without a matching parameter keep their `$n` label rather
+    // than disappearing from the hover.
+    if (positions.len() > 0) {
         if (markdown) { content.push_str("\n\n**Parameters**\n"); }
         else { content.push_str("\n\nParameters:\n"); }
         i64 skip = symbol.instance ? 1 : 0;

@@ -24,7 +24,7 @@ str builtin_macro_doc(str name) {
     if (strcmp(name, "assert") == 0) { return "Abort with a message when the condition is false."; }
     if (strcmp(name, "size") == 0) { return "Size in bytes of a type, as a constant."; }
     if (strcmp(name, "align") == 0) { return "Alignment in bytes of a type, as a constant."; }
-    if (strcmp(name, "hash") == 0) { return "Hash a value at compile time."; }
+    if (strcmp(name, "hash") == 0) { return "Hash a value to an i64 at runtime (needs std.hash)."; }
     if (strcmp(name, "line") == 0) { return "Current source line as a constant."; }
     if (strcmp(name, "column") == 0) { return "Current source column as a constant."; }
     if (strcmp(name, "file") == 0) { return "Current source file path as a constant."; }
