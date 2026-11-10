@@ -32,80 +32,120 @@ import std.sys.result;
 #[link(crypto)]
 
 extern "C" {
+    /// OpenSSL `TLS_client_method`: the version-flexible client method.
     #[link_name("TLS_client_method")]
     i64 ssl_tls_client_method();
+    /// OpenSSL `TLS_server_method`: the version-flexible server method.
     #[link_name("TLS_server_method")]
     i64 ssl_tls_server_method();
+    /// OpenSSL `SSL_CTX_new`: creates a context, or 0 on failure.
     #[link_name("SSL_CTX_new")]
     i64 ssl_ctx_new(i64 method);
+    /// OpenSSL `SSL_CTX_free`: drops a reference to a context.
     #[link_name("SSL_CTX_free")]
     void ssl_ctx_free(i64 ctx);
+    /// OpenSSL `SSL_new`: creates a session from a context, or 0 on failure.
     #[link_name("SSL_new")]
     i64 ssl_new(i64 ctx);
+    /// OpenSSL `SSL_free`: frees a session.
     #[link_name("SSL_free")]
     void ssl_free(i64 ssl);
+    /// OpenSSL `SSL_set_fd`: attaches a socket; the fd stays owned by the caller.
     #[link_name("SSL_set_fd")]
     i32 ssl_set_fd(i64 ssl, i32 fd);
+    /// OpenSSL `SSL_connect`: runs the client handshake; 1 on success.
     #[link_name("SSL_connect")]
     i32 ssl_connect(i64 ssl);
+    /// OpenSSL `SSL_accept`: runs the server handshake; 1 on success.
     #[link_name("SSL_accept")]
     i32 ssl_accept(i64 ssl);
+    /// OpenSSL `SSL_read`: reads up to `len` decrypted bytes.
     #[link_name("SSL_read")]
     i32 ssl_read(i64 ssl, void* buf, i32 len);
+    /// OpenSSL `SSL_write`: writes up to `len` bytes.
     #[link_name("SSL_write")]
     i32 ssl_write(i64 ssl, void* buf, i32 len);
+    /// OpenSSL `SSL_get_error`: classifies the result `ret` of the last call.
     #[link_name("SSL_get_error")]
     i32 ssl_get_error(i64 ssl, i32 ret);
+    /// OpenSSL `SSL_shutdown`: sends close_notify.
     #[link_name("SSL_shutdown")]
     i32 ssl_shutdown(i64 ssl);
+    /// OpenSSL `SSL_get_version`: the negotiated protocol name (static string).
     #[link_name("SSL_get_version")]
     i64 ssl_get_version(i64 ssl);
+    /// OpenSSL `SSL_set1_host`: sets the hostname that certificate checks expect.
     #[link_name("SSL_set1_host")]
     i32 ssl_set1_host(i64 ssl, str host);
+    /// OpenSSL `SSL_ctrl`: generic session control.
     #[link_name("SSL_ctrl")]
     i64 ssl_ctrl(i64 ssl, i32 cmd, i64 larg, void* parg);
+    /// OpenSSL `SSL_CTX_set_verify`: sets the peer verification mode.
     #[link_name("SSL_CTX_set_verify")]
     void ssl_ctx_set_verify(i64 ctx, i32 mode, void* callback);
+    /// OpenSSL `SSL_CTX_set_default_verify_paths`: uses the system trust store.
     #[link_name("SSL_CTX_set_default_verify_paths")]
     i32 ssl_ctx_set_default_verify_paths(i64 ctx);
+    /// OpenSSL `SSL_CTX_load_verify_locations`: loads trusted CA certificates.
     #[link_name("SSL_CTX_load_verify_locations")]
     i32 ssl_ctx_load_verify_locations(i64 ctx, str ca_file, str ca_path);
+    /// OpenSSL `SSL_CTX_ctrl`: generic context control.
     #[link_name("SSL_CTX_ctrl")]
     i64 ssl_ctx_ctrl(i64 ctx, i32 cmd, i64 larg, void* parg);
+    /// OpenSSL `SSL_use_certificate_file`: loads a session certificate.
     #[link_name("SSL_use_certificate_file")]
     i32 ssl_use_certificate_file(i64 ssl, str file, i32 filetype);
+    /// OpenSSL `SSL_use_PrivateKey_file`: loads a session private key.
     #[link_name("SSL_use_PrivateKey_file")]
     i32 ssl_use_private_key_file(i64 ssl, str file, i32 filetype);
+    /// OpenSSL `SSL_CTX_use_certificate_file`: loads a context certificate.
     #[link_name("SSL_CTX_use_certificate_file")]
     i32 ssl_ctx_use_certificate_file(i64 ctx, str file, i32 filetype);
+    /// OpenSSL `SSL_CTX_use_PrivateKey_file`: loads a context private key.
     #[link_name("SSL_CTX_use_PrivateKey_file")]
     i32 ssl_ctx_use_private_key_file(i64 ctx, str file, i32 filetype);
+    /// OpenSSL `SSL_CTX_set_alpn_select_cb`: sets the server ALPN callback.
     #[link_name("SSL_CTX_set_alpn_select_cb")]
     void ssl_ctx_set_alpn_select_cb(i64 ctx, void* cb, void* arg);
+    /// OpenSSL `SSL_select_next_proto`: picks an ALPN protocol from two lists.
     #[link_name("SSL_select_next_proto")]
     i32 ssl_select_next_proto(void* out, void* outlen, u8* server, u32 server_len, u8* client, u32 client_len);
+    /// OpenSSL `SSL_set_alpn_protos`: sets the client ALPN offer.
     #[link_name("SSL_set_alpn_protos")]
     i32 ssl_set_alpn_protos(i64 ssl, u8* protos, u32 len);
+    /// OpenSSL `SSL_get0_alpn_selected`: the negotiated ALPN protocol (borrowed).
     #[link_name("SSL_get0_alpn_selected")]
     void ssl_get0_alpn_selected(i64 ssl, void* out, void* out_len);
+    /// OpenSSL `OpenSSL_version`: library version text (static string).
     #[link_name("OpenSSL_version")]
     i64 ssl_version(i32 which);
 }
 
+/// `Error.code` for every TLS failure; the message tells them apart.
 const i64 TLS_ERR = -7;
 
+/// OpenSSL verify mode: verify the peer certificate.
 const i32 SSL_VERIFY_PEER = 1;
+/// OpenSSL file type: PEM.
 const i32 SSL_FILETYPE_PEM = 1;
+/// Protocol version number of TLS 1.2, the minimum this module allows.
 const i32 TLS1_2_VERSION = 0x0303;
-// SSL_ctrl command for SNI (SSL_set_tlsext_host_name is a macro over it).
+/// SSL_ctrl command for SNI (SSL_set_tlsext_host_name is a macro over it).
 const i32 SSL_CTRL_SET_TLSEXT_HOSTNAME = 55;
+/// SSL_ctrl/SSL_CTX_ctrl command that sets the minimum protocol version.
 const i32 SSL_CTRL_SET_MIN_PROTO_VERSION = 123;
+/// SNI name type for a DNS host name.
 const i64 TLSEXT_NAMETYPE_HOST_NAME = 0;
 
+/// SSL_get_error: the peer closed the TLS session cleanly.
 const i32 SSL_ERROR_ZERO_RETURN = 6;
+/// SSL_get_error: an I/O error on the underlying socket.
 const i32 SSL_ERROR_SYSCALL = 5;
+/// SSL_get_error: the call needs the socket to become writable.
 const i32 SSL_ERROR_WANT_WRITE = 3;
+/// SSL_get_error: the call needs the socket to become readable.
 const i32 SSL_ERROR_WANT_READ = 2;
+/// SSL_get_error: a protocol or library error.
 const i32 SSL_ERROR_SSL = 1;
 
 /// OpenSSL handle + configuration. The socket fd stays owned by the caller's
@@ -117,9 +157,13 @@ struct TlsStream {
     bool active;
 }
 
-// Cached default client context (verify on, system trust store) and the
-// server context (certificate loaded once).
+/// Cached default client context (verify on, system trust store) and the
+/// server context (certificate loaded once).
+/// Internal: shared default client context, created on first use and kept
+/// for the process lifetime.
 i64 g_client_ctx = 0;
+/// Internal: shared server context, created by the first `ssl_server_ctx`
+/// call and kept for the process lifetime.
 i64 g_server_ctx = 0;
 
 /// Build a client context with the given verification policy. The default
@@ -140,6 +184,8 @@ i64 ssl_make_client_ctx(bool verify, str ca_file) {
     return ctx;
 }
 
+/// Returns the shared default client context when `verify` is set and no
+/// CA file is given; otherwise a new context the caller must free.
 i64 ssl_client_ctx(bool verify, str ca_file) {
     if (verify && (ca_file == (str)0 || strlen(ca_file) == 0)) {
         if (g_client_ctx == 0) {
@@ -153,16 +199,20 @@ i64 ssl_client_ctx(bool verify, str ca_file) {
     return ssl_make_client_ctx(verify, ca_file);
 }
 
+/// Internal: server ALPN preference list, `h2` then `http/1.1`.
 u8 g_server_alpn_protos[12] = {
     (u8)2, (u8)'h', (u8)'2',
     (u8)8, (u8)'h', (u8)'t', (u8)'t', (u8)'p', (u8)'/', (u8)'1', (u8)'.', (u8)'1'
 };
 
+/// Internal: server ALPN callback; selects from `g_server_alpn_protos`.
 i32 ssl_server_alpn_select_cb(i64 _ssl, void* out, void* outlen, u8* in_protos, u32 inlen, void* _arg) {
     ssl_select_next_proto(out, outlen, &g_server_alpn_protos[0], (u32)12, in_protos, inlen);
     return 0;
 }
 
+/// Creates a server context (TLS 1.2+, ALPN h2/http1.1) with a PEM
+/// certificate and key. Returns 0 when either file fails to load.
 i64 ssl_make_server_ctx(str cert_file, str key_file) {
     i64 ctx = ssl_ctx_new(ssl_tls_server_method());
     if (ctx == 0) { return 0; }
@@ -176,6 +226,8 @@ i64 ssl_make_server_ctx(str cert_file, str key_file) {
     return ctx;
 }
 
+/// Returns the process-wide server context. The first call loads
+/// `cert_file`/`key_file`; later calls ignore their arguments and reuse it.
 i64 ssl_server_ctx(str cert_file, str key_file) {
     if (g_server_ctx == 0) {
         i64 ctx = ssl_make_server_ctx(cert_file, key_file);
@@ -187,6 +239,7 @@ i64 ssl_server_ctx(str cert_file, str key_file) {
 }
 
 impl TlsStream {
+    /// Returns a stream with no session (`invalid()` is true).
     TlsStream closed() {
         TlsStream tls;
         tls.ssl = 0;
@@ -196,6 +249,7 @@ impl TlsStream {
         return tls;
     }
 
+    /// Returns true when the stream has no TLS session.
     bool invalid(*self) { return self.ssl == 0; }
 
     /// Client handshake on a connected fd. `host` is used for SNI and, when
@@ -286,6 +340,9 @@ impl TlsStream {
         return true;
     }
 
+    /// Reads up to `len` decrypted bytes. Returns the count, 0 when the peer
+    /// closed the session, or a `TLS_ERR` error. Blocks. `len` above i32 range
+    /// is truncated.
     Result<i64, Error> read(*self, u8* buf, i64 len) {
         if (!self.active || self.ssl == 0) {
             return Err(TLS_ERR, "TLS stream is closed");
@@ -299,6 +356,8 @@ impl TlsStream {
         return Err(TLS_ERR, "TLS read error");
     }
 
+    /// Writes all `len` bytes, looping over partial writes. Returns the count
+    /// (partial when an error follows some progress) or a `TLS_ERR` error.
     Result<i64, Error> write(*self, u8* buf, i64 len) {
         if (!self.active || self.ssl == 0) {
             return Err(TLS_ERR, "TLS stream is closed");
@@ -346,36 +405,43 @@ impl Drop for TlsStream {
 // tls_init() registers the TlsStream transport with std.net.http (see
 // std/net/transport.ag). The per-connection state blob is a TlsStream.
 
+/// TLS provider callback: client handshake on `fd` into the stream at `state`.
 bool tls_provider_handshake(void* state, i32 fd, str host, bool verify, str ca_file, Error* err) {
     TlsStream* tls = (TlsStream*)state;
     return tls.connect(fd, host, verify, ca_file, err);
 }
 
+/// TLS provider callback: reads from the stream at `state`.
 Result<i64, Error> tls_provider_read(void* state, u8* buf, i64 len) {
     TlsStream* tls = (TlsStream*)state;
     return tls.read(buf, len);
 }
 
+/// TLS provider callback: writes to the stream at `state`.
 Result<i64, Error> tls_provider_write(void* state, u8* buf, i64 len) {
     TlsStream* tls = (TlsStream*)state;
     return tls.write(buf, len);
 }
 
+/// TLS provider callback: closes the session at `state` (not the socket).
 void tls_provider_close(void* state) {
     TlsStream* tls = (TlsStream*)state;
     tls.close();
 }
 
+/// TLS provider callback: true when ALPN chose HTTP/2.
 bool tls_provider_is_h2(void* state) {
     TlsStream* tls = (TlsStream*)state;
     return tls.is_h2();
 }
 
+/// TLS provider callback: server handshake on `fd` into the stream at `state`.
 bool tls_provider_accept(void* state, i32 fd, str cert_file, str key_file, Error* err) {
     TlsStream* tls = (TlsStream*)state;
     return tls.accept(fd, cert_file, key_file, err);
 }
 
+/// TLS provider callback: the negotiated protocol version name.
 str tls_provider_version(void* state) {
     TlsStream* tls = (TlsStream*)state;
     return tls.version();
