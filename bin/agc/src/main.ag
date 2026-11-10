@@ -6,6 +6,7 @@ import std.io;
 import std.sys.entry;
 import driver;
 
+/// Process entry: runs the command-line frontend and returns its exit code.
 i32 main() {
     return run_frontend();
 }

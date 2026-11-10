@@ -1,6 +1,8 @@
 // agc's option and help schema for the reusable std.cli parser.
 import std.cli;
 
+/// Builds the `agc` command-line schema: commands, options, aliases, and
+/// help text. Parsing happens in the driver.
 CliParser agc_cli_parser() {
     CliParser parser = CliParser.new("agc");
     parser.describe("Silver compiler and package driver");
