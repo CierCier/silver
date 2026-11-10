@@ -741,6 +741,23 @@ String workspace_toml_escape(str value) {
     return move out;
 }
 
+// True when `dir` or one of its ancestors holds a `.git` entry.
+bool workspace_inside_git_repo(str dir) {
+    String current = String.from_str(dir);
+    if (!current.starts_with("/")) {
+        String cwd = current_dir();
+        current = path_join(cwd.to_str(), dir);
+    }
+    while (current.len() > 0) {
+        String marker = path_join(current.to_str(), ".git");
+        if (exists(marker.to_str())) { return true; }
+        String parent = path_dirname(current.to_str());
+        if (parent.equals(current.to_str())) { return false; }
+        current = move parent;
+    }
+    return false;
+}
+
 const str INIT_ENTRY_SOURCE = "i32 main() {\n    @println(\"Hello, Silver!\");\n    return 0;\n}\n";
 
 // `agc init [DIR] [--name NAME]`: create silver.toml + src/main.ag and start a
@@ -798,10 +815,12 @@ i32 workspace_init_command(CliMatches* cli) {
             return 2;
         }
     }
-    // Best effort: start a git repository in the package when git is on PATH.
-    // execve needs a resolved path, so search PATH for the git binary.
+    // Best effort, like stage0: start a git repository when git is on PATH and
+    // the package is not already inside one. execve needs a resolved path, so
+    // search PATH for the git binary.
     Optional<String> path_var = var("PATH");
-    if (path_var.is_some() && set_current_dir(target.to_str())) {
+    if (path_var.is_some() && !workspace_inside_git_repo(target.to_str())
+        && set_current_dir(target.to_str())) {
         String search = path_var.unwrap();
         i64 begin = 0;
         bool spawned_git = false;

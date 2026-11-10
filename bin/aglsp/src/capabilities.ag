@@ -1,6 +1,9 @@
 import std.string;
 import params;
 
+// Keep in step with the workspace version in silver.toml.
+const str AGLSP_VERSION = "0.2.6";
+
 enum SemanticFullMode { Disabled; Full; Delta; }
 
 struct SemanticTokenOptions {
@@ -286,6 +289,6 @@ String server_capabilities(ClientOptions* client) {
         out.push('}');
     }
     out.push_str("},");
-    out.push_str("\"serverInfo\":{\"name\":\"aglsp\",\"version\":\"0.2.6\"}}");
+    out.push_str("\"serverInfo\":{\"name\":\"aglsp\",\"version\":\""); out.push_str(AGLSP_VERSION); out.push_str("\"}}");
     return move out;
 }

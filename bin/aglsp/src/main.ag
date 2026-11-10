@@ -303,7 +303,11 @@ i32 dispatch_message(ServerState* state, PendingMessage* pending) {
             begin_index_session(state);
             *index = workspace_index(store);
             if (client.work_done_progress) { state.requests.create_progress(); }
-            if (client.telemetry) { send_telemetry("{\"event\":\"startup\",\"server\":\"aglsp\",\"version\":\"0.2.6\"}"); }
+            if (client.telemetry) {
+                String event = String.from_str("{\"event\":\"startup\",\"server\":\"aglsp\",\"version\":\"");
+                event.push_str(AGLSP_VERSION); event.push_str("\"}");
+                send_telemetry(event.to_str());
+            }
             if (client.folders_query && store.discover_open_projects && store.roots.len() == 0) {
                 state.requests.request_folders();
             }
@@ -520,14 +524,18 @@ i32 main() {
     // instead of silently starting a protocol loop.
     Vec<String> arguments = args();
     if (arguments.len() > 1) {
-        str flag = arguments.get(1).to_str();
+        str flag = arguments.get_ptr(1).to_str();
         if (strcmp(flag, "-h") == 0 || strcmp(flag, "--help") == 0) {
-            STDOUT.write_str("aglsp — Silver language server 0.2.6\n\nUsage: aglsp\n\nSpeaks LSP (JSON-RPC over stdio); launch with no arguments.\n\n  -h, --help     Print this help and exit\n  -V, --version  Print the version and exit\n");
+            STDOUT.write_str("aglsp — Silver language server ");
+            STDOUT.write_str(AGLSP_VERSION);
+            STDOUT.write_str("\n\nUsage: aglsp\n\nSpeaks LSP (JSON-RPC over stdio); launch with no arguments.\n\n  -h, --help     Print this help and exit\n  -V, --version  Print the version and exit\n");
             STDOUT.flush();
             return 0;
         }
         if (strcmp(flag, "-V") == 0 || strcmp(flag, "--version") == 0) {
-            STDOUT.write_str("aglsp 0.2.6\n");
+            STDOUT.write_str("aglsp ");
+            STDOUT.write_str(AGLSP_VERSION);
+            STDOUT.write_str("\n");
             STDOUT.flush();
             return 0;
         }
