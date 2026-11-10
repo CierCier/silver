@@ -3754,6 +3754,12 @@ class NativeLsp(unittest.TestCase):
         self.assertIn("Adds two values.", value)
         # $n annotations map onto parameter names in a Parameters section.
         self.assertIn("**Parameters**\n- `a` — the first addend\n- `b` — the second addend", value)
+        # Prose keeps its indentation, so an indented example in a block
+        # comment still renders as code.
+        block = "/** Adds two values.\n\n    add(1, 2);\n*/\ni32 add(i32 a, i32 b) { return a + b; }\n"
+        block_uri = self.open(block, "doc-block-indent.ag")
+        block_hover = self.session.result("textDocument/hover", self.at(block_uri, block, "add", block.index("i32 add")))
+        self.assertIn("\n    add(1, 2);", block_hover["contents"]["value"])
         # An empty line between the comment block and the item detaches it.
         detached = self.session.result("textDocument/hover", self.at(uri, text, "detached"))["contents"]["value"]
         self.assertNotIn("Detached block", detached)
@@ -3828,6 +3834,35 @@ class NativeLsp(unittest.TestCase):
         help_result = self.session.result("textDocument/signatureHelp", {
             "textDocument": {"uri": shared_uri}, "position": position(shared, shared.index("@twice(") + len("@twice("))})
         self.assertEqual([p["label"] for p in help_result["signatures"][0]["parameters"]], ["i32 v"])
+        # `macro ReturnType name(...)`: the name is the identifier before the parameters.
+        typed = ("/// Doubles a value.\nmacro i32 double_it(i32 value) { return value + value; }\n"
+                 "i32 main() { return @double_it(2); }\n")
+        typed_uri = self.open(typed, "macro-typed.ag")
+        typed_call = self.at(typed_uri, typed, "double_it", typed.index("@double_it"))
+        typed_hover = self.session.result("textDocument/hover", typed_call)["contents"]["value"]
+        self.assertIn("macro i32 double_it(i32 value)", typed_hover)
+        self.assertIn("Doubles a value.", typed_hover)
+        self.assertEqual(self.session.result("textDocument/definition", typed_call)["range"],
+                         location(typed, "double_it"))
+        typed_items = self.session.result("textDocument/completion", {
+            "textDocument": {"uri": typed_uri}, "position": position(typed, typed.index("@double_it") + 2)})["items"]
+        self.assertIn("@double_it", [item["label"] for item in typed_items])
+        self.assertNotIn("@i32", [item["label"] for item in typed_items])
+        typed_help = self.session.result("textDocument/signatureHelp", {
+            "textDocument": {"uri": typed_uri}, "position": position(typed, typed.index("@double_it(") + len("@double_it("))})
+        self.assertEqual([p["label"] for p in typed_help["signatures"][0]["parameters"]], ["i32 value"])
+        # Auto-import offers another file's functions, never its macros: the
+        # inserted call would lack `@`.
+        (self.root / "macro_provider.ag").write_text(
+            "macro zz_macro_export(i32 v) { return v + v; }\ni32 zz_function_export() { return 1; }\n")
+        self.session.send("workspace/didChangeWatchedFiles", {"changes": [
+            {"uri": (self.root / "macro_provider.ag").as_uri(), "type": 1}]})
+        consumer = "i32 main() { return zz_; }\n"
+        consumer_uri = self.open(consumer, "macro_consumer.ag")
+        offered = [item["label"] for item in self.session.result("textDocument/completion", {
+            "textDocument": {"uri": consumer_uri}, "position": position(consumer, consumer.index("zz_") + 3)})["items"]]
+        self.assertIn("zz_function_export", offered)
+        self.assertNotIn("zz_macro_export", offered)
 
     def test_server_help_and_version_flags(self):
         for flag, needle in (("--help", "Usage: aglsp"), ("-h", "Usage: aglsp"),

@@ -60,9 +60,11 @@ bool completion_visible(CompletionCandidates* candidates, str name) {
     return false;
 }
 
+// Macros are not exports for plain-name completion: an inserted call would
+// lack `@`, and ordinary name lookup does not see them.
 bool completion_exported_symbol(IdeSymbol* symbol) {
     return !symbol.local && !symbol.is_private && symbol.owner.len() == 0
-        && symbol.kind != IdeSymbolKind.ImportAlias;
+        && symbol.kind != IdeSymbolKind.ImportAlias && symbol.kind != IdeSymbolKind.Macro;
 }
 
 // True when `name` is exported by `provider` at `index` and by no other
@@ -421,8 +423,7 @@ void append_auto_imports(DocumentStore* store, Document* doc, str prefix,
             IdeSymbol* symbol = candidate.analysis.symbols.get_ptr(i);
             str name = symbol.name.to_str();
             i64 score = ide_match_score(prefix, name);
-            if (!symbol.local && !symbol.is_private && symbol.owner.len() == 0
-                && symbol.kind != IdeSymbolKind.ImportAlias && score >= 0 && !completion_visible(candidates, name)) {
+            if (completion_exported_symbol(symbol) && score >= 0 && !completion_visible(candidates, name)) {
                 if (score > cutoff) { i += 1; continue; }
                 bool unique_provider_symbol = completion_unique_export(&closure, candidate, name, i);
                 if (unique_provider_symbol) {
@@ -458,22 +459,6 @@ String render_completions(Document* doc, Span replacement, CompletionCandidates*
     out.push_str("]}"); return move out;
 }
 
-// Collect `macro name(...)` declarations in the document.
-void collect_user_macros(SyntaxNode* node, Vec<String>* names) {
-    if (node == (SyntaxNode*)0) { return; }
-    if (node.kind == NodeKind.Macro && node.first_child != (SyntaxNode*)0
-        && node.first_child.kind == NodeKind.Token
-        && node.first_child.token_kind == TokenKind.Macro) {
-        SyntaxNode* name = node.first_child.next_sibling;
-        if (name != (SyntaxNode*)0 && name.kind == NodeKind.Token
-            && name.token_kind == TokenKind.Identifier) {
-            names.push(String.from_str(name.text));
-        }
-    }
-    collect_user_macros(node.first_child, names);
-    collect_user_macros(node.next_sibling, names);
-}
-
 // Offer builtin `@macro` calls plus user macros declared in the document.
 void append_macro_completions(Document* doc, str prefix, CompletionCandidates* candidates) {
     doc.ensure_syntax();
@@ -492,25 +477,19 @@ void append_macro_completions(Document* doc, str prefix, CompletionCandidates* c
         }
         i += 1;
     }
-    Vec<String> user_macros = Vec<String>.new();
-    collect_user_macros(doc.analysis.tree.root, &user_macros);
     i = 0;
-    while (i < user_macros.len()) {
-        String* name = user_macros.get_ptr(i);
-        if (!is_builtin_macro(name.to_str())) {
-            i64 score = ide_match_score(prefix, name.to_str());
-            if (score >= 0) {
-                String label = String.from_str("@");
-                label.push_str(name.to_str());
-                SymbolTarget target; target.document = doc; target.symbol = -1;
-                offer_completion(candidates, label.to_str(), "user macro", "", 3, false, score,
-                    target, false, "", false);
-                label.drop();
-            }
+    while (i < doc.analysis.symbols.len()) {
+        IdeSymbol* symbol = doc.analysis.symbols.get_ptr(i);
+        i64 score = ide_match_score(prefix, symbol.name.to_str());
+        if (symbol.kind == IdeSymbolKind.Macro && score >= 0 && !is_builtin_macro(symbol.name.to_str())) {
+            String label = String.from_str("@");
+            label.push_str(symbol.name.to_str());
+            SymbolTarget target; target.document = doc; target.symbol = -1;
+            offer_completion(candidates, label.to_str(), "user macro", "", 3, false, score,
+                target, false, "", false);
         }
         i += 1;
     }
-    user_macros.drop();
 }
 
 String compute_completion(DocumentStore* store, Document* doc, i64 offset, ClientOptions* client,

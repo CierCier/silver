@@ -290,6 +290,23 @@ private i64 ide_resolve_name(IdeIndex* index, str name, i64 offset, bool types_o
     return ambiguous ? -2 : best;
 }
 
+// The name of a `macro [T] ReturnType name(params) { ... }` declaration is the
+// identifier directly before its parameter list, as in the compiler. Returns
+// null for an `@name` use or a declaration without a parameter list.
+SyntaxNode* ide_macro_declaration_name(SyntaxNode* item) {
+    if (item.kind != NodeKind.Macro || item.first_child == (SyntaxNode*)0
+        || item.first_child.kind != NodeKind.Token
+        || item.first_child.token_kind != TokenKind.Macro) { return (SyntaxNode*)0; }
+    SyntaxNode* previous = item.first_child;
+    SyntaxNode* child = previous.next_sibling;
+    while (child != (SyntaxNode*)0 && child.kind != NodeKind.Parenthesized) {
+        previous = child;
+        child = child.next_sibling;
+    }
+    if (child == (SyntaxNode*)0 || !node_is_identifier(previous)) { return (SyntaxNode*)0; }
+    return previous;
+}
+
 // True when the identifier is the name of an `@name` macro use.
 bool ide_macro_use(SyntaxNode* node) {
     SyntaxNode* previous = binding_previous_sibling(node);
@@ -629,29 +646,22 @@ void ide_collect(IdeIndex* index) {
                 index.implementations.push(implementation);
                 ide_members(index, item, target.text, true, &table);
             }
-        } else if (item.kind == NodeKind.Macro && item.first_child != (SyntaxNode*)0
-                   && item.first_child.kind == NodeKind.Token
-                   && item.first_child.token_kind == TokenKind.Macro) {
-            // `macro name(params) { ... }` declaration: indexed with its
-            // parameters so hover and signature help can describe `@name(...)`.
-            SyntaxNode* name = item.first_child.next_sibling;
-            if (name != (SyntaxNode*)0 && node_is_identifier(name)) {
-                i64 id = ide_add_symbol(index, name, IdeSymbolKind.Macro, "", item.span, item.span, false);
+        } else if (item.kind == NodeKind.Macro) {
+            // Macro declaration: indexed with its parameters so hover and
+            // signature help can describe `@name(...)`.
+            SyntaxNode* macro_name = ide_macro_declaration_name(item);
+            if (macro_name != (SyntaxNode*)0) {
+                i64 id = ide_add_symbol(index, macro_name, IdeSymbolKind.Macro, "", item.span, item.span, false);
                 IdeSymbol* sym = index.symbols.get_ptr(id);
                 sym.signature = ide_render(item.first_child, binding_function_body(item));
-                SyntaxNode* params = name.next_sibling;
-                while (params != (SyntaxNode*)0 && params.kind != NodeKind.Parenthesized) { params = params.next_sibling; }
-                if (params != (SyntaxNode*)0) {
-                    Vec<Binding> macro_bindings = Vec<Binding>.new();
-                    collect_parameter_bindings(params, &macro_bindings);
-                    i64 p = 0;
-                    while (p < macro_bindings.len()) {
-                        Binding* binding = macro_bindings.get_ptr(p);
-                        sym.parameters.push(ide_render(binding.type_start, binding.name_node.next_sibling));
-                        sym.parameter_names.push(String.from_str(binding.name));
-                        p += 1;
-                    }
-                    macro_bindings.drop();
+                Vec<Binding> macro_bindings = Vec<Binding>.new();
+                collect_parameter_bindings(macro_name.next_sibling, &macro_bindings);
+                i64 p = 0;
+                while (p < macro_bindings.len()) {
+                    Binding* binding = macro_bindings.get_ptr(p);
+                    sym.parameters.push(ide_render(binding.type_start, binding.name_node.next_sibling));
+                    sym.parameter_names.push(String.from_str(binding.name));
+                    p += 1;
                 }
             }
         } else if (name != (SyntaxNode*)0) {

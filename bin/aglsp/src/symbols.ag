@@ -48,8 +48,9 @@ void split_doc_annotations(str documentation, String* body, Vec<i64>* positions,
             positions.push(value);
             texts.push(move text);
         } else {
+            // Prose keeps its indentation so indented code examples survive.
             if (body.len() > 0) { body.push((u8)'\n'); }
-            body.push_str(trimmed.to_str());
+            body.push_str(line.to_str());
         }
         trimmed.drop();
         line.drop();
