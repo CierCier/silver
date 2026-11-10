@@ -1991,7 +1991,9 @@ class NativeLsp(unittest.TestCase):
         answered = [response for response in responses if "result" in response]
         abandoned = [response for response in responses if "error" in response]
         self.assertEqual(len(answered), 1, responses)
-        self.assertEqual([response["error"]["code"] for response in abandoned], [-32803] * 4)
+        self.assertEqual([response["error"]["code"] for response in abandoned], [-32802] * 4)
+        # ServerCancelled carries retriggerRequest so clients re-send instead of failing.
+        self.assertEqual([response["error"].get("data") for response in abandoned], [{"retriggerRequest": True}] * 4)
         self.assertIn("items", answered[0]["result"])
 
     def test_sequential_completions_are_not_abandoned(self):
@@ -3320,10 +3322,11 @@ class NativeLsp(unittest.TestCase):
         error = response.get("error", {})
         with self.subTest(operation="active-analysis-terminal-response"):
             self.assertNotIn("result", response)
-            self.assertIn(error.get("code"), (-32800, -32803) if cancel else (-32803,), response)
-            if error.get("code") == -32803:
+            self.assertIn(error.get("code"), (-32800, -32802) if cancel else (-32802,), response)
+            if error.get("code") == -32802:
                 self.assertEqual(error.get("message"),
                                  "Analysis interrupted because the input queue is full; retry the request")
+                self.assertEqual(error.get("data"), {"retriggerRequest": True})
         with self.subTest(operation="progress-end"):
             progress = [message["params"] for message in session.notifications if message.get("method") == "$/progress"]
             self.assertEqual([(item["token"], item["value"]["kind"]) for item in progress], [(token, "end")])
@@ -3871,6 +3874,11 @@ class NativeLsp(unittest.TestCase):
                 out = subprocess.run([str(self.binary), flag], capture_output=True, text=True, timeout=10)
                 self.assertEqual(out.returncode, 0, (flag, out.stderr))
                 self.assertIn(needle, out.stdout)
+        # `--stdio` is the LSP-defined transport flag: accepted without a warning.
+        out = subprocess.run([str(self.binary), "--stdio"], input="", capture_output=True, text=True, timeout=10)
+        self.assertNotIn("unknown argument", out.stderr)
+        out = subprocess.run([str(self.binary), "--bogus"], input="", capture_output=True, text=True, timeout=10)
+        self.assertIn("ignoring unknown argument '--bogus'", out.stderr)
 
     def test_save_will_save_and_include_text(self):
         session, caps = self.capable_session(text={

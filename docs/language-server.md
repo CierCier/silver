@@ -2,7 +2,8 @@
 
 `bin/aglsp` is the Silver implementation of AGLSP. It communicates through
 JSON-RPC over standard input and output. Configure an editor to launch the
-resulting executable with no arguments.
+resulting executable with no arguments; `--stdio`, which some clients add, is
+accepted.
 
 The [protocol support ledger](lsp-protocol.md) records every stable LSP request
 and notification, its direction, support status, limits and verification.
@@ -28,8 +29,8 @@ scripts/dev-lsp.sh bench            # build + scripts/benchmark_lsp.py --workspa
 
 `check_lsp.py` forwards extra arguments to unittest, so `-k <substring>` runs
 matching scenarios only and `-v` prints each scenario as it runs. The binary
-itself supports `--help` and `--version`; any other argument is reported on
-stderr and ignored.
+itself supports `--help` and `--version` and accepts `--stdio`; any other
+argument is reported on stderr and ignored.
 
 To build the server with the native compiler:
 
@@ -314,7 +315,9 @@ Workspace search, references, and rename finish the pending index before
 returning. Cancellation checks stop that traversal between files and return
 `RequestCancelled`; individual frontend passes currently run to completion.
 If the reader is waiting for queue space, interruptible analysis stops at its next
-checkpoint and returns `RequestFailed` with a retry message. Pending document
+checkpoint and returns `ServerCancelled` (`-32802`) with a retry message and
+`data: {"retriggerRequest": true}`, so clients re-send the request (including
+diagnostic pulls) instead of reporting a failure. Pending document
 changes remain ordered. Queue pressure does not count as client cancellation;
 a cancellation behind the backlog may arrive after the overload response.
 Cancelled and completed request identities are removed, allowing ID reuse.

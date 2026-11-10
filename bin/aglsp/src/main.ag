@@ -528,7 +528,7 @@ i32 main() {
         if (strcmp(flag, "-h") == 0 || strcmp(flag, "--help") == 0) {
             STDOUT.write_str("aglsp — Silver language server ");
             STDOUT.write_str(AGLSP_VERSION);
-            STDOUT.write_str("\n\nUsage: aglsp\n\nSpeaks LSP (JSON-RPC over stdio); launch with no arguments.\n\n  -h, --help     Print this help and exit\n  -V, --version  Print the version and exit\n");
+            STDOUT.write_str("\n\nUsage: aglsp\n\nSpeaks LSP (JSON-RPC over stdio); launch with no arguments.\n\n  --stdio        Accepted for clients that pass it; stdio is the only transport\n  -h, --help     Print this help and exit\n  -V, --version  Print the version and exit\n");
             STDOUT.flush();
             return 0;
         }
@@ -539,10 +539,14 @@ i32 main() {
             STDOUT.flush();
             return 0;
         }
-        STDERR.write_str("aglsp: ignoring unknown argument '");
-        STDERR.write_str(flag);
-        STDERR.write_str("' (this server takes no arguments; try --help)\n");
-        STDERR.flush();
+        // `--stdio` names the transport the LSP specification defines as the
+        // default; clients such as vscode-languageclient pass it.
+        if (strcmp(flag, "--stdio") != 0) {
+            STDERR.write_str("aglsp: ignoring unknown argument '");
+            STDERR.write_str(flag);
+            STDERR.write_str("' (this server speaks LSP over stdio; try --help)\n");
+            STDERR.flush();
+        }
     }
     ServerState state; state.store = DocumentStore.new(); state.index.paths = Vec<IndexPath>.new();
     state.client = client_options("{}"); state.initialized = false; state.shutdown = false;

@@ -100,7 +100,10 @@ void complete_response(PendingMessage* message, str id, str result) {
     finish_progress(message);
     if (message.completion == RequestCompletion.Cancelled) { send_error(id, -32800, "Request cancelled"); }
     else if (message.completion == RequestCompletion.Interrupted) {
-        send_error(id, -32803, "Analysis interrupted because the input queue is full; retry the request");
+        // ServerCancelled with retriggerRequest: clients re-send the request
+        // (diagnostic pulls included) instead of reporting a failure.
+        send_error_with_data(id, -32802, "Analysis interrupted because the input queue is full; retry the request",
+            "{\"retriggerRequest\":true}");
     }
     else { send_response(id, result); }
 }

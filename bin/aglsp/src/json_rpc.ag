@@ -126,6 +126,11 @@ void send_trace(str message, str verbose) {
 }
 
 void send_error(str id_json, i64 code, str message) {
+    send_error_with_data(id_json, code, message, "");
+}
+
+// `data_json` is a raw JSON value, or empty for no `data` member.
+void send_error_with_data(str id_json, i64 code, str message, str data_json) {
     if (strlen(id_json) == 0) { return; }
     String resp = String.from_str("{\"jsonrpc\":\"2.0\",\"id\":");
     resp.push_str(id_json);
@@ -133,7 +138,9 @@ void send_error(str id_json, i64 code, str message) {
     resp.push_display(&code);
     resp.push_str(",\"message\":\"");
     json_escape(message, &resp);
-    resp.push_str("\"}}");
+    resp.push('"');
+    if (strlen(data_json) > 0) { resp.push_str(",\"data\":"); resp.push_str(data_json); }
+    resp.push_str("}}");
     send_raw_payload(resp.to_str());
     resp.drop();
 }
