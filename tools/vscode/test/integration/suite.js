@@ -1,6 +1,7 @@
 // Opens a Silver file and checks that aglsp answers through the extension.
 const assert = require("node:assert/strict");
 const { execFileSync } = require("node:child_process");
+const fs = require("node:fs");
 const path = require("node:path");
 const vscode = require("vscode");
 
@@ -15,10 +16,18 @@ async function eventually(probe, timeoutMs, what) {
   }
 }
 
-/** Command lines of the aglsp processes started by this extension host. */
+/**
+ * Arguments (after the executable) of each aglsp process started by this
+ * extension host. Linux only: argv comes from /proc, so paths with spaces
+ * keep their boundaries.
+ */
 function serverProcesses() {
-  const output = execFileSync("ps", ["-o", "comm=,args=", "--ppid", String(process.pid)], { encoding: "utf8" });
-  return output.split("\n").filter((line) => line.trim().startsWith("aglsp ")).map((line) => line.trim().split(/\s+/).slice(1));
+  const output = execFileSync("ps", ["-o", "pid=,comm=", "--ppid", String(process.pid)], { encoding: "utf8" });
+  return output
+    .split("\n")
+    .map((line) => line.trim().split(/\s+/))
+    .filter(([, comm]) => comm === "aglsp")
+    .map(([pid]) => fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean).slice(1));
 }
 
 async function run() {
@@ -58,9 +67,9 @@ async function run() {
   const servers = serverProcesses();
   assert.equal(servers.length, 1, `expected one aglsp child process, found ${servers.length}`);
   // aglsp takes no arguments; the command line is only the executable.
-  assert.equal(servers[0].length, 1, `aglsp was started with arguments: ${servers[0].join(" ")}`);
+  assert.deepEqual(servers[0], [], `aglsp was started with arguments: ${servers[0].join(" ")}`);
 
-  console.log(`aglsp answered: symbols=${names.join(",")}; servers after restarts=${servers.length}; argv=${servers[0].join(" ")}`);
+  console.log(`aglsp answered: symbols=${names.join(",")}; servers after restarts=${servers.length}; arguments=${servers[0].length}`);
 }
 
 module.exports = { run };
