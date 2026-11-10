@@ -1,0 +1,122 @@
+// VS Code client for aglsp, the Silver language server that ships with the
+// Silver toolchain. The extension never downloads or bundles a server.
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as vscode from "vscode";
+import {
+  LanguageClient,
+  type LanguageClientOptions,
+  type ServerOptions,
+  TransportKind,
+} from "vscode-languageclient/node";
+
+const SERVER_BINARY = process.platform === "win32" ? "aglsp.exe" : "aglsp";
+
+let client: LanguageClient | undefined;
+
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  const output = vscode.window.createOutputChannel("Silver Language Server", { log: true });
+  context.subscriptions.push(
+    output,
+    vscode.commands.registerCommand("silver.restartServer", () => restart(output)),
+    vscode.commands.registerCommand("silver.showServerOutput", () => output.show()),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration("silver.server.path") || event.affectsConfiguration("silver.sysroot")) {
+        void restart(output);
+      }
+    }),
+    // A workspace that becomes trusted can now run the server.
+    vscode.workspace.onDidGrantWorkspaceTrust(() => restart(output)),
+  );
+  await start(output);
+}
+
+export async function deactivate(): Promise<void> {
+  await stop();
+}
+
+async function restart(output: vscode.LogOutputChannel): Promise<void> {
+  await stop();
+  await start(output);
+}
+
+async function stop(): Promise<void> {
+  const running = client;
+  client = undefined;
+  await running?.dispose();
+}
+
+async function start(output: vscode.LogOutputChannel): Promise<void> {
+  if (!vscode.workspace.isTrusted) {
+    output.info("Workspace is not trusted; aglsp is not started.");
+    return;
+  }
+  const config = vscode.workspace.getConfiguration("silver");
+  const command = resolveServer(config.get<string>("server.path", ""));
+  if (command === undefined) {
+    const choice = await vscode.window.showErrorMessage(
+      "Silver: `aglsp` was not found. Install the Silver toolchain or set `silver.server.path`.",
+      "Open Settings",
+    );
+    if (choice === "Open Settings") {
+      await vscode.commands.executeCommand("workbench.action.openSettings", "silver.server.path");
+    }
+    return;
+  }
+
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  const sysroot = config.get<string>("sysroot", "").trim();
+  if (sysroot.length > 0) {
+    env.SILVER_SYSROOT = expandHome(sysroot);
+  }
+
+  const serverOptions: ServerOptions = {
+    command,
+    transport: TransportKind.stdio,
+    options: { env },
+  };
+  const clientOptions: LanguageClientOptions = {
+    documentSelector: [{ scheme: "file", language: "silver" }],
+    outputChannel: output,
+  };
+
+  client = new LanguageClient("silver", "Silver Language Server", serverOptions, clientOptions);
+  try {
+    await client.start();
+  } catch (error) {
+    output.error(`Failed to start ${command}: ${String(error)}`);
+    void vscode.window.showErrorMessage(`Silver: failed to start ${command}. See the output channel for details.`);
+    client = undefined;
+  }
+}
+
+/** The configured server path, or `aglsp` found on PATH. */
+function resolveServer(configured: string): string | undefined {
+  const trimmed = configured.trim();
+  if (trimmed.length > 0) {
+    const expanded = expandHome(trimmed);
+    return isExecutable(expanded) ? expanded : undefined;
+  }
+  for (const directory of (process.env.PATH ?? "").split(path.delimiter)) {
+    if (directory.length === 0) continue;
+    const candidate = path.join(directory, SERVER_BINARY);
+    if (isExecutable(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+function isExecutable(file: string): boolean {
+  try {
+    fs.accessSync(file, fs.constants.X_OK);
+    return fs.statSync(file).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function expandHome(file: string): string {
+  if (file === "~" || file.startsWith("~/")) {
+    return path.join(process.env.HOME ?? "", file.slice(1));
+  }
+  return file;
+}

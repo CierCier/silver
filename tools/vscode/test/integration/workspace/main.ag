@@ -1,0 +1,8 @@
+struct Point { i32 x; }
+
+/// Doubles a value.
+i32 twice(i32 value) { return value + value; }
+
+i32 main() {
+    return twice(3);
+}

@@ -1,0 +1,18 @@
+id = "silver"
+name = "Silver"
+version = "0.1.0"
+schema_version = 1
+authors = ["Silver contributors"]
+description = "Silver language support: syntax highlighting, outline, and the aglsp language server."
+repository = "https://github.com/CierCier/silver"
+
+# The grammar lives in this repository. `rev` must name a pushed commit that
+# contains the generated parser; `tools/check.sh` fails when it falls behind.
+[grammars.silver]
+repository = "https://github.com/CierCier/silver"
+rev = "c61d3e3d893cbe5e179aff46090c92a6d93a442b"
+path = "tools/tree-sitter-silver"
+
+[language_servers.aglsp]
+name = "aglsp"
+languages = ["Silver"]

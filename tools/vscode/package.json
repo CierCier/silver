@@ -1,0 +1,130 @@
+{
+  "name": "silver",
+  "displayName": "Silver",
+  "description": "Silver language support: syntax highlighting and the aglsp language server.",
+  "version": "0.1.0",
+  "publisher": "ciercier",
+  "license": "SEE LICENSE IN LICENSE",
+  "icon": "images/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/CierCier/silver.git",
+    "directory": "tools/vscode"
+  },
+  "bugs": {
+    "url": "https://github.com/CierCier/silver/issues"
+  },
+  "homepage": "https://github.com/CierCier/silver/tree/main/tools/vscode#readme",
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "silver",
+    "aglsp",
+    "agc",
+    "language server",
+    "systems programming"
+  ],
+  "main": "./dist/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "The language server starts only in trusted workspaces, because it runs the configured aglsp binary.",
+      "restrictedConfigurations": [
+        "silver.server.path",
+        "silver.sysroot"
+      ]
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "aglsp reads source files and manifests from disk."
+    }
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "silver",
+        "aliases": [
+          "Silver",
+          "silver"
+        ],
+        "extensions": [
+          ".ag"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "silver",
+        "scopeName": "source.silver",
+        "path": "./syntaxes/silver.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "silver.restartServer",
+        "title": "Restart Language Server",
+        "category": "Silver"
+      },
+      {
+        "command": "silver.showServerOutput",
+        "title": "Show Language Server Output",
+        "category": "Silver"
+      }
+    ],
+    "configuration": {
+      "title": "Silver",
+      "properties": {
+        "silver.server.path": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "markdownDescription": "Path to the `aglsp` language server. Leave empty to use `aglsp` from `PATH`."
+        },
+        "silver.sysroot": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "markdownDescription": "Silver installation prefix, passed to the server as `SILVER_SYSROOT`. Leave empty to let `aglsp` find the standard library next to its executable."
+        },
+        "silver.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "scope": "window",
+          "description": "Trace the communication between VS Code and aglsp in the output channel."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "check-types": "tsc --noEmit",
+    "compile": "npm run check-types && node esbuild.js",
+    "package": "npm run check-types && node esbuild.js --production",
+    "test:grammar": "vscode-tmgrammar-test \"test/grammar/*.ag\"",
+    "test": "npm run check-types && npm run test:grammar",
+    "vsix": "vsce package --out silver.vsix",
+    "test:integration": "node test/integration/run.js"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^11.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "@types/vscode": "~1.91.0",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^4.1.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3",
+    "vscode-tmgrammar-test": "^0.1.3"
+  }
+}

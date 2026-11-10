@@ -102,3 +102,20 @@ jobs:
         # Runner auto-resolves to `node <shim>` for wasm targets; WASM_SKIP
         # in run_tests.py triages threads/sockets/raw-asm suites.
         run: python3 tests/run_tests.py --release --no-tui --jobs 4 --target wasm32-wasip1
+
+  editor-tools:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # tools/check.sh compares the Zed grammar rev with the current grammar.
+          fetch-depth: 0
+
+      - name: Set up node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Check grammar, Zed, and VS Code extensions
+        run: tools/check.sh
