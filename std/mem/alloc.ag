@@ -262,8 +262,10 @@ i64 mem_current_tcache_slot() {
             return i;
         }
     }
+    // Probe from `h` itself so a claimed slot is found by the hashed check
+    // above, not by the linear scan on every allocation.
     for (i64 i = 0; i < MEM_MAX_TCACHES; i = i + 1) {
-        i64 slot_idx = (h + i) % 63 + 1;
+        i64 slot_idx = (h - 1 + i) % 63 + 1;
         if (g_mem_tcaches[slot_idx].tid == 0) {
             bool claimed = __atomic_cmpxchg_i64(&g_mem_tcaches[slot_idx].tid, 0, tid, ATOMIC_SEQ_CST, ATOMIC_ACQUIRE);
             if (claimed) {
