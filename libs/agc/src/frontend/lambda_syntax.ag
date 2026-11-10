@@ -1,6 +1,8 @@
 import frontend.ast;
 import std.optional;
 
+/// The parts of one lambda after its parameter list: body start, the node
+/// after the lambda, whether the body is an expression, and its extent.
 struct LambdaSyntax {
     SyntaxNode* body;
     SyntaxNode* end;
@@ -8,6 +10,7 @@ struct LambdaSyntax {
     Span extent;
 }
 
+/// Returns true when `node` is a parenthesized group followed by `=>`.
 bool lambda_start(SyntaxNode* node) {
     return node != (SyntaxNode*)0 && node.kind == NodeKind.Parenthesized
         && node.next_sibling != (SyntaxNode*)0
