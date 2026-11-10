@@ -15,10 +15,10 @@ async function eventually(probe, timeoutMs, what) {
   }
 }
 
-/** Counts aglsp processes started by this extension host. */
+/** Command lines of the aglsp processes started by this extension host. */
 function serverProcesses() {
-  const output = execFileSync("ps", ["-o", "comm=", "--ppid", String(process.pid)], { encoding: "utf8" });
-  return output.split("\n").filter((name) => name.trim() === "aglsp").length;
+  const output = execFileSync("ps", ["-o", "comm=,args=", "--ppid", String(process.pid)], { encoding: "utf8" });
+  return output.split("\n").filter((line) => line.trim().startsWith("aglsp ")).map((line) => line.trim().split(/\s+/).slice(1));
 }
 
 async function run() {
@@ -56,9 +56,11 @@ async function run() {
     return Array.isArray(result) && result.length > 0;
   }, 30000, "document symbols after restarts");
   const servers = serverProcesses();
-  assert.equal(servers, 1, `expected one aglsp child process, found ${servers}`);
+  assert.equal(servers.length, 1, `expected one aglsp child process, found ${servers.length}`);
+  // aglsp takes no arguments; the command line is only the executable.
+  assert.equal(servers[0].length, 1, `aglsp was started with arguments: ${servers[0].join(" ")}`);
 
-  console.log(`aglsp answered: symbols=${names.join(",")}; servers after restarts=${servers}`);
+  console.log(`aglsp answered: symbols=${names.join(",")}; servers after restarts=${servers.length}; argv=${servers[0].join(" ")}`);
 }
 
 module.exports = { run };

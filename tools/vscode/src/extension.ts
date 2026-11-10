@@ -3,16 +3,14 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as vscode from "vscode";
-import {
-  LanguageClient,
-  type LanguageClientOptions,
-  type ServerOptions,
-  TransportKind,
-} from "vscode-languageclient/node";
+import { LanguageClient, type LanguageClientOptions, type ServerOptions } from "vscode-languageclient/node";
 
 const SERVER_BINARY = process.platform === "win32" ? "aglsp.exe" : "aglsp";
+// Settings edits arrive per keystroke; restart once they settle.
+const SETTINGS_RESTART_DELAY_MS = 500;
 
 let client: LanguageClient | undefined;
+let settingsRestart: ReturnType<typeof setTimeout> | undefined;
 // Starts and stops run one at a time, so overlapping restarts cannot leave a
 // second server running.
 let lifecycle: Promise<void> = Promise.resolve();
@@ -30,9 +28,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("silver.showServerOutput", () => output.show()),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration("silver.server.path") || event.affectsConfiguration("silver.sysroot")) {
-        void restart(output);
+        clearTimeout(settingsRestart);
+        settingsRestart = setTimeout(() => void restart(output), SETTINGS_RESTART_DELAY_MS);
       }
     }),
+    { dispose: () => clearTimeout(settingsRestart) },
     // A workspace that becomes trusted can now run the server.
     vscode.workspace.onDidGrantWorkspaceTrust(() => restart(output)),
   );
@@ -85,11 +85,9 @@ async function start(output: vscode.LogOutputChannel): Promise<void> {
     env.SILVER_SYSROOT = expandHome(sysroot);
   }
 
-  const serverOptions: ServerOptions = {
-    command,
-    transport: TransportKind.stdio,
-    options: { env },
-  };
+  // No `transport`: the client then uses stdio without appending `--stdio`,
+  // which aglsp does not accept.
+  const serverOptions: ServerOptions = { command, options: { env } };
   const clientOptions: LanguageClientOptions = {
     documentSelector: [{ scheme: "file", language: "silver" }],
     outputChannel: output,
