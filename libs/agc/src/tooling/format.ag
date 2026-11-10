@@ -1,16 +1,21 @@
 import frontend.ast;
 import std.result;
 
+/// Largest formatted output the formatter will produce (16 MiB).
 const i64 FORMAT_MAX_BYTES = 16777216;
 
+/// Indentation settings: tab width (1-256) and spaces versus tabs.
 struct SourceFormatOptions {
     i64 tab_size;
     bool insert_spaces;
     bool insert_final_newline;
 }
 
+/// Why formatting failed: the source does not parse, the options are
+/// invalid, the output is too large, or the result would change tokens.
 enum SourceFormatError { InvalidSyntax; InvalidOptions; OutputLimit; ChangedTokens; }
 
+/// Builds formatted output: text, the open delimiter stack, and depth.
 struct SourceFormatWriter {
     String text;
     Vec<TokenKind> groups;
@@ -21,11 +26,13 @@ struct SourceFormatWriter {
 }
 
 impl SourceFormatWriter {
+    /// Returns true at the start of a line.
     bool line_start(SourceFormatWriter* self) {
         return self.text.len() == 0 || self.text.data[self.text.len() - 1] == (u8)'\n'
             || self.text.data[self.text.len() - 1] == (u8)'\r';
     }
 
+    /// Ends the current line unless already at a line start.
     void line(SourceFormatWriter* self) {
         if (self.text.len() == 0 || self.text.data[self.text.len() - 1] == (u8)'\n') { return; }
         if (self.text.data[self.text.len() - 1] == (u8)'\r') {
@@ -33,11 +40,13 @@ impl SourceFormatWriter {
         } else { self.text.push_str(self.newline); }
     }
 
+    /// Writes one space unless at a line start or after whitespace.
     void space(SourceFormatWriter* self) {
         if (!self.line_start() && self.text.data[self.text.len() - 1] != (u8)' '
             && self.text.data[self.text.len() - 1] != (u8)'\t') { self.text.push(' '); }
     }
 
+    /// Writes the current indentation when at a line start.
     void indent(SourceFormatWriter* self) {
         if (!self.line_start()) { return; }
         i64 count = self.depth;
@@ -48,6 +57,7 @@ impl SourceFormatWriter {
     }
 }
 
+/// Returns the source's newline style ("\r\n" or "\n").
 str source_newline(str text, TokenStream* tokens) {
     i64 i = 0; i64 token = 0;
     while (token < tokens.len()) {
@@ -62,11 +72,14 @@ str source_newline(str text, TokenStream* tokens) {
     return "\n";
 }
 
+/// Returns true for operators whose original spacing is kept (they can be
+/// unary or generic brackets).
 bool format_preserves_spacing(TokenKind kind) {
     return kind == TokenKind.Star || kind == TokenKind.BitwiseAnd || kind == TokenKind.Less
         || kind == TokenKind.Greater || kind == TokenKind.RightShift || kind == TokenKind.LeftShift;
 }
 
+/// Returns true when the formatter puts a space between two tokens.
 bool format_space_before(Token* previous, Token* current) {
     if (previous == (Token*)0) { return false; }
     TokenKind before = previous.kind; TokenKind kind = current.kind;
@@ -85,11 +98,13 @@ bool format_space_before(Token* previous, Token* current) {
     return true;
 }
 
+/// Returns true when the tokens parse without errors.
 bool format_syntax_valid(TokenStream* tokens) {
     DiagnosticBag diagnostics = DiagnosticBag.new(); NodePool pool = NodePool.new(); SyntaxTree tree;
     parse(tokens, &diagnostics, &pool, &tree); bool valid = diagnostics.is_empty(); pool.destroy(); return valid;
 }
 
+/// Returns true when both streams have the same token kinds and text.
 bool format_same_tokens(TokenStream* before, TokenStream* after) {
     if (before.len() != after.len()) { return false; }
     i64 i = 0;
@@ -102,6 +117,7 @@ bool format_same_tokens(TokenStream* before, TokenStream* after) {
     return true;
 }
 
+/// Returns true when `text[begin..end]` contains a blank line.
 bool format_has_blank_line(str text, i64 begin, i64 end) {
     i64 lines = 0;
     while (begin < end) {
@@ -113,6 +129,9 @@ bool format_has_blank_line(str text, i64 begin, i64 end) {
     return false;
 }
 
+/// Reformats Silver source: re-indents and normalizes spacing, keeping
+/// comments and single blank lines. Fails instead of changing meaning: the
+/// output must re-lex to the same tokens.
 Result<String, SourceFormatError> format_source(str text, SourceFormatOptions* options) {
     if (options.tab_size <= 0 || options.tab_size > 256) { return Result<String, SourceFormatError>.err(SourceFormatError.InvalidOptions); }
     TokenStream tokens = TokenStream.new(); DiagnosticBag diagnostics = DiagnosticBag.new();
