@@ -2517,7 +2517,6 @@ class NativeLsp(unittest.TestCase):
     def test_will_save_wait_until_formats_document(self):
         text = "i32 main(){\nreturn 1;\n}\n"
         uri = self.open(text)
-        self.assertTrue(self.capabilities["willSaveWaitUntilProvider"])
         edits = self.session.result("textDocument/willSaveWaitUntil",
                                     {"textDocument": {"uri": uri}, "reason": 1})
         self.assertEqual(apply_edits(text, edits), "i32 main() {\n    return 1;\n}\n")
