@@ -118,20 +118,26 @@ module.exports = grammar({
       'struct',
       field('name', $.identifier),
       optional(field('type_parameters', $.type_parameters)),
+      optional($.where_clause),
       choice(field('body', $.field_list), ';'),
     ),
 
     field_list: $ => seq('{', repeat(choice($.field_declaration, $.attribute)), '}'),
 
+    // One type may declare several fields: `i32 x, y;`.
     field_declaration: $ => seq(
       optional($.visibility),
       field('type', $._type),
+      sepBy1(',', $._field_declarator),
+      ';',
+    ),
+
+    _field_declarator: $ => seq(
       field('name', $.identifier),
       repeat($.array_dimension),
       // Serialization tag: `i32 id "json:id";`.
       optional(field('tag', $.string_literal)),
       optional(seq('=', field('value', $.initializer))),
-      ';',
     ),
 
     enum_definition: $ => seq(
@@ -139,6 +145,7 @@ module.exports = grammar({
       'enum',
       field('name', $.identifier),
       optional(field('type_parameters', $.type_parameters)),
+      optional($.where_clause),
       field('body', $.variant_list),
     ),
 
@@ -163,6 +170,7 @@ module.exports = grammar({
       field('name', $.identifier),
       optional(field('type_parameters', $.type_parameters)),
       optional(seq(':', field('bounds', $.type_bounds))),
+      optional($.where_clause),
       field('body', $.member_list),
     ),
 

@@ -399,3 +399,94 @@ if (@cfg(os.linux)) {
         (module_path
           (identifier)
           (identifier))))))
+
+================================================================================
+Where clauses on type definitions
+================================================================================
+
+struct Box<T> where T: Show { T value; }
+enum E<T> where T: Show { A; }
+trait Wrap<T> where T: Show { void wrap(&self); }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (struct_definition
+    (identifier)
+    (type_parameters
+      (type_parameter
+        (identifier)))
+    (where_clause
+      (where)
+      (type_identifier)
+      (type_bounds
+        (type_identifier)))
+    (field_list
+      (field_declaration
+        (type_identifier)
+        (identifier))))
+  (enum_definition
+    (identifier)
+    (type_parameters
+      (type_parameter
+        (identifier)))
+    (where_clause
+      (where)
+      (type_identifier)
+      (type_bounds
+        (type_identifier)))
+    (variant_list
+      (enum_variant
+        (identifier))))
+  (trait_definition
+    (identifier)
+    (type_parameters
+      (type_parameter
+        (identifier)))
+    (where_clause
+      (where)
+      (type_identifier)
+      (type_bounds
+        (type_identifier)))
+    (member_list
+      (function_definition
+        (primitive_type)
+        (identifier)
+        (parameters
+          (self_parameter
+            (self)))))))
+
+================================================================================
+Fields sharing one type
+================================================================================
+
+struct Point {
+    i32 x, y;
+    u8 a[2], b[3];
+    i32 id "json:id", seq "json:seq";
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (struct_definition
+    (identifier)
+    (field_list
+      (field_declaration
+        (primitive_type)
+        (identifier)
+        (identifier))
+      (field_declaration
+        (primitive_type)
+        (identifier)
+        (array_dimension
+          (number_literal))
+        (identifier)
+        (array_dimension
+          (number_literal)))
+      (field_declaration
+        (primitive_type)
+        (identifier)
+        (string_literal)
+        (identifier)
+        (string_literal)))))
