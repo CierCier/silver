@@ -10,12 +10,14 @@ import frontend.cfg;
 import frontend.diagnostics;
 import frontend.items;
 
+/// State of the launch Send check; `failed` is set by any report.
 struct SendAnalyzer {
     DiagnosticBag* diagnostics;
     bool failed;
 }
 
 impl SendAnalyzer {
+    /// Creates an analyzer that reports to `diagnostics`.
     SendAnalyzer new(DiagnosticBag* diagnostics) {
         SendAnalyzer analyzer;
         analyzer.diagnostics = diagnostics;
@@ -24,10 +26,12 @@ impl SendAnalyzer {
     }
 }
 
+/// Returns true when the strings are equal.
 bool send_text_equals(str left, str right) {
     return strcmp(left, right) == 0;
 }
 
+/// Returns the binding named `name`, or null.
 Binding* send_find_binding(Vec<Binding>* bindings, str name) {
     i64 i = 0;
     while (i < bindings.len()) {
@@ -40,6 +44,7 @@ Binding* send_find_binding(Vec<Binding>* bindings, str name) {
     return (Binding*)0;
 }
 
+/// Returns a display spelling of a projected type (with `&`/`*` and generics).
 String send_type_display(TypeProjection* value) {
     String result = String.from_str(value.name);
     if (value.kind == ProjectionTypeKind.Reference) {
@@ -74,6 +79,8 @@ String send_type_display(TypeProjection* value) {
     return result;
 }
 
+/// Returns false for non-Send builtin names (`Rc`, `Handle`, `Guard`),
+/// appending the reason to `*reason`.
 bool send_type_name_is_send(str name, String* reason) {
     if (send_text_equals(name, "Rc")) {
         reason.push_str("Rc<T> carries a shared non-atomic reference count");
@@ -91,6 +98,7 @@ bool send_type_name_is_send(str name, String* reason) {
 }
 
 
+/// Appends every leaf token under `node`.
 void send_collect_leaves(SyntaxNode* node, Vec<SyntaxNode*>* leaves) {
     if (node == (SyntaxNode*)0) {
         return;
@@ -106,6 +114,7 @@ void send_collect_leaves(SyntaxNode* node, Vec<SyntaxNode*>* leaves) {
     }
 }
 
+/// Returns true when `text` is a plain identifier.
 bool send_text_is_identifier(str text) {
     if (text == (str)0 || strlen(text) == 0) {
         return false;
@@ -116,6 +125,7 @@ bool send_text_is_identifier(str text) {
         || first == (u8)'_';
 }
 
+/// Returns true for owning containers whose element type decides Send.
 bool send_type_owns_storage(str name) {
     return send_text_equals(name, "Vec")
         || send_text_equals(name, "Box")
@@ -126,6 +136,7 @@ bool send_type_owns_storage(str name) {
         ;
 }
 
+/// Returns the position of type parameter `name` in a generic item, or -1.
 i64 send_type_parameter_index(SyntaxNode* item, str name) {
     SyntaxNode* cursor = item.first_child;
     while (cursor != (SyntaxNode*)0 && cursor.kind != NodeKind.Block) {
@@ -161,12 +172,14 @@ i64 send_type_parameter_index(SyntaxNode* item, str name) {
     return -1;
 }
 
+/// Returns the spelling of generic argument `index` (0 or 1) of `owner`.
 str send_type_argument(TypeProjection* owner, i64 index) {
     if (index == 0) { return owner.argument0.to_str(); }
     if (index == 1) { return owner.argument1.to_str(); }
     return "";
 }
 
+/// Projects the type spelled by siblings `[first, end)`.
 TypeProjection send_parse_node_type(SyntaxNode* first, SyntaxNode* end) {
     Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
     SyntaxNode* cursor = first;
@@ -180,6 +193,8 @@ TypeProjection send_parse_node_type(SyntaxNode* first, SyntaxNode* end) {
 }
 
 
+/// Returns true when a field of a generic declaration is Send once the
+/// owner's type arguments are substituted.
 bool send_field_is_send(SyntaxNode* root, SyntaxNode* declaration,
                         SyntaxNode* first, SyntaxNode* end,
                         TypeProjection* owner,
@@ -223,6 +238,7 @@ bool send_field_is_send(SyntaxNode* root, SyntaxNode* declaration,
     return send_type_is_send_in_declarations(root, &field, visiting, depth + 1, reason);
 }
 
+/// Returns true when every field of struct `item` is Send for `owner`.
 bool send_struct_fields_are_send(SyntaxNode* root, SyntaxNode* item,
                                  TypeProjection* owner,
                                  Vec<str>* visiting, i64 depth, String* reason) {
@@ -260,6 +276,7 @@ bool send_struct_fields_are_send(SyntaxNode* root, SyntaxNode* item,
     return true;
 }
 
+/// Returns true when every payload of enum `item` is Send for `owner`.
 bool send_enum_payloads_are_send(SyntaxNode* root, SyntaxNode* item,
                                  TypeProjection* owner,
                                  Vec<str>* visiting, i64 depth, String* reason) {
@@ -292,6 +309,8 @@ bool send_enum_payloads_are_send(SyntaxNode* root, SyntaxNode* item,
     return true;
 }
 
+/// Returns true when `value` is Send, looking through user struct and enum
+/// declarations (cycles are cut by `visiting`, depth by `depth`).
 bool send_type_is_send_in_declarations(SyntaxNode* root, TypeProjection* value,
                                        Vec<str>* visiting, i64 depth, String* reason) {
     if (!send_type_is_send(value, reason)) {
@@ -330,6 +349,8 @@ bool send_type_is_send_in_declarations(SyntaxNode* root, TypeProjection* value,
 
 
 
+/// Returns true when `value` is Send by its projection alone: references,
+/// raw pointers, Rc, and unknown types are not. Appends the reason.
 bool send_type_is_send(TypeProjection* value, String* reason) {
     if (value.kind == ProjectionTypeKind.Unknown) {
         reason.push_str("the type is unknown (a prior type error)");
@@ -400,6 +421,7 @@ bool send_type_is_send(TypeProjection* value, String* reason) {
     return true;
 }
 
+/// Reports a non-Send launch argument of `type_name` with `reason`.
 void send_report_type(SendAnalyzer* analyzer, Span span, str type_name, str reason) {
     String message = String.from_str("launch argument of type ");
     message.push_str(type_name);
@@ -409,6 +431,7 @@ void send_report_type(SendAnalyzer* analyzer, Span span, str type_name, str reas
     analyzer.failed = true;
 }
 
+/// Appends the source tokens of a type node as text.
 void send_append_type_tokens(SyntaxNode* node, String* out) {
     if (node.kind == NodeKind.Token) {
         out.push_str(node.text);
@@ -428,7 +451,7 @@ void send_append_type_tokens(SyntaxNode* node, String* out) {
     if (node.kind == NodeKind.Bracket) { out.push((u8)']'); }
 }
 
-// Tuple projections only name their first element, so show the declared text.
+/// Tuple projections only name their first element, so show the declared text.
 String send_binding_type_display(Binding* binding) {
     if (binding.type_start == (SyntaxNode*)0 || binding.type_start.kind != NodeKind.Bracket) {
         return send_type_display(&binding.declared_type);
@@ -442,6 +465,7 @@ String send_binding_type_display(Binding* binding) {
     return move result;
 }
 
+/// Checks one `launch` argument: address-of and non-Send values are errors.
 void check_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root,
                            Vec<Binding>* bindings, LaunchArgument* argument) {
     if ((*argument).kind == ProjectionExpressionKind.Address) {
@@ -482,6 +506,8 @@ void check_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root,
     reason.drop();
 }
 
+/// Checks every `launch` call's arguments in cfg-active functions. Returns
+/// false when any argument is not Send.
 bool check_send(SyntaxTree* tree, DiagnosticBag* diagnostics, CfgSet* cfg) {
     bool ok = true;
     Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();

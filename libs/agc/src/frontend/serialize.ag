@@ -5,6 +5,7 @@ import frontend.ast;
 import frontend.items;
 import frontend.lexer;
 
+/// One struct field to serialize: field name, type spelling, and JSON key.
 struct JsonSynthesisField {
     String name;
     String type_name;
@@ -14,6 +15,7 @@ struct JsonSynthesisField {
     SyntaxNode* type_end;
 }
 
+/// Returns the `json:"name"` key from a field tag string, or "".
 String json_synthesis_tag(str raw) {
     String result = String.new();
     i64 length = strlen(raw);
@@ -35,11 +37,13 @@ String json_synthesis_tag(str raw) {
     return result;
 }
 
+/// Returns true for a string literal token.
 bool json_synthesis_string_token(SyntaxNode* node) {
     return node != (SyntaxNode*)0 && node.kind == NodeKind.Token
         && strlen(node.text) >= 2 && node.text[0] == '"';
 }
 
+/// Collects a struct item's fields and their JSON keys.
 void json_synthesis_collect_fields(SyntaxNode* item, Vec<JsonSynthesisField>* fields) {
     SyntaxNode* body = item.first_child;
     while (body != (SyntaxNode*)0 && body.kind != NodeKind.Block) {
@@ -92,6 +96,7 @@ void json_synthesis_collect_fields(SyntaxNode* item, Vec<JsonSynthesisField>* fi
     }
 }
 
+/// Returns true when `node` declares local `value_name` of `type_name`.
 bool json_synthesis_declares_value_as(SyntaxNode* node, str value_name,
                                       str type_name) {
     if (node == (SyntaxNode*)0) { return false; }
@@ -111,6 +116,8 @@ bool json_synthesis_declares_value_as(SyntaxNode* node, str value_name,
     return false;
 }
 
+/// Returns true when a `@json`/`@from_json` use under `node` targets
+/// `type_name`.
 bool json_synthesis_macro_targets_type(SyntaxNode* node, SyntaxNode* root,
                                        str type_name) {
     if (node == (SyntaxNode*)0) { return false; }
@@ -159,6 +166,7 @@ bool json_synthesis_macro_targets_type(SyntaxNode* node, SyntaxNode* root,
     return false;
 }
 
+/// Returns true when an `impl trait_name for type_name` item exists.
 bool json_synthesis_has_impl(SyntaxNode* root, str trait_name, str type_name) {
     SyntaxNode* item = root.first_child;
     while (item != (SyntaxNode*)0) {
@@ -185,6 +193,7 @@ bool json_synthesis_has_impl(SyntaxNode* root, str trait_name, str type_name) {
     return false;
 }
 
+/// Returns true when a struct item is generic (or unnamed).
 bool json_synthesis_generic_struct(SyntaxNode* item) {
     SyntaxNode* name = item_identifier(item);
     if (name == (SyntaxNode*)0) { return true; }
@@ -196,6 +205,7 @@ bool json_synthesis_generic_struct(SyntaxNode* item) {
     return false;
 }
 
+/// Returns true when function `function_name` returns `type_name`.
 bool json_synthesis_function_returns_type(SyntaxNode* root, str function_name,
                                           str type_name) {
     SyntaxNode* item = root.first_child;
@@ -227,6 +237,8 @@ bool json_synthesis_function_returns_type(SyntaxNode* root, str function_name,
     return false;
 }
 
+/// Returns true when `expression` is a call to a function returning
+/// `type_name`.
 bool json_synthesis_call_returns_type(SyntaxNode* root, SyntaxNode* expression,
                                       str type_name) {
     if (expression == (SyntaxNode*)0 || expression.kind != NodeKind.Token
@@ -239,6 +251,7 @@ bool json_synthesis_call_returns_type(SyntaxNode* root, SyntaxNode* expression,
         root, expression.text, type_name);
 }
 
+/// Appends `value` as an escaped string literal.
 void json_synthesis_append_string_literal(String* output, str value) {
     output.push((u8)'"');
     i64 index = 0;
@@ -262,11 +275,13 @@ void json_synthesis_append_string_literal(String* output, str value) {
     output.push((u8)'"');
 }
 
+/// Appends the generated early-return for a decode error.
 void json_synthesis_append_error(String* output) {
     output.push_str("{ JsonError __silver_json_error = JsonError.at_index(input.index); ");
     output.push_str("return Err(move __silver_json_error); }");
 }
 
+/// Appends a generated `impl ToJson for <type_name>`.
 void json_synthesis_append_to_json(String* output, str type_name,
                                    Vec<JsonSynthesisField>* fields) {
     output.push_str("impl ToJson for ");
@@ -287,6 +302,7 @@ void json_synthesis_append_to_json(String* output, str type_name,
     output.push_str("out.end_object(); } }\n");
 }
 
+/// Appends a generated `impl FromJson for <type_name>`.
 void json_synthesis_append_from_json(String* output, str type_name,
                                      Vec<JsonSynthesisField>* fields) {
     output.push_str("impl FromJson for ");
@@ -353,6 +369,7 @@ void json_synthesis_append_from_json(String* output, str type_name,
     output.push_str("return Ok(move result); } }\n");
 }
 
+/// Appends a generated `impl JsonDecode for <type_name>`.
 void json_synthesis_append_decode(String* output, str type_name) {
     output.push_str("impl JsonDecode for ");
     output.push_str(type_name);
@@ -363,6 +380,7 @@ void json_synthesis_append_decode(String* output, str type_name) {
     output.push_str(".from_json(input); } }\n");
 }
 
+/// Appends a generated `impl JsonDispose for <type_name>`.
 void json_synthesis_append_dispose(String* output, str type_name,
                                    Vec<JsonSynthesisField>* fields) {
     output.push_str("impl JsonDispose for ");
@@ -379,6 +397,7 @@ void json_synthesis_append_dispose(String* output, str type_name,
     output.push_str("} }\n");
 }
 
+/// Returns true when `type_name` is already selected.
 bool json_synthesis_type_selected(Vec<str>* selected, str type_name) {
     i64 index = 0;
     while (index < selected.len()) {
@@ -388,6 +407,8 @@ bool json_synthesis_type_selected(Vec<str>* selected, str type_name) {
     return false;
 }
 
+/// Selects the struct field types of `item` that also need impls. Returns
+/// true when anything was added.
 bool json_synthesis_add_field_dependencies(SyntaxNode* root,
                                            SyntaxNode* item,
                                            Vec<str>* selected) {
@@ -420,6 +441,7 @@ bool json_synthesis_add_field_dependencies(SyntaxNode* root,
     return added;
 }
 
+/// Repeats dependency selection until no new type is added.
 void json_synthesis_collect_dependencies(SyntaxNode* root,
                                          Vec<str>* selected) {
     bool changed = true;
@@ -442,6 +464,7 @@ void json_synthesis_collect_dependencies(SyntaxNode* root,
     }
 }
 
+/// Selects the types whose JSON disposal the selected types depend on.
 void json_synthesis_collect_disposal_dependencies(SyntaxNode* root,
                                                   Vec<str>* selected) {
     i64 selected_index = 0;
@@ -484,6 +507,10 @@ void json_synthesis_collect_disposal_dependencies(SyntaxNode* root,
     }
 }
 
+/// Returns generated Silver source with JSON impls for every non-generic
+/// struct marked `#[serialize]` (or `#[serialise]`) or used with
+/// `@json`/`@from_json`, plus their
+/// field dependencies, skipping types that already implement the traits.
 String serialize_synthesize_json(SyntaxNode* root) {
     String generated = String.new();
     if (root == (SyntaxNode*)0) { return generated; }
