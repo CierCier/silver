@@ -16,6 +16,7 @@ import frontend.lexer;
 import frontend.symbols;
 import frontend.types;
 
+/// Shape of a lightweight HIR type.
 enum HirTypeKind {
     Invalid;
     Void;
@@ -30,6 +31,8 @@ enum HirTypeKind {
     Array;
 }
 
+/// One HIR type: kind, display name (interned), and element type for
+/// pointers, references, and arrays.
 struct HirType {
     HirTypeKind kind;
     str name;
@@ -38,12 +41,14 @@ struct HirType {
     bool is_mutable;
 }
 
+/// The HIR's own small type table (separate from the canonical `TypeTable`).
 struct HirTypeTable {
     Interner names;
     Vec<HirType> types;
 }
 
 impl HirTypeTable {
+    /// Creates a table whose id 0 is the invalid type.
     HirTypeTable new() {
         HirTypeTable table;
         table.names = Interner.new();
@@ -58,6 +63,7 @@ impl HirTypeTable {
         return table;
     }
 
+    /// Returns the id of primitive `kind`, adding it once.
     u32 add_primitive(HirTypeTable* self, HirTypeKind kind, str name) {
         i64 i = 0;
         while (i < self.types.len()) {
@@ -77,6 +83,7 @@ impl HirTypeTable {
         return (u32)(self.types.len() - 1);
     }
 
+    /// Returns a named type id, or 0 for an empty name.
     u32 add_named(HirTypeTable* self, str name) {
         if (strlen(name) == 0) {
             return 0;
@@ -84,6 +91,7 @@ impl HirTypeTable {
         return self.add_primitive(HirTypeKind.Named, name);
     }
 
+    /// Adds a pointer type to `pointee` (not deduplicated).
     u32 add_pointer(HirTypeTable* self, u32 pointee, bool is_mutable) {
         HirType result;
         result.kind = HirTypeKind.Pointer;
@@ -95,6 +103,7 @@ impl HirTypeTable {
         return (u32)(self.types.len() - 1);
     }
 
+    /// Adds a reference type to `pointee` (not deduplicated).
     u32 add_reference(HirTypeTable* self, u32 pointee, bool is_mutable) {
         HirType result;
         result.kind = HirTypeKind.Reference;
@@ -106,6 +115,7 @@ impl HirTypeTable {
         return (u32)(self.types.len() - 1);
     }
 
+    /// Adds an array type of `element` (not deduplicated).
     u32 add_array(HirTypeTable* self, u32 element) {
         HirType result;
         result.kind = HirTypeKind.Array;
@@ -117,6 +127,7 @@ impl HirTypeTable {
         return (u32)(self.types.len() - 1);
     }
 
+    /// Returns type `id`, or the invalid type for an out-of-range id.
     HirType* get(HirTypeTable* self, u32 id) {
         if ((i64)id >= self.types.len()) {
             return self.types.get_ptr(0);
@@ -125,6 +136,7 @@ impl HirTypeTable {
     }
 }
 
+/// Converts a projected declaration type into a HIR type id (0 if unknown).
 u32 hir_type_from_projection(HirTypeTable* table, TypeProjection* projection) {
     if (projection == (TypeProjection*)0) {
         return 0;
@@ -164,6 +176,7 @@ u32 hir_type_from_projection(HirTypeTable* table, TypeProjection* projection) {
     return 0;
 }
 
+/// Kind of a HIR node.
 enum HirNodeKind {
     Function;
     Parameter;
@@ -175,6 +188,7 @@ enum HirNodeKind {
     Token;
 }
 
+/// One HIR node lowered from the syntax tree. Owned by a `HirNodePool`.
 struct HirNode {
     HirNodeKind kind;
     TokenKind token_kind;
@@ -188,16 +202,19 @@ struct HirNode {
     HirNode* pool_next;
 }
 
+/// Owns every `HirNode` of a context; freed with `destroy`.
 struct HirNodePool {
     HirNode* head;
 }
 
+/// The HIR types, nodes, and interned strings of one lowering pass.
 struct HirContext {
     HirTypeTable types;
     HirNodePool nodes;
     Interner strings;
 }
 
+/// One lowered function: name, span, return type, and parameter types.
 struct HirFunction {
     str name;
     Span span;
@@ -208,17 +225,20 @@ struct HirFunction {
     Vec<HirNode*> parameters;
 }
 
+/// The lowered functions of a program. Free with `hir_module_drop`.
 struct HirModule {
     Vec<HirFunction> functions;
 }
 
 impl HirNodePool {
+    /// Creates an empty pool.
     HirNodePool new() {
         HirNodePool pool;
         pool.head = (HirNode*)0;
         return pool;
     }
 
+    /// Allocates a node with borrowed `text`, or returns null on failure.
     HirNode* create(HirNodePool* self, HirNodeKind kind, Span span, str text) {
         HirNode* node = (HirNode*)alloc<HirNode>();
         if (node == (HirNode*)0) {
@@ -238,6 +258,7 @@ impl HirNodePool {
         return node;
     }
 
+    /// Frees every node in the pool.
     void destroy(HirNodePool* self) {
         HirNode* node = self.head;
         while (node != (HirNode*)0) {
@@ -250,6 +271,7 @@ impl HirNodePool {
 }
 
 impl HirContext {
+    /// Creates an empty lowering context.
     HirContext new() {
         HirContext context;
         context.types = HirTypeTable.new();
@@ -258,11 +280,13 @@ impl HirContext {
         return context;
     }
 
+    /// Interns `text` and returns the context-owned copy.
     str intern(HirContext* self, str text) {
         return self.strings.get(self.strings.intern(text));
     }
 }
 
+/// Appends `child` to `parent`'s children; ignores nulls.
 void hir_append(HirNode* parent, HirNode* child) {
     if (parent == (HirNode*)0 || child == (HirNode*)0) {
         return;
@@ -278,6 +302,7 @@ void hir_append(HirNode* parent, HirNode* child) {
     }
 }
 
+/// Lowers a syntax node and its children into HIR nodes, or null.
 HirNode* hir_lower_node(HirContext* context, SyntaxNode* syntax) {
     if (syntax == (SyntaxNode*)0) {
         return (HirNode*)0;
@@ -315,6 +340,7 @@ HirNode* hir_lower_node(HirContext* context, SyntaxNode* syntax) {
     return node;
 }
 
+/// Returns the HIR type of a literal token kind, or 0.
 u32 hir_literal_type(HirContext* context, TokenKind kind) {
     if (kind == TokenKind.BoolLiteral) { return context.types.add_primitive(HirTypeKind.Bool, "bool"); }
     if (kind == TokenKind.StringLiteral) { return context.types.add_primitive(HirTypeKind.String, "str"); }
@@ -326,6 +352,7 @@ u32 hir_literal_type(HirContext* context, TokenKind kind) {
     return 0;
 }
 
+/// Assigns literal types to every literal node under `node`.
 void hir_infer_literals(HirNode* node, HirContext* context) {
     if (node == (HirNode*)0) { return; }
     if (node.kind == HirNodeKind.Literal) {
@@ -338,6 +365,7 @@ void hir_infer_literals(HirNode* node, HirContext* context) {
     }
 }
 
+/// Appends every leaf token under `node`.
 void hir_collect_leaves(SyntaxNode* node, Vec<SyntaxNode*>* leaves) {
     if (node == (SyntaxNode*)0) { return; }
     if (node.kind == NodeKind.Token) {
@@ -351,6 +379,7 @@ void hir_collect_leaves(SyntaxNode* node, Vec<SyntaxNode*>* leaves) {
     }
 }
 
+/// Returns the declared return type of a function item.
 u32 hir_function_return_type(HirContext* context, SyntaxNode* function, SyntaxNode* name) {
     SyntaxNode* parameters = binding_function_parameters(function);
     Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
@@ -370,6 +399,7 @@ u32 hir_function_return_type(HirContext* context, SyntaxNode* function, SyntaxNo
     return result;
 }
 
+/// Lowers one function item's signature.
 HirFunction hir_lower_function(HirContext* context, SyntaxNode* function) {
     HirFunction result;
     result.name = "";
@@ -413,6 +443,7 @@ HirFunction hir_lower_function(HirContext* context, SyntaxNode* function) {
     return result;
 }
 
+/// Lowers every cfg-visible function signature of `tree`.
 HirModule hir_build(SyntaxTree* tree, CfgSet* cfg, DiagnosticBag* diagnostics, HirContext* context) {
     HirModule module;
     module.functions = Vec<HirFunction>.new();
@@ -431,6 +462,7 @@ HirModule hir_build(SyntaxTree* tree, CfgSet* cfg, DiagnosticBag* diagnostics, H
     return module;
 }
 
+/// Frees the module's function data.
 void hir_module_drop(HirModule* module) {
     i64 i = 0;
     while (i < module.functions.len()) {
@@ -440,10 +472,12 @@ void hir_module_drop(HirModule* module) {
     module.functions.drop();
 }
 
+/// Returns type `id` (see `HirTypeTable.get`).
 HirType* hir_type_at(HirContext* context, u32 id) {
     return context.types.get(id);
 }
 
+/// Appends the display text of type `id`, or `<unknown>`.
 void hir_append_type(String* out, HirContext* context, u32 id) {
     HirType* ty = hir_type_at(context, id);
     if (id == 0 || ty.kind == HirTypeKind.Invalid) {
@@ -468,6 +502,8 @@ void hir_append_type(String* out, HirContext* context, u32 id) {
     out.push_str(ty.name);
 }
 
+/// Returns true only for clear string/non-string mismatches; unknown types
+/// and every other pair are accepted.
 bool hir_types_conflict(HirContext* context, u32 expected_id, u32 actual_id) {
     if (expected_id == 0 || actual_id == 0) { return false; }
     HirType* expected = hir_type_at(context, expected_id);
@@ -486,11 +522,14 @@ bool hir_types_conflict(HirContext* context, u32 expected_id, u32 actual_id) {
     return false;
 }
 
+/// Returns the literal type of a token node, or 0.
 u32 hir_syntax_literal_type(SyntaxNode* node, HirContext* context) {
     if (node == (SyntaxNode*)0 || node.kind != NodeKind.Token) { return 0; }
     return hir_literal_type(context, node.token_kind);
 }
 
+/// Returns the only lowered function named `name`, or null when there is
+/// none or the name is overloaded.
 HirFunction* hir_find_function(HirModule* module, str name) {
     HirFunction* result = (HirFunction*)0;
     i64 i = 0;
@@ -507,12 +546,15 @@ HirFunction* hir_find_function(HirModule* module, str name) {
     return result;
 }
 
+/// Returns the return type of function `name`, or 0 when unknown or
+/// overloaded.
 u32 hir_find_function_return(HirModule* module, str name) {
     HirFunction* function = hir_find_function(module, name);
     if (function == (HirFunction*)0) { return 0; }
     return function.return_type;
 }
 
+/// Returns the expression node after a `return` token, or null.
 SyntaxNode* hir_return_expression_node(SyntaxNode* return_token) {
     SyntaxNode* cursor = return_token.next_sibling;
     if (cursor == (SyntaxNode*)0) { return (SyntaxNode*)0; }
@@ -524,6 +566,7 @@ SyntaxNode* hir_return_expression_node(SyntaxNode* return_token) {
     return result;
 }
 
+/// Returns the declared type of local `name` in `function`, or 0.
 u32 hir_local_type(SyntaxNode* function, str name, HirContext* context) {
     if (function == (SyntaxNode*)0 || strlen(name) == 0) { return 0; }
     Vec<Binding> bindings = Vec<Binding>.new();
@@ -541,18 +584,21 @@ u32 hir_local_type(SyntaxNode* function, str name, HirContext* context) {
     return result;
 }
 
+/// Returns true for `==`, `!=`, `<=`, `>=`, `&&`, or `||` tokens.
 bool hir_is_comparison_token(TokenKind kind) {
     return kind == TokenKind.Equal || kind == TokenKind.NotEqual
         || kind == TokenKind.LessEqual || kind == TokenKind.GreaterEqual
         || kind == TokenKind.And || kind == TokenKind.Or;
 }
 
+/// Returns true for arithmetic and shift operator tokens.
 bool hir_is_arithmetic_token(TokenKind kind) {
     return kind == TokenKind.Plus || kind == TokenKind.Minus || kind == TokenKind.Star
         || kind == TokenKind.Slash || kind == TokenKind.Percent
         || kind == TokenKind.LeftShift || kind == TokenKind.RightShift;
 }
 
+/// Returns true for tokens that can be an operand (identifiers, literals).
 bool hir_is_operand_token(TokenKind kind) {
     return kind == TokenKind.Identifier || kind == TokenKind.IntLiteral
         || kind == TokenKind.FloatLiteral || kind == TokenKind.ComplexLiteral
@@ -560,6 +606,7 @@ bool hir_is_operand_token(TokenKind kind) {
         || kind == TokenKind.BoolLiteral;
 }
 
+/// Returns the type of a simple operand (literal, local, or call), or 0.
 u32 hir_operand_type(SyntaxNode* function, SyntaxNode* operand, HirContext* context, HirModule* module) {
     if (operand.token_kind == TokenKind.Identifier) {
         SyntaxNode* next = operand.next_sibling;
@@ -574,6 +621,7 @@ u32 hir_operand_type(SyntaxNode* function, SyntaxNode* operand, HirContext* cont
 // Types a token-led return expression up to its semicolon. Comparisons yield
 // bool and plain arithmetic yields the first operand's type; anything else
 // (member access, indexing, ternaries, casts) stays unknown.
+/// Returns the type of a `return` statement's expression, or 0.
 u32 hir_return_expression_type(SyntaxNode* function, SyntaxNode* return_token, HirContext* context, HirModule* module) {
     SyntaxNode* first = return_token.next_sibling;
     if (first == (SyntaxNode*)0) { return 0; }
@@ -614,6 +662,8 @@ u32 hir_return_expression_type(SyntaxNode* function, SyntaxNode* return_token, H
     return hir_operand_type(function, first, context, module);
 }
 
+/// Reports `return` statements under `node` whose value conflicts with
+/// `expected`. Sets `*ok` to false on a mismatch.
 void hir_check_returns(SyntaxNode* function, SyntaxNode* node, HirContext* context, HirModule* module, u32 expected, DiagnosticBag* diagnostics, bool* ok) {
     if (node == (SyntaxNode*)0) { return; }
     if (node.kind == NodeKind.Token && node.token_kind == TokenKind.Return) {
@@ -636,6 +686,7 @@ void hir_check_returns(SyntaxNode* function, SyntaxNode* node, HirContext* conte
     }
 }
 
+/// Returns true when `node` can start a local declaration.
 bool hir_is_declaration_start(SyntaxNode* node) {
     if (node == (SyntaxNode*)0 || node.kind != NodeKind.Token) { return false; }
     if (is_primitive_type_token(node.token_kind)) { return true; }
@@ -645,6 +696,7 @@ bool hir_is_declaration_start(SyntaxNode* node) {
         && node.text[0] <= (u8)'Z';
 }
 
+/// Returns the declared name token of a declaration, or null.
 SyntaxNode* hir_declaration_name(SyntaxNode* first) {
     if (first == (SyntaxNode*)0) { return (SyntaxNode*)0; }
     SyntaxNode* cursor = first;
@@ -676,6 +728,7 @@ SyntaxNode* hir_declaration_name(SyntaxNode* first) {
     return (SyntaxNode*)0;
 }
 
+/// Returns the `=` after a declaration name, or null.
 SyntaxNode* hir_declaration_assign(SyntaxNode* name) {
     SyntaxNode* cursor = name;
     while (cursor != (SyntaxNode*)0) {
@@ -688,6 +741,7 @@ SyntaxNode* hir_declaration_assign(SyntaxNode* name) {
     return (SyntaxNode*)0;
 }
 
+/// Returns the declared type of a local declaration, or 0.
 u32 hir_declaration_type(SyntaxNode* first, SyntaxNode* name, HirContext* context) {
     Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
     SyntaxNode* cursor = first;
@@ -704,6 +758,7 @@ u32 hir_declaration_type(SyntaxNode* first, SyntaxNode* name, HirContext* contex
     return result;
 }
 
+/// Returns the type of a declaration's initializer expression, or 0.
 u32 hir_initializer_type(SyntaxNode* initializer, HirContext* context, HirModule* module) {
     if (initializer == (SyntaxNode*)0) { return 0; }
     if (initializer.kind == NodeKind.Token) {
@@ -728,6 +783,7 @@ u32 hir_initializer_type(SyntaxNode* initializer, HirContext* context, HirModule
     return result;
 }
 
+/// Checks one call's arguments against `callee`'s parameter types.
 void hir_check_call_group(SyntaxNode* group, HirFunction* callee, HirContext* context, DiagnosticBag* diagnostics, bool* ok) {
     if (group == (SyntaxNode*)0 || callee == (HirFunction*)0) { return; }
     SyntaxNode* child = group.first_child;
@@ -771,6 +827,7 @@ void hir_check_call_group(SyntaxNode* group, HirFunction* callee, HirContext* co
     }
 }
 
+/// Checks every call under `node` with a known callee.
 void hir_check_calls(SyntaxNode* node, HirContext* context, HirModule* module, DiagnosticBag* diagnostics, bool* ok) {
     if (node == (SyntaxNode*)0) { return; }
     if (node.kind == NodeKind.Token && node.token_kind == TokenKind.Identifier) {
@@ -810,6 +867,7 @@ void hir_check_calls(SyntaxNode* node, HirContext* context, HirModule* module, D
     }
 }
 
+/// Checks every local declaration's initializer against its declared type.
 void hir_check_declarations(SyntaxNode* node, HirContext* context, HirModule* module, DiagnosticBag* diagnostics, bool* ok) {
     if (node == (SyntaxNode*)0) { return; }
     if (node.kind == NodeKind.Program || node.kind == NodeKind.Block) {
@@ -844,6 +902,8 @@ void hir_check_declarations(SyntaxNode* node, HirContext* context, HirModule* mo
     hir_check_declarations(node.next_sibling, context, module, diagnostics, ok);
 }
 
+/// Runs the early HIR checks (returns, calls, declarations) on `tree`.
+/// Returns false when any check reported an error.
 bool check_hir(SyntaxTree* tree, CfgSet* cfg, DiagnosticBag* diagnostics) {
     HirContext context = HirContext.new();
     HirModule module = hir_build(tree, cfg, diagnostics, &context);
