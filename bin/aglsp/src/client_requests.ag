@@ -4,17 +4,20 @@ import params;
 import document;
 import workspace;
 
+/// The kind of a server-to-client refresh request.
 enum ClientRequestKind { DiagnosticRefresh; SemanticRefresh; InlayHintRefresh; CodeLensRefresh; FoldingRefresh; }
 
+/// One outstanding server-to-client request; `repeat` re-sends it when a
+/// newer refresh was requested while it was in flight.
 struct ClientRequest { String id; ClientRequestKind kind; bool repeat; }
 
-// An executeCommand waiting on a server-to-client request (applyEdit or
-// showDocument). Keyed by the server request id so pipelined commands each
-// complete from their own response.
+/// An executeCommand waiting on a server-to-client request (applyEdit or
+/// showDocument). Keyed by the server request id so pipelined commands each
+/// complete from their own response.
 struct PendingCommand { String server_id; String command_id; }
 
-// Dispatcher-owned context so server-request responses can act on the
-// workspace (rebuild the index, apply configuration) when they arrive.
+/// Dispatcher-owned context so server-request responses can act on the
+/// workspace (rebuild the index, apply configuration) when they arrive.
 struct ResponseSink {
     DocumentStore* store;
     WorkspaceIndex* index;
@@ -22,6 +25,8 @@ struct ResponseSink {
     i64* trace;
 }
 
+/// Outstanding server-to-client requests, pending commands, and progress
+/// state.
 struct ClientRequests {
     Vec<ClientRequest> pending;
     Vec<PendingCommand> commands;
@@ -30,6 +35,7 @@ struct ClientRequests {
     bool progress_created;
 }
 
+/// Maps an LSP trace setting (`off`, `messages`, `verbose`) to 0, 1, or 2.
 i64 trace_level(str value) {
     if (strcmp(value, "off") == 0) { return 0; }
     if (strcmp(value, "messages") == 0) { return 1; }
@@ -38,6 +44,7 @@ i64 trace_level(str value) {
 }
 
 impl ClientRequests {
+    /// Creates an empty request tracker.
     ClientRequests new() {
         ClientRequests requests;
         requests.pending = Vec<ClientRequest>.new();
@@ -48,9 +55,9 @@ impl ClientRequests {
         return move requests;
     }
 
-    // Send a server-to-client request with a `silver/<prefix>/<n>` id and return
-    // that id. One-shot requests are routed by id in accept_response; refresh
-    // requests are tracked in pending so acknowledgements can be matched.
+    /// Send a server-to-client request with a `silver/<prefix>/<n>` id and return
+    /// that id. One-shot requests are routed by id in accept_response; refresh
+    /// requests are tracked in pending so acknowledgements can be matched.
     String send_server_request(ClientRequests* self, str prefix, str method, str params_json) {
         self.next_id += 1;
         String id = String.from_str("silver/");
@@ -69,6 +76,7 @@ impl ClientRequests {
         return move id;
     }
 
+    /// Asks the client to refresh `kind`, coalescing repeated requests.
     void refresh(ClientRequests* self, ClientRequestKind kind) {
         i64 i = 0;
         while (i < self.pending.len()) {
@@ -91,14 +99,15 @@ impl ClientRequests {
         out.drop();
     }
 
-    // Ask the client to create the server-owned indexing progress token. The
-    // token is only used after the client acknowledges the create request.
+    /// Ask the client to create the server-owned indexing progress token. The
+    /// token is only used after the client acknowledges the create request.
     void create_progress(ClientRequests* self) {
         if (self.progress_requested) { return; }
         self.progress_requested = true;
         self.send_server_request("progress", "window/workDoneProgress/create", "{\"token\":\"silver/index\"}");
     }
 
+    /// Sends a `$/progress` value for the indexing token.
     void progress_value(ClientRequests* self, str kind, str message) {
         if (!self.progress_created) { return; }
         String out = String.from_str("{\"token\":\"silver/index\",\"value\":{\"kind\":\"");
@@ -110,10 +119,12 @@ impl ClientRequests {
         out.drop();
     }
 
+    /// Sends `workspace/workspaceFolders`.
     void request_folders(ClientRequests* self) {
         self.send_server_request("folders", "workspace/workspaceFolders", "{}");
     }
 
+    /// Sends `workspace/configuration` for `scope_uri`.
     void request_configuration(ClientRequests* self, str scope_uri) {
         String params = String.from_str("{\"items\":[{\"scopeUri\":\"");
         json_escape(scope_uri, &params);
@@ -122,8 +133,8 @@ impl ClientRequests {
         params.drop();
     }
 
-    // Hand a workspace edit to the client; the originating executeCommand is
-    // answered when the applyEdit response arrives.
+    /// Hand a workspace edit to the client; the originating executeCommand is
+    /// answered when the applyEdit response arrives.
     void apply_edit(ClientRequests* self, str label, str edit_json, str command_id_raw) {
         String params = String.from_str("{\"label\":\"");
         json_escape(label, &params);
@@ -136,6 +147,7 @@ impl ClientRequests {
         self.commands.push(move entry);
     }
 
+    /// Sends `window/showDocument` for a command.
     void show_document_request(ClientRequests* self, str uri, str selection_json, str command_id_raw) {
         String params = String.from_str("{\"uri\":\"");
         json_escape(uri, &params);
@@ -148,7 +160,7 @@ impl ClientRequests {
         self.commands.push(move entry);
     }
 
-    // A watched package manifest changed; offer to rebuild the workspace scope.
+    /// A watched package manifest changed; offer to rebuild the workspace scope.
     void ask_manifest_reload(ClientRequests* self, str path) {
         String params = String.from_str("{\"type\":2,\"message\":\"Package manifest changed: ");
         json_escape(path, &params);
@@ -157,7 +169,7 @@ impl ClientRequests {
         params.drop();
     }
 
-    // Answer the executeCommand that is waiting on server request `server_id`.
+    /// Answer the executeCommand that is waiting on server request `server_id`.
     void complete_pending_command(ClientRequests* self, str server_id, str result_json, bool failed) {
         i64 i = 0;
         while (i < self.commands.len()) {
@@ -174,6 +186,8 @@ impl ClientRequests {
         }
     }
 
+    /// Handles a response to one of our requests. Returns false when `body` is
+    /// not such a response.
     bool accept_response(ClientRequests* self, str body, ResponseSink* sink) {
         String method = json_field(body, "method"); String id = json_field(body, "id");
         String result = json_field(body, "result"); String error = json_field(body, "error");

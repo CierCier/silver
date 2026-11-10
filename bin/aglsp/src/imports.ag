@@ -10,8 +10,11 @@ import frontend.module_loader;
 import tooling.diagnostics;
 import tooling.format;
 
+/// What part of an `import` statement the cursor is completing.
 enum ImportCompletionKind { Module; Selection; AliasKeyword; AliasName; Complete; }
 
+/// The import completion context at the cursor: kind, module typed so far,
+/// name prefix, replacement range, and names already selected.
 struct ImportCompletionContext {
     ImportCompletionKind kind;
     String module;
@@ -20,6 +23,7 @@ struct ImportCompletionContext {
     Vec<String> selected;
 }
 
+/// Appends `doc` and everything it imports, transitively, to `documents`.
 void import_closure(Document* doc, Vec<Document*>* documents) {
     documents.push(doc); i64 i = 0;
     while (i < documents.len()) {
@@ -34,6 +38,8 @@ void import_closure(Document* doc, Vec<Document*>* documents) {
     }
 }
 
+/// Returns true when importing `added` would create a cycle or bring in
+/// names that clash with or overload names already visible in `active`.
 bool import_conflicts(Document* active, Document* added, PendingMessage* pending) {
     active.ensure_syntax();
     Vec<Document*> existing = Vec<Document*>.new(); import_closure(active, &existing);
@@ -135,6 +141,7 @@ bool import_conflicts(Document* active, Document* added, PendingMessage* pending
     return false;
 }
 
+/// Returns the dotted module name of `path` relative to `base`, or "".
 String import_module_from_base(str base, str path) {
     String directory = path_normalize(base); String file = path_normalize(path);
     if (!directory.ends_with("/")) { directory.push('/'); }
@@ -153,6 +160,7 @@ String import_module_from_base(str base, str path) {
     return move name;
 }
 
+/// Returns the module name `active` would use to import `target`.
 String import_module_name(DocumentStore* store, Document* active, Document* target) {
     String parent = path_dirname(active.path.to_str()); String root = absolute_document_path(module_root(active.path.to_str()).to_str());
     i64 i = -1;
@@ -169,20 +177,24 @@ String import_module_name(DocumentStore* store, Document* active, Document* targ
     return String.new();
 }
 
+/// Returns `import <module_name>;` plus the file's newline style.
 String import_statement(Document* active, str module_name) {
     String inserted = String.from_str("import "); inserted.push_str(module_name); inserted.push(';');
     inserted.push_str(source_newline(active.text.to_str(), &active.analysis.tokens));
     return move inserted;
 }
 
+/// Appends a text edit that inserts the import at the start of `active`.
 void append_import_edit(String* out, Document* active, str module_name) {
     String inserted = import_statement(active, module_name);
     out.push_str("{\"range\":"); active.append_range(out, Span.synthetic());
     out.push_str(",\"newText\":\""); json_escape(inserted.to_str(), out); out.push_str("\"}");
 }
 
+/// Parse state within an import selection list (`{ a as b, ... }`).
 enum ImportSelectionState { Name; AfterName; Alias; AfterAlias; }
 
+/// Returns true for an identifier-shaped token.
 bool import_cursor_word(Token* token) {
     if (token.text.len() == 0 || !typecheck_name_start(token.text.data[0])) { return false; }
     i64 i = 1;
@@ -193,6 +205,7 @@ bool import_cursor_word(Token* token) {
     return true;
 }
 
+/// Returns the part of `token` before `offset`.
 String import_token_prefix(Document* doc, Token* token, i64 offset) {
     i64 length = offset - token.span.start;
     if (length < 0) { length = 0; }
@@ -200,6 +213,7 @@ String import_token_prefix(Document* doc, Token* token, i64 offset) {
     return doc.text.substr(token.span.start, length);
 }
 
+/// Returns true when `offset` is inside a comment.
 bool import_context_cursor_in_comment(Document* doc, i64 offset) {
     i64 i = 0;
     while (i < doc.analysis.tokens.len()) {
@@ -210,12 +224,15 @@ bool import_context_cursor_in_comment(Document* doc, i64 offset) {
     return false;
 }
 
+/// Fills an import completion context.
 void import_context_set(ImportCompletionContext* context, ImportCompletionKind kind,
                         str module, str prefix, Span replacement, Vec<String> selected) {
     context.kind = kind; context.module = String.from_str(module); context.prefix = String.from_str(prefix);
     context.replacement = replacement; context.selected = move selected;
 }
 
+/// Returns the import completion context at `offset`, or None when the
+/// cursor is not inside an `import` statement.
 Optional<ImportCompletionContext> import_completion_context(Document* doc, i64 offset) {
     if (offset < 0 || offset > doc.text.len() || import_context_cursor_in_comment(doc, offset)) {
         return Optional<ImportCompletionContext>.none();
@@ -325,6 +342,7 @@ Optional<ImportCompletionContext> import_completion_context(Document* doc, i64 o
     return Optional<ImportCompletionContext>.some(move context);
 }
 
+/// Returns true when `name` lexes as a single identifier.
 bool import_identifier_name(str name) {
     if (strlen(name) == 0) { return false; }
     TokenStream tokens = TokenStream.new(); DiagnosticBag errors = DiagnosticBag.new(); lex(String.from_str(name), &tokens, &errors);
@@ -332,12 +350,14 @@ bool import_identifier_name(str name) {
         && tokens.get(0).text.equals(name);
 }
 
+/// Adds `name` to `modules` once when it is a valid module name.
 void import_module_add(Vec<String>* modules, str name) {
     if (!import_identifier_name(name)) { return; }
     i64 i = 0; while (i < modules.len()) { if (modules.get_ptr(i).equals(name)) { return; } i += 1; }
     modules.push(String.from_str(name));
 }
 
+/// Adds the modules found under `directory` (sources and subdirectories).
 void import_scan_directory(Vec<String>* modules, DocumentStore* store, Document* active,
                            str directory, str parent_module, PendingMessage* pending) {
     if (request_interrupted(pending)) { return; }
@@ -366,6 +386,7 @@ void import_scan_directory(Vec<String>* modules, DocumentStore* store, Document*
     }
 }
 
+/// Adds modules from unsaved open documents under `parent_directory`.
 void import_scan_overlays(Vec<String>* modules, DocumentStore* store, Document* active,
                           str parent_directory, str parent_module, PendingMessage* pending) {
     String directory = path_normalize(parent_directory); String prefix = directory.clone();
@@ -400,6 +421,7 @@ void import_scan_overlays(Vec<String>* modules, DocumentStore* store, Document* 
     }
 }
 
+/// Returns the importable module names under `parent_module`.
 Vec<String> import_modules(DocumentStore* store, Document* active, str parent_module, PendingMessage* pending) {
     Vec<String> modules = Vec<String>.new();
     String local = path_dirname(active.path.to_str()); String root = absolute_document_path(module_root(active.path.to_str()).to_str());
