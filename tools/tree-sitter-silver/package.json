@@ -1,0 +1,19 @@
+{
+  "name": "tree-sitter-silver",
+  "version": "0.1.0",
+  "description": "Silver grammar for tree-sitter",
+  "license": "MIT",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/CierCier/silver.git",
+    "directory": "tools/tree-sitter-silver"
+  },
+  "scripts": {
+    "generate": "tree-sitter generate --abi 14",
+    "test": "tree-sitter test"
+  },
+  "devDependencies": {
+    "tree-sitter-cli": "0.26.8"
+  }
+}

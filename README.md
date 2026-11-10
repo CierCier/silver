@@ -171,6 +171,7 @@ features; separate compiler unit, parity, and self-host test suites are retired.
 - `bootstrap/stage0/ffi-rust/`: Optional Rust implementation behind Silver's versioned C ABI
 - `bin/agc/`: Stage1 self-hosting compiler driver in Silver; see the [compiler guide](docs/compiler-guide.md)
 - `bin/aglsp/`: Silver language-server binary package; see [native LSP setup](docs/language-server.md) and the [protocol support ledger](docs/lsp-protocol.md)
+- `tools/`: Editor support: a [Zed extension](tools/zed), a [VS Code extension](tools/vscode), and the [tree-sitter grammar](tools/tree-sitter-silver) they share; see the [tools guide](tools/README.md)
 - `bin/agc/src/agsm.ag`: AGSM command integrated into the stage1 compiler driver
 - `libs/agc/`: Reusable stage1 compiler frontend library (Silver)
 - `silver.toml`: Silver workspace manifest for the self-host root

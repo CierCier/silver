@@ -1,0 +1,299 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Silver",
+  "scopeName": "source.silver",
+  "fileTypes": ["ag"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#attributes" },
+    { "include": "#strings" },
+    { "include": "#characters" },
+    { "include": "#numbers" },
+    { "include": "#imports" },
+    { "include": "#declarations" },
+    { "include": "#macros" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#functions" },
+    { "include": "#variables" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.documentation.silver",
+          "begin": "///",
+          "beginCaptures": { "0": { "name": "punctuation.definition.comment.silver" } },
+          "end": "$",
+          "patterns": [
+            {
+              "match": "\\G\\s*(\\$\\d+)\\s*(:)",
+              "captures": {
+                "1": { "name": "variable.parameter.documentation.silver" },
+                "2": { "name": "punctuation.separator.silver" }
+              }
+            }
+          ]
+        },
+        {
+          "name": "comment.line.double-slash.silver",
+          "begin": "//",
+          "beginCaptures": { "0": { "name": "punctuation.definition.comment.silver" } },
+          "end": "$"
+        },
+        { "include": "#block-comment" }
+      ]
+    },
+    "block-comment": {
+      "comment": "Block comments nest, as in the compiler.",
+      "patterns": [
+        {
+          "name": "comment.block.documentation.silver",
+          "begin": "/\\*\\*(?!/)",
+          "end": "\\*/",
+          "captures": { "0": { "name": "punctuation.definition.comment.silver" } },
+          "patterns": [{ "include": "#block-comment" }]
+        },
+        {
+          "name": "comment.block.silver",
+          "begin": "/\\*",
+          "end": "\\*/",
+          "captures": { "0": { "name": "punctuation.definition.comment.silver" } },
+          "patterns": [{ "include": "#block-comment" }]
+        }
+      ]
+    },
+    "attributes": {
+      "name": "meta.attribute.silver",
+      "begin": "#\\[",
+      "end": "\\]",
+      "captures": { "0": { "name": "punctuation.definition.attribute.silver" } },
+      "patterns": [
+        { "include": "#strings" },
+        { "include": "#numbers" },
+        {
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b",
+          "name": "entity.other.attribute-name.silver"
+        },
+        { "include": "#punctuation" }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.silver",
+      "begin": "\"",
+      "end": "\"",
+      "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.silver" } },
+      "endCaptures": { "0": { "name": "punctuation.definition.string.end.silver" } },
+      "patterns": [
+        { "include": "#escapes" },
+        {
+          "name": "constant.other.placeholder.silver",
+          "match": "\\{\\}"
+        }
+      ]
+    },
+    "escapes": {
+      "patterns": [
+        {
+          "name": "constant.character.escape.silver",
+          "match": "\\\\(x[0-9A-Fa-f]{2}|u\\{[0-9A-Fa-f]+\\}|[ntr0\\\\\"'])"
+        },
+        {
+          "name": "invalid.illegal.escape.silver",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "characters": {
+      "patterns": [
+        {
+          "name": "string.quoted.single.silver",
+          "match": "'(\\\\(x[0-9A-Fa-f]{2}|u\\{[0-9A-Fa-f]+\\}|[ntr0\\\\\"'])|[^'\\\\\\n])'",
+          "captures": {
+            "1": { "patterns": [{ "include": "#escapes" }] }
+          }
+        },
+        {
+          "name": "storage.modifier.lifetime.silver",
+          "match": "'[A-Za-z_][A-Za-z0-9_]*\\b(?!')"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        { "name": "constant.numeric.hex.silver", "match": "\\b0[xX][0-9A-Fa-f_]+\\b" },
+        { "name": "constant.numeric.binary.silver", "match": "\\b0[bB][01_]+\\b" },
+        { "name": "constant.numeric.octal.silver", "match": "\\b0[oO][0-7_]+\\b" },
+        {
+          "name": "constant.numeric.decimal.silver",
+          "match": "\\b[0-9][0-9_]*(\\.[0-9][0-9_]*)?([eE][+-]?[0-9]+)?i?\\b"
+        }
+      ]
+    },
+    "imports": {
+      "begin": "\\b(import)\\b",
+      "beginCaptures": { "1": { "name": "keyword.control.import.silver" } },
+      "end": ";",
+      "endCaptures": { "0": { "name": "punctuation.terminator.silver" } },
+      "name": "meta.import.silver",
+      "patterns": [
+        { "include": "#comments" },
+        { "match": "\\bas\\b", "name": "keyword.control.import.silver" },
+        { "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b", "name": "entity.name.namespace.silver" },
+        { "include": "#punctuation" }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "comment": "struct, enum, and trait names",
+          "match": "\\b(struct|enum|trait)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.$1.silver" },
+            "2": { "name": "entity.name.type.silver" }
+          }
+        },
+        {
+          "match": "\\b(type)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.alias.silver" },
+            "2": { "name": "entity.name.type.alias.silver" }
+          }
+        },
+        {
+          "comment": "macro [T] ReturnType name(  /  macro name(",
+          "match": "\\b(macro)\\b(?:\\s*\\[[^\\]]*\\])?(?:[^;{(]*?\\s)?\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+          "captures": {
+            "1": { "name": "storage.type.macro.silver" },
+            "2": { "name": "entity.name.function.macro.silver" }
+          }
+        },
+        {
+          "begin": "\\b(impl)\\b",
+          "beginCaptures": { "1": { "name": "storage.type.impl.silver" } },
+          "end": "(?=\\{)",
+          "patterns": [
+            { "match": "\\b(for|where)\\b", "name": "keyword.other.silver" },
+            { "include": "#types" },
+            { "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b", "name": "entity.name.type.silver" },
+            { "include": "#punctuation" }
+          ]
+        },
+        {
+          "comment": "A function definition: a name after a type and before `(` or `<...>(`. Neither the name nor the word before it is a keyword, and `*`/`&` count only when attached to the type.",
+          "match": "(?<=[A-Za-z0-9_>\\]]|[A-Za-z0-9_>\\]][*&]|[A-Za-z0-9_>\\]][*&]{2})(?<!\\b(?:return|else|if|while|for|match|in|as|move|cast|let|defer|launch|wait|comptime|asm|break|continue|import|static|const|mut|volatile|private|extern|macro))\\s+(?!(?:return|else|if|while|for|match|in|as|move|cast|let|defer|launch|wait|comptime|asm|break|continue|import|static|const|mut|volatile|private|extern|macro|true|false)\\b)([A-Za-z_][A-Za-z0-9_]*)\\s*(?=(<[^<>()]*(<[^<>()]*>[^<>()]*)*>)?\\s*\\()",
+          "captures": { "1": { "name": "entity.name.function.silver" } }
+        }
+      ]
+    },
+    "macros": {
+      "match": "(@)([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "punctuation.definition.macro.silver" },
+        "2": { "name": "entity.name.function.macro.silver" }
+      }
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.silver",
+          "match": "\\b(if|else|while|for|in|match|break|continue|return|defer|launch|wait)\\b"
+        },
+        {
+          "name": "keyword.other.silver",
+          "match": "\\b(as|asm|cast|comptime|move|let|where)\\b"
+        },
+        {
+          "name": "storage.type.silver",
+          "match": "\\b(struct|enum|trait|impl|type|macro|extern)\\b"
+        },
+        {
+          "name": "storage.modifier.silver",
+          "match": "\\b(const|mut|static|volatile|private)\\b"
+        },
+        {
+          "name": "constant.language.boolean.silver",
+          "match": "\\b(true|false)\\b"
+        },
+        {
+          "name": "variable.language.self.silver",
+          "match": "\\bself\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "support.type.primitive.silver",
+          "match": "\\b(i8|i16|i32|i64|i128|u8|u16|u32|u64|u128|f32|f64|f80|c32|c64|c80|bool|str|char|void)\\b"
+        },
+        {
+          "name": "storage.type.self.silver",
+          "match": "\\bSelf\\b"
+        },
+        {
+          "name": "entity.name.type.silver",
+          "match": "\\b[A-Z][A-Za-z0-9]*[a-z][A-Za-z0-9]*\\b"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+          "captures": { "1": { "name": "entity.name.function.call.silver" } }
+        }
+      ]
+    },
+    "variables": {
+      "patterns": [
+        {
+          "name": "variable.other.constant.silver",
+          "match": "\\b[A-Z][A-Z0-9_]+\\b"
+        },
+        {
+          "match": "(?<=\\.)\\s*([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": { "1": { "name": "variable.other.property.silver" } }
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.assignment.silver",
+          "match": "(<<=|>>=|\\+=|-=|\\*=|/=|%=|&=|\\|=|\\^=|=(?![=>]))"
+        },
+        {
+          "name": "keyword.operator.comparison.silver",
+          "match": "(==|!=|<=|>=)"
+        },
+        {
+          "name": "keyword.operator.logical.silver",
+          "match": "(&&|\\|\\||!)"
+        },
+        {
+          "name": "keyword.operator.arrow.silver",
+          "match": "=>"
+        },
+        {
+          "name": "keyword.operator.range.silver",
+          "match": "\\.\\.\\.?"
+        },
+        {
+          "name": "keyword.operator.silver",
+          "match": "(\\+\\+|--|<<|>>|[-+*/%&|^~<>?])"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        { "name": "punctuation.terminator.silver", "match": ";" },
+        { "name": "punctuation.separator.silver", "match": "(,|::|:)" },
+        { "name": "punctuation.accessor.silver", "match": "\\." },
+        { "name": "punctuation.brackets.silver", "match": "[{}()\\[\\]]" }
+      ]
+    }
+  }
+}

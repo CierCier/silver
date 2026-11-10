@@ -1,0 +1,44 @@
+import std.io;
+// <- keyword
+
+/// Doubles a value.
+// <- comment.doc
+
+struct Point { i32 x; }
+// <- keyword
+//     ^ type
+//             ^ type.builtin
+//                 ^ property
+
+enum Shape { Circle(f64); }
+//           ^ variant
+
+i32 add(i32 left, &Point right) {
+// <- type.builtin
+//  ^ function
+//          ^ variable.parameter
+//                 ^ type
+//                       ^ variable.parameter
+    String text = make(left);
+//  ^ type
+//                ^ function
+    @println("{}\n", right.x);
+//  ^ function
+//   ^ function
+//           ^ string
+//              ^ string.escape
+//                         ^ property
+    i64 n = MAX_SIZE + text.len();
+//          ^ constant
+//                   ^ operator
+//                          ^ function
+    return self.count == 0x1F;
+//  ^ keyword
+//         ^ variable.special
+//                       ^ number
+}
+
+macro i32 twice(i32 value) { return true; }
+// <- keyword
+//        ^ function
+//                                  ^ boolean

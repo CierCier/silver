@@ -1,0 +1,73 @@
+// SYNTAX TEST "source.silver" "Silver highlighting"
+import std.io.file { println as print_line };
+// <------ keyword.control.import.silver
+//     ^^^ entity.name.namespace.silver
+//                           ^^ keyword.control.import.silver
+
+/// Doubles a value.
+// <--- comment.line.documentation.silver
+/// $1 : the value
+//  ^^ variable.parameter.documentation.silver
+
+/* outer /* inner */ still comment */
+//                    ^^^^^^^^^^^^^ comment.block.silver
+
+#[cfg(os.linux)]
+// <-- meta.attribute.silver
+//^^^ entity.other.attribute-name.silver
+
+private struct Point<T> { i32 x; }
+// <------- storage.modifier.silver
+//      ^^^^^^ storage.type.struct.silver
+//             ^^^^^ entity.name.type.silver
+//                        ^^^ support.type.primitive.silver
+
+macro i32 twice(i32 value) { return value + value; }
+// <----- storage.type.macro.silver
+//        ^^^^^ entity.name.function.macro.silver
+
+i32 add(i32 left, &Point right) {
+//  ^^^ entity.name.function.silver
+//                 ^^^^^ entity.name.type.silver
+    String text = make(left);
+//  ^^^^^^ entity.name.type.silver
+//                ^^^^ entity.name.function.call.silver
+    @println("{} \x1b[0m\n", text.len());
+//  ^ punctuation.definition.macro.silver
+//   ^^^^^^^ entity.name.function.macro.silver
+//            ^^ constant.other.placeholder.silver
+//               ^^^^ constant.character.escape.silver
+//                      ^^ constant.character.escape.silver
+//                                ^^^ entity.name.function.call.silver
+    char c = '\n';
+//  ^^^^ support.type.primitive.silver
+//           ^^^^ string.quoted.single.silver
+    i64 n = MAX_SIZE + 0x1F + 1_000;
+//          ^^^^^^^^ variable.other.constant.silver
+//                     ^^^^ constant.numeric.hex.silver
+//                            ^^^^^ constant.numeric.decimal.silver
+    if (self.count == 0 && true) { return move text; }
+//  ^^ keyword.control.silver
+//      ^^^^ variable.language.self.silver
+//           ^^^^^ variable.other.property.silver
+//                 ^^ keyword.operator.comparison.silver
+//                      ^^ keyword.operator.logical.silver
+//                         ^^^^ constant.language.boolean.silver
+//                                        ^^^^ keyword.other.silver
+}
+
+struct Ref<'a> { &'a str text; }
+//         ^^ storage.modifier.lifetime.silver
+
+void flow() {
+    if (y) { } else if (x) { return twice(3); }
+//                  ^^ keyword.control.silver
+//                                  ^^^^^ entity.name.function.call.silver
+    i64 n = a * foo(b);
+//              ^^^ entity.name.function.call.silver
+}
+
+i32* make(i32 v);
+//   ^^^^ entity.name.function.silver
+Vec<T> build<T>(T v);
+//     ^^^^^ entity.name.function.silver
