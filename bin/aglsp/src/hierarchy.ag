@@ -4,10 +4,13 @@ import completion;
 import params;
 import transport;
 
+/// Returns true for functions and methods.
 bool callable_symbol(IdeSymbolKind kind) {
     return kind == IdeSymbolKind.Function || kind == IdeSymbolKind.Method;
 }
 
+/// Appends a `CallHierarchyItem`/`TypeHierarchyItem` JSON object, with data
+/// that identifies the symbol in later requests.
 void append_hierarchy_item(String* out, SymbolTarget target) {
     Document* doc = target.document; IdeSymbol* symbol = doc.analysis.symbols.get_ptr(target.symbol);
     out.push_str("{\"name\":\"");
@@ -23,6 +26,8 @@ void append_hierarchy_item(String* out, SymbolTarget target) {
     out.push_str(",\"selection\":"); out.push_display(&symbol.selection.start); out.push_str("}}");
 }
 
+/// Computes `prepareCallHierarchy` (or `prepareTypeHierarchy` when
+/// `!calls`) at `offset`.
 String prepare_hierarchy(Document* doc, i64 offset, bool calls) {
     SymbolTarget target = follow_import_alias(resolve_occurrence(doc, doc.analysis.occurrence_at(offset)));
     if (!calls) { target = type_definition_target(target); }
@@ -32,6 +37,9 @@ String prepare_hierarchy(Document* doc, i64 offset, bool calls) {
     String out = String.from_str("["); append_hierarchy_item(&out, target); out.push(']'); return move out;
 }
 
+/// Resolves a hierarchy item from request params into `*target`. Returns 0
+/// on success, or a JSON-RPC error code: -32602 for malformed params or a
+/// symbol of the wrong kind, -32801 when the document changed.
 i64 hierarchy_target(DocumentStore* store, str params, bool calls, SymbolTarget* target) {
     String item = json_field(params, "item"); String data = json_field(item.to_str(), "data");
     String uri = String.new(); String item_uri = String.new(); i64 revision = 0; i64 selection = 0;
@@ -49,6 +57,7 @@ i64 hierarchy_target(DocumentStore* store, str params, bool calls, SymbolTarget*
     target.document = doc; target.symbol = symbol; return 0;
 }
 
+/// Returns the function or method whose body contains `offset`.
 SymbolTarget enclosing_callable(Document* doc, i64 offset) {
     SymbolTarget target; target.document = doc; target.symbol = -1; i64 i = 0;
     while (i < doc.analysis.symbols.len()) {
@@ -64,8 +73,10 @@ SymbolTarget enclosing_callable(Document* doc, i64 offset) {
     return target;
 }
 
+/// Calls between two functions, with each call site range.
 struct CallGroup { SymbolTarget target; Vec<Span> ranges; }
 
+/// Computes incoming or outgoing calls of `selected`. Cancellable.
 String compute_call_hierarchy(DocumentStore* store, SymbolTarget selected, bool incoming, PendingMessage* pending) {
     Vec<CallGroup> groups = Vec<CallGroup>.new(); i64 i = 0;
     Vec<Document*> documents = store.query_documents(selected.document);
@@ -111,6 +122,8 @@ String compute_call_hierarchy(DocumentStore* store, SymbolTarget selected, bool 
     out.push(']'); return move out;
 }
 
+/// Computes the supertypes (traits) or subtypes (implementing types) of
+/// `selected`. Cancellable.
 String compute_type_hierarchy(DocumentStore* store, SymbolTarget selected, bool supers, PendingMessage* pending) {
     Vec<SymbolTarget> targets = Vec<SymbolTarget>.new(); i64 i = 0;
     Vec<Document*> documents = store.query_documents(selected.document);
