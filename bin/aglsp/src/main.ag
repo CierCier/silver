@@ -20,6 +20,8 @@ import actions;
 import file_operations;
 import lenses;
 
+/// All dispatcher state: documents, workspace index, client options,
+/// outstanding client requests, and the transport.
 struct ServerState {
     DocumentStore store;
     WorkspaceIndex index;
@@ -35,12 +37,14 @@ struct ServerState {
     Transport* transport_ptr;
 }
 
-// A fresh index starts a new indexing session; a cancel for the previous one
-// must not stop it.
+/// A fresh index starts a new indexing session; a cancel for the previous one
+/// must not stop it.
 void begin_index_session(ServerState* state) {
     __atomic_store_i32(&state.transport_ptr.index_cancelled, 0, ATOMIC_RELEASE);
 }
 
+/// Tells the client analysis changed: pushes diagnostics, or asks pull
+/// clients to refresh.
 void notify_analysis_change(ServerState* state) {
     if (!state.client.pull_diagnostics) { publish_open_diagnostics(&state.store, &state.client); }
     else if (state.client.diagnostic_refresh) { state.requests.refresh(ClientRequestKind.DiagnosticRefresh); }
@@ -50,6 +54,7 @@ void notify_analysis_change(ServerState* state) {
     if (state.client.folding_refresh) { state.requests.refresh(ClientRequestKind.FoldingRefresh); }
 }
 
+/// Returns true for requests whose params carry a text position.
 bool request_uses_position(str method) {
     return strcmp(method, "textDocument/hover") == 0 || strcmp(method, "textDocument/definition") == 0
         || strcmp(method, "textDocument/declaration") == 0 || strcmp(method, "textDocument/typeDefinition") == 0
@@ -61,7 +66,7 @@ bool request_uses_position(str method) {
         || strcmp(method, "textDocument/moniker") == 0 || strcmp(method, "textDocument/inlineCompletion") == 0;
 }
 
-// One background index step; the status line updates every 25 loaded files.
+/// One background index step; the status line updates every 25 loaded files.
 void index_step(DocumentStore* store, WorkspaceIndex* index, ServerStatus* status) {
     index_workspace_step(store, index);
     i64 files = store.docs.len();
@@ -71,13 +76,15 @@ void index_step(DocumentStore* store, WorkspaceIndex* index, ServerStatus* statu
     }
 }
 
+/// Indexes queued workspace paths until done or the request is
+/// interrupted. Returns true when indexing finished.
 bool index_request_workspace(DocumentStore* store, WorkspaceIndex* index, PendingMessage* pending) {
     pending.preemptible = true;
     while (index.paths.len() > 0 && !request_interrupted(pending)) { index_step(store, index, &pending.transport.status); }
     return !request_interrupted(pending);
 }
 
-// The idle status line: files loaded and the latest whole-project check.
+/// The idle status line: files loaded and the latest whole-project check.
 void report_ready(DocumentStore* store, ServerStatus* status) {
     i64 files = store.docs.len();
     String message = String.from_str("Ready · "); message.push_display(&files); message.push_str(" files indexed");
@@ -88,6 +95,8 @@ void report_ready(DocumentStore* store, ServerStatus* status) {
     status.report(true, message.to_str());
 }
 
+/// Answers one document request (hover, completion, rename, and others),
+/// sending its response or error.
 void handle_document_request(DocumentStore* store, WorkspaceIndex* index, ClientOptions* client, JsonRpcMessage* message, PendingMessage* pending) {
     str method = message.method.to_str(); str params = message.params_json.to_str();
     // Keystroke-rate completion: a newer request aborts this one at its next
@@ -237,10 +246,10 @@ void handle_document_request(DocumentStore* store, WorkspaceIndex* index, Client
     complete_response(pending, message.id_raw.to_str(), result.to_str());
 }
 
-// workspace/executeCommand: `silver.extractVariable` re-runs the extract
-// refactor for command arguments [uri, range, name?]. With client applyEdit
-// support the edit is handed to the client and this request is answered when
-// the applyEdit response arrives; otherwise the WorkspaceEdit is the result.
+/// workspace/executeCommand: `silver.extractVariable` re-runs the extract
+/// refactor for command arguments [uri, range, name?]. With client applyEdit
+/// support the edit is handed to the client and this request is answered when
+/// the applyEdit response arrives; otherwise the WorkspaceEdit is the result.
 void handle_extract_command(ServerState* state, PendingMessage* pending, JsonRpcMessage* message) {
     str params = message.params_json.to_str(); str id = message.id_raw.to_str();
     String arguments = json_field(params, "arguments");
@@ -270,8 +279,8 @@ void handle_extract_command(ServerState* state, PendingMessage* pending, JsonRpc
     else { complete_response(pending, id, edit.to_str()); }
 }
 
-// workspace/executeCommand: `silver.openDocument` asks the client to reveal a
-// document, optionally with a selection, via window/showDocument.
+/// workspace/executeCommand: `silver.openDocument` asks the client to reveal a
+/// document, optionally with a selection, via window/showDocument.
 void handle_open_document_command(ServerState* state, PendingMessage* pending, JsonRpcMessage* message) {
     str params = message.params_json.to_str(); str id = message.id_raw.to_str();
     String arguments = json_field(params, "arguments");
@@ -285,7 +294,7 @@ void handle_open_document_command(ServerState* state, PendingMessage* pending, J
     state.requests.show_document_request(uri.to_str(), range_raw.to_str(), id);
 }
 
-// Returns -1 to continue, or the exit status after an exit notification.
+/// Returns -1 to continue, or the exit status after an exit notification.
 i32 dispatch_message(ServerState* state, PendingMessage* pending) {
         DocumentStore* store = &state.store; WorkspaceIndex* index = &state.index;
         ClientOptions* client = &state.client; bool* initialized = &state.initialized; bool* shutdown = &state.shutdown;
@@ -547,6 +556,8 @@ i32 dispatch_message(ServerState* state, PendingMessage* pending) {
         return -1;
 }
 
+/// Server entry: handles `--help`/`--version`, then runs the LSP loop over
+/// stdin/stdout until `exit`. Returns the process exit code.
 i32 main() {
     // Editors launch the server with no arguments; make stray flags visible
     // instead of silently starting a protocol loop.

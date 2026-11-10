@@ -2,11 +2,13 @@ import document;
 import json_rpc;
 import tooling.index;
 
+/// Appends an LSP `Location` JSON object.
 void append_location(String* out, Document* doc, Span span) {
     out.push_str("{\"uri\":\""); json_escape(doc.uri.to_str(), out);
     out.push_str("\",\"range\":"); doc.append_range(out, span); out.push('}');
 }
 
+/// Computes `textDocument/documentLink` for resolvable `import` paths.
 String compute_document_links(DocumentStore* store, Document* doc, bool tooltip) {
     CfgSet cfg = linux_defaults(); Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
     cfg_collect_items(doc.analysis.tree.root, &cfg, (DiagnosticBag*)0, &items);
@@ -40,10 +42,13 @@ String compute_document_links(DocumentStore* store, Document* doc, bool tooltip)
     out.push(']'); return move out;
 }
 
+/// Returns true when both targets name the same resolved symbol.
 bool same_target(SymbolTarget left, SymbolTarget right) {
     return left.symbol >= 0 && left.symbol == right.symbol && left.document == right.document;
 }
 
+/// Returns the type a symbol's declared type names (for go to type
+/// definition).
 SymbolTarget type_definition_target(SymbolTarget target) {
     if (target.symbol < 0) { return target; }
     IdeSymbol* symbol = target.document.analysis.symbols.get_ptr(target.symbol);
@@ -55,6 +60,7 @@ SymbolTarget type_definition_target(SymbolTarget target) {
     target.symbol = -1; return target;
 }
 
+/// Returns the `impl` block that contains a method target, or -1.
 i64 containing_implementation(SymbolTarget target) {
     if (target.symbol < 0) { return -1; }
     target.document.ensure_syntax();
@@ -67,6 +73,7 @@ i64 containing_implementation(SymbolTarget target) {
     return -1;
 }
 
+/// Returns the method `name` declared inside `extent`, or unresolved.
 SymbolTarget method_in_extent(Document* doc, str name, Span extent) {
     SymbolTarget target; target.document = doc; target.symbol = -1;
     i64 i = ide_name_head(&doc.analysis, name);
@@ -80,6 +87,7 @@ SymbolTarget method_in_extent(Document* doc, str name, Span extent) {
     return target;
 }
 
+/// Returns the trait or declaration a method implementation corresponds to.
 SymbolTarget declaration_target(SymbolTarget target) {
     if (target.symbol < 0) { return target; }
     IdeSymbol* symbol = target.document.analysis.symbols.get_ptr(target.symbol);
@@ -96,12 +104,15 @@ SymbolTarget declaration_target(SymbolTarget target) {
     return method_in_extent(trait_target.document, symbol.name.to_str(), trait_symbol.extent);
 }
 
+/// Returns a target's `Location` JSON, or "null".
 String target_location(SymbolTarget target) {
     if (target.symbol < 0) { return String.from_str("null"); }
     String out = String.new(); append_location(&out, target.document, target.document.analysis.symbols.get_ptr(target.symbol).selection);
     return move out;
 }
 
+/// Computes go to implementation: the impls of a trait or type, or the
+/// implementations of a trait method.
 String compute_implementations(DocumentStore* store, Document* context, SymbolTarget selected) {
     selected = declaration_target(selected);
     String out = String.from_str("["); bool first = true;
@@ -145,7 +156,7 @@ String compute_implementations(DocumentStore* store, Document* context, SymbolTa
     out.push(']'); return move out;
 }
 
-// LSP SymbolKind values for moniker results.
+/// LSP SymbolKind values for moniker results.
 i64 moniker_symbol_kind(IdeSymbolKind kind) {
     return match kind {
         IdeSymbolKind.Function : 12, IdeSymbolKind.Macro : 12, IdeSymbolKind.Method : 6, IdeSymbolKind.Struct : 23,
@@ -156,8 +167,8 @@ i64 moniker_symbol_kind(IdeSymbolKind kind) {
     };
 }
 
-// A moniker is a stable, client-independent identity for the symbol at the
-// position: scheme "silver", project-unique, keyed by document URI and name.
+/// A moniker is a stable, client-independent identity for the symbol at the
+/// position: scheme "silver", project-unique, keyed by document URI and name.
 String compute_moniker(Document* doc, i64 offset) {
     doc.ensure_syntax();
     SymbolTarget target = resolve_occurrence(doc, doc.analysis.occurrence_at(offset));

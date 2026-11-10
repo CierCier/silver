@@ -6,6 +6,8 @@ import std.thread;
 // trees: check_snapshot_diagnostics clones the checked file and the imported
 // signatures into its own pool, so documents stay owned by the dispatcher.
 
+/// One file check: borrowed source and dependency trees, its path, the
+/// resulting diagnostics, and an atomic finished flag.
 struct CheckJob {
     SyntaxTree* source;
     Vec<SyntaxTree*> dependencies;
@@ -15,6 +17,8 @@ struct CheckJob {
     i64 finished;
 }
 
+/// A fixed set of check jobs run by worker threads. Jobs only read their
+/// trees, so the documents stay owned by the dispatcher.
 struct CheckPool {
     Vec<CheckJob> jobs;
     Vec<String>* include_dirs;
@@ -25,6 +29,8 @@ struct CheckPool {
     Vec<TaskRecord*> threads;
 }
 
+/// Worker thread body: claims and runs jobs until none are left or `stop`
+/// is set.
 void check_worker(i64 address) {
     CheckPool* pool = (CheckPool*)address;
     CfgSet cfg = linux_defaults();
@@ -41,8 +47,8 @@ void check_worker(i64 address) {
     }
 }
 
-// `AGLSP_JOBS` when set; otherwise half the CPUs this process may use, so the
-// editor keeps cores while a cold workspace check runs.
+/// `AGLSP_JOBS` when set; otherwise half the CPUs this process may use, so the
+/// editor keeps cores while a cold workspace check runs.
 i64 check_worker_count(i64 jobs) {
     i64 count = thread_available_parallelism() / 2;
     Optional<String> configured = var("AGLSP_JOBS");
@@ -59,12 +65,15 @@ i64 check_worker_count(i64 jobs) {
 }
 
 impl CheckPool {
+    /// Creates an empty pool that resolves imports with `include_dirs`.
     CheckPool new(Vec<String>* include_dirs) {
         CheckPool pool; pool.jobs = Vec<CheckJob>.new(); pool.include_dirs = include_dirs;
         pool.next = 0; pool.completed = 0; pool.stop = 0; pool.threads = Vec<TaskRecord*>.new();
         return move pool;
     }
 
+    /// Queues a check of `source` against `dependencies`. The trees must stay
+    /// alive and unmodified until the pool is joined.
     void add(CheckPool* self, SyntaxTree* source, Vec<SyntaxTree*>* dependencies, str path) {
         CheckJob job; job.source = source; job.dependencies = Vec<SyntaxTree*>.new();
         i64 i = 0;
@@ -73,8 +82,8 @@ impl CheckPool {
         self.jobs.push(move job);
     }
 
-    // Jobs must not be added after start: workers hold pointers into `jobs`.
-    // When no thread can be spawned, the dispatcher runs every job itself.
+    /// Jobs must not be added after start: workers hold pointers into `jobs`.
+    /// When no thread can be spawned, the dispatcher runs every job itself.
     void start(CheckPool* self) {
         i64 workers = check_worker_count(self.jobs.len()); i64 i = 0;
         while (i < workers) {
@@ -85,15 +94,18 @@ impl CheckPool {
         if (self.threads.len() == 0) { check_worker((i64)self); }
     }
 
+    /// Returns the number of finished jobs.
     i64 completed(CheckPool* self) { return __atomic_load_i64(&self.completed, ATOMIC_ACQUIRE); }
 
+    /// Returns true when job `index` has finished.
     bool finished(CheckPool* self, i64 index) {
         return __atomic_load_i64(&self.jobs.get_ptr(index).finished, ATOMIC_ACQUIRE) != 0;
     }
 
-    // Workers finish the file in hand; unclaimed jobs stay unfinished.
+    /// Workers finish the file in hand; unclaimed jobs stay unfinished.
     void stop(CheckPool* self) { __atomic_store_i64(&self.stop, 1, ATOMIC_RELEASE); }
 
+    /// Waits for every worker thread.
     void join(CheckPool* self) {
         i64 i = 0;
         while (i < self.threads.len()) { thread_join(self.threads.get(i)); i += 1; }
