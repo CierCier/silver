@@ -16,9 +16,9 @@ import frontend.monomorph;
 import backend.llvm.context;
 import backend.llvm.types;
 
-// True when the full type shape is concrete and all by-value layouts can be
-// named. Pointers still require concrete pointees so a generic argument cannot
-// smuggle an unresolved type parameter through the ABI.
+/// True when the full type shape is concrete and all by-value layouts can be
+/// named. Pointers still require concrete pointees so a generic argument cannot
+/// smuggle an unresolved type parameter through the ABI.
 bool mono_type_is_concrete(LLVMOpaqueContext* raw_ctx, TypeTable* types, u32 id, i64 depth) {
     if (id == TYPE_UNKNOWN || depth > 64) {
         return false;
@@ -61,8 +61,8 @@ bool mono_type_is_concrete(LLVMOpaqueContext* raw_ctx, TypeTable* types, u32 id,
     return false;
 }
 
-// TypeTable interns structural generic types, so the canonical ID provides a
-// collision-free suffix even for nested applications and pointer/array args.
+/// TypeTable interns structural generic types, so the canonical ID provides a
+/// collision-free suffix even for nested applications and pointer/array args.
 String mono_mangle_method(str base, str method, Vec<u32>* arg_ids) {
     String mangled = String.from_str(base);
     mangled.push_str("__");
@@ -76,6 +76,8 @@ String mono_mangle_method(str base, str method, Vec<u32>* arg_ids) {
     return move mangled;
 }
 
+/// Returns `base__arity_N__<type ids>`, the symbol of a generic free
+/// function instance (type ids keep it collision-free).
 String mono_mangle_function(str base, Vec<u32>* arg_ids, u32 value_arg_count) {
     String mangled = String.from_str(base);
     mangled.push_str("__arity_");
@@ -89,6 +91,8 @@ String mono_mangle_function(str base, Vec<u32>* arg_ids, u32 value_arg_count) {
     return move mangled;
 }
 
+/// Finds the generic free function `base` taking `value_arg_count`
+/// arguments and collects its type parameter names.
 bool mono_find_function_template(SyntaxNode* root, TypeTable* types, str base,
                                  u32 value_arg_count, MonoMethodTemplate* out,
                                  Vec<u32>* param_ids) {
@@ -122,6 +126,7 @@ bool mono_find_function_template(SyntaxNode* root, TypeTable* types, str base,
     return false;
 }
 
+/// Returns the function type of free function `name` used as a value.
 u32 mono_function_value_type(LlvmContext* ctx, str name) {
     SyntaxNode* function = (SyntaxNode*)0;
     SyntaxNode* item = ctx.root.first_child;
@@ -162,6 +167,7 @@ u32 mono_function_value_type(LlvmContext* ctx, str name) {
 }
 
 
+/// Infers a generic free function's type arguments from argument types.
 bool mono_infer_free_function_args(LlvmContext* ctx, str base, u32 value_arg_count,
                                    Vec<u32>* actual_types, Vec<bool>* numeric_literals,
                                    Vec<u32>* arg_ids) {
@@ -222,7 +228,7 @@ bool mono_infer_free_function_args(LlvmContext* ctx, str base, u32 value_arg_cou
     return matched;
 }
 
-// Declare a structural free-function instance and queue its body for emission.
+/// Declare a structural free-function instance and queue its body for emission.
 LLVMOpaqueValue* mono_ensure_free_function(LlvmContext* ctx, str base, Vec<u32>* arg_ids,
                                            u32 value_arg_count) {
     i64 i = 0;
@@ -312,9 +318,9 @@ LLVMOpaqueValue* mono_ensure_free_function(LlvmContext* ctx, str base, Vec<u32>*
     return fn_val;
 }
 
-// Declare (or fetch) a specialized method instance. Pushes substitution
-// frames so the signature resolves concretely; pops before returning on all
-// paths. Mirrors the Pass1 method declaration; keep in sync.
+/// Declare (or fetch) a specialized method instance. Pushes substitution
+/// frames so the signature resolves concretely; pops before returning on all
+/// paths. Mirrors the Pass1 method declaration; keep in sync.
 LLVMOpaqueValue* mono_declare_specialized(LlvmContext* ctx, str base, MonoMethodTemplate* template, Vec<u32>* param_ids, Vec<u32>* arg_ids, str mangled, u32 receiver_depth, u32 receiver_args_count) {
     mono_push_method_bindings(ctx.types, param_ids, arg_ids);
     SyntaxNode* rscan = template.ret_start;
@@ -397,6 +403,8 @@ LLVMOpaqueValue* mono_declare_specialized(LlvmContext* ctx, str base, MonoMethod
     return fn_val;
 }
 
+/// Declares (or fetches) the instance of a generic method a call needs,
+/// inferring its type arguments, and queues its body.
 LLVMOpaqueValue* mono_ensure_generic_method_call(LlvmContext* ctx, u32 receiver_type,
                                                 str method, u32 args_start,
                                                 bool static_method) {
@@ -474,8 +482,8 @@ LLVMOpaqueValue* mono_ensure_generic_method_call(LlvmContext* ctx, u32 receiver_
     return fn_val;
 }
 
-// Ensure a concrete generic receiver's method is declared and queue its body.
-// Type arguments stay structural here; rendering and reparsing loses nesting.
+/// Ensure a concrete generic receiver's method is declared and queue its body.
+/// Type arguments stay structural here; rendering and reparsing loses nesting.
 LLVMOpaqueValue* mono_ensure_specialized(LlvmContext* ctx, u32 receiver_type_id, str method) {
     TypeEntry* receiver = ctx.types.get(receiver_type_id);
     u32 receiver_depth = 0;
@@ -568,6 +576,7 @@ LLVMOpaqueValue* mono_ensure_specialized(LlvmContext* ctx, u32 receiver_type_id,
     return fn_val;
 }
 
+/// Returns true when `type_id` is already in `layout_ids`.
 bool mono_layout_seen(Vec<u32>* layout_ids, u32 type_id) {
     i64 i = 0;
     while (i < layout_ids.len()) {
@@ -579,6 +588,7 @@ bool mono_layout_seen(Vec<u32>* layout_ids, u32 type_id) {
     return false;
 }
 
+/// Appends the payload types of `variant` of a generic enum instance.
 void mono_enum_payload_types(LlvmContext* ctx, u32 type_id, str variant,
                               Vec<u32>* payloads) {
     TypeEntry instance = *ctx.types.get(type_id);
@@ -592,6 +602,7 @@ void mono_enum_payload_types(LlvmContext* ctx, u32 type_id, str variant,
     ctx.types.pop_subst(parameters.len());
 }
 
+/// Returns a generic struct instance's field type with arguments applied.
 u32 mono_resolve_struct_field_type(LlvmContext* ctx, u32 struct_type_id, u32 field_type_id) {
     TypeEntry* struct_type = ctx.types.get(struct_type_id);
     if (struct_type.kind != TypeKind.Named || struct_type.count == 0) {
@@ -616,6 +627,7 @@ u32 mono_resolve_struct_field_type(LlvmContext* ctx, u32 struct_type_id, u32 fie
 }
 
 
+/// Defines the LLVM layouts of the generic types `type_id` contains.
 void mono_ensure_child_layouts(LlvmContext* ctx, u32 type_id, Vec<u32>* layout_ids) {
     TypeEntry* entry = ctx.types.get(type_id);
     if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference
@@ -686,6 +698,7 @@ void mono_ensure_child_layouts(LlvmContext* ctx, u32 type_id, Vec<u32>* layout_i
     }
 }
 
+/// Defines the LLVM struct layout of a generic struct or enum instance once.
 void mono_ensure_type_layout(LlvmContext* ctx, u32 type_id, Vec<u32>* layout_ids) {
     TypeEntry* source = ctx.types.get(type_id);
     if (source.kind != TypeKind.Named || source.count == 0 || mono_layout_seen(layout_ids, type_id)) {
@@ -813,6 +826,7 @@ void mono_ensure_type_layout(LlvmContext* ctx, u32 type_id, Vec<u32>* layout_ids
     param_ids.drop();
 }
 
+/// Defines layouts for every generic type instance in the table.
 void mono_define_generic_layouts(LlvmContext* ctx) {
     i64 i = TYPE_PRIMITIVE_MAX + 1;
     while (i < ctx.types.types.len()) {

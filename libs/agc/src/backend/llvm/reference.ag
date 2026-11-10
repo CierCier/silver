@@ -18,6 +18,8 @@ import backend.llvm.mono;
 import backend.llvm.stmt;
 import backend.llvm.function_abi;
 
+/// An addressable place during codegen: data pointer, initialization node
+/// (null for untracked storage), type, and whether it is raw or borrowed.
 struct LlvmPlace {
     LLVMOpaqueValue* data;
     LLVMOpaqueValue* node;
@@ -26,8 +28,12 @@ struct LlvmPlace {
     bool borrowed;
 }
 
+/// How a write through a borrowed reference changes the referent's
+/// initialization state.
 enum BorrowedTransition { Cleanup; Initialize; Move; }
 
+/// Returns `function` as a value, wrapping it in an adapter when its C
+/// signature passes references, so callers see the Silver reference ABI.
 LLVMOpaqueValue* llvm_import_reference_function_value(LlvmContext* ctx,
     LLVMOpaqueValue* function, str source_name) {
     SyntaxNode* parameters = item_c_extern_function_parameters(ctx.root, source_name);
@@ -87,6 +93,8 @@ LLVMOpaqueValue* llvm_import_reference_function_value(LlvmContext* ctx,
     return adapter;
 }
 
+/// Returns true when the place expression goes through a dereference of a
+/// reference.
 bool llvm_place_has_borrow(LlvmContext* ctx, u32 expr_id) {
     AstExpr expression = *ctx.pool.get_expr(expr_id);
     if (expression.kind == ExprKind.Unary && expression.aux == (u32)TokenKind.Star) {
@@ -105,6 +113,8 @@ bool llvm_place_has_borrow(LlvmContext* ctx, u32 expr_id) {
     return indirect ? borrowed : llvm_place_has_borrow(ctx, expression.inner0);
 }
 
+/// Emits an expression for use as a raw pointer, dropping the
+/// initialization node of a reference value.
 LLVMOpaqueValue* llvm_emit_pointer_operand(LlvmContext* ctx, u32 expr_id) {
     LLVMOpaqueValue* value = llvm_emit_expr(ctx, expr_id);
     if (value != (LLVMOpaqueValue*)0 && LLVMTypeOf(value) == llvm_reference_type(ctx.ctx)) {
@@ -113,6 +123,8 @@ LLVMOpaqueValue* llvm_emit_pointer_operand(LlvmContext* ctx, u32 expr_id) {
     return value;
 }
 
+/// Returns the `__silver_init_node` type (parent, children, child count,
+/// state byte), created once per context.
 LLVMOpaqueType* llvm_reference_node_type(LLVMOpaqueContext* ctx) {
     LLVMOpaqueType* node_type = LLVMGetTypeByName2(ctx, "__silver_init_node");
     if (node_type != (LLVMOpaqueType*)0) { return node_type; }
@@ -126,6 +138,8 @@ LLVMOpaqueType* llvm_reference_node_type(LLVMOpaqueContext* ctx) {
     return node_type;
 }
 
+/// Emits the initialization node of child `index` under `node` (the
+/// "initialized" marker propagates to children).
 LLVMOpaqueValue* llvm_reference_child(LlvmContext* ctx, LLVMOpaqueValue* node,
                                       LLVMOpaqueValue* index) {
     LLVMOpaqueValue* initialized = llvm_reference_initialized(ctx.ctx);
@@ -159,6 +173,7 @@ LLVMOpaqueValue* llvm_reference_child(LlvmContext* ctx, LLVMOpaqueValue* node,
     return result;
 }
 
+/// Follows dereferences of references in a place, keeping their nodes.
 LlvmPlace llvm_reference_deref_place(LlvmContext* ctx, LlvmPlace place) {
     TypeEntry entry = *ctx.types.get(ctx.types.resolve_subst(place.type_id));
     while (place.data != (LLVMOpaqueValue*)0
@@ -182,7 +197,7 @@ LlvmPlace llvm_reference_deref_place(LlvmContext* ctx, LlvmPlace place) {
     return place;
 }
 
-// Resolve address and capability together so receiver/index effects run once.
+/// Resolve address and capability together so receiver/index effects run once.
 LlvmPlace llvm_emit_reference_place(LlvmContext* ctx, u32 expr_id) {
     LlvmPlace place;
     place.data = (LLVMOpaqueValue*)0;
@@ -343,6 +358,7 @@ LlvmPlace llvm_emit_reference_place(LlvmContext* ctx, u32 expr_id) {
     return place;
 }
 
+/// Emits a reference value (`&expr`): data pointer plus initialization node.
 LLVMOpaqueValue* llvm_emit_reference(LlvmContext* ctx, u32 expr_id) {
     u32 type_id = llvm_expr_type(ctx, expr_id);
     TypeEntry entry = *ctx.types.get(ctx.types.resolve_subst(type_id));
@@ -366,6 +382,8 @@ LLVMOpaqueValue* llvm_emit_reference(LlvmContext* ctx, u32 expr_id) {
     return llvm_reference_build(ctx.ctx, ctx.builder, place.data, place.node);
 }
 
+/// Emits an argument for a reference parameter, wrapping raw pointers with
+/// the "initialized" marker.
 LLVMOpaqueValue* llvm_emit_reference_argument(LlvmContext* ctx, u32 expr_id, u32 expected_type) {
     TypeEntry actual = *ctx.types.get(ctx.types.resolve_subst(llvm_expr_type(ctx, expr_id)));
     TypeEntry expected = *ctx.types.get(ctx.types.resolve_subst(expected_type));
@@ -380,7 +398,7 @@ LLVMOpaqueValue* llvm_emit_reference_argument(LlvmContext* ctx, u32 expr_id, u32
     return llvm_emit_reference(ctx, expr_id);
 }
 
-// Reuse the canonical typed plan while addressing the original caller's nodes.
+/// Reuse the canonical typed plan while addressing the original caller's nodes.
 LlvmLocal llvm_borrowed_local(LlvmContext* ctx, LlvmPlace place, Span span) {
     LlvmLocal local = LlvmLocal.new(0, place.data, place.type_id, true);
     i64 plan_index = init_plan_resolve(ctx.init_owner_plans, ctx.types, ctx.names,
@@ -522,6 +540,8 @@ private void llvm_reference_refresh_body(LlvmContext* ctx, LLVMOpaqueValue* node
     LLVMPositionBuilderAtEnd(ctx.builder, after);
 }
 
+/// Emits a call to `__silver_refresh_init_parents` (defined once per
+/// module) to recompute the parent states of `node`.
 void llvm_reference_refresh_parents(LlvmContext* ctx, LLVMOpaqueValue* node) {
     LLVMOpaqueType* pointer = LLVMPointerTypeInContext(ctx.ctx, 0);
     LLVMOpaqueType* signature = LLVMFunctionType(LLVMVoidTypeInContext(ctx.ctx), &pointer, 1, 0);
@@ -543,6 +563,8 @@ void llvm_reference_refresh_parents(LlvmContext* ctx, LLVMOpaqueValue* node) {
     LLVMBuildCall2(ctx.builder, signature, helper, &node, 1, "");
 }
 
+/// Emits the initialization-state update for writing through a borrowed
+/// place (cleanup, initialize, or move).
 void llvm_reference_update(LlvmContext* ctx, LlvmPlace place, Span span, BorrowedTransition transition) {
     if (place.node == (LLVMOpaqueValue*)0) { return; }
     LLVMOpaqueValue* external = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntEQ,
