@@ -5,6 +5,7 @@ import completion;
 import params;
 import capabilities;
 
+/// Maps a symbol kind to this server's semantic token type index.
 i64 semantic_kind(IdeSymbolKind kind) {
     return match kind {
         IdeSymbolKind.Function : 9, IdeSymbolKind.Method : 10, IdeSymbolKind.Macro : 11,
@@ -15,6 +16,8 @@ i64 semantic_kind(IdeSymbolKind kind) {
     };
 }
 
+/// Returns the encoded semantic tokens (LSP 5-integer deltas) for byte range
+/// `[begin, finish)`.
 Vec<i64> semantic_data(Document* doc, &SemanticTokenOptions options, i64 begin, i64 finish) {
     Vec<i64> data = Vec<i64>.new();
     if (begin == finish) { return move data; }
@@ -69,16 +72,20 @@ Vec<i64> semantic_data(Document* doc, &SemanticTokenOptions options, i64 begin, 
     return move data;
 }
 
+/// Appends `data[begin..end]` as a JSON array.
 void append_semantic_data(String* out, Vec<i64>* data, i64 begin, i64 end) {
     out.push('['); i64 i = begin;
     while (i < end) { if (i > begin) { out.push(','); } i64 value = data.get(i); out.push_display(&value); i += 1; }
     out.push(']');
 }
 
+/// Returns the semantic tokens result id `<uri>#<generation>`.
 String semantic_result_id(Document* doc, i64 generation) {
     String id = doc.uri.clone(); id.push('#'); id.push_display(&generation); return move id;
 }
 
+/// Recomputes a dirty document's full semantic tokens, keeping the previous
+/// set for delta requests.
 void update_semantic_data(Document* doc, &SemanticTokenOptions options) {
     if (!doc.semantic_dirty) { return; }
     doc.previous_semantic_generation = doc.semantic_generation;
@@ -88,12 +95,15 @@ void update_semantic_data(Document* doc, &SemanticTokenOptions options) {
     doc.semantic_generation += 1; doc.semantic_dirty = false;
 }
 
+/// Computes the `semanticTokens/full` response.
 String compute_semantic_tokens(Document* doc, &SemanticTokenOptions options) {
     update_semantic_data(doc, options); String id = semantic_result_id(doc, doc.semantic_generation);
     String out = String.from_str("{\"resultId\":\""); json_escape(id.to_str(), &out); out.push_str("\",\"data\":");
     append_semantic_data(&out, &doc.semantic_data, 0, doc.semantic_data.len()); out.push('}'); return move out;
 }
 
+/// Computes the `semanticTokens/full/delta` response against
+/// `previous_id`, or a full result when that id is unknown.
 String compute_semantic_delta(Document* doc, &SemanticTokenOptions options, str previous_id) {
     update_semantic_data(doc, options);
     String current = semantic_result_id(doc, doc.semantic_generation);
@@ -117,11 +127,13 @@ String compute_semantic_delta(Document* doc, &SemanticTokenOptions options, str 
     out.push_str("]}"); return move out;
 }
 
+/// Computes the `semanticTokens/range` response.
 String compute_semantic_range(Document* doc, &SemanticTokenOptions options, i64 begin, i64 end) {
     Vec<i64> data = semantic_data(doc, options, begin, end); String out = String.from_str("{\"data\":");
     append_semantic_data(&out, &data, 0, data.len()); out.push('}'); return move out;
 }
 
+/// Appends one folding range unless the client's limit is reached.
 void append_fold(Document* doc, Span span, bool comment, ClientOptions* client, String* out, i64* count) {
     if (*count >= client.folding_range_limit) { return; }
     LspPosition start = doc.position(span.start); LspPosition end = doc.position(span.end);
@@ -140,6 +152,7 @@ void append_fold(Document* doc, Span span, bool comment, ClientOptions* client, 
     if (comment) { out.push_str(",\"kind\":\"comment\""); } out.push('}');
 }
 
+/// Appends folding ranges for delimited groups under `node`.
 void append_folds(Document* doc, SyntaxNode* node, ClientOptions* client, String* out, i64* count) {
     if (node == (SyntaxNode*)0 || *count >= client.folding_range_limit) { return; }
     if (node.kind == NodeKind.Block || node.kind == NodeKind.Parenthesized || node.kind == NodeKind.Bracket) {
@@ -151,6 +164,7 @@ void append_folds(Document* doc, SyntaxNode* node, ClientOptions* client, String
     }
 }
 
+/// Computes the `textDocument/foldingRange` response.
 String compute_folding(Document* doc, ClientOptions* client) {
     String out = String.from_str("["); i64 count = 0;
     append_folds(doc, doc.analysis.tree.root, client, &out, &count);
@@ -165,6 +179,7 @@ String compute_folding(Document* doc, ClientOptions* client) {
     out.push(']'); return move out;
 }
 
+/// Returns the innermost node containing `offset`, or null.
 SyntaxNode* selection_node(SyntaxNode* node, i64 offset) {
     if (node == (SyntaxNode*)0 || offset < node.span.start || offset >= node.span.end) { return (SyntaxNode*)0; }
     SyntaxNode* child = node.first_child;
@@ -176,6 +191,7 @@ SyntaxNode* selection_node(SyntaxNode* node, i64 offset) {
     return node;
 }
 
+/// Converts the request's `positions` to byte offsets; false when invalid.
 bool parse_selection_offsets(Document* doc, str json, Vec<i64>* offsets) {
     String positions = json_field(json, "positions"); JsonReader reader = JsonReader.new(positions.to_str());
     if (!reader.begin_array()) { return false; }
@@ -192,6 +208,7 @@ bool parse_selection_offsets(Document* doc, str json, Vec<i64>* offsets) {
     return reader.end_array() && !reader.failed;
 }
 
+/// Computes the `textDocument/selectionRange` response.
 String compute_selection_ranges(Document* doc, Vec<i64>* offsets) {
     String out = String.from_str("["); i64 i = 0;
     while (i < offsets.len()) {
@@ -217,6 +234,8 @@ String compute_selection_ranges(Document* doc, Vec<i64>* offsets) {
     out.push(']'); return move out;
 }
 
+/// Returns true when a call argument already spells the parameter name, so
+/// a parameter-name hint would be redundant.
 bool redundant_parameter_argument(Document* doc, i64 begin, i64 end, str name) {
     while (begin < end) {
         Token* first = doc.analysis.tokens.get(begin);
@@ -239,6 +258,8 @@ bool redundant_parameter_argument(Document* doc, i64 begin, i64 end, str name) {
     return false;
 }
 
+/// Computes inlay hints (inferred types, parameter names) for
+/// `[start, end)`.
 String compute_inlay_hints(Document* doc, i64 start, i64 end) {
     String out = String.from_str("["); bool first = true; i64 i = 0;
     while (i < doc.analysis.symbols.len()) {
