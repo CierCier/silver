@@ -19,9 +19,11 @@ if (@cfg(os.linux)) {
     import std.sys.raw.fs;
 }
 
+/// Sentinel returned by the byte-oriented `File` methods at end of file or on
+/// error.
 const i32 EOF = -1;
 
-// Seek origins for File.seek_from (values match lseek(2) whence).
+/// Seek origins for File.seek_from (values match lseek(2) whence).
 enum IO_SEEK {
     SET = 0;
     CURSOR = 1;
@@ -40,6 +42,10 @@ enum IO_SEEK {
 // a null-pointer literal.
 // ---------------------------------------------------------------------------
 
+/// A buffered writer over a file descriptor, or over memory for `@format`.
+/// The buffer is allocated lazily on first write. `STDOUT` and `STDERR` are
+/// flushed automatically at process exit; other writers must be flushed or
+/// dropped by their owner, or buffered output is lost.
 struct BufWriter {
     i64 data;   // address of buffer (0 = uninitialized)
     i64 len;
@@ -51,24 +57,34 @@ struct BufWriter {
 }
 
 // Zero-cost global instances (all zero → triggers lazy init on first write).
+/// Process-wide stdout writer, line buffered. Not synchronized: concurrent
+/// writers from several threads can interleave or race.
 BufWriter STDOUT = { .data = 0, .len = 0, .cap = 0, .fd = 1,
     .list_next = (BufWriter*)0, .list_prev = (BufWriter*)0, .mode = 1 };
+/// Process-wide stderr writer, unbuffered (each write is a syscall).
 BufWriter STDERR = { .data = 0, .len = 0, .cap = 0, .fd = 2,
     .list_next = (BufWriter*)0, .list_prev = (BufWriter*)0, .mode = 0 };
 
 // Buffering modes for BufWriter.
 // Internal constants — no `pub` needed (public by default in Silver).
+/// Buffering mode: one write syscall per write call.
 const u8 IOMODE_UNBUFFERED = 0;   // immediate syscall per write
+/// Buffering mode: flush whenever written data contains a newline.
 const u8 IOMODE_LINE      = 1;   // flush when data contains \n
+/// Buffering mode: flush when the buffer fills or on an explicit flush.
 const u8 IOMODE_BLOCK     = 2;   // flush when buffer is full or explicit call
+/// Buffering mode: in-memory buffer for `@format`/`@sprint`; never written to
+/// an fd.
 const u8 IOMODE_MEMORY    = 3;   // in-memory @format/@sprint buffer (fd = -1)
 
-// Head of the intrusive linked list of global BufWriters (STDOUT, STDERR).
-// NULL = empty list. No heap allocation, no size limit.
+/// Head of the intrusive linked list of global BufWriters (STDOUT, STDERR).
+/// NULL = empty list. No heap allocation, no size limit.
 BufWriter* __buf_writer_list;
 
 // Scratch buffers for number formatting.
+/// Internal: 32-byte scratch buffer for number formatting.
 struct __Buf32 { u8 data[32]; }
+/// Internal: 40-byte scratch buffer for number formatting.
 struct __Buf40 { u8 data[40]; }
 
 impl BufWriter {
@@ -367,10 +383,11 @@ void __silver_flush_all() {
     free_buffer(&STDERR);
 }
 // File — a typed-syscall file descriptor wrapper.
-//
-// Holds the raw fd and an open flag; unbuffered (every operation is one
-// syscall).  `at_eof`/`had_error` remember the last read result so
-// eof()/error() behave like their stdio predecessors.
+/// An open file descriptor with 4 KiB read and write buffers. Writes are
+/// buffered until `flush`, `close`, a read, or a seek. `at_eof`/`had_error`
+/// remember the last result so `eof()`/`error()` work like stdio. Dropping
+/// an owning `File` flushes and closes it; flush errors are then lost, so
+/// call `flush` or `close` yourself when they matter.
 struct File {
     i32 fd;
     bool is_open;
@@ -385,15 +402,18 @@ struct File {
 }
 
 impl File {
+    /// Wraps `fd`, taking ownership: `close` and drop close it.
     File from_fd(i32 fd) {
         File file = { .fd = fd, .is_open = fd >= 0, .at_eof = false, .had_error = false, .owns_fd = true, .read_buf = (u8*)0, .read_pos = 0, .read_len = 0, .write_buf = (u8*)0, .write_len = 0 };
         return file;
     }
 
+    /// Returns a closed `File` (`invalid()` is true).
     File closed() {
         File file = { .fd = -1, .is_open = false, .at_eof = false, .had_error = false, .owns_fd = false, .read_buf = (u8*)0, .read_pos = 0, .read_len = 0, .write_buf = (u8*)0, .write_len = 0 };
         return file;
     }
+    /// Wraps `fd` without ownership: `close` and drop leave it open.
     File borrow_fd(i32 fd) {
         File file = { .fd = fd, .is_open = fd >= 0, .at_eof = false, .had_error = false, .owns_fd = false, .read_buf = (u8*)0, .read_pos = 0, .read_len = 0, .write_buf = (u8*)0, .write_len = 0 };
         return file;
@@ -439,6 +459,9 @@ impl File {
         return O_RDONLY;
     }
 
+    /// Opens `path` with an fopen-style mode (`r`, `w`, `a`, optional `+`/`x`).
+    /// New files get mode 0666 minus the umask. Returns a closed `File` on
+    /// failure; use `try_open` to get the error.
     File open(str path, str mode) {
         Result<i64, Error> r = try_open(path, File.mode_flags(mode), 438); // 0o666
         if (r.is_err()) {
@@ -447,6 +470,7 @@ impl File {
         return File.from_fd((i32)r.value());
     }
 
+    /// Opens `path` like `open`, but returns the OS error on failure.
     Result<File, Error> try_open(str path, str mode) {
         Result<i64, Error> r = try_open(path, File.mode_flags(mode), 438); // 0o666
         if (r.is_err()) {
@@ -455,25 +479,34 @@ impl File {
         return Result<File, Error>.Ok(File.from_fd((i32)r.unwrap()));
     }
 
+    /// Opens `path` for reading; returns a closed `File` on failure.
     File open_read(str path) {
         return File.open(path, "r");
     }
 
+    /// Opens `path` for writing, creating or truncating it; returns a closed
+    /// `File` on failure.
     File open_write(str path) {
         return File.open(path, "w");
     }
 
+    /// Opens `path` for appending, creating it if needed; returns a closed
+    /// `File` on failure.
     File open_append(str path) {
         return File.open(path, "a");
     }
+    /// Returns true when the file holds an open descriptor.
     bool valid(*self) {
         return self.is_open && self.fd >= 0;
     }
 
+    /// Returns true when the file is closed or failed to open.
     bool invalid(*self) {
         return !self.valid();
     }
 
+    /// Flushes, frees the buffers, and closes the fd when owned. Returns 0 or the
+    /// close errno. Flush errors are not reported here. Safe to call again.
     i32 close(*self) {
         self.flush();
         if (self.write_buf != (u8*)0) {
@@ -531,6 +564,8 @@ impl File {
         return 0;
     }
 
+    /// Returns the next byte (0-255), or `EOF` at end of file or on error. Flushes
+    /// pending writes first and refills a 4 KiB read buffer as needed.
     i32 read_char(*self) {
         if (self.invalid() || self.at_eof) {
             return EOF;
@@ -565,6 +600,8 @@ impl File {
         return (i32)self.read_buf[0];
     }
 
+    /// Buffers one byte for writing; flushes when the 4 KiB buffer is full.
+    /// Returns 0, or `EOF` when invalid or a flush fails.
     i32 write_char(*self, i32 ch) {
         if (self.invalid()) {
             return EOF;
@@ -630,6 +667,7 @@ impl File {
         return 0;
     }
 
+    /// Buffers `text` plus a newline. Returns 0, or `EOF` on failure.
     i32 write_line(*self, str text) {
         if (self.invalid()) {
             return EOF;
@@ -713,18 +751,24 @@ impl File {
         return done / elem_size;
     }
 
+    /// Seeks to absolute byte `offset`; see `seek_from`.
     bool seek(*self, i64 offset) {
         return self.seek_from(offset, IO_SEEK.SET);
     }
 
+    /// Seeks to the start of the file; see `seek_from`.
     bool seek_to_start(*self) {
         return self.seek_from(0, IO_SEEK.SET);
     }
 
+    /// Seeks to the end of the file; see `seek_from`.
     bool seek_to_end(*self) {
         return self.seek_from(0, IO_SEEK.END);
     }
 
+    /// Flushes pending writes, discards buffered reads, and moves the file
+    /// position. Returns false on failure. Does not clear the EOF flag; use
+    /// `rewind` or `clear_error` for that.
     bool seek_from(*self, i64 offset, IO_SEEK origin) {
         if (self.invalid()) {
             return false;
@@ -744,6 +788,9 @@ impl File {
         return true;
     }
 
+    /// Flushes pending writes and returns the kernel file offset, or -1. Bytes
+    /// already read ahead into the read buffer are not subtracted, so after
+    /// `read_char`/`read_line` this is ahead of the logical position.
     i64 tell(*self) {
         if (self.invalid()) {
             return -1;
@@ -761,6 +808,7 @@ impl File {
         return r.value();
     }
 
+    /// Seeks to the start and clears the EOF and error flags.
     void rewind(*self) {
         if (self.valid()) {
             self.read_pos = 0;
@@ -771,6 +819,7 @@ impl File {
         }
     }
 
+    /// Returns true at end of file, or when the file is invalid.
     bool eof(&self) {
         if (self.invalid()) {
             return true;
@@ -778,6 +827,7 @@ impl File {
         return self.at_eof;
     }
 
+    /// Returns true after a failed operation, or when the file is invalid.
     bool error(&self) {
         if (self.invalid()) {
             return true;
@@ -785,6 +835,7 @@ impl File {
         return self.had_error;
     }
 
+    /// Clears the EOF and error flags.
     void clear_error(*self) {
         if (self.valid()) {
             self.at_eof = false;
@@ -792,6 +843,8 @@ impl File {
         }
     }
 
+    /// Returns the file size in bytes, or -1. Seeks to the end and back to
+    /// `tell()`, which discards any read-ahead buffer (see `tell`).
     i64 size(*self) {
         if (self.invalid()) {
             return -1;
@@ -817,7 +870,7 @@ impl Drop for File {
 }
 
 
-// True when `needle` (a byte value) occurs in the null-terminated string `p`.
+/// True when `needle` (a byte value) occurs in the null-terminated string `p`.
 bool cstr_contains(u8* p, u8 needle) {
     i64 i = 0;
     while (p[i] != (u8)0) {
@@ -830,20 +883,26 @@ bool cstr_contains(u8* p, u8 needle) {
 }
 
 // Convenience constructors for the standard descriptors.
+/// Returns a non-owning `File` for fd 0; dropping it leaves stdin open.
 File stdin_file() {
     return File.borrow_fd(STDIN_FD);
 }
 
+/// Returns a non-owning `File` for fd 1. Its writes bypass `STDOUT`'s buffer.
 File stdout_file() {
     return File.borrow_fd(STDOUT_FD);
 }
 
+/// Returns a non-owning `File` for fd 2.
 File stderr_file() {
     return File.borrow_fd(STDERR_FD);
 }
 
 // High-level helpers. These write straight through the write(2) syscall
 // (std.fmt), bypassing libc stdio buffering entirely.
+/// Writes `text` and a newline straight to fd 1. Bypasses `STDOUT`'s
+/// buffer, so it can appear before earlier buffered output that has no
+/// newline yet. Returns the bytes written, or `EOF` for null or failure.
 i32 println(str text) {
     if (text == (str)0) {
         return EOF;
@@ -859,6 +918,8 @@ i32 println(str text) {
     return (i32)(len + 1);
 }
 
+/// Writes `text` and a newline straight to fd 2. Returns the bytes written,
+/// or `EOF` for null or failure.
 i32 eprintln(str text) {
     if (text == (str)0) {
         return EOF;
@@ -874,6 +935,8 @@ i32 eprintln(str text) {
     return (i32)(len + 1);
 }
 
+/// Returns true when `path` can be opened for reading. An existing file the
+/// caller cannot read reports false.
 bool file_exists(str path) {
     File file = File.open_read(path);
     if (file.invalid()) {
@@ -883,10 +946,13 @@ bool file_exists(str path) {
     return true;
 }
 
+/// Deletes the file at `path` (unlink). Returns false on any error.
 bool file_delete(str path) {
     return sys_unlink((i64)path) == 0;
 }
 
+/// Renames `from` to `to`, replacing an existing `to`. Returns false on any
+/// error, including a cross-filesystem move.
 bool file_rename(str from, str to) {
     return sys_rename((i64)from, (i64)to) == 0;
 }
@@ -901,14 +967,18 @@ struct FileStat {
 }
 
 impl FileStat {
+    /// Returns true for a directory.
     bool is_dir(&self) {
         return (self.mode & 61440) == 16384; // S_IFDIR = 0x4000 = 16384
     }
 
+    /// Returns true for a regular file.
     bool is_file(&self) {
         return (self.mode & 61440) == 32768; // S_IFREG = 0x8000 = 32768
     }
 
+    /// Returns true for a symbolic link. Only `lstat_path` results can report
+    /// one; `stat_path` follows links.
     bool is_symlink(&self) {
         return (self.mode & 61440) == 40960; // S_IFLNK = 0xA000 = 40960
     }

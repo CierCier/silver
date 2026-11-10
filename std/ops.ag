@@ -6,41 +6,86 @@ import std.mem.memory;
 // `Self` is the implicit first type parameter (the operand the operator is
 // defined on); remaining parameters are the other operand types.
 
+/// Overloads `a + b`. Takes both operands by value.
+/// Overloads `a + b`. Takes both operands by value.
 trait Add<B>        { Self __add(self, B other); }
+/// Overloads `a - b`. Takes both operands by value.
+/// Overloads `a - b`. Takes both operands by value.
 trait Sub<B>        { Self __sub(self, B other); }
+/// Overloads `a * b`. Takes both operands by value.
+/// Overloads `a * b`. Takes both operands by value.
 trait Mul<B>        { Self __mul(self, B other); }
+/// Overloads `a / b`. Takes both operands by value.
+/// Overloads `a / b`. Takes both operands by value.
 trait Div<B>        { Self __div(self, B other); }
+/// Overloads `a % b`. Takes both operands by value.
+/// Overloads `a % b`. Takes both operands by value.
 trait Mod<B>        { Self __mod(self, B other); }
+/// Overloads unary `-a`. Takes the operand by value.
+/// Overloads unary `-a`. Takes the operand by value.
 trait Neg           { Self __neg(self); }
 
+/// Overloads `a & b`. Takes both operands by value.
+/// Overloads `a & b`. Takes both operands by value.
 trait BitAnd<B>     { Self __bitand(self, B other); }
+/// Overloads `a | b`. Takes both operands by value.
+/// Overloads `a | b`. Takes both operands by value.
 trait BitOr<B>      { Self __bitor(self, B other); }
+/// Overloads `a ^ b`. Takes both operands by value.
+/// Overloads `a ^ b`. Takes both operands by value.
 trait BitXor<B>     { Self __bitxor(self, B other); }
+/// Overloads `a << b`. Takes both operands by value.
+/// Overloads `a << b`. Takes both operands by value.
 trait Shl<B>        { Self __shl(self, B other); }
+/// Overloads `a >> b`. Takes both operands by value.
+/// Overloads `a >> b`. Takes both operands by value.
 trait Shr<B>        { Self __shr(self, B other); }
+/// Overloads unary `~a`. Takes the operand by value.
+/// Overloads unary `~a`. Takes the operand by value.
 trait BitNot        { Self __bitnot(self); }
 
+/// Overloads `a == b`. Borrows both operands.
+/// Overloads `a == b`. Borrows both operands.
 trait Eq<A>   { bool __eq(*self, A* other); }
+/// Overloads `a != b`. Borrows both operands.
+/// Overloads `a != b`. Borrows both operands.
 trait Ne<A>   { bool __ne(*self, A* other); }
+/// Overloads `a < b`. Borrows both operands.
+/// Overloads `a < b`. Borrows both operands.
 trait Lt<A>   { bool __lt(*self, A* other); }
+/// Overloads `a > b`. Borrows both operands.
+/// Overloads `a > b`. Borrows both operands.
 trait Gt<A>   { bool __gt(*self, A* other); }
+/// Overloads `a <= b`. Borrows both operands.
+/// Overloads `a <= b`. Borrows both operands.
 trait Le<A>   { bool __le(*self, A* other); }
+/// Overloads `a >= b`. Borrows both operands.
+/// Overloads `a >= b`. Borrows both operands.
 trait Ge<A>   { bool __ge(*self, A* other); }
 
+/// Overloads `value[index]` reads and `value[index] = item` writes.
 trait IndexedAccess {
     type Item;
+    /// Returns the element at `index` (by value). Bounds behavior is up to the
+    /// implementation.
     Item __index_get(*self, i64 index);
+    /// Stores `value` at `index`, taking ownership of it.
     void __index_set(*self, i64 index, Item value);
 }
 
+/// Overloads `value[start:end]` slicing.
 trait SliceAccess {
     type Output;
+    /// Returns the view for `[start, end)`. An omitted start arrives as 0 and
+    /// an omitted end as the i64 maximum, so implementations must clamp.
+    /// Negative-index handling is up to the type.
     Output __slice_get(*self, i64 start, i64 end);
 }
 
-// Compare trait for ordering algorithms (heapsort, binary search, etc.).
-// Returns < 0 when *self sorts before *other, 0 when equal, > 0 when after.
+/// Compare trait for ordering algorithms (heapsort, binary search, etc.).
+/// Returns < 0 when *self sorts before *other, 0 when equal, > 0 when after.
 trait Compare {
+    /// Compares `*self` with `*other`; see the trait for the sign convention.
     i32 compare(*self, Self* other);
 }
 

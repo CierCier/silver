@@ -15,6 +15,10 @@ import std.sys.result;
 // memcmp, strcmp, strlen, abort come from std.mem.memory
 // (transitively via std.mem.alloc).
 
+/// A growable, owned UTF-8 byte string, kept NUL-terminated after any
+/// append so `to_str` can hand it to C-style APIs. Contents are not validated
+/// as UTF-8. Dropping it frees the buffer; borrowed `str` views from
+/// `to_str` are invalidated by any call that grows or drops the string.
 struct String {
     u8* data;
     i64 len;
@@ -32,6 +36,7 @@ private void string_reserve_append(&mut String value, i64 required_capacity) {
 }
 
 impl String {
+    /// Creates an empty string without allocating.
     String new() {
         return String.with_capacity(0);
     }
@@ -43,6 +48,7 @@ impl String {
         return move out;
     }
 
+    /// Creates an empty string with room for `capacity` bytes, including the NUL.
     String with_capacity(i64 capacity) {
         String s;
         s.len = 0;
@@ -56,6 +62,7 @@ impl String {
         return s;
     }
 
+    /// Returns the length in bytes, excluding the NUL.
     i64 len(&self) {
         return self.len;
     }
@@ -65,6 +72,7 @@ impl String {
         return self.len == 0;
     }
 
+    /// Returns the allocated capacity in bytes.
     i64 capacity(&self) {
         return self.capacity;
     }
@@ -86,6 +94,7 @@ impl String {
         return s.__slice_get(start, end);
     }
 
+    /// Sets the length to 0 and keeps the allocation.
     void clear(&mut self) {
         self.len = 0;
         if (self.data != (u8*)0) {
@@ -93,6 +102,7 @@ impl String {
         }
     }
 
+    /// Appends one byte. Grows the buffer when needed.
     void push(&mut self, u8 ch) {
         i64 required_capacity = self.len + 2;
         string_reserve_append(self, required_capacity);
@@ -112,6 +122,8 @@ impl String {
         self.data[self.len] = (u8)0;
     }
 
+    /// Appends the bytes of NUL-terminated `text`; null is ignored. `text` must
+    /// not point into this string: growing the buffer can free it first.
     void push_str(&mut self, str text) {
         if (text == (str)0) {
             return;
@@ -142,9 +154,9 @@ impl String {
         self.push_bytes((u8*)writer.data, writer.len);
     }
 
-    // Clone borrows self by shared reference, creates a deep copy, and returns it.
-    // The caller retains ownership of the original string.
-    // Sizes the copy to the content (len + NUL), not the source capacity.
+    /// Clone borrows self by shared reference, creates a deep copy, and returns it.
+    /// The caller retains ownership of the original string.
+    /// Sizes the copy to the content (len + NUL), not the source capacity.
     String clone(&self) {
         if (self.len == 0) {
             return String.new();
@@ -156,6 +168,7 @@ impl String {
         return s;
     }
 
+    /// Returns true when the contents equal `other` byte for byte; false for null.
     bool equals(&self, str other) {
         if (other == (str)0) {
             return false;
@@ -163,6 +176,8 @@ impl String {
         return self.__eq(other);
     }
 
+    /// Returns the contents as a borrowed C string ("" when unallocated). The view
+    /// is invalidated by any call that grows, clears, or drops the string.
     str to_str(&self) {
         if (self.data == (u8*)0) {
             return "";
@@ -170,6 +185,7 @@ impl String {
         return (str)self.data;
     }
 
+    /// Creates a string holding a copy of NUL-terminated `s`.
     String from_str(str s) {
         // +1 so push_str's NUL never forces a second allocation.
         String out = String.with_capacity(strlen(s) + 1);
@@ -189,6 +205,7 @@ impl String {
         return (str)self.data;
     }
 
+    /// Returns a copy without leading and trailing ASCII space, tab, CR, and LF.
     String trim(&self) {
         i64 start = 0;
         i64 end = self.len;
@@ -218,6 +235,7 @@ impl String {
         return result;
     }
 
+    /// Returns true when the contents start with `prefix`; false for null.
     bool starts_with(&self, str prefix) {
         if (prefix == (str)0) {
             return false;
@@ -232,6 +250,7 @@ impl String {
         return memcmp((const void*)self.data, (const void*)prefix, prefix_len) == 0;
     }
 
+    /// Returns true when the contents end with `suffix`; false for null.
     bool ends_with(&self, str suffix) {
         if (suffix == (str)0) {
             return false;
@@ -246,6 +265,7 @@ impl String {
         return memcmp((const void*)&self.data[self.len - suffix_len], (const void*)suffix, suffix_len) == 0;
     }
 
+    /// Returns true when `needle` occurs in the contents; false for null.
     bool contains(&self, str needle) {
         if (needle == (str)0) {
             return false;
@@ -285,6 +305,8 @@ impl String {
         return false;
     }
 
+    /// Returns the byte index of the first `needle`, 0 for an empty needle, or
+    /// -1 when absent or null.
     i64 find(&self, str needle) {
         if (needle == (str)0) {
             return -1;
@@ -417,6 +439,9 @@ impl String {
         return result;
     }
 
+    /// Returns a copy of up to `len` bytes starting at byte `start`. A negative
+    /// start is treated as 0; an out-of-range start or non-positive length gives
+    /// an empty string. Byte offsets can split a UTF-8 sequence.
     String substr(&self, i64 start, i64 len) {
         if (start < 0) {
             start = 0;
@@ -439,6 +464,9 @@ impl String {
         return result;
     }
 
+    /// Returns an iterator over the pieces between occurrences of `delimiter`.
+    /// Each piece is a `str` in a scratch buffer the next call overwrites. Do not
+    /// modify the string while iterating.
     SplitIter split(&self, str delimiter) {
         SplitIter it;
         it.data = self.data;
@@ -452,6 +480,8 @@ impl String {
         return it;
     }
 
+    /// Returns an iterator over the pieces between occurrences of `delimiter`
+    /// as zero-copy slices of this string. Do not modify it while iterating.
     SplitSliceIter split_slices(&self, str delimiter) {
         SplitSliceIter it;
         it.data = self.data;
@@ -463,6 +493,7 @@ impl String {
         return it;
     }
 
+    /// Concatenates copies of `strings`, separated by `delimiter`.
     String join(str delimiter, Vec<String>* strings) {
         i64 delim_len = strlen(delimiter);
         i64 total = 0;
@@ -493,6 +524,8 @@ impl String {
         return result;
     }
 
+    /// Returns a copy with every non-overlapping `needle` replaced, left to
+    /// right. A null needle returns a plain copy.
     String replace(&self, str needle, str replacement) {
         if (needle == (str)0 || self.len == 0) {
             return self.clone();
@@ -572,10 +605,12 @@ impl String {
         }
         return result;
     }
+    /// Returns the length in bytes (same as `len`).
     i64 byte_len(&self) {
         return self.len;
     }
 
+    /// Returns true when the contents are valid UTF-8; false when unallocated.
     bool is_valid_utf8(&self) {
         if (self.data == (u8*)0) { return false; }
         i64 i = 0;
@@ -648,6 +683,8 @@ impl String {
         return true;
     }
 
+    /// Returns the number of UTF-8 codepoints, stepping by each lead byte's
+    /// sequence width. Invalid UTF-8 gives an approximate count.
     i64 char_len(&self) {
         if (self.data == (u8*)0) { return 0; }
         i64 count = 0;
@@ -668,6 +705,8 @@ impl String {
         return count;
     }
 
+    /// Appends `cp` encoded as UTF-8. Returns false, appending nothing, for a
+    /// surrogate or a value above U+10FFFF.
     bool push_codepoint(&mut self, u32 cp) {
         // Reject surrogates and out-of-range values
         if (cp >= (u32)0xD800 && cp <= (u32)0xDFFF) { return false; }
@@ -677,22 +716,28 @@ impl String {
         self.push_bytes(&bytes[0], length);
         return true;
     }
+    /// Parses the contents as a decimal i64 (see `parse_i64`).
     Optional<i64> parse_i64(&self) {
         if (self.len == 0 || self.data == (u8*)0) { return None; }
         return parse_i64((str)self.data);
     }
 
+    /// Parses the contents as an i64 in `radix` (see `parse_i64_radix`).
     Optional<i64> parse_i64_radix(&self, i64 radix) {
         if (self.len == 0 || self.data == (u8*)0) { return None; }
         return parse_i64_radix((str)self.data, radix);
     }
 
+    /// Parses the contents as a decimal integer and truncates it to i32 without
+    /// a range check.
     Optional<i32> parse_i32(&self) {
         Optional<i64> o = self.parse_i64();
         if (o.is_none()) { return None; }
         return Some((i32)o.unwrap());
     }
 
+    /// Parses the contents as a non-negative decimal i64 and returns it as u64.
+    /// Values above the i64 maximum are rejected.
     Optional<u64> parse_u64(&self) {
         Optional<i64> o = self.parse_i64();
         if (o.is_none()) { return None; }
@@ -701,6 +746,7 @@ impl String {
         return Some((u64)v);
     }
 
+    /// Returns every signed integer found in the contents (see `extract_ints`).
     Vec<i64> extract_ints(&self) {
         if (self.len == 0 || self.data == (u8*)0) {
             return Vec<i64>.new();
@@ -708,6 +754,8 @@ impl String {
         return extract_ints((str)self.data);
     }
 
+    /// Splits on `\n` into copies, removing a trailing `\r` from each line. A
+    /// final newline does not add an empty last line.
     Vec<String> lines(&self) {
         Vec<String> res = Vec<String>.new();
         if (self.len == 0 || self.data == (u8*)0) {
@@ -734,6 +782,7 @@ impl String {
         return res;
     }
 
+    /// Returns copies of the runs separated by ASCII space, tab, CR, or LF.
     Vec<String> words(&self) {
         Vec<String> res = Vec<String>.new();
         if (self.len == 0 || self.data == (u8*)0) {
@@ -755,6 +804,8 @@ impl String {
         }
         return res;
     }
+    /// Splits at the first `delimiter` into copies of the parts before and after
+    /// it, or returns None when it does not occur.
     Optional<[String, String]> split_once(&self, str delimiter) {
         i64 idx = self.find(delimiter);
         if (idx < 0) {
@@ -765,6 +816,7 @@ impl String {
         String second = self.substr(idx + delim_len, self.len - (idx + delim_len));
         return Some([move first, move second]);
     }
+    /// Returns a copy without `prefix` when it starts the string, else a copy.
     String strip_prefix(&self, str prefix) {
         if (self.starts_with(prefix)) {
             i64 plen = strlen(prefix);
@@ -773,6 +825,7 @@ impl String {
         return self.clone();
     }
 
+    /// Returns a copy without `suffix` when it ends the string, else a copy.
     String strip_suffix(&self, str suffix) {
         if (self.ends_with(suffix)) {
             i64 slen = strlen(suffix);
@@ -781,6 +834,7 @@ impl String {
         return self.clone();
     }
 
+    /// Returns a copy without leading ASCII space, tab, CR, and LF.
     String trim_start(&self) {
         i64 start = 0;
         while (start < self.len) {
@@ -794,6 +848,7 @@ impl String {
         return self.substr(start, self.len - start);
     }
 
+    /// Returns a copy without trailing ASCII space, tab, CR, and LF.
     String trim_end(&self) {
         i64 end = self.len;
         while (end > 0) {
@@ -888,6 +943,7 @@ impl Add<String> for String {
 }
 
 impl String {
+    /// Consumes both strings and returns `self` with `other` appended.
     String concat(self, String other) {
         return string_concat_bytes(move self, other.data, other.len);
     }
@@ -915,6 +971,8 @@ impl Ne<String> for String {
 }
 
 impl String {
+    /// Returns true when the contents equal `other`; a null `other` equals an
+    /// empty string.
     bool __eq(&self, str other) {
         if (other == (str)0) { return self.len == 0; }
         i64 other_len = strlen(other);
@@ -923,6 +981,7 @@ impl String {
         return memcmp((const void*)self.data, (const void*)other, self.len) == 0;
     }
 
+    /// Returns true when the contents differ from `other`.
     bool __ne(&self, str other) {
         return !self.__eq(other);
     }
@@ -968,6 +1027,9 @@ impl Ge<String> for String {
     }
 }
 
+/// A splitting iterator that yields borrowed `str` pieces through a scratch
+/// buffer; each piece is invalidated by the next `next` call. Frees the
+/// buffer when dropped.
 struct SplitIter {
     u8* data;
     i64 len;
@@ -1047,6 +1109,7 @@ impl Drop for SplitIter {
     }
 }
 
+/// A splitting iterator that yields zero-copy byte slices of the source.
 struct SplitSliceIter {
     u8* data;
     i64 len;
@@ -1322,32 +1385,38 @@ impl Slice<u8> {
         return move s;
     }
 
+    /// Returns true when the slice and `other` hold the same bytes.
     bool equals_string(&self, &String other) {
         if (self.len != other.len) { return false; }
         if (self.len == 0) { return true; }
         return memcmp((const void*)self.data, (const void*)other.data, self.len) == 0;
     }
 
+    /// Same as `equals_string`.
     bool __eq(&self, &String other) {
         return self.equals_string(other);
     }
 
+    /// Returns true when the slice and `other` differ.
     bool __ne(&self, &String other) {
         return !self.equals_string(other);
     }
 }
 
 impl String {
+    /// Returns true when both slices hold the same bytes.
     bool equals_slice(&self, Slice<u8> other) {
         if (self.len != other.len) { return false; }
         if (self.len == 0) { return true; }
         return memcmp((const void*)self.data, (const void*)other.data, self.len) == 0;
     }
 
+    /// Same as `equals_slice`.
     bool __eq(&self, Slice<u8> other) {
         return self.equals_slice(other);
     }
 
+    /// Returns true when the slices differ.
     bool __ne(&self, Slice<u8> other) {
         return !self.equals_slice(other);
     }

@@ -9,8 +9,11 @@ import std.hash;
 import std.io.file;
 import std.mem.drop;
 
+/// Number of buckets allocated by the first insert.
 const i64 SET_INITIAL_CAPACITY = 16;
+/// Control byte for an empty bucket.
 const u8 SET_CTRL_EMPTY = (u8)0x80;
+/// Control byte for a deleted bucket (tombstone).
 const u8 SET_CTRL_DELETED = (u8)0xFE;
 
 /// Max live entries for `cap` at 7/8 load, via integer math (see map_max_load).
@@ -18,11 +21,13 @@ i64 set_max_load(i64 cap) {
     return cap - cap / 8;
 }
 
+/// Internal: the 7-bit control fingerprint taken from a hash's top bits.
 u8 set_h2(i64 hash) {
     i64 h = (hash >> 57) & (i64)0x7F;
     return (u8)h;
 }
 
+/// Internal: bitmask of the 16 control bytes at `ctrl_ptr` equal to `h2`.
 i64 set_probe_match(u8* ctrl_ptr, u8 h2) {
     if (@cfg(os.wasi)) {
         i64 mask = 0;
@@ -49,6 +54,7 @@ i64 set_probe_match(u8* ctrl_ptr, u8 h2) {
     ", [ctrl_ptr, (i64)h2], ["rdx", "r8", "xmm0", "xmm1"]);
 }
 
+/// Internal: bitmask of the 16 control bytes at `ctrl_ptr` that are empty.
 i64 set_probe_empty(u8* ctrl_ptr) {
     if (@cfg(os.wasi)) {
         i64 mask = 0;
@@ -73,6 +79,8 @@ i64 set_probe_empty(u8* ctrl_ptr) {
     ", [ctrl_ptr], ["rdx", "r8", "xmm0", "xmm1"]);
 }
 
+/// Internal: bitmask of the 16 control bytes at `ctrl_ptr` that are empty
+/// or deleted.
 i64 set_probe_free(u8* ctrl_ptr) {
     if (@cfg(os.wasi)) {
         i64 mask = 0;
@@ -92,6 +100,7 @@ i64 set_probe_free(u8* ctrl_ptr) {
     ", [ctrl_ptr], ["xmm0"]);
 }
 
+/// Internal: number of trailing zero bits in `mask`; 64 for 0.
 i64 set_trailing_zeros(i64 mask) {
     if (@cfg(os.wasi)) {
         if (mask == 0) {
@@ -110,6 +119,10 @@ i64 set_trailing_zeros(i64 mask) {
     ", [mask], []);
 }
 
+/// A SwissTable hash set that owns its keys. Keys hash with `@hash` and
+/// compare with `==`; iteration order is unspecified. Dropping it drops
+/// every key. `erase` does not drop the removed key; use `take`/`remove`
+/// for keys that own resources.
 struct HashSet<K> {
     K* keys;
     u8* ctrl;
@@ -128,16 +141,20 @@ impl HashSet<K> {
         return s;
     }
 
+    /// Returns the number of keys.
     i64 len(&self) {
         return self.len;
     }
 
+    /// Returns true when the set has no keys.
     bool is_empty(&self) {
         return self.len == 0;
     }
 
     // -- internal helpers --
 
+    /// Internal: writes a control byte, mirroring the first 16 into the tail
+    /// group used by wrap-around probing.
     void set_ctrl(&mut self, i64 idx, u8 val) {
         self.ctrl[idx] = val;
         if (idx < 16) {
@@ -145,6 +162,8 @@ impl HashSet<K> {
         }
     }
 
+    /// Internal: rehashes into at least `min_capacity` buckets (a power of two).
+    /// Moves keys and frees the old buffers; clears tombstones.
     void grow(&mut self, i64 min_capacity) {
         i64 new_cap = self.capacity;
         if (new_cap == 0) {
@@ -191,6 +210,7 @@ impl HashSet<K> {
         self.capacity = new_cap;
     }
 
+    /// Internal: returns the bucket index of `key`, or -1.
     i64 find_slot(&self, K key) {
         if (self.capacity == 0 || self.len == 0) {
             return -1;
@@ -200,6 +220,7 @@ impl HashSet<K> {
         return self.find_slot_with_hash(key, h);
     }
 
+    /// Internal: `find_slot` with a precomputed non-negative hash.
     i64 find_slot_with_hash(&self, K key, i64 h) {
         u8 h2 = set_h2(h);
         i64 mask = self.capacity - 1;
@@ -225,7 +246,7 @@ impl HashSet<K> {
         return -1;
     }
 
-    // Returns slot index, dedup-aware. Caller must have grown.
+    /// Returns slot index, dedup-aware. Caller must have grown.
     i64 _insert_at(&mut self, i64 h, u8 h2, K key) {
         i64 mask = self.capacity - 1;
         i64 idx = h & mask;
@@ -281,6 +302,7 @@ impl HashSet<K> {
         return self.len != before;
     }
 
+    /// Returns true when `key` is in the set.
     bool contains(&self, K key) {
         return self.find_slot(key) >= 0;
     }
@@ -313,6 +335,7 @@ impl HashSet<K> {
         self.len = self.len - 1;
         return Some(k);
     }
+    /// Grows the table so `additional` more keys fit without rehashing.
     void reserve(&mut self, i64 additional) {
         if (additional <= 0) { return; }
         i64 required = self.len + additional;
@@ -329,6 +352,9 @@ impl HashSet<K> {
         self.grow(target);
     }
 
+    /// Meant to rehash into the smallest table that holds the current keys.
+    /// Known issue: `grow` never goes below the current capacity, so this only
+    /// rehashes in place (clearing tombstones) and frees no memory.
     void shrink_to_fit(&mut self) {
         i64 cap = self.capacity;
         if (cap == 0) { return; }
@@ -361,6 +387,8 @@ impl HashSet<K> {
         self.len = 0;
     }
 
+    /// Moves every key out into a drain iterator, leaving the set empty but
+    /// usable. Keys the drain does not yield are dropped with it.
     HashSetDrain<K> drain(&mut self) {
         HashSetDrain<K> d;
         d.keys = self.keys;
@@ -374,6 +402,8 @@ impl HashSet<K> {
         return d;
     }
 
+    /// Returns a borrowing iterator over the keys (yields copies). Do not
+    /// modify or drop the set while iterating.
     HashSetIter<K> iter(&self) {
         HashSetIter<K> it;
         it.keys = self.keys;
@@ -467,6 +497,7 @@ impl HashSet<K> {
         return out;
     }
 
+    /// Returns true when every key in this set is also in `other`.
     bool is_subset(&self, &HashSet<K> other) {
         if (self.len > other.len) { return false; }
         for (i64 i = 0; i < self.capacity; i = i + 1) {
@@ -479,10 +510,12 @@ impl HashSet<K> {
         return true;
     }
 
+    /// Returns true when every key in `other` is also in this set.
     bool is_superset(&self, &HashSet<K> other) {
         return other.is_subset(self);
     }
 
+    /// Returns true when the sets share no key.
     bool is_disjoint(&self, &HashSet<K> other) {
         if (self.len <= other.len) {
             for (i64 i = 0; i < self.capacity; i = i + 1) {
@@ -524,6 +557,7 @@ impl<K> Drop for HashSet<K> {
         self.len = 0;
     }
 }
+/// A borrowing iterator over a set's keys.
 struct HashSetIter<K> {
     K* keys;
     u8* ctrl;
@@ -548,6 +582,8 @@ impl<K> Iterator for HashSetIter<K> {
         return None;
     }
 }
+/// Moves every key out of the set, leaving it empty but usable. Keys not yet
+/// yielded are dropped with the drain.
 struct HashSetDrain<K> {
     K* keys;
     u8* ctrl;
@@ -592,6 +628,8 @@ impl<K> Iterator for HashSetDrain<K> {
     }
 }
 
+/// A consuming iterator that owns the set's buffers; drops any keys not yet
+/// yielded when it is dropped.
 struct HashSetIntoIter<K> {
     K* keys;
     u8* ctrl;
