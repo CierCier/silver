@@ -10,6 +10,7 @@ import frontend.messages;
 import frontend.typecheck_expr;
 import frontend.types;
 
+/// The syntax parts of a generic method found for a call (borrowed nodes).
 struct MonoMethodTemplate {
     SyntaxNode* ret_start;
     SyntaxNode* name_node;
@@ -18,6 +19,7 @@ struct MonoMethodTemplate {
     u32 receiver_depth;
 }
 
+/// Returns true when `name_id` is one of `params`.
 bool mono_contains_type_param(Vec<u32>* params, u32 name_id) {
     i64 i = 0;
     while (i < params.len()) {
@@ -29,6 +31,8 @@ bool mono_contains_type_param(Vec<u32>* params, u32 name_id) {
     return false;
 }
 
+/// Collects the type parameter names in one `<...>` segment (skipping
+/// `const` parameters) into `out`.
 void mono_collect_param_segment(SyntaxNode* start, SyntaxNode* end, TypeTable* types, Vec<u32>* out) {
     SyntaxNode* cursor = start;
     while (cursor != (SyntaxNode*)0 && cursor != end) {
@@ -46,6 +50,7 @@ void mono_collect_param_segment(SyntaxNode* start, SyntaxNode* end, TypeTable* t
     }
 }
 
+/// Collects the type parameter names of a generic list starting at `<`.
 void mono_collect_generic_parameters(SyntaxNode* less, TypeTable* types, Vec<u32>* out) {
     if (less == (SyntaxNode*)0 || less.kind != NodeKind.Token || less.token_kind != TokenKind.Less) {
         return;
@@ -72,6 +77,7 @@ void mono_collect_generic_parameters(SyntaxNode* less, TypeTable* types, Vec<u32
     }
 }
 
+/// Collects the declared type parameters used in an impl target.
 void mono_collect_target_parameters(SyntaxNode* target, TypeTable* types, Vec<u32>* declared, Vec<u32>* out) {
     if (target == (SyntaxNode*)0) {
         return;
@@ -99,6 +105,8 @@ void mono_collect_target_parameters(SyntaxNode* target, TypeTable* types, Vec<u3
     }
 }
 
+/// Matches an impl target's type arguments against `arg_ids`, binding
+/// declared parameters. Returns false on a mismatch.
 bool mono_match_target_args(SyntaxNode* target, TypeTable* types, Vec<u32>* declared_params, Vec<u32>* arg_ids, Vec<u32>* out_param_ids) {
     if (target == (SyntaxNode*)0) { return false; }
     SyntaxNode* less = target.next_sibling;
@@ -185,6 +193,7 @@ bool mono_match_target_args(SyntaxNode* target, TypeTable* types, Vec<u32>* decl
     return false;
 }
 
+/// Collects the type parameters of struct or enum `base`.
 void mono_collect_struct_parameters(SyntaxNode* root, str base, TypeTable* types, Vec<u32>* out) {
     SyntaxNode* item = root.first_child;
     while (item != (SyntaxNode*)0) {
@@ -206,8 +215,8 @@ void mono_collect_struct_parameters(SyntaxNode* root, str base, TypeTable* types
     }
 }
 
-// Bind a source declaration before parsing its member types. Parsing first can
-// resolve a same-named parameter from the enclosing function instead.
+/// Bind a source declaration before parsing its member types. Parsing first can
+/// resolve a same-named parameter from the enclosing function instead.
 bool mono_push_owner_type_arguments(SyntaxNode* root, TypeTable* types, u32 type_id,
                                      Vec<u32>* parameters) {
     TypeEntry owner = *types.get(type_id);
@@ -222,9 +231,9 @@ bool mono_push_owner_type_arguments(SyntaxNode* root, TypeTable* types, u32 type
     return true;
 }
 
-// Find an impl block for `base` defining `method`, matching type arguments `arg_ids`.
-// Collects the impl-level type parameter names (deduped, in order) for substitution.
-// For specialized concrete impls, param_ids will be empty (no substitution needed).
+/// Find an impl block for `base` defining `method`, matching type arguments `arg_ids`.
+/// Collects the impl-level type parameter names (deduped, in order) for substitution.
+/// For specialized concrete impls, param_ids will be empty (no substitution needed).
 bool mono_find_method_template(SyntaxNode* root, TypeTable* types, str base, str method,
                                u32 receiver_depth, Vec<u32>* arg_ids,
                                MonoMethodTemplate* out, Vec<u32>* param_ids,
@@ -410,6 +419,8 @@ bool mono_find_method_template(SyntaxNode* root, TypeTable* types, str base, str
     generic_params.drop();
     return false;
 }
+/// Unifies a method parameter type with an argument type, inferring free
+/// type parameters into `inferred`. Numeric literals unify loosely.
 bool mono_unify_free_parameter(TypeTable* types, u32 formal_id, u32 actual_id,
                                Vec<u32>* param_ids, Vec<u32>* inferred,
                                bool numeric_literal) {
@@ -493,8 +504,8 @@ bool mono_unify_free_parameter(TypeTable* types, u32 formal_id, u32 actual_id,
         || (numeric_literal && type_is_numeric(formal_id) && type_is_numeric(actual_id));
 }
 
-// Receiver arguments occupy the prefix; method arguments follow in declaration
-// order. Concrete impl targets have zero placeholders in the binding-name list.
+/// Receiver arguments occupy the prefix; method arguments follow in declaration
+/// order. Concrete impl targets have zero placeholders in the binding-name list.
 bool mono_resolve_method_call(AstPool* pool, SyntaxNode* root, TypeTable* types,
                                  u32 receiver_type, str method, u32 args_start,
                                  bool static_method, MonoMethodTemplate* template,
@@ -532,6 +543,8 @@ bool mono_resolve_method_call(AstPool* pool, SyntaxNode* root, TypeTable* types,
     return true;
 }
 
+/// Resolves a call to a generic method on `receiver_type`, inferring its
+/// type arguments. Writes failure text on error.
 bool mono_resolve_generic_method(AstPool* pool, SyntaxNode* root, TypeTable* types,
                                  u32 receiver_type, str method, u32 args_start,
                                  bool static_method, MonoMethodTemplate* template,
@@ -541,6 +554,8 @@ bool mono_resolve_generic_method(AstPool* pool, SyntaxNode* root, TypeTable* typ
         args_start, static_method, template, param_ids, arg_ids, failure, true);
 }
 
+/// Scores how concrete `type_id` is (0 for a bare method type parameter),
+/// used to prefer the most specific candidate impl.
 i64 mono_type_specificity(TypeTable* types, u32 type_id, Vec<u32>* method_params) {
     TypeEntry* entry = types.get(type_id);
     if (entry.kind == TypeKind.Named && entry.count == 0
@@ -560,6 +575,8 @@ i64 mono_type_specificity(TypeTable* types, u32 type_id, Vec<u32>* method_params
     return score;
 }
 
+/// Picks the best-matching impl method for a call and returns its
+/// specificity score, or -1 with `*failure` set when none matches.
 i64 mono_match_method_call(AstPool* pool, SyntaxNode* root, TypeTable* types,
                             u32 receiver_type, u32 args_start, bool static_method,
                             MonoMethodTemplate* template, Vec<u32>* param_ids,
@@ -644,6 +661,7 @@ i64 mono_match_method_call(AstPool* pool, SyntaxNode* root, TypeTable* types,
     return matched && failure.len() == 0 ? specificity : -1;
 }
 
+/// Returns how many of the first `count` parameters are bound.
 i64 receiver_binding_count(Vec<u32>* param_ids, i64 count) {
     i64 bindings = 0;
     i64 i = 0;
@@ -654,6 +672,8 @@ i64 receiver_binding_count(Vec<u32>* param_ids, i64 count) {
     return bindings;
 }
 
+/// Pushes a type substitution for each bound parameter; pair with
+/// `TypeTable.pop_subst`.
 void mono_push_method_bindings(TypeTable* types, Vec<u32>* param_ids, Vec<u32>* arg_ids) {
     i64 i = 0;
     while (i < param_ids.len()) {
@@ -662,6 +682,7 @@ void mono_push_method_bindings(TypeTable* types, Vec<u32>* param_ids, Vec<u32>* 
     }
 }
 
+/// Checks a generic method's `where` bounds, writing failure text.
 void mono_check_method_bounds(SyntaxNode* root, TypeTable* types,
                               MonoMethodTemplate* template, String* failure) {
     mono_check_bound_list(root, types, template.name_node.next_sibling.next_sibling,
@@ -677,6 +698,7 @@ void mono_check_method_bounds(SyntaxNode* root, TypeTable* types,
     }
 }
 
+/// Reads one bound trait spelling (with generic arguments) at `*position`.
 String mono_bound_trait_text(SyntaxNode** position, SyntaxNode* end, bool* outer_closed) {
     SyntaxNode* cursor = *position;
     String text = String.from_str(cursor.text);
@@ -709,6 +731,8 @@ String mono_bound_trait_text(SyntaxNode** position, SyntaxNode* end, bool* outer
     return move text;
 }
 
+/// Checks every bound in a bound list, writing failure text for the first
+/// unsatisfied one.
 void mono_check_bound_list(SyntaxNode* root, TypeTable* types, SyntaxNode* cursor,
                            SyntaxNode* end, String* failure, u32 depth) {
     u32 parameter = 0;
@@ -740,8 +764,8 @@ void mono_check_bound_list(SyntaxNode* root, TypeTable* types, SyntaxNode* curso
     }
 }
 
-// The node holding an implementation's declared type parameters (`impl<T>`),
-// or null when the implementation declares none.
+/// The node holding an implementation's declared type parameters (`impl<T>`),
+/// or null when the implementation declares none.
 SyntaxNode* mono_impl_generics(SyntaxNode* item) {
     SyntaxNode* head = item.first_child;
     while (head != (SyntaxNode*)0 && head.token_kind != TokenKind.Impl) {
@@ -750,13 +774,13 @@ SyntaxNode* mono_impl_generics(SyntaxNode* item) {
     return head == (SyntaxNode*)0 ? (SyntaxNode*)0 : head.next_sibling;
 }
 
-// The type parameters an implementation declares (`impl<T, U>`).
+/// The type parameters an implementation declares (`impl<T, U>`).
 void mono_impl_type_parameters(SyntaxNode* item, TypeTable* types, Vec<u32>* out) {
     mono_collect_generic_parameters(mono_impl_generics(item), types, out);
 }
 
-// Record a binding for an implementation's type parameter. A parameter that
-// is already bound must keep the same type.
+/// Record a binding for an implementation's type parameter. A parameter that
+/// is already bound must keep the same type.
 bool mono_record_binding(u32 name_id, u32 type_id, Vec<u32>* names, Vec<u32>* values) {
     i64 i = 0;
     while (i < names.len()) {
@@ -768,8 +792,8 @@ bool mono_record_binding(u32 name_id, u32 type_id, Vec<u32>* names, Vec<u32>* va
     return true;
 }
 
-// Unify one implementation trait argument with the requested argument,
-// binding the implementation's type parameters on the way.
+/// Unify one implementation trait argument with the requested argument,
+/// binding the implementation's type parameters on the way.
 bool mono_unify_trait_argument(TypeTable* types, u32 impl_arg, u32 required_arg,
                                Vec<u32>* declared, Vec<u32>* names, Vec<u32>* values) {
     TypeEntry* impl_entry = types.get(impl_arg);
@@ -805,8 +829,8 @@ bool mono_unify_trait_argument(TypeTable* types, u32 impl_arg, u32 required_arg,
     return true;
 }
 
-// Bind the implementation's type parameters from the requested trait
-// arguments, so `impl<T> View<T> for i32` satisfies a `View<i64>` bound.
+/// Bind the implementation's type parameters from the requested trait
+/// arguments, so `impl<T> View<T> for i32` satisfies a `View<i64>` bound.
 bool mono_bind_trait_arguments(TypeTable* types, str trait_text, u32 required_trait,
                                 Vec<u32>* declared, Vec<u32>* names, Vec<u32>* values) {
     TypeEntry* impl_entry = types.get(types.parse_type_name(trait_text));
@@ -824,7 +848,7 @@ bool mono_bind_trait_arguments(TypeTable* types, str trait_text, u32 required_tr
     return true;
 }
 
-// Bind the implementation's type parameters from the owner's arguments.
+/// Bind the implementation's type parameters from the owner's arguments.
 bool mono_bind_owner_arguments(TypeTable* types, SyntaxNode* target, u32 owner_type,
                                 Vec<u32>* declared, Vec<u32>* names, Vec<u32>* values) {
     TypeEntry* owner_entry = types.get(owner_type);
@@ -857,7 +881,7 @@ bool mono_bind_owner_arguments(TypeTable* types, SyntaxNode* target, u32 owner_t
     return matched;
 }
 
-// The implementation's own parameter bounds must hold for the bound types.
+/// The implementation's own parameter bounds must hold for the bound types.
 bool mono_impl_bounds_hold(SyntaxNode* root, TypeTable* types, SyntaxNode* item,
                            SyntaxNode* target, u32 depth) {
     SyntaxNode* generics = mono_impl_generics(item);
@@ -878,9 +902,9 @@ bool mono_impl_bounds_hold(SyntaxNode* root, TypeTable* types, SyntaxNode* item,
     return holds;
 }
 
-// Decide whether one implementation satisfies the requested trait for the
-// requested owner. The implementation's type parameters are inferred from the
-// owner arguments and the requested trait arguments before the comparison.
+/// Decide whether one implementation satisfies the requested trait for the
+/// requested owner. The implementation's type parameters are inferred from the
+/// owner arguments and the requested trait arguments before the comparison.
 bool mono_impl_matches(SyntaxNode* root, TypeTable* types, SyntaxNode* item,
                        SyntaxNode* target, str trait_text, u32 owner_type,
                        u32 required_trait, u32 depth) {
@@ -927,6 +951,8 @@ bool mono_impl_matches(SyntaxNode* root, TypeTable* types, SyntaxNode* item,
     return matched;
 }
 
+/// Returns true when some impl makes `type_id` implement `trait_name`.
+/// Recursion through impl bounds stops at depth 64.
 bool mono_type_implements_trait(SyntaxNode* root, TypeTable* types, u32 type_id, str trait_name, u32 depth) {
     if (depth > 64) { return false; }
     u32 owner_type = types.resolve_subst(type_id);
@@ -981,12 +1007,14 @@ bool mono_type_implements_trait(SyntaxNode* root, TypeTable* types, u32 type_id,
     return false;
 }
 
+/// What a monomorphization request instantiates.
 enum MonomorphKind {
     Function;
     Struct;
     ImplMethod;
 }
 
+/// One instantiation of a generic template with concrete type arguments.
 struct MonomorphRequest {
     MonomorphKind kind;
     u32 template_name_id;
@@ -996,6 +1024,7 @@ struct MonomorphRequest {
     u32 mangled_name_id;
 }
 
+/// Collects deduplicated instantiation requests by mangled name.
 struct MonomorphCollector {
     Interner names;
     Vec<u32> type_arg_ids;
@@ -1003,6 +1032,9 @@ struct MonomorphCollector {
     u32 max_generations;
 }
 
+/// Returns `s` with every non-alphanumeric run turned into `_`, `*` into
+/// `ptr_`, and `&` into `ref_`. The mapping is lossy, so distinct type names
+/// can sanitize to the same text.
 String sanitize_name(str s) {
     String out = String.new();
     i64 len = strlen(s);
@@ -1032,6 +1064,8 @@ String sanitize_name(str s) {
     return move out;
 }
 
+/// Returns `template__arg1_arg2...` from the sanitized type argument names.
+/// Inherits `sanitize_name`'s collisions.
 String mangle_instance_name(str template_name, TypeTable* types, Vec<u32>* type_arg_ids, u32 start, u16 count) {
     String mangled = String.from_str(template_name);
     mangled.push_str("__");
@@ -1051,6 +1085,7 @@ String mangle_instance_name(str template_name, TypeTable* types, Vec<u32>* type_
 }
 
 impl MonomorphCollector {
+    /// Creates an empty collector.
     MonomorphCollector new() {
         MonomorphCollector collector;
         collector.names = Interner.new();
@@ -1060,6 +1095,7 @@ impl MonomorphCollector {
         return move collector;
     }
 
+    /// Returns the request with mangled name `mangled_id`, or -1.
     i64 find_existing(MonomorphCollector* self, u32 mangled_id) {
         i64 i = 0;
         while (i < self.requests.len()) {
@@ -1071,6 +1107,8 @@ impl MonomorphCollector {
         return -1;
     }
 
+    /// Records an instantiation (once per mangled name) and returns the mangled
+    /// name id.
     u32 request_instance(MonomorphCollector* self, MonomorphKind kind, str template_name,
                          Vec<u32>* arg_ids, Span call_span, TypeTable* types) {
         u32 start = (u32)self.type_arg_ids.len();
@@ -1101,10 +1139,12 @@ impl MonomorphCollector {
         return mangled_id;
     }
 
+    /// Returns the number of requests.
     i64 count(MonomorphCollector* self) {
         return self.requests.len();
     }
 
+    /// Returns request `index`. Invalidated when requests are added.
     MonomorphRequest* get(MonomorphCollector* self, i64 index) {
         return self.requests.get_ptr(index);
     }
