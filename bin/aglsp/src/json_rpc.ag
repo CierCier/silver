@@ -10,6 +10,7 @@ import std.string;
 import std.atomic;
 import std.sys.raw.poll;
 
+/// One parsed JSON-RPC message: raw id, method, and params JSON text.
 struct JsonRpcMessage {
     bool has_id;
     // Raw JSON token so string and numeric request IDs round-trip unchanged.
@@ -19,6 +20,7 @@ struct JsonRpcMessage {
 }
 
 impl JsonRpcMessage {
+    /// Creates an empty message.
     JsonRpcMessage new() {
         JsonRpcMessage m;
         m.has_id = false;
@@ -29,6 +31,7 @@ impl JsonRpcMessage {
     }
 }
 
+/// Appends `input` escaped for a JSON string body (quotes not included).
 void json_escape(str input, String* out) {
     i64 len = strlen(input);
     i64 i = 0;
@@ -56,6 +59,8 @@ void json_escape(str input, String* out) {
     }
 }
 
+/// Writes `payload` with its `Content-Length` header to stdout and flushes.
+/// Not synchronized; call only from the thread that owns output.
 void send_raw_payload(str payload) {
     i64 payload_len = strlen(payload);
     String header = String.from_str("Content-Length: ");
@@ -68,6 +73,8 @@ void send_raw_payload(str payload) {
     header.drop();
 }
 
+/// Sends a JSON-RPC response with raw `id_json` and `result_json`. Does
+/// nothing for an empty id (a notification).
 void send_response(str id_json, str result_json) {
     if (strlen(id_json) == 0) { return; }
     String resp = String.from_str("{\"jsonrpc\":\"2.0\",\"id\":");
@@ -79,6 +86,7 @@ void send_response(str id_json, str result_json) {
     resp.drop();
 }
 
+/// Sends a JSON-RPC notification.
 void send_notification(str method, str params_json) {
     String notif = String.from_str("{\"jsonrpc\":\"2.0\",\"method\":\"");
     notif.push_str(method);
@@ -89,6 +97,7 @@ void send_notification(str method, str params_json) {
     notif.drop();
 }
 
+/// Sends a `{type, message}` notification such as `window/logMessage`.
 void send_typed_message(str method, i64 message_type, str text) {
     String out = String.from_str("{\"type\":");
     out.push_display(&message_type);
@@ -99,18 +108,22 @@ void send_typed_message(str method, i64 message_type, str text) {
     out.drop();
 }
 
+/// Sends `window/logMessage` (type 1 error ... 4 log).
 void send_log_message(i64 message_type, str text) {
     send_typed_message("window/logMessage", message_type, text);
 }
 
+/// Sends `window/showMessage` (shown to the user).
 void send_show_message(i64 message_type, str text) {
     send_typed_message("window/showMessage", message_type, text);
 }
 
+/// Sends a `telemetry/event` notification.
 void send_telemetry(str payload) {
     send_notification("telemetry/event", payload);
 }
 
+/// Sends `$/logTrace` with `message` and optional `verbose` text.
 void send_trace(str message, str verbose) {
     String out = String.from_str("{\"message\":\"");
     json_escape(message, &out);
@@ -125,11 +138,12 @@ void send_trace(str message, str verbose) {
     out.drop();
 }
 
+/// Sends a JSON-RPC error response without data.
 void send_error(str id_json, i64 code, str message) {
     send_error_with_data(id_json, code, message, "");
 }
 
-// `data_json` is a raw JSON value, or empty for no `data` member.
+/// `data_json` is a raw JSON value, or empty for no `data` member.
 void send_error_with_data(str id_json, i64 code, str message, str data_json) {
     if (strlen(id_json) == 0) { return; }
     String resp = String.from_str("{\"jsonrpc\":\"2.0\",\"id\":");
@@ -145,6 +159,8 @@ void send_error_with_data(str id_json, i64 code, str message, str data_json) {
     resp.drop();
 }
 
+/// Parses a JSON-RPC message body into `msg`. Returns false when it is not
+/// a valid JSON-RPC object.
 bool parse_rpc_request(str body, JsonRpcMessage* msg) {
     msg.has_id = false;
     msg.method.clear();
@@ -225,8 +241,11 @@ bool parse_rpc_request(str body, JsonRpcMessage* msg) {
     return valid_version && r.index == r.length && msg.method.len() > 0 && msg.method.len() == strlen(msg.method.to_str());
 }
 
+/// The `struct pollfd` layout used to wait for stdin.
 struct RpcPollFd { i32 fd; i16 events; i16 returned; }
 
+/// Returns the next stdin byte, refilling the buffer with `poll` so the read
+/// can stop when `*stopping` is set. Returns -1 at EOF or when stopping.
 i32 rpc_read_byte(ByteStream* stream, i32* stopping) {
     while (stream.pos >= stream.len) {
         if (__atomic_load_i32(stopping, ATOMIC_ACQUIRE) != 0) { return -1; }
@@ -239,6 +258,7 @@ i32 rpc_read_byte(ByteStream* stream, i32* stopping) {
     return stream.read_byte();
 }
 
+/// Reads one header line (without CRLF) into `*line`.
 bool read_header_line(ByteStream* stream, String* line, i32* stopping) {
     line.clear();
     while (true) {
@@ -257,6 +277,8 @@ bool read_header_line(ByteStream* stream, String* line, i32* stopping) {
     return true;
 }
 
+/// Reads one framed message: headers, then `Content-Length` body bytes into
+/// `*body_out`. Returns false at EOF, on a malformed frame, or when stopping.
 bool read_rpc_message(ByteStream* stream, String* body_out, i32* stopping) {
     body_out.clear();
     i64 content_length = -1;
