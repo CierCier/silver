@@ -33,10 +33,8 @@ case "${1:-}" in
   bench)
     shift
     build
-    if [ "$#" -eq 0 ]; then
-      set -- --workspace "$root_dir"
-    fi
-    python3 scripts/benchmark_lsp.py --server "$server" "$@"
+    # A --workspace passed by the caller comes later and overrides this default.
+    python3 scripts/benchmark_lsp.py --server "$server" --workspace "$root_dir" "$@"
     ;;
   list)
     python3 scripts/check_lsp.py --list
