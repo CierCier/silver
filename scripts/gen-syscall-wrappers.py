@@ -94,6 +94,11 @@ RAW_PREFIXED: set[str] = {
 }
 
 
+# Extra full-arity wrappers named `sys_<name><n>`, for callers that need the
+# arguments the arg-count table omits (io_uring_enter's sigset and size).
+EXTRA_ARITY: dict[str, int] = {"io_uring_enter": 6}
+
+
 def parse_kernel_header(path: str) -> dict[str, int]:
     """Parse unistd_64.h and return syscall_name -> syscall_number."""
     syscalls: dict[str, int] = {}
@@ -201,6 +206,19 @@ def generate_wrappers(
         lines.append(f"    return syscall{n}({call_args});{comment}")
         lines.append("}")
         lines.append("")
+        extra = EXTRA_ARITY.get(name)
+        if extra is not None:
+            params = ", ".join(f"i64 a{i}" for i in range(1, extra + 1))
+            call_args = ", ".join(
+                [f"(i64){enum_name}.{name.upper()}"]
+                + [f"a{i}" for i in range(1, extra + 1)]
+            )
+            lines += wrapper_doc(name, syscalls[name], extra)
+            lines.append(f"/// Passes all {extra} kernel arguments.")
+            lines.append(f"i64 sys_{name}{extra}({params}) {{")
+            lines.append(f"    return syscall{extra}({call_args});")
+            lines.append("}")
+            lines.append("")
     lines[-1] = "}"
     return "\n".join(lines) + "\n"
 
