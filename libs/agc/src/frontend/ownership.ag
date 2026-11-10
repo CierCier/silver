@@ -14,15 +14,18 @@ import frontend.module_loader;
 import frontend.typecheck_expr;
 import frontend.symbols;
 import frontend.init_plan;
+/// Scan depth limit for ownership tree walks; deeper code reports an error.
 const u32 MAX_OWNERSHIP_SCAN_DEPTH = 256;
 
 
+/// One enum variant payload type recorded for move tracking.
 struct EnumPayload {
     str enum_name;
     str variant_name;
     str type_name;
 }
 
+/// One tracked local: name, type, declaration span, and scope.
 struct OwnershipVar {
     u32 name_id;
     u32 type_id;
@@ -30,11 +33,15 @@ struct OwnershipVar {
     Span scope;
 }
 
+/// The ownership pass outcome: whether it passed, plus the initialization
+/// plans it built for owned locals (owned by the caller).
 struct OwnershipResult {
     bool valid;
     Vec<InitOwnerPlan> owner_plans;
 }
 
+/// One recorded move of a place; `active` until the place is reinitialized.
+/// `branch_local` moves only affect uses inside `scope`.
 struct MoveOrigin {
     u32 name_id;
     u32 variable_index;
@@ -45,6 +52,7 @@ struct MoveOrigin {
     bool active;
 }
 
+/// A loop body and its span, used to detect moves repeated by iteration.
 struct OwnershipLoop {
     SyntaxNode* body;
     i64 start;
@@ -52,6 +60,7 @@ struct OwnershipLoop {
     bool replayed;
 }
 
+/// Returns true when `block` is the body of a `for` or `while` loop.
 bool ownership_is_loop_body(SyntaxNode* block) {
     if (block.kind != NodeKind.Block) { return false; }
     SyntaxNode* previous = binding_previous_sibling(block);
@@ -68,6 +77,8 @@ bool ownership_is_loop_body(SyntaxNode* block) {
     return false;
 }
 
+/// Returns true when a `break` (or return) leaves `loop_body` after `source`,
+/// so a move there does not repeat on the next iteration.
 bool ownership_breaks_after(SyntaxNode* source, SyntaxNode* loop_body) {
     SyntaxNode* nearest_loop = source.parent;
     while (nearest_loop != (SyntaxNode*)0 && !ownership_is_loop_body(nearest_loop)) {
@@ -90,6 +101,8 @@ bool ownership_breaks_after(SyntaxNode* source, SyntaxNode* loop_body) {
 }
 
 
+/// Drop and payload facts the ownership pass needs, gathered from items.
+/// Owns a private copy of the type table.
 struct OwnershipTypeInfo {
     TypeTable type_table;
     Vec<str> drop_types;
@@ -97,6 +110,8 @@ struct OwnershipTypeInfo {
 }
 
 impl OwnershipTypeInfo {
+    /// Builds type facts over a copy of `types`, so ownership-only drop marks
+    /// cannot change codegen's copy policy.
     OwnershipTypeInfo new(TypeTable* types) {
         OwnershipTypeInfo info;
         // Ownership-only Drop marks must not change codegen's copy policy.
@@ -107,6 +122,8 @@ impl OwnershipTypeInfo {
     }
 }
 
+/// Per-function move tracking state: tracked locals, active moves, and the
+/// moved/observed sets. Reports to the borrowed diagnostics.
 struct OwnershipAnalyzer {
     Interner names;
     BitSet moved_set;
@@ -121,6 +138,8 @@ struct OwnershipAnalyzer {
     bool failed;
     bool depth_error_reported;
 }
+/// Returns true when place path `prefix` is `path` or a parent of it (the
+/// next byte of `path` is the end, `.`, `[`, or `*`).
 bool ownership_path_prefix(str prefix, str path) {
     i64 prefix_len = strlen(prefix);
     i64 i = 0;
@@ -134,15 +153,18 @@ bool ownership_path_prefix(str prefix, str path) {
         || path[prefix_len] == (u8)'[' || path[prefix_len] == (u8)'*';
 }
 
+/// Returns true when one place path contains the other.
 bool ownership_place_overlaps(str left, str right) {
     return ownership_path_prefix(left, right) || ownership_path_prefix(right, left);
 }
 
+/// Returns true when `place` is `parent` or inside it.
 bool ownership_place_is_within(str place, str parent) {
     return ownership_path_prefix(parent, place);
 }
 
 impl OwnershipAnalyzer {
+    /// Creates an analyzer that appends owner plans to `owner_plans`.
     OwnershipAnalyzer new(DiagnosticBag* diagnostics, OwnershipTypeInfo* type_info,
                            Vec<InitOwnerPlan>* owner_plans) {
         OwnershipAnalyzer analyzer;
@@ -161,6 +183,7 @@ impl OwnershipAnalyzer {
         return analyzer;
     }
 
+    /// Clears per-function state before analyzing the next function.
     void reset_for_function(OwnershipAnalyzer* self) {
         self.variables.len = 0;
         self.move_origins.len = 0;
@@ -170,6 +193,7 @@ impl OwnershipAnalyzer {
         self.depth_error_reported = false;
     }
 
+    /// Returns the tracked variable for the root of `place`, or -1.
     i64 variable_index(OwnershipAnalyzer* self, str place, Span use_span) {
         String root = String.new();
         i64 i = 0;
@@ -204,6 +228,7 @@ impl OwnershipAnalyzer {
         return selected;
     }
 
+    /// Returns the type of field path `place` under `root_type_id`.
     u32 resolve_field_type(OwnershipAnalyzer* self, u32 root_type_id, str place) {
         i64 i = 0;
         while (place[i] != 0 && place[i] != (u8)'.') { i += 1; }
@@ -229,6 +254,7 @@ impl OwnershipAnalyzer {
         return target_id;
     }
 
+    /// Returns true when `place` has a type that moves (not Copy).
     bool needs_move_tracking(OwnershipAnalyzer* self, str place, Span use_span) {
         i64 index = self.variable_index(place, use_span);
         if (index < 0) { return false; }
@@ -254,6 +280,8 @@ impl OwnershipAnalyzer {
         return !self.type_table.properties(variable.type_id).is_copy;
     }
 
+    /// Records a use of `place`, reporting "use of moved value" when an active
+    /// move of an overlapping place reaches this use.
     void observe(OwnershipAnalyzer* self, str place, Span span) {
         i64 variable_index = self.variable_index(place, span);
         if (variable_index < 0) { return; }
@@ -285,6 +313,8 @@ impl OwnershipAnalyzer {
         self.observed_set.set((i64)place_id);
     }
 
+    /// Records a move of `place` (after checking the use). When `continues` is
+    /// false the move ends the path, so nothing is recorded.
     void transfer(OwnershipAnalyzer* self, str place, SyntaxNode* node, bool continues,
                   bool branch_local, Span scope) {
         Span span = node.span;
@@ -304,6 +334,7 @@ impl OwnershipAnalyzer {
         self.moved_set.set((i64)origin.name_id);
     }
 
+    /// Clears active moves inside `place` after it is assigned again.
     void reinitialize(OwnershipAnalyzer* self, str place, Span span) {
         i64 variable_index = self.variable_index(place, span);
         if (variable_index < 0) { return; }
@@ -322,10 +353,13 @@ impl OwnershipAnalyzer {
     }
 }
 
+/// Returns true when the strings are equal.
 bool ownership_text_equals(str left, str right) {
     return strcmp(left, right) == 0;
 }
 
+/// Returns true when `use` is in a different branch of an if/else or
+/// match than the move at `source`, so the move cannot reach it.
 bool ownership_in_alternative_branch(SyntaxNode* source, Span use) {
     SyntaxNode* block = source.parent;
     while (block != (SyntaxNode*)0 && block.kind != NodeKind.Function) {
@@ -369,6 +403,7 @@ bool ownership_in_alternative_branch(SyntaxNode* source, Span use) {
     return false;
 }
 
+/// Returns true when type `name` has a Drop impl.
 bool contains_drop_type(OwnershipAnalyzer* analyzer, str name) {
     i64 i = 0;
     while (i < analyzer.drop_types.len()) {
@@ -380,6 +415,7 @@ bool contains_drop_type(OwnershipAnalyzer* analyzer, str name) {
     return false;
 }
 
+/// Records the type of an `impl Drop for T` item as needing drop.
 void collect_drop_impl(OwnershipTypeInfo* info, SyntaxNode* item) {
     if (item.kind != NodeKind.Impl) {
         return;
@@ -401,6 +437,7 @@ void collect_drop_impl(OwnershipTypeInfo* info, SyntaxNode* item) {
     }
 }
 
+/// Records the payload types of an enum item's variants.
 void collect_enum(OwnershipTypeInfo* info, SyntaxNode* item) {
     if (item.kind != NodeKind.Enum) {
         return;
@@ -445,6 +482,7 @@ void collect_enum(OwnershipTypeInfo* info, SyntaxNode* item) {
     }
 }
 
+/// Reports the depth-limit error once per analyzer.
 void ownership_depth_error(OwnershipAnalyzer* analyzer, SyntaxNode* node) {
     if (!analyzer.depth_error_reported) {
         String message = String.from_str("ownership analysis nesting exceeds maximum depth (256)");
@@ -454,6 +492,7 @@ void ownership_depth_error(OwnershipAnalyzer* analyzer, SyntaxNode* node) {
     }
 }
 
+/// Returns the first leaf under a group node, or null past the depth limit.
 SyntaxNode* first_group_leaf(OwnershipAnalyzer* analyzer, SyntaxNode* node, u32 depth) {
     if (depth >= MAX_OWNERSHIP_SCAN_DEPTH) {
         ownership_depth_error(analyzer, node);
@@ -468,6 +507,7 @@ SyntaxNode* first_group_leaf(OwnershipAnalyzer* analyzer, SyntaxNode* node, u32 
     return first_group_leaf(analyzer, node.first_child, depth + 1);
 }
 
+/// Scans constructor calls inside `node` for moved arguments.
 void scan_constructor_group(OwnershipAnalyzer* analyzer, SyntaxNode* node, u32 depth) {
     if (node == (SyntaxNode*)0) {
         return;
@@ -518,6 +558,7 @@ void scan_constructor_group(OwnershipAnalyzer* analyzer, SyntaxNode* node, u32 d
     }
 }
 
+/// Gathers drop impls and enum payloads from `items`.
 void collect_type_information(OwnershipTypeInfo* info, Vec<SyntaxNode*>* items) {
     i64 i = 0;
     while (i < items.len()) {
@@ -533,6 +574,7 @@ void collect_type_information(OwnershipTypeInfo* info, Vec<SyntaxNode*>* items) 
     }
 }
 
+/// Collects the spans of match arm guards under `node`.
 void collect_match_ranges(OwnershipAnalyzer* analyzer, SyntaxNode* node, Vec<Span>* ranges, u32 depth) {
     if (node == (SyntaxNode*)0) {
         return;
@@ -558,10 +600,12 @@ void collect_match_ranges(OwnershipAnalyzer* analyzer, SyntaxNode* node, Vec<Spa
     }
 }
 
+/// Returns true when `value` lies inside `range`.
 bool span_contains(Span range, Span value) {
     return value.start >= range.start && value.end <= range.end;
 }
 
+/// Returns true when the move at `move_index` is inside a match guard.
 bool move_in_match_guard(Vec<SyntaxNode*>* leaves, i64 move_index, Vec<Span>* ranges) {
     SyntaxNode* move_node = leaves.get(move_index);
     i64 range_index = 0;
@@ -600,6 +644,7 @@ bool move_in_match_guard(Vec<SyntaxNode*>* leaves, i64 move_index, Vec<Span>* ra
     return false;
 }
 
+/// Returns true when leaf `end + 1` is an assignment operator.
 bool ownership_assignment_after(Vec<SyntaxNode*>* leaves, i64 end) {
     if (end + 1 >= leaves.len()) { return false; }
     str op = leaves.get(end + 1).text;
@@ -610,6 +655,8 @@ bool ownership_assignment_after(Vec<SyntaxNode*>* leaves, i64 end) {
         || ownership_text_equals(op, "^=");
 }
 
+/// Parses a place path (`a.b[i]`, `*p`) starting at leaf `start`; sets `*end`
+/// to its last leaf.
 String ownership_parse_place(Vec<SyntaxNode*>* leaves, i64 start, i64* end) {
     String place = String.new();
     i64 i = start;
@@ -641,6 +688,7 @@ String ownership_parse_place(Vec<SyntaxNode*>* leaves, i64 start, i64* end) {
     return place;
 }
 
+/// Returns true when the place ending at `end` is followed by a call.
 bool ownership_place_is_call(Vec<SyntaxNode*>* leaves, i64 end) {
     if (end < 0 || end >= leaves.len()) {
         return false;
@@ -674,6 +722,7 @@ bool ownership_place_is_call(Vec<SyntaxNode*>* leaves, i64 end) {
     return false;
 }
 
+/// Returns true when the place ending at `end` is sliced (`x[a:b]`).
 bool ownership_place_is_slice(Vec<SyntaxNode*>* leaves, i64 end) {
     if (end < 0 || end >= leaves.len()) { return false; }
     SyntaxNode* bracket = leaves.get(end).next_sibling;
@@ -688,12 +737,14 @@ bool ownership_place_is_slice(Vec<SyntaxNode*>* leaves, i64 end) {
     return false;
 }
 
+/// Returns true when the place ending at `end` is indexed.
 bool ownership_place_has_index(Vec<SyntaxNode*>* leaves, i64 end) {
     if (end < 0 || end >= leaves.len()) { return false; }
     SyntaxNode* next = leaves.get(end).next_sibling;
     return next != (SyntaxNode*)0 && next.kind == NodeKind.Bracket;
 }
 
+/// Returns the nearest enclosing block, or null.
 SyntaxNode* ownership_enclosing_block(SyntaxNode* node) {
     SyntaxNode* parent = node.parent;
     while (parent != (SyntaxNode*)0) {
@@ -705,6 +756,8 @@ SyntaxNode* ownership_enclosing_block(SyntaxNode* node) {
     return (SyntaxNode*)0;
 }
 
+/// Returns true when the block containing `move_node` returns after it, so
+/// the move cannot reach later code.
 bool ownership_block_returns_after(SyntaxNode* move_node, CfgSet* cfg) {
     SyntaxNode* block = ownership_enclosing_block(move_node);
     if (block == (SyntaxNode*)0) {
@@ -737,6 +790,7 @@ bool ownership_block_returns_after(SyntaxNode* move_node, CfgSet* cfg) {
 }
 
 
+/// Returns the span in which binding `name` is visible inside `function`.
 Span ownership_binding_scope(SyntaxNode* name, SyntaxNode* function) {
     SyntaxNode* parent = name.parent;
     while (parent != (SyntaxNode*)0 && parent != function) {
@@ -748,6 +802,7 @@ Span ownership_binding_scope(SyntaxNode* name, SyntaxNode* function) {
     return function.span;
 }
 
+/// Registers every tracked local of `function`.
 void collect_ownership_variables(OwnershipAnalyzer* analyzer, SyntaxNode* function,
                                  SymbolTable* symbols, SyntaxNode* root) {
     Vec<Binding> bindings = Vec<Binding>.new();
@@ -783,6 +838,8 @@ void collect_ownership_variables(OwnershipAnalyzer* analyzer, SyntaxNode* functi
     bindings.drop();
 }
 
+/// Walks `function`'s leaves in order, recording moves, uses, and
+/// reassignments, and reporting uses after move.
 void check_move_sequences(OwnershipAnalyzer* analyzer, SyntaxNode* function, CfgSet* cfg,
                           SymbolTable* symbols, SyntaxNode* root) {
     Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
@@ -929,6 +986,7 @@ void check_move_sequences(OwnershipAnalyzer* analyzer, SyntaxNode* function, Cfg
     match_ranges.drop();
 }
 
+/// Returns a function item's body block, or null.
 SyntaxNode* ownership_function_body(SyntaxNode* function) {
     if (function == (SyntaxNode*)0) {
         return (SyntaxNode*)0;
@@ -943,6 +1001,7 @@ SyntaxNode* ownership_function_body(SyntaxNode* function) {
     return (SyntaxNode*)0;
 }
 
+/// Runs the ownership pass over every cfg-active function of `tree`.
 OwnershipResult check_ownership(SyntaxTree* tree, SymbolTable* symbols,
                                 DiagnosticBag* diagnostics, CfgSet* cfg) {
     bool ok = true;
