@@ -164,7 +164,7 @@ implements. An accepted spelling alone does not establish behavior.
 | `--tree-shake`, `--no-tree-shake`, `--dry-run`, `-###`, `--show-graph` | Accepted without the promised behavior. In particular, a native dry run still creates an executable. |
 | `--sysroot`, `-D`/`--define`, `--no-std` | `--sysroot` feeds the std search cascade (see below); `-D`/`--define` and `--no-std` are accepted without applying preprocessor definitions or standard-runtime exclusion. |
 | `--check`, `--run`, `--test`, `--test-harness`, `--nocapture` | Accepted without selecting those native build behaviors. Workspace `test`/`t` explicitly reports unsupported; use the integration harness for tests. |
-| `init`, `--init`, `--name` | `agc init [DIR] [--name NAME]` writes `silver.toml` + `src/main.ag` and starts a git repository when git is on PATH. |
+| `init`, `--init`, `--name` | `agc init [DIR] [--name NAME]` writes `silver.toml` + `src/main.ag` and starts a git repository when git is on PATH and the directory is not already inside one. |
 | `agsm` | Own CLI/help and local rejection of unsupported foreign-module generation; it does not invoke a bootstrap generator. |
 
 Stage1 resolves `std.*` and other imports through a sysroot fallback cascade,
