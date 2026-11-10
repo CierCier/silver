@@ -1,0 +1,401 @@
+================================================================================
+Imports
+================================================================================
+
+import std.io;
+import std.io.file { println as print_line, STDOUT };
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (import_declaration
+    (module_path
+      (identifier)
+      (identifier)))
+  (import_declaration
+    (module_path
+      (identifier)
+      (identifier)
+      (identifier))
+    (import_selection
+      (import_item
+        (identifier)
+        (identifier))
+      (import_item
+        (identifier)))))
+
+================================================================================
+Struct with generics, visibility, arrays, and tags
+================================================================================
+
+private struct Point<T> {
+    T x;
+    private T y;
+    u8 buf[16];
+    i32 id "json:id";
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (struct_definition
+    (visibility)
+    (identifier)
+    (type_parameters
+      (type_parameter
+        (identifier)))
+    (field_list
+      (field_declaration
+        (type_identifier)
+        (identifier))
+      (field_declaration
+        (visibility)
+        (type_identifier)
+        (identifier))
+      (field_declaration
+        (primitive_type)
+        (identifier)
+        (array_dimension
+          (number_literal)))
+      (field_declaration
+        (primitive_type)
+        (identifier)
+        (string_literal)))))
+
+================================================================================
+Enum variants
+================================================================================
+
+enum Shape {
+    Circle(f64);
+    Rectangle { f64 width; f64 height; }
+    Point;
+    Tagged = 0x10;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (enum_definition
+    (identifier)
+    (variant_list
+      (enum_variant
+        (identifier)
+        (variant_types
+          (parameter
+            (primitive_type))))
+      (enum_variant
+        (identifier)
+        (field_list
+          (field_declaration
+            (primitive_type)
+            (identifier))
+          (field_declaration
+            (primitive_type)
+            (identifier))))
+      (enum_variant
+        (identifier))
+      (enum_variant
+        (identifier)
+        (initializer
+          (number_literal))))))
+
+================================================================================
+Trait members
+================================================================================
+
+trait Iterator<Self> {
+    type Item;
+    Optional<Item> next(Self* self);
+    handler: i32(i32);
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (trait_definition
+    (identifier)
+    (type_parameters
+      (type_parameter
+        (identifier)))
+    (member_list
+      (type_alias
+        (identifier))
+      (function_definition
+        (generic_type
+          (type_identifier)
+          (type_arguments
+            (type_identifier)))
+        (identifier)
+        (parameters
+          (parameter
+            (pointer_type
+              (self_type))
+            (identifier))))
+      (associated_value
+        (identifier)
+        (function_type
+          (primitive_type)
+          (parameters
+            (parameter
+              (primitive_type))))))))
+
+================================================================================
+Inherent and trait impls
+================================================================================
+
+impl Vector2 {
+    cast f64(Vector2 self) { return 1.0; }
+}
+impl<T: Display> Display for Vec<T> {
+    void fmt(*self, BufWriter* out) { }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (impl_block
+    (type_identifier)
+    (member_list
+      (function_definition
+        (primitive_type)
+        (parameters
+          (parameter
+            (type_identifier)
+            (identifier)))
+        (block
+          (number_literal)))))
+  (impl_block
+    (type_parameters
+      (type_parameter
+        (identifier)
+        (type_bounds
+          (type_identifier))))
+    (type_identifier)
+    (generic_type
+      (type_identifier)
+      (type_arguments
+        (type_identifier)))
+    (member_list
+      (function_definition
+        (primitive_type)
+        (identifier)
+        (parameters
+          (self_parameter
+            (self))
+          (parameter
+            (pointer_type
+              (type_identifier))
+            (identifier)))
+        (block)))))
+
+================================================================================
+Functions
+================================================================================
+
+T max<T>(T a, T b) where T: Lt<T> { return a; }
+private void log(&mut String out, str msg);
+extern "C" i32 printf(const u8* fmt, ...);
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_definition
+    (type_identifier)
+    (identifier)
+    (type_parameters
+      (type_parameter
+        (identifier)))
+    (parameters
+      (parameter
+        (type_identifier)
+        (identifier))
+      (parameter
+        (type_identifier)
+        (identifier)))
+    (where_clause
+      (where)
+      (type_identifier)
+      (type_bounds
+        (generic_type
+          (type_identifier)
+          (type_arguments
+            (type_identifier)))))
+    (block
+      (identifier)))
+  (function_definition
+    (visibility)
+    (primitive_type)
+    (identifier)
+    (parameters
+      (parameter
+        (reference_type
+          (type_identifier))
+        (identifier))
+      (parameter
+        (primitive_type)
+        (identifier))))
+  (function_definition
+    (linkage
+      (string_literal))
+    (primitive_type)
+    (identifier)
+    (parameters
+      (parameter
+        (qualified_type
+          (pointer_type
+            (primitive_type)))
+        (identifier))
+      (variadic))))
+
+================================================================================
+Extern block and attributes
+================================================================================
+
+#[link("m")]
+extern "C" {
+    i32 close(i32 fd);
+    i32 errno;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (attribute
+    (identifier)
+    (parenthesized
+      (string_literal)))
+  (extern_block
+    (string_literal)
+    (item_block
+      (function_definition
+        (primitive_type)
+        (identifier)
+        (parameters
+          (parameter
+            (primitive_type)
+            (identifier))))
+      (variable_declaration
+        (primitive_type)
+        (identifier)))))
+
+================================================================================
+Macros
+================================================================================
+
+macro swap(a, b) { a = b; }
+macro i32 twice(i32 value) { return value + value; }
+macro [T] Vec<T> vec(T... elements) { }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (macro_definition
+    (identifier)
+    (parameters
+      (parameter
+        (type_identifier))
+      (parameter
+        (type_identifier)))
+    (block
+      (identifier)
+      (identifier)))
+  (macro_definition
+    (primitive_type)
+    (identifier)
+    (parameters
+      (parameter
+        (primitive_type)
+        (identifier)))
+    (block
+      (identifier)
+      (identifier)))
+  (macro_definition
+    (macro_type_parameters
+      (type_parameter
+        (identifier)))
+    (generic_type
+      (type_identifier)
+      (type_arguments
+        (type_identifier)))
+    (identifier)
+    (parameters
+      (parameter
+        (type_identifier)
+        (identifier)))
+    (block)))
+
+================================================================================
+Globals and type aliases
+================================================================================
+
+type Handler = void(i32);
+const f64 PI = 3.14;
+str names[2] = { "a", "b" };
+[i32, str] pair = [42, "answer"];
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (type_alias
+    (identifier)
+    (function_type
+      (primitive_type)
+      (parameters
+        (parameter
+          (primitive_type)))))
+  (variable_declaration
+    (qualified_type
+      (primitive_type))
+    (identifier)
+    (initializer
+      (number_literal)))
+  (variable_declaration
+    (primitive_type)
+    (identifier)
+    (array_dimension
+      (number_literal))
+    (initializer
+      (block
+        (string_literal)
+        (string_literal))))
+  (variable_declaration
+    (bracket_type
+      (primitive_type)
+      (primitive_type))
+    (identifier)
+    (initializer
+      (bracketed
+        (number_literal)
+        (string_literal)))))
+
+================================================================================
+Conditional items
+================================================================================
+
+if (@cfg(os.linux)) {
+    import a.linux;
+} else {
+    import a.other;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (conditional_items
+    (parenthesized
+      (macro_invocation
+        (identifier))
+      (parenthesized
+        (identifier)
+        (identifier)))
+    (item_block
+      (import_declaration
+        (module_path
+          (identifier)
+          (identifier))))
+    (item_block
+      (import_declaration
+        (module_path
+          (identifier)
+          (identifier))))))
