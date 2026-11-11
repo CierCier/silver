@@ -2,67 +2,64 @@
 //
 // The concurrency building blocks, with the routine procedures for each:
 //
-//   launch f(args...)   spawn a thread; every argument is MOVED into the
-//                       child.  Arguments must be Send: primitives, owned
-//                       containers (Vec/Box/String/Bytes/HashMap), and
-//                       structs with value fields qualify; Rc, GC handles,
-//                       raw pointers, and references do not (Send gate).
+//   launch f(args...)   spawn a thread. By-value arguments are MOVED into
+//                       the child and must be Send. A `&x` or `&mut x`
+//                       argument for a `&T`/`&mut T` parameter BORROWS the
+//                       launcher's local instead (its pointee must be Send).
 //   Task<T>             the handle; T is the callee's return type.
 //   wait t              join t and move out its result (consumes the handle).
-//   defer wait t;       join on EVERY exit path of the enclosing scope,
-//                       early returns included.
+//   defer wait t;       join on EVERY exit path of the enclosing scope.
 //   Mutex<T>/Guard<T>   RAII-guarded shared value; the guard unlocks on
 //                       drop, so the lock can never be left held.
 //   WaitGroup           counter coordinated with add/done/wait_all.
-//   Channel<T>          unbounded MPSC FIFO: send(T) / recv() / close().
+//   Channel<T>          MPSC FIFO: send(T) / recv() / close().
+//   Arc<T>              shared ownership for a thread that outlives its
+//                       launcher.
 //
-// There is NO auto-join at scope exit: an unwaited Task keeps running and
-// is reaped by the exit-time join-all.  `wait` (or `defer wait`) is the
-// only way to observe completion.
-//
+// A task that borrows is joined before its borrows end: at `wait`, or when
+// its Task local leaves scope. A task that only owns its arguments is
+// detached when its handle is dropped unwaited, and reaped at process exit.
 
 import std.thread;   // launch/wait runtime (threads are joined at exit)
 import std.sync;     // Mutex<T>, Guard<T>, WaitGroup
 import std.channel;  // Channel<T>
+import std.mem.arc;  // Arc<T>
 
-// --- 1. Shared state: Mutex<T> + Guard<T> (RAII) --------------------------
-// A zero-initialized global `Mutex<i64>` is a valid unlocked mutex holding
-// 0, so globals need no constructor call.
+// --- 1. Shared state: one Mutex<T> borrowed by several tasks ---------------
 
-Mutex<i64> g_counter;
-WaitGroup g_wg;
-
-void worker_inc(i64 n) {
-    for (i64 i = 0; i < n; i = i + 1) {
-        Guard<i64> g = g_counter.lock();  // RAII: unlocks when g drops
+void add_many(&Mutex<i64> counter, i64 times) {
+    for (i64 i = 0; i < times; i = i + 1) {
+        Guard<i64> g = counter.lock();  // RAII: unlocks when g drops
         g.set(g.get() + 1);
-		@println("{}", g.get());
     }
-    g_wg.done();
 }
 
 // --- 2. Message passing: Channel<T> (MPSC) --------------------------------
 // Many senders, one consumer.  send() moves the value in; recv() blocks
-// until a value is available.  FIFO order is preserved.
+// until a value is available.  FIFO order is preserved per sender.
 
-Channel<i64> g_ch;
-
-void producer(i64 first, i64 count) {
+void produce(&Channel<i64> channel, i64 first, i64 count) {
     for (i64 i = 0; i < count; i = i + 1) {
-        g_ch.send(first + i);
+        channel.send(first + i);
     }
 }
 
-// --- 3. Routine procedures ------------------------------------------------
+// --- 3. Coordination: WaitGroup --------------------------------------------
+
+void work_then_done(&WaitGroup group, &Mutex<i64> counter) {
+    add_many(counter, 10);
+    group.done();
+}
+
+// --- 4. Routine procedures ------------------------------------------------
 // A task that returns a value: `wait` moves the result out of the handle.
 
 i64 compute(i64 x) {
     return x * 2;
 }
 
-// Deferred join: the sanctioned join-on-scope-exit idiom.  `defer wait t;`
-// runs on every exit path of this function, early returns included.
-
+// Deferred join: `defer wait t;` runs on every exit path of this function,
+// early returns included.
 i64 run_with_deferred_join(i64 x) {
     Task<i64> t = launch compute(x);
     defer wait t;
@@ -72,44 +69,71 @@ i64 run_with_deferred_join(i64 x) {
     return 0;
 }
 
+// --- 5. A thread that outlives its launcher: Arc<T> -----------------------
+// It cannot borrow the launcher's locals, so it owns a handle to shared
+// state; the last handle dropped, on any thread, destroys the value.
+
+void background(Arc<Mutex<i64>> shared) {
+    add_many(shared.get(), 100);
+}
+
+i64 start_background(&Arc<Mutex<i64>> shared) {
+    Arc<Mutex<i64>> handle = shared.clone();
+    Task<void> worker = launch background(move handle);
+    wait worker;
+    return 0;
+}
+
 // --- main -----------------------------------------------------------------
 
 i64 main() {
-    // 1. Four tasks increment a Mutex-guarded counter; a WaitGroup
-    //    coordinates completion (wait_all instead of wait-ing each task).
-    g_wg.add(4);
-    Task<void> t0 = launch worker_inc(2500);
-    Task<void> t1 = launch worker_inc(2500);
-    Task<void> t2 = launch worker_inc(2500);
-    Task<void> t3 = launch worker_inc(2500);
-    g_wg.wait_all();
-    {
-        Guard<i64> g = g_counter.lock();  // scope-end drop releases the lock
-        if (g.get() != 10000) { return 1; }
-    }
+    // 1. Four tasks borrow one local counter.
+    Mutex<i64> counter = Mutex<i64>.new(0);
+    Task<void> t0 = launch add_many(&counter, 2500);
+    Task<void> t1 = launch add_many(&counter, 2500);
+    Task<void> t2 = launch add_many(&counter, 2500);
+    Task<void> t3 = launch add_many(&counter, 2500);
+    wait t0;
+    wait t1;
+    wait t2;
+    wait t3;
+    if (counter.lock().get() != 10000) { return 1; }
 
     // 2. Two producers feed one consumer; the sum of 0..499 and 1000..1499
     //    is 749500 regardless of interleaving.
-    Task<void> p0 = launch producer(0, 500);
-    Task<void> p1 = launch producer(1000, 500);
+    Channel<i64> channel = Channel<i64>.new();
+    Task<void> p0 = launch produce(&channel, 0, 500);
+    Task<void> p1 = launch produce(&channel, 1000, 500);
     i64 sum = 0;
-    i64 received = 0;
-    while (received < 1000) {
-        sum = sum + (g_ch.recv() ? 0);
-        received = received + 1;
+    for (i64 received = 0; received < 1000; received = received + 1) {
+        sum = sum + (channel.recv() ? 0);
     }
     wait p0;
     wait p1;
     if (sum != 749500) { return 2; }
-    g_ch.destroy();  // frees the queue buffer for a leak-check-clean exit
+    channel.destroy();  // drops queued values and frees the buffer
 
-    // 3. Join a task and read its result.
+    // 3. A WaitGroup counts the tasks down; leaving the block joins them.
+    Mutex<i64> grouped = Mutex<i64>.new(0);
+    WaitGroup group = WaitGroup.new();
+    group.add(2);
+    {
+        Task<void> _w0 = launch work_then_done(&group, &grouped);
+        Task<void> _w1 = launch work_then_done(&group, &grouped);
+        group.wait_all();
+    }
+    if (grouped.lock().get() != 20) { return 3; }
+
+    // 4. Join a task and read its result; the deferred join fires on the
+    //    early-return path too.
     Task<i64> t = launch compute(21);
-    i64 r = wait t;
-    if (r != 42) { return 3; }
+    if (wait t != 42) { return 4; }
+    if (run_with_deferred_join(-1) != -1) { return 5; }
 
-    // 4. Deferred join fires on the early-return path too.
-    if (run_with_deferred_join(-1) != -1) { return 4; }
+    // 5. Shared ownership with Arc.
+    Arc<Mutex<i64>> shared = Arc<Mutex<i64>>.new(Mutex<i64>.new(0));
+    start_background(&shared);
+    if (shared.get().lock().get() != 100) { return 6; }
 
     return 0;
 }
