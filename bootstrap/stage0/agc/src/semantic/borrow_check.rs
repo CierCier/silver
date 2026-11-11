@@ -2425,6 +2425,28 @@ impl<'a> BorrowChecker<'a> {
             ast::ExpressionKind::Block(block) => {
                 self.check_block(block);
             }
+            // Loop bodies see the loans held around the loop.
+            ast::ExpressionKind::While { condition, body } => {
+                self.check_expr(condition);
+                self.check_block(body);
+            }
+            ast::ExpressionKind::ForIn { iterable, body, .. } => {
+                self.check_expr(iterable);
+                self.check_block(body);
+            }
+            ast::ExpressionKind::For {
+                init,
+                condition,
+                increment,
+                body,
+            } => {
+                if let Some(initializer) = &init.initializer {
+                    self.check_expr(initializer);
+                }
+                self.check_expr(condition);
+                self.check_block(body);
+                self.check_expr(increment);
+            }
             ast::ExpressionKind::MacroCall { args, .. } => {
                 for arg in args {
                     match arg {
