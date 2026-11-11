@@ -745,6 +745,9 @@ u32 llvm_expr_type(LlvmContext* ctx, u32 expr_id) {
     }
     if (expr.kind == ExprKind.MethodCall) {
         u32 rx_type = llvm_expr_type(ctx, expr.inner0);
+        if (rx_type != TYPE_UNKNOWN && llvm_type_is_task(ctx, ctx.types.resolve_subst(rx_type))) {
+            return TYPE_BOOL;   // `started()`, Task's only method
+        }
         AstExpr* receiver = ctx.pool.get_expr(expr.inner0);
         bool static_method = receiver.kind == ExprKind.Var
             && ctx.find_local(receiver.aux) == (LlvmLocal*)0
@@ -3586,10 +3589,12 @@ LLVMOpaqueValue* llvm_emit_wait(LlvmContext* ctx, u32 expr_id) {
     llvm_clear_place_drops(ctx, wait_expr.inner0);
     LLVMOpaqueValue* wait_fn = LLVMGetNamedFunction(ctx.module, "__silver_wait_done");
     LLVMOpaqueValue* free_fn = LLVMGetNamedFunction(ctx.module, "mem_free_raw_impl");
+    LLVMOpaqueValue* not_started_fn = LLVMGetNamedFunction(ctx.module, "__silver_task_not_started");
     if (handle == (LLVMOpaqueValue*)0 || wait_fn == (LLVMOpaqueValue*)0
-        || free_fn == (LLVMOpaqueValue*)0) {
+        || free_fn == (LLVMOpaqueValue*)0 || not_started_fn == (LLVMOpaqueValue*)0) {
         ctx.note_unresolved("wait-runtime", wait_fn == (LLVMOpaqueValue*)0
-            ? "__silver_wait_done" : "mem_free_raw_impl");
+            ? "__silver_wait_done"
+            : free_fn == (LLVMOpaqueValue*)0 ? "mem_free_raw_impl" : "__silver_task_not_started");
         return (LLVMOpaqueValue*)0;
     }
     LLVMOpaqueValue* zero = LLVMConstInt(LLVMInt64TypeInContext(ctx.ctx), 0, 0);
@@ -3603,13 +3608,15 @@ LLVMOpaqueValue* llvm_emit_wait(LlvmContext* ctx, u32 expr_id) {
         ctx.ctx, ctx.current_fn, "task.wait.after");
     LLVMBuildCondBr(ctx.builder, is_null, null_block, join_block);
 
+    // A null handle means the thread never started: there is no result to
+    // return, so abort.
     LLVMPositionBuilderAtEnd(ctx.builder, null_block);
+    LLVMBuildCall2(ctx.builder, LLVMGlobalGetValueType(not_started_fn), not_started_fn,
+                   (LLVMOpaqueValue**)0, 0, "");
+    LLVMBuildUnreachable(ctx.builder);
     LLVMOpaqueType* result_llvm_type = result_type == TYPE_VOID
         ? LLVMVoidTypeInContext(ctx.ctx)
         : llvm_lower_type(ctx.ctx, ctx.types, result_type);
-    LLVMOpaqueValue* null_result = result_type == TYPE_VOID
-        ? (LLVMOpaqueValue*)0 : LLVMConstNull(result_llvm_type);
-    LLVMBuildBr(ctx.builder, after_block);
 
     LLVMPositionBuilderAtEnd(ctx.builder, join_block);
     LLVMOpaqueType* ptr_type = LLVMPointerTypeInContext(ctx.ctx, (u32)0);
@@ -3640,21 +3647,8 @@ LLVMOpaqueValue* llvm_emit_wait(LlvmContext* ctx, u32 expr_id) {
     free_args.drop();
     LLVMBuildBr(ctx.builder, after_block);
     LLVMPositionBuilderAtEnd(ctx.builder, after_block);
-    if (result_type == TYPE_VOID) {
-        return (LLVMOpaqueValue*)0;
-    }
-    LLVMOpaqueValue* phi = LLVMBuildPhi(ctx.builder, result_llvm_type, "task.wait.result");
-    Vec<LLVMOpaqueValue*> incoming_values = Vec<LLVMOpaqueValue*>.new();
-    incoming_values.push(null_result);
-    incoming_values.push(joined_result);
-    Vec<LLVMOpaqueBasicBlock*> incoming_blocks = Vec<LLVMOpaqueBasicBlock*>.new();
-    incoming_blocks.push(null_block);
-    incoming_blocks.push(join_block);
-    LLVMAddIncoming(phi, incoming_values.data, incoming_blocks.data,
-                    (u32)incoming_values.len());
-    incoming_values.drop();
-    incoming_blocks.drop();
-    return phi;
+    // The join block is the only way here, so its result needs no phi.
+    return joined_result;
 }
 
 /// Returns true when an expression refers to a local declared after
@@ -6045,6 +6039,16 @@ LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
         AstExpr* receiver = ctx.pool.get_expr(expr.inner0);
         u32 method_name_id = expr.aux;
         str method_name = ctx.names.get(method_name_id);
+        u32 task_type = llvm_expr_type(ctx, expr.inner0);
+        if (strcmp(method_name, "started") == 0 && task_type != TYPE_UNKNOWN
+            && llvm_type_is_task(ctx, ctx.types.resolve_subst(task_type))) {
+            // `task.started()`: a failed launch yields a null handle. Reads
+            // the handle without consuming it.
+            LLVMOpaqueValue* handle = llvm_emit_expr(ctx, expr.inner0);
+            if (handle == (LLVMOpaqueValue*)0) { return (LLVMOpaqueValue*)0; }
+            return LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntNE, handle,
+                LLVMConstInt(LLVMInt64TypeInContext(ctx.ctx), 0, 0), "task.started");
+        }
         if (receiver.kind == ExprKind.Var) {
             LlvmLocal* existing = ctx.find_local(receiver.aux);
             if (existing == (LlvmLocal*)0) {

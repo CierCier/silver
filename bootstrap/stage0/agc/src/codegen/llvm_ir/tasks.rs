@@ -368,18 +368,24 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .build_conditional_branch(is_null, null_bb, join_bb)
             .map_err(|e| CodegenError::with_span(format!("wait: branch failed: {e}"), expr.span))?;
 
-        // Null task (spawn failure): yield a zeroed result, no join.
+        // Null task (spawn failure): there is no result to return, so abort.
         let result_ty_owned = result_ty.clone();
         self.builder.position_at_end(null_bb);
-        let null_value = if result_is_void {
-            None
-        } else {
-            let llvm = self.lower_basic_type(&result_ty_owned)?;
-            Some(llvm.const_zero())
-        };
+        let not_started = self
+            .module
+            .get_function("__silver_task_not_started")
+            .ok_or_else(|| {
+                CodegenError::with_span(
+                    "wait requires the thread runtime (`import std.sys.entry;`)",
+                    expr.span,
+                )
+            })?;
         self.builder
-            .build_unconditional_branch(after_bb)
-            .map_err(|e| CodegenError::with_span(format!("wait: branch failed: {e}"), expr.span))?;
+            .build_call(not_started, &[], "")
+            .map_err(|e| CodegenError::with_span(format!("wait: abort call failed: {e}"), expr.span))?;
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CodegenError::with_span(format!("wait: unreachable failed: {e}"), expr.span))?;
 
         // Live task: __silver_wait_done(task) -> u8* pack, read the result,
         // then free the pack.
@@ -453,18 +459,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .map_err(|e| CodegenError::with_span(format!("wait: branch failed: {e}"), expr.span))?;
 
         self.builder.position_at_end(after_bb);
-        match (null_value, join_value) {
-            (None, None) => Ok(self.context.i64_type().const_zero().as_basic_value_enum()),
-            (Some(nv), Some(jv)) => self
-                .builder
-                .build_phi(nv.get_type(), "wait.phi")
-                .map(|phi| {
-                    phi.add_incoming(&[(&nv, null_bb), (&jv, join_bb)]);
-                    phi.as_basic_value()
-                })
-                .map_err(|e| CodegenError::with_span(format!("wait: phi failed: {e}"), expr.span)),
-            _ => unreachable!("wait result presence must agree on both sides"),
-        }
+        Ok(join_value.unwrap_or_else(|| self.context.i64_type().const_zero().as_basic_value_enum()))
     }
 
     /// Emit the per-launch-site trampoline `void __silver_launch_tramp_N(i64 p)`.
@@ -557,6 +552,25 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         // Restore the parent function's builder position.
         self.builder.position_at_end(saved_block);
         Ok(tramp.as_global_value().as_pointer_value().into())
+    }
+
+    /// `task.started()`: whether launch created the thread. A failed launch
+    /// yields a null handle. Reads the handle without consuming it.
+    pub(crate) fn emit_task_started(
+        &mut self,
+        receiver: &ast::Expression,
+        span: &Span,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let handle = self.emit_expression_value(receiver)?.into_int_value();
+        self.builder
+            .build_int_compare(
+                IntPredicate::NE,
+                handle,
+                self.context.i64_type().const_zero(),
+                "task.started",
+            )
+            .map(|started| started.as_basic_value_enum())
+            .map_err(|e| CodegenError::with_span(format!("started: compare failed: {e}"), *span))
     }
 
     /// Retire the storage a waited handle was read from. A named place is

@@ -1123,7 +1123,21 @@ i64 r = wait t;          // join, move out the result, consume the handle
 defer wait t;            // join on every exit path of the scope
 ```
 
-A second `wait` on the same handle is a move error. A task whose arguments
+A second `wait` on the same handle is a move error.
+
+`launch` fails when the 64-slot thread registry is full or the OS cannot
+create the thread. `t.started()` reports whether the thread was created
+without consuming the handle; `wait` on a task that never started aborts the
+process, because there is no result to return:
+
+```silver
+Task<void> t = launch serve(&listener);
+if (!t.started()) {
+    serve(&listener);   // fall back to running on this thread
+}
+```
+
+`started()` is the only method of `Task`. A task whose arguments
 are all moved is **detached** when its handle is dropped unwaited: the
 thread keeps running and is reaped by the exit-time join-all.
 
@@ -1157,7 +1171,7 @@ The compiler joins a borrowing task before its borrows end:
 - It must initialize a local `Task` (`Task<T> t = launch f(&x);`) or be
   waited directly (`wait launch f(&x)`). The local cannot be returned,
   moved, passed by value or stored; only `wait t` or `defer wait t` consume
-  it.
+  it, and `t.started()` reads it.
 - An unwaited borrowing task is joined when its local leaves scope,
   including on an early `return`. Its result is dropped there.
 - Until the join, each `&x` is a shared loan and each `&mut x` a mutable
@@ -1237,8 +1251,8 @@ All futex-based primitives are seq_cst by default.
 
 - Threads are 1:1 OS threads registered in a fixed-size (64-slot) registry;
   a detached task keeps its slot until a waiter or the exit-time join-all
-  reaps it. A launch that finds no free slot yields a null `Task`, whose
-  `wait` returns a zero result without joining.
+  reaps it. A launch that finds no free slot yields a task whose
+  `started()` is false.
 - The runtime entry (`std.sys.entry`) is imported automatically and provides
   `_start`; every binary links statically against the pure-Silver runtime —
   there is no libc, and `--dynamic-runtime` no longer exists.

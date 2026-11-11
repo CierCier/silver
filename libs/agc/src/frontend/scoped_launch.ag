@@ -312,7 +312,22 @@ void collect_scoped_launches(SyntaxNode* root, Vec<SyntaxNode*>* leaves,
     }
 }
 
-/// Reports every use of pinned local `holder` other than `wait holder`.
+/// Returns true when token `use` is the receiver of a `started()` call,
+/// which reads a task handle without consuming it.
+bool scoped_is_started_receiver(SyntaxNode* use) {
+    SyntaxNode* dot = use.next_sibling;
+    if (!scoped_is_token(dot, TokenKind.Dot)) { return false; }
+    SyntaxNode* method = dot.next_sibling;
+    if (!scoped_is_token(method, TokenKind.Identifier) || strcmp(method.text, "started") != 0) {
+        return false;
+    }
+    SyntaxNode* arguments = method.next_sibling;
+    return arguments != (SyntaxNode*)0 && arguments.kind == NodeKind.Parenthesized
+        && arguments.first_child == (SyntaxNode*)0;
+}
+
+/// Reports every use of pinned local `holder` other than `wait holder` or
+/// `holder.started()`.
 void scoped_check_holder_uses(Vec<SyntaxNode*>* leaves, Vec<Binding>* bindings,
                               ScopedLaunchSite* site, str borrowed,
                               DiagnosticBag* diagnostics, bool* failed) {
@@ -324,7 +339,8 @@ void scoped_check_holder_uses(Vec<SyntaxNode*>* leaves, Vec<Binding>* bindings,
             && use.span.start > site.holder.span.start
             && strcmp(use.text, site.holder.text) == 0
             && before.token_kind != TokenKind.Dot
-            && before.token_kind != TokenKind.Wait) {
+            && before.token_kind != TokenKind.Wait
+            && !scoped_is_started_receiver(use)) {
             Binding* used = visible_binding(bindings, use.text, use);
             if (used != (Binding*)0 && used.name_node == site.holder) {
                 diagnostics.error_with_note(use.span, task_cannot_leave_scope(borrowed),

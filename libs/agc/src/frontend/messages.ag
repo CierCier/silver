@@ -431,6 +431,12 @@ str send_reason_reference_value() {
     return "references cross a thread boundary only as direct `&T`/`&mut T` launch arguments";
 }
 
+/// Diagnostic text: "Task has no method '{}'; its only method is
+/// started()". Returns an owned string.
+String unknown_task_method(str method) {
+    return @format("Task has no method '{}'; its only method is started()", method);
+}
+
 /// Diagnostic text: "task handle consumed by wait". Returns static text.
 str note_task_handle_consumed() {
     return "task handle consumed by wait";

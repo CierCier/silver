@@ -445,6 +445,9 @@ pub fn invalid_cast(from: &impl Display, to: &impl Display) -> String {
 pub fn move_operand_place() -> &'static str {
     "move operand must be a place (identifier, field, index, or dereference)"
 }
+pub fn unknown_task_method(method: &str) -> String {
+    format!("Task has no method '{method}'; its only method is started()")
+}
 pub fn wait_requires_task(ty: &impl Display) -> String {
     format!("'wait' requires a Task, got {ty}")
 }

@@ -775,6 +775,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         span: &Span,
         prepared: Option<(super::reference::ResolvedPlace<'ctx>, BasicValueEnum<'ctx>)>,
     ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
+        if method.name == "started"
+            && arguments.is_empty()
+            && let Some(receiver_ty) = self.resolve_receiver_type(receiver)
+            && Self::task_result_type(&receiver_ty).is_some()
+        {
+            return self.emit_task_started(receiver, span).map(Some);
+        }
         let owners = self.receiver_owner_candidates(receiver);
         let mut candidates = Vec::new();
         for owner_name in &owners {

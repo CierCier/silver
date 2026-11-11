@@ -8,8 +8,9 @@
 //! - the launch must initialize a local (`Task<T> t = launch f(&x);`) or be
 //!   the direct operand of `wait`. A local declared by such an initializer is
 //!   always dropped before the locals it borrows, which were declared earlier.
-//! - that local (the holder) may only be consumed by `wait`. Any other use
-//!   could move the handle to a place that outlives the borrow.
+//! - that local (the holder) may only be consumed by `wait`, or read by
+//!   `started()`. Any other use could move the handle to a place that
+//!   outlives the borrow.
 //!
 //! Holders are matched by name within one function, so a second local with a
 //! holder's name is pinned too. Loans on the borrowed places are tracked by
@@ -81,8 +82,9 @@ struct FunctionFacts<'a> {
     holders: FxHashMap<String, (Span, String)>,
     /// Scoped launches in an allowed position.
     placed_launches: FxHashSet<SpanKey>,
-    /// Identifiers that are the direct operand of `wait`.
-    waited_identifiers: FxHashSet<SpanKey>,
+    /// Identifiers a holder may appear as: the operand of `wait`, or the
+    /// receiver of `started()`.
+    allowed_uses: FxHashSet<SpanKey>,
 }
 
 impl FunctionFacts<'_> {
@@ -138,10 +140,20 @@ impl FunctionFacts<'_> {
             }
             ast::ExpressionKind::Wait(operand) => {
                 if matches!(operand.kind.as_ref(), ast::ExpressionKind::Identifier(_)) {
-                    self.waited_identifiers.insert(span_key(operand.span));
+                    self.allowed_uses.insert(span_key(operand.span));
                 } else if is_scoped_launch(operand, self.resolved_callables) {
                     self.placed_launches.insert(span_key(operand.span));
                 }
+            }
+            ast::ExpressionKind::MethodCall {
+                receiver,
+                method,
+                arguments,
+            } if method.name == "started"
+                && arguments.is_empty()
+                && matches!(receiver.kind.as_ref(), ast::ExpressionKind::Identifier(_)) =>
+            {
+                self.allowed_uses.insert(span_key(receiver.span));
             }
             _ => {}
         }
@@ -159,7 +171,7 @@ fn check_function(
         resolved_callables,
         holders: FxHashMap::default(),
         placed_launches: FxHashSet::default(),
-        waited_identifiers: FxHashSet::default(),
+        allowed_uses: FxHashSet::default(),
     };
     facts.record_block(&body);
     visit::expressions_in_block(&mut body, &mut |expression| {
@@ -178,9 +190,7 @@ fn check_function(
             });
         }
         ast::ExpressionKind::Identifier(identifier)
-            if !facts
-                .waited_identifiers
-                .contains(&span_key(expression.span)) =>
+            if !facts.allowed_uses.contains(&span_key(expression.span)) =>
         {
             if let Some((launched_at, borrowed)) = facts.holders.get(&identifier.name) {
                 errors.push(ScopedLaunchError {

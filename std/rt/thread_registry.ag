@@ -190,6 +190,16 @@ u8* __silver_wait_done(i64 rec) {
     return pack;
 }
 
+/// Abort for `wait` on a task whose thread never started (registry full,
+/// stack mmap failure, or clone error). Exits with 134 like `abort()`.
+/// Internal: called by compiler-generated code; never returns.
+void __silver_task_not_started() {
+    str message = "wait: task failed to start; check `task.started()` after `launch`\n";
+    sys_write(2, (i64)message, strlen(message));
+    sys_kill(sys_getpid(), 6);  // SIGABRT
+    sys_exit_group(134);
+}
+
 /// Join a task handle that is leaving scope unwaited. A scoped task (one
 /// launched with borrowed arguments) is joined and its pack returned so the
 /// caller can drop the result and free the pack. Returns null for a null

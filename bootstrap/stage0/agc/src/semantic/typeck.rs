@@ -2525,6 +2525,14 @@ impl TypeChecker {
                 } else {
                     self.check_expr(receiver, None)
                 };
+                // `Task<T>` is builtin; `started()` is its only method.
+                if let Type::Task(_) = &receiver_ty {
+                    if method.name == "started" && arguments.is_empty() {
+                        return Type::Primitive(ast::PrimitiveType::Bool);
+                    }
+                    self.error(msg::unknown_task_method(&method.name), method.span);
+                    return Type::Unknown;
+                }
                 // Check if this is an enum variant construction first
                 if let Type::Named { path: ty_path, .. } = &receiver_ty
                     && ty_path.len() == 1
