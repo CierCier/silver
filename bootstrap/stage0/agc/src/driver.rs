@@ -1867,10 +1867,14 @@ pub fn run(cli: Cli) {
                     for error in &scoped_launch_errors {
                         eprintln!(
                             "{}",
-                            diagnostics::render(
+                            diagnostics::render_with_note(
                                 error.span,
                                 &error.message,
                                 diagnostics::Severity::Error,
+                                error.launched_at,
+                                error
+                                    .launched_at
+                                    .map(|_| crate::diagnostics::messages::note_task_launched_here()),
                             )
                         );
                     }

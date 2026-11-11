@@ -258,16 +258,27 @@ pub fn note_value_moved_into_launch() -> &'static str {
     "value moved into thread launch"
 }
 
-pub fn scoped_launch_must_be_bound() -> &'static str {
-    "a launch that borrows must initialize a local `Task` or be waited directly: \
-     the task is joined when that local leaves scope"
+pub fn scoped_launch_must_be_bound(name: &str) -> String {
+    format!(
+        "a launch that borrows '{name}' must be bound to a local Task or waited directly \
+         (`Task<T> t = launch f(&{name});` or `wait launch f(&{name})`)"
+    )
 }
 
-pub fn scoped_task_cannot_leave_scope(task: &str) -> String {
-    format!(
-        "task `{task}` borrows from the scope it was launched in and cannot leave it: \
-         only `wait {task}` may consume it"
-    )
+pub fn task_cannot_leave_scope(name: &str) -> String {
+    format!("task borrows `{name}` and cannot leave the scope it was launched in")
+}
+
+pub fn note_task_launched_here() -> &'static str {
+    "task launched here"
+}
+
+pub fn cannot_drop_task_borrowed(name: &str) -> String {
+    format!("cannot drop '{name}' because it is borrowed by a launched task")
+}
+
+pub fn note_task_borrow_here() -> &'static str {
+    "borrowed by a task launched here"
 }
 
 pub fn launch_reference_needs_reference_parameter() -> &'static str {

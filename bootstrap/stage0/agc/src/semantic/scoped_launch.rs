@@ -27,12 +27,38 @@ use rustc_hash::{FxHashMap, FxHashSet};
 pub struct ScopedLaunchError {
     pub message: String,
     pub span: Span,
+    /// The launch a pinned task came from.
+    pub launched_at: Option<Span>,
 }
 
 type SpanKey = (u32, usize, usize, u32);
 
 fn span_key(span: Span) -> SpanKey {
     (span.file, span.start, span.end, span.expansion)
+}
+
+/// The variable a scoped launch borrows first, for diagnostics: the root of
+/// its first `&place` argument, or a forwarded reference variable.
+fn borrowed_name(launch: &ast::Expression) -> String {
+    let ast::ExpressionKind::Launch(call) = launch.kind.as_ref() else {
+        return String::new();
+    };
+    let ast::ExpressionKind::Call { arguments, .. } = call.kind.as_ref() else {
+        return String::new();
+    };
+    for argument in arguments {
+        let mut place = match argument.kind.as_ref() {
+            ast::ExpressionKind::Reference { expression, .. } => expression,
+            _ => argument,
+        };
+        while let ast::ExpressionKind::FieldAccess { object, .. } = place.kind.as_ref() {
+            place = object;
+        }
+        if let ast::ExpressionKind::Identifier(identifier) = place.kind.as_ref() {
+            return identifier.name.clone();
+        }
+    }
+    "its argument".to_string()
 }
 
 /// `true` when `expr` is a launch of a callee with a reference parameter.
@@ -50,8 +76,9 @@ pub(crate) fn is_scoped_launch(
 
 struct FunctionFacts<'a> {
     resolved_callables: &'a FxHashMap<CallSiteKey, ResolvedCallable>,
-    /// Locals initialized by a scoped launch.
-    holders: FxHashSet<String>,
+    /// Locals initialized by a scoped launch, with that launch's span and
+    /// the variable it borrows.
+    holders: FxHashMap<String, (Span, String)>,
     /// Scoped launches in an allowed position.
     placed_launches: FxHashSet<SpanKey>,
     /// Identifiers that are the direct operand of `wait`.
@@ -79,7 +106,10 @@ impl FunctionFacts<'_> {
             && let ast::PatternKind::Identifier(name) = &binding.pattern.kind
             && is_scoped_launch(initializer, self.resolved_callables)
         {
-            self.holders.insert(name.name.clone());
+            self.holders.insert(
+                name.name.clone(),
+                (initializer.span, borrowed_name(initializer)),
+            );
             self.placed_launches.insert(span_key(initializer.span));
         }
     }
@@ -127,7 +157,7 @@ fn check_function(
     let mut body = body.clone();
     let mut facts = FunctionFacts {
         resolved_callables,
-        holders: FxHashSet::default(),
+        holders: FxHashMap::default(),
         placed_launches: FxHashSet::default(),
         waited_identifiers: FxHashSet::default(),
     };
@@ -142,20 +172,23 @@ fn check_function(
                 && !facts.placed_launches.contains(&span_key(expression.span)) =>
         {
             errors.push(ScopedLaunchError {
-                message: msg::scoped_launch_must_be_bound().to_string(),
+                message: msg::scoped_launch_must_be_bound(&borrowed_name(expression)),
                 span: expression.span,
+                launched_at: None,
             });
         }
         ast::ExpressionKind::Identifier(identifier)
-            if facts.holders.contains(&identifier.name)
-                && !facts
-                    .waited_identifiers
-                    .contains(&span_key(expression.span)) =>
+            if !facts
+                .waited_identifiers
+                .contains(&span_key(expression.span)) =>
         {
-            errors.push(ScopedLaunchError {
-                message: msg::scoped_task_cannot_leave_scope(&identifier.name),
-                span: expression.span,
-            });
+            if let Some((launched_at, borrowed)) = facts.holders.get(&identifier.name) {
+                errors.push(ScopedLaunchError {
+                    message: msg::task_cannot_leave_scope(borrowed),
+                    span: expression.span,
+                    launched_at: Some(*launched_at),
+                });
+            }
         }
         _ => {}
     });

@@ -196,6 +196,8 @@ struct BorrowChecker<'a> {
     /// Per lexical block: statements that `wait` a task local directly, so
     /// the join is unconditional once that statement has run.
     block_direct_waits: Vec<FxHashMap<String, Vec<usize>>>,
+    /// Task locals of the current function whose launch borrowed arguments.
+    task_holders: FxHashSet<String>,
     /// Maps struct name -> set of field names that are reference types (`&T` / `&'a T`).
     struct_ref_fields: FxHashMap<String, FxHashSet<String>>,
     struct_field_types: FxHashMap<String, FxHashMap<String, String>>,
@@ -270,6 +272,7 @@ impl<'a> BorrowChecker<'a> {
             local_scopes: vec![FxHashMap::default()],
             statement_indices: Vec::new(),
             block_direct_waits: Vec::new(),
+            task_holders: FxHashSet::default(),
             struct_ref_fields: FxHashMap::default(),
             struct_field_types: FxHashMap::default(),
             global_var_types: FxHashMap::default(),
@@ -694,6 +697,7 @@ impl<'a> BorrowChecker<'a> {
         self.var_types.clear();
         self.ref_bindings.clear();
         self.raw_ptr_vars.clear();
+        self.task_holders.clear();
 
         for param in parameters {
             if let Some(scope) = self.local_scopes.last_mut() {
@@ -1508,6 +1512,7 @@ impl<'a> BorrowChecker<'a> {
     /// `wait` later in the task's own block, otherwise when the task local
     /// leaves scope and its drop glue joins.
     fn register_task_borrows(&mut self, task: &str, arguments: &[ast::Expression]) {
+        self.task_holders.insert(task.to_string());
         let declared_at = self.statement_indices.last().copied().unwrap_or(0);
         let joined_at = self.block_direct_waits.last().and_then(|waits| {
             waits
@@ -2096,6 +2101,40 @@ impl<'a> BorrowChecker<'a> {
         }
     }
 
+    /// Rejects `place.drop()` while a launched task still borrows `place`:
+    /// the task would read freed memory on its own thread.
+    fn check_drop_of_task_borrow(&mut self, receiver: &ast::Expression) {
+        let Some((root, path, _)) = self.extract_root_and_path(receiver) else {
+            return;
+        };
+        let task_loan = self
+            .scopes
+            .iter()
+            .flatten()
+            .find(|loan| {
+                loan.root == root
+                    && Self::paths_overlap(&loan.path, &path)
+                    && loan
+                        .borrower
+                        .as_ref()
+                        .is_some_and(|borrower| self.task_holders.contains(borrower))
+            })
+            .map(|loan| loan.span);
+        if let Some(borrowed_at) = task_loan {
+            let target = if path.is_empty() {
+                root
+            } else {
+                format!("{root}.{path}")
+            };
+            self.error_with_note(
+                msg::cannot_drop_task_borrowed(&target),
+                receiver.span,
+                Some(borrowed_at),
+                Some(msg::note_task_borrow_here().to_string()),
+            );
+        }
+    }
+
     /// Check for intra-call argument and receiver borrow conflicts.
     fn check_call_arguments(
         &mut self,
@@ -2331,6 +2370,9 @@ impl<'a> BorrowChecker<'a> {
                 arguments,
             } => {
                 self.check_expr(receiver);
+                if method.name == "drop" {
+                    self.check_drop_of_task_borrow(receiver);
+                }
                 let receiver_kind = self.method_receiver_kind(receiver, &method.name);
                 if let Some(kind) = receiver_kind {
                     self.check_method_receiver_conflict(receiver, kind);
