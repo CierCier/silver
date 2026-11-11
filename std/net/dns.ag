@@ -64,8 +64,9 @@ struct DnsHeader {
 // Cache
 // ---------------------------------------------------------------------------
 
-/// One cached A record: hostname, IPv4 address (network order), and expiry
-/// in unix seconds (0 never expires).
+/// One cached A record: hostname, IPv4 address in numeric form (first octet
+/// most significant, as `inet_pton4` returns it), and expiry in unix seconds
+/// (0 never expires).
 struct DnsCacheEntry {
     String key;
     i32   ip;
@@ -82,8 +83,9 @@ RawMutex g_dns_lock;
 // Nameserver list — discovered once, tried in order
 // ---------------------------------------------------------------------------
 
-/// Internal: discovered nameserver IPv4 addresses, in probe order.
-i32  g_ns_ips[8];   // network byte order; 0 = unused slot
+/// Internal: discovered nameserver IPv4 addresses (numeric form), in probe
+/// order.
+i32  g_ns_ips[8];   // numeric form (first octet most significant); 0 = unused slot
 /// Internal: number of used `g_ns_ips` slots.
 i64  g_ns_count = 0;
 /// Internal: true once nameserver discovery has run.
@@ -278,7 +280,8 @@ i64 dns_build_query(u8* buf, str hostname) {
     return dns_build_query_type(buf, hostname, (u16)1);
 }
 
-/// Parse A record from response. Returns IP in network byte order, 0 on failure.
+/// Parse A record from response. Returns the IPv4 address in numeric form
+/// (first octet most significant), 0 on failure.
 i32 dns_parse_a(u8* buf, i64 len, u16 expected_id) {
     if (len < 12) { return 0; }
     if (dns_get_u16(buf, 0) != expected_id) { return 0; }
@@ -347,7 +350,8 @@ i32 dns_try_ns(str hostname, i32 ns_ip, u16 txid, u8* query, i64 qlen) {
 
     return dns_parse_a(resp, received, txid);
 }
-/// Resolve hostname to IPv4 (network byte order). 0 on failure.
+/// Resolve hostname to IPv4 in numeric form (first octet most significant,
+/// as `inet_pton4` returns it). 0 on failure.
 /// Tries each nameserver in order; first response wins.
 i32 dns_resolve(str hostname) {
     if (hostname == (str)0) { return 0; }
@@ -384,7 +388,8 @@ str dns_resolve_str(str hostname) {
 /// Shared by every caller, so results are overwritten by the next call.
 u8 g_ip_str_buf[16];
 
-/// Network-byte-order u32 -> dotted-quad. NOT thread-safe.
+/// Numeric-form IPv4 (first octet most significant) -> dotted-quad.
+/// NOT thread-safe.
 str ip_to_str(u32 ip) {
     u8* buf = g_ip_str_buf;
     i64 raw = (i64)ip;

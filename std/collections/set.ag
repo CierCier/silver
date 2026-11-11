@@ -1,6 +1,6 @@
 // Keys-only SwissTable. Move transfers owned keys; Copy is bitwise.
 // `iter` borrows; `take`/`remove`/`drain`/`into_iter` move out.
-// `erase` tombstones without moving, so it leaks owned keys.
+// `erase`/`remove` drop the removed key; `take` returns it to the caller.
 
 import std.optional;
 import std.iter;
@@ -121,8 +121,8 @@ i64 set_trailing_zeros(i64 mask) {
 
 /// A SwissTable hash set that owns its keys. Keys hash with `@hash` and
 /// compare with `==`; iteration order is unspecified. Dropping it drops
-/// every key. `erase` does not drop the removed key; use `take`/`remove`
-/// for keys that own resources.
+/// every key. `erase` and `remove` drop the removed key; use `take` to
+/// remove a key and get ownership of it back.
 struct HashSet<K> {
     K* keys;
     u8* ctrl;

@@ -736,8 +736,9 @@ impl String {
         return Some((i32)o.unwrap());
     }
 
-    /// Parses the contents as a non-negative decimal i64 and returns it as u64.
-    /// Values above the i64 maximum are rejected.
+    /// Parses the contents through `parse_i64` and returns a non-negative
+    /// result as u64. Overflow is not detected: oversized inputs wrap and may
+    /// return a wrong value instead of None.
     Optional<u64> parse_u64(&self) {
         Optional<i64> o = self.parse_i64();
         if (o.is_none()) { return None; }
@@ -1254,6 +1255,7 @@ impl String {
 }
 
 /// Parse an integer in decimal format with optional leading '-' or '+'.
+/// Overflow past the i64 range wraps silently.
 Optional<i64> parse_i64(str s) {
     return parse_i64_radix(s, 10);
 }

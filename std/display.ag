@@ -14,8 +14,8 @@ import std.io.file;  // BufWriter only — never the full std.io (that would
 
 /// Trait for types that can be formatted for display.
 trait Display {
-    /// Appends this value's text form to `out`. Implementations should only
-    /// write to `out`; they must not print or allocate outside it.
+    /// Appends this value's text form to `out`. Implementations should write
+    /// output only to `out`, but may allocate temporary storage.
     void fmt(*self, BufWriter* out);
 }
 

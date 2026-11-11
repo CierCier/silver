@@ -7,59 +7,41 @@ import std.mem.memory;
 // defined on); remaining parameters are the other operand types.
 
 /// Overloads `a + b`. Takes both operands by value.
-/// Overloads `a + b`. Takes both operands by value.
 trait Add<B>        { Self __add(self, B other); }
-/// Overloads `a - b`. Takes both operands by value.
 /// Overloads `a - b`. Takes both operands by value.
 trait Sub<B>        { Self __sub(self, B other); }
 /// Overloads `a * b`. Takes both operands by value.
-/// Overloads `a * b`. Takes both operands by value.
 trait Mul<B>        { Self __mul(self, B other); }
-/// Overloads `a / b`. Takes both operands by value.
 /// Overloads `a / b`. Takes both operands by value.
 trait Div<B>        { Self __div(self, B other); }
 /// Overloads `a % b`. Takes both operands by value.
-/// Overloads `a % b`. Takes both operands by value.
 trait Mod<B>        { Self __mod(self, B other); }
-/// Overloads unary `-a`. Takes the operand by value.
 /// Overloads unary `-a`. Takes the operand by value.
 trait Neg           { Self __neg(self); }
 
 /// Overloads `a & b`. Takes both operands by value.
-/// Overloads `a & b`. Takes both operands by value.
 trait BitAnd<B>     { Self __bitand(self, B other); }
-/// Overloads `a | b`. Takes both operands by value.
 /// Overloads `a | b`. Takes both operands by value.
 trait BitOr<B>      { Self __bitor(self, B other); }
 /// Overloads `a ^ b`. Takes both operands by value.
-/// Overloads `a ^ b`. Takes both operands by value.
 trait BitXor<B>     { Self __bitxor(self, B other); }
-/// Overloads `a << b`. Takes both operands by value.
 /// Overloads `a << b`. Takes both operands by value.
 trait Shl<B>        { Self __shl(self, B other); }
 /// Overloads `a >> b`. Takes both operands by value.
-/// Overloads `a >> b`. Takes both operands by value.
 trait Shr<B>        { Self __shr(self, B other); }
-/// Overloads unary `~a`. Takes the operand by value.
 /// Overloads unary `~a`. Takes the operand by value.
 trait BitNot        { Self __bitnot(self); }
 
 /// Overloads `a == b`. Borrows both operands.
-/// Overloads `a == b`. Borrows both operands.
 trait Eq<A>   { bool __eq(*self, A* other); }
-/// Overloads `a != b`. Borrows both operands.
 /// Overloads `a != b`. Borrows both operands.
 trait Ne<A>   { bool __ne(*self, A* other); }
 /// Overloads `a < b`. Borrows both operands.
-/// Overloads `a < b`. Borrows both operands.
 trait Lt<A>   { bool __lt(*self, A* other); }
-/// Overloads `a > b`. Borrows both operands.
 /// Overloads `a > b`. Borrows both operands.
 trait Gt<A>   { bool __gt(*self, A* other); }
 /// Overloads `a <= b`. Borrows both operands.
-/// Overloads `a <= b`. Borrows both operands.
 trait Le<A>   { bool __le(*self, A* other); }
-/// Overloads `a >= b`. Borrows both operands.
 /// Overloads `a >= b`. Borrows both operands.
 trait Ge<A>   { bool __ge(*self, A* other); }
 
