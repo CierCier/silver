@@ -8,6 +8,12 @@
 //! (zero on spawn failure); `wait t` joins via `__silver_wait_done` and frees
 //! the pack once the child is finished.
 //!
+//! A launch whose callee takes a `&T`/`&mut T` parameter is *scoped*: the
+//! reference is stored in the pack without moving its referent, the task is
+//! started through `__silver_launch_scoped`, and the `Task<T>` drop glue
+//! (`task_drop_function`) joins it wherever the handle is dropped unwaited.
+//! For a detached task that glue is a no-op, so it still outlives its handle.
+//!
 //! Pack layout is compiler-owned and shared implicitly between the launcher,
 //! the trampoline, and the waiter. Because the launcher and the waiter may
 //! live in different functions and only agree on the result type `T` (from the
@@ -142,6 +148,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
 
         let ret_is_void = Self::ast_type_is_void(signature.return_type.as_ref());
+        // A reference parameter borrows from the launcher, so the task must be
+        // joined before that borrow ends.
+        let scoped = signature
+            .params
+            .iter()
+            .any(|param| matches!(param.kind.as_ref(), ast::TypeKind::Reference(_)));
 
         // Build the pack struct type; result first (field 0) when non-void,
         // then the arguments in declaration order.
@@ -196,6 +208,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         // Marshal the arguments into the pack, moving them into the task
         // (ownership transfer: the child runs the callee on its own copy).
+        // A borrowed argument stores only the reference; its referent stays
+        // owned, and live, in the launcher.
         for (index, argument) in arguments.iter().enumerate() {
             let value = self.emit_expression_value(argument)?;
             let casted =
@@ -209,7 +223,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             self.builder.build_store(slot, casted).map_err(|e| {
                 CodegenError::with_span(format!("launch: store arg failed: {e}"), expr.span)
             })?;
-            self.clear_drop_flag_of(argument)?;
+            if !matches!(
+                signature.params[index].kind.as_ref(),
+                ast::TypeKind::Reference(_)
+            ) {
+                self.clear_drop_flag_of(argument)?;
+            }
         }
 
         // Per-launch-site trampoline: void(i64 pack) marshals pack -> call ->
@@ -224,8 +243,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             arg_base,
         )?;
 
-        // __silver_launch(void(i64) tramp, u8* pack) -> i64 (TaskRecord*).
-        let launch_fn = self.module.get_function("__silver_launch").ok_or_else(|| {
+        // __silver_launch[_scoped](void(i64) tramp, u8* pack) -> i64 (TaskRecord*).
+        let launch_symbol = if scoped {
+            "__silver_launch_scoped"
+        } else {
+            "__silver_launch"
+        };
+        let launch_fn = self.module.get_function(launch_symbol).ok_or_else(|| {
             CodegenError::with_span(
                 "launch requires the thread runtime (`import std.sys.entry;`)",
                 expr.span,
@@ -246,12 +270,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .builder
             .build_call(launch_fn, &[trampoline, pack_u8.into()], "task.rec")
             .map_err(|e| {
-                CodegenError::with_span(format!("launch: __silver_launch failed: {e}"), expr.span)
+                CodegenError::with_span(format!("launch: {launch_symbol} failed: {e}"), expr.span)
             })?
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| {
-                CodegenError::with_span("launch: __silver_launch returned void", expr.span)
+                CodegenError::with_span(format!("launch: {launch_symbol} returned void"), expr.span)
             })?;
         let rec = rec.into_int_value();
         let is_null = self
@@ -326,6 +350,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         let handle = self.emit_expression_value(inner)?;
         let handle_int = handle.into_int_value();
+        // `wait` consumes the handle: the join below reclaims the registry
+        // slot, so the drop glue must never see this handle again.
+        self.consume_waited_handle(inner)?;
         let zero = self.context.i64_type().const_zero();
         let is_null = self
             .builder
@@ -532,6 +559,126 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(tramp.as_global_value().as_pointer_value().into())
     }
 
+    /// Retire the storage a waited handle was read from. A named place is
+    /// zeroed (the drop glue ignores a null handle) and its owner state is
+    /// cleared; an rvalue operand has no storage to retire.
+    fn consume_waited_handle(&mut self, operand: &ast::Expression) -> CodegenResult<()> {
+        if self.lvalue_root_and_path(operand).is_none() {
+            return Ok(());
+        }
+        let (slot, _) = self.resolve_lvalue_ptr(operand)?;
+        self.builder
+            .build_store(slot, self.context.i64_type().const_zero())
+            .map_err(|e| {
+                CodegenError::with_span(format!("wait: handle reset failed: {e}"), operand.span)
+            })?;
+        self.clear_drop_flag_of(operand)
+    }
+
+    /// Name of the drop glue for a `Task<T>` handle, emitting it on first use:
+    ///
+    /// ```text
+    ///   void __silver_task_drop_T(i64* handle) {
+    ///       u8* pack = __silver_task_join_scoped(*handle);
+    ///       if (pack != null) { drop((T*)pack); mem_free_raw_impl(pack); }
+    ///   }
+    /// ```
+    ///
+    /// The runtime joins only a scoped task; a null or detached handle yields
+    /// a null pack, so dropping it stays a no-op.
+    pub(crate) fn task_drop_function(&mut self, result_ty: &ast::Type) -> CodegenResult<String> {
+        let name = format!(
+            "__silver_task_drop_{}",
+            Type::from_ast(result_ty).canonical_key()
+        );
+        if self.module.get_function(&name).is_some() {
+            return Ok(name);
+        }
+        let join_fn = self
+            .module
+            .get_function("__silver_task_join_scoped")
+            .ok_or_else(|| {
+                CodegenError::with_span(
+                    "dropping a Task requires the thread runtime (`import std.sys.entry;`)",
+                    result_ty.span,
+                )
+            })?;
+        let free_fn = self.module.get_function("mem_free_raw_impl").ok_or_else(|| {
+            CodegenError::with_span(
+                "dropping a Task requires `import std.mem.alloc;` (mem_free_raw_impl)",
+                result_ty.span,
+            )
+        })?;
+        let glue_error =
+            |e: inkwell::builder::BuilderError| CodegenError::new(format!("task drop glue: {e}"));
+
+        let pointer_ty = self.context.ptr_type(AddressSpace::default());
+        let function = self.module.add_function(
+            &name,
+            self.context.void_type().fn_type(&[pointer_ty.into()], false),
+            Some(Linkage::Internal),
+        );
+        // The glue is emitted while another function body is open: park that
+        // body's builder state and keep its debug scope off these instructions.
+        let saved_block = self.builder.get_insert_block();
+        let saved_location = self.builder.get_current_debug_location();
+        let saved_fn = self.current_fn.replace(function);
+        let saved_nested = std::mem::replace(&mut self.debug_nested, true);
+        self.builder.unset_current_debug_location();
+
+        let entry = self.context.append_basic_block(function, "entry");
+        let joined_bb = self.context.append_basic_block(function, "task.drop.joined");
+        let done_bb = self.context.append_basic_block(function, "task.drop.done");
+        self.builder.position_at_end(entry);
+        let slot = function
+            .get_nth_param(0)
+            .ok_or_else(|| CodegenError::new("task drop glue: missing handle parameter"))?
+            .into_pointer_value();
+        let handle = self
+            .builder
+            .build_load(self.context.i64_type(), slot, "task.handle")
+            .map_err(glue_error)?;
+        let pack = self
+            .builder
+            .build_call(join_fn, &[handle.into()], "task.pack")
+            .map_err(glue_error)?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CodegenError::new("task drop glue: join returned void"))?
+            .into_pointer_value();
+        let joined = self
+            .builder
+            .build_is_not_null(pack, "task.joined")
+            .map_err(glue_error)?;
+        self.builder
+            .build_conditional_branch(joined, joined_bb, done_bb)
+            .map_err(glue_error)?;
+
+        self.builder.position_at_end(joined_bb);
+        if !Self::ast_type_is_void(Some(result_ty)) {
+            // The result sits at pack field 0, so the pack address is its address.
+            self.emit_drop_glue_at_pointer(result_ty, pack)?;
+        }
+        self.builder
+            .build_call(free_fn, &[pack.into()], "")
+            .map_err(glue_error)?;
+        self.builder
+            .build_unconditional_branch(done_bb)
+            .map_err(glue_error)?;
+        self.builder.position_at_end(done_bb);
+        self.builder.build_return(None).map_err(glue_error)?;
+
+        self.debug_nested = saved_nested;
+        self.current_fn = saved_fn;
+        if let Some(block) = saved_block {
+            self.builder.position_at_end(block);
+        }
+        if let Some(location) = saved_location {
+            self.builder.set_current_debug_location(location);
+        }
+        Ok(name)
+    }
+
     /// `true` when `ty` lowers to no value (void primitive or empty tuple).
     fn ast_type_is_void(ty: Option<&ast::Type>) -> bool {
         match ty {
@@ -544,7 +691,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     }
 
     /// Extract the payload type `T` from a `Task<T>` type annotation.
-    fn task_result_type(ty: &ast::Type) -> Option<&ast::Type> {
+    pub(crate) fn task_result_type(ty: &ast::Type) -> Option<&ast::Type> {
         if let ast::TypeKind::Named(named) = ty.kind.as_ref()
             && named.path.len() == 1
             && named.path[0].name == "Task"

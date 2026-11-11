@@ -602,6 +602,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         &mut self,
         ty: &ast::Type,
     ) -> CodegenResult<Option<String>> {
+        // A task handle has compiler-made glue that joins a scoped task.
+        if let Some(result_ty) = Self::task_result_type(ty).cloned() {
+            return self.task_drop_function(&result_ty).map(Some);
+        }
         // 1. Check concrete Drop-impl owners already registered
         let drop_owners = Self::owner_name_candidates_from_type(ty);
         for owner in &drop_owners {

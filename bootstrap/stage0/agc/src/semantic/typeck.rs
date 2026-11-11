@@ -2235,8 +2235,9 @@ impl TypeChecker {
                 //
                 // The structural Send gate runs on every argument: launch
                 // MOVES its args into the child thread, so shared-ownership
-                // (Rc), GC-handle, raw-pointer, and reference types are
-                // rejected here.
+                // (Rc), GC-handle, and raw-pointer types are rejected here.
+                // A reference passed to a reference parameter is a borrow
+                // (a scoped launch); its pointee must be Send.
                 let ast::ExpressionKind::Call {
                     function,
                     arguments,
@@ -2259,8 +2260,36 @@ impl TypeChecker {
                 };
                 let (call_ty, arg_types) =
                     self.resolve_overload_with_explicit(ident, &[], arguments, inner.span);
-                for (arg, arg_ty) in arguments.iter().zip(arg_types.iter()) {
-                    if let Err(reason) = self.check_send(arg_ty) {
+                let borrowed_parameters = self
+                    .resolved_callables
+                    .get(&(
+                        inner.span.file,
+                        inner.span.start,
+                        inner.span.end,
+                        inner.span.expansion,
+                    ))
+                    .map(|callable| callable.reference_parameters.clone())
+                    .unwrap_or_default();
+                for (index, (arg, arg_ty)) in arguments.iter().zip(arg_types.iter()).enumerate() {
+                    // A borrowed argument shares its referent with the child,
+                    // so the gate applies to the pointee.
+                    // `&x` types as a pointer until the call coerces it; a raw
+                    // pointer variable is not a tracked borrow and stays gated.
+                    let borrows = borrowed_parameters.contains(&index);
+                    let crossing_ty = match arg_ty {
+                        Type::Reference { inner, .. } if borrows => inner.as_ref(),
+                        Type::Pointer { inner, .. }
+                            if borrows
+                                && matches!(
+                                    arg.kind.as_ref(),
+                                    ast::ExpressionKind::Reference { .. }
+                                ) =>
+                        {
+                            inner.as_ref()
+                        }
+                        other => other,
+                    };
+                    if let Err(reason) = self.check_send(crossing_ty) {
                         self.error(
                             format!("launch argument of type {arg_ty} is not Send: {reason}"),
                             arg.span,

@@ -258,6 +258,22 @@ pub fn note_value_moved_into_launch() -> &'static str {
     "value moved into thread launch"
 }
 
+pub fn scoped_launch_must_be_bound() -> &'static str {
+    "a launch that borrows must initialize a local `Task` or be waited directly: \
+     the task is joined when that local leaves scope"
+}
+
+pub fn scoped_task_cannot_leave_scope(task: &str) -> String {
+    format!(
+        "task `{task}` borrows from the scope it was launched in and cannot leave it: \
+         only `wait {task}` may consume it"
+    )
+}
+
+pub fn launch_reference_needs_reference_parameter() -> &'static str {
+    "a reference crosses a thread boundary only through a `&T` or `&mut T` parameter of the launched function"
+}
+
 pub fn note_task_handle_consumed() -> &'static str {
     "task handle consumed by wait"
 }

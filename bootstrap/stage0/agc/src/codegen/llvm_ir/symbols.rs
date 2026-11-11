@@ -1913,6 +1913,24 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     None
                 }
             }
+            // `launch f(..)` yields `Task<R>` for the callee's return type R,
+            // so `wait launch f(..)` needs no named handle.
+            ast::ExpressionKind::Launch(call) => {
+                let result = self.resolve_receiver_type(call).unwrap_or(ast::Type {
+                    kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::Void)),
+                    span: expr.span,
+                });
+                Some(ast::Type {
+                    kind: Box::new(ast::TypeKind::Named(ast::NamedType {
+                        path: vec![ast::Identifier {
+                            name: "Task".to_string(),
+                            span: expr.span,
+                        }],
+                        generics: Some(vec![result]),
+                    })),
+                    span: expr.span,
+                })
+            }
             ast::ExpressionKind::MethodCall {
                 receiver, method, ..
             } => {

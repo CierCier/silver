@@ -466,6 +466,15 @@ impl Analyzer {
                     if self.is_type_param(name) {
                         return;
                     }
+                    // `Task<T>` is the builtin handle type of `launch`.
+                    if name == "Task" {
+                        if let Some(generics) = &named.generics {
+                            for arg in generics {
+                                self.check_type(arg);
+                            }
+                        }
+                        return;
+                    }
                     if self.has_symbol(name).is_none() && !self.imported_types.contains(name) {
                         let suggestion = self.type_suggestion(name);
                         self.errors.push(SemanticError {

@@ -61,6 +61,31 @@ pub struct ActiveBorrow {
     pub param: bool,
 }
 
+/// The task local a statement joins unconditionally: `wait t;`,
+/// `T r = wait t;` or `r = wait t;`.
+fn directly_waited_task(statement: &ast::Statement) -> Option<&str> {
+    let expression = match &statement.kind {
+        ast::StatementKind::Expression(expression) => expression,
+        ast::StatementKind::Let(binding) => binding.initializer.as_ref()?,
+        _ => return None,
+    };
+    let waited = match expression.kind.as_ref() {
+        ast::ExpressionKind::Binary {
+            right,
+            operator: ast::BinaryOperator::Assign,
+            ..
+        } => right,
+        _ => expression,
+    };
+    let ast::ExpressionKind::Wait(operand) = waited.kind.as_ref() else {
+        return None;
+    };
+    match operand.kind.as_ref() {
+        ast::ExpressionKind::Identifier(task) => Some(task.name.as_str()),
+        _ => None,
+    }
+}
+
 /// Place-based borrow (Phase 8 scaffolding, parallel to `ActiveBorrow`). Overlap via `places_overlap`.
 /// `&x.a` vs `move x.b` allowed (disjoint); `&x` vs `move x.a` overlaps (prefix).
 #[allow(dead_code)]
@@ -168,6 +193,9 @@ struct BorrowChecker<'a> {
     local_scopes: Vec<FxHashMap<String, usize>>,
     /// Statement indices of the nested blocks currently being visited.
     statement_indices: Vec<usize>,
+    /// Per lexical block: statements that `wait` a task local directly, so
+    /// the join is unconditional once that statement has run.
+    block_direct_waits: Vec<FxHashMap<String, Vec<usize>>>,
     /// Maps struct name -> set of field names that are reference types (`&T` / `&'a T`).
     struct_ref_fields: FxHashMap<String, FxHashSet<String>>,
     struct_field_types: FxHashMap<String, FxHashMap<String, String>>,
@@ -241,6 +269,7 @@ impl<'a> BorrowChecker<'a> {
             block_field_writes: Vec::new(),
             local_scopes: vec![FxHashMap::default()],
             statement_indices: Vec::new(),
+            block_direct_waits: Vec::new(),
             struct_ref_fields: FxHashMap::default(),
             struct_field_types: FxHashMap::default(),
             global_var_types: FxHashMap::default(),
@@ -808,6 +837,13 @@ impl<'a> BorrowChecker<'a> {
                 }
             }
         }
+        let mut direct_waits: FxHashMap<String, Vec<usize>> = FxHashMap::default();
+        for (i, stmt) in block.statements.iter().enumerate() {
+            if let Some(task) = directly_waited_task(stmt) {
+                direct_waits.entry(task.to_string()).or_default().push(i);
+            }
+        }
+        self.block_direct_waits.push(direct_waits);
         self.block_last_uses.push(block_last_use);
         self.block_field_reads.push(block_field_reads);
         self.block_field_writes.push(block_field_writes);
@@ -827,6 +863,7 @@ impl<'a> BorrowChecker<'a> {
         self.block_field_reads.pop();
         self.block_field_writes.pop();
         self.block_last_uses.pop();
+        self.block_direct_waits.pop();
         self.var_types = prev_var_types;
         self.raw_ptr_vars = prev_raw_ptr_vars;
     }
@@ -1100,7 +1137,12 @@ impl<'a> BorrowChecker<'a> {
                         }
 
                         // Check if initializer is a borrow expression:
-                        if let ast::ExpressionKind::Reference {
+                        if let ast::ExpressionKind::Launch(call) = init.kind.as_ref()
+                            && let ast::ExpressionKind::Call { arguments, .. } =
+                                call.kind.as_ref()
+                        {
+                            self.register_task_borrows(name, arguments);
+                        } else if let ast::ExpressionKind::Reference {
                             is_mutable,
                             expression,
                         } = init.kind.as_ref()
@@ -1458,6 +1500,96 @@ impl<'a> BorrowChecker<'a> {
             }
         } else {
             self.check_expr(target);
+        }
+    }
+
+    /// Loans held by a task local for the references its launch passed to
+    /// the child thread. The child uses them until it is joined: at a direct
+    /// `wait` later in the task's own block, otherwise when the task local
+    /// leaves scope and its drop glue joins.
+    fn register_task_borrows(&mut self, task: &str, arguments: &[ast::Expression]) {
+        let declared_at = self.statement_indices.last().copied().unwrap_or(0);
+        let joined_at = self.block_direct_waits.last().and_then(|waits| {
+            waits
+                .get(task)?
+                .iter()
+                .copied()
+                .find(|statement| *statement > declared_at)
+        });
+        for argument in arguments {
+            match argument.kind.as_ref() {
+                ast::ExpressionKind::Reference {
+                    is_mutable,
+                    expression,
+                } => {
+                    let kind = if *is_mutable {
+                        BorrowKind::Exclusive
+                    } else {
+                        BorrowKind::Shared
+                    };
+                    self.register_named_borrow(task, expression, kind, argument.span);
+                    // The task is a handle, not a reference to the referent.
+                    self.ref_bindings.remove(task);
+                }
+                ast::ExpressionKind::Identifier(reference)
+                    if self.ref_bindings.contains_key(&reference.name) =>
+                {
+                    // Forwarding a reference shares its referent with the
+                    // child, so another live task on that place conflicts.
+                    let info = self.ref_bindings[&reference.name].clone();
+                    if let Some(conflict) = self
+                        .find_conflict(&info.root, &info.path, info.kind, Some(&reference.name))
+                        .cloned()
+                    {
+                        let target = if info.path.is_empty() {
+                            reference.name.clone()
+                        } else {
+                            format!("{}.{}", reference.name, info.path)
+                        };
+                        let message = match (info.kind, conflict.kind) {
+                            (BorrowKind::Shared, _) => {
+                                msg::cannot_borrow_as_shared_while_mutable(&target)
+                            }
+                            (BorrowKind::Exclusive, BorrowKind::Shared) => {
+                                msg::cannot_borrow_as_mutable_while_shared(&target)
+                            }
+                            (BorrowKind::Exclusive, BorrowKind::Exclusive) => {
+                                msg::cannot_borrow_as_mutable_more_than_once(&target)
+                            }
+                        };
+                        self.error_with_note(
+                            message,
+                            argument.span,
+                            Some(conflict.span),
+                            Some(msg::note_previous_borrow_here(conflict.kind.as_str())),
+                        );
+                    }
+                    let inherited: Vec<_> = self
+                        .scopes
+                        .iter()
+                        .flatten()
+                        .filter(|loan| loan.borrower.as_deref() == Some(reference.name.as_str()))
+                        .cloned()
+                        .collect();
+                    for mut loan in inherited {
+                        loan.borrower = Some(task.to_string());
+                        loan.span = argument.span;
+                        loan.param = false;
+                        if let Some(scope) = self.scopes.last_mut() {
+                            scope.push(loan);
+                        }
+                    }
+                }
+                _ => self.check_expr(argument),
+            }
+        }
+        if let Some(scope) = self.scopes.last_mut() {
+            for loan in scope
+                .iter_mut()
+                .filter(|loan| loan.borrower.as_deref() == Some(task))
+            {
+                loan.last_use = joined_at;
+            }
         }
     }
 
