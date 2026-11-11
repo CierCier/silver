@@ -10,8 +10,11 @@ import std.sys.raw.poll;
 import std.sys.result;
 
 if (@cfg(os.linux)) {
+/// eventfd flag: each read decrements the counter by 1 instead of resetting it.
 const i64 EFD_SEMAPHORE = 1;
+/// eventfd flag: close the descriptor on exec.
 const i64 EFD_CLOEXEC   = 524288; // 0o2000000
+/// eventfd flag: reads and writes fail with EAGAIN instead of blocking.
 const i64 EFD_NONBLOCK  = 2048;   // 0o4000
 
 /// Create an eventfd with initial counter value and flags.
@@ -60,6 +63,8 @@ impl EventFd {
         return Ok(val);
     }
 
+    /// Closes the descriptor if still open. Safe to call more than once; later
+    /// `notify`/`read_val` calls then fail.
     void close(*self) {
         if (self.is_open && self.fd >= 0) {
             try_close(self.fd);

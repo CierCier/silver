@@ -5,6 +5,7 @@ import completion;
 import tooling.format;
 import std.algo.sort;
 
+/// One byte range to format.
 struct FormatSelection { i64 start; i64 end; }
 
 impl Lt<FormatSelection> for FormatSelection {
@@ -13,6 +14,7 @@ impl Lt<FormatSelection> for FormatSelection {
     }
 }
 
+/// Reads the range (or ranges) of a range-formatting request.
 bool parse_format_selections(Document* doc, str params, bool multiple, Vec<FormatSelection>* selections) {
     if (!multiple) {
         String json = json_field(params, "range"); Span range = Span.synthetic();
@@ -53,6 +55,7 @@ SourceFormatOptions default_format_options() {
     return move options;
 }
 
+/// Reads `tabSize` and `insertSpaces` formatting options.
 bool parse_format_options(str params, SourceFormatOptions* options) {
     String json = json_field(params, "options");
     String spaces = json_field(json.to_str(), "insertSpaces");
@@ -64,11 +67,14 @@ bool parse_format_options(str params, SourceFormatOptions* options) {
     return true;
 }
 
+/// Appends one `TextEdit` JSON object.
 void append_format_edit(String* out, Document* doc, Span range, str replacement) {
     out.push_str("{\"range\":"); doc.append_range(out, range);
     out.push_str(",\"newText\":\""); json_escape(replacement, out); out.push_str("\"}");
 }
 
+/// Formats the whole document (or only `selections` when `ranged`) and
+/// returns minimal text edits.
 Result<String, SourceFormatError> compute_formatting(Document* doc, SourceFormatOptions* options, bool ranged, Vec<FormatSelection>* selections) {
     if (ranged && selections.len() == 0) { return Result<String, SourceFormatError>.ok(String.from_str("[]")); }
     Result<String, SourceFormatError> formatted = format_source(doc.text.to_str(), options);
@@ -113,6 +119,8 @@ Result<String, SourceFormatError> compute_formatting(Document* doc, SourceFormat
     out.push(']'); return Result<String, SourceFormatError>.ok(move out);
 }
 
+/// Computes on-type formatting: re-indents the current line. Returns no
+/// edits for lex errors or a line starting inside a literal.
 Result<String, SourceFormatError> compute_on_type_formatting(Document* doc, i64 offset, SourceFormatOptions* options) {
     TokenStream tokens = TokenStream.new(); DiagnosticBag errors = DiagnosticBag.new();
     lex(doc.text.clone(), &tokens, &errors);

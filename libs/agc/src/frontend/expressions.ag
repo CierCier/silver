@@ -15,6 +15,7 @@ import frontend.cfg;
 import frontend.lexer;
 import frontend.symbols;
 
+/// Coarse shape of a projected type.
 enum ProjectionTypeKind {
     Unknown;
     Primitive;
@@ -24,6 +25,7 @@ enum ProjectionTypeKind {
     Array;
 }
 
+/// Coarse shape of a projected launch argument expression.
 enum ProjectionExpressionKind {
     Unknown;
     Identifier;
@@ -32,6 +34,8 @@ enum ProjectionExpressionKind {
     Move;
 }
 
+/// A projected type: kind, base name (borrowed from the CST), up to two
+/// owned generic argument spellings, and Send-relevant flags.
 struct TypeProjection {
     ProjectionTypeKind kind;
     str name;
@@ -43,22 +47,26 @@ struct TypeProjection {
     bool contains_unknown;
 }
 
+/// One argument of a `launch` call: its expression shape, name, and span.
 struct LaunchArgument {
     ProjectionExpressionKind kind;
     str name;
     Span span;
 }
 
+/// Cursor over a range of leaf tokens for type projection.
 struct ProjectionTypeParser {
     Vec<SyntaxNode*>* leaves;
     i64 cursor;
     i64 end;
 }
 
+/// Returns true when the projection is unknown.
 bool projection_is_unknown(TypeProjection* projection) {
     return projection.kind == ProjectionTypeKind.Unknown;
 }
 
+/// Returns an unknown projection.
 TypeProjection projection_type_empty() {
     TypeProjection result;
     result.kind = ProjectionTypeKind.Unknown;
@@ -72,34 +80,43 @@ TypeProjection projection_type_empty() {
     return result;
 }
 
+/// Returns true when token `node` has exactly `text`.
 bool projection_token_text(SyntaxNode* node, str text) {
     return node != (SyntaxNode*)0 && strcmp(node.text, text) == 0;
 }
 
+/// Keywords that may precede a type without being part of it; `move` marks an
+/// ownership-taking parameter such as `move String value`.
 bool projection_is_qualifier(SyntaxNode* node) {
     return node != (SyntaxNode*)0 && node.kind == NodeKind.Token
         && (node.token_kind == TokenKind.Const
             || node.token_kind == TokenKind.Static
             || node.token_kind == TokenKind.Volatile
-            || node.token_kind == TokenKind.Mut);
+            || node.token_kind == TokenKind.Mut
+            || node.token_kind == TokenKind.Move);
 }
 
+/// Advances past leading type qualifiers.
 void projection_skip_qualifiers(ProjectionTypeParser* parser) {
     while (parser.cursor < parser.end && projection_is_qualifier(parser.leaves.get(parser.cursor))) {
         parser.cursor += 1;
     }
 }
 
+/// Returns true for a primitive type keyword or an identifier.
 bool projection_is_type_name(SyntaxNode* node) {
     return node != (SyntaxNode*)0 && node.kind == NodeKind.Token
         && (is_primitive_type_token(node.token_kind) || node.token_kind == TokenKind.Identifier);
 }
+/// Returns true for types that must never cross threads (`Rc`, `Handle`,
+/// `Guard`).
 bool projection_type_name_is_forbidden(str name) {
     return strcmp(name, "Rc") == 0
         || strcmp(name, "Handle") == 0
         || strcmp(name, "Guard") == 0;
 }
 
+/// Merges `source`'s Rc, non-Send, and unknown flags into `target`.
 void projection_merge_type_flags(TypeProjection* target, TypeProjection* source) {
     target.contains_rc = target.contains_rc || source.contains_rc
         || strcmp(source.name, "Rc") == 0;
@@ -110,6 +127,7 @@ void projection_merge_type_flags(TypeProjection* target, TypeProjection* source)
     target.contains_unknown = target.contains_unknown || source.contains_unknown;
 }
 
+/// Marks a projection as fully known and recomputes its non-Send flag.
 void projection_mark_type_known(TypeProjection* value) {
     value.contains_unknown = false;
     value.contains_non_send = projection_type_name_is_forbidden(value.name)
@@ -118,10 +136,10 @@ void projection_mark_type_known(TypeProjection* value) {
     value.contains_rc = strcmp(value.name, "Rc") == 0;
 }
 
-// Render a parsed projection back to source-equivalent text, preserving
-// nesting that borrowed token slices cannot hold (Item* inside Vec<...>,
-// Vec<u8> inside Vec<...>). Array extents are not tracked by the
-// projection, so arrays render name-only as before.
+/// Render a parsed projection back to source-equivalent text, preserving
+/// nesting that borrowed token slices cannot hold (Item* inside Vec<...>,
+/// Vec<u8> inside Vec<...>). Array extents are not tracked by the
+/// projection, so arrays render name-only as before.
 String projection_render_nested(TypeProjection* inner) {
     String rendered = String.from_str(inner.name);
     if (inner.argument0.len() > 0) {
@@ -147,6 +165,7 @@ String projection_render_nested(TypeProjection* inner) {
     return move rendered;
 }
 
+/// Parses one type at the cursor (qualifiers, base name, generics, `*`/`&`).
 TypeProjection projection_parse_type_at(ProjectionTypeParser* parser) {
     projection_skip_qualifiers(parser);
     if (parser.cursor >= parser.end) {
@@ -270,6 +289,7 @@ TypeProjection projection_parse_type_at(ProjectionTypeParser* parser) {
     return result;
 }
 
+/// Projects the type spelled by leaves `[start, end)`.
 TypeProjection projection_parse_type(Vec<SyntaxNode*>* leaves, i64 start, i64 end) {
     if (start >= end) {
         return projection_type_empty();
@@ -281,6 +301,7 @@ TypeProjection projection_parse_type(Vec<SyntaxNode*>* leaves, i64 start, i64 en
     return projection_parse_type_at(&parser);
 }
 
+/// Returns the span of leaves `[start, end)`.
 Span projection_range_span(Vec<SyntaxNode*>* leaves, i64 start, i64 end) {
     if (start >= end || end > leaves.len()) {
         return Span.synthetic();
@@ -288,6 +309,7 @@ Span projection_range_span(Vec<SyntaxNode*>* leaves, i64 start, i64 end) {
     return span_between(leaves.get(start).span, leaves.get(end - 1).span);
 }
 
+/// Returns true for a literal token.
 bool projection_is_literal(SyntaxNode* node) {
     if (node == (SyntaxNode*)0 || node.kind != NodeKind.Token) {
         return false;
@@ -300,6 +322,7 @@ bool projection_is_literal(SyntaxNode* node) {
         || node.token_kind == TokenKind.BoolLiteral;
 }
 
+/// Projects one argument expression from leaves `[start, end)`.
 LaunchArgument projection_argument(Vec<SyntaxNode*>* leaves, i64 start, i64 end) {
     LaunchArgument argument;
     argument.kind = ProjectionExpressionKind.Unknown;
@@ -339,6 +362,7 @@ LaunchArgument projection_argument(Vec<SyntaxNode*>* leaves, i64 start, i64 end)
     return argument;
 }
 
+/// Appends the projection of leaves `[start, end)` as an argument.
 void projection_add_argument(Vec<SyntaxNode*>* leaves, i64 start, i64 end, Vec<LaunchArgument>* arguments) {
     if (start >= end) {
         return;
@@ -347,6 +371,7 @@ void projection_add_argument(Vec<SyntaxNode*>* leaves, i64 start, i64 end, Vec<L
     arguments.push(move argument);
 }
 
+/// Projects the comma-separated arguments of a call group.
 void projection_collect_argument_group(SyntaxNode* group, CfgSet* cfg, Vec<LaunchArgument>* arguments) {
     SyntaxNode* child = group.first_child;
     while (child != (SyntaxNode*)0) {
@@ -364,6 +389,7 @@ void projection_collect_argument_group(SyntaxNode* group, CfgSet* cfg, Vec<Launc
     }
 }
 
+/// Returns a function item's body block, or null.
 SyntaxNode* projection_function_body(SyntaxNode* function) {
     SyntaxNode* child = function.first_child;
     while (child != (SyntaxNode*)0) {
@@ -375,6 +401,7 @@ SyntaxNode* projection_function_body(SyntaxNode* function) {
     return (SyntaxNode*)0;
 }
 
+/// Returns true when `node` is one of the cfg-live `leaves`.
 bool projection_live_leaf(Vec<SyntaxNode*>* leaves, SyntaxNode* node) {
     i64 i = 0;
     while (i < leaves.len()) {
@@ -386,6 +413,7 @@ bool projection_live_leaf(Vec<SyntaxNode*>* leaves, SyntaxNode* node) {
     return false;
 }
 
+/// Collects the arguments of every cfg-live `launch` call under `node`.
 void projection_walk_launches(SyntaxNode* node, CfgSet* cfg, Vec<SyntaxNode*>* live_leaves, Vec<LaunchArgument>* arguments) {
     if (node == (SyntaxNode*)0) {
         return;
@@ -410,6 +438,7 @@ void projection_walk_launches(SyntaxNode* node, CfgSet* cfg, Vec<SyntaxNode*>* l
     }
 }
 
+/// Collects the arguments of every `launch` call in `function`.
 void project_function_launch_arguments(SyntaxNode* function, CfgSet* cfg, Vec<LaunchArgument>* arguments) {
     SyntaxNode* body = projection_function_body(function);
     if (body == (SyntaxNode*)0) {

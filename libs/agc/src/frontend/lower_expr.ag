@@ -12,6 +12,7 @@ import frontend.symbols;
 import frontend.types;
 import frontend.messages;
 
+/// Returns true when the tokens `[start, end)` of a match head contain `?`.
 bool match_head_has_question(SyntaxNode* start, SyntaxNode* end) {
     SyntaxNode* cursor = start;
     while (cursor != (SyntaxNode*)0 && cursor != end) {
@@ -23,6 +24,8 @@ bool match_head_has_question(SyntaxNode* start, SyntaxNode* end) {
     return false;
 }
 
+/// Returns the default type of an integer literal: the smallest of i32, i64,
+/// i128 that holds it, else u128 (also used for malformed or overflowing text).
 u32 int_literal_type(str text) {
     if (text == (str)0) { return TYPE_I32; }
     i64 len = strlen(text);
@@ -68,6 +71,7 @@ u32 int_literal_type(str text) {
     return TYPE_U128;
 }
 
+/// Returns the first item of `kind` named `name` from source file `file_id`.
 SyntaxNode* lower_find_item_in_file(SyntaxNode* root, NodeKind kind, str name,
                                    i64 file_id) {
     if (root == (SyntaxNode*)0) { return (SyntaxNode*)0; }
@@ -84,6 +88,8 @@ SyntaxNode* lower_find_item_in_file(SyntaxNode* root, NodeKind kind, str name,
     return (SyntaxNode*)0;
 }
 
+/// Returns the `>` that closes a call's generic argument list at `less`, or
+/// null when `less` does not start one.
 SyntaxNode* lower_find_generic_call_close(SyntaxNode* less) {
     if (less == (SyntaxNode*)0 || less.kind != NodeKind.Token
         || less.token_kind != TokenKind.Less) {
@@ -125,6 +131,9 @@ SyntaxNode* lower_find_generic_call_close(SyntaxNode* less) {
     return (SyntaxNode*)0;
 }
 
+/// Lowering state: the output pool, the type table and name interner, the
+/// program root for item lookups, and macro expansion diagnostics.
+/// `unsupported` is set when a construct cannot be lowered.
 struct ExprLowerer {
     AstPool* pool;
     TypeTable* types;
@@ -138,11 +147,14 @@ struct ExprLowerer {
     Span macro_error_span;
 }
 
+/// One macro call argument as a range of sibling nodes.
 struct LowerMacroArgument {
     SyntaxNode* start;
     SyntaxNode* end;
 }
 
+/// Binds a macro parameter name to its call arguments (or a type argument
+/// to its replacement spelling).
 struct LowerMacroBinding {
     str name;
     u32 arguments_start;
@@ -153,6 +165,7 @@ struct LowerMacroBinding {
     str type_replacement;
 }
 
+/// Appends the source text of siblings `[start, end)`.
 void lower_append_syntax_source_range(String* output, SyntaxNode* start, SyntaxNode* end) {
     SyntaxNode* cursor = start;
     while (cursor != end && cursor != (SyntaxNode*)0) {
@@ -174,6 +187,7 @@ void lower_append_syntax_source_range(String* output, SyntaxNode* start, SyntaxN
     }
 }
 
+/// Appends the decimal text of a variadic argument count.
 void lower_append_macro_count(String* output, i64 count) {
     if (count == 0) {
         output.push((u8)'0');
@@ -192,6 +206,7 @@ void lower_append_macro_count(String* output, i64 count) {
     digits.drop();
 }
 
+/// Reads the constant index in `bracket` (`args[2]`) into `*value_out`.
 bool lower_macro_index_value(SyntaxNode* bracket, i64* value_out) {
     if (bracket == (SyntaxNode*)0 || bracket.kind != NodeKind.Bracket) { return false; }
     SyntaxNode* literal = bracket.first_child;
@@ -220,6 +235,8 @@ bool lower_macro_index_value(SyntaxNode* bracket, i64* value_out) {
     return true;
 }
 
+/// Appends a macro body range with parameters replaced by argument source
+/// text. Each use repeats the argument text, so its side effects repeat.
 void lower_append_macro_source_range(String* output, SyntaxNode* start, SyntaxNode* end,
                                     Vec<LowerMacroBinding>* bindings,
                                     Vec<LowerMacroArgument>* arguments,
@@ -371,6 +388,7 @@ void lower_append_macro_source_range(String* output, SyntaxNode* start, SyntaxNo
     }
 }
 
+/// Returns the user macro named `name`, or null.
 SyntaxNode* lower_find_user_macro(SyntaxNode* root, str name) {
     if (root == (SyntaxNode*)0) { return (SyntaxNode*)0; }
     SyntaxNode* item = root.first_child;
@@ -391,6 +409,7 @@ SyntaxNode* lower_find_user_macro(SyntaxNode* root, str name) {
     return (SyntaxNode*)0;
 }
 
+/// Splits a macro call's argument list into comma-separated ranges.
 bool lower_collect_macro_arguments(SyntaxNode* list, Vec<LowerMacroArgument>* arguments) {
     if (list == (SyntaxNode*)0 || list.kind != NodeKind.Parenthesized) { return false; }
     SyntaxNode* start = list.first_child;
@@ -415,6 +434,7 @@ bool lower_collect_macro_arguments(SyntaxNode* list, Vec<LowerMacroArgument>* ar
     return true;
 }
 
+/// Returns a macro definition's parameter list, or null.
 SyntaxNode* lower_macro_parameter_list(SyntaxNode* definition) {
     SyntaxNode* child = definition.first_child;
     while (child != (SyntaxNode*)0 && child.kind != NodeKind.Parenthesized) {
@@ -423,6 +443,7 @@ SyntaxNode* lower_macro_parameter_list(SyntaxNode* definition) {
     return child;
 }
 
+/// Returns a macro definition's body block, or null.
 SyntaxNode* lower_macro_body(SyntaxNode* definition) {
     SyntaxNode* child = definition.first_child;
     while (child != (SyntaxNode*)0 && child.kind != NodeKind.Block) {
@@ -431,6 +452,7 @@ SyntaxNode* lower_macro_body(SyntaxNode* definition) {
     return child;
 }
 
+/// Returns the expression of a macro body's sole `return`, or null.
 SyntaxNode* lower_macro_return_expression_in_block(SyntaxNode* body,
                                                     SyntaxNode** end_out) {
     *end_out = (SyntaxNode*)0;
@@ -460,10 +482,13 @@ SyntaxNode* lower_macro_return_expression_in_block(SyntaxNode* body,
     return (SyntaxNode*)0;
 }
 
+/// Returns the expression of a macro definition's `return`, or null.
 SyntaxNode* lower_macro_return_expression(SyntaxNode* definition, SyntaxNode** end_out) {
     return lower_macro_return_expression_in_block(lower_macro_body(definition), end_out);
 }
 
+/// Matches an `if (...) { return a; } else { return b; }` macro body and
+/// returns its parts.
 bool lower_macro_if_return_parts(SyntaxNode* body, SyntaxNode** condition_start,
                                  SyntaxNode** then_expression, SyntaxNode** then_end,
                                  SyntaxNode** else_expression, SyntaxNode** else_end) {
@@ -499,6 +524,7 @@ bool lower_macro_if_return_parts(SyntaxNode* body, SyntaxNode** condition_start,
     return *condition_start != (SyntaxNode*)0;
 }
 
+/// Appends a ternary for an if/else-return macro body after substitution.
 void lower_append_macro_if_return_expression(String* output, SyntaxNode* condition_start,
                                              SyntaxNode* then_expression,
                                              SyntaxNode* then_end,
@@ -523,6 +549,7 @@ void lower_append_macro_if_return_expression(String* output, SyntaxNode* conditi
     output.push((u8)')');
 }
 
+/// Binds a macro's parameters to call arguments, reporting arity errors.
 bool lower_collect_macro_bindings(SyntaxNode* definition, SyntaxNode* call_args,
                                  Vec<LowerMacroBinding>* bindings,
                                  Vec<LowerMacroArgument>* arguments,
@@ -591,6 +618,7 @@ bool lower_collect_macro_bindings(SyntaxNode* definition, SyntaxNode* call_args,
     return supported;
 }
 
+/// Returns a macro definition's generic parameter list, or null.
 SyntaxNode* lower_macro_generic_parameter_list(SyntaxNode* definition) {
     SyntaxNode* child = definition.first_child;
     while (child != (SyntaxNode*)0 && child.kind != NodeKind.Parenthesized) {
@@ -600,6 +628,7 @@ SyntaxNode* lower_macro_generic_parameter_list(SyntaxNode* definition) {
     return (SyntaxNode*)0;
 }
 
+/// Adds bindings for a macro's generic type parameters.
 bool lower_collect_macro_type_bindings(SyntaxNode* definition,
                                        Vec<LowerMacroBinding>* bindings) {
     SyntaxNode* parameters = lower_macro_generic_parameter_list(definition);
@@ -622,6 +651,7 @@ bool lower_collect_macro_type_bindings(SyntaxNode* definition,
     return true;
 }
 
+/// Returns a macro's declared return type id, or `TYPE_UNKNOWN`.
 u32 lower_macro_return_type(ExprLowerer* self, SyntaxNode* definition) {
     SyntaxNode* parameter_list = lower_macro_parameter_list(definition);
     if (parameter_list == (SyntaxNode*)0) { return TYPE_UNKNOWN; }
@@ -650,6 +680,8 @@ u32 lower_macro_return_type(ExprLowerer* self, SyntaxNode* definition) {
     return type_id;
 }
 
+/// Binds macro type parameters by matching a parameter pattern type with
+/// an argument type.
 bool lower_bind_macro_expected_type(TypeTable* types, u32 pattern_id,
                                     u32 actual_id,
                                     Vec<LowerMacroBinding>* bindings) {
@@ -703,6 +735,7 @@ bool lower_bind_macro_expected_type(TypeTable* types, u32 pattern_id,
     return pattern_id == actual_id;
 }
 
+/// Returns the type of a literal macro argument, or `TYPE_UNKNOWN`.
 u32 lower_macro_argument_type(SyntaxNode* start, SyntaxNode* end) {
     if (start == (SyntaxNode*)0 || start == end) { return TYPE_UNKNOWN; }
     if (start.kind == NodeKind.Parenthesized && start.next_sibling == end) {
@@ -723,6 +756,7 @@ u32 lower_macro_argument_type(SyntaxNode* start, SyntaxNode* end) {
     return TYPE_UNKNOWN;
 }
 
+/// Infers a macro's type arguments from its value arguments.
 void lower_infer_macro_type_arguments(ExprLowerer* self, SyntaxNode* definition,
                                       Vec<LowerMacroBinding>* bindings,
                                       Vec<LowerMacroArgument>* arguments) {
@@ -785,6 +819,7 @@ void lower_infer_macro_type_arguments(ExprLowerer* self, SyntaxNode* definition,
     }
 }
 
+/// Binds explicit `<...>` type arguments of a macro call.
 bool lower_bind_macro_type_arguments(ExprLowerer* self, SyntaxNode* definition,
                                      SyntaxNode* less, SyntaxNode* greater,
                                      Vec<LowerMacroBinding>* bindings,
@@ -885,6 +920,7 @@ bool lower_bind_macro_type_arguments(ExprLowerer* self, SyntaxNode* definition,
     return true;
 }
 
+/// Returns true when siblings `[start, end)` contain `return`.
 bool lower_syntax_range_has_return(SyntaxNode* start, SyntaxNode* end) {
     SyntaxNode* cursor = start;
     while (cursor != end && cursor != (SyntaxNode*)0) {
@@ -900,6 +936,7 @@ bool lower_syntax_range_has_return(SyntaxNode* start, SyntaxNode* end) {
     return false;
 }
 
+/// Returns the expression of a macro body's final `return`, or null.
 bool lower_macro_final_return_parts(SyntaxNode* body, SyntaxNode** expression,
                                    SyntaxNode** expression_end) {
     *expression = (SyntaxNode*)0;
@@ -936,6 +973,7 @@ bool lower_macro_final_return_parts(SyntaxNode* body, SyntaxNode** expression,
 }
 
 impl ExprLowerer {
+    /// Creates a lowerer that writes into `pool`.
     ExprLowerer new(AstPool* pool, TypeTable* types, Interner* names) {
         ExprLowerer lowerer;
         lowerer.pool = pool;
@@ -951,6 +989,8 @@ impl ExprLowerer {
         return move lowerer;
     }
 
+    /// Lexes, parses, and lowers expanded macro source as an expression. Returns
+    /// 0 and records a macro error when it does not parse.
     u32 lower_macro_expansion_source(ExprLowerer* self, String expanded_source,
                                      bool has_block_expression) {
         TokenStream expanded_tokens = TokenStream.new();
@@ -1024,6 +1064,7 @@ impl ExprLowerer {
         return result;
     }
 
+    /// Lowers `@json(value)` or `@from_json<T>(text)`.
     u32 lower_json_macro_expression(ExprLowerer* self, SyntaxNode* name_node,
                                     SyntaxNode** next_out) {
         *next_out = (SyntaxNode*)0;
@@ -1093,6 +1134,7 @@ impl ExprLowerer {
         return self.lower_macro_expansion_source(move expanded_source, true);
     }
 
+    /// Expands a user expression macro call and lowers the result.
     u32 lower_user_macro_expression(ExprLowerer* self, SyntaxNode* name_node,
                                    SyntaxNode** next_out) {
         *next_out = (SyntaxNode*)0;
@@ -1205,6 +1247,8 @@ impl ExprLowerer {
                                                  has_block_expression);
     }
 
+    /// Expands a user statement macro call into `stmt_ids`. Returns false when
+    /// the call is not a statement macro.
     bool lower_user_macro_statement(ExprLowerer* self, SyntaxNode* name_node,
                                     Vec<u32>* stmt_ids, SyntaxNode** next_out) {
         *next_out = (SyntaxNode*)0;
@@ -1314,6 +1358,7 @@ impl ExprLowerer {
         return true;
     }
 
+    /// Lowers a primary expression (literal, name, or group).
     u32 lower_primary(ExprLowerer* self, SyntaxNode* node) {
         if (node == (SyntaxNode*)0) {
             return 0;
@@ -1365,6 +1410,7 @@ impl ExprLowerer {
         return 0;
     }
 
+    /// Lowers one match arm pattern and returns its literal or binding info.
     u32 lower_match_arm_pattern(ExprLowerer* self, SyntaxNode* start, SyntaxNode* end,
                                 MatchPatternKind* kind_out, u32* variant_out,
                                 u32* bindings_start_out, u32* bindings_count_out,
@@ -1484,6 +1530,7 @@ impl ExprLowerer {
         return 0;
     }
 
+    /// Lowers a `match` expression starting at `match_token`.
     u32 lower_match(ExprLowerer* self, SyntaxNode* match_token, SyntaxNode** next_out) {
         *next_out = (SyntaxNode*)0;
         SyntaxNode* block = match_token.next_sibling;
@@ -1655,6 +1702,7 @@ impl ExprLowerer {
         return self.pool.add_match(scrutinee, arms_start, arms_count, match_token.span);
     }
 
+    /// Lowers an `asm("code", [args], [clobbers])` expression.
     u32 lower_asm(ExprLowerer* self, SyntaxNode* node, SyntaxNode** next_out) {
         SyntaxNode* paren = node.next_sibling;
         if (paren == (SyntaxNode*)0 || paren.kind != NodeKind.Parenthesized) {
@@ -1793,6 +1841,8 @@ impl ExprLowerer {
         return self.pool.add_asm(code_id, constraints_id, args_start, args_count, node.span);
     }
 
+    /// Returns true when `next` cannot start a cast's operand, so `(T)` is a
+    /// parenthesized expression instead.
     bool cannot_be_cast_operand(ExprLowerer* self, SyntaxNode* next) {
         if (next == (SyntaxNode*)0) { return true; }
         if (next.kind == NodeKind.Block || next.kind == NodeKind.Bracket) {
@@ -1816,6 +1866,7 @@ impl ExprLowerer {
         return false;
     }
 
+    /// Returns true for a resolved, known type id.
     bool is_valid_type(ExprLowerer* self, u32 type_id) {
         if (type_id == TYPE_UNKNOWN || type_id == 0) { return false; }
         if (type_id <= TYPE_PRIMITIVE_MAX) { return true; }
@@ -1861,6 +1912,7 @@ impl ExprLowerer {
         return false;
     }
 
+    /// Parses `(T)` as a cast target type; false when it is not one.
     bool try_parse_cast_type(ExprLowerer* self, SyntaxNode* paren_node, u32* type_id_out) {
         if (paren_node == (SyntaxNode*)0 || paren_node.kind != NodeKind.Parenthesized) {
             return false;
@@ -1934,6 +1986,7 @@ impl ExprLowerer {
         return true;
     }
 
+    /// Lowers the `{}` arguments of a format string into a format expression.
     u32 lower_format_values(ExprLowerer* self, SyntaxNode* format_node,
                             SyntaxNode* first_arg, Span span) {
         if (format_node == (SyntaxNode*)0 || format_node.kind != NodeKind.Token
@@ -2000,6 +2053,7 @@ impl ExprLowerer {
         return self.pool.add_format(format_id, args_start, (u32)placeholders, span);
     }
 
+    /// Lowers `@format`, `@print`, `@println`, `@eprint`, or `@eprintln`.
     u32 lower_format(ExprLowerer* self, SyntaxNode* name_node, SyntaxNode** next_out) {
         SyntaxNode* paren = name_node.next_sibling;
         *next_out = (SyntaxNode*)0;
@@ -2018,6 +2072,7 @@ impl ExprLowerer {
         return format_id;
     }
 
+    /// Appends a newline to a lowered format string (for the `*ln` forms).
     void lower_format_append_newline(ExprLowerer* self, u32 format_id) {
         AstExpr* format_expr = self.pool.get_expr(format_id);
         str raw_format = self.names.get(format_expr.inner0);
@@ -2039,6 +2094,7 @@ impl ExprLowerer {
         newline_format.drop();
     }
 
+    /// Lowers `@fprint(writer, format, ...)`.
     u32 lower_fprint(ExprLowerer* self, SyntaxNode* name_node, SyntaxNode** next_out) {
         SyntaxNode* paren = name_node.next_sibling;
         *next_out = (SyntaxNode*)0;
@@ -2065,6 +2121,7 @@ impl ExprLowerer {
         return self.pool.add_fprint(writer_id, format_id, name_node.span);
     }
 
+    /// Lowers `@memcpy`, `@memmove`, or `@memset`.
     u32 lower_memory_builtin(ExprLowerer* self, SyntaxNode* name_node,
                              SyntaxNode** next_out) {
         SyntaxNode* paren = name_node.next_sibling;
@@ -2115,6 +2172,7 @@ impl ExprLowerer {
         return self.pool.add_memory_builtin(kind, args_start, name_node.span);
     }
 
+    /// Lowers `@assert(cond, msg)`; disabled outside debug builds.
     u32 lower_assert(ExprLowerer* self, SyntaxNode* at_node, SyntaxNode* name_node,
                      SyntaxNode** next_out) {
         SyntaxNode* paren = name_node.next_sibling;
@@ -2151,6 +2209,7 @@ impl ExprLowerer {
         return self.pool.add_assert(condition_id, message_id, self.debug_mode, at_node.span);
     }
 
+    /// Returns the declared type of `struct_name.field_name`.
     u32 struct_field_type(ExprLowerer* self, str struct_name,
                           str field_name) {
         if (struct_name == (str)0) { return TYPE_UNKNOWN; }
@@ -2177,6 +2236,7 @@ impl ExprLowerer {
         return struct_field_type_id(self.types, item, field_name);
     }
 
+    /// Lowers a `{ .field = value, ... }` struct literal of `struct_name`.
     u32 lower_struct_lit(ExprLowerer* self, str struct_name, SyntaxNode* block) {
         // Lower `{ .field = value, ... }` designators into name/expr pairs.
         // Caller verified the struct exists. Malformed entries fail closed.
@@ -2240,6 +2300,7 @@ impl ExprLowerer {
         return self.pool.add_struct_lit(name_id, fields_start, field_count, block.span);
     }
 
+    /// Lowers a `{ a, b, ... }` array initializer.
     u32 lower_array_initializer(ExprLowerer* self, SyntaxNode* initializer) {
         Vec<u32> elements = Vec<u32>.new();
         SyntaxNode* element = initializer.first_child;
@@ -2276,6 +2337,7 @@ impl ExprLowerer {
         return self.pool.add_array_lit(elements_start, element_count, initializer.span);
     }
 
+    /// Returns true for a generic free function (including `alloc`/`realloc`).
     bool lower_is_generic_function(ExprLowerer* self, str name) {
         if (name != (str)0 && (strcmp(name, "alloc") == 0 || strcmp(name, "realloc") == 0)) {
             return true;
@@ -2300,6 +2362,7 @@ impl ExprLowerer {
         return false;
     }
 
+    /// Lowers a postfix chain: calls, method calls, fields, indexing, slicing.
     u32 lower_postfix(ExprLowerer* self, SyntaxNode* node, SyntaxNode** next_out) {
         if (node == (SyntaxNode*)0) {
             *next_out = (SyntaxNode*)0;
@@ -2993,6 +3056,8 @@ impl ExprLowerer {
         return expr;
     }
 
+    /// Returns the precedence of a binary operator token (higher binds tighter;
+    /// 0 for non-operators).
     i32 binary_op_precedence(ExprLowerer* self, TokenKind kind) {
         if (kind == TokenKind.Or) { return 1; }
         if (kind == TokenKind.And) { return 2; }
@@ -3008,6 +3073,8 @@ impl ExprLowerer {
         return 0;
     }
 
+    /// Lowers a binary expression by precedence climbing; sets `*next_out` to
+    /// the node after it.
     u32 lower_expr_prec(ExprLowerer* self, SyntaxNode* start, SyntaxNode* end, i32 min_prec, SyntaxNode** next_out) {
         if (start == (SyntaxNode*)0 || start == end) {
             *next_out = start;
@@ -3050,6 +3117,7 @@ impl ExprLowerer {
         return lhs;
     }
 
+    /// Lowers siblings `[start, end)` as one expression.
     u32 lower_sequence(ExprLowerer* self, SyntaxNode* start, SyntaxNode* end) {
         SyntaxNode* next = (SyntaxNode*)0;
         u32 result = self.lower_expr_prec(start, end, 1, &next);
@@ -3084,6 +3152,7 @@ impl ExprLowerer {
         return result;
     }
 
+    /// Lowers one expression up to the next top-level `,`.
     u32 lower_sequence_until_comma(ExprLowerer* self, SyntaxNode* start, SyntaxNode** next_out) {
         SyntaxNode* cursor = start;
         i64 generic_depth = 0;
@@ -3110,6 +3179,7 @@ impl ExprLowerer {
         return self.lower_sequence(start, cursor);
     }
 
+    /// Returns true for a binary operator token.
     bool is_binary_op(ExprLowerer* self, TokenKind kind) {
         return kind == TokenKind.Plus || kind == TokenKind.Minus
             || kind == TokenKind.Star || kind == TokenKind.Slash || kind == TokenKind.Percent
@@ -3122,6 +3192,7 @@ impl ExprLowerer {
             || kind == TokenKind.BitwiseXor;
     }
 
+    /// Returns true when `[start, limit)` begins with a local declaration.
     bool is_decl_lhs(ExprLowerer* self, SyntaxNode* start, SyntaxNode* limit) {
         if (start == (SyntaxNode*)0 || start == limit) { return false; }
         if (start.kind == NodeKind.Token && start.token_kind == TokenKind.Let) {
@@ -3189,6 +3260,7 @@ impl ExprLowerer {
             || (has_pointer_or_ref && has_primitive_type && ident_count >= 1));
     }
 
+    /// Returns the declared variable name node, or null.
     SyntaxNode* find_decl_var_node(ExprLowerer* self, SyntaxNode* start, SyntaxNode* limit) {
         SyntaxNode* cursor = start;
         SyntaxNode* last_ident = (SyntaxNode*)0;
@@ -3201,6 +3273,7 @@ impl ExprLowerer {
         return last_ident;
     }
 
+    /// Returns true when a declaration is `static`.
     bool declaration_is_static(ExprLowerer* self, SyntaxNode* start, SyntaxNode* variable) {
         SyntaxNode* cursor = start;
         while (cursor != variable && cursor != (SyntaxNode*)0) {
@@ -3212,6 +3285,7 @@ impl ExprLowerer {
         return false;
     }
 
+    /// Returns true for `=` or a compound assignment token.
     bool lower_is_assign_op(ExprLowerer* self, TokenKind kind) {
         return kind == TokenKind.Assign || kind == TokenKind.PlusAssign
             || kind == TokenKind.MinusAssign || kind == TokenKind.StarAssign
@@ -3221,6 +3295,7 @@ impl ExprLowerer {
             || kind == TokenKind.RightShiftAssign;
     }
 
+    /// Returns the binary operator of a compound assignment (`+=` gives `+`).
     TokenKind lower_compound_base_op(ExprLowerer* self, TokenKind kind) {
         if (kind == TokenKind.PlusAssign) { return TokenKind.Plus; }
         if (kind == TokenKind.MinusAssign) { return TokenKind.Minus; }
@@ -3235,6 +3310,7 @@ impl ExprLowerer {
         return TokenKind.Assign;
     }
 
+    /// Lowers one statement from siblings `[start, end)` into `stmt_ids`.
     void lower_statement(ExprLowerer* self, SyntaxNode* start, SyntaxNode* end, Vec<u32>* stmt_ids) {
         if (start == (SyntaxNode*)0 || start == end) { return; }
 
@@ -3461,6 +3537,7 @@ impl ExprLowerer {
         }
     }
 
+    /// Lowers a block into a block statement.
     u32 lower_block_stmt(ExprLowerer* self, SyntaxNode* block) {
         if (block == (SyntaxNode*)0) { return 0; }
         Vec<u32> inner_stmts = Vec<u32>.new();
@@ -3476,6 +3553,7 @@ impl ExprLowerer {
         return self.pool.add_stmt_block(start, count, block.span);
     }
 
+    /// Wraps lowered statements in a block statement.
     u32 lower_stmt_list_block(ExprLowerer* self, Vec<u32>* inner_stmts, Span span) {
         u32 start = (u32)self.pool.block_stmts.len();
         i64 i = 0;
@@ -3487,6 +3565,7 @@ impl ExprLowerer {
         return self.pool.add_stmt_block(start, count, span);
     }
 
+    /// Returns the element type spelling of a `for x in expr` loop variable.
     str for_in_local_variable_type(ExprLowerer* self, SyntaxNode* for_node,
                                    u32 iterable_expr_id) {
         AstExpr* iterable = self.pool.get_expr(iterable_expr_id);
@@ -3546,6 +3625,7 @@ impl ExprLowerer {
         return result;
     }
 
+    /// Returns true when a local iterator's `next` returns `Optional<Struct>`.
     bool local_iterator_returns_struct_optional(ExprLowerer* self,
                                                 str iterator_type_name) {
         if (strlen(iterator_type_name) == 0 || self.unit_root == (SyntaxNode*)0) {
@@ -3606,6 +3686,7 @@ impl ExprLowerer {
         return false;
     }
 
+    /// Lowers `for x in iterable` into a loop over `next()` or indexing.
     u32 lower_for_in_stmt(ExprLowerer* self, SyntaxNode* for_node,
                           SyntaxNode** next_cursor_out) {
         SyntaxNode* binding = for_node.next_sibling;
@@ -3744,6 +3825,7 @@ impl ExprLowerer {
         return lowered;
     }
 
+    /// Returns the node after an `if`/`else if`/`else` chain.
     SyntaxNode* skip_if_chain(ExprLowerer* self, SyntaxNode* if_node) {
         SyntaxNode* cond = if_node.next_sibling;
         if (cond == (SyntaxNode*)0) { return (SyntaxNode*)0; }
@@ -3763,6 +3845,7 @@ impl ExprLowerer {
         return after;
     }
 
+    /// Lowers an `if` statement chain.
     u32 lower_if_stmt(ExprLowerer* self, SyntaxNode* if_token, SyntaxNode** next_cursor_out) {
         SyntaxNode* cond_node = if_token.next_sibling;
         if (cond_node == (SyntaxNode*)0 || cond_node.kind != NodeKind.Parenthesized) {
@@ -3832,6 +3915,7 @@ impl ExprLowerer {
         return self.pool.add_stmt_if(cond_id, then_stmt, else_stmt, span);
     }
 
+    /// Lowers the statements in `[cursor, end)`.
     void lower_block_range(ExprLowerer* self, SyntaxNode* cursor, SyntaxNode* end,
                            Vec<u32>* stmt_ids) {
         while (cursor != end && cursor != (SyntaxNode*)0) {
@@ -3997,6 +4081,7 @@ impl ExprLowerer {
         }
     }
 
+    /// Lowers a block's statements into `stmt_ids`.
     void lower_block(ExprLowerer* self, SyntaxNode* block, Vec<u32>* stmt_ids) {
         if (block != (SyntaxNode*)0) {
             self.lower_block_range(block.first_child, (SyntaxNode*)0, stmt_ids);
@@ -4007,6 +4092,7 @@ impl ExprLowerer {
 // Returns the lone operand of a block's final `operand;` statement, or null
 // when the block ends differently. Only bare identifiers and literals
 // qualify, so call statements keep their statement semantics.
+/// Returns the final expression of a block that ends with `expr;`, or null.
 SyntaxNode* block_trailing_operand(SyntaxNode* block) {
     SyntaxNode* previous = (SyntaxNode*)0;
     SyntaxNode* cursor = block.first_child;
@@ -4035,6 +4121,7 @@ SyntaxNode* block_trailing_operand(SyntaxNode* block) {
     return (SyntaxNode*)0;
 }
 
+/// Returns a function item's body block, or null.
 SyntaxNode* find_function_body(SyntaxNode* function_item) {
     if (function_item == (SyntaxNode*)0) { return (SyntaxNode*)0; }
     SyntaxNode* child = function_item.first_child;

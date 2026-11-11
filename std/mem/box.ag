@@ -8,6 +8,8 @@
 import std.mem;
 import std.mem.drop;
 
+/// An owning pointer to one heap-allocated `T`.
+/// Dropping the box drops the value and frees its allocation.
 struct Box<T> {
     T* ptr;
 }

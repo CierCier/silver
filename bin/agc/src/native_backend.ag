@@ -28,10 +28,13 @@ import backend.llvm.optimization;
 #[link(c)]
 #[link(pthread)]
 extern "C" {
+    /// libc `pthread_create`: starts a thread running `start_routine(argument)`.
     i32 pthread_create(i64* thread, i8* attributes, i64 start_routine, i64 argument);
+    /// libc `pthread_join`: waits for a thread.
     i32 pthread_join(i64 thread, i64* result);
 }
 
+/// Build progress reporting state (step counts, cache hits, timers).
 struct NativeBuildProgress {
     bool enabled;
     bool terminal;
@@ -48,6 +51,7 @@ struct NativeBuildProgress {
     Instant unit_started;
 }
 
+/// Returns progress state for this command; disabled by quiet output.
 NativeBuildProgress native_build_progress(CliMatches* cli, bool has_link_step) {
     NativeBuildProgress progress;
     progress.enabled = !cli.has("no-progress")
@@ -67,6 +71,7 @@ NativeBuildProgress native_build_progress(CliMatches* cli, bool has_link_step) {
     return progress;
 }
 
+/// Writes the `[step/total]` prefix of a progress line.
 void native_progress_prefix(NativeBuildProgress* progress, i64 step) {
     i64 percent = progress.total_steps > 0 ? (step * 100) / progress.total_steps : 100;
     STDERR.write_str("[");
@@ -81,6 +86,7 @@ void native_progress_prefix(NativeBuildProgress* progress, i64 step) {
     STDERR.write_str("% ");
 }
 
+/// Writes a duration in ms or seconds.
 void native_progress_write_duration(i64 elapsed_ms) {
     if (elapsed_ms >= 1000) {
         STDERR.write_i64(elapsed_ms / 1000);
@@ -93,6 +99,7 @@ void native_progress_write_duration(i64 elapsed_ms) {
     }
 }
 
+/// Reports that compiling `target` started.
 void native_progress_start(NativeBuildProgress* progress, str target) {
     if (!progress.enabled) { return; }
     if (progress.terminal && !progress.verbose) {
@@ -121,6 +128,7 @@ void native_progress_start(NativeBuildProgress* progress, str target) {
     }
 }
 
+/// Reports that compiling `target` finished or came from the cache.
 void native_progress_finish_compile(NativeBuildProgress* progress, str target,
                                     bool cached, i64 elapsed_ms) {
     if (!progress.enabled) { return; }
@@ -147,6 +155,7 @@ void native_progress_finish_compile(NativeBuildProgress* progress, str target,
     STDERR.flush();
 }
 
+/// Reports the link step for `target`.
 void native_progress_link(NativeBuildProgress* progress, str target) {
     if (!progress.enabled) { return; }
     progress.completed_steps += 1;
@@ -158,6 +167,7 @@ void native_progress_link(NativeBuildProgress* progress, str target) {
     STDERR.flush();
 }
 
+/// Reports the build summary.
 void native_progress_complete(NativeBuildProgress* progress) {
     if (!progress.enabled) { return; }
     if (progress.active_line) {
@@ -181,6 +191,7 @@ void native_progress_complete(NativeBuildProgress* progress) {
     STDERR.flush();
 }
 
+/// Ends an in-place terminal progress line with a newline.
 void native_progress_end_active_line(NativeBuildProgress* progress) {
     if (!progress.active_line) { return; }
     STDERR.write_str("\n");
@@ -194,12 +205,14 @@ impl Drop for NativeBuildProgress {
     }
 }
 
+/// Returns true for item kinds that produce code.
 bool native_codegen_item(NodeKind kind) {
     return kind == NodeKind.Function || kind == NodeKind.Struct
         || kind == NodeKind.Enum || kind == NodeKind.Trait
         || kind == NodeKind.Global || kind == NodeKind.TypeAlias;
 }
 
+/// Returns the number of methods in an impl item.
 i64 native_impl_method_count(SyntaxNode* item) {
     SyntaxNode* block = item.first_child;
     while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
@@ -232,6 +245,7 @@ i64 native_impl_method_count(SyntaxNode* item) {
     return count;
 }
 
+/// Returns the number of code-producing items in the tree.
 i64 native_codegen_item_count(SyntaxNode* root) {
     i64 count = 0;
     SyntaxNode* item = root.first_child;
@@ -246,6 +260,7 @@ i64 native_codegen_item_count(SyntaxNode* root) {
     return count;
 }
 
+/// Returns the number of code-producing items from source file `file_id`.
 i64 native_codegen_item_count_for_file(SyntaxNode* root, u32 file_id) {
     i64 count = 0;
     SyntaxNode* item = root.first_child;
@@ -260,6 +275,7 @@ i64 native_codegen_item_count_for_file(SyntaxNode* root, u32 file_id) {
     return count;
 }
 
+/// Returns the number of code-producing items from `source_file_ids`.
 i64 native_codegen_item_count_for_sources(SyntaxNode* root, Vec<u32>* source_file_ids) {
     i64 count = 0;
     SyntaxNode* item = root.first_child;
@@ -276,10 +292,13 @@ i64 native_codegen_item_count_for_sources(SyntaxNode* root, Vec<u32>* source_fil
     return count;
 }
 
+/// Returns true for an existing file the process may execute.
 bool native_is_executable(str path) {
     return is_file(path) && sys_access((i64)path, 1) == 0;
 }
 
+/// Resolves a tool: the `environment_name` variable when set, else `*tool`
+/// itself when executable, else the first match on `PATH`.
 void native_set_tool(String* tool, str environment_name) {
     Optional<String> configured = var(environment_name);
     if (configured.is_some()) {
@@ -318,6 +337,8 @@ void native_set_tool(String* tool, str environment_name) {
     }
 }
 
+/// Asks the C compiler (`SILVER_STAGE1_CC`, default `cc`) for the path of
+/// `ld-linux-x86-64.so.2`. Forks a child process. Returns false when unknown.
 bool native_discover_dynamic_linker(String* output) {
     String compiler = String.from_str("cc");
     native_set_tool(&compiler, "SILVER_STAGE1_CC");
@@ -377,6 +398,7 @@ bool native_discover_dynamic_linker(String* output) {
     return output.starts_with("/") && native_is_executable(output.to_str());
 }
 
+/// Writes the input source path from the command line.
 bool native_source_path(CliMatches* cli, String* source) {
     Optional<String> positional = cli.positional(0);
     if (positional.is_none()) { return false; }
@@ -386,6 +408,7 @@ bool native_source_path(CliMatches* cli, String* source) {
     return true;
 }
 
+/// Writes the output path: `-o`/`--output`, else `default_name`.
 bool native_output_path(Vec<String>* arguments, str default_name, String* output) {
     for (i64 i = 1; i < arguments.len(); i += 1) {
         String* argument = arguments.get_ptr(i);
@@ -413,6 +436,7 @@ bool native_output_path(Vec<String>* arguments, str default_name, String* output
     return true;
 }
 
+/// Appends `path` and its length-prefixed contents to a cache key.
 bool native_cache_append_file(String* key, str path) {
     Result<String, Error> loaded = String.from_file(path);
     if (loaded.is_err()) { return false; }
@@ -434,6 +458,8 @@ bool native_cache_append_file(String* key, str path) {
     return true;
 }
 
+/// Returns the cache root: `--cache-dir`, `SILVER_CACHE_DIR`,
+/// `$XDG_CACHE_HOME/silver`, `$HOME/.cache/silver`, else `.silver_cache`.
 String native_cache_directory(CliMatches* cli) {
     Optional<String> configured = cli.value("cache-dir");
     if (configured.is_some()) { return configured.unwrap(); }
@@ -454,12 +480,14 @@ String native_cache_directory(CliMatches* cli) {
     return String.from_str(".silver_cache");
 }
 
+/// Returns the object cache directory (`<cache root>/native-object-v1`).
 String native_object_cache_directory(CliMatches* cli) {
     String directory = native_cache_directory(cli);
     directory.push_str("/native-object-v1");
     return directory;
 }
 
+/// Creates `path` and missing parents. Returns false on failure.
 bool native_ensure_directory(str path) {
     if (is_dir(path)) { return true; }
     i64 length = strlen(path);
@@ -479,6 +507,7 @@ bool native_ensure_directory(str path) {
     return is_dir(path) || create_dir(path);
 }
 
+/// Copies a file byte for byte. Returns false on any failure.
 bool native_copy_binary(str source, str destination) {
     File input = File.open_read(source);
     if (!input.valid()) { return false; }
@@ -504,6 +533,7 @@ bool native_copy_binary(str source, str destination) {
     return ok;
 }
 
+/// Returns the SHA-256 hex digest of the file at `path`, or "".
 String native_cached_object_digest(str path) {
     File object = File.open_read(path);
     if (!object.valid()) { return String.new(); }
@@ -535,12 +565,15 @@ String native_cached_object_digest(str path) {
     return value;
 }
 
+/// Returns the path of the digest sidecar (`<path>.sha256`).
 String native_cached_object_digest_path(str path) {
     String digest_path = String.from_str(path);
     digest_path.push_str(".sha256");
     return digest_path;
 }
 
+/// Copies a cached object to `destination` after checking its digest;
+/// false on a mismatch.
 bool native_copy_cached_object(str source, str destination) {
     String temporary = String.from_str(destination);
     temporary.push_str(".cache-check-");
@@ -567,6 +600,9 @@ bool native_copy_cached_object(str source, str destination) {
     return installed;
 }
 
+/// Returns the cache path for this compile, keyed by a SHA-256 of the
+/// compiler binary, arguments, and every source; "" when caching is off
+/// (`--no-cache` or `SILVER_DUMP_IR`).
 String native_object_cache_path(Vec<String>* arguments, CliMatches* cli,
                                 str source_path, Vec<String>* source_paths,
                                 Vec<String>* link_objects, str default_name,
@@ -665,6 +701,8 @@ String native_object_cache_path(Vec<String>* arguments, CliMatches* cli,
     return directory;
 }
 
+/// Stores an object and its digest in the cache through temporary files
+/// and renames, so readers never see partial entries.
 bool native_store_cached_object(str cache_path, str object_path) {
     if (cache_path == (str)0 || strlen(cache_path) == 0) { return false; }
     String temporary = String.from_str(cache_path);
@@ -695,15 +733,17 @@ bool native_store_cached_object(str cache_path, str object_path) {
     return stored;
 }
 
+/// What a cache path is, without following symlinks.
 enum CacheEntryKind {
     Missing;
     Directory;
     Symlink;
     File;
 }
+/// Nanoseconds per second.
 const i64 NANOS_PER_SECOND = 1000000000;
 
-// Never recurse into a cache entry that resolves through a symlink.
+/// Never recurse into a cache entry that resolves through a symlink.
 CacheEntryKind native_cache_entry_kind(str path, i64* size, i64* modified) {
     Result<Metadata, Error> result = symlink_metadata(path);
     if (result.is_err()) { return CacheEntryKind.Missing; }
@@ -716,6 +756,7 @@ CacheEntryKind native_cache_entry_kind(str path, i64* size, i64* modified) {
     return CacheEntryKind.Missing;
 }
 
+/// Sums the file count and bytes under a cache path (symlinks not followed).
 bool native_cache_measure(str path, i64* count, i64* bytes) {
     i64 path_size = 0;
     i64 path_time = 0;
@@ -761,6 +802,7 @@ bool native_cache_measure(str path, i64* count, i64* bytes) {
     return true;
 }
 
+/// Finds the oldest file under a cache path by modification time.
 bool native_cache_oldest(str path, String* oldest_path, i64* oldest_time) {
     i64 path_size = 0;
     i64 path_time = 0;
@@ -804,6 +846,7 @@ bool native_cache_oldest(str path, String* oldest_path, i64* oldest_time) {
     return true;
 }
 
+/// Deletes a cache directory tree without following symlinks.
 bool native_cache_remove_tree(str path) {
     i64 path_size = 0;
     i64 path_time = 0;
@@ -830,6 +873,8 @@ bool native_cache_remove_tree(str path) {
     return remove_dir(path);
 }
 
+/// Parses a size with an optional `B`/`K`/`M`/`G` suffix (any case), such
+/// as `512M`, into bytes.
 bool native_cache_parse_size(str text, i64* bytes) {
     if (text == (str)0 || strlen(text) == 0) { return false; }
     i64 value = 0;
@@ -864,6 +909,7 @@ bool native_cache_parse_size(str text, i64* bytes) {
     return true;
 }
 
+/// Prints `agc cache` help.
 void native_cache_help(bool color) {
     cli_write_styled(&STDOUT, "Cache commands:", CliStyle.Heading, color);
     STDOUT.write_str("\n");
@@ -884,11 +930,14 @@ void native_cache_help(bool color) {
     STDOUT.write_str("              Remove native object cache entries\n");
 }
 
+/// Prints a cache command error to stderr.
 void native_cache_error(str message, bool color) {
     cli_write_styled(&STDERR, message, CliStyle.Error, color);
     STDERR.write_str("\n");
 }
 
+/// Runs `agc cache info|clean|prune` (and `agc clean`): reports, clears, or
+/// shrinks the cache by deleting oldest files first. Returns the exit code.
 i32 native_cache_command(CliMatches* cli, bool color) {
     str action = "";
     String argument = String.new();
@@ -1067,6 +1116,7 @@ i32 native_cache_command(CliMatches* cli, bool color) {
     return 2;
 }
 
+/// Returns true for the `run` command.
 bool native_is_run(Vec<String>* arguments) {
     i64 i = 1;
     while (i < arguments.len()) {
@@ -1078,6 +1128,7 @@ bool native_is_run(Vec<String>* arguments) {
     return false;
 }
 
+/// Returns true when only an object file is requested (`--emit object`).
 bool native_emit_object_requested(Vec<String>* arguments) {
     i64 i = 1;
     while (i < arguments.len()) {
@@ -1093,6 +1144,7 @@ bool native_emit_object_requested(Vec<String>* arguments) {
 }
 
 
+/// Returns true when a static link is requested.
 bool native_static_link_requested(Vec<String>* arguments) {
     i64 i = 1;
     while (i < arguments.len()) {
@@ -1104,6 +1156,7 @@ bool native_static_link_requested(Vec<String>* arguments) {
     return false;
 }
 
+/// Returns true when the command line has extra link inputs.
 bool native_has_link_inputs(Vec<String>* arguments) {
     i64 i = 1;
     while (i < arguments.len()) {
@@ -1115,6 +1168,8 @@ bool native_has_link_inputs(Vec<String>* arguments) {
     return false;
 }
 
+/// Appends the program arguments (after `--` or from `--run-arg`) to the
+/// command that runs the built binary.
 void native_append_run_args(Vec<String>* arguments, Command* command) {
     i64 i = 1;
     bool after_separator = false;
@@ -1139,6 +1194,8 @@ void native_append_run_args(Vec<String>* arguments, Command* command) {
     }
 }
 
+/// Returns false, reporting an error, for a target the native backend does
+/// not support.
 bool native_validate_target(CliMatches* cli) {
     str host_triple_raw = LLVMGetDefaultTargetTriple();
     String host_triple = String.from_str(host_triple_raw);
@@ -1166,6 +1223,7 @@ bool native_validate_target(CliMatches* cli) {
 }
 
 
+/// Returns a temporary file path containing `pid` and ending in `suffix`.
 String native_temp_path(str suffix, i64 pid) {
     String path = String.from_str("/tmp/silver-stage1-native-");
     path.push_display(&pid);
@@ -1173,6 +1231,7 @@ String native_temp_path(str suffix, i64 pid) {
     return path;
 }
 
+/// Frees the paths, deleting the files first when `remove_files`.
 void native_dispose_object_paths(Vec<String>* paths, bool remove_files) {
     if (remove_files) {
         i64 i = 0;
@@ -1184,6 +1243,7 @@ void native_dispose_object_paths(Vec<String>* paths, bool remove_files) {
     paths.drop();
 }
 
+/// Returns true when `path` is in `visited`.
 bool native_path_seen(Vec<String>* visited, str path) {
     i64 i = 0;
     while (i < visited.len()) {
@@ -1195,6 +1255,7 @@ bool native_path_seen(Vec<String>* visited, str path) {
     return false;
 }
 
+/// Destroys every unit's node pool and token stream.
 void native_destroy_units(Vec<NodePool>* pools, Vec<TokenStream>* streams) {
     i64 i = 0;
     while (i < pools.len()) {
@@ -1205,6 +1266,7 @@ void native_destroy_units(Vec<NodePool>* pools, Vec<TokenStream>* streams) {
     streams.drop();
 }
 
+/// Sets the source file id of `node`'s span.
 void native_set_source_file_node(SyntaxNode* node, u32 file_id) {
     if (node == (SyntaxNode*)0) { return; }
     node.span.file = (i64)file_id;
@@ -1215,6 +1277,7 @@ void native_set_source_file_node(SyntaxNode* node, u32 file_id) {
     }
 }
 
+/// Sets the source file id of `node` and its whole subtree.
 void native_set_source_file(SyntaxNode* node, u32 file_id) {
     SyntaxNode* cursor = node;
     while (cursor != (SyntaxNode*)0) {
@@ -1223,6 +1286,7 @@ void native_set_source_file(SyntaxNode* node, u32 file_id) {
     }
 }
 
+/// Returns true when `node` is an `@assert` use.
 bool native_node_uses_assert(SyntaxNode* node) {
     if (node == (SyntaxNode*)0) { return false; }
     if (node.kind == NodeKind.Token && node.token_kind == TokenKind.At
@@ -1239,6 +1303,7 @@ bool native_node_uses_assert(SyntaxNode* node) {
     return false;
 }
 
+/// Returns true when the tree uses `@assert`.
 bool native_tree_uses_assert(SyntaxNode* node) {
     SyntaxNode* cursor = node;
     while (cursor != (SyntaxNode*)0) {
@@ -1248,6 +1313,7 @@ bool native_tree_uses_assert(SyntaxNode* node) {
     return false;
 }
 
+/// Returns true when `node` is a formatting macro use.
 bool native_node_uses_format(SyntaxNode* node) {
     if (node == (SyntaxNode*)0) { return false; }
     if (node.kind == NodeKind.Token && node.token_kind == TokenKind.At
@@ -1266,6 +1332,7 @@ bool native_node_uses_format(SyntaxNode* node) {
     return false;
 }
 
+/// Returns true when the tree uses a formatting macro.
 bool native_tree_uses_format(SyntaxNode* node) {
     SyntaxNode* cursor = node;
     while (cursor != (SyntaxNode*)0) {
@@ -1275,6 +1342,8 @@ bool native_tree_uses_format(SyntaxNode* node) {
     return false;
 }
 
+/// Reads, lexes, and parses source unit `path` as file `file_id`, keeping
+/// its pool and tokens alive in `pools`/`streams`. Returns null on error.
 SyntaxNode* native_load_unit(str path, u32 file_id, Vec<NodePool>* pools, Vec<TokenStream>* streams) {
     bool verbose = profiler_verbose();
     if (verbose) {
@@ -1331,6 +1400,7 @@ SyntaxNode* native_load_unit(str path, u32 file_id, Vec<NodePool>* pools, Vec<To
     return unit_tree.root;
 }
 
+/// Removes the `import` items from `parent`'s children.
 void native_strip_import_nodes(SyntaxNode* parent) {
     if (parent == (SyntaxNode*)0) { return; }
     SyntaxNode* previous = (SyntaxNode*)0;
@@ -1351,6 +1421,7 @@ void native_strip_import_nodes(SyntaxNode* parent) {
     }
 }
 
+/// Appends `other`'s items to `root`.
 void native_merge_unit(SyntaxNode* root, SyntaxNode* other) {
     if (root == (SyntaxNode*)0 || other == (SyntaxNode*)0) {
         return;
@@ -1368,6 +1439,7 @@ void native_merge_unit(SyntaxNode* root, SyntaxNode* other) {
     }
 }
 
+/// Returns true for a valid identifier.
 bool native_artifact_identifier(str name) {
     i64 i = 0;
     if (name[i] == 0) { return false; }
@@ -1383,6 +1455,7 @@ bool native_artifact_identifier(str name) {
     return true;
 }
 
+/// Returns true for a scalar type an artifact extern may use.
 bool native_artifact_scalar_type(String* name, bool allow_unit) {
     return name.equals("i8") || name.equals("i16") || name.equals("i32")
         || name.equals("i64") || name.equals("u8") || name.equals("u16")
@@ -1391,6 +1464,7 @@ bool native_artifact_scalar_type(String* name, bool allow_unit) {
         || (allow_unit && name.equals("unit"));
 }
 
+/// Appends the decimal text of `value`.
 void native_append_index(String* out, i64 value) {
     Vec<u8> digits = Vec<u8>.new();
     i64 remaining = value;
@@ -1407,6 +1481,8 @@ void native_append_index(String* out, i64 value) {
     digits.drop();
 }
 
+/// Writes an `extern` declaration for an artifact function export; false
+/// when its signature cannot be expressed.
 bool native_artifact_extern(ArtifactExport* export, String* out) {
     if (export.kind != ArtifactExportKind.Function
         || (export.abi_present && export.abi != (u8)2)
@@ -1487,6 +1563,7 @@ bool native_artifact_extern(ArtifactExport* export, String* out) {
     return true;
 }
 
+/// Returns the object path that accompanies an artifact.
 String native_artifact_object_path(str artifact_path) {
     String path = String.from_str(artifact_path);
     String stem = path.strip_suffix(".agm");
@@ -1496,6 +1573,7 @@ String native_artifact_object_path(str artifact_path) {
     return stem;
 }
 
+/// Appends extern declarations for an artifact's exports to the tree.
 bool native_append_artifact_externs(Artifact* artifact, SyntaxTree* tree,
                                     Vec<NodePool>* pools, Vec<TokenStream>* streams) {
     String source = String.from_str("extern \"C\" {\n");
@@ -1529,6 +1607,7 @@ bool native_append_artifact_externs(Artifact* artifact, SyntaxTree* tree,
     return true;
 }
 
+/// Copies a syntax subtree into `pool`.
 SyntaxNode* native_clone_syntax(NodePool* pool, SyntaxNode* source) {
     if (source == (SyntaxNode*)0) { return (SyntaxNode*)0; }
     SyntaxNode* clone = pool.create(source.kind, source.span, source.text);
@@ -1544,6 +1623,7 @@ SyntaxNode* native_clone_syntax(NodePool* pool, SyntaxNode* source) {
     return clone;
 }
 
+/// Adds alias declarations for `import m { f as g }` selections.
 void native_add_function_import_aliases(SyntaxNode* root, CfgSet* cfg, NodePool* pool,
                                        str source_path, Vec<String>* includes,
                                        Vec<String>* source_paths) {
@@ -1599,6 +1679,7 @@ void native_add_function_import_aliases(SyntaxNode* root, CfgSet* cfg, NodePool*
     bindings.drop();
 }
 
+/// Appends the active branch of an `if (@cfg)` block to `root`.
 SyntaxNode* native_append_expanded_cfg(SyntaxNode* root, SyntaxNode* first_token, CfgSet* cfg, NodePool* pool) {
     SyntaxNode* cursor = first_token;
     bool branch_taken = false;
@@ -1635,6 +1716,7 @@ SyntaxNode* native_append_expanded_cfg(SyntaxNode* root, SyntaxNode* first_token
     return (SyntaxNode*)0;
 }
 
+/// Expands nested cfg blocks inside a block's items.
 void native_expand_block_items(SyntaxNode* root, SyntaxNode* block, CfgSet* cfg, NodePool* pool) {
     if (block == (SyntaxNode*)0) { return; }
     SyntaxNode* child = block.first_child;
@@ -1716,6 +1798,7 @@ void native_expand_block_items(SyntaxNode* root, SyntaxNode* block, CfgSet* cfg,
     }
 }
 
+/// Appends an item, expanding it when it is a cfg block.
 void native_append_expanded_item(SyntaxNode* root, SyntaxNode* item, CfgSet* cfg, NodePool* pool) {
     if (item == (SyntaxNode*)0) { return; }
     if (item.kind == NodeKind.CfgBlock) {
@@ -1725,6 +1808,7 @@ void native_append_expanded_item(SyntaxNode* root, SyntaxNode* item, CfgSet* cfg
     }
 }
 
+/// Replaces every top-level `if (@cfg)` block with its active branch.
 void native_expand_cfg_blocks(SyntaxNode* root, CfgSet* cfg, NodePool* pool) {
     if (root == (SyntaxNode*)0) { return; }
     SyntaxNode* old_first = root.first_child;
@@ -1739,6 +1823,7 @@ void native_expand_cfg_blocks(SyntaxNode* root, CfgSet* cfg, NodePool* pool) {
         child = next;
     }
 }
+/// Returns the `cpu.*` feature name of a runtime cfg probe, or "".
 str native_cpu_probe_name(SyntaxNode* args) {
     SyntaxNode* first = args.first_child;
     if (first == (SyntaxNode*)0) {
@@ -1770,6 +1855,8 @@ str native_cpu_probe_name(SyntaxNode* args) {
     return "";
 }
 
+/// Folds compile-time `@cfg(...)` expressions to `true`/`false`, keeping
+/// `cpu.*` probes as runtime reads. Returns false on a malformed condition.
 bool native_fold_cfg_exprs(SyntaxNode* node, CfgSet* cfg) {
     if (node == (SyntaxNode*)0) {
         return true;
@@ -1810,6 +1897,7 @@ bool native_fold_cfg_exprs(SyntaxNode* node, CfgSet* cfg) {
 }
 
 
+/// One source import: its module path and resolved file.
 struct NativeSourceImport {
     u32 parent_file_id;
     String module_name;
@@ -1817,11 +1905,13 @@ struct NativeSourceImport {
     bool implicit_entry;
 }
 
+/// One `import ... as` alias recorded for a unit.
 struct NativeSourceAlias {
     String path;
     u32 source_file_id;
 }
 
+/// Which source files one compilation unit owns.
 struct NativeUnitPlan {
     u32 source_file_id;
     String module_name;
@@ -1829,6 +1919,7 @@ struct NativeUnitPlan {
     i64 raw_item_count;
 }
 
+/// Returns true when `source_file_id` is in `ids`.
 bool native_source_id_seen(Vec<u32>* ids, u32 source_file_id) {
     i64 i = 0;
     while (i < ids.len()) {
@@ -1838,6 +1929,7 @@ bool native_source_id_seen(Vec<u32>* ids, u32 source_file_id) {
     return false;
 }
 
+/// Returns a copy of `source_file_ids`.
 Vec<u32> native_copy_source_ids(Vec<u32>* source_file_ids) {
     Vec<u32> copy = Vec<u32>.with_capacity(source_file_ids.len());
     i64 i = 0;
@@ -1848,6 +1940,7 @@ Vec<u32> native_copy_source_ids(Vec<u32>* source_file_ids) {
     return move copy;
 }
 
+/// Returns the source file id of an import, or 0.
 u32 native_import_source_id(NativeSourceImport* source_import,
                            Vec<String>* source_paths,
                            Vec<NativeSourceAlias>* aliases) {
@@ -1869,6 +1962,8 @@ u32 native_import_source_id(NativeSourceImport* source_import,
     return 0;
 }
 
+/// Returns true when an imported module's source is compiled into the
+/// importing unit instead of its own object.
 bool native_source_module_inlined(NativeSourceImport* source_import,
                                  Vec<String>* source_paths,
                                  Vec<NativeSourceAlias>* aliases) {
@@ -1893,6 +1988,7 @@ bool native_source_module_inlined(NativeSourceImport* source_import,
     return has_std_segment && !cacheable;
 }
 
+/// Returns a module name derived from a source path.
 String native_source_module_name(str source_path) {
     String base = path_basename(source_path);
     i64 stem_length = base.len();
@@ -1910,6 +2006,7 @@ String native_source_module_name(str source_path) {
     return move stem;
 }
 
+/// Splits the sources into compilation units (one object each).
 void native_make_unit_plans(Vec<String>* source_paths,
                             Vec<NativeSourceImport>* source_imports,
                             Vec<NativeSourceAlias>* aliases,
@@ -2010,6 +2107,7 @@ void native_make_unit_plans(Vec<String>* source_paths,
     explicit_source_ids.drop();
 }
 
+/// Loads every source module imported by `unit`, depth first.
 void native_queue_imports(SyntaxNode* unit, str owner, str root_dir, CfgSet* cfg,
                           u32 owner_file_id, Vec<String>* includes,
                           Vec<String>* visited, Vec<String>* pending,
@@ -2054,9 +2152,9 @@ void native_queue_imports(SyntaxNode* unit, str owner, str root_dir, CfgSet* cfg
     names.drop();
 }
 
-// Load the full source import closure and merge it into the root tree, so the
-// backend compiles real multi-file programs. AGM imports are compiled from the
-// source path recorded in their metadata.
+/// Load the full source import closure and merge it into the root tree, so the
+/// backend compiles real multi-file programs. AGM imports are compiled from the
+/// source path recorded in their metadata.
 bool native_load_closure(str source_path, SyntaxTree* tree, CfgSet* cfg,
                          Vec<String>* includes, Vec<String>* source_paths,
                          Vec<String>* link_objects,
@@ -2207,6 +2305,7 @@ bool native_load_closure(str source_path, SyntaxTree* tree, CfgSet* cfg,
     return true;
 }
 
+/// Returns true for a C-style `for (init; cond; step)` loop.
 bool native_for_is_c_style(SyntaxNode* for_token) {
     SyntaxNode* paren = for_token.next_sibling;
     if (paren == (SyntaxNode*)0 || paren.kind != NodeKind.Parenthesized) {
@@ -2223,6 +2322,7 @@ bool native_for_is_c_style(SyntaxNode* for_token) {
     return semis >= 2;
 }
 
+/// Collects `#[link(...)]` library names under `node`.
 void native_collect_link_libs(SyntaxNode* node, Vec<String>* libs) {
     if (node == (SyntaxNode*)0) { return; }
     if (node.kind == NodeKind.Token && node.token_kind == TokenKind.Hash) {
@@ -2266,6 +2366,8 @@ void native_collect_link_libs(SyntaxNode* node, Vec<String>* libs) {
     }
 }
 
+/// Returns true when the native backend supports every construct in the
+/// tree; unsupported programs fail closed.
 bool native_tree_supported(SyntaxNode* node) {
     if (node == (SyntaxNode*)0) {
         return true;
@@ -2299,6 +2401,7 @@ bool native_tree_supported(SyntaxNode* node) {
     return true;
 }
 
+/// Adds an rpath for `dir` to a link command.
 void native_add_rpath(Command* command, bool direct_linker, str dir) {
     if (direct_linker) {
         command.arg("-rpath");
@@ -2311,12 +2414,15 @@ void native_add_rpath(Command* command, bool direct_linker, str dir) {
     }
 }
 
+/// Adds a library search path for `dir` to a link command.
 void native_add_search_path(Command* command, bool direct_linker, str dir) {
     command.arg("-L");
     command.arg(dir);
     native_add_rpath(command, direct_linker, dir);
 }
 
+/// Compiles one module to an object file at `object_path`. Returns false
+/// when codegen, verification, or emission fails.
 bool native_compile_module_object(SyntaxTree* tree, TypeTable* types, Interner* names,
                                  SymbolTable* symbols, Vec<String>* source_paths,
                                  str root_path, String* root_source,
@@ -2443,6 +2549,7 @@ bool native_compile_module_object(SyntaxTree* tree, TypeTable* types, Interner* 
     return true;
 }
 
+/// One compilation unit to build into an object.
 struct NativeCompileJob {
     u32 source_file_id;
     Vec<u32> owned_source_ids;
@@ -2452,6 +2559,7 @@ struct NativeCompileJob {
     i64 item_count;
 }
 
+/// The outcome and timings of one compile job, updated atomically by workers.
 struct NativeCompileResult {
     i32 completed;
     i32 started;
@@ -2467,6 +2575,8 @@ struct NativeCompileResult {
     i64 emit_obj_ms;
 }
 
+/// Shared work queue for parallel compilation; jobs are claimed with an
+/// atomic counter.
 struct NativeCompilePool {
     i64 next_job;
     Vec<NativeCompileJob>* jobs;
@@ -2481,11 +2591,13 @@ struct NativeCompilePool {
     LlvmOptimization optimization;
 }
 
+/// One compile worker with its own symbol table copy.
 struct NativeCompileWorker {
     NativeCompilePool* pool;
     SymbolTable symbols;
 }
 
+/// Claims and compiles the next job. Returns false when no job is left.
 bool native_compile_one(NativeCompileWorker* worker) {
     NativeCompilePool* pool = worker.pool;
     i64 job_index = __atomic_fetch_add_i64(&pool.next_job, 1, ATOMIC_SEQ_CST);
@@ -2524,17 +2636,21 @@ bool native_compile_one(NativeCompileWorker* worker) {
     return true;
 }
 
+/// Compile thread body: runs jobs until the queue is empty.
 void native_compile_worker(i64 arg) {
     NativeCompileWorker* worker = (NativeCompileWorker*)arg;
     while (native_compile_one(worker)) {
     }
 }
 
+/// `pthread_create` entry wrapper for `native_compile_worker`.
 i64 native_compile_worker_entry(i64 arg) {
     native_compile_worker(arg);
     return 0;
 }
 
+/// Compiles every job, in parallel when there are several, and reports
+/// progress. Returns false when any job failed.
 bool native_compile_jobs(SyntaxTree* tree, SymbolTable* symbols,
                          Vec<String>* source_paths, str root_path,
                          Vec<u32>* standalone_source_ids,
@@ -2670,6 +2786,10 @@ bool native_compile_jobs(SyntaxTree* tree, SymbolTable* symbols,
     return true;
 }
 
+/// Builds `source_path` with the native backend: frontend, per-unit object
+/// compilation (cached), and linking; for `run`, also runs the binary.
+/// Writes the exit code to `*result`. Returns false when the build could
+/// not start (no output path, unreadable source), leaving `*result` unset.
 bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path, str default_name,
                         Vec<String>* extra_includes, bool module_object, i32* result) {
     LlvmOptimization optimization = LlvmOptimization.Unspecified;

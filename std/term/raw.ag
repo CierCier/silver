@@ -13,28 +13,46 @@ import std.error;
 import std.result;
 
 // termios ioctl requests (Linux x86_64).
+/// ioctl request that reads a terminal's termios settings.
 const i64 TCGETS = 0x5401;
+/// ioctl request that applies termios settings immediately.
 const i64 TCSETS = 0x5402;
+/// ioctl request that applies termios settings after pending output drains.
 const i64 TCSETSW = 0x5403;
+/// ioctl request that drains output, discards pending input, then applies
+/// termios settings.
 const i64 TCSETSF = 0x5404;
 
 // Input flags.
+/// termios input flag: a break condition sends SIGINT.
 const u32 BRKINT = 0x2;
+/// termios input flag: translate CR to NL on input.
 const u32 ICRNL = 0x100;
+/// termios input flag: enable input parity checking.
 const u32 INPCK = 0x10;
+/// termios input flag: strip the eighth bit of input bytes.
 const u32 ISTRIP = 0x20;
+/// termios input flag: XON/XOFF output flow control (Ctrl-S/Ctrl-Q).
 const u32 IXON = 0x400;
 // Output flags.
+/// termios output flag: enable output processing (such as NL to CRNL).
 const u32 OPOST = 0x1;
 // Control flags.
+/// termios control flag: 8-bit characters.
 const u32 CS8 = 0x30;
 // Local flags.
+/// termios local flag: Ctrl-C, Ctrl-Z, and Ctrl-\ generate signals.
 const u32 ISIG = 0x1;
+/// termios local flag: canonical (line-buffered) input.
 const u32 ICANON = 0x2;
+/// termios local flag: echo input characters.
 const u32 ECHO = 0x8;
+/// termios local flag: extended input processing (such as Ctrl-V).
 const u32 IEXTEN = 0x8000;
 // Control-character indices.
+/// `c_cc` index of the minimum byte count for a non-canonical read.
 const i64 VMIN = 6;
+/// `c_cc` index of the non-canonical read timeout, in tenths of a second.
 const i64 VTIME = 5;
 
 /// Linux x86_64 `struct termios` (60 bytes with C padding, computed by the
@@ -52,6 +70,7 @@ struct Termios {
 }
 
 if (@cfg(os.linux)) {
+/// Reads the termios settings of terminal `fd` into `*out`.
 Result<i64, Error> try_tcgetattr(i32 fd, Termios* out) {
     i64 r = sys_ioctl((i64)fd, TCGETS, (i64)out);
     if (r != 0) {
@@ -60,6 +79,7 @@ Result<i64, Error> try_tcgetattr(i32 fd, Termios* out) {
     return Ok((i64)0);
 }
 
+/// Applies `*t` to terminal `fd`. `action` is `TCSETS`, `TCSETSW`, or `TCSETSF`.
 Result<i64, Error> try_tcsetattr(i32 fd, i64 action, Termios* t) {
     i64 r = sys_ioctl((i64)fd, action, (i64)t);
     if (r != 0) {
@@ -86,6 +106,8 @@ void termios_make_raw(Termios* t) {
 }
 
 if (@cfg(os.linux)) {
+/// A guard that holds a terminal in raw mode. Dropping it restores the saved
+/// termios settings, so keep it alive for as long as raw mode is needed.
 struct RawMode {
     i32 fd;
     Termios saved;
@@ -132,6 +154,8 @@ impl Drop for RawMode {
     // Windows RawMode: same guard shape, but the saved slot carries the
     // console input mode DWORD (little-endian in the first 4 Termios bytes)
     // managed by the sys_raw_enable/sys_raw_restore seam.
+    /// A guard that holds the console in raw mode. Dropping it restores the saved
+    /// console input mode, so keep it alive for as long as raw mode is needed.
     struct RawMode {
         i32 fd;
         Termios saved;

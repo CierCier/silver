@@ -3,11 +3,14 @@ import std.string;
 import std.mem.vec;
 import frontend.diagnostics;
 
+/// A zero-based LSP position (line, UTF-16 column).
 struct LspPosition { i64 line; i64 character; }
 
+/// The byte offset of each line start, for fast position conversion.
 struct LspLineIndex { Vec<i64> starts; i64 length; }
 
 impl LspLineIndex {
+    /// Builds the line index of `text` (`\n`, `\r\n`, and `\r` end lines).
     LspLineIndex new(str text) {
         LspLineIndex index; index.starts = Vec<i64>.new(); index.starts.push(0);
         index.length = strlen(text); i64 offset = 0;
@@ -21,6 +24,7 @@ impl LspLineIndex {
         return move index;
     }
 
+    /// Converts byte `offset` (clamped to the text) to an LSP position.
     LspPosition position(LspLineIndex* self, str text, i64 offset) {
         if (offset < 0) { offset = 0; }
         if (offset > self.length) { offset = self.length; }
@@ -40,6 +44,8 @@ impl LspLineIndex {
         return position;
     }
 
+    /// Converts an LSP position to a byte offset. A column past the line end
+    /// clamps to the line end; a column inside a surrogate pair fails.
     bool offset(LspLineIndex* self, str text, i64 line, i64 character, i64* result) {
         if (line < 0 || line >= self.starts.len() || character < 0) { return false; }
         i64 cursor = self.starts.get(line); i64 column = 0;
@@ -52,6 +58,7 @@ impl LspLineIndex {
     }
 }
 
+/// Returns the UTF-8 sequence length of a lead byte.
 i64 utf8_width(u8 byte) {
     if (byte < 128) { return 1; }
     if (byte < 224) { return 2; }
@@ -59,6 +66,7 @@ i64 utf8_width(u8 byte) {
     return 4;
 }
 
+/// Converts byte `offset` to an LSP position without an index (O(offset)).
 LspPosition lsp_position(str text, i64 offset) {
     LspPosition pos;
     pos.line = 0;
@@ -77,6 +85,7 @@ LspPosition lsp_position(str text, i64 offset) {
     return pos;
 }
 
+/// Converts an LSP position to a byte offset without an index.
 bool lsp_offset(str text, i64 line, i64 character, i64* offset) {
     if (line < 0 || character < 0) { return false; }
     i64 current_line = 0;
@@ -102,11 +111,13 @@ bool lsp_offset(str text, i64 line, i64 character, i64* offset) {
     return true;
 }
 
+/// Appends a `{line, character}` JSON object.
 void append_position(String* out, LspPosition pos) {
     out.push_str("{\"line\":"); out.push_display(&pos.line);
     out.push_str(",\"character\":"); out.push_display(&pos.character); out.push('}');
 }
 
+/// Appends an LSP range JSON object for `span`.
 void append_source_range(String* out, str text, Span span) {
     out.push_str("{\"start\":"); append_position(out, lsp_position(text, span.start));
     out.push_str(",\"end\":"); append_position(out, lsp_position(text, span.end)); out.push('}');

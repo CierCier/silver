@@ -14,6 +14,10 @@ import std.string;
 // 0x80 (128): Empty bucket
 // 0xFE (254): Deleted bucket (tombstone)
 // 0..127: Occupied bucket with 7-bit hash fingerprint (h2)
+/// A SwissTable hash map that owns its keys and values. Keys hash with
+/// `@hash` and compare with `==`. Iteration order is unspecified. Pointers to
+/// values are invalidated by any insert that grows the table. Dropping the
+/// map drops every live key and value.
 struct HashMap<K, V> {
     K* keys;
     V* values;
@@ -22,8 +26,11 @@ struct HashMap<K, V> {
     i64 len;
 }
 
+/// Number of buckets allocated by the first insert.
 const i64 INITIAL_CAPACITY = 16;
+/// Control byte for an empty bucket.
 const u8 CTRL_EMPTY = (u8)0x80;
+/// Control byte for a deleted bucket (tombstone).
 const u8 CTRL_DELETED = (u8)0xFE;
 
 /// Max live entries for `cap` at 7/8 load, via integer math: `cap - cap/8`
@@ -370,6 +377,8 @@ impl HashMap<K, V> {
         return false;
     }
 
+    /// Removes `key` and returns its key and value, transferring ownership to
+    /// the caller, or None when absent. Leaves a tombstone; does not shrink.
     Optional<[K, V]> remove(&mut self, K key) {
         i64 idx = self.find_slot(key);
         if (idx < 0) {
@@ -408,7 +417,9 @@ impl HashMap<K, V> {
         self.grow(target);
     }
 
-    /// Rehash into the smallest capacity that fits the current length.
+    /// Meant to rehash into the smallest capacity that fits the current length.
+    /// Known issue: `grow` never goes below the current capacity, so this only
+    /// rehashes in place (clearing tombstones) and frees no memory.
     void shrink_to_fit(&mut self) {
         i64 cap = self.capacity;
         if (cap == 0) { return; }
@@ -498,11 +509,14 @@ impl<K, V> Drop for HashMap<K, V> {
     }
 }
 
+/// One key/value pair yielded by the map's consuming iterators.
 struct HashMapEntry<K, V> {
     K key;
     V value;
 }
 
+/// A consuming iterator that owns the map's buffers; drops any entries not
+/// yet yielded when it is dropped.
 struct HashMapIntoIter<K, V> {
     K* keys;
     V* values;
@@ -579,6 +593,8 @@ impl<K, V> Iterator for HashMapIntoIter<K, V> {
     }
 }
 
+/// A borrowing iterator over the map's entries. Do not insert into or drop
+/// the map while iterating.
 struct HashMapIter<K, V> {
     K* keys;
     V* values;
@@ -671,6 +687,7 @@ impl<K, V> Iterator for HashMapIter<K, V> {
     }
 }
 
+/// A borrowing iterator over the map's keys (yields copies).
 struct HashMapKeysIter<K, V> {
     K* keys;
     u8* ctrl;
@@ -695,6 +712,7 @@ impl<K, V> Iterator for HashMapKeysIter<K, V> {
         return Optional<K>.none();
     }
 }
+/// A borrowing iterator over the map's values (yields copies).
 struct HashMapValuesIter<K, V> {
     V* values;
     u8* ctrl;
@@ -719,6 +737,8 @@ impl<K, V> Iterator for HashMapValuesIter<K, V> {
         return Optional<V>.none();
     }
 }
+/// A borrowing iterator that yields a pointer to each value for in-place
+/// mutation. Do not insert into or drop the map while iterating.
 struct HashMapIterMut<K, V> {
     V* values;
     u8* ctrl;
@@ -743,6 +763,8 @@ impl<K, V> Iterator for HashMapIterMut<K, V> {
         return Optional<V>.none();
     }
 }
+/// Moves every entry out of the map, leaving it empty but usable.
+/// Entries not yet yielded are dropped with the drain.
 struct HashMapDrain<K, V> {
     K* keys;
     V* values;
@@ -793,6 +815,8 @@ impl<K, V> Iterator for HashMapDrain<K, V> {
         return Optional<[K, V]>.none();
     }
 }
+/// A view of one key's slot, returned by `HashMap.entry`. Holds the lookup
+/// key until `or_insert` moves it into the map. Borrows the map mutably.
 struct HashMapEntryRef<K, V> {
     HashMap<K, V>* map;
     K key;
@@ -800,24 +824,31 @@ struct HashMapEntryRef<K, V> {
     bool inserted;
 }
 impl<K, V> HashMapEntryRef<K, V> {
+    /// Returns true when the key was already present (not inserted by this entry).
     bool was_present(&self) {
         return self.idx >= 0 && !self.inserted;
     }
 
+    /// Returns true when the key is absent.
     bool is_vacant(&self) {
         return self.idx < 0;
     }
 
+    /// Returns a pointer to the value, or null when vacant. Invalidated by any
+    /// later insert that grows the map.
     V* get_ptr(&self) {
         if (self.idx < 0) { return (V*)0; }
         return &self.map.values[self.idx];
     }
 
+    /// Returns a mutable pointer to the value, or null when vacant.
     V* get_mut_ptr(&self) {
         if (self.idx < 0) { return (V*)0; }
         return &self.map.values[self.idx];
     }
 
+    /// Removes the entry, dropping its key and returning the value, or None when
+    /// vacant. The entry is vacant afterwards.
     Optional<V> take(&mut self) {
         if (self.idx < 0) {
             return Optional<V>.none();
@@ -830,6 +861,8 @@ impl<K, V> HashMapEntryRef<K, V> {
         return Optional<V>.some(move v);
     }
 
+    /// Returns a pointer to the value, inserting `default` (and moving the key
+    /// in) when vacant. May grow the map, invalidating other value pointers.
     V* or_insert(&mut self, V default) {
         if (self.idx >= 0) {
             return &self.map.values[self.idx];
@@ -850,6 +883,7 @@ impl<K, V> HashMapEntryRef<K, V> {
         return &self.map.values[self.idx];
     }
 
+    /// Like `or_insert`, but calls `f` for the value only when vacant.
     V* or_insert_with(&mut self, V () f) {
         if (self.idx >= 0) {
             return &self.map.values[self.idx];
@@ -858,6 +892,7 @@ impl<K, V> HashMapEntryRef<K, V> {
         return self.or_insert(move def);
     }
 
+    /// Calls `f` with a pointer to the value when present; does nothing when vacant.
     void and_modify(&mut self, void (V*) f) {
         if (self.idx < 0) { return; }
         f(&self.map.values[self.idx]);
@@ -872,6 +907,8 @@ impl<K, V> HashMapEntryRef<K, V> {
 // symbols; see P0-002). Generalize once FE-001 lands. A method on the generic
 // impl cannot do this either — stage0 checks method bodies per instantiation
 // and `K == str` fails for non-String K (e.g. map_test's `HashMap<i64, _>`).
+/// Returns the bucket index of `key` in `m`, or -1, hashing the `str`
+/// content directly so no `String` key needs to be built.
 i64 map_find_slot_str_u32(HashMap<String, u32>* m, str key) {
     if (m.capacity == 0 || m.len == 0) {
         return -1;

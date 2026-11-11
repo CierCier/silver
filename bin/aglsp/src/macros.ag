@@ -3,16 +3,19 @@
 // completion items.
 import std.string;
 
+/// Names of the builtin `@` macros, as lowering accepts them.
 str builtin_macro_names[19] = {
     "align", "assert", "cfg", "column", "dbg", "drop_in_place", "eprint",
     "eprintln", "file", "format", "fprint", "hash", "line", "memcpy",
     "memmove", "memset", "print", "println", "size",
 };
 
+/// Returns the number of builtin macros.
 i64 builtin_macro_count() {
     return 19;
 }
 
+/// Returns the one-line documentation of builtin macro `name`, or "".
 str builtin_macro_doc(str name) {
     if (strcmp(name, "println") == 0) { return "Print a format string to stdout with a trailing newline."; }
     if (strcmp(name, "print") == 0) { return "Print a format string to stdout."; }
@@ -36,6 +39,7 @@ str builtin_macro_doc(str name) {
     return "";
 }
 
+/// Returns true when `name` is a builtin macro.
 bool is_builtin_macro(str name) {
     i64 i = 0;
     while (i < builtin_macro_count()) {

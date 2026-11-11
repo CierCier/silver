@@ -19,6 +19,9 @@
 import std.mem.alloc;
 import std.mem.drop;
 
+/// A bump allocator over one malloc'd block. Allocations are never freed
+/// individually; dropping the arena frees the whole block without running
+/// destructors for the objects placed in it.
 struct Arena {
     u8* base;
     i64 capacity;

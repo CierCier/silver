@@ -34,14 +34,23 @@ import std.rt.backtrace;
 import std.atomic;
 import std.cpu;
 import std.sys.syscall;
-// Static free-list head table in .bss — eliminates lazy-init branch on every
-// alloc/free. Zero-initialized by the OS loader at program startup.
+/// Static free-list head table in .bss — eliminates lazy-init branch on every
+/// alloc/free. Zero-initialized by the OS loader at program startup.
+/// Internal: global free-list heads per size class, guarded by the
+/// allocator spinlock.
 i64 g_mem_heads[9];
+/// Number of small-allocation size classes (16 to 4096 bytes).
 const i64 MEM_NUM_CLASSES = 9;
+/// Bytes of header stored before every allocation.
 const i64 MEM_HEADER_SIZE = 16;
+/// Page size used to round huge allocations.
 const i64 MEM_PAGE_SIZE = 4096;
+/// Addresses below this are never valid heap pointers; size-0 sentinels
+/// live here so `free` can recognize them.
 const i64 MEM_MIN_VALID_ADDR = 65536; // 64 KiB — Linux vm.mmap_min_addr
+/// Bytes mmap'd at a time to refill a small size class.
 const i64 MEM_CHUNK_SIZE = 65536;
+/// Largest size served from the size-class free lists.
 const i64 MEM_MAX_CLASS_SIZE = 4096;
 
 // -- OS page primitives -----------------------------------------------------
@@ -66,6 +75,7 @@ void mem_sys_free(u8* base, i64 len) {
 
 // -- Internal helpers -------------------------------------------------------
 
+/// Rounds `value` up to a multiple of `alignment` (no-op for alignment <= 1).
 i64 mem_align_up(i64 value, i64 alignment) {
     if (alignment <= 1) {
         return value;
@@ -77,6 +87,7 @@ i64 mem_align_up(i64 value, i64 alignment) {
     return value + alignment - remainder;
 }
 
+/// Rounds `n` up to a whole number of pages.
 i64 mem_page_round(i64 n) {
     return mem_align_up(n, MEM_PAGE_SIZE);
 }
@@ -112,6 +123,7 @@ i64 mem_class_index(i64 size) {
     return idx;
 }
 
+/// Returns the payload size of class `idx` (16 << idx).
 i64 mem_class_size(i64 idx) {
     i64 csize = 16;
     for (i64 i = 0; i < idx; i = i + 1) {
@@ -176,13 +188,17 @@ void mem_lock_release() {
 
 // -- Thread-local allocation cache (tcache) --------------------------------
 
+/// Internal: one thread's private free lists, so most frees and small
+/// allocations skip the global lock.
 struct ThreadCache {
     i64 tid;
     i64 heads[9];
     i32 counts[9];
 }
 
+/// Number of thread caches. Threads beyond this share the global lists.
 const i64 MEM_MAX_TCACHES = 64;
+/// Internal: thread cache table; slot 0 serves the single-threaded case.
 ThreadCache g_mem_tcaches[64];
 
 /// Zero while no second thread has ever been spawned: the allocator may use
@@ -192,10 +208,12 @@ ThreadCache g_mem_tcaches[64];
 i64 g_mem_multithreaded;
 
 if (@cfg(os.linux)) {
+    /// Returns the calling thread's kernel tid (gettid).
     i64 mem_get_tid() {
         return syscall0(186); // SYS_gettid
     }
 
+    /// Returns true when thread `tid` still exists (probed with tkill signal 0).
     bool mem_thread_alive(i64 tid) {
         if (tid <= 0) { return false; }
         i64 r = syscall2(200, tid, 0); // SYS_tkill
@@ -205,28 +223,35 @@ if (@cfg(os.linux)) {
     // WebAssembly v1 is single-threaded: no gettid, no threads to probe.
     // A constant tid keeps the tcache fast path deterministic (slot math is
     // skipped entirely while `g_mem_multithreaded` stays 0).
+    /// Returns a constant tid: WASI programs are single-threaded.
     i64 mem_get_tid() {
         return 1;
     }
 
+    /// Always true on WASI.
     bool mem_thread_alive(i64 tid) {
         return true;
     }
 } else {
     extern "C" {
+        /// Win32 `GetCurrentThreadId`.
         #[link_name("GetCurrentThreadId")]
         u32 win_GetCurrentThreadId();
     }
 
+    /// Returns the calling thread's id.
     i64 mem_get_tid() {
         return (i64)win_GetCurrentThreadId();
     }
 
+    /// Always true on Windows: dead cache owners are not detected.
     bool mem_thread_alive(i64 tid) {
         return true;
     }
 }
 
+/// Internal: returns every block cached in `slot` to the global lists.
+/// Takes the allocator lock.
 void mem_tcache_flush_slot(i64 slot) {
     if (slot < 0 || slot >= MEM_MAX_TCACHES) { return; }
     mem_lock_acquire();
@@ -244,6 +269,8 @@ void mem_tcache_flush_slot(i64 slot) {
     mem_lock_release();
 }
 
+/// Internal: returns the calling thread's cache slot, claiming a free slot
+/// (or one whose owner exited) on first use. Returns -1 when none is free.
 i64 mem_current_tcache_slot() {
     i64 tid = mem_get_tid();
     if (tid <= 0) {
@@ -262,8 +289,10 @@ i64 mem_current_tcache_slot() {
             return i;
         }
     }
+    // Probe from `h` itself so a claimed slot is found by the hashed check
+    // above, not by the linear scan on every allocation.
     for (i64 i = 0; i < MEM_MAX_TCACHES; i = i + 1) {
-        i64 slot_idx = (h + i) % 63 + 1;
+        i64 slot_idx = (h - 1 + i) % 63 + 1;
         if (g_mem_tcaches[slot_idx].tid == 0) {
             bool claimed = __atomic_cmpxchg_i64(&g_mem_tcaches[slot_idx].tid, 0, tid, ATOMIC_SEQ_CST, ATOMIC_ACQUIRE);
             if (claimed) {
@@ -284,6 +313,8 @@ i64 mem_current_tcache_slot() {
     return -1;
 }
 
+/// Flushes the calling thread's cache to the global lists and frees its
+/// slot. Called on thread exit; blocks cached afterwards would be stranded.
 void mem_tcache_exit() {
     i64 tid = mem_get_tid();
     if (tid <= 0) { return; }
@@ -454,27 +485,38 @@ void mem_free_raw_impl(u8* ptr) {
 // leaks, double-frees, and buffer overflows without doing any dynamic
 // allocation themselves.
 
+/// Set by the compiler when the program is built with `--leak-check`.
 extern "C" { bool __silver_leak_check_enabled; }
 
 if (@cfg(os.windows)) {
     extern "C" {
+        /// Win32 `RtlCaptureStackBackTrace`, used to record allocation sites.
         #[link_name("RtlCaptureStackBackTrace")]
         u16 win_RtlCaptureStackBackTrace(u32 skip_frames, u32 count, void** backtrace, u32* hash);
     }
 }
 
+/// Number of allocations the leak checker can track at once.
 const i64 LEAK_MAX_RECORDS = 65536;
+/// Guard word written before and after live leak-checked allocations.
 const i64 LEAK_CANARY_LIVE = 0x4C4956454C495645;  // "LIVELIVE"
+/// Guard word written over freed leak-checked allocations.
 const i64 LEAK_CANARY_DEAD = 0x4445414444454144;  // "DEADDEAD"
 
+/// Internal: leak-check record table (user pointers), open addressing.
 i64 __leak_user_ptrs[65536];
+/// Internal: leak-check record table (underlying allocations).
 i64 __leak_raw_ptrs[65536];
+/// Internal: leak-check record table (requested sizes).
 i64 __leak_sizes[65536];
+/// Internal: leak-check record table (allocating return addresses).
 i64 __leak_callers[65536];
+/// Internal: leak-check record states: 0 empty, 1 live, 2 freed, 3 ignored.
 u8 __leak_states[65536]; // 0 empty, 1 live, 2 freed, 3 ignored (global cache)
 
 // -- Raw stderr helpers (no allocation, no BufWriter) ------------------------
 
+/// Internal: writes `msg` to stderr without allocating.
 void __silver_leak_write_str(str msg) {
     if (msg == (str)0) { return; }
     u8* p = (u8*)msg;
@@ -483,6 +525,7 @@ void __silver_leak_write_str(str msg) {
     sys_write(2, (i64)msg, len);
 }
 
+/// Internal: writes `v` as hex to stderr without allocating.
 void __silver_leak_write_hex(i64 v) {
     u8 buf[19];
     i64 i = 0;
@@ -510,6 +553,7 @@ void __silver_leak_write_hex(i64 v) {
     sys_write(2, (i64)buf, i);
 }
 
+/// Internal: writes `v` in decimal to stderr without allocating.
 void __silver_leak_write_i64(i64 v) {
     if (v < 0) {
         sys_write(2, (i64)"-", 1);
@@ -530,6 +574,7 @@ void __silver_leak_write_i64(i64 v) {
     sys_write(2, (i64)&buf[i], 20 - i);
 }
 
+/// Prints `leak-check: <msg>` to stderr and exits with status 1. Never returns.
 void __silver_leak_abort(str msg) {
     __silver_leak_write_str("leak-check: ");
     __silver_leak_write_str(msg);
@@ -540,6 +585,7 @@ void __silver_leak_abort(str msg) {
 
 // -- Alignment helper (local to avoid import cycle) --------------------------
 
+/// Internal: rounds `value` up to a multiple of `alignment`.
 i64 __leak_align_up(i64 value, i64 alignment) {
     if (alignment <= 1) {
         return value;
@@ -565,6 +611,7 @@ i64 __leak_hash_idx(i64 user) {
     return ((user * -7046029254386353131) >> 48) & (LEAK_MAX_RECORDS - 1);
 }
 
+/// Internal: returns a free or reusable record slot for `user`, or -1.
 i64 __leak_find_empty(i64 user) {
     i64 idx = __leak_hash_idx(user);
     i64 probes = LEAK_MAX_RECORDS;
@@ -579,6 +626,7 @@ i64 __leak_find_empty(i64 user) {
     return -1;
 }
 
+/// Internal: returns the live or ignored record slot for `user`, or -1.
 i64 __leak_find_user(i64 user) {
     i64 idx = __leak_hash_idx(user);
     i64 probes = LEAK_MAX_RECORDS;
@@ -614,6 +662,9 @@ void __silver_leak_ignore(u8* ptr) {
 
 // -- Public allocation hooks -------------------------------------------------
 
+/// Leak-checked allocation: adds guard words around the block and records
+/// it. Returns null for a bad alignment or size overflow; exits the
+/// process when the record table is full.
 u8* __silver_leak_alloc(i64 size, i64 align) {
     if (align <= 0 || (align & (align - 1)) != 0
         || size > 9223372036854775807 - align - 16) { return (u8*)0; }
@@ -707,6 +758,8 @@ u8* __silver_leak_alloc(i64 size, i64 align) {
     return (u8*)user;
 }
 
+/// Leak-checked free: verifies the guard words and exits the process with an
+/// error on a double free, an unknown pointer, or a corrupted guard.
 void __silver_leak_free(u8* ptr) {
     i64 user = (i64)ptr;
     if (user < MEM_MIN_VALID_ADDR) {
@@ -733,6 +786,7 @@ void __silver_leak_free(u8* ptr) {
     mem_free_raw_impl((u8*)__leak_raw_ptrs[slot]);
 }
 
+/// Leak-checked realloc: allocates, copies, and frees the old block.
 u8* __silver_leak_realloc(u8* ptr, i64 new_size, i64 align) {
     i64 user = (i64)ptr;
     if (user < MEM_MIN_VALID_ADDR) {
@@ -760,6 +814,8 @@ u8* __silver_leak_realloc(u8* ptr, i64 new_size, i64 align) {
     return fresh;
 }
 
+/// Prints one stderr line per live, non-ignored allocation and returns the
+/// count. Returns 0 without output when leak checking is off.
 i32 __silver_leak_check_report() {
     if (!__silver_leak_check_enabled) {
         return 0;
@@ -805,6 +861,7 @@ i32 __silver_leak_check_report() {
 
 // -- Checked wrappers (routed through leak-check hooks when enabled) ---------
 
+/// Allocates through the leak checker when enabled, otherwise directly.
 u8* mem_alloc_impl(i64 size, i64 align) {
     if (__silver_leak_check_enabled) {
         return __silver_leak_alloc(size, align);
@@ -812,6 +869,7 @@ u8* mem_alloc_impl(i64 size, i64 align) {
     return mem_alloc_raw_impl(size, align);
 }
 
+/// Frees through the leak checker when enabled, otherwise directly.
 void mem_free_impl(u8* ptr) {
     if (__silver_leak_check_enabled) {
         __silver_leak_free(ptr);
@@ -895,10 +953,13 @@ void silver_rt_dealloc(u8* ptr0, i64 size, i64 align) {
 // Keep existing std/ call sites (malloc/calloc/realloc/free) compiling
 // unchanged, routed through the pure-Silver allocator.
 
+/// C-style `malloc`: 16-byte aligned, uninitialized, null on failure.
+/// Free with `free`.
 void* malloc(i64 size) {
     return (void*)mem_alloc_impl(size, 16);
 }
 
+/// C-style `calloc`: zeroed `count * size` bytes, null on overflow or failure.
 void* calloc(i64 count, i64 size) {
     if (count < 0 || size < 0) { return (void*)0; }
     if (count > 0) {
@@ -910,6 +971,9 @@ void* calloc(i64 count, i64 size) {
     return (void*)silver_rt_alloc_zeroed(total, 16);
 }
 
+/// C-style `realloc` (exported as `realloc`): preserves the contents up to
+/// the smaller size. Null input allocates; a non-positive size frees and
+/// returns a size-0 sentinel. Null on failure, leaving `ptr` valid.
 #[link_name("realloc")]
 void* silver_libc_realloc(void* ptr, i64 new_size) {
     return (void*)mem_realloc_impl((u8*)ptr, new_size, 16);
@@ -922,6 +986,8 @@ void* realloc_bytes(void* ptr, i64 new_size) {
     return silver_libc_realloc(ptr, new_size);
 }
 
+/// C-style `free`. Null and size-0 sentinels are ignored. Freeing any other
+/// pointer not from this allocator, or freeing twice, corrupts the heap.
 void free(void* ptr) {
     mem_free_impl((u8*)ptr);
 }
@@ -932,10 +998,12 @@ void free(void* ptr) {
 // callers that handle OOM explicitly. Prefer `alloc<T>` / `realloc<T>` for
 // new code — they abort on OOM, matching Rust/Zig safe defaults.
 
+/// Allocates one uninitialized `T`, or returns null on failure.
 T* try_alloc<T>() {
     return (T*)silver_rt_alloc(@size(T), @align(T));
 }
 
+/// Allocates `count` zeroed `T`s, or returns null on failure or overflow.
 T* try_alloc_n<T>(i64 count) {
     if (count < 0 || (count > 0 && @size(T) > 9223372036854775807 / count)) {
         return (T*)0;
@@ -943,10 +1011,14 @@ T* try_alloc_n<T>(i64 count) {
     return (T*)silver_rt_alloc_zeroed(@size(T) * count, @align(T));
 }
 
+/// Same as `try_alloc_n`.
 T* try_alloc<T>(i64 count) {
     return try_alloc_n<T>(count);
 }
 
+/// Resizes to `count` `T`s, preserving existing elements; new elements are
+/// uninitialized. Returns null on failure or overflow, leaving `ptr` valid.
+/// Does not run destructors for elements dropped by shrinking.
 T* try_realloc<T>(T* ptr, i64 count) {
     if (count < 0 || (count > 0 && @size(T) > 9223372036854775807 / count)) {
         return (T*)0;
@@ -957,6 +1029,7 @@ T* try_realloc<T>(T* ptr, i64 count) {
 // Abort-on-OOM variants (safe default). These call `abort()` from std.mem.memory
 // when allocation fails, providing explicit failure instead of a segfault.
 
+/// Allocates one uninitialized `T`. Aborts the process on failure.
 T* alloc<T>() {
     T* ptr = try_alloc<T>();
     if (ptr == (T*)0) {
@@ -965,6 +1038,7 @@ T* alloc<T>() {
     return ptr;
 }
 
+/// Allocates `count` zeroed `T`s. Aborts on failure or overflow.
 T* alloc_n<T>(i64 count) {
     T* ptr = try_alloc_n<T>(count);
     if (ptr == (T*)0) {
@@ -987,14 +1061,17 @@ T* alloc_uninit_n<T>(i64 count) {
     return ptr;
 }
 
+/// Same as `alloc_n`.
 T* alloc_array<T>(i64 count) {
     return alloc_n<T>(count);
 }
 
+/// Same as `alloc_n`.
 T* alloc<T>(i64 count) {
     return alloc_n<T>(count);
 }
 
+/// Resizes like `try_realloc`, but aborts the process on failure.
 T* realloc<T>(T* ptr, i64 count) {
     T* result = try_realloc<T>(ptr, count);
     if (result == (T*)0) {

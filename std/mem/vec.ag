@@ -320,6 +320,8 @@ impl<T> AsSlice<T> for Vec<T> {
 }
 
 impl<T> Vec<T> {
+    /// Returns a mutable view of all elements. The view is invalidated by any
+    /// push, insert, or other call that may reallocate the vector.
     Slice<T> as_mut_slice(&mut self) {
         Slice<T> s;
         s.data = self.data;
@@ -343,6 +345,8 @@ impl<T> Vec<T> {
         return it;
     }
 
+    /// Returns an iterator from the last element to the first, borrowing the
+    /// vector. Do not mutate the vector while iterating.
     RevIter<T> rev_iter(&self) {
         RevIter<T> r;
         r.data = self.data;
@@ -439,6 +443,8 @@ impl<T> Iterator for VecIter<T> {
     }
 }
 
+/// Drains `iter` into a new vector, taking ownership of each yielded value.
+/// Advances `iter` to exhaustion; never returns for an infinite iterator.
 Vec<T> iter_collect<I, T>(I* iter) {
     Vec<T> out = Vec<T>.new();
     while (true) {

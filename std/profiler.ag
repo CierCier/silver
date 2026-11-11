@@ -23,10 +23,12 @@ struct PhaseRecord {
 }
 
 impl PhaseRecord {
+    /// Returns the RSS change over the phase in KiB (negative when memory shrank).
     i64 memory_delta_kb(*self) {
         return self.memory_after_kb - self.memory_before_kb;
     }
 
+    /// Returns a deep copy.
     PhaseRecord clone(*self) {
         PhaseRecord r;
         r.name = self.name.clone();
@@ -53,6 +55,7 @@ struct TreeNode {
 }
 
 impl TreeNode {
+    /// Returns a deep copy of this node and its children.
     TreeNode clone(*self) {
         TreeNode n;
         n.record = self.record.clone();
@@ -87,6 +90,8 @@ struct Profiler {
     Vec<PhaseFrame> stack;
 }
 
+/// Returns the display width of `s` in columns: one per codepoint, counting
+/// no combining or wide-character rules.
 i64 utf8_display_width(str s) {
     if (s == (str)0) { return 0; }
     i64 len = 0;
@@ -107,6 +112,7 @@ impl Drop for Profiler {
 }
 
 impl Profiler {
+    /// Creates a profiler. When `enabled` is false every method is a no-op.
     Profiler new(bool enabled, bool verbose) {
         Profiler p;
         p.enabled = enabled;
@@ -119,6 +125,7 @@ impl Profiler {
         return move p;
     }
 
+    /// Starts the total timer and records the starting RSS (reads /proc).
     void begin(*self) {
         if (!self.enabled) { return; }
         self.started = true;
@@ -126,6 +133,8 @@ impl Profiler {
         self.total_memory_before_kb = read_rss_kb();
     }
 
+    /// Opens phase `name`, starting the profiler first when needed. Reads the
+    /// clock and RSS.
     void begin_phase(*self, str name) {
         if (!self.enabled) { return; }
         if (!self.started) {
@@ -138,6 +147,8 @@ impl Profiler {
         self.stack.push(move frame);
     }
 
+    /// Closes the innermost open phase named `name` (or the innermost phase when
+    /// no name matches) and records its time and RSS change.
     void end_phase(*self, str name) {
         if (!self.enabled || self.stack.len() == 0) { return; }
         i64 found_idx = -1;
@@ -168,6 +179,7 @@ impl Profiler {
         self.records.push(move rec);
     }
 
+    /// Records `name` as a skipped phase with zero time.
     void skip_phase(*self, str name) {
         if (!self.enabled) { return; }
         i64 memory_kb = read_rss_kb();
@@ -181,6 +193,7 @@ impl Profiler {
         self.records.push(move rec);
     }
 
+    /// Records a phase measured elsewhere, at the current nesting depth.
     void record_phase(*self, str name, f64 elapsed_ms, i64 mem_before_kb, i64 mem_after_kb, bool skipped) {
         if (!self.enabled) { return; }
         PhaseRecord rec;
@@ -193,6 +206,7 @@ impl Profiler {
         self.records.push(move rec);
     }
 
+    /// Builds the phase tree from the recorded phases' depths.
     Vec<TreeNode> build_tree(*self) {
         Vec<TreeNode> nodes = Vec<TreeNode>.new();
         i64 r = 0;
@@ -220,6 +234,7 @@ impl Profiler {
         return move nodes;
     }
 
+    /// Internal: flattens `nodes` into report lines with tree-drawing prefixes.
     void collect_tree(*self, Vec<TreeNode>* nodes, str prefix, bool root_level, Vec<ReportEntry>* out) {
         i64 i = 0;
         while (i < nodes.len()) {
@@ -263,6 +278,7 @@ impl Profiler {
         }
     }
 
+    /// Prints the phase report to stderr; nothing when disabled or empty.
     void print_report(*self) {
         if (!self.enabled || self.records.len() == 0) {
             return;
@@ -409,6 +425,7 @@ impl Profiler {
 // Report formatting helpers
 // ---------------------------------------------------------------------------
 
+/// Appends `text` right-aligned in `width` columns.
 void append_padded_left(String* out, str text, i64 width) {
     i64 len = utf8_display_width(text);
     i64 pad = width - len;
@@ -419,6 +436,7 @@ void append_padded_left(String* out, str text, i64 width) {
     out.push_str(text);
 }
 
+/// Appends `text` left-aligned in `width` columns.
 void append_padded_right(String* out, str text, i64 width) {
     out.push_str(text);
     i64 len = utf8_display_width(text);
@@ -429,6 +447,7 @@ void append_padded_right(String* out, str text, i64 width) {
     }
 }
 
+/// Appends `ms` with two decimal places.
 void append_f64_2dp(String* out, f64 ms) {
     if (ms < 0.0) {
         out.push_str("-");
@@ -448,6 +467,7 @@ void append_f64_2dp(String* out, f64 ms) {
     out.push_display(&frac);
 }
 
+/// Formats a KiB count as `N KB`, `N.N MB`, or `N.N GB`.
 String format_bytes(i64 kb) {
     String s = String.new();
     if (kb < 1024) {
@@ -484,6 +504,7 @@ String format_bytes(i64 kb) {
     return move s;
 }
 
+/// Formats one report row: name, time, and memory columns.
 String render_report_line(str name, i64 width, f64 elapsed_ms, i64 before, i64 after, bool skipped) {
     String line = String.new();
     append_padded_right(&mut line, name, width);
@@ -573,9 +594,13 @@ i64 read_rss_kb() {
 // Process-wide global profiler state
 // ---------------------------------------------------------------------------
 
+/// Internal: true once `profiler_install` has run.
 bool g_profiler_installed;
+/// Internal: the process-wide profiler used by the `profiler_*` functions.
 Profiler g_profiler;
 
+/// Installs `profiler` as the process-wide profiler, dropping any previous
+/// one. Not thread-safe.
 void profiler_install(Profiler profiler) {
     if (g_profiler_installed) {
         g_profiler.drop();
@@ -584,39 +609,47 @@ void profiler_install(Profiler profiler) {
     g_profiler_installed = true;
 }
 
+/// Returns true when a profiler is installed and enabled.
 bool profiler_enabled() {
     return g_profiler_installed && g_profiler.enabled;
 }
 
+/// Returns true when a profiler is installed and verbose.
 bool profiler_verbose() {
     return g_profiler_installed && g_profiler.verbose;
 }
 
+/// Starts the global profiler; no-op when disabled.
 void profiler_begin() {
     if (!profiler_enabled()) { return; }
     g_profiler.begin();
 }
 
+/// Opens a phase on the global profiler; no-op when disabled.
 void profiler_begin_phase(str name) {
     if (!profiler_enabled()) { return; }
     g_profiler.begin_phase(name);
 }
 
+/// Closes a phase on the global profiler; no-op when disabled.
 void profiler_end_phase(str name) {
     if (!profiler_enabled()) { return; }
     g_profiler.end_phase(name);
 }
 
+/// Records a skipped phase on the global profiler; no-op when disabled.
 void profiler_skip_phase(str name) {
     if (!profiler_enabled()) { return; }
     g_profiler.skip_phase(name);
 }
 
+/// Records an externally measured phase on the global profiler.
 void profiler_record_phase(str name, f64 elapsed_ms, i64 mem_before_kb, i64 mem_after_kb, bool skipped) {
     if (!profiler_enabled()) { return; }
     g_profiler.record_phase(name, elapsed_ms, mem_before_kb, mem_after_kb, skipped);
 }
 
+/// Prints the global profiler's report to stderr; no-op when disabled.
 void profiler_print_report() {
     if (!profiler_enabled()) { return; }
     g_profiler.print_report();

@@ -161,6 +161,9 @@ String path_normalize(str path) {
     return move result;
 }
 
+/// Drops every string in `parts` and frees the vector, leaving it empty so a
+/// later drop is a no-op. Same effect as `parts.drop()`, which already drops
+/// the elements.
 void drop_vec_strings(Vec<String>* parts) {
     i64 k = 0;
     while (k < parts.len) {
@@ -170,12 +173,15 @@ void drop_vec_strings(Vec<String>* parts) {
     parts.drop();
 }
 
+/// Returns true for an ASCII hex digit (0-9, a-f, A-F).
 bool is_hex_digit(u8 c) {
     return (c >= (u8)48 && c <= (u8)57)
         || (c >= (u8)97 && c <= (u8)102)
         || (c >= (u8)65 && c <= (u8)70);
 }
 
+/// Returns the value of a hex digit. `c` must satisfy `is_hex_digit`; other
+/// bytes give a meaningless result.
 i32 hex_value(u8 c) {
     if (c >= (u8)48 && c <= (u8)57) { return (i32)(c - (u8)48); }
     if (c >= (u8)97 && c <= (u8)102) { return (i32)(c - (u8)97) + 10; }
@@ -204,6 +210,7 @@ String percent_decode(str text) {
     return move result;
 }
 
+/// Returns true for an RFC 3986 unreserved byte: ASCII letters, digits, `-._~`.
 bool is_unreserved(u8 c) {
     return (c >= (u8)48 && c <= (u8)57)
         || (c >= (u8)65 && c <= (u8)90)
@@ -232,6 +239,7 @@ String percent_encode_path(str text) {
     return move result;
 }
 
+/// Returns the uppercase hex digit for `v` in 0..15.
 u8 hex_upper(i32 v) {
     if (v < 10) { return (u8)((u32)48 + v); }
     return (u8)((u32)65 + v - 10);

@@ -17,6 +17,10 @@ import std.mem.vec;
 import std.sync;
 import std.optional;
 
+/// A thread-safe multi-producer, multi-consumer FIFO queue.
+/// Unbounded channels never block on send; bounded channels block senders at
+/// capacity. Share a channel by pointer; do not copy or move it while other
+/// threads are blocked on it, because waiters sleep on its futex words.
 struct Channel<T> {
     RawMutex mu;
     Vec<T> queue;

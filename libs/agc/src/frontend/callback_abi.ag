@@ -10,6 +10,7 @@ import frontend.symbols;
 import frontend.typecheck_expr;
 import frontend.types;
 
+/// Parses a C type spelling into a type id after normalizing whitespace.
 u32 callback_abi_type_from_text(TypeTable* types, str text) {
     String normalized = String.new();
     i64 i = 0;
@@ -31,6 +32,7 @@ u32 callback_abi_type_from_text(TypeTable* types, str text) {
     return result;
 }
 
+/// Follows `type` aliases from `type_id` to the underlying type (depth 64).
 u32 callback_abi_resolve_alias(SyntaxNode* root, TypeTable* types, u32 type_id, i64 depth) {
     if (depth > 64) { return TYPE_UNKNOWN; }
     u32 resolved = types.resolve_subst(type_id);
@@ -52,6 +54,8 @@ u32 callback_abi_resolve_alias(SyntaxNode* root, TypeTable* types, u32 type_id, 
     return callback_abi_resolve_alias(root, types, result, depth + 1);
 }
 
+/// Returns true for a scalar the C callback ABI supports: void, 32/64-bit
+/// integers, f32/f64, char, str, and pointers or references.
 bool callback_abi_scalar_supported(SyntaxNode* root, TypeTable* types, u32 type_id, i64 depth) {
     if (depth > 64) { return false; }
     u32 resolved = callback_abi_resolve_alias(root, types, type_id, depth);
@@ -81,6 +85,7 @@ bool callback_abi_scalar_supported(SyntaxNode* root, TypeTable* types, u32 type_
     return true;
 }
 
+/// Returns true when `type_id` contains a callback the C ABI cannot pass.
 bool callback_abi_unsupported_callback(SyntaxNode* root, TypeTable* types, u32 type_id, i64 depth) {
     Vec<u32> visiting = Vec<u32>.new();
     bool result = callback_abi_nested_callback(root, types, type_id, depth, &visiting);
@@ -88,6 +93,7 @@ bool callback_abi_unsupported_callback(SyntaxNode* root, TypeTable* types, u32 t
     return result;
 }
 
+/// Returns true when a field of a record contains an unsupported callback.
 bool callback_abi_record_fields(SyntaxNode* root, TypeTable* types, u32 type_id,
                                 SyntaxNode* body, i64 depth, Vec<u32>* visiting) {
     SyntaxNode* cursor = body == (SyntaxNode*)0 ? (SyntaxNode*)0 : body.first_child;
@@ -120,6 +126,8 @@ bool callback_abi_record_fields(SyntaxNode* root, TypeTable* types, u32 type_id,
     return false;
 }
 
+/// Returns true when `type_id` (or a type it contains) has an unsupported
+/// callback signature. `visiting` cuts cycles.
 bool callback_abi_nested_callback(SyntaxNode* root, TypeTable* types, u32 type_id, i64 depth,
                                   Vec<u32>* visiting) {
     u32 resolved = callback_abi_resolve_alias(root, types, type_id, depth);
@@ -251,6 +259,7 @@ bool callback_abi_nested_callback(SyntaxNode* root, TypeTable* types, u32 type_i
     return unsupported;
 }
 
+/// Returns the type id of a parameter as the callback ABI sees it.
 u32 callback_abi_parameter_type(TypeTable* types, Binding* parameter) {
     bool function_type = binding_has_function_type(parameter);
     String text = binding_parameter_type_text(parameter);
@@ -264,6 +273,7 @@ u32 callback_abi_parameter_type(TypeTable* types, Binding* parameter) {
     return result;
 }
 
+/// Returns true when `node` contains a `...`.
 bool callback_abi_has_variadic(SyntaxNode* node) {
     if (node == (SyntaxNode*)0) { return false; }
     if (node.kind == NodeKind.Token && node.token_kind == TokenKind.DotDotDot) { return true; }
@@ -275,6 +285,8 @@ bool callback_abi_has_variadic(SyntaxNode* node) {
     return false;
 }
 
+/// Returns true when C extern function `name` cannot be used as a value
+/// (variadic or an unsupported signature).
 bool callback_abi_function_value_unsupported(SyntaxNode* root, TypeTable* types, str name) {
     ExternFunctionSignature signature = item_find_c_extern_function(root, name);
     if (signature.parameter_list == (SyntaxNode*)0) { return false; }
@@ -299,6 +311,7 @@ bool callback_abi_function_value_unsupported(SyntaxNode* root, TypeTable* types,
     return unsupported;
 }
 
+/// Like `callback_abi_function_value_unsupported` for imported C functions.
 bool callback_abi_imported_function_value_unsupported(SyntaxNode* root, TypeTable* types,
                                                        SymbolTable* symbols, str name) {
     i64 index = symbols.find(name);
@@ -311,6 +324,7 @@ bool callback_abi_imported_function_value_unsupported(SyntaxNode* root, TypeTabl
         || callback_abi_unsupported_callback(root, types, type_id, 0);
 }
 
+/// Reports an unsupported callback type in C extern `name`'s signature.
 void callback_abi_check_declaration(SyntaxNode* root, TypeTable* types, str name,
                                     DiagnosticBag* diagnostics, bool* ok) {
     ExternFunctionSignature signature = item_find_c_extern_function(root, name);
@@ -343,6 +357,7 @@ void callback_abi_check_declaration(SyntaxNode* root, TypeTable* types, str name
     }
 }
 
+/// Checks every declaration in a C `extern` item.
 void callback_abi_check_extern_item(SyntaxNode* root, TypeTable* types, SyntaxNode* item,
                                     DiagnosticBag* diagnostics, bool* ok) {
     if (item_extern_uses_c_abi(item)) {
@@ -384,7 +399,7 @@ void callback_abi_check_extern_item(SyntaxNode* root, TypeTable* types, SyntaxNo
     }
 }
 
-// Some expression forms still use the CST fallback. Check escapes there too.
+/// Some expression forms still use the CST fallback. Check escapes there too.
 void callback_abi_check_value_tree(SyntaxNode* root, TypeTable* types, SyntaxNode* node,
                                    Vec<Binding>* bindings, DiagnosticBag* diagnostics, bool* ok) {
     if (node == (SyntaxNode*)0) { return; }
@@ -408,6 +423,7 @@ void callback_abi_check_value_tree(SyntaxNode* root, TypeTable* types, SyntaxNod
     }
 }
 
+/// Checks a function or global item for C functions used as values.
 void callback_abi_check_item_values(SyntaxNode* root, TypeTable* types, SyntaxNode* item,
                                     DiagnosticBag* diagnostics, bool* ok) {
     if (item.kind == NodeKind.Function || item.kind == NodeKind.Global) {

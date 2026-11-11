@@ -13,6 +13,8 @@ import frontend.module_loader;
 import frontend.cfg;
 import frontend.bindings;
 
+/// Per-function name resolution state: the locals in scope (by interned
+/// id), const globals, and borrowed symbol table and diagnostics.
 struct NameResolver {
     Interner local_names;
     Vec<u32> locals;
@@ -24,6 +26,7 @@ struct NameResolver {
 }
 
 impl NameResolver {
+    /// Creates a resolver over borrowed `symbols` and `diagnostics`.
     NameResolver new(SymbolTable* symbols, DiagnosticBag* diagnostics) {
         NameResolver resolver;
         resolver.local_names = Interner.new();
@@ -36,10 +39,12 @@ impl NameResolver {
         return resolver;
     }
 
+    /// Brings local `name` into scope.
     void add_local(NameResolver* self, str name) {
         self.locals.push(self.local_names.intern(name));
     }
 
+    /// Returns true when `name` is a local in scope.
     bool has_local(NameResolver* self, str name) {
         if (!self.local_names.contains(name)) {
             return false;
@@ -55,6 +60,7 @@ impl NameResolver {
         return false;
     }
 
+    /// Returns true when `name` is a `const` global.
     bool is_const_global(NameResolver* self, str name) {
         u32 name_id = self.local_names.intern(name);
         i64 i = 0;
@@ -67,6 +73,8 @@ impl NameResolver {
         return false;
     }
 
+    /// Reports an unknown identifier or function, suggesting the closest
+    /// in-scope name when one is near.
     void unknown(NameResolver* self, str name, Span span, bool is_call) {
         Vec<str> candidates = Vec<str>.new();
         i64 i = 0;
@@ -117,6 +125,7 @@ impl NameResolver {
     }
 }
 
+/// Returns true for `=` or a compound assignment operator token.
 bool const_is_assign_op(SyntaxNode* node) {
     if (node == (SyntaxNode*)0 || node.kind != NodeKind.Token) {
         return false;
@@ -134,15 +143,16 @@ bool const_is_assign_op(SyntaxNode* node) {
         || node.token_kind == TokenKind.RightShiftAssign;
 }
 
+/// Returns true for a `;` or `,` token.
 bool const_is_delimiter(SyntaxNode* node) {
     return node != (SyntaxNode*)0 && node.kind == NodeKind.Token
         && (node.token_kind == TokenKind.Semicolon || node.text == ";" || node.text == ",");
 }
 
-// Check one sibling-run segment for const violations (LANG-004). A segment
-// declares iff a `const` token precedes its first assign-op; the declared name
-// is the identifier immediately before that `=`. Block boundaries keep nested
-// declarations from poisoning this scan.
+/// Check one sibling-run segment for const violations (LANG-004). A segment
+/// declares iff a `const` token precedes its first assign-op; the declared name
+/// is the identifier immediately before that `=`. Block boundaries keep nested
+/// declarations from poisoning this scan.
 void const_check_segment(NameResolver* resolver, Vec<Binding>* bindings,
                          Vec<SyntaxNode*>* segment) {
     i64 const_at = -1;
@@ -212,6 +222,8 @@ void const_check_segment(NameResolver* resolver, Vec<Binding>* bindings,
     }
 }
 
+/// Reports const violations in every statement run under `parent`,
+/// recursing into blocks.
 void const_scan_children(NameResolver* resolver, Vec<Binding>* bindings,
                          SyntaxNode* parent) {
     if (parent == (SyntaxNode*)0) {
@@ -240,6 +252,7 @@ void const_scan_children(NameResolver* resolver, Vec<Binding>* bindings,
 }
 
 
+/// Returns a function item's body block, or null for a declaration.
 SyntaxNode* function_body(SyntaxNode* function) {
     SyntaxNode* child = function.first_child;
     while (child != (SyntaxNode*)0) {
@@ -251,6 +264,8 @@ SyntaxNode* function_body(SyntaxNode* function) {
     return (SyntaxNode*)0;
 }
 
+/// Heuristic: returns true when leaf `index` looks like a type name (it is
+/// followed by `<`, `*`, `&`, or `[`, among other cues).
 bool likely_type_name(Vec<SyntaxNode*>* leaves, i64 index) {
     if (index + 1 < leaves.len()) {
         str next = leaves.get(index + 1).text;
@@ -267,6 +282,7 @@ bool likely_type_name(Vec<SyntaxNode*>* leaves, i64 index) {
     return false;
 }
 
+/// Returns true when `text` starts with `prefix`.
 bool name_starts_with(str text, str prefix) {
     i64 text_len = strlen(text);
     i64 prefix_len = strlen(prefix);
@@ -283,6 +299,7 @@ bool name_starts_with(str text, str prefix) {
     return true;
 }
 
+/// Resolves every name used in `function`'s body, reporting unknown ones.
 void resolve_function(NameResolver* resolver, SyntaxNode* function, CfgSet* cfg) {
     resolver.locals.len = 0;
     SyntaxNode* body = function_body(function);
@@ -344,6 +361,8 @@ void resolve_function(NameResolver* resolver, SyntaxNode* function, CfgSet* cfg)
     resolver.locals.len = 0;
 }
 
+/// Resolves names in every cfg-visible function of `tree`. Returns false
+/// when any name was unknown.
 bool resolve_names(SymbolTable* symbols, DiagnosticBag* diagnostics, SyntaxTree* tree,
                     str owner_path, CfgSet* cfg, Vec<String>* include_dirs,
                     ImportedDeclarations* declarations) {

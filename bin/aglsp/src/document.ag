@@ -4,11 +4,12 @@ import std.mem.memory;
 import std.string;
 import std.path;
 import std.fs;
+import std.hash;
 import frontend.module_loader;
 import tooling.index;
 import positions;
 
-// True when the offset sits inside a string, char, or comment literal.
+/// True when the offset sits inside a string, char, or comment literal.
 bool inside_literal(Document* doc, i64 offset) {
     i64 i = 0;
     while (i < doc.analysis.tokens.len()) {
@@ -22,6 +23,7 @@ bool inside_literal(Document* doc, i64 offset) {
     return false;
 }
 
+/// Returns `source` made absolute against the current directory.
 String absolute_document_path(str source) {
     String path = String.from_str(source);
     if (!path.starts_with("/")) {
@@ -30,17 +32,23 @@ String absolute_document_path(str source) {
     return path_normalize(path.to_str());
 }
 
+/// Returns the local path of a `file://` URI, or "" for other schemes.
 String document_path(str uri) {
     Optional<String> decoded = file_uri_to_path(uri);
     if (!decoded.is_some()) { return String.new(); }
     String path = decoded.unwrap(); return absolute_document_path(path.to_str());
 }
 
+/// One file known to the server: its text, line index, version, dirty
+/// flags, cached diagnostics and semantic tokens, editor index, and the
+/// documents it imports. Allocated and owned by the `DocumentStore`.
 struct Document {
     i64 store_id;
     String uri;
     String path;
     String text;
+    // Content hash of `text`, kept by `replace_text`; keys the diagnostic cache.
+    i64 text_hash;
     LspLineIndex lines;
     i64 version;
     i64 revision;
@@ -58,16 +66,22 @@ struct Document {
     Vec<Document*> dependencies;
 }
 
+/// Every known document plus the workspace roots, include directories, and
+/// project manifests used to resolve imports. Not thread-safe; owns the
+/// documents.
 struct DocumentStore {
     Vec<Document*> docs;
     Vec<String> roots;
     Vec<String> include_dirs;
     Vec<String> manifest_dirs;
     Vec<String> project_roots;
+    // Manifest target entry files; workspace diagnostics start from these.
+    Vec<String> project_entries;
     Vec<String> overlay_paths;
     bool discover_open_projects;
 }
 
+/// Returns true when `path` is inside one of `roots`.
 bool path_within_roots(Vec<String>* roots, str path) {
     i64 i = 0;
     while (i < roots.len()) {
@@ -80,11 +94,14 @@ bool path_within_roots(Vec<String>* roots, str path) {
     return false;
 }
 
+/// Returns true for an open document or one inside the workspace or a
+/// project root.
 bool workspace_document(DocumentStore* store, Document* doc) {
     return doc.open || path_within_roots(&store.roots, doc.path.to_str())
         || path_within_roots(&store.project_roots, doc.path.to_str());
 }
 
+/// Returns true when symbols of `doc` may be offered by auto-import.
 bool auto_import_document(DocumentStore* store, Document* doc) {
     return path_within_roots(&store.roots, doc.path.to_str())
         || path_within_roots(&store.project_roots, doc.path.to_str())
@@ -93,7 +110,7 @@ bool auto_import_document(DocumentStore* store, Document* doc) {
 }
 
 impl Document {
-    // Closed files keep stable symbol IDs and source text, not a full parse tree.
+    /// Closed files keep stable symbol IDs and source text, not a full parse tree.
     void compact(Document* self) {
         if (self.open || self.analysis.tree.root == (SyntaxNode*)0) { return; }
         // Pointer field overwrites lack drop glue; locals own the discarded buffers.
@@ -111,6 +128,7 @@ impl Document {
         pool.destroy();
     }
 
+    /// Reparses a compacted document so its syntax tree is available again.
     void ensure_syntax(Document* self) {
         if (self.analysis.tree.root != (SyntaxNode*)0) { return; }
         // Requests can hold symbol pointers while restoring another file's syntax.
@@ -122,21 +140,26 @@ impl Document {
         self.analysis.symbols = move retained;
     }
 
+    /// Replaces the text, rebuilding the line index and editor analysis.
     void replace_text(Document* self, str text) {
         String _previous_text = move self.text;
         LspLineIndex _previous_lines = move self.lines;
         IdeIndex _previous_analysis = move self.analysis;
         self.text = String.from_str(text);
+        self.text_hash = hash_bytes(self.text.data, self.text.len());
         self.lines = LspLineIndex.new(self.text.to_str());
         self.analysis = IdeIndex.new(self.text.to_str());
     }
 
+    /// Returns the LSP position (UTF-16 columns) of byte `offset`.
     LspPosition position(Document* self, i64 offset) { return self.lines.position(self.text.to_str(), offset); }
 
+    /// Converts an LSP position to a byte offset; false when out of range.
     bool offset(Document* self, i64 line, i64 character, i64* result) {
         return self.lines.offset(self.text.to_str(), line, character, result);
     }
 
+    /// Appends a JSON LSP range for `span`.
     void append_range(Document* self, String* out, Span span) {
         out.push_str("{\"start\":"); append_position(out, self.position(span.start));
         out.push_str(",\"end\":"); append_position(out, self.position(span.end)); out.push('}');
@@ -165,6 +188,7 @@ impl DocumentStore {
         return move documents;
     }
 
+    /// Creates an empty store.
     DocumentStore new() {
         DocumentStore store;
         store.docs = Vec<Document*>.new();
@@ -172,6 +196,7 @@ impl DocumentStore {
         store.include_dirs = Vec<String>.new();
         store.manifest_dirs = Vec<String>.new();
         store.project_roots = Vec<String>.new();
+        store.project_entries = Vec<String>.new();
         store.overlay_paths = Vec<String>.new();
         store.discover_open_projects = true;
         // Same sysroot fallback cascade as the compiler: SILVER_SYSROOT,
@@ -191,6 +216,7 @@ impl DocumentStore {
         return move store;
     }
 
+    /// Returns the document for `uri` (matched by path), or null.
     Document* get(DocumentStore* self, str uri) {
         String path = document_path(uri);
         i64 i = 0;
@@ -202,6 +228,9 @@ impl DocumentStore {
         return (Document*)0;
     }
 
+    /// Creates or replaces the document for `uri`. Ignores (returns null) a
+    /// stale version for an open document; otherwise reindexes it, marks it
+    /// dirty, and invalidates the documents that import it.
     Document* set(DocumentStore* self, str uri, str text, i64 version, bool open) {
         Document* doc = self.get(uri);
         if (doc == (Document*)0) {
@@ -227,6 +256,8 @@ impl DocumentStore {
         return doc;
     }
 
+    /// Returns the document for file `path`, loading it from disk when unknown.
+    /// Returns null for unreadable files, embedded NULs, or invalid UTF-8.
     Document* load(DocumentStore* self, str path) {
         String normalized = absolute_document_path(path);
         String uri = path_to_file_uri(normalized.to_str());
@@ -239,6 +270,7 @@ impl DocumentStore {
         return self.set(uri.to_str(), source.to_str(), 0, false);
     }
 
+    /// Recomputes each dirty document's imports and dependencies.
     void refresh_imports(DocumentStore* self) {
         Vec<String> overlay_paths = Vec<String>.new(); i64 overlay = 0; bool changed = false;
         while (overlay < self.docs.len()) {
@@ -285,6 +317,8 @@ impl DocumentStore {
         }
     }
 
+    /// Marks `uri` closed: reloads its on-disk text (or empties it), drops its
+    /// parse tree, and invalidates its dependents.
     void close(DocumentStore* self, str uri) {
         Document* doc = self.get(uri);
         if (doc == (Document*)0) { return; }
@@ -310,11 +344,13 @@ impl DocumentStore {
         doc.compact();
     }
 
+    /// Drops the parse trees of every closed document.
     void compact_closed(DocumentStore* self) {
         i64 i = 0;
         while (i < self.docs.len()) { self.docs.get(i).compact(); i += 1; }
     }
 
+    /// Marks every document that transitively imports `changed` dirty.
     void invalidate_dependents(DocumentStore* self, Document* changed) {
         Vec<Document*> affected = Vec<Document*>.new(); affected.push(changed); i64 next = 0;
         while (next < affected.len()) {
@@ -338,6 +374,8 @@ impl DocumentStore {
     }
 }
 
+/// Resolves import `name` from `doc` to a file path ("" when unresolved),
+/// using open documents as source overlays.
 String resolve_document_import(DocumentStore* store, Document* doc, str name) {
     String module = module_root(doc.path.to_str()); String root = absolute_document_path(module.to_str()); String config = String.new();
     return resolve_module_path_with_sources(doc.path.to_str(), root.to_str(), name,
@@ -356,8 +394,11 @@ impl Drop for DocumentStore {
     }
 }
 
+/// A symbol in a specific document; `symbol` is -1 when unresolved.
 struct SymbolTarget { Document* document; i64 symbol; }
 
+/// Searches `doc` and its imports (skipping `visited`) for a top-level
+/// symbol `name` (a member of `owner` when set), writing it to `*target`.
 void find_imported_symbol(Document* doc, str name, str owner, Vec<Document*>* visited, SymbolTarget* target) {
     i64 i = 0;
     while (i < visited.len()) { if (visited.get(i) == doc) { return; } i += 1; }
@@ -379,6 +420,204 @@ void find_imported_symbol(Document* doc, str name, str owner, Vec<Document*>* vi
     }
 }
 
+/// Collects members named `name` of `owner` across `doc` and its imports.
+void collect_member_symbols(Document* doc, str name, str owner, Vec<Document*>* visited, Vec<SymbolTarget>* found) {
+    i64 i = 0;
+    while (i < visited.len()) { if (visited.get(i) == doc) { return; } i += 1; }
+    visited.push(doc);
+    i = ide_name_head(&doc.analysis, name);
+    while (i >= 0) {
+        IdeSymbol* symbol = doc.analysis.symbols.get_ptr(i);
+        if (!symbol.local && !symbol.is_private && symbol.name.equals(name) && symbol.owner.equals(owner)) {
+            SymbolTarget member; member.document = doc; member.symbol = i; found.push(member);
+        }
+        i = doc.analysis.next_name.get(i);
+    }
+    i = 0;
+    while (i < doc.dependencies.len()) {
+        collect_member_symbols(doc.dependencies.get(i), name, owner, visited, found); i += 1;
+    }
+}
+
+/// One match wins; otherwise the kind the syntax prefers (see
+/// ide_member_preferred). Two preferred matches stay ambiguous (-2).
+SymbolTarget choose_member(Vec<SymbolTarget>* found, bool call) {
+    SymbolTarget any; any.document = (Document*)0; any.symbol = -1;
+    SymbolTarget preferred = any; i64 i = 0;
+    while (i < found.len()) {
+        SymbolTarget candidate = found.get(i);
+        if (any.symbol == -1) { any = candidate; } else { any.symbol = -2; }
+        IdeSymbol* symbol = candidate.document.analysis.symbols.get_ptr(candidate.symbol);
+        if (ide_member_preferred(symbol.kind, call)) {
+            if (preferred.symbol == -1) { preferred = candidate; } else { preferred.symbol = -2; }
+        }
+        i += 1;
+    }
+    return preferred.symbol != -1 ? preferred : any;
+}
+
+/// A type as written in source, and the document and offset whose scope
+/// resolves its names.
+struct TypeText { String text; Document* scope; i64 offset; }
+
+/// Returns an unknown type text scoped to `doc`.
+TypeText unknown_type(Document* doc) {
+    TypeText found_type; found_type.text = String.new(); found_type.scope = doc; found_type.offset = 0; return move found_type;
+}
+
+/// Returns true for a byte that can appear in a type name.
+bool type_name_byte(u8 c) {
+    return (c >= (u8)'a' && c <= (u8)'z') || (c >= (u8)'A' && c <= (u8)'Z') || (c >= (u8)'0' && c <= (u8)'9') || c == (u8)'_';
+}
+
+/// Top-level entries of the `<...>` list that follows the first whole-word
+/// `name` in `text`: `Map<String, Vec<i64>>*` with `Map` gives both arguments.
+Vec<String> generic_arguments(str text, str name) {
+    Vec<String> out = Vec<String>.new(); String source = String.from_str(text);
+    i64 length = source.len(); i64 width = strlen(name); i64 i = 0; i64 open = -1;
+    while (open < 0 && i + width <= length) {
+        String word = source.substr(i, width);
+        bool bounded = (i == 0 || !type_name_byte(source.data[i - 1]))
+            && (i + width == length || !type_name_byte(source.data[i + width]));
+        if (bounded && word.equals(name)) {
+            i64 j = i + width;
+            while (j < length && source.data[j] == (u8)' ') { j += 1; }
+            if (j < length && source.data[j] == (u8)'<') { open = j; }
+            else { return move out; }
+        }
+        i += 1;
+    }
+    if (open < 0) { return move out; }
+    i64 depth = 0; i64 start = open + 1; i = open;
+    while (i < length) {
+        u8 c = source.data[i];
+        if (c == (u8)'<') { depth += 1; }
+        else if (c == (u8)'>') {
+            depth -= 1;
+            if (depth == 0) { String last = source.substr(start, i - start); out.push(last.trim()); return move out; }
+        } else if (c == (u8)',' && depth == 1) {
+            String item = source.substr(start, i - start); out.push(item.trim()); start = i + 1;
+        }
+        i += 1;
+    }
+    out.clear(); return move out;
+}
+
+/// Replaces whole-word type parameter names: `T* get_ptr` with T=String reads `String* get_ptr`.
+String substitute_type_names(str text, Vec<String>* parameters, Vec<String>* arguments) {
+    String source = String.from_str(text); String out = String.new(); i64 i = 0;
+    while (i < source.len()) {
+        if (!type_name_byte(source.data[i])) { out.push(source.data[i]); i += 1; continue; }
+        i64 start = i;
+        while (i < source.len() && type_name_byte(source.data[i])) { i += 1; }
+        String word = source.substr(start, i - start); i64 k = 0; bool replaced = false;
+        while (!replaced && k < parameters.len()) {
+            if (parameters.get_ptr(k).equals(word.to_str())) { out.push_str(arguments.get_ptr(k).to_str()); replaced = true; }
+            k += 1;
+        }
+        if (!replaced) { out.push_str(word.to_str()); }
+    }
+    return move out;
+}
+
+/// `text` from a member of `target` with the receiver's type arguments in place
+/// of the owner's type parameters. Unchanged when either side is not generic.
+String substitute_receiver(TypeText* receiver, SymbolTarget target, str text) {
+    IdeSymbol* member = target.document.analysis.symbols.get_ptr(target.symbol);
+    if (receiver.text.len() == 0 || member.owner.len() == 0) { return String.from_str(text); }
+    SymbolTarget owner = visible_type_name(target.document, member.owner.to_str(), member.selection.start);
+    if (owner.symbol < 0) { return String.from_str(text); }
+    IdeSymbol* declaration = owner.document.analysis.symbols.get_ptr(owner.symbol);
+    Vec<String> declared = generic_arguments(declaration.signature.to_str(), declaration.name.to_str());
+    Vec<String> arguments = generic_arguments(receiver.text.to_str(), member.owner.to_str());
+    if (declared.len() == 0 || declared.len() != arguments.len()) { return String.from_str(text); }
+    // Bounds such as `T: Display` name the parameter first.
+    Vec<String> parameters = Vec<String>.new(); i64 i = 0;
+    while (i < declared.len()) { parameters.push(ide_owner_name(declared.get_ptr(i).to_str())); i += 1; }
+    return substitute_type_names(text, &parameters, &arguments);
+}
+
+/// The receiver before the `.` that precedes a member occurrence, and whether
+/// that receiver is a call result (`make().member`).
+/// A type receiver written with arguments, `Point<i32>.new()`, sets
+/// `written_end` to the end of its `>`; it is -1 otherwise.
+bool member_receiver(Document* doc, i64 occurrence, i64* receiver, bool* call, i64* written_end) {
+    *written_end = -1;
+    SyntaxNode* separator = binding_previous_sibling(doc.analysis.occurrences.get_ptr(occurrence).node);
+    if (separator == (SyntaxNode*)0 || separator.token_kind != TokenKind.Dot) { return false; }
+    SyntaxNode* node = binding_previous_sibling(separator);
+    *call = node != (SyntaxNode*)0 && node.kind == NodeKind.Parenthesized;
+    if (*call) { node = binding_previous_sibling(node); }
+    if (!*call && node != (SyntaxNode*)0
+        && (node.token_kind == TokenKind.Greater || node.token_kind == TokenKind.RightShift)) {
+        *written_end = node.span.end; i64 depth = 0;
+        while (node != (SyntaxNode*)0) {
+            if (node.token_kind == TokenKind.Greater) { depth += 1; }
+            else if (node.token_kind == TokenKind.RightShift) { depth += 2; }
+            else if (node.token_kind == TokenKind.Less) { depth -= 1; if (depth == 0) { break; } }
+            node = binding_previous_sibling(node);
+        }
+        if (node != (SyntaxNode*)0) { node = binding_previous_sibling(node); }
+    }
+    if (node == (SyntaxNode*)0 || !node_is_identifier(node)) { return false; }
+    *receiver = doc.analysis.occurrence_at(node.span.start);
+    return *receiver >= 0 && *receiver < occurrence;
+}
+
+/// Returns the type of the receiver of a member occurrence.
+TypeText member_receiver_type(Document* doc, i64 occurrence) {
+    i64 receiver = -1; bool call = false; i64 written_end = -1;
+    if (!member_receiver(doc, occurrence, &receiver, &call, &written_end)) { return unknown_type(doc); }
+    TypeText found_type = expression_type(doc, receiver, call);
+    // Keep the written arguments: `Point<i32>` substitutes into `Point<T> new(...)`.
+    if (written_end >= 0 && found_type.text.len() > 0) {
+        i64 start = doc.analysis.occurrences.get_ptr(receiver).node.span.start;
+        found_type.text = doc.text.substr(start, written_end - start);
+        found_type.scope = doc; found_type.offset = start;
+    }
+    return move found_type;
+}
+
+/// Concrete type of the expression ending at `occurrence` (`call` when call
+/// arguments follow): a value's declared type or a call's return type, with a
+/// generic receiver's type arguments substituted. A type name used as a
+/// receiver (`String.new()`) is that type. Empty text when unknown.
+TypeText expression_type(Document* doc, i64 occurrence, bool call) {
+    TypeText found_type = unknown_type(doc);
+    SymbolTarget target = follow_import_alias(resolve_occurrence(doc, occurrence));
+    if (target.symbol < 0) { return move found_type; }
+    IdeSymbol* symbol = target.document.analysis.symbols.get_ptr(target.symbol);
+    found_type.scope = target.document; found_type.offset = symbol.selection.start;
+    if (ide_type_symbol(symbol.kind) && symbol.kind != IdeSymbolKind.TypeParameter) {
+        if (!call) { found_type.text = symbol.name.clone(); }
+        return move found_type;
+    }
+    bool callable = symbol.kind == IdeSymbolKind.Function || symbol.kind == IdeSymbolKind.Method;
+    if (callable != call) { return move found_type; }
+    TypeText receiver = member_receiver_type(doc, occurrence);
+    found_type.text = substitute_receiver(&receiver, target, symbol.type_name.to_str());
+    return move found_type;
+}
+
+/// The member owner a type names, following aliases. A name the declaring
+/// scope cannot see (a substituted argument) is resolved from `fallback`.
+String type_text_owner(TypeText* found_type, Document* fallback) {
+    String head = ide_owner_name(found_type.text.to_str());
+    if (head.len() == 0) { return move head; }
+    if (is_primitive_type_token(Lexer.keyword_kind(head.data, 0, head.len()))) { return move head; }
+    SymbolTarget target = visible_type_name(found_type.scope, head.to_str(), found_type.offset);
+    if (target.symbol < 0 && fallback != found_type.scope) { target = visible_type_name(fallback, head.to_str(), 0); }
+    return symbol_receiver_owner(target);
+}
+
+/// A member's hover signature with its receiver's type arguments substituted:
+/// `T item` reads `Text item` on a `Box<Text>`.
+String concrete_signature(Document* doc, i64 occurrence, SymbolTarget target) {
+    TypeText receiver = member_receiver_type(doc, occurrence);
+    return substitute_receiver(&receiver, target, target.document.analysis.symbols.get_ptr(target.symbol).signature.to_str());
+}
+
+/// Resolves an occurrence (local, member, or imported) to its symbol.
 SymbolTarget resolve_occurrence(Document* doc, i64 occurrence) {
     SymbolTarget target;
     target.document = doc;
@@ -394,25 +633,32 @@ SymbolTarget resolve_occurrence(Document* doc, i64 occurrence) {
     if (selected.member) {
         SyntaxNode* separator = binding_previous_sibling(selected.node);
         if (separator != (SyntaxNode*)0 && separator.token_kind == TokenKind.Dot) {
-            SyntaxNode* receiver = binding_previous_sibling(separator);
-            if (receiver == (SyntaxNode*)0 || !node_is_identifier(receiver)) { return target; }
-            i64 receiver_occurrence = doc.analysis.occurrence_at(receiver.span.start);
-            if (receiver_occurrence < 0 || receiver_occurrence >= occurrence) { return target; }
-            owner = symbol_receiver_owner(resolve_occurrence(doc, receiver_occurrence));
-            if (owner.len() == 0) { return target; }
-            i64 local = ide_name_head(&doc.analysis, selected.node.text);
-            while (local >= 0) {
-                IdeSymbol* symbol = doc.analysis.symbols.get_ptr(local);
-                if (symbol.owner.equals(owner.to_str())) {
-                    if (target.symbol == -1) { target.symbol = local; }
-                    else { target.symbol = -2; }
-                }
-                local = doc.analysis.next_name.get(local);
-            }
-            if (target.symbol != -1) { return target; }
+            // `value.member` or `call(...).member`; the owner comes from the receiver's type.
+            i64 receiver = -1; bool call_result = false;
+            i64 written_end = -1;
+            if (!member_receiver(doc, occurrence, &receiver, &call_result, &written_end)) { return target; }
+            TypeText found_type = expression_type(doc, receiver, call_result);
+            owner = type_text_owner(&found_type, doc);
         }
+        if (owner.len() == 0) { return target; }
+        Vec<SymbolTarget> found = Vec<SymbolTarget>.new();
+        i64 local = ide_name_head(&doc.analysis, selected.node.text);
+        while (local >= 0) {
+            IdeSymbol* symbol = doc.analysis.symbols.get_ptr(local);
+            if (symbol.owner.equals(owner.to_str())) { SymbolTarget member; member.document = doc; member.symbol = local; found.push(member); }
+            local = doc.analysis.next_name.get(local);
+        }
+        // Members declared in this file shadow imported ones of the same owner.
+        Vec<Document*> visited = Vec<Document*>.new(); visited.push(doc); i64 i = 0;
+        bool shadowed = found.len() > 0;
+        while (!shadowed && i < doc.dependencies.len()) {
+            collect_member_symbols(doc.dependencies.get(i), selected.node.text, owner.to_str(), &visited, &found);
+            i += 1;
+        }
+        SymbolTarget chosen = choose_member(&found, ide_member_call(selected.node));
+        if (chosen.symbol != -1) { return chosen; }
+        return target;
     }
-    if (selected.member && owner.len() == 0) { return target; }
     Vec<Document*> visited = Vec<Document*>.new();
     visited.push(doc);
     i64 i = 0;
@@ -423,6 +669,7 @@ SymbolTarget resolve_occurrence(Document* doc, i64 occurrence) {
     return target;
 }
 
+/// Follows an import alias symbol to the symbol it names.
 SymbolTarget follow_import_alias(SymbolTarget target) {
     if (target.symbol < 0) { return target; }
     IdeSymbol* symbol = target.document.analysis.symbols.get_ptr(target.symbol);
@@ -438,6 +685,7 @@ SymbolTarget follow_import_alias(SymbolTarget target) {
     return target;
 }
 
+/// Resolves value name `name` visible at `offset` in `doc` or its imports.
 SymbolTarget visible_name(Document* doc, str name, i64 offset) {
     SymbolTarget target; target.document = doc;
     target.symbol = ide_resolve_local(&doc.analysis, name, offset);
@@ -449,6 +697,7 @@ SymbolTarget visible_name(Document* doc, str name, i64 offset) {
     return follow_import_alias(target);
 }
 
+/// Resolves type name `name` visible at `offset` in `doc` or its imports.
 SymbolTarget visible_type_name(Document* doc, str name, i64 offset) {
     SymbolTarget target; target.document = doc;
     target.symbol = ide_resolve_type(&doc.analysis, name, offset);
@@ -463,6 +712,7 @@ SymbolTarget visible_type_name(Document* doc, str name, i64 offset) {
     return target;
 }
 
+/// Returns the owner type name of a symbol, following aliases.
 String symbol_receiver_owner(SymbolTarget target) {
     target = follow_import_alias(target);
     Vec<SymbolTarget> visited = Vec<SymbolTarget>.new();

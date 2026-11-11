@@ -14,28 +14,35 @@ import std.mem.alloc;
 import std.atomic;
 import std.sys.os;
 
-// Maximum concurrently live threads (slots are reclaimed by thread_join).
+/// Maximum concurrently live threads (slots are reclaimed by thread_join).
+/// Spawning fails once this many threads are live.
 const i64 MAX_THREADS = 64;
 
+/// Returns the number of usable thread slots: `MAX_THREADS`, or 1 when built
+/// with the `launch_failure_test` cfg to exercise slot exhaustion.
 i64 thread_registry_capacity() {
     if (@cfg(launch_failure_test)) { return 1; }
     return MAX_THREADS;
 }
 
 // futex(2) operations (Linux x86_64, syscall 202).
+/// futex(2) wait operation.
 const i64 FUTEX_OP_WAIT = 0;
+/// futex(2) wake operation.
 const i64 FUTEX_OP_WAKE = 1;
 // Errnos a futex wait can legitimately observe while the flag stays unset:
 // EAGAIN (-11): the value changed before we slept (wake raced ahead of us);
 // EINTR (-4): a signal interrupted the wait.
+/// futex wait result when the word changed before sleeping; retried.
 const i64 FUTEX_EAGAIN = -11;
+/// futex wait result when a signal interrupted the wait; retried.
 const i64 FUTEX_EINTR = -4;
-// Bounded spin before blocking: short joins never pay a syscall.
+/// Bounded spin before blocking: short joins never pay a syscall.
 const i64 THREAD_JOIN_MAX_SPINS = 64;
 
-// Per-thread bookkeeping. `tid` doubles as the slot liveness flag:
-//   0  = free slot,   <0 = slot claimed but child not yet running,
-//   >0 = child thread running/done (raw clone tid).
+/// Per-thread bookkeeping. `tid` doubles as the slot liveness flag:
+///   0  = free slot,   <0 = slot claimed but child not yet running,
+///   >0 = child thread running/done (raw clone tid).
 struct TaskRecord {
     i64 tid;     // raw clone tid; 0 = free slot (see above)
     i64 fn;      // user function address
@@ -46,8 +53,10 @@ struct TaskRecord {
     i32 ctid;    // kernel-managed tid via CLONE_CHILD_CLEARTID (cleared to 0 upon thread exit)
 }
 
-// Thread table and its guard. .bss, zero-initialized by the OS loader.
+/// Thread table and its guard. .bss, zero-initialized by the OS loader.
+/// Internal: guard with `thread_lock_acquire`/`thread_lock_release`.
 TaskRecord g_threads[64];
+/// Internal: spinlock word for `g_threads` (0 = free, 1 = held).
 i32 g_thread_lock;
 
 /// Acquire the registry spinlock (CAS on i32; same pattern as the allocator).

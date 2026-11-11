@@ -60,6 +60,9 @@ i64 pty_pump_once(i32 src, i32 dst) {
 }
 
 if (@cfg(os.linux)) {
+/// A spawned pty child relayed to the calling terminal under one epoll set.
+/// Ownership: owns the pty and epoll fds. Dropping the session restores the
+/// saved stdin flags; it does not reap or kill the child.
 struct PtySession {
     Pty pty;
     Epoll ep;

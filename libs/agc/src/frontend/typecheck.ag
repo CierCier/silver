@@ -13,10 +13,13 @@ import frontend.messages;
 import frontend.symbols;
 import frontend.types;
 
+/// Returns true for a builtin primitive type name.
 bool typecheck_is_primitive(str name) {
     return types_is_primitive_name(name);
 }
 
+/// Returns true for type names that always resolve (`Self` and stdlib
+/// types the checker knows).
 bool typecheck_is_builtin(str name) {
     return strcmp(name, "Self") == 0
         || strcmp(name, "String") == 0
@@ -38,6 +41,7 @@ bool typecheck_is_builtin(str name) {
         || strcmp(name, "RwLock") == 0;
 }
 
+/// Appends every leaf token under `node`.
 void typecheck_collect_leaves(SyntaxNode* node, Vec<SyntaxNode*>* leaves) {
     if (node == (SyntaxNode*)0) {
         return;
@@ -53,6 +57,7 @@ void typecheck_collect_leaves(SyntaxNode* node, Vec<SyntaxNode*>* leaves) {
     }
 }
 
+/// Returns true when `declaration` declares type parameter `name`.
 bool typecheck_has_type_parameter(SyntaxNode* declaration, str name) {
     if (declaration == (SyntaxNode*)0 || strlen(name) == 0) {
         return false;
@@ -94,6 +99,7 @@ bool typecheck_has_type_parameter(SyntaxNode* declaration, str name) {
     return false;
 }
 
+/// Returns the names of every type symbol, for suggestions.
 Vec<str> typecheck_type_candidates(SymbolTable* symbols) {
     Vec<str> candidates = Vec<str>.new();
     i64 i = 0;
@@ -108,6 +114,7 @@ Vec<str> typecheck_type_candidates(SymbolTable* symbols) {
     return candidates;
 }
 
+/// Returns true when `name` is a declared struct, enum, trait, or alias.
 bool typecheck_has_named_type(SymbolTable* symbols, str name) {
     i64 index = symbols.find(name);
     if (index < 0) {
@@ -118,6 +125,8 @@ bool typecheck_has_named_type(SymbolTable* symbols, str name) {
         || symbol.kind == SymbolKind.TypeAlias || symbol.kind == SymbolKind.Trait;
 }
 
+/// Reports `name` as an unknown type (with a suggestion) unless it is
+/// primitive, builtin, a type parameter, or declared. Sets `*ok` false.
 void typecheck_report_unknown_name(SymbolTable* symbols, SyntaxNode* declaration,
                                    str name, Span span, DiagnosticBag* diagnostics,
                                    bool* ok, Vec<str>* candidates) {
@@ -132,15 +141,18 @@ void typecheck_report_unknown_name(SymbolTable* symbols, SyntaxNode* declaration
     *ok = false;
 }
 
+/// Returns true for a byte that can start an identifier.
 bool typecheck_name_start(u8 ch) {
     return (ch >= (u8)'a' && ch <= (u8)'z')
         || (ch >= (u8)'A' && ch <= (u8)'Z') || ch == (u8)'_';
 }
 
+/// Returns true for a byte that can continue an identifier.
 bool typecheck_name_continue(u8 ch) {
     return typecheck_name_start(ch) || (ch >= (u8)'0' && ch <= (u8)'9');
 }
 
+/// Advances `*cursor` past type punctuation (`*`, `&`, `[`, `]`, spaces).
 void typecheck_skip_rendered_type_punctuation(str text, i64* cursor) {
     while (text[*cursor] == (u8)' ' || text[*cursor] == (u8)'*'
         || text[*cursor] == (u8)'&' || text[*cursor] == (u8)'['
@@ -149,6 +161,8 @@ void typecheck_skip_rendered_type_punctuation(str text, i64* cursor) {
     }
 }
 
+/// Reports unknown type names in rendered type text from `*cursor`,
+/// including nested generic arguments.
 void typecheck_report_rendered_type(SymbolTable* symbols, SyntaxNode* declaration,
                                     str text, i64* cursor, Span span,
                                     DiagnosticBag* diagnostics, bool* ok,
@@ -196,6 +210,7 @@ void typecheck_report_rendered_type(SymbolTable* symbols, SyntaxNode* declaratio
     }
 }
 
+/// Reports unknown type names in a rendered nested type spelling.
 void typecheck_report_unknown_nested(SymbolTable* symbols, SyntaxNode* declaration,
                                      str rendered_type, Span span,
                                      DiagnosticBag* diagnostics, bool* ok,
@@ -206,6 +221,7 @@ void typecheck_report_unknown_nested(SymbolTable* symbols, SyntaxNode* declarati
     );
 }
 
+/// Reports unknown type names in a projected type.
 void typecheck_report_unknown(SymbolTable* symbols, SyntaxNode* declaration,
                               TypeProjection* projection, Span span,
                               DiagnosticBag* diagnostics, bool* ok,
@@ -224,6 +240,7 @@ void typecheck_report_unknown(SymbolTable* symbols, SyntaxNode* declaration,
     );
 }
 
+/// Returns a function item's projected return type.
 TypeProjection typecheck_function_return(SyntaxNode* function) {
     TypeProjection result = projection_type_empty();
     SyntaxNode* parameters = binding_function_parameters(function);
@@ -243,6 +260,7 @@ TypeProjection typecheck_function_return(SyntaxNode* function) {
     return result;
 }
 
+/// Checks the parameter, return, and local types named in a function.
 void typecheck_function(SymbolTable* symbols, SyntaxNode* function,
                         DiagnosticBag* diagnostics, bool* ok) {
     Vec<str> candidates = typecheck_type_candidates(symbols);
@@ -272,6 +290,7 @@ void typecheck_function(SymbolTable* symbols, SyntaxNode* function,
 }
 
 
+/// Checks the target type of a `type` alias item.
 void typecheck_alias(SymbolTable* symbols, SyntaxNode* item,
                      DiagnosticBag* diagnostics, bool* ok) {
     Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
@@ -299,6 +318,7 @@ void typecheck_alias(SymbolTable* symbols, SyntaxNode* item,
     leaves.drop();
 }
 
+/// Checks every field type of a struct item.
 void typecheck_struct(SymbolTable* symbols, SyntaxNode* item,
                       DiagnosticBag* diagnostics, bool* ok) {
     SyntaxNode* body = (SyntaxNode*)0;
@@ -354,6 +374,7 @@ void typecheck_struct(SymbolTable* symbols, SyntaxNode* item,
     candidates.drop();
 }
 
+/// Checks an enum's variants: discriminant syntax, range, and duplicates.
 void typecheck_enum(SyntaxNode* item, DiagnosticBag* diagnostics, bool* ok) {
     Vec<SyntaxNode*> names = Vec<SyntaxNode*>.new();
     Vec<i64> tags = Vec<i64>.new();
@@ -403,6 +424,8 @@ void typecheck_enum(SyntaxNode* item, DiagnosticBag* diagnostics, bool* ok) {
     arities.drop();
 }
 
+/// Checks every named type in cfg-active declarations. Returns false when
+/// any type was unknown or an enum was malformed.
 bool check_declared_types(SymbolTable* symbols, SyntaxTree* tree, CfgSet* cfg,
                           DiagnosticBag* diagnostics) {
     bool ok = true;

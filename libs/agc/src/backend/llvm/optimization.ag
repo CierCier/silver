@@ -2,6 +2,7 @@ import vendor.llvm.llvm;
 import std.optional;
 import std.string;
 
+/// The `-O` level requested on the command line.
 enum LlvmOptimization {
     Unspecified;
     O0;
@@ -13,6 +14,7 @@ enum LlvmOptimization {
     Ofast;
 }
 
+/// Parses an `-O` argument (`0`-`3`, `s`, `z`, `fast`); None when invalid.
 Optional<LlvmOptimization> llvm_parse_optimization(str level) {
     if (strcmp(level, "0") == 0) { return Some(LlvmOptimization.O0); }
     if (strcmp(level, "1") == 0) { return Some(LlvmOptimization.O1); }
@@ -24,6 +26,7 @@ Optional<LlvmOptimization> llvm_parse_optimization(str level) {
     return None;
 }
 
+/// Returns the LLVM code generation level for an optimization level.
 LLVMCodeGenOptLevel llvm_codegen_optimization(LlvmOptimization level) {
     if (level == LlvmOptimization.O0) { return LLVMCodeGenOptLevel.LLVMCodeGenLevelNone; }
     if (level == LlvmOptimization.O1) { return LLVMCodeGenOptLevel.LLVMCodeGenLevelLess; }
@@ -31,6 +34,7 @@ LLVMCodeGenOptLevel llvm_codegen_optimization(LlvmOptimization level) {
     return LLVMCodeGenOptLevel.LLVMCodeGenLevelDefault;
 }
 
+/// Returns the new-pass-manager pipeline text for a level ("" means none).
 str llvm_optimization_pipeline(LlvmOptimization level) {
     if (level == LlvmOptimization.Unspecified || level == LlvmOptimization.O0) { return ""; }
     // Match stage0, including LLVM 22's instcombine fixpoint-check workaround.

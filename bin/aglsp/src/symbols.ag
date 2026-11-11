@@ -7,6 +7,7 @@ import std.algo.sort;
 import transport;
 import macros;
 
+/// Maps a symbol kind to the LSP `SymbolKind` number.
 i64 symbol_kind(IdeSymbolKind kind) {
     return match kind {
         IdeSymbolKind.Function : 12, IdeSymbolKind.Macro : 12, IdeSymbolKind.Method : 6,
@@ -17,10 +18,10 @@ i64 symbol_kind(IdeSymbolKind kind) {
     };
 }
 
-// Split a doc block into prose lines and `$n : description` parameter
-// annotations (1-based positions into the parameter list). Only the comment
-// block directly above an item is attached, so a blank line already ended the
-// block before this runs.
+/// Split a doc block into prose lines and `$n : description` parameter
+/// annotations (1-based positions into the parameter list). Only the comment
+/// block directly above an item is attached, so a blank line already ended the
+/// block before this runs.
 void split_doc_annotations(str documentation, String* body, Vec<i64>* positions, Vec<String>* texts) {
     body.clear();
     i64 total = strlen(documentation);
@@ -59,8 +60,8 @@ void split_doc_annotations(str documentation, String* body, Vec<i64>* positions,
     }
 }
 
-// Append the doc block to a hover body: prose first, then a Parameters section
-// that maps each `$n : ...` annotation onto the n-th parameter name.
+/// Append the doc block to a hover body: prose first, then a Parameters section
+/// that maps each `$n : ...` annotation onto the n-th parameter name.
 void append_hover_documentation(String* content, IdeSymbol* symbol, bool markdown) {
     if (symbol.documentation.len() == 0) { return; }
     String body = String.new();
@@ -97,6 +98,8 @@ void append_hover_documentation(String* content, IdeSymbol* symbol, bool markdow
     }
 }
 
+/// Computes hover markdown (or plain text) for `offset`: signature, doc
+/// comment, or builtin macro docs. Returns "null" when nothing applies.
 String compute_hover(Document* doc, i64 offset, bool markdown) {
     // `@name` macro invocations hover over the builtin documentation table.
     // Text scan (not the token stream) so the name is always current.
@@ -151,7 +154,8 @@ String compute_hover(Document* doc, i64 offset, bool markdown) {
     IdeSymbol* symbol = target.document.analysis.symbols.get_ptr(target.symbol);
     String content = String.new();
     if (markdown) { content.push_str("```silver\n"); }
-    content.push_str(symbol.signature.to_str());
+    String signature = concrete_signature(doc, occurrence, target);
+    content.push_str(signature.to_str());
     if (markdown) { content.push_str("\n```"); }
     append_hover_documentation(&content, symbol, markdown);
     String out = String.from_str("{\"contents\":{\"kind\":\""); out.push_str(markdown ? "markdown" : "plaintext"); out.push_str("\",\"value\":\"");
@@ -160,6 +164,7 @@ String compute_hover(Document* doc, i64 offset, bool markdown) {
     out.push('}'); return move out;
 }
 
+/// Computes the `textDocument/definition` location, or "null".
 String compute_definition(Document* doc, i64 offset) {
     SymbolTarget target = follow_import_alias(resolve_occurrence(doc, doc.analysis.occurrence_at(offset)));
     if (target.symbol < 0) { return String.from_str("null"); }
@@ -168,6 +173,7 @@ String compute_definition(Document* doc, i64 offset) {
     return move out;
 }
 
+/// Appends a `DocumentSymbol` JSON object, with children when requested.
 void append_document_symbol(String* out, Document* doc, i64 id, bool children) {
     IdeSymbol* symbol = doc.analysis.symbols.get_ptr(id);
     out.push_str("{\"name\":\"");
@@ -193,6 +199,7 @@ void append_document_symbol(String* out, Document* doc, i64 id, bool children) {
     out.push('}');
 }
 
+/// Appends a `SymbolInformation` JSON object.
 void append_symbol_information(String* out, Document* doc, IdeSymbol* symbol) {
     out.push_str("{\"name\":\""); json_escape(symbol.name.to_str(), out);
     out.push_str("\",\"containerName\":\""); json_escape(symbol.owner.to_str(), out);
@@ -200,6 +207,7 @@ void append_symbol_information(String* out, Document* doc, IdeSymbol* symbol) {
     out.push_str(",\"location\":"); append_location(out, doc, symbol.selection); out.push('}');
 }
 
+/// Computes the `textDocument/documentSymbol` response.
 String compute_document_symbols(Document* doc, bool hierarchical) {
     String out = String.from_str("["); bool first = true; i64 i = 0;
     while (i < doc.analysis.symbols.len()) {
@@ -219,6 +227,8 @@ String compute_document_symbols(Document* doc, bool hierarchical) {
     out.push(']'); return move out;
 }
 
+/// Computes references (or document highlights) of the symbol at `offset`
+/// across the documents that can see it.
 String compute_references(DocumentStore* store, Document* doc, i64 offset, bool declarations, bool highlights) {
     SymbolTarget target = resolve_occurrence(doc, doc.analysis.occurrence_at(offset));
     Vec<Document*> documents = store.query_documents(doc);
@@ -246,6 +256,7 @@ String compute_references(DocumentStore* store, Document* doc, i64 offset, bool 
     out.push(']'); return move out;
 }
 
+/// Returns true when `name` is a valid identifier.
 bool valid_rename(str name) {
     if (!typecheck_name_start((u8)name[0])) { return false; }
     i64 i = 1;
@@ -255,6 +266,7 @@ bool valid_rename(str name) {
     return diagnostics.is_empty() && tokens.len() == 2 && tokens.get(0).kind == TokenKind.Identifier;
 }
 
+/// Computes the `prepareRename` range, or "null" when not renameable.
 String compute_prepare_rename(Document* doc, i64 offset) {
     i64 occurrence = doc.analysis.occurrence_at(offset);
     SymbolTarget target = rename_target(resolve_occurrence(doc, occurrence));
@@ -266,6 +278,8 @@ String compute_prepare_rename(Document* doc, i64 offset) {
     out.push_str("\"}"); return move out;
 }
 
+/// Returns the symbol a rename changes: a method's trait or declaration
+/// for implementations, else the symbol itself.
 SymbolTarget rename_target(SymbolTarget target) {
     if (target.symbol >= 0 && target.document.analysis.symbols.get_ptr(target.symbol).kind == IdeSymbolKind.Method) {
         return declaration_target(target);
@@ -273,6 +287,7 @@ SymbolTarget rename_target(SymbolTarget target) {
     return target;
 }
 
+/// Returns every symbol a rename must change together.
 Vec<SymbolTarget> rename_plan(DocumentStore* store, Document* context, SymbolTarget target) {
     Vec<SymbolTarget> plan = Vec<SymbolTarget>.new(); target = rename_target(target);
     if (target.symbol < 0) { return move plan; }
@@ -293,6 +308,7 @@ Vec<SymbolTarget> rename_plan(DocumentStore* store, Document* context, SymbolTar
     return move plan;
 }
 
+/// Returns true when renaming to `name` would clash with a visible name.
 bool rename_conflicts(DocumentStore* store, Document* context, SymbolTarget target, str name) {
     target = rename_target(target); Vec<SymbolTarget> plan = rename_plan(store, context, target);
     if (target.symbol < 0) { return true; }
@@ -357,6 +373,8 @@ bool rename_conflicts(DocumentStore* store, Document* context, SymbolTarget targ
     return false;
 }
 
+/// Computes the rename `WorkspaceEdit`, with versioned document edits when
+/// requested; "null" when not renameable.
 String compute_rename(DocumentStore* store, Document* context, SymbolTarget target, str name, bool versioned) {
     target = rename_target(target);
     if (target.symbol < 0) { return String.from_str("null"); }
@@ -394,6 +412,7 @@ String compute_rename(DocumentStore* store, Document* context, SymbolTarget targ
     out.push_str(versioned ? "]}" : "}}"); return move out;
 }
 
+/// One workspace symbol search hit with its match score.
 struct WorkspaceSymbolMatch { Document* document; i64 symbol; i64 score; }
 
 impl Lt<WorkspaceSymbolMatch> for WorkspaceSymbolMatch {
@@ -407,6 +426,7 @@ impl Lt<WorkspaceSymbolMatch> for WorkspaceSymbolMatch {
     }
 }
 
+/// Computes `workspace/symbol` matches for `query`. Cancellable.
 String compute_workspace_symbols(DocumentStore* store, str query, PendingMessage* pending) {
     Vec<Document*> documents = store.query_documents((Document*)0);
     Vec<WorkspaceSymbolMatch> matches = Vec<WorkspaceSymbolMatch>.new(); i64 i = 0;

@@ -1,11 +1,15 @@
 import std.string;
 import params;
 
-// Keep in step with the workspace version in silver.toml.
+/// Keep in step with the workspace version in silver.toml.
 const str AGLSP_VERSION = "0.2.6";
+/// File watcher filters for Silver sources and manifests.
+const str INDEXED_FILE_FILTERS = "{\"filters\":[{\"scheme\":\"file\",\"pattern\":{\"glob\":\"**/*.ag\"}},{\"scheme\":\"file\",\"pattern\":{\"glob\":\"**/silver.toml\"}}]}";
 
+/// How the client supports full semantic token requests.
 enum SemanticFullMode { Disabled; Full; Delta; }
 
+/// The semantic token features the client supports.
 struct SemanticTokenOptions {
     SemanticFullMode full;
     bool range;
@@ -15,6 +19,7 @@ struct SemanticTokenOptions {
     i64 modifier_map[3];
 }
 
+/// Returns the LSP name of semantic token type `kind`.
 str semantic_type_name(i64 kind) {
     return match kind {
         0 : "namespace", 1 : "type", 2 : "struct", 3 : "enum", 4 : "enumMember",
@@ -24,10 +29,12 @@ str semantic_type_name(i64 kind) {
     };
 }
 
+/// Returns the LSP name of semantic token modifier `bit`.
 str semantic_modifier_name(i64 bit) {
     return match bit { 0 : "declaration", 1 : "definition", 2 : "readonly", _ : "" };
 }
 
+/// Returns true when `json` is an array of strings.
 bool client_string_array(str json) {
     JsonReader reader = JsonReader.new(json);
     if (!reader.begin_array()) { return false; }
@@ -42,6 +49,7 @@ bool client_string_array(str json) {
     reader.skip_whitespace(); return reader.index == reader.length;
 }
 
+/// Reads the client's semantic token capabilities from `initialize` params.
 SemanticTokenOptions semantic_options(str params) {
     SemanticTokenOptions options;
     options.full = SemanticFullMode.Disabled;
@@ -82,6 +90,8 @@ SemanticTokenOptions semantic_options(str params) {
     return move options;
 }
 
+/// Client capabilities and settings the server adapts to (markdown,
+/// snippets, limits, refresh support, and more).
 struct ClientOptions {
     bool hover_markdown;
     bool completion_markdown;
@@ -110,6 +120,7 @@ struct ClientOptions {
     bool did_rename;
     bool did_delete;
     bool work_done_progress;
+    bool server_status;
     bool show_document;
     bool apply_edit;
     bool configuration;
@@ -124,6 +135,7 @@ struct ClientOptions {
     bool telemetry;
 }
 
+/// Returns the JSON value at dotted `path` in `json`, or "".
 String client_field(str json, str path) {
     String value = String.from_str(json); i64 begin = 0; i64 i = 0;
     while (true) {
@@ -137,6 +149,7 @@ String client_field(str json, str path) {
     return move value;
 }
 
+/// Returns true when a `contentFormat` array lists markdown first.
 bool prefers_markdown(str json) {
     JsonReader reader = JsonReader.new(json);
     if (!reader.begin_array()) { return false; }
@@ -150,6 +163,7 @@ bool prefers_markdown(str json) {
     return false;
 }
 
+/// Returns true when a JSON array of strings contains `property`.
 bool client_property(str json, str property) {
     JsonReader reader = JsonReader.new(json);
     if (!reader.begin_array()) { return false; }
@@ -161,6 +175,7 @@ bool client_property(str json, str property) {
     return false;
 }
 
+/// Reads `ClientOptions` from `initialize` params.
 ClientOptions client_options(str params) {
     ClientOptions options;
     String hover = client_field(params, "capabilities.textDocument.hover.contentFormat");
@@ -206,6 +221,7 @@ ClientOptions client_options(str params) {
     options.did_delete = json_field(operations.to_str(), "didDelete").equals("true");
     options.work_done_progress = client_field(params, "capabilities.window.workDoneProgress").equals("true");
     options.show_document = client_field(params, "capabilities.window.showDocument.support").equals("true");
+    options.server_status = client_field(params, "capabilities.experimental.serverStatusNotification").equals("true");
     options.apply_edit = client_field(params, "capabilities.workspace.applyEdit").equals("true");
     options.configuration = client_field(params, "capabilities.workspace.configuration").equals("true");
     options.code_lens_refresh = client_field(params, "capabilities.workspace.codeLens.refreshSupport").equals("true");
@@ -227,6 +243,7 @@ ClientOptions client_options(str params) {
     return move options;
 }
 
+/// Returns the `initialize` result JSON (server capabilities and info).
 String server_capabilities(ClientOptions* client) {
     String out = String.from_str("{\"capabilities\":{\"positionEncoding\":\"utf-16\",");
     out.push_str("\"workspace\":{\"workspaceFolders\":{\"supported\":true,\"changeNotifications\":true}");
@@ -247,9 +264,11 @@ String server_capabilities(ClientOptions* client) {
             if (!first_operation) { out.push(','); } first_operation = false;
             out.push_str("\"willDelete\":{\"filters\":[{\"scheme\":\"file\",\"pattern\":{\"glob\":\"**/*.ag\"}},{\"scheme\":\"file\",\"pattern\":{\"glob\":\"**\",\"matches\":\"folder\"}}]}");
         }
-        if (client.did_create) { if (!first_operation) { out.push(','); } first_operation = false; out.push_str("\"didCreate\":true"); }
-        if (client.did_rename) { if (!first_operation) { out.push(','); } first_operation = false; out.push_str("\"didRename\":true"); }
-        if (client.did_delete) { if (!first_operation) { out.push(','); } out.push_str("\"didDelete\":true"); }
+        // Each value must be FileOperationRegistrationOptions; strict clients
+        // such as Zed reject a bare `true`. Sources reindex, manifests rescope.
+        if (client.did_create) { if (!first_operation) { out.push(','); } first_operation = false; out.push_str("\"didCreate\":"); out.push_str(INDEXED_FILE_FILTERS); }
+        if (client.did_rename) { if (!first_operation) { out.push(','); } first_operation = false; out.push_str("\"didRename\":"); out.push_str(INDEXED_FILE_FILTERS); }
+        if (client.did_delete) { if (!first_operation) { out.push(','); } out.push_str("\"didDelete\":"); out.push_str(INDEXED_FILE_FILTERS); }
         out.push_str("}");
     }
     out.push_str("},");

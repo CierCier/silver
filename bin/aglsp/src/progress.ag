@@ -1,5 +1,6 @@
 import transport;
 
+/// Returns true for requests that report work-done progress.
 bool progress_request(str method) {
     return strcmp(method, "workspace/symbol") == 0 || strcmp(method, "textDocument/references") == 0
         || strcmp(method, "textDocument/diagnostic") == 0 || strcmp(method, "workspace/diagnostic") == 0
@@ -8,6 +9,9 @@ bool progress_request(str method) {
         || strcmp(method, "typeHierarchy/supertypes") == 0 || strcmp(method, "typeHierarchy/subtypes") == 0;
 }
 
+/// Starts work-done progress for the request's token (sends a `begin`
+/// `$/progress` notification). Returns true with nothing sent when there is
+/// no token, and false for a malformed token.
 bool begin_progress(PendingMessage* pending) {
     if (pending.progress_token.len() == 0) { return true; }
     JsonReader reader = JsonReader.new(pending.progress_token.to_str());

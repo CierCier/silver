@@ -19,12 +19,15 @@ import frontend.symbols;
 import frontend.typecheck_expr;
 import frontend.types;
 
+/// How a lambda captures a variable: by shared reference, by mutable
+/// reference, or by moving it into the environment.
 enum LambdaCaptureMode {
     Shared;
     Mutable;
     Owned;
 }
 
+/// One captured variable with its type and capture mode.
 struct LambdaCapture {
     u32 name_id;
     u32 type_id;
@@ -32,18 +35,23 @@ struct LambdaCapture {
     Span span;
 }
 
+/// One use of a captured variable inside a lambda body, to be rewritten into
+/// an environment field access.
 struct LambdaOccurrence {
     SyntaxNode* node;
     u32 capture;
     bool implicit_move;
 }
 
+/// A generated callable for a lambda type: its function name and capture mode.
 struct LambdaCallable {
     u32 type_id;
     u32 function_name;
     LambdaCaptureMode mode;
 }
 
+/// Closure-conversion state: rewrites lambdas in the tree into generated
+/// environment structs and functions allocated in the borrowed node pool.
 struct LambdaLowering {
     NodePool* nodes;
     SyntaxNode* root;
@@ -53,6 +61,8 @@ struct LambdaLowering {
     bool changed;
 }
 
+/// Returns a copy of `node` and its subtree allocated in `pool`; with
+/// `retain_text`, token text is interned so it outlives the source.
 SyntaxNode* lambda_clone_node(NodePool* pool, SyntaxNode* node, bool retain_text) {
     SyntaxNode* copy = retain_text && node.kind == NodeKind.Token
         ? pool.create_token(node.token_kind, node.span, node.text)
@@ -66,6 +76,7 @@ SyntaxNode* lambda_clone_node(NodePool* pool, SyntaxNode* node, bool retain_text
     return copy;
 }
 
+/// Appends copies of the siblings `[start, end)` to `parent`.
 void lambda_clone_range(NodePool* pool, SyntaxNode* parent,
                         SyntaxNode* start, SyntaxNode* end) {
     SyntaxNode* cursor = start;
@@ -75,6 +86,7 @@ void lambda_clone_range(NodePool* pool, SyntaxNode* parent,
     }
 }
 
+/// Replaces the children `[start, end)` of `parent` with `replacement`.
 void lambda_replace_range(SyntaxNode* parent, SyntaxNode* start,
                           SyntaxNode* end, SyntaxNode* replacement) {
     SyntaxNode* previous = (SyntaxNode*)0;
@@ -97,6 +109,7 @@ void lambda_replace_range(SyntaxNode* parent, SyntaxNode* start,
     }
 }
 
+/// Appends the syntax for type `type_id` under `parent`.
 void lambda_append_type(NodePool* pool, SyntaxNode* parent, TypeTable* types,
                         u32 type_id, Span span) {
     TokenStream tokens = TokenStream.new();
@@ -123,6 +136,7 @@ void lambda_append_type(NodePool* pool, SyntaxNode* parent, TypeTable* types,
     temporary.destroy();
 }
 
+/// Returns a copy of a type environment.
 TypeEnv lambda_clone_env(TypeEnv* source) {
     TypeEnv result = TypeEnv.new();
     i64 i = 0;
@@ -133,6 +147,8 @@ TypeEnv lambda_clone_env(TypeEnv* source) {
     return move result;
 }
 
+/// Returns true when a `|` or `||` token is a lambda parameter delimiter
+/// that lowering removed.
 bool lambda_removed_delimiter(SyntaxNode* node, SyntaxNode* previous) {
     if (node.kind != NodeKind.Token
         || (node.token_kind != TokenKind.BitwiseOr && node.token_kind != TokenKind.Or)) {
@@ -144,6 +160,7 @@ bool lambda_removed_delimiter(SyntaxNode* node, SyntaxNode* previous) {
             || previous.token_kind == TokenKind.Semicolon));
 }
 
+/// Returns true when `node`'s children contain a lambda (`=>`).
 bool contains_lambda(SyntaxNode* node) {
     SyntaxNode* previous = (SyntaxNode*)0;
     SyntaxNode* child = node.first_child;
@@ -158,6 +175,7 @@ bool contains_lambda(SyntaxNode* node) {
 }
 
 impl LambdaLowering {
+    /// Creates a lowering pass over the tree rooted at `root`.
     LambdaLowering new(NodePool* nodes, SyntaxNode* root,
                        SymbolTable* symbols, DiagnosticBag* diagnostics) {
         LambdaLowering lowering;
@@ -170,10 +188,12 @@ impl LambdaLowering {
         return move lowering;
     }
 
+    /// Creates a token node in the pool.
     SyntaxNode* token(LambdaLowering* self, TokenKind kind, str text, Span span) {
         return self.nodes.create_token(kind, span, text);
     }
 
+    /// Returns the callable recorded for lambda type `type_id`, or -1.
     i64 callable_index(LambdaLowering* self, u32 type_id) {
         i64 i = 0;
         while (i < self.callables.len()) {
@@ -183,6 +203,7 @@ impl LambdaLowering {
         return -1;
     }
 
+    /// Builds the type environment visible at `use` inside `function`.
     TypeEnv environment(LambdaLowering* self, SyntaxNode* function,
                          str owner, SyntaxNode* use, TypeEnv* inherited) {
         TypeEnv env = lambda_clone_env(inherited);
@@ -231,6 +252,7 @@ impl LambdaLowering {
         return move env;
     }
 
+    /// Finds the captured variables referenced in a lambda body.
     void capture_occurrences(LambdaLowering* self, SyntaxNode* node,
                               TypeEnv* outer, Vec<Binding>* locals,
                               Vec<LambdaCapture>* captures,
@@ -276,6 +298,8 @@ impl LambdaLowering {
         }
     }
 
+    /// Raises the capture mode of the variable used by `expression` to at
+    /// least `mode`.
     void demand(LambdaLowering* self, AstPool* ast, u32 expression,
                  LambdaCaptureMode mode, bool implicit,
                  Vec<LambdaCapture>* captures, Vec<LambdaOccurrence>* occurrences) {
@@ -348,6 +372,8 @@ impl LambdaLowering {
         }
     }
 
+    /// Raises capture modes for an argument passed to a parameter of type
+    /// `expected` (by-value parameters move, `&mut` borrows mutably).
     void demand_parameter(LambdaLowering* self, AstPool* ast, u32 argument,
                            u32 expected, Vec<LambdaCapture>* captures,
                            Vec<LambdaOccurrence>* occurrences) {
@@ -359,6 +385,7 @@ impl LambdaLowering {
         self.demand(ast, argument, mode, true, captures, occurrences);
     }
 
+    /// Derives each capture's mode from how the lowered body uses it.
     void analyze_accesses(LambdaLowering* self, AstPool* ast, TypeEnv* env,
                           Vec<LambdaCapture>* captures, Vec<LambdaOccurrence>* occurrences) {
         i64 i = 1;
@@ -447,6 +474,8 @@ impl LambdaLowering {
         }
     }
 
+    /// Returns the expected function type for the lambda at `head` from its
+    /// binding's declared type, or `TYPE_UNKNOWN`.
     u32 expected_type(LambdaLowering* self, SyntaxNode* function, SyntaxNode* head) {
         Vec<Binding> bindings = Vec<Binding>.new();
         collect_function_bindings(function, &bindings);
@@ -497,6 +526,8 @@ impl LambdaLowering {
         return typecheck_parameter_type_id(&self.symbols.types, parameters.get_ptr(index));
     }
 
+    /// Emits the generated function's parameters for a lambda's parameter list,
+    /// taking missing types from `expected`. Returns false on an inference error.
     bool parameters(LambdaLowering* self, SyntaxNode* start, SyntaxNode* end,
                      u32 expected, SyntaxNode* output, Vec<u32>* types) {
         TypeEntry context = *self.symbols.types.get(expected);
@@ -576,6 +607,7 @@ impl LambdaLowering {
         return true;
     }
 
+    /// Rewrites captured-variable uses into accesses on `environment`.
     void rewrite_occurrences(LambdaLowering* self, str environment,
                               Vec<LambdaCapture>* captures,
                               Vec<LambdaOccurrence>* occurrences) {
@@ -602,6 +634,7 @@ impl LambdaLowering {
         }
     }
 
+    /// Gives an inferred `let` binding of a lambda its generated callable type.
     void type_local_binding(LambdaLowering* self, SyntaxNode* function,
                              SyntaxNode* head, u32 type_id) {
         Vec<Binding> bindings = Vec<Binding>.new();
@@ -631,6 +664,8 @@ impl LambdaLowering {
         }
     }
 
+    /// Lowers one lambda into a generated environment and function and returns
+    /// the replacement expression, or null after reporting an error.
     SyntaxNode* lower_lambda(LambdaLowering* self, SyntaxNode* parent,
                              SyntaxNode* head, SyntaxNode* function,
                              str owner, TypeEnv* inherited) {
@@ -855,6 +890,7 @@ impl LambdaLowering {
         return end;
     }
 
+    /// Lowers every lambda under `parent`, recursing into nested blocks.
     void walk(LambdaLowering* self, SyntaxNode* parent, SyntaxNode* function,
                str owner, TypeEnv* inherited) {
         SyntaxNode* cursor = parent.first_child;
@@ -916,6 +952,8 @@ impl LambdaLowering {
     }
 }
 
+/// Lowers the lambdas in every cfg-active function and method. Mutates the
+/// tree in place. Returns false when an error was reported.
 bool lower_lambdas(SyntaxTree* tree, NodePool* nodes, SymbolTable* symbols,
                     DiagnosticBag* diagnostics, CfgSet* cfg) {
     LambdaLowering lowering = LambdaLowering.new(nodes, tree.root, symbols, diagnostics);

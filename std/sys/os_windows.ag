@@ -17,73 +17,105 @@ import std.sys.result;
 // ---------------------------------------------------------------------------
 
 extern "C" {
+    /// Win32 `GetLastError`.
     #[link_name("GetLastError")]
     u32 win_GetLastError();
+    /// Win32 `VirtualAlloc`.
     #[link_name("VirtualAlloc")]
     u8* win_VirtualAlloc(u8* addr, u64 size, u32 alloc_type, u32 protect);
+    /// Win32 `VirtualFree`.
     #[link_name("VirtualFree")]
     i32 win_VirtualFree(u8* addr, u64 size, u32 free_type);
 
+    /// Win32 `GetStdHandle`.
     #[link_name("GetStdHandle")]
     i64 win_GetStdHandle(i32 which);
+    /// Win32 `WriteFile`.
     #[link_name("WriteFile")]
     i32 win_WriteFile(i64 handle, u8* buf, u32 len, u32* written, u8* overlapped);
+    /// Win32 `ReadFile`.
     #[link_name("ReadFile")]
     i32 win_ReadFile(i64 handle, u8* buf, u32 len, u32* read, u8* overlapped);
+    /// Win32 `SetFilePointer`.
     #[link_name("SetFilePointer")]
     i32 win_SetFilePointer(i64 handle, i32 dist_low, i32* dist_high, u32 method);
+    /// Win32 `CloseHandle`.
     #[link_name("CloseHandle")]
     i32 win_CloseHandle(i64 handle);
+    /// Win32 `CreateFileW`.
     #[link_name("CreateFileW")]
     i64 win_CreateFileW(u16* name, u32 access, u32 share, u8* sa, u32 disp, u32 flags, u64 tmpl);
+    /// Win32 `GetFileInformationByHandle`.
     #[link_name("GetFileInformationByHandle")]
     i32 win_GetFileInformationByHandle(i64 handle, u8* info);
+    /// Win32 `DeleteFileW`.
     #[link_name("DeleteFileW")]
     i32 win_DeleteFileW(u16* name);
+    /// Win32 `MoveFileExW`.
     #[link_name("MoveFileExW")]
     i32 win_MoveFileExW(u16* from, u16* to, u32 flags);
 
+    /// Win32 `WaitOnAddress`.
     #[link_name("WaitOnAddress")]
     i32 win_WaitOnAddress(u32* addr, u32* compare, u64 size, u32 ms);
+    /// Win32 `WakeByAddressSingle`.
     #[link_name("WakeByAddressSingle")]
     void win_WakeByAddressSingle(u32* addr);
+    /// Win32 `WakeByAddressAll`.
     #[link_name("WakeByAddressAll")]
     void win_WakeByAddressAll(u32* addr);
 
+    /// Win32 `ExitProcess`.
     #[link_name("ExitProcess")]
     void win_ExitProcess(u32 code);
+    /// Win32 `ExitThread`.
     #[link_name("ExitThread")]
     void win_ExitThread(u32 code);
+    /// Win32 `GetCurrentProcessId`.
     #[link_name("GetCurrentProcessId")]
     u32 win_GetCurrentProcessId();
+    /// Win32 `TerminateProcess`.
     #[link_name("TerminateProcess")]
     i32 win_TerminateProcess(i64 process, u32 code);
+    /// Win32 `GetCurrentProcess`.
     #[link_name("GetCurrentProcess")]
     i64 win_GetCurrentProcess();
 
+    /// Win32 `QueryPerformanceCounter`.
     #[link_name("QueryPerformanceCounter")]
     i32 win_QueryPerformanceCounter(i64* count);
+    /// Win32 `QueryPerformanceFrequency`.
     #[link_name("QueryPerformanceFrequency")]
     i32 win_QueryPerformanceFrequency(i64* freq);
+    /// Win32 `Sleep`.
     #[link_name("Sleep")]
     void win_Sleep(u32 ms);
+    /// Win32 `OpenProcess`.
     #[link_name("OpenProcess")]
     i64 win_OpenProcess(u32 access, i32 inherit, u32 pid);
+    /// Win32 `GetSystemTimePreciseAsFileTime`.
     #[link_name("GetSystemTimePreciseAsFileTime")]
     void win_GetSystemTimePreciseAsFileTime(u64* ft);
 
+    /// Win32 `SetConsoleOutputCP`.
     #[link_name("SetConsoleOutputCP")]
     i32 win_SetConsoleOutputCP(u32 codepage);
+    /// Win32 `SetConsoleCP`.
     #[link_name("SetConsoleCP")]
     i32 win_SetConsoleCP(u32 codepage);
+    /// Win32 `SwitchToThread`.
     #[link_name("SwitchToThread")]
     void win_SwitchToThread();
+    /// Win32 `CreateThread`.
     #[link_name("CreateThread")]
     i64 win_CreateThread(u8* attrs, u64 stack_size, u64(u64) start, u8* param, u32 flags, u32* tid);
+    /// Win32 `GetCommandLineW`.
     #[link_name("GetCommandLineW")]
     u16* win_GetCommandLineW();
+    /// Win32 `CommandLineToArgvW`.
     #[link_name("CommandLineToArgvW")]
     u16** win_CommandLineToArgvW(u16* cmd, i32* count);
+    /// Win32 `LocalFree`.
     #[link_name("LocalFree")]
     u8* win_LocalFree(u8* mem);
 }
@@ -91,33 +123,57 @@ extern "C" {
 // bcrypt is linked by the driver's windows default lib set (like kernel32):
 // an item-level #[link(bcrypt)] here would leak -lbcrypt into posix links.
 extern "C" {
+    /// Win32 `BCryptGenRandom`.
     #[link_name("BCryptGenRandom")]
     i32 win_BCryptGenRandom(i64 alg, u8* buf, u64 len, u32 flags);
 }
 
 // Win32 constants used below.
+/// VirtualAlloc flag: commit pages.
 const u32 WIN_MEM_COMMIT = 0x1000;
+/// VirtualAlloc flag: reserve address space.
 const u32 WIN_MEM_RESERVE = 0x2000;
+/// VirtualFree flag: release the whole reservation.
 const u32 WIN_MEM_RELEASE = 0x8000;
+/// Page protection: read and write.
 const u32 WIN_PAGE_READWRITE = 4;
+/// File access right: read.
 const u32 WIN_GENERIC_READ = 0x80000000;
+/// File access right: write.
 const u32 WIN_GENERIC_WRITE = 0x40000000;
+/// File share mode: allow other readers and writers.
 const u32 WIN_FILE_SHARE_RW = 3;
+/// CreateFileW disposition: create, failing if the file exists.
 const u32 WIN_CREATE_NEW = 1;
+/// CreateFileW disposition: create or truncate.
 const u32 WIN_CREATE_ALWAYS = 2;
+/// CreateFileW disposition: open, failing if missing.
 const u32 WIN_OPEN_EXISTING = 3;
+/// CreateFileW disposition: open and truncate, failing if missing.
 const u32 WIN_TRUNCATE_EXISTING = 5;
+/// CreateFileW disposition: open or create.
 const u32 WIN_OPEN_ALWAYS = 4;
+/// File attribute: normal file.
 const u32 WIN_FILE_ATTRIBUTE_NORMAL = 0x80;
+/// SetFilePointer origin: start of file.
 const u32 WIN_FILE_BEGIN = 0;
+/// SetFilePointer origin: current position.
 const u32 WIN_FILE_CURRENT = 1;
+/// SetFilePointer origin: end of file.
 const u32 WIN_FILE_END = 2;
+/// MoveFileExW flag: replace an existing target.
 const u32 WIN_MOVE_REPLACE = 1;
+/// MoveFileExW flag: allow a copy-and-delete across volumes.
 const u32 WIN_MOVE_COPY_ALLOWED = 2;
+/// Timeout value meaning wait forever.
 const u32 WIN_INFINITE = 0xFFFFFFFF;
+/// GetStdHandle id for standard input.
 const i32 WIN_STD_INPUT = -10;
+/// GetStdHandle id for standard output.
 const i32 WIN_STD_OUTPUT = -11;
+/// GetStdHandle id for standard error.
 const i32 WIN_STD_ERROR = -12;
+/// Console code page for UTF-8.
 const u32 WIN_CP_UTF8 = 65001;
 
 // Linux O_* flag bits come from std/sys/result.ag (Linux numeric values);
@@ -277,6 +333,8 @@ i64 win_fd_handle(i64 fd) {
     return fd;
 }
 
+/// Seam: one WriteFile call; fds 0-2 map to the standard handles. Returns
+/// the count written or -errno (approximated from the Win32 error).
 i64 sys_write(i64 fd, i64 buf, i64 len) {
     if (len == 0) {
         return 0;
@@ -289,6 +347,8 @@ i64 sys_write(i64 fd, i64 buf, i64 len) {
     return (i64)written;
 }
 
+/// Seam: one ReadFile call. A closed pipe reports 0 (EOF) rather than an
+/// error. Returns the count or -errno.
 i64 sys_read(i64 fd, i64 buf, i64 len) {
     u32 nread = 0;
     i64 h = win_fd_handle(fd);
@@ -404,6 +464,8 @@ i64 sys_exit(i64 code) {
     return 0;
 }
 
+/// Seam: closes a file handle. fds 0-2 are never closed and report success;
+/// a bad handle reports -EBADF.
 i64 sys_close(i64 fd) {
     if (fd >= 0 && fd <= 2) {
         return 0; // standard handles are not ours to close
@@ -435,6 +497,8 @@ i64 sys_lseek(i64 fd, i64 off, i64 whence) {
     return ((i64)(u32)high << 32) | (i64)(u32)res;
 }
 
+/// Seam: DeleteFileW. Any failure reports -ENOENT; paths of 1000 or more
+/// UTF-16 units report -ENAMETOOLONG.
 i64 sys_unlink(i64 path) {
     u16 wpath[1024];
     if (win_utf16_len((u8*)path) >= 1000) {
@@ -447,6 +511,8 @@ i64 sys_unlink(i64 path) {
     return 0;
 }
 
+/// Seam: MoveFileExW, replacing the target and allowing cross-volume moves.
+/// Any failure reports -ENOENT.
 i64 sys_rename(i64 from, i64 to) {
     u16 wfrom[1024];
     u16 wto[1024];
@@ -506,10 +572,12 @@ i64 sys_stat(i64 path, i64 buf) {
     return 0;
 }
 
+/// Internal: reads a little-endian i64 at `buf[off]`.
 i64 win_le_i64(u8* buf, i64 off) {
     return (i64)win_le_u64(buf, off);
 }
 
+/// Internal: reads a little-endian u64 at `buf[off]`.
 u64 win_le_u64(u8* buf, i64 off) {
     u64 v = 0;
     i64 i = 7;
@@ -520,6 +588,7 @@ u64 win_le_u64(u8* buf, i64 off) {
     return v;
 }
 
+/// Internal: writes `v` little-endian at `buf[off]`.
 void win_store_le_i64(u8* buf, i64 off, i64 v) {
     i64 i = 0;
     while (i < 8) {
@@ -529,15 +598,20 @@ void win_store_le_i64(u8* buf, i64 off, i64 v) {
     }
 }
 
+/// Seam: ExitProcess with `code`. Never returns.
 i64 sys_exit_group(i64 code) {
     win_ExitProcess((u32)code);
     return 0;
 }
 
+/// Seam: returns the process id.
 i64 sys_getpid() {
     return (i64)win_GetCurrentProcessId();
 }
 
+/// Seam: signal 0 probes whether `pid` exists; signal 6 (SIGABRT) exits the
+/// current process with 134; any other signal terminates the current
+/// process with code 1, whatever `pid` is.
 i64 sys_kill(i64 pid, i64 sig) {
     if (sig == 0) {
         // Existence probe (signal 0): a process is alive when it can be
@@ -569,6 +643,7 @@ void thread_yield() {
     win_SwitchToThread();
 }
 
+/// Seam: ExitThread; ends only the calling thread.
 void thread_exit(i64 code) {
     win_ExitThread((u32)code);
 }
@@ -625,24 +700,28 @@ i64 sys_futex(i64 uaddr, i64 op, i64 val, i64 timeout, i64 uaddr2, i64 val3) {
     return 0;
 }
 
+/// Internal: returns `p[idx]`.
 i64 raw_le_i64_at(i64* p, i64 idx) {
     return p[idx];
 }
 
+/// Seam: closes the thread handle returned by `thread_spawn_raw`.
 void thread_reclaim(i64 tid) {
     if (tid > 0) {
         win_CloseHandle(tid);
     }
 }
 
-// MSVC compatibility markers for the freestanding (no-CRT) Windows link:
-// the backend references `_fltused` whenever float operations exist, and
-// emits `__chkstk` calls before frames larger than one page. The probe
-// walks down from the current stack pointer one 4KB page at a time so the
-// guard page is hit in order; RAX carries the frame size on entry (it is
-// preserved, which is the contract the compiler-generated call relies on).
+/// MSVC compatibility markers for the freestanding (no-CRT) Windows link:
+/// the backend references `_fltused` whenever float operations exist, and
+/// emits `__chkstk` calls before frames larger than one page. The probe
+/// walks down from the current stack pointer one 4KB page at a time so the
+/// guard page is hit in order; RAX carries the frame size on entry (it is
+/// preserved, which is the contract the compiler-generated call relies on).
 i32 _fltused = 1;
 
+/// MSVC stack probe: touches each 4 KiB page of a large frame in order so
+/// the guard page grows the stack. Called by compiler-generated code only.
 void __chkstk() {
     asm("
         push %rcx
@@ -715,6 +794,7 @@ i64 sys_getrandom(i64 buf, i64 len, i64 flags) {
 // codepages so @println renders correctly on a real console.
 // ---------------------------------------------------------------------------
 
+/// Seam: switches the console input and output code pages to UTF-8.
 void sys_platform_init() {
     win_SetConsoleOutputCP(WIN_CP_UTF8);
     win_SetConsoleCP(WIN_CP_UTF8);
@@ -725,16 +805,22 @@ void sys_platform_init() {
 // ---------------------------------------------------------------------------
 
 extern "C" {
+    /// Win32 `CreateDirectoryW`.
     #[link_name("CreateDirectoryW")]
     i32 win_CreateDirectoryW(u16* path, u8* attrs);
+    /// Win32 `RemoveDirectoryW`.
     #[link_name("RemoveDirectoryW")]
     i32 win_RemoveDirectoryW(u16* path);
+    /// Win32 `GetFileAttributesW`.
     #[link_name("GetFileAttributesW")]
     u32 win_GetFileAttributesW(u16* path);
+    /// Win32 `FindFirstFileW`.
     #[link_name("FindFirstFileW")]
     i64 win_FindFirstFileW(u16* pattern, u8* data);
+    /// Win32 `FindNextFileW`.
     #[link_name("FindNextFileW")]
     i32 win_FindNextFileW(i64 handle, u8* data);
+    /// Win32 `FindClose`.
     #[link_name("FindClose")]
     i32 win_FindClose(i64 handle);
 }
@@ -749,6 +835,7 @@ bool win_path_to_wide(u8* path, u16* wpath, i64 cap) {
     return true;
 }
 
+/// Seam: CreateDirectoryW (`mode` is ignored). Failures report -ENOENT.
 i64 sys_mkdir(i64 path, i64 mode) {
     u16 wpath[1024];
     if (!win_path_to_wide((u8*)path, &wpath[0], 1024)) {
@@ -772,6 +859,7 @@ i64 sys_access(i64 path, i64 mode) {
     return 0;
 }
 
+/// Seam: RemoveDirectoryW. Failures report -ENOENT.
 i64 sys_rmdir(i64 path) {
     u16 wpath[1024];
     if (!win_path_to_wide((u8*)path, &wpath[0], 1024)) {
@@ -849,12 +937,16 @@ i64 sys_list_dir(i64 path, u8* buf, i64 cap) {
 // ---------------------------------------------------------------------------
 
 extern "C" {
+    /// Win32 `GetConsoleScreenBufferInfo`.
     #[link_name("GetConsoleScreenBufferInfo")]
     i32 win_GetConsoleScreenBufferInfo(i64 handle, u8* info);
+    /// Win32 `GetConsoleMode`.
     #[link_name("GetConsoleMode")]
     i32 win_GetConsoleMode(i64 handle, u32* mode);
+    /// Win32 `SetConsoleMode`.
     #[link_name("SetConsoleMode")]
     i32 win_SetConsoleMode(i64 handle, u32 mode);
+    /// Win32 `WaitForSingleObject`.
     #[link_name("WaitForSingleObject")]
     i32 win_WaitForSingleObject(i64 handle, u32 ms);
 }

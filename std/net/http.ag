@@ -25,25 +25,41 @@ import std.sync;
 import std.sys.result;
 import std.thread;
 
+/// `Error.code`: a read or write on the connection failed.
 const i64 HTTP_ERR_IO = -1;
+/// `Error.code`: the peer sent malformed HTTP.
 const i64 HTTP_ERR_MALFORMED = -2;
+/// `Error.code`: a header block or body exceeded the configured limit.
 const i64 HTTP_ERR_LIMIT = -3;
+/// `Error.code`: the TCP or TLS connection could not be established.
 const i64 HTTP_ERR_CONNECT = -4;
+/// `Error.code`: the host name did not resolve.
 const i64 HTTP_ERR_DNS = -5;
+/// `Error.code`: too many redirects, or an invalid redirect target.
 const i64 HTTP_ERR_REDIRECT = -6;
+/// `Error.code`: the connection or request timed out.
 const i64 HTTP_ERR_TIMEOUT = -7;
 
+/// Default limit on response header bytes.
 const i64 HTTP_DEFAULT_MAX_HEADER = 65536;
+/// Default limit on body bytes (16 MiB).
 const i64 HTTP_DEFAULT_MAX_BODY = 16777216;
+/// Longest accepted chunk-size line in chunked bodies.
 const i64 HTTP_CHUNK_LINE_MAX = 8192;
+/// Default number of redirects a client follows.
 const i32 HTTP_DEFAULT_MAX_REDIRECTS = 10;
 
+/// HTTP protocol version.
 enum HttpVersion {
     Http10 = 10;
     Http11 = 11;
     Http20 = 20;
 }
 
+/// A client request or a parsed server request. Client fields borrow their
+/// `str` values (method, target, host, body), which must outlive the request;
+/// server-side requests own their parsed text. Bodies are NUL-terminated
+/// strings, so they cannot carry NUL bytes. Dropping it frees owned buffers.
 struct HttpRequest {
     HttpVersion version;
     str method;
@@ -70,6 +86,7 @@ struct HttpRequest {
     String tls_version_str;
 }
 
+/// A fully read response. Owns its reason, headers, body, and trailers.
 struct HttpResponse {
     HttpVersion version;
     i32 status;
@@ -82,6 +99,9 @@ struct HttpResponse {
     bool close_delimited;
 }
 
+/// An HTTP client with redirect following, optional cookie jar, TLS settings,
+/// and keep-alive pooling. Not thread-safe; use one client per thread.
+/// Dropping it closes pooled connections. HTTPS needs `tls_init()` first.
 struct HttpClient {
     i64 max_header_bytes;
     i64 max_body_bytes;
@@ -95,6 +115,8 @@ struct HttpClient {
     i64 timeout_secs; // per-request socket timeout; 0 = none (Go's Client.Timeout)
 }
 
+/// One TCP or TLS connection with a 4 KiB read buffer. Dropping it closes
+/// the connection.
 struct HttpConnection {
     TcpStream stream;
     u8 tls_state[64]; // opaque TLS transport state (TRANSPORT_TLS_STATE_SIZE)
@@ -124,6 +146,8 @@ impl Drop for HttpConnection {
 // (4KB) so header/body parsing costs one syscall (or SSL_read) per 4KB
 // instead of one per byte.
 
+/// Internal `StreamIo` read callback: serves buffered bytes, refilling with a
+/// single transport read of up to 1 KiB when empty.
 #[inline(always)]
 Result<i64, Error> http_transport_read(void* ctx, u8* buf, i64 len) {
     HttpConnection* conn = (HttpConnection*)ctx;
@@ -154,6 +178,7 @@ Result<i64, Error> http_transport_read(void* ctx, u8* buf, i64 len) {
     return Ok(n);
 }
 
+/// Internal `StreamIo` write callback: writes through TLS or TCP.
 #[inline(always)]
 Result<i64, Error> http_transport_write(void* ctx, u8* buf, i64 len) {
     HttpConnection* conn = (HttpConnection*)ctx;
@@ -164,6 +189,8 @@ Result<i64, Error> http_transport_write(void* ctx, u8* buf, i64 len) {
     return conn.stream.write(buf, len);
 }
 
+/// Returns a buffered transport view of `conn`. It borrows `conn`, which
+/// must not move while the view is in use.
 StreamIo http_transport_io(HttpConnection* conn) {
     StreamIo io;
     io.ctx = (void*)conn;
@@ -174,6 +201,7 @@ StreamIo http_transport_io(HttpConnection* conn) {
 
 // --- Connection pooling (Go's Transport keep-alive pool) ------------------
 
+/// Internal: one idle pooled connection with its host/port/scheme key.
 struct PoolEntry {
     HttpConnection conn;
     u8 host[255];
@@ -184,8 +212,11 @@ struct PoolEntry {
 
 // Monotonic sequence for pool LRU ordering — cheaper than a clock syscall
 // per release and strictly increasing.
+/// Internal: process-wide LRU counter for pool entries. Not synchronized.
 i64 g_pool_seq = 0;
 
+/// Idle keep-alive connections, at most `max_idle` (2) per host, guarded by
+/// `lock`. Dropping it closes them.
 struct ConnectionPool {
     Vec<PoolEntry> entries;
     RawMutex lock;
@@ -193,6 +224,7 @@ struct ConnectionPool {
 }
 
 impl ConnectionPool {
+    /// Creates an empty pool.
     ConnectionPool new() {
         ConnectionPool pool;
         pool.entries = Vec<PoolEntry>.new();
@@ -226,6 +258,8 @@ PoolEntry http_pool_remove_at(Vec<PoolEntry>* entries, i64 index) {
     return entry;
 }
 
+/// Returns true when the NUL-terminated host names are byte-equal
+/// (case-sensitive).
 bool http_host_eq(str a, str b) {
     u8* pa = (u8*)a;
     u8* pb = (u8*)b;
@@ -239,6 +273,7 @@ bool http_host_eq(str a, str b) {
     return false;
 }
 
+/// A parsed `http://` or `https://` URL. `path` borrows the input URL.
 struct HttpUrl {
     u8 host[255];
     u16 port;
@@ -642,6 +677,7 @@ impl HttpRequest {
         return move request;
     }
 
+    /// Clears the request for reuse by the server, keeping buffer capacity.
     void reset(&mut self) {
         self.version = HttpVersion.Http11;
         self.method = (str)0;
@@ -668,10 +704,12 @@ impl HttpRequest {
         self.tls_version_str.clear();
     }
 
+    /// Returns true when the request arrived over TLS (server side).
     bool is_tls(*self) {
         return self.is_tls_req;
     }
 
+    /// Returns the negotiated TLS version name, or "" for plain HTTP.
     str tls_version(*self) {
         if (self.tls_version_str.len > 0) {
             return (str)self.tls_version_str.data;
@@ -679,6 +717,7 @@ impl HttpRequest {
         return "";
     }
 
+    /// Returns "https" or "http" for how the request arrived.
     str scheme(*self) {
         if (self.is_tls_req) {
             return "https";
@@ -686,6 +725,8 @@ impl HttpRequest {
         return "http";
     }
 
+    /// Appends a `name: value` header line. Values are not validated: CR or LF
+    /// in either string would inject extra headers.
     void header(&mut self, str name, str value) {
         self.headers.push_str(name);
         self.headers.push_str(": ");
@@ -693,6 +734,7 @@ impl HttpRequest {
         self.headers.push_str("\r\n");
     }
 
+    /// Sets the body to `body`, which is borrowed and must outlive the request.
     void set_body(&mut self, str body) {
         self.body = body;
     }
@@ -732,6 +774,7 @@ impl HttpRequest {
         self.headers.push_str("\r\n");
     }
 
+    /// Clears the close flag so the connection may be reused.
     void keep_alive(&mut self) {
         self.close = false;
     }
@@ -968,6 +1011,7 @@ impl HttpRequest {
         return Ok(1);
     }
 
+    /// Internal: reads exactly `count` body bytes, failing above `max_body`.
     Result<i64, Error> read_exact(*self, StreamIo* io, i64 count, i64 max_body) {
         if (count < 0 || count > max_body) { return Err(HTTP_ERR_LIMIT, "request body exceeds limit"); }
         i64 done = 0;
@@ -984,6 +1028,7 @@ impl HttpRequest {
         return Ok(done);
     }
 
+    /// Internal: reads a chunked body (and trailers), failing above `max_body`.
     Result<i64, Error> read_chunked(*self, StreamIo* io, i64 max_body) {
         i64 total = 0;
         String line = String.new();
@@ -1036,6 +1081,8 @@ impl HttpRequest {
         return Err(HTTP_ERR_MALFORMED, "malformed request");
     }
 
+    /// Reads the request body by its framing; no body when neither chunked nor
+    /// a positive Content-Length.
     Result<i64, Error> read_body(*self, StreamIo* io, i64 max_body) {
         if (self.chunked) { return self.read_chunked(io, max_body); }
         if (self.content_length > 0) { return self.read_exact(io, self.content_length, max_body); }
@@ -1043,6 +1090,8 @@ impl HttpRequest {
         return Ok(0);
     }
 
+    /// Writes the request line, Host, Content-Length (when a body is set),
+    /// Connection, the custom headers, and the body. Blocks.
     Result<i64, Error> write(*self, StreamIo* io) {
         String head = String.new();
         head.push_str(self.method);
@@ -1089,6 +1138,7 @@ impl Drop for HttpRequest {
 // --- Responses ------------------------------------------------------------
 
 impl HttpResponse {
+    /// Returns a response with no status, headers, or body.
     HttpResponse empty() {
         HttpResponse response;
         response.version = HttpVersion.Http11;
@@ -1103,6 +1153,8 @@ impl HttpResponse {
         return move response;
     }
 
+    /// Internal: reads one response head (status line and headers), failing
+    /// above `max_header` bytes. Unread body bytes stay in the transport buffer.
     Result<i64, Error> read_head(*self, StreamIo* io, i64 max_header) {
         // Phase 1: accumulate the raw head in 512-byte bulk reads, scanning
         // for the CRLFCRLF terminator with a plain loop (plus a 3-byte carry
@@ -1212,6 +1264,7 @@ impl HttpResponse {
         return Ok(0);
     }
 
+    /// Internal: reads exactly `count` body bytes, failing above `max_body`.
     Result<i64, Error> read_exact(*self, StreamIo* io, i64 count, i64 max_body) {
         if (count < 0 || count > max_body) { return Err(HTTP_ERR_LIMIT, "response exceeds size limit"); }
         i64 done = 0;
@@ -1227,6 +1280,7 @@ impl HttpResponse {
         return Ok(done);
     }
 
+    /// Internal: reads a chunked body and trailers, failing above `max_body`.
     Result<i64, Error> read_chunked(*self, StreamIo* io, i64 max_body) {
         i64 total = 0;
         String line = String.new();
@@ -1268,6 +1322,8 @@ impl HttpResponse {
         return Err(HTTP_ERR_MALFORMED, "malformed response");
     }
 
+    /// Reads the body by its framing: none for HEAD and 1xx/204/205/304, chunked,
+    /// Content-Length, or until the peer closes (which marks `close_delimited`).
     Result<i64, Error> read_body(*self, StreamIo* io, bool head, i64 max_body) {
         if (http_status_has_no_body(self.status, head)) { return Ok(0); }
         if (self.chunked) { return self.read_chunked(io, max_body); }
@@ -1406,6 +1462,7 @@ impl HttpResponse {
         return Ok(0);
     }
 
+    /// Reads the final head (skipping 1xx interim responses) and the body.
     Result<i64, Error> read(*self, StreamIo* io, bool head, i64 max_header, i64 max_body) {
         Result<i64, Error> h = self.read_final_head(io, max_header);
         if (h.is_err()) { return h; }
@@ -1428,6 +1485,9 @@ impl Drop for HttpResponse {
 // chunked, close-delimited). close() returns the connection to the client's
 // pool when the body was fully consumed and the peer kept it alive.
 
+/// A response whose body is read incrementally. Owns its connection; `close`
+/// returns it to the client's pool when the body was fully read and the peer
+/// allows reuse. The `pool_owner` client must outlive the stream.
 struct HttpStream {
     HttpResponse head; // status/headers/reason; body stays empty
     HttpConnection conn; // owned; returned to the pool on close
@@ -1444,6 +1504,7 @@ struct HttpStream {
 }
 
 impl HttpStream {
+    /// Internal: wraps a response head and its connection for streaming.
     HttpStream new(HttpResponse head, HttpConnection conn, HttpClient* owner,
                    str host, u16 port, bool https) {
         HttpStream stream;
@@ -1468,6 +1529,7 @@ impl HttpStream {
         return stream;
     }
 
+    /// Returns the response status code.
     i32 status(*self) { return self.head.status; }
 
     /// The value of `name` (case-insensitive) in the response headers, or an
@@ -1600,6 +1662,8 @@ impl Drop for HttpStream {
 // --- Client ---------------------------------------------------------------
 
 impl HttpClient {
+    /// Creates a client with default limits, redirects, verification on, and
+    /// pooling on; no cookie jar.
     HttpClient new() {
         HttpClient client;
         client.max_header_bytes = HTTP_DEFAULT_MAX_HEADER;
@@ -1615,11 +1679,13 @@ impl HttpClient {
         return move client;
     }
 
+    /// Sets the header and body byte limits for later requests.
     void limits(&mut self, i64 max_header, i64 max_body) {
         self.max_header_bytes = max_header;
         self.max_body_bytes = max_body;
     }
 
+    /// Sets the number of redirects to follow (0 disables following).
     void set_max_redirects(&mut self, i32 limit) {
         self.max_redirects = limit;
     }
@@ -1646,6 +1712,8 @@ impl HttpClient {
         self.tls_ca_file = String.from_str(path);
     }
 
+    /// Opens a connection to `addr` without TLS, honoring the client timeout.
+    /// Returns `HTTP_ERR_TIMEOUT` or `HTTP_ERR_CONNECT` on failure.
     Result<HttpConnection, Error> connect(*self, SocketAddr* addr, HttpVersion version) {
         Result<TcpStream, Error> connect_result = TcpStream.connect_timeout(addr, self.timeout_secs);
         if (connect_result.failed()) {
@@ -2174,22 +2242,27 @@ impl HttpClient {
         return self.do_stream(&req);
     }
 
+    /// Sends GET `url` and reads the full response. Blocks; follows redirects.
     Result<HttpResponse, Error> get(*self, str url) {
         HttpRequest req = HttpRequest.new("GET", url, (str)0);
         return self.do(&req);
     }
 
+    /// Sends GET `url` with `body` and reads the full response.
     Result<HttpResponse, Error> get(*self, str url, str body) {
         HttpRequest req = HttpRequest.new("GET", url, body);
         return self.do(&req);
     }
 
+    /// Sends GET `url` with `body` and raw `headers` (`Name: value\r\n` lines,
+    /// appended verbatim).
     Result<HttpResponse, Error> get(*self, str url, str body, str headers) {
         HttpRequest req = HttpRequest.new("GET", url, body);
         if (headers != (str)0) { req.headers.push_str(headers); }
         return self.do(&req);
     }
 
+    /// Sends POST `url` with no body or content type.
     Result<HttpResponse, Error> post(*self, str url) {
         return self.post(url, (str)0, (str)0);
     }
@@ -2202,56 +2275,68 @@ impl HttpClient {
         return self.do(&req);
     }
 
+    /// Sends PUT `url` with no body.
     Result<HttpResponse, Error> put(*self, str url) {
         return self.put(url, (str)0, (str)0);
     }
 
+    /// Sends PUT `url` with `body`.
     Result<HttpResponse, Error> put(*self, str url, str body) {
         return self.put(url, body, (str)0);
     }
 
+    /// Sends PUT `url` with `body` and raw `headers` (`Name: value\r\n` lines).
     Result<HttpResponse, Error> put(*self, str url, str body, str headers) {
         HttpRequest req = HttpRequest.new("PUT", url, body);
         if (headers != (str)0) { req.headers.push_str(headers); }
         return self.do(&req);
     }
 
+    /// Sends DELETE `url` with no body.
     Result<HttpResponse, Error> delete(*self, str url) {
         return self.delete(url, (str)0, (str)0);
     }
 
+    /// Sends DELETE `url` with `body`.
     Result<HttpResponse, Error> delete(*self, str url, str body) {
         return self.delete(url, body, (str)0);
     }
 
+    /// Sends DELETE `url` with `body` and raw `headers` (`Name: value\r\n` lines).
     Result<HttpResponse, Error> delete(*self, str url, str body, str headers) {
         HttpRequest req = HttpRequest.new("DELETE", url, body);
         if (headers != (str)0) { req.headers.push_str(headers); }
         return self.do(&req);
     }
 
+    /// Sends HEAD `url`; the response has no body.
     Result<HttpResponse, Error> head(*self, str url) {
         return self.head(url, (str)0, (str)0);
     }
 
+    /// Sends HEAD `url` with `body`.
     Result<HttpResponse, Error> head(*self, str url, str body) {
         return self.head(url, body, (str)0);
     }
 
+    /// Sends HEAD `url` with `body` and raw `headers` (`Name: value\r\n` lines).
     Result<HttpResponse, Error> head(*self, str url, str body, str headers) {
         HttpRequest req = HttpRequest.new("HEAD", url, body);
         if (headers != (str)0) { req.headers.push_str(headers); }
         return self.do(&req);
     }
 
+    /// Sends PATCH `url` with no body.
     Result<HttpResponse, Error> patch(*self, str url) {
         return self.patch(url, (str)0, (str)0);
     }
 
+    /// Sends PATCH `url` with `body`.
     Result<HttpResponse, Error> patch(*self, str url, str body) {
         return self.patch(url, body, (str)0);
     }
 
+    /// Sends PATCH `url` with `body` and raw `headers` (`Name: value\r\n` lines).
     Result<HttpResponse, Error> patch(*self, str url, str body, str headers) {
         HttpRequest req = HttpRequest.new("PATCH", url, body);
         if (headers != (str)0) { req.headers.push_str(headers); }
@@ -2280,6 +2365,8 @@ impl HttpConnection {
         return Ok(move response);
     }
 
+    /// Writes `request`, then reads the full response. Closes the connection
+    /// afterwards when the request asked to close or the body ended at EOF.
     Result<HttpResponse, Error> send(*self, HttpRequest* request, i64 max_header, i64 max_body) {
         Result<HttpResponse, Error> h = self.send_head(request, max_header);
         if (h.failed()) { return h; }
@@ -2291,6 +2378,7 @@ impl HttpConnection {
         return Ok(move response);
     }
 
+    /// Closes TLS and the socket and frees the read buffer. Safe to call again.
     void close(*self) {
         if (self.use_tls) { transport_tls_close(&self.tls_state[0]); }
         self.stream.close();
@@ -2324,6 +2412,7 @@ impl HttpConnection {
         return false;
     }
 
+    /// Wraps an accepted plain-TCP stream (server side), taking ownership.
     HttpConnection from_stream(TcpStream stream) {
         HttpConnection conn;
         conn.stream = move stream;
@@ -2336,6 +2425,8 @@ impl HttpConnection {
         return move conn;
     }
 
+    /// Puts `len` bytes back to be read next. Replaces any unread buffered
+    /// bytes, and `len` must be at most 4096: the buffer is not bounds-checked.
     void push_back(*self, u8* buf, i64 len) {
         if (len <= 0) { return; }
         if (self.read_buf == (u8*)0) {
@@ -2351,6 +2442,7 @@ impl HttpConnection {
 
 // --- Server Utilities -----------------------------------------------------
 
+/// Appends `val` in lowercase hex (for chunk-size lines). `val` must be >= 0.
 void http_append_hex(String* out, i64 val) {
     if (val == 0) {
         out.push((u8)'0');
@@ -2372,6 +2464,9 @@ void http_append_hex(String* out, i64 val) {
     }
 }
 
+/// Splits `host:port` into `*out_ip` and `*out_port`. An empty address or a
+/// leading `:` means 0.0.0.0; a missing port uses `default_port`. Only the
+/// first `:` is used, so IPv6 literals are not supported.
 void http_parse_host_port(str addr, String* out_ip, u16* out_port, u16 default_port) {
     out_ip.clear();
     if (addr == (str)0 || strlen(addr) == 0) {
@@ -2403,12 +2498,15 @@ void http_parse_host_port(str addr, String* out_ip, u16* out_port, u16 default_p
     *out_port = default_port;
 }
 
+/// Same as the four-argument form with default port 80.
 void http_parse_host_port(str addr, String* out_ip, u16* out_port) {
     http_parse_host_port(addr, out_ip, out_port, (u16)80);
 }
 
 // --- ResponseWriter (Go's http.ResponseWriter) ----------------------------
 
+/// Writes one server response (HTTP/1.x or HTTP/2). Headers are buffered
+/// until the first body write or `finish`. Owns its header buffers.
 struct ResponseWriter {
     StreamIo io;
     HttpVersion version;
@@ -2425,6 +2523,7 @@ struct ResponseWriter {
 }
 
 impl ResponseWriter {
+    /// Creates a writer over `io` with status 200.
     ResponseWriter new(StreamIo io, HttpVersion version, bool close_conn) {
         ResponseWriter w;
         w.io = io;
@@ -2442,6 +2541,7 @@ impl ResponseWriter {
         return move w;
     }
 
+    /// Clears the writer for the next request on a keep-alive connection.
     void reset(&mut self, HttpVersion version, bool close_conn) {
         self.version = version;
         self.status_code = 200;
@@ -2473,6 +2573,8 @@ impl ResponseWriter {
         self.status_code = status;
     }
 
+    /// Sends the status line and headers once; later calls do nothing.
+    /// `content_len` < 0 selects chunked encoding on HTTP/1.1.
     void flush_header(&mut self, i64 content_len) {
         if (self.header_written) { return; }
         self.header_written = true;
@@ -2544,6 +2646,7 @@ impl ResponseWriter {
         return self.write((u8*)text, strlen(text));
     }
 
+    /// Writes one HTTP/1.1 chunk (size line, data, CRLF). Blocks.
     Result<i64, Error> write_chunk(&mut self, u8* buf, i64 len) {
         if (len <= 0) { return Ok(0); }
         String ch = String.new();
@@ -2559,6 +2662,8 @@ impl ResponseWriter {
         return Ok(len);
     }
 
+    /// Completes the response: sends headers if none were sent, then the final
+    /// chunk or HTTP/2 END_STREAM. Call once per request.
     void finish(&mut self) {
         if (!self.header_written) {
             self.flush_header(0);
@@ -2586,17 +2691,24 @@ impl Drop for ResponseWriter {
 
 // --- Routing & Multiplexer (Go's http.ServeMux) ---------------------------
 
+/// One route: method (null, "", or "*" for any), path pattern, handler.
+/// `method` and `pattern` are borrowed and must outlive the mux.
 struct RouteEntry {
     str method;
     str pattern;
     void(ResponseWriter*, HttpRequest*) handler;
 }
 
+/// A request router (Go's ServeMux). Exact paths win; otherwise the longest
+/// registered prefix matches as a plain string prefix (so `/api` also
+/// matches `/apiary`). HEAD falls back to GET handlers. A path match with no
+/// method match gets 405; no match gets 404.
 struct ServeMux {
     Vec<RouteEntry> routes;
 }
 
 impl ServeMux {
+    /// Creates an empty router.
     ServeMux new() {
         ServeMux mux;
         mux.routes = Vec<RouteEntry>.new();
@@ -2612,30 +2724,37 @@ impl ServeMux {
         self.routes.push(e);
     }
 
+    /// Registers a GET route.
     void get(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
         self.handle_func("GET", pattern, handler);
     }
 
+    /// Registers a POST route.
     void post(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
         self.handle_func("POST", pattern, handler);
     }
 
+    /// Registers a PUT route.
     void put(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
         self.handle_func("PUT", pattern, handler);
     }
 
+    /// Registers a DELETE route.
     void delete(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
         self.handle_func("DELETE", pattern, handler);
     }
 
+    /// Registers a PATCH route.
     void patch(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
         self.handle_func("PATCH", pattern, handler);
     }
 
+    /// Registers an OPTIONS route.
     void options(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
         self.handle_func("OPTIONS", pattern, handler);
     }
 
+    /// Dispatches `r` to the matching route, or writes a 404/405 response.
     void serve_http(&mut self, ResponseWriter* w, HttpRequest* r) {
         Slice<u8> p = r.path_slice();
         str m = r.method;
@@ -2774,12 +2893,14 @@ impl Drop for ServeMux {
 
 // --- Server (Go's http.Server) --------------------------------------------
 
+/// PEM certificate and key file paths for a TLS server (borrowed).
 struct TlsConfig {
     str cert_file;
     str key_file;
 }
 
 impl TlsConfig {
+    /// Builds a TLS config that borrows both paths.
     TlsConfig new(str cert_file, str key_file) {
         TlsConfig c;
         c.cert_file = cert_file;
@@ -2788,6 +2909,8 @@ impl TlsConfig {
     }
 }
 
+/// An HTTP/1.1 and HTTP/2 server (Go's http.Server). Binds IPv4 only.
+/// Defaults: 30 s read and write timeouts, 50 ms keep-alive wait, one worker.
 struct HttpServer {
     str addr;
     ServeMux mux;
@@ -2803,6 +2926,8 @@ struct HttpServer {
 
 // --- HTTP/2 Connection Reactor --------------------------------------------
 
+/// Serves HTTP/2 frames on `io` until the peer closes, dispatching each
+/// stream through `mux`. Blocks.
 void h2_serve_conn(StreamIo* io, ServeMux* mux, i64 max_body, bool is_tls, str tls_ver) {
     H2Connection c;
     h2_init(&c, io);
@@ -2966,15 +3091,19 @@ void h2_serve_conn(StreamIo* io, ServeMux* mux, i64 max_body, bool is_tls, str t
     c.drop();
 }
 
+/// Same as the five-argument form for plain (non-TLS) connections.
 void h2_serve_conn(StreamIo* io, ServeMux* mux, i64 max_body) {
     h2_serve_conn(io, mux, max_body, false, "");
 }
 
+/// Internal: the server and listening fd shared by acceptor threads.
 struct HttpWorkerContext {
     HttpServer* server;
     i32 lfd;
 }
 
+/// Internal: accept loop for an extra worker thread; runs until the listener
+/// fails with EBADF or EINVAL.
 void http_acceptor_worker(i64 arg) {
     HttpWorkerContext* ctx = (HttpWorkerContext*)arg;
     HttpServer* s = ctx.server;
@@ -3006,6 +3135,7 @@ void http_acceptor_worker(i64 arg) {
     }
 }
 
+/// Internal: the server, listening fd, and certificate paths for TLS workers.
 struct HttpTlsWorkerContext {
     HttpServer* server;
     i32 lfd;
@@ -3013,6 +3143,7 @@ struct HttpTlsWorkerContext {
     str key_file;
 }
 
+/// Internal: TLS accept loop for an extra worker thread.
 void http_tls_acceptor_worker(i64 arg) {
     HttpTlsWorkerContext* ctx = (HttpTlsWorkerContext*)arg;
     HttpServer* s = ctx.server;
@@ -3047,6 +3178,8 @@ void http_tls_acceptor_worker(i64 arg) {
 }
 
 impl HttpServer {
+    /// Creates a server for `addr` (`host:port`, `:port`, or empty for
+    /// 0.0.0.0:80). `addr` is borrowed.
     HttpServer new(str addr) {
         HttpServer s;
         s.addr = addr;
@@ -3062,45 +3195,59 @@ impl HttpServer {
         return move s;
     }
 
+    /// Sets how many threads accept and serve connections. Each thread serves
+    /// one connection at a time, so with one worker connections are serial.
     void set_workers(&mut self, i64 n) {
         self.workers = n;
     }
 
+    /// Sets how long an idle keep-alive connection waits for the next request.
     void set_keep_alive_timeout_ms(&mut self, i64 ms) {
         self.keep_alive_timeout_ms = ms;
     }
 
+    /// Registers a route on the server's own mux.
     void handle_func(&mut self, str method, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
         self.mux.handle_func(method, pattern, handler);
     }
 
+    /// Registers a GET route.
     void get(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
         self.mux.get(pattern, handler);
     }
 
+    /// Registers a POST route.
     void post(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
         self.mux.post(pattern, handler);
     }
 
+    /// Registers a PUT route.
     void put(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
         self.mux.put(pattern, handler);
     }
 
+    /// Registers a DELETE route.
     void delete(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
         self.mux.delete(pattern, handler);
     }
 
+    /// Registers a PATCH route.
     void patch(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
         self.mux.patch(pattern, handler);
     }
 
+    /// Registers an OPTIONS route.
     void options(&mut self, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
         self.mux.options(pattern, handler);
     }
+    /// Routes requests through `mux` instead of the server's own routes. The mux
+    /// is borrowed and must outlive the server.
     void set_mux(&mut self, ServeMux* mux) {
         self.custom_mux = mux;
     }
 
+    /// Serves one plain connection (HTTP/1.x with keep-alive, or h2c prior
+    /// knowledge) until it closes. Blocks; takes ownership of `stream`.
     void serve_conn(&mut self, TcpStream stream) {
         HttpConnection conn = HttpConnection.from_stream(move stream);
         StreamIo io = http_transport_io(&conn);
@@ -3186,6 +3333,8 @@ impl HttpServer {
         conn.drop();
     }
 
+    /// Binds `addr`, starts the extra worker threads, and serves forever on the
+    /// calling thread. Returns only when binding fails or the listener breaks.
     Result<i64, Error> listen_and_serve(&mut self) {
         String ip = String.new();
         u16 port = 80;
@@ -3240,6 +3389,7 @@ impl HttpServer {
         return Ok(0);
     }
 
+    /// Serves one TLS connection (HTTP/1.1 or ALPN h2). Requires `tls_init()`.
     void serve_tls_conn(&mut self, TcpStream stream, str cert_file, str key_file) {
         HttpConnection conn = HttpConnection.from_stream(move stream);
         Error err;
@@ -3337,6 +3487,8 @@ impl HttpServer {
         conn.drop();
     }
 
+    /// Like `listen_and_serve`, over TLS with the given PEM files. Requires
+    /// `tls_init()`. The first certificate loaded is reused process-wide.
     Result<i64, Error> listen_and_serve_tls(&mut self, str cert_file, str key_file) {
         String ip = String.new();
         u16 port = 443;
@@ -3393,6 +3545,7 @@ impl HttpServer {
         return Ok(0);
     }
 
+    /// Same as `listen_and_serve_tls` with paths from `cfg`.
     Result<i64, Error> listen_and_serve_tls_config(&mut self, TlsConfig cfg) {
         return self.listen_and_serve_tls(cfg.cert_file, cfg.key_file);
     }
@@ -3406,13 +3559,16 @@ impl Drop for HttpServer {
 
 // --- Top-Level Go-like Functions ------------------------------------------
 
+/// The router used by `http_handle_func` and the default-mux listeners.
 ServeMux g_default_mux;
 
+/// Registers a route on `g_default_mux`.
 void http_handle_func(str method, str pattern, void(ResponseWriter*, HttpRequest*) handler) {
     g_default_mux.handle_func(method, pattern, handler);
 }
 
 
+/// Serves `g_default_mux` on `addr` until failure (see `listen_and_serve`).
 Result<i64, Error> http_listen_and_serve(str addr) {
     HttpServer s = HttpServer.new(addr);
     s.set_mux(&g_default_mux);
@@ -3421,6 +3577,7 @@ Result<i64, Error> http_listen_and_serve(str addr) {
     return r;
 }
 
+/// Serves every request with `handler` on `addr` until failure.
 Result<i64, Error> http_listen_and_serve(str addr, void(ResponseWriter*, HttpRequest*) handler) {
     HttpServer s = HttpServer.new(addr);
     s.handle_func("*", "/", handler);
@@ -3429,6 +3586,7 @@ Result<i64, Error> http_listen_and_serve(str addr, void(ResponseWriter*, HttpReq
     return r;
 }
 
+/// Serves `g_default_mux` over TLS until failure. Requires `tls_init()`.
 Result<i64, Error> http_listen_and_serve_tls(str addr, str cert_file, str key_file) {
     HttpServer s = HttpServer.new(addr);
     s.set_mux(&g_default_mux);
@@ -3437,6 +3595,7 @@ Result<i64, Error> http_listen_and_serve_tls(str addr, str cert_file, str key_fi
     return r;
 }
 
+/// Serves every request with `handler` over TLS until failure.
 Result<i64, Error> http_listen_and_serve_tls(str addr, str cert_file, str key_file, void(ResponseWriter*, HttpRequest*) handler) {
     HttpServer s = HttpServer.new(addr);
     s.handle_func("*", "/", handler);
@@ -3445,6 +3604,7 @@ Result<i64, Error> http_listen_and_serve_tls(str addr, str cert_file, str key_fi
     return r;
 }
 
+/// Serves `g_default_mux` over TLS with `cfg` until failure.
 Result<i64, Error> http_listen_and_serve_tls_config(str addr, TlsConfig cfg) {
     HttpServer s = HttpServer.new(addr);
     s.set_mux(&g_default_mux);
@@ -3453,6 +3613,7 @@ Result<i64, Error> http_listen_and_serve_tls_config(str addr, TlsConfig cfg) {
     return r;
 }
 
+/// Serves every request with `handler` over TLS with `cfg` until failure.
 Result<i64, Error> http_listen_and_serve_tls_config(str addr, TlsConfig cfg, void(ResponseWriter*, HttpRequest*) handler) {
     HttpServer s = HttpServer.new(addr);
     s.handle_func("*", "/", handler);
@@ -3461,6 +3622,7 @@ Result<i64, Error> http_listen_and_serve_tls_config(str addr, TlsConfig cfg, voi
     return r;
 }
 
+/// GET with a temporary client; reads the full body. Blocks.
 Result<HttpResponse, Error> http_get(str url) {
     HttpClient client = HttpClient.new();
     Result<HttpResponse, Error> r = client.get(url);
@@ -3468,6 +3630,7 @@ Result<HttpResponse, Error> http_get(str url) {
     return r;
 }
 
+/// POST with a temporary client; reads the full body. Blocks.
 Result<HttpResponse, Error> http_post(str url, str content_type, str body) {
     HttpClient client = HttpClient.new();
     Result<HttpResponse, Error> r = client.post(url, content_type, body);

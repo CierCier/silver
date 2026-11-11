@@ -102,6 +102,8 @@ struct Command {
 }
 
 impl Command {
+    /// Starts a command for program `prog` with no arguments, inheriting the
+    /// parent environment. Copies `prog`; nothing runs until `spawn`.
     Command new(str prog) {
         Command cmd;
         cmd.program = String.from_str(prog);
@@ -111,10 +113,15 @@ impl Command {
         return cmd;
     }
 
+    /// Appends one argument (copied). Arguments are passed as-is, with no shell
+    /// splitting or quoting.
     void arg(&mut self, str a) {
         self.args.push(String.from_str(a));
     }
 
+    /// Adds `key=val` to the child's environment (copied). Applied in addition to
+    /// the inherited environment unless the environment was cleared. Does not
+    /// validate `key`; a key containing `=` produces a malformed entry.
     void env(&mut self, str key, str val) {
         String entry = String.from_str(key);
         entry.push((u8)'=');

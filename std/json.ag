@@ -13,12 +13,14 @@ import std.mem.vec;
 import std.optional;
 import std.atomic;
 
+/// A JSON decoding failure, optionally with the byte offset where it happened.
 enum JsonError {
     Invalid;
     At(i64); // byte offset where decoding failed
 }
 
 impl JsonError {
+    /// Returns an error with no known offset.
     JsonError invalid() {
         return JsonError.Invalid;
     }
@@ -39,43 +41,54 @@ impl JsonError {
     }
 }
 
+/// Serializes a value by streaming it into a `JsonWriter`.
 trait ToJson {
+    /// Writes this value as exactly one JSON value.
     void to_json(*self, JsonWriter* out);
 }
 
+/// Builds a value of `Self` from the reader.
 trait FromJson {
+    /// Reads one JSON value. On failure the reader may be partly consumed.
     Result<Self, JsonError> from_json(JsonReader* input);
 }
 
-// Decode a value of type Self from the reader. Unlike FromJson, this has a
-// receiver so generic containers can decode their element type T without
-// knowing it: they call `T slot; slot.json_decode(input)` on a
-// zero-initialized local and the impls return a fresh decoded value.
+/// Decode a value of type Self from the reader. Unlike FromJson, this has a
+/// receiver so generic containers can decode their element type T without
+/// knowing it: they call `T slot; slot.json_decode(input)` on a
+/// zero-initialized local and the impls return a fresh decoded value.
 trait JsonDecode {
+    /// Returns a newly decoded value; `*self` is only a type witness and is not
+    /// read or modified.
     Result<Self, JsonError> json_decode(*self, JsonReader* input);
 }
 
-// Release resources owned by a JSON-decoded value. The decoder creates the
-// elements, so when a container decode fails part-way it must destroy the
-// elements it already decoded (containers own only their backing buffer,
-// never element contents). Every type with a JsonDecode impl must also
-// provide JsonDispose so containers can clean up partial results: element
-// impls no-op for scalars and recurse for containers; #[serialize]
-// synthesis emits one per struct.
+/// Release resources owned by a JSON-decoded value. The decoder creates the
+/// elements, so when a container decode fails part-way it must destroy the
+/// elements it already decoded (containers own only their backing buffer,
+/// never element contents). Every type with a JsonDecode impl must also
+/// provide JsonDispose so containers can clean up partial results: element
+/// impls no-op for scalars and recurse for containers; #[serialize]
+/// synthesis emits one per struct.
 trait JsonDispose {
+    /// Frees resources this decoded value owns. Scalars do nothing.
     void dispose(*self);
 }
 
-// Powers of 10 for float parsing. Built at runtime by the identical
-// recurrence the old loops used (repeated *10.0 / /10.0 from 1.0), so a
-// table lookup reproduces the loop value bit-for-bit: parse results are
-// unchanged, only the per-digit division and the O(exponent) multiply chain
-// disappear. Filled once on first use; concurrent fills compute identical
-// IEEE-754 values, and the ready flag is release/acquire published.
+/// Powers of 10 for float parsing. Built at runtime by the identical
+/// recurrence the old loops used (repeated *10.0 / /10.0 from 1.0), so a
+/// table lookup reproduces the loop value bit-for-bit: parse results are
+/// unchanged, only the per-digit division and the O(exponent) multiply chain
+/// disappear. Filled once on first use; concurrent fills compute identical
+/// IEEE-754 values, and the ready flag is release/acquire published.
+/// Filled by `json_pow10_init`; read only after it returns.
 f64 JSON_POW10_POS[324];
+/// 10^-k for k in [0, 323], filled by `json_pow10_init`.
 f64 JSON_POW10_NEG[324];
+/// Internal: nonzero once the power tables are filled (release/acquire).
 i64 g_json_pow10_ready;
 
+/// Fills the power-of-ten tables on first use. Thread-safe and idempotent.
 void json_pow10_init() {
     if (__atomic_load_i64(&g_json_pow10_ready, ATOMIC_ACQUIRE) != 0) { return; }
     JSON_POW10_POS[0] = 1.0;
@@ -87,6 +100,10 @@ void json_pow10_init() {
     __atomic_store_i64(&g_json_pow10_ready, 1, ATOMIC_RELEASE);
 }
 
+/// A streaming JSON text builder with an in-memory buffer. It inserts commas
+/// automatically. Nesting is tracked to 32 levels; deeper output stays valid
+/// text but comma placement is no longer tracked. It does not check that
+/// begin/end calls balance.
 struct JsonWriter {
     BufWriter output;
     u8 contexts[32]; // 1 = object, 2 = array
@@ -96,6 +113,7 @@ struct JsonWriter {
 }
 
 impl JsonWriter {
+    /// Creates an empty writer.
     JsonWriter new() {
         JsonWriter writer;
         writer.output.data = 0;
@@ -110,6 +128,7 @@ impl JsonWriter {
         return move writer;
     }
 
+    /// Internal: writes the separating comma before an array element.
     void before_value(*self) {
         if (self.depth == 0) {
             return;
@@ -127,6 +146,7 @@ impl JsonWriter {
         }
     }
 
+    /// Internal: writes `value` with JSON string escapes, without quotes.
     void write_escaped_body(*self, str value) {
         u8* bytes = (u8*)value;
         i64 i = 0;
@@ -171,17 +191,20 @@ impl JsonWriter {
         }
     }
 
+    /// Internal: writes `value` as four lowercase hex digits.
     void write_hex4(*self, u32 value) {
         self.output.write_str("\\u00");
         self.output.write_u8(self.hex_digit((value >> 4) & 0xF));
         self.output.write_u8(self.hex_digit(value & 0xF));
     }
 
+    /// Internal: returns the lowercase hex digit for `v` in 0..15.
     u8 hex_digit(*self, u32 v) {
         if (v < 10) { return (u8)((u32)48 + v); }
         return (u8)((u32)97 + v - 10);
     }
 
+    /// Writes `value` as a quoted, escaped JSON string.
     void write_string(*self, str value) {
         self.before_value();
         self.output.write_u8((u8)34);
@@ -189,46 +212,57 @@ impl JsonWriter {
         self.output.write_u8((u8)34);
     }
 
+    /// Writes `value` verbatim as the next value. The caller must ensure it is
+    /// valid JSON.
     void write_raw(*self, str value) {
         self.before_value();
         self.output.write_str(value);
     }
 
+    /// Writes `null`.
     void write_null(*self) {
         self.before_value();
         self.output.write_str("null");
     }
 
+    /// Writes a JSON integer.
     void write_i64(*self, i64 value) {
         self.before_value();
         self.output.write_i64(value);
     }
 
+    /// Writes a JSON integer.
     void write_i128(*self, i128 value) {
         self.before_value();
         self.output.write_i128(value);
     }
 
+    /// Writes a JSON integer.
     void write_u128(*self, u128 value) {
         self.before_value();
         self.output.write_u128(value);
     }
 
+    /// Writes a JSON integer.
     void write_u64(*self, u64 value) {
         self.before_value();
         self.output.write_u64(value);
     }
 
+    /// Writes a JSON number in shortest round-trip form. NaN and infinities are
+    /// written as-is, which is not valid JSON.
     void write_f64(*self, f64 value) {
         self.before_value();
         self.output.write_f64(value);
     }
 
+    /// Writes `true` or `false`.
     void write_bool(*self, bool value) {
         self.before_value();
         self.output.write_bool(value);
     }
 
+    /// Writes `{` and enters an object.
     void begin_object(*self) {
         self.before_value();
         self.output.write_u8((u8)123);
@@ -239,6 +273,7 @@ impl JsonWriter {
         }
     }
 
+    /// Writes `}` and leaves the current object.
     void end_object(*self) {
         if (self.depth > 0) {
             self.depth = self.depth - 1;
@@ -246,6 +281,7 @@ impl JsonWriter {
         self.output.write_u8((u8)125);
     }
 
+    /// Writes `[` and enters an array.
     void begin_array(*self) {
         self.before_value();
         self.output.write_u8((u8)91);
@@ -256,6 +292,7 @@ impl JsonWriter {
         }
     }
 
+    /// Writes `]` and leaves the current array.
     void end_array(*self) {
         if (self.depth > 0) {
             self.depth = self.depth - 1;
@@ -263,6 +300,8 @@ impl JsonWriter {
         self.output.write_u8((u8)93);
     }
 
+    /// Writes an object key (`"name":`); the next write is its value. Ignored
+    /// outside an object.
     void field(*self, str name) {
         if (self.depth == 0 || self.contexts[self.depth - 1] != 1) {
             return;
@@ -278,6 +317,8 @@ impl JsonWriter {
         self.expecting_value = true;
     }
 
+    /// Returns the NUL-terminated text and transfers its heap buffer to the
+    /// caller, who must `free` it. The writer is empty afterwards.
     str finish(*self) {
         self.output.write_u8((u8)0);
         str result = (str)self.output.data;
@@ -288,6 +329,9 @@ impl JsonWriter {
     }
 }
 
+/// A JSON parser over a borrowed NUL-terminated string. Errors are sticky:
+/// any failure sets `failed`, and `ok()` reports whether the whole input was
+/// consumed cleanly. The input must outlive the reader.
 struct JsonReader {
     str input;
     i64 index;
@@ -296,6 +340,7 @@ struct JsonReader {
 }
 
 impl JsonReader {
+    /// Creates a reader at the start of `input` (borrowed).
     JsonReader new(str input) {
         JsonReader reader;
         reader.input = input;
@@ -305,6 +350,7 @@ impl JsonReader {
         return move reader;
     }
 
+    /// Advances past JSON whitespace (space, tab, CR, LF).
     void skip_whitespace(*self) {
         u8* bytes = (u8*)self.input;
         if (@cfg(os.wasi)) {
@@ -372,6 +418,8 @@ impl JsonReader {
         }
     }
 
+    /// Skips whitespace and consumes `expected`, or sets `failed` and returns
+    /// false without consuming.
     bool expect(*self, u8 expected) {
         u8* bytes = (u8*)self.input;
         self.skip_whitespace();
@@ -383,10 +431,15 @@ impl JsonReader {
         return true;
     }
 
+    /// Consumes `{`.
     bool begin_object(*self) { return self.expect((u8)123); }
+    /// Consumes `}`.
     bool end_object(*self) { return self.expect((u8)125); }
+    /// Consumes `[`.
     bool begin_array(*self) { return self.expect((u8)91); }
+    /// Consumes `]`.
     bool end_array(*self) { return self.expect((u8)93); }
+    /// Consumes `,`.
     bool comma(*self) { return self.expect((u8)44); }
 
     /// True when the next non-whitespace byte closes the current object.
@@ -398,6 +451,7 @@ impl JsonReader {
         return self.index < self.length && bytes[self.index] == (u8)125;
     }
 
+    /// Skips whitespace and consumes the exact bytes of `value`, or sets `failed`.
     bool literal(*self, str value) {
         u8* input = (u8*)self.input;
         u8* expected = (u8*)value;
@@ -419,6 +473,7 @@ impl JsonReader {
         return true;
     }
 
+    /// Reads `true` or `false` into `*out`.
     bool read_bool(*self, bool* out) {
         u8* bytes = (u8*)self.input;
         self.skip_whitespace();
@@ -431,6 +486,8 @@ impl JsonReader {
         return false;
     }
 
+    /// Reads a JSON integer into `*out`. Rejects leading zeros; a fraction or
+    /// exponent is left unread. Values beyond the i64 range wrap silently.
     bool read_i64(*self, i64* out) {
         u8* bytes = (u8*)self.input;
         self.skip_whitespace();
@@ -466,6 +523,8 @@ impl JsonReader {
         return true;
     }
 
+    /// Reads an integer like `read_i64` and truncates it to i32 without a range
+    /// check.
     bool read_i32(*self, i32* out) {
         i64 value = 0;
         if (!self.read_i64(&value)) { return false; }
@@ -571,6 +630,7 @@ impl JsonReader {
         return true;
     }
 
+    /// Reads a non-negative JSON integer into `*out`. A leading `-` fails.
     bool read_u64(*self, u64* out) {
         u8* bytes = (u8*)self.input;
         self.skip_whitespace();
@@ -604,6 +664,7 @@ impl JsonReader {
         return true;
     }
 
+    /// Reads a JSON number (sign, fraction, exponent) into `*out`.
     bool read_f64(*self, f64* out) {
         u8* bytes = (u8*)self.input;
         self.skip_whitespace();
@@ -702,6 +763,9 @@ impl JsonReader {
         return true;
     }
 
+    /// Reads a quoted JSON string, decoding escapes (including surrogate pairs)
+    /// to UTF-8. Returns an owned string; on failure it is partial and `failed`
+    /// is set.
     String read_string(*self) {
         u8* bytes = (u8*)self.input;
         String result = String.new();
@@ -809,6 +873,8 @@ impl JsonReader {
         return move result;
     }
 
+    /// Reads an object key, requires it to equal `name`, and consumes the `:`.
+    /// Sets `failed` on a mismatch.
     bool field(*self, str name) {
         String actual = self.read_string();
         if (self.failed || !actual.equals(name)) {
@@ -818,6 +884,7 @@ impl JsonReader {
         return self.expect((u8)58);
     }
 
+    /// Internal: reads four hex digits of a `\u` escape.
     u32 read_hex4(*self) {
         if (self.index + 4 > self.length) {
             self.failed = true;
@@ -839,6 +906,7 @@ impl JsonReader {
         return value;
     }
 
+    /// Internal: returns the value of a hex digit, or -1.
     i32 hex_digit(*self, u8 c) {
         if (c >= (u8)48 && c <= (u8)57) { return (i32)(c - (u8)48); }
         if (c >= (u8)97 && c <= (u8)102) { return (i32)(c - (u8)97) + 10; }
@@ -855,6 +923,7 @@ impl JsonReader {
         return self.skip_value_depth(0);
     }
 
+    /// Internal: `skip_value` with the current nesting depth.
     bool skip_value_depth(*self, i64 depth) {
         if (depth > 256) {
             self.failed = true;
@@ -934,6 +1003,7 @@ impl JsonReader {
         }
     }
 
+    /// Returns true when no error occurred and only whitespace remains.
     bool ok(*self) {
         self.skip_whitespace();
         return !self.failed && self.index == self.length;

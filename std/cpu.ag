@@ -12,13 +12,21 @@
 // destroys rbx/rdx, xgetbv destroys rdx) must be listed so LLVM preserves
 // live values across the instruction.
 
-/// Feature flags, probed once by __silver_cpu_init().
+/// Feature flags, probed once by __silver_cpu_init() before main and false
+/// until then. Treat them as read-only.
+/// True when the CPU supports SSE4.1.
 bool g_has_sse41;
+/// True when the CPU supports SSE4.2. Written once by `__silver_cpu_init`.
 bool g_has_sse42;
+/// True when the CPU supports POPCNT.
 bool g_has_popcnt;
+/// True when the CPU supports FMA3.
 bool g_has_fma;
+/// True when the CPU supports AVX and the OS saves YMM state.
 bool g_has_avx;
+/// True when the CPU supports AVX2 and the OS saves YMM state.
 bool g_has_avx2;
+/// True when the CPU supports AVX-512F and the OS saves ZMM and opmask state.
 bool g_has_avx512f;
 
 if (@cfg(os.wasi)) {
@@ -28,9 +36,11 @@ if (@cfg(os.wasi)) {
 // exactly what portable code paths want. `@cfg(cpu.*)` folds to a read of
 // these globals and therefore folds to false everywhere on wasm.
 
+/// No-op on WebAssembly: every feature flag stays false.
 void __silver_cpu_init() {
 }
 
+/// No-op on WebAssembly.
 void cpu_relax() {
 }
 
@@ -78,6 +88,8 @@ i64 xcr0_low() {
 
 /// True when the OS saves the XMM/YMM/ZMM state required by `required`
 /// (a mask of XCR0 bits). Without this, AVX/AVX2/AVX-512 instructions trap.
+/// Runs `xgetbv`, which itself faults unless the OS enabled XSAVE (CPUID
+/// OSXSAVE); this function does not check that bit.
 bool avx_state_ok(i64 required) {
     i64 xcr0 = xcr0_low();
     return (xcr0 & required) == required;
@@ -106,10 +118,17 @@ void cpu_relax() {
 
 /// Explicit runtime probes (same storage as the @cfg folds). Portable: the
 /// globals exist on every target and stay false where no probe runs (wasm).
+/// Returns true when SSE4.1 is available.
 bool has_sse41() { return g_has_sse41; }
+/// Returns true when SSE4.2 is available.
 bool has_sse42() { return g_has_sse42; }
+/// Returns true when POPCNT is available.
 bool has_popcnt() { return g_has_popcnt; }
+/// Returns true when FMA3 is available.
 bool has_fma() { return g_has_fma; }
+/// Returns true when AVX is available and enabled by the OS.
 bool has_avx() { return g_has_avx; }
+/// Returns true when AVX2 is available and enabled by the OS.
 bool has_avx2() { return g_has_avx2; }
+/// Returns true when AVX-512F is available and enabled by the OS.
 bool has_avx512f() { return g_has_avx512f; }

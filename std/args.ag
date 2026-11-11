@@ -3,7 +3,9 @@ import std.mem.vec;
 import std.string;
 
 extern "C" {
+    /// Returns the process argument count captured at startup.
     i32 silver_argc();
+    /// Returns the process argument vector captured at startup. Do not free it.
     i8** silver_argv();
 }
 
@@ -51,6 +53,7 @@ struct Args {
 }
 
 impl Args {
+    /// Snapshots the process argc/argv. Does not copy the strings.
     Args new() {
         Args a;
         a.argc = silver_argc();
@@ -58,14 +61,17 @@ impl Args {
         return a;
     }
 
+    /// Returns the argument count, including the program name.
     i32 count(&self) {
         return self.argc;
     }
 
+    /// Same as `count`.
     i32 argc(&self) {
         return self.argc;
     }
 
+    /// Returns the argument count as `i64`, or 0 if argc is negative.
     i64 len(&self) {
         if (self.argc < 0) {
             return 0;
@@ -73,6 +79,7 @@ impl Args {
         return (i64)self.argc;
     }
 
+    /// Returns a copy of argument `index`, or an empty string when out of range.
     String get(&self, i64 index) {
         if (index < 0 || index >= (i64)self.argc || self.argv == (i8**)0 || self.argv[index] == (i8*)0) {
             return String.new();
@@ -80,10 +87,12 @@ impl Args {
         return String.from_str((str)self.argv[index]);
     }
 
+    /// Returns copies of every process argument (same as `args()`).
     Vec<String> to_vec(&self) {
         return args();
     }
 
+    /// Returns copies of every process argument (same as `args()`).
     Vec<String> all() {
         return args();
     }

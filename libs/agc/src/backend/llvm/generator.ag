@@ -24,6 +24,7 @@ import backend.llvm.optimization;
 import backend.llvm.stmt;
 import backend.llvm.types;
 
+/// Returns true when an `impl` item declares type parameters.
 bool llvm_item_is_generic_impl(SyntaxNode* impl_item) {
     SyntaxNode* child = impl_item.first_child;
     while (child != (SyntaxNode*)0 && child.kind != NodeKind.Block) {
@@ -41,6 +42,7 @@ bool llvm_item_is_generic_impl(SyntaxNode* impl_item) {
     return item_method_is_generic(target);
 }
 
+/// Returns true when an enum item declares type parameters.
 bool llvm_item_is_generic_enum(SyntaxNode* enum_item) {
     SyntaxNode* child = enum_item.first_child;
     while (child != (SyntaxNode*)0 && child.kind != NodeKind.Block) {
@@ -53,6 +55,7 @@ bool llvm_item_is_generic_enum(SyntaxNode* enum_item) {
     return false;
 }
 
+/// Returns true when a function item declares type parameters.
 bool llvm_item_is_generic_fn(SyntaxNode* fn_item) {
     SyntaxNode* id_node = function_identifier(fn_item);
     if (id_node == (SyntaxNode*)0) { return false; }
@@ -66,6 +69,8 @@ bool llvm_item_is_generic_fn(SyntaxNode* fn_item) {
     return false;
 }
 
+/// Defines the LLVM layout of a non-generic enum (tag plus payload bytes).
+/// Returns false when its payload layout is unresolved.
 bool llvm_define_enum_layout(LlvmContext* ctx, SyntaxNode* item) {
     SyntaxNode* name = item_identifier(item);
     if (name == (SyntaxNode*)0) { return false; }
@@ -107,6 +112,7 @@ bool llvm_define_enum_layout(LlvmContext* ctx, SyntaxNode* item) {
     return true;
 }
 
+/// Returns true when `source_file_id` belongs to this compile job.
 bool llvm_job_owns_source(Vec<u32>* owned_source_ids, u32 source_file_id) {
     i64 i = 0;
     while (i < owned_source_ids.len()) {
@@ -116,6 +122,7 @@ bool llvm_job_owns_source(Vec<u32>* owned_source_ids, u32 source_file_id) {
     return false;
 }
 
+/// Returns true when `source_file_id` is compiled as a standalone module.
 bool llvm_source_is_standalone(Vec<u32>* standalone_source_ids, u32 source_file_id) {
     i64 i = 0;
     while (i < standalone_source_ids.len()) {
@@ -125,6 +132,8 @@ bool llvm_source_is_standalone(Vec<u32>* standalone_source_ids, u32 source_file_
     return false;
 }
 
+/// Returns a free function's symbol: its link name, or its name mangled
+/// when the name is overloaded.
 String llvm_free_function_symbol(TypeTable* types, SyntaxNode* root, SyntaxNode* function) {
     SyntaxNode* id_node = function_identifier(function);
     String link_name = item_function_link_name(function);
@@ -138,6 +147,8 @@ String llvm_free_function_symbol(TypeTable* types, SyntaxNode* root, SyntaxNode*
     return typecheck_overloaded_free_symbol(types, id_node.text, function);
 }
 
+/// Returns true when an earlier item already emits a body for `symbol`, so
+/// this one must not.
 bool llvm_has_prior_function_body(TypeTable* types, SyntaxNode* root,
                                   SyntaxNode* function, str symbol,
                                   Vec<u32>* owned_source_ids,
@@ -173,6 +184,8 @@ bool llvm_has_prior_function_body(TypeTable* types, SyntaxNode* root,
     return false;
 }
 
+/// Returns the LLVM parameter types of a function (receiver included),
+/// using C ABI lowering when `c_abi` is set.
 Vec<LLVMOpaqueType*> llvm_param_types(LlvmContext* ctx, TypeTable* types,
                                       Vec<Binding>* params, str self_type_name,
                                       str _function_name, bool c_abi) {
@@ -210,6 +223,8 @@ Vec<LLVMOpaqueType*> llvm_param_types(LlvmContext* ctx, TypeTable* types,
     return move param_types;
 }
 
+/// Adds a `_start` that calls `main` when the module defines `main` and no
+/// `_start` (for programs built without std's entry point).
 void llvm_emit_entry_point(LLVMOpaqueContext* ctx, LLVMOpaqueModule* module, LLVMOpaqueBuilder* builder) {
     if (LLVMGetNamedFunction(module, "_start") != (LLVMOpaqueValue*)0) {
         return;
@@ -271,9 +286,9 @@ void llvm_emit_entry_point(LLVMOpaqueContext* ctx, LLVMOpaqueModule* module, LLV
     LLVMBuildRetVoid(builder);
 }
 
-// Define one specialized generic method instance under an already-declared
-// symbol, with substitution frames active (pushed by the caller). Structural
-// twin of the Pass2 method block below; keep in sync.
+/// Define one specialized generic method instance under an already-declared
+/// symbol, with substitution frames active (pushed by the caller). Structural
+/// twin of the Pass2 method block below; keep in sync.
 bool llvm_define_method_instance(LlvmContext* ctx, TypeTable* types, Interner* names, AstPool* pool, str struct_name, LLVMOpaqueValue* fn_val, SyntaxNode* ret_start, SyntaxNode* method_name_node, SyntaxNode* params_node, SyntaxNode* body_node, Vec<u32>* arg_ids, u32 receiver_depth) {
     if (fn_val == (LLVMOpaqueValue*)0 || LLVMCountBasicBlocks(fn_val) > 0) {
         return false;
@@ -400,6 +415,7 @@ bool llvm_define_method_instance(LlvmContext* ctx, TypeTable* types, Interner* n
     return true;
 }
 
+/// Defines one generic free function instance under its declared symbol.
 bool llvm_define_free_function_instance(LlvmContext* ctx, TypeTable* types,
                                         Interner* names, AstPool* pool,
                                         LLVMOpaqueValue* fn_val, SyntaxNode* ret_start,
@@ -490,12 +506,12 @@ bool llvm_define_free_function_instance(LlvmContext* ctx, TypeTable* types,
     return true;
 }
 
-// Define all queued specializations. Nested generic calls discovered during
-// definition are declared and queued inline by expression lowering, so the
-// loop runs to fixpoint; the 4096-instance cap fails closed instead.
-// (The full compiler needs ~300 instances; the old 256 cap was sized for
-// small programs and broke the stage2 self-build with 20 distinct
-// monomorph-cap notes and zero duplicates.)
+/// Define all queued specializations. Nested generic calls discovered during
+/// definition are declared and queued inline by expression lowering, so the
+/// loop runs to fixpoint; the 4096-instance cap fails closed instead.
+/// (The full compiler needs ~300 instances; the old 256 cap was sized for
+/// small programs and broke the stage2 self-build with 20 distinct
+/// monomorph-cap notes and zero duplicates.)
 void llvm_drain_mono_queue(LlvmContext* ctx, TypeTable* types, Interner* names, AstPool* pool) {
     i64 index = 0;
     while (index < ctx.mono_queue.len()) {
@@ -587,6 +603,7 @@ void llvm_drain_mono_queue(LlvmContext* ctx, TypeTable* types, Interner* names, 
     }
 }
 
+/// Returns the symbol prefix for literal data of global `global_name`.
 String llvm_const_global_literal_prefix(str global_name, str kind, i64 index) {
     String prefix = String.from_str(global_name);
     prefix.push((u8)'.');
@@ -596,6 +613,7 @@ String llvm_const_global_literal_prefix(str global_name, str kind, i64 index) {
     return move prefix;
 }
 
+/// Adds a private constant byte-array global, optionally NUL-terminated.
 LLVMOpaqueValue* llvm_const_bytes_global(LLVMOpaqueContext* raw_ctx,
     LLVMOpaqueModule* module, i8* bytes, u64 length, str global_prefix,
     i32 null_terminate) {
@@ -611,6 +629,7 @@ LLVMOpaqueValue* llvm_const_bytes_global(LLVMOpaqueContext* raw_ctx,
     return global;
 }
 
+/// Adds a private global for a string literal and returns it.
 LLVMOpaqueValue* llvm_const_string_global(LLVMOpaqueContext* raw_ctx,
     LLVMOpaqueModule* module, str literal_text, str global_prefix) {
     String decoded = unescape_string_literal(literal_text);
@@ -620,6 +639,7 @@ LLVMOpaqueValue* llvm_const_string_global(LLVMOpaqueContext* raw_ctx,
     return global;
 }
 
+/// Returns a constant pointer of `value` (null for 0).
 LLVMOpaqueValue* llvm_const_pointer_literal(LLVMOpaqueContext* raw_ctx,
     LLVMOpaqueType* pointer_type, i64 value) {
     if (value == 0) { return LLVMConstNull(pointer_type); }
@@ -628,8 +648,8 @@ LLVMOpaqueValue* llvm_const_pointer_literal(LLVMOpaqueContext* raw_ctx,
     return LLVMConstIntToPtr(integer, pointer_type);
 }
 
-// Lower one aggregate field or array element to a constant. Returns null when
-// the initializer is not a supported compile-time literal.
+/// Lower one aggregate field or array element to a constant. Returns null when
+/// the initializer is not a supported compile-time literal.
 LLVMOpaqueValue* llvm_const_literal_value(LLVMOpaqueContext* raw_ctx,
     LLVMOpaqueModule* module, TypeTable* types, u32 target_type_id,
     str global_prefix, SyntaxNode* val) {
@@ -731,6 +751,7 @@ LLVMOpaqueValue* llvm_const_literal_value(LLVMOpaqueContext* raw_ctx,
     return (LLVMOpaqueValue*)0;
 }
 
+/// Advances `*cursor` past one initializer value and its trailing comma.
 void llvm_const_skip_initializer_value(SyntaxNode** cursor) {
     SyntaxNode* current = *cursor;
     if (current == (SyntaxNode*)0) { return; }
@@ -749,6 +770,8 @@ void llvm_const_skip_initializer_value(SyntaxNode** cursor) {
     *cursor = next;
 }
 
+/// Builds a constant array from a `{ ... }` initializer at `*cursor`.
+/// With `bounded`, extra elements are an error; missing ones are zero.
 LLVMOpaqueValue* llvm_const_array_from_initializer(LLVMOpaqueContext* raw_ctx,
     LLVMOpaqueModule* module, TypeTable* types, u32 array_type_id,
     str global_prefix, SyntaxNode** cursor, bool bounded) {
@@ -817,12 +840,14 @@ LLVMOpaqueValue* llvm_const_array_from_initializer(LLVMOpaqueContext* raw_ctx,
     return result;
 }
 
+/// Marks `function` to keep frame pointers, so backtraces can walk them.
 void llvm_bt_set_frame_pointer(LLVMOpaqueContext* ctx, LLVMOpaqueValue* function) {
     LLVMOpaqueAttributeRef* attr = LLVMCreateStringAttribute(
         ctx, (i8*)"frame-pointer", 13, (i8*)"all", 3);
     LLVMAddAttributeAtIndex(function, 0xFFFFFFFF, attr);
 }
 
+/// Emits a read of the current frame pointer.
 LLVMOpaqueValue* llvm_bt_read_frame_pointer(LLVMOpaqueContext* ctx, LLVMOpaqueBuilder* builder) {
     LLVMOpaqueType* i64_type = LLVMInt64TypeInContext(ctx);
     LLVMOpaqueType* fn_type = LLVMFunctionType(i64_type, (LLVMOpaqueType**)0, 0, 0);
@@ -835,6 +860,7 @@ LLVMOpaqueValue* llvm_bt_read_frame_pointer(LLVMOpaqueContext* ctx, LLVMOpaqueBu
         builder, fn_type, inline_asm, (LLVMOpaqueValue**)0, 0, "bt.frame");
 }
 
+/// Adds a private string global for backtrace tables.
 LLVMOpaqueValue* llvm_bt_string_global(LLVMOpaqueContext* ctx, LLVMOpaqueModule* module,
                                        str suffix, str text) {
     String global_name = String.from_str("__silver_bt_string.");
@@ -850,6 +876,7 @@ LLVMOpaqueValue* llvm_bt_string_global(LLVMOpaqueContext* ctx, LLVMOpaqueModule*
     return global;
 }
 
+/// Appends a backtrace record (address, name, file, line) for `function`.
 void llvm_bt_record_function(LLVMOpaqueContext* ctx, LLVMOpaqueModule* module,
                              LLVMOpaqueValue* function, str function_name,
                              Span span, Vec<String>* source_paths,
@@ -885,6 +912,7 @@ void llvm_bt_record_function(LLVMOpaqueContext* ctx, LLVMOpaqueModule* module,
     file_name.drop();
 }
 
+/// Builds one spilled-argument record for backtrace argument printing.
 LLVMOpaqueValue* llvm_bt_make_arg_record(LLVMOpaqueContext* ctx, LLVMOpaqueModule* module,
                                          LLVMOpaqueBuilder* builder, LLVMTargetDataRef* target_data,
                                          str function_name, str param_name,
@@ -934,6 +962,7 @@ LLVMOpaqueValue* llvm_bt_make_arg_record(LLVMOpaqueContext* ctx, LLVMOpaqueModul
     return record;
 }
 
+/// Appends the argument table entry of `function`.
 void llvm_bt_record_args(LLVMOpaqueContext* ctx, LLVMOpaqueModule* module,
                          LLVMOpaqueValue* function, Vec<LLVMOpaqueValue*>* arg_records,
                          Vec<LLVMOpaqueValue*>* records) {
@@ -956,6 +985,7 @@ void llvm_bt_record_args(LLVMOpaqueContext* ctx, LLVMOpaqueModule* module,
     fields.drop();
 }
 
+/// Records backtrace entries for an imported function declaration.
 void llvm_bt_record_external_function(LlvmContext* ctx, TypeTable* types,
                                       LLVMTargetDataRef* target_data,
                                       Span span, SyntaxNode* params_node,
@@ -1015,6 +1045,7 @@ void llvm_bt_record_external_function(LlvmContext* ctx, TypeTable* types,
     params.drop();
 }
 
+/// Records backtrace entries for the methods of an imported impl block.
 void llvm_bt_record_imported_methods(LlvmContext* ctx, TypeTable* types,
                                     LLVMTargetDataRef* target_data,
                                     SyntaxNode* impl_item,
@@ -1109,6 +1140,7 @@ void llvm_bt_record_imported_methods(LlvmContext* ctx, TypeTable* types,
     }
 }
 
+/// Emits the `__silver_bt_*` backtrace tables and counts.
 void llvm_bt_emit_tables(LLVMOpaqueContext* ctx, LLVMOpaqueModule* module,
                          Vec<LLVMOpaqueValue*>* function_records,
                          Vec<LLVMOpaqueValue*>* arg_function_records) {
@@ -1158,6 +1190,8 @@ void llvm_bt_emit_tables(LLVMOpaqueContext* ctx, LLVMOpaqueModule* module,
     }
 }
 
+/// One module being compiled: the LLVM context, module, builder, target
+/// machine and layout, plus codegen error counts. Free with `destroy`.
 struct LlvmGenerator {
     LLVMOpaqueContext* ctx;
     LLVMOpaqueModule* module;
@@ -1168,8 +1202,11 @@ struct LlvmGenerator {
     DiagnosticBag ownership_diagnostics;
 }
 
+/// Internal: 0 before, 1 during, 2 after LLVM target registration.
 i32 g_llvm_target_init_state;
 
+/// Registers every supported LLVM target once per process. Thread-safe:
+/// concurrent callers wait until registration finishes.
 void llvm_initialize_targets() {
     if (__atomic_load_i32(&g_llvm_target_init_state, ATOMIC_ACQUIRE) == 2) {
         return;
@@ -1191,6 +1228,8 @@ void llvm_initialize_targets() {
 }
 
 impl LlvmGenerator {
+    /// Creates a generator for `module_name` targeting the host, at the given
+    /// optimization level.
     LlvmGenerator new(str module_name, LlvmOptimization optimization) {
         llvm_initialize_targets();
 
@@ -1235,6 +1274,7 @@ impl LlvmGenerator {
         return move g;
     }
 
+    /// Frees the builder, module, context, and target objects.
     void destroy(LlvmGenerator* self) {
         LLVMDisposeBuilder(self.builder);
         LLVMDisposeModule(self.module);
@@ -1247,6 +1287,9 @@ impl LlvmGenerator {
         }
     }
 
+    /// Lowers the program into the module: declares types, globals, and
+    /// functions, emits bodies for this job's sources, and drains the
+    /// monomorphization queue. Returns false when codegen failed.
     bool compile(LlvmGenerator* self, SyntaxTree* tree, AstPool* pool,
                  TypeTable* types, Interner* names, SymbolTable* symbols,
                  Vec<String>* source_paths, bool debug_mode, bool module_object,
@@ -2374,6 +2417,7 @@ impl LlvmGenerator {
         return ctx.unresolved_calls == 0 && self.ownership_diagnostics.is_empty();
     }
 
+    /// Runs the LLVM verifier; on failure writes the message to `*out_error`.
     bool verify(LlvmGenerator* self, String* out_error) {
         i8* error_msg = (i8*)0;
         i32 res = LLVMVerifyModule(self.module, LLVMVerifierFailureAction.LLVMReturnStatusAction, &error_msg);
@@ -2389,6 +2433,8 @@ impl LlvmGenerator {
         return true;
     }
 
+    /// Runs the optimization pipeline for `level`; no-op at O0. Writes LLVM's
+    /// error to `*out_error` on failure.
     bool optimize(LlvmGenerator* self, LlvmOptimization level, String* out_error) {
         if (level == LlvmOptimization.Unspecified || level == LlvmOptimization.O0) { return true; }
         LLVMOpaquePassBuilderOptions* options = LLVMCreatePassBuilderOptions();
@@ -2404,6 +2450,7 @@ impl LlvmGenerator {
         return true;
     }
 
+    /// Returns the module's textual IR.
     String emit_ir(LlvmGenerator* self) {
         i8* raw_ir = LLVMPrintModuleToString(self.module);
         String ir = String.from_str(raw_ir);
@@ -2411,6 +2458,7 @@ impl LlvmGenerator {
         return move ir;
     }
 
+    /// Writes the module as an object file to `output_path`.
     bool emit_object_file(LlvmGenerator* self, str output_path, String* out_error) {
         if (self.target_machine == (LLVMOpaqueTargetMachine*)0 || self.target_data == (LLVMTargetDataRef*)0) {
             out_error.push_str("failed to initialize target machine and data layout");

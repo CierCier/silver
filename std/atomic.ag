@@ -26,10 +26,15 @@
 
 import std.display;
 
+/// Memory ordering: atomicity only, no ordering constraints.
 const i32 ATOMIC_RELAXED = 0;
+/// Memory ordering: later accesses cannot move before this load.
 const i32 ATOMIC_ACQUIRE = 1;
+/// Memory ordering: earlier accesses cannot move after this store.
 const i32 ATOMIC_RELEASE = 2;
+/// Memory ordering: acquire and release, for read-modify-write operations.
 const i32 ATOMIC_ACQ_REL = 3;
+/// Memory ordering: sequentially consistent; one total order for all such ops.
 const i32 ATOMIC_SEQ_CST = 4;
 
 /// A lock-free 8-bit integer.
@@ -38,6 +43,7 @@ struct AtomicI8 {
 }
 
 impl AtomicI8 {
+    /// Creates an atomic holding `value`. Initialization is a plain store.
     AtomicI8 new(i8 value) {
         AtomicI8 a;
         a.value = value;
@@ -107,6 +113,7 @@ struct AtomicI32 {
 }
 
 impl AtomicI32 {
+    /// Creates an atomic holding `value`. Initialization is a plain store.
     AtomicI32 new(i32 value) {
         AtomicI32 a;
         a.value = value;
@@ -176,6 +183,7 @@ struct AtomicI64 {
 }
 
 impl AtomicI64 {
+    /// Creates an atomic holding `value`. Initialization is a plain store.
     AtomicI64 new(i64 value) {
         AtomicI64 a;
         a.value = value;
@@ -245,6 +253,7 @@ struct AtomicBool {
 }
 
 impl AtomicBool {
+    /// Creates an atomic holding `value`. Initialization is a plain store.
     AtomicBool new(bool value) {
         AtomicBool a;
         a.value = bool_to_i8(value);

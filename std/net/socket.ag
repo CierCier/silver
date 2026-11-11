@@ -19,6 +19,8 @@ import std.time;
 
 // timeval for setsockopt SO_RCVTIMEO
 
+/// An owned socket descriptor. Dropping it closes the descriptor if open.
+/// Most methods are no-ops on an invalid socket instead of failing.
 struct Socket {
     i32  fd;
     bool is_open;
@@ -42,7 +44,9 @@ impl Socket {
         return s;
     }
 
+    /// Returns true when the socket holds an open descriptor.
     bool valid(*self)  { return self.is_open && self.fd >= 0; }
+    /// Returns true when the socket is closed or failed to open.
     bool invalid(*self) { return !self.valid(); }
 
     /// Set socket option. No-op on invalid sockets.
@@ -102,6 +106,7 @@ impl Drop for Socket {
 // UdpSocket — datagram socket with send_to / recv_from
 // ---------------------------------------------------------------------------
 
+/// An IPv4 datagram socket. Dropping it closes the descriptor.
 struct UdpSocket {
     Socket sock;
 }
@@ -324,7 +329,9 @@ impl UdpSocket {
         return r.is_ok();
     }
 
+    /// Returns true when the socket holds an open descriptor.
     bool valid(*self)    { return self.sock.valid(); }
+    /// Returns true when the socket is closed or failed to open.
     bool invalid(*self)  { return self.sock.invalid(); }
 
     /// Close the underlying socket.

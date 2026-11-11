@@ -8,6 +8,8 @@ import frontend.symbols;
 import frontend.types;
 import backend.llvm.context;
 
+/// Returns true when the type is passed as a Silver reference (a
+/// `__silver_reference` pair) rather than a plain pointer.
 bool llvm_type_has_reference_abi(TypeTable* types, u32 type_id) {
     TypeEntry entry = *types.get(types.resolve_subst(type_id));
     if (entry.kind == TypeKind.Reference) { return true; }
@@ -22,6 +24,8 @@ bool llvm_type_has_reference_abi(TypeTable* types, u32 type_id) {
     return false;
 }
 
+/// Returns the `__silver_callable` struct type: an internal function
+/// pointer plus a C-ABI-compatible foreign pointer. Created once per context.
 LLVMOpaqueType* llvm_callable_type(LLVMOpaqueContext* ctx) {
     LLVMOpaqueType* callable_type = LLVMGetTypeByName2(ctx, "__silver_callable");
     if (callable_type != (LLVMOpaqueType*)0) { return callable_type; }
@@ -33,6 +37,7 @@ LLVMOpaqueType* llvm_callable_type(LLVMOpaqueContext* ctx) {
     return callable_type;
 }
 
+/// Builds a callable value from its internal and foreign function pointers.
 LLVMOpaqueValue* llvm_callable_build(LlvmContext* ctx, LLVMOpaqueValue* internal,
                                      LLVMOpaqueValue* foreign) {
     LLVMOpaqueValue* value = LLVMConstNull(llvm_callable_type(ctx.ctx));
@@ -40,6 +45,8 @@ LLVMOpaqueValue* llvm_callable_build(LlvmContext* ctx, LLVMOpaqueValue* internal
     return LLVMBuildInsertValue(ctx.builder, value, foreign, 1, "callable_foreign");
 }
 
+/// Returns the type id of field `field_index` of struct `struct_name`, or
+/// `TYPE_UNKNOWN`.
 u64 llvm_struct_field_type(SyntaxNode* root, str struct_name, i64 field_index, TypeTable* types) {
     SyntaxNode* item = find_item_by_name(root, NodeKind.Struct, struct_name);
     if (item == (SyntaxNode*)0) {
@@ -89,6 +96,7 @@ u64 llvm_struct_field_type(SyntaxNode* root, str struct_name, i64 field_index, T
     return TYPE_UNKNOWN;
 }
 
+/// Returns the field count of struct `struct_name`, or 0 when unknown.
 i64 llvm_struct_field_count(SyntaxNode* root, str struct_name) {
     SyntaxNode* item = find_item_by_name(root, NodeKind.Struct, struct_name);
     if (item == (SyntaxNode*)0) {
@@ -126,6 +134,7 @@ i64 llvm_struct_field_count(SyntaxNode* root, str struct_name) {
     return count;
 }
 
+/// Appends the payload field types of `enum_name.variant_name` to `out`.
 void llvm_enum_payload_types(TypeTable* types, SyntaxNode* root, str enum_name,
                              str variant_name, Vec<u32>* out) {
     SyntaxNode* item = find_enum_item(root, enum_name);
@@ -172,6 +181,7 @@ void llvm_enum_payload_types(TypeTable* types, SyntaxNode* root, str enum_name,
     }
 }
 
+/// Returns true when the type's LLVM layout is fully known (depth 32).
 bool llvm_layout_type_resolved(LlvmContext* ctx, u32 type_id, i64 depth) {
     if (depth > 32 || type_id == TYPE_UNKNOWN) {
         return false;
@@ -213,6 +223,8 @@ bool llvm_layout_type_resolved(LlvmContext* ctx, u32 type_id, i64 depth) {
     return true;
 }
 
+/// Returns the ABI allocation size of `type_id` in bytes from the target
+/// data layout. Reports an unresolved layout and returns 0 without one.
 u64 llvm_target_type_size(LlvmContext* ctx, u32 type_id) {
     if (ctx.target_data == (LLVMTargetDataRef*)0) {
         ctx.note_unresolved("target-layout", ctx.types.type_name(type_id));
@@ -231,6 +243,8 @@ u64 llvm_target_type_size(LlvmContext* ctx, u32 type_id) {
     return LLVMABISizeOfType(ctx.target_data, llvm_type);
 }
 
+/// Returns the ABI alignment of `type_id` in bytes; reports and returns 0
+/// without a target layout.
 u64 llvm_target_type_align(LlvmContext* ctx, u32 type_id) {
     if (ctx.target_data == (LLVMTargetDataRef*)0) {
         ctx.note_unresolved("target-layout", ctx.types.type_name(type_id));
@@ -249,6 +263,8 @@ u64 llvm_target_type_align(LlvmContext* ctx, u32 type_id) {
     return (u64)LLVMABIAlignmentOfType(ctx.target_data, llvm_type);
 }
 
+/// Returns the byte offset of field `index` in `llvm_type`; reports and
+/// returns 0 when the type is unsized or there is no target layout.
 u64 llvm_target_struct_field_offset(LlvmContext* ctx, LLVMOpaqueType* llvm_type, u32 index) {
     if (ctx.target_data == (LLVMTargetDataRef*)0 || LLVMTypeIsSized(llvm_type) == 0) {
         i8* type_text = LLVMPrintTypeToString(llvm_type);
@@ -259,6 +275,8 @@ u64 llvm_target_struct_field_offset(LlvmContext* ctx, LLVMOpaqueType* llvm_type,
     return LLVMOffsetOfElement(ctx.target_data, llvm_type, index);
 }
 
+/// Returns the byte offset of payload field `field_index` in an enum
+/// payload laid out as a struct of `payloads`.
 u64 llvm_target_payload_field_offset(LlvmContext* ctx, Vec<u32>* payloads, i64 field_index) {
     if (field_index < 0 || field_index >= payloads.len()) {
         ctx.note_unresolved("enum-payload-index", "out of range");
@@ -289,6 +307,7 @@ u64 llvm_target_payload_field_offset(LlvmContext* ctx, Vec<u32>* payloads, i64 f
     return offset;
 }
 
+/// Returns the size of an enum payload laid out as a struct of `payloads`.
 u64 llvm_target_payload_size(LlvmContext* ctx, Vec<u32>* payloads) {
     Vec<LLVMOpaqueType*> field_types = Vec<LLVMOpaqueType*>.new();
     i64 i = 0;
@@ -315,15 +334,15 @@ u64 llvm_target_payload_size(LlvmContext* ctx, Vec<u32>* payloads) {
     return size;
 }
 
-// Resolve a type name through the active generic substitution stack (backend
-// mini-monomorphizer). Returns TYPE_UNKNOWN when nothing applies.
+/// Resolve a type name through the active generic substitution stack (backend
+/// mini-monomorphizer). Returns TYPE_UNKNOWN when nothing applies.
 u32 llvm_subst_type_name(LlvmContext* ctx, str name) {
     return ctx.subst_type(name);
 }
 
-// Resolve a Named type that names a generic parameter (e.g. "T" inside a
-// monomorphized body) to its concrete substituted TypeId. Returns the input
-// id when no binding applies.
+/// Resolve a Named type that names a generic parameter (e.g. "T" inside a
+/// monomorphized body) to its concrete substituted TypeId. Returns the input
+/// id when no binding applies.
 u32 llvm_resolve_named(LlvmContext* lctx, TypeTable* types, u32 type_id) {
     TypeEntry* entry = types.get(type_id);
     if (entry.kind != TypeKind.Named) {
@@ -337,6 +356,7 @@ u32 llvm_resolve_named(LlvmContext* lctx, TypeTable* types, u32 type_id) {
     return type_id;
 }
 
+/// Appends the decimal text of `value`.
 void append_u32(String* out, u32 value) {
     if (value == 0) {
         out.push((u8)'0');
@@ -356,6 +376,7 @@ void append_u32(String* out, u32 value) {
     digits.drop();
 }
 
+/// Returns the display name of a generic instantiation's concrete type.
 str llvm_concrete_type_name(TypeTable* types, u32 type_id) {
     TypeEntry* entry = types.get(type_id);
     if (entry.kind != TypeKind.Named || entry.count == 0) {
@@ -375,6 +396,8 @@ str llvm_concrete_type_name(TypeTable* types, u32 type_id) {
     return types.names.get(name_id);
 }
 
+/// Returns the `__silver_reference` type: a data pointer plus the pointer to
+/// the referent's initialization node (or the "initialized" marker).
 LLVMOpaqueType* llvm_reference_type(LLVMOpaqueContext* ctx) {
     LLVMOpaqueType* result = LLVMGetTypeByName2(ctx, "__silver_reference");
     if (result != (LLVMOpaqueType*)0) { return result; }
@@ -386,11 +409,13 @@ LLVMOpaqueType* llvm_reference_type(LLVMOpaqueContext* ctx) {
     return result;
 }
 
+/// Returns the marker node pointer (1) for a fully initialized referent.
 LLVMOpaqueValue* llvm_reference_initialized(LLVMOpaqueContext* ctx) {
     return LLVMConstIntToPtr(LLVMConstInt(LLVMInt64TypeInContext(ctx), 1, 0),
                              LLVMPointerTypeInContext(ctx, 0));
 }
 
+/// Builds a reference value from its data and initialization-node pointers.
 LLVMOpaqueValue* llvm_reference_build(LLVMOpaqueContext* ctx, LLVMOpaqueBuilder* builder,
                                      LLVMOpaqueValue* data, LLVMOpaqueValue* node) {
     LLVMOpaqueValue* value = LLVMBuildInsertValue(builder,
@@ -398,14 +423,17 @@ LLVMOpaqueValue* llvm_reference_build(LLVMOpaqueContext* ctx, LLVMOpaqueBuilder*
     return LLVMBuildInsertValue(builder, value, node, 1, "reference_node");
 }
 
+/// Extracts the data pointer of a reference value.
 LLVMOpaqueValue* llvm_reference_data(LLVMOpaqueBuilder* builder, LLVMOpaqueValue* value) {
     return LLVMBuildExtractValue(builder, value, 0, "reference_data");
 }
 
+/// Extracts the initialization-node pointer of a reference value.
 LLVMOpaqueValue* llvm_reference_node(LLVMOpaqueBuilder* builder, LLVMOpaqueValue* value) {
     return LLVMBuildExtractValue(builder, value, 1, "reference_node");
 }
 
+/// Lowers a canonical type id to its LLVM type.
 LLVMOpaqueType* llvm_lower_type(LLVMOpaqueContext* ctx, TypeTable* types, u32 type_id) {
     TypeEntry* entry = types.get(type_id);
     if (entry.kind == TypeKind.Array) {
@@ -474,6 +502,7 @@ LLVMOpaqueType* llvm_lower_type(LLVMOpaqueContext* ctx, TypeTable* types, u32 ty
     };
 }
 
+/// Returns true when the type is an enum with only unit variants.
 bool llvm_type_is_unit_enum(SyntaxNode* root, TypeTable* types, u32 type_id) {
     u32 resolved = types.resolve_subst(type_id);
     TypeEntry* entry = types.get(resolved);
@@ -496,6 +525,7 @@ bool llvm_type_is_unit_enum(SyntaxNode* root, TypeTable* types, u32 type_id) {
     return unit;
 }
 
+/// Returns true when a unit enum has a negative discriminant.
 bool llvm_unit_enum_has_negative_tag(SyntaxNode* root, TypeTable* types, u32 type_id) {
     u32 resolved = types.resolve_subst(type_id);
     TypeEntry* entry = types.get(resolved);
@@ -518,6 +548,8 @@ bool llvm_unit_enum_has_negative_tag(SyntaxNode* root, TypeTable* types, u32 typ
     return negative;
 }
 
+/// Lowers a type for a C ABI boundary: references and function values become
+/// plain pointers and unit enums become i32.
 LLVMOpaqueType* llvm_lower_c_abi_type(LLVMOpaqueContext* ctx, TypeTable* types,
                                       SyntaxNode* root, u32 type_id) {
     TypeKind kind = types.get(types.resolve_subst(type_id)).kind;

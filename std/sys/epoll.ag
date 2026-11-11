@@ -10,28 +10,47 @@ import std.sys.result;
 
 if (@cfg(os.linux)) {
 // Epoll control operations (epoll_ctl op)
+/// epoll_ctl op: register a descriptor.
 const i32 EPOLL_CTL_ADD = 1;
+/// epoll_ctl op: unregister a descriptor.
 const i32 EPOLL_CTL_DEL = 2;
+/// epoll_ctl op: change a registered descriptor's events or data.
 const i32 EPOLL_CTL_MOD = 3;
 
 // Epoll events bitmask
+/// Event: the descriptor is readable.
 const u32 EPOLLIN      = 1;
+/// Event: urgent (out-of-band) data is readable.
 const u32 EPOLLPRI     = 2;
+/// Event: the descriptor is writable.
 const u32 EPOLLOUT     = 4;
+/// Event: an error condition; always reported, need not be requested.
 const u32 EPOLLERR     = 8;
+/// Event: hang-up; always reported, need not be requested.
 const u32 EPOLLHUP     = 16;
+/// Event: normal data is readable (same as EPOLLIN for most descriptors).
 const u32 EPOLLRDNORM  = 64;
+/// Event: priority-band data is readable.
 const u32 EPOLLRDBAND  = 128;
+/// Event: normal data is writable (same as EPOLLOUT for most descriptors).
 const u32 EPOLLWRNORM  = 256;
+/// Event: priority-band data is writable.
 const u32 EPOLLWRBAND  = 512;
+/// Event flag defined by Linux but unused.
 const u32 EPOLLMSG     = 1024;
+/// Event: the stream peer closed its writing half.
 const u32 EPOLLRDHUP   = 8192;
+/// Flag: wake only one of several epoll instances watching the same fd.
 const u32 EPOLLEXCLUSIVE = 268435456;  // 1 << 28
+/// Flag: hold a wakeup source while the event is pending (needs CAP_BLOCK_SUSPEND).
 const u32 EPOLLWAKEUP    = 536870912;  // 1 << 29
+/// Flag: disable the registration after one event until re-armed with MOD.
 const u32 EPOLLONESHOT   = 1073741824; // 1 << 30
+/// Flag: edge-triggered; read or write until EAGAIN after each event.
 const u32 EPOLLET        = 2147483648; // 1 << 31 (Edge-Triggered)
 
 // epoll_create1 flags
+/// epoll_create1 flag: close the epoll fd on exec.
 const i64 EPOLL_CLOEXEC = 524288; // 0o2000000
 
 /// Linux x86_64 struct epoll_event (packed 12 bytes).
@@ -42,6 +61,7 @@ struct EpollEvent {
 }
 
 impl EpollEvent {
+    /// Builds an event with the `events` mask and caller-chosen `data` word.
     EpollEvent new(u32 events, u64 data) {
         EpollEvent ev;
         ev.events = events;
@@ -69,6 +89,8 @@ Result<i64, Error> try_epoll_wait(i32 epfd, EpollEvent* events, i64 maxevents, i
 // Epoll — RAII epoll instance wrapper
 // ---------------------------------------------------------------------------
 
+/// An owned epoll instance. Dropping it closes the epoll fd; registered
+/// descriptors stay open.
 struct Epoll {
     i32 fd;
     bool is_open;
@@ -118,6 +140,7 @@ impl Epoll {
         return r.value();
     }
 
+    /// Closes the epoll fd if open. Safe to call more than once.
     void close(*self) {
         if (self.is_open && self.fd >= 0) {
             try_close(self.fd);

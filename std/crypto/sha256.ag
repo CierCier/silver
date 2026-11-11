@@ -3,41 +3,52 @@
 import std.mem.memory;
 import std.string;
 
+/// SHA-256 block size in bytes.
 const i64 SHA256_BLOCK = 64;
+/// SHA-256 digest size in bytes.
 const i64 SHA256_OUT = 32;
 
+/// Internal: 32-bit rotate right of the low 32 bits of `x` by `n` (1..31).
 i64 sha256_rotr(i64 x, i64 n) {
     return (((x & (i64)0xffffffff) >> n) | ((x & (i64)0xffffffff) << (32 - n))) & (i64)0xffffffff;
 }
 
+/// Internal: 32-bit logical shift right of the low 32 bits of `x`.
 i64 sha256_shr(i64 x, i64 n) {
     return ((x & (i64)0xffffffff) >> n) & (i64)0xffffffff;
 }
 
+/// Internal: the FIPS 180-4 `Ch` function on 32-bit words.
 i64 sha256_ch(i64 x, i64 y, i64 z) {
     return ((x & y) ^ ((~x) & z)) & (i64)0xffffffff;
 }
 
+/// Internal: the FIPS 180-4 `Maj` function on 32-bit words.
 i64 sha256_maj(i64 x, i64 y, i64 z) {
     return ((x & y) ^ (x & z) ^ (y & z)) & (i64)0xffffffff;
 }
 
+/// Internal: the FIPS 180-4 upper-case Sigma0 function.
 i64 sha256_big_sigma0(i64 x) {
     return sha256_rotr(x, 2) ^ sha256_rotr(x, 13) ^ sha256_rotr(x, 22);
 }
 
+/// Internal: the FIPS 180-4 upper-case Sigma1 function.
 i64 sha256_big_sigma1(i64 x) {
     return sha256_rotr(x, 6) ^ sha256_rotr(x, 11) ^ sha256_rotr(x, 25);
 }
 
+/// Internal: the FIPS 180-4 lower-case sigma0 function.
 i64 sha256_small_sigma0(i64 x) {
     return sha256_rotr(x, 7) ^ sha256_rotr(x, 18) ^ sha256_shr(x, 3);
 }
 
+/// Internal: the FIPS 180-4 lower-case sigma1 function.
 i64 sha256_small_sigma1(i64 x) {
     return sha256_rotr(x, 17) ^ sha256_rotr(x, 19) ^ sha256_shr(x, 10);
 }
 
+/// SHA-256 round constants (FIPS 180-4 section 4.2.2).
 u32 K256[64] = {
     (u32)0x428a2f98, (u32)0x71374491, (u32)0xb5c0fbcf, (u32)0xe9b5dba5,
     (u32)0x3956c25b, (u32)0x59f111f1, (u32)0x923f82a4, (u32)0xab1c5ed5,
@@ -57,6 +68,8 @@ u32 K256[64] = {
     (u32)0x90befffa, (u32)0xa4506ceb, (u32)0xbef9a3f7, (u32)0xc67178f2
 };
 
+/// Incremental SHA-256 state. Call `update` any number of times, then
+/// `finish` once. State words are kept in i64 masked to 32 bits.
 struct Sha256 {
     i64 h0;
     i64 h1;
@@ -72,6 +85,7 @@ struct Sha256 {
 }
 
 impl Sha256 {
+    /// Creates a hasher with the standard initial hash values.
     Sha256 new() {
         Sha256 s;
         s.h0 = (i64)0x6a09e667;
@@ -87,6 +101,7 @@ impl Sha256 {
         return s;
     }
 
+    /// Internal: compresses one 64-byte block into the state.
     void process_block(&mut self, u8* block) {
         i64 w[64];
         i64 i = 0;
@@ -142,6 +157,8 @@ impl Sha256 {
         self.h7 = (self.h7 + h) & (i64)0xffffffff;
     }
 
+    /// Absorbs `len` bytes from `data`. Null data or non-positive lengths are
+    /// ignored.
     void update(&mut self, u8* data, i64 len) {
         if (data == (u8*)0 || len <= 0) {
             return;
@@ -172,6 +189,8 @@ impl Sha256 {
         }
     }
 
+    /// Writes the 32-byte digest to `out`. Pads the state in place, so the hasher
+    /// must not be updated or finished again afterwards; create a new one.
     void finish(&mut self, u8* out) {
         u64 bit_len = self.total_len * (u64)8;
         // Pad with 0x80

@@ -3,6 +3,8 @@ import params;
 import json_rpc;
 import project.manifest;
 
+/// Adds a workspace folder root (and include directory). Returns false when
+/// it is not a file URI or already present.
 bool add_workspace_root(DocumentStore* store, str uri) {
     String path = document_path(uri); if (path.len() == 0) { return false; } i64 i = 0;
     while (i < store.roots.len()) { if (store.roots.get_ptr(i).equals(path.to_str())) { return false; } i += 1; }
@@ -12,6 +14,7 @@ bool add_workspace_root(DocumentStore* store, str uri) {
     return true;
 }
 
+/// Removes a workspace folder root. Returns false when it was not present.
 bool remove_workspace_root(DocumentStore* store, str uri) {
     String path = document_path(uri); if (path.len() == 0) { return false; } i64 i = 0;
     while (i < store.roots.len()) {
@@ -29,6 +32,7 @@ bool remove_workspace_root(DocumentStore* store, str uri) {
     return false;
 }
 
+/// Reads the `uri` of each workspace folder in a JSON array.
 bool workspace_folder_uris(str json, Vec<String>* uris) {
     JsonReader reader = JsonReader.new(json); if (!reader.begin_array()) { return false; }
     reader.skip_whitespace();
@@ -43,6 +47,7 @@ bool workspace_folder_uris(str json, Vec<String>* uris) {
     return reader.end_array() && !reader.failed;
 }
 
+/// Applies a `didChangeWorkspaceFolders` event. Returns true on change.
 bool update_workspace_folders(DocumentStore* store, str json) {
     String event = json_field(json, "event"); String added = json_field(event.to_str(), "added"); String removed = json_field(event.to_str(), "removed");
     Vec<String> additions = Vec<String>.new(); Vec<String> removals = Vec<String>.new();
@@ -54,6 +59,8 @@ bool update_workspace_folders(DocumentStore* store, str json) {
     return changed;
 }
 
+/// Sets the workspace roots from `initialize` params (folders, else
+/// `rootUri`).
 void configure_workspace(DocumentStore* store, str json) {
     store.discover_open_projects = false;
     String uri = String.new();
@@ -73,16 +80,56 @@ void configure_workspace(DocumentStore* store, str json) {
     }
 }
 
+/// One path queued for workspace indexing.
 struct IndexPath { String path; i64 depth; bool directory; }
 
+/// Breadth-first workspace scan state: queued paths, manifests found, and
+/// ignored directory names and paths.
 struct WorkspaceIndex {
     Vec<IndexPath> paths;
     Vec<String> seen_paths;
     Vec<String> manifests;
+    // Directories the walk skips, from workspace roots' `.gitignore`: bare
+    // names (`dist/`) match anywhere, anchored entries (`/playground/`) one path.
+    Vec<String> ignored_names;
+    Vec<String> ignored_paths;
 }
 
+/// Reads the plain directory entries of `root/.gitignore`. Globs and negations
+/// are left to git; skipping fewer directories only costs indexing time.
+void read_ignored_directories(WorkspaceIndex* index, str root) {
+    String file = path_join(root, ".gitignore");
+    Result<Vec<String>, Error> lines = read_lines(file.to_str());
+    if (lines.is_err()) { return; }
+    Vec<String> entries = lines.unwrap(); i64 i = 0;
+    while (i < entries.len()) {
+        String line = entries.get_ptr(i).trim(); i += 1;
+        if (line.len() < 2 || !line.ends_with("/") || line.starts_with("#") || line.starts_with("!")
+            || line.contains("*") || line.contains("?") || line.contains("[")) { continue; }
+        bool anchored = line.starts_with("/");
+        String name = line.substr(anchored ? 1 : 0, line.len() - (anchored ? 2 : 1));
+        if (name.len() == 0) { continue; }
+        if (anchored) { String path = path_join(root, name.to_str()); index.ignored_paths.push(path_normalize(path.to_str())); }
+        else if (!name.contains("/")) { index.ignored_names.push(move name); }
+    }
+}
+
+/// Returns true when a directory should not be indexed (ignored name or
+/// path).
+bool ignored_directory(WorkspaceIndex* index, str name, str path) {
+    i64 i = 0;
+    while (i < index.ignored_names.len()) { if (index.ignored_names.get_ptr(i).equals(name)) { return true; } i += 1; }
+    i = 0;
+    while (i < index.ignored_paths.len()) { if (index.ignored_paths.get_ptr(i).equals(path)) { return true; } i += 1; }
+    // A nested repository (such as an editor's grammar checkout) is not this project.
+    String git = path_join(path, ".git");
+    return file_exists(git.to_str()) || is_dir(git.to_str());
+}
+
+/// One manifest queued for project preloading.
 struct ManifestPath { String path; i64 depth; }
 
+/// Queues `source` for indexing once.
 void enqueue_index_path(WorkspaceIndex* index, str source, i64 depth, bool directory) {
     String path = path_normalize(source); i64 i = 0;
     while (i < index.seen_paths.len()) {
@@ -93,6 +140,7 @@ void enqueue_index_path(WorkspaceIndex* index, str source, i64 depth, bool direc
     index.paths.push(move pending);
 }
 
+/// Returns the nearest `silver.toml` at or above `source`, or "".
 String project_manifest(str source) {
     Result<Metadata, Error> stat = metadata(source);
     bool directory = false; if (stat.is_ok()) { directory = stat.unwrap().is_dir; }
@@ -107,6 +155,8 @@ String project_manifest(str source) {
     return String.new();
 }
 
+/// Sends a project manifest preload error to the client as a warning
+/// `window/logMessage`.
 void project_preload_error(str path, str detail) {
     String message = String.from_str(path);
     message.push_str(": ");
@@ -114,6 +164,8 @@ void project_preload_error(str path, str detail) {
     send_log_message(2, message.to_str());
 }
 
+/// Queues a manifest (and its referenced manifests) for preloading, up to
+/// depth 64.
 void enqueue_manifest(WorkspaceIndex* index, Vec<ManifestPath>* pending, str source, i64 depth) {
     if (strlen(source) == 0) { return; }
     if (depth > 64) { project_preload_error(source, "package manifest reference chain is too deep"); return; }
@@ -125,6 +177,7 @@ void enqueue_manifest(WorkspaceIndex* index, Vec<ManifestPath>* pending, str sou
     ManifestPath entry; entry.path = move path; entry.depth = depth; pending.push(move entry);
 }
 
+/// Adds a manifest's directory to the include directories once.
 void add_manifest_directory(DocumentStore* store, str source) {
     String path = path_normalize(source); i64 i = 0;
     while (i < store.include_dirs.len()) {
@@ -133,6 +186,8 @@ void add_manifest_directory(DocumentStore* store, str source) {
     store.manifest_dirs.push(path.clone()); store.include_dirs.push(move path);
 }
 
+/// Loads the manifests under the workspace, recording package roots and
+/// target entry files.
 void preload_project_manifests(DocumentStore* store, WorkspaceIndex* index) {
     i64 i = 0;
     while (i < store.manifest_dirs.len()) {
@@ -143,7 +198,7 @@ void preload_project_manifests(DocumentStore* store, WorkspaceIndex* index) {
         }
         i += 1;
     }
-    store.manifest_dirs.clear(); store.project_roots.clear();
+    store.manifest_dirs.clear(); store.project_roots.clear(); store.project_entries.clear();
     Vec<ManifestPath> pending = Vec<ManifestPath>.new(); i = 0;
     while (i < store.roots.len()) {
         String manifest = project_manifest(store.roots.get_ptr(i).to_str());
@@ -159,10 +214,12 @@ void preload_project_manifests(DocumentStore* store, WorkspaceIndex* index) {
         }
         i += 1;
     }
-    load_project_manifests(store, index, &pending);
+    load_project_manifests(store, index, &pending, true);
 }
 
-void load_project_manifests(DocumentStore* store, WorkspaceIndex* index, Vec<ManifestPath>* pending) {
+/// `entries` records target entries as diagnostic roots. Manifests found while
+/// walking folders (nested checkouts, playgrounds) are indexed but not reported.
+void load_project_manifests(DocumentStore* store, WorkspaceIndex* index, Vec<ManifestPath>* pending, bool entries) {
     i64 i = 0;
     while (pending.len() > 0) {
         ManifestPath entry = pending.take(0);
@@ -184,6 +241,7 @@ void load_project_manifests(DocumentStore* store, WorkspaceIndex* index, Vec<Man
                 project_preload_error(entry.path.to_str(), error.to_str());
             } else if (item.has_entry) {
                 if (!path_within_roots(&store.project_roots, path.to_str())) { store.project_roots.push(path.clone()); }
+                if (entries) { store.project_entries.push(path.clone()); }
                 enqueue_index_path(index, path.to_str(), 0, false);
             }
             else { enqueue_manifest(index, pending, path.to_str(), entry.depth + 1); }
@@ -210,12 +268,15 @@ void load_project_manifests(DocumentStore* store, WorkspaceIndex* index, Vec<Man
     store.refresh_imports();
 }
 
+/// Scans the workspace roots for Silver sources and manifests.
 WorkspaceIndex workspace_index(DocumentStore* store) {
     WorkspaceIndex index; index.paths = Vec<IndexPath>.new();
     index.seen_paths = Vec<String>.new(); index.manifests = Vec<String>.new(); i64 i = 0;
+    index.ignored_names = Vec<String>.new(); index.ignored_paths = Vec<String>.new();
     while (i < store.roots.len()) {
         String* root = store.roots.get_ptr(i); Result<Metadata, Error> stat = metadata(root.to_str());
         bool directory = true; if (stat.is_ok()) { directory = stat.unwrap().is_dir; }
+        if (directory) { read_ignored_directories(&index, root.to_str()); }
         if (directory || root.ends_with(".ag")) { enqueue_index_path(&index, root.to_str(), 0, directory); }
         i += 1;
     }
@@ -236,7 +297,7 @@ WorkspaceIndex workspace_index(DocumentStore* store) {
     return move index;
 }
 
-// One file or directory per turn lets document requests overtake background work.
+/// One file or directory per turn lets document requests overtake background work.
 void index_workspace_step(DocumentStore* store, WorkspaceIndex* index) {
     if (index.paths.len() == 0) { return; }
     IndexPath path = index.paths.pop();
@@ -263,8 +324,9 @@ void index_workspace_step(DocumentStore* store, WorkspaceIndex* index) {
                 if (file && name.equals(MANIFEST_FILE)) {
                     Vec<ManifestPath> pending = Vec<ManifestPath>.new();
                     enqueue_manifest(index, &pending, child.to_str(), 0);
-                    if (pending.len() > 0) { load_project_manifests(store, index, &pending); }
-                } else if (directory || (file && name.ends_with(".ag"))) {
+                    if (pending.len() > 0) { load_project_manifests(store, index, &pending, false); }
+                } else if ((directory && !ignored_directory(index, name.to_str(), child.to_str()))
+                           || (file && name.ends_with(".ag"))) {
                     enqueue_index_path(index, child.to_str(), path.depth + 1, directory);
                 }
             }
@@ -273,6 +335,8 @@ void index_workspace_step(DocumentStore* store, WorkspaceIndex* index) {
     }
 }
 
+/// Applies `didChangeWatchedFiles`: reloads changed files and manifests.
+/// Returns true when anything changed.
 bool update_watched_files(DocumentStore* store, str json) {
     String changes = json_field(json, "changes"); JsonReader reader = JsonReader.new(changes.to_str());
     if (!reader.begin_array()) { return false; }

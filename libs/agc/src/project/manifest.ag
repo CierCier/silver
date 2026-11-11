@@ -8,17 +8,21 @@ import std.path;
 import std.result;
 import std.string;
 
+/// What a manifest target builds.
 enum TargetKind {
     Bin;
     Lib;
     Test;
 }
 
+/// One `[dependencies]` entry: a name and the path to its manifest.
 struct ManifestDependency {
     str name;
     str manifest;
 }
 
+/// One `[bin.X]`, `[lib.X]`, or `[test.X]` target: name, kind, and its entry
+/// file or nested manifest path.
 struct ManifestTarget {
     str name;
     TargetKind kind;
@@ -29,6 +33,9 @@ struct ManifestTarget {
     bool is_default;
 }
 
+/// A parsed `silver.toml`. Every `str` field points into the owned `text`
+/// arena, so they are valid only while the manifest lives; dropping it
+/// frees the arena.
 struct PackageManifest {
     u8* text;
     i64 text_capacity;
@@ -54,8 +61,10 @@ impl Drop for PackageManifest {
     }
 }
 
+/// The manifest file name looked up in a package directory.
 const str MANIFEST_FILE = "silver.toml";
 
+/// Resets `manifest` to empty with borrowed `manifest_path` and `root`.
 void workspace_manifest_init(PackageManifest* manifest, str manifest_path, str root) {
     manifest.text = (u8*)0;
     manifest.text_capacity = 0;
@@ -70,6 +79,8 @@ void workspace_manifest_init(PackageManifest* manifest, str manifest_path, str r
     manifest.dependencies = Vec<ManifestDependency>.new();
 }
 
+/// Copies `value` into the arena and returns the copy. Returns "" without
+/// copying when the arena is full.
 str workspace_intern_raw(PackageManifest* manifest, str value) {
     i64 length = strlen(value);
     if (manifest.text_used + length + 1 > manifest.text_capacity) {
@@ -82,6 +93,7 @@ str workspace_intern_raw(PackageManifest* manifest, str value) {
     return (str)result;
 }
 
+/// Copies `bytes[start..end]` (trimmed, unquoted, unescaped) into the arena.
 str workspace_intern_bytes(PackageManifest* manifest, u8* bytes, i64 start, i64 end) {
     while (start < end && workspace_byte_space(bytes[start])) { start += 1; }
     while (end > start && workspace_byte_space(bytes[end - 1])) { end -= 1; }
@@ -118,6 +130,7 @@ str workspace_intern_bytes(PackageManifest* manifest, u8* bytes, i64 start, i64 
     return (str)result;
 }
 
+/// Allocates the arena for `source` and interns the manifest path and root.
 void workspace_manifest_set_text(PackageManifest* manifest, str source, str manifest_path, str root) {
     i64 source_len = strlen(source);
     // Interned paths can be much longer than a small manifest's contents.
@@ -131,11 +144,13 @@ void workspace_manifest_set_text(PackageManifest* manifest, str source, str mani
     manifest.root = workspace_intern_raw(manifest, root);
 }
 
+/// Replaces `*error` with `text`.
 void workspace_error(String* error, str text) {
     error.clear();
     error.push_str(text);
 }
 
+/// Replaces `*error` with `prefix + value + suffix`.
 void workspace_error_value(String* error, str prefix, str value, str suffix) {
     error.clear();
     error.push_str(prefix);
@@ -143,14 +158,17 @@ void workspace_error_value(String* error, str prefix, str value, str suffix) {
     error.push_str(suffix);
 }
 
+/// Returns true for a space, tab, or CR byte.
 bool workspace_byte_space(u8 ch) {
     return ch == (u8)32 || ch == (u8)9 || ch == (u8)13;
 }
 
+/// Returns true for a `"` or `'` byte.
 bool workspace_byte_quote(u8 ch) {
     return ch == (u8)34 || ch == (u8)39;
 }
 
+/// Maps `bin`/`lib`/`test` to a target kind; false otherwise.
 bool workspace_kind_from_name(str name, TargetKind* kind) {
     if (strcmp(name, "bin") == 0) { *kind = TargetKind.Bin; return true; }
     if (strcmp(name, "lib") == 0) { *kind = TargetKind.Lib; return true; }
@@ -158,6 +176,7 @@ bool workspace_kind_from_name(str name, TargetKind* kind) {
     return false;
 }
 
+/// Returns the target of `kind` named `name`, or null.
 ManifestTarget* workspace_find_target(Vec<ManifestTarget>* targets, TargetKind kind, str name) {
     i64 i = 0;
     while (i < targets.len()) {
@@ -170,6 +189,7 @@ ManifestTarget* workspace_find_target(Vec<ManifestTarget>* targets, TargetKind k
     return (ManifestTarget*)0;
 }
 
+/// Returns the target of `kind` named `name`, adding it when missing.
 ManifestTarget* workspace_ensure_target(PackageManifest* manifest, TargetKind kind, str name) {
     ManifestTarget* existing = workspace_find_target(&manifest.targets, kind, name);
     if (existing != (ManifestTarget*)0) { return existing; }
@@ -185,6 +205,7 @@ ManifestTarget* workspace_ensure_target(PackageManifest* manifest, TargetKind ki
     return manifest.targets.get_ptr(manifest.targets.len - 1);
 }
 
+/// Returns the dependency named `name`, adding it when missing.
 ManifestDependency* workspace_ensure_dependency(PackageManifest* manifest, str name) {
     i64 i = 0;
     while (i < manifest.dependencies.len()) {
@@ -199,6 +220,7 @@ ManifestDependency* workspace_ensure_dependency(PackageManifest* manifest, str n
     return manifest.dependencies.get_ptr(manifest.dependencies.len - 1);
 }
 
+/// Returns true when `bytes[start..end]` equals `expected`.
 bool workspace_slice_equals(u8* bytes, i64 start, i64 end, str expected) {
     i64 length = strlen(expected);
     if (end - start != length) { return false; }
@@ -210,17 +232,20 @@ bool workspace_slice_equals(u8* bytes, i64 start, i64 end, str expected) {
     return true;
 }
 
+/// Trims spaces, tabs, and CRs from both ends of a slice.
 void workspace_trim_slice(u8* bytes, i64* start, i64* end) {
     while (*start < *end && workspace_byte_space(bytes[*start])) { *start += 1; }
     while (*end > *start && workspace_byte_space(bytes[*end - 1])) { *end -= 1; }
 }
 
+/// Returns true when a trimmed slice is a quoted string.
 bool workspace_quoted_slice(u8* bytes, i64 start, i64 end) {
     workspace_trim_slice(bytes, &start, &end);
     return end - start >= 2 && workspace_byte_quote(bytes[start])
         && bytes[end - 1] == bytes[start];
 }
 
+/// Returns the index of the first `=` outside quotes, or -1.
 i64 workspace_find_equals(u8* bytes, i64 start, i64 end) {
     u8 quote = (u8)0;
     bool escaped = false;
@@ -241,6 +266,8 @@ i64 workspace_find_equals(u8* bytes, i64 start, i64 end) {
     return -1;
 }
 
+/// Parses a `[section]` header line, setting `*section` and the current
+/// target or dependency. Returns false for a malformed header.
 bool workspace_parse_header_slice(PackageManifest* manifest, u8* bytes, i64 start, i64 end, i64* section, TargetKind* kind, str* target_name, str* dependency_name) {
     workspace_trim_slice(bytes, &start, &end);
     if (end - start < 2 || bytes[start] != (u8)91 || bytes[end - 1] != (u8)93) {
@@ -285,6 +312,8 @@ bool workspace_parse_header_slice(PackageManifest* manifest, u8* bytes, i64 star
     return true;
 }
 
+/// Parses manifest text `source` for `manifest_path` into `*manifest`.
+/// Returns false with `*error` set on a syntax or schema error.
 bool workspace_parse_manifest_text(str manifest_path, str source, PackageManifest* manifest, String* error) {
     String root = path_dirname(manifest_path);
     workspace_manifest_init(manifest, "", "");
@@ -475,6 +504,7 @@ bool workspace_parse_manifest_text(str manifest_path, str source, PackageManifes
     return true;
 }
 
+/// Reads and parses the manifest file at `path`.
 bool workspace_read_manifest(str path, PackageManifest* manifest, String* error) {
     Result<String, Error> loaded = String.from_file(path);
     if (loaded.is_err()) {
@@ -487,6 +517,7 @@ bool workspace_read_manifest(str path, PackageManifest* manifest, String* error)
     return ok;
 }
 
+/// Replaces `*destination` with `source`.
 void workspace_set_string(String* destination, str source) {
     destination.clear();
     destination.push_str(source);
@@ -494,11 +525,14 @@ void workspace_set_string(String* destination, str source) {
 
 
 
+/// Returns true for a path starting with `/`.
 bool workspace_is_absolute(str path) {
     return strlen(path) > 0 && path[0] == (u8)47;
 }
 
 
+/// Writes a target's entry (or nested manifest) path joined to `root` into `*path`.
+/// Fails for absolute target paths, which must be manifest-relative.
 bool workspace_manifest_target_path(ManifestTarget* target, str root, String* path, String* error) {
     str relative = strlen(target.entry) > 0 ? target.entry : target.manifest;
     if (workspace_is_absolute(relative)) {

@@ -1,6 +1,6 @@
 // std/io/scanner.ag — stdin token scanner with UTF-8 BOM support.
-// Reads all of stdin into a heap buffer, then provides whitespace-delimited
-// token and line iteration with zero-copy str borrows.
+// Streams stdin (or wraps a string) through a heap window and provides
+// whitespace-delimited token and line iteration with zero-copy borrows.
 import std.error;
 import std.io.file;
 import std.mem;
@@ -9,6 +9,10 @@ import std.mem.drop;
 import std.string;
 import std.sys.result;
 
+/// A whitespace token and line reader over stdin or an in-memory string.
+/// Borrowed results (`next`, `next_slice`, `next_line`, ...) are valid only
+/// until the next scanner call. Parse failures clear `ok` instead of
+/// aborting; check `good()` after reading. Dropping it frees its buffers.
 struct Scanner {
     u8* buf;
     i64 len;
@@ -22,11 +26,10 @@ struct Scanner {
 }
 
 impl Scanner {
-    /// Read all of fd 0 into an internal heap buffer.
-    /// Skips a UTF-8 BOM (0xEF 0xBB 0xBF) if present.
-    /// On read error, ok = false but already-read bytes are kept.
-    /// Initialize Scanner reading from fd 0 with a streaming buffer window.
-    /// Skips a UTF-8 BOM (0xEF 0xBB 0xBF) if present.
+    /// Creates a scanner that streams fd 0 through a growable heap window
+    /// (64 KiB initially). Reads the first chunk immediately, so this call
+    /// may block. Skips a UTF-8 BOM (0xEF 0xBB 0xBF) if present.
+    /// A read error is treated as end of input; it does not clear `ok`.
     Scanner stdin() {
         Scanner s;
         s.cap = 65536;
@@ -125,6 +128,9 @@ impl Scanner {
     }
 
     /// Return the next whitespace-delimited token as an immutable zero-copy Slice<u8>.
+    /// The slice borrows the scanner window and is invalidated by the next
+    /// scanner call, which may slide or reallocate the buffer. Returns an
+    /// empty slice and clears `ok` when no token remains.
     Slice<u8> next_slice(&mut self) {
         if (!self.has_next()) {
             self.ok = false;
@@ -606,7 +612,11 @@ impl Scanner {
         return false;
     }
 
-    /// Return the next line as an immutable zero-copy Slice<u8>.
+    /// Return the next line as an immutable zero-copy Slice<u8>, without its
+    /// `\n` or `\r\n` terminator. If the cursor sits on a line break (as it
+    /// does after a token read), that one break is consumed first, so an empty
+    /// line directly at the cursor is skipped. The slice is invalidated by the
+    /// next scanner call. Returns an empty slice and clears `ok` at end of input.
     Slice<u8> next_line_slice(&mut self) {
         if (self.pos >= self.len) {
             if (self.fd < 0 || self.eof) {
@@ -715,8 +725,10 @@ impl Scanner {
         return empty;
     }
 
-    /// Return the next line as a borrowed NUL-terminated str.
-    /// Does NOT mutate the source buffer in place.
+    /// Return the next line as a borrowed NUL-terminated str, with the same
+    /// line rules as `next_line_slice`. The text is copied into a scratch
+    /// buffer that the next `next`/`next_line` call overwrites. Returns null
+    /// and clears `ok` at end of input. Does NOT mutate the source buffer.
     str next_line(&mut self) {
         Slice<u8> line = self.next_line_slice();
         if (!self.ok || line.data == (u8*)0) {

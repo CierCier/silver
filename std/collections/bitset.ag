@@ -1,12 +1,15 @@
 // std/collections/bitset.ag — Dynamic bitset for dense integer sets and flags.
 import std.mem.vec;
 
+/// A growable set of non-negative integers stored as 64-bit words.
+/// Negative indices are ignored by every method.
 struct BitSet {
     Vec<u64> words;
     i64 bit_count;
 }
 
 impl BitSet {
+    /// Creates an empty bitset without allocating.
     BitSet new() {
         BitSet b;
         b.words = Vec<u64>.new();
@@ -14,6 +17,8 @@ impl BitSet {
         return move b;
     }
 
+    /// Creates a bitset with room for `bits` bits, all clear. `len()` then
+    /// reports `bits` even though no bit is set.
     BitSet with_capacity(i64 bits) {
         BitSet b;
         b.words = Vec<u64>.new();
@@ -27,6 +32,7 @@ impl BitSet {
         return move b;
     }
 
+    /// Sets `bit`, growing the storage when needed.
     void set(BitSet* self, i64 bit) {
         if (bit < 0) { return; }
         i64 word_idx = bit / 64;
@@ -42,6 +48,7 @@ impl BitSet {
         }
     }
 
+    /// Clears `bit`. Does not shrink storage or `len()`.
     void clear_bit(BitSet* self, i64 bit) {
         if (bit < 0) { return; }
         i64 word_idx = bit / 64;
@@ -52,6 +59,7 @@ impl BitSet {
         self.words.set(word_idx, cur & mask);
     }
 
+    /// Returns true when `bit` is set; false for bits beyond the storage.
     bool test(BitSet* self, i64 bit) {
         if (bit < 0) { return false; }
         i64 word_idx = bit / 64;
@@ -61,6 +69,7 @@ impl BitSet {
         return (self.words.get(word_idx) & mask) != 0;
     }
 
+    /// Clears every bit. Keeps the storage and `len()` unchanged.
     void clear_all(BitSet* self) {
         i64 i = 0;
         while (i < self.words.len()) {
@@ -69,6 +78,8 @@ impl BitSet {
         }
     }
 
+    /// Returns one past the highest bit ever set, or the `with_capacity` size if
+    /// larger. It is a bound, not a count of set bits.
     i64 len(&self) {
         return self.bit_count;
     }

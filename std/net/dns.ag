@@ -23,23 +23,32 @@ import std.sync;
 // Constants
 // ---------------------------------------------------------------------------
 
+/// UDP port for DNS queries.
 const i64 DNS_PORT = 53;
+/// Receive timeout per nameserver query, in seconds.
 const i64 DNS_TIMEOUT_SEC = 2;
+/// Number of entries in the process-wide resolver cache.
 const i64 DNS_CACHE_CAP = 64;
+/// Cache lifetime, in seconds, for every resolved A record. The record's own
+/// TTL is not used.
 const i64 DNS_MIN_TTL = 60;
+/// Maximum number of nameservers remembered.
 const i64 DNS_MAX_NS = 8;
 
 // ---------------------------------------------------------------------------
 // DNS wire helpers
 // ---------------------------------------------------------------------------
+/// Writes `val` big-endian at `buf[pos..pos+2]`. No bounds check.
 void dns_put_u16(u8* buf, i64 pos, u16 val) {
     buf[pos]     = (u8)((val >> (u16)8) & (u16)0xFF);
     buf[pos + 1] = (u8)(val & (u16)0xFF);
 }
 
+/// Reads a big-endian u16 at `buf[pos..pos+2]`. No bounds check.
 u16 dns_get_u16(u8* buf, i64 pos) {
     return (u16)(((u16)buf[pos] << (u16)8) | (u16)buf[pos + 1]);
 }
+/// The fixed 12-byte DNS message header, in host byte order.
 struct DnsHeader {
     u16 id;
     u16 flags;
@@ -55,21 +64,31 @@ struct DnsHeader {
 // Cache
 // ---------------------------------------------------------------------------
 
+/// One cached A record: hostname, IPv4 address in numeric form (first octet
+/// most significant, as `inet_pton4` returns it), and expiry in unix seconds
+/// (0 never expires).
 struct DnsCacheEntry {
     String key;
     i32   ip;
     i64   expires;
 }
 
+/// Internal: process-wide resolver cache; guarded by `g_dns_lock`. Its keys
+/// live for the process and are excluded from leak checks.
 DnsCacheEntry g_cache[64];
+/// Internal: guards `g_cache`.
 RawMutex g_dns_lock;
 
 // ---------------------------------------------------------------------------
 // Nameserver list — discovered once, tried in order
 // ---------------------------------------------------------------------------
 
-i32  g_ns_ips[8];   // network byte order; 0 = unused slot
+/// Internal: discovered nameserver IPv4 addresses (numeric form), in probe
+/// order.
+i32  g_ns_ips[8];   // numeric form (first octet most significant); 0 = unused slot
+/// Internal: number of used `g_ns_ips` slots.
 i64  g_ns_count = 0;
+/// Internal: true once nameserver discovery has run.
 bool g_ns_inited = false;
 
 /// Scan /etc/resolv.conf and push each nameserver IP found.
@@ -137,6 +156,8 @@ void dns_init() {
 // Cache
 // ---------------------------------------------------------------------------
 
+/// Returns the cached IPv4 address for `hostname`, or 0 when missing or
+/// expired. An expired entry is evicted. Thread-safe.
 i32 dns_cache_get(str hostname) {
     g_dns_lock.lock();
     i64 now_sec = 0;
@@ -161,6 +182,8 @@ i32 dns_cache_get(str hostname) {
     return 0;
 }
 
+/// Caches `ip` for `hostname` for `ttl_sec` seconds, replacing an existing
+/// entry or evicting the soonest-expiring one when full. Thread-safe.
 void dns_cache_put(str hostname, i32 ip, i64 ttl_sec) {
     g_dns_lock.lock();
     Instant inst = now();
@@ -257,7 +280,8 @@ i64 dns_build_query(u8* buf, str hostname) {
     return dns_build_query_type(buf, hostname, (u16)1);
 }
 
-/// Parse A record from response. Returns IP in network byte order, 0 on failure.
+/// Parse A record from response. Returns the IPv4 address in numeric form
+/// (first octet most significant), 0 on failure.
 i32 dns_parse_a(u8* buf, i64 len, u16 expected_id) {
     if (len < 12) { return 0; }
     if (dns_get_u16(buf, 0) != expected_id) { return 0; }
@@ -326,7 +350,8 @@ i32 dns_try_ns(str hostname, i32 ns_ip, u16 txid, u8* query, i64 qlen) {
 
     return dns_parse_a(resp, received, txid);
 }
-/// Resolve hostname to IPv4 (network byte order). 0 on failure.
+/// Resolve hostname to IPv4 in numeric form (first octet most significant,
+/// as `inet_pton4` returns it). 0 on failure.
 /// Tries each nameserver in order; first response wins.
 i32 dns_resolve(str hostname) {
     if (hostname == (str)0) { return 0; }
@@ -359,10 +384,12 @@ str dns_resolve_str(str hostname) {
     return ip_to_str((u32)ip);
 }
 
-// Static buffer for ip_to_str
+/// Static buffer for ip_to_str
+/// Shared by every caller, so results are overwritten by the next call.
 u8 g_ip_str_buf[16];
 
-/// Network-byte-order u32 -> dotted-quad. NOT thread-safe.
+/// Numeric-form IPv4 (first octet most significant) -> dotted-quad.
+/// NOT thread-safe.
 str ip_to_str(u32 ip) {
     u8* buf = g_ip_str_buf;
     i64 raw = (i64)ip;

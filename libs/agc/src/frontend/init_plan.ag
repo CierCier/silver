@@ -8,12 +8,19 @@ import frontend.module_loader;
 import std.intern;
 import std.mem.vec;
 
+/// Largest number of nodes one owner initialization plan may have.
 const u32 MAX_INIT_PLAN_NODES = 65536;
+/// Deepest field nesting an initialization plan tracks.
 const u32 MAX_INIT_PLAN_DEPTH = 256;
 
+/// How a projection path maps onto a plan: a tracked node, a path through
+/// an indirection (pointer, reference, slice), or an invalid path.
 enum InitPathKind { Node; Indirect; Invalid; }
+/// The result of `init_plan_project`.
 struct InitPathResult { InitPathKind kind; u32 node_index; }
 
+/// Maps `path` onto the plan's node tree. Stops with `Indirect` at a
+/// pointer, reference, or slice, and `Invalid` for an unknown field.
 InitPathResult init_plan_project(Vec<InitNodePlan>* nodes,
                                  Vec<Projection>* projections,
                                  Vec<Projection>* path, TypeTable* types) {
@@ -51,6 +58,9 @@ InitPathResult init_plan_project(Vec<InitNodePlan>* nodes,
     return result;
 }
 
+/// Builds `plan`'s field tree in breadth-first order. Returns false when
+/// the type is unrepresentable (unresolved layout or past the node/depth
+/// limits).
 bool init_plan_build(InitOwnerPlan* plan, TypeTable* types, Interner* names,
                      SyntaxNode* root) {
     plan.nodes.len = 0;
@@ -133,9 +143,9 @@ bool init_plan_build(InitOwnerPlan* plan, TypeTable* types, Interner* names,
     return true;
 }
 
-// Resolve a concrete instantiation using its original function and declaration.
-// Generic bindings are completed here after substitution, with the same builder
-// used by ownership checking. No LLVM or destructor policy enters this pass.
+/// Resolve a concrete instantiation using its original function and declaration.
+/// Generic bindings are completed here after substitution, with the same builder
+/// used by ownership checking. No LLVM or destructor policy enters this pass.
 i64 init_plan_resolve(Vec<InitOwnerPlan>* plans, TypeTable* types, Interner* names,
                       SyntaxNode* root, u32 owner, u32 type_id,
                       Span declaration, Span function) {

@@ -20,6 +20,8 @@ import actions;
 import file_operations;
 import lenses;
 
+/// All dispatcher state: documents, workspace index, client options,
+/// outstanding client requests, and the transport.
 struct ServerState {
     DocumentStore store;
     WorkspaceIndex index;
@@ -29,15 +31,20 @@ struct ServerState {
     bool shutdown;
     i64 trace;
     bool index_progress;
+    // A workspace diagnostic pull yielded to other messages; ask the client to
+    // pull again once the queue and background index are idle.
+    bool diagnostics_yielded;
     Transport* transport_ptr;
 }
 
-// A fresh index starts a new indexing session; a cancel for the previous one
-// must not stop it.
+/// A fresh index starts a new indexing session; a cancel for the previous one
+/// must not stop it.
 void begin_index_session(ServerState* state) {
     __atomic_store_i32(&state.transport_ptr.index_cancelled, 0, ATOMIC_RELEASE);
 }
 
+/// Tells the client analysis changed: pushes diagnostics, or asks pull
+/// clients to refresh.
 void notify_analysis_change(ServerState* state) {
     if (!state.client.pull_diagnostics) { publish_open_diagnostics(&state.store, &state.client); }
     else if (state.client.diagnostic_refresh) { state.requests.refresh(ClientRequestKind.DiagnosticRefresh); }
@@ -47,6 +54,7 @@ void notify_analysis_change(ServerState* state) {
     if (state.client.folding_refresh) { state.requests.refresh(ClientRequestKind.FoldingRefresh); }
 }
 
+/// Returns true for requests whose params carry a text position.
 bool request_uses_position(str method) {
     return strcmp(method, "textDocument/hover") == 0 || strcmp(method, "textDocument/definition") == 0
         || strcmp(method, "textDocument/declaration") == 0 || strcmp(method, "textDocument/typeDefinition") == 0
@@ -58,12 +66,37 @@ bool request_uses_position(str method) {
         || strcmp(method, "textDocument/moniker") == 0 || strcmp(method, "textDocument/inlineCompletion") == 0;
 }
 
+/// One background index step; the status line updates every 25 loaded files.
+void index_step(DocumentStore* store, WorkspaceIndex* index, ServerStatus* status) {
+    index_workspace_step(store, index);
+    i64 files = store.docs.len();
+    if (files % 25 == 0 || !status.busy) {
+        String message = String.from_str("Indexing workspace: "); message.push_display(&files); message.push_str(" files");
+        status.report(false, message.to_str());
+    }
+}
+
+/// Indexes queued workspace paths until done or the request is
+/// interrupted. Returns true when indexing finished.
 bool index_request_workspace(DocumentStore* store, WorkspaceIndex* index, PendingMessage* pending) {
     pending.preemptible = true;
-    while (index.paths.len() > 0 && !request_interrupted(pending)) { index_workspace_step(store, index); }
+    while (index.paths.len() > 0 && !request_interrupted(pending)) { index_step(store, index, &pending.transport.status); }
     return !request_interrupted(pending);
 }
 
+/// The idle status line: files loaded and the latest whole-project check.
+void report_ready(DocumentStore* store, ServerStatus* status) {
+    i64 files = store.docs.len();
+    String message = String.from_str("Ready · "); message.push_display(&files); message.push_str(" files indexed");
+    if (status.checked >= 0) {
+        message.push_str(" · "); message.push_display(&status.checked); message.push_str(" checked");
+        if (status.failing > 0) { message.push_str(", "); message.push_display(&status.failing); message.push_str(" with errors"); }
+    }
+    status.report(true, message.to_str());
+}
+
+/// Answers one document request (hover, completion, rename, and others),
+/// sending its response or error.
 void handle_document_request(DocumentStore* store, WorkspaceIndex* index, ClientOptions* client, JsonRpcMessage* message, PendingMessage* pending) {
     str method = message.method.to_str(); str params = message.params_json.to_str();
     // Keystroke-rate completion: a newer request aborts this one at its next
@@ -213,10 +246,10 @@ void handle_document_request(DocumentStore* store, WorkspaceIndex* index, Client
     complete_response(pending, message.id_raw.to_str(), result.to_str());
 }
 
-// workspace/executeCommand: `silver.extractVariable` re-runs the extract
-// refactor for command arguments [uri, range, name?]. With client applyEdit
-// support the edit is handed to the client and this request is answered when
-// the applyEdit response arrives; otherwise the WorkspaceEdit is the result.
+/// workspace/executeCommand: `silver.extractVariable` re-runs the extract
+/// refactor for command arguments [uri, range, name?]. With client applyEdit
+/// support the edit is handed to the client and this request is answered when
+/// the applyEdit response arrives; otherwise the WorkspaceEdit is the result.
 void handle_extract_command(ServerState* state, PendingMessage* pending, JsonRpcMessage* message) {
     str params = message.params_json.to_str(); str id = message.id_raw.to_str();
     String arguments = json_field(params, "arguments");
@@ -246,8 +279,8 @@ void handle_extract_command(ServerState* state, PendingMessage* pending, JsonRpc
     else { complete_response(pending, id, edit.to_str()); }
 }
 
-// workspace/executeCommand: `silver.openDocument` asks the client to reveal a
-// document, optionally with a selection, via window/showDocument.
+/// workspace/executeCommand: `silver.openDocument` asks the client to reveal a
+/// document, optionally with a selection, via window/showDocument.
 void handle_open_document_command(ServerState* state, PendingMessage* pending, JsonRpcMessage* message) {
     str params = message.params_json.to_str(); str id = message.id_raw.to_str();
     String arguments = json_field(params, "arguments");
@@ -261,7 +294,7 @@ void handle_open_document_command(ServerState* state, PendingMessage* pending, J
     state.requests.show_document_request(uri.to_str(), range_raw.to_str(), id);
 }
 
-// Returns -1 to continue, or the exit status after an exit notification.
+/// Returns -1 to continue, or the exit status after an exit notification.
 i32 dispatch_message(ServerState* state, PendingMessage* pending) {
         DocumentStore* store = &state.store; WorkspaceIndex* index = &state.index;
         ClientOptions* client = &state.client; bool* initialized = &state.initialized; bool* shutdown = &state.shutdown;
@@ -292,6 +325,7 @@ i32 dispatch_message(ServerState* state, PendingMessage* pending) {
         } else if (strcmp(method, "initialize") == 0 && message.has_id) {
             if (*initialized) { complete_error(pending, message.id_raw.to_str(), -32600, "Already initialized"); return -1; }
             configure_workspace(store, params); *client = client_options(params); *initialized = true;
+            state.transport_ptr.status.enabled = client.server_status;
             String result = server_capabilities(client); seal_message(pending, false); send_response(message.id_raw.to_str(), result.to_str());
         } else if (!*initialized) {
             if (message.has_id) { complete_error(pending, message.id_raw.to_str(), -32002, "Server not initialized"); }
@@ -301,6 +335,7 @@ i32 dispatch_message(ServerState* state, PendingMessage* pending) {
         } else if (message.has_id && request_cancelled(pending)) { complete_error(pending, message.id_raw.to_str(), -32800, "Request cancelled"); }
         else if (strcmp(method, "initialized") == 0) {
             begin_index_session(state);
+            state.transport_ptr.status.report(false, "Loading project manifests");
             *index = workspace_index(store);
             if (client.work_done_progress) { state.requests.create_progress(); }
             if (client.telemetry) {
@@ -435,11 +470,13 @@ i32 dispatch_message(ServerState* state, PendingMessage* pending) {
             if (!diagnostic_identifier(params) || !parse_previous_diagnostics(params, &previous)) {
                 complete_error(pending, message.id_raw.to_str(), -32602, "Invalid workspace diagnostic parameters");
             } else {
-                if (!index_request_workspace(store, index, pending)) {
-                    complete_response(pending, message.id_raw.to_str(), "null"); return -1;
-                }
-                String result = compute_workspace_diagnostics(store, client, &previous, pending);
-                complete_response(pending, message.id_raw.to_str(), result.to_str());
+                pending.yields = true;
+                if (index_request_workspace(store, index, pending)) {
+                    String result = compute_workspace_diagnostics(store, client, &previous, pending);
+                    complete_response(pending, message.id_raw.to_str(), result.to_str());
+                } else { complete_response(pending, message.id_raw.to_str(), "null"); }
+                if (pending.completion == RequestCompletion.Interrupted) { state.diagnostics_yielded = true; }
+                state.transport_ptr.status.pull_pending = pending.completion == RequestCompletion.Interrupted;
             }
         }
         else if (strcmp(method, "workspace/symbol") == 0 && message.has_id) {
@@ -536,6 +573,8 @@ i32 dispatch_message(ServerState* state, PendingMessage* pending) {
         return -1;
 }
 
+/// Server entry: handles `--help`/`--version`, then runs the LSP loop over
+/// stdin/stdout until `exit`. Returns the process exit code.
 i32 main() {
     // Editors launch the server with no arguments; make stray flags visible
     // instead of silently starting a protocol loop.
@@ -567,7 +606,7 @@ i32 main() {
     }
     ServerState state; state.store = DocumentStore.new(); state.index.paths = Vec<IndexPath>.new();
     state.client = client_options("{}"); state.initialized = false; state.shutdown = false;
-    state.trace = 0; state.index_progress = false;
+    state.trace = 0; state.index_progress = false; state.diagnostics_yielded = false;
     state.requests = ClientRequests.new();
     Transport transport = Transport.new();
     state.transport_ptr = &transport;
@@ -605,13 +644,23 @@ i32 main() {
                     report.push_str(" paths left)");
                     state.requests.progress_value("report", report.to_str());
                 }
-                index_workspace_step(&state.store, &state.index);
+                index_step(&state.store, &state.index, &transport.status);
             }
             if (state.index.paths.len() == 0 && state.index_progress) {
                 state.requests.progress_value("end", "Indexing finished");
                 state.index_progress = false;
             }
             continue;
+        }
+        if (!next.is_some() && state.diagnostics_yielded) {
+            state.diagnostics_yielded = false;
+            if (state.client.diagnostic_refresh && !state.shutdown) { state.requests.refresh(ClientRequestKind.DiagnosticRefresh); }
+            else { transport.status.pull_pending = false; }
+            continue;
+        }
+        // Idle: no queued message, no index work, no unfinished project check.
+        if (!next.is_some() && transport.status.busy && !transport.status.pull_pending) {
+            report_ready(&state.store, &transport.status);
         }
         if (!next.is_some()) { next = transport.messages.recv(); }
         if (!next.is_some()) { status = state.shutdown ? 0 : 1; break; }

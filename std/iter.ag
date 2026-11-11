@@ -19,35 +19,42 @@
 //   `Iterator::next(Self* self)` is object-safe, and `move` on Copy T is copy.
 import std.optional;
 
-// IntoIterator: types that can be consumed via `into_iter(self)` — takes
-// ownership of `self` by value (Self self, not &Self) and drains the buffer.
-// Required method: Iterator into_iter(self);
+/// IntoIterator: types that can be consumed via `into_iter(self)` — takes
+/// ownership of `self` by value (Self self, not &Self) and drains the buffer.
+/// Required method: Iterator into_iter(self);
 trait IntoIterator {
     type Item;
     type IntoIter;
+    /// Consumes `self` and returns an iterator that owns its elements.
     IntoIter into_iter(self);
 }
 
-// Iterator: types that yield values via next(*self).
+/// Iterator: types that yield values via next(*self).
 trait Iterator {
     type Item;
+    /// Returns the next element, or None when exhausted. Implementations should
+    /// keep returning None after the first None.
     Optional<Item> next(*self);
 }
 
-// IntoIteratorPtr: yields mutable pointers to elements.
+/// IntoIteratorPtr: yields mutable pointers to elements.
 trait IntoIteratorPtr {
     type Item;
     type IntoIter;
+    /// Consumes `self` and returns an iterator of mutable element pointers.
     IntoIter into_iter_ptr(self);
 }
 
-// IntoIteratorConstPtr: yields const pointers to elements.
+/// IntoIteratorConstPtr: yields const pointers to elements.
 trait IntoIteratorConstPtr {
     type Item;
     type IntoIter;
+    /// Consumes `self` and returns an iterator of const element pointers.
     IntoIter into_iter_const_ptr(self);
 }
 
+/// Yields copies of `len` elements at `data` from last to first. Does not own
+/// the buffer, which must outlive the iterator.
 struct RevIter<T> {
     T* data;
     i64 len;
@@ -74,6 +81,7 @@ impl<T> IntoIterator for RevIter<T> {
     }
 }
 
+/// Yields `f(x)` for each element of the wrapped iterator.
 struct MapIter<I, T, U> {
     I inner;
     U (T) f;
@@ -90,6 +98,8 @@ impl<I, T, U> Iterator for MapIter<I, T, U> {
     }
 }
 
+/// Yields the wrapped iterator's elements for which `pred` returns true.
+/// `pred` receives a bitwise copy of each element, so use it with Copy types.
 struct FilterIter<I, T> {
     I inner;
     bool (T) pred;
@@ -109,6 +119,7 @@ impl<I, T> Iterator for FilterIter<I, T> {
     }
 }
 
+/// Yields at most `remaining` elements of the wrapped iterator.
 struct TakeIter<I, T> {
     I inner;
     i64 remaining;
@@ -123,6 +134,8 @@ impl<I, T> Iterator for TakeIter<I, T> {
     }
 }
 
+/// Skips the first `to_skip` elements of the wrapped iterator, then yields
+/// the rest.
 struct SkipIter<I, T> {
     I inner;
     i64 to_skip;
@@ -144,11 +157,13 @@ impl<I, T> Iterator for SkipIter<I, T> {
     }
 }
 
+/// Yields each element paired with its zero-based index.
 struct EnumerateIter<I, T> {
     I inner;
     i64 idx;
 }
 
+/// One `EnumerateIter` item: the index and the element.
 struct Enumerated<T> {
     i64 index;
     T value;
@@ -167,6 +182,7 @@ impl<I, T> Iterator for EnumerateIter<I, T> {
     }
 }
 
+/// Yields every element of `a`, then every element of `b`.
 struct ChainIter<A, B, T> {
     A a;
     B b;
@@ -185,11 +201,13 @@ impl<A, B, T> Iterator for ChainIter<A, B, T> {
     }
 }
 
+/// Yields pairs from two iterators, stopping when either runs out.
 struct ZipIter<A, B, TA, TB> {
     A a;
     B b;
 }
 
+/// One `ZipIter` item: an element from each iterator.
 struct Zipped<A, B> {
     A a;
     B b;
@@ -208,6 +226,7 @@ impl<A, B, TA, TB> Iterator for ZipIter<A, B, TA, TB> {
     }
 }
 
+/// Yields the present results of `f` over the wrapped iterator.
 struct FilterMapIter<I, T, U> {
     I inner;
     Optional<U> (T) f;
@@ -228,6 +247,8 @@ impl<I, T, U> Iterator for FilterMapIter<I, T, U> {
     }
 }
 
+/// Maps each outer element to an inner iterator with `f` and yields the inner
+/// elements in order.
 struct FlatMapIter<I, J, T, U> {
     I outer;
     J current;
@@ -255,6 +276,7 @@ impl<I, J, T, U> Iterator for FlatMapIter<I, J, T, U> {
     }
 }
 
+/// Yields the elements of each inner iterator produced by the outer one.
 struct FlattenIter<I, J, T> {
     I outer;
     J current;
@@ -279,6 +301,7 @@ impl<I, J, T> Iterator for FlattenIter<I, J, T> {
     }
 }
 
+/// Advances `iter` to exhaustion and returns how many elements it yielded.
 i64 iter_count<I, T>(I* iter) {
     i64 c = 0;
     while (true) {
@@ -289,6 +312,7 @@ i64 iter_count<I, T>(I* iter) {
     return c;
 }
 
+/// Folds every remaining element into `init` with `f`, consuming them.
 A iter_fold<I, T, A>(I* iter, A init, A (A, T) f) {
     A acc = init;
     while (true) {
@@ -300,6 +324,8 @@ A iter_fold<I, T, A>(I* iter, A init, A (A, T) f) {
     return acc;
 }
 
+/// Advances `iter` until `pred` matches and returns that element, or None.
+/// Elements before the match are consumed; later ones remain.
 Optional<T> iter_find<I, T>(I* iter, bool (T) pred) {
     while (true) {
         Optional<T> o = iter.next();
@@ -310,6 +336,8 @@ Optional<T> iter_find<I, T>(I* iter, bool (T) pred) {
     return None;
 }
 
+/// Advances `iter` until `pred` matches and returns how many elements came
+/// before it, or -1 when none matches.
 i64 iter_position<I, T>(I* iter, bool (T) pred) {
     i64 idx = 0;
     while (true) {
@@ -322,6 +350,7 @@ i64 iter_position<I, T>(I* iter, bool (T) pred) {
     return -1;
 }
 
+/// Returns true when `pred` matches some element; stops at the first match.
 bool iter_any<I, T>(I* iter, bool (T) pred) {
     while (true) {
         Optional<T> o = iter.next();
@@ -332,6 +361,8 @@ bool iter_any<I, T>(I* iter, bool (T) pred) {
     return false;
 }
 
+/// Returns true when `pred` matches every element; stops at the first
+/// mismatch. True for an empty iterator.
 bool iter_all<I, T>(I* iter, bool (T) pred) {
     while (true) {
         Optional<T> o = iter.next();
@@ -342,6 +373,8 @@ bool iter_all<I, T>(I* iter, bool (T) pred) {
     return true;
 }
 
+/// Combines all elements with `f`, left to right. Aborts the process when
+/// the iterator is empty.
 T iter_reduce<I, T>(I* iter, T (T, T) f) {
     Optional<T> first = iter.next();
     if (first.is_none()) { abort(); }
@@ -355,6 +388,7 @@ T iter_reduce<I, T>(I* iter, T (T, T) f) {
     return acc;
 }
 
+/// Sums the remaining i64 elements (wrapping on overflow); 0 when empty.
 i64 iter_sum_i64<I>(I* iter) {
     i64 acc = 0;
     while (true) {
@@ -365,6 +399,7 @@ i64 iter_sum_i64<I>(I* iter) {
     return acc;
 }
 
+/// Sums the remaining f64 elements; 0.0 when empty.
 f64 iter_sum_f64<I>(I* iter) {
     f64 acc = 0.0;
     while (true) {
@@ -375,6 +410,8 @@ f64 iter_sum_f64<I>(I* iter) {
     return acc;
 }
 
+/// Multiplies the remaining i64 elements (wrapping on overflow). Aborts the
+/// process when the iterator is empty.
 i64 iter_product_i64<I>(I* iter) {
     Optional<i64> first = iter.next();
     if (first.is_none()) { abort(); }
@@ -387,6 +424,8 @@ i64 iter_product_i64<I>(I* iter) {
     return acc;
 }
 
+/// Multiplies the remaining f64 elements. Aborts the process when the
+/// iterator is empty.
 f64 iter_product_f64<I>(I* iter) {
     Optional<f64> first = iter.next();
     if (first.is_none()) { abort(); }
@@ -399,6 +438,8 @@ f64 iter_product_f64<I>(I* iter) {
     return acc;
 }
 
+/// Wraps a copy of `*iter` in a mapping adapter. The adapter shares the
+/// source's state, so advance only the adapter afterwards.
 MapIter<I, T, U> iter_map<I, T, U>(I* iter, U (T) f) {
     MapIter<I, T, U> m;
     m.inner = *iter;
@@ -406,6 +447,7 @@ MapIter<I, T, U> iter_map<I, T, U>(I* iter, U (T) f) {
     return m;
 }
 
+/// Wraps a copy of `*iter` in a filtering adapter; advance only the adapter.
 FilterIter<I, T> iter_filter<I, T>(I* iter, bool (T) pred) {
     FilterIter<I, T> f;
     f.inner = *iter;
@@ -413,6 +455,7 @@ FilterIter<I, T> iter_filter<I, T>(I* iter, bool (T) pred) {
     return f;
 }
 
+/// Wraps a copy of `*iter` in a filter-map adapter; advance only the adapter.
 FilterMapIter<I, T, U> iter_filter_map<I, T, U>(I* iter, Optional<U> (T) f) {
     FilterMapIter<I, T, U> fm;
     fm.inner = *iter;
@@ -420,6 +463,7 @@ FilterMapIter<I, T, U> iter_filter_map<I, T, U>(I* iter, Optional<U> (T) f) {
     return fm;
 }
 
+/// Wraps a copy of `*iter` so it yields at most `n` elements.
 TakeIter<I, T> iter_take<I, T>(I* iter, i64 n) {
     TakeIter<I, T> t;
     t.inner = *iter;
@@ -427,6 +471,7 @@ TakeIter<I, T> iter_take<I, T>(I* iter, i64 n) {
     return t;
 }
 
+/// Wraps a copy of `*iter` so it skips the first `n` elements.
 SkipIter<I, T> iter_skip<I, T>(I* iter, i64 n) {
     SkipIter<I, T> s;
     s.inner = *iter;
@@ -435,6 +480,7 @@ SkipIter<I, T> iter_skip<I, T>(I* iter, i64 n) {
     return s;
 }
 
+/// Wraps a copy of `*iter` so it yields (index, element) pairs.
 EnumerateIter<I, T> iter_enumerate<I, T>(I* iter) {
     EnumerateIter<I, T> e;
     e.inner = *iter;
@@ -442,6 +488,7 @@ EnumerateIter<I, T> iter_enumerate<I, T>(I* iter) {
     return e;
 }
 
+/// Chains copies of `*a` and `*b`; advance only the result afterwards.
 ChainIter<A, B, T> iter_chain<A, B, T>(A* a, B* b) {
     ChainIter<A, B, T> c;
     c.a = *a;
@@ -450,6 +497,7 @@ ChainIter<A, B, T> iter_chain<A, B, T>(A* a, B* b) {
     return c;
 }
 
+/// Zips copies of `*a` and `*b`; advance only the result afterwards.
 ZipIter<A, B, TA, TB> iter_zip<A, B, TA, TB>(A* a, B* b) {
     ZipIter<A, B, TA, TB> z;
     z.a = *a;
@@ -457,6 +505,7 @@ ZipIter<A, B, TA, TB> iter_zip<A, B, TA, TB>(A* a, B* b) {
     return z;
 }
 
+/// Returns a reverse iterator over `len` elements at `data` (borrowed).
 RevIter<T> iter_rev<T>(T* data, i64 len) {
     RevIter<T> r;
     r.data = data;
@@ -465,6 +514,7 @@ RevIter<T> iter_rev<T>(T* data, i64 len) {
     return r;
 }
 
+/// Wraps a copy of `*outer` in a flat-map adapter using `f`.
 FlatMapIter<Outer, Inner, T, U> iter_flat_map<Outer, Inner, T, U>(Outer* outer, Inner (T) f) {
     FlatMapIter<Outer, Inner, T, U> fm;
     fm.outer = *outer;
@@ -473,6 +523,7 @@ FlatMapIter<Outer, Inner, T, U> iter_flat_map<Outer, Inner, T, U>(Outer* outer, 
     return fm;
 }
 
+/// Wraps a copy of `*outer` in a flattening adapter.
 FlattenIter<Outer, Inner, T> iter_flatten<Outer, Inner, T>(Outer* outer) {
     FlattenIter<Outer, Inner, T> fl;
     fl.outer = *outer;

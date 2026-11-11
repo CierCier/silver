@@ -1,8 +1,11 @@
 import std.mem.memory;
 
+/// Lowercases an ASCII letter byte.
 u8 ide_search_lower(u8 byte) { return byte >= (u8)'A' && byte <= (u8)'Z' ? byte + (u8)32 : byte; }
 
-// Identifiers are ASCII. Prefer prefixes, then contiguous and word-boundary matches.
+/// Identifiers are ASCII. Prefer prefixes, then contiguous and word-boundary matches.
+/// Returns a match score (lower is better): 0 for an exact match, small for
+/// a prefix, larger for a scattered subsequence, and -1 for no match.
 i64 ide_match_score(str query, str name) {
     i64 wanted = strlen(query); i64 length = strlen(name);
     if (wanted == 0) { return 0; }

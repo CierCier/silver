@@ -4,7 +4,11 @@ import std.result;
 import std.error;
 import std.sys.errno { ERANGE };
 
+/// Fallible conversion from `T`. Implementations for integer types return
+/// `ERANGE` when the value does not fit the target type.
 trait TryFrom<T> {
+    /// Converts `value`, or returns an error without side effects when it does
+    /// not fit.
     Result<Self, Error> try_from(T value);
 }
 

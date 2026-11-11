@@ -289,7 +289,10 @@ class NativeLsp(unittest.TestCase):
         hierarchy = session.result("textDocument/prepareTypeHierarchy", readable)[0]
         self.assertEqual([item["name"] for item in session.result("typeHierarchy/subtypes", {"item": hierarchy})], ["Other"])
         reports = session.result("workspace/diagnostic", {"previousResultIds": []})["items"]
+        # Closed loose files are indexed but not reported: nothing opened or imports them.
+        self.assertNotIn(outside_uri, {report["uri"] for report in reports})
         previous = [{"uri": report["uri"], "value": report["resultId"]} for report in reports]
+        previous.append({"uri": outside_uri, "value": "stale"})
         session.send("workspace/didChangeWorkspaceFolders", {"event": {"added": [], "removed": [folder]}})
         self.assertEqual(session.result("workspace/symbol", {"query": "loose"}), [])
         references = session.result("textDocument/references", {**target, "context": {"includeDeclaration": True}})
@@ -309,6 +312,108 @@ class NativeLsp(unittest.TestCase):
         self.assertEqual([item["name"] for item in session.result("workspace/symbol", {"query": "loose"})], ["loose"])
         session.send("textDocument/didClose", {"textDocument": {"uri": outside_uri}})
         self.assertEqual(session.result("workspace/symbol", {"query": "loose"}), [])
+
+    def test_parallel_workspace_checks_match_sequential_and_yield_to_requests(self):
+        (self.root / "src").mkdir()
+        modules = [f"part{index}" for index in range(8)]
+        main_text = "".join(f"import {name};\n" for name in modules) + "i32 main() { return 0; }\n"
+        (self.root / "silver.toml").write_text('name = "app"\nversion = "1"\n[bin."app"]\nentry = "src/main.ag"\n')
+        (self.root / "src/main.ag").write_text(main_text)
+        for index, name in enumerate(modules):
+            (self.root / f"src/{name}.ag").write_text(f"i32 value{index}() {{ return missing{index}(); }}\n")
+        def session(jobs):
+            # A fresh cache per session: every file is checked, none reused.
+            env = dict(self.clean_env(), AGLSP_JOBS=str(jobs),
+                       SILVER_CACHE_DIR=str(self.root / f".cache-{jobs}-{len(os.listdir(self.root))}"))
+            return self.folder_session([self.root], env=env)
+        def normalized(items):
+            return sorted((item["uri"], json.dumps(item["items"], sort_keys=True)) for item in items)
+        sequential = session(1)
+        expected = normalized(sequential.result("workspace/diagnostic", {"previousResultIds": []})["items"])
+        sequential.close()
+        self.assertEqual(len(expected), len(modules) + 1)
+        for index, name in enumerate(modules):
+            report = dict(expected)[(self.root / f"src/{name}.ag").as_uri()]
+            self.assertIn(f"missing{index}", report)
+        parallel = session(3)
+        self.assertEqual(normalized(parallel.result("workspace/diagnostic", {"previousResultIds": []})["items"]), expected)
+        parallel.close()
+        # A request queued behind a cold pull is answered first; the retried pull completes.
+        busy = session(3)
+        uri = (self.root / "src/main.ag").as_uri()
+        busy.send("textDocument/didOpen", {"textDocument": {"uri": uri, "languageId": "silver", "version": 1, "text": main_text}})
+        busy.next_id += 1; pull = busy.next_id
+        busy.send("workspace/diagnostic", {"previousResultIds": []}, pull)
+        hover = busy.request("textDocument/hover", {"textDocument": {"uri": uri}, "position": position(main_text, main_text.index("part0"))})
+        self.assertNotIn("error", hover)
+        # The pull may answer while the hover is awaited; the session files it with notifications.
+        first = next((message for message in busy.notifications
+                      if message.get("id") == pull and "method" not in message), None) or busy.wait_response(pull)
+        if "error" in first:
+            self.assertEqual(first["error"]["code"], -32802)
+            self.assertEqual(first["error"]["data"], {"retriggerRequest": True})
+        retried = busy.result("workspace/diagnostic", {"previousResultIds": []})
+        self.assertEqual(normalized(retried["items"]), expected)
+        busy.close()
+
+    def test_restarts_reuse_cached_diagnostics_until_the_import_closure_changes(self):
+        (self.root / "src").mkdir()
+        (self.root / "silver.toml").write_text('name = "app"\nversion = "1"\n[bin."app"]\nentry = "src/main.ag"\n')
+        main = self.root / "src/main.ag"; used = self.root / "src/used.ag"
+        main.write_text('import used;\ni32 main() { return used_value(); }\n')
+        used.write_text('i32 used_value() { return 1; }\n')
+        env = dict(self.clean_env(), SILVER_CACHE_DIR=str(self.root / ".diagnostic-cache"))
+        cache = self.root / ".diagnostic-cache/aglsp-diagnostics-v1"
+        def reports():
+            session = self.folder_session([self.root], env=env)
+            items = {item["uri"]: item["items"] for item in
+                     session.result("workspace/diagnostic", {"previousResultIds": []})["items"]}
+            session.close()
+            return items
+        self.assertEqual(reports()[main.as_uri()], [])
+        # Replace every stored result with a sentinel under the same key.
+        sentinel = [{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
+                     "severity": 2, "source": "silver", "message": "cached"}]
+        for entry in cache.iterdir():
+            key = entry.read_text().split("\n", 1)[0]
+            entry.write_text(key + "\n" + json.dumps(sentinel))
+        self.assertEqual(reports()[main.as_uri()], sentinel)
+        # Editing an imported file changes the key of every importer.
+        used.write_text('i32 used_value() { return missing(); }\n')
+        fresh = reports()
+        self.assertEqual(fresh[main.as_uri()], [])
+        self.assertTrue(any("missing" in item["message"] for item in fresh[used.as_uri()]))
+
+    def test_workspace_diagnostics_cover_project_imports_and_open_files(self):
+        (self.root / "src").mkdir()
+        (self.root / "silver.toml").write_text('name = "app"\nversion = "1"\n[bin."app"]\nentry = "src/main.ag"\n')
+        main = self.root / "src/main.ag"; used = self.root / "src/used.ag"
+        loose = self.root / "examples/loose.ag"; loose.parent.mkdir()
+        main.write_text('import used;\ni32 main() { return used_value(); }\n')
+        used.write_text('i32 used_value() { return missing(); }\n')
+        loose_text = 'import vendor.absent;\ni32 loose() { return nope(); }\n'
+        loose.write_text(loose_text)
+        # A nested checkout's manifest is indexed but is not this project's dependency.
+        nested = self.root / "checkout/main.ag"; nested.parent.mkdir()
+        (nested.parent / "silver.toml").write_text('name = "copy"\nversion = "1"\n[bin."copy"]\nentry = "main.ag"\n')
+        nested.write_text('i32 main() { return copied(); }\n')
+        session = self.folder_session([self.root])
+        reports = {item["uri"]: item for item in session.result("workspace/diagnostic", {"previousResultIds": []})["items"]}
+        self.assertIn(main.as_uri(), reports)
+        self.assertTrue(any("missing" in item["message"] for item in reports[used.as_uri()]["items"]))
+        self.assertNotIn(loose.as_uri(), reports)
+        self.assertNotIn(nested.as_uri(), reports)
+        # The loose file is still indexed for workspace queries.
+        self.assertEqual([item["name"] for item in session.result("workspace/symbol", {"query": "loose"})], ["loose"])
+        session.send("textDocument/didOpen", {"textDocument": {"uri": loose.as_uri(), "languageId": "silver",
+                                                               "version": 1, "text": loose_text}})
+        previous = [{"uri": uri, "value": report["resultId"]} for uri, report in reports.items()]
+        opened = {item["uri"]: item for item in session.result("workspace/diagnostic", {"previousResultIds": previous})["items"]}
+        self.assertTrue(opened[loose.as_uri()]["items"])
+        session.send("textDocument/didClose", {"textDocument": {"uri": loose.as_uri()}})
+        previous = [{"uri": uri, "value": report.get("resultId", "x")} for uri, report in opened.items()]
+        closed = {item["uri"]: item for item in session.result("workspace/diagnostic", {"previousResultIds": previous})["items"]}
+        self.assertEqual(closed[loose.as_uri()]["items"], [])
 
     def test_workspace_folder_batches_are_atomic_and_preserve_sysroot_imports(self):
         active = self.root / "active"; active.mkdir()
@@ -644,7 +749,7 @@ class NativeLsp(unittest.TestCase):
             ('2), point', 'add', ['i32 left', 'i32 right'], 1),
             ('3));', 'plus', ['i32 amount'], 0),
             ('5);', 'choose', ['T left', 'T right'], 1),
-            ('6);', 'unbox', ['Box<i32>value', 'i32 fallback'], 1),
+            ('6);', 'unbox', ['Box<i32> value', 'i32 fallback'], 1),
             ('7);', 'apply', ['i32(i32, i32)operation', 'i32 value'], 1),
             ('8);', 'tagged', ['str value', 'i32 tail'], 1),
             ('1 + 2', 'add', ['i32 left', 'i32 right'], 0),
@@ -3342,7 +3447,7 @@ class NativeLsp(unittest.TestCase):
             self.assertIn(error.get("code"), (-32800, -32802) if cancel else (-32802,), response)
             if error.get("code") == -32802:
                 self.assertEqual(error.get("message"),
-                                 "Analysis interrupted because the input queue is full; retry the request")
+                                 "Analysis interrupted by newer client messages; retry the request")
                 self.assertEqual(error.get("data"), {"retriggerRequest": True})
         with self.subTest(operation="progress-end"):
             progress = [message["params"] for message in session.notifications if message.get("method") == "$/progress"]
@@ -3679,6 +3784,53 @@ class NativeLsp(unittest.TestCase):
             "changes": {uri: [{"range": location(text, "calculate", start), "newText": "compute"}
                               for start in (0, text.index("return answer"))]}})
 
+    def test_member_navigation_prefers_call_syntax_and_follows_call_results(self):
+        model = ('struct Text { i64 len; }\nstruct Box<T> { T item; }\n'
+                 'impl Text {\n Text make() { Text value; return value; }\n i64 len(&self) { return self.len; }\n'
+                 ' i64 count<U: Eq>(&self, U value) { return 0; }\n}\n'
+                 'impl Box<T> { T get(&self) { return self.item; }\n Box<T> wrap(T item) { Box<T> b; return b; } }\n'
+                 'struct Holder { Text text; Box<Text> boxed; }\n')
+        calls = ('i64 read(Holder* holder, Text value) {\n'
+                 ' return value.len() + value.len + holder.text.len() + Text.make().len() + holder.boxed.get().len()'
+                 ' + holder.boxed.item.len + value.count(1) + Box<Text>.wrap(value).get().len();\n}\n')
+        for imported in (False, True):
+            model_uri = self.open(model, "member_model.ag") if imported else None
+            text = ("import member_model;\n" if imported else model) + calls
+            uri = self.open(text, "members-imported.ag" if imported else "members-local.ag")
+            home_uri, home = (model_uri, model) if imported else (uri, text)
+            method = {"uri": home_uri, "range": location(home, "len", home.index("i64 len("))}
+            field = {"uri": home_uri, "range": location(home, "len")}
+            body = text.index("return value")
+            def definition(needle):
+                at = text.index(needle, body) + needle.index("len")
+                return self.session.result("textDocument/definition",
+                                           {"textDocument": {"uri": uri}, "position": position(text, at)})
+            with self.subTest(imported=imported):
+                self.assertEqual(definition("value.len()"), method)
+                self.assertEqual(definition("value.len +"), field)
+                self.assertEqual(definition("text.len()"), method)
+                self.assertEqual(definition("make().len()"), method)
+                # A generic method is named before its `<...>` list, not by its bound.
+                self.assertEqual(self.session.result("textDocument/definition", {"textDocument": {"uri": uri},
+                    "position": position(text, text.index("value.count(", body) + len("value."))}),
+                    {"uri": home_uri, "range": location(home, "count")})
+                # `Box<Text>.get()` returns `T`, substituted to `Text`.
+                self.assertEqual(definition("get().len()"), method)
+                # A type receiver written with arguments: `Box<Text>.wrap(...)`.
+                self.assertEqual(self.session.result("textDocument/definition", {"textDocument": {"uri": uri},
+                    "position": position(text, text.index("Box<Text>.wrap", body) + len("Box<Text>."))}),
+                    {"uri": home_uri, "range": location(home, "wrap")})
+                self.assertEqual(definition("wrap(value).get().len()"), method)
+                def hover(needle, skip):
+                    at = text.index(needle, body) + skip
+                    return self.session.result("textDocument/hover", {"textDocument": {"uri": uri},
+                        "position": position(text, at)})["contents"]["value"]
+                self.assertIn("i64 len(", hover("make().len()", len("make().")))
+                self.assertIn("Text get(&self)", hover("boxed.get()", len("boxed.")))
+                # Generic fields hover with the receiver's type argument, not `T`.
+                self.assertIn("Text item", hover("boxed.item", len("boxed.")))
+                self.assertIn("Box<Text> wrap(Text item)", hover("Text>.wrap", len("Text>.")))
+
     def test_chained_members_resolve_receiver_identity_despite_shadowing(self):
         model = ('struct Leaf { i32 real; }\nstruct Decoy { i32 real; i32 missing; }\n'
                  'struct Branch { Leaf child; }\nstruct Root { Branch branch; }\n')
@@ -3945,9 +4097,11 @@ class NativeLsp(unittest.TestCase):
         self.assertIn("willCreate", operations)
         self.assertIn("willDelete", operations)
         self.assertIn("willRename", operations)
-        self.assertIs(operations["didCreate"], True)
-        self.assertIs(operations["didRename"], True)
-        self.assertIs(operations["didDelete"], True)
+        # Strict clients (Zed) reject a bare `true`; each must carry filters.
+        for name in ("willCreate", "willRename", "willDelete", "didCreate", "didRename", "didDelete"):
+            self.assertIsInstance(operations[name]["filters"], list, name)
+        self.assertEqual([f["pattern"]["glob"] for f in operations["didCreate"]["filters"]],
+                         ["**/*.ag", "**/silver.toml"])
         created = self.root / "created.ag"
         uri = created.as_uri()
         self.assertIsNone(session.result("workspace/willCreateFiles", {"files": [{"uri": uri}]}))
@@ -4149,4 +4303,7 @@ if __name__ == "__main__":
     NativeLsp.binary = args.server.resolve(strict=True)
     if args.stdlib_root is not None:
         NativeLsp.stdlib_root = args.stdlib_root.resolve(strict=True)
+    # Servers persist diagnostics; keep this run's entries out of the user's cache.
+    cache = tempfile.TemporaryDirectory(prefix="silver-lsp-cache-")
+    os.environ["SILVER_CACHE_DIR"] = cache.name
     unittest.main(argv=[__file__, *rest])

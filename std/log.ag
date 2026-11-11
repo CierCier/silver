@@ -4,6 +4,7 @@ import std.io.file;
 import std.sync;
 import std.atomic;
 
+/// Log severity, from least to most severe.
 enum LogLevel {
     Debug;
     Info;
@@ -11,9 +12,12 @@ enum LogLevel {
     Error;
 }
 
+/// Internal: minimum level that `log` prints. Use `set_log_level`.
 i32 g_log_level = 1; // Default to Info (0 = Debug, 1 = Info, 2 = Warn, 3 = Error)
+/// Internal: serializes log lines so concurrent messages do not interleave.
 RawMutex g_log_lock;
 
+/// Sets the minimum level that `log` prints (process-wide, thread-safe).
 void set_log_level(LogLevel level) {
     i32 lvl = match level {
         Debug : 0,
@@ -24,6 +28,7 @@ void set_log_level(LogLevel level) {
     __atomic_store_i32(&g_log_level, lvl, ATOMIC_RELEASE);
 }
 
+/// Returns the current minimum log level.
 LogLevel get_log_level() {
     i32 lvl = __atomic_load_i32(&g_log_level, ATOMIC_ACQUIRE);
     if (lvl == 0) { return LogLevel.Debug; }
@@ -32,6 +37,9 @@ LogLevel get_log_level() {
     return LogLevel.Error;
 }
 
+/// Writes `[LEVEL] msg` and a newline when `level` passes the threshold.
+/// Debug and Info go to stdout; Warn and Error go to stderr. Takes a global
+/// lock and flushes the stream on every call, so it is not cheap.
 void log(LogLevel level, str msg) {
     i32 lvl = match level {
         Debug : 0,
@@ -65,7 +73,11 @@ void log(LogLevel level, str msg) {
     g_log_lock.unlock();
 }
 
+/// Logs `msg` at Debug level (stdout).
 void log_debug(str msg) { log(LogLevel.Debug, msg); }
+/// Logs `msg` at Info level (stdout).
 void log_info(str msg) { log(LogLevel.Info, msg); }
+/// Logs `msg` at Warn level (stderr).
 void log_warn(str msg) { log(LogLevel.Warn, msg); }
+/// Logs `msg` at Error level (stderr).
 void log_error(str msg) { log(LogLevel.Error, msg); }

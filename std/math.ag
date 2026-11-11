@@ -5,118 +5,205 @@
 #[link(m)]
 
 // Constants
+/// Euler's number e.
 const f64 M_E = 2.71828182845904523536;
+/// log2(e).
 const f64 M_LOG2E = 1.44269504088896340736;
+/// log10(e).
 const f64 M_LOG10E = 0.43429448190325182765;
+/// ln(2).
 const f64 M_LN2 = 0.69314718055994530942;
+/// ln(10).
 const f64 M_LN10 = 2.30258509299404568402;
+/// Pi.
 const f64 M_PI = 3.14159265358979323846;
+/// Pi / 2.
 const f64 M_PI_2 = 1.57079632679489661923;
+/// Pi / 4.
 const f64 M_PI_4 = 0.78539816339744830962;
+/// 1 / pi.
 const f64 M_1_PI = 0.31830988618379067154;
+/// 2 / pi.
 const f64 M_2_PI = 0.63661977236758134308;
+/// 2 / sqrt(pi).
 const f64 M_2_SQRTPI = 1.12837916709551257390;
+/// sqrt(2).
 const f64 M_SQRT2 = 1.41421356237309504880;
+/// 1 / sqrt(2).
 const f64 M_SQRT1_2 = 0.70710678118654752440;
 
 // Trigonometry (f64)
+/// libm `sin`: sine of `x` radians.
 extern "C" f64 sin(f64 x);
+/// libm `cos`: cosine of `x` radians.
 extern "C" f64 cos(f64 x);
+/// libm `tan`: tangent of `x` radians.
 extern "C" f64 tan(f64 x);
+/// libm `asin`: arcsine in [-pi/2, pi/2]; NaN outside [-1, 1].
 extern "C" f64 asin(f64 x);
+/// libm `acos`: arccosine in [0, pi]; NaN outside [-1, 1].
 extern "C" f64 acos(f64 x);
+/// libm `atan`: arctangent in [-pi/2, pi/2].
 extern "C" f64 atan(f64 x);
+/// libm `atan2`: angle of the point (x, y) in [-pi, pi], using both signs.
 extern "C" f64 atan2(f64 y, f64 x);
 
 // Trigonometry (f32)
+/// libm `sinf`: f32 sine of `x` radians.
 extern "C" f32 sinf(f32 x);
+/// libm `cosf`: f32 cosine of `x` radians.
 extern "C" f32 cosf(f32 x);
+/// libm `tanf`: f32 tangent of `x` radians.
 extern "C" f32 tanf(f32 x);
+/// libm `asinf`: f32 arcsine; NaN outside [-1, 1].
 extern "C" f32 asinf(f32 x);
+/// libm `acosf`: f32 arccosine; NaN outside [-1, 1].
 extern "C" f32 acosf(f32 x);
+/// libm `atanf`: f32 arctangent.
 extern "C" f32 atanf(f32 x);
+/// libm `atan2f`: f32 angle of the point (x, y) in [-pi, pi].
 extern "C" f32 atan2f(f32 y, f32 x);
 
 // Hyperbolic (f64)
+/// libm `sinh`: hyperbolic sine.
 extern "C" f64 sinh(f64 x);
+/// libm `cosh`: hyperbolic cosine.
 extern "C" f64 cosh(f64 x);
+/// libm `tanh`: hyperbolic tangent.
 extern "C" f64 tanh(f64 x);
+/// libm `asinh`: inverse hyperbolic sine.
 extern "C" f64 asinh(f64 x);
+/// libm `acosh`: inverse hyperbolic cosine; NaN below 1.
 extern "C" f64 acosh(f64 x);
+/// libm `atanh`: inverse hyperbolic tangent; infinite at +/-1, NaN beyond.
 extern "C" f64 atanh(f64 x);
 
 // Hyperbolic (f32)
+/// libm `sinhf`: f32 hyperbolic sine.
 extern "C" f32 sinhf(f32 x);
+/// libm `coshf`: f32 hyperbolic cosine.
 extern "C" f32 coshf(f32 x);
+/// libm `tanhf`: f32 hyperbolic tangent.
 extern "C" f32 tanhf(f32 x);
+/// libm `asinhf`: f32 inverse hyperbolic sine.
 extern "C" f32 asinhf(f32 x);
+/// libm `acoshf`: f32 inverse hyperbolic cosine; NaN below 1.
 extern "C" f32 acoshf(f32 x);
+/// libm `atanhf`: f32 inverse hyperbolic tangent.
 extern "C" f32 atanhf(f32 x);
 
 // Exponents and logarithms (f64)
+/// libm `exp`: e raised to `x`.
 extern "C" f64 exp(f64 x);
+/// libm `exp2`: 2 raised to `x`.
 extern "C" f64 exp2(f64 x);
+/// libm `expm1`: e^x - 1, accurate for small `x`.
 extern "C" f64 expm1(f64 x);
+/// libm `log`: natural logarithm; -inf at 0, NaN for negative `x`.
 extern "C" f64 log(f64 x);
+/// libm `log2`: base-2 logarithm.
 extern "C" f64 log2(f64 x);
+/// libm `log10`: base-10 logarithm.
 extern "C" f64 log10(f64 x);
+/// libm `log1p`: ln(1 + x), accurate for small `x`.
 extern "C" f64 log1p(f64 x);
 
 // Exponents and logarithms (f32)
+/// libm `expf`: f32 e raised to `x`.
 extern "C" f32 expf(f32 x);
+/// libm `exp2f`: f32 2 raised to `x`.
 extern "C" f32 exp2f(f32 x);
+/// libm `expm1f`: f32 e^x - 1.
 extern "C" f32 expm1f(f32 x);
+/// libm `logf`: f32 natural logarithm.
 extern "C" f32 logf(f32 x);
+/// libm `log2f`: f32 base-2 logarithm.
 extern "C" f32 log2f(f32 x);
+/// libm `log10f`: f32 base-10 logarithm.
 extern "C" f32 log10f(f32 x);
+/// libm `log1pf`: f32 ln(1 + x).
 extern "C" f32 log1pf(f32 x);
 
 // Power (f64)
+/// libm `pow`: `x` raised to `y`.
 extern "C" f64 pow(f64 x, f64 y);
+/// libm `sqrt`: square root; NaN for negative `x`.
 extern "C" f64 sqrt(f64 x);
+/// libm `cbrt`: cube root.
 extern "C" f64 cbrt(f64 x);
+/// libm `hypot`: sqrt(x*x + y*y) without intermediate overflow.
 extern "C" f64 hypot(f64 x, f64 y);
 
 // Power (f32)
+/// libm `powf`: f32 `x` raised to `y`.
 extern "C" f32 powf(f32 x, f32 y);
+/// libm `sqrtf`: f32 square root.
 extern "C" f32 sqrtf(f32 x);
+/// libm `cbrtf`: f32 cube root.
 extern "C" f32 cbrtf(f32 x);
+/// libm `hypotf`: f32 sqrt(x*x + y*y) without intermediate overflow.
 extern "C" f32 hypotf(f32 x, f32 y);
 
 // Rounding (f64)
+/// libm `ceil`: smallest integer value not less than `x`.
 extern "C" f64 ceil(f64 x);
+/// libm `floor`: largest integer value not greater than `x`.
 extern "C" f64 floor(f64 x);
+/// libm `round`: nearest integer, halfway cases away from zero.
 extern "C" f64 round(f64 x);
+/// libm `trunc`: integer part, rounding toward zero.
 extern "C" f64 trunc(f64 x);
+/// libm `rint`: nearest integer in the current rounding mode (ties to even).
 extern "C" f64 rint(f64 x);
+/// libm `lrint`: `rint` converted to i64; unspecified when out of range.
 extern "C" i64 lrint(f64 x);
+/// libm `lround`: `round` converted to i64; unspecified when out of range.
 extern "C" i64 lround(f64 x);
 
 // Rounding (f32)
+/// libm `ceilf`: f32 ceiling.
 extern "C" f32 ceilf(f32 x);
+/// libm `floorf`: f32 floor.
 extern "C" f32 floorf(f32 x);
+/// libm `roundf`: f32 round, halfway cases away from zero.
 extern "C" f32 roundf(f32 x);
+/// libm `truncf`: f32 truncation toward zero.
 extern "C" f32 truncf(f32 x);
+/// libm `rintf`: f32 nearest integer in the current rounding mode.
 extern "C" f32 rintf(f32 x);
+/// libm `lrintf`: `rintf` converted to i64.
 extern "C" i64 lrintf(f32 x);
+/// libm `lroundf`: `roundf` converted to i64.
 extern "C" i64 lroundf(f32 x);
 
 // Absolute value, min, max (f64)
+/// libm `fabs`: absolute value.
 extern "C" f64 fabs(f64 x);
+/// libm `fmin`: smaller argument; a NaN argument is ignored.
 extern "C" f64 fmin(f64 x, f64 y);
+/// libm `fmax`: larger argument; a NaN argument is ignored.
 extern "C" f64 fmax(f64 x, f64 y);
 
 // Absolute value, min, max (f32)
+/// libm `fabsf`: f32 absolute value.
 extern "C" f32 fabsf(f32 x);
+/// libm `fminf`: f32 smaller argument; a NaN argument is ignored.
 extern "C" f32 fminf(f32 x, f32 y);
+/// libm `fmaxf`: f32 larger argument; a NaN argument is ignored.
 extern "C" f32 fmaxf(f32 x, f32 y);
 
 // Remainder / modulo
+/// libm `fmod`: remainder of x / y truncated toward zero; sign of `x`.
 extern "C" f64 fmod(f64 x, f64 y);
+/// libm `remainder`: IEEE remainder, x - n*y with n rounded to nearest.
 extern "C" f64 remainder(f64 x, f64 y);
+/// libm `fmodf`: f32 `fmod`.
 extern "C" f32 fmodf(f32 x, f32 y);
+/// libm `remainderf`: f32 IEEE remainder.
 extern "C" f32 remainderf(f32 x, f32 y);
 
 // Copy sign
+/// libm `copysign`: magnitude of `x` with the sign of `y`.
 extern "C" f64 copysign(f64 x, f64 y);
+/// libm `copysignf`: f32 magnitude of `x` with the sign of `y`.
 extern "C" f32 copysignf(f32 x, f32 y);

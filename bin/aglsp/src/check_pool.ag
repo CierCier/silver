@@ -1,0 +1,114 @@
+import tooling.diagnostics;
+import std.env;
+import std.thread;
+
+// Runs independent file checks on worker threads. A job only reads its syntax
+// trees: check_snapshot_diagnostics clones the checked file and the imported
+// signatures into its own pool, so documents stay owned by the dispatcher.
+
+/// One file check: borrowed source and dependency trees, its path, the
+/// resulting diagnostics, and an atomic finished flag.
+struct CheckJob {
+    SyntaxTree* source;
+    Vec<SyntaxTree*> dependencies;
+    String path;
+    DiagnosticBag result;
+    // Atomic: 1 once `result` holds this job's diagnostics.
+    i64 finished;
+}
+
+/// A fixed set of check jobs run by worker threads. Jobs only read their
+/// trees, so the documents stay owned by the dispatcher.
+struct CheckPool {
+    Vec<CheckJob> jobs;
+    Vec<String>* include_dirs;
+    // Atomics shared with the workers.
+    i64 next;
+    i64 completed;
+    i64 stop;
+    Vec<TaskRecord*> threads;
+}
+
+/// Worker thread body: claims and runs jobs until none are left or `stop`
+/// is set.
+void check_worker(i64 address) {
+    CheckPool* pool = (CheckPool*)address;
+    CfgSet cfg = linux_defaults();
+    while (__atomic_load_i64(&pool.stop, ATOMIC_ACQUIRE) == 0) {
+        i64 index = __atomic_fetch_add_i64(&pool.next, 1, ATOMIC_ACQ_REL);
+        if (index >= pool.jobs.len()) { return; }
+        CheckJob* job = pool.jobs.get_ptr(index);
+        DiagnosticBag checked = check_snapshot_diagnostics(job.source, &job.dependencies, &cfg,
+                                                           job.path.to_str(), pool.include_dirs);
+        DiagnosticBag _empty = move job.result;
+        job.result = move checked;
+        __atomic_store_i64(&job.finished, 1, ATOMIC_RELEASE);
+        __atomic_fetch_add_i64(&pool.completed, 1, ATOMIC_ACQ_REL);
+    }
+}
+
+/// `AGLSP_JOBS` when set; otherwise half the CPUs this process may use, so the
+/// editor keeps cores while a cold workspace check runs.
+i64 check_worker_count(i64 jobs) {
+    i64 count = thread_available_parallelism() / 2;
+    Optional<String> configured = var("AGLSP_JOBS");
+    if (configured.is_some()) {
+        String text = configured.unwrap(); i64 value = 0; i64 i = 0;
+        while (i < text.len() && text.data[i] >= (u8)'0' && text.data[i] <= (u8)'9') {
+            value = value * 10 + (i64)(text.data[i] - (u8)'0'); i += 1;
+        }
+        if (i == text.len() && value > 0) { count = value; }
+    }
+    if (count > jobs) { count = jobs; }
+    if (count < 1) { count = 1; }
+    return count;
+}
+
+impl CheckPool {
+    /// Creates an empty pool that resolves imports with `include_dirs`.
+    CheckPool new(Vec<String>* include_dirs) {
+        CheckPool pool; pool.jobs = Vec<CheckJob>.new(); pool.include_dirs = include_dirs;
+        pool.next = 0; pool.completed = 0; pool.stop = 0; pool.threads = Vec<TaskRecord*>.new();
+        return move pool;
+    }
+
+    /// Queues a check of `source` against `dependencies`. The trees must stay
+    /// alive and unmodified until the pool is joined.
+    void add(CheckPool* self, SyntaxTree* source, Vec<SyntaxTree*>* dependencies, str path) {
+        CheckJob job; job.source = source; job.dependencies = Vec<SyntaxTree*>.new();
+        i64 i = 0;
+        while (i < dependencies.len()) { job.dependencies.push(dependencies.get(i)); i += 1; }
+        job.path = String.from_str(path); job.result = DiagnosticBag.new(); job.finished = 0;
+        self.jobs.push(move job);
+    }
+
+    /// Jobs must not be added after start: workers hold pointers into `jobs`.
+    /// When no thread can be spawned, the dispatcher runs every job itself.
+    void start(CheckPool* self) {
+        i64 workers = check_worker_count(self.jobs.len()); i64 i = 0;
+        while (i < workers) {
+            TaskRecord* thread = thread_spawn(check_worker, (i64)self);
+            if (thread != (TaskRecord*)0) { self.threads.push(thread); }
+            i += 1;
+        }
+        if (self.threads.len() == 0) { check_worker((i64)self); }
+    }
+
+    /// Returns the number of finished jobs.
+    i64 completed(CheckPool* self) { return __atomic_load_i64(&self.completed, ATOMIC_ACQUIRE); }
+
+    /// Returns true when job `index` has finished.
+    bool finished(CheckPool* self, i64 index) {
+        return __atomic_load_i64(&self.jobs.get_ptr(index).finished, ATOMIC_ACQUIRE) != 0;
+    }
+
+    /// Workers finish the file in hand; unclaimed jobs stay unfinished.
+    void stop(CheckPool* self) { __atomic_store_i64(&self.stop, 1, ATOMIC_RELEASE); }
+
+    /// Waits for every worker thread.
+    void join(CheckPool* self) {
+        i64 i = 0;
+        while (i < self.threads.len()) { thread_join(self.threads.get(i)); i += 1; }
+        self.threads.clear();
+    }
+}

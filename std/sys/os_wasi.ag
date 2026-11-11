@@ -25,82 +25,102 @@
 // ---------------------------------------------------------------------------
 
 extern "C" {
+    /// WASI `fd_write`: gathers `iovs_len` buffers to `fd`; writes the count.
     #[link_module("wasi_snapshot_preview1")]
     #[link_name("fd_write")]
     i32 wasi_fd_write(i32 fd, u8* iovs, i32 iovs_len, i32* nwritten);
 
+    /// WASI `fd_read`: scatters into `iovs_len` buffers; writes the count.
     #[link_module("wasi_snapshot_preview1")]
     #[link_name("fd_read")]
     i32 wasi_fd_read(i32 fd, u8* iovs, i32 iovs_len, i32* nread);
 
+    /// WASI `fd_close`.
     #[link_module("wasi_snapshot_preview1")]
     #[link_name("fd_close")]
     i32 wasi_fd_close(i32 fd);
 
+    /// WASI `fd_seek`: writes the new offset.
     #[link_module("wasi_snapshot_preview1")]
     #[link_name("fd_seek")]
     i32 wasi_fd_seek(i32 fd, i64 offset, i32 whence, i64* newoffset);
 
+    /// WASI `fd_fdstat_get`: fills a 24-byte fdstat.
     #[link_module("wasi_snapshot_preview1")]
     #[link_name("fd_fdstat_get")]
     i32 wasi_fd_fdstat_get(i32 fd, u8* fdstat);
 
+    /// WASI `fd_fdstat_set_flags`.
     #[link_module("wasi_snapshot_preview1")]
     #[link_name("fd_fdstat_set_flags")]
     i32 wasi_fd_fdstat_set_flags(i32 fd, i32 flags);
 
+    /// WASI `fd_filestat_get`: fills a 64-byte filestat.
     #[link_module("wasi_snapshot_preview1")]
     #[link_name("fd_filestat_get")]
     i32 wasi_fd_filestat_get(i32 fd, u8* filestat);
 
+    /// WASI `path_filestat_get` relative to directory `fd`.
     #[link_module("wasi_snapshot_preview1")]
     #[link_name("path_filestat_get")]
     i32 wasi_path_filestat_get(i32 fd, i32 flags, u8* path, i32 path_len, u8* filestat);
 
+    /// WASI `path_open` relative to directory `fd`; writes the new fd.
     #[link_module("wasi_snapshot_preview1")]
     #[link_name("path_open")]
     i32 wasi_path_open(i32 fd, i32 dirflags, u8* path, i32 path_len, i32 oflags, i64 rights_base, i64 rights_inheriting, i32 fdflags, i32* opened_fd);
 
+    /// WASI `fd_prestat_get`: describes a preopened fd.
     #[link_module("wasi_snapshot_preview1")]
     #[link_name("fd_prestat_get")]
     i32 wasi_fd_prestat_get(i32 fd, u8* prestat);
 
+    /// WASI `fd_prestat_dir_name`.
     #[link_module("wasi_snapshot_preview1")]
     #[link_name("fd_prestat_dir_name")]
     i32 wasi_fd_prestat_dir_name(i32 fd, u8* path, i32 path_len);
 
+    /// WASI `fd_readdir`: reads directory entries starting at `cookie`.
     #[link_module("wasi_snapshot_preview1")]
     #[link_name("fd_readdir")]
     i32 wasi_fd_readdir(i32 fd, u8* buf, i32 buf_len, i64 cookie, i32* bufused);
 
+    /// WASI `path_create_directory`.
     #[link_module("wasi_snapshot_preview1")]
     #[link_name("path_create_directory")]
     i32 wasi_path_create_directory(i32 fd, u8* path, i32 path_len);
 
+    /// WASI `path_remove_directory`.
     #[link_module("wasi_snapshot_preview1")]
     #[link_name("path_remove_directory")]
     i32 wasi_path_remove_directory(i32 fd, u8* path, i32 path_len);
 
+    /// WASI `path_unlink_file`.
     #[link_module("wasi_snapshot_preview1")]
     #[link_name("path_unlink_file")]
     i32 wasi_path_unlink_file(i32 fd, u8* path, i32 path_len);
 
+    /// WASI `path_rename`.
     #[link_module("wasi_snapshot_preview1")]
     #[link_name("path_rename")]
     i32 wasi_path_rename(i32 old_fd, u8* old_path, i32 old_path_len, i32 new_fd, u8* new_path, i32 new_path_len);
 
+    /// WASI `clock_time_get`: writes nanoseconds.
     #[link_module("wasi_snapshot_preview1")]
     #[link_name("clock_time_get")]
     i32 wasi_clock_time_get(i32 id, i64 precision, i64* time);
 
+    /// WASI `random_get`: fills `buf` with random bytes.
     #[link_module("wasi_snapshot_preview1")]
     #[link_name("random_get")]
     i32 wasi_random_get(u8* buf, i32 len);
 
+    /// WASI `poll_oneoff`: waits for the subscriptions in `in_`.
     #[link_module("wasi_snapshot_preview1")]
     #[link_name("poll_oneoff")]
     i32 wasi_poll_oneoff(u8* in_, u8* out, i32 nsubscriptions, i32* nevents);
 
+    /// WASI `proc_exit`: ends the process. Never returns.
     #[link_module("wasi_snapshot_preview1")]
     #[link_name("proc_exit")]
     void wasi_proc_exit(i32 code);
@@ -108,6 +128,7 @@ extern "C" {
 
 // The linker symbol at the end of static data; the bump region starts here.
 extern "C" {
+    /// Linker symbol at the end of static data; the bump heap starts here.
     u8 __heap_base;
 }
 
@@ -115,47 +136,69 @@ extern "C" {
 // Constants.
 // ---------------------------------------------------------------------------
 
-// Precise per-kind masks. A blanket ALL makes directory opens fail on real
-// hosts (SOCK_* and other non-file rights are rejected for directories), so
-// files and directories request exactly what each kind supports.
-// FILE: FD_DATASYNC/READ/SEEK/FDSTAT_SET_FLAGS/SYNC/TELL/WRITE/ADVISE/
-//   ALLOCATE (bits 0-8) + FD_FILESTAT_GET/SET_SIZE/SET_TIMES (21-23) +
-//   POLL_FD_READWRITE (27).
-// DIR: PATH_OPEN (13) + FD_READDIR (14) + PATH_FILESTAT_GET (18) +
-//   FD_FILESTAT_GET (21).
+/// Precise per-kind masks. A blanket ALL makes directory opens fail on real
+/// hosts (SOCK_* and other non-file rights are rejected for directories), so
+/// files and directories request exactly what each kind supports.
+/// FILE: FD_DATASYNC/READ/SEEK/FDSTAT_SET_FLAGS/SYNC/TELL/WRITE/ADVISE/
+///   ALLOCATE (bits 0-8) + FD_FILESTAT_GET/SET_SIZE/SET_TIMES (21-23) +
+///   POLL_FD_READWRITE (27).
+/// DIR: PATH_OPEN (13) + FD_READDIR (14) + PATH_FILESTAT_GET (18) +
+///   FD_FILESTAT_GET (21).
+/// Rights requested when opening files.
 const i64 WASI_RIGHTS_FILE = 148898303;
+/// Rights requested when opening directories.
 const i64 WASI_RIGHTS_DIR = 2383872;
 
 // oflags bits.
+/// WASI oflag: create the file if missing.
 const i32 WASI_O_CREAT = 1;
+/// WASI oflag: fail unless the path is a directory.
 const i32 WASI_O_DIRECTORY = 2;
+/// WASI oflag: fail if the file exists.
 const i32 WASI_O_EXCL = 4;
+/// WASI oflag: truncate to length 0.
 const i32 WASI_O_TRUNC = 8;
 
 // fdflags bits.
+/// WASI fdflag: append mode.
 const i32 WASI_FD_APPEND = 1;
+/// WASI fdflag: non-blocking mode.
 const i32 WASI_FD_NONBLOCK = 4;
 
 // filetype values.
+/// WASI filetype: directory.
 const i32 WASI_FILETYPE_DIRECTORY = 3;
+/// WASI filetype: regular file.
 const i32 WASI_FILETYPE_REGULAR_FILE = 4;
 
 // Linux O_* bits (see std/sys/result.ag).
+/// Linux O_CREAT, translated by `sys_openat`.
 const i64 LINUX_O_CREAT = 64;
+/// Linux O_EXCL, translated by `sys_openat`.
 const i64 LINUX_O_EXCL = 128;
+/// Linux O_TRUNC, translated by `sys_openat`.
 const i64 LINUX_O_TRUNC = 512;
+/// Linux O_APPEND, translated by `sys_openat`.
 const i64 LINUX_O_APPEND = 1024;
+/// Linux O_NONBLOCK, translated by `sys_openat`.
 const i64 LINUX_O_NONBLOCK = 2048;
+/// Linux O_DIRECTORY, translated by `sys_openat`.
 const i64 LINUX_O_DIRECTORY = 65536;
 
 // Linux S_IFMT bits for the synthesized st_mode.
+/// Linux S_IFDIR, used in the synthesized `st_mode`.
 const i64 LINUX_S_IFDIR = 16384;
+/// Linux S_IFREG, used in the synthesized `st_mode`.
 const i64 LINUX_S_IFREG = 32768;
 
 // errno values used directly by the glue below.
+/// errno EINVAL.
 const i64 WASI_EINVAL = 22;
+/// errno ENOENT.
 const i64 WASI_ENOENT = 2;
+/// errno ENAMETOOLONG.
 const i64 WASI_ENAMETOOLONG = 36;
+/// errno ENOMEM.
 const i64 WASI_ENOMEM = 12;
 
 // ---------------------------------------------------------------------------
@@ -250,7 +293,9 @@ u8* wasi_rel_path(i64 path) {
 // Preopened-directory discovery.
 // ---------------------------------------------------------------------------
 
+/// Internal: cached preopened directory fd (see `wasi_preopen_fd`).
 i32 g_wasi_preopen_fd;
+/// Internal: preopen discovery state: 0 unknown, 1 found, 2 none.
 i32 g_wasi_preopen_state; // 0 = unknown, 1 = found, 2 = none
 
 /// The fd of the first preopened directory, or -1 when none exists. WASI
@@ -296,8 +341,10 @@ i32 wasi_base_fd(i64 dirfd) {
 // Memory: grow-only bump allocation over linear memory.
 // ---------------------------------------------------------------------------
 
+/// Internal: current end of the bump region; 0 before first use.
 i64 g_wasi_brk;
 
+/// Internal: returns the bump pointer, initializing it from `__heap_base`.
 i64 wasi_brk_init() {
     if (g_wasi_brk == 0) {
         i64 base = (i64)&__heap_base;
@@ -374,6 +421,7 @@ i64 sys_mremap(i64 old_addr, i64 old_size, i64 new_size, i64 flags, i64 new_addr
 // Stream I/O.
 // ---------------------------------------------------------------------------
 
+/// Seam: writes up to `len` bytes with `fd_write`. Returns the count or -errno.
 i64 sys_write(i64 fd, i64 buf, i64 len) {
     if (len <= 0) {
         return 0;
@@ -390,6 +438,8 @@ i64 sys_write(i64 fd, i64 buf, i64 len) {
     return (i64)nwritten;
 }
 
+/// Seam: reads up to `len` bytes with `fd_read`. Returns the count, 0 at EOF,
+/// or -errno.
 i64 sys_read(i64 fd, i64 buf, i64 len) {
     if (len <= 0) {
         return 0;
@@ -405,10 +455,13 @@ i64 sys_read(i64 fd, i64 buf, i64 len) {
     return (i64)nread;
 }
 
+/// Seam: closes `fd`. Returns 0 or -errno.
 i64 sys_close(i64 fd) {
     return wasi_err(wasi_fd_close((i32)fd));
 }
 
+/// Seam: seeks with `fd_seek` (whence values match Linux). Returns the new
+/// offset or -errno.
 i64 sys_lseek(i64 fd, i64 off, i64 whence) {
     // Verified against node and wasmtime: WASI whence matches Linux
     // (SET=0, CUR=1, END=2), so the value passes straight through.
@@ -470,10 +523,12 @@ i64 sys_openat(i64 dirfd, i64 path, i64 flags, i64 mode) {
     return (i64)opened;
 }
 
+/// Seam: opens `path` relative to the preopened directory (see `sys_openat`).
 i64 sys_open(i64 path, i64 flags, i64 mode) {
     return sys_openat(-100, path, flags, mode);
 }
 
+/// Seam: F_GETFL/F_SETFL translated to and from WASI fdflags.
 i64 sys_fcntl(i64 fd, i64 cmd, i64 arg) {
     if (cmd == 3) {
         // F_GETFL: translate WASI fdflags back to Linux O_* bits.
@@ -532,6 +587,8 @@ i64 sys_stat(i64 path, i64 buf) {
     return 0;
 }
 
+/// Seam: returns 0 when `path` exists under the preopen; `mode` bits are not
+/// checked.
 i64 sys_access(i64 path, i64 mode) {
     i32 base = wasi_preopen_fd();
     if (base < 0) {
@@ -549,6 +606,7 @@ i64 sys_access(i64 path, i64 mode) {
     return 0;
 }
 
+/// Seam: creates a directory under the preopen; `mode` is ignored.
 i64 sys_mkdir(i64 path, i64 mode) {
     i32 base = wasi_preopen_fd();
     if (base < 0) {
@@ -558,6 +616,7 @@ i64 sys_mkdir(i64 path, i64 mode) {
     return wasi_err(wasi_path_create_directory(base, p, (i32)wasi_strlen(p)));
 }
 
+/// Seam: removes an empty directory under the preopen.
 i64 sys_rmdir(i64 path) {
     i32 base = wasi_preopen_fd();
     if (base < 0) {
@@ -567,6 +626,7 @@ i64 sys_rmdir(i64 path) {
     return wasi_err(wasi_path_remove_directory(base, p, (i32)wasi_strlen(p)));
 }
 
+/// Seam: deletes a file under the preopen.
 i64 sys_unlink(i64 path) {
     i32 base = wasi_preopen_fd();
     if (base < 0) {
@@ -576,6 +636,7 @@ i64 sys_unlink(i64 path) {
     return wasi_err(wasi_path_unlink_file(base, p, (i32)wasi_strlen(p)));
 }
 
+/// Seam: renames within the preopen.
 i64 sys_rename(i64 from, i64 to) {
     i32 base = wasi_preopen_fd();
     if (base < 0) {
@@ -706,6 +767,7 @@ i64 sys_nanosleep(i64 req, i64 rem) {
     return 0;
 }
 
+/// Seam: fills `len` bytes with `random_get`; returns `len` or -errno.
 i64 sys_getrandom(i64 buf, i64 len, i64 flags) {
     if (len <= 0) {
         return 0;
@@ -721,11 +783,13 @@ i64 sys_getrandom(i64 buf, i64 len, i64 flags) {
 // Process / signals / threads (preview1 has none of these).
 // ---------------------------------------------------------------------------
 
+/// Seam: ends the process with `code` (`proc_exit`). Never returns.
 i64 sys_exit_group(i64 code) {
     wasi_proc_exit((i32)code);
     return code;
 }
 
+/// Seam: ends the process: WASI has no per-thread exit.
 i64 sys_exit(i64 code) {
     wasi_proc_exit((i32)code);
     return code;
@@ -747,13 +811,16 @@ i64 sys_kill(i64 pid, i64 sig) {
     return -3; // ESRCH
 }
 
+/// Seam: ends the process: WASI has no threads.
 void thread_exit(i64 code) {
     wasi_proc_exit((i32)code);
 }
 
+/// Seam: no-op (single-threaded).
 void thread_yield() {
 }
 
+/// Seam: no-op (no thread handles).
 void thread_reclaim(i64 tid) {
 }
 
@@ -763,6 +830,7 @@ i64 sys_futex(i64 uaddr, i64 op, i64 val, i64 timeout, i64 uaddr2, i64 val3) {
     return 0;
 }
 
+/// Seam: discovers the preopened directory at startup.
 void sys_platform_init() {
     // Force preopen discovery up front so the first file call is not a probe.
     wasi_preopen_fd();
@@ -772,10 +840,12 @@ void sys_platform_init() {
 // Console seam (no termios in preview1).
 // ---------------------------------------------------------------------------
 
+/// Seam: always -ENOTTY; WASI has no window size query.
 i64 sys_console_size(i64 fd, i64 rows_ptr, i64 cols_ptr) {
     return -25; // ENOTTY
 }
 
+/// Seam: 1 when `fd` is a character device, else 0.
 i64 sys_is_tty(i64 fd) {
     u8 st[24];
     i64 i = 0;
@@ -787,10 +857,12 @@ i64 sys_is_tty(i64 fd) {
     return st[0] == (u8)2 ? 1 : 0; // CHARACTER_DEVICE
 }
 
+/// Seam: always -ENOTTY; WASI has no termios.
 i64 sys_raw_enable(i64 fd, u8* saved, i64 len) {
     return -25; // ENOTTY
 }
 
+/// Seam: always -ENOTTY; WASI has no termios.
 i64 sys_raw_restore(i64 fd, u8* saved) {
     return -25; // ENOTTY
 }

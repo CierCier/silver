@@ -11,6 +11,8 @@
 // Unsigned 128-bit division core: q = n / d, *r_out = n % d.
 // Binary long division, one quotient bit per iteration (128 total).
 // ---------------------------------------------------------------------------
+/// Internal: returns `n / d` and writes `n % d` to `*r_out`. Division by zero
+/// returns 0 with remainder 0 instead of trapping.
 u128 __udivmod_core(u128 n, u128 d, u128* r_out) {
     if (d == (u128)0) {
         // Division by zero is UB in the compiler-rt contract; stay finite.
@@ -35,17 +37,21 @@ u128 __udivmod_core(u128 n, u128 d, u128* r_out) {
     return q;
 }
 
+/// compiler-rt `__udivti3`: unsigned 128-bit quotient; 0 when `b` is 0.
 u128 __udivti3(u128 a, u128 b) {
     u128 r = (u128)0;
     return __udivmod_core(a, b, &r);
 }
 
+/// compiler-rt `__umodti3`: unsigned 128-bit remainder; 0 when `b` is 0.
 u128 __umodti3(u128 a, u128 b) {
     u128 r = (u128)0;
     __udivmod_core(a, b, &r);
     return r;
 }
 
+/// compiler-rt `__divti3`: signed 128-bit quotient truncated toward zero;
+/// 0 when `b` is 0.
 i128 __divti3(i128 a, i128 b) {
     if (b == (i128)0) {
         return (i128)0;
@@ -73,6 +79,8 @@ i128 __divti3(i128 a, i128 b) {
     return (i128)q;
 }
 
+/// compiler-rt `__modti3`: signed 128-bit remainder with the dividend's sign;
+/// 0 when `b` is 0.
 i128 __modti3(i128 a, i128 b) {
     if (b == (i128)0) {
         return (i128)0;
@@ -98,6 +106,7 @@ i128 __modti3(i128 a, i128 b) {
 // every partial product fits in a u64 (a 128-bit multiply here would recurse
 // into this very function).
 // ---------------------------------------------------------------------------
+/// compiler-rt `__multi3`: the low 128 bits of `a * b` (wrapping).
 u128 __multi3(i128 a, i128 b) {
     u32 a0 = (u32)(u64)(u128)a;
     u32 a1 = (u32)((u64)((u128)a >> (u128)32));
@@ -154,6 +163,7 @@ u128 __multi3(i128 a, i128 b) {
 // UB per the compiler-rt contract); bodies use only 64-bit shifts so no
 // helper recurses into itself.
 // ---------------------------------------------------------------------------
+/// compiler-rt `__ashlti3`: 128-bit left shift; counts of 128 or more give 0.
 i128 __ashlti3(i128 a, i32 count) {
     u64 s = (u32)count;
     if (s == (u64)0) {
@@ -174,6 +184,8 @@ i128 __ashlti3(i128 a, i32 count) {
     return (i128)(((u128)hi << (u128)64) | (u128)lo);
 }
 
+/// compiler-rt `__lshrti3`: 128-bit logical right shift; counts of 128 or
+/// more give 0.
 u128 __lshrti3(u128 a, i32 count) {
     u64 s = (u32)count;
     if (s == (u64)0) {
@@ -194,6 +206,8 @@ u128 __lshrti3(u128 a, i32 count) {
     return ((u128)hi << (u128)64) | (u128)lo;
 }
 
+/// compiler-rt `__ashrti3`: 128-bit arithmetic right shift; counts of 128 or
+/// more give all sign bits.
 i128 __ashrti3(i128 a, i32 count) {
     u64 s = (u32)count;
     if (s == (u64)0) {
@@ -220,6 +234,8 @@ i128 __ashrti3(i128 a, i32 count) {
 // never contains an f64 <-> i128 cast (which would recurse into this file).
 // Out-of-range f64 inputs saturate; the compiler-rt contract leaves them UB.
 // ---------------------------------------------------------------------------
+/// compiler-rt `__fixdfti`: f64 to i128, truncating toward zero. Out-of-range
+/// inputs saturate to the i128 minimum or maximum.
 i128 __fixdfti(f64 d) {
     if (d == 0.0) {
         return (i128)0;
@@ -251,6 +267,8 @@ i128 __fixdfti(f64 d) {
     return (i128)mag;
 }
 
+/// compiler-rt `__floattidf`: i128 to f64. Combines two 64-bit halves, so
+/// the result may differ from correct rounding by one ulp.
 f64 __floattidf(i128 a) {
     if (a == (i128)0) {
         return 0.0;
@@ -276,6 +294,8 @@ f64 __floattidf(i128 a) {
 // signed variants above: no f64 <-> 128-bit cast appears in these bodies.
 // ---------------------------------------------------------------------------
 
+/// compiler-rt `__floatuntidf`: u128 to f64. Combines two 64-bit halves, so
+/// the result may differ from correct rounding by one ulp.
 f64 __floatuntidf(u128 a) {
     u64 hi = (u64)(a >> (u128)64);
     u64 lo = (u64)a;
@@ -283,6 +303,8 @@ f64 __floatuntidf(u128 a) {
     return result + (f64)lo;
 }
 
+/// compiler-rt `__fixunsdfti`: f64 to u128, truncating toward zero. Values
+/// below 1 give 0 and values of 2^128 or more saturate to the maximum.
 u128 __fixunsdfti(f64 d) {
     if (d < 1.0) {
         return (u128)0;

@@ -3,20 +3,26 @@
 import std.display;
 import std.sys.os;
 
+/// Clock id for wall-clock time, which can jump when the system time changes.
 const i64 CLOCK_REALTIME = 0;
+/// Clock id for a steadily increasing clock with an arbitrary start point.
 const i64 CLOCK_MONOTONIC = 1;
 
+/// POSIX `struct timespec`: seconds plus nanoseconds (0..999,999,999).
 struct Timespec {
     i64 sec;
     i64 nsec;
 }
 
+/// A span of time as whole seconds plus nanoseconds. Constructors split
+/// negative inputs with truncating division, so both parts are then negative.
 struct Duration {
     i64 secs;
     i64 nanos;
 }
 
 impl Duration {
+    /// Returns a zero-length duration.
     Duration zero() {
         Duration d;
         d.secs = 0;
@@ -24,6 +30,7 @@ impl Duration {
         return d;
     }
 
+    /// Returns a duration of `s` seconds.
     Duration from_secs(i64 s) {
         Duration d;
         d.secs = s;
@@ -31,6 +38,7 @@ impl Duration {
         return d;
     }
 
+    /// Returns a duration of `ms` milliseconds.
     Duration from_millis(i64 ms) {
         Duration d;
         d.secs = ms / 1000;
@@ -38,6 +46,7 @@ impl Duration {
         return d;
     }
 
+    /// Returns a duration of `us` microseconds.
     Duration from_micros(i64 us) {
         Duration d;
         d.secs = us / 1000000;
@@ -45,6 +54,7 @@ impl Duration {
         return d;
     }
 
+    /// Returns a duration of `ns` nanoseconds.
     Duration from_nanos(i64 ns) {
         Duration d;
         d.secs = ns / 1000000000;
@@ -52,16 +62,22 @@ impl Duration {
         return d;
     }
 
+    /// Returns the whole seconds, ignoring the nanosecond part.
     i64 as_secs(*self) { return self.secs; }
+    /// Returns the total milliseconds, truncated.
     i64 as_millis(*self) { return self.secs * 1000 + self.nanos / 1000000; }
+    /// Returns the total microseconds, truncated.
     i64 as_micros(*self) { return self.secs * 1000000 + self.nanos / 1000; }
+    /// Returns the total nanoseconds. Overflows past about 292 years.
     i64 as_nanos(*self) { return self.secs * 1000000000 + self.nanos; }
 }
 
+/// A reading of the monotonic clock, for measuring elapsed time.
 struct Instant {
     Timespec ts;
 }
 
+/// Reads the monotonic clock.
 Instant now() {
     Instant inst;
     sys_clock_gettime(CLOCK_MONOTONIC, (i64)&inst.ts);
@@ -69,12 +85,15 @@ Instant now() {
 }
 
 impl Instant {
+    /// Returns nanoseconds from `earlier` to this instant (negative if `earlier`
+    /// is later).
     i64 elapsed_ns(*self, Instant earlier) {
         i64 sec_diff = self.ts.sec - earlier.ts.sec;
         i64 nsec_diff = self.ts.nsec - earlier.ts.nsec;
         return sec_diff * 1000000000 + nsec_diff;
     }
 
+    /// Returns the time since this instant, reading the clock again.
     Duration elapsed(*self) {
         Instant current = now();
         i64 ns = current.elapsed_ns(*self);
@@ -82,10 +101,12 @@ impl Instant {
     }
 }
 
+/// A reading of the wall clock (unix time).
 struct SystemTime {
     Timespec ts;
 }
 
+/// Reads the wall clock.
 SystemTime system_time_now() {
     SystemTime st;
     sys_clock_gettime(CLOCK_REALTIME, (i64)&st.ts);
@@ -93,10 +114,12 @@ SystemTime system_time_now() {
 }
 
 impl SystemTime {
+    /// Returns whole seconds since the unix epoch.
     i64 unix_timestamp(*self) {
         return self.ts.sec;
     }
 
+    /// Returns milliseconds since the unix epoch.
     i64 unix_timestamp_millis(*self) {
         return self.ts.sec * 1000 + self.ts.nsec / 1000000;
     }
@@ -133,6 +156,8 @@ impl Display for Instant {
     }
 }
 
+/// Blocks the calling thread for at least `d`, resuming after signal
+/// interruptions with the remaining time.
 void sleep(Duration d) {
     Timespec req;
     req.sec = d.secs;
@@ -150,6 +175,7 @@ void sleep(Duration d) {
     }
 }
 
+/// Blocks the calling thread for at least `ms` milliseconds.
 void sleep_ms(i64 ms) {
     sleep(Duration.from_millis(ms));
 }

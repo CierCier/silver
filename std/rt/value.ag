@@ -40,11 +40,13 @@ Value* alloc_value() {
     return alloc<Value>();
 }
 
+/// Frees a `Value` box from `alloc_value` without dropping its contents.
 void free_value(Value* p) {
     free(p);
 }
 
-// Digits of a non-positive i128 value (avoids overflow on i128 min).
+/// Digits of a non-positive i128 value (avoids overflow on i128 min).
+/// Internal: appends the decimal digits of a non-positive value.
 void rt_value_append_i128_neg(String* out, i128 value) {
     if (value <= (i128)-10) {
         rt_value_append_i128_neg(out, value / (i128)10);
@@ -97,20 +99,31 @@ void rt_value_append_f64(String* out, f64 value) {
 // UINT        uint_val   (+ ty)     STRUCT   items       (+ ty)
 // FLOAT       float_val  (+ ty)     ENUM     items + variant   (+ ty)
 
+/// `Value.kind`: no value.
 const i32 VALUE_KIND_UNIT = 0;
+/// `Value.kind`: `bool_val` is active.
 const i32 VALUE_KIND_BOOL = 1;
+/// `Value.kind`: `int_val` is active.
 const i32 VALUE_KIND_INT = 2;
+/// `Value.kind`: `uint_val` is active.
 const i32 VALUE_KIND_UINT = 3;
+/// `Value.kind`: `float_val` is active.
 const i32 VALUE_KIND_FLOAT = 4;
+/// `Value.kind`: `text` is active.
 const i32 VALUE_KIND_STRING = 5;
+/// `Value.kind`: `items` holds the vector elements.
 const i32 VALUE_KIND_VEC = 6;
+/// `Value.kind`: `inner` is the boxed value, or null for none.
 const i32 VALUE_KIND_OPTIONAL = 7;
+/// `Value.kind`: `items` holds the struct fields.
 const i32 VALUE_KIND_STRUCT = 8;
+/// `Value.kind`: `variant` plus payload `items`.
 const i32 VALUE_KIND_ENUM = 9;
 
 // ---------------------------------------------------------------------------
 // VALUE_ERR — mirrors silver_runtime's ValueError variants
 
+/// Value construction error kinds, mirroring silver_runtime's `ValueError`.
 enum VALUE_ERR {
     NONE = 0;
     TYPE_MISMATCH = 1;
@@ -124,6 +137,8 @@ enum VALUE_ERR {
 // ---------------------------------------------------------------------------
 // Value — tagged dynamic value.
 
+/// A tagged dynamic value; `kind` (a `VALUE_KIND_*`) selects the payload.
+/// Owns its string, items, and boxed inner value; dropping it frees them.
 struct Value {
     i32 kind;
     TypeId ty;
@@ -139,8 +154,8 @@ struct Value {
 }
 
 impl Value {
-    // Zero every payload field so any constructor yields a fully
-    // initialized value (null inner, empty owned containers).
+    /// Zero every payload field so any constructor yields a fully
+    /// initialized value (null inner, empty owned containers).
     Value blank() {
         Value v;
         v.kind = VALUE_KIND_UNIT;
@@ -157,8 +172,9 @@ impl Value {
         return v;
     }
 
-    // Deep-copy helper used by clone() (Vec<T> elements are shallow, so
-    // composite payloads recurse).
+    /// Deep-copy helper used by clone() (Vec<T> elements are shallow, so
+    /// composite payloads recurse).
+    /// Returns an independent deep copy.
     Value clone(*self) {
         Value v = Value.blank();
         v.kind = self.kind;
@@ -191,11 +207,13 @@ impl Value {
 
     // -- Plain constructors (type tag is fixed or supplied by the caller) --
 
+    /// Returns the unit value.
     Value unit() {
         Value v = Value.blank();
         return v;
     }
 
+    /// Wraps a bool.
     Value from_bool(bool value) {
         Value v = Value.blank();
         v.kind = VALUE_KIND_BOOL;
@@ -204,6 +222,7 @@ impl Value {
         return v;
     }
 
+    /// Wraps a signed integer of type `ty` without validating the type.
     Value from_int(TypeId ty, i128 value) {
         Value v = Value.blank();
         v.kind = VALUE_KIND_INT;
@@ -212,6 +231,7 @@ impl Value {
         return v;
     }
 
+    /// Wraps an unsigned integer of type `ty` without validating the type.
     Value from_uint(TypeId ty, u128 value) {
         Value v = Value.blank();
         v.kind = VALUE_KIND_UINT;
@@ -220,6 +240,7 @@ impl Value {
         return v;
     }
 
+    /// Wraps a float of type `ty` without validating the type.
     Value from_float(TypeId ty, f64 value) {
         Value v = Value.blank();
         v.kind = VALUE_KIND_FLOAT;
@@ -338,6 +359,8 @@ impl Drop for Value {
 // ok flag + Value + VALUE_ERR code + owned message mirroring the Rust
 // ValueError Display strings.
 
+/// The outcome of a validating constructor: a value or a `VALUE_ERR` code
+/// with an owned message. Dropping it frees both.
 struct ValueResult {
     bool ok;
     Value value;
@@ -346,6 +369,7 @@ struct ValueResult {
 }
 
 impl ValueResult {
+    /// Builds a successful result, taking ownership of `value`.
     ValueResult ok_value(Value value) {
         ValueResult r;
         r.ok = true;
@@ -355,6 +379,7 @@ impl ValueResult {
         return r;
     }
 
+    /// Builds a failed result with code `err`, taking ownership of `msg`.
     ValueResult error(i32 err, String msg) {
         ValueResult r;
         r.ok = false;
@@ -364,10 +389,12 @@ impl ValueResult {
         return r;
     }
 
+    /// Returns true on success.
     bool is_ok(*self) {
         return self.ok;
     }
 
+    /// Returns true on failure.
     bool is_err(*self) {
         return !self.ok;
     }
@@ -383,6 +410,7 @@ impl Drop for ValueResult {
 // ---------------------------------------------------------------------------
 // Error-message helpers (mirror the Rust ValueError Display strings).
 
+/// Returns the registry name of `id`, or "<unknown>", as an owned string.
 String value_err_type_name(TypeRegistry* reg, TypeId id) {
     str name = reg.name_of(id);
     if (name == (str)0) {
@@ -716,6 +744,7 @@ ValueResult value_new_enum_by_discriminant(TypeRegistry* reg, TypeId ty, i64 dis
 // Display (TypeRegistry::display_value in the Rust runtime).
 
 
+/// Appends the display name of type `id` to `out`.
 void value_display_type_into(TypeId id, TypeRegistry* reg, String* out) {
     str name = reg.name_of(id);
     if (name == (str)0) {
@@ -727,6 +756,7 @@ void value_display_type_into(TypeId id, TypeRegistry* reg, String* out) {
     out.push_str(name);
 }
 
+/// Appends `items` displayed and separated by ", ".
 void value_display_items_into(Vec<Value>* items, TypeRegistry* reg, String* out) {
     i64 i = 0;
     while (i < items.len()) {
@@ -739,6 +769,7 @@ void value_display_items_into(Vec<Value>* items, TypeRegistry* reg, String* out)
     }
 }
 
+/// Appends the display text of `*v` (Rust runtime `display_value` format).
 void value_display_into(Value* v, TypeRegistry* reg, String* out) {
     if (v.kind == VALUE_KIND_UNIT) {
         out.push_str("()");

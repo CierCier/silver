@@ -18,18 +18,23 @@ import std.sys.result;
 // Memory: mmap-like page allocation.
 // ---------------------------------------------------------------------------
 
+/// Seam: maps memory (mmap(2) semantics). Returns the address or -errno.
 i64 sys_mmap(i64 addr, i64 len, i64 prot, i64 flags, i64 fd, i64 off) {
     return raw_sys_mmap(addr, len, prot, flags, fd, off);
 }
 
+/// Seam: unmaps memory (munmap(2)). Returns 0 or -errno.
 i64 sys_munmap(i64 addr, i64 len) {
     return raw_sys_munmap(addr, len);
 }
 
+/// Seam: writes up to `len` bytes (write(2)). Returns the count or -errno.
 i64 sys_write(i64 fd, i64 buf, i64 len) {
     return raw_sys_write(fd, buf, len);
 }
 
+/// Seam: reads up to `len` bytes (read(2)). Returns the count, 0 at EOF, or
+/// -errno.
 i64 sys_read(i64 fd, i64 buf, i64 len) {
     return raw_sys_read(fd, buf, len);
 }
@@ -46,36 +51,44 @@ i64 sys_stat(i64 path, i64 buf) {
     return raw_sys_stat(path, buf);
 }
 
+/// Seam: closes `fd`. Returns 0 or -errno.
 i64 sys_close(i64 fd) {
     return raw_sys_close(fd);
 }
 
+/// Seam: openat(2). Returns the new fd or -errno.
 i64 sys_openat(i64 dirfd, i64 path, i64 flags, i64 mode) {
     // raw/fs.ag's generated wrapper has the same name as this one; call the
     // syscall seam directly to stay unambiguous.
     return syscall4((i64)RAW_FS.OPENAT, dirfd, path, flags, mode);
 }
 
+/// Seam: fcntl(2) for F_GETFL/F_SETFL. Returns the result or -errno.
 i64 sys_fcntl(i64 fd, i64 cmd, i64 arg) {
     return syscall3((i64)RAW_FS.FCNTL, fd, cmd, arg);
 }
 
+/// Seam: mremap(2). Returns the new address or -errno.
 i64 sys_mremap(i64 old_addr, i64 old_size, i64 new_size, i64 flags, i64 new_addr) {
     return syscall5((i64)RAW_MEMORY.MREMAP, old_addr, old_size, new_size, flags, new_addr);
 }
 
+/// Seam: ends the calling thread only (exit(2), not exit_group).
 i64 sys_exit(i64 code) {
     return raw_sys_exit(code);
 }
 
+/// Seam: lseek(2). Returns the new offset or -errno.
 i64 sys_lseek(i64 fd, i64 off, i64 whence) {
     return raw_sys_lseek(fd, off, whence);
 }
 
+/// Seam: unlink(2). Returns 0 or -errno.
 i64 sys_unlink(i64 path) {
     return raw_sys_unlink(path);
 }
 
+/// Seam: rename(2), replacing `to`. Returns 0 or -errno.
 i64 sys_rename(i64 from, i64 to) {
     return raw_sys_rename(from, to);
 }
@@ -84,10 +97,13 @@ i64 sys_rename(i64 from, i64 to) {
 // Process-level: exit, signals (abort only), pid.
 // ---------------------------------------------------------------------------
 
+/// Seam: ends the whole process with `code`, skipping destructors and buffer
+/// flushes.
 i64 sys_exit_group(i64 code) {
     return raw_sys_exit_group(code);
 }
 
+/// Seam: returns the process id.
 i64 sys_getpid() {
     return raw_sys_getpid();
 }
@@ -105,6 +121,7 @@ void thread_exit(i64 code) {
     raw_sys_exit(code);
 }
 
+/// Seam: yields the CPU to another runnable thread (sched_yield).
 void thread_yield() {
     // raw/thread.ag's generated wrapper has the same name as this one (and
     // importing that module makes the overload ambiguous), so call the
@@ -118,6 +135,9 @@ void thread_yield() {
 // ignored there). The start function always has signature void(i64).
 // ---------------------------------------------------------------------------
 
+/// Seam: starts a thread running `fn(arg)` on `stack_top` via clone(2) with
+/// `flags`. The kernel clears `*ctid` when the thread exits. Returns the
+/// child tid or -errno. The stack must stay mapped until the thread exits.
 i64 thread_spawn_raw(i64 flags, u8* stack_top, i64 fn, i64 arg, i32* ctid) {
     // clone + child trampoline. Parent returns the child tid in %rax; the
     // child resumes with rsp = stack_top, calls fn(arg) (arg arrives in r9,
@@ -140,6 +160,7 @@ i64 thread_spawn_raw(i64 flags, u8* stack_top, i64 fn, i64 arg, i32* ctid) {
 // Futex -> WaitOnAddress.
 // ---------------------------------------------------------------------------
 
+/// Seam: futex(2) passthrough. Returns the kernel result or -errno.
 i64 sys_futex(i64 uaddr, i64 op, i64 val, i64 timeout, i64 uaddr2, i64 val3) {
     return raw_sys_futex(uaddr, op, val, timeout, uaddr2, val3);
 }
@@ -148,6 +169,7 @@ i64 sys_futex(i64 uaddr, i64 op, i64 val, i64 timeout, i64 uaddr2, i64 val3) {
 // Time.
 // ---------------------------------------------------------------------------
 
+/// Seam: clock_gettime(2) into the `{i64 sec, i64 nsec}` at `ts`.
 i64 sys_clock_gettime(i64 clk, i64 ts) {
     return raw_sys_clock_gettime(clk, ts);
 }
@@ -167,10 +189,13 @@ void thread_reclaim(i64 tid) {}
 // Randomness.
 // ---------------------------------------------------------------------------
 
+/// Seam: fills `len` bytes at `buf` from the kernel CSPRNG (getrandom(2)).
+/// Returns the count written (may be short) or -errno.
 i64 sys_getrandom(i64 buf, i64 len, i64 flags) {
     return raw_sys_getrandom(buf, len, flags);
 }
 
+/// Seam: platform startup hook; nothing to do on Linux.
 void sys_platform_init() {
 }
 
@@ -178,14 +203,17 @@ void sys_platform_init() {
 // Filesystem seam: mkdir / access / rmdir / directory listing.
 // ---------------------------------------------------------------------------
 
+/// Seam: mkdir(2) with permission bits `mode`. Returns 0 or -errno.
 i64 sys_mkdir(i64 path, i64 mode) {
     return raw_sys_mkdir(path, mode);
 }
 
+/// Seam: access(2) check of `mode` bits. Returns 0 or -errno.
 i64 sys_access(i64 path, i64 mode) {
     return raw_sys_access(path, mode);
 }
 
+/// Seam: rmdir(2); the directory must be empty. Returns 0 or -errno.
 i64 sys_rmdir(i64 path) {
     return raw_sys_rmdir(path);
 }

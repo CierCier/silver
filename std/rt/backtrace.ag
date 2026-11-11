@@ -18,6 +18,8 @@
 
 import std.sys.os;
 
+/// One compiler-emitted function record: entry address, name, and the
+/// source file and line of its definition (C strings, static lifetime).
 struct BtEntry {
     i64 addr;
     u8* name;
@@ -25,7 +27,7 @@ struct BtEntry {
     i64 line;
 }
 
-// Exact source lines: {function start, offset within function, line, file}.
+/// Exact source lines: {function start, offset within function, line, file}.
 struct BtLine {
     i64 addr;
     i64 offset;
@@ -33,14 +35,16 @@ struct BtLine {
     u8* file;
 }
 
-// Spilled arguments: per function {start, count, args}, each arg = {name,
-// rbp-relative frame offset, byte size}.
+/// Spilled arguments: per function {start, count, args}, each arg = {name,
+/// rbp-relative frame offset, byte size}.
 struct BtArg {
     u8* name;
     i64 fbreg;
     i64 size;
 }
 
+/// The spilled arguments of one function: its start address and an array of
+/// `count` argument records.
 struct BtFnArgs {
     i64 addr;
     i64 count;
@@ -48,16 +52,22 @@ struct BtFnArgs {
 }
 
 extern "C" {
+    /// Number of `__silver_bt_entries` records, emitted by the compiler.
     i64 __silver_bt_count;
+    /// Function records, sorted in place on first use.
     BtEntry* __silver_bt_entries;
+    /// Number of `__silver_bt_lines` records.
     i64 __silver_bt_lines_count;
+    /// Line records, sorted in place on first use.
     BtLine* __silver_bt_lines;
+    /// Number of `__silver_bt_args` records.
     i64 __silver_bt_args_count;
+    /// Argument records for printing spilled arguments in traces.
     BtFnArgs* __silver_bt_args;
 }
 
-/// Return the caller's frame pointer so it remains valid after this helper returns.
 if (@cfg(os.linux)) {
+/// Return the caller's frame pointer so it remains valid after this helper returns.
 i64 bt_read_rbp() {
     return asm("movq (%rbp), %rax", [], []);
 }
@@ -138,7 +148,9 @@ void bt_write_hex(i64 fd, i64 value) {
 // memory is implicitly locked — guards the one-time initialization; later
 // lookups are unlocked reads of stable tables.
 
+/// Internal: spinlock word guarding the one-time sort.
 i64 g_bt_lock;
+/// Internal: nonzero once the tables are sorted (published after the sort).
 i32 g_bt_sorted;
 
 if (@cfg(os.wasi)) {
@@ -146,6 +158,8 @@ if (@cfg(os.wasi)) {
 // the wasm printer is a stub anyway (the host unwinds via the names section).
 // Plain loads/stores keep the shared `bt_ensure_sorted` code compiling
 // without inline asm (which is a hard compile error on wasm).
+/// Internal: stores 1 at `addr` and returns the previous value (no atomics
+/// needed on single-threaded WASI).
 i64 bt_xchg(i64 addr) {
     i64* p = (i64*)addr;
     i64 prev = *p;
@@ -153,14 +167,17 @@ i64 bt_xchg(i64 addr) {
     return prev;
 }
 
+/// Internal: reads the sorted flag at `addr`.
 i64 bt_sorted_load(i64 addr) {
     i32* p = (i32*)addr;
     return (i64)*p;
 }
 
+/// Internal: no-op lock (single-threaded WASI).
 void bt_lock_acquire() {
 }
 
+/// Internal: no-op unlock (single-threaded WASI).
 void bt_lock_release() {
 }
 } else {
@@ -177,6 +194,7 @@ i64 bt_sorted_load(i64 addr) {
     return asm("movl (%rdi), %eax", [0, addr], ["memory"]);
 }
 
+/// Internal: spins on `g_bt_lock` until acquired.
 void bt_lock_acquire() {
     i64 addr = (i64)&g_bt_lock;
     while (bt_xchg(addr) != 0) {
@@ -184,12 +202,14 @@ void bt_lock_acquire() {
     }
 }
 
+/// Internal: releases `g_bt_lock`.
 void bt_lock_release() {
     i64 addr = (i64)&g_bt_lock;
     i64 _s = asm("movq $0, (%rdi)", [0, addr], ["memory"]);
 }
 }
 
+/// Internal: orders line records by function start, then offset.
 bool bt_line_before(BtLine a, BtLine b) {
     if (a.addr != b.addr) {
         return a.addr < b.addr;
@@ -197,8 +217,10 @@ bool bt_line_before(BtLine a, BtLine b) {
     return a.offset < b.offset;
 }
 
+/// Recursion depth at which the table quicksort falls back to heapsort.
 const i64 BT_QSORT_MAX_RECURSION_DEPTH = 64;
 
+/// Internal: heap sift-down over function records `[lo, lo + count)`.
 void bt_heap_sift_entries(i64 lo, i64 count, i64 root) {
     while (root * 2 + 1 < count) {
         i64 child = root * 2 + 1;
@@ -215,6 +237,7 @@ void bt_heap_sift_entries(i64 lo, i64 count, i64 root) {
     }
 }
 
+/// Internal: heapsorts function records `[lo, hi]` by address.
 void bt_heap_sort_entries(i64 lo, i64 hi) {
     i64 count = hi - lo + 1;
     i64 start = count / 2;
@@ -232,6 +255,7 @@ void bt_heap_sort_entries(i64 lo, i64 hi) {
     }
 }
 
+/// Internal: heap sift-down over line records `[lo, lo + count)`.
 void bt_heap_sift_lines(i64 lo, i64 count, i64 root) {
     while (root * 2 + 1 < count) {
         i64 child = root * 2 + 1;
@@ -248,6 +272,7 @@ void bt_heap_sift_lines(i64 lo, i64 count, i64 root) {
     }
 }
 
+/// Internal: heapsorts line records `[lo, hi]`.
 void bt_heap_sort_lines(i64 lo, i64 hi) {
     i64 count = hi - lo + 1;
     i64 start = count / 2;
@@ -265,6 +290,8 @@ void bt_heap_sort_lines(i64 lo, i64 hi) {
     }
 }
 
+/// Internal: quicksorts function records `[lo, hi]`, falling back to
+/// heapsort past `BT_QSORT_MAX_RECURSION_DEPTH`.
 void bt_qsort_entries_at(i64 lo, i64 hi, i64 depth) {
     while (lo < hi) {
         if (depth >= BT_QSORT_MAX_RECURSION_DEPTH) {
@@ -299,10 +326,12 @@ void bt_qsort_entries_at(i64 lo, i64 hi, i64 depth) {
     }
 }
 
+/// Internal: sorts all function records in `[lo, hi]`.
 void bt_qsort_entries(i64 lo, i64 hi) {
     bt_qsort_entries_at(lo, hi, 0);
 }
 
+/// Internal: quicksorts line records `[lo, hi]` with the heapsort fallback.
 void bt_qsort_lines_at(i64 lo, i64 hi, i64 depth) {
     while (lo < hi) {
         if (depth >= BT_QSORT_MAX_RECURSION_DEPTH) {
@@ -337,6 +366,7 @@ void bt_qsort_lines_at(i64 lo, i64 hi, i64 depth) {
     }
 }
 
+/// Internal: sorts all line records in `[lo, hi]`.
 void bt_qsort_lines(i64 lo, i64 hi) {
     bt_qsort_lines_at(lo, hi, 0);
 }
@@ -478,6 +508,7 @@ void bt_print_args(i64 fd, i64 callee_rbp, i64 fn_addr) {
     }
 }
 
+if (@cfg(os.linux)) {
 /// Print a named stack trace to stderr: on Linux the SysV `[rbp]` chain is
 /// walked directly; on Windows the frame pointers are REBASED by LLVM
 /// (`push rbp; push rsi; ...; mov rbp, rsp; sub N; lea rbp=rsp+K`), so the
@@ -485,7 +516,6 @@ void bt_print_args(i64 fd, i64 callee_rbp, i64 fn_addr) {
 /// the established frame pointer the args table needs.
 /// `skip` frames are omitted from the top (the walker's own frame and the
 /// abort/assert frame that invoked it).
-if (@cfg(os.linux)) {
 void silver_print_backtrace(i64 skip) {
     i64 fd = 2;
     bt_write_cstr(fd, (u8*)"backtrace:
@@ -557,26 +587,35 @@ void silver_print_backtrace(i64 skip) {
 }
 
 if (@cfg(os.windows)) {
-// x64 CONTEXT offsets (byte) used by the Windows walker.
-// Rsp = 0x98, Rbp = 0xa0, Rip = 0xf8; sizeof(CONTEXT) = 0x4d0 (1232).
+/// x64 CONTEXT offsets (byte) used by the Windows walker.
+/// Rsp = 0x98, Rbp = 0xa0, Rip = 0xf8; sizeof(CONTEXT) = 0x4d0 (1232).
+/// Byte offset of Rsp in the x64 `CONTEXT` structure.
 const i64 CTX_RSP = 0x98;
+/// Byte offset of Rip in the x64 `CONTEXT` structure.
 const i64 CTX_RIP = 0xf8;
+/// Size in bytes of the x64 `CONTEXT` structure.
 const i64 CTX_SIZE = 0x4d0;
 
 extern "C" {
+    /// Win32 `RtlCaptureContext`: captures the caller's register state.
     #[link_name("RtlCaptureContext")]
     void win_RtlCaptureContext(void* ctx);
+    /// Win32 `RtlLookupFunctionEntry`: finds unwind data for `control_pc`.
     #[link_name("RtlLookupFunctionEntry")]
     void* win_RtlLookupFunctionEntry(u64 control_pc, u64* image_base, void* history_table);
+    /// Win32 `RtlVirtualUnwind`: unwinds one frame of a captured context.
     #[link_name("RtlVirtualUnwind")]
     void win_RtlVirtualUnwind(u32 handler_type, u64 image_base, u64 control_pc, void* fn_entry, void* ctx, void** handler_data, u64* establisher_frame, void* context_pointers);
 }
 
+/// Internal: reads Rip from a captured `CONTEXT`.
 i64 ctx_get_rip(u8* ctx) {
     i64* q = (i64*)ctx;
     return q[CTX_RIP / 8];
 }
 
+/// Prints a named stack trace to stderr using the Windows unwinder, omitting
+/// `skip` frames from the top. Does not allocate; does not exit.
 void silver_print_backtrace(i64 skip) {
     i64 fd = 2;
     bt_write_cstr(fd, (u8*)"backtrace:
@@ -697,6 +736,7 @@ if (@cfg(os.wasi)) {
 // resolves frames from the module's `name` section instead, so the runtime
 // printer is a stub: it announces the failure and exits, and the leak-check
 // origin capture in std/mem/alloc.ag degrades to "caller unknown".
+/// Prints only a notice that backtraces are unavailable; does not exit.
 void silver_print_backtrace(i64 skip) {
     i64 fd = 2;
     bt_write_cstr(fd, (u8*)"backtrace: unavailable on WebAssembly (use a host debugger or the module names section)\n");

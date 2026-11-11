@@ -11,51 +11,89 @@ import std.sys.result;
 
 if (@cfg(os.linux)) {
 // Setup flags (IORING_SETUP_*)
+/// io_uring setup flag: busy-poll for completions (O_DIRECT files only).
 const u32 IORING_SETUP_IOPOLL        = 1;
+/// io_uring setup flag: a kernel thread polls the submission queue.
 const u32 IORING_SETUP_SQPOLL        = 2;
+/// io_uring setup flag: pin the SQPOLL thread to `sq_thread_cpu`.
 const u32 IORING_SETUP_SQ_AFF        = 4;
+/// io_uring setup flag: use `cq_entries` for the completion queue size.
 const u32 IORING_SETUP_CQSIZE        = 8;
+/// io_uring setup flag: clamp oversized entry counts instead of failing.
 const u32 IORING_SETUP_CLAMP         = 16;
+/// io_uring setup flag: share the async worker pool of ring `wq_fd`.
 const u32 IORING_SETUP_ATTACH_WQ     = 32;
+/// io_uring setup flag: start disabled until enabled by register.
 const u32 IORING_SETUP_R_DISABLED    = 64;
+/// io_uring setup flag: keep submitting after an SQE fails.
 const u32 IORING_SETUP_SUBMIT_ALL    = 128;
+/// io_uring setup flag: cooperative task running (no IPI on completion).
 const u32 IORING_SETUP_COOP_TASKRUN  = 256;
+/// io_uring setup flag: set a flag in the SQ ring when work is pending.
 const u32 IORING_SETUP_TASKRUN_FLAG  = 512;
+/// io_uring setup flag: 128-byte submission entries.
 const u32 IORING_SETUP_SQE128        = 1024;
+/// io_uring setup flag: 32-byte completion entries.
 const u32 IORING_SETUP_CQE32         = 2048;
+/// io_uring setup flag: only one task submits.
 const u32 IORING_SETUP_SINGLE_ISSUER = 4096;
+/// io_uring setup flag: defer completion work to the next enter call.
 const u32 IORING_SETUP_DEFER_TASKRUN = 8192;
+/// io_uring setup flag: the application provides the ring memory.
 const u32 IORING_SETUP_NO_MMAP       = 16384;
+/// io_uring setup flag: no SQ index array.
 const u32 IORING_SETUP_NO_SQARRAY    = 65536;
 
 // Kernel features (IORING_FEAT_*)
+/// io_uring feature: SQ and CQ rings share one mmap.
 const u32 IORING_FEAT_SINGLE_MMAP     = 1;
+/// io_uring feature: completions are never dropped on CQ overflow.
 const u32 IORING_FEAT_NODROP          = 2;
+/// io_uring feature: SQE data is stable once submitted.
 const u32 IORING_FEAT_SUBMIT_STABLE   = 4;
+/// io_uring feature: offset -1 means the current file position.
 const u32 IORING_FEAT_RW_CUR_POS      = 8;
+/// io_uring feature: requests use the submitter's credentials.
 const u32 IORING_FEAT_CUR_PERSONALITY = 16;
+/// io_uring feature: internal polling for pollable files.
 const u32 IORING_FEAT_FAST_POLL       = 32;
+/// io_uring feature: 32-bit poll event masks.
 const u32 IORING_FEAT_POLL_32BITS     = 64;
+/// io_uring feature: SQPOLL works with non-registered files.
 const u32 IORING_FEAT_SQPOLL_NONFIXED = 128;
+/// io_uring feature: io_uring_enter accepts an extended argument.
 const u32 IORING_FEAT_EXT_ARG         = 256;
+/// io_uring feature: native kernel worker threads.
 const u32 IORING_FEAT_NATIVE_WORKERS  = 512;
+/// io_uring feature: resource tagging for registered buffers and files.
 const u32 IORING_FEAT_RSRC_TAGS       = 1024;
+/// io_uring feature: SQEs can skip posting a completion.
 const u32 IORING_FEAT_CQE_SKIP        = 2048;
+/// io_uring feature: linked file assignment.
 const u32 IORING_FEAT_LINKED_FILE     = 4096;
+/// io_uring feature: registered ring descriptors.
 const u32 IORING_FEAT_REG_REG_RING    = 8192;
 
 // Magic mmap offsets (IORING_OFF_*)
+/// mmap offset of the submission ring.
 const i64 IORING_OFF_SQ_RING = 0;
+/// mmap offset of the completion ring.
 const i64 IORING_OFF_CQ_RING = 0x8000000;
+/// mmap offset of the submission entry array.
 const i64 IORING_OFF_SQES    = 0x10000000;
 
 // io_uring_enter flags
+/// io_uring_enter flag: wait for `min_complete` completions.
 const u32 IORING_ENTER_GETEVENTS = 1;
+/// io_uring_enter flag: wake the SQPOLL thread.
 const u32 IORING_ENTER_SQ_WAKEUP = 2;
+/// io_uring_enter flag: wait for SQ space (SQPOLL).
 const u32 IORING_ENTER_SQ_WAIT   = 4;
+/// io_uring_enter flag: the last arguments are an extended argument struct.
 const u32 IORING_ENTER_EXT_ARG   = 8;
 
-// io_uring opcodes
+/// io_uring opcodes
+/// Only a subset of kernel opcodes is listed.
 enum IoUringOp {
     NOP = 0;
     READV = 1;
@@ -81,7 +119,7 @@ enum IoUringOp {
     SOCKET = 45;
 }
 
-// Memory offsets for submission ring (40 bytes)
+/// Memory offsets for submission ring (40 bytes)
 struct IoSqringOffsets {
     u32 head;
     u32 tail;
@@ -94,7 +132,7 @@ struct IoSqringOffsets {
     u64 user_addr;
 }
 
-// Memory offsets for completion ring (40 bytes)
+/// Memory offsets for completion ring (40 bytes)
 struct IoCqringOffsets {
     u32 head;
     u32 tail;
@@ -107,7 +145,7 @@ struct IoCqringOffsets {
     u64 user_addr;
 }
 
-// Parameters structure passed to io_uring_setup (120 bytes)
+/// Parameters structure passed to io_uring_setup (120 bytes)
 struct IoUringParams {
     u32 sq_entries;
     u32 cq_entries;
@@ -123,7 +161,7 @@ struct IoUringParams {
     IoCqringOffsets cq_off;
 }
 
-// Submission Queue Entry (64 bytes)
+/// Submission Queue Entry (64 bytes)
 struct IoUringSqe {
     u8  opcode;
     u8  flags;
@@ -141,7 +179,7 @@ struct IoUringSqe {
     u64 pad;
 }
 
-// Completion Queue Entry (16 bytes)
+/// Completion Queue Entry (16 bytes)
 struct IoUringCqe {
     u64 user_data;
     i32 res;
@@ -149,19 +187,28 @@ struct IoUringCqe {
 }
 
 // Raw syscall helpers
+/// io_uring_setup(2): creates a ring with `entries` slots and fills `params`.
+/// Returns the ring fd, which the caller owns.
 Result<i64, Error> try_io_uring_setup(u32 entries, IoUringParams* params) {
     return Result<i64, Error>.from_raw(sys_io_uring_setup((i64)entries, (i64)params));
 }
 
+/// io_uring_enter(2): submits `to_submit` entries and optionally waits for
+/// `min_complete` completions. Blocks when waiting.
 Result<i64, Error> try_io_uring_enter(i32 fd, u32 to_submit, u32 min_complete, u32 flags) {
     return Result<i64, Error>.from_raw(sys_io_uring_enter6((i64)fd, (i64)to_submit, (i64)min_complete, (i64)flags, 0, 0));
 }
 
+/// io_uring_register(2). Known issue: `nr_args` is not passed to the kernel,
+/// because the raw wrapper is generated with three arguments.
 Result<i64, Error> try_io_uring_register(i32 fd, u32 opcode, void* arg, u32 nr_args) {
     return Result<i64, Error>.from_raw(sys_io_uring_register((i64)fd, (i64)opcode, (i64)arg));
 }
 
 // High-level RAII io_uring instance
+/// An owned io_uring instance with its rings mapped. Not thread-safe: ring
+/// indices are updated with plain stores, so use one ring per thread.
+/// Dropping it unmaps the rings and closes the fd.
 struct IoUring {
     i32 ring_fd;
     u32 flags;
@@ -201,6 +248,7 @@ struct IoUring {
 }
 
 impl IoUring {
+    /// Creates a ring with `entries` submission slots and maps its rings.
     Result<IoUring, Error> new(u32 entries) {
         IoUringParams p;
         memset((void*)&p, (u8)0, 120);
@@ -299,15 +347,19 @@ impl IoUring {
         return Ok(move ring);
     }
 
+    /// Returns the ring fd without giving up ownership.
     i32 fd(*self) {
         return self.ring_fd;
     }
 
+    /// Returns true while the ring is open.
     bool is_valid(*self) {
         return self.ring_fd >= 0;
     }
 
-    // Allocate the next SQE in the submission ring
+    /// Allocate the next SQE in the submission ring
+    /// Returns a zeroed entry owned by the ring, or null when the ring is full
+    /// or closed. Fill it with a `prep_*` call before `submit`.
     IoUringSqe* get_sqe(*self) {
         if (!self.is_valid()) {
             return (IoUringSqe*)0;
@@ -325,11 +377,14 @@ impl IoUring {
     }
 
     // SQE preparation helpers
+    /// Prepares a no-op entry that completes with `user_data`.
     void prep_nop(*self, IoUringSqe* sqe, u64 user_data) {
         sqe.opcode = (u8)IoUringOp.NOP;
         sqe.user_data = user_data;
     }
 
+    /// Prepares a read of `nbytes` at `offset` into `buf`. `buf` must stay valid
+    /// until the completion arrives.
     void prep_read(*self, IoUringSqe* sqe, i32 fd, void* buf, u32 nbytes, u64 offset, u64 user_data) {
         sqe.opcode = (u8)IoUringOp.READ;
         sqe.fd = fd;
@@ -339,6 +394,8 @@ impl IoUring {
         sqe.user_data = user_data;
     }
 
+    /// Prepares a write of `nbytes` at `offset` from `buf`. `buf` must stay
+    /// valid until the completion arrives.
     void prep_write(*self, IoUringSqe* sqe, i32 fd, void* buf, u32 nbytes, u64 offset, u64 user_data) {
         sqe.opcode = (u8)IoUringOp.WRITE;
         sqe.fd = fd;
@@ -348,6 +405,8 @@ impl IoUring {
         sqe.user_data = user_data;
     }
 
+    /// Prepares an accept on listening socket `fd`. `addr`/`addrlen` may be null
+    /// and must stay valid until the completion arrives.
     void prep_accept(*self, IoUringSqe* sqe, i32 fd, void* addr, u32* addrlen, u32 flags, u64 user_data) {
         sqe.opcode = (u8)IoUringOp.ACCEPT;
         sqe.fd = fd;
@@ -357,6 +416,8 @@ impl IoUring {
         sqe.user_data = user_data;
     }
 
+    /// Prepares a connect of socket `fd` to `addr`, which must stay valid until
+    /// the completion arrives.
     void prep_connect(*self, IoUringSqe* sqe, i32 fd, void* addr, u32 addrlen, u64 user_data) {
         sqe.opcode = (u8)IoUringOp.CONNECT;
         sqe.fd = fd;
@@ -365,6 +426,7 @@ impl IoUring {
         sqe.user_data = user_data;
     }
 
+    /// Prepares a send of `len` bytes from `buf`, valid until completion.
     void prep_send(*self, IoUringSqe* sqe, i32 fd, void* buf, u32 len, u32 flags, u64 user_data) {
         sqe.opcode = (u8)IoUringOp.SEND;
         sqe.fd = fd;
@@ -374,6 +436,7 @@ impl IoUring {
         sqe.user_data = user_data;
     }
 
+    /// Prepares a receive of up to `len` bytes into `buf`, valid until completion.
     void prep_recv(*self, IoUringSqe* sqe, i32 fd, void* buf, u32 len, u32 flags, u64 user_data) {
         sqe.opcode = (u8)IoUringOp.RECV;
         sqe.fd = fd;
@@ -383,17 +446,21 @@ impl IoUring {
         sqe.user_data = user_data;
     }
 
+    /// Prepares a close of `fd`.
     void prep_close(*self, IoUringSqe* sqe, i32 fd, u64 user_data) {
         sqe.opcode = (u8)IoUringOp.CLOSE;
         sqe.fd = fd;
         sqe.user_data = user_data;
     }
 
-    // Flush prepared SQEs and submit to kernel
+    /// Flush prepared SQEs and submit to kernel
+    /// Does not wait for completions.
     Result<i64, Error> submit(*self) {
         return self.submit_and_wait(0);
     }
 
+    /// Publishes prepared entries and enters the kernel, waiting for `wait_nr`
+    /// completions when it is nonzero. Returns the number submitted.
     Result<i64, Error> submit_and_wait(*self, u32 wait_nr) {
         if (!self.is_valid()) {
             return Err(EINVAL, "io_uring is closed");
@@ -419,7 +486,9 @@ impl IoUring {
         return try_io_uring_enter(self.ring_fd, to_submit, wait_nr, flags);
     }
 
-    // Non-blocking check for a completion event
+    /// Non-blocking check for a completion event
+    /// Copies the oldest completion into `*out_cqe` without consuming it;
+    /// returns false when none is ready. Call `cqe_seen` after handling it.
     bool peek_cqe(*self, IoUringCqe* out_cqe) {
         if (!self.is_valid()) {
             return false;
@@ -437,7 +506,8 @@ impl IoUring {
         return true;
     }
 
-    // Acknowledge consumption of a completion event
+    /// Acknowledge consumption of a completion event
+    /// Advances past one completion; `cqe` is not inspected.
     void cqe_seen(*self, IoUringCqe* cqe) {
         if (!self.is_valid()) {
             return;
@@ -445,7 +515,8 @@ impl IoUring {
         *self.cq_khead += 1;
     }
 
-    // Clean up mappings and close ring fd
+    /// Clean up mappings and close ring fd
+    /// Safe to call more than once.
     void close(*self) {
         if (self.ring_fd < 0) {
             return;

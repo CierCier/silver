@@ -3,29 +3,35 @@ import std.intern;
 import std.mem.vec;
 import frontend.diagnostics;
 
+/// One step from a place to a sub-place.
 enum ProjectionKind {
     Field;
     Index;
     Deref;
 }
 
+/// One projection; `field_name_id` is used by `Field` only.
 struct Projection {
     ProjectionKind kind;
     u32 field_name_id;
 }
 
+/// A memory location: a local plus `projections_count` projections stored
+/// from `projections_start` in a shared projection table.
 struct Place {
     u32 local_id;
     u32 projections_start;
     u16 projections_count;
 }
 
+/// Whether a place is uninitialized, initialized, or partly initialized.
 enum InitState {
     Uninit;
     Init;
     Partial;
 }
 
+/// One node of an owner's initialization plan tree (a field or the root).
 struct InitNodePlan {
     u32 parent_index;
     u32 first_child_index;
@@ -36,6 +42,8 @@ struct InitNodePlan {
     u32 field_index;
 }
 
+/// The field tree of one owned local, used to track partial initialization.
+/// Owns its node and projection vectors.
 struct InitOwnerPlan {
     u32 owner_local_id;
     u32 type_id;
@@ -46,6 +54,7 @@ struct InitOwnerPlan {
 }
 
 impl InitOwnerPlan {
+    /// Creates an empty plan for `owner` of type `type_id`.
     InitOwnerPlan new(u32 owner, u32 type_id, Span declaration, Span function) {
         InitOwnerPlan plan;
         plan.owner_local_id = owner;
@@ -57,6 +66,7 @@ impl InitOwnerPlan {
         return move plan;
     }
 
+    /// Returns a deep copy.
     InitOwnerPlan clone(&self) {
         InitOwnerPlan copy = InitOwnerPlan.new(self.owner_local_id, self.type_id,
                                                self.declaration, self.function);
@@ -72,6 +82,7 @@ impl InitOwnerPlan {
 }
 
 impl Place {
+    /// Returns the place for the whole local.
     Place new(u32 local_id) {
         Place p;
         p.local_id = local_id;
@@ -80,6 +91,7 @@ impl Place {
         return move p;
     }
 
+    /// Returns a place with projections from the shared table.
     Place with_projections(u32 local_id, u32 start, u16 count) {
         Place p;
         p.local_id = local_id;
@@ -88,11 +100,15 @@ impl Place {
         return move p;
     }
 
+    /// Returns true for a whole local (no projections).
     bool is_root(&self) {
         return self.projections_count == 0;
     }
 }
 
+/// Returns true when the places may alias: same local, and their common
+/// projection prefix never names different fields. Index projections are
+/// assumed to overlap.
 bool places_overlap(Place* a, Place* b, Vec<Projection>* projections) {
     if (a.local_id != b.local_id) {
         return false;
