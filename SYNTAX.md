@@ -1203,9 +1203,6 @@ The compiler joins a borrowing task before its borrows end:
   }
   ```
 
-Stage1 recognizes a borrowed launch only when the callee is declared in the
-same file; a borrowed launch of an imported function is rejected.
-
 A thread that must outlive the function that launched it cannot borrow;
 move owned values into it, or share them through `Arc<T>`.
 
