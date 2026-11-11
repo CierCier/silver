@@ -51,6 +51,7 @@ struct TaskRecord {
     i64 done;    // atomic: 1 once the child fn returned (thread then exits)
     i64 pack;    // launch pack ptr (compiler-owned); 0 for spawn(): freed by the waiter
     i32 ctid;    // kernel-managed tid via CLONE_CHILD_CLEARTID (cleared to 0 upon thread exit)
+    i64 scoped;  // 1 for a launch that borrows from its launcher: joined when the handle drops
 }
 
 /// Thread table and its guard. .bss, zero-initialized by the OS loader.
@@ -110,12 +111,10 @@ void thread_wait_ctid(TaskRecord* rec) {
 }
 
 
-/// Join one task: wait until the child fn returned, then reclaim the slot.
-/// Returns the child's tid. Silently returns -1 for a null record.
-i64 thread_join(TaskRecord* rec) {
-    if (rec == (TaskRecord*)0) {
-        return -1;
-    }
+/// Block until `rec`'s thread has finished: spin briefly, then sleep on the
+/// futex. Linux waits for the kernel to clear `ctid` (the thread has left its
+/// stack); other targets wait for the done flag.
+void thread_await_exit(TaskRecord* rec) {
     if (@cfg(os.linux)) {
         i64 spins = 0;
         while (true) {
@@ -141,6 +140,15 @@ i64 thread_join(TaskRecord* rec) {
             }
         }
     }
+}
+
+/// Join one task: wait until the child fn returned, then reclaim the slot.
+/// Returns the child's tid. Silently returns -1 for a null record.
+i64 thread_join(TaskRecord* rec) {
+    if (rec == (TaskRecord*)0) {
+        return -1;
+    }
+    thread_await_exit(rec);
     thread_lock_acquire();
     i64 tid = rec.tid;
     rec.tid = 0;
@@ -163,31 +171,7 @@ u8* __silver_wait_done(i64 rec) {
     if (r == (TaskRecord*)0) {
         return (u8*)0;
     }
-    if (@cfg(os.linux)) {
-        i64 spins = 0;
-        while (true) {
-            if (__atomic_load_i32(&r.ctid, ATOMIC_ACQUIRE) == 0) {
-                break;
-            }
-            spins = spins + 1;
-            if (spins > THREAD_JOIN_MAX_SPINS) {
-                thread_wait_ctid(r);
-                break;
-            }
-        }
-    } else {
-        i64 spins = 0;
-        while (true) {
-            if (__atomic_load_i64(&r.done, ATOMIC_ACQUIRE) == 1) {
-                break;
-            }
-            spins = spins + 1;
-            if (spins > THREAD_JOIN_MAX_SPINS) {
-                thread_wait_done_futex(r);
-                break;
-            }
-        }
-    }
+    thread_await_exit(r);
     thread_lock_acquire();
     u8* pack = (u8*)r.pack;
     i64 tid = r.tid;
@@ -196,6 +180,7 @@ u8* __silver_wait_done(i64 rec) {
     r.arg = 0;
     r.done = 0;
     r.pack = 0;
+    r.scoped = 0;
     thread_lock_release();
     // The child has exited: release its OS resources (Windows CreateThread
     // handle). Returned packs are task results, not thread handles.
@@ -203,6 +188,18 @@ u8* __silver_wait_done(i64 rec) {
         thread_reclaim(tid);
     }
     return pack;
+}
+
+/// Join a task handle that is leaving scope unwaited. A scoped task (one
+/// launched with borrowed arguments) is joined and its pack returned so the
+/// caller can drop the result and free the pack. Returns null for a null
+/// handle or a detached task, which keeps running until the exit-time join.
+u8* __silver_task_join_scoped(i64 rec) {
+    TaskRecord* r = (TaskRecord*)rec;
+    if (r == (TaskRecord*)0 || r.scoped == 0) {
+        return (u8*)0;
+    }
+    return __silver_wait_done(rec);
 }
 
 /// Join every live thread. Called by `_start` before I/O flush / exit.
