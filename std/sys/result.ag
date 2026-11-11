@@ -10,55 +10,83 @@
 // handling is unified with the rest of the stdlib.
 //
 // The typed wrappers are prefixed `try_` (try_read, try_write, ...) rather
-// than using the bare POSIX names: Silver `pub` functions emit unmangled
+// than using the bare POSIX names: public Silver functions emit unmangled
 // C-ABI symbols, and defining `read`/`write`/`open`/... would interpose on
 // libc symbols with an incompatible (sret struct return) ABI while the
 // toolchain still links against libc.
 
 // --- Well-known file descriptors and flag constants ---
+/// Standard input descriptor.
 const i32 STDIN_FD = 0;
+/// Standard output descriptor.
 const i32 STDOUT_FD = 1;
+/// Standard error descriptor.
 const i32 STDERR_FD = 2;
 
 // mmap protection bits (asm-generic/mman-common.h).
+/// mmap protection: no access.
 const i64 PROT_NONE = 0;
+/// mmap protection: readable.
 const i64 PROT_READ = 1;
+/// mmap protection: writable.
 const i64 PROT_WRITE = 2;
+/// mmap protection: executable.
 const i64 PROT_EXEC = 4;
 
 // mmap flag bits (x86_64).
+/// mmap flag: share the mapping with other mappers of the same object.
 const i64 MAP_SHARED = 1;
+/// mmap flag: private copy-on-write mapping.
 const i64 MAP_PRIVATE = 2;
+/// mmap flag: map exactly at `addr`, replacing any existing mapping there.
 const i64 MAP_FIXED = 16;
+/// mmap flag: not backed by a file; pass fd -1.
 const i64 MAP_ANONYMOUS = 32;
+/// mmap flag: prefault the pages, so mmap may take longer.
 const i64 MAP_POPULATE = 32768;
 
-// mremap flag bits. (MREMAP_FIXED is not supported by try_mremap, which
-// does not take a new_address argument.)
+/// mremap flag bits. (MREMAP_FIXED is not supported by try_mremap, which
+/// does not take a new_address argument.)
 const i64 MREMAP_MAYMOVE = 1;
 
 // open(2) flag bits (x86_64, octal values in C headers).
+/// open flag: read only.
 const i64 O_RDONLY = 0;
+/// open flag: write only.
 const i64 O_WRONLY = 1;
+/// open flag: read and write.
 const i64 O_RDWR = 2;
+/// open flag: create the file if it does not exist (uses `mode`).
 const i64 O_CREAT = 64;        // 0o100
+/// open flag: with O_CREAT, fail with EEXIST if the file exists.
 const i64 O_EXCL = 128;        // 0o200
+/// open flag: truncate an existing regular file to length 0.
 const i64 O_TRUNC = 512;       // 0o1000
+/// open flag: every write appends to the end of the file.
 const i64 O_APPEND = 1024;     // 0o2000
+/// open flag: non-blocking I/O.
 const i64 O_NONBLOCK = 2048;   // 0o4000
+/// open flag: fail with ENOTDIR unless the path is a directory.
 const i64 O_DIRECTORY = 65536; // 0o200000
+/// open flag: close the descriptor on exec.
 const i64 O_CLOEXEC = 524288;  // 0o2000000
 
 // fcntl(2) commands used to toggle O_NONBLOCK on an open fd.
+/// fcntl command: read the file status flags.
 const i64 F_GETFL = 3;
+/// fcntl command: set the file status flags (only O_APPEND, O_NONBLOCK, and a
+/// few others can change).
 const i64 F_SETFL = 4;
 
-// openat(2) special dirfd: resolve relative paths against the CWD.
+/// openat(2) special dirfd: resolve relative paths against the CWD.
 const i64 AT_FDCWD = -100;
 
 // lseek(2) whence values.
+/// lseek whence: offset from the start of the file.
 const i64 SEEK_SET = 0;
+/// lseek whence: offset from the current position.
 const i64 SEEK_CUR = 1;
+/// lseek whence: offset from the end of the file.
 const i64 SEEK_END = 2;
 
 import std.error;
@@ -75,7 +103,7 @@ import std.sys.raw.process;
 // pre-enum SysResult API.
 
 impl Result<i64, Error> {
-    // Decode a raw syscall return value (-4095..-1 => error).
+    /// Decode a raw syscall return value (-4095..-1 => error).
     Result<i64, Error> from_raw(i64 raw) {
         if (is_errno(raw)) {
             i64 code = -raw;
@@ -84,17 +112,17 @@ impl Result<i64, Error> {
         return Ok(raw);
     }
 
-    // True when this result failed with exactly errno `err`.
+    /// True when this result failed with exactly errno `err`.
     bool err_is(&self, i64 err) {
         return self.is_err() && self.errno() == err;
     }
 
-    // The successful value, or 0 when the result is an error.
+    /// The successful value, or 0 when the result is an error.
     i64 value(&self) {
         return match *self { Ok(v) : v, Err(e) : (i64)0 };
     }
 
-    // The positive errno when the result is an error, or 0 on success.
+    /// The positive errno when the result is an error, or 0 on success.
     i64 errno(&self) {
         return match *self {
             Ok(v) : (i64)0,
@@ -102,7 +130,7 @@ impl Result<i64, Error> {
         };
     }
 
-    // Symbolic errno name ("EOK" when the call succeeded).
+    /// Symbolic errno name ("EOK" when the call succeeded).
     str err_name(&self) {
         return match *self {
             Ok(v) : "EOK",
@@ -113,77 +141,80 @@ impl Result<i64, Error> {
 
 // --- Typed syscall front-ends ---
 
-// read(2): read up to `count` bytes from `fd` into `buf`.
-// Ok value: number of bytes read (0 = EOF).
+/// read(2): read up to `count` bytes from `fd` into `buf`.
+/// Ok value: number of bytes read (0 = EOF).
 Result<i64, Error> try_read(i32 fd, u8* buf, i64 count) {
     return Result<i64, Error>.from_raw(sys_read((i64)fd, (i64)buf, count));
 }
 
-// write(2): write `count` bytes from `buf` to `fd`.
-// Ok value: number of bytes written.
+/// write(2): write `count` bytes from `buf` to `fd`.
+/// Ok value: number of bytes written.
+/// May write fewer bytes than requested.
 Result<i64, Error> try_write(i32 fd, u8* buf, i64 count) {
     return Result<i64, Error>.from_raw(sys_write((i64)fd, (i64)buf, count));
 }
 
-// open(2): open `path` with O_* `flags`; `mode` is the creation mode
-// (only consulted when flags contain O_CREAT). Ok value: new fd.
+/// open(2): open `path` with O_* `flags`; `mode` is the creation mode
+/// (only consulted when flags contain O_CREAT). Ok value: new fd.
+/// The caller owns the returned fd. Retries nothing; EINTR is an error.
 Result<i64, Error> try_open(str path, i64 flags, i64 mode) {
     return Result<i64, Error>.from_raw(sys_open((i64)path, flags, mode));
 }
 
-// openat(2): like open, resolving relative paths against `dirfd`
-// (pass AT_FDCWD for the current working directory). Ok value: new fd.
+/// openat(2): like open, resolving relative paths against `dirfd`
+/// (pass AT_FDCWD for the current working directory). Ok value: new fd.
 Result<i64, Error> try_openat(i32 dirfd, str path, i64 flags, i64 mode) {
     return Result<i64, Error>.from_raw(sys_openat((i64)dirfd, (i64)path, flags, mode));
 }
 
-// close(2): close `fd`. Ok value: 0.
+/// close(2): close `fd`. Ok value: 0.
+/// The fd is released even when close reports an error; do not retry.
 Result<i64, Error> try_close(i32 fd) {
     return Result<i64, Error>.from_raw(sys_close((i64)fd));
 }
 
-// fcntl(2): F_GETFL returns the current flags; F_SETFL sets them (Ok 0).
+/// fcntl(2): F_GETFL returns the current flags; F_SETFL sets them (Ok 0).
 Result<i64, Error> try_fcntl(i32 fd, i64 cmd, i64 arg) {
     return Result<i64, Error>.from_raw(sys_fcntl((i64)fd, cmd, arg));
 }
 
-// mmap(2): map `length` bytes with PROT_*/MAP_* bits. Pass addr = 0 to let
-// the kernel choose, fd = -1 with MAP_ANONYMOUS. Ok value: mapping address.
+/// mmap(2): map `length` bytes with PROT_*/MAP_* bits. Pass addr = 0 to let
+/// the kernel choose, fd = -1 with MAP_ANONYMOUS. Ok value: mapping address.
 Result<i64, Error> try_mmap(void* addr, i64 length, i64 prot, i64 flags, i32 fd, i64 offset) {
     return Result<i64, Error>.from_raw(sys_mmap((i64)addr, length, prot, flags, (i64)fd, offset));
 }
 
-// munmap(2): unmap `length` bytes at page-aligned `addr`. Ok value: 0.
+/// munmap(2): unmap `length` bytes at page-aligned `addr`. Ok value: 0.
 Result<i64, Error> try_munmap(void* addr, i64 length) {
     return Result<i64, Error>.from_raw(sys_munmap((i64)addr, length));
 }
 
-// mremap(2): resize the mapping at `old_addr` from `old_size` to `new_size`.
-// Pass MREMAP_MAYMOVE to allow relocation. Ok value: new mapping address.
-// MREMAP_FIXED is intentionally unsupported (no new_address parameter);
-// the kernel receives 0 for it.
+/// mremap(2): resize the mapping at `old_addr` from `old_size` to `new_size`.
+/// Pass MREMAP_MAYMOVE to allow relocation. Ok value: new mapping address.
+/// MREMAP_FIXED is intentionally unsupported (no new_address parameter);
+/// the kernel receives 0 for it.
 Result<i64, Error> try_mremap(void* old_addr, i64 old_size, i64 new_size, i64 flags) {
     return Result<i64, Error>.from_raw(sys_mremap((i64)old_addr, old_size, new_size, flags, 0));
 }
 
-// lseek(2): reposition `fd` to `offset` relative to SEEK_*. Ok value: the
-// resulting absolute offset.
+/// lseek(2): reposition `fd` to `offset` relative to SEEK_*. Ok value: the
+/// resulting absolute offset.
 Result<i64, Error> try_lseek(i32 fd, i64 offset, i64 whence) {
     return Result<i64, Error>.from_raw(sys_lseek((i64)fd, offset, whence));
 }
 
-// kill(2): send signal `sig` to `pid` (sig 0 probes existence). Ok value: 0.
+/// kill(2): send signal `sig` to `pid` (sig 0 probes existence). Ok value: 0.
 Result<i64, Error> try_kill(i32 pid, i32 sig) {
     return Result<i64, Error>.from_raw(sys_kill((i64)pid, (i64)sig));
 }
 
-// getpid(2): never fails. Ok value: the calling process id.
+/// getpid(2): never fails. Ok value: the calling process id.
 Result<i64, Error> try_getpid() {
     return Result<i64, Error>.from_raw(sys_getpid());
 }
 
-// exit_group(2): terminate every thread in the process with `code`.
-// Does not return.
+/// exit_group(2): terminate every thread in the process with `code`.
+/// Does not return.
 void exit_group(i64 code) {
     sys_exit_group(code);
     sys_exit(code);

@@ -3,6 +3,7 @@ import std.io;
 import std.mem.vec;
 import std.string;
 
+/// Prints `agc agsm` usage to stdout.
 void print_agsm_help() {
     STDOUT.write_str("Silver foreign sourcemap module tool\n\n");
     STDOUT.write_str("Usage: agc agsm <COMMAND>\n\n");
@@ -11,6 +12,7 @@ void print_agsm_help() {
     STDOUT.write_str("  help   Print this message\n");
 }
 
+/// Prints `agc agsm build` usage to stdout.
 void print_agsm_build_help() {
     STDOUT.write_str("Usage: agc agsm build [OPTIONS] [SOURCEMAP]\n");
     STDOUT.write_str("Foreign sourcemap module generation is not supported by this compiler.\n\n");
@@ -25,6 +27,9 @@ void print_agsm_build_help() {
     STDOUT.write_str("  -h, --help                   Print help\n");
 }
 
+/// Runs `agc agsm`: prints help, or fails with exit code 2 because foreign
+/// sourcemap module generation is not supported. `arguments` is the full
+/// process argument list.
 i32 run_agsm(Vec<String>* arguments) {
     if (arguments.len() <= 2) {
         print_agsm_help();

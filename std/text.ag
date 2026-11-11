@@ -6,12 +6,15 @@
 import std.display;
 import std.string;
 
+/// A zero-based editor position: a line number and a UTF-16 code-unit
+/// offset within that line (the LSP convention).
 struct TextPosition {
     i64 line;
     i64 character; // UTF-16 code units within the line
 }
 
 impl TextPosition {
+    /// Builds a position from a zero-based line and UTF-16 column.
     TextPosition new(i64 line, i64 character) {
         TextPosition pos;
         pos.line = line;

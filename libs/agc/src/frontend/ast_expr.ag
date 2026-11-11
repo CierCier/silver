@@ -6,6 +6,8 @@ import frontend.ast;
 import frontend.lexer;
 import frontend.types;
 
+/// Kind of a lowered expression. The trailing comments give the meaning of
+/// `aux`, `inner0`, and `inner1` for each kind.
 enum ExprKind {
     Literal;       // aux = literal type_id
     Var;           // aux = name_id
@@ -38,6 +40,8 @@ enum ExprKind {
     Wait;          // inner0 = Task expression
 }
 
+/// One lowered expression, stored by id in an `AstPool`. Its fields are
+/// interpreted per `ExprKind`; child expressions are referenced by id.
 struct AstExpr {
     ExprKind kind;
     u32 inner0;
@@ -50,6 +54,7 @@ struct AstExpr {
     u32 resolved_callee_id; // interned name ID plus one; zero means unresolved
 }
 
+/// Kind of a lowered statement; trailing comments give the field meanings.
 enum StmtKind {
     Let;           // aux = var_name_id, inner0 = type_id, inner1 = init_expr_id
     ResetLocal;    // aux = var_name_id; restore a consumed local to zero
@@ -64,12 +69,14 @@ enum StmtKind {
     Block;         // inner0 = block_stmts_start, aux = block_stmts_count
 }
 
+/// Which `@memcpy`/`@memmove`/`@memset` builtin a call uses.
 enum MemoryBuiltinKind {
     Memcpy;
     Memmove;
     Memset;
 }
 
+/// One lowered statement, stored by id in an `AstPool`.
 struct AstStmt {
     StmtKind kind;
     u32 inner0;
@@ -79,6 +86,7 @@ struct AstStmt {
     Span span;
 }
 
+/// Kind of a `match` arm pattern.
 enum MatchPatternKind {
     Wildcard;
     Variant;
@@ -86,6 +94,8 @@ enum MatchPatternKind {
     Literal;
 }
 
+/// One `match` arm: pattern, bound names, optional guard, and the value or
+/// body statement it evaluates.
 struct MatchArm {
     MatchPatternKind pattern;
     u32 enum_name_id;
@@ -99,6 +109,8 @@ struct MatchArm {
     Span span;
 }
 
+/// One inline `asm(...)` expression: interned code and constraint strings
+/// plus a range of argument expression ids.
 struct AstAsm {
     u32 code_id;
     u32 constraints_id;
@@ -106,6 +118,7 @@ struct AstAsm {
     u32 args_count;
 }
 
+/// Decodes the escapes of a string literal's source text into an owned string.
 String unescape_string_literal(str text) {
     String out = String.new();
     if (text == (str)0) { return move out; }
@@ -165,6 +178,8 @@ String unescape_string_literal(str text) {
     return move out;
 }
 
+/// Arena of lowered expressions, statements, and their side tables. Id 0 of
+/// every table is a dummy entry, so 0 means "none".
 struct AstPool {
     Vec<AstExpr> exprs;
     Vec<AstStmt> stmts;
@@ -177,6 +192,7 @@ struct AstPool {
 }
 
 impl AstPool {
+    /// Creates a pool holding only the id-0 dummy entries.
     AstPool new() {
         AstPool pool;
         pool.exprs = Vec<AstExpr>.new();
@@ -233,10 +249,12 @@ impl AstPool {
         return move pool;
     }
 
+    /// Appends a literal of `type_id` with no value; returns its id.
     u32 add_literal(AstPool* self, u32 type_id, Span span) {
         return self.add_literal_val(type_id, 0, span);
     }
 
+    /// Appends a literal of `type_id` with interned value `val_id`; returns its id.
     u32 add_literal_val(AstPool* self, u32 type_id, u32 val_id, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.Literal;
@@ -251,6 +269,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends a `source location` expression and returns its id.
     u32 add_source_location(AstPool* self, u32 kind, u32 type_id, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.SourceLocation;
@@ -266,6 +285,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends a `var` expression and returns its id.
     u32 add_var(AstPool* self, u32 name_id, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.Var;
@@ -280,6 +300,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends a `binary` expression and returns its id.
     u32 add_binary(AstPool* self, TokenKind op, u32 lhs, u32 rhs, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.Binary;
@@ -294,6 +315,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends a `unary` expression and returns its id.
     u32 add_unary(AstPool* self, TokenKind op, u32 operand, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.Unary;
@@ -308,6 +330,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends a `ternary` expression and returns its id.
     u32 add_ternary(AstPool* self, u32 cond_id, u32 then_id, u32 else_id, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.Ternary;
@@ -322,6 +345,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends a `expr block` expression and returns its id.
     u32 add_expr_block(AstPool* self, u32 start, u32 count, u32 result_id, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.Block;
@@ -337,6 +361,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends a `unwrap or` expression and returns its id.
     u32 add_unwrap_or(AstPool* self, u32 value_id, u32 fallback_id, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.UnwrapOr;
@@ -351,6 +376,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends a `launch` expression and returns its id.
     u32 add_launch(AstPool* self, u32 call_id, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.Launch;
@@ -366,6 +392,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends a `wait` expression and returns its id.
     u32 add_wait(AstPool* self, u32 task_id, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.Wait;
@@ -381,6 +408,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends a `match` arm; returns the arm id.
     u32 add_match_arm(AstPool* self, MatchPatternKind pattern, u32 enum_name_id,
                       u32 variant_name_id, u32 bindings_start, u32 bindings_count,
                       u32 literal_id, u32 guard_id, u32 value_id, u32 body_stmt_id, Span span) {
@@ -399,6 +427,7 @@ impl AstPool {
         return (u32)(self.arms.len() - 1);
     }
 
+    /// Appends a `match` expression and returns its id.
     u32 add_match(AstPool* self, u32 scrutinee_id, u32 arms_start, u32 arms_count, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.Match;
@@ -413,6 +442,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends a `move` expression and returns its id.
     u32 add_move(AstPool* self, u32 operand_id, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.Move;
@@ -433,6 +463,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends an inline asm expression; returns its id.
     u32 add_asm(AstPool* self, u32 code_id, u32 constraints_id, u32 args_start, u32 args_count, Span span) {
         AstAsm item;
         item.code_id = code_id;
@@ -454,6 +485,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends a `call` expression and returns its id.
     u32 add_call(AstPool* self, u32 callee, u32 args_start, u32 args_count, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.Call;
@@ -469,6 +501,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends a call with explicit generic type arguments; returns its id.
     u32 add_generic_call(AstPool* self, u32 callee, u32 args_start, u32 args_count,
                          u32 generic_start, u32 generic_count, Span span) {
         u32 call_id = self.add_call(callee, args_start, args_count, span);
@@ -478,6 +511,7 @@ impl AstPool {
         return call_id;
     }
 
+    /// Appends a `array lit` expression and returns its id.
     u32 add_array_lit(AstPool* self, u32 elems_start, u32 elem_count, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.ArrayLit;
@@ -492,6 +526,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends a `format` expression and returns its id.
     u32 add_format(AstPool* self, u32 format_id, u32 args_start, u32 args_count, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.Format;
@@ -506,6 +541,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends a `fprint` expression and returns its id.
     u32 add_fprint(AstPool* self, u32 writer_id, u32 format_expr_id, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.Fprint;
@@ -521,6 +557,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends a `hash` expression and returns its id.
     u32 add_hash(AstPool* self, u32 arg_id, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.Hash;
@@ -535,6 +572,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends a `drop in place` expression and returns its id.
     u32 add_drop_in_place(AstPool* self, u32 elem_type, u32 pointer_id,
                           u32 count_id, Span span) {
         AstExpr expr;
@@ -551,6 +589,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends a `memory builtin` expression and returns its id.
     u32 add_memory_builtin(AstPool* self, MemoryBuiltinKind kind,
                            u32 args_start, Span span) {
         AstExpr expr;
@@ -567,6 +606,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends a `assert` expression and returns its id.
     u32 add_assert(AstPool* self, u32 condition_id, u32 message_id, bool enabled, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.Assert;
@@ -582,6 +622,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends a `struct lit` expression and returns its id.
     u32 add_struct_lit(AstPool* self, u32 struct_name_id, u32 fields_start, u32 field_count, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.StructLit;
@@ -595,6 +636,7 @@ impl AstPool {
         self.exprs.push(move expr);
         return (u32)(self.exprs.len() - 1);
     }
+    /// Appends a `method call` expression and returns its id.
     u32 add_method_call(AstPool* self, u32 receiver, u32 method_name_id, u32 args_start, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.MethodCall;
@@ -609,6 +651,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends a `field` expression and returns its id.
     u32 add_field(AstPool* self, u32 target, u32 field_name_id, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.Field;
@@ -623,6 +666,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends a `index` expression and returns its id.
     u32 add_index(AstPool* self, u32 target, u32 index_expr, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.Index;
@@ -637,6 +681,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends a `slice` expression and returns its id.
     u32 add_slice(AstPool* self, u32 target, u32 start_expr, u32 end_expr, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.Slice;
@@ -651,6 +696,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends a `cast` expression and returns its id.
     u32 add_cast(AstPool* self, u32 expr_id, u32 target_type_id, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.Cast;
@@ -666,6 +712,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends a `sizeof` expression and returns its id.
     u32 add_sizeof(AstPool* self, u32 type_id, u32 expr_id, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.SizeOf;
@@ -681,6 +728,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends a `alignof` expression and returns its id.
     u32 add_alignof(AstPool* self, u32 type_id, u32 expr_id, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.AlignOf;
@@ -696,6 +744,7 @@ impl AstPool {
         return (u32)(self.exprs.len() - 1);
     }
 
+    /// Appends a `return` statement and returns its id.
     u32 add_stmt_return(AstPool* self, u32 expr_id, Span span) {
         AstStmt stmt;
         stmt.kind = StmtKind.Return;
@@ -708,6 +757,7 @@ impl AstPool {
         return (u32)(self.stmts.len() - 1);
     }
 
+    /// Appends a `let` statement and returns its id.
     u32 add_stmt_let(AstPool* self, u32 var_name_id, u32 type_id, u32 init_expr_id, Span span) {
         AstStmt stmt;
         stmt.kind = StmtKind.Let;
@@ -720,6 +770,7 @@ impl AstPool {
         return (u32)(self.stmts.len() - 1);
     }
 
+    /// Appends a `static` local declaration (initialized once); returns its id.
     u32 add_stmt_static_let(AstPool* self, u32 var_name_id, u32 type_id, u32 init_expr_id, Span span) {
         AstStmt stmt;
         stmt.kind = StmtKind.Let;
@@ -732,6 +783,7 @@ impl AstPool {
         return (u32)(self.stmts.len() - 1);
     }
 
+    /// Appends a `assign` statement and returns its id.
     u32 add_stmt_assign(AstPool* self, u32 target_expr_id, u32 val_expr_id, Span span) {
         AstStmt stmt;
         stmt.kind = StmtKind.Assign;
@@ -744,6 +796,7 @@ impl AstPool {
         return (u32)(self.stmts.len() - 1);
     }
 
+    /// Appends a statement that resets a consumed local to zero; returns its id.
     u32 add_stmt_reset_local(AstPool* self, u32 var_name_id, Span span) {
         AstStmt stmt;
         stmt.kind = StmtKind.ResetLocal;
@@ -756,6 +809,7 @@ impl AstPool {
         return (u32)(self.stmts.len() - 1);
     }
 
+    /// Appends a `expr` statement and returns its id.
     u32 add_stmt_expr(AstPool* self, u32 expr_id, Span span) {
         AstStmt stmt;
         stmt.kind = StmtKind.Expr;
@@ -768,6 +822,7 @@ impl AstPool {
         return (u32)(self.stmts.len() - 1);
     }
 
+    /// Appends a `if` statement and returns its id.
     u32 add_stmt_if(AstPool* self, u32 cond_id, u32 then_stmt_id, u32 else_stmt_id, Span span) {
         AstStmt stmt;
         stmt.kind = StmtKind.If;
@@ -780,6 +835,7 @@ impl AstPool {
         return (u32)(self.stmts.len() - 1);
     }
 
+    /// Appends a `while` statement and returns its id.
     u32 add_stmt_while(AstPool* self, u32 cond_id, u32 body_stmt_id, Span span) {
         AstStmt stmt;
         stmt.kind = StmtKind.While;
@@ -792,6 +848,8 @@ impl AstPool {
         return (u32)(self.stmts.len() - 1);
     }
 
+    /// Appends a `while` loop with a step statement run after each iteration
+    /// (including after `continue`); returns its id.
     u32 add_stmt_while_step(AstPool* self, u32 cond_id, u32 body_stmt_id,
                             u32 step_stmt_id, Span span) {
         AstStmt stmt;
@@ -805,6 +863,7 @@ impl AstPool {
         return (u32)(self.stmts.len() - 1);
     }
 
+    /// Appends a `break` statement and returns its id.
     u32 add_stmt_break(AstPool* self, Span span) {
         AstStmt stmt;
         stmt.kind = StmtKind.Break;
@@ -817,6 +876,7 @@ impl AstPool {
         return (u32)(self.stmts.len() - 1);
     }
 
+    /// Appends a `continue` statement and returns its id.
     u32 add_stmt_continue(AstPool* self, Span span) {
         AstStmt stmt;
         stmt.kind = StmtKind.Continue;
@@ -829,6 +889,7 @@ impl AstPool {
         return (u32)(self.stmts.len() - 1);
     }
 
+    /// Appends a `defer` statement and returns its id.
     u32 add_stmt_defer(AstPool* self, u32 deferred_stmt_id, Span span) {
         AstStmt stmt;
         stmt.kind = StmtKind.Defer;
@@ -841,6 +902,7 @@ impl AstPool {
         return (u32)(self.stmts.len() - 1);
     }
 
+    /// Appends a `block` statement and returns its id.
     u32 add_stmt_block(AstPool* self, u32 start, u32 count, Span span) {
         AstStmt stmt;
         stmt.kind = StmtKind.Block;
@@ -853,6 +915,8 @@ impl AstPool {
         return (u32)(self.stmts.len() - 1);
     }
 
+    /// Returns expression `id`, or the id-0 dummy when out of range.
+    /// Invalidated when expressions are added.
     AstExpr* get_expr(AstPool* self, u32 id) {
         if ((i64)id >= self.exprs.len()) {
             return self.exprs.get_ptr(0);
@@ -860,6 +924,8 @@ impl AstPool {
         return self.exprs.get_ptr((i64)id);
     }
 
+    /// Returns statement `id`, or the id-0 dummy when out of range.
+    /// Invalidated when statements are added.
     AstStmt* get_stmt(AstPool* self, u32 id) {
         if ((i64)id >= self.stmts.len()) {
             return self.stmts.get_ptr(0);
@@ -867,6 +933,7 @@ impl AstPool {
         return self.stmts.get_ptr((i64)id);
     }
 
+    /// Returns match arm `id`, or the id-0 dummy when out of range.
     MatchArm* get_arm(AstPool* self, u32 id) {
         if ((i64)id >= self.arms.len()) {
             return self.arms.get_ptr(0);

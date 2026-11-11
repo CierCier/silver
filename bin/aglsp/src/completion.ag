@@ -11,6 +11,7 @@ import transport;
 import std.map;
 import macros;
 
+/// Maps a symbol kind to the LSP `CompletionItemKind` number.
 i64 completion_kind(IdeSymbolKind kind) {
     return match kind {
         IdeSymbolKind.Function : 3, IdeSymbolKind.Macro : 3, IdeSymbolKind.Method : 2,
@@ -21,6 +22,8 @@ i64 completion_kind(IdeSymbolKind kind) {
     };
 }
 
+/// One completion item before rendering: label, detail, docs, kind, rank
+/// score, target symbol, and the module to auto-import when chosen.
 struct CompletionCandidate {
     String name;
     String detail;
@@ -34,6 +37,7 @@ struct CompletionCandidate {
     bool snippets;
 }
 
+/// Collected completion items and the names already offered.
 struct CompletionCandidates {
     Vec<CompletionCandidate> items;
     Vec<String> visible_names;
@@ -42,6 +46,7 @@ struct CompletionCandidates {
     i64 worst_score;
 }
 
+/// Returns an empty candidate set.
 CompletionCandidates completion_candidates() {
     CompletionCandidates candidates;
     candidates.items = Vec<CompletionCandidate>.new();
@@ -51,6 +56,7 @@ CompletionCandidates completion_candidates() {
     return candidates;
 }
 
+/// Returns true when `name` was already offered.
 bool completion_visible(CompletionCandidates* candidates, str name) {
     i64 i = 0;
     while (i < candidates.visible_names.len()) {
@@ -60,17 +66,17 @@ bool completion_visible(CompletionCandidates* candidates, str name) {
     return false;
 }
 
-// Macros are not exports for plain-name completion: an inserted call would
-// lack `@`, and ordinary name lookup does not see them.
+/// Macros are not exports for plain-name completion: an inserted call would
+/// lack `@`, and ordinary name lookup does not see them.
 bool completion_exported_symbol(IdeSymbol* symbol) {
     return !symbol.local && !symbol.is_private && symbol.owner.len() == 0
         && symbol.kind != IdeSymbolKind.ImportAlias && symbol.kind != IdeSymbolKind.Macro;
 }
 
-// True when `name` is exported by `provider` at `index` and by no other
-// declaration in its import closure. Scanning symbols directly avoids the
-// String allocation and hash insert per symbol that a closure-wide export map
-// needed, which dominated completion latency on large workspaces.
+/// True when `name` is exported by `provider` at `index` and by no other
+/// declaration in its import closure. Scanning symbols directly avoids the
+/// String allocation and hash insert per symbol that a closure-wide export map
+/// needed, which dominated completion latency on large workspaces.
 bool completion_unique_export(Vec<Document*>* closure, Document* provider,
                               str name, i64 index) {
     i64 c = 0;
@@ -89,6 +95,8 @@ bool completion_unique_export(Vec<Document*>* closure, Document* provider,
     return true;
 }
 
+/// Returns true when `left` ranks before `right` (score, then locals,
+/// then name).
 bool completion_precedes(CompletionCandidate* left, CompletionCandidate* right) {
     if (left.score != right.score) { return left.score < right.score; }
     if (left.local != right.local) { return left.local; }
@@ -99,6 +107,7 @@ bool completion_precedes(CompletionCandidate* left, CompletionCandidate* right) 
     return left.target.symbol < right.target.symbol;
 }
 
+/// Returns the index of the worst-ranked candidate.
 i64 completion_worst_score(CompletionCandidates* candidates) {
     i64 worst = 0; i64 i = 1;
     while (i < candidates.items.len()) {
@@ -108,6 +117,9 @@ i64 completion_worst_score(CompletionCandidates* candidates) {
     return candidates.items.get_ptr(worst).score;
 }
 
+/// Adds a candidate unless the same symbol is already offered. The list
+/// keeps at most 100 items: past that, a better candidate replaces the worst
+/// one and the list is marked incomplete.
 void offer_completion(CompletionCandidates* candidates, str name, str detail, str documentation,
         i64 kind, bool local, i64 score, SymbolTarget target, bool instance, str auto_module, bool snippets) {
     // Score is the primary ordering key, so a worse auto-import cannot displace
@@ -148,6 +160,7 @@ void offer_completion(CompletionCandidates* candidates, str name, str detail, st
     }
 }
 
+/// Sorts candidates by rank.
 void sort_completions(CompletionCandidates* candidates) {
     i64 i = 0;
     while (i < candidates.items.len()) {
@@ -160,6 +173,9 @@ void sort_completions(CompletionCandidates* candidates) {
     }
 }
 
+/// Appends one candidate as an LSP `CompletionItem` JSON object, with a
+/// snippet for calls when the client supports snippets and an auto-import
+/// edit when needed.
 void append_completion(String* out, Document* doc, Span replacement, CompletionCandidate* item, ClientOptions* client, bool* first) {
     str name = item.name.to_str(); str detail = item.detail.to_str();
     str documentation = item.documentation.to_str(); str auto_module = item.auto_module.to_str();
@@ -224,6 +240,7 @@ void append_completion(String* out, Document* doc, Span replacement, CompletionC
     out.push('}');
 }
 
+/// Returns the owner type spelled before a `.` or `::` at `separator`.
 String receiver_owner(Document* doc, i64 separator) {
     i64 i = separator;
     while (i > 0 && (doc.text.data[i - 1] == (u8)' ' || doc.text.data[i - 1] == (u8)'\t')) { i -= 1; }
@@ -231,6 +248,8 @@ String receiver_owner(Document* doc, i64 separator) {
     return symbol_receiver_owner(resolve_occurrence(doc, doc.analysis.occurrence_at(i - 1)));
 }
 
+/// Offers the matching symbols of `source` and its imports (members of
+/// `owner` when `members`). Stops early when the request is cancelled.
 void completion_symbols(Document* source, Document* active, i64 offset, str prefix,
                          str owner, bool members, bool instance, Vec<Document*>* visited,
                          PendingMessage* pending, CompletionCandidates* candidates) {
@@ -270,6 +289,7 @@ void completion_symbols(Document* source, Document* active, i64 offset, str pref
     }
 }
 
+/// Finds the identifier prefix before `offset` and its replacement range.
 void completion_prefix(Document* doc, i64 offset, Span* replacement, String* prefix) {
     replacement.start = offset; replacement.end = offset;
     while (replacement.start > 0 && typecheck_name_continue(doc.text.data[replacement.start - 1])) { replacement.start -= 1; }
@@ -277,6 +297,7 @@ void completion_prefix(Document* doc, i64 offset, Span* replacement, String* pre
     *prefix = doc.text.substr(replacement.start, offset - replacement.start);
 }
 
+/// Offers module paths and names inside an `import` statement.
 void append_import_context_completions(DocumentStore* store, Document* doc,
         ImportCompletionContext* context, PendingMessage* pending,
         CompletionCandidates* candidates) {
@@ -329,6 +350,8 @@ void append_import_context_completions(DocumentStore* store, Document* doc,
     }
 }
 
+/// Offers exported symbols of unimported workspace documents, with an edit
+/// that adds the import.
 void append_auto_imports(DocumentStore* store, Document* doc, str prefix,
         PendingMessage* pending, CompletionCandidates* candidates) {
     if (prefix[0] == 0 || request_interrupted(pending)) { return; }
@@ -446,6 +469,7 @@ void append_auto_imports(DocumentStore* store, Document* doc, str prefix,
     }
 }
 
+/// Sorts the candidates and renders the LSP `CompletionList` JSON.
 String render_completions(Document* doc, Span replacement, CompletionCandidates* candidates,
         ClientOptions* client, bool incomplete) {
     sort_completions(candidates);
@@ -459,7 +483,7 @@ String render_completions(Document* doc, Span replacement, CompletionCandidates*
     out.push_str("]}"); return move out;
 }
 
-// Offer builtin `@macro` calls plus user macros declared in the document.
+/// Offer builtin `@macro` calls plus user macros declared in the document.
 void append_macro_completions(Document* doc, str prefix, CompletionCandidates* candidates) {
     doc.ensure_syntax();
     i64 i = 0;
@@ -492,6 +516,8 @@ void append_macro_completions(Document* doc, str prefix, CompletionCandidates* c
     }
 }
 
+/// Computes the completion response JSON at `offset`. Cancellable through
+/// `pending`.
 String compute_completion(DocumentStore* store, Document* doc, i64 offset, ClientOptions* client,
         PendingMessage* pending, bool index_pending) {
     CompletionCandidates candidates = completion_candidates();
@@ -545,8 +571,11 @@ String compute_completion(DocumentStore* store, Document* doc, i64 offset, Clien
     return render_completions(doc, replacement, &candidates, client, !members && index_pending);
 }
 
+/// Why a `completionItem/resolve` request could not be answered.
 enum CompletionResolveError { InvalidItem; StaleItem; }
 
+/// Resolves a completion item's documentation from its stored target. Fails
+/// with `StaleItem` when the document changed since completion.
 Result<String, CompletionResolveError> compute_completion_resolve(DocumentStore* store, str json, ClientOptions* client, PendingMessage* pending) {
     JsonReader reader = JsonReader.new(json);
     if (!reader.begin_object()) { return Result<String, CompletionResolveError>.err(CompletionResolveError.InvalidItem); }
@@ -604,7 +633,7 @@ Result<String, CompletionResolveError> compute_completion_resolve(DocumentStore*
     return Result<String, CompletionResolveError>.ok(move out);
 }
 
-// The frontend helper validates the generic suffix against this document's CST snapshot.
+/// The frontend helper validates the generic suffix against this document's CST snapshot.
 i64 generic_call_close_token(Document* doc, i64 less_token) {
     if (less_token < 0 || less_token >= doc.analysis.tokens.len()) { return -1; }
     Token* less = doc.analysis.tokens.get(less_token);
@@ -625,7 +654,7 @@ i64 generic_call_close_token(Document* doc, i64 less_token) {
         && token.kind == close.token_kind ? i : -1;
 }
 
-// Delimiter matching uses tokens, so strings and comments cannot affect the call stack.
+/// Delimiter matching uses tokens, so strings and comments cannot affect the call stack.
 i64 call_occurrence(Document* doc, i64 open) {
     i64 previous = open - 1;
     while (previous >= 0 && doc.analysis.tokens.get(previous).kind == TokenKind.Comment) { previous -= 1; }
@@ -648,6 +677,7 @@ i64 call_occurrence(Document* doc, i64 open) {
     return doc.analysis.occurrence_at(doc.analysis.tokens.get(previous).span.start);
 }
 
+/// Returns the call token whose argument list contains `offset`, or -1.
 i64 active_call(Document* doc, i64 offset) {
     Vec<i64> stack = Vec<i64>.new(); i64 i = 0;
     while (i < doc.analysis.tokens.len()) {
@@ -684,6 +714,7 @@ i64 active_call(Document* doc, i64 offset) {
     return -1;
 }
 
+/// Returns the UTF-16 length of `text[0..offset]`.
 i64 signature_utf16_offset(str text, i64 offset) {
     i64 units = 0; i64 cursor = 0;
     while (cursor < offset) {
@@ -693,6 +724,7 @@ i64 signature_utf16_offset(str text, i64 offset) {
     return units;
 }
 
+/// Returns the source ranges of each parameter in a function signature.
 Vec<Span> signature_parameter_ranges(Document* doc, IdeSymbol* symbol) {
     Vec<Span> ranges = Vec<Span>.new();
     i64 occurrence = doc.analysis.occurrence_at(symbol.selection.start);
@@ -721,6 +753,7 @@ Vec<Span> signature_parameter_ranges(Document* doc, IdeSymbol* symbol) {
     return move ranges;
 }
 
+/// Computes the `textDocument/signatureHelp` response JSON at `offset`.
 String compute_signature_help(Document* doc, i64 offset, ClientOptions* client) {
     i64 call = active_call(doc, offset);
     if (call < 0 || inside_literal(doc, offset)) { return String.from_str("null"); }
@@ -766,14 +799,15 @@ String compute_signature_help(Document* doc, i64 offset, ClientOptions* client) 
     out.push_str("]}],\"activeSignature\":0,\"activeParameter\":"); out.push_display(&active); out.push('}'); return move out;
 }
 
+/// Returns true for an identifier byte.
 bool inline_ident_char(u8 ch) {
     return (ch >= (u8)'a' && ch <= (u8)'z') || (ch >= (u8)'A' && ch <= (u8)'Z')
         || (ch >= (u8)'0' && ch <= (u8)'9') || ch == (u8)'_';
 }
 
-// Ghost-text completion: run the normal completion engine at the cursor and
-// offer its strongest item as a single inline completion. Items that carry
-// their own textEdit keep it; otherwise the text replaces the current word.
+/// Ghost-text completion: run the normal completion engine at the cursor and
+/// offer its strongest item as a single inline completion. Items that carry
+/// their own textEdit keep it; otherwise the text replaces the current word.
 String compute_inline_completion(DocumentStore* store, Document* doc, i64 offset, ClientOptions* client,
                                  PendingMessage* pending, bool index_pending) {
     String result = compute_completion(store, doc, offset, client, pending, index_pending);

@@ -15,10 +15,13 @@ import frontend.bindings;
 import frontend.items;
 import frontend.typecheck_expr;
 import frontend.types;
+/// Returns true when the strings are equal.
 bool borrow_text_equals(str left, str right) {
     return strcmp(left, right) == 0;
 }
 
+/// Returns true when a `return` belongs to a nested function or lambda
+/// rather than `function`'s own body.
 bool borrow_return_is_nested(SyntaxNode* return_node, SyntaxNode* function,
                              SyntaxNode* body) {
     SyntaxNode* cursor = return_node;
@@ -38,11 +41,14 @@ bool borrow_return_is_nested(SyntaxNode* return_node, SyntaxNode* function,
     return false;
 }
 
+/// Whether a loan is a shared (`&`) or mutable (`&mut`) borrow.
 enum LoanKind {
     Shared;
     Mutable;
 }
 
+/// One active borrow of a place. A persistent loan lives until its holder's
+/// last use (`release_index`); others end with the statement.
 struct Loan {
     u32 name_id;
     Place place;
@@ -56,17 +62,22 @@ struct Loan {
     bool active;
 }
 
+/// A function whose return value may borrow parameter `parameter_index`.
 struct BorrowReturnOrigin {
     SyntaxNode* function;
     i64 parameter_index;
 }
 
+/// What is known about a function's returned references: whether some
+/// origin is unknown inside it or it is an opaque external function.
 struct BorrowReturnStatus {
     SyntaxNode* function;
     bool unknown_internal;
     bool opaque_external;
 }
 
+/// Borrow-check state: active loans, projection storage, and where
+/// conflicts are reported. `failed` is set by any report.
 struct BorrowAnalyzer {
     Interner names;
     Vec<Loan> loans;
@@ -76,6 +87,7 @@ struct BorrowAnalyzer {
 }
 
 impl BorrowAnalyzer {
+    /// Creates an analyzer; name id 0 is reserved for "no holder".
     BorrowAnalyzer new(DiagnosticBag* diagnostics) {
         BorrowAnalyzer analyzer;
         analyzer.names = Interner.new();
@@ -88,6 +100,8 @@ impl BorrowAnalyzer {
         return analyzer;
     }
 
+    /// Returns the index of an active loan that conflicts with a new
+    /// `incoming_kind` borrow of `target` (any overlap with a mutable side), or -1.
     i64 find_conflict(BorrowAnalyzer* self, Place* target, LoanKind incoming_kind) {
         i64 i = 0;
         while (i < self.loans.len()) {
@@ -104,6 +118,7 @@ impl BorrowAnalyzer {
         return -1;
     }
 
+    /// Reports a shared/mutable borrow conflict with a note at the earlier loan.
     void conflict(BorrowAnalyzer* self, str name, Span span, Span previous_span, bool incoming_mutable) {
         String message = incoming_mutable
             ? cannot_borrow_as_mutable_while_shared(name)
@@ -113,6 +128,7 @@ impl BorrowAnalyzer {
         self.failed = true;
     }
 
+    /// Records a loan of `place`, reporting a conflict with an existing one.
     void add(BorrowAnalyzer* self, Place place, str name, Span span, LoanKind kind, bool persistent, u32 holder_id, i64 release_index) {
         i64 existing = self.find_conflict(&place, kind);
         if (existing >= 0) {
@@ -142,6 +158,7 @@ impl BorrowAnalyzer {
         self.loans.push(move loan);
     }
 
+    /// Reports assigning to a place while it is borrowed.
     void assign_place(BorrowAnalyzer* self, Place* target, str name, Span span) {
         i64 i = 0;
         while (i < self.loans.len()) {
@@ -157,11 +174,13 @@ impl BorrowAnalyzer {
         }
     }
 
+    /// Reports assigning to local `name` while it is borrowed.
     void assign(BorrowAnalyzer* self, str name, Span span) {
         Place p = Place.new(self.names.intern(name));
         self.assign_place(&p, name, span);
     }
 
+    /// Ends persistent loans whose holder's last use is at or before `index`.
     void release_due(BorrowAnalyzer* self, i64 index) {
         i64 i = 0;
         while (i < self.loans.len()) {
@@ -174,6 +193,7 @@ impl BorrowAnalyzer {
     }
 
 
+    /// Ends every non-persistent loan at a statement boundary.
     void end_statement(BorrowAnalyzer* self) {
         i64 i = 0;
         while (i < self.loans.len()) {
@@ -186,6 +206,7 @@ impl BorrowAnalyzer {
     }
 }
 
+/// Appends every leaf token under `node`.
 void collect_borrow_leaves(SyntaxNode* node, Vec<SyntaxNode*>* leaves) {
     if (node == (SyntaxNode*)0) {
         return;
@@ -201,6 +222,7 @@ void collect_borrow_leaves(SyntaxNode* node, Vec<SyntaxNode*>* leaves) {
     }
 }
 
+/// Returns a function item's body block, or null.
 SyntaxNode* borrow_function_body(SyntaxNode* function) {
     SyntaxNode* child = function.first_child;
     while (child != (SyntaxNode*)0) {
@@ -212,6 +234,7 @@ SyntaxNode* borrow_function_body(SyntaxNode* function) {
     return (SyntaxNode*)0;
 }
 
+/// Returns a function item's parameter list, or null.
 SyntaxNode* borrow_function_parameters(SyntaxNode* function) {
     SyntaxNode* child = function.first_child;
     while (child != (SyntaxNode*)0) {
@@ -223,6 +246,7 @@ SyntaxNode* borrow_function_parameters(SyntaxNode* function) {
     return (SyntaxNode*)0;
 }
 
+/// Returns true when parameter `name` of `function` is `&T` or `&mut T`.
 bool is_reference_parameter(SyntaxNode* function, str name) {
     SyntaxNode* parameters = borrow_function_parameters(function);
     if (parameters == (SyntaxNode*)0) {
@@ -249,6 +273,7 @@ bool is_reference_parameter(SyntaxNode* function, str name) {
     return false;
 }
 
+/// Returns true when `name` is a global variable.
 bool borrow_is_global(SyntaxTree* tree, SymbolTable* symbols, str name) {
     i64 symbol_index = symbols.find(name);
     if (symbol_index >= 0 && symbols.get(symbol_index).kind == SymbolKind.Global) {
@@ -280,6 +305,8 @@ bool borrow_is_global(SyntaxTree* tree, SymbolTable* symbols, str name) {
     return false;
 }
 
+/// Returns true when a type contains a reference, directly or through
+/// fields. Too-deep types count as containing one.
 bool borrow_type_contains_reference(TypeTable* types, SyntaxNode* root, u32 type_id, u32 depth) {
     if (depth >= MAX_TYPE_CHECK_DEPTH) { return true; }
     TypeEntry entry = *types.get(types.resolve_subst(type_id));
@@ -362,6 +389,8 @@ bool borrow_type_contains_reference(TypeTable* types, SyntaxNode* root, u32 type
     return false;
 }
 
+/// Returns true when the function returns a reference, pointer, or a type
+/// containing a reference.
 bool borrow_function_returns_indirect(SyntaxNode* function, SymbolTable* symbols) {
     SyntaxNode* name = function_identifier(function);
     if (name == (SyntaxNode*)0) {
@@ -381,6 +410,7 @@ bool borrow_function_returns_indirect(SyntaxNode* function, SymbolTable* symbols
             function_return_type_id(&symbols.types, function), 0);
 }
 
+/// Returns true when `node` is inside a `return` expression.
 bool borrow_in_return_expression(SyntaxNode* node) {
     SyntaxNode* child = node;
     SyntaxNode* parent = child.parent;
@@ -401,6 +431,8 @@ bool borrow_in_return_expression(SyntaxNode* node) {
     return false;
 }
 
+/// Reports returning a reference to local `name` that does not outlive
+/// `function`.
 void report_escape(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbols,
                    SyntaxNode* function, str name, Span span) {
     if (is_reference_parameter(function, name)
@@ -413,6 +445,7 @@ void report_escape(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symb
 }
 
 
+/// Returns the nearest enclosing bracket group, or null.
 SyntaxNode* borrow_enclosing_bracket(SyntaxNode* node) {
     SyntaxNode* parent = node.parent;
     while (parent != (SyntaxNode*)0) {
@@ -424,6 +457,7 @@ SyntaxNode* borrow_enclosing_bracket(SyntaxNode* node) {
     return (SyntaxNode*)0;
 }
 
+/// Returns true when `node` is `ancestor` or inside it.
 bool borrow_node_within(SyntaxNode* node, SyntaxNode* ancestor) {
     SyntaxNode* parent = node;
     while (parent != (SyntaxNode*)0) {
@@ -435,8 +469,8 @@ bool borrow_node_within(SyntaxNode* node, SyntaxNode* ancestor) {
     return false;
 }
 
-// Type of the slot in aggregate initializer `value` whose expression contains
-// `node`, or TYPE_UNKNOWN when the slot cannot be resolved.
+/// Type of the slot in aggregate initializer `value` whose expression contains
+/// `node`, or TYPE_UNKNOWN when the slot cannot be resolved.
 u32 borrow_aggregate_slot_type(TypeTable* table, SyntaxNode* root, u32 aggregate_type,
                                SyntaxNode* value, SyntaxNode* node) {
     SyntaxNode* top = node;
@@ -469,6 +503,8 @@ u32 borrow_aggregate_slot_type(TypeTable* table, SyntaxNode* root, u32 aggregate
     return TYPE_UNKNOWN;
 }
 
+/// Returns the local that holds an aggregate initializer containing `node`,
+/// when its slot type keeps a reference; otherwise "".
 str borrow_aggregate_holder(Vec<Binding>* bindings, Vec<u32>* types,
                             TypeTable* table, SyntaxNode* root, SyntaxNode* node) {
     i64 i = 0;
@@ -501,6 +537,8 @@ str borrow_aggregate_holder(Vec<Binding>* bindings, Vec<u32>* types,
     return "";
 }
 
+/// Returns the local a borrow at `borrow_index` is stored into (`x = &y`),
+/// or "" when the borrow is temporary.
 str persistent_holder(Vec<SyntaxNode*>* leaves, i64 borrow_index) {
     i64 i = borrow_index - 2;
     while (i >= 0) {
@@ -532,6 +570,7 @@ str persistent_holder(Vec<SyntaxNode*>* leaves, i64 borrow_index) {
     return "";
 }
 
+/// Returns the type of the slot an assignment stores into.
 u32 borrow_assignment_slot_type(
     Vec<Binding>* bindings, Vec<u32>* binding_types, TypeTable* types,
     SyntaxNode* root, Vec<SyntaxNode*>* leaves, i64 borrow_index,
@@ -605,6 +644,7 @@ u32 borrow_assignment_slot_type(
     return type_id;
 }
 
+/// Returns the only binding named `name` declared before `use`, or null.
 Binding* borrow_unique_prior_binding(Vec<Binding>* bindings, str name,
     SyntaxNode* use) {
     Binding* selected = (Binding*)0;
@@ -623,8 +663,8 @@ Binding* borrow_unique_prior_binding(Vec<Binding>* bindings, str name,
     return selected;
 }
 
-// A call result carries the origins of the borrowed parameters returned by
-// its callee. Keep alternatives: a function may return any reference input.
+/// A call result carries the origins of the borrowed parameters returned by
+/// its callee. Keep alternatives: a function may return any reference input.
 bool borrow_body_returns_parameter(SyntaxNode* parameters_node, SyntaxNode* body,
                                    i64 parameter_index, str* parameter_name) {
     Vec<Binding> parameters = Vec<Binding>.new();
@@ -674,12 +714,15 @@ bool borrow_body_returns_parameter(SyntaxNode* parameters_node, SyntaxNode* body
     return returned;
 }
 
+/// Returns true when `function` may return its parameter `parameter_index`.
 bool borrow_function_returns_parameter(SyntaxNode* function, i64 parameter_index,
                                        str* parameter_name) {
     return borrow_body_returns_parameter(borrow_function_parameters(function),
         borrow_function_body(function), parameter_index, parameter_name);
 }
 
+/// Returns the call whose argument list contains `argument` and sets
+/// `*argument_index`, or null.
 SyntaxNode* borrow_call_for_argument(SyntaxNode* argument, i64* argument_index) {
     SyntaxNode* child = argument;
     SyntaxNode* parent = child.parent;
@@ -711,6 +754,8 @@ SyntaxNode* borrow_call_for_argument(SyntaxNode* argument, i64* argument_index) 
     return (SyntaxNode*)0;
 }
 
+/// Returns true when `origins` records `function` returning parameter
+/// `parameter_index`.
 bool borrow_has_return_origin(Vec<BorrowReturnOrigin>* origins,
                               SyntaxNode* function, i64 parameter_index) {
     i64 i = 0;
@@ -724,6 +769,7 @@ bool borrow_has_return_origin(Vec<BorrowReturnOrigin>* origins,
     return false;
 }
 
+/// Returns the return status recorded for `function`, or null.
 BorrowReturnStatus* borrow_return_status(Vec<BorrowReturnStatus>* statuses,
                                          SyntaxNode* function) {
     i64 i = 0;
@@ -735,6 +781,7 @@ BorrowReturnStatus* borrow_return_status(Vec<BorrowReturnStatus>* statuses,
     return (BorrowReturnStatus*)0;
 }
 
+/// Returns argument `argument_index` of call `call`, or null.
 SyntaxNode* borrow_call_argument(SyntaxNode* call, i64 argument_index) {
     if (call == (SyntaxNode*)0 || call.next_sibling == (SyntaxNode*)0
         || call.next_sibling.kind != NodeKind.Parenthesized) { return (SyntaxNode*)0; }
@@ -748,6 +795,8 @@ SyntaxNode* borrow_call_argument(SyntaxNode* call, i64 argument_index) {
     return (SyntaxNode*)0;
 }
 
+/// Returns true when call argument `argument_index` is the local
+/// `binding` (or an alias of it).
 bool borrow_call_argument_matches(Vec<Binding>* caller_bindings,
                                   SyntaxNode* call, i64 argument_index,
                                   Binding* parameter) {
@@ -783,6 +832,7 @@ bool borrow_call_argument_matches(Vec<Binding>* caller_bindings,
         && borrow_text_equals(actual_type.name, parameter.declared_type.name);
 }
 
+/// Records that `function` may return parameter `parameter_index`.
 void borrow_add_return_origin(Vec<BorrowReturnOrigin>* origins,
                               SyntaxNode* function, i64 parameter_index) {
     if (borrow_has_return_origin(origins, function, parameter_index)) { return; }
@@ -792,6 +842,7 @@ void borrow_add_return_origin(Vec<BorrowReturnOrigin>* origins,
     origins.push(origin);
 }
 
+/// Returns the call directly returned by a `return`, or null.
 SyntaxNode* borrow_return_call(SyntaxNode* return_node) {
     SyntaxNode* expression = return_node.next_sibling;
     while (expression != (SyntaxNode*)0
@@ -810,6 +861,7 @@ SyntaxNode* borrow_return_call(SyntaxNode* return_node) {
     return (SyntaxNode*)0;
 }
 
+/// Returns true when a `return` returns one of `bindings` directly.
 bool borrow_return_directly_returns_binding(Vec<Binding>* bindings,
                                             SyntaxNode* return_node,
                                             Binding* expected) {
@@ -828,6 +880,7 @@ bool borrow_return_directly_returns_binding(Vec<Binding>* bindings,
     return actual != (Binding*)0 && actual.name_node == expected.name_node;
 }
 
+/// Returns the argument count of a call.
 i64 borrow_call_arity(SyntaxNode* call) {
     if (call == (SyntaxNode*)0 || call.next_sibling == (SyntaxNode*)0
         || call.next_sibling.kind != NodeKind.Parenthesized) { return -1; }
@@ -851,6 +904,7 @@ i64 borrow_call_arity(SyntaxNode* call) {
     return count;
 }
 
+/// Returns true when `call`'s callee may return argument `argument_index`.
 bool borrow_call_returns_argument(Vec<BorrowReturnOrigin>* origins,
                                   SyntaxNode* call, i64 argument_index,
                                   i64 argument_count, SyntaxNode* root,
@@ -882,6 +936,8 @@ bool borrow_call_returns_argument(Vec<BorrowReturnOrigin>* origins,
     return item_is_c_extern_function(root, call.text);
 }
 
+/// Follows a call that forwards a borrowed argument through another call,
+/// returning the inner call and its argument index.
 SyntaxNode* borrow_lift_forwarded_call(Vec<BorrowReturnOrigin>* origins,
                                       SyntaxNode* call, i64* argument_index,
                                       SyntaxNode* root,
@@ -911,6 +967,8 @@ SyntaxNode* borrow_lift_forwarded_call(Vec<BorrowReturnOrigin>* origins,
     return current;
 }
 
+/// Returns true when argument `argument_index` of a returned call is a
+/// parameter.
 bool borrow_return_arg_is_parameter(Vec<Binding>* bindings,
                                     SyntaxNode* arguments, i64 argument_index,
                                     Binding* parameter) {
@@ -936,6 +994,7 @@ bool borrow_return_arg_is_parameter(Vec<Binding>* bindings,
     return false;
 }
 
+/// Returns true when a local is initialized from a parameter reference.
 bool borrow_binding_aliases_parameter(Vec<Binding>* bindings,
                                       Vec<SyntaxNode*>* leaves,
                                       Binding* binding, Binding* parameter,
@@ -981,6 +1040,7 @@ bool borrow_binding_aliases_parameter(Vec<Binding>* bindings,
     return false;
 }
 
+/// Returns true when a `return` expression may yield any of `parameters`.
 bool borrow_return_matches_any_parameter(Vec<Binding>* bindings,
                                          Vec<Binding>* parameters,
                                          Vec<SyntaxNode*>* leaves,
@@ -1010,6 +1070,8 @@ bool borrow_return_matches_any_parameter(Vec<Binding>* bindings,
     return false;
 }
 
+/// Records, for every function, whether its returned references have known
+/// origins.
 void borrow_collect_return_statuses(SyntaxNode* root, SyntaxTree* tree,
                                     SymbolTable* symbols,
                                     Vec<BorrowReturnStatus>* statuses) {
@@ -1126,6 +1188,8 @@ void borrow_collect_return_statuses(SyntaxNode* root, SyntaxTree* tree,
     }
 }
 
+/// Records which parameters each function may return, iterating to a fixed
+/// point across calls.
 void borrow_collect_return_origins(SyntaxNode* root,
                                    Vec<BorrowReturnOrigin>* origins,
                                    Vec<BorrowReturnStatus>* statuses) {
@@ -1212,6 +1276,8 @@ void borrow_collect_return_origins(SyntaxNode* root,
     }
 }
 
+/// Returns true when `method` on `receiver_type` returns a borrow of its
+/// receiver.
 bool borrow_method_returns_receiver(SyntaxNode* root, str receiver_type,
                                     SyntaxNode* method,
                                     Vec<Binding>* caller_bindings,
@@ -1360,6 +1426,7 @@ bool borrow_method_returns_receiver(SyntaxNode* root, str receiver_type,
     return best_score >= 0 && returns_receiver;
 }
 
+/// Returns the local that holds a call's borrowed result, or "".
 str borrow_call_result_holder(Vec<Binding>* bindings, Vec<u32>* binding_types,
                               Vec<SyntaxNode*>* leaves,
                               SyntaxNode* call, SyntaxNode* argument,
@@ -1394,6 +1461,7 @@ str borrow_call_result_holder(Vec<Binding>* bindings, Vec<u32>* binding_types,
     return holder;
 }
 
+/// Returns the last leaf index from `start` that mentions `holder`, or -1.
 i64 last_use(Vec<SyntaxNode*>* leaves, i64 start, str holder) {
     i64 last = -1;
     i64 i = start;
@@ -1407,6 +1475,7 @@ i64 last_use(Vec<SyntaxNode*>* leaves, i64 start, str holder) {
     return last;
 }
 
+/// Returns the last leaf index from `start` that uses binding `holder`.
 i64 last_binding_use(Vec<Binding>* bindings, Vec<SyntaxNode*>* leaves,
                      i64 start, Binding* holder) {
     if (holder == (Binding*)0) { return -1; }
@@ -1424,6 +1493,7 @@ i64 last_binding_use(Vec<Binding>* bindings, Vec<SyntaxNode*>* leaves,
     return last;
 }
 
+/// Returns true when `node` uses the loan's holder binding.
 bool borrow_is_holder_use(Vec<Binding>* bindings, Loan* loan, SyntaxNode* node) {
     if (loan.holder_binding_start <= 0 || node.token_kind != TokenKind.Identifier) {
         return false;
@@ -1434,6 +1504,7 @@ bool borrow_is_holder_use(Vec<Binding>* bindings, Loan* loan, SyntaxNode* node) 
 }
 
 
+/// Collects the leaf indexes where statements end (loan release points).
 void collect_borrow_release_points(SyntaxNode* node, Vec<SyntaxNode*>* leaves, Vec<i64>* points) {
     if (node == (SyntaxNode*)0) {
         return;
@@ -1459,6 +1530,7 @@ void collect_borrow_release_points(SyntaxNode* node, Vec<SyntaxNode*>* leaves, V
     }
 }
 
+/// Returns true when the scope `scope` ends after leaf `index`.
 bool borrow_scope_ends_after(Vec<SyntaxNode*>* leaves, i64 index,
                              SyntaxNode* scope) {
     if (index < 0 || index >= leaves.len() || !borrow_node_within(leaves.get(index), scope)) {
@@ -1467,6 +1539,7 @@ bool borrow_scope_ends_after(Vec<SyntaxNode*>* leaves, i64 index,
     return index + 1 >= leaves.len() || !borrow_node_within(leaves.get(index + 1), scope);
 }
 
+/// Appends one projection for `borrow_place`.
 void append_projection(BorrowAnalyzer* analyzer, ProjectionKind kind, str field, u16* count) {
     Projection projection;
     projection.kind = kind;
@@ -1475,6 +1548,7 @@ void append_projection(BorrowAnalyzer* analyzer, ProjectionKind kind, str field,
     *count = *count + 1;
 }
 
+/// Builds the place spelled by leaves `[root_index, end_index]`.
 Place borrow_place(BorrowAnalyzer* analyzer, Vec<SyntaxNode*>* leaves, i64 root_index, i64 end_index) {
     SyntaxNode* root = leaves.get(root_index);
     u32 local_id = analyzer.names.intern(root.text);
@@ -1513,6 +1587,7 @@ Place borrow_place(BorrowAnalyzer* analyzer, Vec<SyntaxNode*>* leaves, i64 root_
     return Place.with_projections(local_id, projections_start, projections_count);
 }
 
+/// Returns true when a method receiver expression contains a call.
 bool borrow_receiver_contains_call(Vec<SyntaxNode*>* leaves, i64 root_index, i64 method_index) {
     i64 i = root_index + 1;
     while (i + 1 < method_index) {
@@ -1528,6 +1603,8 @@ bool borrow_receiver_contains_call(Vec<SyntaxNode*>* leaves, i64 root_index, i64
     return false;
 }
 
+/// Returns true when a method call's arguments also call methods on the same
+/// receiver (which would conflict with a mutable receiver borrow).
 bool borrow_method_args_call_same_receiver(Vec<SyntaxNode*>* leaves,
                                           i64 receiver_root, i64 method_index) {
     SyntaxNode* args = leaves.get(method_index).next_sibling;
@@ -1566,23 +1643,28 @@ bool borrow_method_args_call_same_receiver(Vec<SyntaxNode*>* leaves,
     return false;
 }
 
+/// How one method takes its receiver: 1 shared, 2 mutable.
 struct MethodReceiver {
     str receiver_type;
     str method;
     i64 mode;
 }
 
+/// Receiver modes of every method that takes a reference receiver.
 struct MethodReceiverTable {
     Vec<MethodReceiver> entries;
 }
 
 impl MethodReceiverTable {
+    /// Creates an empty table.
     MethodReceiverTable new() {
         MethodReceiverTable table;
         table.entries = Vec<MethodReceiver>.new();
         return table;
     }
 
+    /// Records a method's receiver mode, keeping the strongest seen. Modes
+    /// below 1 (by value) are ignored.
     void register(MethodReceiverTable* self, str receiver_type, str method, i64 mode) {
         if (mode < 1) {
             return;
@@ -1606,6 +1688,7 @@ impl MethodReceiverTable {
         self.entries.push(entry);
     }
 
+    /// Returns the receiver mode of `method` on `receiver_type`, or -1.
     i64 get_for_type(MethodReceiverTable* self, str receiver_type, str method) {
         i64 i = 0;
         while (i < self.entries.len()) {
@@ -1619,6 +1702,7 @@ impl MethodReceiverTable {
         return -1;
     }
 
+    /// Returns the strongest receiver mode any type gives `method`, or -1.
     i64 get(MethodReceiverTable* self, str method) {
         i64 mode = -1;
         i64 i = 0;
@@ -1633,6 +1717,7 @@ impl MethodReceiverTable {
     }
 }
 
+/// Records the receiver modes of every method in an impl block.
 void collect_impl_methods_into_table(MethodReceiverTable* table, SyntaxNode* impl_item) {
     if (impl_item == (SyntaxNode*)0 || impl_item.kind != NodeKind.Impl) {
         return;
@@ -1701,6 +1786,8 @@ void collect_impl_methods_into_table(MethodReceiverTable* table, SyntaxNode* imp
     }
 }
 
+/// Follows type aliases from `name` to the final type name (depth 32;
+/// "" when too deep).
 str borrow_alias_target(SyntaxTree* tree, SymbolTable* symbols, str name, u32 depth) {
     if (depth >= 32) {
         return "";
@@ -1736,12 +1823,14 @@ str borrow_alias_target(SyntaxTree* tree, SymbolTable* symbols, str name, u32 de
     return resolved;
 }
 
+/// Returns true for nodes that do not start a new borrow scope.
 bool borrow_is_transparent_scope_node(SyntaxNode* node) {
     return node.kind != NodeKind.Block && node.kind != NodeKind.If
         && node.kind != NodeKind.While && node.kind != NodeKind.Match
         && node.kind != NodeKind.For && node.kind != NodeKind.Attribute;
 }
 
+/// Internal: scans a declaration's type tokens for `[...]` groups.
 void borrow_scan_type_brackets(SyntaxNode* node, SyntaxNode* stop, bool* found, bool* done,
                                 i64* angle, i64* separators) {
     SyntaxNode* cursor = node.first_child;
@@ -1790,6 +1879,7 @@ void borrow_scan_type_brackets(SyntaxNode* node, SyntaxNode* stop, bool* found, 
 // text can intern a different type than the declaration, so callers fall
 // back to name-based method lookup for those declarations. Fail closed: an
 // unrecognized shape also falls back, matching previous behavior.
+/// Returns true when a declaration's type spelling contains brackets.
 bool borrow_type_span_has_brackets(SyntaxNode* name_node, bool is_array) {
     if (is_array) {
         return true;
@@ -1816,6 +1906,7 @@ bool borrow_type_span_has_brackets(SyntaxNode* name_node, bool is_array) {
     return found || separators >= 2;
 }
 
+/// Returns the type id of a binding's declared type.
 u32 borrow_binding_type(SymbolTable* symbols, Binding* binding) {
     if (binding == (Binding*)0 || binding.declared_type.kind == ProjectionTypeKind.Unknown) {
         return TYPE_UNKNOWN;
@@ -1838,6 +1929,7 @@ u32 borrow_binding_type(SymbolTable* symbols, Binding* binding) {
     return type_id;
 }
 
+/// Returns the type id of global `name`.
 u32 borrow_global_type(SymbolTable* symbols, str name) {
     i64 index = symbols.find(name);
     if (index < 0) {
@@ -1884,6 +1976,7 @@ u32 borrow_global_type(SymbolTable* symbols, str name) {
     return type_id;
 }
 
+/// Returns the display name of `type_id`.
 str borrow_type_name(TypeTable* types, u32 type_id) {
     TypeEntry* entry = types.get(types.resolve_subst(type_id));
     while (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference) {
@@ -1896,6 +1989,7 @@ str borrow_type_name(TypeTable* types, u32 type_id) {
     return types.names.get(entry.name_id);
 }
 
+/// Returns the inferred type of a `let` binding from its initializer.
 u32 borrow_inferred_let_type(SymbolTable* symbols, Vec<Binding>* bindings,
                              Binding* binding, u32 depth) {
     if (binding == (Binding*)0 || binding.kind != BindingKind.Let || depth >= 32) {
@@ -1996,6 +2090,7 @@ u32 borrow_inferred_let_type(SymbolTable* symbols, Vec<Binding>* bindings,
     return type_id;
 }
 
+/// Returns the receiver type name of a method call on a local.
 str borrow_local_receiver_type(SyntaxTree* tree, SymbolTable* symbols,
                                Vec<Binding>* bindings, Binding* visible, str receiver,
                                Vec<SyntaxNode*>* leaves,
@@ -2037,6 +2132,7 @@ str borrow_local_receiver_type(SyntaxTree* tree, SymbolTable* symbols,
     return receiver_type;
 }
 
+/// Returns the strongest receiver mode `method` has in any impl, or -1.
 i64 borrow_method_receiver_kind(SyntaxTree* tree, str method) {
     if (tree == (SyntaxTree*)0 || tree.root == (SyntaxNode*)0) {
         return -1;
@@ -2052,6 +2148,8 @@ i64 borrow_method_receiver_kind(SyntaxTree* tree, str method) {
     return table.get(method);
 }
 
+/// Scans one function's leaves in order, recording loans, releasing them,
+/// and reporting conflicts and escapes.
 void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbols,
                   SyntaxNode* function, CfgSet* cfg, MethodReceiverTable* receiver_table,
                   Vec<BorrowReturnOrigin>* return_origins,
@@ -2488,6 +2586,8 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
     leaves.drop();
 }
 
+/// Runs the borrow and escape checks on every cfg-active function. Returns
+/// false when any error was reported.
 bool check_borrows(SyntaxTree* tree, SymbolTable* symbols, DiagnosticBag* diagnostics, CfgSet* cfg) {
     bool ok = true;
     Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();

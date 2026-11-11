@@ -41,14 +41,20 @@ i64 hash_str(str s) {
 }
 
 // --- SHA-1 (RFC 3174) ----------------------------------------------------
-// Block-based digest used by the WebSocket handshake
-// (Sec-WebSocket-Accept = base64(SHA-1(key + GUID))). Output is written to
-// `out` (exactly 20 bytes); returns false only when `data` is null and
-// `len` is nonzero (an empty hash of null data is valid).
+// Used by the WebSocket handshake: Sec-WebSocket-Accept = base64(SHA-1(key + GUID)).
 
+/// SHA-1 block size in bytes.
 const i64 SHA1_BLOCK = 64;
+/// SHA-1 digest size in bytes.
 const i64 SHA1_OUT = 20;
 
+/// Computes the SHA-1 (RFC 3174) digest of `len` bytes at `data` into `out`.
+/// $1 : input bytes; may be null only when `len` is 0
+/// $2 : input length in bytes
+/// $3 : caller-owned buffer of at least `SHA1_OUT` (20) bytes
+/// Returns false, writing nothing, when `data` is null and `len` is nonzero.
+/// SHA-1 is not collision resistant; use it only for protocol needs such as
+/// the WebSocket handshake.
 bool sha1(u8* data, i64 len, u8* out) {
     if (data == (u8*)0 && len != 0) {
         return false;

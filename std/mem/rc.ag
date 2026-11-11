@@ -25,6 +25,10 @@ struct RcBox<T> {
     T value;
 }
 
+/// A single-threaded reference-counted handle to a shared heap value.
+/// The count is a plain (non-atomic) `i32`, so handles must not be cloned or
+/// dropped concurrently from several threads. The last drop runs the value's
+/// destructor and frees the shared allocation. `clone` does not deep-copy.
 struct Rc<T> {
     T* ptr;
     i32* count;

@@ -20,6 +20,7 @@ struct Slice<T> {
 /// Borrows contiguous elements without allocating or transferring ownership.
 /// The view must not outlive the source or a change to its backing storage.
 trait AsSlice<T> {
+    /// Returns a borrowed view of the contiguous elements.
     Slice<T> as_slice(&self);
 }
 
@@ -197,6 +198,8 @@ impl<T> Slice<T> {
     }
 }
 
+/// A borrowing iterator over a slice. It yields copies of each element and
+/// must not outlive the slice's backing storage.
 struct SliceIter<T> {
     T* data;
     i64 len;
@@ -281,6 +284,7 @@ impl<T> IntoIterator for SliceIter<T> {
 }
 
 impl<T> SliceIter<T> {
+    /// Consumes the remaining elements and returns how many there were.
     i64 count(*self) {
         i64 c = 0;
         while (true) {

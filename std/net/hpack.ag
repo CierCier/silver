@@ -17,12 +17,19 @@ import std.mem.memory;
 import std.mem.drop;
 import std.net.hpack_table;
 
+/// Per-entry overhead added to name and value lengths when sizing the dynamic
+/// table (RFC 7541 section 4.1).
 const i64 HPACK_ENTRY_OVERHEAD = 32;
+/// Maximum number of dynamic table entries the decoder stores, independent of
+/// the byte-size limit.
 const i64 HPACK_MAX_DYN_ENTRIES = 256;
+/// Number of entries in the HPACK static table.
 const i64 HPACK_STATIC_COUNT = 61;
 
 // --- Header field ---------------------------------------------------------
 
+/// One decoded header field. `name` and `value` are malloc'd, NUL-terminated,
+/// and length-tracked, so embedded NULs survive. Free with `hpack_free_field`.
 struct HpackField {
     u8* name;      // malloc'd, null-terminated; name_len octets
     i64 name_len;
@@ -32,6 +39,9 @@ struct HpackField {
 
 // --- Dynamic table state --------------------------------------------------
 
+/// HPACK decoding state: the dynamic table (newest entry first) and its size
+/// limits. Owns its entries and frees them on eviction or clear. One decoder
+/// per connection direction; not thread-safe.
 struct HpackDecoder {
     HpackField table[256]; // newest first (index 0); see HPACK_MAX_DYN_ENTRIES
     i64 count;

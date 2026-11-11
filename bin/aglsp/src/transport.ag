@@ -3,8 +3,13 @@ import params;
 import std.channel;
 import std.thread;
 
+/// How a request ended: normally, cancelled by the client, or interrupted
+/// by newer input.
 enum RequestCompletion { Finished; Cancelled; Interrupted; }
 
+/// One received message queued for the dispatcher, with its cancellation
+/// and preemption state. Shared between the reader and dispatcher threads;
+/// `cancelled` is atomic.
 struct PendingMessage {
     Transport* transport;
     String body;
@@ -31,9 +36,9 @@ struct PendingMessage {
     i32 completion_epoch;
 }
 
-// Rust-analyzer's `experimental/serverStatus` notification, which Zed shows
-// under the server in its language server menu. Only clients that advertise
-// `experimental.serverStatusNotification` receive it; repeats are dropped.
+/// Rust-analyzer's `experimental/serverStatus` notification, which Zed shows
+/// under the server in its language server menu. Only clients that advertise
+/// `experimental.serverStatusNotification` receive it; repeats are dropped.
 struct ServerStatus {
     bool enabled;
     bool busy;
@@ -46,11 +51,13 @@ struct ServerStatus {
 }
 
 impl ServerStatus {
+    /// Creates a disabled status reporter.
     ServerStatus new() {
         ServerStatus status; status.enabled = false; status.busy = false; status.last = String.new();
         status.pull_pending = false; status.checked = -1; status.failing = 0; return move status;
     }
 
+    /// Sends `experimental/serverStatus` when enabled and the message changed.
     void report(ServerStatus* self, bool quiescent, str message) {
         self.busy = !quiescent;
         if (!self.enabled || self.last.equals(message)) { return; }
@@ -61,8 +68,8 @@ impl ServerStatus {
     }
 }
 
-// Only the dispatcher owns documents and writes stdout. The reader owns stdin;
-// the mutex protects live request identities, including the active request.
+/// Only the dispatcher owns documents and writes stdout. The reader owns stdin;
+/// the mutex protects live request identities, including the active request.
 struct Transport {
     Channel<PendingMessage*> messages;
     RawMutex mutex;
@@ -78,6 +85,7 @@ struct Transport {
     ServerStatus status;
 }
 
+/// Returns a request id as text: decoded for strings, raw for numbers.
 String request_identity(str raw) {
     if (strlen(raw) == 0) { return String.new(); }
     if (raw[0] == '"') {
@@ -93,10 +101,14 @@ String request_identity(str raw) {
     String key = String.from_str("n:"); key.push_display(&id); return move key;
 }
 
+/// Returns true after the client cancelled the request.
 bool request_cancelled(PendingMessage* message) {
     return __atomic_load_i32(&message.cancelled, ATOMIC_ACQUIRE) != 0;
 }
 
+/// Returns true when a preemptible request should stop: cancelled, a newer
+/// completion request arrived, the reader is blocked on a full queue, or
+/// (for yielding work) any message is waiting.
 bool request_interrupted(PendingMessage* message) {
     if (request_cancelled(message)) { return true; }
     if (!message.preemptible) { return false; }
@@ -113,8 +125,8 @@ bool request_interrupted(PendingMessage* message) {
     return message.pressure_interrupted;
 }
 
-// Explicit errors and lifecycle responses retain their own result. Successful
-// analysis responses freeze cancellation and pressure before any terminal output.
+/// Explicit errors and lifecycle responses retain their own result. Successful
+/// analysis responses freeze cancellation and pressure before any terminal output.
 void seal_message(PendingMessage* message, bool interruptible) {
     Transport* transport = message.transport;
     transport.mutex.lock();
@@ -131,6 +143,8 @@ void seal_message(PendingMessage* message, bool interruptible) {
     transport.mutex.unlock();
 }
 
+/// Seals the request and sends its response, or a cancellation error when
+/// it was cancelled.
 void complete_response(PendingMessage* message, str id, str result) {
     seal_message(message, true);
     finish_progress(message);
@@ -144,6 +158,7 @@ void complete_response(PendingMessage* message, str id, str result) {
     else { send_response(id, result); }
 }
 
+/// Ends the request's work-done progress, if one was started.
 void finish_progress(PendingMessage* message) {
     seal_message(message, false);
     if (!message.progress_started) { return; }
@@ -155,11 +170,13 @@ void finish_progress(PendingMessage* message) {
     send_notification("$/progress", out.to_str());
 }
 
+/// Seals the request and sends an error response.
 void complete_error(PendingMessage* pending, str id, i64 code, str message) {
     seal_message(pending, code == -32800);
     finish_progress(pending); send_error(id, code, message);
 }
 
+/// Removes `message` from the pending list and frees it.
 void release_message(Transport* transport, PendingMessage* message) {
     seal_message(message, false);
     transport.mutex.lock();
@@ -172,6 +189,10 @@ void release_message(Transport* transport, PendingMessage* message) {
     @drop_in_place(message, 1); free(message);
 }
 
+/// Reader thread body: reads framed messages from stdin, applies
+/// `$/cancelRequest` and progress cancels to pending requests, and queues
+/// the rest (blocking when the queue is full). Ends at EOF or `exit` and
+/// closes the queue.
 void read_transport(i64 address) {
     Transport* transport = (Transport*)address;
     ByteStream stream = ByteStream.stdin(); String body = String.new();
@@ -224,6 +245,7 @@ void read_transport(i64 address) {
 }
 
 impl Transport {
+    /// Creates a transport with a 32-message queue.
     Transport new() {
         Transport transport;
         transport.messages = Channel<PendingMessage*>.bounded(32);
@@ -237,6 +259,7 @@ impl Transport {
         return move transport;
     }
 
+    /// Asks the reader to stop and closes the queue.
     void stop(Transport* self) {
         __atomic_store_i32(&self.stopping, 1, ATOMIC_RELEASE);
         self.messages.close();

@@ -15,14 +15,19 @@ import frontend.symbols;
 import frontend.typecheck;
 import frontend.typecheck_expr;
 
+/// Whether adding an import could change overload resolution at existing
+/// call sites: safe, a conflict, or unknown.
 enum ImportOverloadSafety { Safe; Conflict; Inconclusive; }
 
+/// A scratch syntax tree assembled from a snapshot and its dependencies.
+/// Owns its node pool; token text stays borrowed from the snapshots.
 struct DiagnosticTree {
     NodePool pool;
     SyntaxTree tree;
 }
 
 impl DiagnosticTree {
+    /// Creates a scratch tree that starts with copies of `source`'s items.
     DiagnosticTree new(SyntaxTree* source) {
         DiagnosticTree scratch;
         scratch.pool = NodePool.new();
@@ -35,6 +40,8 @@ impl Drop for DiagnosticTree {
     void drop(*self) { self.pool.destroy(); }
 }
 
+/// Copies an item for the scratch tree under file id `file`, dropping
+/// function bodies when `strip_bodies` (dependencies need signatures only).
 SyntaxNode* diagnostic_clone_signature(NodePool* pool, SyntaxNode* node,
                                        i64 file, bool strip_bodies) {
     Span span = node.span; span.file = file;
@@ -64,6 +71,7 @@ SyntaxNode* diagnostic_clone_signature(NodePool* pool, SyntaxNode* node,
     return copy;
 }
 
+/// Registers the struct, enum, and impl type facts of `tree` in `symbols`.
 void diagnostic_register_types(SymbolTable* symbols, SyntaxTree* tree, CfgSet* cfg) {
     Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
     cfg_collect_items(tree.root, cfg, (DiagnosticBag*)0, &items);
@@ -80,6 +88,8 @@ void diagnostic_register_types(SymbolTable* symbols, SyntaxTree* tree, CfgSet* c
     }
 }
 
+/// Adds a dependency snapshot's signatures to the scratch tree as file
+/// `file`, reporting its own errors to `report`.
 void diagnostic_add_snapshot(DiagnosticTree* scratch, SyntaxTree* dependency,
                              i64 file, SymbolTable* symbols, CfgSet* cfg,
                              DiagnosticBag* report) {
@@ -111,6 +121,7 @@ void diagnostic_add_snapshot(DiagnosticTree* scratch, SyntaxTree* dependency,
     signatures.root.last_child = (SyntaxNode*)0;
 }
 
+/// Appends the diagnostics of `checked` that belong to the local file.
 void diagnostic_append_local(DiagnosticBag* output, DiagnosticBag* checked) {
     i64 i = 0;
     while (i < checked.len()) {
@@ -127,8 +138,8 @@ void diagnostic_append_local(DiagnosticBag* output, DiagnosticBag* checked) {
     }
 }
 
-// Dependencies are deduplicated source snapshots, including current overlays.
-// The returned bag owns its messages and retains no scratch nodes or token text.
+/// Dependencies are deduplicated source snapshots, including current overlays.
+/// The returned bag owns its messages and retains no scratch nodes or token text.
 DiagnosticBag check_snapshot_diagnostics(SyntaxTree* source, Vec<SyntaxTree*>* dependencies,
                                          CfgSet* cfg, str path, Vec<String>* include_dirs) {
     DiagnosticBag diagnostics = DiagnosticBag.new();
@@ -175,6 +186,7 @@ DiagnosticBag check_snapshot_diagnostics(SyntaxTree* source, Vec<SyntaxTree*>* d
     return move local;
 }
 
+/// Returns true when `name` is in `names`.
 bool diagnostic_name_in(Vec<String>* names, str name) {
     i64 i = 0;
     while (i < names.len()) {
@@ -184,6 +196,7 @@ bool diagnostic_name_in(Vec<String>* names, str name) {
     return false;
 }
 
+/// Returns true when a token under `node` is one of `names`.
 bool diagnostic_body_mentions_name(SyntaxNode* node, Vec<String>* names) {
     if (node == (SyntaxNode*)0) { return false; }
     if (node.kind == NodeKind.Token && diagnostic_name_in(names, node.text)) { return true; }
@@ -195,6 +208,8 @@ bool diagnostic_body_mentions_name(SyntaxNode* node, Vec<String>* names) {
     return false;
 }
 
+/// Returns true when the source mentions any of `names` (conservatively
+/// true for an empty tree).
 bool import_overload_may_affect_source(SyntaxTree* source, Vec<String>* names) {
     SyntaxNode* node = source.root;
     if (node == (SyntaxNode*)0) { return true; }
@@ -213,6 +228,8 @@ bool import_overload_may_affect_source(SyntaxTree* source, Vec<String>* names) {
     return false;
 }
 
+/// Returns true when a diagnostic is an overload error about one of
+/// `names`; writes the matched name.
 bool diagnostic_overload_message(Diagnostic* diagnostic, Vec<String>* names, String* matched_name) {
     i64 i = 0;
     while (i < names.len()) {
@@ -227,6 +244,7 @@ bool diagnostic_overload_message(Diagnostic* diagnostic, Vec<String>* names, Str
     return false;
 }
 
+/// Returns true when `diagnostics` has an overload error for `name` at `span`.
 bool diagnostic_has_overload_at(DiagnosticBag* diagnostics, Vec<String>* names,
                                 String* name, Span span) {
     i64 i = 0;
@@ -244,6 +262,8 @@ bool diagnostic_has_overload_at(DiagnosticBag* diagnostics, Vec<String>* names,
     return false;
 }
 
+/// Type-checks `source` against `dependencies` and collects the overload
+/// diagnostics for `names` into `overloads`.
 ImportOverloadSafety diagnostic_probe_import_overloads(
     SyntaxTree* source, Vec<SyntaxTree*>* dependencies, Vec<String>* names, CfgSet* cfg,
     DiagnosticBag* overloads) {
@@ -304,9 +324,9 @@ ImportOverloadSafety diagnostic_probe_import_overloads(
     return ImportOverloadSafety.Safe;
 }
 
-// Compare the compiler's overload diagnostics at existing local call sites.
-// Name resolution is intentionally omitted so unrelated unresolved names do
-// not prevent the expression checker from reaching those calls.
+/// Compare the compiler's overload diagnostics at existing local call sites.
+/// Name resolution is intentionally omitted so unrelated unresolved names do
+/// not prevent the expression checker from reaching those calls.
 ImportOverloadSafety check_import_overload_safety(
     SyntaxTree* source, Vec<SyntaxTree*>* baseline_dependencies,
     Vec<SyntaxTree*>* candidate_dependencies, Vec<String>* names, CfgSet* cfg) {

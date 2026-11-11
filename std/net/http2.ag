@@ -14,44 +14,72 @@ import std.net.transport;
 
 // --- Frame types and flags (RFC 7540 §6) ---------------------------------
 
+/// Frame type: DATA.
 const i64 H2_DATA = 0x0;
+/// Frame type: HEADERS.
 const i64 H2_HEADERS = 0x1;
+/// Frame type: PRIORITY.
 const i64 H2_PRIORITY = 0x2;
+/// Frame type: RST_STREAM.
 const i64 H2_RST_STREAM = 0x3;
+/// Frame type: SETTINGS.
 const i64 H2_SETTINGS = 0x4;
+/// Frame type: PUSH_PROMISE.
 const i64 H2_PUSH_PROMISE = 0x5;
+/// Frame type: PING.
 const i64 H2_PING = 0x6;
+/// Frame type: GOAWAY.
 const i64 H2_GOAWAY = 0x7;
+/// Frame type: WINDOW_UPDATE.
 const i64 H2_WINDOW_UPDATE = 0x8;
+/// Frame type: CONTINUATION.
 const i64 H2_CONTINUATION = 0x9;
 
+/// Frame flag (DATA, HEADERS): last frame of the stream.
 const i64 H2_FLAG_END_STREAM = 0x1;
+/// Frame flag (SETTINGS, PING): acknowledgement.
 const i64 H2_FLAG_ACK = 0x1;
+/// Frame flag (HEADERS, CONTINUATION): last frame of the header block.
 const i64 H2_FLAG_END_HEADERS = 0x4;
+/// Frame flag (DATA, HEADERS): the payload is padded.
 const i64 H2_FLAG_PADDED = 0x8;
+/// Frame flag (HEADERS): priority fields are present.
 const i64 H2_FLAG_PRIORITY = 0x20;
 
 // --- SETTINGS parameter ids (RFC 7540 §6.5.2) ----------------------------
 
+/// SETTINGS id: HPACK dynamic table size.
 const i64 H2_SET_HEADER_TABLE_SIZE = 0x1;
+/// SETTINGS id: server push enabled.
 const i64 H2_SET_ENABLE_PUSH = 0x2;
+/// SETTINGS id: maximum concurrent streams.
 const i64 H2_SET_MAX_CONCURRENT_STREAMS = 0x3;
+/// SETTINGS id: initial stream flow-control window.
 const i64 H2_SET_INITIAL_WINDOW_SIZE = 0x4;
+/// SETTINGS id: maximum frame payload size.
 const i64 H2_SET_MAX_FRAME_SIZE = 0x5;
+/// SETTINGS id: maximum header list size.
 const i64 H2_SET_MAX_HEADER_LIST_SIZE = 0x6;
 
+/// Initial flow-control window size (RFC 7540 section 6.9.2).
 const i64 H2_DEFAULT_WINDOW = 65535;
+/// Default maximum frame payload size.
 const i64 H2_DEFAULT_MAX_FRAME = 16384;
+/// Largest header block this client buffers across HEADERS/CONTINUATION.
 const i64 H2_MAX_HEADER_BLOCK = 65536;
 
+/// The fixed HTTP/2 client connection preface.
 const str H2_CLIENT_PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+/// Byte length of `H2_CLIENT_PREFACE`.
 const i64 H2_CLIENT_PREFACE_LEN = 24;
 
+/// Writes `val` as a big-endian u16 at `buf`.
 void h2_pack_u16(u8* buf, i64 val) {
     buf[0] = (u8)((val >> 8) & 0xFF);
     buf[1] = (u8)(val & 0xFF);
 }
 
+/// Writes `val` as a big-endian u32 at `buf`.
 void h2_pack_u32(u8* buf, i64 val) {
     buf[0] = (u8)((val >> 24) & 0xFF);
     buf[1] = (u8)((val >> 16) & 0xFF);
@@ -59,6 +87,9 @@ void h2_pack_u32(u8* buf, i64 val) {
     buf[3] = (u8)(val & 0xFF);
 }
 
+/// Returns true for connection-specific headers that HTTP/2 forbids
+/// (RFC 9113 section 8.3.1). Matches only all-lowercase or capitalized
+/// spellings, such as `connection` and `Connection`.
 bool h2_is_connection_header(u8* name, i64 len) {
     // RFC 9113 §8.3.1: Connection-specific headers must not be emitted in HTTP/2
     if (len == 10 && (memcmp((const void*)name, (const void*)"connection", 10) == 0 ||
@@ -83,12 +114,15 @@ bool h2_is_connection_header(u8* name, i64 len) {
     }
     return false;
 }
+/// Number of concurrent streams one connection tracks.
 const i64 H2_MAX_STREAMS = 8;
 
 // --- Connection state -----------------------------------------------------
 
 // --- Response -------------------------------------------------------------
 
+/// A decoded response. The caller owns `headers`, `trailers`, and the
+/// malloc'd `body`; release them with `h2_free_response`.
 struct H2Response {
     i64 status;                 // from the :status pseudo-header (0 if absent)
     HpackField headers[32];     // decoded header fields (caller frees)
@@ -151,6 +185,8 @@ struct H2Stream {
     H2Response resp;
 }
 
+/// Client state for one HTTP/2 connection over a borrowed `StreamIo`.
+/// Not thread-safe.
 struct H2Connection {
     StreamIo io;
     HpackDecoder hpack;
@@ -556,6 +592,8 @@ i64 h2_request_body(H2Connection* c, str method, str scheme, str authority, str 
     return h2_read_response(c, sid, out);
 }
 
+/// Same as `h2_request_body` without a request body. Blocks until the
+/// response completes. Returns 0 or -1.
 i64 h2_request(H2Connection* c, str method, str scheme, str authority, str path,
                HpackField* extra, i64 n_extra, H2Response* out) {
     return h2_request_body(c, method, scheme, authority, path, extra, n_extra,

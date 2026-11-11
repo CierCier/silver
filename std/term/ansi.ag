@@ -7,21 +7,31 @@ import std.io.file;
 import std.fmt;
 
 // Standard 8 colors (SGR base codes 30-37 / 40-47).
+/// Color index for black; pass to `term_set_fg`/`term_set_bg`.
 const i64 TERM_BLACK = 0;
+/// Color index for red.
 const i64 TERM_RED = 1;
+/// Color index for green.
 const i64 TERM_GREEN = 2;
+/// Color index for yellow.
 const i64 TERM_YELLOW = 3;
+/// Color index for blue.
 const i64 TERM_BLUE = 4;
+/// Color index for magenta.
 const i64 TERM_MAGENTA = 5;
+/// Color index for cyan.
 const i64 TERM_CYAN = 6;
+/// Color index for white.
 const i64 TERM_WHITE = 7;
-// Added to a base color for the bright variant (90-97 / 100-107).
+/// Added to a base color for the bright variant (90-97 / 100-107).
 const i64 TERM_BRIGHT = 8;
 
+/// Writes an ESC byte.
 void term_write_esc(BufWriter* out) {
     out.write_u8((u8)27);
 }
 
+/// Writes a CSI introducer (`ESC [`).
 void term_write_csi(BufWriter* out) {
     out.write_u8((u8)27);
     out.write_u8((u8)91); // '['
@@ -29,14 +39,17 @@ void term_write_csi(BufWriter* out) {
 
 // -- Cursor ---------------------------------------------------------------
 
+/// Writes the sequence that hides the cursor.
 void term_hide_cursor(BufWriter* out) {
     out.write_str("\x1b[?25l");
 }
 
+/// Writes the sequence that shows the cursor.
 void term_show_cursor(BufWriter* out) {
     out.write_str("\x1b[?25h");
 }
 
+/// Writes the sequence that moves the cursor to the top-left corner.
 void term_cursor_home(BufWriter* out) {
     out.write_str("\x1b[H");
 }
@@ -50,34 +63,40 @@ void term_move_to(BufWriter* out, i64 row, i64 col) {
     out.write_u8((u8)72); // 'H'
 }
 
+/// Writes the sequence that moves the cursor up `n` rows (stops at the top).
 void term_cursor_up(BufWriter* out, i64 n) {
     term_write_csi(out);
     out.write_i64(n);
     out.write_u8((u8)65); // 'A'
 }
 
+/// Writes the sequence that moves the cursor down `n` rows (stops at the bottom).
 void term_cursor_down(BufWriter* out, i64 n) {
     term_write_csi(out);
     out.write_i64(n);
     out.write_u8((u8)66); // 'B'
 }
 
+/// Writes the sequence that moves the cursor right `n` columns.
 void term_cursor_forward(BufWriter* out, i64 n) {
     term_write_csi(out);
     out.write_i64(n);
     out.write_u8((u8)67); // 'C'
 }
 
+/// Writes the sequence that moves the cursor left `n` columns.
 void term_cursor_back(BufWriter* out, i64 n) {
     term_write_csi(out);
     out.write_i64(n);
     out.write_u8((u8)68); // 'D'
 }
 
+/// Writes the sequence that saves the cursor position (`CSI s`).
 void term_cursor_save(BufWriter* out) {
     out.write_str("\x1b[s");
 }
 
+/// Writes the sequence that restores the position saved by `term_cursor_save`.
 void term_cursor_restore(BufWriter* out) {
     out.write_str("\x1b[u");
 }
@@ -106,24 +125,30 @@ void term_erase_screen_end(BufWriter* out) {
 
 // -- Alternate screen ---------------------------------------------------------
 
+/// Writes the sequence that switches to the alternate screen buffer.
+/// Pair it with `term_exit_alt`, or the user's scrollback stays hidden.
 void term_enter_alt(BufWriter* out) {
     out.write_str("\x1b[?1049h");
 }
 
+/// Writes the sequence that returns to the main screen buffer.
 void term_exit_alt(BufWriter* out) {
     out.write_str("\x1b[?1049l");
 }
 
 // -- SGR attributes -------------------------------------------------------------
 
+/// Writes the sequence that resets all colors and text attributes.
 void term_sgr_reset(BufWriter* out) {
     out.write_str("\x1b[0m");
 }
 
+/// Writes the sequence that turns on bold text.
 void term_bold_on(BufWriter* out) {
     out.write_str("\x1b[1m");
 }
 
+/// Writes the sequence that turns on underlined text.
 void term_underline_on(BufWriter* out) {
     out.write_str("\x1b[4m");
 }

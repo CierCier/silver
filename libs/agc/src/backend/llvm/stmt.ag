@@ -15,6 +15,8 @@ import backend.llvm.types;
 import backend.llvm.mono;
 import backend.llvm.reference;
 
+/// Emits an `alloca` of `llvm_type` at the start of the function's entry
+/// block, so the slot is allocated once even inside loops.
 LLVMOpaqueValue* llvm_entry_alloca(LlvmContext* ctx, LLVMOpaqueType* llvm_type, str name) {
     LLVMOpaqueBasicBlock* entry = LLVMGetEntryBasicBlock(ctx.current_fn);
     LLVMOpaqueValue* first = LLVMGetFirstInstruction(entry);
@@ -29,6 +31,8 @@ LLVMOpaqueValue* llvm_entry_alloca(LlvmContext* ctx, LLVMOpaqueType* llvm_type, 
     return storage;
 }
 
+/// Returns the global symbol for a `static` local:
+/// `<prefix><function>_<name>_<source offset>`.
 String llvm_static_local_symbol(LlvmContext* ctx, u32 var_name_id, Span span,
                                 str prefix) {
     String symbol = String.from_str(prefix);
@@ -56,6 +60,8 @@ String llvm_static_local_symbol(LlvmContext* ctx, u32 var_name_id, Span span,
     return move symbol;
 }
 
+/// Emits the deferred statements registered at or above `mark`, newest
+/// first, stopping if a statement terminates the block.
 void llvm_emit_defers_above(LlvmContext* ctx, i64 mark) {
     i64 i = ctx.deferred_statements.len() - 1;
     while (i >= mark && !ctx.is_terminated()) {
@@ -75,6 +81,7 @@ void llvm_emit_defers_above(LlvmContext* ctx, i64 mark) {
     }
 }
 
+/// Binds `name` to an existing slot as an alias local and returns its name id.
 u32 llvm_assignment_alias(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 type_id,
                            Span span, str name) {
     u32 name_id = ctx.names.intern(name);
@@ -84,6 +91,7 @@ u32 llvm_assignment_alias(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 type_id,
     return expr_id;
 }
 
+/// Emits `target op= value`, evaluating the target place once.
 void llvm_emit_compound_assignment(LlvmContext* ctx, u32 stmt_id) {
     AstStmt statement = *ctx.pool.get_stmt(stmt_id);
     AstExpr target = *ctx.pool.get_expr(statement.inner0);
@@ -144,6 +152,8 @@ void llvm_emit_compound_assignment(LlvmContext* ctx, u32 stmt_id) {
     ctx.pop_scope();
 }
 
+/// Emits one lowered statement. Does nothing for id 0 or after the current
+/// block has terminated.
 void llvm_emit_stmt(LlvmContext* ctx, u32 stmt_id) {
     if (stmt_id == 0 || ctx.is_terminated()) { return; }
     // Compound assignments can grow the pool while emitting child statements.

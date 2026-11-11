@@ -19,6 +19,8 @@ import backend.llvm.types;
 import backend.llvm.reference;
 import backend.llvm.function_abi;
 
+/// Returns function `name` as a value (declaring an import when needed),
+/// or null when unknown.
 LLVMOpaqueValue* llvm_function_value_by_name(LlvmContext* ctx, str name) {
     LLVMOpaqueValue* function = LLVMGetNamedFunction(ctx.module, name);
     if (function != (LLVMOpaqueValue*)0) {
@@ -38,6 +40,8 @@ LLVMOpaqueValue* llvm_function_value_by_name(LlvmContext* ctx, str name) {
         : llvm_named_callable_value(ctx, function, name);
 }
 
+/// Parses an integer literal (sign, radix prefix, `_` separators) into i64,
+/// wrapping on overflow; 0 for null or empty text.
 i64 parse_int_literal(str text) {
     if (text == (str)0) { return 0; }
     i64 len = strlen(text);
@@ -87,6 +91,8 @@ i64 parse_int_literal(str text) {
     return neg ? -val : val;
 }
 
+/// Returns a constant of `ty` for integer literal `text`, negated when
+/// `negate`; null for empty text.
 LLVMOpaqueValue* llvm_const_int_literal(LLVMOpaqueType* ty, str text, bool negate) {
     if (text == (str)0) { return (LLVMOpaqueValue*)0; }
     i64 len = strlen(text);
@@ -124,6 +130,7 @@ LLVMOpaqueValue* llvm_const_int_literal(LLVMOpaqueType* ty, str text, bool negat
     return value;
 }
 
+/// Returns a constant of float type `ty` for literal `text`.
 LLVMOpaqueValue* llvm_const_real_literal(LLVMOpaqueType* ty, str text) {
     if (text == (str)0) { return (LLVMOpaqueValue*)0; }
     String digits = String.new();
@@ -138,6 +145,7 @@ LLVMOpaqueValue* llvm_const_real_literal(LLVMOpaqueType* ty, str text) {
     return value;
 }
 
+/// Returns true when any variant of an enum item has a payload.
 bool enum_has_payload(SyntaxNode* enum_item) {
     if (enum_item == (SyntaxNode*)0) {
         return false;
@@ -161,6 +169,7 @@ bool enum_has_payload(SyntaxNode* enum_item) {
     return has_payload;
 }
 
+/// Decodes a character literal's source text (with escapes) to a codepoint.
 u32 parse_char_literal(str text) {
     if (text == (str)0) {
         return 0;
@@ -204,6 +213,7 @@ u32 parse_char_literal(str text) {
     return (u32)first;
 }
 
+/// Emits an inline `asm` expression with its register-bound arguments.
 LLVMOpaqueValue* llvm_emit_asm(LlvmContext* ctx, u32 expr_id) {
     AstExpr* expr = ctx.pool.get_expr(expr_id);
     AstAsm* asm_info = ctx.pool.asms.get_ptr((i64)expr.aux);
@@ -272,6 +282,7 @@ LLVMOpaqueValue* llvm_emit_asm(LlvmContext* ctx, u32 expr_id) {
     return res;
 }
 
+/// Emits a value of `enum_name.variant_name`: the tag plus payload fields.
 LLVMOpaqueValue* llvm_emit_enum_build(LlvmContext* ctx, str enum_name, str variant_name,
                                       u32 args_start, u32 args_count) {
     String base = String.new();
@@ -440,6 +451,7 @@ LLVMOpaqueValue* llvm_emit_enum_build(LlvmContext* ctx, str enum_name, str varia
     return LLVMBuildLoad2(ctx.builder, enum_ty, slot, "enum_val");
 }
 
+/// Returns the declared return type of free function `fn_name`.
 u32 find_function_return_type_by_name(SyntaxNode* root, TypeTable* types, str fn_name) {
     if (root == (SyntaxNode*)0 || strlen(fn_name) == 0) { return TYPE_UNKNOWN; }
     if (str_starts_with(fn_name, "__atomic_")) {
@@ -462,6 +474,7 @@ u32 find_function_return_type_by_name(SyntaxNode* root, TypeTable* types, str fn
     return TYPE_UNKNOWN;
 }
 
+/// Returns the declared return type of `struct_name.method_name`.
 u32 find_method_return_type(SyntaxNode* root, TypeTable* types, str struct_name, str method_name) {
     if (root == (SyntaxNode*)0 || strlen(struct_name) == 0 || strlen(method_name) == 0) {
         return TYPE_UNKNOWN;
@@ -601,6 +614,8 @@ u32 find_method_return_type(SyntaxNode* root, TypeTable* types, str struct_name,
     return TYPE_UNKNOWN;
 }
 
+/// Returns true when a type still contains an unresolved type parameter
+/// (depth 32).
 bool llvm_type_has_unresolved(LlvmContext* ctx, u32 type_id, i64 depth) {
     if (type_id == TYPE_UNKNOWN || depth > 64) { return true; }
     type_id = ctx.types.resolve_subst(type_id);
@@ -631,6 +646,8 @@ bool llvm_type_has_unresolved(LlvmContext* ctx, u32 type_id, i64 depth) {
     return false;
 }
 
+/// Returns the operator trait method name for a binary operator (`__add`,
+/// ...), or null.
 str llvm_binary_operator_method(u32 op) {
     if (op == (u32)TokenKind.Plus) { return "__add"; }
     if (op == (u32)TokenKind.Minus) { return "__sub"; }
@@ -651,6 +668,7 @@ str llvm_binary_operator_method(u32 op) {
     return "";
 }
 
+/// Returns the type of expression `expr_id` under the active substitutions.
 u32 llvm_expr_type(LlvmContext* ctx, u32 expr_id) {
     if (expr_id == 0) { return TYPE_UNKNOWN; }
     AstExpr* expr = ctx.pool.get_expr(expr_id);
@@ -902,6 +920,7 @@ u32 llvm_expr_type(LlvmContext* ctx, u32 expr_id) {
     return TYPE_UNKNOWN;
 }
 
+/// Emits the address of an assignable place expression.
 LLVMOpaqueValue* llvm_emit_lvalue(LlvmContext* ctx, u32 expr_id) {
     if (expr_id == 0) { return (LLVMOpaqueValue*)0; }
     AstExpr* expr = ctx.pool.get_expr(expr_id);
@@ -1054,8 +1073,8 @@ LLVMOpaqueValue* llvm_emit_lvalue(LlvmContext* ctx, u32 expr_id) {
     return (LLVMOpaqueValue*)0;
 }
 
-// True when a place expression reaches its storage through a pointer,
-// reference, or non-array container, so the source keeps ownership.
+/// True when a place expression reaches its storage through a pointer,
+/// reference, or non-array container, so the source keeps ownership.
 bool llvm_place_reached_through_borrow(LlvmContext* ctx, u32 expr_id) {
     while (expr_id != 0) {
         AstExpr* expr = ctx.pool.get_expr(expr_id);
@@ -1077,8 +1096,8 @@ bool llvm_place_reached_through_borrow(LlvmContext* ctx, u32 expr_id) {
     return false;
 }
 
-// Array elements carry no per-element drop state, so transferring one out
-// would have to clear the whole root's flags.
+/// Array elements carry no per-element drop state, so transferring one out
+/// would have to clear the whole root's flags.
 bool llvm_place_indexes_array(LlvmContext* ctx, u32 expr_id) {
     while (expr_id != 0) {
         AstExpr* expr = ctx.pool.get_expr(expr_id);
@@ -1089,6 +1108,8 @@ bool llvm_place_indexes_array(LlvmContext* ctx, u32 expr_id) {
     return false;
 }
 
+/// Returns true when a field access may be unaligned (through a packed
+/// struct), so loads and stores must use alignment 1.
 bool llvm_expr_may_be_unaligned(LlvmContext* ctx, u32 expr_id) {
     if (expr_id == 0) { return false; }
     AstExpr* expr = ctx.pool.get_expr(expr_id);
@@ -1111,6 +1132,7 @@ bool llvm_expr_may_be_unaligned(LlvmContext* ctx, u32 expr_id) {
     return false;
 }
 
+/// Returns the element type of indexing `target_expr_id`.
 u32 llvm_index_elem_type(LlvmContext* ctx, u32 target_expr_id, u32 index_expr_id) {
     u32 target_type = llvm_expr_type(ctx, target_expr_id);
     TypeEntry* entry = ctx.types.get(target_type);
@@ -1141,6 +1163,7 @@ u32 llvm_index_elem_type(LlvmContext* ctx, u32 target_expr_id, u32 index_expr_id
     return TYPE_UNKNOWN;
 }
 
+/// Returns the type stored at a place expression.
 u32 llvm_lvalue_type(LlvmContext* ctx, u32 expr_id) {
     if (expr_id == 0) { return TYPE_UNKNOWN; }
     AstExpr* expr = ctx.pool.get_expr(expr_id);
@@ -1185,6 +1208,7 @@ u32 llvm_lvalue_type(LlvmContext* ctx, u32 expr_id) {
     return TYPE_UNKNOWN;
 }
 
+/// Returns true for a signed integer type (after substitution).
 bool llvm_type_is_signed(TypeTable* types, u32 id) {
     TypeEntry* entry = types.get(id);
     return entry.kind == TypeKind.I8 || entry.kind == TypeKind.I16
@@ -1192,6 +1216,7 @@ bool llvm_type_is_signed(TypeTable* types, u32 id) {
         || entry.kind == TypeKind.I128;
 }
 
+/// Returns true for an unsigned integer type (after substitution).
 bool llvm_type_is_unsigned(TypeTable* types, u32 id) {
     TypeEntry* entry = types.get(id);
     return entry.kind == TypeKind.U8 || entry.kind == TypeKind.U16
@@ -1200,6 +1225,8 @@ bool llvm_type_is_unsigned(TypeTable* types, u32 id) {
         || entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference;
 }
 
+/// Applies a user `cast` block converting `val` from `from_type` to
+/// `to_type`, or returns null when none applies.
 LLVMOpaqueValue* llvm_try_apply_user_cast(LlvmContext* ctx, LLVMOpaqueValue* val, u32 from_type, u32 to_type) {
     if (val == (LLVMOpaqueValue*)0 || from_type == TYPE_UNKNOWN || to_type == TYPE_UNKNOWN || from_type == to_type) {
         return (LLVMOpaqueValue*)0;
@@ -1244,9 +1271,9 @@ LLVMOpaqueValue* llvm_try_apply_user_cast(LlvmContext* ctx, LLVMOpaqueValue* val
     return result;
 }
 
-// Convert val to the lowered target type so stores never silently truncate
-// (opaque pointers hide width mismatches from the LLVM verifier). Unknown
-// or unhandled combinations pass through unchanged (status quo).
+/// Convert val to the lowered target type so stores never silently truncate
+/// (opaque pointers hide width mismatches from the LLVM verifier). Unknown
+/// or unhandled combinations pass through unchanged (status quo).
 LLVMOpaqueValue* llvm_compat_value(LlvmContext* ctx, LLVMOpaqueValue* val,
                                    u32 source_type_id, u32 target_type_id) {
     if (val == (LLVMOpaqueValue*)0 || target_type_id == TYPE_UNKNOWN) {
@@ -1310,6 +1337,8 @@ LLVMOpaqueValue* llvm_compat_value(LlvmContext* ctx, LLVMOpaqueValue* val,
     return val;
 }
 
+/// Emits call arguments converted to the callee's parameter types, moving
+/// by-value owned arguments.
 void llvm_prepare_call_args(LlvmContext* ctx, LLVMOpaqueType* fn_type,
                             Vec<LLVMOpaqueValue*>* call_args, Vec<u32>* source_types,
                             Vec<u32>* target_types, str callee, bool c_abi) {
@@ -1456,6 +1485,8 @@ void llvm_prepare_call_args(LlvmContext* ctx, LLVMOpaqueType* fn_type,
     expected_tys.drop();
 }
 
+/// Packs arguments after `fixed_count` into a slice for a Silver variadic
+/// parameter.
 void llvm_pack_variadic_call_args(LlvmContext* ctx, i64 fixed_count,
                                   u32 element_type_id,
                                   Vec<LLVMOpaqueValue*>* call_args,
@@ -1534,6 +1565,8 @@ void llvm_pack_variadic_call_args(LlvmContext* ctx, i64 fixed_count,
     target_types.push(slice_type_id);
 }
 
+/// Applies C default argument promotions (float to double, small integers
+/// to int) to C variadic arguments.
 void llvm_promote_c_variadic_call_args(LlvmContext* ctx, i64 fixed_count,
                                        Vec<LLVMOpaqueValue*>* call_args,
                                        Vec<u32>* source_types) {
@@ -1568,6 +1601,9 @@ void llvm_promote_c_variadic_call_args(LlvmContext* ctx, i64 fixed_count,
     }
 }
 
+/// Maps an `ATOMIC_*` ordering argument (literal or constant name) to the
+/// LLVM ordering value. Unknown or missing values mean sequentially
+/// consistent.
 i32 llvm_atomic_ordering_from_arg(LlvmContext* ctx, u32 arg_id) {
     if (arg_id == 0) { return 7; }
     AstExpr* arg = ctx.pool.get_expr(arg_id);
@@ -1590,6 +1626,8 @@ i32 llvm_atomic_ordering_from_arg(LlvmContext* ctx, u32 arg_id) {
     return 7;
 }
 
+/// Emits an `__atomic_*` intrinsic call (load, store, exchange, fetch-op,
+/// cmpxchg, fence).
 LLVMOpaqueValue* llvm_emit_atomic_call(LlvmContext* ctx, u32 expr_id, str name) {
     AstExpr* expr = ctx.pool.get_expr(expr_id);
     u32 args_start = expr.inner1;
@@ -1755,6 +1793,8 @@ LLVMOpaqueValue* llvm_emit_atomic_call(LlvmContext* ctx, u32 expr_id, str name) 
     return (LLVMOpaqueValue*)0;
 }
 
+/// Emits a call to runtime formatting function `fn_name`; reports and
+/// returns null when it is not declared.
 LLVMOpaqueValue* llvm_emit_format_call(LlvmContext* ctx, str fn_name,
                                        LLVMOpaqueValue** args, u32 arg_count) {
     LLVMOpaqueValue* fn = LLVMGetNamedFunction(ctx.module, fn_name);
@@ -1785,6 +1825,7 @@ LLVMOpaqueValue* llvm_emit_format_call(LlvmContext* ctx, str fn_name,
     return LLVMBuildCall2(ctx.builder, fn_ty, fn, args, arg_count, call_name);
 }
 
+/// Emits a two-argument runtime formatting call.
 LLVMOpaqueValue* llvm_emit_format_call2(LlvmContext* ctx, str fn_name,
                                         LLVMOpaqueValue* arg0, LLVMOpaqueValue* arg1) {
     Vec<LLVMOpaqueValue*> args = Vec<LLVMOpaqueValue*>.with_capacity(2);
@@ -1795,6 +1836,7 @@ LLVMOpaqueValue* llvm_emit_format_call2(LlvmContext* ctx, str fn_name,
     return result;
 }
 
+/// Emits a three-argument runtime formatting call.
 LLVMOpaqueValue* llvm_emit_format_call3(LlvmContext* ctx, str fn_name,
                                         LLVMOpaqueValue* arg0, LLVMOpaqueValue* arg1,
                                         LLVMOpaqueValue* arg2) {
@@ -1807,6 +1849,7 @@ LLVMOpaqueValue* llvm_emit_format_call3(LlvmContext* ctx, str fn_name,
     return result;
 }
 
+/// Emits appending `length` bytes at `bytes` to the format buffer.
 bool llvm_emit_format_write_bytes(LlvmContext* ctx, LLVMOpaqueValue* string_slot,
                                   LLVMOpaqueValue* writer, LLVMOpaqueValue* data,
                                   LLVMOpaqueValue* len) {
@@ -1818,6 +1861,7 @@ bool llvm_emit_format_write_bytes(LlvmContext* ctx, LLVMOpaqueValue* string_slot
         != (LLVMOpaqueValue*)0;
 }
 
+/// Emits appending a C string to the format buffer.
 bool llvm_emit_format_write_str(LlvmContext* ctx, LLVMOpaqueValue* string_slot,
                                 LLVMOpaqueValue* writer, LLVMOpaqueValue* text) {
     if (writer != (LLVMOpaqueValue*)0) {
@@ -1828,6 +1872,7 @@ bool llvm_emit_format_write_str(LlvmContext* ctx, LLVMOpaqueValue* string_slot,
         != (LLVMOpaqueValue*)0;
 }
 
+/// Returns true when `owner` implements `Display`.
 bool llvm_has_display_impl(SyntaxNode* root, str owner) {
     SyntaxNode* item = root == (SyntaxNode*)0 ? (SyntaxNode*)0 : root.first_child;
     while (item != (SyntaxNode*)0) {
@@ -1857,6 +1902,7 @@ bool llvm_has_display_impl(SyntaxNode* root, str owner) {
     return false;
 }
 
+/// Emits a `{}` argument through its `Display` impl.
 bool llvm_emit_display_format_arg(LlvmContext* ctx, u32 arg_id, u32 arg_type,
                                   LLVMOpaqueValue* string_slot,
                                   LLVMOpaqueValue* output_writer,
@@ -1969,6 +2015,7 @@ bool llvm_emit_display_format_arg(LlvmContext* ctx, u32 arg_id, u32 arg_type,
     return true;
 }
 
+/// Emits a `char` format argument as UTF-8.
 bool llvm_emit_format_char(LlvmContext* ctx, LLVMOpaqueValue* value,
                           LLVMOpaqueValue* string_slot, LLVMOpaqueValue* output_writer) {
     LLVMOpaqueValue* encoder = LLVMGetNamedFunction(ctx.module, "utf8_encode");
@@ -1987,6 +2034,7 @@ bool llvm_emit_format_char(LlvmContext* ctx, LLVMOpaqueValue* value,
     return llvm_emit_format_write_bytes(ctx, string_slot, output_writer, buffer, length);
 }
 
+/// Emits a unit enum format argument as its variant name.
 bool llvm_emit_unit_enum_format_arg(LlvmContext* ctx, u32 arg_id, u32 arg_type,
                                     LLVMOpaqueValue* string_slot,
                                     LLVMOpaqueValue* output_writer,
@@ -2090,6 +2138,7 @@ bool llvm_emit_unit_enum_format_arg(LlvmContext* ctx, u32 arg_id, u32 arg_type,
     return true;
 }
 
+/// Emits the debug (`{:?}`-style) text of a value of `value_type`.
 bool llvm_emit_format_debug_value(LlvmContext* ctx, u32 value_type,
                                   LLVMOpaqueValue* value_ptr,
                                   LLVMOpaqueValue* string_slot,
@@ -2276,6 +2325,7 @@ bool llvm_emit_format_debug_value(LlvmContext* ctx, u32 value_type,
     return false;
 }
 
+/// Emits a debug-formatted argument.
 bool llvm_emit_format_debug_arg(LlvmContext* ctx, u32 arg_id, u32 arg_type,
                                 LLVMOpaqueValue* string_slot,
                                 LLVMOpaqueValue* output_writer) {
@@ -2291,6 +2341,8 @@ bool llvm_emit_format_debug_arg(LlvmContext* ctx, u32 arg_id, u32 arg_type,
         output_writer, 0);
 }
 
+/// Emits a format expression into `output_writer`, or into a new string
+/// buffer when it is null, and returns the result.
 LLVMOpaqueValue* llvm_emit_format_to(LlvmContext* ctx, AstExpr* expr,
                                      LLVMOpaqueValue* output_writer) {
     str source = ctx.names.get(expr.inner0);
@@ -2526,10 +2578,12 @@ LLVMOpaqueValue* llvm_emit_format_to(LlvmContext* ctx, AstExpr* expr,
     return LLVMBuildLoad2(ctx.builder, string_ty, string_slot, "format.result");
 }
 
+/// Emits a `@format` expression.
 LLVMOpaqueValue* llvm_emit_format(LlvmContext* ctx, AstExpr* expr) {
     return llvm_emit_format_to(ctx, expr, (LLVMOpaqueValue*)0);
 }
 
+/// Emits an `@fprint` expression.
 LLVMOpaqueValue* llvm_emit_fprint(LlvmContext* ctx, AstExpr* expr) {
     AstExpr* writer_expr = ctx.pool.get_expr(expr.inner0);
     LLVMOpaqueValue* writer = (LLVMOpaqueValue*)0;
@@ -2559,9 +2613,9 @@ LLVMOpaqueValue* llvm_emit_fprint(LlvmContext* ctx, AstExpr* expr) {
     return llvm_emit_format_to(ctx, format_expr, writer);
 }
 
-    // True when a match arm body ends in a call that never returns, so an
-    // unterminated body still diverges (Optional::unwrap's none arm ends in
-    // __optional_abort). Anything else unterminated fails closed.
+    /// True when a match arm body ends in a call that never returns, so an
+    /// unterminated body still diverges (Optional::unwrap's none arm ends in
+    /// __optional_abort). Anything else unterminated fails closed.
     bool match_body_diverges(LlvmContext* ctx, AstStmt* body_stmt) {
         if (body_stmt.kind != StmtKind.Block || body_stmt.aux == 0) {
             return false;
@@ -2584,6 +2638,7 @@ LLVMOpaqueValue* llvm_emit_fprint(LlvmContext* ctx, AstExpr* expr) {
             || strcmp(name, "__result_abort") == 0;
     }
 
+/// Emits `@hash(value)` (string content hash for `str`, byte hash else).
 LLVMOpaqueValue* llvm_emit_hash(LlvmContext* ctx, AstExpr* expr) {    // Mirrors stage0 hash_codegen: str -> hash_str(s); String ->
     // hash_bytes(data, len); anything else -> hash_bytes(&val, abi_size).
     // hash_str/hash_bytes come from std.hash; missing import fails closed.
@@ -2655,6 +2710,7 @@ LLVMOpaqueValue* llvm_emit_hash(LlvmContext* ctx, AstExpr* expr) {    // Mirrors
     return res;
 }
 
+/// Emits a struct literal value.
 LLVMOpaqueValue* llvm_emit_struct_lit(LlvmContext* ctx, AstExpr* expr) {
     // Runtime struct literal: alloca + zero-init (missing fields stay zero,
     // mirroring global initializers) + per-field stores, then load.
@@ -2709,6 +2765,8 @@ LLVMOpaqueValue* llvm_emit_struct_lit(LlvmContext* ctx, AstExpr* expr) {
     return LLVMBuildLoad2(ctx.builder, def.llvm_type, slot, "struct.lit.val");
 }
 
+/// Converts integer slice bound `value` to i64, sign- or zero-extending by
+/// its type; reports and returns null for a non-integer bound.
 LLVMOpaqueValue* llvm_slice_bound_i64(LlvmContext* ctx, u32 expr_id,
                                       LLVMOpaqueValue* value, str name) {
     u32 source_type = llvm_expr_type(ctx, expr_id);
@@ -2756,6 +2814,7 @@ LLVMOpaqueValue* llvm_slice_bound_i64(LlvmContext* ctx, u32 expr_id,
     return LLVMBuildTrunc(ctx.builder, value, i64_type, name);
 }
 
+/// Emits a call to `strlen` on `text`.
 LLVMOpaqueValue* llvm_emit_strlen(LlvmContext* ctx, LLVMOpaqueValue* text) {
     if (text == (LLVMOpaqueValue*)0) { return (LLVMOpaqueValue*)0; }
     LLVMOpaqueValue* strlen_fn = LLVMGetNamedFunction(ctx.module, "strlen");
@@ -2776,6 +2835,7 @@ LLVMOpaqueValue* llvm_emit_strlen(LlvmContext* ctx, LLVMOpaqueValue* text) {
     return length;
 }
 
+/// Emits a `str` value for `expr_id` (string literal or conversion).
 LLVMOpaqueValue* llvm_emit_str_value(LlvmContext* ctx, u32 expr_id) {
     u32 value_type = ctx.types.resolve_subst(llvm_expr_type(ctx, expr_id));
     LLVMOpaqueValue* value = llvm_emit_expr(ctx, expr_id);
@@ -2795,6 +2855,7 @@ LLVMOpaqueValue* llvm_emit_str_value(LlvmContext* ctx, u32 expr_id) {
     return entry.kind == TypeKind.Str ? value : (LLVMOpaqueValue*)0;
 }
 
+/// Emits a `str` as a `[u8]` slice value.
 LLVMOpaqueValue* llvm_emit_str_as_slice_value(LlvmContext* ctx, u32 expr_id) {
     LLVMOpaqueValue* text = llvm_emit_expr(ctx, expr_id);
     if (text == (LLVMOpaqueValue*)0) { return (LLVMOpaqueValue*)0; }
@@ -2808,6 +2869,7 @@ LLVMOpaqueValue* llvm_emit_str_as_slice_value(LlvmContext* ctx, u32 expr_id) {
     return LLVMBuildInsertValue(ctx.builder, slice, length, 1, "str.slice.len");
 }
 
+/// Emits a `str` as a pointer to a temporary `[u8]` slice.
 LLVMOpaqueValue* llvm_emit_str_as_slice_ptr(LlvmContext* ctx, u32 expr_id) {
     LLVMOpaqueValue* slice = llvm_emit_str_as_slice_value(ctx, expr_id);
     if (slice == (LLVMOpaqueValue*)0) { return (LLVMOpaqueValue*)0; }
@@ -2817,6 +2879,8 @@ LLVMOpaqueValue* llvm_emit_str_as_slice_ptr(LlvmContext* ctx, u32 expr_id) {
     return slot;
 }
 
+/// Emits an array, vector, or slice argument as a slice for a slice
+/// parameter.
 LLVMOpaqueValue* llvm_emit_slice_argument(LlvmContext* ctx, u32 expr_id,
                                           u32 slice_type_id,
                                           LLVMOpaqueValue** temporary_ptr,
@@ -2959,6 +3023,7 @@ LLVMOpaqueValue* llvm_emit_slice_argument(LlvmContext* ctx, u32 expr_id,
                                 "slice.arg.len");
 }
 
+/// Emits a slicing expression (`value[start:end]`).
 LLVMOpaqueValue* llvm_emit_slice(LlvmContext* ctx, u32 expr_id) {
     AstExpr* expr = ctx.pool.get_expr(expr_id);
     u32 target_id = expr.inner0;
@@ -3103,6 +3168,8 @@ LLVMOpaqueValue* llvm_emit_slice(LlvmContext* ctx, u32 expr_id) {
     return LLVMBuildLoad2(ctx.builder, slice_llvm_type, slice_slot, "slice.result.value");
 }
 
+/// Emits `compare` on a primitive receiver: -1, 0, or 1 as i32 (`strcmp`
+/// for `str`; NaN compares as equal).
 LLVMOpaqueValue* llvm_emit_primitive_compare(LlvmContext* ctx, u32 receiver_expr_id,
                                               u32 other_expr_id, u32 type_id,
                                               bool receiver_is_pointer) {
@@ -3172,6 +3239,7 @@ LLVMOpaqueValue* llvm_emit_primitive_compare(LlvmContext* ctx, u32 receiver_expr
     return LLVMBuildSelect(ctx.builder, less, negative_one, nonnegative, "compare_result");
 }
 
+/// Returns the name of an expression kind, for diagnostics.
 str llvm_expr_kind_name(ExprKind kind) {
     if (kind == ExprKind.Literal) { return "literal"; }
     if (kind == ExprKind.Var) { return "variable"; }
@@ -3204,6 +3272,7 @@ str llvm_expr_kind_name(ExprKind kind) {
     return "unknown";
 }
 
+/// Returns the function a `launch` call starts (or its trampoline).
 LLVMOpaqueValue* llvm_launch_callee(LlvmContext* ctx, AstExpr* call, AstExpr* callee) {
     if (callee.kind != ExprKind.Var) {
         ctx.note_unresolved("launch-callee", "must be a named function");
@@ -3274,6 +3343,8 @@ LLVMOpaqueValue* llvm_launch_callee(LlvmContext* ctx, AstExpr* call, AstExpr* ca
     return fn;
 }
 
+/// Emits `launch f(args)`: packs the arguments, spawns a thread through a
+/// generated trampoline, and returns the `Task` handle.
 LLVMOpaqueValue* llvm_emit_launch(LlvmContext* ctx, u32 expr_id) {
     AstExpr* launch_expr = ctx.pool.get_expr(expr_id);
     AstExpr* call = ctx.pool.get_expr(launch_expr.inner0);
@@ -3490,6 +3561,7 @@ LLVMOpaqueValue* llvm_emit_launch(LlvmContext* ctx, u32 expr_id) {
     return handle;
 }
 
+/// Emits `wait task`: joins the thread and moves out its result.
 LLVMOpaqueValue* llvm_emit_wait(LlvmContext* ctx, u32 expr_id) {
     AstExpr* wait_expr = ctx.pool.get_expr(expr_id);
     u32 task_type = ctx.types.resolve_subst(llvm_expr_type(ctx, wait_expr.inner0));
@@ -3575,6 +3647,8 @@ LLVMOpaqueValue* llvm_emit_wait(LlvmContext* ctx, u32 expr_id) {
     return phi;
 }
 
+/// Returns true when an expression refers to a local declared after
+/// `drop_mark` (one that dies with the block).
 bool llvm_expr_references_block_local(LlvmContext* ctx, u32 expr_id,
                                       i64 drop_mark) {
     if (expr_id == 0) { return false; }
@@ -3666,6 +3740,7 @@ bool llvm_expr_references_block_local(LlvmContext* ctx, u32 expr_id,
     return false;
 }
 
+/// Returns true when source file `file_id` is the stdlib's `std/json.ag`.
 bool llvm_source_is_std_json(LlvmContext* ctx, i64 file_id) {
     if (file_id <= 0 || file_id > ctx.source_paths.len()) { return false; }
     String* source_path = ctx.source_paths.get_ptr((u32)(file_id - 1));
@@ -3683,6 +3758,8 @@ bool llvm_source_is_std_json(LlvmContext* ctx, i64 file_id) {
     return start == 0 || path[start - 1] == (u8)'/';
 }
 
+/// Returns true when `JsonWriter` and its `finish` come only from
+/// `std/json.ag`, so `finish()` is known to hand its buffer to the caller.
 bool llvm_std_json_writer_finish_is_detached(LlvmContext* ctx) {
     i64 writer_count = 0;
     i64 finish_count = 0;
@@ -3740,6 +3817,8 @@ bool llvm_std_json_writer_finish_is_detached(LlvmContext* ctx) {
     return writer_count == 1 && finish_count == 1;
 }
 
+/// Returns true when a block's result is `JsonWriter.finish()` from the
+/// stdlib, whose string outlives the writer's block.
 bool llvm_block_result_is_detached_json_buffer(LlvmContext* ctx, u32 expr_id,
                                                 u32 result_type) {
     TypeEntry* result_entry = ctx.types.get(ctx.types.resolve_subst(result_type));
@@ -3760,6 +3839,8 @@ bool llvm_block_result_is_detached_json_buffer(LlvmContext* ctx, u32 expr_id,
         && llvm_std_json_writer_finish_is_detached(ctx);
 }
 
+/// Returns true when a block's pointer or reference result points into a
+/// local that the block drops.
 bool llvm_block_result_aliases_local(LlvmContext* ctx, LLVMOpaqueValue* value,
                                      u32 expr_id, u32 result_type,
                                      i64 drop_mark) {
@@ -3800,6 +3881,8 @@ bool llvm_block_result_aliases_local(LlvmContext* ctx, LLVMOpaqueValue* value,
     return false;
 }
 
+/// Emits expression `expr_id` and returns its value (null for void or on
+/// an unsupported construct, which is also counted).
 LLVMOpaqueValue* llvm_emit_expr(LlvmContext* ctx, u32 expr_id) {
     if (expr_id == 0) { return (LLVMOpaqueValue*)0; }
     // Child statements can synthesize expressions and reallocate the pool.

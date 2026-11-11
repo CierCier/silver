@@ -8,14 +8,15 @@ import std.display;
 import std.io.file;
 
 /// Terminates the process with SIGABRT, like C `abort()`.
-// Uses the pure-Silver abort() from std.mem.memory (transitively via std.io).
+/// Uses the pure-Silver abort() from std.mem.memory (transitively via std.io).
+/// Internal helper for `Optional.unwrap`; not part of the public API.
 void __optional_abort() {
     abort();
 }
 
-// Optional<T> — None carries no value, Some(T) carries a value.
-// NOTE: None is declared first so its discriminant is 0, matching the
-// for-in lowering which treats a zero tag as the end of iteration.
+/// A value that is either present (`Some(T)`) or absent (`None`).
+/// `None` has discriminant 0: `for`-in lowering treats a zero tag as the end
+/// of iteration, so the variant order is load-bearing.
 enum Optional<T> {
     None;
     Some(T);
@@ -34,10 +35,12 @@ impl Optional<T> {
         return Optional.None;
     }
 
+    /// Returns true when a value is present. Does not consume the optional.
     bool is_some(&self) {
         return match *self { Some(v) : true, None : false };
     }
 
+    /// Returns true when no value is present. Does not consume the optional.
     bool is_none(&self) {
         return match *self { Some(v) : false, None : true };
     }
@@ -56,6 +59,8 @@ impl Optional<T> {
         }
     }
 
+    /// Consumes the optional and returns its value, or `fallback` when absent.
+    /// `fallback` is evaluated (and moved in) even when a value is present.
     T unwrap_or(self, T fallback) {
         return match self { Some(move v) : v, None : fallback };
     }

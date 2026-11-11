@@ -3,8 +3,11 @@
 ///
 /// Types implementing `Drop` must define the `drop` method, which takes a pointer
 /// to the instance and is called automatically by the compiler.
-
 trait Drop {
+    /// Releases resources owned by `self`. Called by the compiler at scope exit,
+    /// on overwrite, and on container cleanup; do not call it directly unless the
+    /// value is then never used or dropped again. Fields with their own `Drop`
+    /// are dropped after this method returns, so do not drop them here.
     void drop(*self);
 }
 

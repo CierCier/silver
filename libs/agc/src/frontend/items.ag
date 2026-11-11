@@ -9,6 +9,7 @@ import frontend.lexer;
 import frontend.symbols;
 import frontend.types;
 
+/// Returns the first top-level item of `kind` named `name`, or null.
 SyntaxNode* find_item_by_name(SyntaxNode* root, NodeKind kind, str name) {
     if (root == (SyntaxNode*)0) {
         return (SyntaxNode*)0;
@@ -26,11 +27,13 @@ SyntaxNode* find_item_by_name(SyntaxNode* root, NodeKind kind, str name) {
     return (SyntaxNode*)0;
 }
 
+/// Returns the enum item named `name`, or null.
 SyntaxNode* find_enum_item(SyntaxNode* root, str name) {
     return find_item_by_name(root, NodeKind.Enum, name);
 }
 
 
+/// Returns true when `item` carries a `#[name]` or `#[name(...)]` attribute.
 bool item_has_attribute(SyntaxNode* item, str name) {
     if (item == (SyntaxNode*)0) { return false; }
     SyntaxNode* child = item.first_child;
@@ -54,6 +57,8 @@ bool item_has_attribute(SyntaxNode* item, str name) {
     return false;
 }
 
+/// Returns the string argument of the first `#[name("...")]` attribute
+/// between `start` and `end`, or an empty string.
 String item_attribute_string(SyntaxNode* start, SyntaxNode* end, str name) {
     SyntaxNode* cursor = start;
     while (cursor != (SyntaxNode*)0 && cursor != end) {
@@ -94,6 +99,7 @@ String item_attribute_string(SyntaxNode* start, SyntaxNode* end, str name) {
     return String.new();
 }
 
+/// Returns the function's `#[link_name("...")]`, or an empty string.
 String item_function_link_name(SyntaxNode* function) {
     SyntaxNode* id_node = function_identifier(function);
     SyntaxNode* cursor = function.first_child;
@@ -128,6 +134,7 @@ String item_function_link_name(SyntaxNode* function) {
     return String.new();
 }
 
+/// Returns the link name of top-level function `function_name`, or "".
 String item_function_link_name_by_name(SyntaxNode* root, str function_name) {
     SyntaxNode* item = root == (SyntaxNode*)0 ? (SyntaxNode*)0 : root.first_child;
     while (item != (SyntaxNode*)0) {
@@ -144,6 +151,8 @@ String item_function_link_name_by_name(SyntaxNode* root, str function_name) {
     return String.new();
 }
 
+/// Returns the link name of `function_name` declared in an `extern` block,
+/// or "".
 String item_extern_link_name(SyntaxNode* root, str function_name) {
     SyntaxNode* item = root == (SyntaxNode*)0 ? (SyntaxNode*)0 : root.first_child;
     while (item != (SyntaxNode*)0) {
@@ -197,6 +206,7 @@ String item_extern_link_name(SyntaxNode* root, str function_name) {
     return String.new();
 }
 
+/// Returns true when an `extern` item uses the C linkage spec.
 bool item_extern_uses_c_abi(SyntaxNode* item) {
     if (item == (SyntaxNode*)0 || item.kind != NodeKind.Extern) { return false; }
     SyntaxNode* child = item.first_child;
@@ -214,6 +224,7 @@ bool item_extern_uses_c_abi(SyntaxNode* item) {
     return false;
 }
 
+/// Returns the first node after any leading attributes.
 SyntaxNode* item_skip_extern_attribute(SyntaxNode* node) {
     while (node != (SyntaxNode*)0) {
         if (node.kind == NodeKind.Attribute) {
@@ -229,6 +240,7 @@ SyntaxNode* item_skip_extern_attribute(SyntaxNode* node) {
     return node;
 }
 
+/// Returns the first node of a single-declaration `extern "C" fn` item.
 SyntaxNode* item_extern_single_signature_start(SyntaxNode* item) {
     SyntaxNode* cursor = item.first_child;
     while (cursor != (SyntaxNode*)0 && !(cursor.kind == NodeKind.Token
@@ -242,13 +254,14 @@ SyntaxNode* item_extern_single_signature_start(SyntaxNode* item) {
     return cursor == (SyntaxNode*)0 ? cursor : cursor.next_sibling;
 }
 
+/// The parts of one C `extern` function declaration (borrowed CST nodes).
 struct ExternFunctionSignature {
     SyntaxNode* signature_start;
     SyntaxNode* function_name;
     SyntaxNode* parameter_list;
 }
 
-// C ABI type queries share this walk; requiring parameters excludes extern globals.
+/// C ABI type queries share this walk; requiring parameters excludes extern globals.
 ExternFunctionSignature item_find_c_extern_function(SyntaxNode* root,
                                                      str function_name) {
     ExternFunctionSignature result;
@@ -310,11 +323,13 @@ ExternFunctionSignature item_find_c_extern_function(SyntaxNode* root,
     return result;
 }
 
+/// Returns the parameter list of C extern function `function_name`, or null.
 SyntaxNode* item_c_extern_function_parameters(SyntaxNode* root, str function_name) {
     ExternFunctionSignature signature = item_find_c_extern_function(root, function_name);
     return signature.parameter_list;
 }
 
+/// Returns true when a parameter list ends with `...`.
 bool item_node_has_variadic_ellipsis(SyntaxNode* parameters) {
     if (parameters == (SyntaxNode*)0) { return false; }
     SyntaxNode* child = parameters.first_child;
@@ -327,11 +342,14 @@ bool item_node_has_variadic_ellipsis(SyntaxNode* parameters) {
     return false;
 }
 
+/// Returns true when C extern function `function_name` is variadic.
 bool item_c_extern_function_is_variadic(SyntaxNode* root, str function_name) {
     SyntaxNode* parameters = item_c_extern_function_parameters(root, function_name);
     return item_node_has_variadic_ellipsis(parameters);
 }
 
+/// Returns the return type id of C extern function `function_name`, or
+/// `TYPE_UNKNOWN`.
 u32 item_c_extern_function_return_type_id(TypeTable* types, SyntaxNode* root,
                                           str function_name) {
     ExternFunctionSignature signature = item_find_c_extern_function(root, function_name);
@@ -350,10 +368,14 @@ u32 item_c_extern_function_return_type_id(TypeTable* types, SyntaxNode* root,
     return result;
 }
 
+/// Returns true when `function_name` is a C extern function.
 bool item_is_c_extern_function(SyntaxNode* root, str function_name) {
     return item_c_extern_function_parameters(root, function_name) != (SyntaxNode*)0;
 }
 
+/// Parses a decimal, hex, binary, or octal discriminant (with `_`
+/// separators) into `*result`, negating when `neg`. Returns false when
+/// malformed or out of range.
 bool items_parse_enum_tag(str text, bool neg, i64* result) {
     if (text == (str)0) {
         return false;
@@ -398,6 +420,9 @@ bool items_parse_enum_tag(str text, bool neg, i64* result) {
     return true;
 }
 
+/// Collects an enum's variant names, tags (explicit or auto-incremented), and
+/// payload arities. Sets `*invalid` to the first malformed variant and
+/// returns false on failure.
 bool enum_collect_variants(SyntaxNode* item, Vec<SyntaxNode*>* names, Vec<i64>* tags,
                           Vec<i64>* arities, SyntaxNode** invalid) {
     *invalid = (SyntaxNode*)0;
@@ -462,14 +487,16 @@ bool enum_collect_variants(SyntaxNode* item, Vec<SyntaxNode*>* names, Vec<i64>* 
     return true;
 }
 
-// Walk one enum item body. For each variant calls the visitor logic inline:
-// reports name, tag, payload arity, and payload type texts.
+/// Walk one enum item body. For each variant calls the visitor logic inline:
+/// reports name, tag, payload arity, and payload type texts.
 bool enum_each_variant(SyntaxNode* item, Vec<SyntaxNode*>* names, Vec<i64>* tags,
                        Vec<i64>* arities) {
     SyntaxNode* invalid = (SyntaxNode*)0;
     return enum_collect_variants(item, names, tags, arities, &invalid);
 }
 
+/// Returns the tag and payload arity of `enum_name.variant_name`; false when
+/// either is unknown.
 bool enum_variant_info(SyntaxNode* root, str enum_name, str variant_name,
                        i64* tag_out, i64* arity_out) {
     SyntaxNode* item = find_enum_item(root, enum_name);
@@ -497,6 +524,8 @@ bool enum_variant_info(SyntaxNode* root, str enum_name, str variant_name,
     return found;
 }
 
+/// Finds the enum that declares a variant named `variant_name`. Returns false
+/// unless exactly one enum matches.
 bool find_variant_enum(SyntaxNode* root, str variant_name, SyntaxNode** enum_out) {
     if (root == (SyntaxNode*)0) {
         return false;
@@ -546,6 +575,7 @@ bool find_variant_enum(SyntaxNode* root, str variant_name, SyntaxNode** enum_out
     return found != (SyntaxNode*)0;
 }
 
+/// Appends the source tokens under `node` as text.
 void append_node_tokens(SyntaxNode* node, String* out) {
     if (node == (SyntaxNode*)0) {
         return;
@@ -585,6 +615,7 @@ void append_node_tokens(SyntaxNode* node, String* out) {
     }
 }
 
+/// Parses type spelling `text` into an id (see `TypeTable.parse_type_name`).
 u32 type_id_from_text(TypeTable* types, str text) {
     if (text == (str)0) {
         return TYPE_UNKNOWN;
@@ -658,6 +689,7 @@ u32 type_id_from_text(TypeTable* types, str text) {
     return result;
 }
 
+/// Returns the id of `base_type` wrapped by the array dimensions in `suffix`.
 u32 type_id_from_declarator(TypeTable* types, str base_type, SyntaxNode* suffix) {
     Vec<SyntaxNode*> dimensions = Vec<SyntaxNode*>.new();
     SyntaxNode* cursor = suffix;
@@ -678,6 +710,7 @@ u32 type_id_from_declarator(TypeTable* types, str base_type, SyntaxNode* suffix)
     return result;
 }
 
+/// Returns the declared type id of `field_name` in struct item `item`.
 u32 struct_field_type_id(TypeTable* types, SyntaxNode* item, str field_name) {
     if (item == (SyntaxNode*)0) { return TYPE_UNKNOWN; }
     SyntaxNode* body = item.first_child;
@@ -718,6 +751,7 @@ u32 struct_field_type_id(TypeTable* types, SyntaxNode* item, str field_name) {
     return TYPE_UNKNOWN;
 }
 
+/// Writes the type text of payload field `field_index` of a variant.
 bool enum_payload_type_text(SyntaxNode* root, str enum_name, str variant_name,
                             i64 field_index, String* out) {
     SyntaxNode* item = find_enum_item(root, enum_name);
@@ -767,11 +801,13 @@ bool enum_payload_type_text(SyntaxNode* root, str enum_name, str variant_name,
     return false;
 }
 
+/// Returns true when a method name equals a variant name.
 bool method_matches_variant(str method_name, str variant_name) {
     return method_name != (str)0 && variant_name != (str)0
         && strcmp(method_name, variant_name) == 0;
 }
 
+/// Returns true when a method's first parameter is `self` (any form).
 bool item_first_parameter_is_self(SyntaxNode* parameters) {
     if (parameters == (SyntaxNode*)0) { return false; }
     SyntaxNode* cursor = parameters.first_child;
@@ -794,7 +830,7 @@ bool item_first_parameter_is_self(SyntaxNode* parameters) {
     return last_identifier != (SyntaxNode*)0 && strcmp(last_identifier.text, "self") == 0;
 }
 
-// Ignore identifiers inside return applications and method type parameters.
+/// Ignore identifiers inside return applications and method type parameters.
 SyntaxNode* item_method_name(SyntaxNode* start, SyntaxNode* parameters) {
     SyntaxNode* name = (SyntaxNode*)0;
     SyntaxNode* cursor = start;
@@ -810,12 +846,15 @@ SyntaxNode* item_method_name(SyntaxNode* start, SyntaxNode* parameters) {
     return name;
 }
 
+/// Returns true when a method name is followed by `<` (it is generic).
 bool item_method_is_generic(SyntaxNode* name) {
     SyntaxNode* next = name == (SyntaxNode*)0 ? (SyntaxNode*)0 : name.next_sibling;
     return next != (SyntaxNode*)0 && next.kind == NodeKind.Token
         && next.token_kind == TokenKind.Less;
 }
 
+/// Returns true when an impl of `owner_name` defines `method_name` as an
+/// instance method (`instance_method`) or a static one.
 bool impl_has_method(SyntaxNode* root, str owner_name, str method_name,
                     bool instance_method) {
     if (root == (SyntaxNode*)0 || owner_name == (str)0 || method_name == (str)0) {
@@ -871,14 +910,17 @@ bool impl_has_method(SyntaxNode* root, str owner_name, str method_name,
     return false;
 }
 
+/// Returns true when `owner_name` has a static method `method_name`.
 bool impl_has_static_method(SyntaxNode* root, str owner_name, str method_name) {
     return impl_has_method(root, owner_name, method_name, false);
 }
 
+/// Returns true when `owner_name` has an instance method `method_name`.
 bool impl_has_instance_method(SyntaxNode* root, str owner_name, str method_name) {
     return impl_has_method(root, owner_name, method_name, true);
 }
 
+/// Returns the number of variants of `enum_name`, or 0 when unknown.
 i64 enum_variant_count(SyntaxNode* root, str enum_name) {
     SyntaxNode* item = find_enum_item(root, enum_name);
     if (item == (SyntaxNode*)0) {
@@ -895,6 +937,7 @@ i64 enum_variant_count(SyntaxNode* root, str enum_name) {
     return count;
 }
 
+/// Returns the target type name token of an `impl` item, or null.
 SyntaxNode* impl_target_identifier(SyntaxNode* impl_item) {
     SyntaxNode* child = impl_item.first_child;
     SyntaxNode* first_ident = (SyntaxNode*)0;
@@ -932,6 +975,7 @@ SyntaxNode* impl_target_identifier(SyntaxNode* impl_item) {
     return first_ident;
 }
 
+/// Returns how many `*` follow an impl target (`impl Foo*` gives 1).
 u32 impl_target_pointer_depth(SyntaxNode* impl_item) {
     SyntaxNode* target = impl_target_identifier(impl_item);
     if (target == (SyntaxNode*)0) { return 0; }

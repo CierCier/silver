@@ -7,8 +7,8 @@ import navigation;
 import tooling.index;
 import positions;
 
-// One lens per non-local declaration. Reference counts are deferred to
-// `codeLens/resolve` so a document request stays proportional to its symbols.
+/// One lens per non-local declaration. Reference counts are deferred to
+/// `codeLens/resolve` so a document request stays proportional to its symbols.
 String compute_code_lenses(Document* doc) {
     doc.ensure_syntax();
     String out = String.from_str("[");
@@ -30,6 +30,8 @@ String compute_code_lenses(Document* doc) {
     return move out;
 }
 
+/// Collects reference locations of `target` across visible documents and
+/// returns their count. Cancellable.
 i64 collect_references(DocumentStore* store, SymbolTarget target, PendingMessage* pending,
                        String* locations) {
     Vec<Document*> documents = store.query_documents(target.document);
@@ -52,6 +54,7 @@ i64 collect_references(DocumentStore* store, SymbolTarget target, PendingMessage
     return count;
 }
 
+/// Resolves a references code lens: counts and lists the references.
 String compute_code_lens_resolve(DocumentStore* store, str json, PendingMessage* pending) {
     String data = json_field(json, "data");
     String uri = String.new(); i64 symbol = -1; i64 revision = 0;

@@ -14,7 +14,10 @@ import std.net.http;
 import std.string;
 import std.sys.result;
 
+/// Reserved `Error.code` for SSE I/O failures. Not currently returned:
+/// transport errors pass through with the HTTP client's own codes.
 const i64 SSE_ERR_IO = -1;
+/// `Error.code` returned by `SseStream.open` for a non-2xx response.
 const i64 SSE_ERR_MALFORMED = -2;
 
 /// One dispatched SSE event. Owns its strings; free with `free()` after use.
@@ -43,6 +46,8 @@ struct SseRecv {
     SseEvent event;
 }
 
+/// A server-sent-events reader over an owned HTTP body stream. Dropping it
+/// closes the stream and frees the line buffer.
 struct SseStream {
     HttpStream stream; // owned HTTP body stream
     String line;       // reusable line buffer
@@ -77,6 +82,7 @@ impl SseStream {
     /// True once the stream has ended (recv returned Done).
     bool finished(*self) { return self.finished; }
 
+    /// Returns a copy of response header `name`, or an empty string if absent.
     String get_header(*self, str name) {
         return self.stream.get_header(name);
     }
@@ -219,6 +225,7 @@ bool sse_read_line(HttpStream* stream, String* line) {
     return false;
 }
 
+/// Returns the index of the first `:` in `len` bytes, or -1.
 i64 sse_find_colon(u8* data, i64 len) {
     i64 i = 0;
     while (i < len) {
@@ -228,6 +235,8 @@ i64 sse_find_colon(u8* data, i64 len) {
     return -1;
 }
 
+/// Returns true when the `len` bytes at `data` equal the NUL-terminated
+/// `expected` exactly.
 bool sse_mem_eq(u8* data, i64 len, str expected) {
     u8* exp = (u8*)expected;
     i64 i = 0;

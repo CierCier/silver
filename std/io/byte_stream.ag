@@ -10,6 +10,8 @@ import std.optional;
 import std.string;
 import std.iter;
 
+/// A read-ahead buffer over an owned `File`. Dropping it frees the buffer and
+/// closes the file.
 struct ByteStream {
     File file;
     u8* buf;
@@ -19,6 +21,7 @@ struct ByteStream {
 }
 
 impl ByteStream {
+    /// Creates a stream over stdin with a 4 KiB buffer. Reads lazily.
     ByteStream stdin() {
         ByteStream bs;
         bs.file = stdin_file();
@@ -29,6 +32,8 @@ impl ByteStream {
         return bs;
     }
 
+    /// Returns the next byte (0-255), or -1 at end of file or on a read error.
+    /// May block to refill the buffer.
     i32 read_byte(*self) {
         if (self.pos < self.len) {
             i32 result = (i32)self.buf[self.pos];
@@ -55,6 +60,9 @@ impl ByteStream {
         return (i32)self.buf[0];
     }
 
+    /// Copies up to `dst_len` bytes into `dst`, using buffered bytes first.
+    /// Returns the count copied; 0 means end of file, an error, or an invalid
+    /// file. May block.
     i64 read_into(*self, u8* dst, i64 dst_len) {
         if (dst_len <= 0 || self.file.invalid()) {
             return 0;
@@ -108,6 +116,7 @@ impl ByteStream {
         return total;
     }
 
+    /// Creates a stream that takes ownership of `f`, with a 4 KiB buffer.
     ByteStream from_file(File f) {
         ByteStream bs;
         bs.file = move f;
@@ -118,6 +127,8 @@ impl ByteStream {
         return bs;
     }
 
+    /// Returns the next line including its trailing `\n` (the last line may lack
+    /// one), or None at end of file. `\r` is kept. A read error ends the line.
     Optional<String> read_line(&mut self) {
         if (self.eof()) {
             return Optional<String>.none();
@@ -139,6 +150,8 @@ impl ByteStream {
         return Optional<String>.some(move s);
     }
 
+    /// Returns true when the buffer is empty and the file has reported end of
+    /// file. Does not read ahead, so it can be false right before EOF.
     bool eof(&self) {
         if (self.pos < self.len) {
             return false;
@@ -160,35 +173,45 @@ impl Drop for ByteStream {
     }
 }
 
+/// A buffered reader over an owned `File`; a thin wrapper of `ByteStream`.
 struct BufReader {
     ByteStream inner;
 }
 
 impl BufReader {
+    /// Creates a reader that takes ownership of `f`.
     BufReader new(File f) {
         BufReader br;
         br.inner = ByteStream.from_file(move f);
         return br;
     }
 
+    /// Returns the next byte, or -1 at end of file or on error.
     i32 read_byte(&mut self) {
         return self.inner.read_byte();
     }
 
+    /// Copies up to `dst_len` bytes into `dst`; returns the count (0 at EOF).
     i64 read_into(&mut self, u8* dst, i64 dst_len) {
         return self.inner.read_into(dst, dst_len);
     }
 
+    /// Returns the next line including its `\n`, or None at end of file.
     Optional<String> read_line(&mut self) {
         return self.inner.read_line();
     }
 
+    /// Returns true when no buffered bytes remain and the file reported EOF.
     bool eof(&self) {
         return self.inner.eof();
     }
 }
 
 impl File {
+    /// Returns the next line including its trailing `\n` (the last line may lack
+    /// one), or None at end of file. Allocates a 4 KiB read buffer on first use.
+    /// A read error sets `had_error` and ends the line. Do not mix with unbuffered
+    /// reads on the same file: buffered bytes would be skipped.
     Optional<String> read_line(*self) {
         if (self.invalid() || self.at_eof) {
             return Optional<String>.none();
@@ -245,6 +268,8 @@ impl File {
         return Optional<String>.some(move s);
     }
 
+    /// Returns an iterator over the remaining lines (see `read_line`). The
+    /// iterator borrows the file, which must outlive it.
     LinesIter lines(*self) {
         LinesIter it;
         it.file = self;
@@ -252,6 +277,7 @@ impl File {
     }
 }
 
+/// An iterator of lines from a borrowed `File`; yields owned strings.
 struct LinesIter {
     File* file;
 }

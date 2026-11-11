@@ -24,26 +24,41 @@ import std.string;
 import std.sys.raw.misc;
 import std.sys.result;
 
+/// `Error.code`: the transport failed or closed mid-frame.
 const i64 WS_ERR_IO = -1;
+/// `Error.code`: a frame or URL was malformed.
 const i64 WS_ERR_MALFORMED = -2;
+/// `Error.code`: the server rejected or botched the upgrade handshake.
 const i64 WS_ERR_HANDSHAKE = -3;
+/// `Error.code`: the peer violated RFC 6455 framing rules.
 const i64 WS_ERR_PROTOCOL = -4;
+/// `Error.code`: a message exceeded the configured size limit.
 const i64 WS_ERR_LIMIT = -5;
 
 // --- Opcodes (RFC 6455 §5.2) ----------------------------------------------
 
+/// Frame opcode: continuation of a fragmented message.
 const i64 WS_OP_CONT = 0x0;
+/// Frame opcode: text message (UTF-8).
 const i64 WS_OP_TEXT = 0x1;
+/// Frame opcode: binary message.
 const i64 WS_OP_BINARY = 0x2;
+/// Frame opcode: close.
 const i64 WS_OP_CLOSE = 0x8;
+/// Frame opcode: ping.
 const i64 WS_OP_PING = 0x9;
+/// Frame opcode: pong.
 const i64 WS_OP_PONG = 0xa;
 
+/// Default maximum reassembled message size (16 MiB).
 const i64 WS_DEFAULT_MAX_MESSAGE = 16777216; // 16 MiB
+/// The RFC 6455 GUID appended to the key for `Sec-WebSocket-Accept`.
 const str WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 // --- URL parsing -----------------------------------------------------------
 
+/// A parsed `ws://` or `wss://` URL. `path` borrows the input URL, which
+/// must outlive it.
 struct WsUrl {
     u8 host[255];
     u16 port;
@@ -100,6 +115,7 @@ bool ws_parse_url(str url, WsUrl* out) {
 
 // --- Base64 (RFC 4648 §4, with padding) -----------------------------------
 
+/// Standard base64 alphabet (RFC 4648).
 const str WS_B64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// Encode `len` bytes into a fresh base64 String (caller drops).
@@ -139,6 +155,7 @@ bool ws_random_bytes(u8* out, i64 len) {
 
 // --- Case-insensitive helpers ----------------------------------------------
 
+/// Returns true when the NUL-terminated strings are equal ignoring ASCII case.
 bool ws_ci_eq(str a, str b) {
     u8* pa = a;
     u8* pb = b;
@@ -194,6 +211,7 @@ bool ws_header_has_token(str value, str token) {
 
 // --- Frames ----------------------------------------------------------------
 
+/// One decoded frame. Owns its payload, which drops with the frame.
 struct WsFrame {
     bool fin;
     i64 opcode;
@@ -212,14 +230,22 @@ struct WsMessage {
     Bytes payload;
 }
 
+/// `WsMessage.kind`: a text message.
 const i64 WS_MSG_TEXT = 1;
+/// `WsMessage.kind`: a binary message.
 const i64 WS_MSG_BINARY = 2;
+/// `WsMessage.kind`: a ping (already answered with a pong automatically).
 const i64 WS_MSG_PING = 3;
+/// `WsMessage.kind`: a pong.
 const i64 WS_MSG_PONG = 4;
+/// `WsMessage.kind`: a close frame from the peer.
 const i64 WS_MSG_CLOSE = 5;
 
 // --- The client ------------------------------------------------------------
 
+/// A connected WebSocket client. Not thread-safe. Dropping it closes the
+/// transport without sending a Close frame; call `close` first for a clean
+/// shutdown.
 struct WebSocket {
     HttpConnection conn; // buffered TCP/TLS transport (http_open)
     i64 max_message;
@@ -351,6 +377,7 @@ impl WebSocket {
         return Ok(move ws);
     }
 
+    /// Returns true once the connection has closed.
     bool closed(*self) { return self.closed; }
 
     // --- Sending ---------------------------------------------------------
@@ -365,10 +392,14 @@ impl WebSocket {
         return self.write_frame(WS_OP_BINARY, true, data, len);
     }
 
+    /// Sends a ping with `len` bytes of application data. RFC 6455 allows at
+    /// most 125; larger payloads are not rejected here, and peers may close.
     Result<i64, Error> send_ping(*self, u8* data, i64 len) {
         return self.write_frame(WS_OP_PING, true, data, len);
     }
 
+    /// Sends a pong with `len` bytes of application data (RFC 6455 allows at
+    /// most 125; not checked here).
     Result<i64, Error> send_pong(*self, u8* data, i64 len) {
         return self.write_frame(WS_OP_PONG, true, data, len);
     }
@@ -641,10 +672,13 @@ void ws_nul_terminate(Bytes* payload) {
 // The frame header and payload read through the connection's 4KB buffer, so
 // a frame costs one syscall (or SSL_read) per 4KB, not one per byte.
 
+/// Internal: reads one byte through the connection buffer; false on failure.
 bool ws_read_byte(StreamIo* io, u8* out) {
     return ws_read_bytes(io, out, 1);
 }
 
+/// Internal: reads exactly `len` bytes through the connection buffer,
+/// blocking as needed. Returns false when the transport fails or closes.
 bool ws_read_bytes(StreamIo* io, u8* out, i64 len) {
     HttpConnection* conn = (HttpConnection*)io.ctx;
     i64 got = 0;

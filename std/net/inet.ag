@@ -7,8 +7,8 @@
 import std.display;
 import std.sys.socket;
 
-// Timeval — POSIX struct timeval (seconds/microseconds), shared by
-// the dns and socket modules for timeouts.
+/// Timeval — POSIX struct timeval (seconds/microseconds), shared by
+/// the dns and socket modules for timeouts.
 struct Timeval { i64 tv_sec; i64 tv_usec; }
 
 // --- SockAddrIn (struct sockaddr_in) ---
@@ -18,6 +18,8 @@ struct Timeval { i64 tv_sec; i64 tv_usec; }
 //   offset 4: sin_addr    (u32)
 //   offset 8: sin_zero_1  (u32)
 //   offset 12: sin_zero_2 (u32)
+/// Linux `struct sockaddr_in` (16 bytes). `sin_port` and `sin_addr` hold
+/// network byte order, as the kernel expects.
 struct SockAddrIn {
     u16 sin_family;
     u16 sin_port;
@@ -27,8 +29,10 @@ struct SockAddrIn {
 }
 
 impl SockAddrIn {
-    // Construct a SockAddrIn from a port (host byte order) and dotted-quad
-    // IPv4 string. The port is converted to network byte order internally.
+    /// Construct a SockAddrIn from a port (host byte order) and dotted-quad
+    /// IPv4 string. The port is converted to network byte order internally.
+    /// An invalid address string silently yields 0.0.0.0; use `SocketAddr.v4`
+    /// to get an error instead.
     SockAddrIn v4(u16 port, str addr_str) {
         SockAddrIn sa;
         sa.sin_family = (u16)AddressFamily.INET;
@@ -64,19 +68,19 @@ impl Display for SockAddrIn {
 // (| & << >>) must have exactly the same type, and integer literals
 // default to `i32` / `i64`.
 
-// Host byte order -> network byte order (16-bit).
+/// Host byte order -> network byte order (16-bit).
 u16 hton16(u16 host) {
     i64 h = (i64)host;
     i64 r = ((h & (i64)0xFF) << (i64)8) | ((h >> (i64)8) & (i64)0xFF);
     return (u16)r;
 }
 
-// Network byte order -> host byte order (16-bit). Symmetric for 16-bit.
+/// Network byte order -> host byte order (16-bit). Symmetric for 16-bit.
 u16 ntoh16(u16 net) {
     return hton16(net);
 }
 
-// Host byte order -> network byte order (32-bit).
+/// Host byte order -> network byte order (32-bit).
 u32 hton32(u32 host) {
     i64 h = (i64)host;
     i64 r = ((h & (i64)0xFF) << (i64)24)
@@ -86,18 +90,17 @@ u32 hton32(u32 host) {
     return (u32)r;
 }
 
-// Network byte order -> host byte order (32-bit). Symmetric for 32-bit.
+/// Network byte order -> host byte order (32-bit). Symmetric for 32-bit.
 u32 ntoh32(u32 net) {
     return hton32(net);
 }
 
 // --- IPv4 dotted-quad parser ---
 //
-// Parses `"a.b.c.d"` into a network-byte-order i64. Returns 0 on any invalid
-// input (null string, non-digit characters, overflow, wrong number of octets).
-// Uses i64 throughout (matching Silver's preferred integer type) with a final
-// cast to u32 at the call site.
+// Parses `"a.b.c.d"` into its numeric form (first octet most significant).
 
+/// Parses a decimal port (0-65535) from a NUL-terminated string. Returns -1
+/// for an empty string, a non-digit, more than five digits, or overflow.
 i64 inet_parse_port(u8* p) {
     if (p == (u8*)0 || p[0] == (u8)0) { return -1; }
     i64 value = 0;
@@ -114,6 +117,11 @@ i64 inet_parse_port(u8* p) {
 }
 
 // Parse an IPv4 literal into network byte order.
+/// Parses a dotted-quad IPv4 literal into `*out` in numeric form: the first
+/// octet is the most significant byte (127.0.0.1 is 0x7f000001). Use
+/// `hton32` to get the in-memory network order a `sockaddr_in` needs.
+/// Returns false, leaving `*out` unchanged, for null pointers or malformed
+/// input (leading zeros are accepted).
 bool inet_pton4(str s, u32* out) {
     if (s == (str)0 || out == (u32*)0) { return false; }
     u8* p = (u8*)s;
@@ -150,6 +158,8 @@ bool inet_pton4(str s, u32* out) {
 }
 
 // Compatibility helper: invalid input remains represented as zero.
+/// Same numeric form as `inet_pton4`, but returns 0 for invalid input, which
+/// is indistinguishable from 0.0.0.0.
 i64 inet_addr(str s) {
     u32 out;
     if (!inet_pton4(s, &out)) { return (i64)0; }
@@ -160,8 +170,8 @@ i64 inet_addr(str s) {
 // IPv6
 // ---------------------------------------------------------------------------
 
-// struct sockaddr_in6 — 28 bytes, matches Linux x86_64 layout.
-// sin6_addr is 16 bytes (network byte order).
+/// struct sockaddr_in6 — 28 bytes, matches Linux x86_64 layout.
+/// sin6_addr is 16 bytes (network byte order).
 struct SockAddrIn6 {
     u16 sin6_family;
     u16 sin6_port;
@@ -280,6 +290,7 @@ bool inet_pton6(str s, u8* out_bytes) {
 // Public socket address abstraction
 // ---------------------------------------------------------------------------
 
+/// Why a socket address could not be built.
 enum AddrError {
     InvalidFormat;
     InvalidAddress;
@@ -287,12 +298,13 @@ enum AddrError {
     PathTooLong;
 }
 
-// Linux sockaddr_un: family followed by a 108-byte pathname buffer.
+/// Linux sockaddr_un: family followed by a 108-byte pathname buffer.
 struct SockAddrUn {
     u16 sun_family;
     u8 sun_path[108];
 }
 
+/// An IPv4, IPv6, or Unix-domain socket address, ready for bind/connect.
 enum SocketAddr {
     V4(SockAddrIn);
     V6(SockAddrIn6);
@@ -300,6 +312,8 @@ enum SocketAddr {
 }
 
 impl SocketAddr {
+    /// Builds an IPv4 address from a dotted-quad literal and a host-order port.
+    /// Fails with `InvalidAddress` for a malformed literal.
     Result<SocketAddr, AddrError> v4(str ip, u16 port) {
         u32 addr;
         if (!inet_pton4(ip, &addr)) {
@@ -313,7 +327,8 @@ impl SocketAddr {
         sa.sin_zero_2 = (u32)0;
         return Ok(SocketAddr.V4(sa));
     }
-    // Construct from the network-byte-order representation returned by DNS.
+    /// Builds an IPv4 address from `addr` in the numeric form returned by
+    /// `inet_pton4` and the resolver, and a host-order port.
     Result<SocketAddr, AddrError> v4_network(u32 addr, u16 port) {
         SockAddrIn sa;
         sa.sin_family = (u16)AddressFamily.INET;
@@ -324,6 +339,8 @@ impl SocketAddr {
         return Ok(SocketAddr.V4(sa));
     }
 
+    /// Builds an IPv6 address from a textual literal (no brackets, no zone id)
+    /// and a host-order port. Fails with `InvalidAddress` for a bad literal.
     Result<SocketAddr, AddrError> v6(str ip, u16 port) {
         SockAddrIn6 sa;
         sa.sin6_family = (u16)AddressFamily.INET6;
@@ -341,6 +358,9 @@ impl SocketAddr {
         return Ok(SocketAddr.V6(sa));
     }
 
+    /// Builds a Unix-domain address. A leading `@` selects the Linux abstract
+    /// namespace. Fails with `InvalidFormat` for an empty path and `PathTooLong`
+    /// above 107 bytes.
     Result<SocketAddr, AddrError> unix(str path) {
         u8* p = (u8*)path;
         if (path == (str)0 || p[0] == (u8)0) {
@@ -386,6 +406,8 @@ impl SocketAddr {
         return Ok(SocketAddr.Unix(sa));
     }
 
+    /// Parses `unix:<path>`, `[v6]:port`, or `a.b.c.d:port`. Host names are not
+    /// resolved; an unbracketed host must be an IPv4 literal.
     Result<SocketAddr, AddrError> parse(str endpoint) {
         if (endpoint == (str)0) {
             return Err(AddrError.InvalidFormat);
@@ -470,7 +492,9 @@ impl SocketAddr {
     }
 }
 
-// Length passed to bind/connect/sendto for a Unix address.
+/// Length passed to bind/connect/sendto for a Unix address.
+/// Abstract addresses count the leading NUL and the name, with no trailing
+/// NUL; filesystem paths include the terminating NUL.
 i64 sockaddr_un_len(SockAddrUn* self) {
     if (self.sun_path[0] == (u8)0) {
         i64 n = 1;

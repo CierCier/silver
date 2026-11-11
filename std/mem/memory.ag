@@ -272,6 +272,9 @@ void memmove_v128_back(u8* dend, u8* send, i64 blocks) {
 }
 
 
+/// Copies `len` bytes from `src` to `dst`; the regions may overlap in either
+/// direction. Returns `dst`. A null `dst` or `src` is a no-op.
+/// Part of the frozen C-ABI runtime surface.
 u8* silver_rt_memmove(u8* dst, u8* src, i64 len) {
     if (dst == (u8*)0 || src == (u8*)0) {
         return dst;
@@ -786,18 +789,25 @@ i32 strcmp(str s1, str s2) {
 // 32-bit codepoint, so a C byte string is a `str`, not a `char*`.
 // ---------------------------------------------------------------------------
 
+/// C `memset`: fills `num` bytes at `ptr` with the low byte of `value`.
+/// Returns `ptr`; a null `ptr` is a no-op.
 void* memset(void* ptr, i32 value, i64 num) {
     return (void*)silver_rt_memset((u8*)ptr, (u8)value, num);
 }
 
+/// C `memcpy`: copies `num` bytes. The regions must not overlap; use
+/// `memmove` when they might. Returns `dest`; null pointers are a no-op.
 void* memcpy(void* dest, const void* src, i64 num) {
     return (void*)silver_rt_memcpy((u8*)dest, (u8*)src, num);
 }
 
+/// C `memmove`: copies `num` bytes between possibly overlapping regions.
+/// Returns `dest`; null pointers are a no-op.
 void* memmove(void* dest, const void* src, i64 num) {
     return (void*)silver_rt_memmove((u8*)dest, (u8*)src, num);
 }
 
+/// C `strlen`: returns the byte length of a NUL-terminated string; 0 for null.
 i64 strlen(str s) {
     return silver_rt_strlen(s);
 }
@@ -811,6 +821,9 @@ i64 strlen(str s) {
 import std.sys.os;
 import std.rt.backtrace;
 
+/// Prints a backtrace to stderr, raises SIGABRT, and exits with status 134 if
+/// the signal is caught or ignored. Never returns; no destructors or buffered
+/// output flushes run.
 void abort() {
     // Skip abort itself so the trace starts at its caller.
     silver_print_backtrace(1);

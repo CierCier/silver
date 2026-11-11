@@ -4,12 +4,15 @@ import std.mem.vec;
 import std.optional;
 import std.string;
 
+/// Maps strings to dense `u32` ids, in first-seen order. Owns copies of every
+/// interned string.
 struct Interner {
     Vec<String> values;
     HashMap<String, u32> ids;
 }
 
 impl Interner {
+    /// Creates an empty interner.
     Interner new() {
         Interner interner;
         interner.values = Vec<String>.new();
@@ -17,6 +20,7 @@ impl Interner {
         return interner;
     }
 
+    /// Returns a deep copy with the same id assignments.
     Interner clone(&self) {
         Interner copy = Interner.new();
         i64 i = 0;
@@ -30,6 +34,7 @@ impl Interner {
         return move copy;
     }
 
+    /// Returns the id for `text`, copying it in with the next id when it is new.
     u32 intern(Interner* self, str text) {
         // Borrowed-content lookup: no clone on either path (STD-002).
         Optional<u32> found = map_get_opt_str_u32(&self.ids, text);
@@ -42,6 +47,8 @@ impl Interner {
         return id;
     }
 
+    /// Returns the string for `id`, borrowed from the interner (valid until it is
+    /// dropped). Returns "" for an unknown id.
     str get(Interner* self, u32 id) {
         if ((i64)id >= self.values.len()) {
             return "";
@@ -49,10 +56,12 @@ impl Interner {
         return self.values.get_ptr((i64)id).to_str();
     }
 
+    /// Returns the number of distinct interned strings.
     i64 len(&self) {
         return self.values.len();
     }
 
+    /// Returns true when `text` has already been interned.
     bool contains(Interner* self, str text) {
         return map_contains_key_str_u32(&self.ids, text);
     }

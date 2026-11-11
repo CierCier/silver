@@ -3,6 +3,8 @@ import std.fmt;
 import std.mem.vec;
 import std.string;
 
+/// A source range: byte offsets `[start, end)`, a file id, and 1-based
+/// start/end line and column. File 0 or line 0 marks a synthetic span.
 struct Span {
     i64 start;
     i64 end;
@@ -13,12 +15,15 @@ struct Span {
     i64 end_col;
 }
 
+/// How serious a diagnostic is.
 enum Severity {
     Error;
     Warning;
     Note;
 }
 
+/// One diagnostic: a span, severity, owned message, and an optional note
+/// with its own span and message.
 struct Diagnostic {
     Span span;
     Severity severity;
@@ -28,11 +33,13 @@ struct Diagnostic {
     String note_message;
 }
 
+/// An ordered collection of diagnostics. Owns them.
 struct DiagnosticBag {
     Vec<Diagnostic> items;
 }
 
 impl Span {
+    /// Returns a synthetic span (no source location).
     Span synthetic() {
         Span s;
         s.start = 0;
@@ -45,6 +52,7 @@ impl Span {
         return s;
     }
 
+    /// Returns a span from this span's start to `other`'s end.
     Span extend(Span* self, Span other) {
         Span s = *self;
         s.end = other.end;
@@ -53,18 +61,21 @@ impl Span {
         return s;
     }
 
+    /// Returns true for a span with no real source location.
     bool is_synthetic(&self) {
         return self.file == 0 || self.start_line == 0;
     }
 }
 
 impl DiagnosticBag {
+    /// Creates an empty bag.
     DiagnosticBag new() {
         DiagnosticBag bag;
         bag.items = Vec<Diagnostic>.new();
         return bag;
     }
 
+    /// Appends a diagnostic, taking ownership of `message`.
     void push(DiagnosticBag* self, Span span, Severity severity, String message) {
         Diagnostic item;
         item.span = span;
@@ -76,10 +87,12 @@ impl DiagnosticBag {
         self.items.push(move item);
     }
 
+    /// Appends an error.
     void error(DiagnosticBag* self, Span span, String message) {
         self.push(span, Severity.Error, move message);
     }
 
+    /// Appends an error with an attached note at `note_span`.
     void error_with_note(DiagnosticBag* self, Span span, String message, Span note_span, String note_message) {
         Diagnostic item;
         item.span = span;
@@ -91,35 +104,45 @@ impl DiagnosticBag {
         self.items.push(move item);
     }
 
+    /// Appends a warning.
     void warning(DiagnosticBag* self, Span span, String message) {
         self.push(span, Severity.Warning, move message);
     }
 
+    /// Appends a note.
     void note(DiagnosticBag* self, Span span, String message) {
         self.push(span, Severity.Note, move message);
     }
 
+    /// Returns the number of diagnostics.
     i64 len(&self) {
         return self.items.len();
     }
 
+    /// Returns true when there are no diagnostics.
     bool is_empty(&self) {
         return self.items.is_empty();
     }
 
+    /// Returns diagnostic `index`. Invalidated when the bag grows.
     Diagnostic* get(DiagnosticBag* self, i64 index) {
         return self.items.get_ptr(index);
     }
 }
 
+/// Diagnostic text: "#[cfg] requires at least one argument".
 String cfg_requires_argument_message() {
     return String.from_str("#[cfg] requires at least one argument");
 }
 
+/// Diagnostic text: "invalid #[cfg] argument: expected a name, string, or
+/// dotted path".
 String invalid_cfg_argument_message() {
     return String.from_str("invalid #[cfg] argument: expected a name, string, or dotted path");
 }
 
+/// Returns a copy of 1-based line `line` of the source, without its newline,
+/// or an empty string when out of range.
 String source_line(u8* data, i64 length, i64 line) {
     String result = String.new();
     if (line <= 0 || data == (u8*)0) {
@@ -147,6 +170,7 @@ String source_line(u8* data, i64 length, i64 line) {
     return result;
 }
 
+/// Returns the label printed for `severity` ("error", "warn", "note").
 str severity_name(Severity severity) {
     return match severity {
         Severity.Error : "error",
@@ -155,6 +179,8 @@ str severity_name(Severity severity) {
     };
 }
 
+/// Renders a diagnostic and its note as terminal text (see
+/// `render_diagnostic_span`). `path` is the file name to print.
 String render_diagnostic(Diagnostic* diagnostic, str path, &String source) {
     String out = render_diagnostic_span(diagnostic.severity, diagnostic.span, diagnostic.message.to_str(), path, &source);
     if (diagnostic.has_note) {
@@ -165,6 +191,9 @@ String render_diagnostic(Diagnostic* diagnostic, str path, &String source) {
     return out;
 }
 
+/// Renders `severity: path:line:col: message`, then the source line with a
+/// caret underline when the span has a location. Tabs widen the caret
+/// indent to four columns.
 String render_diagnostic_span(Severity severity, Span span, str message, str path, &String source) {
     String out = String.new();
     String line = source_line(source.data, source.len, span.start_line);

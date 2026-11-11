@@ -8,6 +8,8 @@ import std.mem.vec;
 import std.string;
 import frontend.diagnostics;
 
+/// Comment flavor: `//`, `///` (doc), `/* */`, or `/** */` (doc). Doc kinds
+/// attach to the following item in hover and IR comments.
 enum CommentKind {
     Line;
     DocLine;
@@ -15,6 +17,8 @@ enum CommentKind {
     DocBlock;
 }
 
+/// Token kinds: literals, identifiers, keywords, punctuation, operators,
+/// comments, and `Eof`.
 enum TokenKind {
     IntLiteral;
     FloatLiteral;
@@ -138,6 +142,8 @@ enum TokenKind {
     Eof;
 }
 
+/// One lexed token. `text` is owned: identifiers and operators keep their
+/// source spelling, literals hold decoded values, comments their trimmed body.
 struct Token {
     TokenKind kind;
     CommentKind comment_kind;
@@ -149,10 +155,13 @@ struct Token {
     bool bool_value;
 }
 
+/// The tokens of one source file, ending with an `Eof` token.
 struct TokenStream {
     Vec<Token> tokens;
 }
 
+/// Lexer state over an owned source buffer. Tokens go to `output` and errors
+/// to `diagnostics`; the first error sets `failed` and stops lexing.
 struct Lexer {
     String source;
     i64 position;
@@ -164,24 +173,29 @@ struct Lexer {
 }
 
 impl TokenStream {
+    /// Creates an empty stream.
     TokenStream new() {
         TokenStream stream;
         stream.tokens = Vec<Token>.new();
         return stream;
     }
 
+    /// Removes every token, keeping capacity.
     void clear(TokenStream* self) {
         self.tokens.clear();
     }
 
+    /// Returns the token count, including `Eof`.
     i64 len(&self) {
         return self.tokens.len();
     }
 
+    /// Returns a pointer to token `index`. Invalidated when the stream grows.
     Token* get(TokenStream* self, i64 index) {
         return self.tokens.get_ptr(index);
     }
 
+    /// Returns the first token, or null when empty.
     Token* first(TokenStream* self) {
         if (self.tokens.is_empty()) {
             return (Token*)0;
@@ -189,6 +203,7 @@ impl TokenStream {
         return self.tokens.get_ptr(0);
     }
 
+    /// Returns the last token, or null when empty.
     Token* last(TokenStream* self) {
         if (self.tokens.is_empty()) {
             return (Token*)0;
@@ -198,6 +213,7 @@ impl TokenStream {
 }
 
 impl Lexer {
+    /// Creates a lexer that takes ownership of `source`, starting at line 1.
     Lexer new(String source, TokenStream* output, DiagnosticBag* diagnostics) {
         Lexer lexer;
         lexer.source = move source;
@@ -210,10 +226,12 @@ impl Lexer {
         return lexer;
     }
 
+    /// Returns true when the whole source has been consumed.
     bool is_at_end(&self) {
         return self.position >= self.source.len;
     }
 
+    /// Returns the current byte without consuming it, or 0 at end.
     u8 peek(&self) {
         if (self.is_at_end()) {
             return (u8)0;
@@ -221,6 +239,7 @@ impl Lexer {
         return self.source.data[self.position];
     }
 
+    /// Returns the byte after the current one, or 0 past the end.
     u8 peek_next(&self) {
         if (self.position + 1 >= self.source.len) {
             return (u8)0;
@@ -228,6 +247,7 @@ impl Lexer {
         return self.source.data[self.position + 1];
     }
 
+    /// Consumes and returns one byte, updating line and column.
     u8 advance(Lexer* self) {
         if (self.is_at_end()) {
             return (u8)0;
@@ -243,6 +263,7 @@ impl Lexer {
         return ch;
     }
 
+    /// Consumes the current byte when it equals `expected`.
     bool match_char(Lexer* self, u8 expected) {
         if (self.is_at_end() || self.peek() != expected) {
             return false;
@@ -251,6 +272,7 @@ impl Lexer {
         return true;
     }
 
+    /// Returns the span from `start` to the current position.
     Span span_from(Lexer* self, i64 start, i64 start_line, i64 start_col) {
         Span span;
         span.start = start;
@@ -263,6 +285,7 @@ impl Lexer {
         return span;
     }
 
+    /// Returns a copy of `length` bytes at `data[start]`.
     String copy_text(u8* data, i64 start, i64 length) {
         String result = String.with_capacity(length + 1);
         if (length > 0) {
@@ -271,6 +294,7 @@ impl Lexer {
         return result;
     }
 
+    /// Returns a copy of `data[start..end]` without surrounding ASCII whitespace.
     String trimmed_text(u8* data, i64 start, i64 end) {
         i64 first = start;
         i64 last = end;
@@ -291,6 +315,7 @@ impl Lexer {
         return Lexer.copy_text(data, first, last - first);
     }
 
+    /// Appends a token of `kind` spanning from `start` to the current position.
     void push_token(Lexer* self, TokenKind kind, i64 start, i64 start_line, i64 start_col, String text) {
         Token token;
         token.kind = kind;
@@ -304,25 +329,30 @@ impl Lexer {
         self.output.tokens.push(move token);
     }
 
+    /// Reports a lexing error and stops further lexing.
     void report(Lexer* self, Span span, String message) {
         self.diagnostics.error(span, move message);
         self.failed = true;
     }
 
+    /// Returns true for an identifier's first byte (ASCII letter or `_`).
     bool is_ident_start(u8 ch) {
         return (ch >= (u8)'a' && ch <= (u8)'z')
             || (ch >= (u8)'A' && ch <= (u8)'Z')
             || ch == (u8)'_';
     }
 
+    /// Returns true for an identifier byte after the first (letter, digit, `_`).
     bool is_ident_continue(u8 ch) {
         return Lexer.is_ident_start(ch) || (ch >= (u8)'0' && ch <= (u8)'9');
     }
 
+    /// Returns true for an ASCII decimal digit.
     bool is_digit(u8 ch) {
         return ch >= (u8)'0' && ch <= (u8)'9';
     }
 
+    /// Returns true when the `length` bytes at `data[start]` equal `expected`.
     bool slice_equals(u8* data, i64 start, i64 length, str expected) {
         i64 expected_length = strlen(expected);
         if (length != expected_length) {
@@ -338,6 +368,7 @@ impl Lexer {
         return true;
     }
 
+    /// Returns the keyword kind for an identifier spelling, or `Identifier`.
     TokenKind keyword_kind(u8* data, i64 start, i64 length) {
         if (Lexer.slice_equals(data, start, length, "struct")) { return TokenKind.Struct; }
         if (Lexer.slice_equals(data, start, length, "enum")) { return TokenKind.Enum; }
@@ -398,6 +429,7 @@ impl Lexer {
         return TokenKind.Identifier;
     }
 
+    /// Returns the value of a hex digit, or -1.
     i64 hex_value(u8 ch) {
         if (ch >= (u8)'0' && ch <= (u8)'9') { return (i64)(ch - (u8)'0'); }
         if (ch >= (u8)'a' && ch <= (u8)'f') { return (i64)(ch - (u8)'a') + 10; }
@@ -405,6 +437,7 @@ impl Lexer {
         return -1;
     }
 
+    /// Appends `codepoint` encoded as UTF-8.
     void append_utf8(String* out, u32 codepoint) {
         if (codepoint < (u32)0x80) {
             out.push((u8)codepoint);
@@ -423,6 +456,8 @@ impl Lexer {
         }
     }
 
+    /// Parses digits in `data[start..end]` in `radix`, skipping `_`. Returns -1
+    /// for an invalid digit; overflow past i128 is not detected.
     i128 parse_integer(u8* data, i64 start, i64 end, i64 radix) {
         i128 value = (i128)0;
         i128 base = (i128)radix;
@@ -443,6 +478,8 @@ impl Lexer {
         return value;
     }
 
+    /// Lexes an integer, float, or complex literal with optional radix prefix
+    /// and digit separators, reporting malformed or out-of-range literals.
     void consume_number(Lexer* self, i64 start, i64 start_line, i64 start_col, u8 first) {
         i64 radix = 10;
         if (first == (u8)'0' && !self.is_at_end()) {
@@ -502,6 +539,8 @@ impl Lexer {
         }
     }
 
+    /// Lexes a string literal after its opening quote, decoding escapes. Reports
+    /// unterminated strings, bad escapes, and invalid UTF-8.
     void consume_string(Lexer* self, i64 start, i64 start_line, i64 start_col) {
         String decoded = String.new();
         str error = (str)0;
@@ -605,6 +644,7 @@ impl Lexer {
         self.report(span, String.from_str(error));
     }
 
+    /// Lexes a character literal after its opening quote.
     void consume_character(Lexer* self, i64 start, i64 start_line, i64 start_col) {
         if (self.is_at_end()) {
             Span span = self.span_from(start, start_line, start_col);
@@ -655,6 +695,8 @@ impl Lexer {
         self.output.last().char_value = (u32)value;
     }
 
+    /// Lexes a comment after its first `/`. A third slash (`///`, including
+    /// `////`) makes a doc line; `/**` makes a doc block. Block comments nest.
     void consume_comment(Lexer* self, i64 start, i64 start_line, i64 start_col) {
         self.advance();
         CommentKind kind = CommentKind.Line;
@@ -705,6 +747,7 @@ impl Lexer {
         self.output.last().comment_kind = kind;
     }
 
+    /// Lexes one token starting at the current position.
     void next_token(Lexer* self) {
         i64 start = self.position;
         i64 start_line = self.line;
@@ -828,6 +871,7 @@ impl Lexer {
         self.push_token(kind, start, start_line, start_col, move text);
     }
 
+    /// Lexes the whole source, skipping whitespace, then appends `Eof`.
     void tokenize(Lexer* self) {
         while (!self.is_at_end() && !self.failed) {
             while (!self.is_at_end()) {
@@ -858,6 +902,7 @@ impl Lexer {
     }
 }
 
+/// Lexes `source` into `output`, reporting errors to `diagnostics`.
 void lex(String source, TokenStream* output, DiagnosticBag* diagnostics) {
     Lexer lexer = Lexer.new(move source, output, diagnostics);
     lexer.tokenize();

@@ -9,6 +9,9 @@ import std.process;
 // the file's text, every file in its import closure, the client's rendering
 // option, and the aglsp executable are all unchanged; anything else misses.
 
+/// Returns the diagnostic cache directory (`SILVER_CACHE_DIR`,
+/// `$XDG_CACHE_HOME/silver`, or `$HOME/.cache/silver`, then
+/// `/aglsp-diagnostics-v1`), or "" when none can be found.
 String diagnostic_cache_directory() {
     String root = String.new();
     Optional<String> configured = var("SILVER_CACHE_DIR");
@@ -26,6 +29,7 @@ String diagnostic_cache_directory() {
     return move root;
 }
 
+/// Creates `path` and missing parents.
 bool create_directories(str path) {
     if (is_dir(path)) { return true; }
     String parent = path_dirname(path);
@@ -33,6 +37,7 @@ bool create_directories(str path) {
     return create_dir(path) || is_dir(path);
 }
 
+/// Appends the text hashes of `doc` and its imports to a cache key.
 void push_closure_hashes(Document* doc, Vec<Document*>* visited, String* key) {
     i64 i = 0;
     while (i < visited.len()) { if (visited.get(i) == doc) { return; } i += 1; }
@@ -42,7 +47,7 @@ void push_closure_hashes(Document* doc, Vec<Document*>* visited, String* key) {
     while (i < doc.dependencies.len()) { push_closure_hashes(doc.dependencies.get(i), visited, key); i += 1; }
 }
 
-// Empty when the server cannot identify its own executable, which disables caching.
+/// Empty when the server cannot identify its own executable, which disables caching.
 String diagnostic_cache_key(Document* doc, bool related_information) {
     Result<Metadata, Error> executable = metadata("/proc/self/exe");
     if (executable.is_err() || doc.path.len() == 0) { return String.new(); }
@@ -56,13 +61,14 @@ String diagnostic_cache_key(Document* doc, bool related_information) {
     String out = String.new(); out.push_display(&hashed); return move out;
 }
 
+/// Returns the cache file path for `doc` (a hash of its path).
 String diagnostic_cache_entry(str directory, Document* doc) {
     i64 name = hash_bytes(doc.path.data, doc.path.len());
     String file = String.new(); file.push_display(&name); file.push_str(".json");
     return path_join(directory, file.to_str());
 }
 
-// The entry holds the key on its first line and the rendered items after it.
+/// The entry holds the key on its first line and the rendered items after it.
 bool load_cached_diagnostics(Document* doc, str key, String* items) {
     String directory = diagnostic_cache_directory();
     if (directory.len() == 0 || strlen(key) == 0) { return false; }
@@ -77,6 +83,9 @@ bool load_cached_diagnostics(Document* doc, str key, String* items) {
     return items.starts_with("[");
 }
 
+/// Writes `doc`'s diagnostics to the cache through a per-process temporary
+/// file and rename, so concurrent servers do not interleave writes. Write
+/// failures are ignored.
 void store_cached_diagnostics(Document* doc, str key, str items) {
     String directory = diagnostic_cache_directory();
     if (directory.len() == 0 || strlen(key) == 0 || !create_directories(directory.to_str())) { return; }

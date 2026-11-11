@@ -9,6 +9,9 @@
 
 import std.display;
 
+/// A typed failure: a numeric `code` (errno, `HTTP_ERR_*`, or a module code)
+/// plus a borrowed `message`. The message is not freed with the error, so it
+/// must be a literal or a view that outlives the error.
 struct Error {
     i64 code;
     str message;

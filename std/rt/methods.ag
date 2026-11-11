@@ -36,6 +36,7 @@ import std.rt.types;
 // ---------------------------------------------------------------------------
 // RT_ERR — mirrors silver_runtime's RuntimeError variants
 
+/// Dynamic-call error kinds, mirroring silver_runtime's `RuntimeError`.
 enum RT_ERR {
     NONE = 0;
     METHOD_NOT_FOUND = 1;
@@ -48,14 +49,20 @@ enum RT_ERR {
 // ---------------------------------------------------------------------------
 // Method opcodes replace Rust's Arc<dyn Fn> registry with static dispatch.
 
+/// Opcode for the global `type_name()` method (arity 0).
 const i32 RT_METHOD_OP_TYPE_NAME = 1;   // global "type_name" (arity 0)
+/// Opcode for `string.len()` (arity 0).
 const i32 RT_METHOD_OP_STRING_LEN = 2;  // string.len (arity 0)
+/// Opcode for the global `len()` method on `vec<T>` (arity 0).
 const i32 RT_METHOD_OP_VEC_LEN = 3;     // global "len" for vec<T> (arity 0)
+/// Opcode for the global `push(value)` method on `vec<T>` (arity 1).
 const i32 RT_METHOD_OP_VEC_PUSH = 4;    // global "push" for vec<T> (arity 1)
 
 // ---------------------------------------------------------------------------
 // MethodSpec — arity (-1 = variadic, Rust's None) + opcode + ctx word.
 
+/// A registered method: its arity (-1 for variadic), dispatch opcode, and an
+/// opcode-private `ctx` word.
 struct MethodSpec {
     i32 arity;
     i32 opcode;
@@ -66,6 +73,9 @@ struct MethodSpec {
 // MethodResult — Result-pattern struct: ok flag + RtValue + RT_ERR code +
 // owned message.  RtValue owns no resources, so no Drop impl is needed.
 
+/// The outcome of a dynamic call: on success `value`; on failure an `RT_ERR`
+/// code and an owned message. Dropping it frees the message only; a heap
+/// value it references stays owned by the heap.
 struct MethodResult {
     bool ok;
     RtValue value;
@@ -74,6 +84,7 @@ struct MethodResult {
 }
 
 impl MethodResult {
+    /// Builds a successful result carrying `value`.
     MethodResult ok_value(RtValue value) {
         MethodResult r;
         r.ok = true;
@@ -83,6 +94,7 @@ impl MethodResult {
         return r;
     }
 
+    /// Builds a failed result with `RT_ERR` code `err`, taking ownership of `msg`.
     MethodResult error(i32 err, String msg) {
         MethodResult r;
         r.ok = false;
@@ -92,10 +104,12 @@ impl MethodResult {
         return r;
     }
 
+    /// Returns true for a successful call.
     bool is_ok(*self) {
         return self.ok;
     }
 
+    /// Returns true for a failed call.
     bool is_err(*self) {
         return !self.ok;
     }
@@ -110,6 +124,8 @@ impl Drop for MethodResult {
 // ---------------------------------------------------------------------------
 // MethodRegistry
 
+/// Dynamic method tables: per-type methods, which win over global methods of
+/// the same name, plus the interned name table. Owns its name strings.
 struct MethodRegistry {
     HashMap<u64, MethodSpec> by_type;   // (type_raw << 32) | name_id -> spec
     HashMap<u32, MethodSpec> global;    // name_id -> spec
@@ -118,6 +134,7 @@ struct MethodRegistry {
 }
 
 impl MethodRegistry {
+    /// Creates an empty registry. Builtin methods must be installed separately.
     MethodRegistry new() {
         MethodRegistry r;
         r.by_type = HashMap<u64, MethodSpec>.new();
@@ -146,6 +163,7 @@ impl MethodRegistry {
 
     // -- Registration --------------------------------------------------------
 
+    /// Internal: packs a type id and name id into one `by_type` key.
     u64 by_type_key(u32 type_raw, u32 name_id) {
         return ((u64)type_raw << (u64)32) | (u64)name_id;
     }
@@ -203,6 +221,7 @@ impl MethodRegistry {
 
     // -- Call --------------------------------------------------------------
 
+    /// Builds a `METHOD_NOT_FOUND` error naming the receiver type and method.
     MethodResult method_not_found(TypeRegistry* types, u32 type_raw, str name) {
         String m = rt_type_str_owned("method not found: ");
         str type_name = types.name_of(TypeId.from_raw(type_raw));
@@ -216,6 +235,7 @@ impl MethodRegistry {
         return MethodResult.error((i32)RT_ERR.METHOD_NOT_FOUND, move m);
     }
 
+    /// Builds an `INVALID_RECEIVER` error that names the `expected` receiver.
     MethodResult invalid_receiver(str expected) {
         String m = rt_type_str_owned("invalid receiver (expected ");
         m.push_str(expected);
@@ -252,6 +272,8 @@ impl MethodRegistry {
 
     // -- Opcode dispatch (replaces the Rust closure table) -------------------
 
+    /// Runs the builtin for `opcode`. Some opcodes allocate on or mutate `heap`.
+    /// An unknown opcode returns `METHOD_NOT_FOUND`.
     MethodResult dispatch_method(*self, TypeRegistry* types, Heap* heap, i32 opcode, RtValue receiver, RtValue* args, i64 args_len) {
         if (opcode == RT_METHOD_OP_TYPE_NAME) {
             return self.op_type_name(types, heap, receiver);

@@ -14,11 +14,12 @@ import std.sys.socket;
 
 // --- TcpStream ---
 
+/// A connected TCP (or Unix stream) socket. Dropping it closes the socket.
 struct TcpStream {
     Socket sock;
 }
 
-// Connect `sock` to `addr`. Ok on success; Err carries the errno.
+/// Connect `sock` to `addr`. Ok on success; Err carries the errno.
 Result<i64, Error> tcp_connect_raw(Socket* sock, SocketAddr* addr) {
     return match *addr {
         V4(sa) : try_connect(sock.fd, (void*)&sa, 16),
@@ -27,6 +28,7 @@ Result<i64, Error> tcp_connect_raw(Socket* sock, SocketAddr* addr) {
     };
 }
 
+/// Returns the socket address family for `addr`.
 AddressFamily tcp_addr_family(SocketAddr* addr) {
     return match *addr {
         V4(sa) : AddressFamily.INET,
@@ -35,37 +37,42 @@ AddressFamily tcp_addr_family(SocketAddr* addr) {
     };
 }
 
-// Clear O_NONBLOCK on `fd` (restore blocking mode) via fcntl(2).
+/// Clear O_NONBLOCK on `fd` (restore blocking mode) via fcntl(2).
 Result<i64, Error> tcp_clear_nonblocking(i32 fd) {
     Result<i64, Error> flags = try_fcntl(fd, F_GETFL, 0);
     if (flags.is_err()) { return flags; }
     return try_fcntl(fd, F_SETFL, flags.value() & ~O_NONBLOCK);
 }
 
-// Error payload of a failed syscall Result (positive errno + symbolic name).
+/// Error payload of a failed syscall Result (positive errno + symbolic name).
 Error tcp_syscall_error(Result<i64, Error> r) {
     return Error.new(r.errno(), r.err_name());
 }
 
 impl TcpStream {
+    /// Wraps an existing connected descriptor, taking ownership of it.
     TcpStream from_fd(i32 fd) {
         TcpStream s;
         s.sock = Socket.from_fd(fd);
         return s;
     }
 
+    /// Returns true when the stream holds an open descriptor.
     bool valid(*self) { return self.sock.valid(); }
+    /// Returns true when the stream is closed or failed to connect.
     bool invalid(*self) { return self.sock.invalid(); }
 
-    // Connect to a borrowed address. Err.code is the errno.
+    /// Connect to a borrowed address. Err.code is the errno.
+    /// Blocks until connected or the kernel gives up.
     Result<TcpStream, Error> connect(SocketAddr* addr) {
         return TcpStream.connect_timeout(addr, 0);
     }
 
-    // Connect with a deadline. timeout_secs <= 0 waits indefinitely; a
-    // positive value bounds the total connect time. Err.code is the
-    // underlying errno (ECONNREFUSED, ENETUNREACH, ...), or ETIMEDOUT when
-    // the deadline elapsed first.
+    /// Connect with a deadline. timeout_secs <= 0 waits indefinitely; a
+    /// positive value bounds the total connect time. Err.code is the
+    /// underlying errno (ECONNREFUSED, ENETUNREACH, ...), or ETIMEDOUT when
+    /// the deadline elapsed first.
+    /// The returned stream is in blocking mode with close-on-exec set.
     Result<TcpStream, Error> connect_timeout(SocketAddr* addr, i64 timeout_secs) {
         AddressFamily fam = tcp_addr_family(addr);
         Result<i64, Error> fd_r = try_socket(fam, SocketType.STREAM,
@@ -124,6 +131,8 @@ impl TcpStream {
         return Ok(move stream);
     }
 
+    /// Reads up to `len` bytes into `buf`. Returns the count, 0 when the peer
+    /// closed, or the error. Blocks; retries once on EINTR.
     Result<i64, Error> read(*self, u8* buf, i64 len) {
         if (self.invalid()) {
             return Err(EINVAL, "stream is invalid");
@@ -135,6 +144,9 @@ impl TcpStream {
         return r;
     }
 
+    /// Writes all `len` bytes, looping over short sends. Uses MSG_NOSIGNAL, so a
+    /// closed peer gives EPIPE instead of SIGPIPE. Returns the bytes written; a
+    /// partial count when an error follows some progress, or the error itself.
     Result<i64, Error> write(*self, u8* buf, i64 len) {
         if (self.invalid()) {
             return Err(EINVAL, "stream is invalid");
@@ -154,10 +166,12 @@ impl TcpStream {
         return Ok(done);
     }
 
+    /// Closes the socket. Safe to call more than once.
     void close(*self) {
         self.sock.close();
     }
 
+    /// Shuts down the read side, write side, or both, without closing the fd.
     Result<i64, Error> shutdown(*self, ShutdownHow how) {
         if (self.invalid()) { return Err(EINVAL, "stream is invalid"); }
         return try_shutdown(self.sock.fd, how);
@@ -241,34 +255,44 @@ impl Drop for TcpStream {
 
 // --- TcpListener ---
 
+/// A listening TCP socket. Dropping it closes the socket.
 struct TcpListener {
     Socket sock;
 }
 
 impl TcpListener {
+    /// Returns a listener holding no descriptor (`invalid()` is true).
     TcpListener closed() {
         TcpListener listener;
         listener.sock = Socket.from_fd(-1);
         return listener;
     }
 
+    /// Wraps an existing listening descriptor, taking ownership of it.
     TcpListener from_fd(i32 fd) {
         TcpListener listener;
         listener.sock = Socket.from_fd(fd);
         return listener;
     }
 
+    /// Returns true when the listener holds an open descriptor.
     bool valid(*self) { return self.sock.valid(); }
+    /// Returns true when the listener is closed or failed to bind.
     bool invalid(*self) { return self.sock.invalid(); }
+    /// Returns the descriptor without giving up ownership.
     i32 raw_fd(*self) { return self.sock.fd; }
 
+    /// Gives up ownership of the descriptor and returns it; the listener then
+    /// holds none, so dropping it no longer closes the fd.
     i32 take_fd(&mut self) {
         i32 fd = self.sock.fd;
         self.sock.fd = -1;
         return fd;
     }
 
-    // Bind a TCP listener: socket + SO_REUSEADDR + bind + listen.
+    /// Bind a TCP listener: socket + SO_REUSEADDR + bind + listen.
+    /// Returns a closed listener (see `invalid()`) when any step fails; the
+    /// errno is not reported.
     TcpListener bind(SocketAddr* addr, i64 backlog) {
         AddressFamily fam = tcp_addr_family(addr);
         Socket sock = Socket.new(fam, SocketType.STREAM, SOCK_CLOEXEC, 0);
@@ -308,7 +332,9 @@ impl TcpListener {
         return listener;
     }
 
-    // Returns the accepted client fd; callers can use TcpStream.from_fd.
+    /// Returns the accepted client fd; callers can use TcpStream.from_fd.
+    /// Blocks until a client connects; retries once on EINTR. The new fd has
+    /// close-on-exec set and the caller owns it.
     Result<i64, Error> accept(*self) {
         if (self.invalid()) {
             return Err(EINVAL, "listener is invalid");

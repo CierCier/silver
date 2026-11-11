@@ -16,6 +16,8 @@ import std.process;
 import project.manifest;
 
 
+/// The resolved build target of a package command: manifest, root, entry
+/// file, target name and kind, and every package root for imports.
 struct WorkspacePlan {
     String manifest_path;
     String root;
@@ -25,6 +27,7 @@ struct WorkspacePlan {
     Vec<String> package_roots;
 }
 
+/// Manifest traversal state; `visited` stops reference cycles.
 struct WorkspaceResolver {
     Vec<String> visited;
     WorkspacePlan* plan;
@@ -33,6 +36,7 @@ struct WorkspaceResolver {
 
 
 
+/// Returns an empty plan.
 WorkspacePlan workspace_plan_empty() {
     WorkspacePlan plan;
     plan.manifest_path = String.new();
@@ -44,6 +48,7 @@ WorkspacePlan workspace_plan_empty() {
     return plan;
 }
 
+/// Returns a resolver that fills `plan`.
 WorkspaceResolver workspace_resolver_new(WorkspacePlan* plan) {
     WorkspaceResolver resolver;
     resolver.visited = Vec<String>.new();
@@ -52,6 +57,7 @@ WorkspaceResolver workspace_resolver_new(WorkspacePlan* plan) {
 }
 
 
+/// Returns true when `value` is in `values`.
 bool workspace_contains(Vec<String>* values, str value) {
     i64 i = 0;
     while (i < values.len()) {
@@ -63,12 +69,16 @@ bool workspace_contains(Vec<String>* values, str value) {
     return false;
 }
 
+/// Adds `root` to the plan's package roots unless empty or present.
 void workspace_add_root(WorkspacePlan* plan, str root) {
     if (strlen(root) == 0 || workspace_contains(&plan.package_roots, root)) { return; }
     String owned = String.from_str(root);
     plan.package_roots.push(move owned);
 }
 
+/// Selects the target to build: the one named `requested` (of `kind` when
+/// explicit), else the manifest's default target, else the only matching
+/// one. Writes an error when the choice is missing or ambiguous.
 bool workspace_select_target(PackageManifest* manifest, TargetKind kind, bool has_explicit_kind, str requested, ManifestTarget** selected, String* error) {
     if (strlen(requested) > 0) {
         i64 i = 0;
@@ -197,6 +207,7 @@ bool workspace_select_target(PackageManifest* manifest, TargetKind kind, bool ha
     return false;
 }
 
+/// Returns true when `value` starts with `prefix`.
 bool workspace_str_starts_with(str value, str prefix) {
     i64 value_len = strlen(value);
     i64 prefix_len = strlen(prefix);
@@ -210,6 +221,7 @@ bool workspace_str_starts_with(str value, str prefix) {
 }
 
 
+/// Writes `path` made absolute against the current directory, normalized.
 void workspace_make_absolute(String* output, str path) {
     if (workspace_is_absolute(path)) {
         String normalized = path_normalize(path);
@@ -227,6 +239,8 @@ void workspace_make_absolute(String* output, str path) {
 }
 
 
+/// Visits one manifest: records its root and follows a nested-manifest
+/// target or dependency manifests, up to depth 64.
 bool workspace_visit_manifest(WorkspaceResolver* resolver, str manifest_path, TargetKind kind, bool has_explicit_kind, str requested, i64 depth, String* error) {
     if (depth > 64) {
         workspace_error(error, "package manifest reference cycle is too deep");
@@ -332,6 +346,7 @@ bool workspace_visit_manifest(WorkspaceResolver* resolver, str manifest_path, Ta
     return true;
 }
 
+/// Resolves `manifest_path` into `plan`.
 bool workspace_plan_for_manifest(str manifest_path, TargetKind kind, bool has_explicit_kind, str requested, WorkspacePlan* plan, String* error) {
     WorkspaceResolver resolver = workspace_resolver_new(plan);
     bool ok = workspace_visit_manifest(&resolver, manifest_path, kind, has_explicit_kind, requested, 0, error);
@@ -339,6 +354,7 @@ bool workspace_plan_for_manifest(str manifest_path, TargetKind kind, bool has_ex
     return ok;
 }
 
+/// Returns true when `path`'s file name is `silver.toml`.
 bool workspace_path_is_manifest(str path) {
     String base = path_basename(path);
     bool result = base.equals(MANIFEST_FILE);
@@ -346,6 +362,7 @@ bool workspace_path_is_manifest(str path) {
     return result;
 }
 
+/// Frees everything a plan owns.
 void workspace_plan_drop(WorkspacePlan* plan) {
     plan.package_roots.drop();
     plan.manifest_path.drop();
@@ -354,6 +371,8 @@ void workspace_plan_drop(WorkspacePlan* plan) {
     plan.target_name.drop();
 }
 
+/// Resolves a plan from a manifest path given relative to the current
+/// directory.
 bool workspace_plan_from_manifest(str manifest_path, TargetKind kind, bool has_explicit_kind, str requested, WorkspacePlan* plan, String* error) {
     String absolute = String.new();
     workspace_make_absolute(&absolute, manifest_path);
@@ -368,6 +387,7 @@ bool workspace_plan_from_manifest(str manifest_path, TargetKind kind, bool has_e
     return ok;
 }
 
+/// Sets `*path` to `./silver.toml` when it exists; false otherwise.
 bool workspace_default_manifest(str* path) {
     String cwd = current_dir();
     String candidate = path_join(cwd.to_str(), MANIFEST_FILE);
@@ -380,6 +400,7 @@ bool workspace_default_manifest(str* path) {
     return false;
 }
 
+/// Returns true when `path` names a manifest file (by name or by content).
 bool workspace_manifest_file(str path) {
     if (workspace_path_is_manifest(path)) { return true; }
     // A direct input has no manifest context, so preserve source suffixes.
@@ -397,6 +418,8 @@ bool workspace_manifest_file(str path) {
     return true;
 }
 
+/// Writes the manifest for a package input (a manifest file or a directory
+/// holding one); false when `input` is not a package.
 bool workspace_manifest_input(str input, String* manifest) {
     if (workspace_manifest_file(input)) {
         workspace_set_string(manifest, input);
@@ -413,6 +436,7 @@ bool workspace_manifest_input(str input, String* manifest) {
     return false;
 }
 
+/// Returns true for a package command name or alias.
 bool workspace_is_command(str value) {
     return strcmp(value, "build") == 0 || strcmp(value, "b") == 0
         || strcmp(value, "run") == 0 || strcmp(value, "r") == 0
@@ -421,6 +445,8 @@ bool workspace_is_command(str value) {
         || strcmp(value, "init") == 0 || strcmp(value, "clean") == 0;
 }
 
+/// Returns true for options that print and exit (`--help`, `--version`,
+/// cache info).
 bool workspace_is_terminal_option(str value) {
     return strcmp(value, "--help") == 0 || strcmp(value, "-h") == 0
         || strcmp(value, "--version") == 0 || strcmp(value, "-V") == 0
@@ -429,6 +455,8 @@ bool workspace_is_terminal_option(str value) {
         || workspace_str_starts_with(value, "--cache-prune=");
 }
 
+/// Returns true when `--bin`/`--lib` at `index` takes the next argument as a
+/// target name.
 bool workspace_selector_consumes_value(Vec<String>* arguments, i64 index) {
     String* selector = arguments.get_ptr(index);
     if (strcmp(selector.to_str(), "--bin") != 0
@@ -447,6 +475,7 @@ bool workspace_selector_consumes_value(Vec<String>* arguments, i64 index) {
     return true;
 }
 
+/// Returns true when the option at `index` takes the next argument.
 bool workspace_option_consumes_value(Vec<String>* arguments, i64 index) {
     String* option = arguments.get_ptr(index);
     if (strcmp(option.to_str(), "--bin") == 0 || strcmp(option.to_str(), "--lib") == 0) {
@@ -463,6 +492,7 @@ bool workspace_option_consumes_value(Vec<String>* arguments, i64 index) {
         || strcmp(option.to_str(), "--emit") == 0 || strcmp(option.to_str(), "--run-arg") == 0;
 }
 
+/// Returns true when another input follows `after_index`.
 bool workspace_has_later_input(Vec<String>* arguments, i64 after_index) {
     i64 i = after_index + 1;
     while (i < arguments.len()) {
@@ -479,6 +509,7 @@ bool workspace_has_later_input(Vec<String>* arguments, i64 after_index) {
     return false;
 }
 
+/// Returns the index of the command argument, or -1.
 i64 workspace_command_index(Vec<String>* arguments) {
     i64 i = 1;
     while (i < arguments.len()) {
@@ -498,6 +529,7 @@ i64 workspace_command_index(Vec<String>* arguments) {
     return -1;
 }
 
+/// Returns true when `argument` is `option` or `option=value`.
 bool workspace_argument_is_option(String* argument, str option) {
     if (argument.equals(option)) { return true; }
     i64 option_len = strlen(option);
@@ -505,6 +537,7 @@ bool workspace_argument_is_option(String* argument, str option) {
         && argument.data[option_len] == (u8)61;
 }
 
+/// Returns true when the command line contains `option`.
 bool workspace_has_option(Vec<String>* arguments, str option) {
     i64 i = 1;
     while (i < arguments.len()) {
@@ -516,6 +549,7 @@ bool workspace_has_option(Vec<String>* arguments, str option) {
     return false;
 }
 
+/// Writes the value of `option` (`option value` or `option=value`).
 bool workspace_option_value(Vec<String>* arguments, str option, String* value) {
     i64 i = 1;
     while (i < arguments.len()) {
@@ -542,6 +576,7 @@ bool workspace_option_value(Vec<String>* arguments, str option, String* value) {
     return false;
 }
 
+/// Writes the first package input after the command.
 bool workspace_find_package_input(Vec<String>* arguments, i64 command_index, String* input) {
     i64 start = command_index < 0 ? 1 : command_index + 1;
     i64 i = start;
@@ -562,6 +597,7 @@ bool workspace_find_package_input(Vec<String>* arguments, i64 command_index, Str
     return false;
 }
 
+/// Reads `--bin`/`--lib` target selection from the command line.
 bool workspace_package_kind(Vec<String>* arguments, TargetKind* kind, String* requested, bool* has_explicit_kind) {
     requested.clear();
     bool is_lib = workspace_has_option(arguments, "--lib");
@@ -580,6 +616,7 @@ bool workspace_package_kind(Vec<String>* arguments, TargetKind* kind, String* re
     return true;
 }
 
+/// Returns true when the command has a positional (non-option) input.
 bool workspace_has_positional_input(Vec<String>* arguments, i64 command_index) {
     i64 start = command_index < 0 ? 1 : command_index + 1;
     i64 i = start;
@@ -599,6 +636,7 @@ bool workspace_has_positional_input(Vec<String>* arguments, i64 command_index) {
     return false;
 }
 
+/// Returns true when a grammar emit option is present.
 bool workspace_has_grammar_emit(Vec<String>* arguments) {
     i64 i = 1;
     while (i < arguments.len()) {
@@ -612,6 +650,9 @@ bool workspace_has_grammar_emit(Vec<String>* arguments) {
     return false;
 }
 
+/// Resolves the workspace plan for the command line, setting
+/// `*has_package` when the command targets a package. Writes an error and
+/// returns false when resolution fails.
 bool workspace_package_arguments(Vec<String>* arguments, CliMatches* cli, WorkspacePlan* plan, bool* has_package, String* error) {
     *has_package = false;
     i64 command_index = workspace_command_index(arguments);
@@ -697,6 +738,7 @@ bool workspace_package_arguments(Vec<String>* arguments, CliMatches* cli, Worksp
     return true;
 }
 
+/// Appends the plan's package roots to `include_dirs`.
 void workspace_collect_roots(WorkspacePlan* plan, Vec<String>* include_dirs) {
     i64 i = 0;
     while (i < plan.package_roots.len()) {
@@ -710,6 +752,7 @@ void workspace_collect_roots(WorkspacePlan* plan, Vec<String>* include_dirs) {
     }
 }
 
+/// Creates `path` and missing parents. Returns false on failure.
 bool workspace_mkdir_p(str path) {
     if (is_dir(path)) { return true; }
     String parent = path_dirname(path);
@@ -720,6 +763,7 @@ bool workspace_mkdir_p(str path) {
     return create_dir(path);
 }
 
+/// Escapes a string for a TOML basic string value.
 String workspace_toml_escape(str value) {
     String out = String.new();
     i64 i = 0;
@@ -733,7 +777,7 @@ String workspace_toml_escape(str value) {
     return move out;
 }
 
-// True when the absolute directory `dir` or one of its ancestors holds a `.git` entry.
+/// True when the absolute directory `dir` or one of its ancestors holds a `.git` entry.
 bool workspace_inside_git_repo(str dir) {
     String current = String.from_str(dir);
     while (current.len() > 0) {
@@ -746,10 +790,11 @@ bool workspace_inside_git_repo(str dir) {
     return false;
 }
 
+/// Template source of `src/main.ag` written by `agc init`.
 const str INIT_ENTRY_SOURCE = "i32 main() {\n    @println(\"Hello, Silver!\");\n    return 0;\n}\n";
 
-// `agc init [DIR] [--name NAME]`: create silver.toml + src/main.ag and start a
-// git repository when git is available. Mirrors the stage0 template.
+/// `agc init [DIR] [--name NAME]`: create silver.toml + src/main.ag and start a
+/// git repository when git is available. Mirrors the stage0 template.
 i32 workspace_init_command(CliMatches* cli) {
     String target = String.new();
     if (cli.positional_count() > 0) {

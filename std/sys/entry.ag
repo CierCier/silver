@@ -30,21 +30,26 @@ import std.sys.os;
 // hook, so no separate linking step is needed.
 
 // Cached module objects call these runtime ABI shims; keep them externally rooted.
+/// Returns the process argument count captured by `_start`.
 #[link_name("silver_argc")]
 i32 silver_argc() {
     return __silver_argc;
 }
 
+/// Returns the process argument vector captured by `_start`. Do not free it.
 #[link_name("silver_argv")]
 i8** silver_argv() {
     return __silver_argv;
 }
 
+/// Returns the current environment block (NUL-terminated `KEY=VALUE` array).
 #[link_name("silver_envp")]
 i8** silver_envp() {
     return __silver_envp;
 }
 
+/// Replaces the environment block. The caller keeps ownership of `value` and
+/// must keep it alive while it is installed. Not thread-safe.
 #[link_name("silver_set_envp")]
 void silver_set_envp(i8** value) {
     __silver_envp = value;
@@ -56,28 +61,39 @@ if (@cfg(os.wasi)) {
     // The argv/envp globals are real Silver globals here (the x86 entries
     // define them out of a `.bss` section directive inside an asm blob, which
     // wasm cannot express).
+    /// Process argument count, set once by `_start` before `main`.
     i32 __silver_argc;
+    /// Process argument vector, set once by `_start` before `main`.
     i8** __silver_argv;
+    /// Process environment block, set by `_start` and replaced by `silver_set_envp`.
     i8** __silver_envp;
 
     extern "C" {
+        /// WASI `args_sizes_get`: writes the argument count and total string bytes.
         #[link_module("wasi_snapshot_preview1")]
         #[link_name("args_sizes_get")]
         i32 wasi_args_sizes_get(u32* argc, u32* buf_size);
+        /// WASI `args_get`: fills `argv` with pointers into `argv_buf`.
         #[link_module("wasi_snapshot_preview1")]
         #[link_name("args_get")]
         i32 wasi_args_get(i8** argv, u8* argv_buf);
+        /// WASI `environ_sizes_get`: writes the variable count and total string bytes.
         #[link_module("wasi_snapshot_preview1")]
         #[link_name("environ_sizes_get")]
         i32 wasi_environ_sizes_get(u32* count, u32* buf_size);
+        /// WASI `environ_get`: fills `environ` with pointers into `environ_buf`.
         #[link_module("wasi_snapshot_preview1")]
         #[link_name("environ_get")]
         i32 wasi_environ_get(i8** environ, u8* environ_buf);
+        /// WASI `proc_exit`: terminates the process with `code`. Never returns.
         #[link_module("wasi_snapshot_preview1")]
         #[link_name("proc_exit")]
         void wasi_proc_exit(i32 code);
     }
 
+    /// Program entry point (WASI): sets up args and environment, runs `main`,
+    /// joins live threads, flushes buffered output, and exits with `main`'s
+    /// result, or 1 when the leak check reports a leak.
     void _start() {
         __silver_wasi_arg_setup();
         __silver_wasi_env_setup();
@@ -151,14 +167,20 @@ if (@cfg(os.wasi)) {
     import std.thread;
 
     extern "C" {
+        /// Process argument count, defined in `.bss` by the entry code.
         i32 __silver_argc;
+        /// Process argument vector, defined in `.bss` by the entry code.
         i8** __silver_argv;
+        /// Process environment block, defined in `.bss` by the entry code.
         i8** __silver_envp;
     }
 
 if (@cfg(os.linux)) {
     // Linux entry: raw ET_EXEC _start. argc/argv come off the process stack and
     // exit goes through exit_group — the classic no-libc crt0 contract.
+    /// Program entry point (Linux): reads argc/argv/envp off the initial stack,
+    /// probes CPU features, runs `main`, joins live threads, flushes buffered
+    /// output, and exits via exit_group with `main`'s result, or 1 on a leak.
     void _start() {
         asm("
         .section .bss
@@ -208,14 +230,20 @@ if (@cfg(os.linux)) {
     //   - exit is ExitProcess (never returns, so %r12 needs no preserving).
     extern "C" {
         // Win32 argv plumbing (windows entry only).
+        /// Win32 `GetCommandLineW`: the process command line as UTF-16.
         #[link_name("GetCommandLineW")]
         u16* win_GetCommandLineW();
+        /// Win32 `CommandLineToArgvW`: splits a command line into a LocalAlloc'd argv.
         #[link_name("CommandLineToArgvW")]
         u16** win_CommandLineToArgvW(u16* cmd, i32* count);
+        /// Win32 `LocalFree`: frees memory from LocalAlloc.
         #[link_name("LocalFree")]
         u8* win_LocalFree(u8* mem);
     }
 
+    /// Program entry point (Windows): initializes the platform layer and argv,
+    /// probes CPU features, runs `main`, joins live threads, flushes buffered
+    /// output, and exits via ExitProcess with `main`'s result, or 1 on a leak.
     void _start() {
         sys_platform_init();
         __silver_win_arg_setup();
@@ -247,6 +275,8 @@ if (@cfg(os.linux)) {
     ", [], ["rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5"]);
     }
 
+    /// Internal: builds UTF-8 `__silver_argc`/`__silver_argv` from the UTF-16
+    /// command line. Runs once in `_start`; the strings live for the process.
     void __silver_win_arg_setup() {
         // Define the argv globals in .bss (the Windows counterpart of the Linux
         // entry blob's section directives). Runs once, before anything reads them.

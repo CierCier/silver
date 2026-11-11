@@ -11,6 +11,7 @@ import frontend.cfg;
 import frontend.types;
 import frontend.place;
 
+/// The kind of a top-level symbol.
 enum SymbolKind {
     Function;
     Struct;
@@ -20,6 +21,8 @@ enum SymbolKind {
     TypeAlias;
 }
 
+/// One top-level symbol: interned name, kind, declaration span and node,
+/// resolved type id (0 until typed), and C ABI flags.
 struct Symbol {
     u32 name_id;
     SymbolKind kind;
@@ -30,6 +33,9 @@ struct Symbol {
     bool c_variadic;
 }
 
+/// The top-level names of a program: an interner, the symbols in
+/// declaration order, the type table, and a name-id index. Owns all of it;
+/// `declaration` pointers borrow the syntax tree.
 struct SymbolTable {
     Interner names;
     Vec<Symbol> symbols;
@@ -39,6 +45,7 @@ struct SymbolTable {
 }
 
 impl SymbolTable {
+    /// Creates an empty table.
     SymbolTable new() {
         SymbolTable table;
         table.names = Interner.new();
@@ -49,6 +56,7 @@ impl SymbolTable {
         return move table;
     }
 
+    /// Returns a deep copy (syntax-node pointers are shared, not copied).
     SymbolTable clone(&self) {
         SymbolTable copy;
         copy.names = self.names.clone();
@@ -74,14 +82,17 @@ impl SymbolTable {
         return move copy;
     }
 
+    /// Returns the number of symbols.
     i64 len(&self) {
         return self.symbols.len();
     }
 
+    /// Returns symbol `index`. Invalidated when the table grows.
     Symbol* get(SymbolTable* self, i64 index) {
         return self.symbols.get_ptr(index);
     }
 
+    /// Internal: records `symbol_idx` as the symbol for `name_id`.
     void set_symbol_index(SymbolTable* self, u32 name_id, i64 symbol_idx) {
         while (self.index_by_name_id.len() <= (i64)name_id) {
             self.index_by_name_id.push(-1);
@@ -89,6 +100,7 @@ impl SymbolTable {
         self.index_by_name_id.set((i64)name_id, symbol_idx);
     }
 
+    /// Returns the symbol index for `name_id`, or -1.
     i64 find_by_name_id(SymbolTable* self, u32 name_id) {
         if ((i64)name_id >= self.index_by_name_id.len()) {
             return -1;
@@ -96,6 +108,7 @@ impl SymbolTable {
         return self.index_by_name_id.get((i64)name_id);
     }
 
+    /// Returns the symbol index for `name`, or -1.
     i64 find(SymbolTable* self, str name) {
         Optional<u32> found = map_get_opt_str_u32(&self.names.ids, name);
         if (!found.is_some()) {
@@ -104,10 +117,14 @@ impl SymbolTable {
         return self.find_by_name_id(found.unwrap());
     }
 
+    /// Declares an untyped symbol; see `declare_typed`.
     bool declare(SymbolTable* self, u32 name_id, SymbolKind kind, Span span, SyntaxNode* declaration) {
         return self.declare_typed(name_id, kind, span, declaration, 0);
     }
 
+    /// Declares a symbol. When the name exists, returns true without adding it
+    /// if either side is a function or global (overloads and cfg variants are
+    /// checked later), and false for any other duplicate.
     bool declare_typed(SymbolTable* self, u32 name_id, SymbolKind kind, Span span, SyntaxNode* declaration, u32 type_id) {
         i64 existing = self.find_by_name_id(name_id);
         if (existing >= 0) {
@@ -137,6 +154,7 @@ impl SymbolTable {
         return true;
     }
 
+    /// Returns the type id of symbol `name`, or `TYPE_UNKNOWN`.
     u32 get_type(SymbolTable* self, str name) {
         i64 idx = self.find(name);
         if (idx < 0) {
@@ -145,6 +163,7 @@ impl SymbolTable {
         return self.symbols.get_ptr(idx).type_id;
     }
 
+    /// Sets the type id of symbol `name` when it exists.
     void set_type(SymbolTable* self, str name, u32 type_id) {
         i64 idx = self.find(name);
         if (idx >= 0) {
@@ -152,6 +171,7 @@ impl SymbolTable {
         }
     }
 
+    /// Adds `name` as a global symbol unless the name is already declared.
     void add_visible(SymbolTable* self, str name, Span span, SyntaxNode* declaration) {
         u32 name_id = self.names.intern(name);
         if (self.find_by_name_id(name_id) >= 0) {
@@ -171,6 +191,8 @@ impl SymbolTable {
     }
 }
 
+/// Returns true for an identifier token, including builtin type names such
+/// as `Vec` that lex as their own token kinds.
 bool node_is_identifier(SyntaxNode* node) {
     return node != (SyntaxNode*)0
         && node.kind == NodeKind.Token
@@ -179,6 +201,7 @@ bool node_is_identifier(SyntaxNode* node) {
             || node.token_kind == TokenKind.OptionalType);
 }
 
+/// Returns true for a primitive type keyword token.
 bool is_primitive_type_token(TokenKind kind) {
     return match kind {
         TokenKind.I8 : true,
@@ -207,6 +230,7 @@ bool is_primitive_type_token(TokenKind kind) {
     };
 }
 
+/// Returns the name token of a function item, or null.
 SyntaxNode* function_identifier(SyntaxNode* item) {
     SyntaxNode* child = item.first_child;
     SyntaxNode* candidate = (SyntaxNode*)0;
@@ -234,6 +258,7 @@ SyntaxNode* function_identifier(SyntaxNode* item) {
     return function_name;
 }
 
+/// Returns the name token of any named item, or null.
 SyntaxNode* item_identifier(SyntaxNode* item) {
     if (item == (SyntaxNode*)0) {
         return (SyntaxNode*)0;
@@ -273,14 +298,17 @@ SyntaxNode* item_identifier(SyntaxNode* item) {
     return (SyntaxNode*)0;
 }
 
+/// Returns true for a function item.
 bool symbol_item_is_function(SyntaxNode* item) {
     return item != (SyntaxNode*)0 && item.kind == NodeKind.Function;
 }
 
+/// Returns true for a struct item.
 bool symbol_item_is_struct(SyntaxNode* item) {
     return item != (SyntaxNode*)0 && item.kind == NodeKind.Struct;
 }
 
+/// Returns the symbol kind for an item node.
 SymbolKind symbol_kind_for_item(SyntaxNode* item) {
     return match item.kind {
         NodeKind.Function : SymbolKind.Function,
@@ -293,6 +321,8 @@ SymbolKind symbol_kind_for_item(SyntaxNode* item) {
     };
 }
 
+/// Declares one item's name, reporting a duplicate-symbol error for a
+/// same-file conflict. Imported names may be shadowed by local ones.
 bool record_item(SymbolTable* table, DiagnosticBag* diagnostics, SyntaxNode* item) {
     if (item.kind == NodeKind.Import || item.kind == NodeKind.CfgBlock || item.kind == NodeKind.Extern || item.kind == NodeKind.Macro) {
         return true;
@@ -325,6 +355,8 @@ bool record_item(SymbolTable* table, DiagnosticBag* diagnostics, SyntaxNode* ite
     return true;
 }
 
+/// Collects the cfg-visible top-level symbols of `tree` into `table`.
+/// Returns false when any duplicate was reported.
 bool collect_symbols(SymbolTable* table, DiagnosticBag* diagnostics, SyntaxTree* tree, CfgSet* cfg) {
     bool ok = true;
     Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();

@@ -33,6 +33,8 @@ i64 random_range(i64 min, i64 max) {
     return min + (i64)(r % range);
 }
 
+/// Rotates `x` left by `k` bits. `k` must be in 1..63; 0 or 64 shifts by the
+/// full width, which is undefined for LLVM shifts.
 u64 rotl_u64(u64 x, i64 k) {
     return (x << (u64)k) | (x >> (u64)(64 - k));
 }

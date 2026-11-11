@@ -8,6 +8,9 @@
 
 import std.optional;
 
+/// The kind of a decoded key press. `Char` carries a codepoint and `FKey`
+/// a function-key number in `KeyEvent`; `Unknown` covers unrecognized
+/// escape sequences.
 enum KeyKind {
     Char;
     Enter;
@@ -28,6 +31,7 @@ enum KeyKind {
     Unknown;
 }
 
+/// One decoded key press with its modifier flags.
 struct KeyEvent {
     KeyKind kind;
     u32 codepoint; // Char: the rune (ctrl+letter: the base letter).
@@ -37,6 +41,7 @@ struct KeyEvent {
     bool shift;
 }
 
+/// Builds an event of `kind` with no codepoint and no modifiers.
 KeyEvent key_simple(KeyKind kind) {
     KeyEvent e;
     e.kind = kind;
@@ -48,13 +53,17 @@ KeyEvent key_simple(KeyKind kind) {
     return e;
 }
 
+/// Builds an unmodified `Char` event for codepoint `cp`.
 KeyEvent key_char(u32 cp) {
     KeyEvent e = key_simple(KeyKind.Char);
     e.codepoint = cp;
     return e;
 }
 
-// Parser states: 0 ground, 1 ESC seen, 2 CSI, 3 SS3.
+/// An incremental decoder from terminal input bytes (UTF-8 and VT/xterm
+/// escape sequences) to key events. Feed bytes one at a time with `feed`;
+/// call `flush` at end of input to resolve a lone ESC.
+/// States: 0 ground, 1 ESC seen, 2 CSI, 3 SS3.
 struct KeyParser {
     i64 state;
     i64 utf_need; // pending UTF-8 continuation bytes in ground state
@@ -63,6 +72,7 @@ struct KeyParser {
     i64 nparams;
 }
 
+/// Creates a parser in the ground state.
 KeyParser KeyParser_new() {
     KeyParser p;
     p.state = 0;
@@ -76,6 +86,7 @@ KeyParser KeyParser_new() {
 }
 
 impl KeyParser {
+    /// Creates a parser in the ground state.
     KeyParser new() {
         return KeyParser_new();
     }
@@ -107,6 +118,7 @@ impl KeyParser {
         return None;
     }
 
+    /// Internal `feed` step for the ground state (plain bytes and UTF-8).
     Optional<KeyEvent> feed_ground(*self, u8 byte) {
         // Mid-rune continuation.
         if (self.utf_need > 0) {
@@ -180,6 +192,7 @@ impl KeyParser {
         return Some(e);
     }
 
+    /// Internal `feed` step after an ESC byte.
     Optional<KeyEvent> feed_esc(*self, u8 byte) {
         if (byte == (u8)91) {
             // CSI: ESC [
@@ -222,6 +235,8 @@ impl KeyParser {
         return Some(e);
     }
 
+    /// Internal `feed` step inside a CSI (`ESC [`) sequence. Parameters above
+    /// 9999 stop growing and extra parameters beyond eight are dropped.
     Optional<KeyEvent> feed_csi(*self, u8 byte) {
         if (byte >= (u8)48 && byte <= (u8)57) {
             if (self.nparams < 8) {
@@ -307,6 +322,7 @@ impl KeyParser {
         return e;
     }
 
+    /// Internal `feed` step after `ESC O`; maps P/Q/R/S to F1-F4.
     Optional<KeyEvent> feed_ss3(*self, u8 byte) {
         self.state = 0;
         KeyEvent e = key_simple(KeyKind.Unknown);

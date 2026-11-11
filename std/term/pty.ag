@@ -23,10 +23,15 @@ import std.mem.vec;
 import std.string;
 import std.term.size;
 
+/// ioctl request that returns a pty master's slave number.
 const i64 TIOCGPTN = 0x80045430;
+/// ioctl request that locks or unlocks a pty slave.
 const i64 TIOCSPTLCK = 0x40045431;
+/// ioctl request that makes a terminal the caller's controlling terminal.
 const i64 TIOCSCTTY = 0x540E;
+/// open(2) flag: do not make the opened terminal the controlling terminal.
 const i64 O_NOCTTY = 256; // 0400: never take a controlling terminal here
+/// wait4(2) flag: return immediately when no child has exited.
 const i64 WNOHANG = 1;
 
 /// Exit state of a pty child, decoded from waitpid status like ExitStatus.
@@ -37,25 +42,31 @@ struct PtyStatus {
 }
 
 impl PtyStatus {
-    /// True when the child exited normally (vs signaled or still running).
+    /// True when the child exited with code 0 (not signaled, not running).
     bool success(*self) {
         return self.exited && self.code == 0;
     }
 
+    /// True when the child has been reaped (exited or was killed by a signal).
     bool reaped(*self) {
         return self.exited;
     }
 
+    /// Returns the exit code, or -1 when the child was signaled or unknown.
     i32 exit_code(*self) {
         return self.code;
     }
 
+    /// Returns the terminating signal number, or 0 when the child was not signaled.
     i32 termsig(*self) {
         return self.signal;
     }
 }
 
 if (@cfg(os.linux)) {
+/// A pseudoterminal master and, after `spawn`, the child process on its slave.
+/// Dropping it closes the master, which sends SIGHUP to the child's session;
+/// it does not kill or reap the child.
 struct Pty {
     i32 master;
     i64 child_pid; // <= 0 when no live child
@@ -90,6 +101,10 @@ impl Pty {
 
     /// Spawn `prog` with `args` on a fresh pty sized rows x cols.
     /// Rows/cols of 0 skip the initial size ioctl.
+    /// `prog` is an executable path; there is no PATH lookup. The child gets
+    /// the parent's environment and a new session with the slave as its
+    /// controlling terminal and stdio. If child setup or exec fails, the child
+    /// exits with code 127; the parent still gets `Ok`.
     Result<Pty, Error> spawn(str prog, Vec<String>* args, i64 rows, i64 cols) {
         Result<Pty, Error> q = Pty.open();
         if (q.is_err()) {
@@ -271,6 +286,8 @@ impl Pty {
         return try_fcntl(self.master, F_SETFL, f.value() | O_NONBLOCK).is_ok();
     }
 
+    /// Closes the master fd if open. Safe to call more than once; later reads and
+    /// writes return -EBADF.
     void close(*self) {
         if (self.master >= 0) {
             try_close(self.master);

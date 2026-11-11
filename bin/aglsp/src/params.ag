@@ -3,6 +3,7 @@ import std.string;
 import document;
 import positions;
 
+/// Consumes a `,` when it is next; false otherwise.
 bool skip_comma_if_present(JsonReader* reader) {
     reader.skip_whitespace();
     if (reader.failed || reader.index >= reader.length || reader.input[reader.index] != ',') { return false; }
@@ -10,6 +11,8 @@ bool skip_comma_if_present(JsonReader* reader) {
     return true;
 }
 
+/// Returns the raw JSON value of top-level member `wanted` of an object,
+/// or "" when absent or malformed.
 String json_field(str json, str wanted) {
     JsonReader reader = JsonReader.new(json);
     String result = String.new();
@@ -32,6 +35,7 @@ String json_field(str json, str wanted) {
     return move result;
 }
 
+/// Reads string member `field` into `*output`.
 bool json_string(str json, str field, String* output) {
     String value = json_field(json, field);
     JsonReader reader = JsonReader.new(value.to_str());
@@ -41,14 +45,15 @@ bool json_string(str json, str field, String* output) {
     return true;
 }
 
+/// Reads integer member `field` into `*output`.
 bool json_integer(str json, str field, i64* output) {
     String value = json_field(json, field);
     JsonReader reader = JsonReader.new(value.to_str());
     return reader.read_i64(output) && !reader.failed && reader.index == reader.length;
 }
 
-// Decode a raw JSON string value (not an object field); the whole input must
-// be exactly one string.
+/// Decode a raw JSON string value (not an object field); the whole input must
+/// be exactly one string.
 bool json_string_value(str json, String* output) {
     JsonReader reader = JsonReader.new(json);
     String decoded = reader.read_string();
@@ -60,8 +65,8 @@ bool json_string_value(str json, String* output) {
     return true;
 }
 
-// Return the raw JSON of element `index` in a JSON array. The whole array must
-// parse; the element is captured while scanning.
+/// Return the raw JSON of element `index` in a JSON array. The whole array must
+/// parse; the element is captured while scanning.
 bool json_array_element(str json, i64 index, String* output) {
     JsonReader reader = JsonReader.new(json);
     if (!reader.begin_array()) { return false; }
@@ -84,8 +89,8 @@ bool json_array_element(str json, i64 index, String* output) {
     return found && reader.index == reader.length;
 }
 
-// Validate a client/(un)registerCapability payload: an array of objects that
-// each carry string `id` and (for registrations) `method` fields.
+/// Validate a client/(un)registerCapability payload: an array of objects that
+/// each carry string `id` and (for registrations) `method` fields.
 bool valid_registrations(str json, str field, bool require_method) {
     String registrations = json_field(json, field);
     JsonReader reader = JsonReader.new(registrations.to_str());
@@ -104,33 +109,40 @@ bool valid_registrations(str json, str field, bool require_method) {
     return reader.end_array() && !reader.failed;
 }
 
+/// Reads `textDocument.uri`.
 bool parse_document_uri_param(str json, String* uri) {
     String document = json_field(json, "textDocument");
     return json_string(document.to_str(), "uri", uri) && uri.len() > 0;
 }
 
+/// Reads an LSP `{line, character}` position (both non-negative).
 bool parse_position(str json, i64* line, i64* character) {
     return json_integer(json, "line", line) && json_integer(json, "character", character)
         && *line >= 0 && *character >= 0;
 }
 
+/// Reads `textDocument.uri` and `position`.
 bool parse_position_params(str json, String* uri, i64* line, i64* character) {
     String position = json_field(json, "position");
     return parse_document_uri_param(json, uri) && parse_position(position.to_str(), line, character);
 }
 
+/// Converts an LSP range to a byte span in `doc`.
 bool parse_document_range(Document* doc, str json, Span* range) {
     String start = json_field(json, "start"); String end = json_field(json, "end"); i64 line = 0; i64 character = 0;
     return parse_position(start.to_str(), &line, &character) && doc.offset(line, character, &range.start)
         && parse_position(end.to_str(), &line, &character) && doc.offset(line, character, &range.end) && range.start <= range.end;
 }
 
+/// Reads `didOpen` params: uri, text, and version.
 bool parse_did_open_params(str json, String* uri, String* text, i64* version) {
     String document = json_field(json, "textDocument");
     return json_string(document.to_str(), "uri", uri) && uri.len() > 0
         && json_string(document.to_str(), "text", text) && json_integer(document.to_str(), "version", version);
 }
 
+/// Applies `didChange` content changes (full or ranged) to an open
+/// document. Ignores stale versions. Writes the uri; false when invalid.
 bool apply_document_changes(DocumentStore* store, str json, String* uri) {
     String identifier = json_field(json, "textDocument");
     i64 version = 0;

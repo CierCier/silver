@@ -12,12 +12,13 @@ import project.manifest;
 import frontend.ast;
 import frontend.lexer;
 
+/// One file rename as old and new local paths.
 struct FileRename {
     String old_path;
     String new_path;
 }
 
-// Parse the `files` array of a workspace file-operation request.
+/// Parse the `files` array of a workspace file-operation request.
 Vec<FileRename> parse_file_renames(str params) {
     Vec<FileRename> renames = Vec<FileRename>.new();
     String files = json_field(params, "files");
@@ -43,8 +44,8 @@ Vec<FileRename> parse_file_renames(str params) {
     return move renames;
 }
 
-// Parse the `files` array of a create/delete file-operation request or a
-// didCreate/didDelete notification: plain `{ "uri": ... }` entries.
+/// Parse the `files` array of a create/delete file-operation request or a
+/// didCreate/didDelete notification: plain `{ "uri": ... }` entries.
 bool parse_file_uris(str params, Vec<String>* uris) {
     String files = json_field(params, "files");
     JsonReader reader = JsonReader.new(files.to_str());
@@ -63,13 +64,14 @@ bool parse_file_uris(str params, Vec<String>* uris) {
     return reader.end_array() && !reader.failed;
 }
 
+/// Marks every document's imports for recomputation.
 void mark_imports_dirty(DocumentStore* store) {
     i64 i = 0;
     while (i < store.docs.len()) { store.docs.get(i).imports_dirty = true; i += 1; }
     store.refresh_imports();
 }
 
-// New files enter the background index; new manifests rebuild the scope.
+/// New files enter the background index; new manifests rebuild the scope.
 void handle_did_create_files(DocumentStore* store, WorkspaceIndex* index, str params) {
     Vec<String> uris = Vec<String>.new();
     if (!parse_file_uris(params, &uris)) { return; }
@@ -86,6 +88,8 @@ void handle_did_create_files(DocumentStore* store, WorkspaceIndex* index, str pa
     if (manifest) { *index = workspace_index(store); }
 }
 
+/// Applies `didDeleteFiles`: forgets deleted documents and marks imports
+/// dirty.
 void handle_did_delete_files(DocumentStore* store, WorkspaceIndex* _index, str params) {
     Vec<String> uris = Vec<String>.new();
     if (!parse_file_uris(params, &uris)) { return; }
@@ -98,6 +102,8 @@ void handle_did_delete_files(DocumentStore* store, WorkspaceIndex* _index, str p
     mark_imports_dirty(store);
 }
 
+/// Applies `didRenameFiles`: moves documents to their new paths and marks
+/// imports dirty, rescanning manifests when one moved.
 void handle_did_rename_files(DocumentStore* store, WorkspaceIndex* index, str params) {
     Vec<FileRename> renames = parse_file_renames(params);
     bool manifest = false; i64 i = 0;
@@ -115,6 +121,7 @@ void handle_did_rename_files(DocumentStore* store, WorkspaceIndex* index, str pa
     if (manifest) { *index = workspace_index(store); }
 }
 
+/// Collects the `import` items under `node`.
 void collect_import_nodes(SyntaxNode* node, Vec<SyntaxNode*>* imports) {
     if (node == (SyntaxNode*)0) { return; }
     if (node.kind == NodeKind.Import) { imports.push(node); return; }
@@ -125,8 +132,8 @@ void collect_import_nodes(SyntaxNode* node, Vec<SyntaxNode*>* imports) {
     }
 }
 
-// The module path of an import is the leading dotted identifier run; a
-// selection block or `as` alias follows it.
+/// The module path of an import is the leading dotted identifier run; a
+/// selection block or `as` alias follows it.
 bool import_module_span(SyntaxNode* item, Span* span) {
     SyntaxNode* child = item.first_child;
     bool started = false;
@@ -146,7 +153,7 @@ bool import_module_span(SyntaxNode* item, Span* span) {
     return true;
 }
 
-// Map a resolved path through a rename, including files under a renamed directory.
+/// Map a resolved path through a rename, including files under a renamed directory.
 String renamed_path(str path, str old_path, str new_path) {
     if (strcmp(path, old_path) == 0) { return String.from_str(new_path); }
     i64 length = strlen(old_path);
@@ -158,6 +165,8 @@ String renamed_path(str path, str old_path, str new_path) {
     return String.new();
 }
 
+/// Returns `path` after applying the renames (a directory rename moves the
+/// files inside it).
 String apply_renames(str path, Vec<FileRename>* renames) {
     i64 i = 0;
     while (i < renames.len()) {
@@ -169,8 +178,8 @@ String apply_renames(str path, Vec<FileRename>* renames) {
     return String.from_str(path);
 }
 
-// True when `name` resolves to `new_path` from `doc_path` after the renames, so
-// an earlier search base cannot shadow it with a different file.
+/// True when `name` resolves to `new_path` from `doc_path` after the renames, so
+/// an earlier search base cannot shadow it with a different file.
 bool import_name_resolves_to(DocumentStore* store, str doc_path, str name, str new_path,
                              Vec<FileRename>* renames) {
     String relative = String.from_str(name);
@@ -192,9 +201,9 @@ bool import_name_resolves_to(DocumentStore* store, str doc_path, str name, str n
     return false;
 }
 
-// Recompute the module name from the base that produced the current one, so a
-// rename keeps the import style the author already used. When that base cannot
-// express the new path, fall back to any base that can.
+/// Recompute the module name from the base that produced the current one, so a
+/// rename keeps the import style the author already used. When that base cannot
+/// express the new path, fall back to any base that can.
 String import_module_for_path(DocumentStore* store, str doc_path, str old_path,
                               str new_path, str name, Vec<FileRename>* renames) {
     String parent = path_dirname(doc_path);
@@ -225,6 +234,8 @@ String import_module_for_path(DocumentStore* store, str doc_path, str old_path,
     return String.new();
 }
 
+/// Computes `willRenameFiles` edits that rewrite imports of moved modules.
+/// Cancellable.
 String compute_file_rename_edits(DocumentStore* store, str params, ClientOptions* client,
                                  PendingMessage* pending) {
     Vec<FileRename> renames = parse_file_renames(params);

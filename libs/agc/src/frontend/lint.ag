@@ -6,6 +6,7 @@ import frontend.cfg;
 import frontend.diagnostics;
 import frontend.messages;
 
+/// Which lints run and whether warnings become errors.
 struct LintConfig {
     bool unused_variables;
     bool unused_parameters;
@@ -13,6 +14,7 @@ struct LintConfig {
     bool warnings_as_errors;
 }
 
+/// Returns the default config: every lint on, warnings stay warnings.
 LintConfig lint_config_default() {
     LintConfig config;
     config.unused_variables = true;
@@ -22,6 +24,8 @@ LintConfig lint_config_default() {
     return config;
 }
 
+/// Applies one `-W` flag (`-Wall`, `-Wunused`, `-Wunreachable-code`,
+/// `-Werror`, and their `-Wno-` forms). Unknown flags are ignored.
 void lint_config_flag(LintConfig* config, str flag) {
     if (strcmp(flag, "-Wall") == 0 || strcmp(flag, "-Wextra") == 0) {
         config.unused_variables = true;
@@ -48,6 +52,7 @@ void lint_config_flag(LintConfig* config, str flag) {
     }
 }
 
+/// Turns every warning into an error when `-Werror` is set.
 void lint_config_apply_errors(LintConfig* config, DiagnosticBag* diagnostics) {
     if (!config.warnings_as_errors) { return; }
     i64 i = 0;
@@ -60,6 +65,7 @@ void lint_config_apply_errors(LintConfig* config, DiagnosticBag* diagnostics) {
     }
 }
 
+/// Returns true when any diagnostic is an error.
 bool lint_has_errors(DiagnosticBag* diagnostics) {
     i64 i = 0;
     while (i < diagnostics.len()) {
@@ -69,16 +75,19 @@ bool lint_has_errors(DiagnosticBag* diagnostics) {
     return false;
 }
 
+/// One binding the unused-variable lint tracks.
 struct LintBinding {
     SyntaxNode* declaration;
     bool parameter;
     bool used;
 }
 
+/// Returns true when the strings are equal.
 bool lint_same_name(str left, str right) {
     return strcmp(left, right) == 0;
 }
 
+/// Adds a function's parameters as lint bindings.
 void lint_add_parameter_bindings(SyntaxNode* parameters, Vec<LintBinding>* bindings) {
     if (parameters == (SyntaxNode*)0) { return; }
     Vec<Binding> parameter_bindings = Vec<Binding>.new();
@@ -97,6 +106,8 @@ void lint_add_parameter_bindings(SyntaxNode* parameters, Vec<LintBinding>* bindi
     }
 }
 
+/// Warns about bindings in `[scope_start, ...)` that were never used.
+/// Names starting with `_` are exempt.
 void lint_warn_scope(
     Vec<LintBinding>* bindings,
     i64 scope_start,
@@ -122,6 +133,7 @@ void lint_warn_scope(
     }
 }
 
+/// Walks `node`, recording declarations and uses for the unused lints.
 void lint_visit_node(
     SyntaxNode* node,
     Vec<LintBinding>* bindings,
@@ -172,6 +184,7 @@ void lint_visit_node(
     }
 }
 
+/// Returns a function's parameter group, or null.
 SyntaxNode* lint_parameter_group(SyntaxNode* function) {
     SyntaxNode* child = function.first_child;
     while (child != (SyntaxNode*)0) {
@@ -182,6 +195,7 @@ SyntaxNode* lint_parameter_group(SyntaxNode* function) {
     return (SyntaxNode*)0;
 }
 
+/// Runs the unused-variable and unused-parameter lints on one function.
 void lint_function(
     SyntaxNode* function,
     DiagnosticBag* diagnostics,
@@ -203,6 +217,7 @@ void lint_function(
     bindings.drop();
 }
 
+/// Runs the unused lints on every function under `node`.
 void lint_functions(SyntaxNode* node, DiagnosticBag* diagnostics, bool unused_variables, bool unused_parameters) {
     if (node == (SyntaxNode*)0) { return; }
     if (node.kind == NodeKind.Function) {
@@ -216,12 +231,14 @@ void lint_functions(SyntaxNode* node, DiagnosticBag* diagnostics, bool unused_va
     }
 }
 
+/// Returns true for `return`, `break`, or `continue` tokens.
 bool lint_terminator(SyntaxNode* token) {
     return token.kind == NodeKind.Token
         && (token.token_kind == TokenKind.Return || token.token_kind == TokenKind.Break
             || token.token_kind == TokenKind.Continue);
 }
 
+/// Warns about statements after a terminator in every block under `node`.
 void lint_unreachable_blocks(SyntaxNode* node, DiagnosticBag* diagnostics, bool enabled) {
     if (node == (SyntaxNode*)0) { return; }
     if (enabled && node.kind == NodeKind.Block) {
@@ -252,11 +269,14 @@ void lint_unreachable_blocks(SyntaxNode* node, DiagnosticBag* diagnostics, bool 
     }
 }
 
+/// Runs every enabled lint on the whole tree.
 void check_lints(SyntaxTree* tree, DiagnosticBag* diagnostics, LintConfig* config) {
     lint_functions(tree.root, diagnostics, config.unused_variables, config.unused_parameters);
     lint_unreachable_blocks(tree.root, diagnostics, config.unreachable_code);
 }
 
+/// Runs every enabled lint on the cfg-active items from source file
+/// `source_file_id` only (imported code is not linted).
 void check_lints_for_file(SyntaxTree* tree, CfgSet* cfg, i64 source_file_id,
                           DiagnosticBag* diagnostics, LintConfig* config) {
     Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();

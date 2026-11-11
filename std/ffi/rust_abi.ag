@@ -12,89 +12,133 @@
 
 import std.mem.memory;
 
+/// A borrowed byte view passed to the bridge. The bridge never keeps it past
+/// the call.
 struct RustFfiSlice {
     const u8* data;
     i64 len;
 }
 
+/// A byte buffer allocated by the Rust bridge. Dropping it returns the memory
+/// to the bridge; never free `data` with the Silver allocator.
 struct RustFfiBuffer {
     u8* data;
     i64 len;
     i64 cap;
 }
 
+/// A bridge error: a `SILVER_FFI_*` status code and an owned message buffer.
 struct RustFfiError {
     i32 code;
     RustFfiBuffer message;
 }
 
+/// An opaque handle to a child process spawned by the bridge. Dropping it
+/// frees the handle without waiting for or killing the process.
 struct RustFfiProcess {
     void* handle;
 }
 
+/// ABI version this declaration file expects; compare with
+/// `silver_ffi_abi_version()`.
 const i32 SILVER_FFI_ABI_VERSION = 1;
+/// Status: success.
 const i32 SILVER_FFI_OK = 0;
+/// Status: an argument was invalid.
 const i32 SILVER_FFI_ERR_INVALID_ARGUMENT = 1;
+/// Status: a required pointer was null.
 const i32 SILVER_FFI_ERR_NULL_POINTER = 2;
+/// Status: text was not valid UTF-8.
 const i32 SILVER_FFI_ERR_INVALID_UTF8 = 3;
+/// Status: an I/O error.
 const i32 SILVER_FFI_ERR_IO = 4;
+/// Status: a process could not be spawned or waited on.
 const i32 SILVER_FFI_ERR_PROCESS = 5;
+/// Status: the requested item was not found.
 const i32 SILVER_FFI_ERR_NOT_FOUND = 6;
+/// Status: a callback returned nonzero and stopped the operation.
 const i32 SILVER_FFI_ERR_CALLBACK_STOPPED = 7;
+/// Status: a handle was invalid or already freed.
 const i32 SILVER_FFI_ERR_INVALID_HANDLE = 8;
+/// Status: the Rust side panicked; the panic was caught at the boundary.
 const i32 SILVER_FFI_ERR_PANIC = 9;
 
 #[link(silver_ffi)]
 extern "C" {
+    /// Returns the bridge's ABI version.
     i32 silver_ffi_abi_version();
+    /// Initializes `buffer` as empty.
     void silver_ffi_buffer_init(RustFfiBuffer* buffer);
+    /// Frees `buffer`'s storage and resets it to empty. Safe on an empty buffer.
     void silver_ffi_buffer_free(RustFfiBuffer* buffer);
+    /// Initializes `error` as success with an empty message.
     void silver_ffi_error_init(RustFfiError* error);
+    /// Frees `error`'s message and resets it to success.
     void silver_ffi_error_clear(RustFfiError* error);
-    // Process-lifetime NUL-terminated static text for a status code.
+    /// Process-lifetime NUL-terminated static text for a status code.
     str silver_ffi_status_message(i32 code);
 
+    /// Joins `child` onto `base` (Rust `Path::join`) into `out`. Returns a status.
     i32 silver_path_join(const RustFfiSlice* base,
                          const RustFfiSlice* child,
                          RustFfiBuffer* out,
                          RustFfiError* error);
+    /// Sets `*out_exists` to 1 when `path` exists, else 0. Returns a status.
     i32 silver_fs_exists(const RustFfiSlice* path,
                          i32* out_exists,
                          RustFfiError* error);
+    /// Reads the whole file at `path` into `out`. Returns a status.
     i32 silver_fs_read_file(const RustFfiSlice* path,
                             RustFfiBuffer* out,
                             RustFfiError* error);
+    /// Writes `contents` to `path`, creating or truncating it. Returns a status.
     i32 silver_fs_write_file(const RustFfiSlice* path,
                              const RustFfiSlice* contents,
                              RustFfiError* error);
+    /// Deletes the file at `path`. Returns a status.
     i32 silver_fs_remove_file(const RustFfiSlice* path,
                               RustFfiError* error);
+    /// Creates the directory at `path` and any missing parents (Rust
+    /// `create_dir_all`). Returns a status.
     i32 silver_fs_create_dir(const RustFfiSlice* path,
                              RustFfiError* error);
+    /// Removes the empty directory at `path`. Returns a status.
     i32 silver_fs_remove_dir(const RustFfiSlice* path,
                              RustFfiError* error);
+    /// Reads the file at `path` and calls `callback(userdata, chunk)` for each
+    /// chunk of up to 8 KiB; a nonzero callback result stops with
+    /// `SILVER_FFI_ERR_CALLBACK_STOPPED`.
+    /// The chunk view is valid only during the callback.
     i32 silver_fs_read_file_callback(
         const RustFfiSlice* path,
         i32 (void*, const RustFfiSlice*) callback,
         void* userdata,
         RustFfiError* error);
 
+    /// Copies environment variable `key` into `out`; `SILVER_FFI_ERR_NOT_FOUND`
+    /// when unset. Returns a status.
     i32 silver_env_get(const RustFfiSlice* key,
                        RustFfiBuffer* out,
                        RustFfiError* error);
+    /// Copies the current working directory into `out`. Returns a status.
     i32 silver_env_current_dir(RustFfiBuffer* out, RustFfiError* error);
 
+    /// Spawns `program` with `arg_count` arguments from `args`, inheriting
+    /// stdio, and stores an owned handle in `*out_handle`. Returns a status.
     i32 silver_process_spawn(const RustFfiSlice* program,
                              const RustFfiSlice* args,
                              i64 arg_count,
                              void** out_handle,
                              RustFfiError* error);
+    /// Waits for the process and stores its exit code. Blocks. Returns a status.
     i32 silver_process_wait(void* handle,
                             i32* out_exit_code,
                             RustFfiError* error);
+    /// Frees a process handle and sets `*handle` to null. Does not wait.
     void silver_process_free(void** handle);
 }
 
+/// Builds a borrowed view of `len` bytes at `data`.
 RustFfiSlice rust_ffi_slice(const u8* data, i64 len) {
     RustFfiSlice result;
     result.data = data;
@@ -102,6 +146,7 @@ RustFfiSlice rust_ffi_slice(const u8* data, i64 len) {
     return result;
 }
 
+/// Builds a borrowed view of NUL-terminated `text` (empty for null).
 RustFfiSlice rust_ffi_text(str text) {
     if (text == (str)0) {
         return rust_ffi_slice((const u8*)0, 0);
@@ -109,6 +154,7 @@ RustFfiSlice rust_ffi_text(str text) {
     return rust_ffi_slice((const u8*)text, strlen(text));
 }
 
+/// Creates an empty bridge buffer.
 RustFfiBuffer rust_ffi_buffer_new() {
     RustFfiBuffer result;
     result.data = (u8*)0;
@@ -117,10 +163,12 @@ RustFfiBuffer rust_ffi_buffer_new() {
     return move result;
 }
 
+/// Returns a borrowed view of `buffer`'s contents.
 RustFfiSlice rust_ffi_buffer_slice(&RustFfiBuffer buffer) {
     return rust_ffi_slice((const u8*)buffer.data, buffer.len);
 }
 
+/// Creates a success-state error value.
 RustFfiError rust_ffi_error_new() {
     RustFfiError result;
     result.code = SILVER_FFI_OK;
@@ -129,12 +177,14 @@ RustFfiError rust_ffi_error_new() {
     return move result;
 }
 
+/// Creates a process value with no handle.
 RustFfiProcess rust_ffi_process_new() {
     RustFfiProcess result;
     result.handle = (void*)0;
     return move result;
 }
 
+/// Frees the process handle if present. Does not wait for the process.
 void rust_ffi_process_close(RustFfiProcess* self) {
     if (self.handle != (void*)0) {
         silver_process_free(&self.handle);

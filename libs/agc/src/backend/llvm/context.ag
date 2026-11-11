@@ -13,6 +13,8 @@ import frontend.symbols;
 import frontend.types;
 import backend.llvm.types;
 
+/// One local in codegen scope: its stack slot, type, drop flag, and the
+/// per-field initialization flags and plan used for partial moves and drops.
 struct LlvmLocal {
     u32 name_id;
     LLVMOpaqueValue* ptr;
@@ -30,6 +32,7 @@ struct LlvmLocal {
     Vec<Projection> init_projections;
 }
 
+/// A drop flag for one field path of a local (by projection range).
 struct LlvmFieldFlag {
     u32 projections_start;
     u32 projections_count;
@@ -38,6 +41,7 @@ struct LlvmFieldFlag {
 }
 
 impl LlvmLocal {
+    /// Creates a local for stack slot `ptr` with no drop state.
     LlvmLocal new(u32 name_id, LLVMOpaqueValue* ptr, u32 type_id, bool is_mut) {
         LlvmLocal local;
         local.name_id = name_id;
@@ -58,9 +62,9 @@ impl LlvmLocal {
     }
 }
 
-// One payload binding of a match arm and the scrutinee expression it was
-// extracted from. While the arm emits, moving the binding out also releases
-// the scrutinee side (its payload was moved away).
+/// One payload binding of a match arm and the scrutinee expression it was
+/// extracted from. While the arm emits, moving the binding out also releases
+/// the scrutinee side (its payload was moved away).
 struct ScrutineeMove {
     u32 binding_name;
     u32 scrutinee_expr;
@@ -70,12 +74,14 @@ struct ScrutineeMove {
     bool clearing;
 }
 
+/// One struct field's interned name and type id.
 struct LlvmFieldInfo {
     u32 name_id;
     u32 type_id;
     u32 index;
 }
 
+/// A struct's lowered LLVM type and its fields in declaration order.
 struct LlvmStructDef {
     u32 name_id;
     LLVMOpaqueType* llvm_type;
@@ -83,16 +89,20 @@ struct LlvmStructDef {
     Vec<LlvmFieldInfo> fields;
 }
 
+/// One active generic substitution during codegen.
 struct LlvmTypeBinding {
     u32 param_name_id;
     u32 type_id;
 }
 
+/// What a name refers to at a use site: a global or a local, and its type.
 struct LlvmSymbolInfo {
     bool is_global;
     u32 type_id;
 }
 
+/// A queued monomorphized function or method to emit later: the template,
+/// its receiver/method names, mangled name, and type arguments.
 struct MonoRequest {
     SyntaxNode* template_name;
     bool is_free_function;
@@ -107,6 +117,9 @@ struct MonoRequest {
     u32 value_arg_count;
 }
 
+/// All state for lowering one module to LLVM IR: the LLVM handles, type and
+/// name tables, the AST pool, and the per-function scope, loop, defer, and
+/// monomorphization stacks. Borrows every handle and table it is given.
 struct LlvmContext {
     LLVMOpaqueContext* ctx;
     LLVMTargetDataRef* target_data;
@@ -146,6 +159,7 @@ struct LlvmContext {
 }
 
 impl LlvmContext {
+    /// Creates a context over borrowed LLVM handles and frontend tables.
     LlvmContext new(LLVMOpaqueContext* ctx, LLVMTargetDataRef* target_data,
                     LLVMOpaqueModule* module, LLVMOpaqueBuilder* builder,
                     TypeTable* types, Interner* names, AstPool* pool, SyntaxNode* root,
@@ -190,6 +204,7 @@ impl LlvmContext {
         return move c;
     }
 
+    /// Pushes a generic substitution for `param_name`.
     void push_type_binding(LlvmContext* self, str param_name, u32 type_id) {
         LlvmTypeBinding binding;
         binding.param_name_id = self.names.intern(param_name);
@@ -197,6 +212,7 @@ impl LlvmContext {
         self.type_subst.push(move binding);
     }
 
+    /// Pops up to `count` generic substitutions.
     void pop_type_bindings(LlvmContext* self, i64 count) {
         while (count > 0 && self.type_subst.len() > 0) {
             self.type_subst.pop();
@@ -317,6 +333,8 @@ impl LlvmContext {
         return info;
     }
 
+    /// Counts a call the backend could not resolve and prints an error to
+    /// stderr (naming the current function). Emission continues.
     void note_unresolved(LlvmContext* self, str kind, str name) {
         self.unresolved_calls += 1;
         STDERR.write_str("agc: error: native backend cannot resolve ");
@@ -334,11 +352,13 @@ impl LlvmContext {
         STDERR.write_str("\n");
     }
 
+    /// Returns the struct definition named by `name_id`, or null.
     LlvmStructDef* find_struct(LlvmContext* self, u32 name_id) {
         str name = self.names.get(name_id);
         return self.find_struct_by_str(name);
     }
 
+    /// Returns the struct definition named `name`, or null.
     LlvmStructDef* find_struct_by_str(LlvmContext* self, str name) {
         if (name == (str)0 || strlen(name) == 0) {
             return (LlvmStructDef*)0;
@@ -364,6 +384,7 @@ impl LlvmContext {
         return (LlvmStructDef*)0;
     }
 
+    /// Returns the field index of `field_name_id` in `def`, or -1.
     i32 find_field_index(LlvmContext* self, LlvmStructDef* def, u32 field_name_id) {
         i64 i = 0;
         while (i < def.fields.len()) {
@@ -376,6 +397,7 @@ impl LlvmContext {
         return -1;
     }
 
+    /// Returns the type id of field `field_name_id` in `def`, or `TYPE_UNKNOWN`.
     u32 find_field_type(LlvmContext* self, LlvmStructDef* def, u32 field_name_id) {
         i64 i = 0;
         while (i < def.fields.len()) {
@@ -389,11 +411,14 @@ impl LlvmContext {
     }
 
 
+    /// Opens a lexical scope for locals and deferred statements.
     void push_scope(LlvmContext* self) {
         self.scope_markers.push(self.locals.len());
         self.defer_scope_markers.push(self.deferred_statements.len());
     }
 
+    /// Closes the innermost scope, forgetting its locals and deferred statements.
+    /// Emits nothing; callers emit defers and drops first.
     void pop_scope(LlvmContext* self) {
         if (self.defer_scope_markers.len() > 0) {
             i64 defer_mark = self.defer_scope_markers.pop();
@@ -409,6 +434,7 @@ impl LlvmContext {
         }
     }
 
+    /// Returns the innermost local named `name_id`, or null.
     LlvmLocal* find_local(LlvmContext* self, u32 name_id) {
         i64 i = self.locals.len() - 1;
         while (i >= 0) {
@@ -421,10 +447,12 @@ impl LlvmContext {
         return (LlvmLocal*)0;
     }
 
+    /// Adds a local to the current scope.
     void add_local(LlvmContext* self, u32 name_id, LLVMOpaqueValue* ptr, u32 type_id, bool is_mut) {
         self.locals.push(LlvmLocal.new(name_id, ptr, type_id, is_mut));
     }
 
+    /// Emits `llvm.stacksave` and returns the saved stack pointer.
     LLVMOpaqueValue* save_stack(LlvmContext* self) {
         LLVMOpaqueType* ptr_ty = LLVMPointerTypeInContext(self.ctx, 0);
         LLVMOpaqueType* fn_ty = LLVMFunctionType(ptr_ty, (LLVMOpaqueType**)0, 0, 0);
@@ -435,6 +463,7 @@ impl LlvmContext {
         return LLVMBuildCall2(self.builder, fn_ty, fn, (LLVMOpaqueValue**)0, 0, "loop.stack.save");
     }
 
+    /// Emits `llvm.stackrestore` of `saved`.
     void restore_stack(LlvmContext* self, LLVMOpaqueValue* saved) {
         LLVMOpaqueType* ptr_ty = LLVMPointerTypeInContext(self.ctx, 0);
         LLVMOpaqueType* fn_ty = LLVMFunctionType(LLVMVoidTypeInContext(self.ctx), &ptr_ty, 1, 0);
@@ -448,6 +477,7 @@ impl LlvmContext {
         args.drop();
     }
 
+    /// Enters a loop: records its break and continue blocks and stack save.
     void push_loop(LlvmContext* self, LLVMOpaqueBasicBlock* break_bb,
                    LLVMOpaqueBasicBlock* cont_bb, LLVMOpaqueValue* stack_save) {
         self.loop_breaks.push(break_bb);
@@ -457,6 +487,7 @@ impl LlvmContext {
         self.loop_stack_saves.push(stack_save);
     }
 
+    /// Leaves the innermost loop.
     void pop_loop(LlvmContext* self) {
         if (self.loop_breaks.len() > 0) {
             self.loop_breaks.pop();
@@ -473,6 +504,7 @@ impl LlvmContext {
         }
     }
 
+    /// Returns the innermost loop's break block, or null outside loops.
     LLVMOpaqueBasicBlock* current_break(LlvmContext* self) {
         if (self.loop_breaks.len() == 0) {
             return (LLVMOpaqueBasicBlock*)0;
@@ -480,6 +512,7 @@ impl LlvmContext {
         return self.loop_breaks.get(self.loop_breaks.len() - 1);
     }
 
+    /// Returns the innermost loop's continue block, or null outside loops.
     LLVMOpaqueBasicBlock* current_continue(LlvmContext* self) {
         if (self.loop_continues.len() == 0) {
             return (LLVMOpaqueBasicBlock*)0;
@@ -487,6 +520,7 @@ impl LlvmContext {
         return self.loop_continues.get(self.loop_continues.len() - 1);
     }
 
+    /// Returns the innermost loop's saved stack pointer, or null.
     LLVMOpaqueValue* current_loop_stack_save(LlvmContext* self) {
         if (self.loop_stack_saves.len() == 0) {
             return (LLVMOpaqueValue*)0;
@@ -494,6 +528,7 @@ impl LlvmContext {
         return self.loop_stack_saves.get(self.loop_stack_saves.len() - 1);
     }
 
+    /// Returns true when the current block already ends in a terminator.
     bool is_terminated(LlvmContext* self) {
         LLVMOpaqueBasicBlock* bb = LLVMGetInsertBlock(self.builder);
         if (bb == (LLVMOpaqueBasicBlock*)0) {
@@ -503,6 +538,7 @@ impl LlvmContext {
     }
 }
 
+/// Returns true when `s` starts with `prefix`; false for null.
 bool str_starts_with(str s, str prefix) {
     if (s == (str)0 || prefix == (str)0) { return false; }
     i64 slen = strlen(s);
@@ -516,6 +552,7 @@ bool str_starts_with(str s, str prefix) {
     return true;
 }
 
+/// Returns true when `s` contains `sub`; false for null.
 bool str_contains(str s, str sub) {
     if (s == (str)0 || sub == (str)0) { return false; }
     i64 slen = strlen(s);

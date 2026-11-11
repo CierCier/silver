@@ -19,6 +19,7 @@ import std.slice;
 import std.string;
 import std.time;
 
+/// Lowercase hex digits indexed by nibble value, used to format UUIDs.
 const str UUID_HEX_CHARS = "0123456789abcdef";
 
 /// Decodes a single hexadecimal ASCII character to its 0..15 integer value,

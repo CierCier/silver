@@ -22,11 +22,14 @@ import backend.llvm.expr;
 import backend.llvm.stmt;
 import backend.llvm.reference;
 
-// Shared runtime encoding with the stage0 owner-state lowering.
+/// Shared runtime encoding with the stage0 owner-state lowering.
 const u64 LLVM_INIT_UNINIT = 0;
+/// Initialization state byte: some fields initialized.
 const u64 LLVM_INIT_PARTIAL = 1;
+/// Initialization state byte: fully initialized.
 const u64 LLVM_INIT_FULL = 2;
 
+/// Returns true when values of `type_id` need drop glue.
 bool llvm_type_needs_drop(LlvmContext* ctx, u32 type_id) {
     if (type_id == TYPE_UNKNOWN || type_id == 0) { return false; }
     TypeProperties props = type_properties_at(ctx.types, type_id, 0);
@@ -34,6 +37,7 @@ bool llvm_type_needs_drop(LlvmContext* ctx, u32 type_id) {
 }
 
 
+/// Stores `FULL` (live) or `UNINIT` (moved) into a drop flag byte.
 void llvm_store_drop_flag(LlvmContext* ctx, LLVMOpaqueValue* flag, bool value) {
     if (flag == (LLVMOpaqueValue*)0) { return; }
     LLVMOpaqueType* state_ty = LLVMInt8TypeInContext(ctx.ctx);
@@ -41,6 +45,7 @@ void llvm_store_drop_flag(LlvmContext* ctx, LLVMOpaqueValue* flag, bool value) {
         value ? LLVM_INIT_FULL : LLVM_INIT_UNINIT, 0), flag);
 }
 
+/// Stores `state` into initialization node `node_index` of `local`.
 void llvm_store_init_node(LlvmContext* ctx, LlvmLocal* local, u32 node_index,
                           InitState state) {
     LLVMOpaqueValue* state_ptr = llvm_init_tree_state_ptr(ctx, local, node_index);
@@ -51,6 +56,7 @@ void llvm_store_init_node(LlvmContext* ctx, LlvmLocal* local, u32 node_index,
         LLVMConstInt(LLVMInt8TypeInContext(ctx.ctx), value, 0), state_ptr);
 }
 
+/// Stores a computed state byte into node `node_index` of `local`.
 void llvm_store_init_node_value(LlvmContext* ctx, LlvmLocal* local,
                                 u32 node_index, LLVMOpaqueValue* value) {
     LLVMOpaqueValue* state_ptr = llvm_init_tree_state_ptr(ctx, local, node_index);
@@ -59,6 +65,7 @@ void llvm_store_init_node_value(LlvmContext* ctx, LlvmLocal* local,
     }
 }
 
+/// Loads the state byte of node `node_index`, or null when untracked.
 LLVMOpaqueValue* llvm_load_init_node(LlvmContext* ctx, LlvmLocal* local,
                                      u32 node_index) {
     LLVMOpaqueValue* state_ptr = llvm_init_tree_state_ptr(ctx, local, node_index);
@@ -67,6 +74,7 @@ LLVMOpaqueValue* llvm_load_init_node(LlvmContext* ctx, LlvmLocal* local,
                           "init_node_state");
 }
 
+/// Emits a check that the state byte at `state_ptr` is `FULL`.
 LLVMOpaqueValue* llvm_state_is_init(LlvmContext* ctx, LLVMOpaqueValue* state_ptr,
                                     str name) {
     LLVMOpaqueType* state_ty = LLVMInt8TypeInContext(ctx.ctx);
@@ -75,9 +83,9 @@ LLVMOpaqueValue* llvm_state_is_init(LlvmContext* ctx, LLVMOpaqueValue* state_ptr
         LLVMConstInt(state_ty, LLVM_INIT_FULL, 0), "init_state_is_init");
 }
 
-// Quiet probe: can a `drop` call be emitted for this type? Unlike
-// llvm_drop_fn_for_type this never queues monomorphization and never
-// records unresolved symbols, so scope-exit planning can ask freely.
+/// Quiet probe: can a `drop` call be emitted for this type? Unlike
+/// llvm_drop_fn_for_type this never queues monomorphization and never
+/// records unresolved symbols, so scope-exit planning can ask freely.
 bool llvm_can_resolve_drop_fn(LlvmContext* ctx, u32 type_id) {
     u32 resolved = ctx.types.resolve_subst(type_id);
     if (resolved == TYPE_UNKNOWN || resolved == 0) { return false; }
@@ -113,11 +121,11 @@ bool llvm_can_resolve_drop_fn(LlvmContext* ctx, u32 type_id) {
     return fn_val != (LLVMOpaqueValue*)0;
 }
 
-// Resolve the `drop` function for a type: generic instantiations go through
-// monomorphization (trait `impl Drop` methods are found by base name like
-// any other method); concrete types use the `Base__drop` symbol. Only call
-// this after llvm_can_resolve_drop_fn said yes, so failure here is a loud
-// internal error rather than a silent leak.
+/// Resolve the `drop` function for a type: generic instantiations go through
+/// monomorphization (trait `impl Drop` methods are found by base name like
+/// any other method); concrete types use the `Base__drop` symbol. Only call
+/// this after llvm_can_resolve_drop_fn said yes, so failure here is a loud
+/// internal error rather than a silent leak.
 LLVMOpaqueValue* llvm_drop_fn_for_type(LlvmContext* ctx, u32 type_id) {
     u32 resolved = ctx.types.resolve_subst(type_id);
     if (resolved == TYPE_UNKNOWN || resolved == 0) { return (LLVMOpaqueValue*)0; }
@@ -134,10 +142,10 @@ LLVMOpaqueValue* llvm_drop_fn_for_type(LlvmContext* ctx, u32 type_id) {
     return fn_val;
 }
 
-// Should a local of this type be drop-tracked? Either its own `drop` is
-// resolvable (covers user types like `Owned`, which the name-based
-// needs_drop predicate cannot see) or some part of it needs dropping.
-// Tracking a value that later proves unlowerable only leaks, as before.
+/// Should a local of this type be drop-tracked? Either its own `drop` is
+/// resolvable (covers user types like `Owned`, which the name-based
+/// needs_drop predicate cannot see) or some part of it needs dropping.
+/// Tracking a value that later proves unlowerable only leaks, as before.
 bool llvm_type_needs_tracking_inner(LlvmContext* ctx, u32 type_id, Vec<u32>* active) {
     u32 resolved = ctx.types.resolve_subst(type_id);
     if (resolved == TYPE_UNKNOWN || resolved == 0) { return false; }
@@ -192,6 +200,7 @@ bool llvm_type_needs_tracking_inner(LlvmContext* ctx, u32 type_id, Vec<u32>* act
     return false;
 }
 
+/// Returns true when locals of `type_id` need runtime drop tracking.
 bool llvm_type_needs_tracking(LlvmContext* ctx, u32 type_id) {
     Vec<u32> active = Vec<u32>.new();
     bool needed = llvm_type_needs_tracking_inner(ctx, type_id, &active);
@@ -199,6 +208,8 @@ bool llvm_type_needs_tracking(LlvmContext* ctx, u32 type_id) {
     return needed;
 }
 
+/// Emits a call to drop function `fn_val` on `ptr`, guarded by `flag` being
+/// `FULL` when a flag is given.
 void llvm_emit_guarded_drop_call(LlvmContext* ctx, LLVMOpaqueValue* flag,
                                  LLVMOpaqueValue* fn_val, LLVMOpaqueValue* ptr) {
     if (fn_val == (LLVMOpaqueValue*)0 || ptr == (LLVMOpaqueValue*)0) { return; }
@@ -222,6 +233,7 @@ void llvm_emit_guarded_drop_call(LlvmContext* ctx, LLVMOpaqueValue* flag,
 
 // Compute the address and resolved type of a direct field of a local.
 
+/// Returns true when a field flag's projection path equals `path`.
 bool llvm_drop_path_matches(LlvmLocal* local, LlvmFieldFlag* entry,
                             Vec<Projection>* path) {
     if (path.len() == 0 || entry.projections_count == 0) { return false; }
@@ -238,6 +250,7 @@ bool llvm_drop_path_matches(LlvmLocal* local, LlvmFieldFlag* entry,
     return true;
 }
 
+/// Returns the address of the storage tracked by node `node_index`.
 LLVMOpaqueValue* llvm_init_node_place(LlvmContext* ctx, LlvmLocal* local,
                                        u32 node_index) {
     if (node_index == 0) { return local.ptr; }
@@ -260,6 +273,8 @@ LLVMOpaqueValue* llvm_init_node_place(LlvmContext* ctx, LlvmLocal* local,
     return LLVMBuildStructGEP2(ctx.builder, aggregate, base, node.field_index,
                                "init_field_place");
 }
+/// Emits drops for the live payload of an enum value at `ptr`, switching on
+/// its tag.
 void llvm_emit_enum_payload_drop(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 type_id,
                                  str enum_name) {
     LLVMOpaqueType* enum_ty = llvm_lower_type(ctx.ctx, ctx.types, type_id);
@@ -319,6 +334,8 @@ void llvm_emit_enum_payload_drop(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 typ
     LLVMPositionBuilderAtEnd(ctx.builder, merge_bb);
 }
 
+/// Emits the drop of a value of `type_id` stored at `ptr` (its `Drop` impl,
+/// then field or payload glue).
 void llvm_emit_value_drop_at_ptr(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 type_id) {
     u32 resolved = ctx.types.resolve_subst(type_id);
     if (resolved == TYPE_UNKNOWN || resolved == 0) { return; }
@@ -386,12 +403,15 @@ void llvm_emit_value_drop_at_ptr(LlvmContext* ctx, LLVMOpaqueValue* ptr, u32 typ
     }
 }
 
+/// Emits drops for `count` elements at `ptr` (`@drop_in_place`).
 LLVMOpaqueValue* llvm_emit_drop_in_place(LlvmContext* ctx, u32 elem_type,
                                           LLVMOpaqueValue* ptr, LLVMOpaqueValue* count) {
     return llvm_emit_tracked_drop_in_place(ctx, elem_type, ptr, count,
         (LLVMOpaqueValue*)0, ctx.current_function_span);
 }
 
+/// Emits drops for `count` elements at `ptr`, skipping elements whose
+/// initialization `node` says they are not live.
 LLVMOpaqueValue* llvm_emit_tracked_drop_in_place(LlvmContext* ctx, u32 elem_type,
     LLVMOpaqueValue* ptr, LLVMOpaqueValue* count, LLVMOpaqueValue* node, Span span) {
     if (!llvm_type_needs_tracking(ctx, elem_type)) {
@@ -459,7 +479,7 @@ LLVMOpaqueValue* llvm_emit_tracked_drop_in_place(LlvmContext* ctx, u32 elem_type
     return LLVMConstInt(i64_ty, 0, 0);
 }
 
-// Does any enum payload contain a value that needs drop tracking?
+/// Does any enum payload contain a value that needs drop tracking?
 bool llvm_enum_needs_payload_drop(LlvmContext* ctx, u32 type_id, str enum_name) {
     Vec<SyntaxNode*> variant_names = Vec<SyntaxNode*>.new();
     Vec<i64> variant_tags = Vec<i64>.new();
@@ -497,6 +517,7 @@ bool llvm_enum_needs_payload_drop(LlvmContext* ctx, u32 type_id, str enum_name) 
 
 
 
+/// Returns the address of initialization node `index` (runtime index).
 LLVMOpaqueValue* llvm_init_tree_node_at(LlvmContext* ctx, LlvmLocal* local,
                                         LLVMOpaqueValue* index) {
     if (local.init_node_map != (LLVMOpaqueValue*)0) {
@@ -517,6 +538,7 @@ LLVMOpaqueValue* llvm_init_tree_node_at(LlvmContext* ctx, LlvmLocal* local,
     return node;
 }
 
+/// Returns the address of initialization node `node_index`.
 LLVMOpaqueValue* llvm_init_tree_node_ptr(LlvmContext* ctx, LlvmLocal* local,
                                          u32 node_index) {
     if ((local.init_tree_storage == (LLVMOpaqueValue*)0 && local.init_node_map == (LLVMOpaqueValue*)0)
@@ -526,6 +548,8 @@ LLVMOpaqueValue* llvm_init_tree_node_ptr(LlvmContext* ctx, LlvmLocal* local,
         LLVMConstInt(LLVMInt32TypeInContext(ctx.ctx), node_index, 0));
 }
 
+/// Returns the address of the state byte of node `node_index`, or null when
+/// the local is untracked.
 LLVMOpaqueValue* llvm_init_tree_state_ptr(LlvmContext* ctx, LlvmLocal* local,
                                           u32 node_index) {
     LLVMOpaqueValue* node = llvm_init_tree_node_ptr(ctx, local, node_index);
@@ -534,7 +558,7 @@ LLVMOpaqueValue* llvm_init_tree_state_ptr(LlvmContext* ctx, LlvmLocal* local,
                                "init_tree_state");
 }
 
-// A concrete type has one immutable parent/child layout per LLVM module.
+/// A concrete type has one immutable parent/child layout per LLVM module.
 LLVMOpaqueValue* llvm_init_tree_layout(LlvmContext* ctx, LlvmLocal* local,
                                        LLVMOpaqueType* record_type) {
     String name = String.from_str("__silver_init_layout.");
@@ -563,8 +587,8 @@ LLVMOpaqueValue* llvm_init_tree_layout(LlvmContext* ctx, LlvmLocal* local,
     return layout;
 }
 
-// Bulk transitions stay loops so large inline arrays do not produce thousands
-// of stores in one basic block for LLVM's store combiner to compare.
+/// Bulk transitions stay loops so large inline arrays do not produce thousands
+/// of stores in one basic block for LLVM's store combiner to compare.
 void llvm_store_init_tree(LlvmContext* ctx, LlvmLocal* local, LLVMOpaqueValue* state) {
     if (local.init_nodes.len() == 0) { return; }
     if (local.init_nodes.len() == 1) {
@@ -694,6 +718,8 @@ private void llvm_initialize_owner_nodes(LlvmContext* ctx, LLVMOpaqueType* node_
     LLVMBuildCall2(ctx.builder, signature, helper, arguments.data, 4, "");
 }
 
+/// Allocates and fills `local`'s initialization tree from `plan`, all
+/// nodes `FULL` when `initialized`, else `UNINIT`.
 void llvm_init_tree_build(LlvmContext* ctx, LlvmLocal* local, InitOwnerPlan* plan,
                           bool initialized) {
     i64 i = 0;
@@ -760,8 +786,8 @@ void llvm_init_tree_build(LlvmContext* ctx, LlvmLocal* local, InitOwnerPlan* pla
     ctx.builder = saved_builder;
 }
 
-// Every inline child has a state node, including Copy and scalar fields. The
-// tree is fixed-size for the local and its layout is computed by LLVM.
+/// Every inline child has a state node, including Copy and scalar fields. The
+/// tree is fixed-size for the local and its layout is computed by LLVM.
 void llvm_register_local_drops(LlvmContext* ctx, u32 name_id, LLVMOpaqueValue* ptr,
                                u32 type_id, bool initialized, Span declaration) {
     u32 resolved = ctx.types.resolve_subst(type_id);
@@ -798,6 +824,7 @@ void llvm_register_local_drops(LlvmContext* ctx, u32 name_id, LLVMOpaqueValue* p
 }
 
 
+/// Marks local `name_id` live (`FULL`) or moved (`UNINIT`).
 void llvm_set_local_drop_live(LlvmContext* ctx, u32 name_id, bool live) {
     LlvmLocal* local = ctx.find_local(name_id);
     if (local == (LlvmLocal*)0) { return; }
@@ -805,6 +832,7 @@ void llvm_set_local_drop_live(LlvmContext* ctx, u32 name_id, bool live) {
         live ? LLVM_INIT_FULL : LLVM_INIT_UNINIT, 0));
 }
 
+/// Returns the initialization node for field `path` of `local`, or -1.
 i64 llvm_init_path_node(LlvmContext* ctx, LlvmLocal* local,
                         Vec<Projection>* path) {
     if (local == (LlvmLocal*)0 || local.init_nodes.len() == 0) { return -1; }
@@ -818,6 +846,8 @@ i64 llvm_init_path_node(LlvmContext* ctx, LlvmLocal* local,
     return (i64)result.node_index;
 }
 
+/// Marks the field at `path` of `local` live or moved, updating parent
+/// states.
 void llvm_set_path_drop_live(LlvmContext* ctx, LlvmLocal* local,
                              Vec<Projection>* path, bool live) {
     i64 target_index = llvm_init_path_node(ctx, local, path);
@@ -884,6 +914,7 @@ void llvm_set_path_drop_live(LlvmContext* ctx, LlvmLocal* local,
     }
 }
 
+/// Marks the field path of a re-initialized place live.
 void llvm_set_field_drop_live(LlvmContext* ctx, u32 name_id,
                               Vec<Projection>* path) {
     LlvmLocal* local = ctx.find_local(name_id);
@@ -891,18 +922,18 @@ void llvm_set_field_drop_live(LlvmContext* ctx, u32 name_id,
     llvm_set_path_drop_live(ctx, local, path, true);
 }
 
-// Clear every drop flag of a local: the value was moved out and must not be
-// dropped at scope exit. Clearing an unflagged local is a no-op.
+/// Clear every drop flag of a local: the value was moved out and must not be
+/// dropped at scope exit. Clearing an unflagged local is a no-op.
 void llvm_clear_local_drops(LlvmContext* ctx, u32 name_id) {
     llvm_set_local_drop_live(ctx, name_id, false);
 }
 
-// After a call completes, clear the drops of any argument that was
-// transferred by value: the callee now owns it (its parameter flags drop
-// it). Transfer is proven by the callee's LLVM parameter kind — opaque
-// pointers borrow, everything else moves — mirroring the receiver
-// normalization in method calls. Unknown or variadic-tail positions are
-// left alone (status-quo leak, never a double drop).
+/// After a call completes, clear the drops of any argument that was
+/// transferred by value: the callee now owns it (its parameter flags drop
+/// it). Transfer is proven by the callee's LLVM parameter kind — opaque
+/// pointers borrow, everything else moves — mirroring the receiver
+/// normalization in method calls. Unknown or variadic-tail positions are
+/// left alone (status-quo leak, never a double drop).
 void llvm_clear_transferred_arg(LlvmContext* ctx, LLVMOpaqueType* fn_type,
                                i64 param_index, u32 arg_expr_id) {
     if (fn_type == (LLVMOpaqueType*)0 || arg_expr_id == 0 || param_index < 0) { return; }
@@ -923,8 +954,8 @@ void llvm_clear_transferred_arg(LlvmContext* ctx, LLVMOpaqueType* fn_type,
     llvm_clear_place_drops(ctx, arg_expr_id);
 }
 
-// Root Var name of a place expression, following field/index chains and
-// explicit moves. Returns 0 when the operand has no local root.
+/// Root Var name of a place expression, following field/index chains and
+/// explicit moves. Returns 0 when the operand has no local root.
 u32 llvm_place_root_name(LlvmContext* ctx, u32 expr_id) {
     if (expr_id == 0) { return 0; }
     AstExpr* expr = ctx.pool.get_expr(expr_id);
@@ -937,8 +968,8 @@ u32 llvm_place_root_name(LlvmContext* ctx, u32 expr_id) {
     return 0;
 }
 
-// Record that an arm binding was extracted from a scrutinee expression:
-// moving the binding out releases the scrutinee side as well.
+/// Record that an arm binding was extracted from a scrutinee expression:
+/// moving the binding out releases the scrutinee side as well.
 void llvm_push_scrutinee_move(LlvmContext* ctx, u32 binding_name, u32 scrutinee_expr) {
     ScrutineeMove entry;
     entry.binding_name = binding_name;
@@ -973,6 +1004,7 @@ void llvm_push_scrutinee_move(LlvmContext* ctx, u32 binding_name, u32 scrutinee_
     ctx.scrutinee_moves.push(move entry);
 }
 
+/// Marks the match-arm binding at `local_index` live or moved.
 void llvm_set_scrutinee_binding_live(LlvmContext* ctx, i64 local_index, bool live) {
     if (local_index < 0 || local_index >= ctx.locals.len()) { return; }
     LlvmLocal* local = ctx.locals.get_ptr(local_index);
@@ -980,7 +1012,7 @@ void llvm_set_scrutinee_binding_live(LlvmContext* ctx, i64 local_index, bool liv
         live ? LLVM_INIT_FULL : LLVM_INIT_UNINIT, 0));
 }
 
-// Payload bindings own their copies only after the source has been consumed.
+/// Payload bindings own their copies only after the source has been consumed.
 void llvm_init_scrutinee_binding_drops(LlvmContext* ctx) {
     i64 move_index = ctx.scrutinee_moves.len() - 1;
     if (move_index < 0) { return; }
@@ -1002,8 +1034,8 @@ void llvm_init_scrutinee_binding_drops(LlvmContext* ctx) {
     llvm_store_init_tree(ctx, binding, binding_state);
 }
 
-// When a binding is moved from a still-owned source, the arm bindings become
-// the owners of its remaining payloads. A consumed source stays consumed.
+/// When a binding is moved from a still-owned source, the arm bindings become
+/// the owners of its remaining payloads. A consumed source stays consumed.
 void llvm_promote_scrutinee_bindings(LlvmContext* ctx, i64 move_index) {
     if (move_index < 0 || move_index >= ctx.scrutinee_moves.len()) { return; }
     ScrutineeMove* entry = ctx.scrutinee_moves.get_ptr(move_index);
@@ -1032,6 +1064,7 @@ void llvm_promote_scrutinee_bindings(LlvmContext* ctx, i64 move_index) {
     LLVMPositionBuilderAtEnd(ctx.builder, after_bb);
 }
 
+/// Pops `count` scrutinee move records.
 void llvm_pop_scrutinee_moves(LlvmContext* ctx, i64 count) {
     while (count > 0 && ctx.scrutinee_moves.len() > 0) {
         ctx.scrutinee_moves.pop();
@@ -1039,10 +1072,10 @@ void llvm_pop_scrutinee_moves(LlvmContext* ctx, i64 count) {
     }
 }
 
-// After moving a place out, release any match scrutinee it was bound from.
-// Newest entries win so nested matches resolve to the innermost scrutinee.
-// Stale entries only survive on paths where compilation already failed
-// closed, so they can never affect an emitted binary.
+/// After moving a place out, release any match scrutinee it was bound from.
+/// Newest entries win so nested matches resolve to the innermost scrutinee.
+/// Stale entries only survive on paths where compilation already failed
+/// closed, so they can never affect an emitted binary.
 void llvm_clear_scrutinee_source(LlvmContext* ctx, u32 moved_expr_id) {
     u32 root_name = llvm_place_root_name(ctx, moved_expr_id);
     if (root_name == 0) { return; }
@@ -1066,9 +1099,9 @@ void llvm_clear_scrutinee_source(LlvmContext* ctx, u32 moved_expr_id) {
     }
 }
 
-// A moved payload clears the whole enum's drop flag, which would also leak
-// the payloads the arm did not move. At the end of the arm, release those
-// bindings when the move actually cleared the scrutinee local's flag.
+/// A moved payload clears the whole enum's drop flag, which would also leak
+/// the payloads the arm did not move. At the end of the arm, release those
+/// bindings when the move actually cleared the scrutinee local's flag.
 void llvm_drop_unmoved_payloads_at(LlvmContext* ctx, u32 scrutinee_expr,
                                    i64 base, i64 count) {
     if (count < 2 || scrutinee_expr == 0) { return; }
@@ -1130,13 +1163,15 @@ void llvm_drop_unmoved_payloads_at(LlvmContext* ctx, u32 scrutinee_expr,
     LLVMPositionBuilderAtEnd(ctx.builder, after_bb);
 }
 
+/// Drops the payloads not moved out of a scrutinee, over the last `count`
+/// scrutinee move records.
 void llvm_drop_unmoved_payloads(LlvmContext* ctx, u32 scrutinee_expr, i64 count) {
     llvm_drop_unmoved_payloads_at(ctx, scrutinee_expr,
                                   ctx.scrutinee_moves.len() - count, count);
 }
 
-// Return bypasses match-arm fallthrough, so release active match bindings
-// before the normal scope cleanup drops the now-partially-moved scrutinee.
+/// Return bypasses match-arm fallthrough, so release active match bindings
+/// before the normal scope cleanup drops the now-partially-moved scrutinee.
 void llvm_drop_active_unmoved_payloads_above(LlvmContext* ctx, i64 local_mark) {
     i64 end = ctx.scrutinee_moves.len();
     while (end > 0) {
@@ -1162,12 +1197,13 @@ void llvm_drop_active_unmoved_payloads_above(LlvmContext* ctx, i64 local_mark) {
     }
 }
 
+/// Drops every scrutinee's unmoved payloads.
 void llvm_drop_active_unmoved_payloads(LlvmContext* ctx) {
     llvm_drop_active_unmoved_payloads_above(ctx, 0);
 }
 
-// Direct Copy+Drop places can retain ownership in local bindings; aggregate
-// construction still transfers their nested drop flags to the new value.
+/// Direct Copy+Drop places can retain ownership in local bindings; aggregate
+/// construction still transfers their nested drop flags to the new value.
 void llvm_clear_copy_source(LlvmContext* ctx, u32 src_id,
                             bool preserve_direct_copy_drop) {
     if (src_id == 0) { return; }
@@ -1195,9 +1231,9 @@ void llvm_clear_copy_source(LlvmContext* ctx, u32 src_id,
     llvm_clear_place_drops(ctx, src_id);
 }
 
-// After building an aggregate value, release any droppable place operand
-// it was copied from: the aggregate temp owns those bits now (when it is
-// stored into a flagged local). Skips non-places and untracked types.
+/// After building an aggregate value, release any droppable place operand
+/// it was copied from: the aggregate temp owns those bits now (when it is
+/// stored into a flagged local). Skips non-places and untracked types.
 void llvm_clear_aggregate_sources(LlvmContext* ctx, u32 args_start, u32 args_count) {
     i64 i = 0;
     while (i < (i64)args_count) {
@@ -1206,6 +1242,8 @@ void llvm_clear_aggregate_sources(LlvmContext* ctx, u32 args_start, u32 args_cou
     }
 }
 
+/// Collects the field path of place `expr_id` into `path`; returns its root
+/// local name id, or 0.
 u32 llvm_collect_drop_field_path(LlvmContext* ctx, u32 expr_id,
                                  Vec<Projection>* path) {
     if (expr_id == 0) { return 0; }
@@ -1250,6 +1288,10 @@ u32 llvm_collect_drop_field_path(LlvmContext* ctx, u32 expr_id,
 }
 
 
+/// Returns true when moving the field at `path` out of `local` is allowed:
+/// Copy values, untracked paths, and fields with no `Drop`-implementing
+/// ancestor. Otherwise reports "cannot move ... implements Drop" and
+/// returns false.
 bool llvm_validate_drop_field_transfer(LlvmContext* ctx, LlvmLocal* local,
                                       Vec<Projection>* path, u32 expr_id) {
     u32 value_type = llvm_expr_type(ctx, expr_id);
@@ -1272,8 +1314,8 @@ bool llvm_validate_drop_field_transfer(LlvmContext* ctx, LlvmLocal* local,
     return true;
 }
 
-// Statically indexed inline places select exact state nodes. Heap elements
-// retain their container's initialized-length contract.
+/// Statically indexed inline places select exact state nodes. Heap elements
+/// retain their container's initialized-length contract.
 void llvm_clear_place_drops_at_local(LlvmContext* ctx, u32 expr_id,
                                      i64 local_index) {
     if (expr_id == 0) { return; }
@@ -1323,7 +1365,7 @@ void llvm_clear_place_drops_at_local(LlvmContext* ctx, u32 expr_id,
     }
 }
 
-// Captured places borrow storage, but ownership still belongs to the source.
+/// Captured places borrow storage, but ownership still belongs to the source.
 u32 llvm_assignment_source(LlvmContext* ctx, u32 expr_id) {
     if (expr_id == 0) { return 0; }
     AstExpr* expr = ctx.pool.get_expr(expr_id);
@@ -1336,6 +1378,8 @@ u32 llvm_assignment_source(LlvmContext* ctx, u32 expr_id) {
     return expr_id;
 }
 
+/// Marks the place read by `expr_id` as moved, so its scope exit does not
+/// drop it.
 void llvm_clear_place_drops(LlvmContext* ctx, u32 expr_id) {
     expr_id = llvm_assignment_source(ctx, expr_id);
     if (expr_id == 0) { return; }
@@ -1356,8 +1400,8 @@ void llvm_clear_place_drops(LlvmContext* ctx, u32 expr_id) {
     llvm_clear_place_drops_at_local(ctx, expr_id, -1);
 }
 
-// A custom enum destructor manages its payload; otherwise the tag selects
-// implicit payload cleanup. The whole flag skips moved-out values.
+/// A custom enum destructor manages its payload; otherwise the tag selects
+/// implicit payload cleanup. The whole flag skips moved-out values.
 void llvm_emit_local_whole_drop(LlvmContext* ctx, LlvmLocal* local) {
     if (local.drop_flag == (LLVMOpaqueValue*)0) { return; }
     u32 local_type = local.type_id;
@@ -1389,7 +1433,7 @@ void llvm_emit_local_whole_drop(LlvmContext* ctx, LlvmLocal* local) {
     }
 }
 
-// Emit one field-path entry's destructor or recursively owned enum payload.
+/// Emit one field-path entry's destructor or recursively owned enum payload.
 void llvm_emit_local_field_drop(LlvmContext* ctx, LlvmLocal* local, LlvmFieldFlag* entry) {
     LLVMOpaqueValue* field_ptr = llvm_init_node_place(ctx, local, entry.node_index);
     u32 field_ty = local.init_nodes.get_ptr(entry.node_index).type_id;
@@ -1412,9 +1456,9 @@ void llvm_emit_local_field_drop(LlvmContext* ctx, LlvmLocal* local, LlvmFieldFla
     }
 }
 
-// BFS storage is traversed in declaration-order DFS for destructor cascade.
-// A Partial parent skips its own Drop; each child's authoritative state decides
-// its cleanup. Uninit skips the entire subtree.
+/// BFS storage is traversed in declaration-order DFS for destructor cascade.
+/// A Partial parent skips its own Drop; each child's authoritative state decides
+/// its cleanup. Uninit skips the entire subtree.
 void llvm_emit_init_node_cleanup(LlvmContext* ctx, LlvmLocal* local, u32 node_index) {
     if (local.init_nodes.len() == 0) { return; }
     InitNodePlan node = local.init_nodes.get(node_index);
@@ -1452,16 +1496,16 @@ void llvm_emit_init_node_cleanup(LlvmContext* ctx, LlvmLocal* local, u32 node_in
     LLVMPositionBuilderAtEnd(ctx.builder, after);
 }
 
-// Capture the current locals depth as a drop mark, right after pushing a
-// scope: llvm_emit_drops_above with this mark later drops exactly the
-// locals declared inside the scope.
+/// Capture the current locals depth as a drop mark, right after pushing a
+/// scope: llvm_emit_drops_above with this mark later drops exactly the
+/// locals declared inside the scope.
 i64 llvm_current_drop_mark(LlvmContext* ctx) {
     return (i64)ctx.locals.len();
 }
 
-// Emit scope-exit drops for locals at stack positions [mark, len), newest
-// first. A struct's own destructor runs before its live fields, which drop
-// in declaration order.
+/// Emit scope-exit drops for locals at stack positions [mark, len), newest
+/// first. A struct's own destructor runs before its live fields, which drop
+/// in declaration order.
 void llvm_emit_drops_above(LlvmContext* ctx, i64 mark) {
     if (ctx.current_fn == (LLVMOpaqueValue*)0) { return; }
     i64 i = (i64)ctx.locals.len() - 1;
@@ -1472,7 +1516,7 @@ void llvm_emit_drops_above(LlvmContext* ctx, i64 mark) {
     }
 }
 
-// Overwrite predrop releases the target subtree in parent-first preorder.
+/// Overwrite predrop releases the target subtree in parent-first preorder.
 void llvm_emit_assign_predrop(LlvmContext* ctx, u32 target_id, u32 rhs_id) {
     target_id = llvm_assignment_source(ctx, target_id);
     if (target_id == 0 || rhs_id == 0 || ctx.current_fn == (LLVMOpaqueValue*)0) { return; }
@@ -1507,7 +1551,7 @@ void llvm_emit_assign_predrop(LlvmContext* ctx, u32 target_id, u32 rhs_id) {
     path.drop();
 }
 
-// Initialize the assigned subtree, then summarize every required sibling.
+/// Initialize the assigned subtree, then summarize every required sibling.
 void llvm_mark_assign_live(LlvmContext* ctx, u32 target_id) {
     if (target_id == 0) { return; }
     AstExpr* target = ctx.pool.get_expr(target_id);
@@ -1523,7 +1567,7 @@ void llvm_mark_assign_live(LlvmContext* ctx, u32 target_id) {
     path.drop();
 }
 
-// Tag-dispatched payload drops guarded by an existing whole-local flag.
+/// Tag-dispatched payload drops guarded by an existing whole-local flag.
 void llvm_emit_guarded_enum_payload_drop(LlvmContext* ctx, LLVMOpaqueValue* flag,
                                          LLVMOpaqueValue* ptr, u32 type_id, str enum_name) {
     LLVMOpaqueBasicBlock* run_bb = LLVMAppendBasicBlockInContext(ctx.ctx, ctx.current_fn, "drop_enum_run");

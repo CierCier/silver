@@ -9,6 +9,7 @@ import frontend.items;
 import frontend.lexer;
 import frontend.symbols;
 
+/// Where a local binding was introduced.
 enum BindingKind {
     Parameter;
     Let;
@@ -18,6 +19,8 @@ enum BindingKind {
     For;
 }
 
+/// One local binding: name, span, kind, and projected declared type. The
+/// name and node pointers borrow the caller-owned syntax tree.
 struct Binding {
     str name;
     Span span;
@@ -30,6 +33,8 @@ struct Binding {
     SyntaxNode* type_end;
 }
 
+/// Appends a binding for identifier `name` with an optional declared type.
+/// Ignores null, non-identifier, and `_` names.
 void add_typed_binding(Vec<Binding>* bindings, SyntaxNode* name, BindingKind kind, TypeProjection* declared_type) {
     if (name == (SyntaxNode*)0 || name.token_kind != TokenKind.Identifier || name.text == "_") {
         return;
@@ -59,10 +64,12 @@ void add_typed_binding(Vec<Binding>* bindings, SyntaxNode* name, BindingKind kin
     bindings.push(move binding);
 }
 
+/// Appends an untyped binding (see `add_typed_binding`).
 void add_binding(Vec<Binding>* bindings, SyntaxNode* name, BindingKind kind) {
     add_typed_binding(bindings, name, kind, (TypeProjection*)0);
 }
 
+/// Returns the declared type's spelling, or an empty string when unknown.
 String binding_declared_type_text(TypeProjection* proj) {
     if (proj == (TypeProjection*)0 || strlen(proj.name) == 0) {
         return String.new();
@@ -80,6 +87,7 @@ String binding_declared_type_text(TypeProjection* proj) {
     return move s;
 }
 
+/// Returns true when the binding's declared type is a function type.
 bool binding_has_function_type(Binding* binding) {
     if (binding == (Binding*)0 || binding.type_start == (SyntaxNode*)0) {
         return false;
@@ -94,6 +102,7 @@ bool binding_has_function_type(Binding* binding) {
     return false;
 }
 
+/// Returns true when the binding is a `...` variadic parameter.
 bool binding_is_variadic_parameter(Binding* binding) {
     if (binding == (Binding*)0 || binding.type_start == (SyntaxNode*)0) {
         return false;
@@ -109,6 +118,8 @@ bool binding_is_variadic_parameter(Binding* binding) {
     return false;
 }
 
+/// Returns true when a bracket group has a top-level `,` (a tuple type
+/// rather than a slice).
 bool binding_bracket_has_tuple_separator(SyntaxNode* bracket) {
     i64 angle_depth = 0;
     SyntaxNode* part = bracket.first_child;
@@ -128,6 +139,7 @@ bool binding_bracket_has_tuple_separator(SyntaxNode* bracket) {
     return false;
 }
 
+/// Returns the parameter's declared type text, including array suffixes.
 String binding_parameter_type_text(Binding* binding) {
     if (binding != (Binding*)0 && !binding_has_function_type(binding)
         && binding.declared_type.kind == ProjectionTypeKind.Array) {
@@ -200,6 +212,7 @@ String binding_parameter_type_text(Binding* binding) {
     return move text;
 }
 
+/// Returns the sibling before `node`, or null.
 SyntaxNode* binding_previous_sibling(SyntaxNode* node) {
     if (node == (SyntaxNode*)0 || node.parent == (SyntaxNode*)0) {
         return (SyntaxNode*)0;
@@ -213,6 +226,7 @@ SyntaxNode* binding_previous_sibling(SyntaxNode* node) {
     return previous;
 }
 
+/// Returns true when a token can start a declaration type.
 bool binding_token_is_decl_type(SyntaxNode* node) {
     if (node == (SyntaxNode*)0 || node.kind != NodeKind.Token) {
         return false;
@@ -232,6 +246,7 @@ bool binding_token_is_decl_type(SyntaxNode* node) {
         || node.token_kind == TokenKind.BitwiseAnd;
 }
 
+/// Appends every leaf token under `node` in source order.
 void binding_collect_leaves(SyntaxNode* node, Vec<SyntaxNode*>* leaves) {
     if (node == (SyntaxNode*)0) {
         return;
@@ -247,8 +262,8 @@ void binding_collect_leaves(SyntaxNode* node, Vec<SyntaxNode*>* leaves) {
     }
 }
 
-// Like binding_collect_leaves, but drops function parameter lists nested in a
-// bracket type so `[i32(&i32), i32]` projects as `i32`, not `i32 & i32`.
+/// Like binding_collect_leaves, but drops function parameter lists nested in a
+/// bracket type so `[i32(&i32), i32]` projects as `i32`, not `i32 & i32`.
 void binding_collect_type_leaves(SyntaxNode* node, Vec<SyntaxNode*>* leaves, bool in_bracket) {
     if (node == (SyntaxNode*)0 || (in_bracket && node.kind == NodeKind.Parenthesized)) {
         return;
@@ -265,6 +280,7 @@ void binding_collect_type_leaves(SyntaxNode* node, Vec<SyntaxNode*>* leaves, boo
     }
 }
 
+/// Returns true for an identifier that can name a value.
 bool binding_is_value_name(SyntaxNode* node) {
     if (node == (SyntaxNode*)0 || node.kind != NodeKind.Token
         || node.token_kind != TokenKind.Identifier || strlen(node.text) == 0) {
@@ -274,6 +290,7 @@ bool binding_is_value_name(SyntaxNode* node) {
         || (node.text[0] >= (u8)'a' && node.text[0] <= (u8)'z');
 }
 
+/// Adds bindings for the names in a destructuring `[a, b]` pattern.
 void collect_bracket_bindings(SyntaxNode* bracket, Vec<Binding>* bindings) {
     Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
     binding_collect_leaves(bracket, &leaves);
@@ -288,6 +305,7 @@ void collect_bracket_bindings(SyntaxNode* bracket, Vec<Binding>* bindings) {
     leaves.drop();
 }
 
+/// Returns true when a block is the arm block of a `match`.
 bool binding_is_match_block(SyntaxNode* node) {
     SyntaxNode* previous = binding_previous_sibling(node);
     while (previous != (SyntaxNode*)0) {
@@ -305,6 +323,7 @@ bool binding_is_match_block(SyntaxNode* node) {
         && binding_is_match_block(parent);
 }
 
+/// Adds the bindings introduced by each `match` arm pattern in `block`.
 void collect_match_arm_bindings(SyntaxNode* block, Vec<Binding>* bindings) {
     SyntaxNode* child = block.first_child;
     bool in_pattern = true;
@@ -324,6 +343,7 @@ void collect_match_arm_bindings(SyntaxNode* block, Vec<Binding>* bindings) {
     }
 }
 
+/// Returns true when `node` is inside a `match` arm block.
 bool binding_has_match_ancestor(SyntaxNode* node) {
     SyntaxNode* parent = node.parent;
     while (parent != (SyntaxNode*)0) {
@@ -335,6 +355,7 @@ bool binding_has_match_ancestor(SyntaxNode* node) {
     return false;
 }
 
+/// Adds bindings from every pattern under `node`.
 void collect_pattern_bindings_in_tree(SyntaxNode* node, Vec<Binding>* bindings) {
     if (node == (SyntaxNode*)0) {
         return;
@@ -369,6 +390,7 @@ void collect_pattern_bindings_in_tree(SyntaxNode* node, Vec<Binding>* bindings) 
     }
 }
 
+/// Adds a binding for each parameter in a parameter list.
 void collect_parameter_bindings(SyntaxNode* parameters, Vec<Binding>* bindings) {
     if (parameters == (SyntaxNode*)0) {
         return;
@@ -434,6 +456,8 @@ void collect_parameter_bindings(SyntaxNode* parameters, Vec<Binding>* bindings) 
     }
 }
 
+/// Returns true when a call with `count` arguments fits the parameters,
+/// allowing a final variadic parameter to take zero or more.
 bool binding_parameters_accept_arity(Vec<Binding>* bindings, i64 count) {
     i64 parameter_count = bindings.len();
     if (count == parameter_count) {
@@ -445,6 +469,8 @@ bool binding_parameters_accept_arity(Vec<Binding>* bindings, i64 count) {
     return binding_is_variadic_parameter(bindings.get_ptr(parameter_count - 1));
 }
 
+/// Returns true when an identifier starting with a lowercase letter begins
+/// a declaration type (a user type name).
 bool binding_lowercase_type_start(SyntaxNode* child) {
     if (child == (SyntaxNode*)0 || child.kind != NodeKind.Token
         || child.token_kind != TokenKind.Identifier
@@ -474,9 +500,9 @@ bool binding_lowercase_type_start(SyntaxNode* child) {
         || next.text == "<";
 }
 
-// Leaves of a bracket node omit its delimiters, so a `&`, `mut`, or `*` on the
-// first element of `[&A, B]` or `[&A]` would otherwise project as the outer
-// type. Bracket types are never references or pointers themselves.
+/// Leaves of a bracket node omit its delimiters, so a `&`, `mut`, or `*` on the
+/// first element of `[&A, B]` or `[&A]` would otherwise project as the outer
+/// type. Bracket types are never references or pointers themselves.
 i64 binding_type_projection_start(SyntaxNode* first, Vec<SyntaxNode*>* leaves, i64 end) {
     i64 start = 0;
     if (first == (SyntaxNode*)0 || first.kind != NodeKind.Bracket) {
@@ -491,8 +517,8 @@ i64 binding_type_projection_start(SyntaxNode* first, Vec<SyntaxNode*>* leaves, i
     return start;
 }
 
-// Function parameter lists describe a callee, not stored data, so a callback
-// such as `i32(&i32)` stays Send. Nested brackets merge their own elements.
+/// Function parameter lists describe a callee, not stored data, so a callback
+/// such as `i32(&i32)` stays Send. Nested brackets merge their own elements.
 void binding_collect_element_leaves(SyntaxNode* node, Vec<SyntaxNode*>* leaves,
                                     TypeProjection* result) {
     if (node.kind == NodeKind.Parenthesized) {
@@ -513,8 +539,8 @@ void binding_collect_element_leaves(SyntaxNode* node, Vec<SyntaxNode*>* leaves,
     }
 }
 
-// The projection names only the first element of a bracket type, so merge
-// every element's flags: a reference or Rc anywhere makes the aggregate non-Send.
+/// The projection names only the first element of a bracket type, so merge
+/// every element's flags: a reference or Rc anywhere makes the aggregate non-Send.
 void binding_merge_bracket_flags(SyntaxNode* bracket, TypeProjection* result) {
     if (bracket == (SyntaxNode*)0 || bracket.kind != NodeKind.Bracket) {
         return;
@@ -536,6 +562,7 @@ void binding_merge_bracket_flags(SyntaxNode* bracket, TypeProjection* result) {
     }
 }
 
+/// Projects the declared type between `first` and the binding's `name`.
 TypeProjection binding_declared_type(SyntaxNode* first, SyntaxNode* name) {
     TypeProjection result = projection_type_empty();
     if (first == (SyntaxNode*)0 || name == (SyntaxNode*)0) {
@@ -556,6 +583,7 @@ TypeProjection binding_declared_type(SyntaxNode* first, SyntaxNode* name) {
     return result;
 }
 
+/// Adds the bindings declared directly or nested in `block`.
 void collect_block_bindings(SyntaxNode* block, Vec<Binding>* bindings) {
     if (block == (SyntaxNode*)0) {
         return;
@@ -672,6 +700,7 @@ void collect_block_bindings(SyntaxNode* block, Vec<Binding>* bindings) {
     }
 }
 
+/// Returns a function item's parameter list group, or null.
 SyntaxNode* binding_function_parameters(SyntaxNode* function) {
     SyntaxNode* name = function_identifier(function);
     SyntaxNode* child = name == (SyntaxNode*)0 ? (SyntaxNode*)0 : name.next_sibling;
@@ -684,6 +713,7 @@ SyntaxNode* binding_function_parameters(SyntaxNode* function) {
     return (SyntaxNode*)0;
 }
 
+/// Returns a function item's body block, or null.
 SyntaxNode* binding_function_body(SyntaxNode* function) {
     SyntaxNode* child = function.first_child;
     while (child != (SyntaxNode*)0) {
@@ -695,11 +725,14 @@ SyntaxNode* binding_function_body(SyntaxNode* function) {
     return (SyntaxNode*)0;
 }
 
+/// Collects a function's parameter and body bindings.
 void collect_function_bindings(SyntaxNode* function, Vec<Binding>* bindings) {
     collect_parameter_bindings(binding_function_parameters(function), bindings);
     collect_block_bindings(binding_function_body(function), bindings);
 }
 
+/// Returns the node whose subtree a binding is visible in: the function for
+/// a parameter, the loop for a `for` variable, else the enclosing block.
 SyntaxNode* binding_visibility_scope(Binding* binding) {
     SyntaxNode* scope = binding.name_node;
     if (binding.kind == BindingKind.Parameter) {
@@ -737,6 +770,7 @@ SyntaxNode* binding_visibility_scope(Binding* binding) {
     return scope;
 }
 
+/// Returns how many blocks and loops enclose `scope`.
 i64 binding_scope_depth(SyntaxNode* scope) {
     i64 depth = 0;
     while (scope != (SyntaxNode*)0) {
@@ -748,6 +782,7 @@ i64 binding_scope_depth(SyntaxNode* scope) {
     return depth;
 }
 
+/// Returns true when `use` is inside `scope`.
 bool binding_scope_contains(SyntaxNode* scope, SyntaxNode* use) {
     SyntaxNode* cursor = use;
     while (cursor != (SyntaxNode*)0) {
@@ -784,6 +819,7 @@ Binding* visible_binding(Vec<Binding>* bindings, str name, SyntaxNode* use) {
     return visible;
 }
 
+/// Returns true when the binding was declared with `const`.
 bool binding_is_const(Binding* binding) {
     if (binding == (Binding*)0 || binding.name_node == (SyntaxNode*)0) {
         return false;

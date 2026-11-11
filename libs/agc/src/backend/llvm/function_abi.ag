@@ -13,6 +13,8 @@ import backend.llvm.reference;
 import backend.llvm.drop;
 import backend.llvm.expr;
 
+/// Emits a runtime check that a reference passed to C points to fully
+/// initialized storage; traps (`llvm.trap`) when it does not.
 void llvm_require_initialized_c_reference(LlvmContext* ctx, LLVMOpaqueValue* value) {
     LLVMOpaqueValue* node = llvm_reference_node(ctx.builder, value);
     if (node == llvm_reference_initialized(ctx.ctx)) { return; }
@@ -37,6 +39,8 @@ void llvm_require_initialized_c_reference(LlvmContext* ctx, LLVMOpaqueValue* val
     LLVMPositionBuilderAtEnd(ctx.builder, initialized);
 }
 
+/// Converts a value received from C into the Silver ABI (a raw pointer
+/// becomes a reference marked initialized).
 LLVMOpaqueValue* llvm_value_from_c_abi(LlvmContext* ctx, LLVMOpaqueValue* value, u32 type_id) {
     TypeEntry entry = *ctx.types.get(ctx.types.resolve_subst(type_id));
     if (entry.kind == TypeKind.Reference) {
@@ -53,6 +57,8 @@ LLVMOpaqueValue* llvm_value_from_c_abi(LlvmContext* ctx, LLVMOpaqueValue* value,
     return value;
 }
 
+/// Converts a value for passing to C: references are checked to be fully
+/// initialized and passed as plain data pointers.
 LLVMOpaqueValue* llvm_value_to_c_abi(LlvmContext* ctx, LLVMOpaqueValue* value, u32 type_id) {
     TypeEntry entry = *ctx.types.get(ctx.types.resolve_subst(type_id));
     if (entry.kind == TypeKind.Reference) {
@@ -71,6 +77,8 @@ LLVMOpaqueValue* llvm_value_to_c_abi(LlvmContext* ctx, LLVMOpaqueValue* value, u
     return value;
 }
 
+/// Returns the LLVM function type of a callable value: the Silver internal
+/// signature, or the C-compatible one when `foreign`.
 LLVMOpaqueType* llvm_callable_signature(LlvmContext* ctx, u32 type_id, bool foreign) {
     TypeEntry entry = *ctx.types.get(ctx.types.resolve_subst(type_id));
     Vec<LLVMOpaqueType*> parameters = Vec<LLVMOpaqueType*>.new();
@@ -87,6 +95,8 @@ LLVMOpaqueType* llvm_callable_signature(LlvmContext* ctx, u32 type_id, bool fore
     return LLVMFunctionType(result_type, parameters.data, (u32)parameters.len(), 0);
 }
 
+/// Returns a callable pair for function `function` used as a value,
+/// building a C-ABI adapter when needed.
 LLVMOpaqueValue* llvm_named_callable_value(LlvmContext* ctx, LLVMOpaqueValue* function, str name) {
     u32 type_id = mono_function_value_type(ctx, name);
     if (type_id == TYPE_UNKNOWN) {
@@ -138,6 +148,8 @@ LLVMOpaqueValue* llvm_named_callable_value(LlvmContext* ctx, LLVMOpaqueValue* fu
     return llvm_callable_build(ctx, function, adapter);
 }
 
+/// Emits a call through a callable pair: the internal entry when it is
+/// non-null, else the foreign (C ABI) entry with values converted.
 LLVMOpaqueValue* llvm_emit_callable_call(LlvmContext* ctx, LLVMOpaqueValue* callable,
                                          u32 type_id, Vec<LLVMOpaqueValue*>* arguments) {
     LLVMOpaqueValue* internal = LLVMBuildExtractValue(ctx.builder, callable, 0, "callable_internal");
