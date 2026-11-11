@@ -1,6 +1,9 @@
 // Structural Send gate for launch arguments over the typed CST projections.
 // It covers the declaration/expression slice needed by the launch tests while
-// leaving the full generic type checker to the next migration stage.
+// leaving the full generic type checker to the next migration stage. An
+// argument bound to a `&T`/`&mut T` parameter is a borrow: its pointee must
+// be Send, because Silver has no unsynchronized shared mutation outside raw
+// pointers.
 import std.mem.memory;
 import std.mem.vec;
 import std.string;
@@ -9,6 +12,8 @@ import frontend.bindings;
 import frontend.cfg;
 import frontend.diagnostics;
 import frontend.items;
+import frontend.messages;
+import frontend.scoped_launch;
 
 /// State of the launch Send check; `failed` is set by any report.
 struct SendAnalyzer {
@@ -129,6 +134,7 @@ bool send_text_is_identifier(str text) {
 bool send_type_owns_storage(str name) {
     return send_text_equals(name, "Vec")
         || send_text_equals(name, "Box")
+        || send_text_equals(name, "Arc")
         || send_text_equals(name, "String")
         || send_text_equals(name, "Bytes")
         || send_text_equals(name, "ByteBuffer")
@@ -373,7 +379,7 @@ bool send_type_is_send(TypeProjection* value, String* reason) {
         return false;
     }
     if (value.kind == ProjectionTypeKind.Reference) {
-        reason.push_str("references cannot cross a thread boundary in v1 (scoped threads are not implemented yet)");
+        reason.push_str(send_reason_reference_value());
         return false;
     }
     if (value.kind == ProjectionTypeKind.Array) {
@@ -412,6 +418,7 @@ bool send_type_is_send(TypeProjection* value, String* reason) {
     }
     if ((send_text_equals(value.name, "Vec")
             || send_text_equals(value.name, "Box")
+            || send_text_equals(value.name, "Arc")
             || send_text_equals(value.name, "Optional")
             || send_text_equals(value.name, "HashMap"))
         && value.argument0.len() == 0) {
@@ -465,9 +472,82 @@ String send_binding_type_display(Binding* binding) {
     return move result;
 }
 
-/// Checks one `launch` argument: address-of and non-Send values are errors.
+/// Projects the pointee of reference binding `binding`: the type after its
+/// `&` or `&mut`. Sets `*slice` when that pointee is a slice `[T]`.
+TypeProjection send_reference_pointee(Binding* binding, bool* slice) {
+    SyntaxNode* first = binding.type_start;
+    while (first != (SyntaxNode*)0 && first != binding.type_end
+        && first.kind == NodeKind.Token
+        && (first.token_kind == TokenKind.BitwiseAnd || first.token_kind == TokenKind.Mut
+            || first.token_kind == TokenKind.Const || first.token_kind == TokenKind.Move)) {
+        first = first.next_sibling;
+    }
+    *slice = first != (SyntaxNode*)0 && first.kind == NodeKind.Bracket
+        && !binding_bracket_has_tuple_separator(first);
+    return binding_declared_type(first, binding.type_end);
+}
+
+/// Checks a `launch` argument bound to `&T`/`&mut T` parameter
+/// `argument.index` of `callee`: the borrowed pointee must be Send.
+void check_borrowed_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root,
+                                    Vec<Binding>* bindings, LaunchArgument* argument,
+                                    SyntaxNode* callee) {
+    Vec<Binding> parameters = Vec<Binding>.new();
+    collect_parameter_bindings(binding_function_parameters(callee), &parameters);
+    Binding* parameter = parameters.get_ptr(argument.index);
+    bool slice = false;
+    TypeProjection pointee = send_reference_pointee(parameter, &slice);
+    // A generic callee names no concrete pointee, so judge the borrowed local:
+    // its whole type for `&place`, its own pointee for a reference variable.
+    Binding* source = send_find_binding(bindings, argument.name);
+    if (send_type_parameter_index(callee, pointee.name) >= 0 && source != (Binding*)0) {
+        if (source.declared_type.kind == ProjectionTypeKind.Reference) {
+            pointee = send_reference_pointee(source, &slice);
+        } else {
+            slice = false;
+            pointee = binding_declared_type(source.type_start, source.type_end);
+        }
+    }
+    String reason = String.new();
+    bool is_send = !slice;
+    if (slice) {
+        reason.push_str(send_reason_borrowed_slice());
+    } else {
+        Vec<str> visiting = Vec<str>.new();
+        is_send = send_type_is_send_in_declarations(root, &pointee, &visiting, 0, &reason);
+        visiting.drop();
+    }
+    if (!is_send) {
+        String type_name = String.from_str(parameter.declared_type.is_mutable ? "&mut " : "&");
+        String pointee_name = send_type_display(&pointee);
+        if (slice) { type_name.push((u8)'['); }
+        type_name.push_str(pointee_name.to_str());
+        if (slice) { type_name.push((u8)']'); }
+        send_report_type(analyzer, argument.span, type_name.to_str(), reason.to_str());
+        pointee_name.drop();
+        type_name.drop();
+    }
+    reason.drop();
+    parameters.drop();
+}
+
+/// Checks one `launch` argument. A borrow passed to a `&T`/`&mut T`
+/// parameter needs a Send pointee; any other address-of is a raw pointer,
+/// and by-value arguments must be Send themselves.
 void check_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root,
                            Vec<Binding>* bindings, LaunchArgument* argument) {
+    SyntaxNode* borrowing = launch_borrowing_callee(root, (*argument).callee,
+        (*argument).count, (*argument).index);
+    if (borrowing != (SyntaxNode*)0) {
+        Binding* reference = send_find_binding(bindings, (*argument).name);
+        if ((*argument).kind == ProjectionExpressionKind.Address
+            || ((*argument).kind == ProjectionExpressionKind.Identifier
+                && reference != (Binding*)0
+                && reference.declared_type.kind == ProjectionTypeKind.Reference)) {
+            check_borrowed_launch_argument(analyzer, root, bindings, argument, borrowing);
+            return;
+        }
+    }
     if ((*argument).kind == ProjectionExpressionKind.Address) {
         String type_name = String.from_str("unknown");
         Binding* binding = send_find_binding(bindings, (*argument).name);

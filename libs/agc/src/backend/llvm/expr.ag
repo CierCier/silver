@@ -8,6 +8,7 @@ import frontend.ast;
 import frontend.ast_expr;
 import frontend.items;
 import frontend.lexer;
+import frontend.scoped_launch;
 import frontend.symbols;
 import frontend.typecheck_expr;
 import frontend.types;
@@ -3397,11 +3398,18 @@ LLVMOpaqueValue* llvm_emit_launch(LlvmContext* ctx, u32 expr_id) {
         ctx.ctx, pack_fields.data, (u32)pack_fields.len(), 0);
     pack_fields.drop();
 
+    // A callee that borrows an argument makes the launch scoped: the runtime
+    // marks its task so the handle's drop glue joins it.
+    Vec<bool> borrowed_params = Vec<bool>.new();
+    str launch_entry = launch_borrowed_parameters(ctx.root,
+            ctx.names.get(callee_expr.aux), (i64)call.aux, &borrowed_params)
+        ? "__silver_launch_scoped" : "__silver_launch";
+    borrowed_params.drop();
     LLVMOpaqueValue* alloc_fn = LLVMGetNamedFunction(ctx.module, "mem_alloc_raw_impl");
-    LLVMOpaqueValue* launch_fn = LLVMGetNamedFunction(ctx.module, "__silver_launch");
+    LLVMOpaqueValue* launch_fn = LLVMGetNamedFunction(ctx.module, launch_entry);
     if (alloc_fn == (LLVMOpaqueValue*)0 || launch_fn == (LLVMOpaqueValue*)0) {
         ctx.note_unresolved("launch-runtime",
-            alloc_fn == (LLVMOpaqueValue*)0 ? "mem_alloc_raw_impl" : "__silver_launch");
+            alloc_fn == (LLVMOpaqueValue*)0 ? "mem_alloc_raw_impl" : launch_entry);
         param_types.drop();
         return (LLVMOpaqueValue*)0;
     }
@@ -3574,6 +3582,8 @@ LLVMOpaqueValue* llvm_emit_wait(LlvmContext* ctx, u32 expr_id) {
     }
     u32 result_type = ctx.types.resolve_subst(ctx.types.type_args.get(task_entry.inner));
     LLVMOpaqueValue* handle = llvm_emit_expr(ctx, wait_expr.inner0);
+    // The join consumes the handle, so its drop glue must not join again.
+    llvm_clear_place_drops(ctx, wait_expr.inner0);
     LLVMOpaqueValue* wait_fn = LLVMGetNamedFunction(ctx.module, "__silver_wait_done");
     LLVMOpaqueValue* free_fn = LLVMGetNamedFunction(ctx.module, "mem_free_raw_impl");
     if (handle == (LLVMOpaqueValue*)0 || wait_fn == (LLVMOpaqueValue*)0

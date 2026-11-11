@@ -47,11 +47,15 @@ struct TypeProjection {
     bool contains_unknown;
 }
 
-/// One argument of a `launch` call: its expression shape, name, and span.
+/// One argument of a `launch` call: its expression shape, name, and span,
+/// plus the callee name, the argument's position, and the call's arity.
 struct LaunchArgument {
     ProjectionExpressionKind kind;
     str name;
     Span span;
+    str callee;
+    i64 index;
+    i64 count;
 }
 
 /// Cursor over a range of leaf tokens for type projection.
@@ -327,6 +331,9 @@ LaunchArgument projection_argument(Vec<SyntaxNode*>* leaves, i64 start, i64 end)
     LaunchArgument argument;
     argument.kind = ProjectionExpressionKind.Unknown;
     argument.name = "";
+    argument.callee = "";
+    argument.index = 0;
+    argument.count = 0;
     argument.span = projection_range_span(leaves, start, end);
     if (start >= end) {
         return argument;
@@ -371,8 +378,9 @@ void projection_add_argument(Vec<SyntaxNode*>* leaves, i64 start, i64 end, Vec<L
     arguments.push(move argument);
 }
 
-/// Projects the comma-separated arguments of a call group.
-void projection_collect_argument_group(SyntaxNode* group, CfgSet* cfg, Vec<LaunchArgument>* arguments) {
+/// Projects the comma-separated arguments of `callee`'s call group.
+void projection_collect_argument_group(SyntaxNode* group, str callee, CfgSet* cfg, Vec<LaunchArgument>* arguments) {
+    i64 first = arguments.len();
     SyntaxNode* child = group.first_child;
     while (child != (SyntaxNode*)0) {
         Vec<SyntaxNode*> segment = Vec<SyntaxNode*>.new();
@@ -386,6 +394,15 @@ void projection_collect_argument_group(SyntaxNode* group, CfgSet* cfg, Vec<Launc
         if (child != (SyntaxNode*)0) {
             child = child.next_sibling;
         }
+    }
+    i64 count = arguments.len() - first;
+    i64 index = 0;
+    while (index < count) {
+        LaunchArgument* argument = arguments.get_ptr(first + index);
+        argument.callee = callee;
+        argument.index = index;
+        argument.count = count;
+        index += 1;
     }
 }
 
@@ -428,7 +445,7 @@ void projection_walk_launches(SyntaxNode* node, CfgSet* cfg, Vec<SyntaxNode*>* l
         if (callee != (SyntaxNode*)0 && callee.kind == NodeKind.Token
             && callee.token_kind == TokenKind.Identifier
             && group != (SyntaxNode*)0 && group.kind == NodeKind.Parenthesized) {
-            projection_collect_argument_group(group, cfg, arguments);
+            projection_collect_argument_group(group, callee.text, cfg, arguments);
         }
     }
     SyntaxNode* child = node.first_child;

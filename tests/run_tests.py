@@ -52,6 +52,7 @@ LEAK_CHECK_TESTS = {
     'mem_test',
     'memory_stress',
     'result_combinators_test',
+    'scoped_launch_test',
     'sequence_traits_test',
     'string_split_once_drop_test',
     'string_test',

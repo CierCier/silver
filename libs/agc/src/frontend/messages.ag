@@ -383,6 +383,54 @@ str note_value_moved_into_launch() {
     return "value moved into thread launch";
 }
 
+/// Diagnostic text: "a launch that borrows '{}' must be bound to a local
+/// Task or waited directly (`Task<T> t = launch f(&{});` or `wait launch
+/// f(&{})`)". Returns an owned string.
+String scoped_launch_must_be_bound(str name) {
+    return @format("a launch that borrows '{}' must be bound to a local Task or waited directly (`Task<T> t = launch f(&{});` or `wait launch f(&{})`)", name, name, name);
+}
+
+/// Diagnostic text: "task borrows `{}` and cannot leave the scope it was
+/// launched in". Returns an owned string.
+String task_cannot_leave_scope(str name) {
+    return @format("task borrows `{}` and cannot leave the scope it was launched in", name);
+}
+
+/// Diagnostic text: "a borrowed launch argument must be `&place`, `&mut
+/// place`, or a reference variable". Returns an owned string.
+String scoped_launch_argument_not_a_place() {
+    return String.from_str("a borrowed launch argument must be `&place`, `&mut place`, or a reference variable");
+}
+
+/// Diagnostic text: "cannot drop '{}' because it is borrowed by a launched
+/// task". Returns an owned string.
+String cannot_drop_task_borrowed(str name) {
+    return @format("cannot drop '{}' because it is borrowed by a launched task", name);
+}
+
+/// Diagnostic text: "task launched here". Returns an owned string.
+String note_task_launched_here() {
+    return String.from_str("task launched here");
+}
+
+/// Diagnostic text: "borrowed by a task launched here". Returns an owned
+/// string.
+String note_task_borrow_here() {
+    return String.from_str("borrowed by a task launched here");
+}
+
+/// Send-gate reason: "slices borrow storage the launch cannot track; borrow
+/// the owning container instead". Returns static text.
+str send_reason_borrowed_slice() {
+    return "slices borrow storage the launch cannot track; borrow the owning container instead";
+}
+
+/// Send-gate reason: "references cross a thread boundary only as direct
+/// `&T`/`&mut T` launch arguments". Returns static text.
+str send_reason_reference_value() {
+    return "references cross a thread boundary only as direct `&T`/`&mut T` launch arguments";
+}
+
 /// Diagnostic text: "task handle consumed by wait". Returns static text.
 str note_task_handle_consumed() {
     return "task handle consumed by wait";

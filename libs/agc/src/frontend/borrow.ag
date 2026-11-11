@@ -9,6 +9,7 @@ import frontend.diagnostics;
 import frontend.cfg;
 import frontend.place;
 import frontend.messages;
+import frontend.scoped_launch;
 import frontend.symbols;
 import frontend.expressions;
 import frontend.bindings;
@@ -48,7 +49,8 @@ enum LoanKind {
 }
 
 /// One active borrow of a place. A persistent loan lives until its holder's
-/// last use (`release_index`); others end with the statement.
+/// last use (`release_index`); others end with the statement. A task loan is
+/// held by a scoped launch until its task is joined.
 struct Loan {
     u32 name_id;
     Place place;
@@ -60,6 +62,7 @@ struct Loan {
     Span span;
     SyntaxNode* owner_scope;
     bool active;
+    bool task;
 }
 
 /// A function whose return value may borrow parameter `parameter_index`.
@@ -155,7 +158,22 @@ impl BorrowAnalyzer {
         loan.span = span;
         loan.owner_scope = (SyntaxNode*)0;
         loan.active = true;
+        loan.task = false;
         self.loans.push(move loan);
+    }
+
+    /// Returns the index of an active task loan that overlaps `target`, or -1.
+    i64 find_task_loan(BorrowAnalyzer* self, Place* target) {
+        i64 i = 0;
+        while (i < self.loans.len()) {
+            Loan* loan = self.loans.get_ptr(i);
+            if (loan.active && loan.task
+                && places_overlap(&loan.place, target, &self.projections)) {
+                return i;
+            }
+            i += 1;
+        }
+        return -1;
     }
 
     /// Reports assigning to a place while it is borrowed.
@@ -2148,6 +2166,85 @@ i64 borrow_method_receiver_kind(SyntaxTree* tree, str method) {
     return table.get(method);
 }
 
+/// Returns the leaf index where the loans of scoped launch `site` end: its
+/// straight-line `wait`, else the last leaf of the holder's block.
+i64 borrow_task_release_index(Vec<SyntaxNode*>* leaves, ScopedLaunchSite* site) {
+    SyntaxNode* scope = site.holder.parent;
+    i64 release = -1;
+    i64 i = 0;
+    while (i < leaves.len()) {
+        SyntaxNode* leaf = leaves.get(i);
+        if (leaf == site.join) { return i; }
+        if (borrow_node_within(leaf, scope)) { release = i; }
+        i += 1;
+    }
+    return release;
+}
+
+/// Marks the newest loan as held by the task of `site` until it is joined.
+void borrow_mark_task_loan(BorrowAnalyzer* analyzer, Vec<Binding>* bindings,
+                           ScopedLaunchSite* site) {
+    Loan* loan = analyzer.loans.get_ptr(analyzer.loans.len() - 1);
+    loan.task = true;
+    Binding* holder = scoped_binding_at(bindings, site.holder);
+    if (holder != (Binding*)0) { loan.holder_binding_start = holder.span.start; }
+}
+
+/// Returns true when identifier `node` is one whole argument of a call.
+bool borrow_is_whole_call_argument(SyntaxNode* node) {
+    SyntaxNode* group = node.parent;
+    if (group == (SyntaxNode*)0 || group.kind != NodeKind.Parenthesized) { return false; }
+    SyntaxNode* before = binding_previous_sibling(node);
+    if (before != (SyntaxNode*)0 && before.token_kind == TokenKind.Move) {
+        before = binding_previous_sibling(before);
+    }
+    if (before != (SyntaxNode*)0 && before.token_kind != TokenKind.Comma) { return false; }
+    if (node.next_sibling != (SyntaxNode*)0
+        && node.next_sibling.token_kind != TokenKind.Comma) { return false; }
+    SyntaxNode* callee = binding_previous_sibling(group);
+    if (callee == (SyntaxNode*)0 || callee.kind != NodeKind.Token) { return false; }
+    // Macro arguments are formatted through borrows, never moved.
+    SyntaxNode* sigil = binding_previous_sibling(callee);
+    if (sigil != (SyntaxNode*)0 && sigil.token_kind == TokenKind.At) { return false; }
+    return callee.token_kind == TokenKind.Identifier || callee.token_kind == TokenKind.Greater;
+}
+
+/// Reports a use that would move or drop a place while a launched task still
+/// borrows it: a by-value call argument, a returned value, or `.drop()`.
+void borrow_check_task_loan_use(BorrowAnalyzer* analyzer, SyntaxTree* tree,
+                                SymbolTable* symbols, Vec<SyntaxNode*>* leaves,
+                                Vec<Binding>* bindings, Vec<u32>* binding_types, i64 i) {
+    SyntaxNode* node = leaves.get(i);
+    Place place = borrow_place(analyzer, leaves, i, leaves.len());
+    i64 loaned = analyzer.find_task_loan(&place);
+    if (loaned < 0) { return; }
+    Span borrowed_at = analyzer.loans.get_ptr(loaned).span;
+    if (i + 2 < leaves.len() && leaves.get(i + 1).token_kind == TokenKind.Dot
+        && borrow_text_equals(leaves.get(i + 2).text, "drop")
+        && leaves.get(i + 2).next_sibling != (SyntaxNode*)0
+        && leaves.get(i + 2).next_sibling.kind == NodeKind.Parenthesized) {
+        analyzer.diagnostics.error_with_note(node.span, cannot_drop_task_borrowed(node.text),
+            borrowed_at, note_task_borrow_here());
+        analyzer.failed = true;
+        return;
+    }
+    bool returned = i > 0 && leaves.get(i - 1).token_kind == TokenKind.Return
+        && node.next_sibling != (SyntaxNode*)0
+        && node.next_sibling.token_kind == TokenKind.Semicolon;
+    if (!returned && !borrow_is_whole_call_argument(node)) { return; }
+    Binding* binding = visible_binding(bindings, node.text, node);
+    u32 type_id = borrow_binding_type(symbols, binding);
+    if (type_id == TYPE_UNKNOWN) {
+        type_id = typecheck_resolved_binding_type(bindings, binding_types, binding);
+    }
+    if (type_id != TYPE_UNKNOWN && typecheck_type_is_copy(tree.root, &symbols.types, type_id)) {
+        return;
+    }
+    analyzer.diagnostics.error_with_note(node.span, cannot_move_borrowed(node.text),
+        borrowed_at, note_task_borrow_here());
+    analyzer.failed = true;
+}
+
 /// Scans one function's leaves in order, recording loans, releasing them,
 /// and reporting conflicts and escapes.
 void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbols,
@@ -2166,9 +2263,46 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
     typecheck_binding_types(symbols, &symbols.types, tree.root, &bindings, &binding_types);
     Vec<i64> release_points = Vec<i64>.new();
     collect_borrow_release_points(body, &leaves, &release_points);
+    ScopedLaunches launches = ScopedLaunches.new();
+    collect_scoped_launches(tree.root, &leaves, &bindings, &launches);
     i64 i = 0;
     while (i < leaves.len()) {
         SyntaxNode* node = leaves.get(i);
+        // A reference variable passed to a scoped launch stays borrowed by
+        // the task, as does everything that variable itself borrows.
+        ScopedLaunchBorrow* task_reference = node.token_kind == TokenKind.Identifier
+            ? launches.borrow_at(node) : (ScopedLaunchBorrow*)0;
+        if (task_reference != (ScopedLaunchBorrow*)0) {
+            ScopedLaunchSite* site = launches.sites.get_ptr(task_reference.site);
+            Binding* reference = scoped_visible_binding(&bindings, node);
+            if (site.holder != (SyntaxNode*)0 && reference != (Binding*)0
+                && reference.declared_type.kind == ProjectionTypeKind.Reference) {
+                u32 task_holder = analyzer.names.intern(site.holder.text);
+                i64 task_release = borrow_task_release_index(&leaves, site);
+                u32 reference_id = analyzer.names.intern(node.text);
+                i64 count = analyzer.loans.len();
+                i64 loan_index = 0;
+                while (loan_index < count) {
+                    Loan inherited = analyzer.loans.get(loan_index);
+                    if (inherited.active && inherited.persistent
+                        && inherited.holder_id == reference_id) {
+                        inherited.holder_id = task_holder;
+                        inherited.release_index = task_release;
+                        analyzer.loans.push(inherited);
+                        borrow_mark_task_loan(analyzer, &bindings, site);
+                    }
+                    loan_index += 1;
+                }
+                analyzer.add(Place.new(reference_id), node.text, node.span,
+                    reference.declared_type.is_mutable ? LoanKind.Mutable : LoanKind.Shared,
+                    true, task_holder, task_release);
+                borrow_mark_task_loan(analyzer, &bindings, site);
+            }
+        } else if (launches.sites.len() > 0 && node.token_kind == TokenKind.Identifier
+            && !(i > 0 && leaves.get(i - 1).token_kind == TokenKind.Dot)) {
+            borrow_check_task_loan_use(analyzer, tree, symbols, &leaves, &bindings,
+                &binding_types, i);
+        }
         if (node.token_kind == TokenKind.Assign && i > 0 && i + 1 < leaves.len()
             && leaves.get(i - 1).token_kind == TokenKind.Identifier
             && !(i >= 2 && leaves.get(i - 2).token_kind == TokenKind.Dot)) {
@@ -2198,7 +2332,8 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
                 }
             }
         }
-        if (node.token_kind == TokenKind.Identifier && i + 1 < leaves.len()) {
+        if (node.token_kind == TokenKind.Identifier && i + 1 < leaves.len()
+            && task_reference == (ScopedLaunchBorrow*)0) {
             bool is_field = i > 0 && borrow_text_equals(leaves.get(i - 1).text, ".");
             if (!is_field) {
                 str aggregate = borrow_aggregate_holder(&bindings, &binding_types,
@@ -2399,13 +2534,22 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
                             symbols.types.resolve_subst(source_type)).kind == TypeKind.Pointer
                         && place.projections_count > 0;
                     if (unchecked_pointer_access) { persistent = false; }
+                    // A scoped launch argument stays borrowed until its task
+                    // is joined; a launch waited in place ends with the statement.
+                    ScopedLaunchBorrow* task_borrow = launches.borrow_at(node);
+                    ScopedLaunchSite* task_site = task_borrow != (ScopedLaunchBorrow*)0
+                        ? launches.sites.get_ptr(task_borrow.site) : (ScopedLaunchSite*)0;
+                    if (task_site != (ScopedLaunchSite*)0 && task_site.holder == (SyntaxNode*)0) {
+                        task_site = (ScopedLaunchSite*)0;
+                    }
+                    if (task_site != (ScopedLaunchSite*)0) { persistent = !unchecked_pointer_access; }
                     LoanKind kind = LoanKind.Shared;
                     if (mutable) {
                         kind = LoanKind.Mutable;
                     }
                     u32 holder_id = (u32)0;
                     i64 release_index = leaves.len();
-                    if (persistent) {
+                    if (persistent && task_site == (ScopedLaunchSite*)0) {
                         str holder = strlen(aggregate_holder) > 0
                             ? aggregate_holder : persistent_holder(&leaves, i);
                         Binding* destination = visible_binding(&bindings, holder, node);
@@ -2421,7 +2565,10 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
                             unchecked_pointer_access = true;
                         }
                     }
-                    if (persistent) {
+                    if (persistent && task_site != (ScopedLaunchSite*)0) {
+                        holder_id = analyzer.names.intern(task_site.holder.text);
+                        release_index = borrow_task_release_index(&leaves, task_site);
+                    } else if (persistent) {
                         str holder = strlen(aggregate_holder) > 0
                             ? aggregate_holder : persistent_holder(&leaves, i);
                         if (strlen(holder) > 0) {
@@ -2441,7 +2588,9 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
                         analyzer.add(move place, name, leaves.get(j).span,
                             kind, persistent, holder_id, release_index);
                     }
-                    if (persistent && holder_id > 0) {
+                    if (persistent && task_site != (ScopedLaunchSite*)0) {
+                        borrow_mark_task_loan(analyzer, &bindings, task_site);
+                    } else if (persistent && holder_id > 0) {
                         i64 added = analyzer.loans.len() - 1;
                         Binding* holder = visible_binding(&bindings,
                             analyzer.names.get(holder_id), node);
@@ -2581,6 +2730,8 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
         analyzer.release_due(i);
         i += 1;
     }
+    launches.sites.drop();
+    launches.borrows.drop();
     bindings.drop();
     release_points.drop();
     leaves.drop();
@@ -2623,5 +2774,8 @@ bool check_borrows(SyntaxTree* tree, SymbolTable* symbols, DiagnosticBag* diagno
     items.drop();
     return_origins.drop();
     return_statuses.drop();
+    if (!check_scoped_launches(tree, diagnostics, cfg)) {
+        ok = false;
+    }
     return ok;
 }
