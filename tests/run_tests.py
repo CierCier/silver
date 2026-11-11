@@ -37,6 +37,7 @@ MAX_STDLIB_TESTS = 124
 LEAK_CHECK_TESTS = {
     'alloc_validity_test',
     'allocation_bounds_test',
+    'arc_test',
     'box_test',
     'bytes_test',
     'channel_test',

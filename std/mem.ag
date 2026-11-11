@@ -6,3 +6,4 @@ import std.mem.drop;
 import std.mem.vec;
 import std.mem.arena;
 import std.mem.rc;
+import std.mem.arc;
