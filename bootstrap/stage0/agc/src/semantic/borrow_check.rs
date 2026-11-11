@@ -857,6 +857,11 @@ impl<'a> BorrowChecker<'a> {
             self.expire_loans_before(i);
             self.statement_indices.push(i);
             self.check_statement(stmt);
+            if let ast::StatementKind::Let(binding) = &stmt.kind
+                && let ast::PatternKind::Identifier(name) = &binding.pattern.kind
+            {
+                self.register_collection_task_borrows(&name.name, &block.statements[i + 1..]);
+            }
             self.statement_indices.pop();
         }
         // Final statement boundary: expire loans whose last use was within this block.
@@ -1594,6 +1599,90 @@ impl<'a> BorrowChecker<'a> {
                 .filter(|loan| loan.borrower.as_deref() == Some(task))
             {
                 loan.last_use = joined_at;
+            }
+        }
+    }
+
+    /// Loans held by local collection `holder` for every launch later pushed
+    /// into it in its scope. They start at the declaration, not the push: a
+    /// push inside a loop runs again after code that precedes it in the loop
+    /// body, so the borrowed places stay read-only until `holder` drops and
+    /// joins its tasks.
+    fn register_collection_task_borrows(&mut self, holder: &str, rest: &[ast::Statement]) {
+        let mut rest = ast::Block {
+            statements: rest.to_vec(),
+            span: Span::default(),
+        };
+        let mut launches = Vec::new();
+        crate::parser::visit::expressions_in_block(&mut rest, &mut |expression| {
+            if let ast::ExpressionKind::MethodCall {
+                receiver,
+                method,
+                arguments,
+            } = expression.kind.as_ref()
+                && method.name == "push"
+                && matches!(receiver.kind.as_ref(), ast::ExpressionKind::Identifier(name) if name.name == holder)
+                && let [launch] = arguments.as_slice()
+                && let ast::ExpressionKind::Launch(call) = launch.kind.as_ref()
+                && let ast::ExpressionKind::Call { arguments, .. } = call.kind.as_ref()
+            {
+                launches.push(arguments.clone());
+            }
+        });
+        if launches.is_empty() {
+            return;
+        }
+        self.task_holders.insert(holder.to_string());
+        for arguments in launches {
+            for argument in &arguments {
+                match argument.kind.as_ref() {
+                    // `&mut` is reported by the scoped-launch pass.
+                    ast::ExpressionKind::Reference {
+                        is_mutable: false,
+                        expression,
+                    } => {
+                        self.register_named_borrow(holder, expression, BorrowKind::Shared, argument.span);
+                        self.ref_bindings.remove(holder);
+                    }
+                    ast::ExpressionKind::Identifier(reference)
+                        if self.ref_bindings.contains_key(&reference.name) =>
+                    {
+                        let info = self.ref_bindings[&reference.name].clone();
+                        if info.kind == BorrowKind::Exclusive {
+                            self.error_with_note(
+                                msg::task_collection_mutable_borrow(&reference.name),
+                                argument.span,
+                                None,
+                                None,
+                            );
+                            continue;
+                        }
+                        let inherited: Vec<_> = self
+                            .scopes
+                            .iter()
+                            .flatten()
+                            .filter(|loan| loan.borrower.as_deref() == Some(reference.name.as_str()))
+                            .cloned()
+                            .collect();
+                        for mut loan in inherited {
+                            loan.borrower = Some(holder.to_string());
+                            loan.span = argument.span;
+                            loan.param = false;
+                            if let Some(scope) = self.scopes.last_mut() {
+                                scope.push(loan);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if let Some(scope) = self.scopes.last_mut() {
+            for loan in scope
+                .iter_mut()
+                .filter(|loan| loan.borrower.as_deref() == Some(holder))
+            {
+                loan.last_use = None;
             }
         }
     }

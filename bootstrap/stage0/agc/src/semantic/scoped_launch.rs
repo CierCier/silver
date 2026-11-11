@@ -11,6 +11,12 @@
 //! - that local (the holder) may only be consumed by `wait`, or read by
 //!   `started()`. Any other use could move the handle to a place that
 //!   outlives the borrow.
+//! - the launch may instead be pushed into a local collection
+//!   (`tasks.push(launch f(&x));`) declared after everything it borrows, so
+//!   the collection's drop joins its tasks first. Its tasks may run at once,
+//!   so they borrow only with `&`, and the collection is used only through
+//!   `push`, `len`, `is_empty`, `clear`, `drop`, or `wait` on `pop`, `take`,
+//!   `swap_remove` or `get`.
 //!
 //! Holders are matched by name within one function, so a second local with a
 //! holder's name is pinned too. Loans on the borrowed places are tracked by
@@ -85,6 +91,70 @@ struct FunctionFacts<'a> {
     /// Identifiers a holder may appear as: the operand of `wait`, or the
     /// receiver of `started()`.
     allowed_uses: FxHashSet<SpanKey>,
+    /// Locals a scoped launch was pushed into, with that launch's span and
+    /// the variable it borrows.
+    collection_holders: FxHashMap<String, (Span, String)>,
+    /// Identifiers a collection holder may appear as (see the module docs).
+    collection_uses: FxHashSet<SpanKey>,
+    /// Where each local is declared, by span start.
+    declared_at: FxHashMap<String, usize>,
+}
+
+/// Methods a collection holder may be called with directly.
+const COLLECTION_METHODS: &[&str] = &["push", "len", "is_empty", "clear", "drop"];
+/// Methods that take a task out of a collection holder; only under `wait`.
+const COLLECTION_WAIT_METHODS: &[&str] = &["pop", "take", "swap_remove", "get"];
+
+/// The single launch argument of `holder.push(launch ...)`, with the holder.
+fn pushed_launch(expression: &ast::Expression) -> Option<(&ast::Identifier, &ast::Expression)> {
+    let ast::ExpressionKind::MethodCall {
+        receiver,
+        method,
+        arguments,
+    } = expression.kind.as_ref()
+    else {
+        return None;
+    };
+    let ast::ExpressionKind::Identifier(holder) = receiver.kind.as_ref() else {
+        return None;
+    };
+    match arguments.as_slice() {
+        [launch] if method.name == "push"
+            && matches!(launch.kind.as_ref(), ast::ExpressionKind::Launch(_)) =>
+        {
+            Some((holder, launch))
+        }
+        _ => None,
+    }
+}
+
+/// Root variables of a launch's `&place`/`&mut place` arguments, each with
+/// whether the borrow is mutable.
+fn borrowed_roots(launch: &ast::Expression) -> Vec<(String, bool)> {
+    let mut roots = Vec::new();
+    let ast::ExpressionKind::Launch(call) = launch.kind.as_ref() else {
+        return roots;
+    };
+    let ast::ExpressionKind::Call { arguments, .. } = call.kind.as_ref() else {
+        return roots;
+    };
+    for argument in arguments {
+        let ast::ExpressionKind::Reference {
+            is_mutable,
+            expression,
+        } = argument.kind.as_ref()
+        else {
+            continue;
+        };
+        let mut place = expression;
+        while let ast::ExpressionKind::FieldAccess { object, .. } = place.kind.as_ref() {
+            place = object;
+        }
+        if let ast::ExpressionKind::Identifier(root) = place.kind.as_ref() {
+            roots.push((root.name.clone(), *is_mutable));
+        }
+    }
+    roots
 }
 
 impl FunctionFacts<'_> {
@@ -104,6 +174,9 @@ impl FunctionFacts<'_> {
     }
 
     fn record_binding(&mut self, binding: &ast::LetStatement) {
+        if let ast::PatternKind::Identifier(name) = &binding.pattern.kind {
+            self.declared_at.insert(name.name.clone(), name.span.start);
+        }
         if let Some(initializer) = &binding.initializer
             && let ast::PatternKind::Identifier(name) = &binding.pattern.kind
             && is_scoped_launch(initializer, self.resolved_callables)
@@ -143,6 +216,28 @@ impl FunctionFacts<'_> {
                     self.allowed_uses.insert(span_key(operand.span));
                 } else if is_scoped_launch(operand, self.resolved_callables) {
                     self.placed_launches.insert(span_key(operand.span));
+                } else if let ast::ExpressionKind::MethodCall {
+                    receiver, method, ..
+                } = operand.kind.as_ref()
+                    && COLLECTION_WAIT_METHODS.contains(&method.name.as_str())
+                    && matches!(receiver.kind.as_ref(), ast::ExpressionKind::Identifier(_))
+                {
+                    self.collection_uses.insert(span_key(receiver.span));
+                }
+            }
+            ast::ExpressionKind::MethodCall {
+                receiver, method, ..
+            } if COLLECTION_METHODS.contains(&method.name.as_str())
+                && matches!(receiver.kind.as_ref(), ast::ExpressionKind::Identifier(_)) =>
+            {
+                self.collection_uses.insert(span_key(receiver.span));
+                if let Some((holder, launch)) = pushed_launch(expression)
+                    && is_scoped_launch(launch, self.resolved_callables)
+                {
+                    self.placed_launches.insert(span_key(launch.span));
+                    self.collection_holders
+                        .entry(holder.name.clone())
+                        .or_insert((launch.span, borrowed_name(launch)));
                 }
             }
             ast::ExpressionKind::MethodCall {
@@ -172,6 +267,9 @@ fn check_function(
         holders: FxHashMap::default(),
         placed_launches: FxHashSet::default(),
         allowed_uses: FxHashSet::default(),
+        collection_holders: FxHashMap::default(),
+        collection_uses: FxHashSet::default(),
+        declared_at: FxHashMap::default(),
     };
     facts.record_block(&body);
     visit::expressions_in_block(&mut body, &mut |expression| {
@@ -189,15 +287,57 @@ fn check_function(
                 launched_at: None,
             });
         }
-        ast::ExpressionKind::Identifier(identifier)
-            if !facts.allowed_uses.contains(&span_key(expression.span)) =>
-        {
-            if let Some((launched_at, borrowed)) = facts.holders.get(&identifier.name) {
+        ast::ExpressionKind::Identifier(identifier) => {
+            let key = span_key(expression.span);
+            if let Some((launched_at, borrowed)) = facts.holders.get(&identifier.name)
+                && !facts.allowed_uses.contains(&key)
+            {
                 errors.push(ScopedLaunchError {
                     message: msg::task_cannot_leave_scope(borrowed),
                     span: expression.span,
                     launched_at: Some(*launched_at),
                 });
+            }
+            if let Some((launched_at, borrowed)) = facts.collection_holders.get(&identifier.name)
+                && !facts.collection_uses.contains(&key)
+            {
+                errors.push(ScopedLaunchError {
+                    message: msg::task_collection_misused(&identifier.name, borrowed),
+                    span: expression.span,
+                    launched_at: Some(*launched_at),
+                });
+            }
+        }
+        ast::ExpressionKind::MethodCall { .. } => {
+            let Some((holder, launch)) = pushed_launch(expression) else {
+                return;
+            };
+            if !is_scoped_launch(launch, resolved_callables) {
+                return;
+            }
+            let holder_declared = facts.declared_at.get(&holder.name).copied();
+            for (root, mutable) in borrowed_roots(launch) {
+                if mutable {
+                    errors.push(ScopedLaunchError {
+                        message: msg::task_collection_mutable_borrow(&root),
+                        span: launch.span,
+                        launched_at: None,
+                    });
+                }
+                let root_declared = facts.declared_at.get(&root).copied();
+                let joined_first = match (holder_declared, root_declared) {
+                    (Some(holder_at), Some(root_at)) => holder_at > root_at,
+                    // A parameter outlives every local.
+                    (Some(_), None) => true,
+                    (None, _) => false,
+                };
+                if !joined_first {
+                    errors.push(ScopedLaunchError {
+                        message: msg::task_collection_declared_too_early(&root, &holder.name),
+                        span: launch.span,
+                        launched_at: None,
+                    });
+                }
             }
         }
         _ => {}

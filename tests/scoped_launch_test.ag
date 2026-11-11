@@ -15,6 +15,9 @@
 //      joined; a waited result is moved out, not dropped.
 //   7. A stale copy of a waited handle, left in a Vec, does nothing when the
 //      Vec drops, even after its registry slot runs another borrowing task.
+//   8. Tasks pushed into a local Vec in a loop share one local; `wait` on
+//      pop collects their results, and leaving the Vec's block joins the
+//      rest.
 //
 // Exit 0 on success; distinct non-zero codes per failure.
 
@@ -59,6 +62,12 @@ Counted make_counted(&i64 value) {
     Counted counted;
     counted.value = *value;
     return counted;
+}
+
+// Sleeps first so the launcher reaches the end of the block before the add.
+void slow_add(&AtomicI64 counter) {
+    sleep_ms(20);
+    counter.fetch_add(1);
 }
 
 i64 twice(i64 value) {
@@ -129,6 +138,28 @@ i64 main() {
     if (flag != 1) { return 10; }
 
     tasks.drop();
+
+    // 8. A worker pool in a Vec.
+    i64 pooled = 0;
+    {
+        Vec<Task<i64>> pool = Vec<Task<i64>>.new();
+        for (i64 i = 0; i < 4; i += 1) {
+            pool.push(launch sum(&values));
+        }
+        while (pool.len() > 0) {
+            pooled += wait pool.pop();
+        }
+    }
+    if (pooled != 180) { return 11; }
+    AtomicI64 counter = AtomicI64.new(0);
+    {
+        Vec<Task<void>> workers = Vec<Task<void>>.new();
+        for (i64 i = 0; i < 4; i += 1) {
+            workers.push(launch slow_add(&counter));
+        }
+    }
+    if (counter.get() != 4) { return 12; }
+
     out.drop();
     values.drop();
     return 0;

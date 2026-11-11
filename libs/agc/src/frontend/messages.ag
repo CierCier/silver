@@ -384,10 +384,31 @@ str note_value_moved_into_launch() {
 }
 
 /// Diagnostic text: "a launch that borrows '{}' must be bound to a local
-/// Task or waited directly (`Task<T> t = launch f(&{});` or `wait launch
-/// f(&{})`)". Returns an owned string.
+/// Task, pushed into a local collection, or waited directly (...)", with
+/// one example of each form. Returns an owned string.
 String scoped_launch_must_be_bound(str name) {
-    return @format("a launch that borrows '{}' must be bound to a local Task or waited directly (`Task<T> t = launch f(&{});` or `wait launch f(&{})`)", name, name, name);
+    return @format("a launch that borrows '{}' must be bound to a local Task, pushed into a local collection, or waited directly (`Task<T> t = launch f(&{});`, `tasks.push(launch f(&{}));` or `wait launch f(&{})`)", name, name, name, name);
+}
+
+/// Diagnostic text: "`{}` holds tasks that borrow `{}`: use it only
+/// through push, len, is_empty, clear and drop, or `wait` on pop, take,
+/// swap_remove or get". Returns an owned string.
+String task_collection_misused(str holder, str name) {
+    return @format("`{}` holds tasks that borrow `{}`: use it only through push, len, is_empty, clear and drop, or `wait` on pop, take, swap_remove or get", holder, name);
+}
+
+/// Diagnostic text: "a launch pushed into a collection can only borrow
+/// with `&`: its tasks may run at once, so `&mut {}` would be shared".
+/// Returns an owned string.
+String task_collection_mutable_borrow(str name) {
+    return @format("a launch pushed into a collection can only borrow with `&`: its tasks may run at once, so `&mut {}` would be shared", name);
+}
+
+/// Diagnostic text: "a launch that borrows '{}' can only be pushed into a
+/// local collection declared after '{}', so the collection joins its tasks
+/// first; `{}` is not". Returns an owned string.
+String task_collection_declared_too_early(str name, str holder) {
+    return @format("a launch that borrows '{}' can only be pushed into a local collection declared after '{}', so the collection joins its tasks first; `{}` is not", name, name, holder);
 }
 
 /// Diagnostic text: "task borrows `{}` and cannot leave the scope it was

@@ -260,8 +260,30 @@ pub fn note_value_moved_into_launch() -> &'static str {
 
 pub fn scoped_launch_must_be_bound(name: &str) -> String {
     format!(
-        "a launch that borrows '{name}' must be bound to a local Task or waited directly \
-         (`Task<T> t = launch f(&{name});` or `wait launch f(&{name})`)"
+        "a launch that borrows '{name}' must be bound to a local Task, pushed into a local \
+         collection, or waited directly (`Task<T> t = launch f(&{name});`, \
+         `tasks.push(launch f(&{name}));` or `wait launch f(&{name})`)"
+    )
+}
+
+pub fn task_collection_misused(holder: &str, name: &str) -> String {
+    format!(
+        "`{holder}` holds tasks that borrow `{name}`: use it only through push, len, \
+         is_empty, clear and drop, or `wait` on pop, take, swap_remove or get"
+    )
+}
+
+pub fn task_collection_mutable_borrow(name: &str) -> String {
+    format!(
+        "a launch pushed into a collection can only borrow with `&`: its tasks may run \
+         at once, so `&mut {name}` would be shared"
+    )
+}
+
+pub fn task_collection_declared_too_early(name: &str, holder: &str) -> String {
+    format!(
+        "a launch that borrows '{name}' can only be pushed into a local collection \
+         declared after '{name}', so the collection joins its tasks first; `{holder}` is not"
     )
 }
 

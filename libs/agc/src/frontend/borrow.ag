@@ -2190,6 +2190,64 @@ void borrow_mark_task_loan(BorrowAnalyzer* analyzer, Vec<Binding>* bindings,
     if (holder != (Binding*)0) { loan.holder_binding_start = holder.span.start; }
 }
 
+/// Marks the newest loan as a task loan held by collection `holder`.
+void borrow_mark_collection_loan(BorrowAnalyzer* analyzer, Binding* holder) {
+    Loan* loan = analyzer.loans.get_ptr(analyzer.loans.len() - 1);
+    loan.task = true;
+    if (holder != (Binding*)0) { loan.holder_binding_start = holder.span.start; }
+}
+
+/// Adds the loans of local collection `site.collection` for the places the
+/// launch at `site_index` borrows. They run from the collection's
+/// declaration to the end of its block: a push in a loop runs again after
+/// code that precedes it, and the collection's drop is the join.
+void borrow_add_collection_loans(BorrowAnalyzer* analyzer, Vec<SyntaxNode*>* leaves,
+                                 Vec<Binding>* bindings, ScopedLaunches* launches,
+                                 i64 site_index) {
+    ScopedLaunchSite* site = launches.sites.get_ptr(site_index);
+    SyntaxNode* scope = site.collection.parent;
+    i64 release = -1;
+    i64 i = 0;
+    while (i < leaves.len()) {
+        if (borrow_node_within(leaves.get(i), scope)) { release = i; }
+        i += 1;
+    }
+    u32 holder_id = analyzer.names.intern(site.collection.text);
+    Binding* holder = scoped_binding_at(bindings, site.collection);
+    i = 0;
+    while (i < launches.borrows.len()) {
+        ScopedLaunchBorrow* borrow = launches.borrows.get_ptr(i);
+        i += 1;
+        if (borrow.site != site_index || borrow.root == (SyntaxNode*)0) { continue; }
+        // The scoped-launch pass rejects `&mut` and places declared after
+        // the collection; a loan for them would only add a confusing error.
+        Binding* root = scoped_visible_binding(bindings, borrow.root);
+        if (borrow.mutable || (root != (Binding*)0 && root.kind != BindingKind.Parameter
+                               && root.name_node.span.start > site.collection.span.start)) {
+            continue;
+        }
+        u32 root_id = analyzer.names.intern(borrow.root.text);
+        if (!borrow.address) {
+            // A forwarded reference keeps what it borrows borrowed too.
+            i64 count = analyzer.loans.len();
+            i64 loan_index = 0;
+            while (loan_index < count) {
+                Loan inherited = analyzer.loans.get(loan_index);
+                if (inherited.active && inherited.persistent && inherited.holder_id == root_id) {
+                    inherited.holder_id = holder_id;
+                    inherited.release_index = release;
+                    analyzer.loans.push(inherited);
+                    borrow_mark_collection_loan(analyzer, holder);
+                }
+                loan_index += 1;
+            }
+        }
+        analyzer.add(Place.new(root_id), borrow.root.text, borrow.first.span,
+            LoanKind.Shared, true, holder_id, release);
+        borrow_mark_collection_loan(analyzer, holder);
+    }
+}
+
 /// Returns true when identifier `node` is one whole argument of a call.
 bool borrow_is_whole_call_argument(SyntaxNode* node) {
     SyntaxNode* group = node.parent;
@@ -2268,6 +2326,14 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
     i64 i = 0;
     while (i < leaves.len()) {
         SyntaxNode* node = leaves.get(i);
+        i64 collection_site = 0;
+        while (collection_site < launches.sites.len()) {
+            if (launches.sites.get_ptr(collection_site).collection == node) {
+                borrow_add_collection_loans(analyzer, &leaves, &bindings, &launches,
+                    collection_site);
+            }
+            collection_site += 1;
+        }
         // A reference variable passed to a scoped launch stays borrowed by
         // the task, as does everything that variable itself borrows.
         ScopedLaunchBorrow* task_reference = node.token_kind == TokenKind.Identifier

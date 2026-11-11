@@ -2,7 +2,11 @@
 // parameters borrows from its launcher, so the task must be joined before
 // those borrows end. This pass finds such launches, checks where they appear
 // and that the local owning the task never leaves its scope; the borrow pass
-// turns the recorded arguments into loans.
+// turns the recorded arguments into loans. A launch may also be pushed into
+// a local collection declared after everything it borrows, so the
+// collection's drop joins its tasks first; those tasks may run at once, so
+// they borrow only with `&`, and the collection is used only through a few
+// methods (see `scoped_collection_use_allowed`).
 import std.mem.memory;
 import std.mem.vec;
 import std.string;
@@ -24,6 +28,9 @@ struct ScopedLaunchSite {
     // The holder token of a `wait` that is a straight-line statement of the
     // holder's block. Null when the task is joined at the end of that block.
     SyntaxNode* join;
+    // Name node declaring the local collection the launch is pushed into.
+    // Null for a launch bound to a Task local or waited in place.
+    SyntaxNode* collection;
     // False when the launch is neither bound to a local nor waited in place.
     bool placed;
 }
@@ -214,10 +221,39 @@ SyntaxNode* scoped_straight_line_join(Vec<Binding>* bindings, SyntaxNode* holder
     return (SyntaxNode*)0;
 }
 
-/// Decides where a scoped launch sits: bound by a local declaration, waited
-/// in place, or misplaced.
+/// Places a launch that is the whole argument of `holder.push(...)` on a
+/// local `holder`. Returns false when the launch is not such an argument.
+bool scoped_place_pushed_launch(Vec<Binding>* bindings, SyntaxNode* launch_token,
+                                SyntaxNode* arguments, ScopedLaunchSite* site) {
+    SyntaxNode* group = launch_token.parent;
+    if (group == (SyntaxNode*)0 || group.kind != NodeKind.Parenthesized
+        || group.first_child != launch_token || arguments.next_sibling != (SyntaxNode*)0) {
+        return false;
+    }
+    SyntaxNode* method = binding_previous_sibling(group);
+    SyntaxNode* dot = method == (SyntaxNode*)0 ? (SyntaxNode*)0 : binding_previous_sibling(method);
+    SyntaxNode* receiver = dot == (SyntaxNode*)0 ? (SyntaxNode*)0 : binding_previous_sibling(dot);
+    if (!scoped_is_token(method, TokenKind.Identifier) || strcmp(method.text, "push") != 0
+        || !scoped_is_token(dot, TokenKind.Dot) || !scoped_is_token(receiver, TokenKind.Identifier)
+        || scoped_is_token(binding_previous_sibling(receiver), TokenKind.Dot)) {
+        return false;
+    }
+    Binding* declared = visible_binding(bindings, receiver.text, receiver);
+    if (declared != (Binding*)0
+        && (declared.kind == BindingKind.Variable || declared.kind == BindingKind.Let)) {
+        site.placed = true;
+        site.collection = declared.name_node;
+    }
+    return true;
+}
+
+/// Decides where a scoped launch sits: bound by a local declaration, pushed
+/// into a local collection, waited in place, or misplaced.
 void scoped_place_launch(Vec<Binding>* bindings, SyntaxNode* launch_token, SyntaxNode* arguments,
                          ScopedLaunchSite* site) {
+    if (scoped_place_pushed_launch(bindings, launch_token, arguments, site)) {
+        return;
+    }
     SyntaxNode* previous = binding_previous_sibling(launch_token);
     if (scoped_is_token(previous, TokenKind.Wait)) {
         // A deferred launch would start after later code already ran.
@@ -294,6 +330,7 @@ void collect_scoped_launches(SyntaxNode* root, Vec<SyntaxNode*>* leaves,
             site.launch_token = launch_token;
             site.holder = (SyntaxNode*)0;
             site.join = (SyntaxNode*)0;
+            site.collection = (SyntaxNode*)0;
             site.placed = false;
             scoped_place_launch(bindings, launch_token, arguments, &site);
             i64 site_index = out.sites.len();
@@ -352,6 +389,77 @@ void scoped_check_holder_uses(Vec<SyntaxNode*>* leaves, Vec<Binding>* bindings,
     }
 }
 
+/// Returns true when use `use` of a collection holder is allowed: a call of
+/// push, len, is_empty, clear or drop, or `wait` on pop, take, swap_remove
+/// or get.
+bool scoped_collection_use_allowed(SyntaxNode* use) {
+    SyntaxNode* dot = use.next_sibling;
+    if (!scoped_is_token(dot, TokenKind.Dot)) { return false; }
+    SyntaxNode* method = dot.next_sibling;
+    if (!scoped_is_token(method, TokenKind.Identifier)) { return false; }
+    str name = method.text;
+    if (strcmp(name, "push") == 0 || strcmp(name, "len") == 0 || strcmp(name, "is_empty") == 0
+        || strcmp(name, "clear") == 0 || strcmp(name, "drop") == 0) {
+        return true;
+    }
+    bool takes_task = strcmp(name, "pop") == 0 || strcmp(name, "take") == 0
+        || strcmp(name, "swap_remove") == 0 || strcmp(name, "get") == 0;
+    return takes_task && scoped_is_token(binding_previous_sibling(use), TokenKind.Wait);
+}
+
+/// Reports each use of collection holder `declared` that
+/// `scoped_collection_use_allowed` rejects.
+void scoped_check_collection_uses(Vec<SyntaxNode*>* leaves, Vec<Binding>* bindings,
+                                  SyntaxNode* declared, SyntaxNode* launch_token, str borrowed,
+                                  DiagnosticBag* diagnostics, bool* failed) {
+    i64 i = 1;
+    while (i < leaves.len()) {
+        SyntaxNode* use = leaves.get(i);
+        if (use != declared && use.token_kind == TokenKind.Identifier
+            && strcmp(use.text, declared.text) == 0
+            && leaves.get(i - 1).token_kind != TokenKind.Dot
+            && !scoped_collection_use_allowed(use)) {
+            Binding* used = visible_binding(bindings, use.text, use);
+            if (used != (Binding*)0 && used.name_node == declared) {
+                diagnostics.error_with_note(use.span,
+                    task_collection_misused(declared.text, borrowed),
+                    launch_token.span, note_task_launched_here());
+                *failed = true;
+            }
+        }
+        i += 1;
+    }
+}
+
+/// Checks the borrows of a launch pushed into a collection: only shared
+/// borrows, each of a place declared before the collection.
+void scoped_check_collection_borrows(Vec<Binding>* bindings, ScopedLaunches* launches,
+                                     i64 site_index, SyntaxNode* collection,
+                                     DiagnosticBag* diagnostics, bool* failed) {
+    ScopedLaunchSite* site = launches.sites.get_ptr(site_index);
+    i64 i = 0;
+    while (i < launches.borrows.len()) {
+        ScopedLaunchBorrow* borrow = launches.borrows.get_ptr(i);
+        i += 1;
+        if (borrow.site != site_index || borrow.root == (SyntaxNode*)0) { continue; }
+        Binding* root = scoped_visible_binding(bindings, borrow.root);
+        bool mutable = borrow.mutable
+            || (!borrow.address && root != (Binding*)0
+                && root.declared_type.kind == ProjectionTypeKind.Reference
+                && root.declared_type.is_mutable);
+        if (mutable) {
+            diagnostics.error(site.launch_token.span, task_collection_mutable_borrow(borrow.root.text));
+            *failed = true;
+        }
+        if (root != (Binding*)0 && root.kind != BindingKind.Parameter
+            && root.name_node.span.start > collection.span.start) {
+            diagnostics.error(site.launch_token.span,
+                task_collection_declared_too_early(borrow.root.text, collection.text));
+            *failed = true;
+        }
+    }
+}
+
 /// Checks the scoped launches of one function or method body.
 void check_scoped_launch_body(SyntaxNode* root, SyntaxNode* parameters, SyntaxNode* body,
                               CfgSet* cfg, DiagnosticBag* diagnostics, bool* failed) {
@@ -390,6 +498,20 @@ void check_scoped_launch_body(SyntaxNode* root, SyntaxNode* parameters, SyntaxNo
             *failed = true;
         } else if (site.holder != (SyntaxNode*)0) {
             scoped_check_holder_uses(&leaves, &bindings, site, borrowed, diagnostics, failed);
+        } else if (site.collection != (SyntaxNode*)0) {
+            scoped_check_collection_borrows(&bindings, &launches, i, site.collection,
+                diagnostics, failed);
+            // Several pushes may share one collection; check its uses once.
+            bool first = true;
+            i64 earlier = 0;
+            while (earlier < i) {
+                if (launches.sites.get_ptr(earlier).collection == site.collection) { first = false; }
+                earlier += 1;
+            }
+            if (first) {
+                scoped_check_collection_uses(&leaves, &bindings, site.collection,
+                    site.launch_token, borrowed, diagnostics, failed);
+            }
         }
         i += 1;
     }

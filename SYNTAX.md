@@ -1168,8 +1168,9 @@ i64 main() {
 
 The compiler joins a borrowing task before its borrows end:
 
-- It must initialize a local `Task` (`Task<T> t = launch f(&x);`) or be
-  waited directly (`wait launch f(&x)`). The local cannot be returned,
+- It must initialize a local `Task` (`Task<T> t = launch f(&x);`), be
+  pushed into a local collection (below), or be waited directly
+  (`wait launch f(&x)`). The local cannot be returned,
   moved, passed by value or stored; only `wait t` or `defer wait t` consume
   it, and `t.started()` reads it.
 - An unwaited borrowing task is joined when its local leaves scope,
@@ -1181,6 +1182,26 @@ The compiler joins a borrowing task before its borrows end:
   inside a condition does not.
 - A reference parameter can be forwarded: `launch f(r)` with a `&T` or
   `&mut T` variable `r` keeps `r`'s loans until the join.
+- A borrowing launch can also be pushed into a local collection, for a
+  worker pool. The collection's drop joins its tasks, so it must be declared
+  after everything they borrow. Its tasks may run at once, so they borrow
+  only with `&`, and the borrowed places stay read-only from the
+  collection's declaration to the end of its scope. Use the collection only
+  through `push`, `len`, `is_empty`, `clear` and `drop`, or `wait` on `pop`,
+  `take`, `swap_remove` or `get`:
+
+  ```silver
+  i64 total = 0;
+  {
+      Vec<Task<i64>> pool = Vec<Task<i64>>.new();
+      for (i64 i = 0; i < 4; i += 1) {
+          pool.push(launch sum(&data));
+      }
+      while (pool.len() > 0) {
+          total += wait pool.pop();
+      }
+  }
+  ```
 
 Stage1 recognizes a borrowed launch only when the callee is declared in the
 same file; a borrowed launch of an imported function is rejected.
