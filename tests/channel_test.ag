@@ -13,6 +13,8 @@
 //   4. Mutex + WaitGroup: 4 threads each do 10000 RawMutex-guarded increments
 //      of a shared counter, then done(); the coordinator wait_all()s and
 //      verifies the exact total (any lost update would read less).
+//   5. Owned elements: a Channel<String> crosses the compaction threshold
+//      and is destroyed with values still queued.
 //
 // Synchronization failures (lost wake, lost update, out-of-order recv,
 // unfreed channel buffer) surface as a non-zero exit code; leak-check and
@@ -22,6 +24,7 @@ import std.thread;
 import std.atomic;
 import std.sync;
 import std.channel;
+import std.string;
 import std.sys.raw.thread;
 import std.sys.entry;
 
@@ -113,6 +116,23 @@ i64 main() {
     i64 v3 = g_ch3.recv() ? -1;   // blocks until producer_slow sends
     @assert(!(v3 != 777), "v3 != 777");
     @assert(!(thread_join(h3) < 0), "thread_join(h3) < 0");
+
+    // Test 5: owned elements. Received Strings belong to the receiver; the
+    // compaction at 1024 receives and destroy() must release only the ten
+    // still queued (leak-check fails on a double free or a leak).
+    Channel<String> owned = Channel<String>.new();
+    for (i64 i = 0; i < 1100; i = i + 1) {
+        owned.send(String.from_str("owned element"));
+    }
+    i64 owned_bytes = 0;
+    for (i64 i = 0; i < 1090; i = i + 1) {
+        Optional<String> got = owned.recv();
+        String text = got.unwrap();
+        owned_bytes = owned_bytes + text.len();
+    }
+    @assert(!(owned_bytes != 1090 * 13), "owned_bytes != 1090 * 13");
+    @assert(!(owned.len() != 10), "owned.len() != 10");
+    owned.destroy();
 
     // Free the channel buffers so leak-check sees a clean exit.
     g_ch.destroy();
