@@ -1890,6 +1890,10 @@ impl ExprLowerer {
         if (entry.kind == TypeKind.Named) {
             str name = self.types.names.get(entry.name_id);
             if (strlen(name) == 0) { return false; }
+            // `Task<T>` is the builtin launch handle; it has no declaration.
+            if (strcmp(name, "Task") == 0) {
+                return entry.count == 1 && self.is_valid_type(self.types.type_args.get(entry.inner));
+            }
             u32 probe_id = self.types.names.intern(name);
             i64 si = self.types.subst.len() - 1;
             while (si >= 0) {

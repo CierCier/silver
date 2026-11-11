@@ -52,7 +52,15 @@ struct TaskRecord {
     i64 pack;    // launch pack ptr (compiler-owned); 0 for spawn(): freed by the waiter
     i32 ctid;    // kernel-managed tid via CLONE_CHILD_CLEARTID (cleared to 0 upon thread exit)
     i64 scoped;  // 1 for a launch that borrows from its launcher: joined when the handle drops
+    i64 generation; // bumped when a waiter reclaims the slot; older handles are stale
 }
+
+/// A `launch` handle is `generation << TASK_HANDLE_SLOT_BITS | (slot + 1)`,
+/// so it is never 0 (the failed-launch value) and a copy of a handle that
+/// was already waited no longer matches its slot once the slot is reused.
+const i64 TASK_HANDLE_SLOT_BITS = 7;
+/// Mask for the slot bits of a task handle.
+const i64 TASK_HANDLE_SLOT_MASK = 127;
 
 /// Thread table and its guard. .bss, zero-initialized by the OS loader.
 /// Internal: guard with `thread_lock_acquire`/`thread_lock_release`.
@@ -142,6 +150,39 @@ void thread_await_exit(TaskRecord* rec) {
     }
 }
 
+/// Returns the handle `launch` gives out for the task in `rec`.
+i64 task_handle(TaskRecord* rec) {
+    i64 slot = ((i64)rec - (i64)&g_threads[0]) / @size(TaskRecord);
+    i64 generation = __atomic_load_i64(&rec.generation, ATOMIC_ACQUIRE);
+    return (generation << TASK_HANDLE_SLOT_BITS) | (slot + 1);
+}
+
+/// Returns the record `handle` names, or null when the handle is 0 or stale:
+/// its task was already waited, so the slot may hold another task.
+TaskRecord* task_handle_record(i64 handle) {
+    i64 slot = (handle & TASK_HANDLE_SLOT_MASK) - 1;
+    if (slot < 0 || slot >= thread_registry_capacity()) {
+        return (TaskRecord*)0;
+    }
+    TaskRecord* rec = &g_threads[slot];
+    if (__atomic_load_i64(&rec.generation, ATOMIC_ACQUIRE) != (handle >> TASK_HANDLE_SLOT_BITS)) {
+        return (TaskRecord*)0;
+    }
+    return rec;
+}
+
+/// Ends a stale handle so no later task can reuse it. Caller holds the lock.
+void task_retire_generation(TaskRecord* rec) {
+    __atomic_store_i64(&rec.generation, rec.generation + 1, ATOMIC_RELEASE);
+}
+
+/// Prints `message` to stderr and exits with 134 like `abort()`.
+void task_abort(str message) {
+    sys_write(2, (i64)message, strlen(message));
+    sys_kill(sys_getpid(), 6);  // SIGABRT
+    sys_exit_group(134);
+}
+
 /// Join one task: wait until the child fn returned, then reclaim the slot.
 /// Returns the child's tid. Silently returns -1 for a null record.
 i64 thread_join(TaskRecord* rec) {
@@ -152,6 +193,7 @@ i64 thread_join(TaskRecord* rec) {
     thread_lock_acquire();
     i64 tid = rec.tid;
     rec.tid = 0;
+    task_retire_generation(rec);
     thread_lock_release();
     // The child has exited (done flag set): release its OS resources. On
     // Windows tid is the CreateThread handle and must be closed.
@@ -161,18 +203,22 @@ i64 thread_join(TaskRecord* rec) {
     return tid;
 }
 
-/// Wait for a `launch`ed task (T1). Spins on the done flag, then atomically
-/// claims and returns its pack so the caller can read the result and free it.
-/// v1 has no lazy slot-reap (a slot is reclaimed only here or by join_all at
-/// process exit), so `rec` stays stable while any waiter may reference it and
-/// the returned pack is never freed concurrently.
-u8* __silver_wait_done(i64 rec) {
-    TaskRecord* r = (TaskRecord*)rec;
+/// Wait for a `launch`ed task and claim its pack so the caller can read the
+/// result and free it. Aborts when `handle` is stale: a copy of a handle
+/// whose task was already waited. Waiting one task from two threads at once
+/// is not supported. Internal: called by compiler-generated code with a
+/// non-zero handle.
+u8* __silver_wait_done(i64 handle) {
+    TaskRecord* r = task_handle_record(handle);
     if (r == (TaskRecord*)0) {
-        return (u8*)0;
+        task_abort("wait: task was already waited\n");
     }
     thread_await_exit(r);
     thread_lock_acquire();
+    if (r.generation != (handle >> TASK_HANDLE_SLOT_BITS)) {
+        thread_lock_release();
+        task_abort("wait: task was already waited\n");
+    }
     u8* pack = (u8*)r.pack;
     i64 tid = r.tid;
     r.tid = 0;
@@ -181,6 +227,7 @@ u8* __silver_wait_done(i64 rec) {
     r.done = 0;
     r.pack = 0;
     r.scoped = 0;
+    task_retire_generation(r);
     thread_lock_release();
     // The child has exited: release its OS resources (Windows CreateThread
     // handle). Returned packs are task results, not thread handles.
@@ -194,22 +241,20 @@ u8* __silver_wait_done(i64 rec) {
 /// stack mmap failure, or clone error). Exits with 134 like `abort()`.
 /// Internal: called by compiler-generated code; never returns.
 void __silver_task_not_started() {
-    str message = "wait: task failed to start; check `task.started()` after `launch`\n";
-    sys_write(2, (i64)message, strlen(message));
-    sys_kill(sys_getpid(), 6);  // SIGABRT
-    sys_exit_group(134);
+    task_abort("wait: task failed to start; check `task.started()` after `launch`\n");
 }
 
 /// Join a task handle that is leaving scope unwaited. A scoped task (one
 /// launched with borrowed arguments) is joined and its pack returned so the
-/// caller can drop the result and free the pack. Returns null for a null
-/// handle or a detached task, which keeps running until the exit-time join.
-u8* __silver_task_join_scoped(i64 rec) {
-    TaskRecord* r = (TaskRecord*)rec;
+/// caller can drop the result and free the pack. Returns null for a failed
+/// launch, a stale copy of an already-waited handle, or a detached task,
+/// which keeps running until the exit-time join.
+u8* __silver_task_join_scoped(i64 handle) {
+    TaskRecord* r = task_handle_record(handle);
     if (r == (TaskRecord*)0 || r.scoped == 0) {
         return (u8*)0;
     }
-    return __silver_wait_done(rec);
+    return __silver_wait_done(handle);
 }
 
 /// Join every live thread. Called by `_start` before I/O flush / exit.

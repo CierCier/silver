@@ -13,6 +13,8 @@
 //   5. `wait launch f(&x)` needs no named task.
 //   6. An unwaited task's result is dropped exactly once when the task is
 //      joined; a waited result is moved out, not dropped.
+//   7. A stale copy of a waited handle, left in a Vec, does nothing when the
+//      Vec drops, even after its registry slot runs another borrowing task.
 //
 // Exit 0 on success; distinct non-zero codes per failure.
 
@@ -57,6 +59,10 @@ Counted make_counted(&i64 value) {
     Counted counted;
     counted.value = *value;
     return counted;
+}
+
+i64 twice(i64 value) {
+    return value * 2;
 }
 
 i64 leave_early(bool early) {
@@ -110,6 +116,19 @@ i64 main() {
     Counted kept = wait counted;
     if (__atomic_load_i64(&g_drops, ATOMIC_SEQ_CST) != 1 || kept.value != 3) { return 8; }
 
+    // 7. Stale handle copies.
+    Vec<Task<i64>> tasks = Vec<Task<i64>>.new();
+    tasks.push(launch twice(1));
+    tasks.push(launch twice(2));
+    if (wait tasks.get(0) != 2) { return 9; }   // a copy: the Vec keeps a stale handle
+    i64 flag = 0;
+    {
+        Task<void> reuse = launch slow_write(&mut flag, 1);
+        tasks.clear();   // must not join `reuse` through the stale copy
+    }
+    if (flag != 1) { return 10; }
+
+    tasks.drop();
     out.drop();
     values.drop();
     return 0;

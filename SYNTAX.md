@@ -1253,6 +1253,11 @@ All futex-based primitives are seq_cst by default.
   a detached task keeps its slot until a waiter or the exit-time join-all
   reaps it. A launch that finds no free slot yields a task whose
   `started()` is false.
+- A `Task` can be stored in a collection. A bitwise copy of a handle, such as
+  one read with `Vec.get`, becomes stale once any copy is waited: dropping a
+  stale copy does nothing, and waiting it aborts. Move handles out with
+  `pop`, `take` or `swap_remove` instead. Waiting one task from two threads
+  at once is not supported.
 - The runtime entry (`std.sys.entry`) is imported automatically and provides
   `_start`; every binary links statically against the pure-Silver runtime —
   there is no libc, and `--dynamic-runtime` no longer exists.
