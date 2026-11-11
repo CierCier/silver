@@ -181,8 +181,8 @@ i32 run_verb_case(str verb, str body, str headers) {
     g_job.body_len = 0;
     if (body != (str)0) { g_job.body_len = strlen(body); }
     g_job.status = -1;
-    TaskRecord* server_handle = thread_spawn(server_main, 0);
-    @assert(!(server_handle == (TaskRecord*)0), "server_handle == (TaskRecord*)0");
+    Task<void> server_handle = launch server_main(0);
+    @assert(server_handle.started(), "launch server_main");
 
     HttpClient client = HttpClient.new();
     String url = build_url(port, "/submit");
@@ -196,11 +196,12 @@ i32 run_verb_case(str verb, str body, str headers) {
     else if (verb == "PUT") { response_result = client.put((str)url.data, body); }
     else if (verb == "HEAD") { response_result = client.head((str)url.data); }
     else { response_result = client.get((str)url.data); }
-    if (response_result.failed()) { thread_join(server_handle); return 8; }
+    // The server handles one request; join it before any early return.
+    wait server_handle;
+    if (response_result.failed()) { return 8; }
     HttpResponse response = response_result.unwrap();
-    if (response.status != 200) { thread_join(server_handle); return 9; }
-    if (verb == "GET" && !response.body.equals("hello")) { thread_join(server_handle); return 15; }
-    @assert(!(thread_join(server_handle) < 0), "thread_join(server_handle) < 0");
+    if (response.status != 200) { return 9; }
+    if (verb == "GET" && !response.body.equals("hello")) { return 15; }
     if (g_job.status != 0) { return g_job.status; }
 
     // Verify what the server captured.
@@ -372,18 +373,19 @@ i32 run_redirect_case(str first_wire, str second_wire, str method, str body,
     g_second_body_len = 0;
     if (expected_second_body != (str)0) { g_second_body_len = strlen(expected_second_body); }
     g_job.status = -1;
-    TaskRecord* server_handle = thread_spawn(redirect_server_main, 0);
-    @assert(!(server_handle == (TaskRecord*)0), "server_handle == (TaskRecord*)0");
+    Task<void> server_handle = launch redirect_server_main(0);
+    @assert(server_handle.started(), "launch redirect_server_main");
 
     HttpClient client = HttpClient.new();
     String url = build_url(port, "/start");
     HttpRequest req = HttpRequest.new(method, (str)url.data, body);
     Result<HttpResponse, Error> response_result = client.do(&req);
-    if (response_result.failed()) { thread_join(server_handle); return 8; }
+    // The server handles one redirect chain; join it before any early return.
+    wait server_handle;
+    if (response_result.failed()) { return 8; }
     HttpResponse response = response_result.unwrap();
-    if (response.status != 200) { thread_join(server_handle); return 9; }
-    if (!response.body.equals("hello")) { thread_join(server_handle); return 10; }
-    @assert(!(thread_join(server_handle) < 0), "thread_join(server_handle) < 0");
+    if (response.status != 200) { return 9; }
+    if (!response.body.equals("hello")) { return 10; }
     if (g_job.status != 0) { return g_job.status; }
 
     String head = String.from_str((str)&g_req_head[0]);
@@ -552,15 +554,15 @@ i32 run_redirect_case(str first_wire, str second_wire, str method, str body,
         g_job.body_len = 0;
         g_second_body_len = 0;
         g_job.status = -1;
-        TaskRecord* server_handle = thread_spawn(redirect_loop_server_main, 0);
-        if (server_handle == (TaskRecord*)0) { assert_true(false, "spawn server"); }
+        Task<void> server_handle = launch redirect_loop_server_main(0);
+        if (!server_handle.started()) { assert_true(false, "spawn server"); }
         else {
             HttpClient client = HttpClient.new();
             client.set_max_redirects(2);
             String url = build_url(port, "/start");
             HttpRequest req = HttpRequest.new("GET", (str)url.data, (str)0);
             Result<HttpResponse, Error> response_result = client.do(&req);
-            thread_join(server_handle);
+            wait server_handle;
             assert_true(response_result.failed(), "redirect limit errors");
             if (response_result.failed()) {
                 Error e = response_result.get_error();

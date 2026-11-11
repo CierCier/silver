@@ -1,4 +1,6 @@
 // compile_flags: --static-runtime
+// Thread registry slot reuse: 200 sequential launch/wait cycles. The
+// registry holds 64 slots, so this fails unless `wait` reclaims each one.
 import std.thread;
 import std.sys.entry;
 
@@ -10,11 +12,11 @@ void worker(i64 val) {
 
 i32 main() {
     for (i64 i = 0; i < 200; i = i + 1) {
-        TaskRecord* t = thread_spawn((void(i64))worker, 1);
-        if (t == (TaskRecord*)0) {
+        Task<void> t = launch worker(1);
+        if (!t.started()) {
             return 1;
         }
-        thread_join(t);
+        wait t;
     }
     if (counter != 200) {
         return 2;

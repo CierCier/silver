@@ -96,8 +96,8 @@ i32 main() {
         g_consumed_sum = 0;
         g_consumed_count = 0;
 
-        TaskRecord* hc = thread_spawn(consumer_worker, 0);
-        @assert(!(hc == (TaskRecord*)0), "failed to spawn consumer_worker");
+        Task<void> hc = launch consumer_worker(0);
+        @assert(hc.started(), "failed to spawn consumer_worker");
 
         // Send 50 items into capacity-4 channel (forces blocking backpressure)
         i64 expected_sum = 0;
@@ -110,7 +110,7 @@ i32 main() {
         g_bounded_ch.close();
         @assert(g_bounded_ch.is_closed(), "channel is_closed() is true");
 
-        @assert(!(thread_join(hc) < 0), "failed to join consumer_worker");
+        wait hc;
         assert_eq_i64(50, g_consumed_count, "consumer received all 50 items");
         assert_eq_i64(expected_sum, g_consumed_sum, "consumer received correct total sum");
 

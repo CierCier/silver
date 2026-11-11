@@ -127,8 +127,8 @@ i32 main() {
         g_per_conn = 1;
         g_accepts = 0;
         g_status = -1;
-        TaskRecord* server_handle = thread_spawn(stream_server_main, 0);
-        if (server_handle == (TaskRecord*)0) { assert_true(false, "spawn"); }
+        Task<void> server_handle = launch stream_server_main(0);
+        if (!server_handle.started()) { assert_true(false, "spawn"); }
         else {
             HttpClient client = HttpClient.new();
             String url = build_url(port, "/big");
@@ -146,7 +146,7 @@ i32 main() {
             assert_true(body.equals("0123456789abcdefghij"), "full streamed body");
             body.drop();
             stream.close();
-            assert_true(thread_join(server_handle) >= 0, "join");
+            wait server_handle;
             assert_eq_i64(g_status, 0, "server status");
             assert_eq_i64(g_accepts, 1, "one connection");
         }
@@ -166,8 +166,8 @@ i32 main() {
         g_per_conn = 1;
         g_accepts = 0;
         g_status = -1;
-        TaskRecord* server_handle = thread_spawn(stream_server_main, 0);
-        if (server_handle == (TaskRecord*)0) { assert_true(false, "spawn"); }
+        Task<void> server_handle = launch stream_server_main(0);
+        if (!server_handle.started()) { assert_true(false, "spawn"); }
         else {
             HttpClient client = HttpClient.new();
             String url = build_url(port, "/chunked");
@@ -181,7 +181,7 @@ i32 main() {
             assert_true(body.equals("helloworld"), "chunked body reassembled");
             body.drop();
             stream.close();
-            assert_true(thread_join(server_handle) >= 0, "join");
+            wait server_handle;
             assert_eq_i64(g_status, 0, "server status");
         }
     }
@@ -200,8 +200,8 @@ i32 main() {
         g_per_conn = 1;
         g_accepts = 0;
         g_status = -1;
-        TaskRecord* server_handle = thread_spawn(stream_server_main, 0);
-        if (server_handle == (TaskRecord*)0) { assert_true(false, "spawn"); }
+        Task<void> server_handle = launch stream_server_main(0);
+        if (!server_handle.started()) { assert_true(false, "spawn"); }
         else {
             HttpClient client = HttpClient.new();
             String url = build_url(port, "/close");
@@ -215,7 +215,7 @@ i32 main() {
             assert_true(body.equals("stream-body-data"), "close-delimited body");
             body.drop();
             stream.close();
-            assert_true(thread_join(server_handle) >= 0, "join");
+            wait server_handle;
             assert_eq_i64(g_status, 0, "server status");
         }
     }
@@ -242,8 +242,8 @@ i32 main() {
         g_per_conn = 1;
         g_accepts = 0;
         g_status = -1;
-        TaskRecord* server_handle = thread_spawn(stream_server_main, 0);
-        if (server_handle == (TaskRecord*)0) { assert_true(false, "spawn"); }
+        Task<void> server_handle = launch stream_server_main(0);
+        if (!server_handle.started()) { assert_true(false, "spawn"); }
         else {
             HttpClient client = HttpClient.new();
             String url = build_url(port, "/big");
@@ -266,7 +266,7 @@ i32 main() {
             assert_true(pattern_ok, "body content intact across refills");
             body.drop();
             stream.close();
-            assert_true(thread_join(server_handle) >= 0, "join");
+            wait server_handle;
             assert_eq_i64(g_status, 0, "server status");
         }
         wire.drop();
@@ -286,8 +286,8 @@ i32 main() {
         g_per_conn = 2;
         g_accepts = 0;
         g_status = -1;
-        TaskRecord* server_handle = thread_spawn(stream_server_main, 0);
-        if (server_handle == (TaskRecord*)0) { assert_true(false, "spawn"); }
+        Task<void> server_handle = launch stream_server_main(0);
+        if (!server_handle.started()) { assert_true(false, "spawn"); }
         else {
             HttpClient client = HttpClient.new();
             String u1 = build_url(port, "/a");
@@ -304,7 +304,7 @@ i32 main() {
             Result<HttpResponse, Error> r2 = client.get((str)u2.data);
             u2.drop();
             assert_true(!r2.failed(), "follow-up get");
-            assert_true(thread_join(server_handle) >= 0, "join");
+            wait server_handle;
             assert_eq_i64(g_status, 0, "server status");
             assert_eq_i64(g_accepts, 1, "connection reused after stream close");
         }
@@ -324,8 +324,8 @@ i32 main() {
         g_per_conn = 1;
         g_accepts = 0;
         g_status = -1;
-        TaskRecord* server_handle = thread_spawn(stream_server_main, 0);
-        if (server_handle == (TaskRecord*)0) { assert_true(false, "spawn"); }
+        Task<void> server_handle = launch stream_server_main(0);
+        if (!server_handle.started()) { assert_true(false, "spawn"); }
         else {
             HttpClient client = HttpClient.new();
             String url = build_url(port, "/start");
@@ -339,7 +339,7 @@ i32 main() {
             assert_true(body.equals("hello"), "final streamed body");
             body.drop();
             stream.close();
-            assert_true(thread_join(server_handle) >= 0, "join");
+            wait server_handle;
             assert_eq_i64(g_status, 0, "server status");
         }
     }

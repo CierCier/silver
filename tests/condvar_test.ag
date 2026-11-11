@@ -5,6 +5,7 @@ import std.thread;
 import std.atomic;
 import std.sync;
 import std.sys.raw.thread;
+import std.mem.vec;
 import std.sys.entry;
 
 Mutex<i64> g_mu;
@@ -12,7 +13,6 @@ Condvar g_cond;
 i64 g_ready = 0;
 i64 g_work_done = 0;
 WaitGroup g_wg;
-i64 g_workers[4];
 
 void worker_single(i64 _arg) {
     Guard<i64> g = g_mu.lock();
@@ -39,8 +39,8 @@ i32 main() {
     {
         g_ready = 0;
         g_work_done = 0;
-        TaskRecord* h = thread_spawn(worker_single, 0);
-        @assert(!(h == (TaskRecord*)0), "failed to spawn worker_single");
+        Task<void> h = launch worker_single(0);
+        @assert(h.started(), "failed to spawn worker_single");
 
         // Give the worker time to block on the condvar
         for (i64 i = 0; i < 500; i = i + 1) {
@@ -53,7 +53,7 @@ i32 main() {
             g_cond.notify_one();
         }
 
-        @assert(!(thread_join(h) < 0), "failed to join worker_single");
+        wait h;
         assert_eq_i64(42, g_work_done, "worker_single received notification and completed work");
     }
 
@@ -64,10 +64,11 @@ i32 main() {
         g_work_done = 0;
         g_wg.add(4);
 
+        Vec<Task<void>> workers = Vec<Task<void>>.new();
         for (i64 i = 0; i < 4; i = i + 1) {
-            TaskRecord* h = thread_spawn(worker_broadcast, 0);
-            @assert(!(h == (TaskRecord*)0), "failed to spawn worker_broadcast");
-            g_workers[i] = (i64)h;
+            Task<void> h = launch worker_broadcast(0);
+            @assert(h.started(), "failed to spawn worker_broadcast");
+            workers.push(move h);
         }
 
         // Give workers time to block on the condvar
@@ -82,8 +83,8 @@ i32 main() {
         }
 
         g_wg.wait_all();
-        for (i64 i = 0; i < 4; i = i + 1) {
-            @assert(!(thread_join((TaskRecord*)g_workers[i]) < 0), "failed to join worker_broadcast");
+        while (workers.len() > 0) {
+            wait workers.pop();
         }
 
         assert_eq_i64(4, g_work_done, "all 4 broadcast workers woke and completed");
