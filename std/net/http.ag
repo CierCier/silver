@@ -2755,7 +2755,9 @@ impl ServeMux {
     }
 
     /// Dispatches `r` to the matching route, or writes a 404/405 response.
-    void serve_http(&mut self, ResponseWriter* w, HttpRequest* r) {
+    /// Thread-safe: it only reads the route table, so worker threads share
+    /// one mux. Handlers run concurrently and must synchronize any state.
+    void serve_http(&self, ResponseWriter* w, HttpRequest* r) {
         Slice<u8> p = r.path_slice();
         str m = r.method;
         if (m == (str)0) { m = "GET"; }
@@ -3248,7 +3250,8 @@ impl HttpServer {
 
     /// Serves one plain connection (HTTP/1.x with keep-alive, or h2c prior
     /// knowledge) until it closes. Blocks; takes ownership of `stream`.
-    void serve_conn(&mut self, TcpStream stream) {
+    /// Thread-safe: worker threads serve connections on one shared server.
+    void serve_conn(&self, TcpStream stream) {
         HttpConnection conn = HttpConnection.from_stream(move stream);
         StreamIo io = http_transport_io(&conn);
 
@@ -3390,7 +3393,8 @@ impl HttpServer {
     }
 
     /// Serves one TLS connection (HTTP/1.1 or ALPN h2). Requires `tls_init()`.
-    void serve_tls_conn(&mut self, TcpStream stream, str cert_file, str key_file) {
+    /// Thread-safe: worker threads serve connections on one shared server.
+    void serve_tls_conn(&self, TcpStream stream, str cert_file, str key_file) {
         HttpConnection conn = HttpConnection.from_stream(move stream);
         Error err;
         bool ok = transport_tls_accept((void*)&conn.tls_state[0], conn.stream.sock.fd, cert_file, key_file, &err);
