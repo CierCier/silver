@@ -2588,6 +2588,14 @@ impl<'a> BorrowChecker<'a> {
                     }
                 }
             }
+            // `wait launch f(&mut x)` joins at once, so its borrows are those
+            // of a plain call. A named or pushed launch registers task loans
+            // where it is bound instead.
+            ast::ExpressionKind::Wait(operand) => {
+                if let ast::ExpressionKind::Launch(call) = operand.kind.as_ref() {
+                    self.check_expr(call);
+                }
+            }
             _ => {}
         }
     }
@@ -3136,4 +3144,25 @@ mod tests {
         assert!(errors.is_empty(), "replacement did not end the old field loan: {errors:?}");
     }
 
+    #[test]
+    fn an_in_place_wait_launch_checks_its_borrows() {
+        let callees = "i64 read(&i64 value) { return *value; }\n\
+                       void bump(&mut i64 value) { *value += 1; }\n";
+        let (_, borrow) = integrated_safety_errors(
+            &format!(
+                "{callees}i64 main() {{ i64 x = 1; Task<i64> t = launch read(&x);\n\
+                 wait launch bump(&mut x); return wait t; }}"
+            ),
+            28,
+        );
+        assert!(
+            borrow.iter().any(|error| error.message.starts_with("cannot borrow 'x' as mutable")),
+            "{borrow:?}"
+        );
+        let (_, borrow) = integrated_safety_errors(
+            &format!("{callees}i64 main() {{ i64 x = 1; wait launch bump(&mut x); return x; }}"),
+            29,
+        );
+        assert!(borrow.is_empty(), "{borrow:?}");
+    }
 }
