@@ -266,6 +266,18 @@ pub fn scoped_launch_must_be_bound(name: &str) -> String {
     )
 }
 
+/// `place` is quoted source text such as "`total`", or "this value".
+pub fn lock_needs_shared(place: &str, ty: &impl Display) -> String {
+    format!("{place} is `{ty}`, not shared: declare it `shared {ty}` to lock it")
+}
+
+pub fn shared_value_outside_lock(name: &str) -> String {
+    format!(
+        "`{name}` is shared between threads: read or change it inside \
+         `lock {name} {{ ... }}`"
+    )
+}
+
 pub fn task_collection_misused(holder: &str, name: &str) -> String {
     format!(
         "`{holder}` holds tasks that borrow `{name}`: use it only through push, len, \
@@ -285,9 +297,9 @@ pub fn task_collection_mutable_borrow(name: &str) -> String {
 /// several threads change `name`, for the user to choose between.
 pub fn thread_share_help(name: &str) -> String {
     format!(
-        " (help: to change `{name}` from several threads, make it a `Mutex<T>` and lock \
-         around each change, or use an atomic such as `AtomicI64` for a counter; then pass \
-         `&{name}` to each task)"
+        " (help: to change `{name}` from several threads, declare it `shared` and change it \
+         inside `lock {name} {{ ... }}`, or use an atomic such as `AtomicI64` for a counter; \
+         then pass `&{name}` to each task)"
     )
 }
 

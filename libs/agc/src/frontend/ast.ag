@@ -7,6 +7,7 @@ import std.recursion;
 import std.intern;
 import frontend.diagnostics;
 import frontend.lexer;
+import frontend.sync_sugar;
 
 /// The kind of a syntax tree node. `Token` nodes are leaves; the rest group
 /// children (items, delimited groups, and expression shapes).
@@ -611,6 +612,8 @@ void parse_cfg_block_items(Parser* self, SyntaxNode* item, i64 start, i64 end) {
 /// Parses `tokens` into `tree`, allocating nodes in `pool` and reporting
 /// errors to `diagnostics`. The tree borrows the tokens' text.
 void parse(TokenStream* tokens, DiagnosticBag* diagnostics, NodePool* pool, SyntaxTree* tree) {
+    // `shared` and `lock` are rewritten before the tree is built.
+    desugar_sync_sugar(tokens, diagnostics);
     Parser parser;
     parser.tokens = tokens;
     parser.diagnostics = diagnostics;

@@ -36,7 +36,7 @@ prove type checking, code generation, or runtime behavior. Stage0 lives under
 | Control flow, matching, and defers | [stage1 statement codegen](libs/agc/src/backend/llvm/stmt.ag) | [iterators](tests/iterator_ergonomics_test.ag), [guards](tests/guard_test.ag) |
 | Macros, attributes, cfg, and static values | [stage1 cfg](libs/agc/src/frontend/cfg.ag), [stage0 parser](bootstrap/stage0/agc/src/parser/prt_parser.rs) | [JSON serialization](tests/json_test.ag), [formatting](tests/fmt_test.ag) |
 | Ownership and borrowing | [stage0 borrow checker](bootstrap/stage0/agc/src/semantic/borrow_check.rs), [stage1 ownership](libs/agc/src/frontend/ownership.ag) | [container cleanup](tests/collection_drop_glue_test.ag), [Box](tests/box_test.ag) |
-| Threads and channels | [stage1 Send check](libs/agc/src/frontend/send.ag), [borrowed launch](libs/agc/src/frontend/scoped_launch.ag), [channels](std/channel.ag), [Arc](std/mem/arc.ag) | [borrowed launch](tests/scoped_launch_test.ag), [channels](tests/channel_test.ag), [bounded channels](tests/channel_bounded_test.ag), [Arc](tests/arc_test.ag) |
+| Threads and channels | [stage1 Send check](libs/agc/src/frontend/send.ag), [borrowed launch](libs/agc/src/frontend/scoped_launch.ag), [`shared` and `lock`](libs/agc/src/frontend/sync_sugar.ag), [channels](std/channel.ag), [Arc](std/mem/arc.ag) | [borrowed launch](tests/scoped_launch_test.ag), [`shared` and `lock`](tests/shared_lock_test.ag), [channels](tests/channel_test.ag), [bounded channels](tests/channel_bounded_test.ag), [Arc](tests/arc_test.ag) |
 | Result and optional values | [Optional](std/optional.ag), [Result](std/result.ag), [syscall errors](std/sys/result.ag) | [structured errors](tests/structured_error_test.ag), [Result cleanup](tests/unwrap_or_err_drop_test.ag) |
 | Allocation, formatting, FFI, and assembly | [allocator](std/mem/alloc.ag), [display](std/display.ag), [stage1 codegen](libs/agc/src/backend/llvm/generator.ag) | [allocation](tests/allocation_bounds_test.ag), [display](tests/display_test.ag), [Rust FFI](tests/rust_ffi_test.ag), [syscalls](tests/syscall_wrapper_test.ag) |
 
@@ -104,6 +104,12 @@ These are hard keywords — they cannot be used as identifiers:
 
 **Not keywords**: `pub` (items are public by default; `private` restricts visibility), `fn`.
 `let` is a keyword introducing inferred local bindings (`let x = expr;`).
+
+**Contextual keywords**: `shared` is a keyword only before a type
+(`shared i64 total`), and `lock` only at the start of a statement before a
+place and a block (`lock total { ... }`); see
+[Shared values and `lock`](#shared-values-and-lock). Elsewhere both are
+ordinary names: `m.lock()`, `i64 lock = 0;`.
 
 ### Literals
 
@@ -1151,18 +1157,19 @@ reference to the launcher's local instead of moving it. Threads can share
 state without globals or wrapper types:
 
 ```silver
-void add(&Mutex<i64> total, i64 amount) {
-    Guard<i64> g = total.lock();
-    g.set(g.get() + amount);
+void add(&shared i64 total, i64 amount) {
+    lock total { total += amount; }
 }
 
 i64 main() {
-    Mutex<i64> total = Mutex<i64>.new(0);
+    shared i64 total = 0;
     Task<void> a = launch add(&total, 5);
     Task<void> b = launch add(&total, 7);
     wait a;
     wait b;
-    return total.lock().get();   // 12
+    i64 result = 0;
+    lock total { result = total; }
+    return result;   // 12
 }
 ```
 
@@ -1180,8 +1187,9 @@ The compiler joins a borrowing task before its borrows end:
   `&mut x` excludes every other use of `x`, including a second launch. A
   `wait t;` statement in the task's own block ends the loans; a `wait`
   inside a condition does not. When a task's loan blocks a change, the error suggests
-  the two ways to let several threads change the place, a `Mutex<T>` or an
-  atomic such as `AtomicI64` passed as `&x`, and leaves the choice to you.
+  the two ways to let several threads change the place, a `shared` value
+  changed inside `lock`, or an atomic such as `AtomicI64` passed as `&x`, and
+  leaves the choice to you.
 - A reference parameter can be forwarded: `launch f(r)` with a `&T` or
   `&mut T` variable `r` keeps `r`'s loans until the join.
 - A borrowing launch can also be pushed into a local collection, for a
@@ -1207,6 +1215,73 @@ The compiler joins a borrowing task before its borrows end:
 
 A thread that must outlive the function that launched it cannot borrow;
 move owned values into it, or share them through `Arc<T>`.
+
+### Shared values and `lock`
+
+`shared T` declares a value that several threads change. Its type is
+`Mutex<T>` from `std.sync`, and a declaration's initializer is a plain `T`:
+
+```silver
+import std.sync;
+
+shared i64 total = 0;                    // Mutex<i64> total = Mutex<i64>.new(0);
+shared Vec<i64> seen = Vec<i64>.new();
+```
+
+`shared` declares locals, struct fields, and reference parameters
+(`&shared i64 total`). `lock x { ... }` is the way to read or
+change the value. Inside the block `x` names the value itself, a `T`, and
+the lock is held until the block ends:
+
+```silver
+void add(&shared i64 total, i64 amount) {
+    lock total { total += amount; }
+}
+```
+
+The lock is released on every exit from the block: its end, `return`,
+`break` and `continue`. To lock a place that is not a plain name, name the
+value with `as`:
+
+```silver
+struct Limiter {
+    shared i64 hits;
+    i64 limit;
+}
+
+impl Limiter {
+    bool accept(&self) {
+        lock self.hits as hits {
+            if (hits >= self.limit) { return false; }   // unlocks, then returns
+            hits += 1;
+        }
+        return true;
+    }
+}
+```
+
+`lock` also takes a `Mutex<T>` written out, a reference to one, or a pointer
+to one (`lock state.get() as count { ... }` for an `Arc<Mutex<i64>>`).
+`m.lock()` still returns a `Guard<T>` for code that holds a lock across
+statements that a block cannot express.
+
+The compiler rejects the mistakes it can see:
+
+- Using a shared value outside a lock: `` `total` is shared between threads:
+  read or change it inside `lock total { ... }` ``.
+- Locking a value that is not shared: `` `count` is `i64`, not shared:
+  declare it `shared i64` to lock it ``.
+- Locking `x` again inside `lock x`, which would deadlock, and declaring
+  another `x` inside it.
+- A place that is not a plain name without `as name`.
+
+Two rules are not checked. A reference to the value taken inside the block
+must not outlive it, because the lock no longer protects the value. And
+threads that hold two locks at once must take them in the same order, or
+they can deadlock.
+
+`lock` is a statement, not an expression. Editors show a shared value's
+type as `Mutex<T>`.
 
 ### Send gate
 
@@ -1244,7 +1319,7 @@ struct Inbox {
 ```
 
 Stage1 judges a by-value argument by the declared type of the variable it
-starts with, so bind a computed value such as `shared.clone()` to a local
+starts with, so bind a computed value such as `state.clone()` to a local
 before launching it.
 
 ### Synchronization primitives
@@ -1253,7 +1328,8 @@ Every operation that may run on several threads at once takes `&self`, so
 threads share a primitive through `&T`. Teardown such as `Channel.destroy`
 still needs exclusive access.
 
-- **`Mutex<T>`** + **`Guard<T>`** (RAII): `m.lock()` returns a guard granting
+- **`Mutex<T>`** + **`Guard<T>`** (RAII): `shared T` spells a `Mutex<T>`,
+  and `lock m { ... }` locks it for a block. `m.lock()` returns a guard granting
   access to the value (`get`/`set`/`get_ptr`) and unlocking the underlying
   `RawMutex` when the guard drops — at scope exit, on early return, or when
   moved.  A zero-initialized global `Mutex<T>` is a valid unlocked mutex

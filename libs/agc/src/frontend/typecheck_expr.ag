@@ -2061,6 +2061,69 @@ u32 typecheck_slice_result_type(TypeTable* types, SyntaxNode* root, u32 target_t
 
 /// Infers and records the type of expression `expr_id`, reporting type
 /// errors. Caches the result in the expression.
+/// True when `type_id` is a Mutex<T>, directly or behind a reference: the
+/// type a `shared T` is spelled as.
+bool typecheck_is_mutex(TypeTable* types, u32 type_id) {
+    if (type_id == TYPE_UNKNOWN) { return false; }
+    TypeEntry* entry = types.get(types.resolve_subst(type_id));
+    if (entry.kind == TypeKind.Reference) {
+        entry = types.get(types.resolve_subst(entry.inner));
+    }
+    return entry.kind == TypeKind.Named && strcmp(types.names.get(entry.name_id), "Mutex") == 0;
+}
+
+/// The name for expression `expr_id` in a diagnostic: its variable name, or
+/// "this value" for anything else.
+str typecheck_operand_name(AstPool* pool, SymbolTable* symbols, u32 expr_id) {
+    AstExpr* operand = pool.get_expr(expr_id);
+    if (operand.kind == ExprKind.Var) { return symbols.names.get(operand.aux); }
+    return "this value";
+}
+
+/// Reports a `lock` block whose place is not shared. sync_sugar lowers the
+/// block to `{ let __lock_N_guard = place.lock(); ... }`; the statements are
+/// `[start, start + count)`. Returns true when it reported one.
+bool typecheck_lock_on_unshared(AstPool* pool, TypeTable* types, SymbolTable* symbols,
+                                SyntaxNode* root, TypeEnv* env, u32 start, u32 count,
+                                DiagnosticBag* diagnostics, bool* ok) {
+    if (count < 2) { return false; }
+    AstStmt* guard = pool.get_stmt(pool.block_stmts.get((i64)start));
+    if (guard.kind != StmtKind.Let || guard.inner1 == 0
+        || !typecheck_str_starts_with(symbols.names.get(guard.aux), "__lock_")) {
+        return false;
+    }
+    AstExpr* call = pool.get_expr(guard.inner1);
+    if (call.kind != ExprKind.MethodCall || strcmp(symbols.names.get(call.aux), "lock") != 0) {
+        return false;
+    }
+    u32 place_type = infer_expr(pool, types, symbols, root, env, call.inner0, diagnostics, ok);
+    if (place_type == TYPE_UNKNOWN) {
+        place_type = typecheck_place_type(pool, types, symbols, root, env, call.inner0);
+    }
+    if (place_type == TYPE_UNKNOWN) { return false; }
+    // `.lock()` reaches a Mutex through a reference or a pointer.
+    TypeEntry* entry = types.get(types.resolve_subst(place_type));
+    if (entry.kind == TypeKind.Reference || entry.kind == TypeKind.Pointer) { place_type = entry.inner; }
+    if (typecheck_is_mutex(types, place_type)) { return false; }
+    Vec<u32> fields = Vec<u32>.new();
+    u32 root_name = typecheck_collect_place(pool, call.inner0, &fields);
+    String place = String.from_str(root_name == 0 ? "this value" : "`");
+    if (root_name != 0) {
+        place.push_str(symbols.names.get(root_name));
+        i64 i = 0;
+        while (i < fields.len()) {
+            place.push('.');
+            place.push_str(symbols.names.get(fields.get(i)));
+            i += 1;
+        }
+        place.push('`');
+    }
+    diagnostics.error(pool.get_expr(call.inner0).span,
+                      lock_needs_shared(place.to_str(), types.type_name(place_type)));
+    *ok = false;
+    return true;
+}
+
 u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode* root,
                TypeEnv* env, u32 expr_id, DiagnosticBag* diagnostics, bool* ok) {
     if (expr_id == 0) { return TYPE_UNKNOWN; }
@@ -2238,7 +2301,13 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         u32 op = expr.aux;
         u32 lhs = infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
         u32 rhs = infer_expr(pool, types, symbols, root, env, expr.inner1, diagnostics, ok);
-        if (op == (u32)TokenKind.Equal || op == (u32)TokenKind.NotEqual
+        if (typecheck_is_mutex(types, lhs) || typecheck_is_mutex(types, rhs)) {
+            // A `shared T` is a Mutex<T>: its value is reached only by locking it.
+            u32 operand = typecheck_is_mutex(types, lhs) ? expr.inner0 : expr.inner1;
+            diagnostics.error(expr.span, shared_value_outside_lock(
+                typecheck_operand_name(pool, symbols, operand)));
+            *ok = false;
+        } else if (op == (u32)TokenKind.Equal || op == (u32)TokenKind.NotEqual
             || op == (u32)TokenKind.Less || op == (u32)TokenKind.LessEqual
             || op == (u32)TokenKind.Greater || op == (u32)TokenKind.GreaterEqual
             || op == (u32)TokenKind.And || op == (u32)TokenKind.Or) {
@@ -3314,7 +3383,12 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
             typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
                                                stmt.inner1, diagnostics, ok);
         }
-        if (target_type != TYPE_UNKNOWN && val_type != TYPE_UNKNOWN
+        if (typecheck_is_mutex(types, target_type) && val_type != TYPE_UNKNOWN
+            && !typecheck_is_mutex(types, val_type)) {
+            diagnostics.error(stmt.span, shared_value_outside_lock(
+                typecheck_operand_name(pool, symbols, stmt.inner0)));
+            *ok = false;
+        } else if (target_type != TYPE_UNKNOWN && val_type != TYPE_UNKNOWN
             && !types_match_value(types, target_type, val_type, expr_is_literal(pool, stmt.inner1))
             && !has_user_cast(root, types, val_type, target_type)) {
             String message = String.from_str("type mismatch: expected ");
@@ -3370,6 +3444,10 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
     } else if (stmt.kind == StmtKind.Block) {
         u32 start = stmt.inner0;
         u32 count = stmt.aux;
+        // Its lowered body would only repeat the error.
+        if (typecheck_lock_on_unshared(pool, types, symbols, root, env, start, count, diagnostics, ok)) {
+            return;
+        }
         i64 i = 0;
         while (i < (i64)count) {
             u32 s_id = pool.block_stmts.get((i64)start + i);
@@ -3587,6 +3665,8 @@ bool typecheck_expressions_scoped(AstPool* pool, SymbolTable* symbols, SyntaxTre
                             || typecheck_str_starts_with(diagnostic_text, "unwrap-or ")
                             || typecheck_str_starts_with(diagnostic_text, "generic method ")
                             || typecheck_str_starts_with(diagnostic_text, "Task has no method '")
+                            || diagnostic.message.contains(" is shared between threads: read or change it inside `lock ")
+                            || diagnostic.message.contains(", not shared: declare it `shared ")
                             || typecheck_str_starts_with(diagnostic_text, "cannot move '")
                             || typecheck_str_starts_with(diagnostic_text,
                                 "return statement is not allowed inside a defer block")

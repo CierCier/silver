@@ -189,6 +189,11 @@ pub enum LexError {
         span: (usize, usize),
         message: String,
     },
+    /// A malformed `lock` statement (see `sync_sugar`).
+    InvalidSyntax {
+        span: (usize, usize),
+        message: String,
+    },
 }
 
 // Compatibility types for the existing main.rs interface
@@ -281,14 +286,24 @@ pub fn lex(input: &str) -> Result<Vec<LexToken>, Vec<LexErrorCompat>> {
 pub fn lex_with_source(input: &str, file: u32) -> Result<Vec<LexToken>, Vec<LexErrorCompat>> {
     let mut lexer = Lexer::with_source(input.to_string(), file);
     match lexer.tokenize_with_spans() {
-        Ok(tokens) => Ok(tokens),
+        // `shared` and `lock` are rewritten before any later pass sees them.
+        Ok(tokens) => crate::sync_sugar::desugar(tokens).map_err(|error| {
+            vec![LexErrorCompat {
+                kind: LexError::InvalidSyntax {
+                    span: (error.span.start, error.span.end),
+                    message: error.message,
+                },
+                span: error.span,
+            }]
+        }),
         Err(error) => {
             let byte_span = match error {
                 LexError::UnexpectedChar { span, .. }
                 | LexError::UnexpectedEof { span }
                 | LexError::InvalidNumber { span, .. }
                 | LexError::InvalidString { span, .. }
-                | LexError::InvalidChar { span, .. } => span,
+                | LexError::InvalidChar { span, .. }
+                | LexError::InvalidSyntax { span, .. } => span,
             };
             let (start_line, start_col) = line_col_at(input, byte_span.0);
             let (end_line, end_col) = line_col_at(input, byte_span.1);
@@ -1267,6 +1282,7 @@ impl fmt::Display for LexError {
             LexError::InvalidChar { message, .. } => {
                 write!(f, "invalid character literal: {message}")
             }
+            LexError::InvalidSyntax { message, .. } => write!(f, "{message}"),
         }
     }
 }

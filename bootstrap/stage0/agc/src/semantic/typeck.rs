@@ -22,6 +22,80 @@ const MAX_TYPE_CHECK_DEPTH: usize = 32;
 
 pub type CallSiteKey = (u32, usize, usize, u32);
 
+/// True when `ty` is a Mutex<T>, directly or behind a reference: the type a
+/// `shared T` is spelled as.
+fn is_mutex_type(ty: &Type) -> bool {
+    let ty = match ty {
+        Type::Reference { inner, .. } => inner.as_ref(),
+        other => other,
+    };
+    matches!(ty, Type::Named { path, .. } if path.last().is_some_and(|name| name == "Mutex"))
+}
+
+/// The operand to name in a "lock it first" error when `left` or `right` is
+/// a Mutex: its identifier when it is one, otherwise a generic description.
+fn shared_operand(left: &Type, right: &Type, expr: &ast::Expression) -> Option<String> {
+    let is_mutex = is_mutex_type;
+    let ast::ExpressionKind::Binary {
+        left: left_expr,
+        right: right_expr,
+        ..
+    } = expr.kind.as_ref()
+    else {
+        return (is_mutex(left) || is_mutex(right)).then(|| "this value".to_string());
+    };
+    let name_of = |operand: &ast::Expression| match operand.kind.as_ref() {
+        ast::ExpressionKind::Identifier(identifier) => identifier.name.clone(),
+        _ => "this value".to_string(),
+    };
+    if is_mutex(left) {
+        Some(name_of(left_expr))
+    } else if is_mutex(right) {
+        Some(name_of(right_expr))
+    } else {
+        None
+    }
+}
+
+/// The place a `lock` block locks, when `block` is one lowered by
+/// sync_sugar: `{ let __lock_N_guard = place.lock(); ... }`.
+fn lock_block_place(block: &ast::Block) -> Option<&ast::Expression> {
+    let ast::StatementKind::Let(guard) = &block.statements.first()?.kind else {
+        return None;
+    };
+    let ast::PatternKind::Identifier(guard_name) = &guard.pattern.kind else {
+        return None;
+    };
+    if !guard_name.name.starts_with("__lock_") || !guard_name.name.ends_with("_guard") {
+        return None;
+    }
+    let ast::ExpressionKind::MethodCall { receiver, method, .. } = guard.initializer.as_ref()?.kind.as_ref()
+    else {
+        return None;
+    };
+    (method.name == "lock").then_some(receiver.as_ref())
+}
+
+/// Source text of a simple place (`x`, `self.hits`), or None.
+fn place_text(expr: &ast::Expression) -> Option<String> {
+    match expr.kind.as_ref() {
+        ast::ExpressionKind::Identifier(identifier) => Some(identifier.name.clone()),
+        ast::ExpressionKind::FieldAccess { object, field } => {
+            Some(format!("{}.{}", place_text(object)?, field.name))
+        }
+        _ => None,
+    }
+}
+
+/// Identifies a `let` statement whose type was inferred: its file, byte
+/// range and expansion tag, so synthesized statements at one source span
+/// (macro bodies, `lock` blocks) stay distinct.
+pub type InferredLetKey = (u32, usize, usize, u32);
+
+fn inferred_let_key(span: Span) -> InferredLetKey {
+    (span.file, span.start, span.end, span.expansion)
+}
+
 /// Source declaration selected by type checking for a call expression.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CallableIdentity {
@@ -130,7 +204,7 @@ pub struct TypeChecker {
     /// The driver materializes these as type annotations after typeck so
     /// downstream passes (move/borrow/escape checks, monomorphization,
     /// codegen) see ordinary annotated bindings.
-    inferred_lets: HashMap<(usize, usize), (Type, Span)>,
+    inferred_lets: HashMap<InferredLetKey, (Type, Span)>,
 }
 
 /// A binary operation on a type parameter recorded during generic body
@@ -406,7 +480,7 @@ impl TypeChecker {
     }
 
     /// Consume inferred `let` bindings for post-typeck AST materialization.
-    pub fn take_inferred_lets(&mut self) -> HashMap<(usize, usize), (Type, Span)> {
+    pub fn take_inferred_lets(&mut self) -> HashMap<InferredLetKey, (Type, Span)> {
         std::mem::take(&mut self.inferred_lets)
     }
 
@@ -1125,7 +1199,30 @@ impl TypeChecker {
 
     fn check_statement(&mut self, stmt: &ast::Statement) {
         match &stmt.kind {
-            ast::StatementKind::Block(block) => self.check_block(block),
+            ast::StatementKind::Block(block) => {
+                // A `lock` block on a value that is not shared gets one error
+                // naming the fix, not errors from its lowered body.
+                if let Some(place) = lock_block_place(block) {
+                    let before = self.errors.len();
+                    let place_type = self.check_expr(place, None);
+                    // `.lock()` reaches a Mutex through a reference or a pointer.
+                    let value_type = match &place_type {
+                        Type::Reference { inner, .. } | Type::Pointer { inner, .. } => inner.as_ref(),
+                        other => other,
+                    };
+                    if !is_mutex_type(value_type) {
+                        if !matches!(value_type, Type::Unknown) {
+                            let place_name = place_text(place)
+                                .map_or_else(|| "this value".to_string(), |text| format!("`{text}`"));
+                            self.error(msg::lock_needs_shared(&place_name, value_type), place.span);
+                        }
+                        return;
+                    }
+                    // check_block checks the place again.
+                    self.errors.truncate(before);
+                }
+                self.check_block(block)
+            }
             ast::StatementKind::Let(let_stmt) => {
                 // Two binding forms:
                 // - `T x = expr;`  — declared type comes from the annotation.
@@ -1164,7 +1261,7 @@ impl TypeChecker {
                         return;
                     }
                     self.inferred_lets.insert(
-                        (stmt.span.start, stmt.span.end),
+                        inferred_let_key(stmt.span),
                         (inferred.clone(), let_stmt.pattern.span),
                     );
                     Self::bind_let_pattern(self, let_stmt, inferred);
@@ -1763,7 +1860,14 @@ impl TypeChecker {
                     if !self.lambdas.frames.is_empty() && !self.lambda_copy_type(&right_ty) {
                         self.consume_capture(right);
                     }
-                    if left_ty != right_ty && !self.is_implicitly_castable(&right_ty, &left_ty) {
+                    if is_mutex_type(&left_ty) && !is_mutex_type(&right_ty) && right_ty != Type::Unknown {
+                        // Assigning a plain value to a `shared T` meant its value.
+                        let name = match left.kind.as_ref() {
+                            ast::ExpressionKind::Identifier(identifier) => identifier.name.clone(),
+                            _ => "this value".to_string(),
+                        };
+                        self.error(msg::shared_value_outside_lock(&name), expr.span);
+                    } else if left_ty != right_ty && !self.is_implicitly_castable(&right_ty, &left_ty) {
                         self.error(
                             msg::assignment_type_mismatch(&left_ty, &right_ty),
                             expr.span,
@@ -6867,6 +6971,12 @@ impl TypeChecker {
         if self.is_primitive_type(left) {
             return None;
         }
+        // A `shared T` is a Mutex<T>: its value is reached only by locking it.
+        if let Some(operand) = shared_operand(left, right, expr) {
+            self.error(msg::shared_value_outside_lock(&operand), expr.span);
+            // Already reported: the unknown type suppresses follow-on errors.
+            return Some(Type::Unknown);
+        }
 
         let name = operator_method_name(operator)?;
 
@@ -8362,7 +8472,7 @@ pub fn rewrite_bare_constructors(
 /// binding instead of having to handle inference itself.
 pub fn populate_inferred_let_types(
     program: &mut ast::Program,
-    inferred: &HashMap<(usize, usize), (Type, Span)>,
+    inferred: &HashMap<InferredLetKey, (Type, Span)>,
 ) {
     for item in &mut program.items {
         match &mut item.kind {
@@ -8384,7 +8494,7 @@ pub fn populate_inferred_let_types(
 
 fn populate_block_inferred_let_types(
     block: &mut ast::Block,
-    inferred: &HashMap<(usize, usize), (Type, Span)>,
+    inferred: &HashMap<InferredLetKey, (Type, Span)>,
 ) {
     for stmt in &mut block.statements {
         populate_statement_inferred_let_types(stmt, inferred);
@@ -8393,11 +8503,11 @@ fn populate_block_inferred_let_types(
 
 fn populate_statement_inferred_let_types(
     stmt: &mut ast::Statement,
-    inferred: &HashMap<(usize, usize), (Type, Span)>,
+    inferred: &HashMap<InferredLetKey, (Type, Span)>,
 ) {
     if let ast::StatementKind::Let(let_stmt) = &mut stmt.kind
         && let_stmt.type_annotation.is_none()
-        && let Some((ty, _name_span)) = inferred.get(&(stmt.span.start, stmt.span.end))
+        && let Some((ty, _name_span)) = inferred.get(&inferred_let_key(stmt.span))
     {
         let_stmt.type_annotation = Some(ty.to_ast());
     }
@@ -8426,7 +8536,7 @@ fn populate_statement_inferred_let_types(
 /// bodies and blocks).
 fn populate_expr_blocks_inferred_let_types(
     expr: &mut ast::Expression,
-    inferred: &HashMap<(usize, usize), (Type, Span)>,
+    inferred: &HashMap<InferredLetKey, (Type, Span)>,
 ) {
     match expr.kind.as_mut() {
         ast::ExpressionKind::Block(block) | ast::ExpressionKind::Lambda { body: block, .. } => {
