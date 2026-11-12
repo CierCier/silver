@@ -98,8 +98,9 @@ struct FunctionFacts<'a> {
     collection_uses: FxHashSet<SpanKey>,
     /// Where each local is declared, by span start.
     declared_at: FxHashMap<String, usize>,
-    /// Parameters and locals declared as `&mut T`.
-    mutable_references: FxHashSet<String>,
+    /// Parameters and locals declared as references, with whether each is
+    /// `&mut T`.
+    references: FxHashMap<String, bool>,
 }
 
 /// Methods a collection holder may be called with directly.
@@ -138,7 +139,7 @@ fn pushed_launch(expression: &ast::Expression) -> Option<(&ast::Identifier, &ast
 fn borrowed_roots(
     launch: &ast::Expression,
     resolved_callables: &FxHashMap<CallSiteKey, ResolvedCallable>,
-    mutable_references: &FxHashSet<String>,
+    references: &FxHashMap<String, bool>,
 ) -> Vec<(String, bool)> {
     let mut roots = Vec::new();
     let ast::ExpressionKind::Launch(call) = launch.kind.as_ref() else {
@@ -160,7 +161,7 @@ fn borrowed_roots(
             ast::ExpressionKind::Identifier(forwarded)
                 if reference_parameters.contains(&index) =>
             {
-                (argument, mutable_references.contains(&forwarded.name))
+                (argument, references.get(&forwarded.name).copied().unwrap_or(false))
             }
             _ => continue,
         };
@@ -195,8 +196,13 @@ impl FunctionFacts<'_> {
     fn record_binding(&mut self, binding: &ast::LetStatement) {
         if let ast::PatternKind::Identifier(name) = &binding.pattern.kind {
             self.declared_at.insert(name.name.clone(), name.span.start);
-            if binding.type_annotation.as_ref().is_some_and(is_mutable_reference) {
-                self.mutable_references.insert(name.name.clone());
+            match binding.type_annotation.as_ref().map(|ty| ty.kind.as_ref()) {
+                Some(ast::TypeKind::Reference(reference)) => {
+                    self.references.insert(name.name.clone(), reference.is_mutable);
+                }
+                _ => {
+                    self.references.remove(&name.name);
+                }
             }
         }
         if let Some(initializer) = &binding.initializer
@@ -277,8 +283,44 @@ impl FunctionFacts<'_> {
     }
 }
 
-fn is_mutable_reference(ty: &ast::Type) -> bool {
-    matches!(ty.kind.as_ref(), ast::TypeKind::Reference(reference) if reference.is_mutable)
+/// Rejects an argument for a reference parameter of `launch` that is not
+/// `&place`, `&mut place` or a reference variable: a bare local would be
+/// borrowed implicitly, and a call result's borrow is not tracked.
+fn check_borrowed_arguments(
+    launch: &ast::Expression,
+    resolved_callables: &FxHashMap<CallSiteKey, ResolvedCallable>,
+    references: &FxHashMap<String, bool>,
+    errors: &mut Vec<ScopedLaunchError>,
+) {
+    let ast::ExpressionKind::Launch(call) = launch.kind.as_ref() else {
+        return;
+    };
+    let ast::ExpressionKind::Call { arguments, .. } = call.kind.as_ref() else {
+        return;
+    };
+    let Some(callable) = resolved_callables.get(&span_key(call.span)) else {
+        return;
+    };
+    for &index in &callable.reference_parameters {
+        let Some(argument) = arguments.get(index) else {
+            continue;
+        };
+        let message = match argument.kind.as_ref() {
+            ast::ExpressionKind::Reference { .. } => continue,
+            ast::ExpressionKind::Identifier(name) if references.contains_key(&name.name) => {
+                continue;
+            }
+            ast::ExpressionKind::Identifier(name) => {
+                msg::launch_borrows_without_reference(&name.name)
+            }
+            _ => msg::scoped_launch_argument_not_a_place().to_string(),
+        };
+        errors.push(ScopedLaunchError {
+            message,
+            span: argument.span,
+            launched_at: None,
+        });
+    }
 }
 
 fn check_function(
@@ -297,10 +339,14 @@ fn check_function(
         collection_holders: FxHashMap::default(),
         collection_uses: FxHashSet::default(),
         declared_at: FxHashMap::default(),
-        mutable_references: parameters
+        references: parameters
             .iter()
-            .filter(|parameter| is_mutable_reference(&parameter.param_type))
-            .map(|parameter| parameter.name.name.clone())
+            .filter_map(|parameter| match parameter.param_type.kind.as_ref() {
+                ast::TypeKind::Reference(reference) => {
+                    Some((parameter.name.name.clone(), reference.is_mutable))
+                }
+                _ => None,
+            })
             .collect(),
     };
     facts.record_block(&body);
@@ -309,15 +355,17 @@ fn check_function(
     });
 
     visit::expressions_in_block(&mut body, &mut |expression| match expression.kind.as_ref() {
-        ast::ExpressionKind::Launch(_)
+        ast::ExpressionKind::Launch(_) => {
+            check_borrowed_arguments(expression, resolved_callables, &facts.references, errors);
             if is_scoped_launch(expression, resolved_callables)
-                && !facts.placed_launches.contains(&span_key(expression.span)) =>
-        {
-            errors.push(ScopedLaunchError {
-                message: msg::scoped_launch_must_be_bound(&borrowed_name(expression)),
-                span: expression.span,
-                launched_at: None,
-            });
+                && !facts.placed_launches.contains(&span_key(expression.span))
+            {
+                errors.push(ScopedLaunchError {
+                    message: msg::scoped_launch_must_be_bound(&borrowed_name(expression)),
+                    span: expression.span,
+                    launched_at: None,
+                });
+            }
         }
         ast::ExpressionKind::Identifier(identifier) => {
             let key = span_key(expression.span);
@@ -349,7 +397,7 @@ fn check_function(
             }
             let holder_declared = facts.declared_at.get(&holder.name).copied();
             for (root, mutable) in
-                borrowed_roots(launch, resolved_callables, &facts.mutable_references)
+                borrowed_roots(launch, resolved_callables, &facts.references)
             {
                 if mutable {
                     errors.push(ScopedLaunchError {
@@ -417,7 +465,8 @@ mod tests {
     /// A stand-in for std's Vec: the checks key on the `push` method.
     const POOL: &str = "struct Vec<T> { T* data; }\n\
                         impl Vec<T> { void push(&mut self, T value) {} }\n\
-                        void read(&i64 value) {}\n";
+                        void read(&i64 value) {}\n\
+                        &i64 pick(&i64 value) { return value; }\n";
 
     fn launch_errors(body: &str) -> Vec<String> {
         let source = format!("{POOL}i64 main() {{\n{body}\nreturn 0;\n}}\n");
@@ -450,5 +499,23 @@ mod tests {
             "i64 values[2] = { 1, 2 };\nVec<Task<void>> pool;\npool.push(launch read(&values[0]));",
         );
         assert!(late.is_empty(), "{late:?}");
+    }
+
+    #[test]
+    fn a_reference_parameter_takes_only_an_explicit_borrow() {
+        let bare = launch_errors("i64 x = 1;\nTask<void> t = launch read(x);\nwait t;");
+        assert_eq!(
+            bare,
+            ["launch passes `x` to a reference parameter without `&`: declare it `shared`, \
+              or move it into the task through a by-value parameter"]
+        );
+        let call = launch_errors("i64 x = 1;\nTask<void> t = launch read(pick(&x));\nwait t;");
+        assert_eq!(
+            call,
+            ["a borrowed launch argument must be `&place`, `&mut place`, or a reference variable"]
+        );
+        let forwarded =
+            launch_errors("i64 x = 1;\n&i64 r = &x;\nTask<void> t = launch read(r);\nwait t;");
+        assert!(forwarded.is_empty(), "{forwarded:?}");
     }
 }

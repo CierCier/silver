@@ -1193,6 +1193,11 @@ The compiler joins a borrowing task before its borrows end:
   leaves the choice to you.
 - A reference parameter can be forwarded: `launch f(r)` with a `&T` or
   `&mut T` variable `r` keeps `r`'s loans until the join.
+- The argument for a reference parameter must be `&place`, `&mut place` or
+  a reference variable. A plain local (`launch f(x)`) is rejected rather
+  than borrowed implicitly: declare it `shared`, or move it into the task
+  through a by-value parameter. A call that returns a reference is
+  rejected too.
 - A borrowing launch can also be pushed into a local collection, for a
   worker pool. The collection's drop joins its tasks, so it must be declared
   after everything they borrow. Its tasks may run at once, so they borrow

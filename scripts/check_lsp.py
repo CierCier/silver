@@ -729,6 +729,18 @@ class NativeLsp(unittest.TestCase):
                   for item in session.result("textDocument/diagnostic", alias_document)["items"]]
         self.assertEqual(errors, [("launch argument of type &Rc<i64> is not Send: "
                                    "Rc<T> carries a shared non-atomic reference count", 5)])
+        # A reference parameter takes only an explicit borrow.
+        bare = ("i64 read(&i64 v) { return *v; }\n&i64 pick(&i64 v) { return v; }\n"
+                "i64 main() {\n i64 x = 1;\n Task<i64> a = launch read(x);\n"
+                " Task<i64> b = launch read(pick(&x));\n return wait a + wait b;\n}\n")
+        session.send("textDocument/didChange", {"textDocument": {"uri": alias_uri, "version": 23},
+            "contentChanges": [{"text": bare}]})
+        errors = [(item["message"], item["range"]["start"]["line"])
+                  for item in session.result("textDocument/diagnostic", alias_document)["items"]]
+        self.assertEqual(errors, [
+            ("launch passes `x` to a reference parameter without `&`: declare it `shared`, "
+             "or move it into the task through a by-value parameter", 4),
+            ("a borrowed launch argument must be `&place`, `&mut place`, or a reference variable", 5)])
         # Using a shared value outside a lock names the fix.
         session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
             "contentChanges": [{"text": text.replace(" i64 seen = 0;", " i64 seen = count + 1;")}]})

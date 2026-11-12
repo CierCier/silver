@@ -285,6 +285,17 @@ pub fn task_collection_misused(holder: &str, name: &str) -> String {
     )
 }
 
+pub fn scoped_launch_argument_not_a_place() -> &'static str {
+    "a borrowed launch argument must be `&place`, `&mut place`, or a reference variable"
+}
+
+pub fn launch_borrows_without_reference(name: &str) -> String {
+    format!(
+        "launch passes `{name}` to a reference parameter without `&`: declare it `shared`, \
+         or move it into the task through a by-value parameter"
+    )
+}
+
 pub fn task_collection_mutable_borrow(name: &str) -> String {
     format!(
         "a launch pushed into a collection can only borrow with `&`: its tasks may run \

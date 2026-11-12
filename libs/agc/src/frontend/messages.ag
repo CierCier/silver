@@ -448,6 +448,13 @@ String scoped_launch_argument_not_a_place() {
     return String.from_str("a borrowed launch argument must be `&place`, `&mut place`, or a reference variable");
 }
 
+/// Diagnostic text: "launch passes `{}` to a reference parameter without
+/// `&`: declare it `shared`, or move it into the task through a by-value
+/// parameter". Returns an owned string.
+String launch_borrows_without_reference(str name) {
+    return @format("launch passes `{}` to a reference parameter without `&`: declare it `shared`, or move it into the task through a by-value parameter", name);
+}
+
 /// Diagnostic text: "cannot drop '{}' because it is borrowed by a launched
 /// task". Returns an owned string.
 String cannot_drop_task_borrowed(str name) {

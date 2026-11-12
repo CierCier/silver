@@ -496,6 +496,17 @@ void check_scoped_launch_body(SyntaxNode* root, SymbolTable* symbols, SyntaxNode
         if (borrow.root == (SyntaxNode*)0) {
             diagnostics.error(borrow.first.span, scoped_launch_argument_not_a_place());
             *failed = true;
+        } else if (!borrow.address) {
+            // A bare local would be borrowed implicitly; a reference variable
+            // already names its borrow.
+            Binding* bound = scoped_visible_binding(&bindings, borrow.root);
+            if (bound != (Binding*)0
+                && bound.declared_type.kind != ProjectionTypeKind.Reference
+                && bound.declared_type.kind != ProjectionTypeKind.Unknown) {
+                diagnostics.error(borrow.first.span,
+                    launch_borrows_without_reference(borrow.root.text));
+                *failed = true;
+            }
         }
         i += 1;
     }
