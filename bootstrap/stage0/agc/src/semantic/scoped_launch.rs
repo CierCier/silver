@@ -540,6 +540,10 @@ mod tests {
         let forwarded =
             launch_errors("i64 x = 1;\n&i64 r = &x;\nTask<void> t = launch read(r);\nwait t;");
         assert!(forwarded.is_empty(), "{forwarded:?}");
+        // `&r` of a reference passes `r`: the Send check sees `i64`.
+        let reborrowed =
+            launch_errors("i64 x = 1;\n&i64 r = &x;\nTask<void> t = launch read(&r);\nwait t;");
+        assert!(reborrowed.is_empty(), "{reborrowed:?}");
     }
 
     #[test]

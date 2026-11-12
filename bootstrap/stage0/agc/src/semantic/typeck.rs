@@ -2396,7 +2396,12 @@ impl TypeChecker {
                                     ast::ExpressionKind::Reference { .. }
                                 ) =>
                         {
-                            inner.as_ref()
+                            // `&r` of a reference `r` passes `r` itself, as
+                            // overload resolution adapts it.
+                            match inner.as_ref() {
+                                Type::Reference { inner, .. } => inner.as_ref(),
+                                inner => inner,
+                            }
                         }
                         other => other,
                     };
