@@ -12,7 +12,8 @@
 //   4. An early `return` joins an unwaited borrowing task first.
 //   5. `wait launch f(&x)` needs no named task.
 //   6. An unwaited task's result is dropped exactly once when the task is
-//      joined; a waited result is moved out, not dropped.
+//      joined, an enum's owned payload included; a waited result is moved
+//      out, not dropped.
 //   7. A stale copy of a waited handle, left in a Vec, does nothing when the
 //      Vec drops, even after its registry slot runs another borrowing task.
 //   8. Tasks pushed into a local Vec in a loop share one local; `wait` on
@@ -65,6 +66,14 @@ Counted make_counted(&i64 value) {
     Counted counted;
     counted.value = *value;
     return counted;
+}
+
+/// An enum without its own Drop: its payload is dropped by the enum's glue.
+enum Held { Value(Counted); Empty; }
+
+Held make_held(&i64 value) {
+    Counted counted = make_counted(value);
+    return Held.Value(move counted);
 }
 
 /// A counter behind a raw pointer; `lock` guards every access to `value`.
@@ -142,6 +151,10 @@ i64 main() {
     Task<Counted> counted = launch make_counted(&number);
     Counted kept = wait counted;
     if (__atomic_load_i64(&g_drops, ATOMIC_SEQ_CST) != 1 || kept.value != 3) { return 8; }
+    {
+        Task<Held> _unwaited_held = launch make_held(&number);
+    }
+    if (__atomic_load_i64(&g_drops, ATOMIC_SEQ_CST) != 2) { return 14; }
 
     // 7. Stale handle copies.
     Vec<Task<i64>> tasks = Vec<Task<i64>>.new();

@@ -136,7 +136,8 @@ LLVMOpaqueValue* llvm_task_drop_fn(LlvmContext* ctx, u32 task_type) {
     u32 result_type = ctx.types.resolve_subst(
         ctx.types.type_args.get(ctx.types.get(task_type).inner));
     // The result is pack field 0, so it lives at the pack's own address.
-    if (result_type != TYPE_VOID && llvm_type_needs_tracking(ctx, result_type)) {
+    // The drop decides per type, enum payloads included, what to emit.
+    if (result_type != TYPE_VOID) {
         llvm_emit_value_drop_at_ptr(ctx, pack, result_type);
     }
     LLVMBuildCall2(ctx.builder, LLVMGlobalGetValueType(free_fn), free_fn, &pack, 1, "");
