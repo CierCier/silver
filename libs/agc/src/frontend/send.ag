@@ -201,25 +201,119 @@ TypeProjection send_parse_node_type(SyntaxNode* first, SyntaxNode* end) {
 }
 
 
+/// Projects a type spelled as text by `projection_render_nested`
+/// (`Name<A, B>`, `Name*`, `&mut Name`), so a type argument is checked as a
+/// type rather than as one opaque name. `*base` owns the projected name.
+TypeProjection send_project_rendered(str text, String* base) {
+    TypeProjection result = projection_type_empty();
+    i64 i = 0;
+    bool reference = text[0] == (u8)'&';
+    bool is_mutable = false;
+    if (reference) {
+        i = 1;
+        if (text[1] == (u8)'m' && text[2] == (u8)'u' && text[3] == (u8)'t' && text[4] == (u8)' ') {
+            is_mutable = true;
+            i = 5;
+        }
+    }
+    while (text[i] != (u8)0 && text[i] != (u8)'<' && text[i] != (u8)'*') {
+        base.push(text[i]);
+        i += 1;
+    }
+    if (base.len() == 0) { return result; }
+    result.kind = ProjectionTypeKind.Named;
+    result.name = base.to_str();
+    projection_mark_type_known(&result);
+    if (text[i] == (u8)'<') {
+        i += 1;
+        i64 depth = 1;
+        i64 index = 0;
+        String argument = String.new();
+        while (text[i] != (u8)0 && depth > 0) {
+            u8 c = text[i];
+            i += 1;
+            if (c == (u8)'<') { depth += 1; }
+            if (c == (u8)'>') { depth -= 1; }
+            if (depth == 0 || (depth == 1 && c == (u8)',')) {
+                String inner_base = String.new();
+                TypeProjection inner = send_project_rendered(argument.to_str(), &inner_base);
+                projection_merge_type_flags(&result, &inner);
+                if (index == 0) { result.argument0 = argument.clone(); }
+                else { result.argument1 = argument.clone(); }
+                argument.clear();
+                index += 1;
+                while (text[i] == (u8)' ') { i += 1; }
+            } else {
+                argument.push(c);
+            }
+        }
+    }
+    while (text[i] == (u8)'*') {
+        result.kind = ProjectionTypeKind.Pointer;
+        result.is_mutable = true;
+        result.contains_non_send = true;
+        i += 1;
+    }
+    if (reference) {
+        result.kind = ProjectionTypeKind.Reference;
+        result.is_mutable = is_mutable;
+        result.contains_non_send = true;
+    }
+    return result;
+}
+
+/// True when `c` can continue an identifier.
+bool send_is_name_char(u8 c) {
+    return (c >= (u8)'a' && c <= (u8)'z') || (c >= (u8)'A' && c <= (u8)'Z')
+        || (c >= (u8)'0' && c <= (u8)'9') || c == (u8)'_';
+}
+
+/// `text` with each type parameter of `declaration` replaced by `owner`'s
+/// type argument at that position.
+String send_substitute_parameters(str text, SyntaxNode* declaration, TypeProjection* owner) {
+    String result = String.new();
+    i64 i = 0;
+    while (text[i] != (u8)0) {
+        if (!send_is_name_char(text[i])) {
+            result.push(text[i]);
+            i += 1;
+            continue;
+        }
+        String name = String.new();
+        while (send_is_name_char(text[i])) {
+            name.push(text[i]);
+            i += 1;
+        }
+        str argument = send_type_argument(owner, send_type_parameter_index(declaration, name.to_str()));
+        result.push_str(strlen(argument) > 0 ? argument : name.to_str());
+    }
+    return move result;
+}
+
+/// Checks type argument text `argument` of `owner` for Send, keeping the
+/// owner's flags as a conservative floor.
+bool send_argument_is_send(SyntaxNode* root, str argument, TypeProjection* owner,
+                           Vec<String>* visiting, i64 depth, String* reason) {
+    String base = String.new();
+    TypeProjection projected = send_project_rendered(argument, &base);
+    projected.contains_rc = projected.contains_rc || owner.contains_rc;
+    projected.contains_non_send = projected.contains_non_send || owner.contains_non_send;
+    projected.contains_unknown = projected.contains_unknown || owner.contains_unknown;
+    return send_type_is_send_in_declarations(root, &projected, visiting, depth + 1, reason);
+}
+
 /// Returns true when a field of a generic declaration is Send once the
 /// owner's type arguments are substituted.
 bool send_field_is_send(SyntaxNode* root, SyntaxNode* declaration,
                         SyntaxNode* first, SyntaxNode* end,
                         TypeProjection* owner,
-                        Vec<str>* visiting, i64 depth, String* reason) {
+                        Vec<String>* visiting, i64 depth, String* reason) {
     TypeProjection field = send_parse_node_type(first, end);
     if (field.kind == ProjectionTypeKind.Pointer && send_type_owns_storage(owner.name)) {
         i64 parameter_index = send_type_parameter_index(declaration, field.name);
         str argument = send_type_argument(owner, parameter_index);
         if (parameter_index >= 0 && strlen(argument) > 0) {
-            field.kind = ProjectionTypeKind.Named;
-            field.name = argument;
-            field.is_mutable = false;
-            field.contains_rc = owner.contains_rc;
-            field.contains_non_send = owner.contains_non_send;
-            field.contains_unknown = owner.contains_unknown;
-            return send_type_is_send_in_declarations(
-                root, &field, visiting, depth + 1, reason);
+            return send_argument_is_send(root, argument, owner, visiting, depth, reason);
         }
         return true;
     }
@@ -227,20 +321,16 @@ bool send_field_is_send(SyntaxNode* root, SyntaxNode* declaration,
         i64 parameter_index = send_type_parameter_index(declaration, field.name);
         str argument = send_type_argument(owner, parameter_index);
         if (parameter_index >= 0 && strlen(argument) > 0) {
-            field.name = argument;
-            field.contains_rc = field.contains_rc || owner.contains_rc;
-            field.contains_non_send = field.contains_non_send || owner.contains_non_send;
-            field.contains_unknown = field.contains_unknown || owner.contains_unknown;
-        } else {
-            i64 nested_parameter0 = send_type_parameter_index(
-                declaration, field.argument0.to_str());
-            i64 nested_parameter1 = send_type_parameter_index(
-                declaration, field.argument1.to_str());
-            if (nested_parameter0 >= 0 || nested_parameter1 >= 0) {
-                field.contains_rc = field.contains_rc || owner.contains_rc;
-                field.contains_non_send = field.contains_non_send || owner.contains_non_send;
-                field.contains_unknown = field.contains_unknown || owner.contains_unknown;
-            }
+            return send_argument_is_send(root, argument, owner, visiting, depth, reason);
+        }
+        // `Vec<T>`: check the field with the owner's arguments in place.
+        String argument0 = send_substitute_parameters(field.argument0.to_str(), declaration, owner);
+        String argument1 = send_substitute_parameters(field.argument1.to_str(), declaration, owner);
+        if (!argument0.equals(field.argument0.to_str()) || !argument1.equals(field.argument1.to_str())) {
+            field.argument0 = move argument0;
+            field.argument1 = move argument1;
+            String substituted = send_type_display(&field);
+            return send_argument_is_send(root, substituted.to_str(), owner, visiting, depth, reason);
         }
     }
     return send_type_is_send_in_declarations(root, &field, visiting, depth + 1, reason);
@@ -250,20 +340,13 @@ bool send_field_is_send(SyntaxNode* root, SyntaxNode* declaration,
 /// Send: its author vouches for its fields, not for what it is
 /// instantiated with.
 bool send_safe_struct_arguments_are_send(SyntaxNode* root, TypeProjection* owner,
-                                         Vec<str>* visiting, i64 depth, String* reason) {
+                                         Vec<String>* visiting, i64 depth, String* reason) {
     i64 index = 0;
     while (index < 2) {
         str argument = send_type_argument(owner, index);
-        if (strlen(argument) > 0) {
-            TypeProjection projected = projection_type_empty();
-            projected.kind = ProjectionTypeKind.Named;
-            projected.name = argument;
-            projected.contains_rc = owner.contains_rc;
-            projected.contains_non_send = owner.contains_non_send;
-            projected.contains_unknown = owner.contains_unknown;
-            if (!send_type_is_send_in_declarations(root, &projected, visiting, depth + 1, reason)) {
-                return false;
-            }
+        if (strlen(argument) > 0
+            && !send_argument_is_send(root, argument, owner, visiting, depth, reason)) {
+            return false;
         }
         index += 1;
     }
@@ -273,7 +356,7 @@ bool send_safe_struct_arguments_are_send(SyntaxNode* root, TypeProjection* owner
 /// Returns true when every field of struct `item` is Send for `owner`.
 bool send_struct_fields_are_send(SyntaxNode* root, SyntaxNode* item,
                                  TypeProjection* owner,
-                                 Vec<str>* visiting, i64 depth, String* reason) {
+                                 Vec<String>* visiting, i64 depth, String* reason) {
     SyntaxNode* block = item.first_child;
     while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
         block = block.next_sibling;
@@ -311,7 +394,7 @@ bool send_struct_fields_are_send(SyntaxNode* root, SyntaxNode* item,
 /// Returns true when every payload of enum `item` is Send for `owner`.
 bool send_enum_payloads_are_send(SyntaxNode* root, SyntaxNode* item,
                                  TypeProjection* owner,
-                                 Vec<str>* visiting, i64 depth, String* reason) {
+                                 Vec<String>* visiting, i64 depth, String* reason) {
     SyntaxNode* block = item.first_child;
     while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
         block = block.next_sibling;
@@ -344,7 +427,7 @@ bool send_enum_payloads_are_send(SyntaxNode* root, SyntaxNode* item,
 /// Returns true when `value` is Send, looking through user struct and enum
 /// declarations (cycles are cut by `visiting`, depth by `depth`).
 bool send_type_is_send_in_declarations(SyntaxNode* root, TypeProjection* value,
-                                       Vec<str>* visiting, i64 depth, String* reason) {
+                                       Vec<String>* visiting, i64 depth, String* reason) {
     if (!send_type_is_send(value, reason)) {
         return false;
     }
@@ -360,14 +443,16 @@ bool send_type_is_send_in_declarations(SyntaxNode* root, TypeProjection* value,
             is_enum = item != (SyntaxNode*)0;
         }
         if (item != (SyntaxNode*)0) {
+            // Keyed by the whole type, so `Vec<Vec<T>>` still checks the inner Vec.
+            String key = send_type_display(value);
             i64 index = 0;
             while (index < visiting.len()) {
-                if (send_text_equals(visiting.get(index), value.name)) {
+                if (visiting.get_ptr(index).equals(key.to_str())) {
                     return true;
                 }
                 index += 1;
             }
-            visiting.push(value.name);
+            visiting.push(move key);
             bool result = is_enum
                 ? send_enum_payloads_are_send(root, item, value, visiting, depth, reason)
                 : item_has_attribute(item, "safe")
@@ -541,7 +626,7 @@ void check_borrowed_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root,
     if (slice) {
         reason.push_str(send_reason_borrowed_slice());
     } else {
-        Vec<str> visiting = Vec<str>.new();
+        Vec<String> visiting = Vec<String>.new();
         is_send = send_type_is_send_in_declarations(root, &pointee, &visiting, 0, &reason);
         visiting.drop();
     }
@@ -603,7 +688,7 @@ void check_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root,
         return;
     }
     String reason = String.new();
-    Vec<str> visiting = Vec<str>.new();
+    Vec<String> visiting = Vec<String>.new();
     bool is_send = send_type_is_send_in_declarations(root, &(*binding).declared_type, &visiting, 0, &reason);
     visiting.drop();
     if (!is_send) {
