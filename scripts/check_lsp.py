@@ -640,7 +640,7 @@ class NativeLsp(unittest.TestCase):
         # its name; a locked name right after `{` is still highlighted.
         alias = ("import std.sync;\n"
                  "i64 main() {\n i64 x = 0;\n shared i64 m = 1;\n lock m as x { x += 1; }\n"
-                 " lock m{m += x;}\n return x;\n}\n")
+                 " lock m /* again */{m += x;}\n return x;\n}\n")
         alias_uri = (self.root / "alias.ag").as_uri()
         alias_document = {"textDocument": {"uri": alias_uri}}
         session.send("textDocument/didOpen", {"textDocument": {
@@ -656,6 +656,11 @@ class NativeLsp(unittest.TestCase):
         inner = session.result("textDocument/rename", {**alias_document, "position": body,
             "newName": "value"})["changes"][alias_uri]
         self.assertEqual(apply_edits(alias, inner), alias.replace("as x { x += 1", "as value { value += 1"))
+        # A comment after the place leaves the place's lookups intact.
+        for start in [alias.index("lock m /*") + 5, alias.index("m += x")]:
+            self.assertEqual(session.result("textDocument/definition",
+                                            {**alias_document, "position": position(alias, start)}),
+                             {"uri": alias_uri, "range": location(alias, "m", alias.index("shared i64 m") + 11)})
         tokens = decode_tokens(session.result("textDocument/semanticTokens/full", alias_document)["data"], legend)
         kinds = {(line, character): kind for line, character, _, kind, _ in tokens}
         for start in [alias.index("as x") + 3, alias.index("x += 1"), alias.index("m += x")]:

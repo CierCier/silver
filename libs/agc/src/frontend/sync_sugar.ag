@@ -403,10 +403,11 @@ void desugar_locks(Vec<Token>* tokens, Vec<Token>* out, i64* counter, Diagnostic
             continue;
         }
         Span guard_span = tokens.get_ptr(i).span;
-        // `.lock();` sits empty after the place. An `as` alias declares the
-        // pointer local on the alias, so editors see a definition there;
+        // `.lock();` sits empty after the copied place, a trailing comment
+        // included, so tokens stay in source order. An `as` alias declares
+        // the pointer local on the alias, so editors see a definition there;
         // otherwise the local sits empty after `{`.
-        Span call_span = sugar_after(tokens.get_ptr(sugar_previous(tokens, head.place_end)).span);
+        Span call_span = sugar_after(tokens.get_ptr(head.place_end - 1).span);
         bool alias = head.name != head.place_start;
         Span alias_span = tokens.get_ptr(head.name).span;
         Span let_span = sugar_after(tokens.get_ptr(alias ? sugar_previous(tokens, head.name) : head.open).span);
