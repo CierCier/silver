@@ -10,7 +10,7 @@ repository = "https://github.com/CierCier/silver"
 # contains the generated parser; `tools/check.sh` fails when it falls behind.
 [grammars.silver]
 repository = "https://github.com/CierCier/silver"
-rev = "b95c9941da2c67c19b6d60900abe1d704b3a4115"
+rev = "182f6b6af30c5c5a05180e7ea8794dd8e2fe3d8e"
 path = "tools/tree-sitter-silver"
 
 [language_servers.aglsp]
