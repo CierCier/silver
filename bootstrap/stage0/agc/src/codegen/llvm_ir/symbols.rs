@@ -1916,7 +1916,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             // `launch f(..)` yields `Task<R>` for the callee's return type R,
             // so `wait launch f(..)` needs no named handle.
             ast::ExpressionKind::Launch(call) => {
-                let result = self.resolve_receiver_type(call).unwrap_or(ast::Type {
+                // An imported function's signature is registered under its
+                // link name, which is also what the launch emitter calls.
+                let linked = match call.kind.as_ref() {
+                    ast::ExpressionKind::Call { function, .. } => match function.kind.as_ref() {
+                        ast::ExpressionKind::Identifier(ident) => self
+                            .imported_function_links
+                            .get(&ident.name)
+                            .and_then(|link| self.signature_for_name(link))
+                            .and_then(|sig| sig.return_type),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let result = linked.or_else(|| self.resolve_receiver_type(call)).unwrap_or(ast::Type {
                     kind: Box::new(ast::TypeKind::Primitive(ast::PrimitiveType::Void)),
                     span: expr.span,
                 });
