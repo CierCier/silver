@@ -81,14 +81,25 @@ static bool type_follows(TSLexer *lexer) {
   return !word_is(word, "as") && !word_is(word, "in");
 }
 
-// After `lock`: a place (`total`, `self.hits`), an optional `as name`, then `{`.
+// After `lock`: a place (`total`, `self.hits`, `state.get()`, `slots[i]`),
+// an optional `as name`, then `{`. Calls and indexes may hold any
+// expression without a statement or block delimiter.
 static bool place_and_block_follow(TSLexer *lexer) {
   skip_space(lexer);
   if (!is_word_start(lexer->lookahead)) return false;
+  unsigned depth = 0;
   while (!lexer->eof(lexer)) {
     int32_t c = lexer->lookahead;
+    if (c == ';' || c == '}' || (c == '{' && depth > 0)) return false;
     if (c == '{') return true;
-    if (!is_word(c) && !is_space(c) && c != '.') return false;
+    if (c == '(' || c == '[') {
+      depth++;
+    } else if (c == ')' || c == ']') {
+      if (depth == 0) return false;
+      depth--;
+    } else if (depth == 0 && !is_word(c) && !is_space(c) && c != '.') {
+      return false;
+    }
     lexer->advance(lexer, false);
   }
   return false;

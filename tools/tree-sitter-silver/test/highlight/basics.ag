@@ -49,6 +49,10 @@ void count(&shared i64 total) {
 //  ^ keyword
     lock total { total += 1; }
 //  ^ keyword
+    lock state.get() as count { count += 1; }
+//  ^ keyword
+    lock slots[index] as slot { slot += 1; }
+//  ^ keyword
     i64 lock = guard.lock();
 //                   ^ function
 }
