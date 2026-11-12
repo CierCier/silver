@@ -18,12 +18,15 @@
 //   8. Tasks pushed into a local Vec in a loop share one local; `wait` on
 //      pop collects their results, and leaving the Vec's block joins the
 //      rest.
+//   9. A `#[safe]` struct holding a raw pointer, guarded by its own lock,
+//      is shared by several tasks.
 //
 // Exit 0 on success; distinct non-zero codes per failure.
 
 import std.thread;
 import std.mem.vec;
 import std.atomic;
+import std.sync;
 import std.time;
 import std.sys.entry;
 
@@ -62,6 +65,21 @@ Counted make_counted(&i64 value) {
     Counted counted;
     counted.value = *value;
     return counted;
+}
+
+/// A counter behind a raw pointer; `lock` guards every access to `value`.
+#[safe]
+struct LockedCounter {
+    i64* value;
+    RawMutex lock;
+}
+
+void bump_locked(&LockedCounter counter) {
+    for (i64 i = 0; i < 1000; i += 1) {
+        counter.lock.lock();
+        *counter.value = *counter.value + 1;
+        counter.lock.unlock();
+    }
 }
 
 // Sleeps first so the launcher reaches the end of the block before the add.
@@ -159,6 +177,19 @@ i64 main() {
         }
     }
     if (counter.get() != 4) { return 12; }
+
+    // 9. A #[safe] struct shared by several tasks.
+    i64 storage = 0;
+    LockedCounter locked;
+    locked.value = &storage;
+    locked.lock = RawMutex.new();
+    {
+        Vec<Task<void>> bumpers = Vec<Task<void>>.new();
+        for (i64 i = 0; i < 4; i += 1) {
+            bumpers.push(launch bump_locked(&locked));
+        }
+    }
+    if (storage != 4000) { return 13; }
 
     out.drop();
     values.drop();

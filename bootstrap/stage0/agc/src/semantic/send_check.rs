@@ -13,6 +13,9 @@
 //! sharing a value is safe exactly when moving it is (Silver has no
 //! unsynchronized interior mutability outside raw pointers).
 //! Shared-ownership and GC types (`Rc`, `Handle`) are rejected explicitly.
+//! A struct marked `#[safe]` is trusted like an owning container: its
+//! author vouches that its raw pointers are synchronized, so only its type
+//! arguments are checked.
 //!
 //! The walk resolves named types through the `resolve` callback supplied by
 //! the type checker, which knows struct/enum definitions.  A value-field
@@ -54,6 +57,9 @@ const NOT_SEND: &[(&str, &str)] = &[
 #[derive(Debug, Clone)]
 pub enum DefView {
     Struct {
+        /// Marked `#[safe]`: Send iff its type arguments are, like an
+        /// owning container; its fields are not inspected.
+        thread_safe: bool,
         type_params: Vec<String>,
         fields: Vec<(String, Type)>,
     },
@@ -140,6 +146,15 @@ fn structural_send_inner(
                 ));
             };
             if visiting.iter().any(|active| active == ty) {
+                return Ok(());
+            }
+            if let DefView::Struct {
+                thread_safe: true, ..
+            } = &def
+            {
+                for argument in generics {
+                    structural_send_inner(argument, resolve, visiting, depth + 1)?;
+                }
                 return Ok(());
             }
 

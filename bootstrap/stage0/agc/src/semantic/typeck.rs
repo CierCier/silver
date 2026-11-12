@@ -214,6 +214,8 @@ struct TraitImpl {
 struct StructDef {
     type_params: Vec<String>,
     fields: HashMap<String, Type>,
+    /// Marked `#[safe]`: trusted to cross a thread boundary.
+    thread_safe: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -589,6 +591,7 @@ impl TypeChecker {
                             StructDef {
                                 type_params: export.type_params.clone(),
                                 fields,
+                                thread_safe: export.thread_safe,
                             },
                         );
                     }
@@ -773,11 +776,14 @@ impl TypeChecker {
                             (field.name.name.clone(), ty)
                         })
                         .collect::<HashMap<_, _>>();
+                    let thread_safe = crate::types::parse_struct_attributes(&item.attributes)
+                        .is_ok_and(|attributes| attributes.safe);
                     self.struct_defs.insert(
                         struct_item.name.name.clone(),
                         StructDef {
                             type_params,
                             fields,
+                            thread_safe,
                         },
                     );
                 }
@@ -3627,6 +3633,7 @@ impl TypeChecker {
         send_check::structural_send(ty, &|name: &str| {
             if let Some(def) = self.struct_defs.get(name) {
                 return Some(DefView::Struct {
+                    thread_safe: def.thread_safe,
                     type_params: def.type_params.clone(),
                     fields: def
                         .fields

@@ -1222,7 +1222,24 @@ structural field walk:
 - **Not Send** (compile error at the launch site): `Rc<T>` (shared,
   non-atomic refcount), GC heap `Handle`s, `Guard<T>`, raw pointers (`T*`),
   slices, references stored in a by-value argument, and any struct holding
-  an unmarked raw pointer. `&x` passed to a `T*` parameter is a raw pointer.
+  a raw pointer that is not marked `#[safe]`. `&x` passed to a `T*`
+  parameter is a raw pointer.
+
+A struct whose raw pointers are synchronized by its own locks or atomics can
+be marked `#[safe]`: its author vouches that it may be moved to and shared
+with other threads, and the compiler does not inspect its fields. Like
+`Vec<T>` or `Arc<T>`, a generic `#[safe]` struct is still Send only when its
+type arguments are. The compiler cannot check the promise, so name the lock
+or atomic that protects each pointer in the struct's doc comment:
+
+```silver
+/// `items` is read and written only while `lock` is held.
+#[safe]
+struct Inbox {
+    Vec<Message>* items;
+    RawMutex lock;
+}
+```
 
 Stage1 judges a by-value argument by the declared type of the variable it
 starts with, so bind a computed value such as `shared.clone()` to a local

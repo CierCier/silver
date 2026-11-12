@@ -670,6 +670,8 @@ impl TypeChecker {
                     .iter()
                     .map(|field| (field.name.name.clone(), Type::from_ast(&field.field_type)))
                     .collect(),
+                // Captures are checked field by field.
+                thread_safe: false,
             },
         );
         let field_types: Vec<_> = definition

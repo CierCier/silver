@@ -3,7 +3,9 @@
 // leaving the full generic type checker to the next migration stage. An
 // argument bound to a `&T`/`&mut T` parameter is a borrow: its pointee must
 // be Send, because Silver has no unsynchronized shared mutation outside raw
-// pointers.
+// pointers. A struct marked `#[safe]` is trusted like an owning container:
+// its author vouches for its raw pointers, so only its type arguments are
+// checked.
 import std.mem.memory;
 import std.mem.vec;
 import std.string;
@@ -244,6 +246,30 @@ bool send_field_is_send(SyntaxNode* root, SyntaxNode* declaration,
     return send_type_is_send_in_declarations(root, &field, visiting, depth + 1, reason);
 }
 
+/// Returns true when the type arguments of `#[safe]` struct `owner` are
+/// Send: its author vouches for its fields, not for what it is
+/// instantiated with.
+bool send_safe_struct_arguments_are_send(SyntaxNode* root, TypeProjection* owner,
+                                         Vec<str>* visiting, i64 depth, String* reason) {
+    i64 index = 0;
+    while (index < 2) {
+        str argument = send_type_argument(owner, index);
+        if (strlen(argument) > 0) {
+            TypeProjection projected = projection_type_empty();
+            projected.kind = ProjectionTypeKind.Named;
+            projected.name = argument;
+            projected.contains_rc = owner.contains_rc;
+            projected.contains_non_send = owner.contains_non_send;
+            projected.contains_unknown = owner.contains_unknown;
+            if (!send_type_is_send_in_declarations(root, &projected, visiting, depth + 1, reason)) {
+                return false;
+            }
+        }
+        index += 1;
+    }
+    return true;
+}
+
 /// Returns true when every field of struct `item` is Send for `owner`.
 bool send_struct_fields_are_send(SyntaxNode* root, SyntaxNode* item,
                                  TypeProjection* owner,
@@ -344,7 +370,9 @@ bool send_type_is_send_in_declarations(SyntaxNode* root, TypeProjection* value,
             visiting.push(value.name);
             bool result = is_enum
                 ? send_enum_payloads_are_send(root, item, value, visiting, depth, reason)
-                : send_struct_fields_are_send(root, item, value, visiting, depth, reason);
+                : item_has_attribute(item, "safe")
+                    ? send_safe_struct_arguments_are_send(root, value, visiting, depth, reason)
+                    : send_struct_fields_are_send(root, item, value, visiting, depth, reason);
             visiting.pop();
             return result;
         }

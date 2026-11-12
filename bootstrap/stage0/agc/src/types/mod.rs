@@ -112,6 +112,9 @@ pub struct TypeContext {
 
 #[derive(Debug, Clone, Default)]
 pub struct StructAttributes {
+    /// `#[safe]`: the author vouches the struct may be moved to and shared
+    /// with other threads, so the Send gate trusts its fields.
+    pub safe: bool,
     pub packed: bool,
     pub repr_c: bool,
     pub align: Option<usize>,
@@ -203,6 +206,7 @@ pub fn parse_struct_attributes(
     attributes: &[ast::Attribute],
 ) -> Result<StructAttributes, StructAttrError> {
     let mut out = StructAttributes {
+        safe: false,
         packed: false,
         repr_c: false,
         align: None,
@@ -211,6 +215,15 @@ pub fn parse_struct_attributes(
 
     for attr in attributes {
         match attr.name.name.as_str() {
+            "safe" => {
+                if !attr.args.is_empty() {
+                    return Err(StructAttrError {
+                        message: "safe takes no arguments".to_string(),
+                        span: attr.span,
+                    });
+                }
+                out.safe = true;
+            }
             "packed" => {
                 if !attr.args.is_empty() {
                     return Err(StructAttrError {
