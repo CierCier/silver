@@ -131,9 +131,10 @@ fn pushed_launch(expression: &ast::Expression) -> Option<(&ast::Identifier, &ast
 }
 
 /// Root variables a launch borrows, each with whether the borrow is mutable:
-/// the root of each `&place`/`&mut place` argument, and each reference
-/// variable forwarded to a reference parameter. A forwarded reference was
-/// declared after what it borrows, so ordering against it is enough.
+/// the root of each `&place`/`&mut place` argument (through fields and
+/// indexes), and each reference variable forwarded to a reference
+/// parameter. A forwarded reference was declared after what it borrows, so
+/// ordering against it is enough.
 fn borrowed_roots(
     launch: &ast::Expression,
     resolved_callables: &FxHashMap<CallSiteKey, ResolvedCallable>,
@@ -163,7 +164,9 @@ fn borrowed_roots(
             }
             _ => continue,
         };
-        while let ast::ExpressionKind::FieldAccess { object, .. } = place.kind.as_ref() {
+        while let ast::ExpressionKind::FieldAccess { object, .. }
+        | ast::ExpressionKind::Index { object, .. } = place.kind.as_ref()
+        {
             place = object;
         }
         if let ast::ExpressionKind::Identifier(root) = place.kind.as_ref() {
@@ -403,4 +406,49 @@ pub fn check_program(
         }
     }
     errors
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        lexer, parser::Parser, semantic::typeck::TypeChecker, symbol_table::CompilerSymbolTable,
+    };
+
+    /// A stand-in for std's Vec: the checks key on the `push` method.
+    const POOL: &str = "struct Vec<T> { T* data; }\n\
+                        impl Vec<T> { void push(&mut self, T value) {} }\n\
+                        void read(&i64 value) {}\n";
+
+    fn launch_errors(body: &str) -> Vec<String> {
+        let source = format!("{POOL}i64 main() {{\n{body}\nreturn 0;\n}}\n");
+        let tokens = lexer::lex(&source).expect("probe should lex");
+        let (mut program, errors) = Parser::new(tokens).parse_program();
+        assert!(errors.is_empty(), "probe should parse: {errors:?}");
+        TypeChecker::resolve_type_aliases_in_program(&mut program);
+        let mut checker = TypeChecker::new();
+        let (type_errors, _) =
+            checker.check_program_with_table(&program, &mut CompilerSymbolTable::new());
+        assert!(type_errors.is_empty(), "probe should type check: {type_errors:?}");
+        let inferred_lets = checker.take_inferred_lets();
+        crate::semantic::typeck::populate_inferred_let_types(&mut program, &inferred_lets);
+        super::check_program(&program, checker.resolved_callables())
+            .into_iter()
+            .map(|error| error.message)
+            .collect()
+    }
+
+    #[test]
+    fn an_indexed_borrow_orders_the_collection_after_its_root() {
+        let early = launch_errors(
+            "Vec<Task<void>> pool;\ni64 values[2] = { 1, 2 };\npool.push(launch read(&values[0]));",
+        );
+        assert!(
+            early.iter().any(|message| message.contains("declared after 'values'")),
+            "{early:?}"
+        );
+        let late = launch_errors(
+            "i64 values[2] = { 1, 2 };\nVec<Task<void>> pool;\npool.push(launch read(&values[0]));",
+        );
+        assert!(late.is_empty(), "{late:?}");
+    }
 }
