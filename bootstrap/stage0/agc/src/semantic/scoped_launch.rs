@@ -96,8 +96,9 @@ struct FunctionFacts<'a> {
     collection_holders: FxHashMap<String, (Span, String)>,
     /// Identifiers a collection holder may appear as (see the module docs).
     collection_uses: FxHashSet<SpanKey>,
-    /// Where each local is declared, by span start.
-    declared_at: FxHashMap<String, usize>,
+    /// Every declaration of each local name: its span start and the span of
+    /// the block it is visible in.
+    declared_at: FxHashMap<String, Vec<(usize, Span)>>,
     /// Parameters and locals declared as references, with whether each is
     /// `&mut T`.
     references: FxHashMap<String, bool>,
@@ -180,21 +181,32 @@ fn borrowed_roots(
 impl FunctionFacts<'_> {
     fn record_block(&mut self, block: &ast::Block) {
         for statement in &block.statements {
-            self.record_statement(statement);
+            self.record_statement(statement, block.span);
         }
     }
 
-    fn record_statement(&mut self, statement: &ast::Statement) {
+    fn record_statement(&mut self, statement: &ast::Statement, scope: Span) {
         match &statement.kind {
-            ast::StatementKind::Let(binding) => self.record_binding(binding),
+            ast::StatementKind::Let(binding) => self.record_binding(binding, scope),
             ast::StatementKind::Block(block) => self.record_block(block),
-            ast::StatementKind::Defer(inner) => self.record_statement(inner),
+            ast::StatementKind::Defer(inner) => self.record_statement(inner, scope),
             _ => {}
         }
     }
 
-    fn record_binding(&mut self, binding: &ast::LetStatement) {
-        self.record_declaration(binding);
+    /// Where the declaration of `name` visible at offset `at` starts, or None
+    /// for a parameter: the latest one before `at` whose block contains it.
+    fn declaration(&self, name: &str, at: usize) -> Option<usize> {
+        self.declared_at
+            .get(name)?
+            .iter()
+            .filter(|(start, scope)| *start < at && scope.start <= at && at < scope.end)
+            .map(|(start, _)| *start)
+            .max()
+    }
+
+    fn record_binding(&mut self, binding: &ast::LetStatement, scope: Span) {
+        self.record_declaration(binding, scope);
         if let Some(initializer) = &binding.initializer
             && let ast::PatternKind::Identifier(name) = &binding.pattern.kind
             && is_scoped_launch(initializer, self.resolved_callables)
@@ -207,10 +219,14 @@ impl FunctionFacts<'_> {
         }
     }
 
-    /// Records where `binding` declares its name and whether it is a reference.
-    fn record_declaration(&mut self, binding: &ast::LetStatement) {
+    /// Records where `binding` declares its name, the block `scope` it is
+    /// visible in, and whether it is a reference.
+    fn record_declaration(&mut self, binding: &ast::LetStatement, scope: Span) {
         if let ast::PatternKind::Identifier(name) = &binding.pattern.kind {
-            self.declared_at.insert(name.name.clone(), name.span.start);
+            self.declared_at
+                .entry(name.name.clone())
+                .or_default()
+                .push((name.span.start, scope));
             match binding.type_annotation.as_ref().map(|ty| ty.kind.as_ref()) {
                 Some(ast::TypeKind::Reference(reference)) => {
                     self.references.insert(name.name.clone(), reference.is_mutable);
@@ -233,7 +249,7 @@ impl FunctionFacts<'_> {
             ast::ExpressionKind::For { init, body, .. } => {
                 // A `for` initializer cannot hold a borrowing launch: the
                 // borrow checker tracks task loans only for block locals.
-                self.record_declaration(init);
+                self.record_declaration(init, expression.span);
                 self.record_block(body);
             }
             ast::ExpressionKind::If {
@@ -402,7 +418,7 @@ fn check_function(
             if !is_scoped_launch(launch, resolved_callables) {
                 return;
             }
-            let holder_declared = facts.declared_at.get(&holder.name).copied();
+            let holder_declared = facts.declaration(&holder.name, holder.span.start);
             for (root, mutable) in
                 borrowed_roots(launch, resolved_callables, &facts.references)
             {
@@ -413,7 +429,7 @@ fn check_function(
                         launched_at: None,
                     });
                 }
-                let root_declared = facts.declared_at.get(&root).copied();
+                let root_declared = facts.declaration(&root, launch.span.start);
                 let joined_first = match (holder_declared, root_declared) {
                     (Some(holder_at), Some(root_at)) => holder_at > root_at,
                     // A parameter outlives every local.
@@ -524,6 +540,23 @@ mod tests {
         let forwarded =
             launch_errors("i64 x = 1;\n&i64 r = &x;\nTask<void> t = launch read(r);\nwait t;");
         assert!(forwarded.is_empty(), "{forwarded:?}");
+    }
+
+    #[test]
+    fn a_push_orders_the_collection_it_names_not_a_later_namesake() {
+        let errors = launch_errors(
+            "Vec<Task<void>> tasks;\ni64 value = 1;\n{ Vec<Task<void>> tasks; }\n\
+             tasks.push(launch read(&value));",
+        );
+        assert!(
+            errors.iter().any(|message| message.contains("declared after 'value'")),
+            "{errors:?}"
+        );
+        let inner = launch_errors(
+            "Vec<Task<void>> tasks;\ni64 value = 1;\n\
+             { Vec<Task<void>> tasks; tasks.push(launch read(&value)); }",
+        );
+        assert!(inner.is_empty(), "{inner:?}");
     }
 
     #[test]
