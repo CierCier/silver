@@ -232,12 +232,13 @@ void typecheck_report_unknown(SymbolTable* symbols, SyntaxNode* declaration,
     typecheck_report_unknown_name(
         symbols, declaration, projection.name, span, diagnostics, ok, candidates
     );
-    typecheck_report_unknown_nested(
-        symbols, declaration, projection.argument0.to_str(), span, diagnostics, ok, candidates
-    );
-    typecheck_report_unknown_nested(
-        symbols, declaration, projection.argument1.to_str(), span, diagnostics, ok, candidates
-    );
+    i64 i = 0;
+    while (i < projection.arguments.len()) {
+        typecheck_report_unknown_nested(
+            symbols, declaration, projection_argument(projection, i), span, diagnostics, ok, candidates
+        );
+        i += 1;
+    }
 }
 
 /// Returns a function item's projected return type.

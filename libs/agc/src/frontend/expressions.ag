@@ -6,7 +6,7 @@
 // records copyable and avoids putting a recursive owned type tree into every
 // local declaration before the typed checker exists. Generic arguments are
 // the exception: nested spellings (Vec<Item*>, Vec<Vec<u8>>) cannot borrow
-// discontiguous tokens, so argument0/argument1 own their rendered text.
+// discontiguous tokens, so `arguments` owns their rendered text.
 import std.mem.memory;
 import std.mem.vec;
 import std.string;
@@ -34,13 +34,12 @@ enum ProjectionExpressionKind {
     Move;
 }
 
-/// A projected type: kind, base name (borrowed from the CST), up to two
-/// owned generic argument spellings, and Send-relevant flags.
+/// A projected type: kind, base name (borrowed from the CST), the owned
+/// spelling of each generic argument, and Send-relevant flags.
 struct TypeProjection {
     ProjectionTypeKind kind;
     str name;
-    String argument0;
-    String argument1;
+    Vec<String> arguments;
     bool is_mutable;
     bool contains_rc;
     bool contains_non_send;
@@ -75,13 +74,42 @@ TypeProjection projection_type_empty() {
     TypeProjection result;
     result.kind = ProjectionTypeKind.Unknown;
     result.name = "";
-    result.argument0 = String.new();
-    result.argument1 = String.new();
+    result.arguments = Vec<String>.new();
     result.is_mutable = false;
     result.contains_rc = false;
     result.contains_non_send = false;
     result.contains_unknown = true;
     return result;
+}
+
+/// Returns the spelling of generic argument `index`, or "" when absent.
+str projection_argument(TypeProjection* projection, i64 index) {
+    if (index < 0 || index >= projection.arguments.len()) { return ""; }
+    return projection.arguments.get_ptr(index).to_str();
+}
+
+/// Returns a deep copy of `arguments`.
+Vec<String> projection_clone_arguments(Vec<String>* arguments) {
+    Vec<String> result = Vec<String>.new();
+    i64 i = 0;
+    while (i < arguments.len()) {
+        result.push(arguments.get_ptr(i).clone());
+        i += 1;
+    }
+    return result;
+}
+
+/// Appends `<A, B, ...>` to `out`; nothing when there are no arguments.
+void projection_push_arguments(String* out, Vec<String>* arguments) {
+    if (arguments.len() == 0) { return; }
+    out.push((u8)'<');
+    i64 i = 0;
+    while (i < arguments.len()) {
+        if (i > 0) { out.push_str(", "); }
+        out.push_str(arguments.get_ptr(i).to_str());
+        i += 1;
+    }
+    out.push((u8)'>');
 }
 
 /// Returns true when token `node` has exactly `text`.
@@ -146,15 +174,7 @@ void projection_mark_type_known(TypeProjection* value) {
 /// projection, so arrays render name-only as before.
 String projection_render_nested(TypeProjection* inner) {
     String rendered = String.from_str(inner.name);
-    if (inner.argument0.len() > 0) {
-        rendered.push((u8)'<');
-        rendered.push_str(inner.argument0.to_str());
-        if (inner.argument1.len() > 0) {
-            rendered.push_str(", ");
-            rendered.push_str(inner.argument1.to_str());
-        }
-        rendered.push((u8)'>');
-    }
+    projection_push_arguments(&rendered, &inner.arguments);
     if (inner.kind == ProjectionTypeKind.Pointer) {
         rendered.push((u8)'*');
     } else if (inner.kind == ProjectionTypeKind.Reference) {
@@ -193,8 +213,7 @@ TypeProjection projection_parse_type_at(ProjectionTypeParser* parser) {
         TypeProjection result = projection_type_empty();
         result.kind = ProjectionTypeKind.Reference;
         result.name = inner.name;
-        result.argument0 = inner.argument0.clone();
-        result.argument1 = inner.argument1.clone();
+        result.arguments = projection_clone_arguments(&inner.arguments);
         result.is_mutable = is_mutable;
         projection_mark_type_known(&result);
         projection_merge_type_flags(&result, &inner);
@@ -207,8 +226,7 @@ TypeProjection projection_parse_type_at(ProjectionTypeParser* parser) {
         TypeProjection result = projection_type_empty();
         result.kind = ProjectionTypeKind.Pointer;
         result.name = inner.name;
-        result.argument0 = inner.argument0.clone();
-        result.argument1 = inner.argument1.clone();
+        result.arguments = projection_clone_arguments(&inner.arguments);
         result.is_mutable = true;
         projection_mark_type_known(&result);
         projection_merge_type_flags(&result, &inner);
@@ -224,8 +242,7 @@ TypeProjection projection_parse_type_at(ProjectionTypeParser* parser) {
         TypeProjection result = projection_type_empty();
         result.kind = ProjectionTypeKind.Array;
         result.name = element.name;
-        result.argument0 = element.argument0.clone();
-        result.argument1 = element.argument1.clone();
+        result.arguments = projection_clone_arguments(&element.arguments);
         projection_mark_type_known(&result);
         projection_merge_type_flags(&result, &element);
         return result;
@@ -252,20 +269,17 @@ TypeProjection projection_parse_type_at(ProjectionTypeParser* parser) {
 
     if (parser.cursor < parser.end && projection_token_text(parser.leaves.get(parser.cursor), "<")) {
         parser.cursor += 1;
-        if (parser.cursor < parser.end && !projection_token_text(parser.leaves.get(parser.cursor), ">")) {
-            TypeProjection argument0 = projection_parse_type_at(parser);
-            result.argument0 = projection_render_nested(&argument0);
-            projection_merge_type_flags(&result, &argument0);
-            if (parser.cursor < parser.end
-                && parser.leaves.get(parser.cursor).token_kind == TokenKind.Comma) {
-                parser.cursor += 1;
-                if (parser.cursor < parser.end && !projection_token_text(parser.leaves.get(parser.cursor), ">")) {
-                    TypeProjection argument1 = projection_parse_type_at(parser);
-                    result.argument1 = projection_render_nested(&argument1);
-                    projection_merge_type_flags(&result, &argument1);
-                } else {
-                    result.contains_unknown = true;
-                }
+        while (parser.cursor < parser.end && !projection_token_text(parser.leaves.get(parser.cursor), ">")) {
+            TypeProjection argument = projection_parse_type_at(parser);
+            result.arguments.push(projection_render_nested(&argument));
+            projection_merge_type_flags(&result, &argument);
+            if (parser.cursor >= parser.end
+                || parser.leaves.get(parser.cursor).token_kind != TokenKind.Comma) {
+                break;
+            }
+            parser.cursor += 1;
+            if (parser.cursor < parser.end && projection_token_text(parser.leaves.get(parser.cursor), ">")) {
+                result.contains_unknown = true;
             }
         }
         while (parser.cursor < parser.end && !projection_token_text(parser.leaves.get(parser.cursor), ">")) {

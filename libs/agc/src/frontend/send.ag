@@ -74,15 +74,7 @@ String send_type_display(TypeProjection* value) {
         result.drop();
         return move array;
     }
-    if (value.argument0.len() > 0) {
-        result.push((u8)'<');
-        result.push_str(value.argument0.to_str());
-        if (value.argument1.len() > 0) {
-            result.push_str(", ");
-            result.push_str(value.argument1.to_str());
-        }
-        result.push((u8)'>');
-    }
+    projection_push_arguments(&result, &value.arguments);
     return result;
 }
 
@@ -180,13 +172,6 @@ i64 send_type_parameter_index(SyntaxNode* item, str name) {
     return -1;
 }
 
-/// Returns the spelling of generic argument `index` (0 or 1) of `owner`.
-str send_type_argument(TypeProjection* owner, i64 index) {
-    if (index == 0) { return owner.argument0.to_str(); }
-    if (index == 1) { return owner.argument1.to_str(); }
-    return "";
-}
-
 /// Projects the type spelled by siblings `[first, end)`.
 TypeProjection send_parse_node_type(SyntaxNode* first, SyntaxNode* end) {
     Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
@@ -227,7 +212,6 @@ TypeProjection send_project_rendered(str text, String* base) {
     if (text[i] == (u8)'<') {
         i += 1;
         i64 depth = 1;
-        i64 index = 0;
         String argument = String.new();
         while (text[i] != (u8)0 && depth > 0) {
             u8 c = text[i];
@@ -238,10 +222,8 @@ TypeProjection send_project_rendered(str text, String* base) {
                 String inner_base = String.new();
                 TypeProjection inner = send_project_rendered(argument.to_str(), &inner_base);
                 projection_merge_type_flags(&result, &inner);
-                if (index == 0) { result.argument0 = argument.clone(); }
-                else { result.argument1 = argument.clone(); }
+                result.arguments.push(argument.clone());
                 argument.clear();
-                index += 1;
                 while (text[i] == (u8)' ') { i += 1; }
             } else {
                 argument.push(c);
@@ -284,7 +266,7 @@ String send_substitute_parameters(str text, SyntaxNode* declaration, TypeProject
             name.push(text[i]);
             i += 1;
         }
-        str argument = send_type_argument(owner, send_type_parameter_index(declaration, name.to_str()));
+        str argument = projection_argument(owner, send_type_parameter_index(declaration, name.to_str()));
         result.push_str(strlen(argument) > 0 ? argument : name.to_str());
     }
     return move result;
@@ -311,7 +293,7 @@ bool send_field_is_send(SyntaxNode* root, SyntaxNode* declaration,
     TypeProjection field = send_parse_node_type(first, end);
     if (field.kind == ProjectionTypeKind.Pointer && send_type_owns_storage(owner.name)) {
         i64 parameter_index = send_type_parameter_index(declaration, field.name);
-        str argument = send_type_argument(owner, parameter_index);
+        str argument = projection_argument(owner, parameter_index);
         if (parameter_index >= 0 && strlen(argument) > 0) {
             return send_argument_is_send(root, argument, owner, visiting, depth, reason);
         }
@@ -319,16 +301,23 @@ bool send_field_is_send(SyntaxNode* root, SyntaxNode* declaration,
     }
     if (field.kind == ProjectionTypeKind.Named && send_text_is_identifier(field.name)) {
         i64 parameter_index = send_type_parameter_index(declaration, field.name);
-        str argument = send_type_argument(owner, parameter_index);
+        str argument = projection_argument(owner, parameter_index);
         if (parameter_index >= 0 && strlen(argument) > 0) {
             return send_argument_is_send(root, argument, owner, visiting, depth, reason);
         }
         // `Vec<T>`: check the field with the owner's arguments in place.
-        String argument0 = send_substitute_parameters(field.argument0.to_str(), declaration, owner);
-        String argument1 = send_substitute_parameters(field.argument1.to_str(), declaration, owner);
-        if (!argument0.equals(field.argument0.to_str()) || !argument1.equals(field.argument1.to_str())) {
-            field.argument0 = move argument0;
-            field.argument1 = move argument1;
+        bool changed = false;
+        i64 index = 0;
+        while (index < field.arguments.len()) {
+            String* argument = field.arguments.get_ptr(index);
+            String substituted = send_substitute_parameters(argument.to_str(), declaration, owner);
+            if (!substituted.equals(argument.to_str())) {
+                *argument = move substituted;
+                changed = true;
+            }
+            index += 1;
+        }
+        if (changed) {
             String substituted = send_type_display(&field);
             return send_argument_is_send(root, substituted.to_str(), owner, visiting, depth, reason);
         }
@@ -342,8 +331,8 @@ bool send_field_is_send(SyntaxNode* root, SyntaxNode* declaration,
 bool send_safe_struct_arguments_are_send(SyntaxNode* root, TypeProjection* owner,
                                          Vec<String>* visiting, i64 depth, String* reason) {
     i64 index = 0;
-    while (index < 2) {
-        str argument = send_type_argument(owner, index);
+    while (index < owner.arguments.len()) {
+        str argument = projection_argument(owner, index);
         if (strlen(argument) > 0
             && !send_argument_is_send(root, argument, owner, visiting, depth, reason)) {
             return false;
@@ -534,7 +523,7 @@ bool send_type_is_send(TypeProjection* value, String* reason) {
             || send_text_equals(value.name, "Arc")
             || send_text_equals(value.name, "Optional")
             || send_text_equals(value.name, "HashMap"))
-        && value.argument0.len() == 0) {
+        && value.arguments.len() == 0) {
         reason.push_str("the type is unknown (a prior type error)");
         return false;
     }

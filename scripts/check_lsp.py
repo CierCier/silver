@@ -679,6 +679,15 @@ class NativeLsp(unittest.TestCase):
             errors = {(item["message"], item["range"]["start"]["line"])
                       for item in session.result("textDocument/diagnostic", alias_document)["items"]}
             self.assertIn((message, 4), errors)
+        # A `#[safe]` struct is Send only when every type argument is.
+        session.send("textDocument/didChange", {"textDocument": {"uri": alias_uri, "version": 5},
+            "contentChanges": [{"text": "import std.mem.rc;\n#[safe]\nstruct Triple<A, B, C> { A a; B b; C* c; }\n"
+                                "void take(Triple<i64, i64, Rc<i64>> _t) {}\n"
+                                "i64 main() {\n Triple<i64, i64, Rc<i64>> t;\n"
+                                " Task<void> worker = launch take(move t);\n wait worker;\n return 0;\n}\n"}]})
+        messages = [item["message"] for item in session.result("textDocument/diagnostic", alias_document)["items"]]
+        self.assertIn("launch argument of type Triple<i64, i64, Rc<i64>> is not Send: "
+                      "Rc<T> carries a shared non-atomic reference count", messages)
         # Using a shared value outside a lock names the fix.
         session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
             "contentChanges": [{"text": text.replace(" i64 seen = 0;", " i64 seen = count + 1;")}]})

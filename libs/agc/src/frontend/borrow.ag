@@ -1847,8 +1847,7 @@ str borrow_alias_target(SyntaxTree* tree, SymbolTable* symbols, str name, u32 de
     str resolved = strlen(target.name) == 0 || borrow_text_equals(target.name, name)
         ? ""
         : borrow_alias_target(tree, symbols, target.name, depth + 1);
-    target.argument0.drop();
-    target.argument1.drop();
+    target.arguments.drop();
     leaves.drop();
     return resolved;
 }
@@ -1984,8 +1983,7 @@ u32 borrow_global_type(SymbolTable* symbols, str name) {
     if (name_index >= 0
         && borrow_type_span_has_brackets(leaves.get(name_index),
             declared.kind == ProjectionTypeKind.Array)) {
-        declared.argument0.drop();
-        declared.argument1.drop();
+        declared.arguments.drop();
         leaves.drop();
         return TYPE_UNKNOWN;
     }
@@ -2000,8 +1998,7 @@ u32 borrow_global_type(SymbolTable* symbols, str name) {
     }
     u32 type_id = symbols.types.parse_type_name(type_text.to_str());
     type_text.drop();
-    declared.argument0.drop();
-    declared.argument1.drop();
+    declared.arguments.drop();
     leaves.drop();
     return type_id;
 }

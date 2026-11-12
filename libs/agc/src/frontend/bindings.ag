@@ -54,8 +54,7 @@ void add_typed_binding(Vec<Binding>* bindings, SyntaxNode* name, BindingKind kin
         // argument strings and double-free. The source stays usable.
         binding.declared_type.kind = declared_type.kind;
         binding.declared_type.name = declared_type.name;
-        binding.declared_type.argument0 = declared_type.argument0.clone();
-        binding.declared_type.argument1 = declared_type.argument1.clone();
+        binding.declared_type.arguments = projection_clone_arguments(&declared_type.arguments);
         binding.declared_type.is_mutable = declared_type.is_mutable;
         binding.declared_type.contains_rc = declared_type.contains_rc;
         binding.declared_type.contains_non_send = declared_type.contains_non_send;
@@ -75,15 +74,7 @@ String binding_declared_type_text(TypeProjection* proj) {
         return String.new();
     }
     String s = String.from_str(proj.name);
-    if (proj.argument0.len() > 0) {
-        s.push('<');
-        s.push_str(proj.argument0.to_str());
-        if (proj.argument1.len() > 0) {
-            s.push_str(", ");
-            s.push_str(proj.argument1.to_str());
-        }
-        s.push('>');
-    }
+    projection_push_arguments(&s, &proj.arguments);
     return move s;
 }
 
