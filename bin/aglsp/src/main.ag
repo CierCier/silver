@@ -610,8 +610,8 @@ i32 main() {
     state.requests = ClientRequests.new();
     Transport transport = Transport.new();
     state.transport_ptr = &transport;
-    TaskRecord* reader = thread_spawn(read_transport, (i64)&transport);
-    if (reader == (TaskRecord*)0) { return 1; }
+    Task<void> reader = launch read_transport(&transport);
+    if (!reader.started()) { return 1; }
     i32 status = 1;
     while (true) {
         Optional<PendingMessage*> next = transport.messages.try_recv();
@@ -655,7 +655,9 @@ i32 main() {
         if (!next.is_some() && state.diagnostics_yielded) {
             state.diagnostics_yielded = false;
             if (state.client.diagnostic_refresh && !state.shutdown) { state.requests.refresh(ClientRequestKind.DiagnosticRefresh); }
-            else { transport.status.pull_pending = false; }
+            // `status` is dispatcher-only; write it through the dispatcher's
+            // pointer while the reader borrows the transport.
+            else { state.transport_ptr.status.pull_pending = false; }
             continue;
         }
         // Idle: no queued message, no index work, no unfinished project check.
@@ -671,6 +673,6 @@ i32 main() {
         state.store.compact_closed();
         if (result >= 0) { status = result; break; }
     }
-    transport.stop(); thread_join(reader);
+    transport.stop(); wait reader;
     return status;
 }
