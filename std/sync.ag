@@ -313,6 +313,9 @@ impl RawRwLock {
     /// Acquire a shared read lock, blocking if a writer is active or waiting.
     void read_lock(&self) {
         while (true) {
+            // Read the wake counter before the state, so an unlock between
+            // the check and the sleep changes the counter and the wait returns.
+            i32 expected = __atomic_load_i32(&self.read_futex, ATOMIC_SEQ_CST);
             i32 ww = __atomic_load_i32(&self.writers_waiting, ATOMIC_SEQ_CST);
             i32 s = __atomic_load_i32(&self.state, ATOMIC_SEQ_CST);
             if (ww == 0 && s >= 0) {
@@ -320,7 +323,6 @@ impl RawRwLock {
                     return;
                 }
             } else {
-                i32 expected = __atomic_load_i32(&self.read_futex, ATOMIC_SEQ_CST);
                 futex_wait(&self.read_futex, expected);
             }
         }
@@ -355,11 +357,12 @@ impl RawRwLock {
     void write_lock(&self) {
         __atomic_fetch_add_i32(&self.writers_waiting, 1, ATOMIC_SEQ_CST);
         while (true) {
+            // As in read_lock: read the wake counter before trying the lock.
+            i32 expected = __atomic_load_i32(&self.write_futex, ATOMIC_SEQ_CST);
             if (__atomic_cmpxchg_i32(&self.state, 0, -1, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST)) {
                 __atomic_fetch_sub_i32(&self.writers_waiting, 1, ATOMIC_SEQ_CST);
                 return;
             }
-            i32 expected = __atomic_load_i32(&self.write_futex, ATOMIC_SEQ_CST);
             futex_wait(&self.write_futex, expected);
         }
     }
