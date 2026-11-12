@@ -16,17 +16,58 @@ i64 semantic_kind(IdeSymbolKind kind) {
     };
 }
 
+/// True when `token` is spelled as the source text at its span. Tokens that
+/// sync_sugar synthesized are not: `Mutex` sits on `shared`, a lock block's
+/// setup on `lock`, and `(*__lock_N__x)` on `x`.
+bool semantic_spells_source(Document* doc, Token* token) {
+    i64 length = token.span.end - token.span.start;
+    if (length != token.text.len()) { return false; }
+    i64 i = 0;
+    while (i < length) {
+        if (doc.text.data[token.span.start + i] != token.text.data[i]) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+/// True when the source at `span` is `word`.
+bool semantic_source_is(Document* doc, Span span, str word) {
+    i64 length = strlen(word);
+    if (span.end - span.start != length) { return false; }
+    i64 i = 0;
+    while (i < length) {
+        if (doc.text.data[span.start + i] != word[i]) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
 /// Returns the encoded semantic tokens (LSP 5-integer deltas) for byte range
 /// `[begin, finish)`.
 Vec<i64> semantic_data(Document* doc, &SemanticTokenOptions options, i64 begin, i64 finish) {
     Vec<i64> data = Vec<i64>.new();
     if (begin == finish) { return move data; }
     i64 previous_line = 0; i64 previous_character = 0; i64 i = 0;
+    i64 emitted_start = -1;
     while (i < doc.analysis.tokens.len()) {
         Token* token = doc.analysis.tokens.get(i);
         if (token.span.end <= begin || token.span.start >= finish) { i += 1; continue; }
+        // A synthesized token takes the class of the source it sits on: the
+        // `shared`/`lock` keyword, once, or the user's name inside a lock block.
+        bool literal = token.kind == TokenKind.Comment || token.kind == TokenKind.StringLiteral
+            || token.kind == TokenKind.CharLiteral || token.kind == TokenKind.IntLiteral
+            || token.kind == TokenKind.FloatLiteral || token.kind == TokenKind.ComplexLiteral;
+        bool synthesized = !literal && !semantic_spells_source(doc, token);
+        bool sugar_keyword = synthesized
+            && (semantic_source_is(doc, token.span, "shared") || semantic_source_is(doc, token.span, "lock"));
+        if (synthesized && (token.span.start == emitted_start
+                            || (!sugar_keyword && token.kind != TokenKind.Identifier))) {
+            i += 1;
+            continue;
+        }
         i64 kind = -1; i64 modifiers = 0;
-        if (token.kind == TokenKind.Comment) { kind = 13; }
+        if (sugar_keyword) { kind = 12; }
+        else if (token.kind == TokenKind.Comment) { kind = 13; }
         else if (token.kind == TokenKind.StringLiteral || token.kind == TokenKind.CharLiteral) { kind = 14; }
         else if (token.kind == TokenKind.IntLiteral || token.kind == TokenKind.FloatLiteral || token.kind == TokenKind.ComplexLiteral) { kind = 15; }
         else if (is_primitive_type_token(token.kind)) { kind = 1; }
@@ -50,6 +91,7 @@ Vec<i64> semantic_data(Document* doc, &SemanticTokenOptions options, i64 begin, 
                 if ((modifiers & (1 << bit)) != 0) { mapped_modifiers = mapped_modifiers | options.modifier_map[bit]; }
                 bit += 1;
             }
+            emitted_start = token.span.start;
             i64 start = token.span.start;
             i64 limit = token.span.end;
             while (start < limit) {

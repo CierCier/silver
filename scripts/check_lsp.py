@@ -583,6 +583,60 @@ class NativeLsp(unittest.TestCase):
         self.assertEqual(session.result("textDocument/definition", {**document,
             "position": position(text, at)}), before)
 
+    def test_shared_values_and_lock_blocks_resolve_to_user_declarations(self):
+        repo = Path(__file__).resolve().parent.parent
+        text = ("import std.sync;\n"
+                "void add(&shared i64 total, i64 amount) {\n"
+                " lock total { total += amount; }\n}\n"
+                "i64 main() {\n shared i64 count = 0;\n add(&count, 2);\n"
+                " i64 seen = 0;\n lock count { seen = count; }\n return seen;\n}\n")
+        env = os.environ.copy()
+        env["SILVER_SYSROOT"] = str(repo)
+        session = Session(self.binary, self.root, env=env)
+        self.addCleanup(session.close)
+        legend = session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {
+            "textDocument": {"diagnostic": {}, "semanticTokens": semantic_capability()}}})["capabilities"][
+            "semanticTokensProvider"]["legend"]
+        session.send("initialized", {})
+        uri = (self.root / "shared.ag").as_uri()
+        document = {"textDocument": {"uri": uri}}
+        session.send("textDocument/didOpen", {"textDocument": {
+            "uri": uri, "languageId": "silver", "version": 1, "text": text}})
+        self.assertEqual(session.result("textDocument/diagnostic", document)["items"], [])
+        # Inside a lock block the locked name resolves to the user's declaration,
+        # never to the locals the block lowers to.
+        inside = {**document, "position": location(text, "total", text.index("lock total {") + 12)["start"]}
+        declaration = location(text, "total")
+        self.assertEqual(session.result("textDocument/definition", inside), {"uri": uri, "range": declaration})
+        self.assertIn("total", session.result("textDocument/hover", inside)["contents"]["value"])
+        self.assertNotIn("__lock", session.result("textDocument/hover", inside)["contents"]["value"])
+        references = session.result("textDocument/references", {**inside, "context": {"includeDeclaration": True}})
+        self.assertEqual(len(references), 3)
+        renamed = session.result("textDocument/rename", {**document,
+            "position": location(text, "count")["start"], "newName": "tally"})
+        self.assertEqual(len(renamed["changes"][uri]), 4)
+        symbols = json.dumps(session.result("textDocument/documentSymbol", document))
+        self.assertNotIn("__lock", symbols)
+        # The words are keywords, and the code they lower to adds no tokens.
+        tokens = decode_tokens(session.result("textDocument/semanticTokens/full", document)["data"], legend)
+        starts = [(line, character) for line, character, *_ in tokens]
+        self.assertEqual(starts, sorted(set(starts)))
+        kinds = {(line, character): kind for line, character, _, kind, _ in tokens}
+        for word, start in [("shared", text.index("shared i64 count")), ("lock", text.index("lock count")),
+                            ("shared", text.index("shared i64 total")), ("lock", text.index("lock total"))]:
+            at = position(text, start)
+            self.assertEqual(kinds[(at["line"], at["character"])], "keyword", word)
+        inside = position(text, text.index("seen = count") + len("seen = "))
+        self.assertEqual(kinds[(inside["line"], inside["character"])], "variable")
+        items = session.result("textDocument/completion", {**document,
+            "position": position(text, text.index("seen = count") + len("seen = "))})["items"]
+        self.assertFalse(any(item["label"].startswith("__lock") for item in items))
+        # Using a shared value outside a lock names the fix.
+        session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
+            "contentChanges": [{"text": text.replace(" i64 seen = 0;", " i64 seen = count + 1;")}]})
+        messages = [item["message"] for item in session.result("textDocument/diagnostic", document)["items"]]
+        self.assertTrue(any("lock count { ... }" in message for message in messages), messages)
+
     def test_push_lambda_diagnostics_report_real_errors_and_clear_after_edits(self):
         original = ('i32 main() {\n i32 value = 4;\n'
                     ' let shadow = (i32 value) => value + 1;\n'
