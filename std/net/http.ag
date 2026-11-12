@@ -3098,7 +3098,10 @@ void h2_serve_conn(StreamIo* io, ServeMux* mux, i64 max_body) {
     h2_serve_conn(io, mux, max_body, false, "");
 }
 
-/// Internal: the server and listening fd shared by acceptor threads.
+/// Internal: the server and listening fd shared by acceptor threads. Each
+/// worker gets its own copy; the server is only read while serving (see
+/// `serve_conn`).
+#[safe]
 struct HttpWorkerContext {
     HttpServer* server;
     i32 lfd;
@@ -3106,8 +3109,7 @@ struct HttpWorkerContext {
 
 /// Internal: accept loop for an extra worker thread; runs until the listener
 /// fails with EBADF or EINVAL.
-void http_acceptor_worker(i64 arg) {
-    HttpWorkerContext* ctx = (HttpWorkerContext*)arg;
+void http_acceptor_worker(HttpWorkerContext ctx) {
     HttpServer* s = ctx.server;
     i32 lfd = ctx.lfd;
     while (true) {
@@ -3138,6 +3140,8 @@ void http_acceptor_worker(i64 arg) {
 }
 
 /// Internal: the server, listening fd, and certificate paths for TLS workers.
+/// Each worker gets its own copy; the server is only read while serving.
+#[safe]
 struct HttpTlsWorkerContext {
     HttpServer* server;
     i32 lfd;
@@ -3146,8 +3150,7 @@ struct HttpTlsWorkerContext {
 }
 
 /// Internal: TLS accept loop for an extra worker thread.
-void http_tls_acceptor_worker(i64 arg) {
-    HttpTlsWorkerContext* ctx = (HttpTlsWorkerContext*)arg;
+void http_tls_acceptor_worker(HttpTlsWorkerContext ctx) {
     HttpServer* s = ctx.server;
     i32 lfd = ctx.lfd;
     str cert = ctx.cert_file;
@@ -3354,16 +3357,16 @@ impl HttpServer {
             return Err(HTTP_ERR_CONNECT, "failed to bind socket");
         }
 
-        if (self.workers > 1) {
-            HttpWorkerContext* ctx = alloc<HttpWorkerContext>();
+        // Extra acceptors are detached: like the loop below, they serve
+        // until the listener breaks.
+        i64 spawned = 0;
+        while (spawned < self.workers - 1) {
+            HttpWorkerContext ctx;
             ctx.server = self;
             ctx.lfd = listener.raw_fd();
-            i64 spawned = 0;
-            while (spawned < self.workers - 1) {
-                TaskRecord* h = thread_spawn(http_acceptor_worker, (i64)ctx);
-                if (h == (TaskRecord*)0) { break; }
-                spawned = spawned + 1;
-            }
+            Task<void> worker = launch http_acceptor_worker(ctx);
+            if (!worker.started()) { break; }
+            spawned = spawned + 1;
         }
 
         while (true) {
@@ -3510,18 +3513,18 @@ impl HttpServer {
         }
 
 
-        if (self.workers > 1) {
-            HttpTlsWorkerContext* ctx = alloc<HttpTlsWorkerContext>();
+        // Extra acceptors are detached: like the loop below, they serve
+        // until the listener breaks.
+        i64 spawned = 0;
+        while (spawned < self.workers - 1) {
+            HttpTlsWorkerContext ctx;
             ctx.server = self;
             ctx.lfd = listener.raw_fd();
             ctx.cert_file = cert_file;
             ctx.key_file = key_file;
-            i64 spawned = 0;
-            while (spawned < self.workers - 1) {
-                TaskRecord* h = thread_spawn(http_tls_acceptor_worker, (i64)ctx);
-                if (h == (TaskRecord*)0) { break; }
-                spawned = spawned + 1;
-            }
+            Task<void> worker = launch http_tls_acceptor_worker(ctx);
+            if (!worker.started()) { break; }
+            spawned = spawned + 1;
         }
         while (true) {
             Result<i64, Error> a = listener.accept();
