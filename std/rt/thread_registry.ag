@@ -40,16 +40,18 @@ const i64 FUTEX_EINTR = -4;
 /// Bounded spin before blocking: short joins never pay a syscall.
 const i64 THREAD_JOIN_MAX_SPINS = 64;
 
-/// Per-thread bookkeeping. `tid` doubles as the slot liveness flag:
+/// Internal: per-thread bookkeeping shared by std.thread and this registry;
+/// user code reaches threads only through `launch` and `Task<T>`. `tid`
+/// doubles as the slot liveness flag:
 ///   0  = free slot,   <0 = slot claimed but child not yet running,
 ///   >0 = child thread running/done (raw clone tid).
 struct TaskRecord {
     i64 tid;     // raw clone tid; 0 = free slot (see above)
-    i64 fn;      // user function address
-    i64 arg;     // user argument
+    i64 fn;      // launch trampoline address
+    i64 arg;     // trampoline argument (the launch pack)
     u8* stack;   // child stack base (parent-owned mmap; see thread.ag)
     i64 done;    // atomic: 1 once the child fn returned (thread then exits)
-    i64 pack;    // launch pack ptr (compiler-owned); 0 for spawn(): freed by the waiter
+    i64 pack;    // launch pack ptr (compiler-owned); freed by the waiter
     i32 ctid;    // kernel-managed tid via CLONE_CHILD_CLEARTID (cleared to 0 upon thread exit)
     i64 scoped;  // 1 for a launch that borrows from its launcher: joined when the handle drops
     i64 generation; // bumped when a waiter reclaims the slot; older handles are stale
@@ -87,7 +89,7 @@ void thread_lock_release() {
 /// the flag before sleeping, and the kernel atomically re-checks that
 /// `*uaddr == 0` when entering FUTEX_WAIT, so a wake that raced ahead of
 /// the wait returns -EAGAIN instead of stranding us.
-void thread_wait_done_futex(TaskRecord* rec) {
+private void thread_wait_done_futex(TaskRecord* rec) {
     while (true) {
         if (__atomic_load_i64(&rec.done, ATOMIC_ACQUIRE) == 1) {
             return;
@@ -105,7 +107,7 @@ void thread_wake_done_futex(TaskRecord* rec) {
     sys_futex((i64)&rec.done, FUTEX_OP_WAKE, 1, 0, 0, 0);
 }
 /// Wait until the kernel clears rec.ctid to 0 upon thread exit via CLONE_CHILD_CLEARTID.
-void thread_wait_ctid(TaskRecord* rec) {
+private void thread_wait_ctid(TaskRecord* rec) {
     while (true) {
         i32 c = __atomic_load_i32(&rec.ctid, ATOMIC_ACQUIRE);
         if (c == 0) {
@@ -122,7 +124,7 @@ void thread_wait_ctid(TaskRecord* rec) {
 /// Block until `rec`'s thread has finished: spin briefly, then sleep on the
 /// futex. Linux waits for the kernel to clear `ctid` (the thread has left its
 /// stack); other targets wait for the done flag.
-void thread_await_exit(TaskRecord* rec) {
+private void thread_await_exit(TaskRecord* rec) {
     if (@cfg(os.linux)) {
         i64 spins = 0;
         while (true) {
@@ -159,7 +161,7 @@ i64 task_handle(TaskRecord* rec) {
 
 /// Returns the record `handle` names, or null when the handle is 0 or stale:
 /// its task was already waited, so the slot may hold another task.
-TaskRecord* task_handle_record(i64 handle) {
+private TaskRecord* task_handle_record(i64 handle) {
     i64 slot = (handle & TASK_HANDLE_SLOT_MASK) - 1;
     if (slot < 0 || slot >= thread_registry_capacity()) {
         return (TaskRecord*)0;
@@ -172,12 +174,12 @@ TaskRecord* task_handle_record(i64 handle) {
 }
 
 /// Ends a stale handle so no later task can reuse it. Caller holds the lock.
-void task_retire_generation(TaskRecord* rec) {
+private void task_retire_generation(TaskRecord* rec) {
     __atomic_store_i64(&rec.generation, rec.generation + 1, ATOMIC_RELEASE);
 }
 
 /// Prints `message` to stderr and exits with 134 like `abort()`.
-void task_abort(str message) {
+private void task_abort(str message) {
     sys_write(2, (i64)message, strlen(message));
     sys_kill(sys_getpid(), 6);  // SIGABRT
     sys_exit_group(134);
@@ -185,7 +187,7 @@ void task_abort(str message) {
 
 /// Join one task: wait until the child fn returned, then reclaim the slot.
 /// Returns the child's tid. Silently returns -1 for a null record.
-i64 thread_join(TaskRecord* rec) {
+private i64 thread_join(TaskRecord* rec) {
     if (rec == (TaskRecord*)0) {
         return -1;
     }
