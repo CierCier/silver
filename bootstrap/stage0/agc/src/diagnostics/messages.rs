@@ -376,6 +376,10 @@ pub fn cannot_assign_to_borrowed(name: &str) -> String {
     format!("cannot assign to '{name}' because it is borrowed")
 }
 
+pub fn move_out_of_lock(name: &str) -> String {
+    format!("cannot move '{name}' out of its lock block: the shared value still owns it; clone it instead")
+}
+
 pub fn cannot_move_out_of_borrowed(name: &str) -> String {
     format!("cannot move out of '{name}' because it is borrowed")
 }

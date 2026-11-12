@@ -1229,7 +1229,10 @@ shared Vec<i64> seen = Vec<i64>.new();
 ```
 
 `shared` declares locals, struct fields, and reference parameters
-(`&shared i64 total`). `lock x { ... }` is the way to read or
+(`&shared i64 total`). It applies to the type name it precedes, so
+`shared i64*` is a pointer to a shared `i64` (`Mutex<i64>*`), like
+`&shared i64`; a shared pointer is written `Mutex<i64*>`.
+`lock x { ... }` is the way to read or
 change the value. Inside the block `x` names the value itself, a `T`, and
 the lock is held until the block ends:
 
@@ -1271,8 +1274,11 @@ The compiler rejects the mistakes it can see:
   read or change it inside `lock total { ... }` ``.
 - Locking a value that is not shared: `` `count` is `i64`, not shared:
   declare it `shared i64` to lock it ``.
-- Locking `x` again inside `lock x`, which would deadlock, and declaring
-  another `x` inside it.
+- Locking the same place again inside its own lock block, which would
+  deadlock, and declaring another `x` inside `lock x`.
+- Moving the value, or an owned field of it, out of the block:
+  `` cannot move 'seen' out of its lock block: the shared value still owns
+  it; clone it instead ``.
 - A place that is not a plain name without `as name`.
 
 Two rules are not checked. A reference to the value taken inside the block

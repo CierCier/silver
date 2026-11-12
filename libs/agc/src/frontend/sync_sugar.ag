@@ -325,20 +325,39 @@ bool sugar_declares(Vec<Token>* tokens, i64 index) {
         || sugar_is(tokens, next, TokenKind.RightParen));
 }
 
-/// Reports a redeclaration of the locked `name`, or a nested lock of it,
-/// inside a lock body.
-void sugar_check_body(Vec<Token>* body, str name, DiagnosticBag* diagnostics) {
+/// True when the place starting at `body[start]` spells the same tokens as
+/// `tokens[from, to)` and ends there, before `{` or `as`.
+bool sugar_same_place(Vec<Token>* tokens, i64 from, i64 to, Vec<Token>* body, i64 start) {
+    i64 i = from;
+    i64 j = start;
+    while (i >= 0 && i < to) {
+        if (j < 0 || tokens.get_ptr(i).kind != body.get_ptr(j).kind
+            || !tokens.get_ptr(i).text.equals(body.get_ptr(j).text.to_str())) {
+            return false;
+        }
+        i = sugar_next(tokens, i);
+        j = sugar_next(body, j);
+    }
+    return sugar_is(body, j, TokenKind.LeftBrace) || sugar_is(body, j, TokenKind.As);
+}
+
+/// Reports a redeclaration of the locked `name`, or a nested lock of the
+/// place `tokens[from, to)`, inside a lock body.
+void sugar_check_body(Vec<Token>* body, str name, Vec<Token>* tokens, i64 from, i64 to,
+                      DiagnosticBag* diagnostics) {
     i64 j = 0;
     while (j < body.len()) {
-        if (sugar_is_name(body, j, "lock") && sugar_starts_statement(body, j)) {
-            i64 inner = sugar_next(body, j);
-            i64 after = sugar_next(body, inner);
-            if (sugar_is_name(body, inner, name)
-                && (sugar_is(body, after, TokenKind.LeftBrace) || sugar_is(body, after, TokenKind.As))) {
-                diagnostics.error(body.get_ptr(j).span, @format(
-                    "`{}` is already locked by an enclosing lock block; locking it again would deadlock",
-                    name));
+        if (sugar_is_name(body, j, "lock") && sugar_starts_statement(body, j)
+            && sugar_same_place(tokens, from, to, body, sugar_next(body, j))) {
+            String place = String.new();
+            i64 k = from;
+            while (k < to) {
+                if (tokens.get_ptr(k).kind != TokenKind.Comment) { place.push_str(tokens.get_ptr(k).text.to_str()); }
+                k += 1;
             }
+            diagnostics.error(body.get_ptr(j).span, @format(
+                "`{}` is already locked by an enclosing lock block; locking it again would deadlock",
+                place.to_str()));
         }
         if (sugar_is_name(body, j, name) && sugar_declares(body, j)) {
             diagnostics.error(body.get_ptr(j).span, @format(
@@ -377,7 +396,7 @@ void desugar_locks(Vec<Token>* tokens, Vec<Token>* out, i64* counter, Diagnostic
         str name = tokens.get_ptr(head.name).text.to_str();
         Vec<Token> raw_body = Vec<Token>.new();
         sugar_copy_range(tokens, head.open + 1, close, &raw_body);
-        sugar_check_body(&raw_body, name, diagnostics);
+        sugar_check_body(&raw_body, name, tokens, head.place_start, head.place_end, diagnostics);
         Vec<Token> body = Vec<Token>.new();
         desugar_locks(&raw_body, &body, counter, diagnostics);
         String value = @format("__lock_{}__{}", *counter, name);
@@ -424,6 +443,20 @@ void desugar_locks(Vec<Token>* tokens, Vec<Token>* out, i64* counter, Diagnostic
         out.push(sugar_token(TokenKind.RightBrace, "}", tokens.get_ptr(close).span));
         i = close + 1;
     }
+}
+
+/// Where the user's name starts inside a generated `__lock_N__name` local, or
+/// -1 for any other name (including the guard, `__lock_N_guard`).
+i64 sugar_locked_name_start(str local) {
+    str prefix = "__lock_";
+    i64 i = 0;
+    while (prefix[i] != (u8)0) {
+        if (local[i] != prefix[i]) { return -1; }
+        i += 1;
+    }
+    while (local[i] >= (u8)'0' && local[i] <= (u8)'9') { i += 1; }
+    if (local[i] != (u8)'_' || local[i + 1] != (u8)'_') { return -1; }
+    return i + 2;
 }
 
 /// True when `stream` names `shared` or `lock` at all, so files without the

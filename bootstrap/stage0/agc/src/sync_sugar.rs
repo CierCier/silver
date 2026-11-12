@@ -294,6 +294,23 @@ fn lock_head(tokens: &[LexToken], index: usize) -> Result<Option<LockHead>, Suga
     }))
 }
 
+/// The spelling of each non-comment token in `tokens`.
+fn significant_text(tokens: &[LexToken]) -> Vec<&str> {
+    tokens
+        .iter()
+        .filter(|token| !is_comment(token))
+        .map(|token| token.text.as_str())
+        .collect()
+}
+
+/// The user's name inside a generated `__lock_N__name` local, or None for
+/// any other name (including the guard, `__lock_N_guard`).
+pub fn locked_name(local: &str) -> Option<&str> {
+    let rest = local.strip_prefix("__lock_")?;
+    let digits = rest.find(|c: char| !c.is_ascii_digit())?;
+    rest[digits..].strip_prefix("__")
+}
+
 /// The index of the `}` matching the `{` at `open`.
 fn matching_brace(tokens: &[LexToken], open: usize) -> Option<usize> {
     let mut depth = 0usize;
@@ -358,16 +375,17 @@ fn desugar_locks(tokens: &[LexToken], counter: &mut usize) -> Result<Vec<LexToke
             span: tokens[head.open].span,
         })?;
         let body = &tokens[head.open + 1..close];
+        let place = significant_text(&tokens[head.place.clone()]);
         for (j, token) in body.iter().enumerate() {
             if is_identifier(token, "lock")
                 && starts_statement(body, j)
                 && let Some(inner) = lock_head(body, j)?
-                && inner.name == head.name
+                && significant_text(&body[inner.place]) == place
             {
                 return Err(SugarError {
                     message: format!(
                         "`{}` is already locked by an enclosing lock block; locking it again would deadlock",
-                        head.name
+                        place.concat()
                     ),
                     span: token.span,
                 });

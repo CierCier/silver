@@ -493,6 +493,12 @@ str note_value_moved_here() {
     return "value moved here";
 }
 
+/// Diagnostic text: "cannot move '{}' out of its lock block: the shared value
+/// still owns it; clone it instead". Returns an owned string.
+String move_out_of_lock(str name) {
+    return @format("cannot move '{}' out of its lock block: the shared value still owns it; clone it instead", name);
+}
+
 /// Diagnostic text: "cannot move out of '{}' because it is borrowed". Returns
 /// an owned string.
 String cannot_move_out_of_borrowed(str name) {

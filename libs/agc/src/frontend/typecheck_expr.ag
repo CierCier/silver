@@ -12,6 +12,7 @@ import frontend.items;
 import frontend.lexer;
 import frontend.lower_expr;
 import frontend.symbols;
+import frontend.sync_sugar;
 import frontend.messages;
 import frontend.monomorph;
 import frontend.types;
@@ -1179,11 +1180,47 @@ u32 typecheck_place_type(AstPool* pool, TypeTable* types, SymbolTable* symbols,
     return place_type;
 }
 
-/// Reports moving a field out of a value whose type implements Drop.
-/// Returns true when it reported.
+/// Reports moving a `lock` block's value, or an owned field of it, out of the
+/// block. The value is `(*__lock_N__name)`, a place inside the Mutex (see
+/// sync_sugar.ag), and the Mutex would still own and drop it. Returns true
+/// when it reported.
+bool typecheck_reject_locked_move(AstPool* pool, TypeTable* types, SymbolTable* symbols,
+                                  SyntaxNode* root, u32 place_id,
+                                  DiagnosticBag* diagnostics, bool* ok) {
+    AstExpr* place = pool.get_expr(place_id);
+    AstExpr* base = place;
+    String path = String.new();
+    while (base.kind == ExprKind.Field && base.inner0 != 0) {
+        String field = String.from_str(".");
+        field.push_str(symbols.names.get(base.aux));
+        field.push_str(path.to_str());
+        path = move field;
+        base = pool.get_expr(base.inner0);
+    }
+    if (base.kind != ExprKind.Unary || base.aux != (u32)TokenKind.Star || base.inner0 == 0) { return false; }
+    AstExpr* pointer = pool.get_expr(base.inner0);
+    if (pointer.kind != ExprKind.Var) { return false; }
+    String local = String.from_str(symbols.names.get(pointer.aux));
+    i64 start = sugar_locked_name_start(local.to_str());
+    if (start < 0 || place.inferred_type == TYPE_UNKNOWN
+        || typecheck_type_is_copy(root, types, place.inferred_type)) {
+        return false;
+    }
+    String name = local.substr(start, local.len() - start);
+    name.push_str(path.to_str());
+    diagnostics.error(place.span, move_out_of_lock(name.to_str()));
+    *ok = false;
+    return true;
+}
+
+/// Reports moving a field out of a value whose type implements Drop, or a
+/// value out of a lock block. Returns true when it reported.
 bool typecheck_reject_partial_drop_move(AstPool* pool, TypeTable* types, SymbolTable* symbols,
                                         SyntaxNode* root, TypeEnv* env, u32 place_id,
                                         DiagnosticBag* diagnostics, bool* ok) {
+    if (typecheck_reject_locked_move(pool, types, symbols, root, place_id, diagnostics, ok)) {
+        return true;
+    }
     Vec<u32> fields = Vec<u32>.new();
     u32 root_name = typecheck_collect_place(pool, place_id, &fields);
     if (root_name == 0 || fields.len() == 0) {

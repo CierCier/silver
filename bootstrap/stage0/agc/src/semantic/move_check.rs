@@ -1081,6 +1081,7 @@ impl MoveChecker {
         scopes: &mut Vec<Vec<ScopeEntry>>,
         var_types: &mut FxHashMap<String, ast::Type>,
     ) {
+        self.reject_locked_move(argument, var_types);
         if let Some((root, path)) = expr_root_and_path(argument)
             && state.contains_key(&root)
             && self.is_path_tracked(&root, &path, var_types)
@@ -1258,7 +1259,11 @@ impl MoveChecker {
         path: &str,
         var_types: &FxHashMap<String, ast::Type>,
     ) -> Option<ast::Type> {
-        let mut curr_ty = var_types.get(root_name)?.clone();
+        self.field_type(var_types.get(root_name)?.clone(), path)
+    }
+
+    /// The type of dotted field `path` inside a value of type `curr_ty`.
+    fn field_type(&self, mut curr_ty: ast::Type, path: &str) -> Option<ast::Type> {
         if path.is_empty() {
             return Some(curr_ty);
         }
@@ -1374,6 +1379,49 @@ impl MoveChecker {
             other => other.clone(),
         });
         ty
+    }
+
+    /// Rejects moving a `lock` block's value, or an owned field of it, out of
+    /// the block. The value is `(*__lock_N__name)`, a place inside the Mutex
+    /// (see sync_sugar), and the Mutex would still own and drop it.
+    fn reject_locked_move(
+        &mut self,
+        expr: &ast::Expression,
+        var_types: &FxHashMap<String, ast::Type>,
+    ) {
+        let mut path = Vec::new();
+        let mut place = expr;
+        while let ast::ExpressionKind::FieldAccess { object, field } = place.kind.as_ref() {
+            path.push(field.name.as_str());
+            place = object;
+        }
+        let ast::ExpressionKind::Unary {
+            operator: ast::UnaryOperator::Dereference,
+            operand,
+        } = place.kind.as_ref()
+        else {
+            return;
+        };
+        let ast::ExpressionKind::Identifier(pointer) = operand.kind.as_ref() else {
+            return;
+        };
+        let Some(name) = crate::sync_sugar::locked_name(&pointer.name) else {
+            return;
+        };
+        let Some(ast::TypeKind::Pointer(pointer_type)) =
+            var_types.get(&pointer.name).map(|ty| ty.kind.as_ref())
+        else {
+            return;
+        };
+        path.reverse();
+        let path = path.join(".");
+        if self
+            .field_type(pointer_type.inner.as_ref().clone(), &path)
+            .is_some_and(|ty| self.is_tracked(&ty))
+        {
+            let place = if path.is_empty() { name.to_string() } else { format!("{name}.{path}") };
+            self.error(msg::move_out_of_lock(&place), expr.span);
+        }
     }
 
     /// A non-Copy field cannot be detached from any enclosing value whose own
@@ -1581,6 +1629,7 @@ impl MoveChecker {
                     self.record_owner(name, ty, let_stmt.initializer.is_some());
                 }
                 if let Some(init) = &let_stmt.initializer {
+                    self.reject_locked_move(init, var_types);
                     if let Some((root_name, path)) = expr_root_and_path(init)
                         && !path.is_empty()
                         && state.contains_key(&root_name)
@@ -1619,6 +1668,7 @@ impl MoveChecker {
                 // Bare identifier returns are implicit moves (the drop flag is
                 // cleared on the return path); the variable is dead afterwards.
                 // Field returns (`return x.field;`) are views and do not move.
+                self.reject_locked_move(expr, var_types);
                 match expr.kind.as_ref() {
                     ast::ExpressionKind::Identifier(ident) => {
                         if let Some(var) = state.get_mut(&ident.name) {
@@ -1703,6 +1753,7 @@ impl MoveChecker {
                 }
             }
             ast::ExpressionKind::Move(inner) => {
+                self.reject_locked_move(inner, var_types);
                 self.check_place_operands(inner, state, scopes, var_types);
                 // Phase 11 — Index place: try structured Place first for v[i] / x.a[i] etc.
                 // Index projections are built via Place::new(local).index() /
@@ -1900,6 +1951,7 @@ impl MoveChecker {
                         arguments,
                     } => {
                         for arg in arguments {
+                            self.reject_locked_move(arg, var_types);
                             if let Some((root_name, path)) = expr_root_and_path(arg)
                                 && state.contains_key(&root_name)
                             {
@@ -2100,6 +2152,7 @@ impl MoveChecker {
             } => {
                 if *operator == ast::BinaryOperator::Assign {
                     // Evaluate RHS first (in case it uses or moves resources).
+                    self.reject_locked_move(right, var_types);
                     if let Some((root_name, path)) = expr_root_and_path(right)
                         && !path.is_empty()
                         && state.contains_key(&root_name)
