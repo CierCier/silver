@@ -899,14 +899,21 @@ impl<'a> BorrowChecker<'a> {
         self.block_field_writes.push(block_field_writes);
         self.local_scopes.push(FxHashMap::default());
 
+        let pushes = collection_pushes(&block.statements);
         for (i, stmt) in block.statements.iter().enumerate() {
             self.expire_loans_before(i);
             self.statement_indices.push(i);
             self.check_statement(stmt);
             if let ast::StatementKind::Let(binding) = &stmt.kind
                 && let ast::PatternKind::Identifier(name) = &binding.pattern.kind
+                && let Some(found) = pushes.get(&name.name)
             {
-                self.register_collection_task_borrows(&name.name, &block.statements[i + 1..]);
+                let launches: Vec<_> = found
+                    .iter()
+                    .filter(|(at, _)| *at > i)
+                    .map(|(_, arguments)| arguments.as_slice())
+                    .collect();
+                self.register_collection_task_borrows(&name.name, &launches);
             }
             self.statement_indices.pop();
         }
@@ -1676,33 +1683,13 @@ impl<'a> BorrowChecker<'a> {
     /// push inside a loop runs again after code that precedes it in the loop
     /// body, so the borrowed places stay read-only until `holder` drops and
     /// joins its tasks.
-    fn register_collection_task_borrows(&mut self, holder: &str, rest: &[ast::Statement]) {
-        let mut rest = ast::Block {
-            statements: rest.to_vec(),
-            span: Span::default(),
-        };
-        let mut launches = Vec::new();
-        crate::parser::visit::expressions_in_block(&mut rest, &mut |expression| {
-            if let ast::ExpressionKind::MethodCall {
-                receiver,
-                method,
-                arguments,
-            } = expression.kind.as_ref()
-                && method.name == "push"
-                && matches!(receiver.kind.as_ref(), ast::ExpressionKind::Identifier(name) if name.name == holder)
-                && let [launch] = arguments.as_slice()
-                && let ast::ExpressionKind::Launch(call) = launch.kind.as_ref()
-                && let ast::ExpressionKind::Call { arguments, .. } = call.kind.as_ref()
-            {
-                launches.push(arguments.clone());
-            }
-        });
+    fn register_collection_task_borrows(&mut self, holder: &str, launches: &[&[ast::Expression]]) {
         if launches.is_empty() {
             return;
         }
         self.task_holders.insert(holder.to_string());
         for arguments in launches {
-            for argument in &arguments {
+            for argument in *arguments {
                 match argument.kind.as_ref() {
                     // `&mut` is reported by the scoped-launch pass.
                     ast::ExpressionKind::Reference {
@@ -3252,4 +3239,38 @@ fn lock_guard_place<'a>(name: &str, init: &'a ast::Expression) -> Option<&'a ast
         root = object;
     }
     matches!(root.kind.as_ref(), ast::ExpressionKind::Identifier(_)).then_some(place)
+}
+
+/// The arguments of each `name.push(launch f(...))` in `statements`, nested
+/// ones included, by `name`, with the index of the statement that holds it.
+/// One pass per block, so each declaration looks its pushes up.
+fn collection_pushes(
+    statements: &[ast::Statement],
+) -> FxHashMap<String, Vec<(usize, Vec<ast::Expression>)>> {
+    let mut pushes: FxHashMap<String, Vec<(usize, Vec<ast::Expression>)>> = FxHashMap::default();
+    for (index, statement) in statements.iter().enumerate() {
+        let mut one = ast::Block {
+            statements: vec![statement.clone()],
+            span: Span::default(),
+        };
+        crate::parser::visit::expressions_in_block(&mut one, &mut |expression| {
+            if let ast::ExpressionKind::MethodCall {
+                receiver,
+                method,
+                arguments,
+            } = expression.kind.as_ref()
+                && method.name == "push"
+                && let ast::ExpressionKind::Identifier(name) = receiver.kind.as_ref()
+                && let [launch] = arguments.as_slice()
+                && let ast::ExpressionKind::Launch(call) = launch.kind.as_ref()
+                && let ast::ExpressionKind::Call { arguments, .. } = call.kind.as_ref()
+            {
+                pushes
+                    .entry(name.name.clone())
+                    .or_default()
+                    .push((index, arguments.clone()));
+            }
+        });
+    }
+    pushes
 }
