@@ -3513,6 +3513,21 @@ bool typecheck_is_drop_ancestor_error(str message) {
     return true;
 }
 
+/// Returns true for a shared_value_outside_lock message: a generic body
+/// that uses its `T` directly is wrong once `T` is a `shared` Mutex.
+bool typecheck_is_shared_value_error(str message) {
+    str marker = "` is shared between threads: ";
+    i64 marker_len = strlen(marker);
+    i64 start = 1;
+    while (message[0] == '`' && start + marker_len <= strlen(message)) {
+        i64 i = 0;
+        while (i < marker_len && message[start + i] == marker[i]) { i += 1; }
+        if (i == marker_len) { return true; }
+        start += 1;
+    }
+    return false;
+}
+
 /// Rechecks drop-ownership errors in generic call instantiations.
 void typecheck_generic_call_drop_ownership(
     AstPool* caller_pool, TypeTable* types, SymbolTable* symbols, SyntaxNode* root,
@@ -3605,6 +3620,7 @@ void typecheck_generic_call_drop_ownership(
         Diagnostic* diagnostic = probe_diagnostics.get(i);
         if (diagnostic.severity == Severity.Error
             && (typecheck_is_drop_ancestor_error(diagnostic.message.to_str())
+                || typecheck_is_shared_value_error(diagnostic.message.to_str())
                 || typecheck_str_starts_with(diagnostic.message.to_str(), "pointer argument type mismatch:"))) {
             diagnostics.error(diagnostic.span, diagnostic.message.clone());
             *ok = false;

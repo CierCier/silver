@@ -667,9 +667,13 @@ class NativeLsp(unittest.TestCase):
                   "void drain(&Pool pool) {\n lock pool.items as a { lock pool.items as b { } }\n}\n")
         moved = misuse.replace("lock pool.items as a { lock pool.items as b { } }",
                                "lock pool.items as items { Vec<i64> mine = items; }")
+        # A generic body that uses its `T` directly is wrong for a shared `T`.
+        generic = ("import std.sync;\n\n\nT twice<T>(T a) {\n return a + a;\n}\n"
+                   "i64 main() {\n shared i64 total = 1;\n Mutex<i64> other = twice(move total);\n return 0;\n}\n")
         for version, (source, message) in enumerate([
                 (misuse, "`pool.items` is already locked by an enclosing lock block; locking it again would deadlock"),
-                (moved, "cannot move 'items' out of its lock block: the shared value still owns it; clone it instead")], 2):
+                (moved, "cannot move 'items' out of its lock block: the shared value still owns it; clone it instead"),
+                (generic, "`a` is shared between threads: read or change it inside `lock a { ... }`")], 2):
             session.send("textDocument/didChange", {"textDocument": {"uri": alias_uri, "version": version},
                 "contentChanges": [{"text": source}]})
             errors = {(item["message"], item["range"]["start"]["line"])
