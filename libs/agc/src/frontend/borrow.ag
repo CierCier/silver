@@ -2257,17 +2257,17 @@ void borrow_add_collection_loans(BorrowAnalyzer* analyzer, Vec<SyntaxNode*>* lea
     }
 }
 
-/// Returns true when identifier `node` is one whole argument of a call.
-bool borrow_is_whole_call_argument(SyntaxNode* node) {
-    SyntaxNode* group = node.parent;
+/// Returns true when the tokens `first`..`last` are one whole argument of a call.
+bool borrow_is_whole_call_argument(SyntaxNode* first, SyntaxNode* last) {
+    SyntaxNode* group = first.parent;
     if (group == (SyntaxNode*)0 || group.kind != NodeKind.Parenthesized) { return false; }
-    SyntaxNode* before = binding_previous_sibling(node);
+    SyntaxNode* before = binding_previous_sibling(first);
     if (before != (SyntaxNode*)0 && before.token_kind == TokenKind.Move) {
         before = binding_previous_sibling(before);
     }
     if (before != (SyntaxNode*)0 && before.token_kind != TokenKind.Comma) { return false; }
-    if (node.next_sibling != (SyntaxNode*)0
-        && node.next_sibling.token_kind != TokenKind.Comma) { return false; }
+    if (last.next_sibling != (SyntaxNode*)0
+        && last.next_sibling.token_kind != TokenKind.Comma) { return false; }
     SyntaxNode* callee = binding_previous_sibling(group);
     if (callee == (SyntaxNode*)0 || callee.kind != NodeKind.Token) { return false; }
     // Macro arguments are formatted through borrows, never moved.
@@ -2276,38 +2276,68 @@ bool borrow_is_whole_call_argument(SyntaxNode* node) {
     return callee.token_kind == TokenKind.Identifier || callee.token_kind == TokenKind.Greater;
 }
 
+/// Returns true when `name` is called as a method: `(` follows it.
+bool borrow_is_method_name(SyntaxNode* name) {
+    return name.next_sibling != (SyntaxNode*)0 && name.next_sibling.kind == NodeKind.Parenthesized;
+}
+
+/// Returns one past the last leaf of the field path `a.b.c` that starts at
+/// leaf `i`, stopping before a method name.
+i64 borrow_field_path_end(Vec<SyntaxNode*>* leaves, i64 i) {
+    i64 end = i + 1;
+    while (end + 1 < leaves.len() && leaves.get(end).token_kind == TokenKind.Dot
+        && leaves.get(end + 1).token_kind == TokenKind.Identifier
+        && !borrow_is_method_name(leaves.get(end + 1))) {
+        end += 2;
+    }
+    return end;
+}
+
 /// Reports a use that would move or drop a place while a launched task still
-/// borrows it: a by-value call argument, a returned value, or `.drop()`.
+/// borrows it or part of it: the place, or a field path into it, as a
+/// by-value call argument, a returned value, or the receiver of `.drop()`.
 void borrow_check_task_loan_use(BorrowAnalyzer* analyzer, SyntaxTree* tree,
                                 SymbolTable* symbols, Vec<SyntaxNode*>* leaves,
                                 Vec<Binding>* bindings, Vec<u32>* binding_types, i64 i) {
     SyntaxNode* node = leaves.get(i);
-    Place place = borrow_place(analyzer, leaves, i, leaves.len());
+    i64 end = borrow_field_path_end(leaves, i);
+    Place place = borrow_place(analyzer, leaves, i, end);
     i64 loaned = analyzer.find_task_loan(&place);
     if (loaned < 0) { return; }
     Span borrowed_at = analyzer.loans.get_ptr(loaned).span;
-    if (i + 2 < leaves.len() && leaves.get(i + 1).token_kind == TokenKind.Dot
-        && borrow_text_equals(leaves.get(i + 2).text, "drop")
-        && leaves.get(i + 2).next_sibling != (SyntaxNode*)0
-        && leaves.get(i + 2).next_sibling.kind == NodeKind.Parenthesized) {
-        analyzer.diagnostics.error_with_note(node.span, cannot_drop_task_borrowed(node.text),
+    String path = String.new();
+    i64 k = i;
+    while (k < end) {
+        path.push_str(leaves.get(k).text);
+        k += 1;
+    }
+    if (end + 1 < leaves.len() && leaves.get(end).token_kind == TokenKind.Dot
+        && borrow_text_equals(leaves.get(end + 1).text, "drop")
+        && borrow_is_method_name(leaves.get(end + 1))) {
+        analyzer.diagnostics.error_with_note(node.span, cannot_drop_task_borrowed(path.to_str()),
             borrowed_at, note_task_borrow_here());
         analyzer.failed = true;
         return;
     }
+    SyntaxNode* last = leaves.get(end - 1);
     bool returned = i > 0 && leaves.get(i - 1).token_kind == TokenKind.Return
-        && node.next_sibling != (SyntaxNode*)0
-        && node.next_sibling.token_kind == TokenKind.Semicolon;
-    if (!returned && !borrow_is_whole_call_argument(node)) { return; }
+        && last.next_sibling != (SyntaxNode*)0
+        && last.next_sibling.token_kind == TokenKind.Semicolon;
+    if (!returned && !borrow_is_whole_call_argument(node, last)) { return; }
     Binding* binding = visible_binding(bindings, node.text, node);
     u32 type_id = borrow_binding_type(symbols, binding);
     if (type_id == TYPE_UNKNOWN) {
         type_id = typecheck_resolved_binding_type(bindings, binding_types, binding);
     }
+    k = i + 2;
+    while (k < end && type_id != TYPE_UNKNOWN) {
+        type_id = typecheck_struct_field_type(&symbols.types, tree.root, type_id, leaves.get(k).text);
+        k += 2;
+    }
     if (type_id != TYPE_UNKNOWN && typecheck_type_is_copy(tree.root, &symbols.types, type_id)) {
         return;
     }
-    analyzer.diagnostics.error_with_note(node.span, cannot_move_borrowed(node.text),
+    analyzer.diagnostics.error_with_note(node.span, cannot_move_borrowed(path.to_str()),
         borrowed_at, note_task_borrow_here());
     analyzer.failed = true;
 }

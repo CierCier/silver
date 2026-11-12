@@ -675,17 +675,28 @@ class NativeLsp(unittest.TestCase):
         # A generic body that uses its `T` directly is wrong for a shared `T`.
         generic = ("import std.sync;\n\n\nT twice<T>(T a) {\n return a + a;\n}\n"
                    "i64 main() {\n shared i64 total = 1;\n Mutex<i64> other = twice(move total);\n return 0;\n}\n")
+        # A field a task borrows cannot be moved or dropped before the task joins.
+        field = ("import std.mem.vec;\nstruct Holder { Vec<i64> items; }\ni64 size(&Vec<i64> values) { return values.len(); }\n"
+                 "i64 keep(Vec<i64> values) { return values.len(); }\n"
+                 "i64 pass(Holder h) { Task<i64> t = launch size(&h.items); i64 n = keep(h.items); return n + wait t; }\n")
+        returned = field.replace("i64 n = keep(h.items); return n + wait t;", "return h.items;").replace(
+            "i64 pass(Holder h) { Task<i64> t", "Vec<i64> pass(Holder h) { Task<i64> _t")
+        dropped = field.replace("i64 n = keep(h.items);", "h.items.drop(); i64 n = 0;")
         for version, (source, message) in enumerate([
                 (misuse, "`pool.items` is already locked by an enclosing lock block; locking it again would deadlock"),
                 (moved, "cannot move 'items' out of its lock block: the shared value still owns it; clone it instead"),
-                (generic, "`a` is shared between threads: read or change it inside `lock a { ... }`")], 2):
+                (generic, "`a` is shared between threads: read or change it inside `lock a { ... }`"),
+                (field, "cannot move 'h.items' because it is borrowed\nborrowed by a task launched here"),
+                (returned, "cannot move 'h.items' because it is borrowed\nborrowed by a task launched here"),
+                (dropped, "cannot drop 'h.items' because it is borrowed by a launched task\n"
+                          "borrowed by a task launched here")], 2):
             session.send("textDocument/didChange", {"textDocument": {"uri": alias_uri, "version": version},
                 "contentChanges": [{"text": source}]})
             errors = {(item["message"], item["range"]["start"]["line"])
                       for item in session.result("textDocument/diagnostic", alias_document)["items"]}
             self.assertIn((message, 4), errors)
         # A `#[safe]` struct is Send only when every type argument is.
-        session.send("textDocument/didChange", {"textDocument": {"uri": alias_uri, "version": 5},
+        session.send("textDocument/didChange", {"textDocument": {"uri": alias_uri, "version": 20},
             "contentChanges": [{"text": "import std.mem.rc;\n#[safe]\nstruct Triple<A, B, C> { A a; B b; C* c; }\n"
                                 "void take(Triple<i64, i64, Rc<i64>> _t) {}\n"
                                 "i64 main() {\n Triple<i64, i64, Rc<i64>> t;\n"
