@@ -96,14 +96,23 @@ fn is_type_start(kind: &Token) -> bool {
     matches!(kind, Token::Identifier(_)) || is_type_keyword(kind)
 }
 
-/// The end (exclusive) of the type name starting at `start`, including a
-/// balanced `<...>` argument list.
+/// The end (exclusive) of the type name starting at `start`: its `a::b::T`
+/// path and a balanced `<...>` argument list. A `*` after it is not part of
+/// the shared type: `shared T*` is a pointer to a shared T.
 fn type_end(tokens: &[LexToken], start: usize) -> usize {
-    let Some(next) = next_significant(tokens, start) else {
-        return start + 1;
+    let mut last = start;
+    while let Some(colons) = next_significant(tokens, last)
+        && matches!(tokens[colons].kind, Token::DoubleColon)
+        && let Some(segment) = next_significant(tokens, colons)
+        && is_type_start(&tokens[segment].kind)
+    {
+        last = segment;
+    }
+    let Some(next) = next_significant(tokens, last) else {
+        return last + 1;
     };
     if !matches!(tokens[next].kind, Token::Less) {
-        return start + 1;
+        return last + 1;
     }
     let mut depth = 0usize;
     for (i, token) in tokens.iter().enumerate().skip(next) {
@@ -119,7 +128,7 @@ fn type_end(tokens: &[LexToken], start: usize) -> usize {
             _ => {}
         }
     }
-    start + 1
+    last + 1
 }
 
 /// The index of the `;` that ends the expression starting at `start`.
@@ -452,4 +461,29 @@ fn desugar_locks(tokens: &[LexToken], counter: &mut usize) -> Result<Vec<LexToke
         i = close + 1;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    /// The rewritten source of `source`, tokens joined by spaces.
+    fn rewritten(source: &str) -> String {
+        let tokens = crate::lexer::lex(source).expect("lexes");
+        let texts: Vec<&str> = tokens
+            .iter()
+            .filter(|token| !matches!(token.kind, crate::lexer::Token::Eof))
+            .map(|token| token.text.as_str())
+            .collect();
+        texts.join(" ")
+    }
+
+    #[test]
+    fn shared_wraps_the_whole_type_name() {
+        assert_eq!(
+            rewritten("shared a::b::Thing<i64> item = make();"),
+            "Mutex < a :: b :: Thing < i64 > > item = Mutex < a :: b :: Thing < i64 > > . new ( make ( ) ) ;"
+        );
+        // `shared` binds to the type name, so this is a pointer to a shared
+        // i64, initialized with a pointer.
+        assert_eq!(rewritten("shared i64* p = &total;"), "Mutex < i64 > * p = & total ;");
+    }
 }

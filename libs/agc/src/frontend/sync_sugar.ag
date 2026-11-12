@@ -119,11 +119,20 @@ bool sugar_is_type_start(Vec<Token>* tokens, i64 index) {
     return kind == TokenKind.Identifier || sugar_is_type_keyword(kind);
 }
 
-/// The end (exclusive) of the type name starting at `start`, including a
-/// balanced `<...>` argument list (`>>` closes two levels).
+/// The end (exclusive) of the type name starting at `start`: its `a::b::T`
+/// path and a balanced `<...>` argument list (`>>` closes two levels). A `*`
+/// after it is not part of the shared type: `shared T*` is a pointer to a
+/// shared T.
 i64 sugar_type_end(Vec<Token>* tokens, i64 start) {
-    i64 next = sugar_next(tokens, start);
-    if (!sugar_is(tokens, next, TokenKind.Less)) { return start + 1; }
+    i64 last = start;
+    i64 colons = sugar_next(tokens, last);
+    while (sugar_is(tokens, colons, TokenKind.DoubleColon)
+        && sugar_is_type_start(tokens, sugar_next(tokens, colons))) {
+        last = sugar_next(tokens, colons);
+        colons = sugar_next(tokens, last);
+    }
+    i64 next = sugar_next(tokens, last);
+    if (!sugar_is(tokens, next, TokenKind.Less)) { return last + 1; }
     i64 depth = 0;
     i64 i = next;
     while (i < tokens.len()) {
@@ -135,11 +144,11 @@ i64 sugar_type_end(Vec<Token>* tokens, i64 start) {
             if (depth <= 0) { return i + 1; }
         } else if (kind == TokenKind.Semicolon || kind == TokenKind.LeftBrace
             || kind == TokenKind.RightBrace) {
-            return start + 1;
+            return last + 1;
         }
         i += 1;
     }
-    return start + 1;
+    return last + 1;
 }
 
 /// The index of the `;` ending the expression that starts at `start`, or -1.
