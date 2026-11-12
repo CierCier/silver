@@ -5,8 +5,8 @@
 //! `Task` drop glue performs the join; this pass keeps the handle where that
 //! glue is guaranteed to run in time:
 //!
-//! - the launch must initialize a local (`Task<T> t = launch f(&x);`) or be
-//!   the direct operand of `wait`. A local declared by such an initializer is
+//! - the launch must initialize a block local (`Task<T> t = launch f(&x);`),
+//!   not a `for` initializer, or be the direct operand of `wait`. A local declared by such an initializer is
 //!   always dropped before the locals it borrows, which were declared earlier.
 //! - that local (the holder) may only be consumed by `wait`, or read by
 //!   `started()`. Any other use could move the handle to a place that
@@ -194,17 +194,7 @@ impl FunctionFacts<'_> {
     }
 
     fn record_binding(&mut self, binding: &ast::LetStatement) {
-        if let ast::PatternKind::Identifier(name) = &binding.pattern.kind {
-            self.declared_at.insert(name.name.clone(), name.span.start);
-            match binding.type_annotation.as_ref().map(|ty| ty.kind.as_ref()) {
-                Some(ast::TypeKind::Reference(reference)) => {
-                    self.references.insert(name.name.clone(), reference.is_mutable);
-                }
-                _ => {
-                    self.references.remove(&name.name);
-                }
-            }
-        }
+        self.record_declaration(binding);
         if let Some(initializer) = &binding.initializer
             && let ast::PatternKind::Identifier(name) = &binding.pattern.kind
             && is_scoped_launch(initializer, self.resolved_callables)
@@ -217,6 +207,21 @@ impl FunctionFacts<'_> {
         }
     }
 
+    /// Records where `binding` declares its name and whether it is a reference.
+    fn record_declaration(&mut self, binding: &ast::LetStatement) {
+        if let ast::PatternKind::Identifier(name) = &binding.pattern.kind {
+            self.declared_at.insert(name.name.clone(), name.span.start);
+            match binding.type_annotation.as_ref().map(|ty| ty.kind.as_ref()) {
+                Some(ast::TypeKind::Reference(reference)) => {
+                    self.references.insert(name.name.clone(), reference.is_mutable);
+                }
+                _ => {
+                    self.references.remove(&name.name);
+                }
+            }
+        }
+    }
+
     /// Records the statements of blocks owned by `expression`, and `wait`
     /// operands. The visitor reaches nested expressions on its own.
     fn record_expression(&mut self, expression: &ast::Expression) {
@@ -226,7 +231,9 @@ impl FunctionFacts<'_> {
             | ast::ExpressionKind::While { body, .. }
             | ast::ExpressionKind::ForIn { body, .. } => self.record_block(body),
             ast::ExpressionKind::For { init, body, .. } => {
-                self.record_binding(init);
+                // A `for` initializer cannot hold a borrowing launch: the
+                // borrow checker tracks task loans only for block locals.
+                self.record_declaration(init);
                 self.record_block(body);
             }
             ast::ExpressionKind::If {
@@ -517,5 +524,16 @@ mod tests {
         let forwarded =
             launch_errors("i64 x = 1;\n&i64 r = &x;\nTask<void> t = launch read(r);\nwait t;");
         assert!(forwarded.is_empty(), "{forwarded:?}");
+    }
+
+    #[test]
+    fn a_for_initializer_cannot_hold_a_borrowing_launch() {
+        let errors = launch_errors(
+            "i64 x = 1;\nfor (Task<void> t = launch read(&x); x < 3; x += 1) { }",
+        );
+        assert!(
+            errors.iter().any(|message| message.starts_with("a launch that borrows 'x' must be bound")),
+            "{errors:?}"
+        );
     }
 }
