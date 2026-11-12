@@ -98,6 +98,8 @@ struct FunctionFacts<'a> {
     collection_uses: FxHashSet<SpanKey>,
     /// Where each local is declared, by span start.
     declared_at: FxHashMap<String, usize>,
+    /// Parameters and locals declared as `&mut T`.
+    mutable_references: FxHashSet<String>,
 }
 
 /// Methods a collection holder may be called with directly.
@@ -128,9 +130,15 @@ fn pushed_launch(expression: &ast::Expression) -> Option<(&ast::Identifier, &ast
     }
 }
 
-/// Root variables of a launch's `&place`/`&mut place` arguments, each with
-/// whether the borrow is mutable.
-fn borrowed_roots(launch: &ast::Expression) -> Vec<(String, bool)> {
+/// Root variables a launch borrows, each with whether the borrow is mutable:
+/// the root of each `&place`/`&mut place` argument, and each reference
+/// variable forwarded to a reference parameter. A forwarded reference was
+/// declared after what it borrows, so ordering against it is enough.
+fn borrowed_roots(
+    launch: &ast::Expression,
+    resolved_callables: &FxHashMap<CallSiteKey, ResolvedCallable>,
+    mutable_references: &FxHashSet<String>,
+) -> Vec<(String, bool)> {
     let mut roots = Vec::new();
     let ast::ExpressionKind::Launch(call) = launch.kind.as_ref() else {
         return roots;
@@ -138,20 +146,28 @@ fn borrowed_roots(launch: &ast::Expression) -> Vec<(String, bool)> {
     let ast::ExpressionKind::Call { arguments, .. } = call.kind.as_ref() else {
         return roots;
     };
-    for argument in arguments {
-        let ast::ExpressionKind::Reference {
-            is_mutable,
-            expression,
-        } = argument.kind.as_ref()
-        else {
-            continue;
+    let reference_parameters = resolved_callables
+        .get(&span_key(call.span))
+        .map(|callable| callable.reference_parameters.as_slice())
+        .unwrap_or_default();
+    for (index, argument) in arguments.iter().enumerate() {
+        let (mut place, mutable) = match argument.kind.as_ref() {
+            ast::ExpressionKind::Reference {
+                is_mutable,
+                expression,
+            } => (expression.as_ref(), *is_mutable),
+            ast::ExpressionKind::Identifier(forwarded)
+                if reference_parameters.contains(&index) =>
+            {
+                (argument, mutable_references.contains(&forwarded.name))
+            }
+            _ => continue,
         };
-        let mut place = expression;
         while let ast::ExpressionKind::FieldAccess { object, .. } = place.kind.as_ref() {
             place = object;
         }
         if let ast::ExpressionKind::Identifier(root) = place.kind.as_ref() {
-            roots.push((root.name.clone(), *is_mutable));
+            roots.push((root.name.clone(), mutable));
         }
     }
     roots
@@ -176,6 +192,9 @@ impl FunctionFacts<'_> {
     fn record_binding(&mut self, binding: &ast::LetStatement) {
         if let ast::PatternKind::Identifier(name) = &binding.pattern.kind {
             self.declared_at.insert(name.name.clone(), name.span.start);
+            if binding.type_annotation.as_ref().is_some_and(is_mutable_reference) {
+                self.mutable_references.insert(name.name.clone());
+            }
         }
         if let Some(initializer) = &binding.initializer
             && let ast::PatternKind::Identifier(name) = &binding.pattern.kind
@@ -255,7 +274,12 @@ impl FunctionFacts<'_> {
     }
 }
 
+fn is_mutable_reference(ty: &ast::Type) -> bool {
+    matches!(ty.kind.as_ref(), ast::TypeKind::Reference(reference) if reference.is_mutable)
+}
+
 fn check_function(
+    parameters: &[ast::Parameter],
     body: &ast::Block,
     resolved_callables: &FxHashMap<CallSiteKey, ResolvedCallable>,
     errors: &mut Vec<ScopedLaunchError>,
@@ -270,6 +294,11 @@ fn check_function(
         collection_holders: FxHashMap::default(),
         collection_uses: FxHashSet::default(),
         declared_at: FxHashMap::default(),
+        mutable_references: parameters
+            .iter()
+            .filter(|parameter| is_mutable_reference(&parameter.param_type))
+            .map(|parameter| parameter.name.name.clone())
+            .collect(),
     };
     facts.record_block(&body);
     visit::expressions_in_block(&mut body, &mut |expression| {
@@ -316,7 +345,9 @@ fn check_function(
                 return;
             }
             let holder_declared = facts.declared_at.get(&holder.name).copied();
-            for (root, mutable) in borrowed_roots(launch) {
+            for (root, mutable) in
+                borrowed_roots(launch, resolved_callables, &facts.mutable_references)
+            {
                 if mutable {
                     errors.push(ScopedLaunchError {
                         message: msg::task_collection_mutable_borrow(&root),
@@ -353,16 +384,16 @@ pub fn check_program(
     for item in &program.items {
         match &item.kind {
             ast::ItemKind::Function(function) => {
-                check_function(&function.body, resolved_callables, &mut errors);
+                check_function(&function.parameters, &function.body, resolved_callables, &mut errors);
             }
             ast::ItemKind::Impl(implementation) => {
                 for member in &implementation.items {
                     match member {
                         ast::ImplItemKind::Function(function) => {
-                            check_function(&function.body, resolved_callables, &mut errors);
+                            check_function(&function.parameters, &function.body, resolved_callables, &mut errors);
                         }
                         ast::ImplItemKind::Cast(cast) => {
-                            check_function(&cast.body, resolved_callables, &mut errors);
+                            check_function(&cast.parameters, &cast.body, resolved_callables, &mut errors);
                         }
                         _ => {}
                     }
