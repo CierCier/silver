@@ -214,6 +214,15 @@
           "match": "\\b(const|mut|static|volatile|private)\\b"
         },
         {
+          "comment": "`shared T` and `lock place {`: keywords only before a type or a place, so `m.lock()` and a variable named `lock` stay names.",
+          "name": "storage.modifier.silver",
+          "match": "(?<![.\\w])shared(?=\\s+&?[A-Za-z_])"
+        },
+        {
+          "name": "keyword.control.silver",
+          "match": "(?<![.\\w])lock(?=\\s+[A-Za-z_*][^;=]*\\{)"
+        },
+        {
           "name": "constant.language.boolean.silver",
           "match": "\\b(true|false)\\b"
         },

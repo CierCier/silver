@@ -42,3 +42,13 @@ macro i32 twice(i32 value) { return true; }
 // <- keyword
 //        ^ function
 //                                  ^ boolean
+
+void count(&shared i64 total) {
+//          ^ keyword
+    shared Vec<i64> seen = Vec<i64>.new();
+//  ^ keyword
+    lock total { total += 1; }
+//  ^ keyword
+    i64 lock = guard.lock();
+//                   ^ function
+}

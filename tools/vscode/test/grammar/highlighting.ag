@@ -71,3 +71,14 @@ i32* make(i32 v);
 //   ^^^^ entity.name.function.silver
 Vec<T> build<T>(T v);
 //     ^^^^^ entity.name.function.silver
+
+void count(&shared i64 total) {
+//          ^^^^^^ storage.modifier.silver
+    shared Vec<i64> seen = Vec<i64>.new();
+//  ^^^^^^ storage.modifier.silver
+    lock total { total += 1; }
+//  ^^^^ keyword.control.silver
+    i64 lock = guard.lock();
+//      ^^^^ - keyword.control.silver
+//                   ^^^^ entity.name.function.call.silver
+}

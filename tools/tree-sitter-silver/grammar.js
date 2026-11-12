@@ -44,7 +44,10 @@ const commaList = rule => optional(seq(sepBy1(',', rule), optional(',')));
 module.exports = grammar({
   name: 'silver',
 
-  externals: $ => [$.block_comment],
+  // `shared` and `lock` are also ordinary names (`m.lock()`, `i64 lock`), so
+  // the scanner reports them as keywords only by what follows: `shared T` and
+  // `lock place [as name] {`.
+  externals: $ => [$.block_comment, $._shared_keyword, $._lock_keyword],
 
   extras: $ => [/\s/, $.line_comment, $.block_comment],
 
@@ -340,7 +343,10 @@ module.exports = grammar({
 
     reference_type: $ => prec.right(1, seq('&', optional($.lifetime), optional('mut'), $._type)),
 
-    qualified_type: $ => prec.right(seq(choice('const', 'mut', 'volatile'), $._type)),
+    // `shared T` is a Mutex<T>.
+    qualified_type: $ => prec.right(seq(choice('const', 'mut', 'volatile', $._shared), $._type)),
+
+    _shared: $ => alias($._shared_keyword, 'shared'),
 
     // `[T]` is a slice and `[A, B]` a tuple.
     bracket_type: $ => seq('[', commaList($._type), ']'),
@@ -372,6 +378,8 @@ module.exports = grammar({
       $.lifetime,
       $.identifier,
       ...BODY_KEYWORDS,
+      $._shared,
+      alias($._lock_keyword, 'lock'),
       ...OPERATORS,
       '.', ':', '::',
     ),
