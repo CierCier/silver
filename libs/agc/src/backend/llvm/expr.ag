@@ -670,9 +670,25 @@ str llvm_binary_operator_method(u32 op) {
 }
 
 /// Returns the type of expression `expr_id` under the active substitutions.
+/// Returns `Task<R>` for launch expression `expr`, where R is the callee's
+/// return type. Method bodies reach codegen without a checked type, so it is
+/// derived from the call when type checking recorded none.
+u32 llvm_launch_task_type(LlvmContext* ctx, AstExpr* expr) {
+    u32 recorded = ctx.types.resolve_subst(expr.inferred_type);
+    if (recorded != TYPE_UNKNOWN && llvm_type_is_task(ctx, recorded)) { return recorded; }
+    u32 result = llvm_expr_type(ctx, expr.inner0);
+    if (result == TYPE_UNKNOWN) { return TYPE_UNKNOWN; }
+    Vec<u32> arguments = Vec<u32>.new();
+    arguments.push(result);
+    u32 task = ctx.types.get_named_args("Task", &arguments);
+    arguments.drop();
+    return task;
+}
+
 u32 llvm_expr_type(LlvmContext* ctx, u32 expr_id) {
     if (expr_id == 0) { return TYPE_UNKNOWN; }
     AstExpr* expr = ctx.pool.get_expr(expr_id);
+    if (expr.kind == ExprKind.Launch) { return llvm_launch_task_type(ctx, expr); }
     if (expr.kind == ExprKind.Var) {
         LlvmLocal* local = ctx.find_local(expr.aux);
         if (local != (LlvmLocal*)0 && local.type_id != TYPE_UNKNOWN) {
@@ -3376,7 +3392,7 @@ LLVMOpaqueValue* llvm_emit_launch(LlvmContext* ctx, u32 expr_id) {
         param_index += 1;
     }
 
-    u32 task_type = ctx.types.resolve_subst(launch_expr.inferred_type);
+    u32 task_type = llvm_launch_task_type(ctx, launch_expr);
     TypeEntry* task_entry = ctx.types.get(task_type);
     if (task_entry.kind != TypeKind.Named
         || strcmp(ctx.types.names.get(task_entry.name_id), "Task") != 0

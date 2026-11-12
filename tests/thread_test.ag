@@ -4,8 +4,8 @@
 // spacing so the sum is deterministic), waits for every task, then checks
 // the counter reached exactly the expected total and that a second
 // launch/wait round still works (registry slot reclamation).
-// Also exercises the _start join-all path: a task left running when `main`
-// returns is joined before exit_group.
+// A method can launch and wait too. Also exercises the _start join-all
+// path: a task left running when `main` returns is joined before exit_group.
 
 import std.thread;
 import std.atomic;
@@ -39,6 +39,22 @@ bool run_round() {
     return started;
 }
 
+i64 twice(i64 value) {
+    return value * 2;
+}
+
+/// Launches from a method body, which the native backend types on its own.
+struct Doubler {
+    i64 value;
+}
+
+impl Doubler {
+    i64 doubled(&self) {
+        Task<i64> task = launch twice(self.value);
+        return wait task;
+    }
+}
+
 i64 main() {
     // Round 1: launch all, wait all. Expected counter = 1+2+3+4 = 10.
     @assert(run_round(), "round 1 launches");
@@ -49,6 +65,10 @@ i64 main() {
     g_counter = 0;
     @assert(run_round(), "round 2 launches");
     @assert(__atomic_load_i64(&g_counter, ATOMIC_ACQUIRE) == 10, "round 2 total");
+
+    Doubler doubler;
+    doubler.value = 21;
+    @assert(doubler.doubled() == 42, "launch in a method");
 
     // Round 3: launch one task and return WITHOUT waiting. It borrows
     // nothing, so dropping its handle does not join it; the join-all hook in
