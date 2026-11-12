@@ -461,6 +461,13 @@ String cannot_drop_task_borrowed(str name) {
     return @format("cannot drop '{}' because it is borrowed by a launched task", name);
 }
 
+/// Diagnostic text: "a launch that borrows '{}' can only be pushed into a
+/// local `Vec<Task<T>>`, whose drop joins its tasks; `{}` is not one".
+/// Returns an owned string.
+String task_collection_does_not_join(str name, str holder) {
+    return @format("a launch that borrows '{}' can only be pushed into a local `Vec<Task<T>>`, whose drop joins its tasks; `{}` is not one", name, holder);
+}
+
 /// Diagnostic text: "cannot drop '{}' inside a lock block on it: the lock
 /// guard points into it". Returns an owned string.
 String cannot_drop_locked_owner(str name) {

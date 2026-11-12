@@ -11,9 +11,9 @@
 //! - that local (the holder) may only be consumed by `wait`, or read by
 //!   `started()`. Any other use could move the handle to a place that
 //!   outlives the borrow.
-//! - the launch may instead be pushed into a local collection
+//! - the launch may instead be pushed into a local `Vec<Task<T>>`
 //!   (`tasks.push(launch f(&x));`) declared after everything it borrows, so
-//!   the collection's drop joins its tasks first. Its tasks may run at once,
+//!   the vector's drop joins its tasks first. Its tasks may run at once,
 //!   so they borrow only with `&`, and the collection is used only through
 //!   `push`, `len`, `is_empty`, `clear`, `drop`, or `wait` on `pop`, `take`,
 //!   `swap_remove` or `get`.
@@ -96,12 +96,42 @@ struct FunctionFacts<'a> {
     collection_holders: FxHashMap<String, (Span, String)>,
     /// Identifiers a collection holder may appear as (see the module docs).
     collection_uses: FxHashSet<SpanKey>,
-    /// Every declaration of each local name: its span start and the span of
-    /// the block it is visible in.
-    declared_at: FxHashMap<String, Vec<(usize, Span)>>,
+    /// Every declaration of each local name: its span start, the span of the
+    /// block it is visible in, and whether it is declared `Vec<Task<T>>`.
+    declared_at: FxHashMap<String, Vec<Declaration>>,
+    /// Launches pushed into a local: the local's name and use offset, the
+    /// launch's span, and what it borrows. Placed once every declaration is
+    /// recorded, since the visitor reaches a loop body's pushes before the
+    /// loop records that body.
+    pushes: Vec<(String, usize, Span, String)>,
+    /// Launches pushed into a local collection that is not `Vec<Task<T>>`,
+    /// with that collection's name.
+    unjoined_pushes: FxHashMap<SpanKey, String>,
     /// Parameters and locals declared as references, with whether each is
     /// `&mut T`.
     references: FxHashMap<String, bool>,
+}
+
+/// One declaration of a local name.
+struct Declaration {
+    start: usize,
+    /// The block the name is visible in.
+    scope: Span,
+    /// Declared `Vec<Task<T>>`, whose drop joins every task it holds.
+    joins_tasks: bool,
+}
+
+/// True when `ty` is `Vec<Task<T>>`.
+fn joins_tasks(ty: Option<&ast::Type>) -> bool {
+    let Some(ast::TypeKind::Named(collection)) = ty.map(|ty| ty.kind.as_ref()) else {
+        return false;
+    };
+    let Some([task]) = collection.generics.as_deref() else {
+        return false;
+    };
+    collection.path.last().is_some_and(|name| name.name == "Vec")
+        && matches!(task.kind.as_ref(), ast::TypeKind::Named(task)
+            if task.path.last().is_some_and(|name| name.name == "Task"))
 }
 
 /// Methods a collection holder may be called with directly.
@@ -194,15 +224,28 @@ impl FunctionFacts<'_> {
         }
     }
 
-    /// Where the declaration of `name` visible at offset `at` starts, or None
-    /// for a parameter: the latest one before `at` whose block contains it.
-    fn declaration(&self, name: &str, at: usize) -> Option<usize> {
+    /// Places each pushed launch whose collection is declared `Vec<Task<T>>`.
+    fn place_pushes(&mut self) {
+        for (holder, at, launch, borrowed) in std::mem::take(&mut self.pushes) {
+            if self.declaration(&holder, at).is_some_and(|declaration| declaration.joins_tasks) {
+                self.placed_launches.insert(span_key(launch));
+                self.collection_holders.entry(holder).or_insert((launch, borrowed));
+            } else {
+                self.unjoined_pushes.insert(span_key(launch), holder);
+            }
+        }
+    }
+
+    /// The declaration of `name` visible at offset `at`, or None for a
+    /// parameter: the latest one before `at` whose block contains it.
+    fn declaration(&self, name: &str, at: usize) -> Option<&Declaration> {
         self.declared_at
             .get(name)?
             .iter()
-            .filter(|(start, scope)| *start < at && scope.start <= at && at < scope.end)
-            .map(|(start, _)| *start)
-            .max()
+            .filter(|declaration| {
+                declaration.start < at && declaration.scope.start <= at && at < declaration.scope.end
+            })
+            .max_by_key(|declaration| declaration.start)
     }
 
     fn record_binding(&mut self, binding: &ast::LetStatement, scope: Span) {
@@ -223,10 +266,11 @@ impl FunctionFacts<'_> {
     /// visible in, and whether it is a reference.
     fn record_declaration(&mut self, binding: &ast::LetStatement, scope: Span) {
         if let ast::PatternKind::Identifier(name) = &binding.pattern.kind {
-            self.declared_at
-                .entry(name.name.clone())
-                .or_default()
-                .push((name.span.start, scope));
+            self.declared_at.entry(name.name.clone()).or_default().push(Declaration {
+                start: name.span.start,
+                scope,
+                joins_tasks: joins_tasks(binding.type_annotation.as_ref()),
+            });
             match binding.type_annotation.as_ref().map(|ty| ty.kind.as_ref()) {
                 Some(ast::TypeKind::Reference(reference)) => {
                     self.references.insert(name.name.clone(), reference.is_mutable);
@@ -285,10 +329,12 @@ impl FunctionFacts<'_> {
                 if let Some((holder, launch)) = pushed_launch(expression)
                     && is_scoped_launch(launch, self.resolved_callables)
                 {
-                    self.placed_launches.insert(span_key(launch.span));
-                    self.collection_holders
-                        .entry(holder.name.clone())
-                        .or_insert((launch.span, borrowed_name(launch)));
+                    self.pushes.push((
+                        holder.name.clone(),
+                        holder.span.start,
+                        launch.span,
+                        borrowed_name(launch),
+                    ));
                 }
             }
             ast::ExpressionKind::MethodCall {
@@ -362,6 +408,8 @@ fn check_function(
         collection_holders: FxHashMap::default(),
         collection_uses: FxHashSet::default(),
         declared_at: FxHashMap::default(),
+        pushes: Vec::new(),
+        unjoined_pushes: FxHashMap::default(),
         references: parameters
             .iter()
             .filter_map(|parameter| match parameter.param_type.kind.as_ref() {
@@ -376,6 +424,7 @@ fn check_function(
     visit::expressions_in_block(&mut body, &mut |expression| {
         facts.record_expression(expression);
     });
+    facts.place_pushes();
 
     visit::expressions_in_block(&mut body, &mut |expression| match expression.kind.as_ref() {
         ast::ExpressionKind::Launch(_) => {
@@ -383,8 +432,12 @@ fn check_function(
             if is_scoped_launch(expression, resolved_callables)
                 && !facts.placed_launches.contains(&span_key(expression.span))
             {
+                let borrowed = borrowed_name(expression);
                 errors.push(ScopedLaunchError {
-                    message: msg::scoped_launch_must_be_bound(&borrowed_name(expression)),
+                    message: match facts.unjoined_pushes.get(&span_key(expression.span)) {
+                        Some(holder) => msg::task_collection_does_not_join(&borrowed, holder),
+                        None => msg::scoped_launch_must_be_bound(&borrowed),
+                    },
                     span: expression.span,
                     launched_at: None,
                 });
@@ -418,7 +471,11 @@ fn check_function(
             if !is_scoped_launch(launch, resolved_callables) {
                 return;
             }
-            let holder_declared = facts.declaration(&holder.name, holder.span.start);
+            if !facts.placed_launches.contains(&span_key(launch.span)) {
+                return;
+            }
+            let holder_declared =
+                facts.declaration(&holder.name, holder.span.start).map(|declaration| declaration.start);
             for (root, mutable) in
                 borrowed_roots(launch, resolved_callables, &facts.references)
             {
@@ -429,7 +486,8 @@ fn check_function(
                         launched_at: None,
                     });
                 }
-                let root_declared = facts.declaration(&root, launch.span.start);
+                let root_declared =
+                    facts.declaration(&root, launch.span.start).map(|declaration| declaration.start);
                 let joined_first = match (holder_declared, root_declared) {
                     (Some(holder_at), Some(root_at)) => holder_at > root_at,
                     // A parameter outlives every local.
@@ -488,6 +546,8 @@ mod tests {
     /// A stand-in for std's Vec: the checks key on the `push` method.
     const POOL: &str = "struct Vec<T> { T* data; }\n\
                         impl Vec<T> { void push(&mut self, T value) {} }\n\
+                        struct Forgetful { i64 count; }\n\
+                        impl Forgetful { void push(&mut self, Task<void> task) {} }\n\
                         void read(&i64 value) {}\n\
                         &i64 pick(&i64 value) { return value; }\n";
 
@@ -561,6 +621,23 @@ mod tests {
              { Vec<Task<void>> tasks; tasks.push(launch read(&value)); }",
         );
         assert!(inner.is_empty(), "{inner:?}");
+    }
+
+    #[test]
+    fn only_a_vec_of_tasks_holds_a_pushed_launch() {
+        let pushed = launch_errors(
+            "i64 value = 1;\nwhile (value < 2) { Vec<Task<void>> tasks;\n\
+             tasks.push(launch read(&value)); value += 1; }",
+        );
+        assert!(pushed.is_empty(), "{pushed:?}");
+        let other = launch_errors(
+            "i64 value = 1;\nForgetful bag;\nbag.push(launch read(&value));",
+        );
+        assert_eq!(
+            other,
+            ["a launch that borrows 'value' can only be pushed into a local `Vec<Task<T>>`, \
+              whose drop joins its tasks; `bag` is not one"]
+        );
     }
 
     #[test]

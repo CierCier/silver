@@ -3,8 +3,8 @@
 // those borrows end. This pass finds such launches, checks where they appear
 // and that the local owning the task never leaves its scope; the borrow pass
 // turns the recorded arguments into loans. A launch may also be pushed into
-// a local collection declared after everything it borrows, so the
-// collection's drop joins its tasks first; those tasks may run at once, so
+// a local `Vec<Task<T>>` declared after everything it borrows, so the
+// vector's drop joins its tasks first; those tasks may run at once, so
 // they borrow only with `&`, and the collection is used only through a few
 // methods (see `scoped_collection_use_allowed`).
 import std.mem.memory;
@@ -228,8 +228,18 @@ SyntaxNode* scoped_straight_line_join(Vec<Binding>* bindings, SyntaxNode* holder
     return (SyntaxNode*)0;
 }
 
+/// True when `binding` is declared `Vec<Task<T>>`, whose drop joins every
+/// task it holds.
+bool scoped_joins_tasks(Binding* binding) {
+    TypeProjection* declared = &binding.declared_type;
+    return declared.kind == ProjectionTypeKind.Named && strcmp(declared.name, "Vec") == 0
+        && declared.arguments.len() == 1 && declared.arguments.get_ptr(0).starts_with("Task<");
+}
+
 /// Places a launch that is the whole argument of `holder.push(...)` on a
-/// local `holder`. Returns false when the launch is not such an argument.
+/// local `holder` declared `Vec<Task<T>>`. Another local collection is
+/// recorded but left unplaced: its drop need not join the task. Returns
+/// false when the launch is not such an argument.
 bool scoped_place_pushed_launch(Vec<Binding>* bindings, SyntaxNode* launch_token,
                                 SyntaxNode* arguments, ScopedLaunchSite* site) {
     SyntaxNode* group = launch_token.parent;
@@ -248,7 +258,7 @@ bool scoped_place_pushed_launch(Vec<Binding>* bindings, SyntaxNode* launch_token
     Binding* declared = visible_binding(bindings, receiver.text, receiver);
     if (declared != (Binding*)0
         && (declared.kind == BindingKind.Variable || declared.kind == BindingKind.Let)) {
-        site.placed = true;
+        site.placed = scoped_joins_tasks(declared);
         site.collection = declared.name_node;
     }
     return true;
@@ -515,7 +525,9 @@ void check_scoped_launch_body(SyntaxNode* root, SymbolTable* symbols, SyntaxNode
         ScopedLaunchSite* site = launches.sites.get_ptr(i);
         str borrowed = launches.borrowed_name(i);
         if (!site.placed) {
-            diagnostics.error(site.launch_token.span, scoped_launch_must_be_bound(borrowed));
+            diagnostics.error(site.launch_token.span, site.collection != (SyntaxNode*)0
+                ? task_collection_does_not_join(borrowed, site.collection.text)
+                : scoped_launch_must_be_bound(borrowed));
             *failed = true;
         } else if (site.holder != (SyntaxNode*)0) {
             scoped_check_holder_uses(&leaves, &bindings, site, borrowed, diagnostics, failed);

@@ -1177,7 +1177,7 @@ i64 main() {
 The compiler joins a borrowing task before its borrows end:
 
 - It must initialize a local `Task` (`Task<T> t = launch f(&x);`), be
-  pushed into a local collection (below), or be waited directly
+  pushed into a local `Vec<Task<T>>` (below), or be waited directly
   (`wait launch f(&x)`). The local cannot be returned,
   moved, passed by value or stored; only `wait t` or `defer wait t` consume
   it, and `t.started()` reads it.
@@ -1198,9 +1198,10 @@ The compiler joins a borrowing task before its borrows end:
   than borrowed implicitly: declare it `shared`, or move it into the task
   through a by-value parameter. A call that returns a reference is
   rejected too.
-- A borrowing launch can also be pushed into a local collection, for a
-  worker pool. The collection's drop joins its tasks, so it must be declared
-  after everything they borrow. Its tasks may run at once, so they borrow
+- A borrowing launch can also be pushed into a local `Vec<Task<T>>`, for a
+  worker pool. The vector's drop joins its tasks, so it must be declared
+  after everything they borrow. Another type with a `push` method may not
+  join what it holds, so it cannot take a borrowing launch. Its tasks may run at once, so they borrow
   only with `&`, and the borrowed places stay read-only from the
   collection's declaration to the end of its scope. Use the collection only
   through `push`, `len`, `is_empty`, `clear` and `drop`, or `wait` on `pop`,

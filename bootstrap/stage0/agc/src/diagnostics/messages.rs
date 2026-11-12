@@ -333,6 +333,13 @@ pub fn cannot_drop_task_borrowed(name: &str) -> String {
     format!("cannot drop '{name}' because it is borrowed by a launched task")
 }
 
+pub fn task_collection_does_not_join(name: &str, holder: &str) -> String {
+    format!(
+        "a launch that borrows '{name}' can only be pushed into a local `Vec<Task<T>>`, \
+         whose drop joins its tasks; `{holder}` is not one"
+    )
+}
+
 pub fn cannot_drop_locked_owner(name: &str) -> String {
     format!("cannot drop '{name}' inside a lock block on it: the lock guard points into it")
 }
