@@ -672,6 +672,9 @@ class NativeLsp(unittest.TestCase):
                   "void drain(&Pool pool) {\n lock pool.items as a { lock pool.items as b { } }\n}\n")
         moved = misuse.replace("lock pool.items as a { lock pool.items as b { } }",
                                "lock pool.items as items { Vec<i64> mine = items; }")
+        indexed = ("import std.sync;\nimport std.mem.vec; import std.string;\n"
+                   "struct Pool { shared Vec<String> items; }\nvoid drain(&Pool pool) {\n"
+                   " lock pool.items as items { String first = move items[0]; }\n}\n")
         # A generic body that uses its `T` directly is wrong for a shared `T`.
         generic = ("import std.sync;\n\n\nT twice<T>(T a) {\n return a + a;\n}\n"
                    "i64 main() {\n shared i64 total = 1;\n Mutex<i64> other = twice(move total);\n return 0;\n}\n")
@@ -686,6 +689,8 @@ class NativeLsp(unittest.TestCase):
                 (misuse, "`pool.items` is already locked by an enclosing lock block; locking it again would deadlock"),
                 (moved, "cannot move 'items' out of its lock block: the shared value still owns it; clone it instead"),
                 (generic, "`a` is shared between threads: read or change it inside `lock a { ... }`"),
+                (indexed, "cannot move 'items[...]' out of its lock block: the shared value still owns it; "
+                          "clone it instead"),
                 (field, "cannot move 'h.items' because it is borrowed\nborrowed by a task launched here"),
                 (returned, "cannot move 'h.items' because it is borrowed\nborrowed by a task launched here"),
                 (dropped, "cannot drop 'h.items' because it is borrowed by a launched task\n"

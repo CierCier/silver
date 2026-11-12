@@ -1197,21 +1197,21 @@ u32 typecheck_place_type(AstPool* pool, TypeTable* types, SymbolTable* symbols,
     return place_type;
 }
 
-/// Reports moving a `lock` block's value, or an owned field of it, out of the
-/// block. The value is `(*__lock_N__name)`, a place inside the Mutex (see
-/// sync_sugar.ag), and the Mutex would still own and drop it. Returns true
-/// when it reported.
+/// Reports moving a `lock` block's value, or an owned field or element of
+/// it, out of the block. The value is `(*__lock_N__name)`, a place inside
+/// the Mutex (see sync_sugar.ag), and the Mutex would still own and drop
+/// it. Returns true when it reported.
 bool typecheck_reject_locked_move(AstPool* pool, TypeTable* types, SymbolTable* symbols,
                                   SyntaxNode* root, u32 place_id,
                                   DiagnosticBag* diagnostics, bool* ok) {
     AstExpr* place = pool.get_expr(place_id);
     AstExpr* base = place;
     String path = String.new();
-    while (base.kind == ExprKind.Field && base.inner0 != 0) {
-        String field = String.from_str(".");
-        field.push_str(symbols.names.get(base.aux));
-        field.push_str(path.to_str());
-        path = move field;
+    while ((base.kind == ExprKind.Field || base.kind == ExprKind.Index) && base.inner0 != 0) {
+        String step = String.from_str(base.kind == ExprKind.Field ? "." : "[...]");
+        if (base.kind == ExprKind.Field) { step.push_str(symbols.names.get(base.aux)); }
+        step.push_str(path.to_str());
+        path = move step;
         base = pool.get_expr(base.inner0);
     }
     if (base.kind != ExprKind.Unary || base.aux != (u32)TokenKind.Star || base.inner0 == 0) { return false; }

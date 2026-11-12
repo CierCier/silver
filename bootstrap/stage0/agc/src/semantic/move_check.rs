@@ -1017,10 +1017,13 @@ impl MoveChecker {
         method: &str,
         var_types: &FxHashMap<String, ast::Type>,
     ) -> bool {
-        let Some((root, path)) = expr_root_and_path(receiver) else {
-            return false;
+        // A lock block's value is `(*__lock_N__name)`, which has no root
+        // local of its own.
+        let ty = match expr_root_and_path(receiver) {
+            Some((root, path)) => self.get_field_type(&root, &path, var_types),
+            None => self.locked_place(receiver, var_types).map(|(_, ty)| ty),
         };
-        let Some(ty) = self.get_field_type(&root, &path, var_types) else {
+        let Some(ty) = ty else {
             return false;
         };
         self.facts
@@ -1381,45 +1384,72 @@ impl MoveChecker {
         ty
     }
 
-    /// Rejects moving a `lock` block's value, or an owned field of it, out of
-    /// the block. The value is `(*__lock_N__name)`, a place inside the Mutex
-    /// (see sync_sugar), and the Mutex would still own and drop it.
-    fn reject_locked_move(
-        &mut self,
+    /// A place inside a `lock` block, `(*__lock_N__name)` with fields and
+    /// indexes: the user's spelling (`name.field[...]`) and its type.
+    fn locked_place(
+        &self,
         expr: &ast::Expression,
         var_types: &FxHashMap<String, ast::Type>,
-    ) {
-        let mut path = Vec::new();
+    ) -> Option<(String, ast::Type)> {
+        let mut steps = Vec::new();
         let mut place = expr;
-        while let ast::ExpressionKind::FieldAccess { object, field } = place.kind.as_ref() {
-            path.push(field.name.as_str());
-            place = object;
+        loop {
+            match place.kind.as_ref() {
+                ast::ExpressionKind::FieldAccess { object, field } => {
+                    steps.push(Some(field.name.as_str()));
+                    place = object;
+                }
+                ast::ExpressionKind::Index { object, .. } => {
+                    steps.push(None);
+                    place = object;
+                }
+                _ => break,
+            }
         }
         let ast::ExpressionKind::Unary {
             operator: ast::UnaryOperator::Dereference,
             operand,
         } = place.kind.as_ref()
         else {
-            return;
+            return None;
         };
         let ast::ExpressionKind::Identifier(pointer) = operand.kind.as_ref() else {
-            return;
+            return None;
         };
-        let Some(name) = crate::sync_sugar::locked_name(&pointer.name) else {
-            return;
-        };
+        let name = crate::sync_sugar::locked_name(&pointer.name)?;
         let Some(ast::TypeKind::Pointer(pointer_type)) =
             var_types.get(&pointer.name).map(|ty| ty.kind.as_ref())
         else {
-            return;
+            return None;
         };
-        path.reverse();
-        let path = path.join(".");
-        if self
-            .field_type(pointer_type.inner.as_ref().clone(), &path)
-            .is_some_and(|ty| self.is_tracked(&ty))
+        let mut spelling = name.to_string();
+        let mut ty = pointer_type.inner.as_ref().clone();
+        for step in steps.into_iter().rev() {
+            ty = match step {
+                Some(field) => {
+                    spelling = format!("{spelling}.{field}");
+                    self.field_type(ty, field)?
+                }
+                None => {
+                    spelling.push_str("[...]");
+                    index_element_type(&ty)?
+                }
+            };
+        }
+        Some((spelling, ty))
+    }
+
+    /// Rejects moving a `lock` block's value, or an owned field or element of
+    /// it, out of the block. The value is `(*__lock_N__name)`, a place inside
+    /// the Mutex (see sync_sugar), and the Mutex would still own and drop it.
+    fn reject_locked_move(
+        &mut self,
+        expr: &ast::Expression,
+        var_types: &FxHashMap<String, ast::Type>,
+    ) {
+        if let Some((place, ty)) = self.locked_place(expr, var_types)
+            && self.is_tracked(&ty)
         {
-            let place = if path.is_empty() { name.to_string() } else { format!("{name}.{path}") };
             self.error(msg::move_out_of_lock(&place), expr.span);
         }
     }
@@ -2486,5 +2516,19 @@ impl MoveChecker {
             ast::PatternKind::Tuple(items) => items.iter().any(Self::pattern_has_move),
             _ => false,
         }
+    }
+}
+
+/// The element type of indexing `ty`: an array's or slice's element, or the
+/// one type argument of a container such as `Vec<T>`.
+fn index_element_type(ty: &ast::Type) -> Option<ast::Type> {
+    match ty.kind.as_ref() {
+        ast::TypeKind::Array(array) => Some(array.element_type.as_ref().clone()),
+        ast::TypeKind::Slice(slice) => Some(slice.element_type.as_ref().clone()),
+        ast::TypeKind::Named(named) => match named.generics.as_deref() {
+            Some([element]) => Some(element.clone()),
+            _ => None,
+        },
+        _ => None,
     }
 }
