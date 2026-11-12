@@ -5,6 +5,7 @@ import frontend.cfg;
 import frontend.items;
 import frontend.module_loader;
 import frontend.symbols;
+import frontend.sync_sugar;
 import frontend.typecheck_expr;
 import frontend.typecheck;
 import frontend.lambda_syntax;
@@ -208,8 +209,14 @@ String ide_documentation(IdeIndex* index, Span span) {
 /// Adds a symbol for `name` and returns its id.
 i64 ide_add_symbol(IdeIndex* index, SyntaxNode* name, IdeSymbolKind kind,
                    str owner, Span extent, Span scope, bool local) {
+    return ide_add_named_symbol(index, name.text, name, kind, owner, extent, scope, local);
+}
+
+/// Adds a symbol called `text` whose name token is `name`, and returns its id.
+i64 ide_add_named_symbol(IdeIndex* index, str text, SyntaxNode* name, IdeSymbolKind kind,
+                         str owner, Span extent, Span scope, bool local) {
     IdeSymbol symbol;
-    symbol.name = String.from_str(name.text);
+    symbol.name = String.from_str(text);
     symbol.owner = String.from_str(owner);
     symbol.signature = String.new();
     symbol.type_name = String.new();
@@ -235,7 +242,7 @@ i64 ide_add_symbol(IdeIndex* index, SyntaxNode* name, IdeSymbolKind kind,
     symbol.parameters = Vec<String>.new();
     symbol.parameter_names = Vec<String>.new();
     i64 id = index.symbols.len();
-    u32 name_id = index.names.intern(name.text);
+    u32 name_id = index.names.intern(text);
     while (index.name_heads.len() <= (i64)name_id) { index.name_heads.push(-1); }
     index.next_name.push(index.name_heads.get((i64)name_id));
     index.name_heads.set((i64)name_id, id);
@@ -441,8 +448,11 @@ void ide_add_bindings(IdeIndex* index, Vec<Binding>* bindings, Span function,
     while (i < bindings.len()) {
         Binding* binding = bindings.get_ptr(i);
         if (ide_find_definition(index, binding.span) >= 0) { i += 1; continue; }
-        // Locals generated for a `lock` block are not the user's symbols.
-        if (ide_lock_local(binding.name)) { i += 1; continue; }
+        // Locals generated for a `lock` block are not the user's symbols,
+        // except the value local of `lock place as name`, which sits on `name`.
+        i64 locked = sugar_locked_name_start(binding.name);
+        bool alias = locked > 0 && binding.name_node.span.start < binding.name_node.span.end;
+        if (ide_lock_local(binding.name) && !alias) { i += 1; continue; }
         SyntaxNode* visibility = binding_visibility_scope(binding);
         Span scope = visibility == (SyntaxNode*)0 ? function : visibility.span;
         if (binding.kind == BindingKind.Parameter) { scope = function; }
@@ -465,18 +475,20 @@ void ide_add_bindings(IdeIndex* index, Vec<Binding>* bindings, Span function,
                 scope = parameters.span.extend(body.span); counter = true;
             }
         }
-        i64 id = ide_add_symbol(index, binding.name_node,
+        str name = alias ? (str)((u64)binding.name + (u64)locked) : binding.name;
+        i64 id = ide_add_named_symbol(index, name, binding.name_node,
             (binding.kind == BindingKind.Parameter || lambda_parameter) && !counter ? IdeSymbolKind.Parameter : IdeSymbolKind.Local,
             "", binding.span, scope, true);
         IdeSymbol* symbol = index.symbols.get_ptr(id);
         u32 type_id = typecheck_parameter_type_id(&table.types, binding);
         symbol.type_name = String.from_str(type_id == TYPE_UNKNOWN ? binding.declared_type.name : table.types.type_name(type_id));
         if (strcmp(binding.declared_type.name, "Self") == 0) { symbol.type_name = String.from_str(owner); }
-        symbol.inferred = binding.kind == BindingKind.Let;
+        // An alias's local holds a pointer to the value; its type would mislead.
+        symbol.inferred = binding.kind == BindingKind.Let && !alias;
         symbol.readonly = binding_is_const(binding);
         symbol.signature = symbol.type_name.clone();
         if (symbol.signature.len() > 0) { symbol.signature.push(' '); }
-        symbol.signature.push_str(binding.name);
+        symbol.signature.push_str(name);
         i += 1;
     }
 }
@@ -602,20 +614,10 @@ bool ide_lock_local(str name) {
     return true;
 }
 
-/// Where the user's name starts inside a generated `__lock_N__name` local,
-/// or -1 for any other name. See frontend/sync_sugar.ag.
-i64 ide_locked_name_start(str name) {
-    if (!ide_lock_local(name)) { return -1; }
-    i64 i = 7;
-    while (name[i] >= (u8)'0' && name[i] <= (u8)'9') { i += 1; }
-    if (name[i] != (u8)'_' || name[i + 1] != (u8)'_') { return -1; }
-    return i + 2;
-}
-
 /// True when an occurrence spelled `text` is `name` in the source: a
 /// generated `__lock_N__name` local is spelled `name` by its user.
 bool ide_spells(str text, str name) {
-    i64 offset = ide_locked_name_start(text);
+    i64 offset = sugar_locked_name_start(text);
     if (offset < 0) { return strcmp(text, name) == 0; }
     i64 length = strlen(name);
     if (strlen(text) - offset != length) { return false; }
@@ -649,7 +651,7 @@ void ide_collect_nodes(IdeIndex* index, SyntaxNode* node, bool import_selection)
         if (!occurrence.definition && !occurrence.member && !import_selection) {
             // Inside a `lock` block the locked name is written `__lock_N__name`;
             // the guard local `__lock_N_guard` is not the user's.
-            i64 locked = ide_locked_name_start(node.text);
+            i64 locked = sugar_locked_name_start(node.text);
             if (ide_macro_use(node)) {
                 occurrence.symbol = ide_resolve_macro(index, node.text);
             } else if (locked > 0) {

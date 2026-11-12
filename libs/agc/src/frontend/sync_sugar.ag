@@ -12,12 +12,13 @@
 // before a type name and `lock` only at the start of a statement before a
 // place, so both stay usable as ordinary names (`m.lock()`, `RawMutex lock;`).
 // A synthesized token that stands for a source token (`Mutex` for `shared`,
-// `(*__lock_N__x)` for `x`) takes that token's span, so diagnostics point at
-// the user's code. Every other synthesized token gets an empty span where it
-// sits in the source: spans stay in source order, which the IDE index's
-// binary search needs, and the index skips empty identifiers. Stage0 does the
-// same rewrite in sync_sugar.rs (it has no IDE index, so spans differ);
-// keep the token output of the two in step.
+// `(*__lock_N__x)` for `x`, the pointer local for an `as` alias) takes that
+// token's span, so diagnostics point at the user's code. Every other
+// synthesized token gets an empty span where it sits in the source: spans
+// stay in source order, which the IDE index's binary search needs, and the
+// index skips empty identifiers. Stage0 does the same rewrite in
+// sync_sugar.rs (it has no IDE index, so spans differ); keep the token
+// output of the two in step.
 import std.mem.vec;
 import std.string;
 import frontend.diagnostics;
@@ -390,9 +391,15 @@ void desugar_locks(Vec<Token>* tokens, Vec<Token>* out, i64* counter, Diagnostic
             continue;
         }
         Span guard_span = tokens.get_ptr(i).span;
-        // `.lock();` sits empty after the place, the pointer local after `{`.
+        // `.lock();` sits empty after the place. An `as` alias declares the
+        // pointer local on the alias, so editors see a definition there;
+        // otherwise the local sits empty after `{`.
         Span call_span = sugar_after(tokens.get_ptr(sugar_previous(tokens, head.place_end)).span);
-        Span pointer_span = sugar_after(tokens.get_ptr(head.open).span);
+        bool alias = head.name != head.place_start;
+        Span alias_span = tokens.get_ptr(head.name).span;
+        Span let_span = sugar_after(tokens.get_ptr(alias ? sugar_previous(tokens, head.name) : head.open).span);
+        Span value_span = alias ? alias_span : let_span;
+        Span pointer_span = alias ? sugar_after(alias_span) : let_span;
         str name = tokens.get_ptr(head.name).text.to_str();
         Vec<Token> raw_body = Vec<Token>.new();
         sugar_copy_range(tokens, head.open + 1, close, &raw_body);
@@ -417,8 +424,8 @@ void desugar_locks(Vec<Token>* tokens, Vec<Token>* out, i64* counter, Diagnostic
         out.push(sugar_token(TokenKind.LeftParen, "(", call_span));
         out.push(sugar_token(TokenKind.RightParen, ")", call_span));
         out.push(sugar_token(TokenKind.Semicolon, ";", call_span));
-        out.push(sugar_token(TokenKind.Let, "let", pointer_span));
-        out.push(sugar_token(TokenKind.Identifier, value.to_str(), pointer_span));
+        out.push(sugar_token(TokenKind.Let, "let", let_span));
+        out.push(sugar_token(TokenKind.Identifier, value.to_str(), value_span));
         out.push(sugar_token(TokenKind.Assign, "=", pointer_span));
         out.push(sugar_token(TokenKind.Identifier, guard.to_str(), pointer_span));
         out.push(sugar_token(TokenKind.Dot, ".", pointer_span));

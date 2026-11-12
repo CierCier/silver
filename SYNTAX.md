@@ -1287,7 +1287,7 @@ threads that hold two locks at once must take them in the same order, or
 they can deadlock.
 
 `lock` is a statement, not an expression. Editors show a shared value's
-type as `Mutex<T>`.
+type as `Mutex<T>`; an `as` name is a declaration of its own.
 
 ### Send gate
 

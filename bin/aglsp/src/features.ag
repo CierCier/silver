@@ -51,7 +51,9 @@ Vec<i64> semantic_data(Document* doc, &SemanticTokenOptions options, i64 begin, 
     i64 emitted_start = -1;
     while (i < doc.analysis.tokens.len()) {
         Token* token = doc.analysis.tokens.get(i);
-        if (token.span.end <= begin || token.span.start >= finish) { i += 1; continue; }
+        // An empty token was synthesized and covers no source.
+        if (token.span.end <= begin || token.span.start >= finish
+            || token.span.start == token.span.end) { i += 1; continue; }
         // A synthesized token takes the class of the source it sits on: the
         // `shared`/`lock` keyword, once, or the user's name inside a lock block.
         bool literal = token.kind == TokenKind.Comment || token.kind == TokenKind.StringLiteral

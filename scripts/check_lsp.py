@@ -631,6 +631,50 @@ class NativeLsp(unittest.TestCase):
         items = session.result("textDocument/completion", {**document,
             "position": position(text, text.index("seen = count") + len("seen = "))})["items"]
         self.assertFalse(any(item["label"].startswith("__lock") for item in items))
+        # The formatter lays out the sugar like any other block.
+        params = {**document, "options": {"tabSize": 1, "insertSpaces": True}}
+        self.assertEqual(apply_edits(text, session.result("textDocument/formatting", params)),
+                         text.replace("{ total += amount; }", "{\n  total += amount;\n }")
+                         .replace("{ seen = count; }", "{\n  seen = count;\n }"))
+        # An `as` alias is its own declaration, apart from an outer local with
+        # its name; a locked name right after `{` is still highlighted.
+        alias = ("import std.sync;\n"
+                 "i64 main() {\n i64 x = 0;\n shared i64 m = 1;\n lock m as x { x += 1; }\n"
+                 " lock m{m += x;}\n return x;\n}\n")
+        alias_uri = (self.root / "alias.ag").as_uri()
+        alias_document = {"textDocument": {"uri": alias_uri}}
+        session.send("textDocument/didOpen", {"textDocument": {
+            "uri": alias_uri, "languageId": "silver", "version": 1, "text": alias}})
+        self.assertEqual(session.result("textDocument/diagnostic", alias_document)["items"], [])
+        body = position(alias, alias.index("x += 1"))
+        self.assertEqual(session.result("textDocument/definition", {**alias_document, "position": body}),
+                         {"uri": alias_uri, "range": location(alias, "x", alias.index("as x") + 3)})
+        outer = session.result("textDocument/rename", {**alias_document,
+            "position": location(alias, "x")["start"], "newName": "y"})["changes"][alias_uri]
+        self.assertEqual(apply_edits(alias, outer), alias.replace("i64 x", "i64 y").replace("+= x", "+= y")
+                         .replace("return x", "return y"))
+        inner = session.result("textDocument/rename", {**alias_document, "position": body,
+            "newName": "value"})["changes"][alias_uri]
+        self.assertEqual(apply_edits(alias, inner), alias.replace("as x { x += 1", "as value { value += 1"))
+        tokens = decode_tokens(session.result("textDocument/semanticTokens/full", alias_document)["data"], legend)
+        kinds = {(line, character): kind for line, character, _, kind, _ in tokens}
+        for start in [alias.index("as x") + 3, alias.index("x += 1"), alias.index("m += x")]:
+            at = position(alias, start)
+            self.assertEqual(kinds.get((at["line"], at["character"])), "variable", alias[start:start + 6])
+        # Locking a place again inside its own block, or moving the value out
+        # of the block, is reported where it happens.
+        misuse = ("import std.sync;\nimport std.mem.vec;\nstruct Pool { shared Vec<i64> items; }\n"
+                  "void drain(&Pool pool) {\n lock pool.items as a { lock pool.items as b { } }\n}\n")
+        moved = misuse.replace("lock pool.items as a { lock pool.items as b { } }",
+                               "lock pool.items as items { Vec<i64> mine = items; }")
+        for version, (source, message) in enumerate([
+                (misuse, "`pool.items` is already locked by an enclosing lock block; locking it again would deadlock"),
+                (moved, "cannot move 'items' out of its lock block: the shared value still owns it; clone it instead")], 2):
+            session.send("textDocument/didChange", {"textDocument": {"uri": alias_uri, "version": version},
+                "contentChanges": [{"text": source}]})
+            errors = {(item["message"], item["range"]["start"]["line"])
+                      for item in session.result("textDocument/diagnostic", alias_document)["items"]}
+            self.assertIn((message, 4), errors)
         # Using a shared value outside a lock names the fix.
         session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
             "contentChanges": [{"text": text.replace(" i64 seen = 0;", " i64 seen = count + 1;")}]})
