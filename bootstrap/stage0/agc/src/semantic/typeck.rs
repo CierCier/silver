@@ -659,7 +659,8 @@ impl TypeChecker {
                             fields.insert(field.name.clone(), field_ty);
                         }
                     }
-                    if !fields.is_empty() {
+                    // Register only a complete definition; an empty struct is one.
+                    if fields.len() == export.fields.len() {
                         self.struct_defs.insert(
                             export.name.clone(),
                             StructDef {
