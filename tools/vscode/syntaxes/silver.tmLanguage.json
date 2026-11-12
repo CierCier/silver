@@ -214,9 +214,9 @@
           "match": "\\b(const|mut|static|volatile|private)\\b"
         },
         {
-          "comment": "`shared T` and `lock place {`: keywords only before a type or a place, so `m.lock()` and a variable named `lock` stay names.",
+          "comment": "`shared T name` and `lock place {`: keywords only before a type and a declared name, or a place, so `m.lock()`, a variable named `lock` and a `shared create()` return type stay names.",
           "name": "storage.modifier.silver",
-          "match": "(?<![.\\w])shared(?=\\s+&?[A-Za-z_])"
+          "match": "(?<![.\\w])shared(?=(?:\\s|/\\*.*?\\*/)+&?[A-Za-z_][\\w:]*\\b(?:<[^;{}()]*>)?\\s*\\*?\\s*[A-Za-z_])"
         },
         {
           "name": "keyword.control.silver",

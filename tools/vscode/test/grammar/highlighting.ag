@@ -81,4 +81,11 @@ void count(&shared i64 total) {
     i64 lock = guard.lock();
 //      ^^^^ - keyword.control.silver
 //                   ^^^^ entity.name.function.call.silver
+    shared /* noted */ i64 noted = 0;
+//  ^^^^^^ storage.modifier.silver
+    shared i64* pointer = &noted;
+//  ^^^^^^ storage.modifier.silver
 }
+
+shared create() { return made; }
+// <- - storage.modifier.silver

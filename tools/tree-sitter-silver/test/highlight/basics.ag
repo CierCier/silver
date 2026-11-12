@@ -55,4 +55,11 @@ void count(&shared i64 total) {
 //  ^ keyword
     i64 lock = guard.lock();
 //                   ^ function
+    shared /* noted */ i64 noted = 0;
+//  ^ keyword
+    lock noted /* why */ { noted += 1; }
+//  ^ keyword
 }
+
+shared create() { return made; }
+// <- type

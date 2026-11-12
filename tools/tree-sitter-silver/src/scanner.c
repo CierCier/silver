@@ -1,8 +1,8 @@
 // External scanner for Silver: nested block comments, `/* a /* b */ c */`,
 // and the contextual keywords `shared` and `lock`, which are also ordinary
-// names. `shared` is a keyword before a type (`shared i64 total`) and `lock`
-// before a place and a block (`lock total {`, `lock self.hits as hits {`),
-// as in the compiler's sync_sugar rewrite.
+// names. `shared` is a keyword before a type and a declared name
+// (`shared i64 total`) and `lock` before a place and a block (`lock total {`,
+// `lock self.hits as hits {`), as in the compiler's sync_sugar rewrite.
 #include "tree_sitter/parser.h"
 
 #include <stdbool.h>
@@ -50,11 +50,9 @@ static void read_word(TSLexer *lexer, char *word, unsigned size) {
   word[length + 1 < size ? length : 0] = '\0';
 }
 
-static bool scan_block_comment(TSLexer *lexer) {
-  lexer->advance(lexer, false);
-  if (lexer->lookahead != '*') return false;
-  lexer->advance(lexer, false);
-
+// Consumes a block comment's body after its opening `/*`, nesting
+// included; false when the file ends first.
+static bool finish_block_comment(TSLexer *lexer) {
   unsigned depth = 1;
   while (depth > 0) {
     if (lexer->eof(lexer)) return false;
@@ -68,17 +66,65 @@ static bool scan_block_comment(TSLexer *lexer) {
       depth--;
     }
   }
+  return true;
+}
+
+static bool scan_block_comment(TSLexer *lexer) {
+  lexer->advance(lexer, false);
+  if (lexer->lookahead != '*') return false;
+  lexer->advance(lexer, false);
+  if (!finish_block_comment(lexer)) return false;
   lexer->result_symbol = BLOCK_COMMENT;
   return true;
 }
 
-// After `shared`: a type name follows, not an operator or `as`/`in`.
+// Skips spaces and comments in a lookahead, as the compiler skips them
+// between tokens; false when a `/` starts no comment.
+static bool skip_trivia(TSLexer *lexer) {
+  for (;;) {
+    skip_space(lexer);
+    if (lexer->lookahead != '/') return true;
+    lexer->advance(lexer, false);
+    if (lexer->lookahead == '/') {
+      while (!lexer->eof(lexer) && lexer->lookahead != '\n') lexer->advance(lexer, false);
+    } else if (lexer->lookahead == '*') {
+      lexer->advance(lexer, false);
+      if (!finish_block_comment(lexer)) return false;
+    } else {
+      return false;
+    }
+  }
+}
+
+// After `shared`: a type (`a::b::T<...>`), then the declared name or a
+// `*`. `shared create()` and `shared x;` keep `shared` a type name.
 static bool type_follows(TSLexer *lexer) {
-  skip_space(lexer);
-  if (!is_word_start(lexer->lookahead)) return false;
+  if (!skip_trivia(lexer) || !is_word_start(lexer->lookahead)) return false;
   char word[3];
   read_word(lexer, word, sizeof word);
-  return !word_is(word, "as") && !word_is(word, "in");
+  if (word_is(word, "as") || word_is(word, "in")) return false;
+  for (;;) {
+    if (!skip_trivia(lexer)) return false;
+    if (lexer->lookahead == ':') {
+      lexer->advance(lexer, false);
+      if (lexer->lookahead != ':') return false;
+      lexer->advance(lexer, false);
+      if (!skip_trivia(lexer) || !is_word_start(lexer->lookahead)) return false;
+      read_word(lexer, word, sizeof word);
+    } else if (lexer->lookahead == '<') {
+      unsigned depth = 0;
+      do {
+        int32_t c = lexer->lookahead;
+        if (lexer->eof(lexer) || c == ';' || c == '{' || c == '}' || c == '(' || c == ')') return false;
+        if (c == '<') depth++;
+        if (c == '>') depth--;
+        lexer->advance(lexer, false);
+      } while (depth > 0);
+    } else {
+      break;
+    }
+  }
+  return is_word_start(lexer->lookahead) || lexer->lookahead == '*';
 }
 
 // After `lock`: a place (`total`, `self.hits`, `state.get()`, `slots[i]`),
@@ -97,6 +143,9 @@ static bool place_and_block_follow(TSLexer *lexer) {
     } else if (c == ')' || c == ']') {
       if (depth == 0) return false;
       depth--;
+    } else if (depth == 0 && c == '/') {
+      if (!skip_trivia(lexer)) return false;
+      continue;
     } else if (depth == 0 && !is_word(c) && !is_space(c) && c != '.') {
       return false;
     }

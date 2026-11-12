@@ -185,18 +185,27 @@ fn desugar_shared(tokens: &[LexToken]) -> Vec<LexToken> {
     let mut i = 0;
     while i < tokens.len() {
         let current = &tokens[i];
-        let is_shared = is_identifier(current, "shared")
+        // A keyword only before `T name` or `T* name`: `shared create()`
+        // and `shared x;` keep `shared` as a type name.
+        let keyword = is_identifier(current, "shared")
             && !previous_significant(tokens, i)
-                .is_some_and(|p| matches!(tokens[p].kind, Token::Dot))
-            && next_significant(tokens, i).is_some_and(|n| is_type_start(&tokens[n].kind));
-        if !is_shared {
+                .is_some_and(|p| matches!(tokens[p].kind, Token::Dot));
+        let declared = keyword
+            .then(|| next_significant(tokens, i))
+            .flatten()
+            .filter(|&start| is_type_start(&tokens[start].kind))
+            .map(|start| (start, type_end(tokens, start)))
+            .filter(|&(_, end)| {
+                next_significant(tokens, end - 1).is_some_and(|n| {
+                    matches!(tokens[n].kind, Token::Identifier(_) | Token::Star)
+                })
+            });
+        let Some((start, end)) = declared else {
             out.push(current.clone());
             i += 1;
             continue;
-        }
+        };
         let span = synthesized(current.span, Role::Shared);
-        let start = next_significant(tokens, i).unwrap_or(i + 1);
-        let end = type_end(tokens, start);
         let ty = &tokens[start..end];
         mutex_of(ty, span, &mut out);
         i = end;
@@ -485,5 +494,12 @@ mod tests {
         // `shared` binds to the type name, so this is a pointer to a shared
         // i64, initialized with a pointer.
         assert_eq!(rewritten("shared i64* p = &total;"), "Mutex < i64 > * p = & total ;");
+    }
+
+    #[test]
+    fn shared_without_a_declared_name_stays_a_name() {
+        assert_eq!(rewritten("shared create() { }"), "shared create ( ) { }");
+        assert_eq!(rewritten("shared value;"), "shared value ;");
+        assert_eq!(rewritten("shared i64 count;"), "Mutex < i64 > count ;");
     }
 }

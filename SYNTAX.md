@@ -105,11 +105,12 @@ These are hard keywords — they cannot be used as identifiers:
 **Not keywords**: `pub` (items are public by default; `private` restricts visibility), `fn`.
 `let` is a keyword introducing inferred local bindings (`let x = expr;`).
 
-**Contextual keywords**: `shared` is a keyword only before a type
-(`shared i64 total`), and `lock` only at the start of a statement before a
-place and a block (`lock total { ... }`); see
+**Contextual keywords**: `shared` is a keyword only before a type and a
+declared name (`shared i64 total`, `shared i64* p`), and `lock` only at the
+start of a statement before a place and a block (`lock total { ... }`); see
 [Shared values and `lock`](#shared-values-and-lock). Elsewhere both are
-ordinary names: `m.lock()`, `i64 lock = 0;`.
+ordinary names: `m.lock()`, `i64 lock = 0;`, and a type named `shared` in
+`shared create() { ... }`.
 
 ### Literals
 

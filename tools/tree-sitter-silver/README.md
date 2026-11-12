@@ -11,8 +11,9 @@ comes from the language server's semantic tokens.
 
 A small external scanner (`src/scanner.c`) handles what a token rule
 cannot. Block comments nest, as in the compiler. `shared` and `lock` are
-keywords only by what follows them, `shared T` and `lock place {`, so
-`m.lock()` and a variable named `lock` stay identifiers.
+keywords only by what follows them, `shared T name` and `lock place {`, so
+`m.lock()`, a variable named `lock` and a `shared create()` return type stay
+identifiers. Comments may sit between the words.
 
 ```sh
 npm ci

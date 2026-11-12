@@ -187,17 +187,20 @@ void sugar_mutex_of(Vec<Token>* tokens, i64 from, i64 to, Span open, Vec<Token>*
 void desugar_shared(Vec<Token>* tokens, Vec<Token>* out) {
     i64 i = 0;
     while (i < tokens.len()) {
+        i64 start = sugar_next(tokens, i);
         bool keyword = sugar_is_name(tokens, i, "shared")
             && !sugar_is(tokens, sugar_previous(tokens, i), TokenKind.Dot)
-            && sugar_is_type_start(tokens, sugar_next(tokens, i));
-        if (!keyword) {
+            && sugar_is_type_start(tokens, start);
+        i64 end = keyword ? sugar_type_end(tokens, start) : start;
+        // A keyword only before `T name` or `T* name`: `shared create()`
+        // and `shared x;` keep `shared` as a type name.
+        i64 declarator = keyword ? sugar_next(tokens, end - 1) : -1;
+        if (!sugar_is(tokens, declarator, TokenKind.Identifier) && !sugar_is(tokens, declarator, TokenKind.Star)) {
             out.push(sugar_copy(tokens.get_ptr(i)));
             i += 1;
             continue;
         }
         Span span = tokens.get_ptr(i).span;
-        i64 start = sugar_next(tokens, i);
-        i64 end = sugar_type_end(tokens, start);
         sugar_mutex_of(tokens, start, end, span, out);
         i = end;
         // `shared T name = init;`: the initializer is a plain T.
