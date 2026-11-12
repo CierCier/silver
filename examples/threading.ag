@@ -79,11 +79,10 @@ void background(Arc<Mutex<i64>> state) {
     add_many(state.get(), 100);
 }
 
-i64 start_background(&Arc<Mutex<i64>> state) {
+// The worker owns its handle, so its task may leave this function.
+Task<void> start_background(&Arc<Mutex<i64>> state) {
     Arc<Mutex<i64>> handle = state.clone();
-    Task<void> worker = launch background(move handle);
-    wait worker;
-    return 0;
+    return launch background(move handle);
 }
 
 // --- main -----------------------------------------------------------------
@@ -118,12 +117,14 @@ i64 main() {
     channel.destroy();  // drops queued values and frees the buffer
 
     // 3. A WaitGroup counts the tasks down; leaving the block joins them.
+    //    A task that never started never calls done(), so check first.
     shared i64 grouped = 0;
     WaitGroup group = WaitGroup.new();
     group.add(2);
     {
-        Task<void> _w0 = launch work_then_done(&group, &grouped);
-        Task<void> _w1 = launch work_then_done(&group, &grouped);
+        Task<void> w0 = launch work_then_done(&group, &grouped);
+        Task<void> w1 = launch work_then_done(&group, &grouped);
+        if (!w0.started() || !w1.started()) { return 7; }
         group.wait_all();
     }
     lock grouped {
@@ -138,7 +139,8 @@ i64 main() {
 
     // 5. Shared ownership with Arc.
     Arc<Mutex<i64>> state = Arc<Mutex<i64>>.new(Mutex<i64>.new(0));
-    start_background(&state);
+    Task<void> worker = start_background(&state);
+    wait worker;
     lock state.get() as background_count {
         if (background_count != 100) { return 6; }
     }
