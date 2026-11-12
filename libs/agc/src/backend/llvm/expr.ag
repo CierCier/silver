@@ -3418,10 +3418,15 @@ LLVMOpaqueValue* llvm_emit_launch(LlvmContext* ctx, u32 expr_id) {
     pack_fields.drop();
 
     // A callee that borrows an argument makes the launch scoped: the runtime
-    // marks its task so the handle's drop glue joins it.
+    // marks its task so the handle's drop glue joins it. Of overloads, only
+    // the one type checking chose counts.
     Vec<bool> borrowed_params = Vec<bool>.new();
-    str launch_entry = launch_borrowed_parameters(ctx.root,
-            ctx.names.get(callee_expr.aux), (i64)call.aux, &borrowed_params)
+    str callee_name = ctx.names.get(callee_expr.aux);
+    SyntaxNode* selected = call.resolved_callee_id == 0 ? (SyntaxNode*)0
+        : typecheck_overload_by_symbol(ctx.types, ctx.names, ctx.root, callee_name,
+                                       call.resolved_callee_id - 1);
+    str launch_entry = launch_borrowed_parameters(ctx.root, selected, callee_name,
+            (i64)call.aux, &borrowed_params)
         ? "__silver_launch_scoped" : "__silver_launch";
     borrowed_params.drop();
     LLVMOpaqueValue* alloc_fn = LLVMGetNamedFunction(ctx.module, "mem_alloc_raw_impl");

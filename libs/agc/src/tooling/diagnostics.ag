@@ -170,13 +170,15 @@ DiagnosticBag check_snapshot_diagnostics(SyntaxTree* source, Vec<SyntaxTree*>* d
         check_declared_types(&symbols, &scratch.tree, cfg, &declarations);
         diagnostic_append_local(&diagnostics, &declarations);
     }
-    if (diagnostics.is_empty()) { check_borrows(&scratch.tree, &symbols, &diagnostics, cfg); }
-    if (diagnostics.is_empty()) { check_send(&scratch.tree, &diagnostics, cfg); }
     if (diagnostics.is_empty()) { check_ownership(&scratch.tree, &symbols, &diagnostics, cfg); }
+    // Expression checking chooses each launch's overload, which the borrow
+    // and Send checks then judge.
     if (diagnostics.is_empty()) {
         AstPool expressions = AstPool.new();
         typecheck_expressions_scoped(&expressions, &symbols, &scratch.tree, cfg, &diagnostics, 1);
     }
+    if (diagnostics.is_empty()) { check_borrows(&scratch.tree, &symbols, &diagnostics, cfg); }
+    if (diagnostics.is_empty()) { check_send(&scratch.tree, &symbols, &diagnostics, cfg); }
     if (diagnostics.is_empty()) {
         LintConfig lint = lint_config_default();
         check_lints_for_file(&scratch.tree, cfg, 1, &diagnostics, &lint);

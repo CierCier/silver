@@ -2361,7 +2361,7 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
     Vec<i64> release_points = Vec<i64>.new();
     collect_borrow_release_points(body, &leaves, &release_points);
     ScopedLaunches launches = ScopedLaunches.new();
-    collect_scoped_launches(tree.root, &leaves, &bindings, &launches);
+    collect_scoped_launches(tree.root, symbols, &leaves, &bindings, &launches);
     i64 i = 0;
     while (i < leaves.len()) {
         SyntaxNode* node = leaves.get(i);
@@ -2879,7 +2879,7 @@ bool check_borrows(SyntaxTree* tree, SymbolTable* symbols, DiagnosticBag* diagno
     items.drop();
     return_origins.drop();
     return_statuses.drop();
-    if (!check_scoped_launches(tree, diagnostics, cfg)) {
+    if (!check_scoped_launches(tree, symbols, diagnostics, cfg)) {
         ok = false;
     }
     return ok;

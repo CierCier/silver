@@ -88,11 +88,21 @@ impl ScopedLaunches {
     }
 }
 
+/// Returns true when function `item` is a candidate launch callee: the
+/// overload type checking chose, or, without one, any `name` of `arity`.
+bool launch_callee_candidate(SyntaxNode* item, SyntaxNode* selected, str name) {
+    if (selected != (SyntaxNode*)0) { return item == selected; }
+    SyntaxNode* identifier = item.kind == NodeKind.Function
+        ? function_identifier(item) : (SyntaxNode*)0;
+    return identifier != (SyntaxNode*)0 && strcmp(identifier.text, name) == 0;
+}
+
 /// Marks which of the `arity` parameters of launch callee `name` are `&T` or
-/// `&mut T`. With overloads of that arity, a position counts as borrowed when
-/// any of them borrows it. Returns true when any position is borrowed.
-/// `borrowed` must be empty.
-bool launch_borrowed_parameters(SyntaxNode* root, str name, i64 arity, Vec<bool>* borrowed) {
+/// `&mut T`: those of `selected`, the overload type checking chose, or,
+/// without one, those any overload of that arity borrows. Returns true when
+/// any position is borrowed. `borrowed` must be empty.
+bool launch_borrowed_parameters(SyntaxNode* root, SyntaxNode* selected, str name, i64 arity,
+                                Vec<bool>* borrowed) {
     i64 i = 0;
     while (i < arity) {
         borrowed.push(false);
@@ -101,9 +111,7 @@ bool launch_borrowed_parameters(SyntaxNode* root, str name, i64 arity, Vec<bool>
     bool any = false;
     SyntaxNode* item = root == (SyntaxNode*)0 ? (SyntaxNode*)0 : root.first_child;
     while (item != (SyntaxNode*)0) {
-        SyntaxNode* identifier = item.kind == NodeKind.Function
-            ? function_identifier(item) : (SyntaxNode*)0;
-        if (identifier != (SyntaxNode*)0 && strcmp(identifier.text, name) == 0) {
+        if (launch_callee_candidate(item, selected, name)) {
             Vec<Binding> parameters = Vec<Binding>.new();
             collect_parameter_bindings(binding_function_parameters(item), &parameters);
             if (parameters.len() == arity) {
@@ -123,14 +131,13 @@ bool launch_borrowed_parameters(SyntaxNode* root, str name, i64 arity, Vec<bool>
     return any;
 }
 
-/// Returns a function named `name` with `arity` parameters whose parameter
-/// `index` is `&T` or `&mut T`, or null.
-SyntaxNode* launch_borrowing_callee(SyntaxNode* root, str name, i64 arity, i64 index) {
+/// Returns the launch callee (see `launch_callee_candidate`) with `arity`
+/// parameters whose parameter `index` is `&T` or `&mut T`, or null.
+SyntaxNode* launch_borrowing_callee(SyntaxNode* root, SyntaxNode* selected, str name,
+                                    i64 arity, i64 index) {
     SyntaxNode* item = root == (SyntaxNode*)0 ? (SyntaxNode*)0 : root.first_child;
     while (item != (SyntaxNode*)0) {
-        SyntaxNode* identifier = item.kind == NodeKind.Function
-            ? function_identifier(item) : (SyntaxNode*)0;
-        if (identifier != (SyntaxNode*)0 && strcmp(identifier.text, name) == 0) {
+        if (launch_callee_candidate(item, selected, name)) {
             Vec<Binding> parameters = Vec<Binding>.new();
             collect_parameter_bindings(binding_function_parameters(item), &parameters);
             bool borrows = parameters.len() == arity && index >= 0 && index < arity
@@ -304,7 +311,7 @@ void scoped_add_borrow(ScopedLaunches* out, i64 site, SyntaxNode* first, SyntaxN
 
 /// Collects the scoped launches among `leaves` (the cfg-live leaves of one
 /// function body) into `out`. Reports nothing.
-void collect_scoped_launches(SyntaxNode* root, Vec<SyntaxNode*>* leaves,
+void collect_scoped_launches(SyntaxNode* root, SymbolTable* symbols, Vec<SyntaxNode*>* leaves,
                              Vec<Binding>* bindings, ScopedLaunches* out) {
     i64 i = 0;
     while (i < leaves.len()) {
@@ -325,7 +332,9 @@ void collect_scoped_launches(SyntaxNode* root, Vec<SyntaxNode*>* leaves,
             if (cursor != (SyntaxNode*)0) { cursor = cursor.next_sibling; }
         }
         Vec<bool> borrowed = Vec<bool>.new();
-        if (launch_borrowed_parameters(root, launch_token.next_sibling.text, starts.len(), &borrowed)) {
+        SyntaxNode* callee = launch_token.next_sibling;
+        if (launch_borrowed_parameters(root, symbols.selected_callee(callee.span), callee.text,
+                                       starts.len(), &borrowed)) {
             ScopedLaunchSite site;
             site.launch_token = launch_token;
             site.holder = (SyntaxNode*)0;
@@ -461,8 +470,9 @@ void scoped_check_collection_borrows(Vec<Binding>* bindings, ScopedLaunches* lau
 }
 
 /// Checks the scoped launches of one function or method body.
-void check_scoped_launch_body(SyntaxNode* root, SyntaxNode* parameters, SyntaxNode* body,
-                              CfgSet* cfg, DiagnosticBag* diagnostics, bool* failed) {
+void check_scoped_launch_body(SyntaxNode* root, SymbolTable* symbols, SyntaxNode* parameters,
+                              SyntaxNode* body, CfgSet* cfg, DiagnosticBag* diagnostics,
+                              bool* failed) {
     Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
     cfg_collect_live_leaves(body, cfg, &leaves);
     bool launches_here = false;
@@ -479,7 +489,7 @@ void check_scoped_launch_body(SyntaxNode* root, SyntaxNode* parameters, SyntaxNo
     collect_parameter_bindings(parameters, &bindings);
     collect_block_bindings(body, &bindings);
     ScopedLaunches launches = ScopedLaunches.new();
-    collect_scoped_launches(root, &leaves, &bindings, &launches);
+    collect_scoped_launches(root, symbols, &leaves, &bindings, &launches);
     i = 0;
     while (i < launches.borrows.len()) {
         ScopedLaunchBorrow* borrow = launches.borrows.get_ptr(i);
@@ -523,8 +533,8 @@ void check_scoped_launch_body(SyntaxNode* root, SyntaxNode* parameters, SyntaxNo
 
 /// Checks every method body of an impl or trait item. Methods are sibling
 /// fragments of the item's block: a parameter list followed by a body.
-void check_scoped_launch_methods(SyntaxNode* root, SyntaxNode* item, CfgSet* cfg,
-                                 DiagnosticBag* diagnostics, bool* failed) {
+void check_scoped_launch_methods(SyntaxNode* root, SymbolTable* symbols, SyntaxNode* item,
+                                 CfgSet* cfg, DiagnosticBag* diagnostics, bool* failed) {
     SyntaxNode* block = item.first_child;
     while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
         block = block.next_sibling;
@@ -538,7 +548,7 @@ void check_scoped_launch_methods(SyntaxNode* root, SyntaxNode* item, CfgSet* cfg
             parameters = (SyntaxNode*)0;
         } else if (member.kind == NodeKind.Block) {
             if (parameters != (SyntaxNode*)0) {
-                check_scoped_launch_body(root, parameters, member, cfg, diagnostics, failed);
+                check_scoped_launch_body(root, symbols, parameters, member, cfg, diagnostics, failed);
             }
             parameters = (SyntaxNode*)0;
         }
@@ -548,7 +558,8 @@ void check_scoped_launch_methods(SyntaxNode* root, SyntaxNode* item, CfgSet* cfg
 
 /// Checks the placement and pinning of scoped launches in every cfg-active
 /// function and method. Returns false when any error was reported.
-bool check_scoped_launches(SyntaxTree* tree, DiagnosticBag* diagnostics, CfgSet* cfg) {
+bool check_scoped_launches(SyntaxTree* tree, SymbolTable* symbols, DiagnosticBag* diagnostics,
+                           CfgSet* cfg) {
     bool failed = false;
     Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
     cfg_collect_items(tree.root, cfg, diagnostics, &items);
@@ -558,11 +569,11 @@ bool check_scoped_launches(SyntaxTree* tree, DiagnosticBag* diagnostics, CfgSet*
         if (item.kind == NodeKind.Function) {
             SyntaxNode* body = binding_function_body(item);
             if (body != (SyntaxNode*)0) {
-                check_scoped_launch_body(tree.root, binding_function_parameters(item), body,
+                check_scoped_launch_body(tree.root, symbols, binding_function_parameters(item), body,
                     cfg, diagnostics, &failed);
             }
         } else if (item.kind == NodeKind.Impl || item.kind == NodeKind.Trait) {
-            check_scoped_launch_methods(tree.root, item, cfg, diagnostics, &failed);
+            check_scoped_launch_methods(tree.root, symbols, item, cfg, diagnostics, &failed);
         }
         i += 1;
     }

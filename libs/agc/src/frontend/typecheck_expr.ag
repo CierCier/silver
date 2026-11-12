@@ -652,6 +652,23 @@ u32 typecheck_overload_symbol_id(TypeTable* types, Interner* names, str name,
     return symbol_id;
 }
 
+/// Returns the non-generic overload of `name` whose symbol is `symbol_id`,
+/// or null.
+SyntaxNode* typecheck_overload_by_symbol(TypeTable* types, Interner* names, SyntaxNode* root,
+                                         str name, u32 symbol_id) {
+    SyntaxNode* item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        SyntaxNode* id = item.kind == NodeKind.Function && !typecheck_is_generic_function(item)
+            ? function_identifier(item) : (SyntaxNode*)0;
+        if (id != (SyntaxNode*)0 && strcmp(id.text, name) == 0
+            && typecheck_overload_symbol_id(types, names, name, item) == symbol_id) {
+            return item;
+        }
+        item = item.next_sibling;
+    }
+    return (SyntaxNode*)0;
+}
+
 /// Resolves a free-function call to the overload whose parameters fit its
 /// arguments. Returns null when none fits or several do; sets `*overloaded`
 /// and `*ambiguous` for the caller to report.
@@ -2217,6 +2234,15 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
     } else if (expr.kind == ExprKind.Launch) {
         u32 result_type = infer_expr(pool, types, symbols, root, env,
                                      expr.inner0, diagnostics, ok);
+        // The borrow and Send passes judge the launch by this overload.
+        AstExpr* call = pool.get_expr(expr.inner0);
+        AstExpr* callee = pool.get_expr(call.inner0);
+        if (call.kind == ExprKind.Call && call.resolved_callee_id != 0
+            && callee.kind == ExprKind.Var) {
+            SyntaxNode* selected = typecheck_overload_by_symbol(types, &symbols.names, root,
+                symbols.names.get(callee.aux), call.resolved_callee_id - 1);
+            if (selected != (SyntaxNode*)0) { symbols.select_callee(callee.span, selected); }
+        }
         if (result_type != TYPE_UNKNOWN) {
             Vec<u32> task_args = Vec<u32>.new();
             task_args.push(result_type);

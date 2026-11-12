@@ -16,6 +16,7 @@ import frontend.diagnostics;
 import frontend.items;
 import frontend.messages;
 import frontend.scoped_launch;
+import frontend.symbols;
 
 /// State of the launch Send check; `failed` is set by any report.
 struct SendAnalyzer {
@@ -38,17 +39,11 @@ bool send_text_equals(str left, str right) {
     return strcmp(left, right) == 0;
 }
 
-/// Returns the binding named `name`, or null.
-Binding* send_find_binding(Vec<Binding>* bindings, str name) {
-    i64 i = 0;
-    while (i < bindings.len()) {
-        Binding* binding = bindings.get_ptr(i);
-        if (send_text_equals(binding.name, name)) {
-            return binding;
-        }
-        i += 1;
-    }
-    return (Binding*)0;
+/// Returns the binding a launch argument names where it is used, so an
+/// inner local shadows an outer one; null when there is none.
+Binding* send_argument_binding(Vec<Binding>* bindings, LaunchArgument* argument) {
+    if (argument.name_node == (SyntaxNode*)0) { return (Binding*)0; }
+    return visible_binding(bindings, argument.name, argument.name_node);
 }
 
 /// Returns a display spelling of a projected type (with `&`/`*` and generics).
@@ -601,7 +596,7 @@ void check_borrowed_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root,
     TypeProjection pointee = send_reference_pointee(parameter, &slice);
     // A generic callee names no concrete pointee, so judge the borrowed local:
     // its whole type for `&place`, its own pointee for a reference variable.
-    Binding* source = send_find_binding(bindings, argument.name);
+    Binding* source = send_argument_binding(bindings, argument);
     if (send_type_parameter_index(callee, pointee.name) >= 0 && source != (Binding*)0) {
         if (source.declared_type.kind == ProjectionTypeKind.Reference) {
             pointee = send_reference_pointee(source, &slice);
@@ -636,12 +631,13 @@ void check_borrowed_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root,
 /// Checks one `launch` argument. A borrow passed to a `&T`/`&mut T`
 /// parameter needs a Send pointee; any other address-of is a raw pointer,
 /// and by-value arguments must be Send themselves.
-void check_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root,
+void check_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root, SymbolTable* symbols,
                            Vec<Binding>* bindings, LaunchArgument* argument) {
-    SyntaxNode* borrowing = launch_borrowing_callee(root, (*argument).callee,
+    SyntaxNode* borrowing = launch_borrowing_callee(root,
+        symbols.selected_callee((*argument).callee_span), (*argument).callee,
         (*argument).count, (*argument).index);
     if (borrowing != (SyntaxNode*)0) {
-        Binding* reference = send_find_binding(bindings, (*argument).name);
+        Binding* reference = send_argument_binding(bindings, argument);
         if ((*argument).kind == ProjectionExpressionKind.Address
             || ((*argument).kind == ProjectionExpressionKind.Identifier
                 && reference != (Binding*)0
@@ -652,7 +648,7 @@ void check_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root,
     }
     if ((*argument).kind == ProjectionExpressionKind.Address) {
         String type_name = String.from_str("unknown");
-        Binding* binding = send_find_binding(bindings, (*argument).name);
+        Binding* binding = send_argument_binding(bindings, argument);
         if (binding != (Binding*)0) {
             String declared = send_type_display(&(*binding).declared_type);
             type_name = move declared;
@@ -672,7 +668,7 @@ void check_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root,
         && (*argument).kind != ProjectionExpressionKind.Move) {
         return;
     }
-    Binding* binding = send_find_binding(bindings, (*argument).name);
+    Binding* binding = send_argument_binding(bindings, argument);
     if (binding == (Binding*)0) {
         return;
     }
@@ -690,7 +686,7 @@ void check_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root,
 
 /// Checks every `launch` call's arguments in cfg-active functions. Returns
 /// false when any argument is not Send.
-bool check_send(SyntaxTree* tree, DiagnosticBag* diagnostics, CfgSet* cfg) {
+bool check_send(SyntaxTree* tree, SymbolTable* symbols, DiagnosticBag* diagnostics, CfgSet* cfg) {
     bool ok = true;
     Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
     cfg_collect_items(tree.root, cfg, diagnostics, &items);
@@ -707,6 +703,7 @@ bool check_send(SyntaxTree* tree, DiagnosticBag* diagnostics, CfgSet* cfg) {
                 check_launch_argument(
                     &analyzer,
                     tree.root,
+                    symbols,
                     &bindings,
                     launch_arguments.get_ptr(argument_index)
                 );

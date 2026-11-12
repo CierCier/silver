@@ -704,6 +704,31 @@ class NativeLsp(unittest.TestCase):
         messages = [item["message"] for item in session.result("textDocument/diagnostic", alias_document)["items"]]
         self.assertIn("launch argument of type Triple<i64, i64, Rc<i64>> is not Send: "
                       "Rc<T> carries a shared non-atomic reference count", messages)
+        # A launch is judged by the overload type checking chose, not the
+        # first one with its name and arity.
+        overloads = ("import std.mem.rc;\ni64 f(&i64 v) { return *v; }\ni64 f(&Rc<i64> _v) { return 0; }\n"
+                     "i64 work(i64 v) { return v; }\ni64 work(&i64 v) { return *v; }\n"
+                     "i64 main() {\n i64 x = 1;\n Rc<i64> r = Rc<i64>.new(1);\n"
+                     " Task<i64> plain = launch work(21);\n Task<i64> fine = launch f(&x);\n"
+                     " Task<i64> bad = launch f(&r);\n return wait plain + wait fine + wait bad;\n}\n")
+        session.send("textDocument/didChange", {"textDocument": {"uri": alias_uri, "version": 21},
+            "contentChanges": [{"text": overloads}]})
+        errors = [(item["message"], item["range"]["start"]["line"])
+                  for item in session.result("textDocument/diagnostic", alias_document)["items"]]
+        self.assertEqual(errors, [("launch argument of type &Rc<i64> is not Send: "
+                                   "Rc<T> carries a shared non-atomic reference count", 10)])
+        # A launch argument is the binding in scope there, not an outer one
+        # with its name.
+        shadowed = ("import std.mem.rc;\ni64 peek<T>(&T _v) { return 0; }\ni64 own(i64 v) { return v; }\n"
+                    "i64 bad() {\n i64 x = 1;\n { Rc<i64> x = Rc<i64>.new(2); return wait launch peek(&x); }\n}\n"
+                    "i64 fine() {\n Rc<i64> x = Rc<i64>.new(2);\n"
+                    " { i64 x = 1; return wait launch peek(&x) + wait launch own(x); }\n}\n")
+        session.send("textDocument/didChange", {"textDocument": {"uri": alias_uri, "version": 22},
+            "contentChanges": [{"text": shadowed}]})
+        errors = [(item["message"], item["range"]["start"]["line"])
+                  for item in session.result("textDocument/diagnostic", alias_document)["items"]]
+        self.assertEqual(errors, [("launch argument of type &Rc<i64> is not Send: "
+                                   "Rc<T> carries a shared non-atomic reference count", 5)])
         # Using a shared value outside a lock names the fix.
         session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
             "contentChanges": [{"text": text.replace(" i64 seen = 0;", " i64 seen = count + 1;")}]})

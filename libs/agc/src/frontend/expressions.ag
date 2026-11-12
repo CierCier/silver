@@ -47,12 +47,15 @@ struct TypeProjection {
 }
 
 /// One argument of a `launch` call: its expression shape, name, and span,
-/// plus the callee name, the argument's position, and the call's arity.
+/// plus the callee name and span, the argument's position, and the call's
+/// arity.
 struct LaunchArgument {
     ProjectionExpressionKind kind;
     str name;
+    SyntaxNode* name_node;
     Span span;
     str callee;
+    Span callee_span;
     i64 index;
     i64 count;
 }
@@ -345,7 +348,9 @@ LaunchArgument projection_argument(Vec<SyntaxNode*>* leaves, i64 start, i64 end)
     LaunchArgument argument;
     argument.kind = ProjectionExpressionKind.Unknown;
     argument.name = "";
+    argument.name_node = (SyntaxNode*)0;
     argument.callee = "";
+    argument.callee_span = argument.span;
     argument.index = 0;
     argument.count = 0;
     argument.span = projection_range_span(leaves, start, end);
@@ -357,7 +362,8 @@ LaunchArgument projection_argument(Vec<SyntaxNode*>* leaves, i64 start, i64 end)
     if (first.token_kind == TokenKind.Move) {
         argument.kind = ProjectionExpressionKind.Move;
         if (start + 1 < end && leaves.get(start + 1).token_kind == TokenKind.Identifier) {
-            argument.name = leaves.get(start + 1).text;
+            argument.name_node = leaves.get(start + 1);
+            argument.name = argument.name_node.text;
         }
         return argument;
     }
@@ -368,12 +374,14 @@ LaunchArgument projection_argument(Vec<SyntaxNode*>* leaves, i64 start, i64 end)
             name_index += 1;
         }
         if (name_index < end && leaves.get(name_index).token_kind == TokenKind.Identifier) {
-            argument.name = leaves.get(name_index).text;
+            argument.name_node = leaves.get(name_index);
+            argument.name = argument.name_node.text;
         }
         return argument;
     }
     if (first.token_kind == TokenKind.Identifier) {
         argument.kind = ProjectionExpressionKind.Identifier;
+        argument.name_node = first;
         argument.name = first.text;
         return argument;
     }
@@ -393,7 +401,8 @@ void projection_add_argument(Vec<SyntaxNode*>* leaves, i64 start, i64 end, Vec<L
 }
 
 /// Projects the comma-separated arguments of `callee`'s call group.
-void projection_collect_argument_group(SyntaxNode* group, str callee, CfgSet* cfg, Vec<LaunchArgument>* arguments) {
+void projection_collect_argument_group(SyntaxNode* group, SyntaxNode* callee, CfgSet* cfg,
+                                       Vec<LaunchArgument>* arguments) {
     i64 first = arguments.len();
     SyntaxNode* child = group.first_child;
     while (child != (SyntaxNode*)0) {
@@ -413,7 +422,8 @@ void projection_collect_argument_group(SyntaxNode* group, str callee, CfgSet* cf
     i64 index = 0;
     while (index < count) {
         LaunchArgument* argument = arguments.get_ptr(first + index);
-        argument.callee = callee;
+        argument.callee = callee.text;
+        argument.callee_span = callee.span;
         argument.index = index;
         argument.count = count;
         index += 1;
@@ -459,7 +469,7 @@ void projection_walk_launches(SyntaxNode* node, CfgSet* cfg, Vec<SyntaxNode*>* l
         if (callee != (SyntaxNode*)0 && callee.kind == NodeKind.Token
             && callee.token_kind == TokenKind.Identifier
             && group != (SyntaxNode*)0 && group.kind == NodeKind.Parenthesized) {
-            projection_collect_argument_group(group, callee.text, cfg, arguments);
+            projection_collect_argument_group(group, callee, cfg, arguments);
         }
     }
     SyntaxNode* child = node.first_child;
