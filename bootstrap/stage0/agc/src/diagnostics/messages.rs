@@ -276,7 +276,18 @@ pub fn task_collection_misused(holder: &str, name: &str) -> String {
 pub fn task_collection_mutable_borrow(name: &str) -> String {
     format!(
         "a launch pushed into a collection can only borrow with `&`: its tasks may run \
-         at once, so `&mut {name}` would be shared"
+         at once, so `&mut {name}` would be shared{}",
+        thread_share_help(name)
+    )
+}
+
+/// Appended to a borrow conflict with a launched task: the two ways to let
+/// several threads change `name`, for the user to choose between.
+pub fn thread_share_help(name: &str) -> String {
+    format!(
+        " (help: to change `{name}` from several threads, make it a `Mutex<T>` and lock \
+         around each change, or use an atomic such as `AtomicI64` for a counter; then pass \
+         `&{name}` to each task)"
     )
 }
 

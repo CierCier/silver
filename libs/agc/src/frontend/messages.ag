@@ -398,10 +398,22 @@ String task_collection_misused(str holder, str name) {
 }
 
 /// Diagnostic text: "a launch pushed into a collection can only borrow
-/// with `&`: its tasks may run at once, so `&mut {}` would be shared".
-/// Returns an owned string.
+/// with `&`: its tasks may run at once, so `&mut {}` would be shared",
+/// followed by `thread_share_help`. Returns an owned string.
 String task_collection_mutable_borrow(str name) {
-    return @format("a launch pushed into a collection can only borrow with `&`: its tasks may run at once, so `&mut {}` would be shared", name);
+    String message = @format("a launch pushed into a collection can only borrow with `&`: its tasks may run at once, so `&mut {}` would be shared", name);
+    String help = thread_share_help(name);
+    message.push_str(help.to_str());
+    help.drop();
+    return move message;
+}
+
+/// Help appended to a borrow conflict with a launched task: " (help: to
+/// change `{}` from several threads, make it a `Mutex<T>` ...)", naming the
+/// two ways to share the place so the user can choose. Returns an owned
+/// string.
+String thread_share_help(str name) {
+    return @format(" (help: to change `{}` from several threads, make it a `Mutex<T>` and lock around each change, or use an atomic such as `AtomicI64` for a counter; then pass `&{}` to each task)", name, name);
 }
 
 /// Diagnostic text: "a launch that borrows '{}' can only be pushed into a

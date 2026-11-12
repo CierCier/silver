@@ -1179,7 +1179,9 @@ The compiler joins a borrowing task before its borrows end:
   loan on `x`. The launcher cannot assign, move or `drop()` `x`, and a
   `&mut x` excludes every other use of `x`, including a second launch. A
   `wait t;` statement in the task's own block ends the loans; a `wait`
-  inside a condition does not.
+  inside a condition does not. When a task's loan blocks a change, the error suggests
+  the two ways to let several threads change the place, a `Mutex<T>` or an
+  atomic such as `AtomicI64` passed as `&x`, and leaves the choice to you.
 - A reference parameter can be forwarded: `launch f(r)` with a `&T` or
   `&mut T` variable `r` keeps `r`'s loans until the join.
 - A borrowing launch can also be pushed into a local collection, for a

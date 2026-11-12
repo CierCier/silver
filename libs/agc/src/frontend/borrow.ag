@@ -121,13 +121,23 @@ impl BorrowAnalyzer {
         return -1;
     }
 
+    /// Appends the two ways to share a place between threads, for the user
+    /// to choose from, when `loan` belongs to a launched task.
+    void add_thread_help(BorrowAnalyzer* self, String* message, Loan* loan) {
+        if (!loan.task) { return; }
+        String help = thread_share_help(self.names.get(loan.name_id));
+        message.push_str(help.to_str());
+        help.drop();
+    }
+
     /// Reports a shared/mutable borrow conflict with a note at the earlier loan.
-    void conflict(BorrowAnalyzer* self, str name, Span span, Span previous_span, bool incoming_mutable) {
+    void conflict(BorrowAnalyzer* self, str name, Span span, Loan* previous, bool incoming_mutable) {
         String message = incoming_mutable
             ? cannot_borrow_as_mutable_while_shared(name)
             : cannot_borrow_as_shared_while_mutable(name);
+        self.add_thread_help(&message, previous);
         String note = String.from_str(incoming_mutable ? note_previous_borrow_here("shared") : note_previous_borrow_here("mutable"));
-        self.diagnostics.error_with_note(span, move message, previous_span, move note);
+        self.diagnostics.error_with_note(span, move message, previous.span, move note);
         self.failed = true;
     }
 
@@ -140,11 +150,12 @@ impl BorrowAnalyzer {
             bool new_mutable = kind == LoanKind.Mutable;
             if (old_mutable && new_mutable) {
                 String message = cannot_borrow_as_mutable_more_than_once(name);
+                self.add_thread_help(&message, loan);
                 String note = note_previous_borrow_here("mutable");
                 self.diagnostics.error_with_note(span, move message, loan.span, move note);
                 self.failed = true;
             } else if (old_mutable != new_mutable) {
-                self.conflict(name, span, loan.span, new_mutable);
+                self.conflict(name, span, loan, new_mutable);
             }
         }
         Loan loan;
@@ -183,6 +194,7 @@ impl BorrowAnalyzer {
             Loan* loan = self.loans.get_ptr(i);
             if (loan.active && places_overlap(&loan.place, target, &self.projections)) {
                 String message = cannot_assign_borrowed(name);
+                self.add_thread_help(&message, loan);
                 String note = note_previous_borrow_here(loan.kind == LoanKind.Mutable ? "mutable" : "shared");
                 self.diagnostics.error_with_note(span, move message, loan.span, move note);
                 self.failed = true;
@@ -2454,7 +2466,7 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
                                         loan.kind == LoanKind.Mutable ? "mutable" : "shared"));
                                 analyzer.failed = true;
                             } else {
-                                analyzer.conflict(node.text, node.span, loan.span, false);
+                                analyzer.conflict(node.text, node.span, loan, false);
                             }
                         }
                     }

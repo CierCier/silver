@@ -198,6 +198,8 @@ struct BorrowChecker<'a> {
     block_direct_waits: Vec<FxHashMap<String, Vec<usize>>>,
     /// Task locals of the current function whose launch borrowed arguments.
     task_holders: FxHashSet<String>,
+    /// Spans of loans held by launched tasks, with the place each borrows.
+    task_loan_places: FxHashMap<(u32, usize, usize), String>,
     /// Maps struct name -> set of field names that are reference types (`&T` / `&'a T`).
     struct_ref_fields: FxHashMap<String, FxHashSet<String>>,
     struct_field_types: FxHashMap<String, FxHashMap<String, String>>,
@@ -273,6 +275,7 @@ impl<'a> BorrowChecker<'a> {
             statement_indices: Vec::new(),
             block_direct_waits: Vec::new(),
             task_holders: FxHashSet::default(),
+            task_loan_places: FxHashMap::default(),
             struct_ref_fields: FxHashMap::default(),
             struct_field_types: FxHashMap::default(),
             global_var_types: FxHashMap::default(),
@@ -322,6 +325,43 @@ impl<'a> BorrowChecker<'a> {
             note_span,
             note_message,
         });
+    }
+
+    /// Reports a borrow conflict. When the earlier loan belongs to a launched
+    /// task, the message also names the two ways to share the place between
+    /// threads, so the user can pick one.
+    fn report_conflict(
+        &mut self,
+        mut message: String,
+        span: Span,
+        note_span: Option<Span>,
+        note_message: Option<String>,
+    ) {
+        if let Some(loan) = note_span
+            && let Some(place) = self.task_loan_places.get(&(loan.file, loan.start, loan.end))
+        {
+            message.push_str(&msg::thread_share_help(place));
+        }
+        self.error_with_note(message, span, note_span, note_message);
+    }
+
+    /// Remembers the loans `task` holds, for `report_conflict`.
+    fn record_task_loans(&mut self, task: &str) {
+        let held: Vec<_> = self
+            .scopes
+            .iter()
+            .flatten()
+            .filter(|loan| loan.borrower.as_deref() == Some(task))
+            .map(|loan| {
+                let place = if loan.path.is_empty() {
+                    loan.root.clone()
+                } else {
+                    format!("{}.{}", loan.root, loan.path)
+                };
+                ((loan.span.file, loan.span.start, loan.span.end), place)
+            })
+            .collect();
+        self.task_loan_places.extend(held);
     }
 
     fn push_scope(&mut self) {
@@ -698,6 +738,7 @@ impl<'a> BorrowChecker<'a> {
         self.ref_bindings.clear();
         self.raw_ptr_vars.clear();
         self.task_holders.clear();
+        self.task_loan_places.clear();
 
         for param in parameters {
             if let Some(scope) = self.local_scopes.last_mut() {
@@ -1410,7 +1451,7 @@ impl<'a> BorrowChecker<'a> {
                         }
                         (BorrowKind::Shared, BorrowKind::Shared) => unreachable!(),
                     };
-                    self.error_with_note(
+                    self.report_conflict(
                         msg,
                         span,
                         Some(conflict.span),
@@ -1472,7 +1513,7 @@ impl<'a> BorrowChecker<'a> {
                     }
                     (BorrowKind::Shared, BorrowKind::Shared) => unreachable!(),
                 };
-                self.error_with_note(
+                self.report_conflict(
                     msg,
                     span,
                     Some(conflict.span),
@@ -1567,7 +1608,7 @@ impl<'a> BorrowChecker<'a> {
                                 msg::cannot_borrow_as_mutable_more_than_once(&target)
                             }
                         };
-                        self.error_with_note(
+                        self.report_conflict(
                             message,
                             argument.span,
                             Some(conflict.span),
@@ -1601,6 +1642,7 @@ impl<'a> BorrowChecker<'a> {
                 loan.last_use = joined_at;
             }
         }
+        self.record_task_loans(task);
     }
 
     /// Loans held by local collection `holder` for every launch later pushed
@@ -1685,6 +1727,7 @@ impl<'a> BorrowChecker<'a> {
                 loan.last_use = None;
             }
         }
+        self.record_task_loans(holder);
     }
 
     fn register_call_result_borrow(
@@ -2068,7 +2111,7 @@ impl<'a> BorrowChecker<'a> {
                 format!("{root}.{path}")
             };
             if let Some(borrow) = self.find_any_borrow(&root, &path, ref_var.as_deref()) {
-                self.error_with_note(
+                self.report_conflict(
                     msg::cannot_assign_to_borrowed(&full_target),
                     target.span,
                     Some(borrow.span),
@@ -2181,7 +2224,7 @@ impl<'a> BorrowChecker<'a> {
                 }
                 (BorrowKind::Shared, BorrowKind::Shared) => unreachable!(),
             };
-            self.error_with_note(
+            self.report_conflict(
                 message,
                 receiver.span,
                 Some(conflict.span),
@@ -2343,7 +2386,7 @@ impl<'a> BorrowChecker<'a> {
                             }
                             (BorrowKind::Shared, BorrowKind::Shared) => unreachable!(),
                         };
-                        self.error_with_note(
+                        self.report_conflict(
                             msg,
                             expr.span,
                             Some(conflict.span),
@@ -2377,7 +2420,7 @@ impl<'a> BorrowChecker<'a> {
                 if !self.ref_bindings.contains_key(&ident.name)
                     && let Some(borrow) = self.find_mutable_borrow(&ident.name, "", None)
                 {
-                    self.error_with_note(
+                    self.report_conflict(
                         msg::cannot_use_mutably_borrowed(&ident.name),
                         ident.span,
                         Some(borrow.span),
