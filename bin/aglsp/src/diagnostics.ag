@@ -248,13 +248,24 @@ void check_dirty_files(DocumentStore* store, ClientOptions* client, Vec<Document
         queued.push(doc); keys.push(move key);
     }
     if (queued.len() == 0 || request_interrupted(pending)) { return; }
-    pool.start();
-    while (pool.completed() < queued.len()) {
-        if (request_interrupted(pending)) { pool.stop(); break; }
-        report_check_progress(status, clean + pool.completed(), docs.len());
-        sleep_ms(CHECK_POLL_MS);
+    {
+        // Workers borrow the pool; leaving this block joins them.
+        Task<void> first = launch check_worker(&pool);
+        if (!first.started()) {
+            // No thread could start: the dispatcher runs every job itself.
+            check_worker(&pool);
+        }
+        Vec<Task<void>> more = Vec<Task<void>>.new();
+        i64 extra = check_worker_count(queued.len()) - 1;
+        for (i64 w = 0; w < extra && first.started(); w += 1) {
+            more.push(launch check_worker(&pool));
+        }
+        while (pool.completed() < queued.len()) {
+            if (request_interrupted(pending)) { pool.stop(); break; }
+            report_check_progress(status, clean + pool.completed(), docs.len());
+            sleep_ms(CHECK_POLL_MS);
+        }
     }
-    pool.join();
     i = 0;
     while (i < queued.len()) {
         if (pool.finished(i)) {
