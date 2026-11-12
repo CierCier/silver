@@ -1282,9 +1282,13 @@ The compiler rejects the mistakes it can see:
   declare it `shared i64` to lock it ``.
 - Locking the same place again inside its own lock block, which would
   deadlock, and declaring another `x` inside `lock x`.
-- Moving the value, or an owned field of it, out of the block:
+- Moving the value, or an owned field or element of it, out of the block:
   `` cannot move 'seen' out of its lock block: the shared value still owns
   it; clone it instead ``.
+- Moving, dropping, or overwriting the place the block locks while the block
+  runs, such as `state` in `lock state.get() as count { ... }`: the lock
+  points into it. `` cannot drop 'state' inside a lock block on it: the lock
+  guard points into it ``.
 - A place that is not a plain name without `as name`.
 
 Two rules are not checked. A reference to the value taken inside the block

@@ -321,8 +321,13 @@ fn significant_text(tokens: &[LexToken]) -> Vec<&str> {
         .collect()
 }
 
+/// True when `local` is a generated `__lock_N__name_guard`.
+pub fn is_lock_guard(local: &str) -> bool {
+    locked_name(local).is_some_and(|name| name.ends_with("_guard"))
+}
+
 /// The user's name inside a generated `__lock_N__name` local, or None for
-/// any other name (including the guard, `__lock_N_guard`).
+/// any other name. The guard, `__lock_N__name_guard`, yields `name_guard`.
 pub fn locked_name(local: &str) -> Option<&str> {
     let rest = local.strip_prefix("__lock_")?;
     let digits = rest.find(|c: char| !c.is_ascii_digit())?;

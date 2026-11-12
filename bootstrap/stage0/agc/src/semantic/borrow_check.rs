@@ -198,6 +198,9 @@ struct BorrowChecker<'a> {
     block_direct_waits: Vec<FxHashMap<String, Vec<usize>>>,
     /// Task locals of the current function whose launch borrowed arguments.
     task_holders: FxHashSet<String>,
+    /// `lock` block guards of the current function holding a loan on the
+    /// place they lock.
+    lock_guards: FxHashSet<String>,
     /// Spans of loans held by launched tasks, with the place each borrows.
     task_loan_places: FxHashMap<(u32, usize, usize), String>,
     /// Maps struct name -> set of field names that are reference types (`&T` / `&'a T`).
@@ -275,6 +278,7 @@ impl<'a> BorrowChecker<'a> {
             statement_indices: Vec::new(),
             block_direct_waits: Vec::new(),
             task_holders: FxHashSet::default(),
+            lock_guards: FxHashSet::default(),
             task_loan_places: FxHashMap::default(),
             struct_ref_fields: FxHashMap::default(),
             struct_field_types: FxHashMap::default(),
@@ -738,6 +742,7 @@ impl<'a> BorrowChecker<'a> {
         self.ref_bindings.clear();
         self.raw_ptr_vars.clear();
         self.task_holders.clear();
+        self.lock_guards.clear();
         self.task_loan_places.clear();
 
         for param in parameters {
@@ -1187,7 +1192,10 @@ impl<'a> BorrowChecker<'a> {
                         }
 
                         // Check if initializer is a borrow expression:
-                        if let ast::ExpressionKind::Launch(call) = init.kind.as_ref()
+                        if let Some(place) = lock_guard_place(name, init) {
+                            self.check_expr(init);
+                            self.register_lock_guard_borrow(name, place, init.span);
+                        } else if let ast::ExpressionKind::Launch(call) = init.kind.as_ref()
                             && let ast::ExpressionKind::Call { arguments, .. } =
                                 call.kind.as_ref()
                         {
@@ -1643,6 +1651,24 @@ impl<'a> BorrowChecker<'a> {
             }
         }
         self.record_task_loans(task);
+    }
+
+    /// The loan a `lock` block's guard holds on the place it locks, to the end
+    /// of the generated block: the guard points into that place, so the body
+    /// cannot move, drop, or overwrite it.
+    fn register_lock_guard_borrow(&mut self, guard: &str, place: &ast::Expression, span: Span) {
+        self.register_named_borrow(guard, place, BorrowKind::Shared, span);
+        // The guard is a handle, not a reference to the place.
+        self.ref_bindings.remove(guard);
+        self.lock_guards.insert(guard.to_string());
+        if let Some(scope) = self.scopes.last_mut() {
+            for loan in scope
+                .iter_mut()
+                .filter(|loan| loan.borrower.as_deref() == Some(guard))
+            {
+                loan.last_use = None;
+            }
+        }
     }
 
     /// Loans held by local collection `holder` for every launch later pushed
@@ -2234,7 +2260,8 @@ impl<'a> BorrowChecker<'a> {
     }
 
     /// Rejects `place.drop()` while a launched task still borrows `place`:
-    /// the task would read freed memory on its own thread.
+    /// the task would read freed memory on its own thread. A `lock` block
+    /// on `place` holds it the same way.
     fn check_drop_of_task_borrow(&mut self, receiver: &ast::Expression) {
         let Some((root, path, _)) = self.extract_root_and_path(receiver) else {
             return;
@@ -2246,24 +2273,29 @@ impl<'a> BorrowChecker<'a> {
             .find(|loan| {
                 loan.root == root
                     && Self::paths_overlap(&loan.path, &path)
-                    && loan
-                        .borrower
-                        .as_ref()
-                        .is_some_and(|borrower| self.task_holders.contains(borrower))
+                    && loan.borrower.as_ref().is_some_and(|borrower| {
+                        self.task_holders.contains(borrower) || self.lock_guards.contains(borrower)
+                    })
             })
-            .map(|loan| loan.span);
-        if let Some(borrowed_at) = task_loan {
+            .map(|loan| {
+                let locked = loan
+                    .borrower
+                    .as_ref()
+                    .is_some_and(|borrower| self.lock_guards.contains(borrower));
+                (loan.span, locked)
+            });
+        if let Some((borrowed_at, locked)) = task_loan {
             let target = if path.is_empty() {
                 root
             } else {
                 format!("{root}.{path}")
             };
-            self.error_with_note(
-                msg::cannot_drop_task_borrowed(&target),
-                receiver.span,
-                Some(borrowed_at),
-                Some(msg::note_task_borrow_here().to_string()),
-            );
+            let (message, note) = if locked {
+                (msg::cannot_drop_locked_owner(&target), msg::note_locked_here())
+            } else {
+                (msg::cannot_drop_task_borrowed(&target), msg::note_task_borrow_here())
+            };
+            self.error_with_note(message, receiver.span, Some(borrowed_at), Some(note.to_string()));
         }
     }
 
@@ -3145,6 +3177,36 @@ mod tests {
     }
 
     #[test]
+    fn a_lock_block_keeps_the_place_it_locks_borrowed() {
+        // sync_sugar's lowering of `lock owner.get() as n { ... }`.
+        let program = |body: &str| {
+            format!(
+                "trait Drop {{ void drop(*self); }}\n\
+                 struct Mutex {{ i64 value; }}\nstruct Owner {{ Mutex inner; }}\n\
+                 impl Mutex {{ i64 lock(&self) {{ return self.value; }} }}\n\
+                 impl Owner {{ &Mutex get(&self) {{ return &self.inner; }} }}\n\
+                 impl Drop for Owner {{ void drop(*self) {{ }} }}\n\
+                 i64 main() {{ Owner owner; owner.inner.value = 1;\n\
+                 {{ let __lock_0__n_guard = owner.get().lock(); {body} }}\n\
+                 owner.drop(); return 0; }}"
+            )
+        };
+        let (_, borrow) = integrated_safety_errors(&program("owner.drop();"), 30);
+        assert!(
+            borrow.iter().any(|error| error.message
+                == crate::diagnostics::messages::cannot_drop_locked_owner("owner")),
+            "{borrow:?}"
+        );
+        let (_, borrow) = integrated_safety_errors(&program("Owner moved = move owner;"), 31);
+        assert!(
+            borrow.iter().any(|error| error.message.starts_with("cannot move out of 'owner'")),
+            "{borrow:?}"
+        );
+        let (_, borrow) = integrated_safety_errors(&program("i64 v = owner.inner.value;"), 32);
+        assert!(borrow.is_empty(), "{borrow:?}");
+    }
+
+    #[test]
     fn an_in_place_wait_launch_checks_its_borrows() {
         let callees = "i64 read(&i64 value) { return *value; }\n\
                        void bump(&mut i64 value) { *value += 1; }\n";
@@ -3165,4 +3227,29 @@ mod tests {
         );
         assert!(borrow.is_empty(), "{borrow:?}");
     }
+}
+
+/// The place a `lock` block's guard locks, when `init` initializes guard
+/// `name`: sync_sugar lowers `lock state.get() as n` to
+/// `let __lock_N__n_guard = state.get().lock();`, which locks `state`. None
+/// for a temporary such as `lock create()`, which no local owns.
+fn lock_guard_place<'a>(name: &str, init: &'a ast::Expression) -> Option<&'a ast::Expression> {
+    if !crate::sync_sugar::is_lock_guard(name) {
+        return None;
+    }
+    let ast::ExpressionKind::MethodCall { receiver, method, .. } = init.kind.as_ref() else {
+        return None;
+    };
+    if method.name != "lock" {
+        return None;
+    }
+    let mut place = receiver;
+    while let ast::ExpressionKind::MethodCall { receiver, .. } = place.kind.as_ref() {
+        place = receiver;
+    }
+    let mut root = place;
+    while let ast::ExpressionKind::FieldAccess { object, .. } = root.kind.as_ref() {
+        root = object;
+    }
+    matches!(root.kind.as_ref(), ast::ExpressionKind::Identifier(_)).then_some(place)
 }

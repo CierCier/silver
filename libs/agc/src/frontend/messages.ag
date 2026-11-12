@@ -461,6 +461,17 @@ String cannot_drop_task_borrowed(str name) {
     return @format("cannot drop '{}' because it is borrowed by a launched task", name);
 }
 
+/// Diagnostic text: "cannot drop '{}' inside a lock block on it: the lock
+/// guard points into it". Returns an owned string.
+String cannot_drop_locked_owner(str name) {
+    return @format("cannot drop '{}' inside a lock block on it: the lock guard points into it", name);
+}
+
+/// Diagnostic text: "locked here". Returns an owned string.
+String note_locked_here() {
+    return String.from_str("locked here");
+}
+
 /// Diagnostic text: "task launched here". Returns an owned string.
 String note_task_launched_here() {
     return String.from_str("task launched here");

@@ -479,6 +479,26 @@ i64 sugar_locked_name_start(str local) {
     return i + 2;
 }
 
+/// True when `local` is a generated `__lock_N_guard`.
+bool sugar_is_lock_guard(str local) {
+    str prefix = "__lock_";
+    i64 i = 0;
+    while (prefix[i] != (u8)0) {
+        if (local[i] != prefix[i]) { return false; }
+        i += 1;
+    }
+    i64 digits = i;
+    while (local[i] >= (u8)'0' && local[i] <= (u8)'9') { i += 1; }
+    if (i == digits) { return false; }
+    str suffix = "_guard";
+    i64 j = 0;
+    while (suffix[j] != (u8)0) {
+        if (local[i + j] != suffix[j]) { return false; }
+        j += 1;
+    }
+    return local[i + j] == (u8)0;
+}
+
 /// True when `stream` names `shared` or `lock` at all, so files without the
 /// sugar skip the rewrite.
 bool sugar_mentioned(TokenStream* stream) {

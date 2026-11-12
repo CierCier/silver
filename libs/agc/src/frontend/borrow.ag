@@ -10,6 +10,7 @@ import frontend.cfg;
 import frontend.place;
 import frontend.messages;
 import frontend.scoped_launch;
+import frontend.sync_sugar;
 import frontend.symbols;
 import frontend.expressions;
 import frontend.bindings;
@@ -42,6 +43,12 @@ bool borrow_return_is_nested(SyntaxNode* return_node, SyntaxNode* function,
     return false;
 }
 
+/// The note at a loan's origin: the lock block that holds it, or the borrow.
+String borrow_loan_note(Loan* loan) {
+    if (loan.lock_guard) { return note_locked_here(); }
+    return note_previous_borrow_here(loan.kind == LoanKind.Mutable ? "mutable" : "shared");
+}
+
 /// Whether a loan is a shared (`&`) or mutable (`&mut`) borrow.
 enum LoanKind {
     Shared;
@@ -50,7 +57,9 @@ enum LoanKind {
 
 /// One active borrow of a place. A persistent loan lives until its holder's
 /// last use (`release_index`); others end with the statement. A task loan is
-/// held by a scoped launch until its task is joined.
+/// held by a scoped launch until its task is joined. A lock-guard loan is a
+/// task loan held by a `lock` block's guard on the place it locks, until the
+/// block ends: the guard points into that place.
 struct Loan {
     u32 name_id;
     Place place;
@@ -63,6 +72,7 @@ struct Loan {
     SyntaxNode* owner_scope;
     bool active;
     bool task;
+    bool lock_guard;
 }
 
 /// A function whose return value may borrow parameter `parameter_index`.
@@ -124,7 +134,7 @@ impl BorrowAnalyzer {
     /// Appends the two ways to share a place between threads, for the user
     /// to choose from, when `loan` belongs to a launched task.
     void add_thread_help(BorrowAnalyzer* self, String* message, Loan* loan) {
-        if (!loan.task) { return; }
+        if (!loan.task || loan.lock_guard) { return; }
         String help = thread_share_help(self.names.get(loan.name_id));
         message.push_str(help.to_str());
         help.drop();
@@ -170,6 +180,7 @@ impl BorrowAnalyzer {
         loan.owner_scope = (SyntaxNode*)0;
         loan.active = true;
         loan.task = false;
+        loan.lock_guard = false;
         self.loans.push(move loan);
     }
 
@@ -195,8 +206,7 @@ impl BorrowAnalyzer {
             if (loan.active && places_overlap(&loan.place, target, &self.projections)) {
                 String message = cannot_assign_borrowed(name);
                 self.add_thread_help(&message, loan);
-                String note = note_previous_borrow_here(loan.kind == LoanKind.Mutable ? "mutable" : "shared");
-                self.diagnostics.error_with_note(span, move message, loan.span, move note);
+                self.diagnostics.error_with_note(span, move message, loan.span, borrow_loan_note(loan));
                 self.failed = true;
                 return;
             }
@@ -2293,6 +2303,39 @@ i64 borrow_field_path_end(Vec<SyntaxNode*>* leaves, i64 i) {
     return end;
 }
 
+/// Adds the loan a `lock` block's guard holds on the place it locks, when
+/// leaf `i` declares the guard: sync_sugar lowers `lock state.get() as n`
+/// to `let __lock_N_guard = state.get().lock();`. The loan runs to the
+/// end of the generated block, so the body cannot move, drop, or overwrite
+/// `state` while the guard points into it. Returns true when it added one.
+bool borrow_add_lock_guard_loan(BorrowAnalyzer* analyzer, Vec<SyntaxNode*>* leaves, i64 i) {
+    SyntaxNode* guard = leaves.get(i);
+    if (i == 0 || i + 2 >= leaves.len() || leaves.get(i - 1).token_kind != TokenKind.Let
+        || leaves.get(i + 1).token_kind != TokenKind.Assign
+        || !sugar_is_lock_guard(guard.text)) {
+        return false;
+    }
+    SyntaxNode* first = leaves.get(i + 2);
+    // `lock create()` locks a temporary that no local owns.
+    if (first.token_kind != TokenKind.Identifier || borrow_is_method_name(first)) { return false; }
+    i64 end = borrow_field_path_end(leaves, i + 2);
+    SyntaxNode* block = guard.parent;
+    while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) { block = block.parent; }
+    if (block == (SyntaxNode*)0) { return false; }
+    i64 release = i;
+    i64 k = i;
+    while (k < leaves.len() && borrow_node_within(leaves.get(k), block)) {
+        release = k;
+        k += 1;
+    }
+    analyzer.add(borrow_place(analyzer, leaves, i + 2, end), first.text, first.span,
+        LoanKind.Shared, true, analyzer.names.intern(guard.text), release);
+    Loan* loan = analyzer.loans.get_ptr(analyzer.loans.len() - 1);
+    loan.task = true;
+    loan.lock_guard = true;
+    return true;
+}
+
 /// Reports a use that would move or drop a place while a launched task still
 /// borrows it or part of it: the place, or a field path into it, as a
 /// by-value call argument, a returned value, or the receiver of `.drop()`.
@@ -2305,6 +2348,7 @@ void borrow_check_task_loan_use(BorrowAnalyzer* analyzer, SyntaxTree* tree,
     i64 loaned = analyzer.find_task_loan(&place);
     if (loaned < 0) { return; }
     Span borrowed_at = analyzer.loans.get_ptr(loaned).span;
+    bool locked = analyzer.loans.get_ptr(loaned).lock_guard;
     String path = String.new();
     i64 k = i;
     while (k < end) {
@@ -2314,8 +2358,9 @@ void borrow_check_task_loan_use(BorrowAnalyzer* analyzer, SyntaxTree* tree,
     if (end + 1 < leaves.len() && leaves.get(end).token_kind == TokenKind.Dot
         && borrow_text_equals(leaves.get(end + 1).text, "drop")
         && borrow_is_method_name(leaves.get(end + 1))) {
-        analyzer.diagnostics.error_with_note(node.span, cannot_drop_task_borrowed(path.to_str()),
-            borrowed_at, note_task_borrow_here());
+        analyzer.diagnostics.error_with_note(node.span,
+            locked ? cannot_drop_locked_owner(path.to_str()) : cannot_drop_task_borrowed(path.to_str()),
+            borrowed_at, locked ? note_locked_here() : note_task_borrow_here());
         analyzer.failed = true;
         return;
     }
@@ -2338,7 +2383,7 @@ void borrow_check_task_loan_use(BorrowAnalyzer* analyzer, SyntaxTree* tree,
         return;
     }
     analyzer.diagnostics.error_with_note(node.span, cannot_move_borrowed(path.to_str()),
-        borrowed_at, note_task_borrow_here());
+        borrowed_at, locked ? note_locked_here() : note_task_borrow_here());
     analyzer.failed = true;
 }
 
@@ -2362,9 +2407,13 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
     collect_borrow_release_points(body, &leaves, &release_points);
     ScopedLaunches launches = ScopedLaunches.new();
     collect_scoped_launches(tree.root, symbols, &leaves, &bindings, &launches);
+    bool lock_guards = false;
     i64 i = 0;
     while (i < leaves.len()) {
         SyntaxNode* node = leaves.get(i);
+        if (node.token_kind == TokenKind.Identifier && borrow_add_lock_guard_loan(analyzer, &leaves, i)) {
+            lock_guards = true;
+        }
         i64 collection_site = 0;
         while (collection_site < launches.sites.len()) {
             if (launches.sites.get_ptr(collection_site).collection == node) {
@@ -2403,7 +2452,7 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
                     true, task_holder, task_release);
                 borrow_mark_task_loan(analyzer, &bindings, site);
             }
-        } else if (launches.sites.len() > 0 && node.token_kind == TokenKind.Identifier
+        } else if ((launches.sites.len() > 0 || lock_guards) && node.token_kind == TokenKind.Identifier
             && !(i > 0 && leaves.get(i - 1).token_kind == TokenKind.Dot)) {
             borrow_check_task_loan_use(analyzer, tree, symbols, &leaves, &bindings,
                 &binding_types, i);
@@ -2489,8 +2538,7 @@ void scan_borrows(BorrowAnalyzer* analyzer, SyntaxTree* tree, SymbolTable* symbo
                             Loan* loan = analyzer.loans.get_ptr(conflict);
                             if (consuming) {
                                 analyzer.diagnostics.error_with_note(node.span, cannot_move_borrowed(node.text),
-                                    loan.span, note_previous_borrow_here(
-                                        loan.kind == LoanKind.Mutable ? "mutable" : "shared"));
+                                    loan.span, borrow_loan_note(loan));
                                 analyzer.failed = true;
                             } else {
                                 analyzer.conflict(node.text, node.span, loan, false);

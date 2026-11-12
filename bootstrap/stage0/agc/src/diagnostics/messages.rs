@@ -333,6 +333,14 @@ pub fn cannot_drop_task_borrowed(name: &str) -> String {
     format!("cannot drop '{name}' because it is borrowed by a launched task")
 }
 
+pub fn cannot_drop_locked_owner(name: &str) -> String {
+    format!("cannot drop '{name}' inside a lock block on it: the lock guard points into it")
+}
+
+pub fn note_locked_here() -> &'static str {
+    "locked here"
+}
+
 pub fn note_task_borrow_here() -> &'static str {
     "borrowed by a task launched here"
 }

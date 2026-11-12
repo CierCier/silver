@@ -675,6 +675,10 @@ class NativeLsp(unittest.TestCase):
         indexed = ("import std.sync;\nimport std.mem.vec; import std.string;\n"
                    "struct Pool { shared Vec<String> items; }\nvoid drain(&Pool pool) {\n"
                    " lock pool.items as items { String first = move items[0]; }\n}\n")
+        # The guard of `lock state.get()` points into `state` until the block ends.
+        owner = ("import std.sync;\nimport std.mem.arc;\ni64 main() {\n"
+                 " Arc<Mutex<i64>> state = Arc<Mutex<i64>>.new(Mutex<i64>.new(1));\n"
+                 " lock state.get() as count { state.drop(); count = 2; }\n return 0;\n}\n")
         # A generic body that uses its `T` directly is wrong for a shared `T`.
         generic = ("import std.sync;\n\n\nT twice<T>(T a) {\n return a + a;\n}\n"
                    "i64 main() {\n shared i64 total = 1;\n Mutex<i64> other = twice(move total);\n return 0;\n}\n")
@@ -691,6 +695,7 @@ class NativeLsp(unittest.TestCase):
                 (generic, "`a` is shared between threads: read or change it inside `lock a { ... }`"),
                 (indexed, "cannot move 'items[...]' out of its lock block: the shared value still owns it; "
                           "clone it instead"),
+                (owner, "cannot drop 'state' inside a lock block on it: the lock guard points into it\nlocked here"),
                 (field, "cannot move 'h.items' because it is borrowed\nborrowed by a task launched here"),
                 (returned, "cannot move 'h.items' because it is borrowed\nborrowed by a task launched here"),
                 (dropped, "cannot drop 'h.items' because it is borrowed by a launched task\n"
