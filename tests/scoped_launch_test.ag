@@ -182,6 +182,13 @@ i64 main() {
         }
     }
     if (pooled != 180) { return 11; }
+    // The same pool declared with `let`: its inferred type joins too.
+    {
+        let pool = Vec<Task<i64>>.new();
+        pool.push(launch sum(&values));
+        pooled += wait pool.pop();
+    }
+    if (pooled != 225) { return 15; }
     AtomicI64 counter = AtomicI64.new(0);
     {
         Vec<Task<void>> workers = Vec<Task<void>>.new();

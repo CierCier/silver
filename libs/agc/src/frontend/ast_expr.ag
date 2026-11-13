@@ -36,7 +36,7 @@ enum ExprKind {
     Assert;        // inner0 = condition, inner1 = message, aux = enabled (debug cfg)
     SourceLocation; // aux = line/column/file selector
     StructLit;     // inner0 = struct name id, inner1 = fields_start, aux = field count (pool.args: name,expr pairs)
-    Launch;        // inner0 = direct Call expression
+    Launch;        // inner0 = direct Call expression, aux = 1 inside a macro expansion
     Wait;          // inner0 = Task expression
 }
 
@@ -377,12 +377,12 @@ impl AstPool {
     }
 
     /// Appends a `launch` expression and returns its id.
-    u32 add_launch(AstPool* self, u32 call_id, Span span) {
+    u32 add_launch(AstPool* self, u32 call_id, bool expanded, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.Launch;
         expr.inner0 = call_id;
         expr.inner1 = 0;
-        expr.aux = 0;
+        expr.aux = expanded ? 1 : 0;
         expr.span = span;
         expr.inferred_type = TYPE_UNKNOWN;
         expr.generic_args_start = 0;

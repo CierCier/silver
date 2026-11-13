@@ -2336,9 +2336,19 @@ bool borrow_add_lock_guard_loan(BorrowAnalyzer* analyzer, Vec<SyntaxNode*>* leav
     return true;
 }
 
-/// Reports a use that would move or drop a place while a launched task still
-/// borrows it or part of it: the place, or a field path into it, as a
-/// by-value call argument, a returned value, or the receiver of `.drop()`.
+/// Returns true when the leaf at `index` is `=` or a compound assignment.
+bool borrow_is_assignment_operator(Vec<SyntaxNode*>* leaves, i64 index) {
+    if (index >= leaves.len()) { return false; }
+    str text = leaves.get(index).text;
+    return borrow_text_equals(text, "=") || borrow_text_equals(text, "+=")
+        || borrow_text_equals(text, "-=") || borrow_text_equals(text, "*=")
+        || borrow_text_equals(text, "/=") || borrow_text_equals(text, "%=");
+}
+
+/// Reports a use that would move, drop, or overwrite a place while a launched
+/// task still borrows it or part of it: the place, or a field path into it,
+/// as a by-value call argument, a returned value, the receiver of `.drop()`,
+/// or the target of a field assignment.
 void borrow_check_task_loan_use(BorrowAnalyzer* analyzer, SyntaxTree* tree,
                                 SymbolTable* symbols, Vec<SyntaxNode*>* leaves,
                                 Vec<Binding>* bindings, Vec<u32>* binding_types, i64 i) {
@@ -2354,6 +2364,11 @@ void borrow_check_task_loan_use(BorrowAnalyzer* analyzer, SyntaxTree* tree,
     while (k < end) {
         path.push_str(leaves.get(k).text);
         k += 1;
+    }
+    // Assigning the whole local is checked where the scan sees `name =`.
+    if (end > i + 1 && borrow_is_assignment_operator(leaves, end)) {
+        analyzer.assign_place(&place, path.to_str(), node.span);
+        return;
     }
     if (end + 1 < leaves.len() && leaves.get(end).token_kind == TokenKind.Dot
         && borrow_text_equals(leaves.get(end + 1).text, "drop")

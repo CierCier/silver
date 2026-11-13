@@ -757,6 +757,30 @@ class NativeLsp(unittest.TestCase):
             ("launch passes `x` to a reference parameter without `&`: declare it `shared`, "
              "or move it into the task through a by-value parameter", 4),
             ("a borrowed launch argument must be `&place`, `&mut place`, or a reference variable", 5)])
+        # Each source and the (message, line) errors it must report, exactly.
+        for version, (source, expected) in enumerate([
+                # A worker pool declared with `let` is a Vec<Task<T>> too.
+                ("import std.mem.vec;\ni64 read(&i64 v) { return *v; }\ni64 main() {\n i64 value = 3;\n"
+                 " let pool = Vec<Task<i64>>.new();\n pool.push(launch read(&value));\n return 0;\n}\n", []),
+                # Writing a field a task reads is a conflict.
+                ("struct Owner { i64 field; }\ni64 read(&i64 v) { return *v; }\ni64 main() {\n"
+                 " Owner owner; owner.field = 1; Task<i64> t = launch read(&owner.field);\n"
+                 " owner.field = 2;\n return wait t;\n}\n",
+                 [("cannot assign to 'owner.field' because it is borrowed", 4)]),
+                # A borrowed global's own type decides Send for a generic `&T`.
+                ("import std.mem.rc;\nRc<i64> counter = Rc<i64>.new(1);\nvoid peek<T>(&T _v) { }\ni64 main() {\n"
+                 " Task<void> t = launch peek(&counter);\n wait t;\n return 0;\n}\n",
+                 [("launch argument of type &Rc<i64> is not Send: Rc<T> carries a shared non-atomic reference count", 4)]),
+                # A generic body that locks its `T` needs a shared argument.
+                ("import std.sync;\nvoid touch<T>(&T value) { lock value { } }\ni64 main() {\n i64 plain = 1;\n"
+                 " touch(&plain);\n return 0;\n}\n",
+                 [("`value` is `i64`, not shared: declare it `shared i64` to lock it", 1)])], 24):
+            session.send("textDocument/didChange", {"textDocument": {"uri": alias_uri, "version": version},
+                "contentChanges": [{"text": source}]})
+            errors = [(item["message"].split("\n")[0].split(" (help:")[0], item["range"]["start"]["line"])
+                      for item in session.result("textDocument/diagnostic", alias_document)["items"]
+                      if item.get("severity", 1) == 1]
+            self.assertEqual(errors, expected, source)
         # Using a shared value outside a lock names the fix.
         session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
             "contentChanges": [{"text": text.replace(" i64 seen = 0;", " i64 seen = count + 1;")}]})

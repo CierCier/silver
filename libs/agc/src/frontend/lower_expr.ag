@@ -2391,7 +2391,7 @@ impl ExprLowerer {
                 self.unsupported = true;
                 return 0;
             }
-            return self.pool.add_launch(operand_id, node.span);
+            return self.pool.add_launch(operand_id, self.macro_depth > 0, node.span);
         }
 
         if (node.kind == NodeKind.Token && node.token_kind == TokenKind.Match) {

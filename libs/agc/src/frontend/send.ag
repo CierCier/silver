@@ -584,6 +584,35 @@ TypeProjection send_reference_pointee(Binding* binding, bool* slice) {
     return binding_declared_type(first, binding.type_end);
 }
 
+/// The declared type of global variable `name`, or an Unknown projection.
+/// A global's children are its type, its name, then `=` and the initializer.
+TypeProjection send_global_type(SyntaxNode* root, str name) {
+    SyntaxNode* item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Global) {
+            SyntaxNode* first = item.first_child;
+            while (first != (SyntaxNode*)0 && first.kind == NodeKind.Token
+                && strcmp(first.text, "private") == 0) {
+                first = first.next_sibling;
+            }
+            SyntaxNode* declared = (SyntaxNode*)0;
+            SyntaxNode* child = first;
+            while (child != (SyntaxNode*)0 && child.token_kind != TokenKind.Assign
+                && child.token_kind != TokenKind.Semicolon) {
+                if (child.kind == NodeKind.Token && child.token_kind == TokenKind.Identifier) {
+                    declared = child;
+                }
+                child = child.next_sibling;
+            }
+            if (declared != (SyntaxNode*)0 && strcmp(declared.text, name) == 0) {
+                return binding_declared_type(first, declared);
+            }
+        }
+        item = item.next_sibling;
+    }
+    return projection_type_empty();
+}
+
 /// Checks a `launch` argument bound to `&T`/`&mut T` parameter
 /// `argument.index` of `callee`: the borrowed pointee must be Send.
 void check_borrowed_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root,
@@ -596,9 +625,13 @@ void check_borrowed_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root,
     TypeProjection pointee = send_reference_pointee(parameter, &slice);
     // A generic callee names no concrete pointee, so judge the borrowed local:
     // its whole type for `&place`, its own pointee for a reference variable.
+    // A borrowed global is no local binding: judge its declared type.
     Binding* source = send_argument_binding(bindings, argument);
-    if (send_type_parameter_index(callee, pointee.name) >= 0 && source != (Binding*)0) {
-        if (source.declared_type.kind == ProjectionTypeKind.Reference) {
+    if (send_type_parameter_index(callee, pointee.name) >= 0) {
+        if (source == (Binding*)0) {
+            slice = false;
+            pointee = send_global_type(root, (*argument).name);
+        } else if (source.declared_type.kind == ProjectionTypeKind.Reference) {
             pointee = send_reference_pointee(source, &slice);
         } else {
             slice = false;

@@ -2234,11 +2234,14 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
     } else if (expr.kind == ExprKind.Launch) {
         u32 result_type = infer_expr(pool, types, symbols, root, env,
                                      expr.inner0, diagnostics, ok);
-        // The borrow and Send passes judge the launch by this overload.
+        // The borrow and Send passes judge the launch by this overload. They
+        // read the source tree, which has no expanded launches, and an
+        // expansion's spans are offsets into its own text, so they could
+        // collide with a source callee's key.
         AstExpr* call = pool.get_expr(expr.inner0);
         AstExpr* callee = pool.get_expr(call.inner0);
         if (call.kind == ExprKind.Call && call.resolved_callee_id != 0
-            && callee.kind == ExprKind.Var) {
+            && callee.kind == ExprKind.Var && expr.aux == 0) {
             SyntaxNode* selected = typecheck_overload_by_symbol(types, &symbols.names, root,
                 symbols.names.get(callee.aux), call.resolved_callee_id - 1);
             if (selected != (SyntaxNode*)0) { symbols.select_callee(callee.span, selected); }
@@ -3539,19 +3542,25 @@ bool typecheck_is_drop_ancestor_error(str message) {
     return true;
 }
 
-/// Returns true for a shared_value_outside_lock message: a generic body
-/// that uses its `T` directly is wrong once `T` is a `shared` Mutex.
-bool typecheck_is_shared_value_error(str message) {
-    str marker = "` is shared between threads: ";
+/// Returns true when `message` contains `marker`.
+bool typecheck_str_contains(str message, str marker) {
     i64 marker_len = strlen(marker);
-    i64 start = 1;
-    while (message[0] == '`' && start + marker_len <= strlen(message)) {
+    i64 start = 0;
+    while (start + marker_len <= strlen(message)) {
         i64 i = 0;
         while (i < marker_len && message[start + i] == marker[i]) { i += 1; }
         if (i == marker_len) { return true; }
         start += 1;
     }
     return false;
+}
+
+/// Returns true for a shared_value_outside_lock or lock_needs_shared
+/// message: a generic body that uses its `T` directly is wrong once `T` is
+/// a `shared` Mutex, and one that locks its `T` is wrong unless it is.
+bool typecheck_is_shared_value_error(str message) {
+    return (message[0] == '`' && typecheck_str_contains(message, "` is shared between threads: "))
+        || typecheck_str_contains(message, ", not shared: declare it `shared ");
 }
 
 /// Rechecks drop-ownership errors in generic call instantiations.
