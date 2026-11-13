@@ -12,6 +12,7 @@ pub mod driver;
 pub mod intrinsics;
 pub mod grammar;
 pub mod lexer;
+pub mod sync_sugar;
 pub mod link;
 pub mod mangling;
 pub mod module_artifact;

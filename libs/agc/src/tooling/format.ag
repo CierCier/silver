@@ -98,10 +98,13 @@ bool format_space_before(Token* previous, Token* current) {
     return true;
 }
 
-/// Returns true when the tokens parse without errors.
-bool format_syntax_valid(TokenStream* tokens) {
-    DiagnosticBag diagnostics = DiagnosticBag.new(); NodePool pool = NodePool.new(); SyntaxTree tree;
-    parse(tokens, &diagnostics, &pool, &tree); bool valid = diagnostics.is_empty(); pool.destroy(); return valid;
+/// Returns true when `text` parses without errors. Parsing rewrites its own
+/// tokens (`shared`, `lock`), so the formatter's tokens are lexed separately.
+bool format_syntax_valid(str text) {
+    TokenStream tokens = TokenStream.new(); DiagnosticBag diagnostics = DiagnosticBag.new();
+    lex(String.from_str(text), &tokens, &diagnostics);
+    NodePool pool = NodePool.new(); SyntaxTree tree;
+    parse(&tokens, &diagnostics, &pool, &tree); bool valid = diagnostics.is_empty(); pool.destroy(); return valid;
 }
 
 /// Returns true when both streams have the same token kinds and text.
@@ -136,7 +139,7 @@ Result<String, SourceFormatError> format_source(str text, SourceFormatOptions* o
     if (options.tab_size <= 0 || options.tab_size > 256) { return Result<String, SourceFormatError>.err(SourceFormatError.InvalidOptions); }
     TokenStream tokens = TokenStream.new(); DiagnosticBag diagnostics = DiagnosticBag.new();
     lex(String.from_str(text), &tokens, &diagnostics);
-    if (!diagnostics.is_empty() || !format_syntax_valid(&tokens)) { return Result<String, SourceFormatError>.err(SourceFormatError.InvalidSyntax); }
+    if (!diagnostics.is_empty() || !format_syntax_valid(text)) { return Result<String, SourceFormatError>.err(SourceFormatError.InvalidSyntax); }
     SourceFormatWriter writer; writer.text = String.new(); writer.groups = Vec<TokenKind>.new();
     writer.depth = 0; writer.options = *options; writer.newline = source_newline(text, &tokens); writer.failed = false;
     i64 i = 0; Token* previous = (Token*)0;

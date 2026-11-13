@@ -258,6 +258,124 @@ pub fn note_value_moved_into_launch() -> &'static str {
     "value moved into thread launch"
 }
 
+pub fn scoped_launch_must_be_bound(name: &str) -> String {
+    format!(
+        "a launch that borrows '{name}' must be bound to a local Task, pushed into a local \
+         collection, or waited directly (`Task<T> t = launch f(&{name});`, \
+         `tasks.push(launch f(&{name}));` or `wait launch f(&{name})`)"
+    )
+}
+
+pub fn lock_expected_as() -> &'static str {
+    "expected `lock <place> as <name> { ... }`"
+}
+
+pub fn lock_needs_name() -> &'static str {
+    "name the locked value: `lock <place> as <name> { ... }`"
+}
+
+pub fn lock_never_closed() -> &'static str {
+    "this lock block is never closed"
+}
+
+pub fn lock_already_held(place: &str) -> String {
+    format!("`{place}` is already locked by an enclosing lock block; locking it again would deadlock")
+}
+
+pub fn lock_name_redeclared(name: &str) -> String {
+    format!("`{name}` names the locked value inside `lock {name} {{ ... }}`; declare a different name")
+}
+
+/// `place` is quoted source text such as "`total`", or "this value".
+pub fn lock_needs_shared(place: &str, ty: &impl Display) -> String {
+    format!("{place} is `{ty}`, not shared: declare it `shared {ty}` to lock it")
+}
+
+pub fn shared_value_outside_lock(name: &str) -> String {
+    format!(
+        "`{name}` is shared between threads: read or change it inside \
+         `lock {name} {{ ... }}`"
+    )
+}
+
+pub fn task_collection_misused(holder: &str, name: &str) -> String {
+    format!(
+        "`{holder}` holds tasks that borrow `{name}`: use it only through push, len, \
+         is_empty, clear and drop, or `wait` on pop, take, swap_remove or get"
+    )
+}
+
+pub fn scoped_launch_argument_not_a_place() -> &'static str {
+    "a borrowed launch argument must be `&place`, `&mut place`, or a reference variable"
+}
+
+pub fn launch_borrows_without_reference(name: &str) -> String {
+    format!(
+        "launch passes `{name}` to a reference parameter without `&`: declare it `shared`, \
+         or move it into the task through a by-value parameter"
+    )
+}
+
+pub fn task_collection_mutable_borrow(name: &str) -> String {
+    format!(
+        "a launch pushed into a collection can only borrow with `&`: its tasks may run \
+         at once, so `&mut {name}` would be shared{}",
+        thread_share_help(name)
+    )
+}
+
+/// Appended to a borrow conflict with a launched task: the two ways to let
+/// several threads change `name`, for the user to choose between.
+pub fn thread_share_help(name: &str) -> String {
+    format!(
+        " (help: to change `{name}` from several threads, declare it `shared` and change it \
+         inside `lock {name} {{ ... }}`, or use an atomic such as `AtomicI64` for a counter; \
+         then pass `&{name}` to each task)"
+    )
+}
+
+pub fn task_collection_declared_too_early(name: &str, holder: &str) -> String {
+    format!(
+        "a launch that borrows '{name}' can only be pushed into a local collection \
+         declared after '{name}', so the collection joins its tasks first; `{holder}` is not"
+    )
+}
+
+pub fn task_cannot_leave_scope(name: &str) -> String {
+    format!("task borrows `{name}` and cannot leave the scope it was launched in")
+}
+
+pub fn note_task_launched_here() -> &'static str {
+    "task launched here"
+}
+
+pub fn cannot_drop_task_borrowed(name: &str) -> String {
+    format!("cannot drop '{name}' because it is borrowed by a launched task")
+}
+
+pub fn task_collection_does_not_join(name: &str, holder: &str) -> String {
+    format!(
+        "a launch that borrows '{name}' can only be pushed into a local `Vec<Task<T>>`, \
+         whose drop joins its tasks; `{holder}` is not one"
+    )
+}
+
+pub fn cannot_drop_locked_owner(name: &str) -> String {
+    format!("cannot drop '{name}' inside a lock block on it: the lock guard points into it")
+}
+
+pub fn note_locked_here() -> &'static str {
+    "locked here"
+}
+
+pub fn note_task_borrow_here() -> &'static str {
+    "borrowed by a task launched here"
+}
+
+pub fn launch_reference_needs_reference_parameter() -> &'static str {
+    "a reference crosses a thread boundary only through a `&T` or `&mut T` parameter of the launched function"
+}
+
 pub fn note_task_handle_consumed() -> &'static str {
     "task handle consumed by wait"
 }
@@ -302,6 +420,10 @@ pub fn cannot_borrow_as_shared_while_mutable(name: &str) -> String {
 
 pub fn cannot_assign_to_borrowed(name: &str) -> String {
     format!("cannot assign to '{name}' because it is borrowed")
+}
+
+pub fn move_out_of_lock(name: &str) -> String {
+    format!("cannot move '{name}' out of its lock block: the shared value still owns it; clone it instead")
 }
 
 pub fn cannot_move_out_of_borrowed(name: &str) -> String {
@@ -417,6 +539,9 @@ pub fn invalid_cast(from: &impl Display, to: &impl Display) -> String {
 }
 pub fn move_operand_place() -> &'static str {
     "move operand must be a place (identifier, field, index, or dereference)"
+}
+pub fn unknown_task_method(method: &str) -> String {
+    format!("Task has no method '{method}'; its only method is started()")
 }
 pub fn wait_requires_task(ty: &impl Display) -> String {
     format!("'wait' requires a Task, got {ty}")

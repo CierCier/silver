@@ -9,8 +9,11 @@ bodies and initializers are balanced token groups. Outlines, folding, and
 indentation stay exact while a body is half-typed. Expression-level meaning
 comes from the language server's semantic tokens.
 
-Block comments nest, as in the compiler. A small external scanner
-(`src/scanner.c`) handles that.
+A small external scanner (`src/scanner.c`) handles what a token rule
+cannot. Block comments nest, as in the compiler. `shared` and `lock` are
+keywords only by what follows them, `shared T name` and `lock place {`, so
+`m.lock()`, a variable named `lock` and a `shared create()` return type stay
+identifiers. Comments may sit between the words.
 
 ```sh
 npm ci

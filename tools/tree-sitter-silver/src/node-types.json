@@ -2698,6 +2698,10 @@
     "extra": true
   },
   {
+    "type": "lock",
+    "named": false
+  },
+  {
     "type": "macro",
     "named": false
   },
@@ -2732,6 +2736,10 @@
   {
     "type": "self_type",
     "named": true
+  },
+  {
+    "type": "shared",
+    "named": false
   },
   {
     "type": "static",

@@ -3,14 +3,14 @@
 //
 // The whole-allocator spinlock (std/mem/alloc.ag) makes it safe for these
 // threads to allocate/free concurrently. Synchronization is the atomics-based
-// done-flag in each TaskRecord: spawn hands the child a stack + function, the
-// child runs fn(arg), stores its done flag, wakes one joiner via futex, and
-// exits via sys_exit (which with CLONE_THREAD ends only that thread). Callers
-// spin briefly on the flag and then sleep in the kernel (futex wait).
+// done-flag in each TaskRecord: a launch hands the child a stack and its
+// trampoline, the child runs it, stores its done flag, wakes one joiner via
+// futex, and exits via sys_exit (which with CLONE_THREAD ends only that
+// thread). Waiters spin briefly on the flag and then sleep in the kernel.
 //
-// Model: `spawn(fn, arg)` accepts a plain function pointer plus one machine
-// word of argument. This is the M3 "threads pass addresses" core that
-// the T1 `Task<T>` message layer and channels build on.
+// User code starts threads only with `launch`; the compiler calls
+// `__silver_launch` / `__silver_launch_scoped` here, and `wait` and Task drop
+// glue call into std.rt.thread_registry.
 
 import std.sys.os;
 import std.sys.raw.thread;
@@ -60,7 +60,7 @@ const i64 THREAD_STACK_SIZE = 2097152;
 /// thread sleeps instead of spinning), then exits the thread.
 /// Internal: the spawn trampoline target; not for direct calls. It never
 /// returns, and it also flushes this thread's allocator cache.
-void thread_entry(i64 arg) {
+private void thread_entry(i64 arg) {
     TaskRecord* rec = (TaskRecord*)arg;
     void(i64) fn = (void(i64))rec.fn;
     fn(rec.arg);
@@ -70,13 +70,11 @@ void thread_entry(i64 arg) {
     thread_exit(0);
 }
 
-/// Spawn a thread running `fn(arg)`. Returns the TaskRecord handle to join, or
-/// null on failure (registry full, stack mmap failure, or clone error).
-TaskRecord* thread_spawn(void(i64) fn, i64 arg) {
-    if ((i64)fn == 0) {
-        return (TaskRecord*)0;
-    }
-    // Claim a registry slot under the lock.
+/// Claims a free registry slot for `fn(arg)` and starts its thread. `pack` is
+/// the launch pack the waiter frees (0 for a raw spawn) and `scoped` marks a
+/// task that borrows from its launcher. Returns null when the registry is
+/// full, the stack mmap fails, or clone fails; the caller keeps `pack`.
+private TaskRecord* thread_start(i64 fn, i64 arg, i64 pack, i64 scoped) {
     thread_lock_acquire();
     i64 slot = -1;
     for (i64 i = 0; i < thread_registry_capacity(); i = i + 1) {
@@ -91,10 +89,11 @@ TaskRecord* thread_spawn(void(i64) fn, i64 arg) {
     }
     TaskRecord* rec = &g_threads[slot];
     rec.tid = -1; // claimed, child not yet running
-    rec.fn = (i64)fn;
+    rec.fn = fn;
     rec.arg = arg;
     rec.done = 0;
-    rec.pack = 0;
+    rec.pack = pack;
+    rec.scoped = scoped;
     thread_lock_release();
 
     i64 tid = thread_spawn_claimed(rec, (i64)thread_entry);
@@ -108,7 +107,7 @@ TaskRecord* thread_spawn(void(i64) fn, i64 arg) {
 
 /// Launch a `launch` expression's trampoline on a fresh thread (T1). `tramp`
 /// is a per-site `void(i64)` marshaller; `pack` is the compiler-owned
-/// argument/result block. Returns the TaskRecord* (as i64) to `wait` on, or 0
+/// argument/result block. Returns the task handle to `wait` on, or 0
 /// on failure (registry full, stack mmap failure, or clone error). On failure,
 /// ownership of `pack` stays with the caller so it can run argument destructors.
 /// v1: no lazy slot-reap — a slot is reclaimed only by `__silver_wait_done`
@@ -117,40 +116,32 @@ i64 __silver_launch(void(i64) tramp, u8* pack) {
     if ((i64)tramp == 0 || (i64)pack == 0) {
         return 0;
     }
-    thread_lock_acquire();
-    i64 slot = -1;
-    for (i64 i = 0; i < thread_registry_capacity(); i = i + 1) {
-        if (g_threads[i].tid == 0) {
-            slot = i;
-            break;
-        }
-    }
-    if (slot < 0) {
-        thread_lock_release();
+    TaskRecord* rec = thread_start((i64)tramp, (i64)pack, (i64)pack, 0);
+    if (rec == (TaskRecord*)0) {
         return 0;
     }
-    TaskRecord* rec = &g_threads[slot];
-    rec.tid = -1; // claimed, child not yet running
-    rec.fn = (i64)tramp;
-    rec.arg = (i64)pack;
-    rec.done = 0;
-    rec.pack = (i64)pack;
-    thread_lock_release();
+    return task_handle(rec);
+}
 
-    i64 tid = thread_spawn_claimed(rec, (i64)thread_entry);
-    if (tid <= 0) {
-        thread_spawn_cleanup(rec);
+/// `__silver_launch` for a launch whose arguments borrow from the launcher.
+/// The compiler joins such a task before its borrows end: an unwaited handle
+/// is joined by `__silver_task_join_scoped` when it leaves scope.
+i64 __silver_launch_scoped(void(i64) tramp, u8* pack) {
+    if ((i64)tramp == 0 || (i64)pack == 0) {
         return 0;
     }
-    rec.tid = tid;
-    return (i64)rec;
+    TaskRecord* rec = thread_start((i64)tramp, (i64)pack, (i64)pack, 1);
+    if (rec == (TaskRecord*)0) {
+        return 0;
+    }
+    return task_handle(rec);
 }
 
 /// Allocates the Linux-only dedicated stack and spawns the child running
 /// fn(rec.arg). Returns the tid/handle (> 0) or 0 on failure. On Linux the
 /// child stack is mmapped and recorded in rec.stack; on Windows CreateThread
 /// manages the stack and rec.stack stays null.
-i64 thread_spawn_claimed(TaskRecord* rec, i64 fn) {
+private i64 thread_spawn_claimed(TaskRecord* rec, i64 fn) {
     u8* stack = (u8*)0;
     u8* top = (u8*)0;
     if (@cfg(os.linux)) {
@@ -179,7 +170,7 @@ i64 thread_spawn_claimed(TaskRecord* rec, i64 fn) {
 }
 
 /// Rolls a failed spawn back without freeing the caller-owned launch pack.
-void thread_spawn_cleanup(TaskRecord* rec) {
+private void thread_spawn_cleanup(TaskRecord* rec) {
     if (rec.stack != (u8*)0) {
         mem_sys_free(rec.stack, THREAD_STACK_SIZE);
         rec.stack = (u8*)0;
@@ -187,5 +178,6 @@ void thread_spawn_cleanup(TaskRecord* rec) {
     thread_lock_acquire();
     rec.tid = 0;
     rec.pack = 0;
+    rec.scoped = 0;
     thread_lock_release();
 }

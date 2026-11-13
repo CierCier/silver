@@ -70,6 +70,9 @@ impl ServerStatus {
 
 /// Only the dispatcher owns documents and writes stdout. The reader owns stdin;
 /// the mutex protects live request identities, including the active request.
+/// Shared with the reader thread: `messages` is a thread-safe channel,
+/// `pending` is touched only under `mutex`, and the `i32` flags are atomics.
+#[safe]
 struct Transport {
     Channel<PendingMessage*> messages;
     RawMutex mutex;
@@ -192,9 +195,10 @@ void release_message(Transport* transport, PendingMessage* message) {
 /// Reader thread body: reads framed messages from stdin, applies
 /// `$/cancelRequest` and progress cancels to pending requests, and queues
 /// the rest (blocking when the queue is full). Ends at EOF or `exit` and
-/// closes the queue.
-void read_transport(i64 address) {
-    Transport* transport = (Transport*)address;
+/// closes the queue. Launched with a borrow of the server's transport.
+void read_transport(&Transport shared) {
+    // Mutation goes through the transport's own lock and atomics.
+    Transport* transport = shared;
     ByteStream stream = ByteStream.stdin(); String body = String.new();
     while (read_rpc_message(&stream, &body, &transport.stopping)) {
         JsonRpcMessage parsed = JsonRpcMessage.new();

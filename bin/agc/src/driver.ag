@@ -404,19 +404,21 @@ i32 emit_check(str path, CfgSet* cfg, Vec<String>* include_dirs, LintConfig* lin
                 profiler_begin_phase("type check");
                 check_declared_types(&symbols, &tree, cfg, &diagnostics);
                 if (diagnostics.is_empty()) {
-                    check_borrows(&tree, &symbols, &diagnostics, cfg);
-                }
-                if (diagnostics.is_empty()) {
-                    check_send(&tree, &diagnostics, cfg);
-                }
-                if (diagnostics.is_empty()) {
                     OwnershipResult ownership = check_ownership(&tree, &symbols, &diagnostics, cfg);
                     Vec<InitOwnerPlan> _previous_plans = move symbols.init_owner_plans;
                     symbols.init_owner_plans = move ownership.owner_plans;
                 }
+                // Expression checking chooses each launch's overload, which
+                // the borrow and Send checks then judge.
                 if (diagnostics.is_empty()) {
                     AstPool check_pool = AstPool.new();
                     typecheck_expressions_scoped(&check_pool, &symbols, &tree, cfg, &diagnostics, 0);
+                }
+                if (diagnostics.is_empty()) {
+                    check_borrows(&tree, &symbols, &diagnostics, cfg);
+                }
+                if (diagnostics.is_empty()) {
+                    check_send(&tree, &symbols, &diagnostics, cfg);
                 }
                 profiler_end_phase("type check");
             }

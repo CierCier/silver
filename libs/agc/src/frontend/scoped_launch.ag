@@ -1,0 +1,646 @@
+// Scoped launches over the CST. A `launch` whose callee takes `&T`/`&mut T`
+// parameters borrows from its launcher, so the task must be joined before
+// those borrows end. This pass finds such launches, checks where they appear
+// and that the local owning the task never leaves its scope; the borrow pass
+// turns the recorded arguments into loans. A launch may also be pushed into
+// a local `Vec<Task<T>>` declared after everything it borrows, so the
+// vector's drop joins its tasks first; those tasks may run at once, so
+// they borrow only with `&`, and the collection is used only through a few
+// methods (see `scoped_collection_use_allowed`).
+import std.mem.memory;
+import std.mem.vec;
+import std.string;
+import frontend.ast;
+import frontend.bindings;
+import frontend.cfg;
+import frontend.diagnostics;
+import frontend.expressions;
+import frontend.lexer;
+import frontend.messages;
+import frontend.symbols;
+import frontend.typecheck_expr;
+import frontend.types;
+
+/// One `launch` whose callee borrows at least one argument.
+struct ScopedLaunchSite {
+    SyntaxNode* launch_token;
+    // Name node of the pinned local that owns the task. Null when the launch
+    // is waited in place or misplaced.
+    SyntaxNode* holder;
+    // The holder token of a `wait` that is a straight-line statement of the
+    // holder's block. Null when the task is joined at the end of that block.
+    SyntaxNode* join;
+    // Name node declaring the local collection the launch is pushed into.
+    // Null for a launch bound to a Task local or waited in place.
+    SyntaxNode* collection;
+    // False when the launch is neither bound to a local nor waited in place.
+    bool placed;
+}
+
+/// One borrowed argument of a scoped launch.
+struct ScopedLaunchBorrow {
+    i64 site;
+    // First token of the argument: `&`, or the reference variable.
+    SyntaxNode* first;
+    // Root identifier of the borrowed place. Null when the argument is not a
+    // place or a reference variable.
+    SyntaxNode* root;
+    // True for `&place`/`&mut place`, false for a reference variable.
+    bool address;
+    bool mutable;
+}
+
+/// The scoped launches of one function body and their borrowed arguments.
+struct ScopedLaunches {
+    Vec<ScopedLaunchSite> sites;
+    Vec<ScopedLaunchBorrow> borrows;
+}
+
+impl ScopedLaunches {
+    /// Creates an empty set.
+    ScopedLaunches new() {
+        ScopedLaunches launches;
+        launches.sites = Vec<ScopedLaunchSite>.new();
+        launches.borrows = Vec<ScopedLaunchBorrow>.new();
+        return launches;
+    }
+
+    /// Returns the borrowed argument that starts at token `first`, or null.
+    ScopedLaunchBorrow* borrow_at(ScopedLaunches* self, SyntaxNode* first) {
+        i64 i = 0;
+        while (i < self.borrows.len()) {
+            ScopedLaunchBorrow* borrow = self.borrows.get_ptr(i);
+            if (borrow.first == first) { return borrow; }
+            i += 1;
+        }
+        return (ScopedLaunchBorrow*)0;
+    }
+
+    /// Returns the name of the first place site `site` borrows, for messages.
+    str borrowed_name(ScopedLaunches* self, i64 site) {
+        i64 i = 0;
+        while (i < self.borrows.len()) {
+            ScopedLaunchBorrow* borrow = self.borrows.get_ptr(i);
+            if (borrow.site == site && borrow.root != (SyntaxNode*)0) {
+                return borrow.root.text;
+            }
+            i += 1;
+        }
+        return "its argument";
+    }
+}
+
+/// Returns true when function `item` is a candidate launch callee: the
+/// overload type checking chose, or, without one, any `name` of `arity`.
+bool launch_callee_candidate(SyntaxNode* item, SyntaxNode* selected, str name) {
+    if (selected != (SyntaxNode*)0) { return item == selected; }
+    SyntaxNode* identifier = item.kind == NodeKind.Function
+        ? function_identifier(item) : (SyntaxNode*)0;
+    return identifier != (SyntaxNode*)0 && strcmp(identifier.text, name) == 0;
+}
+
+/// Marks which of the `arity` parameters of launch callee `name` are `&T` or
+/// `&mut T`: those of `selected`, the overload type checking chose, or,
+/// without one, those any overload of that arity borrows. Returns true when
+/// any position is borrowed. `borrowed` must be empty.
+bool launch_borrowed_parameters(SyntaxNode* root, SyntaxNode* selected, str name, i64 arity,
+                                Vec<bool>* borrowed) {
+    i64 i = 0;
+    while (i < arity) {
+        borrowed.push(false);
+        i += 1;
+    }
+    bool any = false;
+    SyntaxNode* item = root == (SyntaxNode*)0 ? (SyntaxNode*)0 : root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (launch_callee_candidate(item, selected, name)) {
+            Vec<Binding> parameters = Vec<Binding>.new();
+            collect_parameter_bindings(binding_function_parameters(item), &parameters);
+            if (parameters.len() == arity) {
+                i64 p = 0;
+                while (p < arity) {
+                    if (parameters.get_ptr(p).declared_type.kind == ProjectionTypeKind.Reference) {
+                        borrowed.set(p, true);
+                        any = true;
+                    }
+                    p += 1;
+                }
+            }
+            parameters.drop();
+        }
+        item = item.next_sibling;
+    }
+    return any;
+}
+
+/// Returns the launch callee (see `launch_callee_candidate`) with `arity`
+/// parameters whose parameter `index` is `&T` or `&mut T`, or null.
+SyntaxNode* launch_borrowing_callee(SyntaxNode* root, SyntaxNode* selected, str name,
+                                    i64 arity, i64 index) {
+    SyntaxNode* item = root == (SyntaxNode*)0 ? (SyntaxNode*)0 : root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (launch_callee_candidate(item, selected, name)) {
+            Vec<Binding> parameters = Vec<Binding>.new();
+            collect_parameter_bindings(binding_function_parameters(item), &parameters);
+            bool borrows = parameters.len() == arity && index >= 0 && index < arity
+                && parameters.get_ptr(index).declared_type.kind == ProjectionTypeKind.Reference;
+            parameters.drop();
+            if (borrows) { return item; }
+        }
+        item = item.next_sibling;
+    }
+    return (SyntaxNode*)0;
+}
+
+/// Returns true when `node` is a token of kind `kind`.
+bool scoped_is_token(SyntaxNode* node, TokenKind kind) {
+    return node != (SyntaxNode*)0 && node.kind == NodeKind.Token && node.token_kind == kind;
+}
+
+/// Returns the binding declared at name node `name`, or null.
+Binding* scoped_binding_at(Vec<Binding>* bindings, SyntaxNode* name) {
+    i64 i = 0;
+    while (i < bindings.len()) {
+        Binding* binding = bindings.get_ptr(i);
+        if (binding.name_node == name) { return binding; }
+        i += 1;
+    }
+    return (Binding*)0;
+}
+
+/// Returns the binding `use` names. Method parameters have no function scope
+/// node in the CST, so they resolve by name when no local shadows them.
+Binding* scoped_visible_binding(Vec<Binding>* bindings, SyntaxNode* use) {
+    Binding* visible = visible_binding(bindings, use.text, use);
+    if (visible != (Binding*)0) { return visible; }
+    i64 i = 0;
+    while (i < bindings.len()) {
+        Binding* binding = bindings.get_ptr(i);
+        if (binding.kind == BindingKind.Parameter && strcmp(binding.name, use.text) == 0) {
+            return binding;
+        }
+        i += 1;
+    }
+    return (Binding*)0;
+}
+
+/// Finds the `wait holder` that joins the task as a straight-line statement
+/// of the holder's own block, scanning the siblings after `after`. Returns
+/// the holder token of that wait, or null.
+SyntaxNode* scoped_straight_line_join(Vec<Binding>* bindings, SyntaxNode* holder,
+                                      SyntaxNode* after) {
+    bool straight = true;
+    SyntaxNode* cursor = after;
+    while (cursor != (SyntaxNode*)0) {
+        if (cursor.kind == NodeKind.Block || scoped_is_token(cursor, TokenKind.Semicolon)) {
+            straight = true;
+        } else if (cursor.kind == NodeKind.Token
+            && (cursor.token_kind == TokenKind.If || cursor.token_kind == TokenKind.Else
+                || cursor.token_kind == TokenKind.While || cursor.token_kind == TokenKind.For
+                || cursor.token_kind == TokenKind.Match || cursor.token_kind == TokenKind.Defer
+                || cursor.token_kind == TokenKind.And || cursor.token_kind == TokenKind.Or
+                || cursor.token_kind == TokenKind.Question || cursor.token_kind == TokenKind.Colon)) {
+            // The wait may not run on every path through the block.
+            straight = false;
+        } else if (straight && scoped_is_token(cursor, TokenKind.Wait)) {
+            SyntaxNode* operand = cursor.next_sibling;
+            if (scoped_is_token(operand, TokenKind.Identifier)
+                && strcmp(operand.text, holder.text) == 0
+                && !scoped_is_token(operand.next_sibling, TokenKind.Dot)) {
+                Binding* waited = visible_binding(bindings, operand.text, operand);
+                if (waited != (Binding*)0 && waited.name_node == holder) { return operand; }
+            }
+        }
+        cursor = cursor.next_sibling;
+    }
+    return (SyntaxNode*)0;
+}
+
+/// True when `binding` holds a `Vec<Task<T>>`, whose drop joins every task
+/// it holds: declared so, or a `let` whose initializer has that type.
+bool scoped_joins_tasks(SyntaxNode* root, SymbolTable* symbols, Binding* binding) {
+    TypeProjection* declared = &binding.declared_type;
+    if (declared.kind == ProjectionTypeKind.Named) {
+        return strcmp(declared.name, "Vec") == 0 && declared.arguments.len() == 1
+            && declared.arguments.get_ptr(0).starts_with("Task<");
+    }
+    if (binding.kind != BindingKind.Let) { return false; }
+    TypeEnv env = TypeEnv.new();
+    TypeTable* types = &symbols.types;
+    u32 type_id = typecheck_initializer_type(symbols, types, root, binding.name_node, &env);
+    if (type_id == TYPE_UNKNOWN) { return false; }
+    TypeEntry* collection = types.get(types.resolve_subst(type_id));
+    if (collection.kind != TypeKind.Named || collection.count != 1
+        || strcmp(types.names.get(collection.name_id), "Vec") != 0) {
+        return false;
+    }
+    TypeEntry* task = types.get(types.resolve_subst(types.type_args.get(collection.inner)));
+    return task.kind == TypeKind.Named && strcmp(types.names.get(task.name_id), "Task") == 0;
+}
+
+/// True when `binding` is known not to be a reference: by its declared
+/// type, or for a `let`, by its initializer's inferred type. A type that
+/// cannot be inferred is not judged.
+bool scoped_binding_is_value(SyntaxNode* root, SymbolTable* symbols, Binding* binding) {
+    ProjectionTypeKind kind = binding.declared_type.kind;
+    if (kind != ProjectionTypeKind.Unknown) { return kind != ProjectionTypeKind.Reference; }
+    if (binding.kind != BindingKind.Let) { return false; }
+    TypeEnv env = TypeEnv.new();
+    TypeTable* types = &symbols.types;
+    u32 type_id = typecheck_initializer_type(symbols, types, root, binding.name_node, &env);
+    if (type_id == TYPE_UNKNOWN) { return false; }
+    TypeEntry* entry = types.get(types.resolve_subst(type_id));
+    return entry.kind != TypeKind.Reference && entry.kind != TypeKind.Pointer
+        && entry.kind != TypeKind.Unknown;
+}
+
+/// Places a launch that is the whole argument of `holder.push(...)` on a
+/// local `holder` declared `Vec<Task<T>>`. Another local collection is
+/// recorded but left unplaced: its drop need not join the task. Returns
+/// false when the launch is not such an argument.
+bool scoped_place_pushed_launch(SyntaxNode* root, SymbolTable* symbols, Vec<Binding>* bindings,
+                                SyntaxNode* launch_token, SyntaxNode* arguments,
+                                ScopedLaunchSite* site) {
+    SyntaxNode* group = launch_token.parent;
+    if (group == (SyntaxNode*)0 || group.kind != NodeKind.Parenthesized
+        || group.first_child != launch_token || arguments.next_sibling != (SyntaxNode*)0) {
+        return false;
+    }
+    SyntaxNode* method = binding_previous_sibling(group);
+    SyntaxNode* dot = method == (SyntaxNode*)0 ? (SyntaxNode*)0 : binding_previous_sibling(method);
+    SyntaxNode* receiver = dot == (SyntaxNode*)0 ? (SyntaxNode*)0 : binding_previous_sibling(dot);
+    if (!scoped_is_token(method, TokenKind.Identifier) || strcmp(method.text, "push") != 0
+        || !scoped_is_token(dot, TokenKind.Dot) || !scoped_is_token(receiver, TokenKind.Identifier)
+        || scoped_is_token(binding_previous_sibling(receiver), TokenKind.Dot)) {
+        return false;
+    }
+    Binding* declared = visible_binding(bindings, receiver.text, receiver);
+    if (declared != (Binding*)0
+        && (declared.kind == BindingKind.Variable || declared.kind == BindingKind.Let)) {
+        site.placed = scoped_joins_tasks(root, symbols, declared);
+        site.collection = declared.name_node;
+    }
+    return true;
+}
+
+/// Decides where a scoped launch sits: bound by a local declaration, pushed
+/// into a local collection, waited in place, or misplaced.
+void scoped_place_launch(SyntaxNode* root, SymbolTable* symbols, Vec<Binding>* bindings,
+                         SyntaxNode* launch_token, SyntaxNode* arguments, ScopedLaunchSite* site) {
+    if (scoped_place_pushed_launch(root, symbols, bindings, launch_token, arguments, site)) {
+        return;
+    }
+    SyntaxNode* previous = binding_previous_sibling(launch_token);
+    if (scoped_is_token(previous, TokenKind.Wait)) {
+        // A deferred launch would start after later code already ran.
+        site.placed = !scoped_is_token(binding_previous_sibling(previous), TokenKind.Defer);
+        return;
+    }
+    if (!scoped_is_token(previous, TokenKind.Assign) || launch_token.parent == (SyntaxNode*)0
+        || launch_token.parent.kind != NodeKind.Block
+        || !scoped_is_token(arguments.next_sibling, TokenKind.Semicolon)) {
+        return;
+    }
+    SyntaxNode* name = binding_previous_sibling(previous);
+    Binding* declared = name == (SyntaxNode*)0
+        ? (Binding*)0 : scoped_binding_at(bindings, name);
+    if (declared == (Binding*)0
+        || (declared.kind != BindingKind.Variable && declared.kind != BindingKind.Let)) {
+        return;
+    }
+    site.placed = true;
+    site.holder = name;
+    site.join = scoped_straight_line_join(bindings, name, arguments.next_sibling);
+}
+
+/// Records one argument of a scoped launch that starts at `first` and ends
+/// before `end` (a comma or null).
+void scoped_add_borrow(ScopedLaunches* out, i64 site, SyntaxNode* first, SyntaxNode* end) {
+    ScopedLaunchBorrow borrow;
+    borrow.site = site;
+    borrow.first = first;
+    borrow.root = (SyntaxNode*)0;
+    borrow.address = false;
+    borrow.mutable = false;
+    if (scoped_is_token(first, TokenKind.BitwiseAnd)) {
+        borrow.address = true;
+        SyntaxNode* place = first.next_sibling;
+        if (place != end && scoped_is_token(place, TokenKind.Mut)) {
+            borrow.mutable = true;
+            place = place.next_sibling;
+        }
+        // Only a place is borrowed: a name, then `.field` and `[index]` steps.
+        // A call result is a temporary the task would outlive.
+        SyntaxNode* step = place != end ? place.next_sibling : end;
+        while (step != end
+            && ((scoped_is_token(step, TokenKind.Dot)
+                    && scoped_is_token(step.next_sibling, TokenKind.Identifier))
+                || step.kind == NodeKind.Bracket)) {
+            step = step.kind == NodeKind.Bracket ? step.next_sibling : step.next_sibling.next_sibling;
+        }
+        if (place != end && scoped_is_token(place, TokenKind.Identifier) && step == end) {
+            borrow.root = place;
+        }
+    } else if (scoped_is_token(first, TokenKind.Identifier) && first.next_sibling == end) {
+        borrow.root = first;
+    }
+    out.borrows.push(borrow);
+}
+
+/// Collects the scoped launches among `leaves` (the cfg-live leaves of one
+/// function body) into `out`. Reports nothing.
+void collect_scoped_launches(SyntaxNode* root, SymbolTable* symbols, Vec<SyntaxNode*>* leaves,
+                             Vec<Binding>* bindings, ScopedLaunches* out) {
+    i64 i = 0;
+    while (i < leaves.len()) {
+        SyntaxNode* launch_token = leaves.get(i);
+        i += 1;
+        if (launch_token.token_kind != TokenKind.Launch) { continue; }
+        SyntaxNode* arguments = launch_call_arguments(launch_token);
+        if (arguments == (SyntaxNode*)0) { continue; }
+        Vec<SyntaxNode*> starts = Vec<SyntaxNode*>.new();
+        Vec<SyntaxNode*> ends = Vec<SyntaxNode*>.new();
+        SyntaxNode* cursor = arguments.first_child;
+        while (cursor != (SyntaxNode*)0) {
+            starts.push(cursor);
+            while (cursor != (SyntaxNode*)0 && !scoped_is_token(cursor, TokenKind.Comma)) {
+                cursor = cursor.next_sibling;
+            }
+            ends.push(cursor);
+            if (cursor != (SyntaxNode*)0) { cursor = cursor.next_sibling; }
+        }
+        Vec<bool> borrowed = Vec<bool>.new();
+        SyntaxNode* callee = launch_token.next_sibling;
+        if (launch_borrowed_parameters(root, symbols.selected_callee(callee.span), callee.text,
+                                       starts.len(), &borrowed)) {
+            ScopedLaunchSite site;
+            site.launch_token = launch_token;
+            site.holder = (SyntaxNode*)0;
+            site.join = (SyntaxNode*)0;
+            site.collection = (SyntaxNode*)0;
+            site.placed = false;
+            scoped_place_launch(root, symbols, bindings, launch_token, arguments, &site);
+            i64 site_index = out.sites.len();
+            out.sites.push(site);
+            i64 argument = 0;
+            while (argument < starts.len()) {
+                if (borrowed.get(argument)) {
+                    scoped_add_borrow(out, site_index, starts.get(argument), ends.get(argument));
+                }
+                argument += 1;
+            }
+        }
+        borrowed.drop();
+        ends.drop();
+        starts.drop();
+    }
+}
+
+/// Returns true when token `use` is the receiver of a `started()` call,
+/// which reads a task handle without consuming it.
+bool scoped_is_started_receiver(SyntaxNode* use) {
+    SyntaxNode* dot = use.next_sibling;
+    if (!scoped_is_token(dot, TokenKind.Dot)) { return false; }
+    SyntaxNode* method = dot.next_sibling;
+    if (!scoped_is_token(method, TokenKind.Identifier) || strcmp(method.text, "started") != 0) {
+        return false;
+    }
+    SyntaxNode* arguments = method.next_sibling;
+    return arguments != (SyntaxNode*)0 && arguments.kind == NodeKind.Parenthesized
+        && arguments.first_child == (SyntaxNode*)0;
+}
+
+/// Reports every use of pinned local `holder` other than `wait holder` or
+/// `holder.started()`.
+void scoped_check_holder_uses(Vec<SyntaxNode*>* leaves, Vec<Binding>* bindings,
+                              ScopedLaunchSite* site, str borrowed,
+                              DiagnosticBag* diagnostics, bool* failed) {
+    i64 i = 1;
+    while (i < leaves.len()) {
+        SyntaxNode* use = leaves.get(i);
+        SyntaxNode* before = leaves.get(i - 1);
+        if (use != site.holder && use.token_kind == TokenKind.Identifier
+            && use.span.start > site.holder.span.start
+            && strcmp(use.text, site.holder.text) == 0
+            && before.token_kind != TokenKind.Dot
+            && before.token_kind != TokenKind.Wait
+            && !scoped_is_started_receiver(use)) {
+            Binding* used = visible_binding(bindings, use.text, use);
+            if (used != (Binding*)0 && used.name_node == site.holder) {
+                diagnostics.error_with_note(use.span, task_cannot_leave_scope(borrowed),
+                    site.launch_token.span, note_task_launched_here());
+                *failed = true;
+            }
+        }
+        i += 1;
+    }
+}
+
+/// Returns true when use `use` of a collection holder is allowed: a call of
+/// push, len, is_empty, clear or drop, or `wait` on pop, take, swap_remove
+/// or get.
+bool scoped_collection_use_allowed(SyntaxNode* use) {
+    SyntaxNode* dot = use.next_sibling;
+    if (!scoped_is_token(dot, TokenKind.Dot)) { return false; }
+    SyntaxNode* method = dot.next_sibling;
+    if (!scoped_is_token(method, TokenKind.Identifier)) { return false; }
+    str name = method.text;
+    if (strcmp(name, "push") == 0 || strcmp(name, "len") == 0 || strcmp(name, "is_empty") == 0
+        || strcmp(name, "clear") == 0 || strcmp(name, "drop") == 0) {
+        return true;
+    }
+    bool takes_task = strcmp(name, "pop") == 0 || strcmp(name, "take") == 0
+        || strcmp(name, "swap_remove") == 0 || strcmp(name, "get") == 0;
+    return takes_task && scoped_is_token(binding_previous_sibling(use), TokenKind.Wait);
+}
+
+/// Reports each use of collection holder `declared` that
+/// `scoped_collection_use_allowed` rejects.
+void scoped_check_collection_uses(Vec<SyntaxNode*>* leaves, Vec<Binding>* bindings,
+                                  SyntaxNode* declared, SyntaxNode* launch_token, str borrowed,
+                                  DiagnosticBag* diagnostics, bool* failed) {
+    i64 i = 1;
+    while (i < leaves.len()) {
+        SyntaxNode* use = leaves.get(i);
+        if (use != declared && use.token_kind == TokenKind.Identifier
+            && strcmp(use.text, declared.text) == 0
+            && leaves.get(i - 1).token_kind != TokenKind.Dot
+            && !scoped_collection_use_allowed(use)) {
+            Binding* used = visible_binding(bindings, use.text, use);
+            if (used != (Binding*)0 && used.name_node == declared) {
+                diagnostics.error_with_note(use.span,
+                    task_collection_misused(declared.text, borrowed),
+                    launch_token.span, note_task_launched_here());
+                *failed = true;
+            }
+        }
+        i += 1;
+    }
+}
+
+/// Checks the borrows of a launch pushed into a collection: only shared
+/// borrows, each of a place declared before the collection.
+void scoped_check_collection_borrows(Vec<Binding>* bindings, ScopedLaunches* launches,
+                                     i64 site_index, SyntaxNode* collection,
+                                     DiagnosticBag* diagnostics, bool* failed) {
+    ScopedLaunchSite* site = launches.sites.get_ptr(site_index);
+    i64 i = 0;
+    while (i < launches.borrows.len()) {
+        ScopedLaunchBorrow* borrow = launches.borrows.get_ptr(i);
+        i += 1;
+        if (borrow.site != site_index || borrow.root == (SyntaxNode*)0) { continue; }
+        Binding* root = scoped_visible_binding(bindings, borrow.root);
+        bool mutable = borrow.mutable
+            || (!borrow.address && root != (Binding*)0
+                && root.declared_type.kind == ProjectionTypeKind.Reference
+                && root.declared_type.is_mutable);
+        if (mutable) {
+            diagnostics.error(site.launch_token.span, task_collection_mutable_borrow(borrow.root.text));
+            *failed = true;
+        }
+        if (root != (Binding*)0 && root.kind != BindingKind.Parameter
+            && root.name_node.span.start > collection.span.start) {
+            diagnostics.error(site.launch_token.span,
+                task_collection_declared_too_early(borrow.root.text, collection.text));
+            *failed = true;
+        }
+    }
+}
+
+/// Checks the scoped launches of one function or method body.
+void check_scoped_launch_body(SyntaxNode* root, SymbolTable* symbols, SyntaxNode* parameters,
+                              SyntaxNode* body, CfgSet* cfg, DiagnosticBag* diagnostics,
+                              bool* failed) {
+    Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+    cfg_collect_live_leaves(body, cfg, &leaves);
+    bool launches_here = false;
+    i64 i = 0;
+    while (i < leaves.len() && !launches_here) {
+        launches_here = leaves.get(i).token_kind == TokenKind.Launch;
+        i += 1;
+    }
+    if (!launches_here) {
+        leaves.drop();
+        return;
+    }
+    Vec<Binding> bindings = Vec<Binding>.new();
+    collect_parameter_bindings(parameters, &bindings);
+    collect_block_bindings(body, &bindings);
+    ScopedLaunches launches = ScopedLaunches.new();
+    collect_scoped_launches(root, symbols, &leaves, &bindings, &launches);
+    i = 0;
+    while (i < launches.borrows.len()) {
+        ScopedLaunchBorrow* borrow = launches.borrows.get_ptr(i);
+        if (borrow.root == (SyntaxNode*)0) {
+            diagnostics.error(borrow.first.span, scoped_launch_argument_not_a_place());
+            *failed = true;
+        } else if (!borrow.address) {
+            // A bare local would be borrowed implicitly; a reference variable
+            // already names its borrow.
+            Binding* bound = scoped_visible_binding(&bindings, borrow.root);
+            if (bound != (Binding*)0 && scoped_binding_is_value(root, symbols, bound)) {
+                diagnostics.error(borrow.first.span,
+                    launch_borrows_without_reference(borrow.root.text));
+                *failed = true;
+            }
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < launches.sites.len()) {
+        ScopedLaunchSite* site = launches.sites.get_ptr(i);
+        str borrowed = launches.borrowed_name(i);
+        if (!site.placed) {
+            diagnostics.error(site.launch_token.span, site.collection != (SyntaxNode*)0
+                ? task_collection_does_not_join(borrowed, site.collection.text)
+                : scoped_launch_must_be_bound(borrowed));
+            *failed = true;
+        } else if (site.holder != (SyntaxNode*)0) {
+            scoped_check_holder_uses(&leaves, &bindings, site, borrowed, diagnostics, failed);
+        } else if (site.collection != (SyntaxNode*)0) {
+            scoped_check_collection_borrows(&bindings, &launches, i, site.collection,
+                diagnostics, failed);
+            // Several pushes may share one collection; check its uses once.
+            bool first = true;
+            i64 earlier = 0;
+            while (earlier < i) {
+                if (launches.sites.get_ptr(earlier).collection == site.collection) { first = false; }
+                earlier += 1;
+            }
+            if (first) {
+                scoped_check_collection_uses(&leaves, &bindings, site.collection,
+                    site.launch_token, borrowed, diagnostics, failed);
+            }
+        }
+        i += 1;
+    }
+    launches.sites.drop();
+    launches.borrows.drop();
+    bindings.drop();
+    leaves.drop();
+}
+
+/// Appends each method of an impl or trait item to `out` as a pair: its
+/// parameter list, then its body. Methods are sibling fragments of the
+/// item's block, and a method without a body is skipped.
+void collect_method_bodies(SyntaxNode* item, Vec<SyntaxNode*>* out) {
+    SyntaxNode* block = item.first_child;
+    while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+        block = block.next_sibling;
+    }
+    SyntaxNode* parameters = (SyntaxNode*)0;
+    SyntaxNode* member = block == (SyntaxNode*)0 ? (SyntaxNode*)0 : block.first_child;
+    while (member != (SyntaxNode*)0) {
+        if (member.kind == NodeKind.Parenthesized) {
+            parameters = member;
+        } else if (scoped_is_token(member, TokenKind.Semicolon)) {
+            parameters = (SyntaxNode*)0;
+        } else if (member.kind == NodeKind.Block) {
+            if (parameters != (SyntaxNode*)0) {
+                out.push(parameters);
+                out.push(member);
+            }
+            parameters = (SyntaxNode*)0;
+        }
+        member = member.next_sibling;
+    }
+}
+
+/// Checks every method body of an impl or trait item.
+void check_scoped_launch_methods(SyntaxNode* root, SymbolTable* symbols, SyntaxNode* item,
+                                 CfgSet* cfg, DiagnosticBag* diagnostics, bool* failed) {
+    Vec<SyntaxNode*> methods = Vec<SyntaxNode*>.new();
+    collect_method_bodies(item, &methods);
+    i64 i = 0;
+    while (i + 1 < methods.len()) {
+        check_scoped_launch_body(root, symbols, methods.get(i), methods.get(i + 1), cfg,
+                                 diagnostics, failed);
+        i += 2;
+    }
+    methods.drop();
+}
+
+/// Checks the placement and pinning of scoped launches in every cfg-active
+/// function and method. Returns false when any error was reported.
+bool check_scoped_launches(SyntaxTree* tree, SymbolTable* symbols, DiagnosticBag* diagnostics,
+                           CfgSet* cfg) {
+    bool failed = false;
+    Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
+    cfg_collect_items(tree.root, cfg, diagnostics, &items);
+    i64 i = 0;
+    while (i < items.len()) {
+        SyntaxNode* item = items.get(i);
+        if (item.kind == NodeKind.Function) {
+            SyntaxNode* body = binding_function_body(item);
+            if (body != (SyntaxNode*)0) {
+                check_scoped_launch_body(tree.root, symbols, binding_function_parameters(item), body,
+                    cfg, diagnostics, &failed);
+            }
+        } else if (item.kind == NodeKind.Impl || item.kind == NodeKind.Trait) {
+            check_scoped_launch_methods(tree.root, symbols, item, cfg, diagnostics, &failed);
+        }
+        i += 1;
+    }
+    items.drop();
+    return !failed;
+}

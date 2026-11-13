@@ -8,7 +8,7 @@ use crate::parser;
 use crate::parser::ast;
 use crate::types::{Type, TypeContext, TypeLayout, parse_struct_attributes, struct_layout};
 // v12 preserves the v11 metadata layout but requires borrow-state reference ABI.
-const MODULE_MAGIC: &[u8; 6] = b"AGM\x00\x00\x0C";
+const MODULE_MAGIC: &[u8; 6] = b"AGM\x00\x00\x0D";
 
 #[derive(Debug, Clone)]
 pub struct ModuleArtifact {
@@ -54,6 +54,9 @@ pub struct ModuleExport {
     /// Owning trait for `Owner::method` exports (`None` for inherent
     /// methods and pre-v11 artifacts).
     pub impl_trait: Option<String>,
+    /// A `#[safe]` struct: its author vouches it may be moved to and
+    /// shared with other threads.
+    pub thread_safe: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -304,6 +307,7 @@ impl ModuleArtifact {
             write_optional_string(&mut out, export.const_value.as_deref())?;
             out.push(export.is_mutable as u8);
             write_optional_string(&mut out, export.impl_trait.as_deref())?;
+            out.push(export.thread_safe as u8);
         }
         write_len(&mut out, self.native_libs.len())?;
         for lib in &self.native_libs {
@@ -435,6 +439,7 @@ impl ModuleArtifact {
             let const_value = read_optional_string(bytes, &mut cursor)?;
             let is_mutable = read_u8(bytes, &mut cursor)? != 0;
             let impl_trait = read_optional_string(bytes, &mut cursor)?;
+            let thread_safe = read_u8(bytes, &mut cursor)? != 0;
             exports.push(ModuleExport {
                 kind,
                 name,
@@ -451,6 +456,7 @@ impl ModuleArtifact {
                 trait_items,
                 const_value,
                 is_mutable,
+                thread_safe,
                 impl_trait,
             });
         }
@@ -789,6 +795,7 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                     trait_items: Vec::new(),
                     const_value: None,
                     is_mutable: false,
+                    thread_safe: false,
                 impl_trait: None,
                 });
             }
@@ -826,6 +833,7 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                     trait_items: Vec::new(),
                     const_value: None,
                     is_mutable: false,
+                    thread_safe: false,
                 impl_trait: None,
                 });
             }
@@ -897,6 +905,7 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                     trait_items: Vec::new(),
                     const_value: None,
                     is_mutable: false,
+                    thread_safe: attrs.safe,
                 impl_trait: None,
                 });
             }
@@ -951,6 +960,7 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                     trait_items: Vec::new(),
                     const_value: None,
                     is_mutable: false,
+                    thread_safe: false,
                 impl_trait: None,
                 });
             }
@@ -1013,6 +1023,7 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                     trait_items: items,
                     const_value: None,
                     is_mutable: false,
+                    thread_safe: false,
                 impl_trait: None,
                 });
             }
@@ -1049,6 +1060,7 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                     trait_items: Vec::new(),
                     const_value,
                     is_mutable,
+                    thread_safe: false,
                 impl_trait: None,
                 });
             }
@@ -1086,6 +1098,7 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                         trait_items: Vec::new(),
                         const_value: None,
                         is_mutable: false,
+                        thread_safe: false,
                     impl_trait: None,
                     });
                 }
@@ -1108,6 +1121,7 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                         trait_items: Vec::new(),
                         const_value: None,
                         is_mutable: true,
+                        thread_safe: false,
                     impl_trait: None,
                     });
                 }
@@ -1130,6 +1144,7 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                     trait_items: Vec::new(),
                     const_value: None,
                     is_mutable: false,
+                    thread_safe: false,
                 impl_trait: None,
                 });
             }
@@ -1203,6 +1218,7 @@ fn collect_exports(program: &ast::Program, lib_file: u32) -> Vec<ModuleExport> {
                         trait_items: Vec::new(),
                         const_value: None,
                         is_mutable: false,
+                        thread_safe: false,
                         impl_trait,
                     });
                 }
@@ -1586,7 +1602,7 @@ mod reference_abi_tests {
         assert_eq!(decoded.module_name, artifact.module_name);
         assert_eq!(decoded.module_deps, artifact.module_deps);
         assert_eq!(decoded.native_libs, artifact.native_libs);
-        for version in [2, 6, 7, 8, 9, 10, 11] {
+        for version in [2, 6, 7, 8, 9, 10, 11, 12] {
             let mut old = bytes.clone();
             old[5] = version;
             assert!(ModuleArtifact::from_bytes(&old).is_err(), "accepted ABI v{version}");

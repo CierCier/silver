@@ -6,9 +6,16 @@
 //! deliberately mechanical recursive walk over the type's fields — no trait
 //! solving, no impl lookup, no inference.  Raw pointers and references are
 //! rejected outright unless the containing type is a known *owning*
-//! container (`Vec`, `Box`, `String`, `Bytes`, `HashMap`) whose pointees it
-//! exclusively owns; the owned type arguments are then checked recursively.
+//! container (`Vec`, `Box`, `Arc`, `String`, `Bytes`, `HashMap`) that manages
+//! its pointees; the owned type arguments are then checked recursively.
+//! A reference passed to a `&T`/`&mut T` parameter is a borrowed launch
+//! argument: the type checker runs this gate on its pointee instead, because
+//! sharing a value is safe exactly when moving it is (Silver has no
+//! unsynchronized interior mutability outside raw pointers).
 //! Shared-ownership and GC types (`Rc`, `Handle`) are rejected explicitly.
+//! A struct marked `#[safe]` is trusted like an owning container: its
+//! author vouches that its raw pointers are synchronized, so only its type
+//! arguments are checked.
 //!
 //! The walk resolves named types through the `resolve` callback supplied by
 //! the type checker, which knows struct/enum definitions.  A value-field
@@ -25,6 +32,7 @@ use crate::types::Type;
 const OWNING_CONTAINERS: &[(&str, &[usize])] = &[
     ("Vec", &[0]),
     ("Box", &[0]),
+    ("Arc", &[0]),
     ("String", &[]),
     ("Bytes", &[]),
     ("HashMap", &[0, 1]),
@@ -49,6 +57,9 @@ const NOT_SEND: &[(&str, &str)] = &[
 #[derive(Debug, Clone)]
 pub enum DefView {
     Struct {
+        /// Marked `#[safe]`: Send iff its type arguments are, like an
+        /// owning container; its fields are not inspected.
+        thread_safe: bool,
         type_params: Vec<String>,
         fields: Vec<(String, Type)>,
     },
@@ -104,10 +115,10 @@ fn structural_send_inner(
             "raw pointer types are not Send: move owned values (Box/Vec) or pass a Channel across threads"
                 .to_string(),
         ),
-        Type::Reference { .. } => Err(
-            "references cannot cross a thread boundary in v1 (scoped threads are not implemented yet)"
-                .to_string(),
-        ),
+        Type::Reference { .. } => {
+            Err(crate::diagnostics::messages::launch_reference_needs_reference_parameter()
+                .to_string())
+        }
         Type::Slice { .. } => {
             Err("slice views are not Send: they borrow memory owned elsewhere".to_string())
         }
@@ -135,6 +146,15 @@ fn structural_send_inner(
                 ));
             };
             if visiting.iter().any(|active| active == ty) {
+                return Ok(());
+            }
+            if let DefView::Struct {
+                thread_safe: true, ..
+            } = &def
+            {
+                for argument in generics {
+                    structural_send_inner(argument, resolve, visiting, depth + 1)?;
+                }
                 return Ok(());
             }
 

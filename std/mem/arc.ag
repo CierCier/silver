@@ -1,0 +1,106 @@
+// Arc<T> — atomically reference-counted shared-ownership smart pointer.
+//
+// The thread-safe counterpart of Rc<T>: several handles, possibly owned by
+// different threads, share one heap object. The object is destroyed and its
+// memory freed when the last handle is dropped, on whichever thread that is.
+//
+// USAGE:
+//   Arc<Config> shared = Arc<Config>.new(load_config());
+//   Arc<Config> mine = shared.clone();   // +1, safe from any thread
+//   i64 port = mine.get().port;
+//
+// The count and the value live in one co-allocated ArcBox<T>, so creating a
+// handle is a single heap allocation. Like Rc, the handle stores the two
+// interior pointers; the count sits at offset 0 of the box, so freeing it
+// releases the whole allocation.
+//
+// Arc makes the *count* thread-safe, not the value. Share a value that
+// threads mutate as `Arc<Mutex<T>>` or build it from atomics.
+//
+// ORDERINGS (the usual reference-count protocol):
+//   clone  relaxed increment — a new handle is always made from a live one,
+//          so no other thread can be freeing the box at that moment.
+//   drop   release decrement, then an acquire fence before destruction, so
+//          the destroying thread observes every write made through handles
+//          that other threads have already dropped.
+import std.atomic;
+import std.mem.alloc;
+import std.mem.drop;
+
+/// Shared allocation: atomic strong count followed by the value.
+struct ArcBox<T> {
+    i64 strong;
+    T value;
+}
+
+/// A thread-safe reference-counted handle to a shared heap value.
+/// Each handle has one owner; distinct handles to the same value may be
+/// cloned, used and dropped concurrently from several threads. The last drop
+/// runs the value's destructor exactly once and frees the shared allocation.
+/// `clone` does not deep-copy. A zero-initialized handle is empty: dropping
+/// it is a no-op and `strong_count` reports 0.
+struct Arc<T> {
+    T* ptr;
+    i64* strong;
+}
+
+impl<T> Arc<T> {
+    /// Create a new handle owning `val` (single co-allocated box). The count
+    /// starts at 1.
+    Arc<T> new(T val) {
+        ArcBox<T>* b = alloc<ArcBox<T>>();
+        b.strong = 1;
+        b.value = move val;
+        Arc<T> arc;
+        arc.ptr = &b.value;
+        arc.strong = &b.strong;
+        return arc;
+    }
+
+    /// Clone the handle — atomically increments the strong count. Thread-safe:
+    /// several threads may clone from the same handle at once.
+    Arc<T> clone(&self) {
+        if (self.strong != (i64*)0) {
+            __atomic_fetch_add_i64(self.strong, 1, ATOMIC_RELAXED);
+        }
+        Arc<T> c;
+        c.ptr = self.ptr;
+        c.strong = self.strong;
+        return c;
+    }
+
+    /// Get a raw pointer to the shared value, valid while any handle lives.
+    /// Null for an empty handle. Other threads may read the same value, so
+    /// writes through this pointer need their own synchronization.
+    T* get(&self) {
+        return self.ptr;
+    }
+
+    /// Number of live handles to the value (0 for an empty handle). Other
+    /// threads may change it at any time, so treat it as a snapshot.
+    i64 strong_count(&self) {
+        if (self.strong == (i64*)0) {
+            return 0;
+        }
+        return __atomic_load_i64(self.strong, ATOMIC_RELAXED);
+    }
+}
+
+impl<T> Drop for Arc<T> {
+    /// Drop one handle — atomically decrements the strong count. The handle
+    /// that takes it to zero drops the value and frees the co-allocated box.
+    void drop(*self) {
+        T* value = self.ptr;
+        i64* strong = self.strong;
+        self.ptr = (T*)0;
+        self.strong = (i64*)0;
+        if (strong == (i64*)0) {
+            return;
+        }
+        if (__atomic_fetch_sub_i64(strong, 1, ATOMIC_RELEASE) == 1) {
+            __atomic_fence(ATOMIC_ACQUIRE);
+            @drop_in_place(value, 1);
+            free(strong);
+        }
+    }
+}

@@ -1,0 +1,225 @@
+// Borrowed launch: tasks that borrow the launcher's locals.
+//
+// A launch whose callee takes `&T`/`&mut T` borrows from the launching
+// scope. The compiler keeps the referent alive and joins the task before the
+// borrow ends: at `wait`, or when the task local leaves scope.
+//
+// Covers:
+//   1. Two tasks share one local through `&` and return results via `wait`.
+//   2. A task fills a local through `&mut`; the launcher reads it after `wait`.
+//   3. An unwaited task is joined when its block ends: the write it makes
+//      after sleeping is visible right after the block.
+//   4. An early `return` joins an unwaited borrowing task first.
+//   5. `wait launch f(&x)` needs no named task.
+//   6. An unwaited task's result is dropped exactly once when the task is
+//      joined, an enum's owned payload included; a waited result is moved
+//      out, not dropped.
+//   7. A stale copy of a waited handle, left in a Vec, does nothing when the
+//      Vec drops, even after its registry slot runs another borrowing task.
+//   8. Tasks pushed into a local Vec in a loop share one local; `wait` on
+//      pop collects their results, and leaving the Vec's block joins the
+//      rest, for a declared or an inferred `let` Vec.
+//   9. A `#[safe]` struct holding a raw pointer, guarded by its own lock,
+//      is shared by several tasks.
+//
+// Exit 0 on success; distinct non-zero codes per failure.
+
+import std.thread;
+import std.mem.vec;
+import std.atomic;
+import std.sync;
+import std.time;
+import std.sys.entry;
+
+i64 sum(&Vec<i64> values) {
+    i64 total = 0;
+    for (i64 i = 0; i < values.len(); i += 1) {
+        total += values.get(i);
+    }
+    return total;
+}
+
+void fill(&mut Vec<i64> out, i64 count) {
+    for (i64 i = 0; i < count; i += 1) {
+        out.push(i);
+    }
+}
+
+// Sleeps first so the launcher reaches its join point before the write.
+void slow_write(&mut i64 slot, i64 value) {
+    sleep_ms(20);
+    *slot = value;
+}
+
+i64 g_drops;
+
+/// Counts its drops, so the test can see when a task result is destroyed.
+struct Counted {
+    i64 value;
+}
+
+impl Drop for Counted {
+    void drop(*self) { __atomic_fetch_add_i64(&g_drops, 1, ATOMIC_SEQ_CST); }
+}
+
+Counted make_counted(&i64 value) {
+    Counted counted;
+    counted.value = *value;
+    return counted;
+}
+
+/// An enum without its own Drop: its payload is dropped by the enum's glue.
+enum Held { Value(Counted); Empty; }
+
+Held make_held(&i64 value) {
+    Counted counted = make_counted(value);
+    return Held.Value(move counted);
+}
+
+/// A counter behind a raw pointer; `lock` guards every access to `value`.
+#[safe]
+struct LockedCounter {
+    i64* value;
+    RawMutex lock;
+}
+
+void bump_locked(&LockedCounter counter) {
+    for (i64 i = 0; i < 1000; i += 1) {
+        counter.lock.lock();
+        *counter.value = *counter.value + 1;
+        counter.lock.unlock();
+    }
+}
+
+// Sleeps first so the launcher reaches the end of the block before the add.
+void slow_add(&AtomicI64 counter) {
+    sleep_ms(20);
+    counter.fetch_add(1);
+}
+
+i64 twice(i64 value) {
+    return value * 2;
+}
+
+i64 leave_early(bool early) {
+    i64 slot = 0;
+    Task<void> writer = launch slow_write(&mut slot, 9);
+    if (early) {
+        return 1;
+    }
+    wait writer;
+    return slot;
+}
+
+i64 main() {
+    Vec<i64> values = Vec<i64>.new();
+    fill(&mut values, 10);
+
+    // 1. Shared borrows.
+    Task<i64> left = launch sum(&values);
+    Task<i64> right = launch sum(&values);
+    i64 left_sum = wait left;
+    i64 right_sum = wait right;
+    if (left_sum != 45 || right_sum != 45) { return 1; }
+
+    // 2. Mutable borrow, observed after the join.
+    Vec<i64> out = Vec<i64>.new();
+    Task<void> filler = launch fill(&mut out, 5);
+    wait filler;
+    if (out.len() != 5 || out.get(4) != 4) { return 2; }
+
+    // 3. Joined at the end of the block.
+    i64 slot = 0;
+    {
+        Task<void> _writer = launch slow_write(&mut slot, 7);
+    }
+    if (slot != 7) { return 3; }
+
+    // 4. Joined before an early return.
+    if (leave_early(true) != 1) { return 4; }
+    if (leave_early(false) != 9) { return 5; }
+
+    // 5. Waited without a named task.
+    if (wait launch sum(&values) != 45) { return 6; }
+
+    // 6. Result drops.
+    i64 number = 3;
+    {
+        Task<Counted> _unwaited = launch make_counted(&number);
+    }
+    if (__atomic_load_i64(&g_drops, ATOMIC_SEQ_CST) != 1) { return 7; }
+    Task<Counted> counted = launch make_counted(&number);
+    Counted kept = wait counted;
+    if (__atomic_load_i64(&g_drops, ATOMIC_SEQ_CST) != 1 || kept.value != 3) { return 8; }
+    {
+        Task<Held> _unwaited_held = launch make_held(&number);
+    }
+    if (__atomic_load_i64(&g_drops, ATOMIC_SEQ_CST) != 2) { return 14; }
+
+    // 7. Stale handle copies.
+    Vec<Task<i64>> tasks = Vec<Task<i64>>.new();
+    tasks.push(launch twice(1));
+    tasks.push(launch twice(2));
+    if (wait tasks.get(0) != 2) { return 9; }   // a copy: the Vec keeps a stale handle
+    i64 flag = 0;
+    {
+        Task<void> reuse = launch slow_write(&mut flag, 1);
+        tasks.clear();   // must not join `reuse` through the stale copy
+    }
+    if (flag != 1) { return 10; }
+
+    tasks.drop();
+
+    // 8. A worker pool in a Vec.
+    i64 pooled = 0;
+    {
+        Vec<Task<i64>> pool = Vec<Task<i64>>.new();
+        for (i64 i = 0; i < 4; i += 1) {
+            pool.push(launch sum(&values));
+        }
+        while (pool.len() > 0) {
+            pooled += wait pool.pop();
+        }
+    }
+    if (pooled != 180) { return 11; }
+    // The same pool declared with `let`: its inferred type joins too.
+    {
+        let pool = Vec<Task<i64>>.new();
+        pool.push(launch sum(&values));
+        pooled += wait pool.pop();
+    }
+    if (pooled != 225) { return 15; }
+    AtomicI64 counter = AtomicI64.new(0);
+    {
+        Vec<Task<void>> workers = Vec<Task<void>>.new();
+        for (i64 i = 0; i < 4; i += 1) {
+            workers.push(launch slow_add(&counter));
+        }
+    }
+    if (counter.get() != 4) { return 12; }
+    // A `let` pool also joins its unwaited tasks when its block ends.
+    {
+        let workers = Vec<Task<void>>.new();
+        for (i64 i = 0; i < 4; i += 1) {
+            workers.push(launch slow_add(&counter));
+        }
+    }
+    if (counter.get() != 8) { return 16; }
+
+    // 9. A #[safe] struct shared by several tasks.
+    i64 storage = 0;
+    LockedCounter locked;
+    locked.value = &storage;
+    locked.lock = RawMutex.new();
+    {
+        Vec<Task<void>> bumpers = Vec<Task<void>>.new();
+        for (i64 i = 0; i < 4; i += 1) {
+            bumpers.push(launch bump_locked(&locked));
+        }
+    }
+    if (storage != 4000) { return 13; }
+
+    out.drop();
+    values.drop();
+    return 0;
+}

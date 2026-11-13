@@ -83,6 +83,73 @@ LLVMOpaqueValue* llvm_state_is_init(LlvmContext* ctx, LLVMOpaqueValue* state_ptr
         LLVMConstInt(state_ty, LLVM_INIT_FULL, 0), "init_state_is_init");
 }
 
+/// Returns true when resolved type `type_id` is the builtin `Task<T>` handle.
+bool llvm_type_is_task(LlvmContext* ctx, u32 type_id) {
+    TypeEntry* entry = ctx.types.get(type_id);
+    return entry.kind == TypeKind.Named && entry.count == 1
+        && strcmp(ctx.types.names.get(entry.name_id), "Task") == 0;
+}
+
+/// Returns the drop glue of resolved `Task<T>` type `task_type`, emitting it
+/// once per module: join the task if it is scoped, drop its unclaimed result,
+/// and free the pack. The runtime returns null for a detached or null handle,
+/// which keeps running until a `wait` or the exit-time join. Returns null
+/// when the thread runtime is not linked into this module.
+LLVMOpaqueValue* llvm_task_drop_fn(LlvmContext* ctx, u32 task_type) {
+    LLVMOpaqueValue* join_fn = LLVMGetNamedFunction(ctx.module, "__silver_task_join_scoped");
+    LLVMOpaqueValue* free_fn = LLVMGetNamedFunction(ctx.module, "mem_free_raw_impl");
+    if (join_fn == (LLVMOpaqueValue*)0 || free_fn == (LLVMOpaqueValue*)0) {
+        return (LLVMOpaqueValue*)0;
+    }
+    String symbol = String.from_str("__silver_task_drop.");
+    symbol.push_str(llvm_concrete_type_name(ctx.types, task_type));
+    LLVMOpaqueValue* glue = LLVMGetNamedFunction(ctx.module, symbol.to_str());
+    if (glue != (LLVMOpaqueValue*)0) {
+        symbol.drop();
+        return glue;
+    }
+    LLVMOpaqueType* ptr_ty = LLVMPointerTypeInContext(ctx.ctx, (u32)0);
+    LLVMOpaqueType* i64_ty = LLVMInt64TypeInContext(ctx.ctx);
+    LLVMOpaqueType* signature = LLVMFunctionType(LLVMVoidTypeInContext(ctx.ctx), &ptr_ty, 1, 0);
+    // Registered before its body so a `Task<Task<T>>` result finds it.
+    glue = LLVMAddFunction(ctx.module, symbol.to_str(), signature);
+    symbol.drop();
+    LLVMSetLinkage(glue, LLVMLinkage.LLVMInternalLinkage);
+    LLVMOpaqueBuilder* saved_builder = ctx.builder;
+    LLVMOpaqueValue* saved_function = ctx.current_fn;
+    ctx.builder = LLVMCreateBuilderInContext(ctx.ctx);
+    ctx.current_fn = glue;
+    LLVMPositionBuilderAtEnd(ctx.builder,
+        LLVMAppendBasicBlockInContext(ctx.ctx, glue, "entry"));
+    LLVMOpaqueValue* handle = LLVMBuildLoad2(ctx.builder, i64_ty,
+        LLVMGetParam(glue, 0), "task.drop.handle");
+    LLVMOpaqueValue* pack = LLVMBuildCall2(ctx.builder,
+        LLVMGlobalGetValueType(join_fn), join_fn, &handle, 1, "task.drop.pack");
+    LLVMOpaqueValue* joined = LLVMBuildICmp(ctx.builder, LLVMIntPredicate.LLVMIntNE,
+        pack, LLVMConstNull(ptr_ty), "task.drop.joined");
+    LLVMOpaqueBasicBlock* joined_bb = LLVMAppendBasicBlockInContext(
+        ctx.ctx, glue, "task.drop.result");
+    LLVMOpaqueBasicBlock* done_bb = LLVMAppendBasicBlockInContext(
+        ctx.ctx, glue, "task.drop.done");
+    LLVMBuildCondBr(ctx.builder, joined, joined_bb, done_bb);
+    LLVMPositionBuilderAtEnd(ctx.builder, joined_bb);
+    u32 result_type = ctx.types.resolve_subst(
+        ctx.types.type_args.get(ctx.types.get(task_type).inner));
+    // The result is pack field 0, so it lives at the pack's own address.
+    // The drop decides per type, enum payloads included, what to emit.
+    if (result_type != TYPE_VOID) {
+        llvm_emit_value_drop_at_ptr(ctx, pack, result_type);
+    }
+    LLVMBuildCall2(ctx.builder, LLVMGlobalGetValueType(free_fn), free_fn, &pack, 1, "");
+    LLVMBuildBr(ctx.builder, done_bb);
+    LLVMPositionBuilderAtEnd(ctx.builder, done_bb);
+    LLVMBuildRetVoid(ctx.builder);
+    LLVMDisposeBuilder(ctx.builder);
+    ctx.builder = saved_builder;
+    ctx.current_fn = saved_function;
+    return glue;
+}
+
 /// Quiet probe: can a `drop` call be emitted for this type? Unlike
 /// llvm_drop_fn_for_type this never queues monomorphization and never
 /// records unresolved symbols, so scope-exit planning can ask freely.
@@ -92,6 +159,12 @@ bool llvm_can_resolve_drop_fn(LlvmContext* ctx, u32 type_id) {
     TypeEntry* entry = ctx.types.get(resolved);
     if (entry.kind != TypeKind.Named) { return false; }
     str base = ctx.types.names.get(entry.name_id);
+    if (llvm_type_is_task(ctx, resolved)) {
+        return mono_type_is_concrete(ctx.ctx, ctx.types,
+                ctx.types.type_args.get(entry.inner), 0)
+            && LLVMGetNamedFunction(ctx.module, "__silver_task_join_scoped") != (LLVMOpaqueValue*)0
+            && LLVMGetNamedFunction(ctx.module, "mem_free_raw_impl") != (LLVMOpaqueValue*)0;
+    }
     if (entry.count > 0) {
         Vec<u32> arg_ids = Vec<u32>.new();
         i64 i = 0;
@@ -132,6 +205,9 @@ LLVMOpaqueValue* llvm_drop_fn_for_type(LlvmContext* ctx, u32 type_id) {
     TypeEntry* entry = ctx.types.get(resolved);
     if (entry.kind != TypeKind.Named) { return (LLVMOpaqueValue*)0; }
     str base = ctx.types.names.get(entry.name_id);
+    if (llvm_type_is_task(ctx, resolved)) {
+        return llvm_task_drop_fn(ctx, resolved);
+    }
     if (entry.count > 0) {
         return mono_ensure_specialized(ctx, resolved, "drop");
     }

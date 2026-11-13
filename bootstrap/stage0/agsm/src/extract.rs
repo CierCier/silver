@@ -395,6 +395,7 @@ fn export_typedef(
                 trait_items: Vec::new(),
                 const_value: None,
                 is_mutable: false,
+                thread_safe: false,
                 impl_trait: None,
             }))
         }
@@ -430,6 +431,7 @@ fn export_var(entity: &Entity<'_>, name: &str) -> Result<Option<ModuleExport>, E
         trait_items: Vec::new(),
         const_value: None,
         is_mutable: !is_const,
+        thread_safe: false,
         impl_trait: None,
     }))
 }
@@ -466,6 +468,7 @@ fn export_macro(entity: &Entity<'_>, name: &str) -> Result<Option<ModuleExport>,
         trait_items: Vec::new(),
         const_value: Some(const_val),
         is_mutable: false,
+        thread_safe: false,
         impl_trait: None,
     }))
 }
@@ -550,10 +553,13 @@ fn export_function(
         trait_items: Vec::new(),
         const_value: None,
         is_mutable: false,
+        thread_safe: false,
         impl_trait: None,
     })
 }
 
+// C records never carry Silver's `#[safe]`, so extracted exports are
+// never thread-safe by declaration.
 fn export_opaque_record(name: &str) -> ModuleExport {
     ModuleExport {
         kind: ExportKind::Struct,
@@ -571,6 +577,7 @@ fn export_opaque_record(name: &str) -> ModuleExport {
         trait_items: Vec::new(),
         const_value: None,
         is_mutable: false,
+        thread_safe: false,
         impl_trait: None,
     }
 }
@@ -728,6 +735,7 @@ fn export_record(
         },
         const_value: None,
         is_mutable: false,
+        thread_safe: false,
         impl_trait: None,
     })
 }
@@ -768,6 +776,7 @@ fn export_enum(entity: &Entity<'_>, name: &str) -> Result<ModuleExport, ExtractE
         trait_items: Vec::new(),
         const_value: None,
         is_mutable: false,
+        thread_safe: false,
         impl_trait: None,
     })
 }

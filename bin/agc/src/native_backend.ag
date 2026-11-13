@@ -2421,6 +2421,22 @@ void native_add_search_path(Command* command, bool direct_linker, str dir) {
     native_add_rpath(command, direct_linker, dir);
 }
 
+/// Prints `diagnostic` against the file its span names: an imported file's
+/// path and source, or the entry file's when the span has no file id.
+void native_print_diagnostic(Diagnostic* diagnostic, str root_path, String* root_source,
+                             Vec<String>* source_paths) {
+    if (diagnostic.span.file == 0 || diagnostic.span.file > source_paths.len()) {
+        String rendered = render_diagnostic(diagnostic, root_path, root_source);
+        STDERR.write_str(rendered.to_str());
+        return;
+    }
+    str path = source_paths.get_ptr(diagnostic.span.file - 1).to_str();
+    Result<String, Error> loaded = String.from_file(path);
+    String source = loaded.is_ok() ? loaded.unwrap() : String.new();
+    String rendered = render_diagnostic(diagnostic, path, &source);
+    STDERR.write_str(rendered.to_str());
+}
+
 /// Compiles one module to an object file at `object_path`. Returns false
 /// when codegen, verification, or emission fails.
 bool native_compile_module_object(SyntaxTree* tree, TypeTable* types, Interner* names,
@@ -2459,20 +2475,8 @@ bool native_compile_module_object(SyntaxTree* tree, TypeTable* types, Interner* 
         if (!gen.ownership_diagnostics.is_empty()) {
             i64 i = 0;
             while (i < gen.ownership_diagnostics.len()) {
-                Diagnostic* diagnostic = gen.ownership_diagnostics.get(i);
-                str diagnostic_path = root_path;
-                String diagnostic_source = root_source.clone();
-                if (diagnostic.span.file > 0
-                    && diagnostic.span.file <= source_paths.len()) {
-                    diagnostic_path = source_paths.get_ptr(diagnostic.span.file - 1).to_str();
-                    Result<String, Error> imported_source = String.from_file(diagnostic_path);
-                    diagnostic_source.drop();
-                    diagnostic_source = imported_source.is_ok()
-                        ? imported_source.unwrap() : String.new();
-                }
-                String rendered = render_diagnostic(diagnostic, diagnostic_path,
-                    &diagnostic_source);
-                STDERR.write_str(rendered.to_str());
+                native_print_diagnostic(gen.ownership_diagnostics.get(i), root_path, root_source,
+                    source_paths);
                 i += 1;
             }
             gen.destroy();
@@ -3092,27 +3096,30 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
         check_declared_types(&symbols, &tree, &cfg, &diagnostics);
         profiler_end_phase("check declared types");
         if (diagnostics.is_empty()) {
-            profiler_begin_phase("check borrows");
-            check_borrows(&tree, &symbols, &diagnostics, &cfg);
-            profiler_end_phase("check borrows");
-        }
-        if (diagnostics.is_empty()) {
-            profiler_begin_phase("check send");
-            check_send(&tree, &diagnostics, &cfg);
-            profiler_end_phase("check send");
-        }
-        if (diagnostics.is_empty()) {
             profiler_begin_phase("check ownership");
             OwnershipResult ownership = check_ownership(&tree, &symbols, &diagnostics, &cfg);
             Vec<InitOwnerPlan> _previous_plans = move symbols.init_owner_plans;
             symbols.init_owner_plans = move ownership.owner_plans;
             profiler_end_phase("check ownership");
         }
+        // Expression checking chooses each launch's overload, which the
+        // borrow and Send checks then judge. They scan every file, so every
+        // file is checked here.
         if (diagnostics.is_empty()) {
             profiler_begin_phase("typecheck expressions");
             AstPool check_pool = AstPool.new();
-            typecheck_expressions_scoped(&check_pool, &symbols, &tree, &cfg, &diagnostics, 1);
+            typecheck_expressions_scoped(&check_pool, &symbols, &tree, &cfg, &diagnostics, 0);
             profiler_end_phase("typecheck expressions");
+        }
+        if (diagnostics.is_empty()) {
+            profiler_begin_phase("check borrows");
+            check_borrows(&tree, &symbols, &diagnostics, &cfg);
+            profiler_end_phase("check borrows");
+        }
+        if (diagnostics.is_empty()) {
+            profiler_begin_phase("check send");
+            check_send(&tree, &symbols, &diagnostics, &cfg);
+            profiler_end_phase("check send");
         }
         profiler_end_phase("type check");
     }
@@ -3121,9 +3128,7 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
     if (!diagnostics.is_empty()) {
         i64 i = 0;
         while (i < diagnostics.len()) {
-            Diagnostic* diagnostic = diagnostics.get(i);
-            String rendered = render_diagnostic(diagnostic, source_path, &source_copy);
-            STDERR.write_str(rendered.to_str());
+            native_print_diagnostic(diagnostics.get(i), source_path, &source_copy, &source_paths);
             i += 1;
         }
         native_destroy_units(&pools, &streams);

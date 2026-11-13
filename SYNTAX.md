@@ -36,7 +36,7 @@ prove type checking, code generation, or runtime behavior. Stage0 lives under
 | Control flow, matching, and defers | [stage1 statement codegen](libs/agc/src/backend/llvm/stmt.ag) | [iterators](tests/iterator_ergonomics_test.ag), [guards](tests/guard_test.ag) |
 | Macros, attributes, cfg, and static values | [stage1 cfg](libs/agc/src/frontend/cfg.ag), [stage0 parser](bootstrap/stage0/agc/src/parser/prt_parser.rs) | [JSON serialization](tests/json_test.ag), [formatting](tests/fmt_test.ag) |
 | Ownership and borrowing | [stage0 borrow checker](bootstrap/stage0/agc/src/semantic/borrow_check.rs), [stage1 ownership](libs/agc/src/frontend/ownership.ag) | [container cleanup](tests/collection_drop_glue_test.ag), [Box](tests/box_test.ag) |
-| Threads and channels | [stage1 Send check](libs/agc/src/frontend/send.ag), [channels](std/channel.ag) | [channels](tests/channel_test.ag), [bounded channels](tests/channel_bounded_test.ag) |
+| Threads and channels | [stage1 Send check](libs/agc/src/frontend/send.ag), [borrowed launch](libs/agc/src/frontend/scoped_launch.ag), [`shared` and `lock`](libs/agc/src/frontend/sync_sugar.ag), [channels](std/channel.ag), [Arc](std/mem/arc.ag) | [borrowed launch](tests/scoped_launch_test.ag), [`shared` and `lock`](tests/shared_lock_test.ag), [channels](tests/channel_test.ag), [bounded channels](tests/channel_bounded_test.ag), [Arc](tests/arc_test.ag) |
 | Result and optional values | [Optional](std/optional.ag), [Result](std/result.ag), [syscall errors](std/sys/result.ag) | [structured errors](tests/structured_error_test.ag), [Result cleanup](tests/unwrap_or_err_drop_test.ag) |
 | Allocation, formatting, FFI, and assembly | [allocator](std/mem/alloc.ag), [display](std/display.ag), [stage1 codegen](libs/agc/src/backend/llvm/generator.ag) | [allocation](tests/allocation_bounds_test.ag), [display](tests/display_test.ag), [Rust FFI](tests/rust_ffi_test.ag), [syscalls](tests/syscall_wrapper_test.ag) |
 
@@ -94,7 +94,7 @@ These are hard keywords — they cannot be used as identifiers:
 | `in` | Iterator element | `break` | Loop termination (with optional value) |
 | `continue` | Loop iteration skip | `return` | Early return |
 | `defer` | Scope-exit deferred action | `import` | Module import directive |
-| `comptime` | Compile-time evaluation | `launch` | Spawn a detached thread, returning a `Task<T>` |
+| `comptime` | Compile-time evaluation | `launch` | Spawn a thread, returning a `Task<T>` |
 | `wait` | Join a `Task`, moving out its result | `cast` | Type cast declaration/expr |
 | `move` | Ownership transfer | `extern` | External symbol binding |
 | `private` | Private visibility modifier | `asm` | Inline assembly block |
@@ -104,6 +104,13 @@ These are hard keywords — they cannot be used as identifiers:
 
 **Not keywords**: `pub` (items are public by default; `private` restricts visibility), `fn`.
 `let` is a keyword introducing inferred local bindings (`let x = expr;`).
+
+**Contextual keywords**: `shared` is a keyword only before a type and a
+declared name (`shared i64 total`, `shared i64* p`), and `lock` only at the
+start of a statement before a place and a block (`lock total { ... }`); see
+[Shared values and `lock`](#shared-values-and-lock). Elsewhere both are
+ordinary names: `m.lock()`, `i64 lock = 0;`, and a type named `shared` in
+`shared create() { ... }`.
 
 ### Literals
 
@@ -1108,17 +1115,15 @@ Threads are 1:1 OS threads running on the pure-Silver static runtime
 ### Launching Tasks
 
 `launch f(args...)` spawns a thread that calls `f`, returning a `Task<T>`
-handle where `T` is `f`'s return type.  Every argument is **moved** into
- the child thread.
+handle where `T` is `f`'s return type. By-value arguments are **moved** into
+the child thread.
 
 ```silver
 Task<i64> t = launch compute(21);   // Task<i64>: the callee's return type
 Task<void> u = launch worker();     // void tasks are fine
 ```
 
-The handle is a plain value with no `Drop`: dropping an unwaited `Task`
-does **not** join it — the thread keeps running and is reaped by the
-exit-time join-all.  Joining is always explicit:
+Joining is explicit, and consumes the handle:
 
 ```silver
 i64 r = wait t;          // join, move out the result, consume the handle
@@ -1127,41 +1132,245 @@ defer wait t;            // join on every exit path of the scope
 
 A second `wait` on the same handle is a move error.
 
+`launch` fails when the 64-slot thread registry is full or the OS cannot
+create the thread. `t.started()` reports whether the thread was created
+without consuming the handle; `wait` on a task that never started aborts the
+process, because there is no result to return:
+
+```silver
+Task<void> t = launch serve(&listener);
+if (!t.started()) {
+    serve(&listener);   // fall back to running on this thread
+}
+```
+
+`started()` is the only method of `Task`. A task whose arguments
+are all moved is **detached** when its handle is dropped unwaited: the
+thread keeps running and is reaped by the exit-time join-all.
+
 The result type `T` need not be `Send`: `wait` joins the worker before exposing
-the result to the caller. Launch arguments still must be `Send` because they
-are accessed concurrently with the launching thread.
+the result to the caller.
+
+### Borrowed launch
+
+When the callee takes a `&T` or `&mut T` parameter, the launch passes a
+reference to the launcher's local instead of moving it. Threads can share
+state without globals or wrapper types:
+
+```silver
+void add(&shared i64 total, i64 amount) {
+    lock total { total += amount; }
+}
+
+i64 main() {
+    shared i64 total = 0;
+    Task<void> a = launch add(&total, 5);
+    Task<void> b = launch add(&total, 7);
+    wait a;
+    wait b;
+    i64 result = 0;
+    lock total { result = total; }
+    return result;   // 12
+}
+```
+
+The compiler joins a borrowing task before its borrows end:
+
+- It must initialize a local `Task` (`Task<T> t = launch f(&x);`), be
+  pushed into a local `Vec<Task<T>>` (below), or be waited directly
+  (`wait launch f(&x)`). The local cannot be returned,
+  moved, passed by value or stored; only `wait t` or `defer wait t` consume
+  it, and `t.started()` reads it.
+- An unwaited borrowing task is joined when its local leaves scope,
+  including on an early `return`. Its result is dropped there.
+- Until the join, each `&x` is a shared loan and each `&mut x` a mutable
+  loan on `x`. The launcher cannot assign, move or `drop()` `x`, and a
+  `&mut x` excludes every other use of `x`, including a second launch. A
+  `wait t;` statement in the task's own block ends the loans; a `wait`
+  inside a condition does not. When a task's loan blocks a change, the error suggests
+  the two ways to let several threads change the place, a `shared` value
+  changed inside `lock`, or an atomic such as `AtomicI64` passed as `&x`, and
+  leaves the choice to you.
+- A reference parameter can be forwarded: `launch f(r)` with a `&T` or
+  `&mut T` variable `r` keeps `r`'s loans until the join.
+- The argument for a reference parameter must be `&place`, `&mut place` or
+  a reference variable. A plain local (`launch f(x)`) is rejected rather
+  than borrowed implicitly: declare it `shared`, or move it into the task
+  through a by-value parameter. A call that returns a reference is
+  rejected too.
+- A borrowing launch can also be pushed into a local `Vec<Task<T>>`, for a
+  worker pool. The vector's drop joins its tasks, so it must be declared
+  after everything they borrow. Another type with a `push` method may not
+  join what it holds, so it cannot take a borrowing launch. Its tasks may run at once, so they borrow
+  only with `&`, and the borrowed places stay read-only from the
+  collection's declaration to the end of its scope. Use the collection only
+  through `push`, `len`, `is_empty`, `clear` and `drop`, or `wait` on `pop`,
+  `take`, `swap_remove` or `get`:
+
+  ```silver
+  i64 total = 0;
+  {
+      Vec<Task<i64>> pool = Vec<Task<i64>>.new();
+      for (i64 i = 0; i < 4; i += 1) {
+          pool.push(launch sum(&data));
+      }
+      while (pool.len() > 0) {
+          total += wait pool.pop();
+      }
+  }
+  ```
+
+A thread that must outlive the function that launched it cannot borrow;
+move owned values into it, or share them through `Arc<T>`.
+
+### Shared values and `lock`
+
+`shared T` declares a value that several threads change. Its type is
+`Mutex<T>` from `std.sync`, and a declaration's initializer is a plain `T`:
+
+```silver
+import std.sync;
+
+shared i64 total = 0;                    // Mutex<i64> total = Mutex<i64>.new(0);
+shared Vec<i64> seen = Vec<i64>.new();
+```
+
+`shared` declares locals, struct fields, and reference parameters
+(`&shared i64 total`). It applies to the type name it precedes, so
+`shared i64*` is a pointer to a shared `i64` (`Mutex<i64>*`), like
+`&shared i64`; a shared pointer is written `Mutex<i64*>`.
+`lock x { ... }` is the way to read or
+change the value. Inside the block `x` names the value itself, a `T`, and
+the lock is held until the block ends:
+
+```silver
+void add(&shared i64 total, i64 amount) {
+    lock total { total += amount; }
+}
+```
+
+The lock is released on every exit from the block: its end, `return`,
+`break` and `continue`. To lock a place that is not a plain name, name the
+value with `as`:
+
+```silver
+struct Limiter {
+    shared i64 hits;
+    i64 limit;
+}
+
+impl Limiter {
+    bool accept(&self) {
+        lock self.hits as hits {
+            if (hits >= self.limit) { return false; }   // unlocks, then returns
+            hits += 1;
+        }
+        return true;
+    }
+}
+```
+
+`lock` also takes a `Mutex<T>` written out, a reference to one, or a pointer
+to one (`lock state.get() as count { ... }` for an `Arc<Mutex<i64>>`).
+`m.lock()` still returns a `Guard<T>` for code that holds a lock across
+statements that a block cannot express.
+
+The compiler rejects the mistakes it can see:
+
+- Using a shared value outside a lock: `` `total` is shared between threads:
+  read or change it inside `lock total { ... }` ``.
+- Locking a value that is not shared: `` `count` is `i64`, not shared:
+  declare it `shared i64` to lock it ``.
+- Locking the same place again inside its own lock block, which would
+  deadlock, and declaring another `x` inside `lock x`.
+- Moving the value, or an owned field or element of it, out of the block:
+  `` cannot move 'seen' out of its lock block: the shared value still owns
+  it; clone it instead ``.
+- Moving, dropping, or overwriting the place the block locks while the block
+  runs, such as `state` in `lock state.get() as count { ... }`: the lock
+  points into it. `` cannot drop 'state' inside a lock block on it: the lock
+  guard points into it ``.
+- A place that is not a plain name without `as name`.
+
+Two rules are not checked. A reference to the value taken inside the block
+must not outlive it, because the lock no longer protects the value. And
+threads that hold two locks at once must take them in the same order, or
+they can deadlock.
+
+`lock` is a statement, not an expression. Editors show a shared value's
+type as `Mutex<T>`; an `as` name is a declaration of its own.
 
 ### Send gate
 
-Because launch arguments are moved across the thread boundary, every
-argument type must be **Send**.  The check is a structural field walk:
+Every value that crosses the thread boundary must be **Send**: a by-value
+argument itself, and the pointee of a borrowed argument. Silver has no
+unsynchronized shared mutation outside raw pointers, so a value that may be
+moved to another thread may also be shared with it. The check is a
+structural field walk:
 
 - **Send**: primitives (`i64`, `str`, `bool`, …), function values, `Task<T>`
   handles, arrays, `Optional<T>`, tuples; owned containers (`Vec<T>`,
-  `Box<T>`, `String`, `Bytes`, `HashMap<K, V>`) iff their owned type
-  arguments are Send; structs/enums whose fields/variant payloads are all
-  Send (generic parameters substituted from the instantiation).
+  `Box<T>`, `Arc<T>`, `String`, `Bytes`, `HashMap<K, V>`) iff their owned
+  type arguments are Send; structs/enums whose fields/variant payloads are
+  all Send (generic parameters substituted from the instantiation).
 - **Not Send** (compile error at the launch site): `Rc<T>` (shared,
-  non-atomic refcount), GC heap `Handle`s, raw pointers (`T*`), references
-  (`&T`/`&mut T`), slices, and any struct holding an unmarked raw pointer.
+  non-atomic refcount), GC heap `Handle`s, `Guard<T>`, raw pointers (`T*`),
+  slices, references stored in a by-value argument, and any struct holding
+  a raw pointer that is not marked `#[safe]`. `&x` passed to a `T*`
+  parameter is a raw pointer.
+
+A struct whose raw pointers are synchronized by its own locks or atomics can
+be marked `#[safe]`: its author vouches that it may be moved to and shared
+with other threads, and the compiler does not inspect its fields. Like
+`Vec<T>` or `Arc<T>`, a generic `#[safe]` struct is still Send only when its
+type arguments are. The compiler cannot check the promise, so name the lock
+or atomic that protects each pointer in the struct's doc comment:
+
+```silver
+/// `items` is read and written only while `lock` is held.
+#[safe]
+struct Inbox {
+    Vec<Message>* items;
+    RawMutex lock;
+}
+```
+
+Stage1 judges a by-value argument by the declared type of the variable it
+starts with, so bind a computed value such as `state.clone()` to a local
+before launching it.
 
 ### Synchronization primitives
 
-- **`Mutex<T>`** + **`Guard<T>`** (RAII): `g.lock()` returns a guard granting
+Every operation that may run on several threads at once takes `&self`, so
+threads share a primitive through `&T`. Teardown such as `Channel.destroy`
+still needs exclusive access.
+
+- **`Mutex<T>`** + **`Guard<T>`** (RAII): `shared T` spells a `Mutex<T>`,
+  and `lock m { ... }` locks it for a block. `m.lock()` returns a guard granting
   access to the value (`get`/`set`/`get_ptr`) and unlocking the underlying
   `RawMutex` when the guard drops — at scope exit, on early return, or when
   moved.  A zero-initialized global `Mutex<T>` is a valid unlocked mutex
-  holding a zero value.
+  holding a zero value. Do not move a mutex while a guard is alive.
 - **`RawMutex`**: the low-level futex lock (`lock`/`unlock`/`try_lock`)
   underneath `Mutex<T>` and `Channel<T>`.
+- **`RwLock<T>`**: `read()` and `write()` return RAII guards for shared or
+  exclusive access.
+- **`Condvar`**: `wait_on(&mu)` releases a held `RawMutex`, sleeps, and
+  re-acquires it; `notify_one`/`notify_all` wake waiters. Re-check the
+  awaited condition in a loop.
 - **`Channel<T>`**: thread-safe FIFO with unbounded (`Channel<T>.new()`) and
   bounded (`Channel<T>.bounded(cap)`) modes. `send(T)` moves a value into the
   queue; bounded sends block when the queue is full. `recv()` blocks until it
   can return `Some(value)`, or until a closed, drained channel returns `None`.
   `send()` returns false if the channel is closed. `close()` wakes blocked
-  senders and receivers. Call `destroy()` after use to free the queue buffer.
+  senders and receivers. Call `destroy()` after use to drop queued values and
+  free the queue buffer.
 - **`WaitGroup`**: `add(n)` / `done()` / `wait_all()` — a counter that
   blocks `wait_all()` until `done()` brings it to zero.
+- **`Arc<T>`** (`std.mem.arc`): atomically reference-counted shared
+  ownership. Handles may be cloned and dropped on any thread; the last drop
+  destroys the value once. Arc shares the value read-only; wrap mutable
+  state as `Arc<Mutex<T>>`.
 - **Atomics**: the `__atomic_*` intrinsic layer (`__atomic_load_i64`,
   `__atomic_fetch_add_i64`, …) wrapped by `std.atomic` value types
   (`AtomicI8`/`AtomicI32`/`AtomicI64`/`AtomicBool`).
@@ -1172,7 +1381,13 @@ All futex-based primitives are seq_cst by default.
 
 - Threads are 1:1 OS threads registered in a fixed-size (64-slot) registry;
   a detached task keeps its slot until a waiter or the exit-time join-all
-  reaps it.
+  reaps it. A launch that finds no free slot yields a task whose
+  `started()` is false.
+- A `Task` can be stored in a collection. A bitwise copy of a handle, such as
+  one read with `Vec.get`, becomes stale once any copy is waited: dropping a
+  stale copy does nothing, and waiting it aborts. Move handles out with
+  `pop`, `take` or `swap_remove` instead. Waiting one task from two threads
+  at once is not supported.
 - The runtime entry (`std.sys.entry`) is imported automatically and provides
   `_start`; every binary links statically against the pure-Silver runtime —
   there is no libc, and `--dynamic-runtime` no longer exists.

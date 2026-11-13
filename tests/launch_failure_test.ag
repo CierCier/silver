@@ -1,0 +1,58 @@
+// expected_exit: 134
+// compile_flags: --cfg launch_failure_test=true
+//
+// A launch that cannot start reports it through `started()`, and `wait` on
+// it aborts instead of inventing a result.
+//
+// The `launch_failure_test` cfg shrinks the thread registry to one slot:
+//   1. A first task holds the slot until main releases it; it started.
+//   2. Launches made meanwhile, borrowing or not, report started() == false.
+//      A borrowing one leaving scope unwaited is a no-op.
+//   3. After the first task is joined, `wait` on the failed task aborts with
+//      exit 134. Any wrong started() answer exits with a smaller code.
+
+import std.thread;
+import std.atomic;
+import std.time;
+import std.sys.entry;
+
+i64 g_release;
+
+// Holds its registry slot until main sets g_release.
+i64 hold_slot(i64 value) {
+    while (__atomic_load_i64(&g_release, ATOMIC_SEQ_CST) == 0) {
+        sleep_ms(1);
+    }
+    return value;
+}
+
+i64 peek(&i64 value) {
+    return *value;
+}
+
+i64 main() {
+    Task<i64> holder = launch hold_slot(7);
+    if (!holder.started()) { return 1; }
+
+    // Failures are collected so the slot is always released before
+    // returning: an unjoined holder would hang the exit-time join.
+    i64 status = 0;
+    i64 local = 3;
+    {
+        Task<i64> borrowing = launch peek(&local);
+        if (borrowing.started()) { status = 2; }
+    }
+    Task<i64> failed = launch hold_slot(9);
+    bool failed_started = failed.started();
+    if (failed_started && status == 0) { status = 3; }
+
+    __atomic_store_i64(&g_release, 1, ATOMIC_SEQ_CST);
+    if (wait holder != 7 && status == 0) { status = 4; }
+    if (status != 0 && !failed_started) { return status; }
+
+    // Aborts when the task never ran: there is no result to return. Only a
+    // regression that started it reaches the returns below.
+    i64 never = wait failed;
+    if (status != 0) { return status; }
+    return never + 5;
+}

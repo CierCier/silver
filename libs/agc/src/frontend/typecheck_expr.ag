@@ -12,6 +12,7 @@ import frontend.items;
 import frontend.lexer;
 import frontend.lower_expr;
 import frontend.symbols;
+import frontend.sync_sugar;
 import frontend.messages;
 import frontend.monomorph;
 import frontend.types;
@@ -282,6 +283,73 @@ bool typecheck_slice_argument_coercion(TypeTable* types, u32 expected, u32 actua
             == element_type;
     }
     return false;
+}
+
+/// True when `type_id` is fully known: no unknown, type parameter, function,
+/// tuple, or slice anywhere inside it.
+bool typecheck_type_is_concrete(TypeTable* types, u32 type_id, i64 depth) {
+    if (depth > 16) { return false; }
+    type_id = types.resolve_subst(type_id);
+    TypeEntry* entry = types.get(type_id);
+    if (entry.kind == TypeKind.Unknown || entry.kind == TypeKind.Void
+        || entry.kind == TypeKind.TypeParam || entry.kind == TypeKind.Function
+        || entry.kind == TypeKind.Tuple || entry.kind == TypeKind.Slice) {
+        return false;
+    }
+    if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference
+        || entry.kind == TypeKind.Array) {
+        return typecheck_type_is_concrete(types, entry.inner, depth + 1);
+    }
+    if (entry.kind == TypeKind.Named) {
+        i64 i = 0;
+        while (i < entry.count) {
+            if (!typecheck_type_is_concrete(types, types.type_args.get(entry.inner + (u32)i),
+                                            depth + 1)) {
+                return false;
+            }
+            i += 1;
+        }
+    }
+    return true;
+}
+
+/// True when an argument of type `actual` cannot bind to reference
+/// parameter type `expected`: the value it points at, or the value itself
+/// for an implicit borrow, is not the parameter's pointee. Types that are
+/// not fully known are not judged.
+bool typecheck_reference_argument_mismatch(TypeTable* types, u32 expected, u32 actual) {
+    expected = types.resolve_subst(expected);
+    actual = types.resolve_subst(actual);
+    TypeEntry* parameter = types.get(expected);
+    if (parameter.kind != TypeKind.Reference) { return false; }
+    u32 pointee = actual;
+    TypeEntry* argument = types.get(actual);
+    if (argument.kind == TypeKind.Pointer || argument.kind == TypeKind.Reference) {
+        pointee = argument.inner;
+        // `&r` where `r` is already a reference reborrows through it.
+        TypeEntry* through = types.get(types.resolve_subst(pointee));
+        if (through.kind == TypeKind.Reference
+            && types.get(types.resolve_subst(parameter.inner)).kind != TypeKind.Reference) {
+            pointee = through.inner;
+        }
+    }
+    if (!typecheck_type_is_concrete(types, parameter.inner, 0)
+        || !typecheck_type_is_concrete(types, pointee, 0)) {
+        return false;
+    }
+    // `types_match` lets any two numbers match, but an `&mut i64` over an
+    // `i32` writes 8 bytes. An implicit borrow into `&T` converts the value
+    // first, so only a real borrow or a mutable parameter needs one layout.
+    u32 expected_pointee = types.resolve_subst(parameter.inner);
+    pointee = types.resolve_subst(pointee);
+    if ((argument.kind == TypeKind.Pointer || argument.kind == TypeKind.Reference
+            || parameter.is_mut)
+        && type_is_numeric_or_char(expected_pointee) && type_is_numeric_or_char(pointee)) {
+        return expected_pointee != pointee
+            && !(type_is_byte_like(expected_pointee) && type_is_byte_like(pointee));
+    }
+    return !types_match(types, parameter.inner, pointee)
+        && !typecheck_slice_argument_coercion(types, expected, actual);
 }
 
 /// Returns true when a call argument fits its parameter (value matching or
@@ -649,6 +717,23 @@ u32 typecheck_overload_symbol_id(TypeTable* types, Interner* names, str name,
     u32 symbol_id = names.intern(symbol.to_str());
     symbol.drop();
     return symbol_id;
+}
+
+/// Returns the non-generic overload of `name` whose symbol is `symbol_id`,
+/// or null.
+SyntaxNode* typecheck_overload_by_symbol(TypeTable* types, Interner* names, SyntaxNode* root,
+                                         str name, u32 symbol_id) {
+    SyntaxNode* item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        SyntaxNode* id = item.kind == NodeKind.Function && !typecheck_is_generic_function(item)
+            ? function_identifier(item) : (SyntaxNode*)0;
+        if (id != (SyntaxNode*)0 && strcmp(id.text, name) == 0
+            && typecheck_overload_symbol_id(types, names, name, item) == symbol_id) {
+            return item;
+        }
+        item = item.next_sibling;
+    }
+    return (SyntaxNode*)0;
 }
 
 /// Resolves a free-function call to the overload whose parameters fit its
@@ -1179,11 +1264,97 @@ u32 typecheck_place_type(AstPool* pool, TypeTable* types, SymbolTable* symbols,
     return place_type;
 }
 
-/// Reports moving a field out of a value whose type implements Drop.
-/// Returns true when it reported.
+/// Reports moving a `lock` block's value, or an owned field or element of
+/// it, out of the block. The value is `(*__lock_N__name)`, a place inside
+/// the Mutex (see sync_sugar.ag), and the Mutex would still own and drop
+/// it. A tuple, a brace initializer, or a match arm consumes each value it
+/// is built from. Returns true when it reported.
+bool typecheck_reject_locked_move(AstPool* pool, TypeTable* types, SymbolTable* symbols,
+                                  SyntaxNode* root, u32 place_id,
+                                  DiagnosticBag* diagnostics, bool* ok) {
+    AstExpr* place = pool.get_expr(place_id);
+    if (place.kind == ExprKind.ArrayLit || place.kind == ExprKind.Match) {
+        bool reported = false;
+        i64 i = 0;
+        while (i < (i64)place.aux) {
+            u32 part = place.kind == ExprKind.ArrayLit
+                ? pool.args.get((i64)place.inner1 + 1 + i)
+                : pool.arms.get_ptr((i64)place.inner1 + i).value_id;
+            // A `move` part is rejected where the move is checked.
+            if (part != 0 && pool.get_expr(part).kind != ExprKind.Move
+                && typecheck_reject_locked_move(pool, types, symbols, root, part,
+                                                diagnostics, ok)) {
+                reported = true;
+            }
+            i += 1;
+        }
+        return reported;
+    }
+    AstExpr* base = place;
+    String path = String.new();
+    while ((base.kind == ExprKind.Field || base.kind == ExprKind.Index) && base.inner0 != 0) {
+        String step = String.from_str(base.kind == ExprKind.Field ? "." : "[...]");
+        if (base.kind == ExprKind.Field) { step.push_str(symbols.names.get(base.aux)); }
+        step.push_str(path.to_str());
+        path = move step;
+        base = pool.get_expr(base.inner0);
+    }
+    if (base.kind != ExprKind.Unary || base.aux != (u32)TokenKind.Star || base.inner0 == 0) { return false; }
+    AstExpr* pointer = pool.get_expr(base.inner0);
+    if (pointer.kind != ExprKind.Var) { return false; }
+    String local = String.from_str(symbols.names.get(pointer.aux));
+    i64 start = sugar_locked_name_start(local.to_str());
+    if (start < 0 || place.inferred_type == TYPE_UNKNOWN
+        || typecheck_type_is_copy(root, types, place.inferred_type)) {
+        return false;
+    }
+    String name = local.substr(start, local.len() - start);
+    name.push_str(path.to_str());
+    diagnostics.error(place.span, move_out_of_lock(name.to_str()));
+    *ok = false;
+    return true;
+}
+
+/// True when `id` reads a lock block's value or a field of it: sync_sugar
+/// lowers the value to `(*__lock_N__name)`.
+bool typecheck_reads_locked_value(AstPool* pool, SymbolTable* symbols, u32 id) {
+    AstExpr* base = pool.get_expr(id);
+    while ((base.kind == ExprKind.Field || base.kind == ExprKind.Index) && base.inner0 != 0) {
+        base = pool.get_expr(base.inner0);
+    }
+    if (base.kind != ExprKind.Unary || base.aux != (u32)TokenKind.Star || base.inner0 == 0) { return false; }
+    AstExpr* pointer = pool.get_expr(base.inner0);
+    return pointer.kind == ExprKind.Var && sugar_locked_name_start(symbols.names.get(pointer.aux)) >= 0;
+}
+
+/// The payload binding that match arm `arm` moves out of its scrutinee: a
+/// `move` binding, or an owning binding the arm yields. 0 when none.
+u32 typecheck_arm_moved_binding(AstPool* pool, TypeTable* types, SyntaxNode* root, MatchArm* arm) {
+    if (arm.pattern != MatchPatternKind.Variant || arm.bindings_count == 0) { return 0; }
+    if (arm.value_id != 0) {
+        AstExpr* value = pool.get_expr(arm.value_id);
+        if (value.kind == ExprKind.Move && value.inner0 != 0) { value = pool.get_expr(value.inner0); }
+        i64 i = 0;
+        while (value.kind == ExprKind.Var && i < (i64)arm.bindings_count) {
+            if (pool.arm_bindings.get((i64)arm.bindings_start + i) == value.aux
+                && value.inferred_type != TYPE_UNKNOWN
+                && !typecheck_type_is_copy(root, types, value.inferred_type)) {
+                return value.aux;
+            }
+            i += 1;
+        }
+    }
+    return arm.moves_payload ? pool.arm_bindings.get((i64)arm.bindings_start) : 0;
+}
+
+/// Reports moving a field out of a value whose type implements Drop, or a
+/// value out of a lock block. Returns true when it reported.
 bool typecheck_reject_partial_drop_move(AstPool* pool, TypeTable* types, SymbolTable* symbols,
                                         SyntaxNode* root, TypeEnv* env, u32 place_id,
                                         DiagnosticBag* diagnostics, bool* ok) {
+    if (typecheck_reject_locked_move(pool, types, symbols, root, place_id, diagnostics, ok)) {
+        return true;
+    }
     Vec<u32> fields = Vec<u32>.new();
     u32 root_name = typecheck_collect_place(pool, place_id, &fields);
     if (root_name == 0 || fields.len() == 0) {
@@ -1272,6 +1443,27 @@ bool typecheck_reject_partial_drop_move(AstPool* pool, TypeTable* types, SymbolT
     owner_text.drop();
     fields.drop();
     return false;
+}
+
+/// True when `owner.method(...)` constructs a variant of enum `owner`,
+/// which takes each payload by value.
+bool typecheck_is_variant_constructor(SyntaxNode* root, str owner, str method_name) {
+    SyntaxNode* enum_item = find_enum_item(root, owner);
+    if (enum_item == (SyntaxNode*)0) { return false; }
+    Vec<SyntaxNode*> variants = Vec<SyntaxNode*>.new();
+    Vec<i64> tags = Vec<i64>.new();
+    Vec<i64> arities = Vec<i64>.new();
+    enum_each_variant(enum_item, &variants, &tags, &arities);
+    bool constructor = false;
+    i64 i = 0;
+    while (i < variants.len() && !constructor) {
+        constructor = strcmp(variants.get(i).text, method_name) == 0;
+        i += 1;
+    }
+    variants.drop();
+    tags.drop();
+    arities.drop();
+    return constructor;
 }
 
 /// Returns true when the method parameter takes its argument by value.
@@ -2061,6 +2253,69 @@ u32 typecheck_slice_result_type(TypeTable* types, SyntaxNode* root, u32 target_t
 
 /// Infers and records the type of expression `expr_id`, reporting type
 /// errors. Caches the result in the expression.
+/// True when `type_id` is a Mutex<T>, directly or behind a reference: the
+/// type a `shared T` is spelled as.
+bool typecheck_is_mutex(TypeTable* types, u32 type_id) {
+    if (type_id == TYPE_UNKNOWN) { return false; }
+    TypeEntry* entry = types.get(types.resolve_subst(type_id));
+    if (entry.kind == TypeKind.Reference) {
+        entry = types.get(types.resolve_subst(entry.inner));
+    }
+    return entry.kind == TypeKind.Named && strcmp(types.names.get(entry.name_id), "Mutex") == 0;
+}
+
+/// The name for expression `expr_id` in a diagnostic: its variable name, or
+/// "this value" for anything else.
+str typecheck_operand_name(AstPool* pool, SymbolTable* symbols, u32 expr_id) {
+    AstExpr* operand = pool.get_expr(expr_id);
+    if (operand.kind == ExprKind.Var) { return symbols.names.get(operand.aux); }
+    return "this value";
+}
+
+/// Reports a `lock` block whose place is not shared. sync_sugar lowers the
+/// block to `{ let __lock_N_guard = place.lock(); ... }`; the statements are
+/// `[start, start + count)`. Returns true when it reported one.
+bool typecheck_lock_on_unshared(AstPool* pool, TypeTable* types, SymbolTable* symbols,
+                                SyntaxNode* root, TypeEnv* env, u32 start, u32 count,
+                                DiagnosticBag* diagnostics, bool* ok) {
+    if (count < 2) { return false; }
+    AstStmt* guard = pool.get_stmt(pool.block_stmts.get((i64)start));
+    if (guard.kind != StmtKind.Let || guard.inner1 == 0
+        || !typecheck_str_starts_with(symbols.names.get(guard.aux), "__lock_")) {
+        return false;
+    }
+    AstExpr* call = pool.get_expr(guard.inner1);
+    if (call.kind != ExprKind.MethodCall || strcmp(symbols.names.get(call.aux), "lock") != 0) {
+        return false;
+    }
+    u32 place_type = infer_expr(pool, types, symbols, root, env, call.inner0, diagnostics, ok);
+    if (place_type == TYPE_UNKNOWN) {
+        place_type = typecheck_place_type(pool, types, symbols, root, env, call.inner0);
+    }
+    if (place_type == TYPE_UNKNOWN) { return false; }
+    // `.lock()` reaches a Mutex through a reference or a pointer.
+    TypeEntry* entry = types.get(types.resolve_subst(place_type));
+    if (entry.kind == TypeKind.Reference || entry.kind == TypeKind.Pointer) { place_type = entry.inner; }
+    if (typecheck_is_mutex(types, place_type)) { return false; }
+    Vec<u32> fields = Vec<u32>.new();
+    u32 root_name = typecheck_collect_place(pool, call.inner0, &fields);
+    String place = String.from_str(root_name == 0 ? "this value" : "`");
+    if (root_name != 0) {
+        place.push_str(symbols.names.get(root_name));
+        i64 i = 0;
+        while (i < fields.len()) {
+            place.push('.');
+            place.push_str(symbols.names.get(fields.get(i)));
+            i += 1;
+        }
+        place.push('`');
+    }
+    diagnostics.error(pool.get_expr(call.inner0).span,
+                      lock_needs_shared(place.to_str(), types.type_name(place_type)));
+    *ok = false;
+    return true;
+}
+
 u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode* root,
                TypeEnv* env, u32 expr_id, DiagnosticBag* diagnostics, bool* ok) {
     if (expr_id == 0) { return TYPE_UNKNOWN; }
@@ -2117,6 +2372,18 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
     } else if (expr.kind == ExprKind.Launch) {
         u32 result_type = infer_expr(pool, types, symbols, root, env,
                                      expr.inner0, diagnostics, ok);
+        // The borrow and Send passes judge the launch by this overload. They
+        // read the source tree, which has no expanded launches, and an
+        // expansion's spans are offsets into its own text, so they could
+        // collide with a source callee's key.
+        AstExpr* call = pool.get_expr(expr.inner0);
+        AstExpr* callee = pool.get_expr(call.inner0);
+        if (call.kind == ExprKind.Call && call.resolved_callee_id != 0
+            && callee.kind == ExprKind.Var && expr.aux == 0) {
+            SyntaxNode* selected = typecheck_overload_by_symbol(types, &symbols.names, root,
+                symbols.names.get(callee.aux), call.resolved_callee_id - 1);
+            if (selected != (SyntaxNode*)0) { symbols.select_callee(callee.span, selected); }
+        }
         if (result_type != TYPE_UNKNOWN) {
             Vec<u32> task_args = Vec<u32>.new();
             task_args.push(result_type);
@@ -2238,7 +2505,13 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         u32 op = expr.aux;
         u32 lhs = infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
         u32 rhs = infer_expr(pool, types, symbols, root, env, expr.inner1, diagnostics, ok);
-        if (op == (u32)TokenKind.Equal || op == (u32)TokenKind.NotEqual
+        if (typecheck_is_mutex(types, lhs) || typecheck_is_mutex(types, rhs)) {
+            // A `shared T` is a Mutex<T>: its value is reached only by locking it.
+            u32 operand = typecheck_is_mutex(types, lhs) ? expr.inner0 : expr.inner1;
+            diagnostics.error(expr.span, shared_value_outside_lock(
+                typecheck_operand_name(pool, symbols, operand)));
+            *ok = false;
+        } else if (op == (u32)TokenKind.Equal || op == (u32)TokenKind.NotEqual
             || op == (u32)TokenKind.Less || op == (u32)TokenKind.LessEqual
             || op == (u32)TokenKind.Greater || op == (u32)TokenKind.GreaterEqual
             || op == (u32)TokenKind.And || op == (u32)TokenKind.Or) {
@@ -2350,6 +2623,8 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         }
     } else if (expr.kind == ExprKind.Match) {
         u32 scrut_type = infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
+        // The shared value keeps owning a locked scrutinee's payload.
+        bool locked = typecheck_reads_locked_value(pool, symbols, expr.inner0);
         str scrut_enum = "";
         if (scrut_type != TYPE_UNKNOWN) {
             TypeEntry* scrut_entry = types.get(scrut_type);
@@ -2465,6 +2740,11 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
             } else {
                 arm_type = infer_expr(pool, types, symbols, root, &arm_env,
                                       arm.value_id, diagnostics, ok);
+            }
+            u32 moved = locked ? typecheck_arm_moved_binding(pool, types, root, arm) : 0;
+            if (moved != 0) {
+                diagnostics.error(arm.span, move_out_of_lock(symbols.names.get(moved)));
+                *ok = false;
             }
             if (result_type == TYPE_UNKNOWN) {
                 result_type = arm_type;
@@ -2615,7 +2895,15 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                             typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
                                                                arg_expr_id, diagnostics, ok);
                         }
-                        if (!typecheck_call_argument_matches(
+                        if (!typecheck_is_generic_function(callee_fn)
+                            && typecheck_reference_argument_mismatch(
+                                types, expected_arg_type, actual_arg_type)
+                            && !has_user_cast(root, types, actual_arg_type, expected_arg_type)) {
+                            diagnostics.error(pool.get_expr(arg_expr_id).span,
+                                reference_argument_mismatch(types.type_name(expected_arg_type),
+                                    types.type_name(actual_arg_type)));
+                            *ok = false;
+                        } else if (!typecheck_call_argument_matches(
                                 types, expected_arg_type, actual_arg_type,
                                 expr_is_literal(pool, arg_expr_id))
                             && !has_user_cast(root, types, actual_arg_type, expected_arg_type)) {
@@ -2773,7 +3061,22 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         }
         str method_name = symbols.names.get(expr.aux);
         u32 arg_count = expr.inner1 < (u32)pool.args.len() ? pool.args.get((i64)expr.inner1) : 0;
+        // `Task<T>` is builtin; `started()` is its only method.
+        TypeEntry* receiver_entry = types.get(types.resolve_subst(receiver_type));
+        if (receiver_entry.kind == TypeKind.Named && receiver_entry.count == 1
+            && strcmp(types.names.get(receiver_entry.name_id), "Task") == 0) {
+            u32 task_method_type = TYPE_BOOL;
+            if (strcmp(method_name, "started") != 0 || arg_count != 0) {
+                diagnostics.error(expr.span, unknown_task_method(method_name));
+                *ok = false;
+                task_method_type = TYPE_UNKNOWN;
+            }
+            expr.inferred_type = task_method_type;
+            env.expression_depth -= 1;
+            return task_method_type;
+        }
         bool static_method = false;
+        bool variant_constructor = false;
         if (receiver.kind == ExprKind.Var) {
             str receiver_name = symbols.names.get(receiver.aux);
             String base = String.new();
@@ -2783,6 +3086,8 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 base_index += 1;
             }
             static_method = impl_has_static_method(root, base.to_str(), method_name);
+            variant_constructor = env.lookup(receiver.aux) == TYPE_UNKNOWN
+                && typecheck_is_variant_constructor(root, base.to_str(), method_name);
             if (static_method) {
                 u32 static_receiver_type = type_id_from_text(types, receiver_name);
                 if (static_receiver_type != TYPE_UNKNOWN) {
@@ -2845,9 +3150,10 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                         arg_type = argument.inferred_type;
                     }
                 }
-                if (typecheck_method_parameter_is_value(root, types, receiver_type,
-                                                       method_name, total_param_count,
-                                                       parameter_index, arg_type)) {
+                if (variant_constructor
+                    || typecheck_method_parameter_is_value(root, types, receiver_type,
+                                                           method_name, total_param_count,
+                                                           parameter_index, arg_type)) {
                     if (pool.get_expr(arg_id).kind != ExprKind.Move) {
                         typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
                                                            arg_id, diagnostics, ok);
@@ -3300,7 +3606,12 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
             typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
                                                stmt.inner1, diagnostics, ok);
         }
-        if (target_type != TYPE_UNKNOWN && val_type != TYPE_UNKNOWN
+        if (typecheck_is_mutex(types, target_type) && val_type != TYPE_UNKNOWN
+            && !typecheck_is_mutex(types, val_type)) {
+            diagnostics.error(stmt.span, shared_value_outside_lock(
+                typecheck_operand_name(pool, symbols, stmt.inner0)));
+            *ok = false;
+        } else if (target_type != TYPE_UNKNOWN && val_type != TYPE_UNKNOWN
             && !types_match_value(types, target_type, val_type, expr_is_literal(pool, stmt.inner1))
             && !has_user_cast(root, types, val_type, target_type)) {
             String message = String.from_str("type mismatch: expected ");
@@ -3356,6 +3667,10 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
     } else if (stmt.kind == StmtKind.Block) {
         u32 start = stmt.inner0;
         u32 count = stmt.aux;
+        // Its lowered body would only repeat the error.
+        if (typecheck_lock_on_unshared(pool, types, symbols, root, env, start, count, diagnostics, ok)) {
+            return;
+        }
         i64 i = 0;
         while (i < (i64)count) {
             u32 s_id = pool.block_stmts.get((i64)start + i);
@@ -3382,6 +3697,27 @@ bool typecheck_is_drop_ancestor_error(str message) {
         i += 1;
     }
     return true;
+}
+
+/// Returns true when `message` contains `marker`.
+bool typecheck_str_contains(str message, str marker) {
+    i64 marker_len = strlen(marker);
+    i64 start = 0;
+    while (start + marker_len <= strlen(message)) {
+        i64 i = 0;
+        while (i < marker_len && message[start + i] == marker[i]) { i += 1; }
+        if (i == marker_len) { return true; }
+        start += 1;
+    }
+    return false;
+}
+
+/// Returns true for a shared_value_outside_lock or lock_needs_shared
+/// message: a generic body that uses its `T` directly is wrong once `T` is
+/// a `shared` Mutex, and one that locks its `T` is wrong unless it is.
+bool typecheck_is_shared_value_error(str message) {
+    return (message[0] == '`' && typecheck_str_contains(message, "` is shared between threads: "))
+        || typecheck_str_contains(message, ", not shared: declare it `shared ");
 }
 
 /// Rechecks drop-ownership errors in generic call instantiations.
@@ -3476,6 +3812,8 @@ void typecheck_generic_call_drop_ownership(
         Diagnostic* diagnostic = probe_diagnostics.get(i);
         if (diagnostic.severity == Severity.Error
             && (typecheck_is_drop_ancestor_error(diagnostic.message.to_str())
+                || typecheck_is_shared_value_error(diagnostic.message.to_str())
+                || typecheck_str_contains(diagnostic.message.to_str(), "' out of its lock block: ")
                 || typecheck_str_starts_with(diagnostic.message.to_str(), "pointer argument type mismatch:"))) {
             diagnostics.error(diagnostic.span, diagnostic.message.clone());
             *ok = false;
@@ -3570,8 +3908,12 @@ bool typecheck_expressions_scoped(AstPool* pool, SymbolTable* symbols, SyntaxTre
                                 "cannot use this C function as a value:")
                             || typecheck_str_starts_with(diagnostic_text, "macro '@")
                             || typecheck_str_starts_with(diagnostic_text, "pointer argument type mismatch:")
+                            || typecheck_str_starts_with(diagnostic_text, "reference argument type mismatch:")
                             || typecheck_str_starts_with(diagnostic_text, "unwrap-or ")
                             || typecheck_str_starts_with(diagnostic_text, "generic method ")
+                            || typecheck_str_starts_with(diagnostic_text, "Task has no method '")
+                            || diagnostic.message.contains(" is shared between threads: read or change it inside `lock ")
+                            || diagnostic.message.contains(", not shared: declare it `shared ")
                             || typecheck_str_starts_with(diagnostic_text, "cannot move '")
                             || typecheck_str_starts_with(diagnostic_text,
                                 "return statement is not allowed inside a defer block")

@@ -206,6 +206,8 @@ TypeProperties type_properties_at(TypeTable* table, u32 id, u32 depth) {
         properties.needs_drop = type_name_needs_drop(name);
         properties.is_copy = !properties.needs_drop && !type_name_is_move_only(name);
         if (type_name_is_move_only(name)) {
+            // A Task's drop glue joins a scoped task before its borrows end.
+            properties.needs_drop = true;
             return properties;
         }
         i64 i = 0;

@@ -490,3 +490,48 @@ struct Point {
         (string_literal)
         (identifier)
         (string_literal)))))
+
+================================================================================
+Shared types
+================================================================================
+
+struct Limiter { shared i64 hits; }
+
+void add(&shared Vec<i64> seen) {
+    lock seen { }
+    i64 lock = guard.lock();
+    shared = lock;
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (struct_definition
+    (identifier)
+    (field_list
+      (field_declaration
+        (qualified_type
+          (primitive_type))
+        (identifier))))
+  (function_definition
+    (primitive_type)
+    (identifier)
+    (parameters
+      (parameter
+        (reference_type
+          (qualified_type
+            (generic_type
+              (type_identifier)
+              (type_arguments
+                (primitive_type)))))
+        (identifier)))
+    (block
+      (identifier)
+      (block)
+      (primitive_type)
+      (identifier)
+      (identifier)
+      (identifier)
+      (parenthesized)
+      (identifier)
+      (identifier))))

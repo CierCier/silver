@@ -1,0 +1,525 @@
+// Sugar for sharing data between threads, rewritten on the token stream
+// before parsing so every later pass sees ordinary code:
+//
+//   shared T                  =>  Mutex<T>
+//   shared T name = init;     =>  Mutex<T> name = Mutex<T>.new(init);
+//   lock place [as name] { body }
+//       =>  { let __lock_N_guard = place.lock();
+//             let __lock_N__name = __lock_N_guard.get_ptr();
+//             body, with each use of `name` written as (*__lock_N__name) }
+//
+// The guard unlocks on every exit from the block. `shared` is a keyword only
+// before a type name and `lock` only at the start of a statement before a
+// place, so both stay usable as ordinary names (`m.lock()`, `RawMutex lock;`).
+// A synthesized token that stands for a source token (`Mutex` for `shared`,
+// `(*__lock_N__x)` for `x`, the pointer local for an `as` alias) takes that
+// token's span, so diagnostics point at the user's code. Every other
+// synthesized token gets an empty span where it sits in the source: spans
+// stay in source order, which the IDE index's binary search needs, and the
+// index skips empty identifiers. Stage0 does the same rewrite in
+// sync_sugar.rs (it has no IDE index, so spans differ); keep the token
+// output of the two in step.
+import std.mem.vec;
+import std.string;
+import frontend.diagnostics;
+import frontend.lexer;
+import frontend.messages;
+
+/// A copy of `token` that owns its text.
+Token sugar_copy(Token* token) {
+    Token copy;
+    copy.kind = token.kind;
+    copy.comment_kind = token.comment_kind;
+    copy.span = token.span;
+    copy.text = token.text.clone();
+    copy.integer_value = token.integer_value;
+    copy.float_value = token.float_value;
+    copy.char_value = token.char_value;
+    copy.bool_value = token.bool_value;
+    return move copy;
+}
+
+/// A synthesized token of `kind` spelled `text` at `span`.
+Token sugar_token(TokenKind kind, str text, Span span) {
+    Token token;
+    token.kind = kind;
+    token.comment_kind = CommentKind.Line;
+    token.span = span;
+    token.text = String.from_str(text);
+    token.integer_value = (i128)0;
+    token.float_value = 0.0;
+    token.char_value = (u32)0;
+    token.bool_value = false;
+    return move token;
+}
+
+/// An empty span at the end of `span`.
+Span sugar_after(Span span) {
+    Span empty = span;
+    empty.start = span.end;
+    empty.start_line = span.end_line;
+    empty.start_col = span.end_col;
+    return empty;
+}
+
+/// Copies tokens `[from, to)` of `tokens` into `out`.
+void sugar_copy_range(Vec<Token>* tokens, i64 from, i64 to, Vec<Token>* out) {
+    i64 i = from;
+    while (i < to) {
+        out.push(sugar_copy(tokens.get_ptr(i)));
+        i += 1;
+    }
+}
+
+/// The index of the nearest non-comment token after `index`, or -1.
+i64 sugar_next(Vec<Token>* tokens, i64 index) {
+    i64 i = index + 1;
+    while (i < tokens.len()) {
+        if (tokens.get_ptr(i).kind != TokenKind.Comment) { return i; }
+        i += 1;
+    }
+    return -1;
+}
+
+/// The index of the nearest non-comment token before `index`, or -1.
+i64 sugar_previous(Vec<Token>* tokens, i64 index) {
+    i64 i = index - 1;
+    while (i >= 0) {
+        if (tokens.get_ptr(i).kind != TokenKind.Comment) { return i; }
+        i -= 1;
+    }
+    return -1;
+}
+
+/// True when token `index` exists and has kind `kind`.
+bool sugar_is(Vec<Token>* tokens, i64 index, TokenKind kind) {
+    return index >= 0 && index < tokens.len() && tokens.get_ptr(index).kind == kind;
+}
+
+/// True when token `index` is the identifier `name`.
+bool sugar_is_name(Vec<Token>* tokens, i64 index, str name) {
+    return sugar_is(tokens, index, TokenKind.Identifier) && tokens.get_ptr(index).text.equals(name);
+}
+
+/// Primitive and builtin type keywords.
+bool sugar_is_type_keyword(TokenKind kind) {
+    return kind == TokenKind.I8 || kind == TokenKind.I16 || kind == TokenKind.I32
+        || kind == TokenKind.I64 || kind == TokenKind.I128 || kind == TokenKind.U8
+        || kind == TokenKind.U16 || kind == TokenKind.U32 || kind == TokenKind.U64
+        || kind == TokenKind.U128 || kind == TokenKind.F32 || kind == TokenKind.F64
+        || kind == TokenKind.F80 || kind == TokenKind.C32 || kind == TokenKind.C64
+        || kind == TokenKind.C80 || kind == TokenKind.Bool || kind == TokenKind.Str
+        || kind == TokenKind.Char || kind == TokenKind.Void || kind == TokenKind.VecType
+        || kind == TokenKind.OptionalType || kind == TokenKind.SelfType;
+}
+
+/// True when token `index` can start a type name.
+bool sugar_is_type_start(Vec<Token>* tokens, i64 index) {
+    if (index < 0) { return false; }
+    TokenKind kind = tokens.get_ptr(index).kind;
+    return kind == TokenKind.Identifier || sugar_is_type_keyword(kind);
+}
+
+/// The end (exclusive) of the type name starting at `start`: its `a::b::T`
+/// path and a balanced `<...>` argument list (`>>` closes two levels). A `*`
+/// after it is not part of the shared type: `shared T*` is a pointer to a
+/// shared T.
+i64 sugar_type_end(Vec<Token>* tokens, i64 start) {
+    i64 last = start;
+    i64 colons = sugar_next(tokens, last);
+    while (sugar_is(tokens, colons, TokenKind.DoubleColon)
+        && sugar_is_type_start(tokens, sugar_next(tokens, colons))) {
+        last = sugar_next(tokens, colons);
+        colons = sugar_next(tokens, last);
+    }
+    i64 next = sugar_next(tokens, last);
+    if (!sugar_is(tokens, next, TokenKind.Less)) { return last + 1; }
+    i64 depth = 0;
+    i64 i = next;
+    while (i < tokens.len()) {
+        TokenKind kind = tokens.get_ptr(i).kind;
+        if (kind == TokenKind.Less) {
+            depth += 1;
+        } else if (kind == TokenKind.Greater || kind == TokenKind.RightShift) {
+            depth -= kind == TokenKind.Greater ? 1 : 2;
+            if (depth <= 0) { return i + 1; }
+        } else if (kind == TokenKind.Semicolon || kind == TokenKind.LeftBrace
+            || kind == TokenKind.RightBrace) {
+            return last + 1;
+        }
+        i += 1;
+    }
+    return last + 1;
+}
+
+/// The index of the `;` ending the expression that starts at `start`, or -1.
+i64 sugar_expression_end(Vec<Token>* tokens, i64 start) {
+    i64 depth = 0;
+    i64 i = start;
+    while (i < tokens.len()) {
+        TokenKind kind = tokens.get_ptr(i).kind;
+        if (kind == TokenKind.LeftParen || kind == TokenKind.LeftBracket || kind == TokenKind.LeftBrace) {
+            depth += 1;
+        } else if (kind == TokenKind.RightParen || kind == TokenKind.RightBracket
+            || kind == TokenKind.RightBrace) {
+            depth -= 1;
+            if (depth < 0) { return -1; }
+        } else if (kind == TokenKind.Semicolon && depth == 0) {
+            return i;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+/// Appends `Mutex<` + tokens `[from, to)` + `>` to `out`. `Mutex<` takes
+/// `open`; `>` sits empty after the type.
+void sugar_mutex_of(Vec<Token>* tokens, i64 from, i64 to, Span open, Vec<Token>* out) {
+    out.push(sugar_token(TokenKind.Identifier, "Mutex", open));
+    out.push(sugar_token(TokenKind.Less, "<", open));
+    Vec<Token> inner = Vec<Token>.new();
+    sugar_copy_range(tokens, from, to, &inner);
+    desugar_shared(&inner, out);
+    out.push(sugar_token(TokenKind.Greater, ">", sugar_after(tokens.get_ptr(to - 1).span)));
+}
+
+/// Rewrites `shared T` to `Mutex<T>` into `out`, and wraps the initializer of
+/// a `shared T name = init;` declaration in `Mutex<T>.new(...)`.
+void desugar_shared(Vec<Token>* tokens, Vec<Token>* out) {
+    i64 i = 0;
+    while (i < tokens.len()) {
+        i64 start = sugar_next(tokens, i);
+        bool keyword = sugar_is_name(tokens, i, "shared")
+            && !sugar_is(tokens, sugar_previous(tokens, i), TokenKind.Dot)
+            && sugar_is_type_start(tokens, start);
+        i64 end = keyword ? sugar_type_end(tokens, start) : start;
+        // A keyword only before `T name` or `T* name`: `shared create()`
+        // and `shared x;` keep `shared` as a type name.
+        i64 declarator = keyword ? sugar_next(tokens, end - 1) : -1;
+        if (!sugar_is(tokens, declarator, TokenKind.Identifier) && !sugar_is(tokens, declarator, TokenKind.Star)) {
+            out.push(sugar_copy(tokens.get_ptr(i)));
+            i += 1;
+            continue;
+        }
+        Span span = tokens.get_ptr(i).span;
+        sugar_mutex_of(tokens, start, end, span, out);
+        i = end;
+        // `shared T name = init;`: the initializer is a plain T.
+        i64 name = sugar_next(tokens, end - 1);
+        i64 assign = sugar_next(tokens, name);
+        if (sugar_is(tokens, name, TokenKind.Identifier) && sugar_is(tokens, assign, TokenKind.Assign)) {
+            i64 semicolon = sugar_expression_end(tokens, assign + 1);
+            if (semicolon >= 0) {
+                sugar_copy_range(tokens, end, assign + 1, out);
+                // `Mutex<T>.new(` sits empty after `=`; its `T` is a copy.
+                Span at = sugar_after(tokens.get_ptr(assign).span);
+                Vec<Token> copied = Vec<Token>.new();
+                i64 k = start;
+                while (k < end) {
+                    Token copy = sugar_copy(tokens.get_ptr(k));
+                    copy.span = at;
+                    copied.push(move copy);
+                    k += 1;
+                }
+                sugar_mutex_of(&copied, 0, copied.len(), at, out);
+                out.push(sugar_token(TokenKind.Dot, ".", at));
+                out.push(sugar_token(TokenKind.Identifier, "new", at));
+                out.push(sugar_token(TokenKind.LeftParen, "(", at));
+                Vec<Token> initializer = Vec<Token>.new();
+                sugar_copy_range(tokens, assign + 1, semicolon, &initializer);
+                desugar_shared(&initializer, out);
+                Span last = tokens.get_ptr(sugar_previous(tokens, semicolon)).span;
+                out.push(sugar_token(TokenKind.RightParen, ")", sugar_after(last)));
+                i = semicolon;
+            }
+        }
+    }
+}
+
+/// True when `index` begins a statement: the previous token ends one.
+bool sugar_starts_statement(Vec<Token>* tokens, i64 index) {
+    i64 previous = sugar_previous(tokens, index);
+    return previous < 0 || sugar_is(tokens, previous, TokenKind.Semicolon)
+        || sugar_is(tokens, previous, TokenKind.LeftBrace)
+        || sugar_is(tokens, previous, TokenKind.RightBrace);
+}
+
+/// The parsed head of `lock place [as name] {`. `place_start` is -1 when the
+/// tokens are not a lock statement.
+struct LockHead {
+    i64 place_start;
+    i64 place_end;
+    i64 name;
+    i64 open;
+}
+
+/// Parses a `lock` statement head at `index`. Reports a malformed head to
+/// `diagnostics` and returns it as not a lock statement.
+LockHead sugar_lock_head(Vec<Token>* tokens, i64 index, DiagnosticBag* diagnostics) {
+    LockHead head;
+    head.place_start = -1;
+    head.place_end = -1;
+    head.name = -1;
+    head.open = -1;
+    i64 start = sugar_next(tokens, index);
+    if (!sugar_is(tokens, start, TokenKind.Identifier)) { return head; }
+    i64 depth = 0;
+    i64 cursor = start;
+    while (cursor < tokens.len()) {
+        TokenKind kind = tokens.get_ptr(cursor).kind;
+        if (kind == TokenKind.LeftParen || kind == TokenKind.LeftBracket) {
+            depth += 1;
+        } else if (kind == TokenKind.RightParen || kind == TokenKind.RightBracket) {
+            depth -= 1;
+        } else if ((kind == TokenKind.LeftBrace || kind == TokenKind.As) && depth == 0) {
+            break;
+        } else if (kind == TokenKind.Semicolon || kind == TokenKind.Assign
+            || kind == TokenKind.RightBrace || kind == TokenKind.Eof) {
+            return head;
+        }
+        cursor += 1;
+    }
+    if (cursor >= tokens.len()) { return head; }
+    if (sugar_is(tokens, cursor, TokenKind.As)) {
+        i64 name = sugar_next(tokens, cursor);
+        i64 open = name >= 0 ? sugar_next(tokens, name) : -1;
+        if (!sugar_is(tokens, name, TokenKind.Identifier) || !sugar_is(tokens, open, TokenKind.LeftBrace)) {
+            diagnostics.error(tokens.get_ptr(cursor).span, String.from_str(lock_expected_as()));
+            return head;
+        }
+        head.place_start = start;
+        head.place_end = cursor;
+        head.name = name;
+        head.open = open;
+        return head;
+    }
+    if (sugar_next(tokens, start) != cursor) {
+        diagnostics.error(tokens.get_ptr(start).span, String.from_str(lock_needs_name()));
+        return head;
+    }
+    head.place_start = start;
+    head.place_end = cursor;
+    head.name = start;
+    head.open = cursor;
+    return head;
+}
+
+/// The index of the `}` matching the `{` at `open`, or -1.
+i64 sugar_matching_brace(Vec<Token>* tokens, i64 open) {
+    i64 depth = 0;
+    i64 i = open;
+    while (i < tokens.len()) {
+        TokenKind kind = tokens.get_ptr(i).kind;
+        if (kind == TokenKind.LeftBrace) {
+            depth += 1;
+        } else if (kind == TokenKind.RightBrace) {
+            depth -= 1;
+            if (depth == 0) { return i; }
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+/// True when the identifier at `index` is being declared rather than used:
+/// it follows `let`, a type name, a primitive type, or `]`.
+bool sugar_declares(Vec<Token>* tokens, i64 index) {
+    i64 previous = sugar_previous(tokens, index);
+    if (previous < 0) { return false; }
+    TokenKind kind = tokens.get_ptr(previous).kind;
+    bool declared_by = kind == TokenKind.Let || kind == TokenKind.RightBracket
+        || sugar_is_type_keyword(kind)
+        || (kind == TokenKind.Identifier
+            && !sugar_is(tokens, sugar_previous(tokens, previous), TokenKind.Dot));
+    i64 next = sugar_next(tokens, index);
+    return declared_by && (sugar_is(tokens, next, TokenKind.Assign)
+        || sugar_is(tokens, next, TokenKind.Semicolon) || sugar_is(tokens, next, TokenKind.Comma)
+        || sugar_is(tokens, next, TokenKind.RightParen));
+}
+
+/// True when the place starting at `body[start]` spells the same tokens as
+/// `tokens[from, to)` and ends there, before `{` or `as`.
+bool sugar_same_place(Vec<Token>* tokens, i64 from, i64 to, Vec<Token>* body, i64 start) {
+    i64 i = from;
+    i64 j = start;
+    while (i >= 0 && i < to) {
+        if (j < 0 || tokens.get_ptr(i).kind != body.get_ptr(j).kind
+            || !tokens.get_ptr(i).text.equals(body.get_ptr(j).text.to_str())) {
+            return false;
+        }
+        i = sugar_next(tokens, i);
+        j = sugar_next(body, j);
+    }
+    return sugar_is(body, j, TokenKind.LeftBrace) || sugar_is(body, j, TokenKind.As);
+}
+
+/// Reports a redeclaration of the locked `name`, or a nested lock of the
+/// place `tokens[from, to)`, inside a lock body.
+void sugar_check_body(Vec<Token>* body, str name, Vec<Token>* tokens, i64 from, i64 to,
+                      DiagnosticBag* diagnostics) {
+    i64 j = 0;
+    while (j < body.len()) {
+        if (sugar_is_name(body, j, "lock") && sugar_starts_statement(body, j)
+            && sugar_same_place(tokens, from, to, body, sugar_next(body, j))) {
+            String place = String.new();
+            i64 k = from;
+            while (k < to) {
+                if (tokens.get_ptr(k).kind != TokenKind.Comment) { place.push_str(tokens.get_ptr(k).text.to_str()); }
+                k += 1;
+            }
+            diagnostics.error(body.get_ptr(j).span, lock_already_held(place.to_str()));
+        }
+        if (sugar_is_name(body, j, name) && sugar_declares(body, j)) {
+            diagnostics.error(body.get_ptr(j).span, lock_name_redeclared(name));
+        }
+        j += 1;
+    }
+}
+
+/// Rewrites every `lock` statement in `tokens` into `out`, inner blocks
+/// included. `counter` numbers the generated locals. The value local is
+/// named `__lock_N__<name>` so editor tooling can map it back to `name`.
+void desugar_locks(Vec<Token>* tokens, Vec<Token>* out, i64* counter, DiagnosticBag* diagnostics) {
+    i64 i = 0;
+    while (i < tokens.len()) {
+        LockHead head;
+        head.place_start = -1;
+        if (sugar_is_name(tokens, i, "lock") && sugar_starts_statement(tokens, i)) {
+            head = sugar_lock_head(tokens, i, diagnostics);
+        }
+        i64 close = head.place_start >= 0 ? sugar_matching_brace(tokens, head.open) : -1;
+        if (head.place_start >= 0 && close < 0) {
+            diagnostics.error(tokens.get_ptr(head.open).span, String.from_str(lock_never_closed()));
+        }
+        if (head.place_start < 0 || close < 0) {
+            out.push(sugar_copy(tokens.get_ptr(i)));
+            i += 1;
+            continue;
+        }
+        Span guard_span = tokens.get_ptr(i).span;
+        // `.lock();` sits empty after the copied place, a trailing comment
+        // included, so tokens stay in source order. An `as` alias declares
+        // the pointer local on the alias, so editors see a definition there;
+        // otherwise the local sits empty after `{`.
+        Span call_span = sugar_after(tokens.get_ptr(head.place_end - 1).span);
+        bool alias = head.name != head.place_start;
+        Span alias_span = tokens.get_ptr(head.name).span;
+        Span let_span = sugar_after(tokens.get_ptr(alias ? sugar_previous(tokens, head.name) : head.open).span);
+        Span value_span = alias ? alias_span : let_span;
+        Span pointer_span = alias ? sugar_after(alias_span) : let_span;
+        str name = tokens.get_ptr(head.name).text.to_str();
+        Vec<Token> raw_body = Vec<Token>.new();
+        sugar_copy_range(tokens, head.open + 1, close, &raw_body);
+        sugar_check_body(&raw_body, name, tokens, head.place_start, head.place_end, diagnostics);
+        Vec<Token> body = Vec<Token>.new();
+        desugar_locks(&raw_body, &body, counter, diagnostics);
+        String value = @format("__lock_{}__{}", *counter, name);
+        String guard = @format("__lock_{}_guard", *counter);
+        *counter += 1;
+
+        out.push(sugar_token(TokenKind.LeftBrace, "{", guard_span));
+        out.push(sugar_token(TokenKind.Let, "let", guard_span));
+        out.push(sugar_token(TokenKind.Identifier, guard.to_str(), guard_span));
+        out.push(sugar_token(TokenKind.Assign, "=", guard_span));
+        bool wrap = sugar_is(tokens, head.place_start, TokenKind.Star)
+            || sugar_is(tokens, head.place_start, TokenKind.BitwiseAnd);
+        if (wrap) { out.push(sugar_token(TokenKind.LeftParen, "(", guard_span)); }
+        sugar_copy_range(tokens, head.place_start, head.place_end, out);
+        if (wrap) { out.push(sugar_token(TokenKind.RightParen, ")", call_span)); }
+        out.push(sugar_token(TokenKind.Dot, ".", call_span));
+        out.push(sugar_token(TokenKind.Identifier, "lock", call_span));
+        out.push(sugar_token(TokenKind.LeftParen, "(", call_span));
+        out.push(sugar_token(TokenKind.RightParen, ")", call_span));
+        out.push(sugar_token(TokenKind.Semicolon, ";", call_span));
+        out.push(sugar_token(TokenKind.Let, "let", let_span));
+        out.push(sugar_token(TokenKind.Identifier, value.to_str(), value_span));
+        out.push(sugar_token(TokenKind.Assign, "=", pointer_span));
+        out.push(sugar_token(TokenKind.Identifier, guard.to_str(), pointer_span));
+        out.push(sugar_token(TokenKind.Dot, ".", pointer_span));
+        out.push(sugar_token(TokenKind.Identifier, "get_ptr", pointer_span));
+        out.push(sugar_token(TokenKind.LeftParen, "(", pointer_span));
+        out.push(sugar_token(TokenKind.RightParen, ")", pointer_span));
+        out.push(sugar_token(TokenKind.Semicolon, ";", pointer_span));
+        i64 j = 0;
+        while (j < body.len()) {
+            // A field name or a macro name is not the locked value.
+            i64 before = sugar_previous(&body, j);
+            bool other = sugar_is(&body, before, TokenKind.Dot) || sugar_is(&body, before, TokenKind.At);
+            if (sugar_is_name(&body, j, name) && !other) {
+                Span span = body.get_ptr(j).span;
+                out.push(sugar_token(TokenKind.LeftParen, "(", span));
+                out.push(sugar_token(TokenKind.Star, "*", span));
+                out.push(sugar_token(TokenKind.Identifier, value.to_str(), span));
+                out.push(sugar_token(TokenKind.RightParen, ")", span));
+            } else {
+                out.push(sugar_copy(body.get_ptr(j)));
+            }
+            j += 1;
+        }
+        out.push(sugar_token(TokenKind.RightBrace, "}", tokens.get_ptr(close).span));
+        i = close + 1;
+    }
+}
+
+/// Where the user's name starts inside a generated `__lock_N__name` local, or
+/// -1 for any other name (including the guard, `__lock_N_guard`).
+i64 sugar_locked_name_start(str local) {
+    str prefix = "__lock_";
+    i64 i = 0;
+    while (prefix[i] != (u8)0) {
+        if (local[i] != prefix[i]) { return -1; }
+        i += 1;
+    }
+    while (local[i] >= (u8)'0' && local[i] <= (u8)'9') { i += 1; }
+    if (local[i] != (u8)'_' || local[i + 1] != (u8)'_') { return -1; }
+    return i + 2;
+}
+
+/// True when `local` is a generated `__lock_N_guard`.
+bool sugar_is_lock_guard(str local) {
+    str prefix = "__lock_";
+    i64 i = 0;
+    while (prefix[i] != (u8)0) {
+        if (local[i] != prefix[i]) { return false; }
+        i += 1;
+    }
+    i64 digits = i;
+    while (local[i] >= (u8)'0' && local[i] <= (u8)'9') { i += 1; }
+    if (i == digits) { return false; }
+    str suffix = "_guard";
+    i64 j = 0;
+    while (suffix[j] != (u8)0) {
+        if (local[i + j] != suffix[j]) { return false; }
+        j += 1;
+    }
+    return local[i + j] == (u8)0;
+}
+
+/// True when `stream` names `shared` or `lock` at all, so files without the
+/// sugar skip the rewrite.
+bool sugar_mentioned(TokenStream* stream) {
+    i64 i = 0;
+    while (i < stream.tokens.len()) {
+        Token* token = stream.tokens.get_ptr(i);
+        if (token.kind == TokenKind.Identifier
+            && (token.text.equals("shared") || token.text.equals("lock"))) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+/// Rewrites `shared` types and `lock` blocks in `stream` before parsing,
+/// reporting malformed lock statements to `diagnostics`.
+void desugar_sync_sugar(TokenStream* stream, DiagnosticBag* diagnostics) {
+    if (!sugar_mentioned(stream)) { return; }
+    Vec<Token> with_shared = Vec<Token>.new();
+    desugar_shared(&stream.tokens, &with_shared);
+    Vec<Token> rewritten = Vec<Token>.new();
+    i64 counter = 0;
+    desugar_locks(&with_shared, &rewritten, &counter, diagnostics);
+    // A store through a pointer does not drop the old tokens; this local does.
+    Vec<Token> _original = move stream.tokens;
+    stream.tokens = move rewritten;
+}

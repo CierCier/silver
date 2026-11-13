@@ -229,9 +229,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     && named.path[0].name == "Task"
                     && named.generics.as_ref().is_some_and(|gs| gs.len() == 1)
                 {
-                    // A Task<T> is a plain i64 handle to a thread-registry
-                    // slot (the launch pack pointer). It has no Drop and is
-                    // consumed by `wait`.
+                    // A Task<T> is an i64 handle to a thread-registry slot.
+                    // `wait` consumes it; its drop glue joins a scoped task.
                     return Ok(self.context.i64_type().as_basic_type_enum());
                 }
                 let struct_ty = self.ensure_named_struct_type(named)?;

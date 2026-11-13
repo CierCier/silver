@@ -1,0 +1,138 @@
+// Arc<T> test: single-thread contract plus cross-thread clone/drop.
+//
+// Launch arguments cannot carry an Arc in every compiler yet, so the
+// threaded cases share handles through globals and launch workers with
+// primitive arguments:
+//   1. Handle basics: new/get/clone/strong_count and an empty handle.
+//   2. The destructor of an owned value runs once, on the last drop only.
+//   3. Clone storm: 4 threads clone and drop the same handle 20000 times
+//      each. A lost count update leaves strong_count != 1 or frees early.
+//   4. Cross-thread last drop: main fills 4 slots with clones and drops its
+//      own handle; each worker drops one slot. Exactly one of them runs the
+//      destructor, on a thread that did not create the value.
+// --leak-check proves every box is freed exactly once.
+
+import std.test;
+import std.atomic;
+import std.mem.arc;
+import std.string;
+import std.sys.entry;
+
+/// Counts its own destruction so tests can observe when the value dies.
+struct Probe {
+    i64 id;
+}
+
+i64 g_probe_drops;
+
+impl Drop for Probe {
+    void drop(*self) {
+        __atomic_fetch_add_i64(&g_probe_drops, 1, ATOMIC_SEQ_CST);
+    }
+}
+
+Probe probe(i64 id) {
+    Probe p = { .id = id };
+    return move p;
+}
+
+i64 probe_drops() {
+    return __atomic_load_i64(&g_probe_drops, ATOMIC_SEQ_CST);
+}
+
+Arc<i64> g_empty;        // zero-initialized: an empty handle
+Arc<Probe> g_shared;     // cloned concurrently by the storm workers
+Arc<Probe> g_slots[4];   // one handle per worker for the last-drop case
+i64 g_id_sum;            // sum of ids read through worker clones
+
+void worker_clone_storm(i64 rounds) {
+    i64 sum = 0;
+    for (i64 i = 0; i < rounds; i = i + 1) {
+        Arc<Probe> mine = g_shared.clone();
+        sum = sum + mine.get().id;
+    }
+    __atomic_fetch_add_i64(&g_id_sum, sum, ATOMIC_SEQ_CST);
+}
+
+void worker_drop_slot(i64 slot) {
+    g_slots[slot].drop();
+}
+
+i32 main() {
+    test_start("Arc handle basics");
+    {
+        Arc<i64> a = Arc<i64>.new(42);
+        assert_eq_i64(42, *a.get(), "new holds the value");
+        assert_eq_i64(1, a.strong_count(), "a fresh handle counts 1");
+        Arc<i64> b = a.clone();
+        assert_eq_i64(2, a.strong_count(), "clone counts 2");
+        assert_true(a.get() == b.get(), "clones share one value");
+        *a.get() = 7;
+        assert_eq_i64(7, *b.get(), "a write is visible through the clone");
+        b.drop();
+        assert_eq_i64(1, a.strong_count(), "dropping a clone counts 1");
+
+        assert_eq_i64(0, g_empty.strong_count(), "an empty handle counts 0");
+        assert_true(g_empty.get() == (i64*)0, "an empty handle has no value");
+        Arc<i64> still_empty = g_empty.clone();
+        assert_eq_i64(0, still_empty.strong_count(), "cloning empty stays empty");
+    }
+
+    test_start("Arc drops an owned value once");
+    {
+        Arc<String> text = Arc<String>.new(String.from_str("shared text"));
+        Arc<String> other = text.clone();
+        assert_eq_i64(11, other.get().len(), "clone reads the owned String");
+
+        Arc<Probe> first = Arc<Probe>.new(probe(1));
+        Arc<Probe> second = first.clone();
+        Arc<Probe> third = second.clone();
+        assert_eq_i64(3, first.strong_count(), "three handles");
+        first.drop();
+        second.drop();
+        assert_eq_i64(0, probe_drops(), "value lives while a handle remains");
+        assert_eq_i64(1, third.strong_count(), "one handle left");
+        third.drop();
+        assert_eq_i64(1, probe_drops(), "last drop destroys the value once");
+    }
+
+    test_start("Arc concurrent clone and drop");
+    {
+        __atomic_store_i64(&g_probe_drops, 0, ATOMIC_SEQ_CST);
+        g_shared = Arc<Probe>.new(probe(3));
+        i64 rounds = 20000;
+        Task<void> t0 = launch worker_clone_storm(rounds);
+        Task<void> t1 = launch worker_clone_storm(rounds);
+        Task<void> t2 = launch worker_clone_storm(rounds);
+        Task<void> t3 = launch worker_clone_storm(rounds);
+        wait t0;
+        wait t1;
+        wait t2;
+        wait t3;
+        assert_eq_i64(1, g_shared.strong_count(), "every clone was counted and released");
+        assert_eq_i64(0, probe_drops(), "value survived the storm");
+        assert_eq_i64(4 * rounds * 3, __atomic_load_i64(&g_id_sum, ATOMIC_SEQ_CST), "each clone read the live value");
+    }
+
+    test_start("Arc last drop on another thread");
+    {
+        for (i64 i = 0; i < 4; i = i + 1) {
+            g_slots[i] = g_shared.clone();
+        }
+        assert_eq_i64(5, g_shared.strong_count(), "four slots plus the original");
+        g_shared.drop();
+        assert_eq_i64(0, probe_drops(), "slots keep the value alive");
+        Task<void> d0 = launch worker_drop_slot(0);
+        Task<void> d1 = launch worker_drop_slot(1);
+        Task<void> d2 = launch worker_drop_slot(2);
+        Task<void> d3 = launch worker_drop_slot(3);
+        wait d0;
+        wait d1;
+        wait d2;
+        wait d3;
+        assert_eq_i64(1, probe_drops(), "a worker destroyed the value exactly once");
+        assert_eq_i64(0, g_slots[0].strong_count(), "slot handles are empty");
+    }
+
+    return done();
+}

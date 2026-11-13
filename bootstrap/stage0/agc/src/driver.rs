@@ -1861,6 +1861,26 @@ pub fn run(cli: Cli) {
                     std::process::exit(2);
                 }
 
+                let scoped_launch_errors =
+                    crate::semantic::scoped_launch::check_program(&ast, resolved_callables);
+                if !scoped_launch_errors.is_empty() {
+                    for error in &scoped_launch_errors {
+                        eprintln!(
+                            "{}",
+                            diagnostics::render_with_note(
+                                error.span,
+                                &error.message,
+                                diagnostics::Severity::Error,
+                                error.launched_at,
+                                error
+                                    .launched_at
+                                    .map(|_| crate::diagnostics::messages::note_task_launched_here()),
+                            )
+                        );
+                    }
+                    std::process::exit(2);
+                }
+
                 let move_report = crate::semantic::move_check::analyze_program_with_imports(
                     &ast,
                     &imported_modules,

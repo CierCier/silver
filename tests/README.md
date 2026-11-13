@@ -1,6 +1,6 @@
 # Standard-library tests
 
-The suite contains 114 runnable Silver programs and is capped at 124. Tests
+The suite contains 118 runnable Silver programs and is capped at 124. Tests
 exercise stdlib APIs, observable results, failure behavior, and resource cleanup.
 Language features are exercised by the library and compiler builds. Dedicated
 compiler unit, parser/parity, and self-host test suites are retired.

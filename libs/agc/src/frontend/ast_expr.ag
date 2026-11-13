@@ -36,7 +36,7 @@ enum ExprKind {
     Assert;        // inner0 = condition, inner1 = message, aux = enabled (debug cfg)
     SourceLocation; // aux = line/column/file selector
     StructLit;     // inner0 = struct name id, inner1 = fields_start, aux = field count (pool.args: name,expr pairs)
-    Launch;        // inner0 = direct Call expression
+    Launch;        // inner0 = direct Call expression, aux = 1 inside a macro expansion
     Wait;          // inner0 = Task expression
 }
 
@@ -106,6 +106,8 @@ struct MatchArm {
     u32 guard_id;
     u32 value_id;
     u32 body_stmt_id;
+    /// A `move` payload binding takes the payload out of the scrutinee.
+    bool moves_payload;
     Span span;
 }
 
@@ -215,6 +217,7 @@ impl AstPool {
         null_arm.guard_id = 0;
         null_arm.value_id = 0;
         null_arm.body_stmt_id = 0;
+        null_arm.moves_payload = false;
         null_arm.span = Span.synthetic();
         pool.arms.push(move null_arm);
 
@@ -377,12 +380,12 @@ impl AstPool {
     }
 
     /// Appends a `launch` expression and returns its id.
-    u32 add_launch(AstPool* self, u32 call_id, Span span) {
+    u32 add_launch(AstPool* self, u32 call_id, bool expanded, Span span) {
         AstExpr expr;
         expr.kind = ExprKind.Launch;
         expr.inner0 = call_id;
         expr.inner1 = 0;
-        expr.aux = 0;
+        expr.aux = expanded ? 1 : 0;
         expr.span = span;
         expr.inferred_type = TYPE_UNKNOWN;
         expr.generic_args_start = 0;
@@ -422,6 +425,7 @@ impl AstPool {
         arm.guard_id = guard_id;
         arm.value_id = value_id;
         arm.body_stmt_id = body_stmt_id;
+        arm.moves_payload = false;
         arm.span = span;
         self.arms.push(move arm);
         return (u32)(self.arms.len() - 1);

@@ -22,7 +22,9 @@
 // `ATOMIC_RELAXED`.
 //
 // Atomic types are plain value types (no drop, no allocation); they may live
-// in globals, structs, or heap objects shared between threads.
+// in globals, structs, or heap objects shared between threads. Every
+// operation takes `&self`, so any number of threads may read and update one
+// atomic through a shared reference.
 
 import std.display;
 
@@ -61,48 +63,48 @@ impl AtomicI8 {
     }
 
     /// Sequentially-consistent store.
-    void set(&mut self, i8 value) {
+    void set(&self, i8 value) {
         __atomic_store_i8(&self.value, value, ATOMIC_SEQ_CST);
     }
 
     /// Relaxed (monotonic) store.
-    void set_monotonic(&mut self, i8 value) {
+    void set_monotonic(&self, i8 value) {
         __atomic_store_i8(&self.value, value, ATOMIC_RELAXED);
     }
 
     /// Atomically replace the value; returns the previous value.
-    i8 swap(&mut self, i8 value) {
+    i8 swap(&self, i8 value) {
         return __atomic_exchange_i8(&self.value, value, ATOMIC_SEQ_CST);
     }
 
     /// Atomically add `delta`; returns the previous value.
-    i8 fetch_add(&mut self, i8 delta) {
+    i8 fetch_add(&self, i8 delta) {
         return __atomic_fetch_add_i8(&self.value, delta, ATOMIC_SEQ_CST);
     }
 
     /// Atomically subtract `delta`; returns the previous value.
-    i8 fetch_sub(&mut self, i8 delta) {
+    i8 fetch_sub(&self, i8 delta) {
         return __atomic_fetch_sub_i8(&self.value, delta, ATOMIC_SEQ_CST);
     }
 
     /// Relaxed atomic add; returns the previous value.
-    i8 fetch_add_monotonic(&mut self, i8 delta) {
+    i8 fetch_add_monotonic(&self, i8 delta) {
         return __atomic_fetch_add_i8(&self.value, delta, ATOMIC_RELAXED);
     }
 
     /// Relaxed atomic subtract; returns the previous value.
-    i8 fetch_sub_monotonic(&mut self, i8 delta) {
+    i8 fetch_sub_monotonic(&self, i8 delta) {
         return __atomic_fetch_sub_i8(&self.value, delta, ATOMIC_RELAXED);
     }
 
     /// If the current value equals `expected`, replace it with `desired` and
     /// return true; otherwise leaves the value unchanged and returns false.
-    bool compare_exchange(&mut self, i8 expected, i8 desired) {
+    bool compare_exchange(&self, i8 expected, i8 desired) {
         return __atomic_cmpxchg_i8(&self.value, expected, desired, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST);
     }
 
     /// Relaxed compare-and-swap.
-    bool compare_exchange_monotonic(&mut self, i8 expected, i8 desired) {
+    bool compare_exchange_monotonic(&self, i8 expected, i8 desired) {
         return __atomic_cmpxchg_i8(&self.value, expected, desired, ATOMIC_RELAXED, ATOMIC_RELAXED);
     }
 }
@@ -131,48 +133,48 @@ impl AtomicI32 {
     }
 
     /// Sequentially-consistent store.
-    void set(&mut self, i32 value) {
+    void set(&self, i32 value) {
         __atomic_store_i32(&self.value, value, ATOMIC_SEQ_CST);
     }
 
     /// Relaxed (monotonic) store.
-    void set_monotonic(&mut self, i32 value) {
+    void set_monotonic(&self, i32 value) {
         __atomic_store_i32(&self.value, value, ATOMIC_RELAXED);
     }
 
     /// Atomically replace the value; returns the previous value.
-    i32 swap(&mut self, i32 value) {
+    i32 swap(&self, i32 value) {
         return __atomic_exchange_i32(&self.value, value, ATOMIC_SEQ_CST);
     }
 
     /// Atomically add `delta`; returns the previous value.
-    i32 fetch_add(&mut self, i32 delta) {
+    i32 fetch_add(&self, i32 delta) {
         return __atomic_fetch_add_i32(&self.value, delta, ATOMIC_SEQ_CST);
     }
 
     /// Atomically subtract `delta`; returns the previous value.
-    i32 fetch_sub(&mut self, i32 delta) {
+    i32 fetch_sub(&self, i32 delta) {
         return __atomic_fetch_sub_i32(&self.value, delta, ATOMIC_SEQ_CST);
     }
 
     /// Relaxed atomic add; returns the previous value.
-    i32 fetch_add_monotonic(&mut self, i32 delta) {
+    i32 fetch_add_monotonic(&self, i32 delta) {
         return __atomic_fetch_add_i32(&self.value, delta, ATOMIC_RELAXED);
     }
 
     /// Relaxed atomic subtract; returns the previous value.
-    i32 fetch_sub_monotonic(&mut self, i32 delta) {
+    i32 fetch_sub_monotonic(&self, i32 delta) {
         return __atomic_fetch_sub_i32(&self.value, delta, ATOMIC_RELAXED);
     }
 
     /// If the current value equals `expected`, replace it with `desired` and
     /// return true; otherwise leaves the value unchanged and returns false.
-    bool compare_exchange(&mut self, i32 expected, i32 desired) {
+    bool compare_exchange(&self, i32 expected, i32 desired) {
         return __atomic_cmpxchg_i32(&self.value, expected, desired, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST);
     }
 
     /// Relaxed compare-and-swap.
-    bool compare_exchange_monotonic(&mut self, i32 expected, i32 desired) {
+    bool compare_exchange_monotonic(&self, i32 expected, i32 desired) {
         return __atomic_cmpxchg_i32(&self.value, expected, desired, ATOMIC_RELAXED, ATOMIC_RELAXED);
     }
 }
@@ -201,48 +203,48 @@ impl AtomicI64 {
     }
 
     /// Sequentially-consistent store.
-    void set(&mut self, i64 value) {
+    void set(&self, i64 value) {
         __atomic_store_i64(&self.value, value, ATOMIC_SEQ_CST);
     }
 
     /// Relaxed (monotonic) store.
-    void set_monotonic(&mut self, i64 value) {
+    void set_monotonic(&self, i64 value) {
         __atomic_store_i64(&self.value, value, ATOMIC_RELAXED);
     }
 
     /// Atomically replace the value; returns the previous value.
-    i64 swap(&mut self, i64 value) {
+    i64 swap(&self, i64 value) {
         return __atomic_exchange_i64(&self.value, value, ATOMIC_SEQ_CST);
     }
 
     /// Atomically add `delta`; returns the previous value.
-    i64 fetch_add(&mut self, i64 delta) {
+    i64 fetch_add(&self, i64 delta) {
         return __atomic_fetch_add_i64(&self.value, delta, ATOMIC_SEQ_CST);
     }
 
     /// Atomically subtract `delta`; returns the previous value.
-    i64 fetch_sub(&mut self, i64 delta) {
+    i64 fetch_sub(&self, i64 delta) {
         return __atomic_fetch_sub_i64(&self.value, delta, ATOMIC_SEQ_CST);
     }
 
     /// Relaxed atomic add; returns the previous value.
-    i64 fetch_add_monotonic(&mut self, i64 delta) {
+    i64 fetch_add_monotonic(&self, i64 delta) {
         return __atomic_fetch_add_i64(&self.value, delta, ATOMIC_RELAXED);
     }
 
     /// Relaxed atomic subtract; returns the previous value.
-    i64 fetch_sub_monotonic(&mut self, i64 delta) {
+    i64 fetch_sub_monotonic(&self, i64 delta) {
         return __atomic_fetch_sub_i64(&self.value, delta, ATOMIC_RELAXED);
     }
 
     /// If the current value equals `expected`, replace it with `desired` and
     /// return true; otherwise leaves the value unchanged and returns false.
-    bool compare_exchange(&mut self, i64 expected, i64 desired) {
+    bool compare_exchange(&self, i64 expected, i64 desired) {
         return __atomic_cmpxchg_i64(&self.value, expected, desired, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST);
     }
 
     /// Relaxed compare-and-swap.
-    bool compare_exchange_monotonic(&mut self, i64 expected, i64 desired) {
+    bool compare_exchange_monotonic(&self, i64 expected, i64 desired) {
         return __atomic_cmpxchg_i64(&self.value, expected, desired, ATOMIC_RELAXED, ATOMIC_RELAXED);
     }
 }
@@ -271,23 +273,23 @@ impl AtomicBool {
     }
 
     /// Sequentially-consistent store.
-    void set(&mut self, bool value) {
+    void set(&self, bool value) {
         __atomic_store_i8(&self.value, bool_to_i8(value), ATOMIC_SEQ_CST);
     }
 
     /// Relaxed (monotonic) store.
-    void set_monotonic(&mut self, bool value) {
+    void set_monotonic(&self, bool value) {
         __atomic_store_i8(&self.value, bool_to_i8(value), ATOMIC_RELAXED);
     }
 
     /// Atomically replace the value; returns the previous value.
-    bool swap(&mut self, bool value) {
+    bool swap(&self, bool value) {
         return __atomic_exchange_i8(&self.value, bool_to_i8(value), ATOMIC_SEQ_CST) != 0;
     }
 
     /// If the current value equals `expected`, replace it with `desired` and
     /// return true; otherwise leaves the value unchanged and returns false.
-    bool compare_exchange(&mut self, bool expected, bool desired) {
+    bool compare_exchange(&self, bool expected, bool desired) {
         return __atomic_cmpxchg_i8(&self.value, bool_to_i8(expected), bool_to_i8(desired), ATOMIC_SEQ_CST, ATOMIC_SEQ_CST);
     }
 }

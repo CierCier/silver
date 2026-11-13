@@ -61,6 +61,31 @@ pub struct ActiveBorrow {
     pub param: bool,
 }
 
+/// The task local a statement joins unconditionally: `wait t;`,
+/// `T r = wait t;` or `r = wait t;`.
+fn directly_waited_task(statement: &ast::Statement) -> Option<&str> {
+    let expression = match &statement.kind {
+        ast::StatementKind::Expression(expression) => expression,
+        ast::StatementKind::Let(binding) => binding.initializer.as_ref()?,
+        _ => return None,
+    };
+    let waited = match expression.kind.as_ref() {
+        ast::ExpressionKind::Binary {
+            right,
+            operator: ast::BinaryOperator::Assign,
+            ..
+        } => right,
+        _ => expression,
+    };
+    let ast::ExpressionKind::Wait(operand) = waited.kind.as_ref() else {
+        return None;
+    };
+    match operand.kind.as_ref() {
+        ast::ExpressionKind::Identifier(task) => Some(task.name.as_str()),
+        _ => None,
+    }
+}
+
 /// Place-based borrow (Phase 8 scaffolding, parallel to `ActiveBorrow`). Overlap via `places_overlap`.
 /// `&x.a` vs `move x.b` allowed (disjoint); `&x` vs `move x.a` overlaps (prefix).
 #[allow(dead_code)]
@@ -168,6 +193,16 @@ struct BorrowChecker<'a> {
     local_scopes: Vec<FxHashMap<String, usize>>,
     /// Statement indices of the nested blocks currently being visited.
     statement_indices: Vec<usize>,
+    /// Per lexical block: statements that `wait` a task local directly, so
+    /// the join is unconditional once that statement has run.
+    block_direct_waits: Vec<FxHashMap<String, Vec<usize>>>,
+    /// Task locals of the current function whose launch borrowed arguments.
+    task_holders: FxHashSet<String>,
+    /// `lock` block guards of the current function holding a loan on the
+    /// place they lock.
+    lock_guards: FxHashSet<String>,
+    /// Spans of loans held by launched tasks, with the place each borrows.
+    task_loan_places: FxHashMap<(u32, usize, usize), String>,
     /// Maps struct name -> set of field names that are reference types (`&T` / `&'a T`).
     struct_ref_fields: FxHashMap<String, FxHashSet<String>>,
     struct_field_types: FxHashMap<String, FxHashMap<String, String>>,
@@ -241,6 +276,10 @@ impl<'a> BorrowChecker<'a> {
             block_field_writes: Vec::new(),
             local_scopes: vec![FxHashMap::default()],
             statement_indices: Vec::new(),
+            block_direct_waits: Vec::new(),
+            task_holders: FxHashSet::default(),
+            lock_guards: FxHashSet::default(),
+            task_loan_places: FxHashMap::default(),
             struct_ref_fields: FxHashMap::default(),
             struct_field_types: FxHashMap::default(),
             global_var_types: FxHashMap::default(),
@@ -290,6 +329,43 @@ impl<'a> BorrowChecker<'a> {
             note_span,
             note_message,
         });
+    }
+
+    /// Reports a borrow conflict. When the earlier loan belongs to a launched
+    /// task, the message also names the two ways to share the place between
+    /// threads, so the user can pick one.
+    fn report_conflict(
+        &mut self,
+        mut message: String,
+        span: Span,
+        note_span: Option<Span>,
+        note_message: Option<String>,
+    ) {
+        if let Some(loan) = note_span
+            && let Some(place) = self.task_loan_places.get(&(loan.file, loan.start, loan.end))
+        {
+            message.push_str(&msg::thread_share_help(place));
+        }
+        self.error_with_note(message, span, note_span, note_message);
+    }
+
+    /// Remembers the loans `task` holds, for `report_conflict`.
+    fn record_task_loans(&mut self, task: &str) {
+        let held: Vec<_> = self
+            .scopes
+            .iter()
+            .flatten()
+            .filter(|loan| loan.borrower.as_deref() == Some(task))
+            .map(|loan| {
+                let place = if loan.path.is_empty() {
+                    loan.root.clone()
+                } else {
+                    format!("{}.{}", loan.root, loan.path)
+                };
+                ((loan.span.file, loan.span.start, loan.span.end), place)
+            })
+            .collect();
+        self.task_loan_places.extend(held);
     }
 
     fn push_scope(&mut self) {
@@ -665,6 +741,9 @@ impl<'a> BorrowChecker<'a> {
         self.var_types.clear();
         self.ref_bindings.clear();
         self.raw_ptr_vars.clear();
+        self.task_holders.clear();
+        self.lock_guards.clear();
+        self.task_loan_places.clear();
 
         for param in parameters {
             if let Some(scope) = self.local_scopes.last_mut() {
@@ -808,15 +887,34 @@ impl<'a> BorrowChecker<'a> {
                 }
             }
         }
+        let mut direct_waits: FxHashMap<String, Vec<usize>> = FxHashMap::default();
+        for (i, stmt) in block.statements.iter().enumerate() {
+            if let Some(task) = directly_waited_task(stmt) {
+                direct_waits.entry(task.to_string()).or_default().push(i);
+            }
+        }
+        self.block_direct_waits.push(direct_waits);
         self.block_last_uses.push(block_last_use);
         self.block_field_reads.push(block_field_reads);
         self.block_field_writes.push(block_field_writes);
         self.local_scopes.push(FxHashMap::default());
 
+        let pushes = collection_pushes(&block.statements);
         for (i, stmt) in block.statements.iter().enumerate() {
             self.expire_loans_before(i);
             self.statement_indices.push(i);
             self.check_statement(stmt);
+            if let ast::StatementKind::Let(binding) = &stmt.kind
+                && let ast::PatternKind::Identifier(name) = &binding.pattern.kind
+                && let Some(found) = pushes.get(&name.name)
+            {
+                let launches: Vec<_> = found
+                    .iter()
+                    .filter(|(at, _)| *at > i)
+                    .map(|(_, arguments)| arguments.as_slice())
+                    .collect();
+                self.register_collection_task_borrows(&name.name, &launches);
+            }
             self.statement_indices.pop();
         }
         // Final statement boundary: expire loans whose last use was within this block.
@@ -827,6 +925,7 @@ impl<'a> BorrowChecker<'a> {
         self.block_field_reads.pop();
         self.block_field_writes.pop();
         self.block_last_uses.pop();
+        self.block_direct_waits.pop();
         self.var_types = prev_var_types;
         self.raw_ptr_vars = prev_raw_ptr_vars;
     }
@@ -1100,7 +1199,17 @@ impl<'a> BorrowChecker<'a> {
                         }
 
                         // Check if initializer is a borrow expression:
-                        if let ast::ExpressionKind::Reference {
+                        if let Some(places) = lock_guard_places(name, init) {
+                            self.check_expr(init);
+                            for place in places {
+                                self.register_lock_guard_borrow(name, place, init.span);
+                            }
+                        } else if let ast::ExpressionKind::Launch(call) = init.kind.as_ref()
+                            && let ast::ExpressionKind::Call { arguments, .. } =
+                                call.kind.as_ref()
+                        {
+                            self.register_task_borrows(name, arguments);
+                        } else if let ast::ExpressionKind::Reference {
                             is_mutable,
                             expression,
                         } = init.kind.as_ref()
@@ -1359,7 +1468,7 @@ impl<'a> BorrowChecker<'a> {
                         }
                         (BorrowKind::Shared, BorrowKind::Shared) => unreachable!(),
                     };
-                    self.error_with_note(
+                    self.report_conflict(
                         msg,
                         span,
                         Some(conflict.span),
@@ -1421,7 +1530,7 @@ impl<'a> BorrowChecker<'a> {
                     }
                     (BorrowKind::Shared, BorrowKind::Shared) => unreachable!(),
                 };
-                self.error_with_note(
+                self.report_conflict(
                     msg,
                     span,
                     Some(conflict.span),
@@ -1459,6 +1568,181 @@ impl<'a> BorrowChecker<'a> {
         } else {
             self.check_expr(target);
         }
+    }
+
+    /// Loans held by a task local for the references its launch passed to
+    /// the child thread. The child uses them until it is joined: at a direct
+    /// `wait` later in the task's own block, otherwise when the task local
+    /// leaves scope and its drop glue joins.
+    fn register_task_borrows(&mut self, task: &str, arguments: &[ast::Expression]) {
+        self.task_holders.insert(task.to_string());
+        let declared_at = self.statement_indices.last().copied().unwrap_or(0);
+        let joined_at = self.block_direct_waits.last().and_then(|waits| {
+            waits
+                .get(task)?
+                .iter()
+                .copied()
+                .find(|statement| *statement > declared_at)
+        });
+        for argument in arguments {
+            match argument.kind.as_ref() {
+                ast::ExpressionKind::Reference {
+                    is_mutable,
+                    expression,
+                } => {
+                    let kind = if *is_mutable {
+                        BorrowKind::Exclusive
+                    } else {
+                        BorrowKind::Shared
+                    };
+                    self.register_named_borrow(task, expression, kind, argument.span);
+                    // The task is a handle, not a reference to the referent.
+                    self.ref_bindings.remove(task);
+                }
+                ast::ExpressionKind::Identifier(reference)
+                    if self.ref_bindings.contains_key(&reference.name) =>
+                {
+                    // Forwarding a reference shares its referent with the
+                    // child, so another live task on that place conflicts.
+                    let info = self.ref_bindings[&reference.name].clone();
+                    if let Some(conflict) = self
+                        .find_conflict(&info.root, &info.path, info.kind, Some(&reference.name))
+                        .cloned()
+                    {
+                        let target = if info.path.is_empty() {
+                            reference.name.clone()
+                        } else {
+                            format!("{}.{}", reference.name, info.path)
+                        };
+                        let message = match (info.kind, conflict.kind) {
+                            (BorrowKind::Shared, _) => {
+                                msg::cannot_borrow_as_shared_while_mutable(&target)
+                            }
+                            (BorrowKind::Exclusive, BorrowKind::Shared) => {
+                                msg::cannot_borrow_as_mutable_while_shared(&target)
+                            }
+                            (BorrowKind::Exclusive, BorrowKind::Exclusive) => {
+                                msg::cannot_borrow_as_mutable_more_than_once(&target)
+                            }
+                        };
+                        self.report_conflict(
+                            message,
+                            argument.span,
+                            Some(conflict.span),
+                            Some(msg::note_previous_borrow_here(conflict.kind.as_str())),
+                        );
+                    }
+                    let inherited: Vec<_> = self
+                        .scopes
+                        .iter()
+                        .flatten()
+                        .filter(|loan| loan.borrower.as_deref() == Some(reference.name.as_str()))
+                        .cloned()
+                        .collect();
+                    for mut loan in inherited {
+                        loan.borrower = Some(task.to_string());
+                        loan.span = argument.span;
+                        loan.param = false;
+                        if let Some(scope) = self.scopes.last_mut() {
+                            scope.push(loan);
+                        }
+                    }
+                }
+                _ => self.check_expr(argument),
+            }
+        }
+        if let Some(scope) = self.scopes.last_mut() {
+            for loan in scope
+                .iter_mut()
+                .filter(|loan| loan.borrower.as_deref() == Some(task))
+            {
+                loan.last_use = joined_at;
+            }
+        }
+        self.record_task_loans(task);
+    }
+
+    /// The loan a `lock` block's guard holds on the place it locks, to the end
+    /// of the generated block: the guard points into that place, so the body
+    /// cannot move, drop, or overwrite it.
+    fn register_lock_guard_borrow(&mut self, guard: &str, place: &ast::Expression, span: Span) {
+        self.register_named_borrow(guard, place, BorrowKind::Shared, span);
+        // The guard is a handle, not a reference to the place.
+        self.ref_bindings.remove(guard);
+        self.lock_guards.insert(guard.to_string());
+        if let Some(scope) = self.scopes.last_mut() {
+            for loan in scope
+                .iter_mut()
+                .filter(|loan| loan.borrower.as_deref() == Some(guard))
+            {
+                loan.last_use = None;
+            }
+        }
+    }
+
+    /// Loans held by local collection `holder` for every launch later pushed
+    /// into it in its scope. They start at the declaration, not the push: a
+    /// push inside a loop runs again after code that precedes it in the loop
+    /// body, so the borrowed places stay read-only until `holder` drops and
+    /// joins its tasks.
+    fn register_collection_task_borrows(&mut self, holder: &str, launches: &[&[ast::Expression]]) {
+        if launches.is_empty() {
+            return;
+        }
+        self.task_holders.insert(holder.to_string());
+        for arguments in launches {
+            for argument in *arguments {
+                match argument.kind.as_ref() {
+                    // `&mut` is reported by the scoped-launch pass.
+                    ast::ExpressionKind::Reference {
+                        is_mutable: false,
+                        expression,
+                    } => {
+                        self.register_named_borrow(holder, expression, BorrowKind::Shared, argument.span);
+                        self.ref_bindings.remove(holder);
+                    }
+                    ast::ExpressionKind::Identifier(reference)
+                        if self.ref_bindings.contains_key(&reference.name) =>
+                    {
+                        let info = self.ref_bindings[&reference.name].clone();
+                        if info.kind == BorrowKind::Exclusive {
+                            self.error_with_note(
+                                msg::task_collection_mutable_borrow(&reference.name),
+                                argument.span,
+                                None,
+                                None,
+                            );
+                            continue;
+                        }
+                        let inherited: Vec<_> = self
+                            .scopes
+                            .iter()
+                            .flatten()
+                            .filter(|loan| loan.borrower.as_deref() == Some(reference.name.as_str()))
+                            .cloned()
+                            .collect();
+                        for mut loan in inherited {
+                            loan.borrower = Some(holder.to_string());
+                            loan.span = argument.span;
+                            loan.param = false;
+                            if let Some(scope) = self.scopes.last_mut() {
+                                scope.push(loan);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if let Some(scope) = self.scopes.last_mut() {
+            for loan in scope
+                .iter_mut()
+                .filter(|loan| loan.borrower.as_deref() == Some(holder))
+            {
+                loan.last_use = None;
+            }
+        }
+        self.record_task_loans(holder);
     }
 
     fn register_call_result_borrow(
@@ -1842,7 +2126,7 @@ impl<'a> BorrowChecker<'a> {
                 format!("{root}.{path}")
             };
             if let Some(borrow) = self.find_any_borrow(&root, &path, ref_var.as_deref()) {
-                self.error_with_note(
+                self.report_conflict(
                     msg::cannot_assign_to_borrowed(&full_target),
                     target.span,
                     Some(borrow.span),
@@ -1955,12 +2239,52 @@ impl<'a> BorrowChecker<'a> {
                 }
                 (BorrowKind::Shared, BorrowKind::Shared) => unreachable!(),
             };
-            self.error_with_note(
+            self.report_conflict(
                 message,
                 receiver.span,
                 Some(conflict.span),
                 Some(msg::note_previous_borrow_here(conflict.kind.as_str())),
             );
+        }
+    }
+
+    /// Rejects `place.drop()` while a launched task still borrows `place`:
+    /// the task would read freed memory on its own thread. A `lock` block
+    /// on `place` holds it the same way.
+    fn check_drop_of_task_borrow(&mut self, receiver: &ast::Expression) {
+        let Some((root, path, _)) = self.extract_root_and_path(receiver) else {
+            return;
+        };
+        let task_loan = self
+            .scopes
+            .iter()
+            .flatten()
+            .find(|loan| {
+                loan.root == root
+                    && Self::paths_overlap(&loan.path, &path)
+                    && loan.borrower.as_ref().is_some_and(|borrower| {
+                        self.task_holders.contains(borrower) || self.lock_guards.contains(borrower)
+                    })
+            })
+            .map(|loan| {
+                let locked = loan
+                    .borrower
+                    .as_ref()
+                    .is_some_and(|borrower| self.lock_guards.contains(borrower));
+                (loan.span, locked)
+            });
+        if let Some((borrowed_at, locked)) = task_loan {
+            let target = if path.is_empty() {
+                root
+            } else {
+                format!("{root}.{path}")
+            };
+            let (message, note) = if locked {
+                (msg::cannot_drop_locked_owner(&target), msg::note_locked_here())
+            } else {
+                (msg::cannot_drop_task_borrowed(&target), msg::note_task_borrow_here())
+            };
+            self.error_with_note(message, receiver.span, Some(borrowed_at), Some(note.to_string()));
         }
     }
 
@@ -2083,7 +2407,7 @@ impl<'a> BorrowChecker<'a> {
                             }
                             (BorrowKind::Shared, BorrowKind::Shared) => unreachable!(),
                         };
-                        self.error_with_note(
+                        self.report_conflict(
                             msg,
                             expr.span,
                             Some(conflict.span),
@@ -2117,7 +2441,7 @@ impl<'a> BorrowChecker<'a> {
                 if !self.ref_bindings.contains_key(&ident.name)
                     && let Some(borrow) = self.find_mutable_borrow(&ident.name, "", None)
                 {
-                    self.error_with_note(
+                    self.report_conflict(
                         msg::cannot_use_mutably_borrowed(&ident.name),
                         ident.span,
                         Some(borrow.span),
@@ -2199,6 +2523,9 @@ impl<'a> BorrowChecker<'a> {
                 arguments,
             } => {
                 self.check_expr(receiver);
+                if method.name == "drop" {
+                    self.check_drop_of_task_borrow(receiver);
+                }
                 let receiver_kind = self.method_receiver_kind(receiver, &method.name);
                 if let Some(kind) = receiver_kind {
                     self.check_method_receiver_conflict(receiver, kind);
@@ -2251,6 +2578,28 @@ impl<'a> BorrowChecker<'a> {
             ast::ExpressionKind::Block(block) => {
                 self.check_block(block);
             }
+            // Loop bodies see the loans held around the loop.
+            ast::ExpressionKind::While { condition, body } => {
+                self.check_expr(condition);
+                self.check_block(body);
+            }
+            ast::ExpressionKind::ForIn { iterable, body, .. } => {
+                self.check_expr(iterable);
+                self.check_block(body);
+            }
+            ast::ExpressionKind::For {
+                init,
+                condition,
+                increment,
+                body,
+            } => {
+                if let Some(initializer) = &init.initializer {
+                    self.check_expr(initializer);
+                }
+                self.check_expr(condition);
+                self.check_block(body);
+                self.check_expr(increment);
+            }
             ast::ExpressionKind::MacroCall { args, .. } => {
                 for arg in args {
                     match arg {
@@ -2258,6 +2607,14 @@ impl<'a> BorrowChecker<'a> {
                         ast::MacroArg::Statement(statement) => self.check_statement(statement),
                         _ => {}
                     }
+                }
+            }
+            // `wait launch f(&mut x)` joins at once, so its borrows are those
+            // of a plain call. A named or pushed launch registers task loans
+            // where it is bound instead.
+            ast::ExpressionKind::Wait(operand) => {
+                if let ast::ExpressionKind::Launch(call) = operand.kind.as_ref() {
+                    self.check_expr(call);
                 }
             }
             _ => {}
@@ -2808,4 +3165,130 @@ mod tests {
         assert!(errors.is_empty(), "replacement did not end the old field loan: {errors:?}");
     }
 
+    #[test]
+    fn a_lock_block_keeps_the_place_it_locks_borrowed() {
+        // sync_sugar's lowering of `lock owner.get() as n { ... }`.
+        let program = |body: &str| {
+            format!(
+                "trait Drop {{ void drop(*self); }}\n\
+                 struct Mutex {{ i64 value; }}\nstruct Owner {{ Mutex inner; }}\n\
+                 impl Mutex {{ i64 lock(&self) {{ return self.value; }} }}\n\
+                 impl Owner {{ &Mutex get(&self) {{ return &self.inner; }} }}\n\
+                 impl Drop for Owner {{ void drop(*self) {{ }} }}\n\
+                 i64 main() {{ Owner owner; owner.inner.value = 1;\n\
+                 {{ let __lock_0__n_guard = owner.get().lock(); {body} }}\n\
+                 owner.drop(); return 0; }}"
+            )
+        };
+        let (_, borrow) = integrated_safety_errors(&program("owner.drop();"), 30);
+        assert!(
+            borrow.iter().any(|error| error.message
+                == crate::diagnostics::messages::cannot_drop_locked_owner("owner")),
+            "{borrow:?}"
+        );
+        let (_, borrow) = integrated_safety_errors(&program("Owner moved = move owner;"), 31);
+        assert!(
+            borrow.iter().any(|error| error.message.starts_with("cannot move out of 'owner'")),
+            "{borrow:?}"
+        );
+        let (_, borrow) = integrated_safety_errors(&program("i64 v = owner.inner.value;"), 32);
+        assert!(borrow.is_empty(), "{borrow:?}");
+    }
+
+    #[test]
+    fn an_in_place_wait_launch_checks_its_borrows() {
+        let callees = "i64 read(&i64 value) { return *value; }\n\
+                       void bump(&mut i64 value) { *value += 1; }\n";
+        let (_, borrow) = integrated_safety_errors(
+            &format!(
+                "{callees}i64 main() {{ i64 x = 1; Task<i64> t = launch read(&x);\n\
+                 wait launch bump(&mut x); return wait t; }}"
+            ),
+            28,
+        );
+        assert!(
+            borrow.iter().any(|error| error.message.starts_with("cannot borrow 'x' as mutable")),
+            "{borrow:?}"
+        );
+        let (_, borrow) = integrated_safety_errors(
+            &format!("{callees}i64 main() {{ i64 x = 1; wait launch bump(&mut x); return x; }}"),
+            29,
+        );
+        assert!(borrow.is_empty(), "{borrow:?}");
+    }
+}
+
+/// The place a `lock` block's guard locks, when `init` initializes guard
+/// `name`: sync_sugar lowers `lock state.get() as n` to
+/// `let __lock_N__n_guard = state.get().lock();`, which locks `state`.
+/// `lock get(&owner)` locks into each place the call borrows, since its
+/// returned reference can point into any of them. Empty for a temporary
+/// such as `lock create()`, which no local owns.
+fn lock_guard_places<'a>(name: &str, init: &'a ast::Expression) -> Option<Vec<&'a ast::Expression>> {
+    if !crate::sync_sugar::is_lock_guard(name) {
+        return None;
+    }
+    let ast::ExpressionKind::MethodCall { receiver, method, .. } = init.kind.as_ref() else {
+        return None;
+    };
+    if method.name != "lock" {
+        return None;
+    }
+    let mut place = receiver;
+    while let ast::ExpressionKind::MethodCall { receiver, .. } = place.kind.as_ref() {
+        place = receiver;
+    }
+    if super::scoped_launch::is_place(place) {
+        return Some(vec![place]);
+    }
+    let ast::ExpressionKind::Call { arguments, .. } = place.kind.as_ref() else {
+        return Some(Vec::new());
+    };
+    Some(
+        arguments
+            .iter()
+            .filter_map(|argument| match argument.kind.as_ref() {
+                ast::ExpressionKind::Reference { expression, .. }
+                    if super::scoped_launch::is_place(expression) =>
+                {
+                    Some(expression.as_ref())
+                }
+                _ => None,
+            })
+            .collect(),
+    )
+}
+
+/// The arguments of each `name.push(launch f(...))` in `statements`, nested
+/// ones included, by `name`, with the index of the statement that holds it.
+/// One pass per block, so each declaration looks its pushes up.
+fn collection_pushes(
+    statements: &[ast::Statement],
+) -> FxHashMap<String, Vec<(usize, Vec<ast::Expression>)>> {
+    let mut pushes: FxHashMap<String, Vec<(usize, Vec<ast::Expression>)>> = FxHashMap::default();
+    for (index, statement) in statements.iter().enumerate() {
+        let mut one = ast::Block {
+            statements: vec![statement.clone()],
+            span: Span::default(),
+        };
+        crate::parser::visit::expressions_in_block(&mut one, &mut |expression| {
+            if let ast::ExpressionKind::MethodCall {
+                receiver,
+                method,
+                arguments,
+            } = expression.kind.as_ref()
+                && method.name == "push"
+                && let ast::ExpressionKind::Identifier(name) = receiver.kind.as_ref()
+                && let [launch] = arguments.as_slice()
+                && let ast::ExpressionKind::Launch(call) = launch.kind.as_ref()
+                && let ast::ExpressionKind::Call { arguments, .. } = call.kind.as_ref()
+            {
+                pushes
+                    .entry(name.name.clone())
+                    .or_default()
+                    .push((index, arguments.clone()));
+            }
+        });
+    }
+    pushes
 }

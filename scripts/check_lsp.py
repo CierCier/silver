@@ -583,6 +583,285 @@ class NativeLsp(unittest.TestCase):
         self.assertEqual(session.result("textDocument/definition", {**document,
             "position": position(text, at)}), before)
 
+    def test_shared_values_and_lock_blocks_resolve_to_user_declarations(self):
+        repo = Path(__file__).resolve().parent.parent
+        text = ("import std.sync;\n"
+                "void add(&shared i64 total, i64 amount) {\n"
+                " lock total { total += amount; }\n}\n"
+                "i64 main() {\n shared i64 count = 0;\n add(&count, 2);\n"
+                " i64 seen = 0;\n lock count { seen = count; }\n return seen;\n}\n")
+        env = os.environ.copy()
+        env["SILVER_SYSROOT"] = str(repo)
+        session = Session(self.binary, self.root, env=env)
+        self.addCleanup(session.close)
+        legend = session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {
+            "textDocument": {"diagnostic": {}, "semanticTokens": semantic_capability()}}})["capabilities"][
+            "semanticTokensProvider"]["legend"]
+        session.send("initialized", {})
+        uri = (self.root / "shared.ag").as_uri()
+        document = {"textDocument": {"uri": uri}}
+        session.send("textDocument/didOpen", {"textDocument": {
+            "uri": uri, "languageId": "silver", "version": 1, "text": text}})
+        self.assertEqual(session.result("textDocument/diagnostic", document)["items"], [])
+        # Inside a lock block the locked name resolves to the user's declaration,
+        # never to the locals the block lowers to.
+        inside = {**document, "position": location(text, "total", text.index("lock total {") + 12)["start"]}
+        declaration = location(text, "total")
+        self.assertEqual(session.result("textDocument/definition", inside), {"uri": uri, "range": declaration})
+        self.assertIn("total", session.result("textDocument/hover", inside)["contents"]["value"])
+        self.assertNotIn("__lock", session.result("textDocument/hover", inside)["contents"]["value"])
+        references = session.result("textDocument/references", {**inside, "context": {"includeDeclaration": True}})
+        self.assertEqual(len(references), 3)
+        renamed = session.result("textDocument/rename", {**document,
+            "position": location(text, "count")["start"], "newName": "tally"})
+        self.assertEqual(len(renamed["changes"][uri]), 4)
+        symbols = json.dumps(session.result("textDocument/documentSymbol", document))
+        self.assertNotIn("__lock", symbols)
+        # The words are keywords, and the code they lower to adds no tokens.
+        tokens = decode_tokens(session.result("textDocument/semanticTokens/full", document)["data"], legend)
+        starts = [(line, character) for line, character, *_ in tokens]
+        self.assertEqual(starts, sorted(set(starts)))
+        kinds = {(line, character): kind for line, character, _, kind, _ in tokens}
+        for word, start in [("shared", text.index("shared i64 count")), ("lock", text.index("lock count")),
+                            ("shared", text.index("shared i64 total")), ("lock", text.index("lock total"))]:
+            at = position(text, start)
+            self.assertEqual(kinds[(at["line"], at["character"])], "keyword", word)
+        inside = position(text, text.index("seen = count") + len("seen = "))
+        self.assertEqual(kinds[(inside["line"], inside["character"])], "variable")
+        items = session.result("textDocument/completion", {**document,
+            "position": position(text, text.index("seen = count") + len("seen = "))})["items"]
+        self.assertFalse(any(item["label"].startswith("__lock") for item in items))
+        # The formatter lays out the sugar like any other block.
+        params = {**document, "options": {"tabSize": 1, "insertSpaces": True}}
+        self.assertEqual(apply_edits(text, session.result("textDocument/formatting", params)),
+                         text.replace("{ total += amount; }", "{\n  total += amount;\n }")
+                         .replace("{ seen = count; }", "{\n  seen = count;\n }"))
+        # An `as` alias is its own declaration, apart from an outer local with
+        # its name; a locked name right after `{` is still highlighted.
+        alias = ("import std.sync;\n"
+                 "i64 main() {\n i64 x = 0;\n shared i64 m = 1;\n lock m as x { x += 1; }\n"
+                 " lock m /* again */{m += x;}\n return x;\n}\n")
+        alias_uri = (self.root / "alias.ag").as_uri()
+        alias_document = {"textDocument": {"uri": alias_uri}}
+        session.send("textDocument/didOpen", {"textDocument": {
+            "uri": alias_uri, "languageId": "silver", "version": 1, "text": alias}})
+        self.assertEqual(session.result("textDocument/diagnostic", alias_document)["items"], [])
+        body = position(alias, alias.index("x += 1"))
+        self.assertEqual(session.result("textDocument/definition", {**alias_document, "position": body}),
+                         {"uri": alias_uri, "range": location(alias, "x", alias.index("as x") + 3)})
+        outer = session.result("textDocument/rename", {**alias_document,
+            "position": location(alias, "x")["start"], "newName": "y"})["changes"][alias_uri]
+        self.assertEqual(apply_edits(alias, outer), alias.replace("i64 x", "i64 y").replace("+= x", "+= y")
+                         .replace("return x", "return y"))
+        inner = session.result("textDocument/rename", {**alias_document, "position": body,
+            "newName": "value"})["changes"][alias_uri]
+        self.assertEqual(apply_edits(alias, inner), alias.replace("as x { x += 1", "as value { value += 1"))
+        # A comment after the place leaves the place's lookups intact.
+        for start in [alias.index("lock m /*") + 5, alias.index("m += x")]:
+            self.assertEqual(session.result("textDocument/definition",
+                                            {**alias_document, "position": position(alias, start)}),
+                             {"uri": alias_uri, "range": location(alias, "m", alias.index("shared i64 m") + 11)})
+        tokens = decode_tokens(session.result("textDocument/semanticTokens/full", alias_document)["data"], legend)
+        kinds = {(line, character): kind for line, character, _, kind, _ in tokens}
+        for start in [alias.index("as x") + 3, alias.index("x += 1"), alias.index("m += x")]:
+            at = position(alias, start)
+            self.assertEqual(kinds.get((at["line"], at["character"])), "variable", alias[start:start + 6])
+        # Locking a place again inside its own block, or moving the value out
+        # of the block, is reported where it happens.
+        misuse = ("import std.sync;\nimport std.mem.vec;\nstruct Pool { shared Vec<i64> items; }\n"
+                  "void drain(&Pool pool) {\n lock pool.items as a { lock pool.items as b { } }\n}\n")
+        moved = misuse.replace("lock pool.items as a { lock pool.items as b { } }",
+                               "lock pool.items as items { Vec<i64> mine = items; }")
+        # A tuple, a match arm, or a variant payload consumes the value too.
+        in_tuple = moved.replace("Vec<i64> mine = items;", "[Vec<i64>, i64] pair = [items, 0];")
+        in_match = moved.replace("Vec<i64> mine = items;",
+                                 "i64 k = 0; Vec<i64> mine = match k { 0: items, _: items };")
+        in_variant = moved.replace("Vec<i64> mine = items;", "Wrap w = Wrap.Some(items);").replace(
+            "struct Pool", "enum Wrap { Some(Vec<i64>); Empty; } struct Pool")
+        indexed = ("import std.sync;\nimport std.mem.vec; import std.string;\n"
+                   "struct Pool { shared Vec<String> items; }\nvoid drain(&Pool pool) {\n"
+                   " lock pool.items as items { String first = move items[0]; }\n}\n")
+        # The guard of `lock state.get()` points into `state` until the block ends.
+        owner = ("import std.sync;\nimport std.mem.arc;\ni64 main() {\n"
+                 " Arc<Mutex<i64>> state = Arc<Mutex<i64>>.new(Mutex<i64>.new(1));\n"
+                 " lock state.get() as count { state.drop(); count = 2; }\n return 0;\n}\n")
+        # A match arm cannot take a locked enum's payload out of the block.
+        payload = misuse.replace("struct Pool { shared Vec<i64> items; }",
+                                 "enum Bin { Full(Vec<i64>); Empty; } struct Pool { shared Bin items; }").replace(
+            "lock pool.items as a { lock pool.items as b { } }",
+            "lock pool.items as items { Vec<i64> mine = match items { Full(owned): owned, Empty: Vec<i64>.new() }; }")
+        payload_move = payload.replace("Full(owned)", "Full(move owned)")
+        # `lock get(&owner)` and `lock view` (with `view = &owner`) keep `owner` borrowed.
+        through_call = ("import std.sync;\nstruct Owner { Mutex<i64> cell; }\n"
+                        "&Mutex<i64> get(&Owner owner) { return &owner.cell; }\nvoid consume(Owner _o) { }\n"
+                        "i64 main() { Owner owner = { .cell = Mutex<i64>.new(1) };"
+                        " lock get(&owner) as value { consume(move owner); value = 2; } return 0; }\n")
+        through_view = through_call.replace("lock get(&owner) as value",
+                                            "&Mutex<i64> view = &owner.cell; lock view as value")
+        # Only a `Vec<Task<T>>` joins the tasks pushed into it when it drops.
+        forgetful = ("struct Forgetful { i64 count; }\nimpl Forgetful { void push(&mut self, Task<void> _t) { } }\n"
+                     "void read(&i64 _v) { }\n"
+                     "i64 main() {\n i64 value = 1; Forgetful bag; bag.push(launch read(&value)); return 0;\n}\n")
+        # A generic body that uses its `T` directly is wrong for a shared `T`.
+        generic = ("import std.sync;\n\n\nT twice<T>(T a) {\n return a + a;\n}\n"
+                   "i64 main() {\n shared i64 total = 1;\n Mutex<i64> other = twice(move total);\n return 0;\n}\n")
+        # A field a task borrows cannot be moved or dropped before the task joins.
+        field = ("import std.mem.vec;\nstruct Holder { Vec<i64> items; }\ni64 size(&Vec<i64> values) { return values.len(); }\n"
+                 "i64 keep(Vec<i64> values) { return values.len(); }\n"
+                 "i64 pass(Holder h) { Task<i64> t = launch size(&h.items); i64 n = keep(h.items); return n + wait t; }\n")
+        returned = field.replace("i64 n = keep(h.items); return n + wait t;", "return h.items;").replace(
+            "i64 pass(Holder h) { Task<i64> t", "Vec<i64> pass(Holder h) { Task<i64> _t")
+        dropped = field.replace("i64 n = keep(h.items);", "h.items.drop(); i64 n = 0;")
+        for version, (source, message) in enumerate([
+                (misuse, "`pool.items` is already locked by an enclosing lock block; locking it again would deadlock"),
+                (moved, "cannot move 'items' out of its lock block: the shared value still owns it; clone it instead"),
+                (in_tuple, "cannot move 'items' out of its lock block: the shared value still owns it; clone it instead"),
+                (in_match, "cannot move 'items' out of its lock block: the shared value still owns it; clone it instead"),
+                (in_variant, "cannot move 'items' out of its lock block: the shared value still owns it; "
+                             "clone it instead"),
+                (generic, "`a` is shared between threads: read or change it inside `lock a { ... }`"),
+                (indexed, "cannot move 'items[...]' out of its lock block: the shared value still owns it; "
+                          "clone it instead"),
+                (owner, "cannot drop 'state' inside a lock block on it: the lock guard points into it\nlocked here"),
+                (payload, "cannot move 'owned' out of its lock block: the shared value still owns it; clone it instead"),
+                (payload_move, "cannot move 'owned' out of its lock block: the shared value still owns it; "
+                               "clone it instead"),
+                (through_call, "cannot move 'owner' because it is borrowed\nlocked here"),
+                (through_view, "cannot move 'owner' because it is borrowed\nprevious shared borrow occurs here"),
+                (forgetful, "a launch that borrows 'value' can only be pushed into a local `Vec<Task<T>>`, "
+                            "whose drop joins its tasks; `bag` is not one"),
+                (field, "cannot move 'h.items' because it is borrowed\nborrowed by a task launched here"),
+                (returned, "cannot move 'h.items' because it is borrowed\nborrowed by a task launched here"),
+                (dropped, "cannot drop 'h.items' because it is borrowed by a launched task\n"
+                          "borrowed by a task launched here")], 2):
+            session.send("textDocument/didChange", {"textDocument": {"uri": alias_uri, "version": version},
+                "contentChanges": [{"text": source}]})
+            errors = {(item["message"], item["range"]["start"]["line"])
+                      for item in session.result("textDocument/diagnostic", alias_document)["items"]}
+            self.assertIn((message, 4), errors)
+        # A `#[safe]` struct is Send only when every type argument is.
+        session.send("textDocument/didChange", {"textDocument": {"uri": alias_uri, "version": 20},
+            "contentChanges": [{"text": "import std.mem.rc;\n#[safe]\nstruct Triple<A, B, C> { A a; B b; C* c; }\n"
+                                "void take(Triple<i64, i64, Rc<i64>> _t) {}\n"
+                                "i64 main() {\n Triple<i64, i64, Rc<i64>> t;\n"
+                                " Task<void> worker = launch take(move t);\n wait worker;\n return 0;\n}\n"}]})
+        messages = [item["message"] for item in session.result("textDocument/diagnostic", alias_document)["items"]]
+        self.assertIn("launch argument of type Triple<i64, i64, Rc<i64>> is not Send: "
+                      "Rc<T> carries a shared non-atomic reference count", messages)
+        # A launch is judged by the overload type checking chose, not the
+        # first one with its name and arity.
+        overloads = ("import std.mem.rc;\ni64 f(&i64 v) { return *v; }\ni64 f(&Rc<i64> _v) { return 0; }\n"
+                     "i64 work(i64 v) { return v; }\ni64 work(&i64 v) { return *v; }\n"
+                     "i64 main() {\n i64 x = 1;\n Rc<i64> r = Rc<i64>.new(1);\n"
+                     " Task<i64> plain = launch work(21);\n Task<i64> fine = launch f(&x);\n"
+                     " Task<i64> bad = launch f(&r);\n return wait plain + wait fine + wait bad;\n}\n")
+        session.send("textDocument/didChange", {"textDocument": {"uri": alias_uri, "version": 21},
+            "contentChanges": [{"text": overloads}]})
+        errors = [(item["message"], item["range"]["start"]["line"])
+                  for item in session.result("textDocument/diagnostic", alias_document)["items"]]
+        self.assertEqual(errors, [("launch argument of type &Rc<i64> is not Send: "
+                                   "Rc<T> carries a shared non-atomic reference count", 10)])
+        # A launch argument is the binding in scope there, not an outer one
+        # with its name.
+        shadowed = ("import std.mem.rc;\ni64 peek<T>(&T _v) { return 0; }\ni64 own(i64 v) { return v; }\n"
+                    "i64 bad() {\n i64 x = 1;\n { Rc<i64> x = Rc<i64>.new(2); return wait launch peek(&x); }\n}\n"
+                    "i64 fine() {\n Rc<i64> x = Rc<i64>.new(2);\n"
+                    " { i64 x = 1; return wait launch peek(&x) + wait launch own(x); }\n}\n")
+        session.send("textDocument/didChange", {"textDocument": {"uri": alias_uri, "version": 22},
+            "contentChanges": [{"text": shadowed}]})
+        errors = [(item["message"], item["range"]["start"]["line"])
+                  for item in session.result("textDocument/diagnostic", alias_document)["items"]]
+        self.assertEqual(errors, [("launch argument of type &Rc<i64> is not Send: "
+                                   "Rc<T> carries a shared non-atomic reference count", 5)])
+        # A reference parameter takes only an explicit borrow.
+        bare = ("i64 read(&i64 v) { return *v; }\n&i64 pick(&i64 v) { return v; }\n"
+                "i64 main() {\n i64 x = 1;\n Task<i64> a = launch read(x);\n"
+                " Task<i64> b = launch read(pick(&x));\n return wait a + wait b;\n}\n")
+        session.send("textDocument/didChange", {"textDocument": {"uri": alias_uri, "version": 23},
+            "contentChanges": [{"text": bare}]})
+        errors = [(item["message"], item["range"]["start"]["line"])
+                  for item in session.result("textDocument/diagnostic", alias_document)["items"]]
+        self.assertEqual(errors, [
+            ("launch passes `x` to a reference parameter without `&`: declare it `shared`, "
+             "or move it into the task through a by-value parameter", 4),
+            ("a borrowed launch argument must be `&place`, `&mut place`, or a reference variable", 5)])
+        # Each source and the (message, line) errors it must report, exactly.
+        for version, (source, expected) in enumerate([
+                # A worker pool declared with `let` is a Vec<Task<T>> too.
+                ("import std.mem.vec;\ni64 read(&i64 v) { return *v; }\ni64 main() {\n i64 value = 3;\n"
+                 " let pool = Vec<Task<i64>>.new();\n pool.push(launch read(&value));\n return 0;\n}\n", []),
+                # Writing a field a task reads is a conflict.
+                ("struct Owner { i64 field; }\ni64 read(&i64 v) { return *v; }\ni64 main() {\n"
+                 " Owner owner; owner.field = 1; Task<i64> t = launch read(&owner.field);\n"
+                 " owner.field = 2;\n return wait t;\n}\n",
+                 [("cannot assign to 'owner.field' because it is borrowed", 4)]),
+                # A borrowed global's own type decides Send for a generic `&T`.
+                ("import std.mem.rc;\nRc<i64> counter = Rc<i64>.new(1);\nvoid peek<T>(&T _v) { }\ni64 main() {\n"
+                 " Task<void> t = launch peek(&counter);\n wait t;\n return 0;\n}\n",
+                 [("launch argument of type &Rc<i64> is not Send: Rc<T> carries a shared non-atomic reference count", 4)]),
+                # Only the borrowed field crosses into the task, not its whole owner.
+                ("struct State { i64 count; i64* data; }\nState state;\nvoid peek<T>(&T _v) { }\ni64 main() {\n"
+                 " wait launch peek(&state.count);\n wait launch peek(&state.data);\n return 0;\n}\n",
+                 [("launch argument of type &i64* is not Send: raw pointer types are not Send: move owned "
+                   "values (Box/Vec) or pass a Channel across threads", 5)]),
+                # A generic body that locks its `T` needs a shared argument.
+                ("import std.sync;\nvoid touch<T>(&T value) { lock value { } }\ni64 main() {\n i64 plain = 1;\n"
+                 " touch(&plain);\n return 0;\n}\n",
+                 [("`value` is `i64`, not shared: declare it `shared i64` to lock it", 1)]),
+                # A reference parameter takes only its own pointee type.
+                ("import std.sync;\nvoid bump(&shared i64 c) { lock c { c += 1; } }\ni64 main() {\n i64 plain = 0;\n"
+                 " bump(&plain);\n return 0;\n}\n",
+                 [("reference argument type mismatch: expected &Mutex<i64>, found &i64", 4)]),
+                # A reference to a narrower number cannot stand in for a wider one.
+                ("void put(&mut i64 out) { *out = 1; }\ni64 main() {\n i32 small = 0;\n put(&mut small);\n"
+                 " return 0;\n}\n",
+                 [("reference argument type mismatch: expected &mut i64, found &i32", 3)]),
+                # A `let` value needs `&` like any other local.
+                ("void mutate(&mut i64 v) { *v += 1; }\ni64 start() { return 0; }\ni64 main() {\n"
+                 " let value = start();\n Task<void> task = launch mutate(value);\n wait task;\n return 0;\n}\n",
+                 [("launch passes `value` to a reference parameter without `&`: declare it `shared`, "
+                   "or move it into the task through a by-value parameter", 4)]),
+                # A borrowed call result is not a place the launch can track.
+                ("i64 read(&i64 v) { return *v; }\ni64 pick(&i64 v) { return *v; }\ni64 main() {\n i64 x = 1;\n"
+                 " Task<i64> t = launch read(&pick(&x));\n return wait t;\n}\n",
+                 [("a borrowed launch argument must be `&place`, `&mut place`, or a reference variable", 4)]),
+                # A generic `&Vec<T>` is judged by its concrete `T`.
+                ("import std.mem.vec;\nimport std.mem.rc;\ni64 count<T>(&Vec<T> values) { return values.len(); }\n"
+                 "i64 main() {\n Vec<Rc<i64>> values = Vec<Rc<i64>>.new();\n Task<i64> t = launch count(&values);\n"
+                 " return wait t;\n}\n",
+                 [("launch argument of type &Vec<Rc<i64>> is not Send: Rc<T> carries a shared non-atomic "
+                   "reference count", 5)]),
+                # A generic body cannot move its locked `T` out either.
+                ("import std.sync;\nimport std.mem.vec;\nvoid take<T>(&Mutex<T> m) { lock m as value { T mine = value; } }\n"
+                 "i64 main() {\n Mutex<Vec<i64>> state = Mutex<Vec<i64>>.new(Vec<i64>.new());\n take(&state);\n"
+                 " return 0;\n}\n",
+                 [("cannot move 'value' out of its lock block: the shared value still owns it; clone it instead", 2)]),
+                # Launches in methods are checked like launches in functions.
+                ("import std.mem.rc;\nvoid inspect(&Rc<i64> _r) { }\nstruct Runner { i64 n; }\nimpl Runner {\n"
+                 " void go(&self) {\n  Rc<i64> rc = Rc<i64>.new(1);\n  Task<void> t = launch inspect(&rc);\n"
+                 "  wait t;\n }\n}\n",
+                 [("launch argument of type &Rc<i64> is not Send: Rc<T> carries a shared non-atomic "
+                   "reference count", 6)]),
+                ("void bump(&mut i64 v) { *v += 1; }\nstruct Runner { i64 n; }\nimpl Runner {\n i64 go(&self) {\n"
+                 "  i64 value = 1;\n  Task<void> t = launch bump(&mut value);\n  value = 5;\n  wait t;\n"
+                 "  return value;\n }\n}\n",
+                 [("cannot assign to 'value' because it is borrowed", 6)]),
+                # Explicit type arguments do not hide a launch's borrows.
+                ("void worker<T>(&mut T value, T add) { *value = *value + add; }\ni64 main() {\n i64 value = 1;\n"
+                 " Task<void> t = launch worker<i64>(&mut value, 1);\n value = 2;\n wait t;\n return 0;\n}\n",
+                 [("cannot assign to 'value' because it is borrowed", 4)])], 24):
+            session.send("textDocument/didChange", {"textDocument": {"uri": alias_uri, "version": version},
+                "contentChanges": [{"text": source}]})
+            errors = [(item["message"].split("\n")[0].split(" (help:")[0], item["range"]["start"]["line"])
+                      for item in session.result("textDocument/diagnostic", alias_document)["items"]
+                      if item.get("severity", 1) == 1]
+            self.assertEqual(errors, expected, source)
+        # Using a shared value outside a lock names the fix.
+        session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
+            "contentChanges": [{"text": text.replace(" i64 seen = 0;", " i64 seen = count + 1;")}]})
+        messages = [item["message"] for item in session.result("textDocument/diagnostic", document)["items"]]
+        self.assertTrue(any("lock count { ... }" in message for message in messages), messages)
+
     def test_push_lambda_diagnostics_report_real_errors_and_clear_after_edits(self):
         original = ('i32 main() {\n i32 value = 4;\n'
                     ' let shadow = (i32 value) => value + 1;\n'

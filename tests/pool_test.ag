@@ -111,23 +111,26 @@ i32 run_requests(u16 port, i64 requests, i64 per_conn) {
     g_total_b = 0;
     g_accepts_a = 0;
     g_status = -1;
-    TaskRecord* server_handle = thread_spawn(keepalive_server_main, 0);
-    @assert(!(server_handle == (TaskRecord*)0), "server_handle == (TaskRecord*)0");
+    Task<void> server_handle = launch keepalive_server_main(0);
+    @assert(server_handle.started(), "launch keepalive_server_main");
     HttpClient client = HttpClient.new();
     i64 i = 0;
+    i32 failure = 0;
     while (i < requests) {
         String url = build_url(port, "/p");
         Result<HttpResponse, Error> r = client.get((str)url.data);
         url.drop();
-        if (r.failed()) { thread_join(server_handle); return 8; }
+        if (r.failed()) { failure = 8; break; }
         HttpResponse response = r.unwrap();
         if (response.status != 200 || !response.body.equals("ok")) {
-            thread_join(server_handle);
-            return 9;
+            failure = 9;
+            break;
         }
         i = i + 1;
     }
-    @assert(!(thread_join(server_handle) < 0), "thread_join(server_handle) < 0");
+    // Join before reading the server's status.
+    wait server_handle;
+    if (failure != 0) { return failure; }
     if (g_status != 0) { return (i32)g_status; }
     return 0;
 }
@@ -223,10 +226,10 @@ i32 main() {
         g_listener_b = move listener_b;
         g_redirect_port = port_b;
         g_status = -1;
-        TaskRecord* server_a = thread_spawn(cross_server_a_main, 0);
-        assert_true(server_a != (TaskRecord*)0, "spawn a");
-        TaskRecord* server_b = thread_spawn(cross_server_b_main, 1);
-        assert_true(server_b != (TaskRecord*)0, "spawn b");
+        Task<void> server_a = launch cross_server_a_main(0);
+        assert_true(server_a.started(), "spawn a");
+        Task<void> server_b = launch cross_server_b_main(1);
+        assert_true(server_b.started(), "spawn b");
 
         HttpClient client = HttpClient.new();
         String url = build_url(port_a, "/start");
@@ -240,8 +243,8 @@ i32 main() {
             assert_eq_i64(response.status, 200, "final status");
             response.drop();
         }
-        assert_true(thread_join(server_a) >= 0, "join a");
-        assert_true(thread_join(server_b) >= 0, "join b");
+        wait server_a;
+        wait server_b;
         assert_eq_i64(g_status, 0, "server status");
         assert_true(!head_contains(&g_head_b[0], "authorization"),
             "Authorization dropped on cross-host redirect");
@@ -292,13 +295,13 @@ i32 main() {
         g_total_b = 1;
         g_accepts_a = 0;
         g_status = -1;
-        TaskRecord* server_a = thread_spawn(keepalive_server_main, 0);
-        assert_true(server_a != (TaskRecord*)0, "spawn a");
+        Task<void> server_a = launch keepalive_server_main(0);
+        assert_true(server_a.started(), "spawn a");
 
         g_accepts_b = 0;
         g_status = -1;
-        TaskRecord* server_b = thread_spawn(keepalive_server_main, 1);
-        assert_true(server_b != (TaskRecord*)0, "spawn b");
+        Task<void> server_b = launch keepalive_server_main(1);
+        assert_true(server_b.started(), "spawn b");
 
         HttpClient client = HttpClient.new();
         client.set_pool_max_idle(1);
@@ -316,8 +319,8 @@ i32 main() {
         Result<HttpResponse, Error> r3 = client.get((str)ua2.data);
         ua2.drop();
         assert_true(!r3.failed(), "request A2 reconnects");
-        assert_true(thread_join(server_a) >= 0, "join a");
-        assert_true(thread_join(server_b) >= 0, "join b");
+        wait server_a;
+        wait server_b;
         assert_eq_i64(g_status, 0, "server status");
         assert_eq_i64(g_accepts_b, 1, "server b accepted once");
         assert_eq_i64(g_accepts_a, 2, "server a accepted twice (evicted, then reconnected)");

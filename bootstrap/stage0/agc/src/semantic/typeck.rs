@@ -22,6 +22,95 @@ const MAX_TYPE_CHECK_DEPTH: usize = 32;
 
 pub type CallSiteKey = (u32, usize, usize, u32);
 
+/// True when `ty` is a Mutex<T>, directly or behind a reference: the type a
+/// `shared T` is spelled as.
+fn is_mutex_type(ty: &Type) -> bool {
+    let ty = match ty {
+        Type::Reference { inner, .. } => inner.as_ref(),
+        other => other,
+    };
+    matches!(ty, Type::Named { path, .. } if path.last().is_some_and(|name| name == "Mutex"))
+}
+
+/// The operand to name in a "lock it first" error when `left` or `right` is
+/// a Mutex: its identifier when it is one, otherwise a generic description.
+fn shared_operand(left: &Type, right: &Type, expr: &ast::Expression) -> Option<String> {
+    let is_mutex = is_mutex_type;
+    let ast::ExpressionKind::Binary {
+        left: left_expr,
+        right: right_expr,
+        ..
+    } = expr.kind.as_ref()
+    else {
+        return (is_mutex(left) || is_mutex(right)).then(|| "this value".to_string());
+    };
+    let name_of = |operand: &ast::Expression| match operand.kind.as_ref() {
+        ast::ExpressionKind::Identifier(identifier) => identifier.name.clone(),
+        _ => "this value".to_string(),
+    };
+    if is_mutex(left) {
+        Some(name_of(left_expr))
+    } else if is_mutex(right) {
+        Some(name_of(right_expr))
+    } else {
+        None
+    }
+}
+
+/// The place a `lock` block locks, when `block` is one lowered by
+/// sync_sugar: `{ let __lock_N_guard = place.lock(); ... }`.
+fn lock_block_place(block: &ast::Block) -> Option<&ast::Expression> {
+    let ast::StatementKind::Let(guard) = &block.statements.first()?.kind else {
+        return None;
+    };
+    let ast::PatternKind::Identifier(guard_name) = &guard.pattern.kind else {
+        return None;
+    };
+    if !guard_name.name.starts_with("__lock_") || !guard_name.name.ends_with("_guard") {
+        return None;
+    }
+    let ast::ExpressionKind::MethodCall { receiver, method, .. } = guard.initializer.as_ref()?.kind.as_ref()
+    else {
+        return None;
+    };
+    (method.name == "lock").then_some(receiver.as_ref())
+}
+
+/// True when `expr` reads a lock block's value or a field of it: sync_sugar
+/// lowers the value to `(*__lock_N__name)`.
+fn reads_locked_value(expr: &ast::Expression) -> bool {
+    let mut place = expr;
+    while let ast::ExpressionKind::FieldAccess { object, .. } = place.kind.as_ref() {
+        place = object;
+    }
+    matches!(place.kind.as_ref(), ast::ExpressionKind::Unary {
+        operator: ast::UnaryOperator::Dereference,
+        operand,
+    } if matches!(operand.kind.as_ref(),
+        ast::ExpressionKind::Identifier(pointer)
+            if crate::sync_sugar::locked_name(&pointer.name).is_some()))
+}
+
+/// Source text of a simple place (`x`, `self.hits`), or None.
+fn place_text(expr: &ast::Expression) -> Option<String> {
+    match expr.kind.as_ref() {
+        ast::ExpressionKind::Identifier(identifier) => Some(identifier.name.clone()),
+        ast::ExpressionKind::FieldAccess { object, field } => {
+            Some(format!("{}.{}", place_text(object)?, field.name))
+        }
+        _ => None,
+    }
+}
+
+/// Identifies a `let` statement whose type was inferred: its file, byte
+/// range and expansion tag, so synthesized statements at one source span
+/// (macro bodies, `lock` blocks) stay distinct.
+pub type InferredLetKey = (u32, usize, usize, u32);
+
+fn inferred_let_key(span: Span) -> InferredLetKey {
+    (span.file, span.start, span.end, span.expansion)
+}
+
 /// Source declaration selected by type checking for a call expression.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CallableIdentity {
@@ -130,7 +219,7 @@ pub struct TypeChecker {
     /// The driver materializes these as type annotations after typeck so
     /// downstream passes (move/borrow/escape checks, monomorphization,
     /// codegen) see ordinary annotated bindings.
-    inferred_lets: HashMap<(usize, usize), (Type, Span)>,
+    inferred_lets: HashMap<InferredLetKey, (Type, Span)>,
 }
 
 /// A binary operation on a type parameter recorded during generic body
@@ -214,6 +303,8 @@ struct TraitImpl {
 struct StructDef {
     type_params: Vec<String>,
     fields: HashMap<String, Type>,
+    /// Marked `#[safe]`: trusted to cross a thread boundary.
+    thread_safe: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -404,7 +495,7 @@ impl TypeChecker {
     }
 
     /// Consume inferred `let` bindings for post-typeck AST materialization.
-    pub fn take_inferred_lets(&mut self) -> HashMap<(usize, usize), (Type, Span)> {
+    pub fn take_inferred_lets(&mut self) -> HashMap<InferredLetKey, (Type, Span)> {
         std::mem::take(&mut self.inferred_lets)
     }
 
@@ -583,12 +674,14 @@ impl TypeChecker {
                             fields.insert(field.name.clone(), field_ty);
                         }
                     }
-                    if !fields.is_empty() {
+                    // Register only a complete definition; an empty struct is one.
+                    if fields.len() == export.fields.len() {
                         self.struct_defs.insert(
                             export.name.clone(),
                             StructDef {
                                 type_params: export.type_params.clone(),
                                 fields,
+                                thread_safe: export.thread_safe,
                             },
                         );
                     }
@@ -773,11 +866,14 @@ impl TypeChecker {
                             (field.name.name.clone(), ty)
                         })
                         .collect::<HashMap<_, _>>();
+                    let thread_safe = crate::types::parse_struct_attributes(&item.attributes)
+                        .is_ok_and(|attributes| attributes.safe);
                     self.struct_defs.insert(
                         struct_item.name.name.clone(),
                         StructDef {
                             type_params,
                             fields,
+                            thread_safe,
                         },
                     );
                 }
@@ -1119,7 +1215,30 @@ impl TypeChecker {
 
     fn check_statement(&mut self, stmt: &ast::Statement) {
         match &stmt.kind {
-            ast::StatementKind::Block(block) => self.check_block(block),
+            ast::StatementKind::Block(block) => {
+                // A `lock` block on a value that is not shared gets one error
+                // naming the fix, not errors from its lowered body.
+                if let Some(place) = lock_block_place(block) {
+                    let before = self.errors.len();
+                    let place_type = self.check_expr(place, None);
+                    // `.lock()` reaches a Mutex through a reference or a pointer.
+                    let value_type = match &place_type {
+                        Type::Reference { inner, .. } | Type::Pointer { inner, .. } => inner.as_ref(),
+                        other => other,
+                    };
+                    if !is_mutex_type(value_type) {
+                        if !matches!(value_type, Type::Unknown) {
+                            let place_name = place_text(place)
+                                .map_or_else(|| "this value".to_string(), |text| format!("`{text}`"));
+                            self.error(msg::lock_needs_shared(&place_name, value_type), place.span);
+                        }
+                        return;
+                    }
+                    // check_block checks the place again.
+                    self.errors.truncate(before);
+                }
+                self.check_block(block)
+            }
             ast::StatementKind::Let(let_stmt) => {
                 // Two binding forms:
                 // - `T x = expr;`  — declared type comes from the annotation.
@@ -1158,7 +1277,7 @@ impl TypeChecker {
                         return;
                     }
                     self.inferred_lets.insert(
-                        (stmt.span.start, stmt.span.end),
+                        inferred_let_key(stmt.span),
                         (inferred.clone(), let_stmt.pattern.span),
                     );
                     Self::bind_let_pattern(self, let_stmt, inferred);
@@ -1757,7 +1876,14 @@ impl TypeChecker {
                     if !self.lambdas.frames.is_empty() && !self.lambda_copy_type(&right_ty) {
                         self.consume_capture(right);
                     }
-                    if left_ty != right_ty && !self.is_implicitly_castable(&right_ty, &left_ty) {
+                    if is_mutex_type(&left_ty) && !is_mutex_type(&right_ty) && right_ty != Type::Unknown {
+                        // Assigning a plain value to a `shared T` meant its value.
+                        let name = match left.kind.as_ref() {
+                            ast::ExpressionKind::Identifier(identifier) => identifier.name.clone(),
+                            _ => "this value".to_string(),
+                        };
+                        self.error(msg::shared_value_outside_lock(&name), expr.span);
+                    } else if left_ty != right_ty && !self.is_implicitly_castable(&right_ty, &left_ty) {
                         self.error(
                             msg::assignment_type_mismatch(&left_ty, &right_ty),
                             expr.span,
@@ -2235,8 +2361,9 @@ impl TypeChecker {
                 //
                 // The structural Send gate runs on every argument: launch
                 // MOVES its args into the child thread, so shared-ownership
-                // (Rc), GC-handle, raw-pointer, and reference types are
-                // rejected here.
+                // (Rc), GC-handle, and raw-pointer types are rejected here.
+                // A reference passed to a reference parameter is a borrow
+                // (a scoped launch); its pointee must be Send.
                 let ast::ExpressionKind::Call {
                     function,
                     arguments,
@@ -2259,8 +2386,41 @@ impl TypeChecker {
                 };
                 let (call_ty, arg_types) =
                     self.resolve_overload_with_explicit(ident, &[], arguments, inner.span);
-                for (arg, arg_ty) in arguments.iter().zip(arg_types.iter()) {
-                    if let Err(reason) = self.check_send(arg_ty) {
+                let borrowed_parameters = self
+                    .resolved_callables
+                    .get(&(
+                        inner.span.file,
+                        inner.span.start,
+                        inner.span.end,
+                        inner.span.expansion,
+                    ))
+                    .map(|callable| callable.reference_parameters.clone())
+                    .unwrap_or_default();
+                for (index, (arg, arg_ty)) in arguments.iter().zip(arg_types.iter()).enumerate() {
+                    // A borrowed argument shares its referent with the child,
+                    // so the gate applies to the pointee.
+                    // `&x` types as a pointer until the call coerces it; a raw
+                    // pointer variable is not a tracked borrow and stays gated.
+                    let borrows = borrowed_parameters.contains(&index);
+                    let crossing_ty = match arg_ty {
+                        Type::Reference { inner, .. } if borrows => inner.as_ref(),
+                        Type::Pointer { inner, .. }
+                            if borrows
+                                && matches!(
+                                    arg.kind.as_ref(),
+                                    ast::ExpressionKind::Reference { .. }
+                                ) =>
+                        {
+                            // `&r` of a reference `r` passes `r` itself, as
+                            // overload resolution adapts it.
+                            match inner.as_ref() {
+                                Type::Reference { inner, .. } => inner.as_ref(),
+                                inner => inner,
+                            }
+                        }
+                        other => other,
+                    };
+                    if let Err(reason) = self.check_send(crossing_ty) {
                         self.error(
                             format!("launch argument of type {arg_ty} is not Send: {reason}"),
                             arg.span,
@@ -2496,6 +2656,14 @@ impl TypeChecker {
                 } else {
                     self.check_expr(receiver, None)
                 };
+                // `Task<T>` is builtin; `started()` is its only method.
+                if let Type::Task(_) = &receiver_ty {
+                    if method.name == "started" && arguments.is_empty() {
+                        return Type::Primitive(ast::PrimitiveType::Bool);
+                    }
+                    self.error(msg::unknown_task_method(&method.name), method.span);
+                    return Type::Unknown;
+                }
                 // Check if this is an enum variant construction first
                 if let Type::Named { path: ty_path, .. } = &receiver_ty
                     && ty_path.len() == 1
@@ -2538,11 +2706,18 @@ impl TypeChecker {
                                 // `move`d — otherwise the source keeps its
                                 // drop flag and the enum's copy shares the
                                 // same buffers (silent double owner).
-                                let is_named_lvalue = matches!(
-                                    arg.kind.as_ref(),
+                                // A lock block's value is `(*__lock_N__name)`.
+                                let is_named_lvalue = match arg.kind.as_ref() {
                                     ast::ExpressionKind::Identifier(_)
-                                        | ast::ExpressionKind::FieldAccess { .. }
-                                );
+                                    | ast::ExpressionKind::FieldAccess { .. } => true,
+                                    ast::ExpressionKind::Unary {
+                                        operator: ast::UnaryOperator::Dereference,
+                                        operand,
+                                    } => matches!(operand.kind.as_ref(),
+                                        ast::ExpressionKind::Identifier(pointer)
+                                            if crate::sync_sugar::locked_name(&pointer.name).is_some()),
+                                    _ => false,
+                                };
                                 // Check the CONCRETE argument type (resolved
                                 // through the expected payload type): in a
                                 // concrete enum impl the arg is i64 even
@@ -3056,6 +3231,8 @@ impl TypeChecker {
             }
             ast::ExpressionKind::Match { expression, arms } => {
                 let scrutinee_ty = self.check_expr(expression, None);
+                // The shared value keeps owning a locked scrutinee's payload.
+                let locked = reads_locked_value(expression);
 
                 // Enum dispatch: scrutinee is a named enum type.
                 if let Type::Named { path, .. } = &scrutinee_ty {
@@ -3080,6 +3257,7 @@ impl TypeChecker {
                         let mut arm_types: Vec<Type> = Vec::new();
                         for (arm_index, arm) in arms.iter().enumerate() {
                             self.push_scope();
+                            let mut owned_bindings: Vec<&str> = Vec::new();
                             match &arm.pattern.kind {
                                 ast::PatternKind::Wildcard
                                 | ast::PatternKind::Identifier(_)
@@ -3114,6 +3292,15 @@ impl TypeChecker {
                                                         data_pattern.kind,
                                                         ast::PatternKind::Move(_)
                                                     );
+                                                    if locked && is_mut {
+                                                        self.error(
+                                                            msg::move_out_of_lock(&binding.name),
+                                                            data_pattern.span,
+                                                        );
+                                                    }
+                                                    if !is_mut && self.type_has_drop_impl(&bound.to_ast()) {
+                                                        owned_bindings.push(&binding.name);
+                                                    }
                                                     self.bind(
                                                         &binding.name,
                                                         bound,
@@ -3132,7 +3319,14 @@ impl TypeChecker {
                                                             &Type::from_ast(pt),
                                                             &enum_type_map,
                                                         );
+                                                        if self.type_has_drop_impl(&bound.to_ast()) {
+                                                            owned_bindings.push(&b.name);
+                                                        }
                                                         self.bind(&b.name, bound, false, b.span);
+                                                    } else if locked
+                                                        && let ast::PatternKind::Move(b) = &sub.kind
+                                                    {
+                                                        self.error(msg::move_out_of_lock(&b.name), sub.span);
                                                     }
                                                 }
                                             }
@@ -3182,6 +3376,14 @@ impl TypeChecker {
                                 arm_types.first()
                             };
                             arm_types.push(self.check_expr(&arm.body, arm_expected));
+                            // Yielding an owning payload binding would give the
+                            // match result a second owner of the locked storage.
+                            if locked
+                                && let ast::ExpressionKind::Identifier(name) = arm.body.kind.as_ref()
+                                && owned_bindings.contains(&name.name.as_str())
+                            {
+                                self.error(msg::move_out_of_lock(&name.name), arm.body.span);
+                            }
                             self.pop_scope();
                         }
                         let non_never: Vec<&Type> =
@@ -3590,6 +3792,7 @@ impl TypeChecker {
         send_check::structural_send(ty, &|name: &str| {
             if let Some(def) = self.struct_defs.get(name) {
                 return Some(DefView::Struct {
+                    thread_safe: def.thread_safe,
                     type_params: def.type_params.clone(),
                     fields: def
                         .fields
@@ -5231,6 +5434,14 @@ impl TypeChecker {
         )
     }
 
+    /// True when two distinct primitive pointees differ in layout: a value
+    /// cast between them converts, but a pointer to one cannot stand in for
+    /// a pointer to the other (`&mut i64` over an `i32` writes 8 bytes).
+    fn pointee_layouts_differ(from: &Type, to: &Type) -> bool {
+        matches!((from, to), (Type::Primitive(a), Type::Primitive(b))
+            if a != b && !(Self::is_byte_element(from) && Self::is_byte_element(to)))
+    }
+
 
     pub(crate) fn can_coerce_to_slice(&self, found: &Type, expected_elem: &Type) -> bool {
         match found {
@@ -6323,7 +6534,9 @@ impl TypeChecker {
                 },
             ) => {
                 (!*to_mut || *from_mut)
-                    && (from_inner == to_inner || self.is_implicitly_castable(from_inner, to_inner))
+                    && (from_inner == to_inner
+                        || (!Self::pointee_layouts_differ(from_inner, to_inner)
+                            && self.is_implicitly_castable(from_inner, to_inner)))
             }
             (
                 from_val,
@@ -6822,6 +7035,12 @@ impl TypeChecker {
     ) -> Option<Type> {
         if self.is_primitive_type(left) {
             return None;
+        }
+        // A `shared T` is a Mutex<T>: its value is reached only by locking it.
+        if let Some(operand) = shared_operand(left, right, expr) {
+            self.error(msg::shared_value_outside_lock(&operand), expr.span);
+            // Already reported: the unknown type suppresses follow-on errors.
+            return Some(Type::Unknown);
         }
 
         let name = operator_method_name(operator)?;
@@ -8318,7 +8537,7 @@ pub fn rewrite_bare_constructors(
 /// binding instead of having to handle inference itself.
 pub fn populate_inferred_let_types(
     program: &mut ast::Program,
-    inferred: &HashMap<(usize, usize), (Type, Span)>,
+    inferred: &HashMap<InferredLetKey, (Type, Span)>,
 ) {
     for item in &mut program.items {
         match &mut item.kind {
@@ -8340,7 +8559,7 @@ pub fn populate_inferred_let_types(
 
 fn populate_block_inferred_let_types(
     block: &mut ast::Block,
-    inferred: &HashMap<(usize, usize), (Type, Span)>,
+    inferred: &HashMap<InferredLetKey, (Type, Span)>,
 ) {
     for stmt in &mut block.statements {
         populate_statement_inferred_let_types(stmt, inferred);
@@ -8349,11 +8568,11 @@ fn populate_block_inferred_let_types(
 
 fn populate_statement_inferred_let_types(
     stmt: &mut ast::Statement,
-    inferred: &HashMap<(usize, usize), (Type, Span)>,
+    inferred: &HashMap<InferredLetKey, (Type, Span)>,
 ) {
     if let ast::StatementKind::Let(let_stmt) = &mut stmt.kind
         && let_stmt.type_annotation.is_none()
-        && let Some((ty, _name_span)) = inferred.get(&(stmt.span.start, stmt.span.end))
+        && let Some((ty, _name_span)) = inferred.get(&inferred_let_key(stmt.span))
     {
         let_stmt.type_annotation = Some(ty.to_ast());
     }
@@ -8382,7 +8601,7 @@ fn populate_statement_inferred_let_types(
 /// bodies and blocks).
 fn populate_expr_blocks_inferred_let_types(
     expr: &mut ast::Expression,
-    inferred: &HashMap<(usize, usize), (Type, Span)>,
+    inferred: &HashMap<InferredLetKey, (Type, Span)>,
 ) {
     match expr.kind.as_mut() {
         ast::ExpressionKind::Block(block) | ast::ExpressionKind::Lambda { body: block, .. } => {

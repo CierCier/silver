@@ -6,7 +6,7 @@
 // records copyable and avoids putting a recursive owned type tree into every
 // local declaration before the typed checker exists. Generic arguments are
 // the exception: nested spellings (Vec<Item*>, Vec<Vec<u8>>) cannot borrow
-// discontiguous tokens, so argument0/argument1 own their rendered text.
+// discontiguous tokens, so `arguments` owns their rendered text.
 import std.mem.memory;
 import std.mem.vec;
 import std.string;
@@ -34,24 +34,30 @@ enum ProjectionExpressionKind {
     Move;
 }
 
-/// A projected type: kind, base name (borrowed from the CST), up to two
-/// owned generic argument spellings, and Send-relevant flags.
+/// A projected type: kind, base name (borrowed from the CST), the owned
+/// spelling of each generic argument, and Send-relevant flags.
 struct TypeProjection {
     ProjectionTypeKind kind;
     str name;
-    String argument0;
-    String argument1;
+    Vec<String> arguments;
     bool is_mutable;
     bool contains_rc;
     bool contains_non_send;
     bool contains_unknown;
 }
 
-/// One argument of a `launch` call: its expression shape, name, and span.
+/// One argument of a `launch` call: its expression shape, name, and span,
+/// plus the callee name and span, the argument's position, and the call's
+/// arity.
 struct LaunchArgument {
     ProjectionExpressionKind kind;
     str name;
+    SyntaxNode* name_node;
     Span span;
+    str callee;
+    Span callee_span;
+    i64 index;
+    i64 count;
 }
 
 /// Cursor over a range of leaf tokens for type projection.
@@ -71,13 +77,42 @@ TypeProjection projection_type_empty() {
     TypeProjection result;
     result.kind = ProjectionTypeKind.Unknown;
     result.name = "";
-    result.argument0 = String.new();
-    result.argument1 = String.new();
+    result.arguments = Vec<String>.new();
     result.is_mutable = false;
     result.contains_rc = false;
     result.contains_non_send = false;
     result.contains_unknown = true;
     return result;
+}
+
+/// Returns the spelling of generic argument `index`, or "" when absent.
+str projection_argument(TypeProjection* projection, i64 index) {
+    if (index < 0 || index >= projection.arguments.len()) { return ""; }
+    return projection.arguments.get_ptr(index).to_str();
+}
+
+/// Returns a deep copy of `arguments`.
+Vec<String> projection_clone_arguments(Vec<String>* arguments) {
+    Vec<String> result = Vec<String>.new();
+    i64 i = 0;
+    while (i < arguments.len()) {
+        result.push(arguments.get_ptr(i).clone());
+        i += 1;
+    }
+    return result;
+}
+
+/// Appends `<A, B, ...>` to `out`; nothing when there are no arguments.
+void projection_push_arguments(String* out, Vec<String>* arguments) {
+    if (arguments.len() == 0) { return; }
+    out.push((u8)'<');
+    i64 i = 0;
+    while (i < arguments.len()) {
+        if (i > 0) { out.push_str(", "); }
+        out.push_str(arguments.get_ptr(i).to_str());
+        i += 1;
+    }
+    out.push((u8)'>');
 }
 
 /// Returns true when token `node` has exactly `text`.
@@ -142,15 +177,7 @@ void projection_mark_type_known(TypeProjection* value) {
 /// projection, so arrays render name-only as before.
 String projection_render_nested(TypeProjection* inner) {
     String rendered = String.from_str(inner.name);
-    if (inner.argument0.len() > 0) {
-        rendered.push((u8)'<');
-        rendered.push_str(inner.argument0.to_str());
-        if (inner.argument1.len() > 0) {
-            rendered.push_str(", ");
-            rendered.push_str(inner.argument1.to_str());
-        }
-        rendered.push((u8)'>');
-    }
+    projection_push_arguments(&rendered, &inner.arguments);
     if (inner.kind == ProjectionTypeKind.Pointer) {
         rendered.push((u8)'*');
     } else if (inner.kind == ProjectionTypeKind.Reference) {
@@ -189,8 +216,7 @@ TypeProjection projection_parse_type_at(ProjectionTypeParser* parser) {
         TypeProjection result = projection_type_empty();
         result.kind = ProjectionTypeKind.Reference;
         result.name = inner.name;
-        result.argument0 = inner.argument0.clone();
-        result.argument1 = inner.argument1.clone();
+        result.arguments = projection_clone_arguments(&inner.arguments);
         result.is_mutable = is_mutable;
         projection_mark_type_known(&result);
         projection_merge_type_flags(&result, &inner);
@@ -203,8 +229,7 @@ TypeProjection projection_parse_type_at(ProjectionTypeParser* parser) {
         TypeProjection result = projection_type_empty();
         result.kind = ProjectionTypeKind.Pointer;
         result.name = inner.name;
-        result.argument0 = inner.argument0.clone();
-        result.argument1 = inner.argument1.clone();
+        result.arguments = projection_clone_arguments(&inner.arguments);
         result.is_mutable = true;
         projection_mark_type_known(&result);
         projection_merge_type_flags(&result, &inner);
@@ -220,8 +245,7 @@ TypeProjection projection_parse_type_at(ProjectionTypeParser* parser) {
         TypeProjection result = projection_type_empty();
         result.kind = ProjectionTypeKind.Array;
         result.name = element.name;
-        result.argument0 = element.argument0.clone();
-        result.argument1 = element.argument1.clone();
+        result.arguments = projection_clone_arguments(&element.arguments);
         projection_mark_type_known(&result);
         projection_merge_type_flags(&result, &element);
         return result;
@@ -248,20 +272,17 @@ TypeProjection projection_parse_type_at(ProjectionTypeParser* parser) {
 
     if (parser.cursor < parser.end && projection_token_text(parser.leaves.get(parser.cursor), "<")) {
         parser.cursor += 1;
-        if (parser.cursor < parser.end && !projection_token_text(parser.leaves.get(parser.cursor), ">")) {
-            TypeProjection argument0 = projection_parse_type_at(parser);
-            result.argument0 = projection_render_nested(&argument0);
-            projection_merge_type_flags(&result, &argument0);
-            if (parser.cursor < parser.end
-                && parser.leaves.get(parser.cursor).token_kind == TokenKind.Comma) {
-                parser.cursor += 1;
-                if (parser.cursor < parser.end && !projection_token_text(parser.leaves.get(parser.cursor), ">")) {
-                    TypeProjection argument1 = projection_parse_type_at(parser);
-                    result.argument1 = projection_render_nested(&argument1);
-                    projection_merge_type_flags(&result, &argument1);
-                } else {
-                    result.contains_unknown = true;
-                }
+        while (parser.cursor < parser.end && !projection_token_text(parser.leaves.get(parser.cursor), ">")) {
+            TypeProjection argument = projection_parse_type_at(parser);
+            result.arguments.push(projection_render_nested(&argument));
+            projection_merge_type_flags(&result, &argument);
+            if (parser.cursor >= parser.end
+                || parser.leaves.get(parser.cursor).token_kind != TokenKind.Comma) {
+                break;
+            }
+            parser.cursor += 1;
+            if (parser.cursor < parser.end && projection_token_text(parser.leaves.get(parser.cursor), ">")) {
+                result.contains_unknown = true;
             }
         }
         while (parser.cursor < parser.end && !projection_token_text(parser.leaves.get(parser.cursor), ">")) {
@@ -327,6 +348,11 @@ LaunchArgument projection_argument(Vec<SyntaxNode*>* leaves, i64 start, i64 end)
     LaunchArgument argument;
     argument.kind = ProjectionExpressionKind.Unknown;
     argument.name = "";
+    argument.name_node = (SyntaxNode*)0;
+    argument.callee = "";
+    argument.callee_span = argument.span;
+    argument.index = 0;
+    argument.count = 0;
     argument.span = projection_range_span(leaves, start, end);
     if (start >= end) {
         return argument;
@@ -336,7 +362,8 @@ LaunchArgument projection_argument(Vec<SyntaxNode*>* leaves, i64 start, i64 end)
     if (first.token_kind == TokenKind.Move) {
         argument.kind = ProjectionExpressionKind.Move;
         if (start + 1 < end && leaves.get(start + 1).token_kind == TokenKind.Identifier) {
-            argument.name = leaves.get(start + 1).text;
+            argument.name_node = leaves.get(start + 1);
+            argument.name = argument.name_node.text;
         }
         return argument;
     }
@@ -347,12 +374,14 @@ LaunchArgument projection_argument(Vec<SyntaxNode*>* leaves, i64 start, i64 end)
             name_index += 1;
         }
         if (name_index < end && leaves.get(name_index).token_kind == TokenKind.Identifier) {
-            argument.name = leaves.get(name_index).text;
+            argument.name_node = leaves.get(name_index);
+            argument.name = argument.name_node.text;
         }
         return argument;
     }
     if (first.token_kind == TokenKind.Identifier) {
         argument.kind = ProjectionExpressionKind.Identifier;
+        argument.name_node = first;
         argument.name = first.text;
         return argument;
     }
@@ -371,8 +400,10 @@ void projection_add_argument(Vec<SyntaxNode*>* leaves, i64 start, i64 end, Vec<L
     arguments.push(move argument);
 }
 
-/// Projects the comma-separated arguments of a call group.
-void projection_collect_argument_group(SyntaxNode* group, CfgSet* cfg, Vec<LaunchArgument>* arguments) {
+/// Projects the comma-separated arguments of `callee`'s call group.
+void projection_collect_argument_group(SyntaxNode* group, SyntaxNode* callee, CfgSet* cfg,
+                                       Vec<LaunchArgument>* arguments) {
+    i64 first = arguments.len();
     SyntaxNode* child = group.first_child;
     while (child != (SyntaxNode*)0) {
         Vec<SyntaxNode*> segment = Vec<SyntaxNode*>.new();
@@ -387,18 +418,16 @@ void projection_collect_argument_group(SyntaxNode* group, CfgSet* cfg, Vec<Launc
             child = child.next_sibling;
         }
     }
-}
-
-/// Returns a function item's body block, or null.
-SyntaxNode* projection_function_body(SyntaxNode* function) {
-    SyntaxNode* child = function.first_child;
-    while (child != (SyntaxNode*)0) {
-        if (child.kind == NodeKind.Block) {
-            return child;
-        }
-        child = child.next_sibling;
+    i64 count = arguments.len() - first;
+    i64 index = 0;
+    while (index < count) {
+        LaunchArgument* argument = arguments.get_ptr(first + index);
+        argument.callee = callee.text;
+        argument.callee_span = callee.span;
+        argument.index = index;
+        argument.count = count;
+        index += 1;
     }
-    return (SyntaxNode*)0;
 }
 
 /// Returns true when `node` is one of the cfg-live `leaves`.
@@ -413,6 +442,30 @@ bool projection_live_leaf(Vec<SyntaxNode*>* leaves, SyntaxNode* node) {
     return false;
 }
 
+/// The argument group of the call that `launch` token `launch_token`
+/// starts, past any explicit generic arguments (`worker<i64>(...)`), or null.
+SyntaxNode* launch_call_arguments(SyntaxNode* launch_token) {
+    SyntaxNode* callee = launch_token.next_sibling;
+    if (callee == (SyntaxNode*)0 || callee.kind != NodeKind.Token
+        || callee.token_kind != TokenKind.Identifier) {
+        return (SyntaxNode*)0;
+    }
+    SyntaxNode* group = callee.next_sibling;
+    if (group != (SyntaxNode*)0 && group.kind == NodeKind.Token && group.token_kind == TokenKind.Less) {
+        i64 depth = 0;
+        while (group != (SyntaxNode*)0) {
+            if (group.kind == NodeKind.Token && group.token_kind == TokenKind.Less) { depth += 1; }
+            if (group.kind == NodeKind.Token && group.token_kind == TokenKind.Greater) { depth -= 1; }
+            group = group.next_sibling;
+            if (depth == 0) { break; }
+        }
+    }
+    if (group == (SyntaxNode*)0 || group.kind != NodeKind.Parenthesized) {
+        return (SyntaxNode*)0;
+    }
+    return group;
+}
+
 /// Collects the arguments of every cfg-live `launch` call under `node`.
 void projection_walk_launches(SyntaxNode* node, CfgSet* cfg, Vec<SyntaxNode*>* live_leaves, Vec<LaunchArgument>* arguments) {
     if (node == (SyntaxNode*)0) {
@@ -420,15 +473,9 @@ void projection_walk_launches(SyntaxNode* node, CfgSet* cfg, Vec<SyntaxNode*>* l
     }
     if (node.kind == NodeKind.Token && node.token_kind == TokenKind.Launch
         && projection_live_leaf(live_leaves, node)) {
-        SyntaxNode* callee = node.next_sibling;
-        SyntaxNode* group = (SyntaxNode*)0;
-        if (callee != (SyntaxNode*)0) {
-            group = callee.next_sibling;
-        }
-        if (callee != (SyntaxNode*)0 && callee.kind == NodeKind.Token
-            && callee.token_kind == TokenKind.Identifier
-            && group != (SyntaxNode*)0 && group.kind == NodeKind.Parenthesized) {
-            projection_collect_argument_group(group, cfg, arguments);
+        SyntaxNode* group = launch_call_arguments(node);
+        if (group != (SyntaxNode*)0) {
+            projection_collect_argument_group(group, node.next_sibling, cfg, arguments);
         }
     }
     SyntaxNode* child = node.first_child;
@@ -438,14 +485,3 @@ void projection_walk_launches(SyntaxNode* node, CfgSet* cfg, Vec<SyntaxNode*>* l
     }
 }
 
-/// Collects the arguments of every `launch` call in `function`.
-void project_function_launch_arguments(SyntaxNode* function, CfgSet* cfg, Vec<LaunchArgument>* arguments) {
-    SyntaxNode* body = projection_function_body(function);
-    if (body == (SyntaxNode*)0) {
-        return;
-    }
-    Vec<SyntaxNode*> live_leaves = Vec<SyntaxNode*>.new();
-    cfg_collect_live_leaves(body, cfg, &live_leaves);
-    projection_walk_launches(body, cfg, &live_leaves, arguments);
-    live_leaves.drop();
-}

@@ -336,7 +336,7 @@ bool rename_conflicts(DocumentStore* store, Document* context, SymbolTarget targ
         j = 0;
         while (j < doc.analysis.occurrences.len()) {
             IdeOccurrence* occurrence = doc.analysis.occurrences.get_ptr(j);
-            if (!occurrence.member && strcmp(occurrence.node.text, name) == 0) {
+            if (!occurrence.member && ide_spells(occurrence.node.text, name)) {
                 i64 p = 0;
                 while (p < plan.len()) {
                     SymbolTarget renamed = plan.get(p);
@@ -351,7 +351,7 @@ bool rename_conflicts(DocumentStore* store, Document* context, SymbolTarget targ
                     p += 1;
                 }
             }
-            if (strcmp(occurrence.node.text, selected.name.to_str()) != 0) { j += 1; continue; }
+            if (!ide_spells(occurrence.node.text, selected.name.to_str())) { j += 1; continue; }
             SymbolTarget resolved = rename_target(resolve_occurrence(doc, j));
             if (resolved.symbol == -2) {
                 i64 p = 0;
@@ -384,7 +384,7 @@ String compute_rename(DocumentStore* store, Document* context, SymbolTarget targ
     while (i < documents.len()) {
         Document* doc = documents.get(i); doc.ensure_syntax(); String edits = String.new(); bool first = true; i64 j = 0;
         while (j < doc.analysis.occurrences.len()) {
-            if (strcmp(doc.analysis.occurrences.get_ptr(j).node.text, selected_name) != 0) { j += 1; continue; }
+            if (!ide_spells(doc.analysis.occurrences.get_ptr(j).node.text, selected_name)) { j += 1; continue; }
             SymbolTarget resolved = rename_target(resolve_occurrence(doc, j));
             if (same_target(resolved, target)) {
                 if (!first) { edits.push(','); } first = false;

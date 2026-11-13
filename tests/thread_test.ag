@@ -1,54 +1,79 @@
-// Thread runtime integration test: spawn/join on real 1:1 OS threads.
+// Thread runtime integration test: launch/wait on real 1:1 OS threads.
 //
-// Spawns N threads that each run a worker incrementing a shared atomic
-// counter (with per-thread spacing so the sum is deterministic), joins every
-// thread, then verifies the counter reached exactly the expected total and
-// that a second spawn/join cycle still works (registry slot reclamation).
-// Also exercises the _start join-all path: a thread left running when `main`
-// returns is joined before exit_group.
+// Launches N tasks that each add to a shared atomic counter (with per-task
+// spacing so the sum is deterministic), waits for every task, then checks
+// the counter reached exactly the expected total and that a second
+// launch/wait round still works (registry slot reclamation).
+// A method can launch and wait too. Also exercises the _start join-all
+// path: a task left running when `main` returns is joined before exit_group.
 
 import std.thread;
 import std.atomic;
+import std.mem.vec;
 import std.sys.entry;
 
 i64 g_counter;
 
-void worker(i64 tid) {
-    // Spaced increments: thread t adds (t+1) to the counter.
-    __atomic_fetch_add_i64(&g_counter, tid + 1, ATOMIC_RELEASE);
+void worker(i64 index) {
+    // Spaced increments: task t adds (t+1) to the counter.
+    __atomic_fetch_add_i64(&g_counter, index + 1, ATOMIC_RELEASE);
+}
+
+/// Launches four workers and waits for all of them. Returns false when a
+/// launch fails.
+bool run_round() {
+    Vec<Task<void>> tasks = Vec<Task<void>>.new();
+    bool started = true;
+    for (i64 i = 0; i < 4; i = i + 1) {
+        Task<void> task = launch worker(i);
+        started = started && task.started();
+        tasks.push(move task);
+    }
+    while (tasks.len() > 0) {
+        Task<void> task = tasks.pop();
+        if (task.started()) {
+            wait task;
+        }
+    }
+    tasks.drop();
+    return started;
+}
+
+i64 twice(i64 value) {
+    return value * 2;
+}
+
+/// Launches from a method body, which the native backend types on its own.
+struct Doubler {
+    i64 value;
+}
+
+impl Doubler {
+    i64 doubled(&self) {
+        Task<i64> task = launch twice(self.value);
+        return wait task;
+    }
 }
 
 i64 main() {
-    i64 nthreads = 4;
+    // Round 1: launch all, wait all. Expected counter = 1+2+3+4 = 10.
+    @assert(run_round(), "round 1 launches");
+    @assert(__atomic_load_i64(&g_counter, ATOMIC_ACQUIRE) == 10, "round 1 total");
 
-    // Round 1: spawn all, join all. Expected counter = 1+2+3+4 = 10.
-    TaskRecord* h0 = thread_spawn(worker, 0);
-    TaskRecord* h1 = thread_spawn(worker, 1);
-    TaskRecord* h2 = thread_spawn(worker, 2);
-    TaskRecord* h3 = thread_spawn(worker, 3);
-    @assert(!(h0 == (TaskRecord*)0 || h1 == (TaskRecord*)0 || h2 == (TaskRecord*)0 || h3 == (TaskRecord*)0), "h0 == (TaskRecord*)0 || h1 == (TaskRecord*)0 || h2 == (TaskRecord*)0 || h3 == (TaskRecord*)0");
-    @assert(!(thread_join(h0) < 0 || thread_join(h1) < 0 || thread_join(h2) < 0 || thread_join(h3) < 0), "thread_join(h0) < 0 || thread_join(h1) < 0 || thread_join(h2) < 0 || thread_join(h3) < 0");
-    @assert(!(__atomic_load_i64(&g_counter, ATOMIC_ACQUIRE) != 10), "__atomic_load_i64(&g_counter, ATOMIC_ACQUIRE) != 10");
-
-    // Round 2: slots were reclaimed by join — spawn again and join all four.
-    // The counter must reach the full sum again, proving concurrent runs of
-    // independent spawn/join cycles are correct.
+    // Round 2: `wait` reclaimed the slots, so launching again works and the
+    // counter reaches the full sum again.
     g_counter = 0;
-    h0 = thread_spawn(worker, 0);
-    h1 = thread_spawn(worker, 1);
-    h2 = thread_spawn(worker, 2);
-    h3 = thread_spawn(worker, 3);
-    @assert(!(h0 == (TaskRecord*)0 || h1 == (TaskRecord*)0 || h2 == (TaskRecord*)0 || h3 == (TaskRecord*)0), "h0 == (TaskRecord*)0 || h1 == (TaskRecord*)0 || h2 == (TaskRecord*)0 || h3 == (TaskRecord*)0");
-    @assert(!(thread_join(h0) < 0 || thread_join(h1) < 0 || thread_join(h2) < 0 || thread_join(h3) < 0), "thread_join(h0) < 0 || thread_join(h1) < 0 || thread_join(h2) < 0 || thread_join(h3) < 0");
-    @assert(!(__atomic_load_i64(&g_counter, ATOMIC_ACQUIRE) != 10), "__atomic_load_i64(&g_counter, ATOMIC_ACQUIRE) != 10");
+    @assert(run_round(), "round 2 launches");
+    @assert(__atomic_load_i64(&g_counter, ATOMIC_ACQUIRE) == 10, "round 2 total");
 
-    // Round 3: spawn one thread and return WITHOUT joining. The join-all hook
-    // in _start must wait for it before exit_group; if the registry were not
-    // linked (e.g. entry.ag lost its import) the binary would fail to link,
-    // and if join-all hung the suite timeout would fire. The worker's
-    // increment races the exit only if join-all is missing — with it, the
-    // thread always finishes before exit_group.
-    h0 = thread_spawn(worker, 0);
-    @assert(!(h0 == (TaskRecord*)0), "h0 == (TaskRecord*)0");
+    Doubler doubler;
+    doubler.value = 21;
+    @assert(doubler.doubled() == 42, "launch in a method");
+
+    // Round 3: launch one task and return WITHOUT waiting. It borrows
+    // nothing, so dropping its handle does not join it; the join-all hook in
+    // _start must wait for it before exit_group.
+    Task<void> detached = launch worker(0);
+    @assert(detached.started(), "round 3 launch");
     return 0;
 }

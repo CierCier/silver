@@ -163,6 +163,33 @@ bool ownership_place_is_within(str place, str parent) {
     return ownership_path_prefix(parent, place);
 }
 
+/// True when `text` starts with `prefix`.
+bool ownership_text_starts_with(str text, str prefix) {
+    i64 i = 0;
+    while (prefix[i] != (u8)0) {
+        if (text[i] != prefix[i]) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+/// True for the binary arithmetic, comparison and logical operators.
+bool ownership_is_binary_operator(SyntaxNode* node) {
+    if (node == (SyntaxNode*)0 || node.kind != NodeKind.Token) { return false; }
+    TokenKind kind = node.token_kind;
+    return kind == TokenKind.Plus || kind == TokenKind.Minus || kind == TokenKind.Star
+        || kind == TokenKind.Slash || kind == TokenKind.Percent || kind == TokenKind.Equal
+        || kind == TokenKind.NotEqual || kind == TokenKind.Less || kind == TokenKind.Greater
+        || kind == TokenKind.LessEqual || kind == TokenKind.GreaterEqual
+        || kind == TokenKind.And || kind == TokenKind.Or;
+}
+
+/// True when variable token `node` is an operand of a binary operator.
+bool ownership_is_operator_operand(SyntaxNode* node) {
+    return ownership_is_binary_operator(node.next_sibling)
+        || ownership_is_binary_operator(binding_previous_sibling(node));
+}
+
 impl OwnershipAnalyzer {
     /// Creates an analyzer that appends owner plans to `owner_plans`.
     OwnershipAnalyzer new(DiagnosticBag* diagnostics, OwnershipTypeInfo* type_info,
@@ -320,6 +347,14 @@ impl OwnershipAnalyzer {
         Span span = node.span;
         i64 variable_index = self.variable_index(place, span);
         if (variable_index < 0 || !self.needs_move_tracking(place, span)) { return; }
+        // A `shared T` is a Mutex<T>: as an operator operand it was meant to
+        // be its value, which only a lock block reaches. Not a move.
+        str type_name = self.type_table.type_name(self.variables.get_ptr(variable_index).type_id);
+        if (ownership_text_starts_with(type_name, "Mutex<") && ownership_is_operator_operand(node)) {
+            self.diagnostics.error(span, shared_value_outside_lock(place));
+            self.failed = true;
+            return;
+        }
         self.observe(place, span);
         if (!continues) { return; }
         MoveOrigin origin;

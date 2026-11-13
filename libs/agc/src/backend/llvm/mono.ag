@@ -56,6 +56,8 @@ bool mono_type_is_concrete(LLVMOpaqueContext* raw_ctx, TypeTable* types, u32 id,
             i += 1;
         }
         str name = types.names.get(entry.name_id);
+        // `Task<T>` is a builtin i64 handle with no LLVM struct of its own.
+        if (strcmp(name, "Task") == 0 && entry.count == 1) { return true; }
         return LLVMGetTypeByName2(raw_ctx, name) != (LLVMOpaqueType*)0;
     }
     return false;
@@ -702,6 +704,10 @@ void mono_ensure_child_layouts(LlvmContext* ctx, u32 type_id, Vec<u32>* layout_i
 void mono_ensure_type_layout(LlvmContext* ctx, u32 type_id, Vec<u32>* layout_ids) {
     TypeEntry* source = ctx.types.get(type_id);
     if (source.kind != TypeKind.Named || source.count == 0 || mono_layout_seen(layout_ids, type_id)) {
+        return;
+    }
+    // `Task<T>` lowers to an i64 handle and has no struct layout.
+    if (strcmp(ctx.types.names.get(source.name_id), "Task") == 0) {
         return;
     }
     u32 name_id = source.name_id;

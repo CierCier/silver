@@ -5,12 +5,12 @@ import std.thread;
 import std.atomic;
 import std.sync;
 import std.sys.raw.thread;
+import std.mem.vec;
 import std.sys.entry;
 
 RwLock<i64> g_rw;
 i64 g_read_matches = 0;
 WaitGroup g_wg;
-i64 g_readers[4];
 
 void reader_worker(i64 _arg) {
     ReadGuard<i64> r = g_rw.read();
@@ -36,15 +36,16 @@ i32 main() {
         g_read_matches = 0;
         g_wg.add(4);
 
+        Vec<Task<void>> readers = Vec<Task<void>>.new();
         for (i64 i = 0; i < 4; i = i + 1) {
-            TaskRecord* h = thread_spawn(reader_worker, 0);
-            @assert(!(h == (TaskRecord*)0), "failed to spawn reader_worker");
-            g_readers[i] = (i64)h;
+            Task<void> h = launch reader_worker(0);
+            @assert(h.started(), "failed to spawn reader_worker");
+            readers.push(move h);
         }
 
         g_wg.wait_all();
-        for (i64 i = 0; i < 4; i = i + 1) {
-            @assert(!(thread_join((TaskRecord*)g_readers[i]) < 0), "failed to join reader_worker");
+        while (readers.len() > 0) {
+            wait readers.pop();
         }
 
         assert_eq_i64(4, g_read_matches, "all 4 concurrent readers read correct value");
@@ -54,11 +55,11 @@ i32 main() {
     STDOUT.write_str("\n--- Test 2: Exclusive Writer ---\n");
     {
         g_wg.add(1);
-        TaskRecord* hw = thread_spawn(writer_worker, 0);
-        @assert(!(hw == (TaskRecord*)0), "failed to spawn writer_worker");
+        Task<void> hw = launch writer_worker(0);
+        @assert(hw.started(), "failed to spawn writer_worker");
 
         g_wg.wait_all();
-        @assert(!(thread_join(hw) < 0), "failed to join writer_worker");
+        wait hw;
 
         ReadGuard<i64> r = g_rw.read();
         assert_eq_i64(200, r.get(), "writer updated value to 200");

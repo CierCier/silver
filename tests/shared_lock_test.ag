@@ -1,0 +1,122 @@
+// `shared T` and `lock` blocks: state several threads change.
+//
+// `shared T` is spelled like a plain T but is a Mutex<T>; `lock x { ... }`
+// is the only way to reach the value, and unlocks on every exit.
+//
+// Covers:
+//   1. Two tasks add to one `shared i64` through `&shared i64` parameters.
+//   2. A worker pool appends to a `shared Vec<i64>`; the final length is exact.
+//   3. A `shared` struct field, locked with `lock self.hits as hits`.
+//   4. `return`, `break` and `continue` inside a lock release it: each case
+//      locks the same value again afterwards, which would hang otherwise.
+//   5. `lock` also works on a Mutex<T> written out, and `shared` and `lock`
+//      stay usable as ordinary names.
+//   6. Inside `lock format { ... }`, `@format(...)` still names the macro.
+//
+// Exit 0 on success; distinct non-zero codes per failure.
+
+import std.thread;
+import std.sync;
+import std.mem.vec;
+import std.string;
+import std.sys.entry;
+
+void add(&shared i64 total, i64 amount) {
+    for (i64 i = 0; i < 1000; i += 1) {
+        lock total { total += amount; }
+    }
+}
+
+void record(&shared Vec<i64> seen, i64 value) {
+    for (i64 i = 0; i < 100; i += 1) {
+        lock seen { seen.push(value); }
+    }
+}
+
+/// Counts accepted calls up to `limit`; `hits` is shared by all callers.
+struct Limiter {
+    shared i64 hits;
+    i64 limit;
+}
+
+impl Limiter {
+    /// Returns false once `limit` calls were accepted. The early return
+    /// inside the lock must release it.
+    bool accept(&self) {
+        lock self.hits as hits {
+            if (hits >= self.limit) { return false; }
+            hits += 1;
+        }
+        return true;
+    }
+}
+
+/// Returns from inside a lock block.
+i64 read_early(&shared i64 value) {
+    lock value { return value; }
+    return -1;
+}
+
+i64 main() {
+    // 1. Two tasks, one shared counter.
+    shared i64 total = 0;
+    Task<void> first = launch add(&total, 1);
+    Task<void> second = launch add(&total, 2);
+    wait first;
+    wait second;
+    i64 sum = 0;
+    lock total { sum = total; }
+    if (sum != 3000) { return 1; }
+
+    // 2. A pool of writers.
+    shared Vec<i64> seen = Vec<i64>.new();
+    {
+        Vec<Task<void>> pool = Vec<Task<void>>.new();
+        for (i64 i = 0; i < 4; i += 1) {
+            pool.push(launch record(&seen, i));
+        }
+    }
+    i64 count = 0;
+    lock seen { count = seen.len(); }
+    if (count != 400) { return 2; }
+
+    // 3. A shared field.
+    Limiter limiter;
+    limiter.limit = 3;
+    i64 accepted = 0;
+    for (i64 i = 0; i < 5; i += 1) {
+        if (limiter.accept()) { accepted += 1; }
+    }
+    if (accepted != 3) { return 3; }
+
+    // 4. Every way out of a lock releases it.
+    shared i64 steps = 0;
+    for (i64 i = 0; i < 10; i += 1) {
+        lock steps {
+            if (i == 2) { continue; }
+            if (i == 8) { break; }
+            steps += 1;
+        }
+    }
+    if (read_early(&steps) != 7) { return 4; }
+    lock steps { steps += 1; }
+    if (read_early(&steps) != 8) { return 5; }
+
+    // 5. A Mutex written out, and the words as ordinary names.
+    Mutex<i64> plain = Mutex<i64>.new(10);
+    lock plain { plain *= 2; }
+    i64 shared = 0;
+    i64 lock = 0;
+    lock plain { shared = plain; }
+    lock = shared + 1;
+    if (lock != 21) { return 6; }
+
+    // 6. A macro named like the locked value keeps its name.
+    shared i64 format = 7;
+    lock format {
+        String text = @format("{}", format);
+        if (!text.equals("7")) { return 7; }
+        text.drop();
+    }
+    return 0;
+}

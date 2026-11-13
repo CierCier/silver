@@ -2364,6 +2364,10 @@
               {
                 "type": "STRING",
                 "value": "volatile"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "_shared"
               }
             ]
           },
@@ -2373,6 +2377,15 @@
           }
         ]
       }
+    },
+    "_shared": {
+      "type": "ALIAS",
+      "content": {
+        "type": "SYMBOL",
+        "name": "_shared_keyword"
+      },
+      "named": false,
+      "value": "shared"
     },
     "bracket_type": {
       "type": "SEQ",
@@ -2713,6 +2726,19 @@
         {
           "type": "STRING",
           "value": "wait"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_shared"
+        },
+        {
+          "type": "ALIAS",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_lock_keyword"
+          },
+          "named": false,
+          "value": "lock"
         },
         {
           "type": "STRING",
@@ -3113,6 +3139,14 @@
     {
       "type": "SYMBOL",
       "name": "block_comment"
+    },
+    {
+      "type": "SYMBOL",
+      "name": "_shared_keyword"
+    },
+    {
+      "type": "SYMBOL",
+      "name": "_lock_keyword"
     }
   ],
   "inline": [],

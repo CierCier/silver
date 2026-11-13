@@ -383,6 +383,164 @@ str note_value_moved_into_launch() {
     return "value moved into thread launch";
 }
 
+/// Diagnostic text: "a launch that borrows '{}' must be bound to a local
+/// Task, pushed into a local collection, or waited directly (...)", with
+/// one example of each form. Returns an owned string.
+String scoped_launch_must_be_bound(str name) {
+    return @format("a launch that borrows '{}' must be bound to a local Task, pushed into a local collection, or waited directly (`Task<T> t = launch f(&{});`, `tasks.push(launch f(&{}));` or `wait launch f(&{})`)", name, name, name, name);
+}
+
+/// Diagnostic text: "expected `lock <place> as <name> { ... }`".
+str lock_expected_as() {
+    return "expected `lock <place> as <name> { ... }`";
+}
+
+/// Diagnostic text: "name the locked value: `lock <place> as <name> { ... }`".
+str lock_needs_name() {
+    return "name the locked value: `lock <place> as <name> { ... }`";
+}
+
+/// Diagnostic text: "this lock block is never closed".
+str lock_never_closed() {
+    return "this lock block is never closed";
+}
+
+/// Diagnostic text: "`{}` is already locked by an enclosing lock block;
+/// locking it again would deadlock". Returns an owned string.
+String lock_already_held(str place) {
+    return @format("`{}` is already locked by an enclosing lock block; locking it again would deadlock", place);
+}
+
+/// Diagnostic text: "`{}` names the locked value inside `lock {} { ... }`;
+/// declare a different name". Returns an owned string.
+String lock_name_redeclared(str name) {
+    return @format("`{}` names the locked value inside `lock {} {{ ... }}`; declare a different name", name, name);
+}
+
+/// Diagnostic text: "{} is `{}`, not shared: declare it `shared {}` to lock
+/// it". `place` is quoted source text such as "`total`", or "this value".
+/// Returns an owned string.
+String lock_needs_shared(str place, str type_name) {
+    return @format("{} is `{}`, not shared: declare it `shared {}` to lock it", place, type_name, type_name);
+}
+
+/// Diagnostic text: "`{}` is shared between threads: read or change it
+/// inside `lock {} { ... }`". Returns an owned string.
+String shared_value_outside_lock(str name) {
+    return @format("`{}` is shared between threads: read or change it inside `lock {} {{ ... }}`", name, name);
+}
+
+/// Diagnostic text: "`{}` holds tasks that borrow `{}`: use it only
+/// through push, len, is_empty, clear and drop, or `wait` on pop, take,
+/// swap_remove or get". Returns an owned string.
+String task_collection_misused(str holder, str name) {
+    return @format("`{}` holds tasks that borrow `{}`: use it only through push, len, is_empty, clear and drop, or `wait` on pop, take, swap_remove or get", holder, name);
+}
+
+/// Diagnostic text: "a launch pushed into a collection can only borrow
+/// with `&`: its tasks may run at once, so `&mut {}` would be shared",
+/// followed by `thread_share_help`. Returns an owned string.
+String task_collection_mutable_borrow(str name) {
+    String message = @format("a launch pushed into a collection can only borrow with `&`: its tasks may run at once, so `&mut {}` would be shared", name);
+    String help = thread_share_help(name);
+    message.push_str(help.to_str());
+    help.drop();
+    return move message;
+}
+
+/// Help appended to a borrow conflict with a launched task: " (help: to
+/// change `{}` from several threads, declare it `shared` ...)", naming the
+/// two ways to share the place so the user can choose. Returns an owned
+/// string.
+String thread_share_help(str name) {
+    return @format(" (help: to change `{}` from several threads, declare it `shared` and change it inside `lock {} {{ ... }}`, or use an atomic such as `AtomicI64` for a counter; then pass `&{}` to each task)", name, name, name);
+}
+
+/// Diagnostic text: "a launch that borrows '{}' can only be pushed into a
+/// local collection declared after '{}', so the collection joins its tasks
+/// first; `{}` is not". Returns an owned string.
+String task_collection_declared_too_early(str name, str holder) {
+    return @format("a launch that borrows '{}' can only be pushed into a local collection declared after '{}', so the collection joins its tasks first; `{}` is not", name, name, holder);
+}
+
+/// Diagnostic text: "task borrows `{}` and cannot leave the scope it was
+/// launched in". Returns an owned string.
+String task_cannot_leave_scope(str name) {
+    return @format("task borrows `{}` and cannot leave the scope it was launched in", name);
+}
+
+/// Diagnostic text: "a borrowed launch argument must be `&place`, `&mut
+/// place`, or a reference variable". Returns an owned string.
+String scoped_launch_argument_not_a_place() {
+    return String.from_str("a borrowed launch argument must be `&place`, `&mut place`, or a reference variable");
+}
+
+/// Diagnostic text: "launch passes `{}` to a reference parameter without
+/// `&`: declare it `shared`, or move it into the task through a by-value
+/// parameter". Returns an owned string.
+String launch_borrows_without_reference(str name) {
+    return @format("launch passes `{}` to a reference parameter without `&`: declare it `shared`, or move it into the task through a by-value parameter", name);
+}
+
+/// Diagnostic text: "cannot drop '{}' because it is borrowed by a launched
+/// task". Returns an owned string.
+String cannot_drop_task_borrowed(str name) {
+    return @format("cannot drop '{}' because it is borrowed by a launched task", name);
+}
+
+/// Diagnostic text: "a launch that borrows '{}' can only be pushed into a
+/// local `Vec<Task<T>>`, whose drop joins its tasks; `{}` is not one".
+/// Returns an owned string.
+String task_collection_does_not_join(str name, str holder) {
+    return @format("a launch that borrows '{}' can only be pushed into a local `Vec<Task<T>>`, whose drop joins its tasks; `{}` is not one", name, holder);
+}
+
+/// Diagnostic text: "reference argument type mismatch: expected {}, found
+/// {}". Returns an owned string.
+String reference_argument_mismatch(str expected, str found) {
+    return @format("reference argument type mismatch: expected {}, found {}", expected, found);
+}
+
+/// Diagnostic text: "cannot drop '{}' inside a lock block on it: the lock
+/// guard points into it". Returns an owned string.
+String cannot_drop_locked_owner(str name) {
+    return @format("cannot drop '{}' inside a lock block on it: the lock guard points into it", name);
+}
+
+/// Diagnostic text: "locked here". Returns an owned string.
+String note_locked_here() {
+    return String.from_str("locked here");
+}
+
+/// Diagnostic text: "task launched here". Returns an owned string.
+String note_task_launched_here() {
+    return String.from_str("task launched here");
+}
+
+/// Diagnostic text: "borrowed by a task launched here". Returns an owned
+/// string.
+String note_task_borrow_here() {
+    return String.from_str("borrowed by a task launched here");
+}
+
+/// Send-gate reason: "slices borrow storage the launch cannot track; borrow
+/// the owning container instead". Returns static text.
+str send_reason_borrowed_slice() {
+    return "slices borrow storage the launch cannot track; borrow the owning container instead";
+}
+
+/// Send-gate reason: "references cross a thread boundary only as direct
+/// `&T`/`&mut T` launch arguments". Returns static text.
+str send_reason_reference_value() {
+    return "references cross a thread boundary only as direct `&T`/`&mut T` launch arguments";
+}
+
+/// Diagnostic text: "Task has no method '{}'; its only method is
+/// started()". Returns an owned string.
+String unknown_task_method(str method) {
+    return @format("Task has no method '{}'; its only method is started()", method);
+}
+
 /// Diagnostic text: "task handle consumed by wait". Returns static text.
 str note_task_handle_consumed() {
     return "task handle consumed by wait";
@@ -391,6 +549,12 @@ str note_task_handle_consumed() {
 /// Diagnostic text: "value moved here". Returns static text.
 str note_value_moved_here() {
     return "value moved here";
+}
+
+/// Diagnostic text: "cannot move '{}' out of its lock block: the shared value
+/// still owns it; clone it instead". Returns an owned string.
+String move_out_of_lock(str name) {
+    return @format("cannot move '{}' out of its lock block: the shared value still owns it; clone it instead", name);
 }
 
 /// Diagnostic text: "cannot move out of '{}' because it is borrowed". Returns

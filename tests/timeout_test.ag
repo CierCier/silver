@@ -109,8 +109,8 @@ i32 main() {
         assert_eq_i64(0, r, "bind");
         g_listener = listener;
         g_status = -1;
-        TaskRecord* server_handle = thread_spawn(hung_server_main, 0);
-        if (server_handle == (TaskRecord*)0) { assert_true(false, "spawn"); }
+        Task<void> server_handle = launch hung_server_main(0);
+        if (!server_handle.started()) { assert_true(false, "spawn"); }
         else {
             HttpClient client = HttpClient.new();
             client.set_timeout(1);
@@ -122,7 +122,7 @@ i32 main() {
             assert_true(r1.failed(), "hung request fails");
             assert_true(elapsed < 5000, "fails within the timeout (not forever)");
             assert_true(elapsed >= 900, "waits at least the timeout");
-            thread_join(server_handle);
+            wait server_handle;
         }
     }
 
@@ -135,8 +135,8 @@ i32 main() {
         assert_eq_i64(0, r, "bind");
         g_listener = listener;
         g_status = -1;
-        TaskRecord* server_handle = thread_spawn(fast_server_main, 0);
-        if (server_handle == (TaskRecord*)0) { assert_true(false, "spawn"); }
+        Task<void> server_handle = launch fast_server_main(0);
+        if (!server_handle.started()) { assert_true(false, "spawn"); }
         else {
             HttpClient client = HttpClient.new();
             client.set_timeout(2);
@@ -149,7 +149,7 @@ i32 main() {
                 assert_eq_i64(response.status, 200, "status");
                 assert_true(response.body.equals("ok"), "body");
             }
-            assert_true(thread_join(server_handle) >= 0, "join");
+            wait server_handle;
             assert_eq_i64(g_status, 0, "server status");
         }
     }

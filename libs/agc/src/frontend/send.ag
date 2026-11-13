@@ -1,6 +1,11 @@
 // Structural Send gate for launch arguments over the typed CST projections.
 // It covers the declaration/expression slice needed by the launch tests while
-// leaving the full generic type checker to the next migration stage.
+// leaving the full generic type checker to the next migration stage. An
+// argument bound to a `&T`/`&mut T` parameter is a borrow: its pointee must
+// be Send, because Silver has no unsynchronized shared mutation outside raw
+// pointers. A struct marked `#[safe]` is trusted like an owning container:
+// its author vouches for its raw pointers, so only its type arguments are
+// checked.
 import std.mem.memory;
 import std.mem.vec;
 import std.string;
@@ -9,6 +14,9 @@ import frontend.bindings;
 import frontend.cfg;
 import frontend.diagnostics;
 import frontend.items;
+import frontend.messages;
+import frontend.scoped_launch;
+import frontend.symbols;
 
 /// State of the launch Send check; `failed` is set by any report.
 struct SendAnalyzer {
@@ -31,17 +39,11 @@ bool send_text_equals(str left, str right) {
     return strcmp(left, right) == 0;
 }
 
-/// Returns the binding named `name`, or null.
-Binding* send_find_binding(Vec<Binding>* bindings, str name) {
-    i64 i = 0;
-    while (i < bindings.len()) {
-        Binding* binding = bindings.get_ptr(i);
-        if (send_text_equals(binding.name, name)) {
-            return binding;
-        }
-        i += 1;
-    }
-    return (Binding*)0;
+/// Returns the binding a launch argument names where it is used, so an
+/// inner local shadows an outer one; null when there is none.
+Binding* send_argument_binding(Vec<Binding>* bindings, LaunchArgument* argument) {
+    if (argument.name_node == (SyntaxNode*)0) { return (Binding*)0; }
+    return visible_binding(bindings, argument.name, argument.name_node);
 }
 
 /// Returns a display spelling of a projected type (with `&`/`*` and generics).
@@ -67,15 +69,7 @@ String send_type_display(TypeProjection* value) {
         result.drop();
         return move array;
     }
-    if (value.argument0.len() > 0) {
-        result.push((u8)'<');
-        result.push_str(value.argument0.to_str());
-        if (value.argument1.len() > 0) {
-            result.push_str(", ");
-            result.push_str(value.argument1.to_str());
-        }
-        result.push((u8)'>');
-    }
+    projection_push_arguments(&result, &value.arguments);
     return result;
 }
 
@@ -129,6 +123,7 @@ bool send_text_is_identifier(str text) {
 bool send_type_owns_storage(str name) {
     return send_text_equals(name, "Vec")
         || send_text_equals(name, "Box")
+        || send_text_equals(name, "Arc")
         || send_text_equals(name, "String")
         || send_text_equals(name, "Bytes")
         || send_text_equals(name, "ByteBuffer")
@@ -172,13 +167,6 @@ i64 send_type_parameter_index(SyntaxNode* item, str name) {
     return -1;
 }
 
-/// Returns the spelling of generic argument `index` (0 or 1) of `owner`.
-str send_type_argument(TypeProjection* owner, i64 index) {
-    if (index == 0) { return owner.argument0.to_str(); }
-    if (index == 1) { return owner.argument1.to_str(); }
-    return "";
-}
-
 /// Projects the type spelled by siblings `[first, end)`.
 TypeProjection send_parse_node_type(SyntaxNode* first, SyntaxNode* end) {
     Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
@@ -193,55 +181,166 @@ TypeProjection send_parse_node_type(SyntaxNode* first, SyntaxNode* end) {
 }
 
 
+/// Projects a type spelled as text by `projection_render_nested`
+/// (`Name<A, B>`, `Name*`, `&mut Name`), so a type argument is checked as a
+/// type rather than as one opaque name. `*base` owns the projected name.
+TypeProjection send_project_rendered(str text, String* base) {
+    TypeProjection result = projection_type_empty();
+    i64 i = 0;
+    bool reference = text[0] == (u8)'&';
+    bool is_mutable = false;
+    if (reference) {
+        i = 1;
+        if (text[1] == (u8)'m' && text[2] == (u8)'u' && text[3] == (u8)'t' && text[4] == (u8)' ') {
+            is_mutable = true;
+            i = 5;
+        }
+    }
+    while (text[i] != (u8)0 && text[i] != (u8)'<' && text[i] != (u8)'*') {
+        base.push(text[i]);
+        i += 1;
+    }
+    if (base.len() == 0) { return result; }
+    result.kind = ProjectionTypeKind.Named;
+    result.name = base.to_str();
+    projection_mark_type_known(&result);
+    if (text[i] == (u8)'<') {
+        i += 1;
+        i64 depth = 1;
+        String argument = String.new();
+        while (text[i] != (u8)0 && depth > 0) {
+            u8 c = text[i];
+            i += 1;
+            if (c == (u8)'<') { depth += 1; }
+            if (c == (u8)'>') { depth -= 1; }
+            if (depth == 0 || (depth == 1 && c == (u8)',')) {
+                String inner_base = String.new();
+                TypeProjection inner = send_project_rendered(argument.to_str(), &inner_base);
+                projection_merge_type_flags(&result, &inner);
+                result.arguments.push(argument.clone());
+                argument.clear();
+                while (text[i] == (u8)' ') { i += 1; }
+            } else {
+                argument.push(c);
+            }
+        }
+    }
+    while (text[i] == (u8)'*') {
+        result.kind = ProjectionTypeKind.Pointer;
+        result.is_mutable = true;
+        result.contains_non_send = true;
+        i += 1;
+    }
+    if (reference) {
+        result.kind = ProjectionTypeKind.Reference;
+        result.is_mutable = is_mutable;
+        result.contains_non_send = true;
+    }
+    return result;
+}
+
+/// True when `c` can continue an identifier.
+bool send_is_name_char(u8 c) {
+    return (c >= (u8)'a' && c <= (u8)'z') || (c >= (u8)'A' && c <= (u8)'Z')
+        || (c >= (u8)'0' && c <= (u8)'9') || c == (u8)'_';
+}
+
+/// `text` with each type parameter of `declaration` replaced by `owner`'s
+/// type argument at that position.
+String send_substitute_parameters(str text, SyntaxNode* declaration, TypeProjection* owner) {
+    String result = String.new();
+    i64 i = 0;
+    while (text[i] != (u8)0) {
+        if (!send_is_name_char(text[i])) {
+            result.push(text[i]);
+            i += 1;
+            continue;
+        }
+        String name = String.new();
+        while (send_is_name_char(text[i])) {
+            name.push(text[i]);
+            i += 1;
+        }
+        str argument = projection_argument(owner, send_type_parameter_index(declaration, name.to_str()));
+        result.push_str(strlen(argument) > 0 ? argument : name.to_str());
+    }
+    return move result;
+}
+
+/// Checks type argument text `argument` of `owner` for Send, keeping the
+/// owner's flags as a conservative floor.
+bool send_argument_is_send(SyntaxNode* root, str argument, TypeProjection* owner,
+                           Vec<String>* visiting, i64 depth, String* reason) {
+    String base = String.new();
+    TypeProjection projected = send_project_rendered(argument, &base);
+    projected.contains_rc = projected.contains_rc || owner.contains_rc;
+    projected.contains_non_send = projected.contains_non_send || owner.contains_non_send;
+    projected.contains_unknown = projected.contains_unknown || owner.contains_unknown;
+    return send_type_is_send_in_declarations(root, &projected, visiting, depth + 1, reason);
+}
+
 /// Returns true when a field of a generic declaration is Send once the
 /// owner's type arguments are substituted.
 bool send_field_is_send(SyntaxNode* root, SyntaxNode* declaration,
                         SyntaxNode* first, SyntaxNode* end,
                         TypeProjection* owner,
-                        Vec<str>* visiting, i64 depth, String* reason) {
+                        Vec<String>* visiting, i64 depth, String* reason) {
     TypeProjection field = send_parse_node_type(first, end);
     if (field.kind == ProjectionTypeKind.Pointer && send_type_owns_storage(owner.name)) {
         i64 parameter_index = send_type_parameter_index(declaration, field.name);
-        str argument = send_type_argument(owner, parameter_index);
+        str argument = projection_argument(owner, parameter_index);
         if (parameter_index >= 0 && strlen(argument) > 0) {
-            field.kind = ProjectionTypeKind.Named;
-            field.name = argument;
-            field.is_mutable = false;
-            field.contains_rc = owner.contains_rc;
-            field.contains_non_send = owner.contains_non_send;
-            field.contains_unknown = owner.contains_unknown;
-            return send_type_is_send_in_declarations(
-                root, &field, visiting, depth + 1, reason);
+            return send_argument_is_send(root, argument, owner, visiting, depth, reason);
         }
         return true;
     }
     if (field.kind == ProjectionTypeKind.Named && send_text_is_identifier(field.name)) {
         i64 parameter_index = send_type_parameter_index(declaration, field.name);
-        str argument = send_type_argument(owner, parameter_index);
+        str argument = projection_argument(owner, parameter_index);
         if (parameter_index >= 0 && strlen(argument) > 0) {
-            field.name = argument;
-            field.contains_rc = field.contains_rc || owner.contains_rc;
-            field.contains_non_send = field.contains_non_send || owner.contains_non_send;
-            field.contains_unknown = field.contains_unknown || owner.contains_unknown;
-        } else {
-            i64 nested_parameter0 = send_type_parameter_index(
-                declaration, field.argument0.to_str());
-            i64 nested_parameter1 = send_type_parameter_index(
-                declaration, field.argument1.to_str());
-            if (nested_parameter0 >= 0 || nested_parameter1 >= 0) {
-                field.contains_rc = field.contains_rc || owner.contains_rc;
-                field.contains_non_send = field.contains_non_send || owner.contains_non_send;
-                field.contains_unknown = field.contains_unknown || owner.contains_unknown;
+            return send_argument_is_send(root, argument, owner, visiting, depth, reason);
+        }
+        // `Vec<T>`: check the field with the owner's arguments in place.
+        bool changed = false;
+        i64 index = 0;
+        while (index < field.arguments.len()) {
+            String* argument = field.arguments.get_ptr(index);
+            String substituted = send_substitute_parameters(argument.to_str(), declaration, owner);
+            if (!substituted.equals(argument.to_str())) {
+                *argument = move substituted;
+                changed = true;
             }
+            index += 1;
+        }
+        if (changed) {
+            String substituted = send_type_display(&field);
+            return send_argument_is_send(root, substituted.to_str(), owner, visiting, depth, reason);
         }
     }
     return send_type_is_send_in_declarations(root, &field, visiting, depth + 1, reason);
 }
 
+/// Returns true when the type arguments of `#[safe]` struct `owner` are
+/// Send: its author vouches for its fields, not for what it is
+/// instantiated with.
+bool send_safe_struct_arguments_are_send(SyntaxNode* root, TypeProjection* owner,
+                                         Vec<String>* visiting, i64 depth, String* reason) {
+    i64 index = 0;
+    while (index < owner.arguments.len()) {
+        str argument = projection_argument(owner, index);
+        if (strlen(argument) > 0
+            && !send_argument_is_send(root, argument, owner, visiting, depth, reason)) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}
+
 /// Returns true when every field of struct `item` is Send for `owner`.
 bool send_struct_fields_are_send(SyntaxNode* root, SyntaxNode* item,
                                  TypeProjection* owner,
-                                 Vec<str>* visiting, i64 depth, String* reason) {
+                                 Vec<String>* visiting, i64 depth, String* reason) {
     SyntaxNode* block = item.first_child;
     while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
         block = block.next_sibling;
@@ -279,7 +378,7 @@ bool send_struct_fields_are_send(SyntaxNode* root, SyntaxNode* item,
 /// Returns true when every payload of enum `item` is Send for `owner`.
 bool send_enum_payloads_are_send(SyntaxNode* root, SyntaxNode* item,
                                  TypeProjection* owner,
-                                 Vec<str>* visiting, i64 depth, String* reason) {
+                                 Vec<String>* visiting, i64 depth, String* reason) {
     SyntaxNode* block = item.first_child;
     while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
         block = block.next_sibling;
@@ -312,7 +411,7 @@ bool send_enum_payloads_are_send(SyntaxNode* root, SyntaxNode* item,
 /// Returns true when `value` is Send, looking through user struct and enum
 /// declarations (cycles are cut by `visiting`, depth by `depth`).
 bool send_type_is_send_in_declarations(SyntaxNode* root, TypeProjection* value,
-                                       Vec<str>* visiting, i64 depth, String* reason) {
+                                       Vec<String>* visiting, i64 depth, String* reason) {
     if (!send_type_is_send(value, reason)) {
         return false;
     }
@@ -328,17 +427,21 @@ bool send_type_is_send_in_declarations(SyntaxNode* root, TypeProjection* value,
             is_enum = item != (SyntaxNode*)0;
         }
         if (item != (SyntaxNode*)0) {
+            // Keyed by the whole type, so `Vec<Vec<T>>` still checks the inner Vec.
+            String key = send_type_display(value);
             i64 index = 0;
             while (index < visiting.len()) {
-                if (send_text_equals(visiting.get(index), value.name)) {
+                if (visiting.get_ptr(index).equals(key.to_str())) {
                     return true;
                 }
                 index += 1;
             }
-            visiting.push(value.name);
+            visiting.push(move key);
             bool result = is_enum
                 ? send_enum_payloads_are_send(root, item, value, visiting, depth, reason)
-                : send_struct_fields_are_send(root, item, value, visiting, depth, reason);
+                : item_has_attribute(item, "safe")
+                    ? send_safe_struct_arguments_are_send(root, value, visiting, depth, reason)
+                    : send_struct_fields_are_send(root, item, value, visiting, depth, reason);
             visiting.pop();
             return result;
         }
@@ -373,7 +476,7 @@ bool send_type_is_send(TypeProjection* value, String* reason) {
         return false;
     }
     if (value.kind == ProjectionTypeKind.Reference) {
-        reason.push_str("references cannot cross a thread boundary in v1 (scoped threads are not implemented yet)");
+        reason.push_str(send_reason_reference_value());
         return false;
     }
     if (value.kind == ProjectionTypeKind.Array) {
@@ -412,9 +515,10 @@ bool send_type_is_send(TypeProjection* value, String* reason) {
     }
     if ((send_text_equals(value.name, "Vec")
             || send_text_equals(value.name, "Box")
+            || send_text_equals(value.name, "Arc")
             || send_text_equals(value.name, "Optional")
             || send_text_equals(value.name, "HashMap"))
-        && value.argument0.len() == 0) {
+        && value.arguments.len() == 0) {
         reason.push_str("the type is unknown (a prior type error)");
         return false;
     }
@@ -465,12 +569,219 @@ String send_binding_type_display(Binding* binding) {
     return move result;
 }
 
-/// Checks one `launch` argument: address-of and non-Send values are errors.
-void check_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root,
+/// Projects the pointee of reference binding `binding`: the type after its
+/// `&` or `&mut`. Sets `*slice` when that pointee is a slice `[T]`.
+TypeProjection send_reference_pointee(Binding* binding, bool* slice) {
+    SyntaxNode* first = binding.type_start;
+    while (first != (SyntaxNode*)0 && first != binding.type_end
+        && first.kind == NodeKind.Token
+        && (first.token_kind == TokenKind.BitwiseAnd || first.token_kind == TokenKind.Mut
+            || first.token_kind == TokenKind.Const || first.token_kind == TokenKind.Move)) {
+        first = first.next_sibling;
+    }
+    *slice = first != (SyntaxNode*)0 && first.kind == NodeKind.Bracket
+        && !binding_bracket_has_tuple_separator(first);
+    return binding_declared_type(first, binding.type_end);
+}
+
+/// The declared type of global variable `name`, or an Unknown projection.
+/// A global's children are its type, its name, then `=` and the initializer.
+TypeProjection send_global_type(SyntaxNode* root, str name) {
+    SyntaxNode* item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Global) {
+            SyntaxNode* first = item.first_child;
+            while (first != (SyntaxNode*)0 && first.kind == NodeKind.Token
+                && strcmp(first.text, "private") == 0) {
+                first = first.next_sibling;
+            }
+            SyntaxNode* declared = (SyntaxNode*)0;
+            SyntaxNode* child = first;
+            while (child != (SyntaxNode*)0 && child.token_kind != TokenKind.Assign
+                && child.token_kind != TokenKind.Semicolon) {
+                if (child.kind == NodeKind.Token && child.token_kind == TokenKind.Identifier) {
+                    declared = child;
+                }
+                child = child.next_sibling;
+            }
+            if (declared != (SyntaxNode*)0 && strcmp(declared.text, name) == 0) {
+                return binding_declared_type(first, declared);
+            }
+        }
+        item = item.next_sibling;
+    }
+    return projection_type_empty();
+}
+
+/// The type of field `field` of struct type `owner`, with the owner's type
+/// arguments in place of the struct's parameters, or an Unknown projection.
+/// `*names` owns the name of a substituted field type.
+TypeProjection send_field_type(SyntaxNode* root, TypeProjection* owner, str field,
+                               Vec<String>* names) {
+    if (owner.kind != ProjectionTypeKind.Named) { return projection_type_empty(); }
+    SyntaxNode* item = find_item_by_name(root, NodeKind.Struct, owner.name);
+    if (item == (SyntaxNode*)0) { return projection_type_empty(); }
+    SyntaxNode* block = item.first_child;
+    while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+        block = block.next_sibling;
+    }
+    SyntaxNode* cursor = block == (SyntaxNode*)0 ? block : block.first_child;
+    while (cursor != (SyntaxNode*)0) {
+        SyntaxNode* start = cursor;
+        SyntaxNode* name = (SyntaxNode*)0;
+        while (cursor != (SyntaxNode*)0 && !scoped_is_token(cursor, TokenKind.Semicolon)) {
+            if (scoped_is_token(cursor, TokenKind.Identifier)) { name = cursor; }
+            cursor = cursor.next_sibling;
+        }
+        if (name != (SyntaxNode*)0 && name != start && strcmp(name.text, field) == 0) {
+            TypeProjection parsed = send_parse_node_type(start, name);
+            String rendered = send_type_display(&parsed);
+            String substituted = send_substitute_parameters(rendered.to_str(), item, owner);
+            if (substituted.equals(rendered.to_str())) { return move parsed; }
+            String base = String.new();
+            TypeProjection projected = send_project_rendered(substituted.to_str(), &base);
+            names.push(move base);
+            return move projected;
+        }
+        if (cursor != (SyntaxNode*)0) { cursor = cursor.next_sibling; }
+    }
+    return projection_type_empty();
+}
+
+/// Narrows `*place`, the type of borrowed root `name`, to the struct field
+/// that `&name.a.b` names. Returns false and leaves `*place` alone when the
+/// argument is not such a path (an index, a call, a tuple element, an
+/// unknown field), so the whole root is judged.
+bool send_narrow_to_field(SyntaxNode* root, SyntaxNode* name, TypeProjection* place,
+                          Vec<String>* names) {
+    SyntaxNode* cursor = name.next_sibling;
+    if (!scoped_is_token(cursor, TokenKind.Dot)) { return false; }
+    TypeProjection current = projection_type_empty();
+    bool first = true;
+    while (scoped_is_token(cursor, TokenKind.Dot)
+        && scoped_is_token(cursor.next_sibling, TokenKind.Identifier)) {
+        str step = cursor.next_sibling.text;
+        TypeProjection field = projection_type_empty();
+        if (first) {
+            field = send_field_type(root, place, step, names);
+        } else {
+            field = send_field_type(root, &current, step, names);
+        }
+        if (field.kind == ProjectionTypeKind.Unknown) { return false; }
+        current = move field;
+        first = false;
+        cursor = cursor.next_sibling.next_sibling;
+    }
+    if (first || (cursor != (SyntaxNode*)0 && !scoped_is_token(cursor, TokenKind.Comma)
+                  && !scoped_is_token(cursor, TokenKind.RightParen))) {
+        return false;
+    }
+    *place = move current;
+    return true;
+}
+
+/// True when `pointee` names a type parameter of `callee` anywhere, as
+/// `T` or inside `Vec<T>`: only the caller's argument then says what is
+/// borrowed.
+bool send_mentions_type_parameter(SyntaxNode* callee, TypeProjection* pointee) {
+    String text = send_type_display(pointee);
+    str spelled = text.to_str();
+    bool mentions = false;
+    i64 i = 0;
+    while (spelled[i] != (u8)0 && !mentions) {
+        if (!send_is_name_char(spelled[i])) {
+            i += 1;
+            continue;
+        }
+        String name = String.new();
+        while (send_is_name_char(spelled[i])) {
+            name.push(spelled[i]);
+            i += 1;
+        }
+        mentions = send_type_parameter_index(callee, name.to_str()) >= 0;
+        name.drop();
+    }
+    text.drop();
+    return mentions;
+}
+
+/// Checks a `launch` argument bound to `&T`/`&mut T` parameter
+/// `argument.index` of `callee`: the borrowed pointee must be Send.
+void check_borrowed_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root,
+                                    Vec<Binding>* bindings, LaunchArgument* argument,
+                                    SyntaxNode* callee) {
+    Vec<Binding> parameters = Vec<Binding>.new();
+    collect_parameter_bindings(binding_function_parameters(callee), &parameters);
+    Binding* parameter = parameters.get_ptr(argument.index);
+    bool slice = false;
+    TypeProjection pointee = send_reference_pointee(parameter, &slice);
+    // A generic callee names no concrete pointee, so judge what is borrowed:
+    // the local's type for `&place`, its own pointee for a reference
+    // variable, or a global's declared type, narrowed to the field that
+    // `&root.field` names. Only that field crosses into the task.
+    Binding* source = send_argument_binding(bindings, argument);
+    Vec<String> names = Vec<String>.new();
+    if (send_mentions_type_parameter(callee, &pointee)) {
+        if (source == (Binding*)0) {
+            slice = false;
+            pointee = send_global_type(root, (*argument).name);
+        } else if (source.declared_type.kind == ProjectionTypeKind.Reference) {
+            pointee = send_reference_pointee(source, &slice);
+        } else {
+            slice = false;
+            pointee = binding_declared_type(source.type_start, source.type_end);
+        }
+        if ((*argument).kind == ProjectionExpressionKind.Address
+            && (*argument).name_node != (SyntaxNode*)0
+            && send_narrow_to_field(root, (*argument).name_node, &pointee, &names)) {
+            slice = false;
+        }
+    }
+    String reason = String.new();
+    bool is_send = !slice;
+    if (slice) {
+        reason.push_str(send_reason_borrowed_slice());
+    } else {
+        Vec<String> visiting = Vec<String>.new();
+        is_send = send_type_is_send_in_declarations(root, &pointee, &visiting, 0, &reason);
+        visiting.drop();
+    }
+    if (!is_send) {
+        String type_name = String.from_str(parameter.declared_type.is_mutable ? "&mut " : "&");
+        String pointee_name = send_type_display(&pointee);
+        if (slice) { type_name.push((u8)'['); }
+        type_name.push_str(pointee_name.to_str());
+        if (slice) { type_name.push((u8)']'); }
+        send_report_type(analyzer, argument.span, type_name.to_str(), reason.to_str());
+        pointee_name.drop();
+        type_name.drop();
+    }
+    reason.drop();
+    names.drop();
+    parameters.drop();
+}
+
+/// Checks one `launch` argument. A borrow passed to a `&T`/`&mut T`
+/// parameter needs a Send pointee; any other address-of is a raw pointer,
+/// and by-value arguments must be Send themselves.
+void check_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root, SymbolTable* symbols,
                            Vec<Binding>* bindings, LaunchArgument* argument) {
+    SyntaxNode* borrowing = launch_borrowing_callee(root,
+        symbols.selected_callee((*argument).callee_span), (*argument).callee,
+        (*argument).count, (*argument).index);
+    if (borrowing != (SyntaxNode*)0) {
+        Binding* reference = send_argument_binding(bindings, argument);
+        if ((*argument).kind == ProjectionExpressionKind.Address
+            || ((*argument).kind == ProjectionExpressionKind.Identifier
+                && reference != (Binding*)0
+                && reference.declared_type.kind == ProjectionTypeKind.Reference)) {
+            check_borrowed_launch_argument(analyzer, root, bindings, argument, borrowing);
+            return;
+        }
+    }
     if ((*argument).kind == ProjectionExpressionKind.Address) {
         String type_name = String.from_str("unknown");
-        Binding* binding = send_find_binding(bindings, (*argument).name);
+        Binding* binding = send_argument_binding(bindings, argument);
         if (binding != (Binding*)0) {
             String declared = send_type_display(&(*binding).declared_type);
             type_name = move declared;
@@ -490,12 +801,12 @@ void check_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root,
         && (*argument).kind != ProjectionExpressionKind.Move) {
         return;
     }
-    Binding* binding = send_find_binding(bindings, (*argument).name);
+    Binding* binding = send_argument_binding(bindings, argument);
     if (binding == (Binding*)0) {
         return;
     }
     String reason = String.new();
-    Vec<str> visiting = Vec<str>.new();
+    Vec<String> visiting = Vec<String>.new();
     bool is_send = send_type_is_send_in_declarations(root, &(*binding).declared_type, &visiting, 0, &reason);
     visiting.drop();
     if (!is_send) {
@@ -506,35 +817,57 @@ void check_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root,
     reason.drop();
 }
 
-/// Checks every `launch` call's arguments in cfg-active functions. Returns
-/// false when any argument is not Send.
-bool check_send(SyntaxTree* tree, DiagnosticBag* diagnostics, CfgSet* cfg) {
+/// Checks the `launch` arguments in one function or method body. Returns
+/// false when any error was reported.
+bool check_send_body(SyntaxNode* root, SymbolTable* symbols, SyntaxNode* parameters,
+                     SyntaxNode* body, CfgSet* cfg, DiagnosticBag* diagnostics) {
+    if (body == (SyntaxNode*)0) { return true; }
+    SendAnalyzer analyzer = SendAnalyzer.new(diagnostics);
+    Vec<Binding> bindings = Vec<Binding>.new();
+    collect_parameter_bindings(parameters, &bindings);
+    collect_block_bindings(body, &bindings);
+    Vec<SyntaxNode*> live_leaves = Vec<SyntaxNode*>.new();
+    cfg_collect_live_leaves(body, cfg, &live_leaves);
+    Vec<LaunchArgument> launch_arguments = Vec<LaunchArgument>.new();
+    projection_walk_launches(body, cfg, &live_leaves, &launch_arguments);
+    i64 argument_index = 0;
+    while (argument_index < launch_arguments.len()) {
+        check_launch_argument(&analyzer, root, symbols, &bindings,
+                              launch_arguments.get_ptr(argument_index));
+        argument_index += 1;
+    }
+    launch_arguments.drop();
+    live_leaves.drop();
+    bindings.drop();
+    return !analyzer.failed;
+}
+
+/// Checks every `launch` call's arguments in cfg-active functions and
+/// methods. Returns false when any argument is not Send.
+bool check_send(SyntaxTree* tree, SymbolTable* symbols, DiagnosticBag* diagnostics, CfgSet* cfg) {
     bool ok = true;
     Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
     cfg_collect_items(tree.root, cfg, diagnostics, &items);
     i64 i = 0;
     while (i < items.len()) {
-        if (items.get(i).kind == NodeKind.Function) {
-            SendAnalyzer analyzer = SendAnalyzer.new(diagnostics);
-            Vec<Binding> bindings = Vec<Binding>.new();
-            collect_function_bindings(items.get(i), &bindings);
-            Vec<LaunchArgument> launch_arguments = Vec<LaunchArgument>.new();
-            project_function_launch_arguments(items.get(i), cfg, &launch_arguments);
-            i64 argument_index = 0;
-            while (argument_index < launch_arguments.len()) {
-                check_launch_argument(
-                    &analyzer,
-                    tree.root,
-                    &bindings,
-                    launch_arguments.get_ptr(argument_index)
-                );
-                argument_index += 1;
-            }
-            launch_arguments.drop();
-            bindings.drop();
-            if (analyzer.failed) {
+        SyntaxNode* item = items.get(i);
+        if (item.kind == NodeKind.Function) {
+            if (!check_send_body(tree.root, symbols, binding_function_parameters(item),
+                                 binding_function_body(item), cfg, diagnostics)) {
                 ok = false;
             }
+        } else if (item.kind == NodeKind.Impl || item.kind == NodeKind.Trait) {
+            Vec<SyntaxNode*> methods = Vec<SyntaxNode*>.new();
+            collect_method_bodies(item, &methods);
+            i64 m = 0;
+            while (m + 1 < methods.len()) {
+                if (!check_send_body(tree.root, symbols, methods.get(m), methods.get(m + 1),
+                                     cfg, diagnostics)) {
+                    ok = false;
+                }
+                m += 2;
+            }
+            methods.drop();
         }
         i += 1;
     }
