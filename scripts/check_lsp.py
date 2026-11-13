@@ -813,6 +813,11 @@ class NativeLsp(unittest.TestCase):
                  " return wait t;\n}\n",
                  [("launch argument of type &Vec<Rc<i64>> is not Send: Rc<T> carries a shared non-atomic "
                    "reference count", 5)]),
+                # A generic body cannot move its locked `T` out either.
+                ("import std.sync;\nimport std.mem.vec;\nvoid take<T>(&Mutex<T> m) { lock m as value { T mine = value; } }\n"
+                 "i64 main() {\n Mutex<Vec<i64>> state = Mutex<Vec<i64>>.new(Vec<i64>.new());\n take(&state);\n"
+                 " return 0;\n}\n",
+                 [("cannot move 'value' out of its lock block: the shared value still owns it; clone it instead", 2)]),
                 # Launches in methods are checked like launches in functions.
                 ("import std.mem.rc;\nvoid inspect(&Rc<i64> _r) { }\nstruct Runner { i64 n; }\nimpl Runner {\n"
                  " void go(&self) {\n  Rc<i64> rc = Rc<i64>.new(1);\n  Task<void> t = launch inspect(&rc);\n"

@@ -3774,6 +3774,7 @@ void typecheck_generic_call_drop_ownership(
         if (diagnostic.severity == Severity.Error
             && (typecheck_is_drop_ancestor_error(diagnostic.message.to_str())
                 || typecheck_is_shared_value_error(diagnostic.message.to_str())
+                || typecheck_str_contains(diagnostic.message.to_str(), "' out of its lock block: ")
                 || typecheck_str_starts_with(diagnostic.message.to_str(), "pointer argument type mismatch:"))) {
             diagnostics.error(diagnostic.span, diagnostic.message.clone());
             *ok = false;
