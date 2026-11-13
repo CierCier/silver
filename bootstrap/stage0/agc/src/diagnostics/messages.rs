@@ -266,6 +266,26 @@ pub fn scoped_launch_must_be_bound(name: &str) -> String {
     )
 }
 
+pub fn lock_expected_as() -> &'static str {
+    "expected `lock <place> as <name> { ... }`"
+}
+
+pub fn lock_needs_name() -> &'static str {
+    "name the locked value: `lock <place> as <name> { ... }`"
+}
+
+pub fn lock_never_closed() -> &'static str {
+    "this lock block is never closed"
+}
+
+pub fn lock_already_held(place: &str) -> String {
+    format!("`{place}` is already locked by an enclosing lock block; locking it again would deadlock")
+}
+
+pub fn lock_name_redeclared(name: &str) -> String {
+    format!("`{name}` names the locked value inside `lock {name} {{ ... }}`; declare a different name")
+}
+
 /// `place` is quoted source text such as "`total`", or "this value".
 pub fn lock_needs_shared(place: &str, ty: &impl Display) -> String {
     format!("{place} is `{ty}`, not shared: declare it `shared {ty}` to lock it")

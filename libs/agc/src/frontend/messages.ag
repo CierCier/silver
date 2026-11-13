@@ -390,6 +390,33 @@ String scoped_launch_must_be_bound(str name) {
     return @format("a launch that borrows '{}' must be bound to a local Task, pushed into a local collection, or waited directly (`Task<T> t = launch f(&{});`, `tasks.push(launch f(&{}));` or `wait launch f(&{})`)", name, name, name, name);
 }
 
+/// Diagnostic text: "expected `lock <place> as <name> { ... }`".
+str lock_expected_as() {
+    return "expected `lock <place> as <name> { ... }`";
+}
+
+/// Diagnostic text: "name the locked value: `lock <place> as <name> { ... }`".
+str lock_needs_name() {
+    return "name the locked value: `lock <place> as <name> { ... }`";
+}
+
+/// Diagnostic text: "this lock block is never closed".
+str lock_never_closed() {
+    return "this lock block is never closed";
+}
+
+/// Diagnostic text: "`{}` is already locked by an enclosing lock block;
+/// locking it again would deadlock". Returns an owned string.
+String lock_already_held(str place) {
+    return @format("`{}` is already locked by an enclosing lock block; locking it again would deadlock", place);
+}
+
+/// Diagnostic text: "`{}` names the locked value inside `lock {} { ... }`;
+/// declare a different name". Returns an owned string.
+String lock_name_redeclared(str name) {
+    return @format("`{}` names the locked value inside `lock {} {{ ... }}`; declare a different name", name, name);
+}
+
 /// Diagnostic text: "{} is `{}`, not shared: declare it `shared {}` to lock
 /// it". `place` is quoted source text such as "`total`", or "this value".
 /// Returns an owned string.

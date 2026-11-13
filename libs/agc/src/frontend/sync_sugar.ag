@@ -23,6 +23,7 @@ import std.mem.vec;
 import std.string;
 import frontend.diagnostics;
 import frontend.lexer;
+import frontend.messages;
 
 /// A copy of `token` that owns its text.
 Token sugar_copy(Token* token) {
@@ -283,8 +284,7 @@ LockHead sugar_lock_head(Vec<Token>* tokens, i64 index, DiagnosticBag* diagnosti
         i64 name = sugar_next(tokens, cursor);
         i64 open = name >= 0 ? sugar_next(tokens, name) : -1;
         if (!sugar_is(tokens, name, TokenKind.Identifier) || !sugar_is(tokens, open, TokenKind.LeftBrace)) {
-            diagnostics.error(tokens.get_ptr(cursor).span,
-                String.from_str("expected `lock <place> as <name> { ... }`"));
+            diagnostics.error(tokens.get_ptr(cursor).span, String.from_str(lock_expected_as()));
             return head;
         }
         head.place_start = start;
@@ -294,8 +294,7 @@ LockHead sugar_lock_head(Vec<Token>* tokens, i64 index, DiagnosticBag* diagnosti
         return head;
     }
     if (sugar_next(tokens, start) != cursor) {
-        diagnostics.error(tokens.get_ptr(start).span,
-            String.from_str("name the locked value: `lock <place> as <name> { ... }`"));
+        diagnostics.error(tokens.get_ptr(start).span, String.from_str(lock_needs_name()));
         return head;
     }
     head.place_start = start;
@@ -368,14 +367,10 @@ void sugar_check_body(Vec<Token>* body, str name, Vec<Token>* tokens, i64 from, 
                 if (tokens.get_ptr(k).kind != TokenKind.Comment) { place.push_str(tokens.get_ptr(k).text.to_str()); }
                 k += 1;
             }
-            diagnostics.error(body.get_ptr(j).span, @format(
-                "`{}` is already locked by an enclosing lock block; locking it again would deadlock",
-                place.to_str()));
+            diagnostics.error(body.get_ptr(j).span, lock_already_held(place.to_str()));
         }
         if (sugar_is_name(body, j, name) && sugar_declares(body, j)) {
-            diagnostics.error(body.get_ptr(j).span, @format(
-                "`{}` names the locked value inside `lock {} {{ ... }}`; declare a different name",
-                name, name));
+            diagnostics.error(body.get_ptr(j).span, lock_name_redeclared(name));
         }
         j += 1;
     }
@@ -394,8 +389,7 @@ void desugar_locks(Vec<Token>* tokens, Vec<Token>* out, i64* counter, Diagnostic
         }
         i64 close = head.place_start >= 0 ? sugar_matching_brace(tokens, head.open) : -1;
         if (head.place_start >= 0 && close < 0) {
-            diagnostics.error(tokens.get_ptr(head.open).span,
-                String.from_str("this lock block is never closed"));
+            diagnostics.error(tokens.get_ptr(head.open).span, String.from_str(lock_never_closed()));
         }
         if (head.place_start < 0 || close < 0) {
             out.push(sugar_copy(tokens.get_ptr(i)));

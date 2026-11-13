@@ -16,6 +16,7 @@
 //! Synthesized tokens carry the span of the source token they replace, so
 //! diagnostics inside a lock block point at the user's own code.
 
+use crate::diagnostics::messages as msg;
 use crate::lexer::{LexToken, Span, Token};
 
 /// A malformed `lock` statement, with the span to report it at.
@@ -294,14 +295,14 @@ fn lock_head(tokens: &[LexToken], index: usize) -> Result<Option<LockHead>, Suga
                 }))
             }
             _ => Err(SugarError {
-                message: "expected `lock <place> as <name> { ... }`".to_string(),
+                message: msg::lock_expected_as().to_string(),
                 span: tokens[cursor].span,
             }),
         };
     }
     if !single {
         return Err(SugarError {
-            message: "name the locked value: `lock <place> as <name> { ... }`".to_string(),
+            message: msg::lock_needs_name().to_string(),
             span: tokens[place_start].span,
         });
     }
@@ -394,7 +395,7 @@ fn desugar_locks(tokens: &[LexToken], counter: &mut usize) -> Result<Vec<LexToke
         let guard_span = synthesized(lock_span, Role::Guard);
         let pointer_span = synthesized(tokens[head.open].span, Role::Pointer);
         let close = matching_brace(tokens, head.open).ok_or_else(|| SugarError {
-            message: "this lock block is never closed".to_string(),
+            message: msg::lock_never_closed().to_string(),
             span: tokens[head.open].span,
         })?;
         let body = &tokens[head.open + 1..close];
@@ -406,19 +407,13 @@ fn desugar_locks(tokens: &[LexToken], counter: &mut usize) -> Result<Vec<LexToke
                 && significant_text(&body[inner.place]) == place
             {
                 return Err(SugarError {
-                    message: format!(
-                        "`{}` is already locked by an enclosing lock block; locking it again would deadlock",
-                        place.concat()
-                    ),
+                    message: msg::lock_already_held(&place.concat()),
                     span: token.span,
                 });
             }
             if is_identifier(token, &head.name) && declares(body, j) {
                 return Err(SugarError {
-                    message: format!(
-                        "`{}` names the locked value inside `lock {} {{ ... }}`; declare a different name",
-                        head.name, head.name
-                    ),
+                    message: msg::lock_name_redeclared(&head.name),
                     span: token.span,
                 });
             }
