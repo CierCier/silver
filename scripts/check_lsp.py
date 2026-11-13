@@ -771,6 +771,11 @@ class NativeLsp(unittest.TestCase):
                 ("import std.mem.rc;\nRc<i64> counter = Rc<i64>.new(1);\nvoid peek<T>(&T _v) { }\ni64 main() {\n"
                  " Task<void> t = launch peek(&counter);\n wait t;\n return 0;\n}\n",
                  [("launch argument of type &Rc<i64> is not Send: Rc<T> carries a shared non-atomic reference count", 4)]),
+                # Only the borrowed field crosses into the task, not its whole owner.
+                ("struct State { i64 count; i64* data; }\nState state;\nvoid peek<T>(&T _v) { }\ni64 main() {\n"
+                 " wait launch peek(&state.count);\n wait launch peek(&state.data);\n return 0;\n}\n",
+                 [("launch argument of type &i64* is not Send: raw pointer types are not Send: move owned "
+                   "values (Box/Vec) or pass a Channel across threads", 5)]),
                 # A generic body that locks its `T` needs a shared argument.
                 ("import std.sync;\nvoid touch<T>(&T value) { lock value { } }\ni64 main() {\n i64 plain = 1;\n"
                  " touch(&plain);\n return 0;\n}\n",

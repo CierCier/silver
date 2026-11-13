@@ -613,6 +613,73 @@ TypeProjection send_global_type(SyntaxNode* root, str name) {
     return projection_type_empty();
 }
 
+/// The type of field `field` of struct type `owner`, with the owner's type
+/// arguments in place of the struct's parameters, or an Unknown projection.
+/// `*names` owns the name of a substituted field type.
+TypeProjection send_field_type(SyntaxNode* root, TypeProjection* owner, str field,
+                               Vec<String>* names) {
+    if (owner.kind != ProjectionTypeKind.Named) { return projection_type_empty(); }
+    SyntaxNode* item = find_item_by_name(root, NodeKind.Struct, owner.name);
+    if (item == (SyntaxNode*)0) { return projection_type_empty(); }
+    SyntaxNode* block = item.first_child;
+    while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+        block = block.next_sibling;
+    }
+    SyntaxNode* cursor = block == (SyntaxNode*)0 ? block : block.first_child;
+    while (cursor != (SyntaxNode*)0) {
+        SyntaxNode* start = cursor;
+        SyntaxNode* name = (SyntaxNode*)0;
+        while (cursor != (SyntaxNode*)0 && !scoped_is_token(cursor, TokenKind.Semicolon)) {
+            if (scoped_is_token(cursor, TokenKind.Identifier)) { name = cursor; }
+            cursor = cursor.next_sibling;
+        }
+        if (name != (SyntaxNode*)0 && name != start && strcmp(name.text, field) == 0) {
+            TypeProjection parsed = send_parse_node_type(start, name);
+            String rendered = send_type_display(&parsed);
+            String substituted = send_substitute_parameters(rendered.to_str(), item, owner);
+            if (substituted.equals(rendered.to_str())) { return move parsed; }
+            String base = String.new();
+            TypeProjection projected = send_project_rendered(substituted.to_str(), &base);
+            names.push(move base);
+            return move projected;
+        }
+        if (cursor != (SyntaxNode*)0) { cursor = cursor.next_sibling; }
+    }
+    return projection_type_empty();
+}
+
+/// Narrows `*place`, the type of borrowed root `name`, to the struct field
+/// that `&name.a.b` names. Returns false and leaves `*place` alone when the
+/// argument is not such a path (an index, a call, a tuple element, an
+/// unknown field), so the whole root is judged.
+bool send_narrow_to_field(SyntaxNode* root, SyntaxNode* name, TypeProjection* place,
+                          Vec<String>* names) {
+    SyntaxNode* cursor = name.next_sibling;
+    if (!scoped_is_token(cursor, TokenKind.Dot)) { return false; }
+    TypeProjection current = projection_type_empty();
+    bool first = true;
+    while (scoped_is_token(cursor, TokenKind.Dot)
+        && scoped_is_token(cursor.next_sibling, TokenKind.Identifier)) {
+        str step = cursor.next_sibling.text;
+        TypeProjection field = projection_type_empty();
+        if (first) {
+            field = send_field_type(root, place, step, names);
+        } else {
+            field = send_field_type(root, &current, step, names);
+        }
+        if (field.kind == ProjectionTypeKind.Unknown) { return false; }
+        current = move field;
+        first = false;
+        cursor = cursor.next_sibling.next_sibling;
+    }
+    if (first || (cursor != (SyntaxNode*)0 && !scoped_is_token(cursor, TokenKind.Comma)
+                  && !scoped_is_token(cursor, TokenKind.RightParen))) {
+        return false;
+    }
+    *place = move current;
+    return true;
+}
+
 /// Checks a `launch` argument bound to `&T`/`&mut T` parameter
 /// `argument.index` of `callee`: the borrowed pointee must be Send.
 void check_borrowed_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root,
@@ -623,10 +690,12 @@ void check_borrowed_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root,
     Binding* parameter = parameters.get_ptr(argument.index);
     bool slice = false;
     TypeProjection pointee = send_reference_pointee(parameter, &slice);
-    // A generic callee names no concrete pointee, so judge the borrowed local:
-    // its whole type for `&place`, its own pointee for a reference variable.
-    // A borrowed global is no local binding: judge its declared type.
+    // A generic callee names no concrete pointee, so judge what is borrowed:
+    // the local's type for `&place`, its own pointee for a reference
+    // variable, or a global's declared type, narrowed to the field that
+    // `&root.field` names. Only that field crosses into the task.
     Binding* source = send_argument_binding(bindings, argument);
+    Vec<String> names = Vec<String>.new();
     if (send_type_parameter_index(callee, pointee.name) >= 0) {
         if (source == (Binding*)0) {
             slice = false;
@@ -636,6 +705,11 @@ void check_borrowed_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root,
         } else {
             slice = false;
             pointee = binding_declared_type(source.type_start, source.type_end);
+        }
+        if ((*argument).kind == ProjectionExpressionKind.Address
+            && (*argument).name_node != (SyntaxNode*)0
+            && send_narrow_to_field(root, (*argument).name_node, &pointee, &names)) {
+            slice = false;
         }
     }
     String reason = String.new();
@@ -658,6 +732,7 @@ void check_borrowed_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root,
         type_name.drop();
     }
     reason.drop();
+    names.drop();
     parameters.drop();
 }
 
