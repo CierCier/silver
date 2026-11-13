@@ -787,7 +787,12 @@ class NativeLsp(unittest.TestCase):
                 # A reference to a narrower number cannot stand in for a wider one.
                 ("void put(&mut i64 out) { *out = 1; }\ni64 main() {\n i32 small = 0;\n put(&mut small);\n"
                  " return 0;\n}\n",
-                 [("reference argument type mismatch: expected &mut i64, found &i32", 3)])], 24):
+                 [("reference argument type mismatch: expected &mut i64, found &i32", 3)]),
+                # A `let` value needs `&` like any other local.
+                ("void mutate(&mut i64 v) { *v += 1; }\ni64 start() { return 0; }\ni64 main() {\n"
+                 " let value = start();\n Task<void> task = launch mutate(value);\n wait task;\n return 0;\n}\n",
+                 [("launch passes `value` to a reference parameter without `&`: declare it `shared`, "
+                   "or move it into the task through a by-value parameter", 4)])], 24):
             session.send("textDocument/didChange", {"textDocument": {"uri": alias_uri, "version": version},
                 "contentChanges": [{"text": source}]})
             errors = [(item["message"].split("\n")[0].split(" (help:")[0], item["range"]["start"]["line"])

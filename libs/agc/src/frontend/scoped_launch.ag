@@ -252,6 +252,22 @@ bool scoped_joins_tasks(SyntaxNode* root, SymbolTable* symbols, Binding* binding
     return task.kind == TypeKind.Named && strcmp(types.names.get(task.name_id), "Task") == 0;
 }
 
+/// True when `binding` is known not to be a reference: by its declared
+/// type, or for a `let`, by its initializer's inferred type. A type that
+/// cannot be inferred is not judged.
+bool scoped_binding_is_value(SyntaxNode* root, SymbolTable* symbols, Binding* binding) {
+    ProjectionTypeKind kind = binding.declared_type.kind;
+    if (kind != ProjectionTypeKind.Unknown) { return kind != ProjectionTypeKind.Reference; }
+    if (binding.kind != BindingKind.Let) { return false; }
+    TypeEnv env = TypeEnv.new();
+    TypeTable* types = &symbols.types;
+    u32 type_id = typecheck_initializer_type(symbols, types, root, binding.name_node, &env);
+    if (type_id == TYPE_UNKNOWN) { return false; }
+    TypeEntry* entry = types.get(types.resolve_subst(type_id));
+    return entry.kind != TypeKind.Reference && entry.kind != TypeKind.Pointer
+        && entry.kind != TypeKind.Unknown;
+}
+
 /// Places a launch that is the whole argument of `holder.push(...)` on a
 /// local `holder` declared `Vec<Task<T>>`. Another local collection is
 /// recorded but left unplaced: its drop need not join the task. Returns
@@ -527,9 +543,7 @@ void check_scoped_launch_body(SyntaxNode* root, SymbolTable* symbols, SyntaxNode
             // A bare local would be borrowed implicitly; a reference variable
             // already names its borrow.
             Binding* bound = scoped_visible_binding(&bindings, borrow.root);
-            if (bound != (Binding*)0
-                && bound.declared_type.kind != ProjectionTypeKind.Reference
-                && bound.declared_type.kind != ProjectionTypeKind.Unknown) {
+            if (bound != (Binding*)0 && scoped_binding_is_value(root, symbols, bound)) {
                 diagnostics.error(borrow.first.span,
                     launch_borrows_without_reference(borrow.root.text));
                 *failed = true;
