@@ -326,10 +326,27 @@ bool typecheck_reference_argument_mismatch(TypeTable* types, u32 expected, u32 a
     TypeEntry* argument = types.get(actual);
     if (argument.kind == TypeKind.Pointer || argument.kind == TypeKind.Reference) {
         pointee = argument.inner;
+        // `&r` where `r` is already a reference reborrows through it.
+        TypeEntry* through = types.get(types.resolve_subst(pointee));
+        if (through.kind == TypeKind.Reference
+            && types.get(types.resolve_subst(parameter.inner)).kind != TypeKind.Reference) {
+            pointee = through.inner;
+        }
     }
     if (!typecheck_type_is_concrete(types, parameter.inner, 0)
         || !typecheck_type_is_concrete(types, pointee, 0)) {
         return false;
+    }
+    // `types_match` lets any two numbers match, but an `&mut i64` over an
+    // `i32` writes 8 bytes. An implicit borrow into `&T` converts the value
+    // first, so only a real borrow or a mutable parameter needs one layout.
+    u32 expected_pointee = types.resolve_subst(parameter.inner);
+    pointee = types.resolve_subst(pointee);
+    if ((argument.kind == TypeKind.Pointer || argument.kind == TypeKind.Reference
+            || parameter.is_mut)
+        && type_is_numeric_or_char(expected_pointee) && type_is_numeric_or_char(pointee)) {
+        return expected_pointee != pointee
+            && !(type_is_byte_like(expected_pointee) && type_is_byte_like(pointee));
     }
     return !types_match(types, parameter.inner, pointee)
         && !typecheck_slice_argument_coercion(types, expected, actual);

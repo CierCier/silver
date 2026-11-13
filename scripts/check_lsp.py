@@ -783,7 +783,11 @@ class NativeLsp(unittest.TestCase):
                 # A reference parameter takes only its own pointee type.
                 ("import std.sync;\nvoid bump(&shared i64 c) { lock c { c += 1; } }\ni64 main() {\n i64 plain = 0;\n"
                  " bump(&plain);\n return 0;\n}\n",
-                 [("reference argument type mismatch: expected &Mutex<i64>, found &i64", 4)])], 24):
+                 [("reference argument type mismatch: expected &Mutex<i64>, found &i64", 4)]),
+                # A reference to a narrower number cannot stand in for a wider one.
+                ("void put(&mut i64 out) { *out = 1; }\ni64 main() {\n i32 small = 0;\n put(&mut small);\n"
+                 " return 0;\n}\n",
+                 [("reference argument type mismatch: expected &mut i64, found &i32", 3)])], 24):
             session.send("textDocument/didChange", {"textDocument": {"uri": alias_uri, "version": version},
                 "contentChanges": [{"text": source}]})
             errors = [(item["message"].split("\n")[0].split(" (help:")[0], item["range"]["start"]["line"])

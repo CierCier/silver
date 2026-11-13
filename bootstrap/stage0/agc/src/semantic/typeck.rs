@@ -5385,6 +5385,14 @@ impl TypeChecker {
         )
     }
 
+    /// True when two distinct primitive pointees differ in layout: a value
+    /// cast between them converts, but a pointer to one cannot stand in for
+    /// a pointer to the other (`&mut i64` over an `i32` writes 8 bytes).
+    fn pointee_layouts_differ(from: &Type, to: &Type) -> bool {
+        matches!((from, to), (Type::Primitive(a), Type::Primitive(b))
+            if a != b && !(Self::is_byte_element(from) && Self::is_byte_element(to)))
+    }
+
 
     pub(crate) fn can_coerce_to_slice(&self, found: &Type, expected_elem: &Type) -> bool {
         match found {
@@ -6477,7 +6485,9 @@ impl TypeChecker {
                 },
             ) => {
                 (!*to_mut || *from_mut)
-                    && (from_inner == to_inner || self.is_implicitly_castable(from_inner, to_inner))
+                    && (from_inner == to_inner
+                        || (!Self::pointee_layouts_differ(from_inner, to_inner)
+                            && self.is_implicitly_castable(from_inner, to_inner)))
             }
             (
                 from_val,
