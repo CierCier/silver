@@ -369,6 +369,16 @@ impl FunctionFacts<'_> {
     }
 }
 
+/// True for a place a launch can borrow: a name, then field and index steps.
+pub(super) fn is_place(expression: &ast::Expression) -> bool {
+    match expression.kind.as_ref() {
+        ast::ExpressionKind::Identifier(_) => true,
+        ast::ExpressionKind::FieldAccess { object, .. }
+        | ast::ExpressionKind::Index { object, .. } => is_place(object),
+        _ => false,
+    }
+}
+
 /// Rejects an argument for a reference parameter of `launch` that is not
 /// `&place`, `&mut place` or a reference variable: a bare local would be
 /// borrowed implicitly, and a call result's borrow is not tracked.
@@ -392,7 +402,7 @@ fn check_borrowed_arguments(
             continue;
         };
         let message = match argument.kind.as_ref() {
-            ast::ExpressionKind::Reference { .. } => continue,
+            ast::ExpressionKind::Reference { expression, .. } if is_place(expression) => continue,
             ast::ExpressionKind::Identifier(name)
                 if facts.reference_at(&name.name, argument.span.start).is_some() =>
             {

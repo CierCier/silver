@@ -343,7 +343,16 @@ void scoped_add_borrow(ScopedLaunches* out, i64 site, SyntaxNode* first, SyntaxN
             borrow.mutable = true;
             place = place.next_sibling;
         }
-        if (place != end && scoped_is_token(place, TokenKind.Identifier)) {
+        // Only a place is borrowed: a name, then `.field` and `[index]` steps.
+        // A call result is a temporary the task would outlive.
+        SyntaxNode* step = place != end ? place.next_sibling : end;
+        while (step != end
+            && ((scoped_is_token(step, TokenKind.Dot)
+                    && scoped_is_token(step.next_sibling, TokenKind.Identifier))
+                || step.kind == NodeKind.Bracket)) {
+            step = step.kind == NodeKind.Bracket ? step.next_sibling : step.next_sibling.next_sibling;
+        }
+        if (place != end && scoped_is_token(place, TokenKind.Identifier) && step == end) {
             borrow.root = place;
         }
     } else if (scoped_is_token(first, TokenKind.Identifier) && first.next_sibling == end) {

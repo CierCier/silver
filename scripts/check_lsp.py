@@ -802,7 +802,11 @@ class NativeLsp(unittest.TestCase):
                 ("void mutate(&mut i64 v) { *v += 1; }\ni64 start() { return 0; }\ni64 main() {\n"
                  " let value = start();\n Task<void> task = launch mutate(value);\n wait task;\n return 0;\n}\n",
                  [("launch passes `value` to a reference parameter without `&`: declare it `shared`, "
-                   "or move it into the task through a by-value parameter", 4)])], 24):
+                   "or move it into the task through a by-value parameter", 4)]),
+                # A borrowed call result is not a place the launch can track.
+                ("i64 read(&i64 v) { return *v; }\ni64 pick(&i64 v) { return *v; }\ni64 main() {\n i64 x = 1;\n"
+                 " Task<i64> t = launch read(&pick(&x));\n return wait t;\n}\n",
+                 [("a borrowed launch argument must be `&place`, `&mut place`, or a reference variable", 4)])], 24):
             session.send("textDocument/didChange", {"textDocument": {"uri": alias_uri, "version": version},
                 "contentChanges": [{"text": source}]})
             errors = [(item["message"].split("\n")[0].split(" (help:")[0], item["range"]["start"]["line"])
