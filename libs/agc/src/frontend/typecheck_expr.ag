@@ -1267,11 +1267,29 @@ u32 typecheck_place_type(AstPool* pool, TypeTable* types, SymbolTable* symbols,
 /// Reports moving a `lock` block's value, or an owned field or element of
 /// it, out of the block. The value is `(*__lock_N__name)`, a place inside
 /// the Mutex (see sync_sugar.ag), and the Mutex would still own and drop
-/// it. Returns true when it reported.
+/// it. A tuple, a brace initializer, or a match arm consumes each value it
+/// is built from. Returns true when it reported.
 bool typecheck_reject_locked_move(AstPool* pool, TypeTable* types, SymbolTable* symbols,
                                   SyntaxNode* root, u32 place_id,
                                   DiagnosticBag* diagnostics, bool* ok) {
     AstExpr* place = pool.get_expr(place_id);
+    if (place.kind == ExprKind.ArrayLit || place.kind == ExprKind.Match) {
+        bool reported = false;
+        i64 i = 0;
+        while (i < (i64)place.aux) {
+            u32 part = place.kind == ExprKind.ArrayLit
+                ? pool.args.get((i64)place.inner1 + 1 + i)
+                : pool.arms.get_ptr((i64)place.inner1 + i).value_id;
+            // A `move` part is rejected where the move is checked.
+            if (part != 0 && pool.get_expr(part).kind != ExprKind.Move
+                && typecheck_reject_locked_move(pool, types, symbols, root, part,
+                                                diagnostics, ok)) {
+                reported = true;
+            }
+            i += 1;
+        }
+        return reported;
+    }
     AstExpr* base = place;
     String path = String.new();
     while ((base.kind == ExprKind.Field || base.kind == ExprKind.Index) && base.inner0 != 0) {
@@ -1393,6 +1411,27 @@ bool typecheck_reject_partial_drop_move(AstPool* pool, TypeTable* types, SymbolT
     owner_text.drop();
     fields.drop();
     return false;
+}
+
+/// True when `owner.method(...)` constructs a variant of enum `owner`,
+/// which takes each payload by value.
+bool typecheck_is_variant_constructor(SyntaxNode* root, str owner, str method_name) {
+    SyntaxNode* enum_item = find_enum_item(root, owner);
+    if (enum_item == (SyntaxNode*)0) { return false; }
+    Vec<SyntaxNode*> variants = Vec<SyntaxNode*>.new();
+    Vec<i64> tags = Vec<i64>.new();
+    Vec<i64> arities = Vec<i64>.new();
+    enum_each_variant(enum_item, &variants, &tags, &arities);
+    bool constructor = false;
+    i64 i = 0;
+    while (i < variants.len() && !constructor) {
+        constructor = strcmp(variants.get(i).text, method_name) == 0;
+        i += 1;
+    }
+    variants.drop();
+    tags.drop();
+    arities.drop();
+    return constructor;
 }
 
 /// Returns true when the method parameter takes its argument by value.
@@ -2998,6 +3037,7 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
             return task_method_type;
         }
         bool static_method = false;
+        bool variant_constructor = false;
         if (receiver.kind == ExprKind.Var) {
             str receiver_name = symbols.names.get(receiver.aux);
             String base = String.new();
@@ -3007,6 +3047,8 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 base_index += 1;
             }
             static_method = impl_has_static_method(root, base.to_str(), method_name);
+            variant_constructor = env.lookup(receiver.aux) == TYPE_UNKNOWN
+                && typecheck_is_variant_constructor(root, base.to_str(), method_name);
             if (static_method) {
                 u32 static_receiver_type = type_id_from_text(types, receiver_name);
                 if (static_receiver_type != TYPE_UNKNOWN) {
@@ -3069,9 +3111,10 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                         arg_type = argument.inferred_type;
                     }
                 }
-                if (typecheck_method_parameter_is_value(root, types, receiver_type,
-                                                       method_name, total_param_count,
-                                                       parameter_index, arg_type)) {
+                if (variant_constructor
+                    || typecheck_method_parameter_is_value(root, types, receiver_type,
+                                                           method_name, total_param_count,
+                                                           parameter_index, arg_type)) {
                     if (pool.get_expr(arg_id).kind != ExprKind.Move) {
                         typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
                                                            arg_id, diagnostics, ok);

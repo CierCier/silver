@@ -1442,11 +1442,44 @@ impl MoveChecker {
     /// Rejects moving a `lock` block's value, or an owned field or element of
     /// it, out of the block. The value is `(*__lock_N__name)`, a place inside
     /// the Mutex (see sync_sugar), and the Mutex would still own and drop it.
+    /// An aggregate or a match consumes each value it is built from.
     fn reject_locked_move(
         &mut self,
         expr: &ast::Expression,
         var_types: &FxHashMap<String, ast::Type>,
     ) {
+        match expr.kind.as_ref() {
+            ast::ExpressionKind::Array(items)
+            | ast::ExpressionKind::Tuple(items)
+            | ast::ExpressionKind::EnumVariant { fields: items, .. } => {
+                for item in items {
+                    self.reject_locked_move(item, var_types);
+                }
+                return;
+            }
+            ast::ExpressionKind::StructLiteral { fields, .. } => {
+                for field in fields {
+                    self.reject_locked_move(&field.value, var_types);
+                }
+                return;
+            }
+            ast::ExpressionKind::Initializer { items } => {
+                for item in items {
+                    let (ast::InitializerItem::Positional(value)
+                    | ast::InitializerItem::Field { value, .. }
+                    | ast::InitializerItem::Index { value, .. }) = item;
+                    self.reject_locked_move(value, var_types);
+                }
+                return;
+            }
+            ast::ExpressionKind::Match { arms, .. } => {
+                for arm in arms {
+                    self.reject_locked_move(&arm.body, var_types);
+                }
+                return;
+            }
+            _ => {}
+        }
         if let Some((place, ty)) = self.locked_place(expr, var_types)
             && self.is_tracked(&ty)
         {

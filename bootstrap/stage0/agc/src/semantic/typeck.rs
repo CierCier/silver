@@ -2691,11 +2691,18 @@ impl TypeChecker {
                                 // `move`d — otherwise the source keeps its
                                 // drop flag and the enum's copy shares the
                                 // same buffers (silent double owner).
-                                let is_named_lvalue = matches!(
-                                    arg.kind.as_ref(),
+                                // A lock block's value is `(*__lock_N__name)`.
+                                let is_named_lvalue = match arg.kind.as_ref() {
                                     ast::ExpressionKind::Identifier(_)
-                                        | ast::ExpressionKind::FieldAccess { .. }
-                                );
+                                    | ast::ExpressionKind::FieldAccess { .. } => true,
+                                    ast::ExpressionKind::Unary {
+                                        operator: ast::UnaryOperator::Dereference,
+                                        operand,
+                                    } => matches!(operand.kind.as_ref(),
+                                        ast::ExpressionKind::Identifier(pointer)
+                                            if crate::sync_sugar::locked_name(&pointer.name).is_some()),
+                                    _ => false,
+                                };
                                 // Check the CONCRETE argument type (resolved
                                 // through the expected payload type): in a
                                 // concrete enum impl the arg is i64 even

@@ -672,6 +672,12 @@ class NativeLsp(unittest.TestCase):
                   "void drain(&Pool pool) {\n lock pool.items as a { lock pool.items as b { } }\n}\n")
         moved = misuse.replace("lock pool.items as a { lock pool.items as b { } }",
                                "lock pool.items as items { Vec<i64> mine = items; }")
+        # A tuple, a match arm, or a variant payload consumes the value too.
+        in_tuple = moved.replace("Vec<i64> mine = items;", "[Vec<i64>, i64] pair = [items, 0];")
+        in_match = moved.replace("Vec<i64> mine = items;",
+                                 "i64 k = 0; Vec<i64> mine = match k { 0: items, _: items };")
+        in_variant = moved.replace("Vec<i64> mine = items;", "Wrap w = Wrap.Some(items);").replace(
+            "struct Pool", "enum Wrap { Some(Vec<i64>); Empty; } struct Pool")
         indexed = ("import std.sync;\nimport std.mem.vec; import std.string;\n"
                    "struct Pool { shared Vec<String> items; }\nvoid drain(&Pool pool) {\n"
                    " lock pool.items as items { String first = move items[0]; }\n}\n")
@@ -696,6 +702,10 @@ class NativeLsp(unittest.TestCase):
         for version, (source, message) in enumerate([
                 (misuse, "`pool.items` is already locked by an enclosing lock block; locking it again would deadlock"),
                 (moved, "cannot move 'items' out of its lock block: the shared value still owns it; clone it instead"),
+                (in_tuple, "cannot move 'items' out of its lock block: the shared value still owns it; clone it instead"),
+                (in_match, "cannot move 'items' out of its lock block: the shared value still owns it; clone it instead"),
+                (in_variant, "cannot move 'items' out of its lock block: the shared value still owns it; "
+                             "clone it instead"),
                 (generic, "`a` is shared between threads: read or change it inside `lock a { ... }`"),
                 (indexed, "cannot move 'items[...]' out of its lock block: the shared value still owns it; "
                           "clone it instead"),
