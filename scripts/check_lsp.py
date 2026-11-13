@@ -685,6 +685,12 @@ class NativeLsp(unittest.TestCase):
         owner = ("import std.sync;\nimport std.mem.arc;\ni64 main() {\n"
                  " Arc<Mutex<i64>> state = Arc<Mutex<i64>>.new(Mutex<i64>.new(1));\n"
                  " lock state.get() as count { state.drop(); count = 2; }\n return 0;\n}\n")
+        # A match arm cannot take a locked enum's payload out of the block.
+        payload = misuse.replace("struct Pool { shared Vec<i64> items; }",
+                                 "enum Bin { Full(Vec<i64>); Empty; } struct Pool { shared Bin items; }").replace(
+            "lock pool.items as a { lock pool.items as b { } }",
+            "lock pool.items as items { Vec<i64> mine = match items { Full(owned): owned, Empty: Vec<i64>.new() }; }")
+        payload_move = payload.replace("Full(owned)", "Full(move owned)")
         # `lock get(&owner)` and `lock view` (with `view = &owner`) keep `owner` borrowed.
         through_call = ("import std.sync;\nstruct Owner { Mutex<i64> cell; }\n"
                         "&Mutex<i64> get(&Owner owner) { return &owner.cell; }\nvoid consume(Owner _o) { }\n"
@@ -717,6 +723,9 @@ class NativeLsp(unittest.TestCase):
                 (indexed, "cannot move 'items[...]' out of its lock block: the shared value still owns it; "
                           "clone it instead"),
                 (owner, "cannot drop 'state' inside a lock block on it: the lock guard points into it\nlocked here"),
+                (payload, "cannot move 'owned' out of its lock block: the shared value still owns it; clone it instead"),
+                (payload_move, "cannot move 'owned' out of its lock block: the shared value still owns it; "
+                               "clone it instead"),
                 (through_call, "cannot move 'owner' because it is borrowed\nlocked here"),
                 (through_view, "cannot move 'owner' because it is borrowed\nprevious shared borrow occurs here"),
                 (forgetful, "a launch that borrows 'value' can only be pushed into a local `Vec<Task<T>>`, "

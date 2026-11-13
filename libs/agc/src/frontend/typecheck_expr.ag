@@ -1315,6 +1315,38 @@ bool typecheck_reject_locked_move(AstPool* pool, TypeTable* types, SymbolTable* 
     return true;
 }
 
+/// True when `id` reads a lock block's value or a field of it: sync_sugar
+/// lowers the value to `(*__lock_N__name)`.
+bool typecheck_reads_locked_value(AstPool* pool, SymbolTable* symbols, u32 id) {
+    AstExpr* base = pool.get_expr(id);
+    while ((base.kind == ExprKind.Field || base.kind == ExprKind.Index) && base.inner0 != 0) {
+        base = pool.get_expr(base.inner0);
+    }
+    if (base.kind != ExprKind.Unary || base.aux != (u32)TokenKind.Star || base.inner0 == 0) { return false; }
+    AstExpr* pointer = pool.get_expr(base.inner0);
+    return pointer.kind == ExprKind.Var && sugar_locked_name_start(symbols.names.get(pointer.aux)) >= 0;
+}
+
+/// The payload binding that match arm `arm` moves out of its scrutinee: a
+/// `move` binding, or an owning binding the arm yields. 0 when none.
+u32 typecheck_arm_moved_binding(AstPool* pool, TypeTable* types, SyntaxNode* root, MatchArm* arm) {
+    if (arm.pattern != MatchPatternKind.Variant || arm.bindings_count == 0) { return 0; }
+    if (arm.value_id != 0) {
+        AstExpr* value = pool.get_expr(arm.value_id);
+        if (value.kind == ExprKind.Move && value.inner0 != 0) { value = pool.get_expr(value.inner0); }
+        i64 i = 0;
+        while (value.kind == ExprKind.Var && i < (i64)arm.bindings_count) {
+            if (pool.arm_bindings.get((i64)arm.bindings_start + i) == value.aux
+                && value.inferred_type != TYPE_UNKNOWN
+                && !typecheck_type_is_copy(root, types, value.inferred_type)) {
+                return value.aux;
+            }
+            i += 1;
+        }
+    }
+    return arm.moves_payload ? pool.arm_bindings.get((i64)arm.bindings_start) : 0;
+}
+
 /// Reports moving a field out of a value whose type implements Drop, or a
 /// value out of a lock block. Returns true when it reported.
 bool typecheck_reject_partial_drop_move(AstPool* pool, TypeTable* types, SymbolTable* symbols,
@@ -2591,6 +2623,8 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         }
     } else if (expr.kind == ExprKind.Match) {
         u32 scrut_type = infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
+        // The shared value keeps owning a locked scrutinee's payload.
+        bool locked = typecheck_reads_locked_value(pool, symbols, expr.inner0);
         str scrut_enum = "";
         if (scrut_type != TYPE_UNKNOWN) {
             TypeEntry* scrut_entry = types.get(scrut_type);
@@ -2706,6 +2740,11 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
             } else {
                 arm_type = infer_expr(pool, types, symbols, root, &arm_env,
                                       arm.value_id, diagnostics, ok);
+            }
+            u32 moved = locked ? typecheck_arm_moved_binding(pool, types, root, arm) : 0;
+            if (moved != 0) {
+                diagnostics.error(arm.span, move_out_of_lock(symbols.names.get(moved)));
+                *ok = false;
             }
             if (result_type == TYPE_UNKNOWN) {
                 result_type = arm_type;

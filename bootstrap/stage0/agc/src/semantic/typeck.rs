@@ -76,6 +76,21 @@ fn lock_block_place(block: &ast::Block) -> Option<&ast::Expression> {
     (method.name == "lock").then_some(receiver.as_ref())
 }
 
+/// True when `expr` reads a lock block's value or a field of it: sync_sugar
+/// lowers the value to `(*__lock_N__name)`.
+fn reads_locked_value(expr: &ast::Expression) -> bool {
+    let mut place = expr;
+    while let ast::ExpressionKind::FieldAccess { object, .. } = place.kind.as_ref() {
+        place = object;
+    }
+    matches!(place.kind.as_ref(), ast::ExpressionKind::Unary {
+        operator: ast::UnaryOperator::Dereference,
+        operand,
+    } if matches!(operand.kind.as_ref(),
+        ast::ExpressionKind::Identifier(pointer)
+            if crate::sync_sugar::locked_name(&pointer.name).is_some()))
+}
+
 /// Source text of a simple place (`x`, `self.hits`), or None.
 fn place_text(expr: &ast::Expression) -> Option<String> {
     match expr.kind.as_ref() {
@@ -3216,6 +3231,8 @@ impl TypeChecker {
             }
             ast::ExpressionKind::Match { expression, arms } => {
                 let scrutinee_ty = self.check_expr(expression, None);
+                // The shared value keeps owning a locked scrutinee's payload.
+                let locked = reads_locked_value(expression);
 
                 // Enum dispatch: scrutinee is a named enum type.
                 if let Type::Named { path, .. } = &scrutinee_ty {
@@ -3240,6 +3257,7 @@ impl TypeChecker {
                         let mut arm_types: Vec<Type> = Vec::new();
                         for (arm_index, arm) in arms.iter().enumerate() {
                             self.push_scope();
+                            let mut owned_bindings: Vec<&str> = Vec::new();
                             match &arm.pattern.kind {
                                 ast::PatternKind::Wildcard
                                 | ast::PatternKind::Identifier(_)
@@ -3274,6 +3292,15 @@ impl TypeChecker {
                                                         data_pattern.kind,
                                                         ast::PatternKind::Move(_)
                                                     );
+                                                    if locked && is_mut {
+                                                        self.error(
+                                                            msg::move_out_of_lock(&binding.name),
+                                                            data_pattern.span,
+                                                        );
+                                                    }
+                                                    if !is_mut && self.type_has_drop_impl(&bound.to_ast()) {
+                                                        owned_bindings.push(&binding.name);
+                                                    }
                                                     self.bind(
                                                         &binding.name,
                                                         bound,
@@ -3292,7 +3319,14 @@ impl TypeChecker {
                                                             &Type::from_ast(pt),
                                                             &enum_type_map,
                                                         );
+                                                        if self.type_has_drop_impl(&bound.to_ast()) {
+                                                            owned_bindings.push(&b.name);
+                                                        }
                                                         self.bind(&b.name, bound, false, b.span);
+                                                    } else if locked
+                                                        && let ast::PatternKind::Move(b) = &sub.kind
+                                                    {
+                                                        self.error(msg::move_out_of_lock(&b.name), sub.span);
                                                     }
                                                 }
                                             }
@@ -3342,6 +3376,14 @@ impl TypeChecker {
                                 arm_types.first()
                             };
                             arm_types.push(self.check_expr(&arm.body, arm_expected));
+                            // Yielding an owning payload binding would give the
+                            // match result a second owner of the locked storage.
+                            if locked
+                                && let ast::ExpressionKind::Identifier(name) = arm.body.kind.as_ref()
+                                && owned_bindings.contains(&name.name.as_str())
+                            {
+                                self.error(msg::move_out_of_lock(&name.name), arm.body.span);
+                            }
                             self.pop_scope();
                         }
                         let non_never: Vec<&Type> =

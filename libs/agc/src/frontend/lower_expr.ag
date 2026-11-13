@@ -1691,6 +1691,7 @@ impl ExprLowerer {
             lowered_arm.guard_id = guard_id;
             lowered_arm.value_id = value_id;
             lowered_arm.body_stmt_id = body_stmt_id;
+            lowered_arm.moves_payload = arm_has_move;
             lowered_arm.span = cursor.span;
             arms_count += 1;
             cursor = value_end;

@@ -106,6 +106,8 @@ struct MatchArm {
     u32 guard_id;
     u32 value_id;
     u32 body_stmt_id;
+    /// A `move` payload binding takes the payload out of the scrutinee.
+    bool moves_payload;
     Span span;
 }
 
@@ -215,6 +217,7 @@ impl AstPool {
         null_arm.guard_id = 0;
         null_arm.value_id = 0;
         null_arm.body_stmt_id = 0;
+        null_arm.moves_payload = false;
         null_arm.span = Span.synthetic();
         pool.arms.push(move null_arm);
 
@@ -422,6 +425,7 @@ impl AstPool {
         arm.guard_id = guard_id;
         arm.value_id = value_id;
         arm.body_stmt_id = body_stmt_id;
+        arm.moves_payload = false;
         arm.span = span;
         self.arms.push(move arm);
         return (u32)(self.arms.len() - 1);
