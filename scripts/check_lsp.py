@@ -807,6 +807,12 @@ class NativeLsp(unittest.TestCase):
                 ("i64 read(&i64 v) { return *v; }\ni64 pick(&i64 v) { return *v; }\ni64 main() {\n i64 x = 1;\n"
                  " Task<i64> t = launch read(&pick(&x));\n return wait t;\n}\n",
                  [("a borrowed launch argument must be `&place`, `&mut place`, or a reference variable", 4)]),
+                # A generic `&Vec<T>` is judged by its concrete `T`.
+                ("import std.mem.vec;\nimport std.mem.rc;\ni64 count<T>(&Vec<T> values) { return values.len(); }\n"
+                 "i64 main() {\n Vec<Rc<i64>> values = Vec<Rc<i64>>.new();\n Task<i64> t = launch count(&values);\n"
+                 " return wait t;\n}\n",
+                 [("launch argument of type &Vec<Rc<i64>> is not Send: Rc<T> carries a shared non-atomic "
+                   "reference count", 5)]),
                 # Launches in methods are checked like launches in functions.
                 ("import std.mem.rc;\nvoid inspect(&Rc<i64> _r) { }\nstruct Runner { i64 n; }\nimpl Runner {\n"
                  " void go(&self) {\n  Rc<i64> rc = Rc<i64>.new(1);\n  Task<void> t = launch inspect(&rc);\n"

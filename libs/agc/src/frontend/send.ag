@@ -680,6 +680,31 @@ bool send_narrow_to_field(SyntaxNode* root, SyntaxNode* name, TypeProjection* pl
     return true;
 }
 
+/// True when `pointee` names a type parameter of `callee` anywhere, as
+/// `T` or inside `Vec<T>`: only the caller's argument then says what is
+/// borrowed.
+bool send_mentions_type_parameter(SyntaxNode* callee, TypeProjection* pointee) {
+    String text = send_type_display(pointee);
+    str spelled = text.to_str();
+    bool mentions = false;
+    i64 i = 0;
+    while (spelled[i] != (u8)0 && !mentions) {
+        if (!send_is_name_char(spelled[i])) {
+            i += 1;
+            continue;
+        }
+        String name = String.new();
+        while (send_is_name_char(spelled[i])) {
+            name.push(spelled[i]);
+            i += 1;
+        }
+        mentions = send_type_parameter_index(callee, name.to_str()) >= 0;
+        name.drop();
+    }
+    text.drop();
+    return mentions;
+}
+
 /// Checks a `launch` argument bound to `&T`/`&mut T` parameter
 /// `argument.index` of `callee`: the borrowed pointee must be Send.
 void check_borrowed_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root,
@@ -696,7 +721,7 @@ void check_borrowed_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root,
     // `&root.field` names. Only that field crosses into the task.
     Binding* source = send_argument_binding(bindings, argument);
     Vec<String> names = Vec<String>.new();
-    if (send_type_parameter_index(callee, pointee.name) >= 0) {
+    if (send_mentions_type_parameter(callee, &pointee)) {
         if (source == (Binding*)0) {
             slice = false;
             pointee = send_global_type(root, (*argument).name);
