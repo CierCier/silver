@@ -774,7 +774,11 @@ class NativeLsp(unittest.TestCase):
                 # A generic body that locks its `T` needs a shared argument.
                 ("import std.sync;\nvoid touch<T>(&T value) { lock value { } }\ni64 main() {\n i64 plain = 1;\n"
                  " touch(&plain);\n return 0;\n}\n",
-                 [("`value` is `i64`, not shared: declare it `shared i64` to lock it", 1)])], 24):
+                 [("`value` is `i64`, not shared: declare it `shared i64` to lock it", 1)]),
+                # A reference parameter takes only its own pointee type.
+                ("import std.sync;\nvoid bump(&shared i64 c) { lock c { c += 1; } }\ni64 main() {\n i64 plain = 0;\n"
+                 " bump(&plain);\n return 0;\n}\n",
+                 [("reference argument type mismatch: expected &Mutex<i64>, found &i64", 4)])], 24):
             session.send("textDocument/didChange", {"textDocument": {"uri": alias_uri, "version": version},
                 "contentChanges": [{"text": source}]})
             errors = [(item["message"].split("\n")[0].split(" (help:")[0], item["range"]["start"]["line"])

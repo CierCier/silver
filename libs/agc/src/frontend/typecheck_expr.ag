@@ -285,6 +285,56 @@ bool typecheck_slice_argument_coercion(TypeTable* types, u32 expected, u32 actua
     return false;
 }
 
+/// True when `type_id` is fully known: no unknown, type parameter, function,
+/// tuple, or slice anywhere inside it.
+bool typecheck_type_is_concrete(TypeTable* types, u32 type_id, i64 depth) {
+    if (depth > 16) { return false; }
+    type_id = types.resolve_subst(type_id);
+    TypeEntry* entry = types.get(type_id);
+    if (entry.kind == TypeKind.Unknown || entry.kind == TypeKind.Void
+        || entry.kind == TypeKind.TypeParam || entry.kind == TypeKind.Function
+        || entry.kind == TypeKind.Tuple || entry.kind == TypeKind.Slice) {
+        return false;
+    }
+    if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference
+        || entry.kind == TypeKind.Array) {
+        return typecheck_type_is_concrete(types, entry.inner, depth + 1);
+    }
+    if (entry.kind == TypeKind.Named) {
+        i64 i = 0;
+        while (i < entry.count) {
+            if (!typecheck_type_is_concrete(types, types.type_args.get(entry.inner + (u32)i),
+                                            depth + 1)) {
+                return false;
+            }
+            i += 1;
+        }
+    }
+    return true;
+}
+
+/// True when an argument of type `actual` cannot bind to reference
+/// parameter type `expected`: the value it points at, or the value itself
+/// for an implicit borrow, is not the parameter's pointee. Types that are
+/// not fully known are not judged.
+bool typecheck_reference_argument_mismatch(TypeTable* types, u32 expected, u32 actual) {
+    expected = types.resolve_subst(expected);
+    actual = types.resolve_subst(actual);
+    TypeEntry* parameter = types.get(expected);
+    if (parameter.kind != TypeKind.Reference) { return false; }
+    u32 pointee = actual;
+    TypeEntry* argument = types.get(actual);
+    if (argument.kind == TypeKind.Pointer || argument.kind == TypeKind.Reference) {
+        pointee = argument.inner;
+    }
+    if (!typecheck_type_is_concrete(types, parameter.inner, 0)
+        || !typecheck_type_is_concrete(types, pointee, 0)) {
+        return false;
+    }
+    return !types_match(types, parameter.inner, pointee)
+        && !typecheck_slice_argument_coercion(types, expected, actual);
+}
+
 /// Returns true when a call argument fits its parameter (value matching or
 /// slice coercion).
 bool typecheck_call_argument_matches(TypeTable* types, u32 expected, u32 actual,
@@ -2750,7 +2800,15 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                             typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
                                                                arg_expr_id, diagnostics, ok);
                         }
-                        if (!typecheck_call_argument_matches(
+                        if (!typecheck_is_generic_function(callee_fn)
+                            && typecheck_reference_argument_mismatch(
+                                types, expected_arg_type, actual_arg_type)
+                            && !has_user_cast(root, types, actual_arg_type, expected_arg_type)) {
+                            diagnostics.error(pool.get_expr(arg_expr_id).span,
+                                reference_argument_mismatch(types.type_name(expected_arg_type),
+                                    types.type_name(actual_arg_type)));
+                            *ok = false;
+                        } else if (!typecheck_call_argument_matches(
                                 types, expected_arg_type, actual_arg_type,
                                 expr_is_literal(pool, arg_expr_id))
                             && !has_user_cast(root, types, actual_arg_type, expected_arg_type)) {
@@ -3750,6 +3808,7 @@ bool typecheck_expressions_scoped(AstPool* pool, SymbolTable* symbols, SyntaxTre
                                 "cannot use this C function as a value:")
                             || typecheck_str_starts_with(diagnostic_text, "macro '@")
                             || typecheck_str_starts_with(diagnostic_text, "pointer argument type mismatch:")
+                            || typecheck_str_starts_with(diagnostic_text, "reference argument type mismatch:")
                             || typecheck_str_starts_with(diagnostic_text, "unwrap-or ")
                             || typecheck_str_starts_with(diagnostic_text, "generic method ")
                             || typecheck_str_starts_with(diagnostic_text, "Task has no method '")

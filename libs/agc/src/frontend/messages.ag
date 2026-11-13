@@ -468,6 +468,12 @@ String task_collection_does_not_join(str name, str holder) {
     return @format("a launch that borrows '{}' can only be pushed into a local `Vec<Task<T>>`, whose drop joins its tasks; `{}` is not one", name, holder);
 }
 
+/// Diagnostic text: "reference argument type mismatch: expected {}, found
+/// {}". Returns an owned string.
+String reference_argument_mismatch(str expected, str found) {
+    return @format("reference argument type mismatch: expected {}, found {}", expected, found);
+}
+
 /// Diagnostic text: "cannot drop '{}' inside a lock block on it: the lock
 /// guard points into it". Returns an owned string.
 String cannot_drop_locked_owner(str name) {
