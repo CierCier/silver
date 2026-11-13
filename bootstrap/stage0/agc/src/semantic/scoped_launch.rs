@@ -107,9 +107,9 @@ struct FunctionFacts<'a> {
     /// Launches pushed into a local collection that is not `Vec<Task<T>>`,
     /// with that collection's name.
     unjoined_pushes: FxHashMap<SpanKey, String>,
-    /// Parameters and locals declared as references, with whether each is
-    /// `&mut T`.
-    references: FxHashMap<String, bool>,
+    /// Parameters declared as references, with whether each is `&mut T`.
+    /// A local reference is in its `Declaration`.
+    parameter_references: FxHashMap<String, bool>,
 }
 
 /// One declaration of a local name.
@@ -119,6 +119,8 @@ struct Declaration {
     scope: Span,
     /// Declared `Vec<Task<T>>`, whose drop joins every task it holds.
     joins_tasks: bool,
+    /// Declared `&T` (false) or `&mut T` (true); None for any other type.
+    reference: Option<bool>,
 }
 
 /// True when `ty` is `Vec<Task<T>>`.
@@ -170,7 +172,7 @@ fn pushed_launch(expression: &ast::Expression) -> Option<(&ast::Identifier, &ast
 fn borrowed_roots(
     launch: &ast::Expression,
     resolved_callables: &FxHashMap<CallSiteKey, ResolvedCallable>,
-    references: &FxHashMap<String, bool>,
+    facts: &FunctionFacts,
 ) -> Vec<(String, bool)> {
     let mut roots = Vec::new();
     let ast::ExpressionKind::Launch(call) = launch.kind.as_ref() else {
@@ -192,7 +194,7 @@ fn borrowed_roots(
             ast::ExpressionKind::Identifier(forwarded)
                 if reference_parameters.contains(&index) =>
             {
-                (argument, references.get(&forwarded.name).copied().unwrap_or(false))
+                (argument, facts.reference_at(&forwarded.name, argument.span.start).unwrap_or(false))
             }
             _ => continue,
         };
@@ -236,6 +238,15 @@ impl FunctionFacts<'_> {
         }
     }
 
+    /// Whether `name` at offset `at` is a reference, and if so whether it is
+    /// `&mut`: from the declaration visible there, else from a parameter.
+    fn reference_at(&self, name: &str, at: usize) -> Option<bool> {
+        match self.declaration(name, at) {
+            Some(declaration) => declaration.reference,
+            None => self.parameter_references.get(name).copied(),
+        }
+    }
+
     /// The declaration of `name` visible at offset `at`, or None for a
     /// parameter: the latest one before `at` whose block contains it.
     fn declaration(&self, name: &str, at: usize) -> Option<&Declaration> {
@@ -270,15 +281,11 @@ impl FunctionFacts<'_> {
                 start: name.span.start,
                 scope,
                 joins_tasks: joins_tasks(binding.type_annotation.as_ref()),
+                reference: match binding.type_annotation.as_ref().map(|ty| ty.kind.as_ref()) {
+                    Some(ast::TypeKind::Reference(reference)) => Some(reference.is_mutable),
+                    _ => None,
+                },
             });
-            match binding.type_annotation.as_ref().map(|ty| ty.kind.as_ref()) {
-                Some(ast::TypeKind::Reference(reference)) => {
-                    self.references.insert(name.name.clone(), reference.is_mutable);
-                }
-                _ => {
-                    self.references.remove(&name.name);
-                }
-            }
         }
     }
 
@@ -288,8 +295,18 @@ impl FunctionFacts<'_> {
         match expression.kind.as_ref() {
             ast::ExpressionKind::Lambda { body, .. }
             | ast::ExpressionKind::Block(body)
-            | ast::ExpressionKind::While { body, .. }
-            | ast::ExpressionKind::ForIn { body, .. } => self.record_block(body),
+            | ast::ExpressionKind::While { body, .. } => self.record_block(body),
+            ast::ExpressionKind::ForIn { binding, body, .. } => {
+                // The loop variable lives in the body, so a collection
+                // declared before the loop outlives it.
+                self.declared_at.entry(binding.name.clone()).or_default().push(Declaration {
+                    start: binding.span.start,
+                    scope: body.span,
+                    joins_tasks: false,
+                    reference: None,
+                });
+                self.record_block(body);
+            }
             ast::ExpressionKind::For { init, body, .. } => {
                 // A `for` initializer cannot hold a borrowing launch: the
                 // borrow checker tracks task loans only for block locals.
@@ -358,7 +375,7 @@ impl FunctionFacts<'_> {
 fn check_borrowed_arguments(
     launch: &ast::Expression,
     resolved_callables: &FxHashMap<CallSiteKey, ResolvedCallable>,
-    references: &FxHashMap<String, bool>,
+    facts: &FunctionFacts,
     errors: &mut Vec<ScopedLaunchError>,
 ) {
     let ast::ExpressionKind::Launch(call) = launch.kind.as_ref() else {
@@ -376,7 +393,9 @@ fn check_borrowed_arguments(
         };
         let message = match argument.kind.as_ref() {
             ast::ExpressionKind::Reference { .. } => continue,
-            ast::ExpressionKind::Identifier(name) if references.contains_key(&name.name) => {
+            ast::ExpressionKind::Identifier(name)
+                if facts.reference_at(&name.name, argument.span.start).is_some() =>
+            {
                 continue;
             }
             ast::ExpressionKind::Identifier(name) => {
@@ -410,7 +429,7 @@ fn check_function(
         declared_at: FxHashMap::default(),
         pushes: Vec::new(),
         unjoined_pushes: FxHashMap::default(),
-        references: parameters
+        parameter_references: parameters
             .iter()
             .filter_map(|parameter| match parameter.param_type.kind.as_ref() {
                 ast::TypeKind::Reference(reference) => {
@@ -428,7 +447,7 @@ fn check_function(
 
     visit::expressions_in_block(&mut body, &mut |expression| match expression.kind.as_ref() {
         ast::ExpressionKind::Launch(_) => {
-            check_borrowed_arguments(expression, resolved_callables, &facts.references, errors);
+            check_borrowed_arguments(expression, resolved_callables, &facts, errors);
             if is_scoped_launch(expression, resolved_callables)
                 && !facts.placed_launches.contains(&span_key(expression.span))
             {
@@ -477,7 +496,7 @@ fn check_function(
             let holder_declared =
                 facts.declaration(&holder.name, holder.span.start).map(|declaration| declaration.start);
             for (root, mutable) in
-                borrowed_roots(launch, resolved_callables, &facts.references)
+                borrowed_roots(launch, resolved_callables, &facts)
             {
                 if mutable {
                     errors.push(ScopedLaunchError {
@@ -637,6 +656,22 @@ mod tests {
             other,
             ["a launch that borrows 'value' can only be pushed into a local `Vec<Task<T>>`, \
               whose drop joins its tasks; `bag` is not one"]
+        );
+    }
+
+    #[test]
+    fn a_reference_is_the_declaration_visible_at_the_launch() {
+        let earlier = launch_errors(
+            "i64 x = 1;\n&i64 r = &x;\nwait launch read(r);\n{ i64 r = 0; }",
+        );
+        assert!(earlier.is_empty(), "{earlier:?}");
+        let later = launch_errors(
+            "i64 other = 9;\ni64 x = 1;\nTask<void> t = launch read(x);\n\
+             { &i64 x = &other; }\nwait t;",
+        );
+        assert!(
+            later.iter().any(|message| message.starts_with("launch passes `x`")),
+            "{later:?}"
         );
     }
 
