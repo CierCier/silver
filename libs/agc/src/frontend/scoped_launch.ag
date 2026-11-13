@@ -152,20 +152,6 @@ SyntaxNode* launch_borrowing_callee(SyntaxNode* root, SyntaxNode* selected, str 
     return (SyntaxNode*)0;
 }
 
-/// Returns the argument list of the call a `launch` token starts, or null.
-SyntaxNode* scoped_launch_arguments(SyntaxNode* launch_token) {
-    SyntaxNode* callee = launch_token.next_sibling;
-    if (callee == (SyntaxNode*)0 || callee.kind != NodeKind.Token
-        || callee.token_kind != TokenKind.Identifier) {
-        return (SyntaxNode*)0;
-    }
-    SyntaxNode* group = callee.next_sibling;
-    if (group == (SyntaxNode*)0 || group.kind != NodeKind.Parenthesized) {
-        return (SyntaxNode*)0;
-    }
-    return group;
-}
-
 /// Returns true when `node` is a token of kind `kind`.
 bool scoped_is_token(SyntaxNode* node, TokenKind kind) {
     return node != (SyntaxNode*)0 && node.kind == NodeKind.Token && node.token_kind == kind;
@@ -370,7 +356,7 @@ void collect_scoped_launches(SyntaxNode* root, SymbolTable* symbols, Vec<SyntaxN
         SyntaxNode* launch_token = leaves.get(i);
         i += 1;
         if (launch_token.token_kind != TokenKind.Launch) { continue; }
-        SyntaxNode* arguments = scoped_launch_arguments(launch_token);
+        SyntaxNode* arguments = launch_call_arguments(launch_token);
         if (arguments == (SyntaxNode*)0) { continue; }
         Vec<SyntaxNode*> starts = Vec<SyntaxNode*>.new();
         Vec<SyntaxNode*> ends = Vec<SyntaxNode*>.new();
@@ -594,10 +580,10 @@ void check_scoped_launch_body(SyntaxNode* root, SymbolTable* symbols, SyntaxNode
     leaves.drop();
 }
 
-/// Checks every method body of an impl or trait item. Methods are sibling
-/// fragments of the item's block: a parameter list followed by a body.
-void check_scoped_launch_methods(SyntaxNode* root, SymbolTable* symbols, SyntaxNode* item,
-                                 CfgSet* cfg, DiagnosticBag* diagnostics, bool* failed) {
+/// Appends each method of an impl or trait item to `out` as a pair: its
+/// parameter list, then its body. Methods are sibling fragments of the
+/// item's block, and a method without a body is skipped.
+void collect_method_bodies(SyntaxNode* item, Vec<SyntaxNode*>* out) {
     SyntaxNode* block = item.first_child;
     while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
         block = block.next_sibling;
@@ -611,12 +597,27 @@ void check_scoped_launch_methods(SyntaxNode* root, SymbolTable* symbols, SyntaxN
             parameters = (SyntaxNode*)0;
         } else if (member.kind == NodeKind.Block) {
             if (parameters != (SyntaxNode*)0) {
-                check_scoped_launch_body(root, symbols, parameters, member, cfg, diagnostics, failed);
+                out.push(parameters);
+                out.push(member);
             }
             parameters = (SyntaxNode*)0;
         }
         member = member.next_sibling;
     }
+}
+
+/// Checks every method body of an impl or trait item.
+void check_scoped_launch_methods(SyntaxNode* root, SymbolTable* symbols, SyntaxNode* item,
+                                 CfgSet* cfg, DiagnosticBag* diagnostics, bool* failed) {
+    Vec<SyntaxNode*> methods = Vec<SyntaxNode*>.new();
+    collect_method_bodies(item, &methods);
+    i64 i = 0;
+    while (i + 1 < methods.len()) {
+        check_scoped_launch_body(root, symbols, methods.get(i), methods.get(i + 1), cfg,
+                                 diagnostics, failed);
+        i += 2;
+    }
+    methods.drop();
 }
 
 /// Checks the placement and pinning of scoped launches in every cfg-active

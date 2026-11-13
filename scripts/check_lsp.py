@@ -806,7 +806,21 @@ class NativeLsp(unittest.TestCase):
                 # A borrowed call result is not a place the launch can track.
                 ("i64 read(&i64 v) { return *v; }\ni64 pick(&i64 v) { return *v; }\ni64 main() {\n i64 x = 1;\n"
                  " Task<i64> t = launch read(&pick(&x));\n return wait t;\n}\n",
-                 [("a borrowed launch argument must be `&place`, `&mut place`, or a reference variable", 4)])], 24):
+                 [("a borrowed launch argument must be `&place`, `&mut place`, or a reference variable", 4)]),
+                # Launches in methods are checked like launches in functions.
+                ("import std.mem.rc;\nvoid inspect(&Rc<i64> _r) { }\nstruct Runner { i64 n; }\nimpl Runner {\n"
+                 " void go(&self) {\n  Rc<i64> rc = Rc<i64>.new(1);\n  Task<void> t = launch inspect(&rc);\n"
+                 "  wait t;\n }\n}\n",
+                 [("launch argument of type &Rc<i64> is not Send: Rc<T> carries a shared non-atomic "
+                   "reference count", 6)]),
+                ("void bump(&mut i64 v) { *v += 1; }\nstruct Runner { i64 n; }\nimpl Runner {\n i64 go(&self) {\n"
+                 "  i64 value = 1;\n  Task<void> t = launch bump(&mut value);\n  value = 5;\n  wait t;\n"
+                 "  return value;\n }\n}\n",
+                 [("cannot assign to 'value' because it is borrowed", 6)]),
+                # Explicit type arguments do not hide a launch's borrows.
+                ("void worker<T>(&mut T value, T add) { *value = *value + add; }\ni64 main() {\n i64 value = 1;\n"
+                 " Task<void> t = launch worker<i64>(&mut value, 1);\n value = 2;\n wait t;\n return 0;\n}\n",
+                 [("cannot assign to 'value' because it is borrowed", 4)])], 24):
             session.send("textDocument/didChange", {"textDocument": {"uri": alias_uri, "version": version},
                 "contentChanges": [{"text": source}]})
             errors = [(item["message"].split("\n")[0].split(" (help:")[0], item["range"]["start"]["line"])

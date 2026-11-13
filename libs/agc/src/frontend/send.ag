@@ -792,36 +792,57 @@ void check_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root, SymbolTable
     reason.drop();
 }
 
-/// Checks every `launch` call's arguments in cfg-active functions. Returns
-/// false when any argument is not Send.
+/// Checks the `launch` arguments in one function or method body. Returns
+/// false when any error was reported.
+bool check_send_body(SyntaxNode* root, SymbolTable* symbols, SyntaxNode* parameters,
+                     SyntaxNode* body, CfgSet* cfg, DiagnosticBag* diagnostics) {
+    if (body == (SyntaxNode*)0) { return true; }
+    SendAnalyzer analyzer = SendAnalyzer.new(diagnostics);
+    Vec<Binding> bindings = Vec<Binding>.new();
+    collect_parameter_bindings(parameters, &bindings);
+    collect_block_bindings(body, &bindings);
+    Vec<SyntaxNode*> live_leaves = Vec<SyntaxNode*>.new();
+    cfg_collect_live_leaves(body, cfg, &live_leaves);
+    Vec<LaunchArgument> launch_arguments = Vec<LaunchArgument>.new();
+    projection_walk_launches(body, cfg, &live_leaves, &launch_arguments);
+    i64 argument_index = 0;
+    while (argument_index < launch_arguments.len()) {
+        check_launch_argument(&analyzer, root, symbols, &bindings,
+                              launch_arguments.get_ptr(argument_index));
+        argument_index += 1;
+    }
+    launch_arguments.drop();
+    live_leaves.drop();
+    bindings.drop();
+    return !analyzer.failed;
+}
+
+/// Checks every `launch` call's arguments in cfg-active functions and
+/// methods. Returns false when any argument is not Send.
 bool check_send(SyntaxTree* tree, SymbolTable* symbols, DiagnosticBag* diagnostics, CfgSet* cfg) {
     bool ok = true;
     Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
     cfg_collect_items(tree.root, cfg, diagnostics, &items);
     i64 i = 0;
     while (i < items.len()) {
-        if (items.get(i).kind == NodeKind.Function) {
-            SendAnalyzer analyzer = SendAnalyzer.new(diagnostics);
-            Vec<Binding> bindings = Vec<Binding>.new();
-            collect_function_bindings(items.get(i), &bindings);
-            Vec<LaunchArgument> launch_arguments = Vec<LaunchArgument>.new();
-            project_function_launch_arguments(items.get(i), cfg, &launch_arguments);
-            i64 argument_index = 0;
-            while (argument_index < launch_arguments.len()) {
-                check_launch_argument(
-                    &analyzer,
-                    tree.root,
-                    symbols,
-                    &bindings,
-                    launch_arguments.get_ptr(argument_index)
-                );
-                argument_index += 1;
-            }
-            launch_arguments.drop();
-            bindings.drop();
-            if (analyzer.failed) {
+        SyntaxNode* item = items.get(i);
+        if (item.kind == NodeKind.Function) {
+            if (!check_send_body(tree.root, symbols, binding_function_parameters(item),
+                                 binding_function_body(item), cfg, diagnostics)) {
                 ok = false;
             }
+        } else if (item.kind == NodeKind.Impl || item.kind == NodeKind.Trait) {
+            Vec<SyntaxNode*> methods = Vec<SyntaxNode*>.new();
+            collect_method_bodies(item, &methods);
+            i64 m = 0;
+            while (m + 1 < methods.len()) {
+                if (!check_send_body(tree.root, symbols, methods.get(m), methods.get(m + 1),
+                                     cfg, diagnostics)) {
+                    ok = false;
+                }
+                m += 2;
+            }
+            methods.drop();
         }
         i += 1;
     }

@@ -430,18 +430,6 @@ void projection_collect_argument_group(SyntaxNode* group, SyntaxNode* callee, Cf
     }
 }
 
-/// Returns a function item's body block, or null.
-SyntaxNode* projection_function_body(SyntaxNode* function) {
-    SyntaxNode* child = function.first_child;
-    while (child != (SyntaxNode*)0) {
-        if (child.kind == NodeKind.Block) {
-            return child;
-        }
-        child = child.next_sibling;
-    }
-    return (SyntaxNode*)0;
-}
-
 /// Returns true when `node` is one of the cfg-live `leaves`.
 bool projection_live_leaf(Vec<SyntaxNode*>* leaves, SyntaxNode* node) {
     i64 i = 0;
@@ -454,6 +442,30 @@ bool projection_live_leaf(Vec<SyntaxNode*>* leaves, SyntaxNode* node) {
     return false;
 }
 
+/// The argument group of the call that `launch` token `launch_token`
+/// starts, past any explicit generic arguments (`worker<i64>(...)`), or null.
+SyntaxNode* launch_call_arguments(SyntaxNode* launch_token) {
+    SyntaxNode* callee = launch_token.next_sibling;
+    if (callee == (SyntaxNode*)0 || callee.kind != NodeKind.Token
+        || callee.token_kind != TokenKind.Identifier) {
+        return (SyntaxNode*)0;
+    }
+    SyntaxNode* group = callee.next_sibling;
+    if (group != (SyntaxNode*)0 && group.kind == NodeKind.Token && group.token_kind == TokenKind.Less) {
+        i64 depth = 0;
+        while (group != (SyntaxNode*)0) {
+            if (group.kind == NodeKind.Token && group.token_kind == TokenKind.Less) { depth += 1; }
+            if (group.kind == NodeKind.Token && group.token_kind == TokenKind.Greater) { depth -= 1; }
+            group = group.next_sibling;
+            if (depth == 0) { break; }
+        }
+    }
+    if (group == (SyntaxNode*)0 || group.kind != NodeKind.Parenthesized) {
+        return (SyntaxNode*)0;
+    }
+    return group;
+}
+
 /// Collects the arguments of every cfg-live `launch` call under `node`.
 void projection_walk_launches(SyntaxNode* node, CfgSet* cfg, Vec<SyntaxNode*>* live_leaves, Vec<LaunchArgument>* arguments) {
     if (node == (SyntaxNode*)0) {
@@ -461,15 +473,9 @@ void projection_walk_launches(SyntaxNode* node, CfgSet* cfg, Vec<SyntaxNode*>* l
     }
     if (node.kind == NodeKind.Token && node.token_kind == TokenKind.Launch
         && projection_live_leaf(live_leaves, node)) {
-        SyntaxNode* callee = node.next_sibling;
-        SyntaxNode* group = (SyntaxNode*)0;
-        if (callee != (SyntaxNode*)0) {
-            group = callee.next_sibling;
-        }
-        if (callee != (SyntaxNode*)0 && callee.kind == NodeKind.Token
-            && callee.token_kind == TokenKind.Identifier
-            && group != (SyntaxNode*)0 && group.kind == NodeKind.Parenthesized) {
-            projection_collect_argument_group(group, callee, cfg, arguments);
+        SyntaxNode* group = launch_call_arguments(node);
+        if (group != (SyntaxNode*)0) {
+            projection_collect_argument_group(group, node.next_sibling, cfg, arguments);
         }
     }
     SyntaxNode* child = node.first_child;
@@ -479,14 +485,3 @@ void projection_walk_launches(SyntaxNode* node, CfgSet* cfg, Vec<SyntaxNode*>* l
     }
 }
 
-/// Collects the arguments of every `launch` call in `function`.
-void project_function_launch_arguments(SyntaxNode* function, CfgSet* cfg, Vec<LaunchArgument>* arguments) {
-    SyntaxNode* body = projection_function_body(function);
-    if (body == (SyntaxNode*)0) {
-        return;
-    }
-    Vec<SyntaxNode*> live_leaves = Vec<SyntaxNode*>.new();
-    cfg_collect_live_leaves(body, cfg, &live_leaves);
-    projection_walk_launches(body, cfg, &live_leaves, arguments);
-    live_leaves.drop();
-}
