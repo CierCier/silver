@@ -18,7 +18,7 @@
 //      Vec drops, even after its registry slot runs another borrowing task.
 //   8. Tasks pushed into a local Vec in a loop share one local; `wait` on
 //      pop collects their results, and leaving the Vec's block joins the
-//      rest.
+//      rest, for a declared or an inferred `let` Vec.
 //   9. A `#[safe]` struct holding a raw pointer, guarded by its own lock,
 //      is shared by several tasks.
 //
@@ -197,6 +197,14 @@ i64 main() {
         }
     }
     if (counter.get() != 4) { return 12; }
+    // A `let` pool also joins its unwaited tasks when its block ends.
+    {
+        let workers = Vec<Task<void>>.new();
+        for (i64 i = 0; i < 4; i += 1) {
+            workers.push(launch slow_add(&counter));
+        }
+    }
+    if (counter.get() != 8) { return 16; }
 
     // 9. A #[safe] struct shared by several tasks.
     i64 storage = 0;
