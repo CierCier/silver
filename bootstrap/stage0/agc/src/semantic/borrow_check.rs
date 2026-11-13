@@ -1199,9 +1199,11 @@ impl<'a> BorrowChecker<'a> {
                         }
 
                         // Check if initializer is a borrow expression:
-                        if let Some(place) = lock_guard_place(name, init) {
+                        if let Some(places) = lock_guard_places(name, init) {
                             self.check_expr(init);
-                            self.register_lock_guard_borrow(name, place, init.span);
+                            for place in places {
+                                self.register_lock_guard_borrow(name, place, init.span);
+                            }
                         } else if let ast::ExpressionKind::Launch(call) = init.kind.as_ref()
                             && let ast::ExpressionKind::Call { arguments, .. } =
                                 call.kind.as_ref()
@@ -3218,9 +3220,11 @@ mod tests {
 
 /// The place a `lock` block's guard locks, when `init` initializes guard
 /// `name`: sync_sugar lowers `lock state.get() as n` to
-/// `let __lock_N__n_guard = state.get().lock();`, which locks `state`. None
-/// for a temporary such as `lock create()`, which no local owns.
-fn lock_guard_place<'a>(name: &str, init: &'a ast::Expression) -> Option<&'a ast::Expression> {
+/// `let __lock_N__n_guard = state.get().lock();`, which locks `state`.
+/// `lock get(&owner)` locks into each place the call borrows, since its
+/// returned reference can point into any of them. Empty for a temporary
+/// such as `lock create()`, which no local owns.
+fn lock_guard_places<'a>(name: &str, init: &'a ast::Expression) -> Option<Vec<&'a ast::Expression>> {
     if !crate::sync_sugar::is_lock_guard(name) {
         return None;
     }
@@ -3234,11 +3238,25 @@ fn lock_guard_place<'a>(name: &str, init: &'a ast::Expression) -> Option<&'a ast
     while let ast::ExpressionKind::MethodCall { receiver, .. } = place.kind.as_ref() {
         place = receiver;
     }
-    let mut root = place;
-    while let ast::ExpressionKind::FieldAccess { object, .. } = root.kind.as_ref() {
-        root = object;
+    if super::scoped_launch::is_place(place) {
+        return Some(vec![place]);
     }
-    matches!(root.kind.as_ref(), ast::ExpressionKind::Identifier(_)).then_some(place)
+    let ast::ExpressionKind::Call { arguments, .. } = place.kind.as_ref() else {
+        return Some(Vec::new());
+    };
+    Some(
+        arguments
+            .iter()
+            .filter_map(|argument| match argument.kind.as_ref() {
+                ast::ExpressionKind::Reference { expression, .. }
+                    if super::scoped_launch::is_place(expression) =>
+                {
+                    Some(expression.as_ref())
+                }
+                _ => None,
+            })
+            .collect(),
+    )
 }
 
 /// The arguments of each `name.push(launch f(...))` in `statements`, nested

@@ -2317,9 +2317,7 @@ bool borrow_add_lock_guard_loan(BorrowAnalyzer* analyzer, Vec<SyntaxNode*>* leav
         return false;
     }
     SyntaxNode* first = leaves.get(i + 2);
-    // `lock create()` locks a temporary that no local owns.
-    if (first.token_kind != TokenKind.Identifier || borrow_is_method_name(first)) { return false; }
-    i64 end = borrow_field_path_end(leaves, i + 2);
+    if (first.token_kind != TokenKind.Identifier) { return false; }
     SyntaxNode* block = guard.parent;
     while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) { block = block.parent; }
     if (block == (SyntaxNode*)0) { return false; }
@@ -2329,12 +2327,52 @@ bool borrow_add_lock_guard_loan(BorrowAnalyzer* analyzer, Vec<SyntaxNode*>* leav
         release = k;
         k += 1;
     }
-    analyzer.add(borrow_place(analyzer, leaves, i + 2, end), first.text, first.span,
-        LoanKind.Shared, true, analyzer.names.intern(guard.text), release);
+    if (!borrow_is_method_name(first)) {
+        borrow_add_guard_loan_on(analyzer, leaves, i + 2, guard, release);
+        return true;
+    }
+    // `lock get(&owner)` locks into each place the call borrows, since its
+    // result can point into any of them. `lock create()` locks a temporary
+    // that no local owns.
+    SyntaxNode* arguments = first.next_sibling;
+    bool added = false;
+    i64 j = i + 3;
+    while (j < leaves.len() && borrow_node_within(leaves.get(j), arguments)) {
+        SyntaxNode* before = leaves.get(j - 1);
+        // `&` must start an argument: after `(`, `,`, or nothing in the group.
+        SyntaxNode* opener = leaves.get(j - 2);
+        if (leaves.get(j).token_kind == TokenKind.Identifier && before.parent == arguments
+            && before.token_kind == TokenKind.BitwiseAnd
+            && (opener.parent != arguments || opener.token_kind == TokenKind.LeftParen
+                || opener.token_kind == TokenKind.Comma)) {
+            borrow_add_guard_loan_on(analyzer, leaves, j, guard, release);
+            added = true;
+        }
+        j += 1;
+    }
+    return added;
+}
+
+/// Adds guard `guard`'s loan on the field path that starts at leaf `start`,
+/// released at leaf `release`. Locking through a reference
+/// (`view = &state; lock view`) also keeps the loans that reference holds.
+void borrow_add_guard_loan_on(BorrowAnalyzer* analyzer, Vec<SyntaxNode*>* leaves, i64 start,
+                              SyntaxNode* guard, i64 release) {
+    SyntaxNode* root = leaves.get(start);
+    u32 root_id = analyzer.names.intern(root.text);
+    i64 held = 0;
+    while (held < analyzer.loans.len()) {
+        Loan* origin = analyzer.loans.get_ptr(held);
+        if (origin.active && origin.holder_id == root_id && origin.release_index < release) {
+            origin.release_index = release;
+        }
+        held += 1;
+    }
+    analyzer.add(borrow_place(analyzer, leaves, start, borrow_field_path_end(leaves, start)),
+        root.text, root.span, LoanKind.Shared, true, analyzer.names.intern(guard.text), release);
     Loan* loan = analyzer.loans.get_ptr(analyzer.loans.len() - 1);
     loan.task = true;
     loan.lock_guard = true;
-    return true;
 }
 
 /// Returns true when the leaf at `index` is `=` or a compound assignment.
@@ -2380,6 +2418,8 @@ void borrow_check_task_loan_use(BorrowAnalyzer* analyzer, SyntaxTree* tree,
         analyzer.failed = true;
         return;
     }
+    // The scan reports an explicit `move` against every loan.
+    if (i > 0 && leaves.get(i - 1).token_kind == TokenKind.Move) { return; }
     SyntaxNode* last = leaves.get(end - 1);
     bool returned = i > 0 && leaves.get(i - 1).token_kind == TokenKind.Return
         && last.next_sibling != (SyntaxNode*)0

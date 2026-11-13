@@ -685,6 +685,13 @@ class NativeLsp(unittest.TestCase):
         owner = ("import std.sync;\nimport std.mem.arc;\ni64 main() {\n"
                  " Arc<Mutex<i64>> state = Arc<Mutex<i64>>.new(Mutex<i64>.new(1));\n"
                  " lock state.get() as count { state.drop(); count = 2; }\n return 0;\n}\n")
+        # `lock get(&owner)` and `lock view` (with `view = &owner`) keep `owner` borrowed.
+        through_call = ("import std.sync;\nstruct Owner { Mutex<i64> cell; }\n"
+                        "&Mutex<i64> get(&Owner owner) { return &owner.cell; }\nvoid consume(Owner _o) { }\n"
+                        "i64 main() { Owner owner = { .cell = Mutex<i64>.new(1) };"
+                        " lock get(&owner) as value { consume(move owner); value = 2; } return 0; }\n")
+        through_view = through_call.replace("lock get(&owner) as value",
+                                            "&Mutex<i64> view = &owner.cell; lock view as value")
         # Only a `Vec<Task<T>>` joins the tasks pushed into it when it drops.
         forgetful = ("struct Forgetful { i64 count; }\nimpl Forgetful { void push(&mut self, Task<void> _t) { } }\n"
                      "void read(&i64 _v) { }\n"
@@ -710,6 +717,8 @@ class NativeLsp(unittest.TestCase):
                 (indexed, "cannot move 'items[...]' out of its lock block: the shared value still owns it; "
                           "clone it instead"),
                 (owner, "cannot drop 'state' inside a lock block on it: the lock guard points into it\nlocked here"),
+                (through_call, "cannot move 'owner' because it is borrowed\nlocked here"),
+                (through_view, "cannot move 'owner' because it is borrowed\nprevious shared borrow occurs here"),
                 (forgetful, "a launch that borrows 'value' can only be pushed into a local `Vec<Task<T>>`, "
                             "whose drop joins its tasks; `bag` is not one"),
                 (field, "cannot move 'h.items' because it is borrowed\nborrowed by a task launched here"),
