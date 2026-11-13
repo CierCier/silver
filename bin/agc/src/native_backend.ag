@@ -3099,11 +3099,12 @@ bool native_backend_try(Vec<String>* arguments, CliMatches* cli, str source_path
             profiler_end_phase("check ownership");
         }
         // Expression checking chooses each launch's overload, which the
-        // borrow and Send checks then judge.
+        // borrow and Send checks then judge. They scan every file, so every
+        // file is checked here.
         if (diagnostics.is_empty()) {
             profiler_begin_phase("typecheck expressions");
             AstPool check_pool = AstPool.new();
-            typecheck_expressions_scoped(&check_pool, &symbols, &tree, &cfg, &diagnostics, 1);
+            typecheck_expressions_scoped(&check_pool, &symbols, &tree, &cfg, &diagnostics, 0);
             profiler_end_phase("typecheck expressions");
         }
         if (diagnostics.is_empty()) {
