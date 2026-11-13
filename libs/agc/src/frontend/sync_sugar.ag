@@ -448,8 +448,10 @@ void desugar_locks(Vec<Token>* tokens, Vec<Token>* out, i64* counter, Diagnostic
         out.push(sugar_token(TokenKind.Semicolon, ";", pointer_span));
         i64 j = 0;
         while (j < body.len()) {
-            bool field = sugar_is(&body, sugar_previous(&body, j), TokenKind.Dot);
-            if (sugar_is_name(&body, j, name) && !field) {
+            // A field name or a macro name is not the locked value.
+            i64 before = sugar_previous(&body, j);
+            bool other = sugar_is(&body, before, TokenKind.Dot) || sugar_is(&body, before, TokenKind.At);
+            if (sugar_is_name(&body, j, name) && !other) {
                 Span span = body.get_ptr(j).span;
                 out.push(sugar_token(TokenKind.LeftParen, "(", span));
                 out.push(sugar_token(TokenKind.Star, "*", span));

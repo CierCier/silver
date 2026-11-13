@@ -459,9 +459,10 @@ fn desugar_locks(tokens: &[LexToken], counter: &mut usize) -> Result<Vec<LexToke
         out.push(token(Token::RightParen, ")", pointer_span));
         out.push(token(Token::Semicolon, ";", pointer_span));
         for (j, token_in_body) in body.iter().enumerate() {
-            let field = previous_significant(&body, j)
-                .is_some_and(|p| matches!(body[p].kind, Token::Dot));
-            if is_identifier(token_in_body, &head.name) && !field {
+            // A field name or a macro name is not the locked value.
+            let other = previous_significant(&body, j)
+                .is_some_and(|p| matches!(body[p].kind, Token::Dot | Token::At));
+            if is_identifier(token_in_body, &head.name) && !other {
                 let span = token_in_body.span;
                 out.push(token(Token::LeftParen, "(", span));
                 out.push(token(Token::Star, "*", span));

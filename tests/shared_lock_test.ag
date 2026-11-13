@@ -11,12 +11,14 @@
 //      locks the same value again afterwards, which would hang otherwise.
 //   5. `lock` also works on a Mutex<T> written out, and `shared` and `lock`
 //      stay usable as ordinary names.
+//   6. Inside `lock format { ... }`, `@format(...)` still names the macro.
 //
 // Exit 0 on success; distinct non-zero codes per failure.
 
 import std.thread;
 import std.sync;
 import std.mem.vec;
+import std.string;
 import std.sys.entry;
 
 void add(&shared i64 total, i64 amount) {
@@ -108,5 +110,13 @@ i64 main() {
     lock plain { shared = plain; }
     lock = shared + 1;
     if (lock != 21) { return 6; }
+
+    // 6. A macro named like the locked value keeps its name.
+    shared i64 format = 7;
+    lock format {
+        String text = @format("{}", format);
+        if (!text.equals("7")) { return 7; }
+        text.drop();
+    }
     return 0;
 }
