@@ -2,7 +2,8 @@
 //
 // Pty.spawn runs a child process on a fresh pty: the parent keeps the master
 // fd for read/write/resize/poll, the child gets the slave as its controlling
-// terminal with stdio attached. Linux-only for now.
+// terminal with stdio attached. Linux and macOS (/dev/ptmx on both; the
+// macOS seam translates the Linux pty ioctls).
 //
 // Child setup mirrors std/process.ag (argv/env construction), plus the pty
 // handshake: unlock (TIOCSPTLCK), number (TIOCGPTN), setsid, attach
@@ -63,7 +64,29 @@ impl PtyStatus {
     }
 }
 
-if (@cfg(os.linux)) {
+if (@cfg(os.linux) || @cfg(os.macos)) {
+/// Returns the device path of the slave side of pty `master`: /dev/pts/N on
+/// Linux, the name the kernel reports (/dev/ttysNNN) on macOS.
+Result<String, Error> pty_slave_path(i32 master) {
+    if (@cfg(os.macos)) {
+        u8 name[128];
+        i64 r = sys_ptsname((i64)master, &name[0], 128);
+        if (r != 0) {
+            return Err(-r, "pty name failed");
+        }
+        return Ok(String.from_str((str)&name[0]));
+    } else {
+        i32 num = 0;
+        i64 g = sys_ioctl((i64)master, TIOCGPTN, (i64)&num);
+        if (g != 0) {
+            return Err(-g, "pty number failed");
+        }
+        String path = String.from_str("/dev/pts/");
+        path.push_display(&num);
+        return Ok(move path);
+    }
+}
+
 /// A pseudoterminal master and, after `spawn`, the child process on its slave.
 /// Dropping it closes the master, which sends SIGHUP to the child's session;
 /// it does not kill or reap the child.
@@ -113,15 +136,12 @@ impl Pty {
         Pty p = q.unwrap();
         i32 master = p.master;
 
-        // Slave path: /dev/pts/N from the pty number.
-        i32 num = 0;
-        i64 g = sys_ioctl((i64)master, TIOCGPTN, (i64)&num);
-        if (g != 0) {
+        Result<String, Error> named = pty_slave_path(master);
+        if (named.is_err()) {
             p.drop();
-            return Err(-g, "pty number failed");
+            return Err(named.unwrap_err());
         }
-        String path = String.from_str("/dev/pts/");
-        path.push_display(&num);
+        String path = named.unwrap();
         Result<i64, Error> s = try_open(path.to_str(), O_RDWR | O_NOCTTY, 0);
         path.drop();
         if (s.is_err()) {

@@ -1021,9 +1021,10 @@ Result<FileStat, Error> stat_path(str path) {
     return Result<FileStat, Error>.Ok(move st);
 }
 
-/// lstat(2) for Linux paths. Other targets report that no-follow metadata is unavailable.
+/// lstat(2) for Linux and macOS paths. Other targets report that no-follow
+/// metadata is unavailable.
 Result<FileStat, Error> lstat_path(str path) {
-    if (@cfg(os.linux)) {
+    if (@cfg(os.linux) || @cfg(os.macos)) {
         u8 buf[144];
         i64 i = 0;
         while (i < 144) {

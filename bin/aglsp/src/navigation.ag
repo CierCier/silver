@@ -10,7 +10,7 @@ void append_location(String* out, Document* doc, Span span) {
 
 /// Computes `textDocument/documentLink` for resolvable `import` paths.
 String compute_document_links(DocumentStore* store, Document* doc, bool tooltip) {
-    CfgSet cfg = linux_defaults(); Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
+    CfgSet cfg = host_defaults(); Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
     cfg_collect_items(doc.analysis.tree.root, &cfg, (DiagnosticBag*)0, &items);
     String out = String.from_str("["); bool comma = false; i64 i = 0;
     while (i < items.len()) {

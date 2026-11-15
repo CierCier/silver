@@ -517,7 +517,7 @@ void collect_workspace_check_options(Vec<String>* arguments, CfgSet* cfg, Vec<St
 
 /// Runs `agc check` over every target of a workspace plan.
 i32 run_workspace_check(Vec<String>* arguments, WorkspacePlan* plan) {
-    CfgSet cfg = linux_defaults();
+    CfgSet cfg = host_defaults();
     Vec<String> include_dirs = Vec<String>.new();
     LintConfig lint_config = lint_config_default();
     collect_workspace_check_options(arguments, &cfg, &include_dirs, plan, &lint_config);
@@ -1093,7 +1093,7 @@ i32 run_frontend() {
         STDERR.write_str("usage: agc <lex|parse|check> <source.ag> [--cfg key=value,...] [-I dir] [-O2]\n");
         return 2;
     }
-    CfgSet cfg = linux_defaults();
+    CfgSet cfg = host_defaults();
     Vec<String> include_dirs = Vec<String>.new();
     LintConfig lint_config = lint_config_default();
     i64 option = 1;

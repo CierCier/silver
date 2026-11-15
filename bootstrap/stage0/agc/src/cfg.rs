@@ -79,6 +79,9 @@ pub fn add_derived_cfgs(set: &mut CfgSet, opt_level: Option<&str>, target: Optio
             let mut parts = triple.split('-');
             let arch = parts.next().unwrap_or("unknown");
             let os = triple_os(triple);
+            // LLVM spells Apple's 64-bit ARM `arm64`; std gates on the one
+            // name the host build (`std::env::consts::ARCH`) also reports.
+            let arch = if arch == "arm64" { "aarch64" } else { arch };
             (arch, os)
         }
         None => (std::env::consts::ARCH, std::env::consts::OS),
@@ -124,6 +127,16 @@ pub fn add_derived_cfgs(set: &mut CfgSet, opt_level: Option<&str>, target: Optio
 /// wasm32-wasip1, wasm32-wasip2) normalize to `wasi` regardless of where the
 /// token sits, so `@cfg(os.wasi)` gates the std seam consistently.
 fn triple_os(triple: &str) -> &str {
+    // Apple triples carry a version (`arm64-apple-darwin25.1.0`,
+    // `arm64-apple-macosx15.0`); all of them are `os.macos`, the key a host
+    // build derives from `std::env::consts::OS`.
+    if triple
+        .split('-')
+        .skip(1)
+        .any(|part| part.starts_with("darwin") || part.starts_with("macos"))
+    {
+        return "macos";
+    }
     for os in [
         "linux", "darwin", "macos", "windows", "freebsd", "netbsd", "openbsd", "solaris",
         "illumos", "android", "ios", "haiku",

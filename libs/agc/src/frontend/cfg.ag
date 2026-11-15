@@ -147,6 +147,19 @@ CfgSet linux_defaults() {
     return set;
 }
 
+/// Returns the default key set for a debug build on the host this compiler
+/// runs on (stage1 builds only for its host): Linux x86_64 or macOS arm64.
+CfgSet host_defaults() {
+    if (@cfg(os.macos)) {
+        CfgSet set = CfgSet.new();
+        set.add("debug");
+        set.add("arch.aarch64");
+        set.add("os.macos");
+        return set;
+    }
+    return linux_defaults();
+}
+
 /// Returns true when `part` equals `word`.
 bool cfg_part_equals(str part, str word) {
     return strcmp(part, word) == 0;
@@ -183,6 +196,10 @@ void cfg_apply_target(CfgSet* self, str triple) {
     Optional<str> first = parts.next();
     if (first.is_some()) {
         str arch = first.unwrap();
+        // LLVM spells Apple's 64-bit ARM `arm64`; std gates on `aarch64`.
+        if (cfg_part_equals(arch, "arm64")) {
+            arch = "aarch64";
+        }
         if (!cfg_part_equals(arch, "x86_64")) {
             if (!self.is_explicit("arch.x86_64")) {
                 self.remove("arch.x86_64");
@@ -202,8 +219,19 @@ void cfg_apply_target(CfgSet* self, str triple) {
         seen.push(String.from_str(item.unwrap()));
     }
     str os = (str)0;
-    i64 i = 0;
+    // Apple triples carry a version (`arm64-apple-darwin25.1.0`,
+    // `arm64-apple-macosx15.0`); all of them are `os.macos`.
+    i64 i = 1;
     while (i < seen.len()) {
+        str part = seen.get_ptr(i).to_str();
+        if (cfg_part_starts_with(part, "darwin") || cfg_part_starts_with(part, "macos")) {
+            os = "macos";
+            break;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (os == (str)0 && i < seen.len()) {
         str part = seen.get_ptr(i).to_str();
         if (cfg_part_equals(part, "linux") || cfg_part_equals(part, "darwin")
             || cfg_part_equals(part, "macos") || cfg_part_equals(part, "windows")
@@ -628,38 +656,45 @@ void cfg_collect_live_leaves_at(SyntaxNode* node, CfgSet* cfg, Vec<SyntaxNode*>*
             continue;
         }
         if (child.kind == NodeKind.Token && cfg_node_text(child, "if")) {
-            leaves.push(child);
-            SyntaxNode* condition = child.next_sibling;
-            SyntaxNode* then_block = condition == (SyntaxNode*)0 ? (SyntaxNode*)0 : condition.next_sibling;
-            if (condition != (SyntaxNode*)0 && !cfg_is_cfg_call(condition)) {
-                cfg_collect_live_leaves_at(condition, cfg, leaves, depth + 1);
-            }
-            if (then_block != (SyntaxNode*)0 && then_block.kind == NodeKind.Block) {
-                i64 value = condition == (SyntaxNode*)0 ? 2 : cfg_condition_value(condition, cfg);
-                if (value != 0) {
+            // Walk the whole `if .. else if .. else` chain: once a cfg test
+            // holds, later branches are dead. Runtime conditions (value 2)
+            // keep every branch live.
+            SyntaxNode* link = child;
+            bool open = true;
+            child = (SyntaxNode*)0;
+            while (link != (SyntaxNode*)0) {
+                leaves.push(link);
+                SyntaxNode* condition = link.next_sibling;
+                SyntaxNode* then_block = condition == (SyntaxNode*)0 ? (SyntaxNode*)0 : condition.next_sibling;
+                if (condition != (SyntaxNode*)0 && !cfg_is_cfg_call(condition)) {
+                    cfg_collect_live_leaves_at(condition, cfg, leaves, depth + 1);
+                }
+                if (then_block == (SyntaxNode*)0 || then_block.kind != NodeKind.Block) {
+                    child = then_block == (SyntaxNode*)0 ? condition : then_block.next_sibling;
+                    break;
+                }
+                i64 value = cfg_condition_value(condition, cfg);
+                if (open && value != 0) {
                     cfg_collect_live_leaves_at(then_block, cfg, leaves, depth + 1);
                 }
+                if (value == 1) {
+                    open = false;
+                }
                 SyntaxNode* else_token = then_block.next_sibling;
-                if (else_token != (SyntaxNode*)0 && cfg_node_text(else_token, "else")) {
-                    SyntaxNode* else_tail = else_token.next_sibling;
-                    if (value != 1 && else_tail != (SyntaxNode*)0 && else_tail.kind == NodeKind.Block) {
-                        cfg_collect_live_leaves_at(else_tail, cfg, leaves, depth + 1);
-                    }
-                    if (else_tail != (SyntaxNode*)0) {
-                        child = else_tail;
-                    } else {
-                        child = else_token;
-                    }
-                    if (child != (SyntaxNode*)0) {
-                        child = child.next_sibling;
-                    }
+                if (else_token == (SyntaxNode*)0 || !cfg_node_text(else_token, "else")) {
+                    child = else_token;
+                    break;
+                }
+                SyntaxNode* tail = else_token.next_sibling;
+                if (tail != (SyntaxNode*)0 && cfg_node_text(tail, "if")) {
+                    link = tail;
                     continue;
                 }
-            }
-            if (then_block != (SyntaxNode*)0) {
-                child = then_block.next_sibling;
-            } else {
-                child = child.next_sibling;
+                if (open && tail != (SyntaxNode*)0 && tail.kind == NodeKind.Block) {
+                    cfg_collect_live_leaves_at(tail, cfg, leaves, depth + 1);
+                }
+                child = tail == (SyntaxNode*)0 ? (SyntaxNode*)0 : tail.next_sibling;
+                break;
             }
             continue;
         }
@@ -689,6 +724,45 @@ bool cfg_is_parser_fragment(SyntaxNode* item) {
     return false;
 }
 
+/// Appends the blocks of the top-level cfg chain starting at the `if` token
+/// `first` (`if (@cfg) {..} else if (@cfg) {..} else {..}`, kept as flat
+/// siblings) that may be live: the first branch whose condition holds, or
+/// the trailing `else`. A condition that is not a plain cfg test (value 2)
+/// keeps its block and the rest of the chain, as for a single `else`.
+void cfg_chain_live_blocks(SyntaxNode* first, CfgSet* cfg, Vec<SyntaxNode*>* blocks) {
+    SyntaxNode* cursor = first;
+    while (cursor != (SyntaxNode*)0) {
+        SyntaxNode* condition = cursor.next_sibling;
+        SyntaxNode* then_block = condition == (SyntaxNode*)0 ? (SyntaxNode*)0 : condition.next_sibling;
+        if (then_block == (SyntaxNode*)0 || then_block.kind != NodeKind.Block) {
+            return;
+        }
+        i64 value = cfg_condition_value(condition, cfg);
+        if (value != 0) {
+            blocks.push(then_block);
+        }
+        if (value == 1) {
+            return;
+        }
+        SyntaxNode* else_token = then_block.next_sibling;
+        if (else_token == (SyntaxNode*)0 || !cfg_node_text(else_token, "else")) {
+            return;
+        }
+        SyntaxNode* tail = else_token.next_sibling;
+        if (tail == (SyntaxNode*)0) {
+            return;
+        }
+        if (tail.kind == NodeKind.Block) {
+            blocks.push(tail);
+            return;
+        }
+        if (!cfg_node_text(tail, "if")) {
+            return;
+        }
+        cursor = tail;
+    }
+}
+
 /// Appends the cfg-active items under `parent`, descending into active
 /// `if (@cfg)` blocks and skipping disabled `#[cfg]` items.
 void cfg_collect_items_at(SyntaxNode* parent, CfgSet* cfg, DiagnosticBag* diagnostics, Vec<SyntaxNode*>* items, i64 depth) {
@@ -698,19 +772,14 @@ void cfg_collect_items_at(SyntaxNode* parent, CfgSet* cfg, DiagnosticBag* diagno
     SyntaxNode* child = parent.first_child;
     while (child != (SyntaxNode*)0) {
         if (child.kind == NodeKind.CfgBlock) {
-            SyntaxNode* condition = child.first_child == (SyntaxNode*)0 ? (SyntaxNode*)0 : child.first_child.next_sibling;
-            SyntaxNode* then_block = condition == (SyntaxNode*)0 ? (SyntaxNode*)0 : condition.next_sibling;
-            i64 value = condition == (SyntaxNode*)0 ? 2 : cfg_condition_value(condition, cfg);
-            if (value != 0 && then_block != (SyntaxNode*)0 && then_block.kind == NodeKind.Block) {
-                cfg_collect_items_at(then_block, cfg, diagnostics, items, depth + 1);
+            Vec<SyntaxNode*> live = Vec<SyntaxNode*>.new();
+            cfg_chain_live_blocks(child.first_child, cfg, &live);
+            i64 live_index = 0;
+            while (live_index < live.len()) {
+                cfg_collect_items_at(live.get(live_index), cfg, diagnostics, items, depth + 1);
+                live_index += 1;
             }
-            SyntaxNode* else_token = then_block == (SyntaxNode*)0 ? (SyntaxNode*)0 : then_block.next_sibling;
-            if (value != 1 && else_token != (SyntaxNode*)0 && cfg_node_text(else_token, "else")) {
-                SyntaxNode* else_block = else_token.next_sibling;
-                if (else_block != (SyntaxNode*)0 && else_block.kind == NodeKind.Block) {
-                    cfg_collect_items_at(else_block, cfg, diagnostics, items, depth + 1);
-                }
-            }
+            live.drop();
         } else if (!cfg_is_parser_fragment(child) && cfg_item_enabled(child, cfg, diagnostics)) {
             items.push(child);
         }
@@ -824,19 +893,14 @@ void cfg_collect_import_bindings_at(SyntaxNode* parent, CfgSet* cfg, Vec<CfgImpo
                 }
             }
         } else if (child.kind == NodeKind.CfgBlock) {
-            SyntaxNode* condition = child.first_child == (SyntaxNode*)0 ? (SyntaxNode*)0 : child.first_child.next_sibling;
-            SyntaxNode* then_block = condition == (SyntaxNode*)0 ? (SyntaxNode*)0 : condition.next_sibling;
-            i64 value = condition == (SyntaxNode*)0 ? 2 : cfg_condition_value(condition, cfg);
-            if (value != 0 && then_block != (SyntaxNode*)0 && then_block.kind == NodeKind.Block) {
-                cfg_collect_import_bindings_at(then_block, cfg, bindings, depth + 1);
+            Vec<SyntaxNode*> live = Vec<SyntaxNode*>.new();
+            cfg_chain_live_blocks(child.first_child, cfg, &live);
+            i64 live_index = 0;
+            while (live_index < live.len()) {
+                cfg_collect_import_bindings_at(live.get(live_index), cfg, bindings, depth + 1);
+                live_index += 1;
             }
-            SyntaxNode* else_token = then_block == (SyntaxNode*)0 ? (SyntaxNode*)0 : then_block.next_sibling;
-            if (value != 1 && else_token != (SyntaxNode*)0 && cfg_node_text(else_token, "else")) {
-                SyntaxNode* else_block = else_token.next_sibling;
-                if (else_block != (SyntaxNode*)0 && else_block.kind == NodeKind.Block) {
-                    cfg_collect_import_bindings_at(else_block, cfg, bindings, depth + 1);
-                }
-            }
+            live.drop();
         }
         child = child.next_sibling;
     }
@@ -862,19 +926,14 @@ void cfg_collect_import_names_at(SyntaxNode* parent, CfgSet* cfg, Vec<String>* n
                 name.drop();
             }
         } else if (child.kind == NodeKind.CfgBlock) {
-            SyntaxNode* condition = child.first_child == (SyntaxNode*)0 ? (SyntaxNode*)0 : child.first_child.next_sibling;
-            SyntaxNode* then_block = condition == (SyntaxNode*)0 ? (SyntaxNode*)0 : condition.next_sibling;
-            i64 value = condition == (SyntaxNode*)0 ? 2 : cfg_condition_value(condition, cfg);
-            if (value != 0 && then_block != (SyntaxNode*)0 && then_block.kind == NodeKind.Block) {
-                cfg_collect_import_names_at(then_block, cfg, names, depth + 1);
+            Vec<SyntaxNode*> live = Vec<SyntaxNode*>.new();
+            cfg_chain_live_blocks(child.first_child, cfg, &live);
+            i64 live_index = 0;
+            while (live_index < live.len()) {
+                cfg_collect_import_names_at(live.get(live_index), cfg, names, depth + 1);
+                live_index += 1;
             }
-            SyntaxNode* else_token = then_block == (SyntaxNode*)0 ? (SyntaxNode*)0 : then_block.next_sibling;
-            if (value != 1 && else_token != (SyntaxNode*)0 && cfg_node_text(else_token, "else")) {
-                SyntaxNode* else_block = else_token.next_sibling;
-                if (else_block != (SyntaxNode*)0 && else_block.kind == NodeKind.Block) {
-                    cfg_collect_import_names_at(else_block, cfg, names, depth + 1);
-                }
-            }
+            live.drop();
         }
         child = child.next_sibling;
     }

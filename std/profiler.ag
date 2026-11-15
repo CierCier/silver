@@ -564,8 +564,12 @@ String render_report_line(str name, i64 width, f64 elapsed_ms, i64 before, i64 a
     return move line;
 }
 
-/// Query current resident set size (RSS) in kilobytes from `/proc/self/status`.
+/// Query current resident set size (RSS) in kilobytes: `/proc/self/status`
+/// on Linux, the Mach task info on macOS.
 i64 read_rss_kb() {
+    if (@cfg(os.macos)) {
+        return mac_resident_kb();
+    }
     Result<String, Error> res = String.from_file("/proc/self/status");
     if (res.is_err()) {
         return 0;

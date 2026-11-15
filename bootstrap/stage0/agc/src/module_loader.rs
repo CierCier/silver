@@ -91,11 +91,7 @@ impl ModuleLoader {
 
     fn effective_target(&self) -> String {
         self.target.clone().unwrap_or_else(|| {
-            inkwell::targets::TargetMachine::get_default_triple()
-                .as_str()
-                .to_str()
-                .unwrap_or("default")
-                .to_string()
+            crate::codegen::abi::host_target_triple()
         })
     }
 

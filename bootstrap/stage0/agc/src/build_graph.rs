@@ -1511,11 +1511,7 @@ impl<'a> ParallelGraphExecutor<'a> {
         }
 
         let target_triple = self.loader.target.clone().unwrap_or_else(|| {
-            inkwell::targets::TargetMachine::get_default_triple()
-                .as_str()
-                .to_str()
-                .unwrap_or("x86_64-unknown-linux-gnu")
-                .to_string()
+            crate::codegen::abi::host_target_triple()
         });
 
         let mut module_native_libs =

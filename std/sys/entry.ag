@@ -175,7 +175,50 @@ if (@cfg(os.wasi)) {
         i8** __silver_envp;
     }
 
-if (@cfg(os.linux) && @cfg(arch.aarch64)) {
+if (@cfg(os.macos)) {
+    // macOS entry: the linker names `_start` (Mach-O `__start`) as the
+    // LC_MAIN entry, so dyld calls it like C `main(argc, argv, envp, apple)`
+    // after loading libSystem. Returning hands the status to libSystem's
+    // `exit`, which also flushes any C stdio a linked library used.
+    /// Program entry point (macOS): records argc/argv/envp, runs platform
+    /// and CPU init, runs `main`, joins live threads, flushes buffered
+    /// output, and returns `main`'s result, or 1 when the leak check fails.
+    i32 _start(i32 argc, i8** argv, i8** envp) {
+        // Mach-O storage for the argv globals the other entries define in
+        // ELF `.bss`; `.zerofill` does not switch the current section.
+        asm("
+        .globl ___silver_argc
+        .zerofill __DATA,__bss,___silver_argc,4,2
+        .globl ___silver_argv
+        .zerofill __DATA,__bss,___silver_argv,8,3
+        .globl ___silver_envp
+        .zerofill __DATA,__bss,___silver_envp,8,3
+    ", []);
+        __silver_argc = argc;
+        __silver_argv = argv;
+        __silver_envp = envp;
+        sys_platform_init();
+        __silver_cpu_init();
+        i32 rc = __silver_call_main();
+        __silver_thread_registry_join_all();
+        __silver_flush_all();
+        if (__silver_leak_check_report() != 0) {
+            rc = 1;
+        }
+        return rc;
+    }
+
+    /// Calls the user program's `main` without naming its type, as the
+    /// Linux and Windows entries do: the result is read from x0, so an i32,
+    /// i64, or void `main` links and runs (a void `main` exits with
+    /// whatever x0 holds). Every AAPCS64 caller-saved register is clobbered.
+    i32 __silver_call_main() {
+        return (i32)asm("bl _main", [], ["x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8",
+            "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "x30",
+            "q0", "q1", "q2", "q3", "q4", "q5", "q6", "q7", "q16", "q17", "q18", "q19",
+            "q20", "q21", "q22", "q23", "q24", "q25", "q26", "q27", "q28", "q29", "q30", "q31"]);
+    }
+} else if (@cfg(os.linux) && @cfg(arch.aarch64)) {
     // Linux aarch64 entry: same contract as the x86_64 blob below. A pure-asm
     // body makes `_start` naked, so sp is still the kernel's initial stack:
     // [sp] = argc, then argv[], NULL, envp[]. Zeroing x29/x30 ends the

@@ -456,7 +456,10 @@ i64 item_boundary(Parser* self, i64 start) {
                 }
                 Token* next_token = token_at(self.tokens, next);
                 if (cfg_item) {
-                    if (next_token != (Token*)0 && (i64)next_token.kind == (i64)TokenKind.Else) {
+                    // A cfg chain ends at a `}` with no `else` after it; the
+                    // `)` closing an `else if` condition is not a boundary.
+                    if ((i64)token.kind != (i64)TokenKind.RightBrace
+                        || (next_token != (Token*)0 && (i64)next_token.kind == (i64)TokenKind.Else)) {
                         i += 1;
                         continue;
                     }

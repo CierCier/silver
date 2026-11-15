@@ -76,36 +76,13 @@ impl Child {
         return self.pid;
     }
 
-    /// Wait for the child to exit and return its ExitStatus.
-#[cfg(os.linux)]
-    ExitStatus wait_status(&mut self) {
-        ExitStatus st;
-        st.code = -1;
-        st.exited = false;
-        st.signal = 0;
-        if (self.pid <= 0) {
-            return st;
-        }
-        i32 status = 0;
-        i64 r = sys_wait4(self.pid, (i64)&status, 0, 0);
-        if (r > 0) {
-            self.pid = 0;
-            i32 term_sig = status & 0x7F;
-            if (term_sig == 0) {
-                st.exited = true;
-                st.code = (status >> 8) & 0xFF;
-            } else {
-                st.exited = false;
-                st.signal = term_sig;
-            }
-        }
-        return st;
-    }
+}
 
+if (@cfg(os.windows)) {
+impl Child {
     /// Wait for the child to exit and return its ExitStatus. Windows has no
     /// signals: every termination reports `exited` with the process exit
     /// code (`kill` uses 137, the shell's 128 + SIGKILL).
-#[cfg(os.windows)]
     ExitStatus wait_status(&mut self) {
         ExitStatus st;
         st.code = -1;
@@ -131,7 +108,10 @@ impl Child {
         self.pid = 0;
         return st;
     }
+}
+}
 
+impl Child {
     /// Send SIGKILL to the child process (TerminateProcess with exit code
     /// 137 on Windows).
     void kill(&self) {
@@ -183,9 +163,135 @@ impl Command {
         entry.push_str(val);
         self.env_vars.push(move entry);
     }
+}
 
+if (@cfg(os.windows)) {
+impl Command {
+    /// Spawn the command as a child process (CreateProcessW). The program is
+    /// found as Windows does (the PATH search appends `.exe`); arguments are
+    /// quoted so the child's CommandLineToArgvW sees them unchanged. The
+    /// child inherits the standard handles and the environment from
+    /// `std.env` (including `set_var` changes) plus this command's `env`
+    /// entries, which override same-named (case-insensitive) variables.
+    /// Unlike Linux, where exec runs after fork and a missing program exits
+    /// 127, a program that cannot start is an Err(-errno) here.
+    Result<Child, i64> spawn(&self) {
+        String line = String.new();
+        win_append_quoted_arg(&mut line, self.program.to_str());
+        for (i64 i = 0; i < self.args.len(); i = i + 1) {
+            line.push((u8)' ');
+            win_append_quoted_arg(&mut line, self.args.get_ptr(i).to_str());
+        }
+        u16* wline = win_wide_dup(line.to_str());
+        u16* wenv = win_env_block(self);
+
+        u64 si[13]; // STARTUPINFOW (104 bytes)
+        for (i64 i = 0; i < 13; i = i + 1) { si[i] = 0; }
+        si[0] = 104;                                    // cb
+        si[7] = (u64)WIN_STARTF_USESTDHANDLES << 32;    // dwFlags at 60
+        si[10] = (u64)win_GetStdHandle(WIN_STD_INPUT);  // hStdInput at 80
+        si[11] = (u64)win_GetStdHandle(WIN_STD_OUTPUT); // hStdOutput at 88
+        si[12] = (u64)win_GetStdHandle(WIN_STD_ERROR);  // hStdError at 96
+        u64 pi[3]; // PROCESS_INFORMATION
+        pi[0] = 0;
+        pi[1] = 0;
+        pi[2] = 0;
+
+        i32 ok = win_CreateProcessW((u16*)0, wline, (u8*)0, (u8*)0, 1,
+            WIN_CREATE_UNICODE_ENVIRONMENT, wenv, (u16*)0, (u8*)&si[0], (u8*)&pi[0]);
+        i64 err = win_last_errno();
+        free((void*)wline);
+        free((void*)wenv);
+        if (ok == 0) {
+            return Result<Child, i64>.Err(-err);
+        }
+        win_CloseHandle((i64)pi[1]); // primary thread handle
+        Child c;
+        c.pid = (i64)(pi[2] & 0xFFFFFFFF);
+        c.handle = (i64)pi[0];
+        return Result<Child, i64>.Ok(move c);
+    }
+}
+}
+
+impl Command {
+    /// Spawn the command and wait for it to complete.
+    /// Err(-ENOSYS) on WASI, which cannot spawn processes.
+    Result<ExitStatus, i64> status(&self) {
+        if (@cfg(os.wasi)) {
+            return Result<ExitStatus, i64>.Err(-38); // ENOSYS
+        } else {
+            Result<Child, i64> res = self.spawn();
+            if (res.is_err()) {
+                return Result<ExitStatus, i64>.Err(res.unwrap_err());
+            }
+            Child c = res.unwrap();
+            ExitStatus st = c.wait_status();
+            return Result<ExitStatus, i64>.Ok(st);
+        }
+    }
+}
+
+/// Terminate the current process immediately with an exit code.
+void exit(i32 code) {
+    sys_exit_group((i64)code);
+}
+
+/// Return the process ID of the calling process.
+// The symbol is not `getpid`: on macOS the OS seam calls libSystem's
+// `getpid`, which a same-named definition in the executable would replace.
+#[link_name("silver_getpid")]
+i64 getpid() {
+    return sys_getpid();
+}
+
+/// Return the process ID of the parent process: the creator's id, which
+/// Windows does not reparent (the creator may have exited since).
+#[cfg(os.windows)]
+#[link_name("silver_getppid")]
+i64 getppid() {
+    // PROCESS_BASIC_INFORMATION (48 bytes): InheritedFromUniqueProcessId at 40.
+    u64 info[6];
+    for (i64 i = 0; i < 6; i = i + 1) { info[i] = 0; }
+    u32 returned = 0;
+    if (win_NtQueryInformationProcess(win_GetCurrentProcess(), 0, (u8*)&info[0], 48, &returned) != 0) {
+        return -1;
+    }
+    return (i64)info[5];
+}
+
+// POSIX process control: fork/execve/wait4 (raw syscalls on Linux,
+// libSystem through the OS seam on macOS).
+if (@cfg(os.linux) || @cfg(os.macos)) {
+impl Child {
+    /// Wait for the child to exit and return its ExitStatus.
+    ExitStatus wait_status(&mut self) {
+        ExitStatus st;
+        st.code = -1;
+        st.exited = false;
+        st.signal = 0;
+        if (self.pid <= 0) {
+            return st;
+        }
+        i32 status = 0;
+        i64 r = sys_wait4(self.pid, (i64)&status, 0, 0);
+        if (r > 0) {
+            self.pid = 0;
+            i32 term_sig = status & 0x7F;
+            if (term_sig == 0) {
+                st.exited = true;
+                st.code = (status >> 8) & 0xFF;
+            } else {
+                st.exited = false;
+                st.signal = term_sig;
+            }
+        }
+        return st;
+    }
+}
+
+impl Command {
     /// Spawn the command as a child process.
-#[cfg(os.linux)]
     Result<Child, i64> spawn(&self) {
         i64 pid = sys_fork();
         if (pid < 0) {
@@ -224,98 +330,13 @@ impl Command {
         c.handle = 0;
         return Result<Child, i64>.Ok(move c);
     }
-
-    /// Spawn the command as a child process (CreateProcessW). The program is
-    /// found as Windows does (the PATH search appends `.exe`); arguments are
-    /// quoted so the child's CommandLineToArgvW sees them unchanged. The
-    /// child inherits the standard handles and the environment from
-    /// `std.env` (including `set_var` changes) plus this command's `env`
-    /// entries, which override same-named (case-insensitive) variables.
-    /// Unlike Linux, where exec runs after fork and a missing program exits
-    /// 127, a program that cannot start is an Err(-errno) here.
-#[cfg(os.windows)]
-    Result<Child, i64> spawn(&self) {
-        String line = String.new();
-        win_append_quoted_arg(&mut line, self.program.to_str());
-        for (i64 i = 0; i < self.args.len(); i = i + 1) {
-            line.push((u8)' ');
-            win_append_quoted_arg(&mut line, self.args.get_ptr(i).to_str());
-        }
-        u16* wline = win_wide_dup(line.to_str());
-        u16* wenv = win_env_block(self);
-
-        u64 si[13]; // STARTUPINFOW (104 bytes)
-        for (i64 i = 0; i < 13; i = i + 1) { si[i] = 0; }
-        si[0] = 104;                                    // cb
-        si[7] = (u64)WIN_STARTF_USESTDHANDLES << 32;    // dwFlags at 60
-        si[10] = (u64)win_GetStdHandle(WIN_STD_INPUT);  // hStdInput at 80
-        si[11] = (u64)win_GetStdHandle(WIN_STD_OUTPUT); // hStdOutput at 88
-        si[12] = (u64)win_GetStdHandle(WIN_STD_ERROR);  // hStdError at 96
-        u64 pi[3]; // PROCESS_INFORMATION
-        pi[0] = 0;
-        pi[1] = 0;
-        pi[2] = 0;
-
-        i32 ok = win_CreateProcessW((u16*)0, wline, (u8*)0, (u8*)0, 1,
-            WIN_CREATE_UNICODE_ENVIRONMENT, wenv, (u16*)0, (u8*)&si[0], (u8*)&pi[0]);
-        i64 err = win_last_errno();
-        free((void*)wline);
-        free((void*)wenv);
-        if (ok == 0) {
-            return Result<Child, i64>.Err(-err);
-        }
-        win_CloseHandle((i64)pi[1]); // primary thread handle
-        Child c;
-        c.pid = (i64)(pi[2] & 0xFFFFFFFF);
-        c.handle = (i64)pi[0];
-        return Result<Child, i64>.Ok(move c);
-    }
-
-    /// Spawn the command and wait for it to complete.
-    /// Err(-ENOSYS) on WASI, which cannot spawn processes.
-    Result<ExitStatus, i64> status(&self) {
-        if (@cfg(os.wasi)) {
-            return Result<ExitStatus, i64>.Err(-38); // ENOSYS
-        } else {
-            Result<Child, i64> res = self.spawn();
-            if (res.is_err()) {
-                return Result<ExitStatus, i64>.Err(res.unwrap_err());
-            }
-            Child c = res.unwrap();
-            ExitStatus st = c.wait_status();
-            return Result<ExitStatus, i64>.Ok(st);
-        }
-    }
-}
-
-/// Terminate the current process immediately with an exit code.
-void exit(i32 code) {
-    sys_exit_group((i64)code);
-}
-
-/// Return the process ID of the calling process.
-i64 getpid() {
-    return sys_getpid();
 }
 
 /// Return the process ID of the parent process.
-#[cfg(os.linux)]
+#[link_name("silver_getppid")]
 i64 getppid() {
     return sys_getppid();
 }
-
-/// Return the process ID of the parent process: the creator's id, which
-/// Windows does not reparent (the creator may have exited since).
-#[cfg(os.windows)]
-i64 getppid() {
-    // PROCESS_BASIC_INFORMATION (48 bytes): InheritedFromUniqueProcessId at 40.
-    u64 info[6];
-    for (i64 i = 0; i < 6; i = i + 1) { info[i] = 0; }
-    u32 returned = 0;
-    if (win_NtQueryInformationProcess(win_GetCurrentProcess(), 0, (u8*)&info[0], 48, &returned) != 0) {
-        return -1;
-    }
-    return (i64)info[5];
 }
 
 if (@cfg(os.windows)) {

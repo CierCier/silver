@@ -64,10 +64,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             // every object keeps its own `.weak.<name>.*` copy and the link fails
             // with duplicate symbols. An `any` COMDAT deduplicates on COFF exactly
             // like linkonce_odr does on ELF (this is what Clang emits for C++
-            // inline functions).
-            let comdat = self.module.get_or_insert_comdat(fn_name);
-            comdat.set_selection_kind(inkwell::comdat::ComdatSelectionKind::Any);
-            function.as_global_value().set_comdat(comdat);
+            // inline functions). Mach-O has no COMDATs: there, linkonce_odr
+            // lowers to a weak definition that ld64 coalesces on its own.
+            let triple = self.module.get_triple();
+            let triple = triple.as_str().to_str().unwrap_or("");
+            if !crate::codegen::abi::target_is_darwin(&triple.to_ascii_lowercase()) {
+                let comdat = self.module.get_or_insert_comdat(fn_name);
+                comdat.set_selection_kind(inkwell::comdat::ComdatSelectionKind::Any);
+                function.as_global_value().set_comdat(comdat);
+            }
         } else if Self::is_private(visibility) {
             function.set_linkage(Linkage::Internal);
         } else {
@@ -204,10 +209,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             fn_source_info: rustc_hash::FxHashMap::default(),
             stable_places: rustc_hash::FxHashSet::default(),
             abi_handler: abi::get_abi_handler(
-                TargetMachine::get_default_triple()
-                    .as_str()
-                    .to_str()
-                    .unwrap_or("x86_64-unknown-linux-gnu"),
+                &crate::codegen::abi::host_target_triple(),
             ),
             leak_check: false,
             emit_bt_tables: true,
@@ -220,7 +222,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         // must observe the target's layout (Win64 i128 alignment etc.), and
         // emit_asm_expression branches on the module triple.
         Target::initialize_all(&InitializationConfig::default());
-        let host_triple = TargetMachine::get_default_triple();
+        let host_triple =
+            inkwell::targets::TargetTriple::create(&crate::codegen::abi::host_target_triple());
         generator.module.set_triple(&host_triple);
         if let Ok(target) = Target::from_triple(&host_triple) {
             if let Some(machine) = target.create_target_machine(
@@ -293,11 +296,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let module = context.create_module("silver");
         let builder = context.create_builder();
         let effective_triple = target_triple.map(str::to_string).unwrap_or_else(|| {
-            TargetMachine::get_default_triple()
-                .as_str()
-                .to_str()
-                .unwrap_or("x86_64-unknown-linux-gnu")
-                .to_string()
+            crate::codegen::abi::host_target_triple()
         });
         let debug = if debug_info {
             match (source_path, source_text) {
@@ -827,11 +826,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         // triple: a windows triple must select Win64 struct passing, and the
         // default must be the host triple (not a hardcoded Linux triple).
         let effective_triple = target_triple.map(str::to_string).unwrap_or_else(|| {
-            TargetMachine::get_default_triple()
-                .as_str()
-                .to_str()
-                .unwrap_or("x86_64-unknown-linux-gnu")
-                .to_string()
+            crate::codegen::abi::host_target_triple()
         });
         let debug = if debug_info {
             match (source_path, source_text) {

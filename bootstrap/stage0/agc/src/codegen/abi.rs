@@ -211,7 +211,7 @@ impl AbiHandler for Win64Abi {
     }
 }
 
-/// AAPCS64 (aarch64 Linux):
+/// AAPCS64 (aarch64 Linux) and Apple's arm64 variant of it:
 ///
 /// 1. A homogeneous floating-point aggregate (HFA: one to four members of one
 ///    float type, through nested structs and arrays) passes as `[N x T]` in
@@ -221,7 +221,14 @@ impl AbiHandler for Win64Abi {
 ///    8 bytes.
 /// 3. Larger structs pass as a pointer to a caller copy (not `byval`) and
 ///    return through `sret`, which AArch64 places in `x8`.
-pub struct Arm64Abi;
+///
+/// Apple arm64 classifies aggregates the same way. It differs in packing
+/// stack arguments at their natural alignment and in passing variadic
+/// arguments on the stack; LLVM applies both from the triple, as long as an
+/// HFA carries no explicit AAPCS64 8/16-byte stack alignment.
+pub struct Arm64Abi {
+    pub darwin: bool,
+}
 
 impl Arm64Abi {
     /// The member float type and count of an HFA, or `None` when `struct_ty`
@@ -272,7 +279,7 @@ impl AbiHandler for Arm64Abi {
         if let Some((base, count)) = Self::homogeneous_float(target_data, struct_ty) {
             return StructPass::Direct {
                 ty: base.array_type(count).as_basic_type_enum(),
-                stack_align: Some(8),
+                stack_align: (!self.darwin).then_some(8),
             };
         }
         if size > 16 {
@@ -359,10 +366,10 @@ pub fn get_abi_handler(target_triple: &str) -> Option<Box<dyn AbiHandler>> {
         } else {
             Some(Box::new(Amd64Abi))
         }
-    } else if matches!(arch, "aarch64" | "arm64") && !target_is_windows(Some(&triple)) && !target_is_darwin(&triple) {
-        // Darwin and Windows arm64 deviate from AAPCS64 (Darwin variadics and
-        // stack packing, Windows HFA variadics); neither is a Silver target.
-        Some(Box::new(Arm64Abi))
+    } else if matches!(arch, "aarch64" | "arm64") && !target_is_windows(Some(&triple)) {
+        // Windows arm64 deviates from AAPCS64 in HFA variadics and is not a
+        // Silver target.
+        Some(Box::new(Arm64Abi { darwin: target_is_darwin(&triple) }))
     } else {
         None
     }
@@ -370,7 +377,7 @@ pub fn get_abi_handler(target_triple: &str) -> Option<Box<dyn AbiHandler>> {
 
 /// Whether `triple` names an Apple OS, by vendor or by OS component, as LLVM
 /// treats `aarch64-unknown-darwin` like `arm64-apple-darwin`.
-fn target_is_darwin(triple: &str) -> bool {
+pub fn target_is_darwin(triple: &str) -> bool {
     triple.split('-').skip(1).any(|part| {
         part == "apple" || ["darwin", "macos", "ios", "tvos", "watchos", "xros", "visionos"]
             .iter().any(|os| part.starts_with(os))
@@ -388,6 +395,34 @@ pub fn target_is_wasm(target_triple: Option<&str>) -> bool {
             t.starts_with("wasm32") || t.starts_with("wasm64") || t.contains("wasm")
         }
         None => false,
+    }
+}
+
+/// Oldest macOS Silver programs run on: std's thread runtime waits with
+/// `os_sync_wait_on_address`, new in macOS 14.4.
+pub const MACOS_DEPLOYMENT_TARGET: &str = "14.4";
+
+/// The triple to build for when no `--target` is given. LLVM's default
+/// carries the build machine's OS version (`arm64-apple-darwin25.1.0`), so
+/// objects would demand the newest macOS; macOS hosts get Silver's
+/// deployment target instead.
+pub fn host_target_triple() -> String {
+    if cfg!(target_os = "macos") {
+        return format!("arm64-apple-macosx{MACOS_DEPLOYMENT_TARGET}.0");
+    }
+    inkwell::targets::TargetMachine::get_default_triple()
+        .as_str()
+        .to_str()
+        .unwrap_or("x86_64-unknown-linux-gnu")
+        .to_string()
+}
+
+/// Returns true when the target triple denotes macOS (any Apple desktop
+/// triple), or, with no explicit target, when the host is macOS.
+pub fn target_is_macos(target_triple: Option<&str>) -> bool {
+    match target_triple {
+        Some(triple) => target_is_darwin(&triple.to_ascii_lowercase()),
+        None => cfg!(target_os = "macos"),
     }
 }
 

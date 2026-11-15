@@ -18,8 +18,12 @@ import std.rt.thread_registry;
 import std.mem.alloc;
 
 /// Number of logical CPUs available to the current process. Linux uses the
-/// calling thread's affinity mask so pools respect cpusets and containers.
+/// calling thread's affinity mask so pools respect cpusets and containers;
+/// macOS reports the active CPUs.
 i64 thread_available_parallelism() {
+    if (@cfg(os.macos)) {
+        return mac_cpu_count();
+    }
     i64 count = 1;
     if (@cfg(os.linux)) {
         u8 mask[1024];

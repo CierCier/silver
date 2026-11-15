@@ -251,17 +251,25 @@ class BackgroundServices:
         self.ffi_dir = self._find_ffi()
 
     def _find_openssl(self) -> str:
+        # Shared libssl names: ELF on Linux, Mach-O dylibs on macOS (whose
+        # /usr/lib holds no linkable OpenSSL; Nix and Homebrew provide one).
+        names = ("libssl.so", "libssl.so.3", "libssl.dylib", "libssl.3.dylib")
+
+        def has_libssl(p: Path) -> bool:
+            return any((p / name).is_file() for name in names)
+
         env_dir = os.environ.get("OPENSSL_LIB_DIR") or os.environ.get("SILVER_OPENSSL_LIB_DIR")
         if env_dir:
             p = Path(env_dir)
-            if (p / "libssl.so").is_file() or (p / "libssl.so.3").is_file():
+            if has_libssl(p):
                 return str(p)
         if not shutil.which("openssl"):
             return ""
-        for pattern in ["/nix/store/*openssl-*/lib", "/usr/lib", "/usr/local/lib"]:
+        for pattern in ["/nix/store/*openssl-*/lib", "/usr/lib", "/usr/local/lib",
+                        "/opt/homebrew/opt/openssl@3/lib"]:
             for d in glob.glob(pattern):
                 p = Path(d)
-                if (p / "libssl.so").is_file() or (p / "libssl.so.3").is_file():
+                if has_libssl(p):
                     return str(p)
         try:
             out = subprocess.check_output(["ldconfig", "-p"], stderr=subprocess.DEVNULL).decode(errors="replace")

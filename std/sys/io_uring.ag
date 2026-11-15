@@ -2,14 +2,16 @@
 //
 // Provides raw kernel structs, constants, syscall wrappers, and an
 // RAII IoUring ring manager for high-throughput zero-syscall submission
-// and completion queue processing.
+// and completion queue processing. On macOS the OS seam emulates the ring
+// in userspace (std/sys/os_macos.ag): same API and results, but pending
+// operations progress only inside `submit` / `submit_and_wait`.
 
 import std.error;
 import std.mem.memory;
 import std.sys.raw.poll;
 import std.sys.result;
 
-if (@cfg(os.linux)) {
+if (@cfg(os.linux) || @cfg(os.macos)) {
 // Setup flags (IORING_SETUP_*)
 /// io_uring setup flag: busy-poll for completions (O_DIRECT files only).
 const u32 IORING_SETUP_IOPOLL        = 1;

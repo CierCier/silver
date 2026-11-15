@@ -80,4 +80,61 @@ i64 syscall6(i64 num, i64 arg1, i64 arg2, i64 arg3, i64 arg4, i64 arg5, i64 arg6
     return asm("syscall", [num, arg1, arg2, arg3, arg4, arg5, arg6]);
 }
 }
+} else if (@cfg(os.macos)) {
+/// Raw Darwin syscalls (aarch64). The compiler binds the number to x8 and
+/// the arguments to x0..x5; Darwin takes the number in x16 and reports a
+/// failure by setting the carry flag with a positive errno in x0. The
+/// wrappers return the Linux convention instead: the result, or a negated
+/// Linux errno in -4095..-1. Apple does not keep syscall numbers or
+/// conventions stable; std itself calls libSystem (std/sys/os_macos.ag).
+/// Numbers: std.sys.darwin_syscalls (`SYSCALL`).
+
+import std.sys.darwin_syscalls;
+import std.sys.os;
+
+/// Maps a raw Darwin result (negated Darwin errno on failure) to Linux's.
+i64 darwin_syscall_result(i64 r) {
+    if (r < 0 && r > -4096) {
+        return -mac_errno_to_linux(-r);
+    }
+    return r;
+}
+
+/// Performs a 0-argument syscall.
+i64 syscall0(i64 num) {
+    return darwin_syscall_result(asm("mov x16, x8\n svc #0x80\n b.cc 1f\n neg x0, x0\n 1:", [num], ["x1", "x16"]));
+}
+
+/// Performs a 1-argument syscall.
+i64 syscall1(i64 num, i64 arg1) {
+    return darwin_syscall_result(asm("mov x16, x8\n svc #0x80\n b.cc 1f\n neg x0, x0\n 1:", [num, arg1], ["x1", "x16"]));
+}
+
+// With two or more arguments x1 is an input; Darwin may return a second
+// value there (fork, pipe), which these wrappers discard.
+
+/// Performs a 2-argument syscall.
+i64 syscall2(i64 num, i64 arg1, i64 arg2) {
+    return darwin_syscall_result(asm("mov x16, x8\n svc #0x80\n b.cc 1f\n neg x0, x0\n 1:", [num, arg1, arg2], ["x16"]));
+}
+
+/// Performs a 3-argument syscall.
+i64 syscall3(i64 num, i64 arg1, i64 arg2, i64 arg3) {
+    return darwin_syscall_result(asm("mov x16, x8\n svc #0x80\n b.cc 1f\n neg x0, x0\n 1:", [num, arg1, arg2, arg3], ["x16"]));
+}
+
+/// Performs a 4-argument syscall.
+i64 syscall4(i64 num, i64 arg1, i64 arg2, i64 arg3, i64 arg4) {
+    return darwin_syscall_result(asm("mov x16, x8\n svc #0x80\n b.cc 1f\n neg x0, x0\n 1:", [num, arg1, arg2, arg3, arg4], ["x16"]));
+}
+
+/// Performs a 5-argument syscall.
+i64 syscall5(i64 num, i64 arg1, i64 arg2, i64 arg3, i64 arg4, i64 arg5) {
+    return darwin_syscall_result(asm("mov x16, x8\n svc #0x80\n b.cc 1f\n neg x0, x0\n 1:", [num, arg1, arg2, arg3, arg4, arg5], ["x16"]));
+}
+
+/// Performs a 6-argument syscall.
+i64 syscall6(i64 num, i64 arg1, i64 arg2, i64 arg3, i64 arg4, i64 arg5, i64 arg6) {
+    return darwin_syscall_result(asm("mov x16, x8\n svc #0x80\n b.cc 1f\n neg x0, x0\n 1:", [num, arg1, arg2, arg3, arg4, arg5, arg6], ["x16"]));
+}
 }

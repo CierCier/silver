@@ -220,6 +220,17 @@ if (@cfg(os.linux)) {
         i64 r = syscall2((i64)SYSCALL.TKILL, tid, 0);
         return r == 0;
     }
+} else if (@cfg(os.macos)) {
+    /// Returns the calling thread's system-wide id.
+    i64 mem_get_tid() {
+        return mac_thread_id();
+    }
+
+    /// Always true on macOS: no API probes a thread by id, so dead cache
+    /// owners are not detected (their slot is reclaimed on thread exit).
+    bool mem_thread_alive(i64 tid) {
+        return true;
+    }
 } else if (@cfg(os.wasi)) {
     // WebAssembly v1 is single-threaded: no gettid, no threads to probe.
     // A constant tid keeps the tcache fast path deterministic (slot math is
@@ -727,7 +738,7 @@ u8* __silver_leak_alloc(i64 size, i64 align) {
             ai += 1;
         }
     }
-    if (@cfg(os.linux)) {
+    if (@cfg(os.linux) || @cfg(os.macos)) {
         i64 cur_rbp = bt_read_rbp();
         i64 depth = 0;
         while (cur_rbp > 65536 && depth < 8) {

@@ -218,7 +218,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let function = self
             .current_fn
             .ok_or_else(|| CodegenError::new("owner storage outside a function"))?;
-        let storage = self.create_entry_alloca(
+        // Cleanup is registered with the enclosing statement scope, which a
+        // declaration in a short-circuited operand (`a && f().len() == 0`)
+        // may never reach: zeroed storage reads as "not present" there.
+        let storage = self.create_zeroed_entry_alloca(
             function,
             &format!("{}.owner", identifier.name),
             storage_type.into(),

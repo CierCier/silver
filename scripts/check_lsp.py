@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -3636,7 +3637,8 @@ class NativeLsp(unittest.TestCase):
             self.assertEqual({entry["uri"] for entry in references}, {
                 uri, helper.as_uri(), (self.root / "other.ag").as_uri()})
 
-    @unittest.skipUnless(Path("/proc/self/status").is_file(), "RSS regression requires Linux /proc")
+    @unittest.skipUnless(Path("/proc/self/status").is_file() or shutil.which("ps"),
+                         "RSS regression requires Linux /proc or ps")
     def test_repeated_closed_workspace_analysis_releases_discarded_snapshots(self):
         for file in range(20):
             (self.root / f"cached_{file}.ag").write_text("".join(
@@ -3646,8 +3648,13 @@ class NativeLsp(unittest.TestCase):
         target = self.at(source.as_uri(), source.read_text(), "item_0_0")
 
         def rss():
-            status = Path(f"/proc/{self.session.process.pid}/status").read_text()
-            return int(next(line.split()[1] for line in status.splitlines() if line.startswith("VmRSS:")))
+            # Resident set size in KiB: /proc on Linux, ps elsewhere (macOS).
+            pid = self.session.process.pid
+            status_path = Path(f"/proc/{pid}/status")
+            if status_path.is_file():
+                status = status_path.read_text()
+                return int(next(line.split()[1] for line in status.splitlines() if line.startswith("VmRSS:")))
+            return int(subprocess.check_output(["ps", "-o", "rss=", "-p", str(pid)], text=True).strip())
 
         baseline = None
         for iteration in range(6):

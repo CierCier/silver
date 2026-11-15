@@ -707,7 +707,7 @@ void ide_collect_nodes(IdeIndex* index, SyntaxNode* node, bool import_selection)
 /// Indexes every item of the tree (with default Linux cfg keys), then
 /// resolves occurrences.
 void ide_collect(IdeIndex* index) {
-    CfgSet cfg = linux_defaults();
+    CfgSet cfg = host_defaults();
     Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
     cfg_collect_items(index.tree.root, &cfg, (DiagnosticBag*)0, &items);
     cfg_collect_import_names(index.tree.root, &cfg, &index.imports);

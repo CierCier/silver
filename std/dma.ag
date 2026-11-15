@@ -9,7 +9,7 @@ import std.sys.errno { EINTR, EAGAIN, EINVAL };
 import std.sys.raw.fs;
 import std.sys.raw.memory;
 
-if (@cfg(os.linux)) {
+if (@cfg(os.linux) || @cfg(os.macos)) {
 // Linux UAPI: dma-heap.h and dma-buf.h, generic ioctl encoding on x86_64.
 /// `DMA_HEAP_IOCTL_ALLOC` request (linux/dma-heap.h, x86_64 encoding).
 const i64 DMA_HEAP_IOCTL_ALLOC = 0xc0184800;
