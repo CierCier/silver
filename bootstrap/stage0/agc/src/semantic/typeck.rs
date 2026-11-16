@@ -127,6 +127,21 @@ pub struct ResolvedCallable {
     pub returns_reference: bool,
     pub returns_mutable: bool,
     pub reference_parameters: Vec<usize>,
+    /// The `&mut T` subset of `reference_parameters`.
+    pub mutable_parameters: Vec<usize>,
+}
+
+/// Indices of the reference parameters in `params`, or of only the `&mut`
+/// ones when `mutable_only`.
+fn reference_parameter_indices(params: &[Type], mutable_only: bool) -> Vec<usize> {
+    params
+        .iter()
+        .enumerate()
+        .filter_map(|(index, parameter)| match parameter {
+            Type::Reference { is_mutable, .. } if *is_mutable || !mutable_only => Some(index),
+            _ => None,
+        })
+        .collect()
 }
 
 impl CallableIdentity {
@@ -4245,14 +4260,8 @@ impl TypeChecker {
                 identity: CallableIdentity::from_decl_span(candidate.source.name.span, false),
                 returns_reference: matches!(return_type, Type::Reference { .. }),
                 returns_mutable: matches!(return_type, Type::Reference { is_mutable: true, .. }),
-                reference_parameters: candidate
-                    .params
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, parameter)| {
-                        matches!(parameter, Type::Reference { .. }).then_some(index)
-                    })
-                    .collect(),
+                reference_parameters: reference_parameter_indices(&candidate.params, false),
+                mutable_parameters: reference_parameter_indices(&candidate.params, true),
             },
         );
         self.record_function_monomorph(candidate, mapping, span);
@@ -4793,14 +4802,8 @@ impl TypeChecker {
                 identity: CallableIdentity::from_decl_span(candidate.source_method.name.span, true),
                 returns_reference: matches!(return_type, Type::Reference { .. }),
                 returns_mutable: matches!(return_type, Type::Reference { is_mutable: true, .. }),
-                reference_parameters: candidate
-                    .params
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, parameter)| {
-                        matches!(parameter, Type::Reference { .. }).then_some(index)
-                    })
-                    .collect(),
+                reference_parameters: reference_parameter_indices(&candidate.params, false),
+                mutable_parameters: reference_parameter_indices(&candidate.params, true),
             },
         );
         self.record_method_monomorph(candidate, mapping, span);

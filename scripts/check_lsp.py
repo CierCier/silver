@@ -865,7 +865,12 @@ class NativeLsp(unittest.TestCase):
                    "reference count", 5)]),
                 # A field read through a reference passes only that field.
                 ("import std.mem.rc;\nstruct Holder { Rc<i64> r; i64 n; }\ni64 twice(i64 x) { return x * 2; }\n"
-                 "i64 doubled(&Holder h) {\n Task<i64> t = launch twice(h.n);\n return wait t;\n}\n", [])], 24):
+                 "i64 doubled(&Holder h) {\n Task<i64> t = launch twice(h.n);\n return wait t;\n}\n", []),
+                # A task that writes through `&mut` needs a mutable loan.
+                ("void bump(&mut i64 v) { *v += 1; }\ni64 main() {\n i64 x = 0;\n Task<void> t = launch bump(&x);\n"
+                 " wait t;\n return x;\n}\n",
+                 [("a launch argument for a `&mut` parameter must be `&mut place` or a `&mut` reference "
+                   "variable", 3)])], 24):
             session.send("textDocument/didChange", {"textDocument": {"uri": alias_uri, "version": version},
                 "contentChanges": [{"text": source}]})
             errors = [(item["message"].split("\n")[0].split(" (help:")[0], item["range"]["start"]["line"])

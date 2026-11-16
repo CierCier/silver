@@ -475,6 +475,12 @@ String scoped_launch_argument_not_a_place() {
     return String.from_str("a borrowed launch argument must be `&place`, `&mut place`, or a reference variable");
 }
 
+/// Diagnostic text: "a launch argument for a `&mut` parameter must be
+/// `&mut place` or a `&mut` reference variable". Returns an owned string.
+String launch_mutable_argument_needs_mut() {
+    return String.from_str("a launch argument for a `&mut` parameter must be `&mut place` or a `&mut` reference variable");
+}
+
 /// Diagnostic text: "launch passes `{}` to a reference parameter without
 /// `&`: declare it `shared`, or move it into the task through a by-value
 /// parameter". Returns an owned string.

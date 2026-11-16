@@ -309,6 +309,10 @@ pub fn scoped_launch_argument_not_a_place() -> &'static str {
     "a borrowed launch argument must be `&place`, `&mut place`, or a reference variable"
 }
 
+pub fn launch_mutable_argument_needs_mut() -> &'static str {
+    "a launch argument for a `&mut` parameter must be `&mut place` or a `&mut` reference variable"
+}
+
 pub fn launch_borrows_without_reference(name: &str) -> String {
     format!(
         "launch passes `{name}` to a reference parameter without `&`: declare it `shared`, \

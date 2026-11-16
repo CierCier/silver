@@ -401,15 +401,28 @@ fn check_borrowed_arguments(
         let Some(argument) = arguments.get(index) else {
             continue;
         };
+        // A task writes through a `&mut` parameter while the launcher runs,
+        // so it needs a mutable loan, not the shared one `&x` would take.
+        let needs_mut = callable.mutable_parameters.contains(&index);
         let message = match argument.kind.as_ref() {
-            ast::ExpressionKind::Reference { expression, .. } if is_place(expression) => continue,
-            ast::ExpressionKind::Identifier(name)
-                if facts.reference_at(&name.name, argument.span.start).is_some() =>
-            {
-                continue;
+            ast::ExpressionKind::Reference {
+                expression,
+                is_mutable,
+            } if is_place(expression) => {
+                if needs_mut && !is_mutable {
+                    msg::launch_mutable_argument_needs_mut().to_string()
+                } else {
+                    continue;
+                }
             }
             ast::ExpressionKind::Identifier(name) => {
-                msg::launch_borrows_without_reference(&name.name)
+                match facts.reference_at(&name.name, argument.span.start) {
+                    Some(mutable) if needs_mut && !mutable => {
+                        msg::launch_mutable_argument_needs_mut().to_string()
+                    }
+                    Some(_) => continue,
+                    None => msg::launch_borrows_without_reference(&name.name),
+                }
             }
             _ => msg::scoped_launch_argument_not_a_place().to_string(),
         };

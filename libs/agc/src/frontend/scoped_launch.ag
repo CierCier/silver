@@ -48,6 +48,8 @@ struct ScopedLaunchBorrow {
     // True for `&place`/`&mut place`, false for a reference variable.
     bool address;
     bool mutable;
+    // True when the parameter is `&mut T`, which needs a mutable loan.
+    bool needs_mut;
 }
 
 /// The scoped launches of one function body and their borrowed arguments.
@@ -150,6 +152,19 @@ SyntaxNode* launch_borrowing_callee(SyntaxNode* root, SyntaxNode* selected, str 
         item = item.next_sibling;
     }
     return (SyntaxNode*)0;
+}
+
+/// True when parameter `index` of the launch callee with `arity` parameters
+/// is `&mut T`.
+bool launch_parameter_is_mutable(SyntaxNode* root, SyntaxNode* selected, str name, i64 arity,
+                                 i64 index) {
+    SyntaxNode* callee = launch_borrowing_callee(root, selected, name, arity, index);
+    if (callee == (SyntaxNode*)0) { return false; }
+    Vec<Binding> parameters = Vec<Binding>.new();
+    collect_parameter_bindings(binding_function_parameters(callee), &parameters);
+    bool is_mutable = parameters.get_ptr(index).declared_type.is_mutable;
+    parameters.drop();
+    return is_mutable;
 }
 
 /// Returns true when `node` is a token of kind `kind`.
@@ -315,13 +330,15 @@ void scoped_place_launch(SyntaxNode* root, SymbolTable* symbols, Vec<Binding>* b
 
 /// Records one argument of a scoped launch that starts at `first` and ends
 /// before `end` (a comma or null).
-void scoped_add_borrow(ScopedLaunches* out, i64 site, SyntaxNode* first, SyntaxNode* end) {
+void scoped_add_borrow(ScopedLaunches* out, i64 site, SyntaxNode* first, SyntaxNode* end,
+                       bool needs_mut) {
     ScopedLaunchBorrow borrow;
     borrow.site = site;
     borrow.first = first;
     borrow.root = (SyntaxNode*)0;
     borrow.address = false;
     borrow.mutable = false;
+    borrow.needs_mut = needs_mut;
     if (scoped_is_token(first, TokenKind.BitwiseAnd)) {
         borrow.address = true;
         SyntaxNode* place = first.next_sibling;
@@ -371,8 +388,8 @@ void collect_scoped_launches(SyntaxNode* root, SymbolTable* symbols, Vec<SyntaxN
         }
         Vec<bool> borrowed = Vec<bool>.new();
         SyntaxNode* callee = launch_token.next_sibling;
-        if (launch_borrowed_parameters(root, symbols.selected_callee(callee.span), callee.text,
-                                       starts.len(), &borrowed)) {
+        SyntaxNode* selected = symbols.selected_callee(callee.span);
+        if (launch_borrowed_parameters(root, selected, callee.text, starts.len(), &borrowed)) {
             ScopedLaunchSite site;
             site.launch_token = launch_token;
             site.holder = (SyntaxNode*)0;
@@ -385,7 +402,8 @@ void collect_scoped_launches(SyntaxNode* root, SymbolTable* symbols, Vec<SyntaxN
             i64 argument = 0;
             while (argument < starts.len()) {
                 if (borrowed.get(argument)) {
-                    scoped_add_borrow(out, site_index, starts.get(argument), ends.get(argument));
+                    scoped_add_borrow(out, site_index, starts.get(argument), ends.get(argument),
+                        launch_parameter_is_mutable(root, selected, callee.text, starts.len(), argument));
                 }
                 argument += 1;
             }
@@ -542,7 +560,16 @@ void check_scoped_launch_body(SyntaxNode* root, SymbolTable* symbols, SyntaxNode
                 diagnostics.error(borrow.first.span,
                     launch_borrows_without_reference(borrow.root.text));
                 *failed = true;
+            } else if (borrow.needs_mut && bound != (Binding*)0
+                && bound.declared_type.kind == ProjectionTypeKind.Reference
+                && !bound.declared_type.is_mutable) {
+                diagnostics.error(borrow.first.span, launch_mutable_argument_needs_mut());
+                *failed = true;
             }
+        } else if (borrow.needs_mut && !borrow.mutable) {
+            // The task writes through the parameter while the launcher runs.
+            diagnostics.error(borrow.first.span, launch_mutable_argument_needs_mut());
+            *failed = true;
         }
         i += 1;
     }
