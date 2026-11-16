@@ -827,15 +827,17 @@ void check_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root, SymbolTable
     TypeProjection* passed = &(*binding).declared_type;
     TypeProjection path_type = projection_type_empty();
     Vec<String> names = Vec<String>.new();
+    String inferred = String.new();
     bool projected = (*argument).kind == ProjectionExpressionKind.Identifier
         && scoped_is_token((*argument).name_node.next_sibling, TokenKind.Dot);
     if (projected) {
         bool slice = false;
         path_type = passed.kind == ProjectionTypeKind.Reference
             ? send_reference_pointee(binding, &slice)
-            : binding_declared_type(binding.type_start, binding.type_end);
+            : send_binding_value_type(root, symbols, binding, &inferred);
         // `&self` spells no type here, so its paths are left unjudged.
         if (path_type.kind == ProjectionTypeKind.Unknown) {
+            inferred.drop();
             names.drop();
             return;
         }
@@ -853,6 +855,7 @@ void check_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root, SymbolTable
     }
     reason.drop();
     names.drop();
+    inferred.drop();
 }
 
 /// Checks the `launch` arguments in one function or method body. Returns

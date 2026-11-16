@@ -866,6 +866,13 @@ class NativeLsp(unittest.TestCase):
                 # A field read through a reference passes only that field.
                 ("import std.mem.rc;\nstruct Holder { Rc<i64> r; i64 n; }\ni64 twice(i64 x) { return x * 2; }\n"
                  "i64 doubled(&Holder h) {\n Task<i64> t = launch twice(h.n);\n return wait t;\n}\n", []),
+                # A field of an inferred `let` is judged by the initializer's type.
+                ("import std.mem.rc;\nstruct Holder { Rc<i64> r; i64 n; }\n"
+                 "Holder make_holder() { Holder h; h.r = Rc<i64>.new(1); h.n = 2; return h; }\n"
+                 "i64 take(Rc<i64> _r) { return 0; }\ni64 main() {\n let holder = make_holder();\n"
+                 " Task<i64> t = launch take(holder.r);\n return wait t;\n}\n",
+                 [("launch argument of type Rc<i64> is not Send: Rc<T> carries a shared non-atomic "
+                   "reference count", 6)]),
                 # A task that writes through `&mut` needs a mutable loan.
                 ("void bump(&mut i64 v) { *v += 1; }\ni64 main() {\n i64 x = 0;\n Task<void> t = launch bump(&x);\n"
                  " wait t;\n return x;\n}\n",
