@@ -151,22 +151,27 @@ impl BorrowAnalyzer {
         self.failed = true;
     }
 
+    /// Reports a new `kind` borrow of `name` at `span` that conflicts with
+    /// `loan`: nothing when both are shared.
+    void report_conflict(BorrowAnalyzer* self, str name, Span span, Loan* loan, LoanKind kind) {
+        bool old_mutable = loan.kind == LoanKind.Mutable;
+        bool new_mutable = kind == LoanKind.Mutable;
+        if (old_mutable && new_mutable) {
+            String message = cannot_borrow_as_mutable_more_than_once(name);
+            self.add_thread_help(&message, loan);
+            String note = note_previous_borrow_here("mutable");
+            self.diagnostics.error_with_note(span, move message, loan.span, move note);
+            self.failed = true;
+        } else if (old_mutable != new_mutable) {
+            self.conflict(name, span, loan, new_mutable);
+        }
+    }
+
     /// Records a loan of `place`, reporting a conflict with an existing one.
     void add(BorrowAnalyzer* self, Place place, str name, Span span, LoanKind kind, bool persistent, u32 holder_id, i64 release_index) {
         i64 existing = self.find_conflict(&place, kind);
         if (existing >= 0) {
-            Loan* loan = self.loans.get_ptr(existing);
-            bool old_mutable = loan.kind == LoanKind.Mutable;
-            bool new_mutable = kind == LoanKind.Mutable;
-            if (old_mutable && new_mutable) {
-                String message = cannot_borrow_as_mutable_more_than_once(name);
-                self.add_thread_help(&message, loan);
-                String note = note_previous_borrow_here("mutable");
-                self.diagnostics.error_with_note(span, move message, loan.span, move note);
-                self.failed = true;
-            } else if (old_mutable != new_mutable) {
-                self.conflict(name, span, loan, new_mutable);
-            }
+            self.report_conflict(name, span, self.loans.get_ptr(existing), kind);
         }
         Loan loan;
         loan.name_id = self.names.intern(name);
@@ -2424,8 +2429,12 @@ void borrow_check_task_loan_use(BorrowAnalyzer* analyzer, SyntaxTree* tree,
     bool returned = i > 0 && leaves.get(i - 1).token_kind == TokenKind.Return
         && last.next_sibling != (SyntaxNode*)0
         && last.next_sibling.token_kind == TokenKind.Semicolon;
-    if (!returned && (!borrow_is_whole_call_argument(node, last)
-                      || borrow_argument_is_borrowed(tree.root, symbols, node))) {
+    if (!returned && !borrow_is_whole_call_argument(node, last)) { return; }
+    // A reference parameter borrows the argument for the call instead.
+    bool writes = false;
+    if (!returned && borrow_argument_is_borrowed(tree.root, node, &writes)) {
+        analyzer.report_conflict(path.to_str(), node.span, analyzer.loans.get_ptr(loaned),
+                                 writes ? LoanKind.Mutable : LoanKind.Shared);
         return;
     }
     Binding* binding = visible_binding(bindings, node.text, node);
@@ -2446,23 +2455,71 @@ void borrow_check_task_loan_use(BorrowAnalyzer* analyzer, SyntaxTree* tree,
     analyzer.failed = true;
 }
 
-/// True when `argument` goes to a `&T`/`&mut T` parameter of the function
-/// its call selects, which borrows it rather than moving it. A method call
-/// is not resolved here and counts as by-value.
-bool borrow_argument_is_borrowed(SyntaxNode* root, SymbolTable* symbols, SyntaxNode* argument) {
+/// Folds one candidate callee into a borrow verdict for argument `index` of
+/// `arity`. Returns false when the candidate takes that argument by value.
+/// A method's `self` is not an argument.
+bool borrow_candidate_borrows(SyntaxNode* parameter_list, i64 arity, i64 index, bool* matched,
+                              bool* writes) {
+    Vec<Binding> parameters = Vec<Binding>.new();
+    collect_parameter_bindings(parameter_list, &parameters);
+    i64 skip = parameters.len() > 0 && strcmp(parameters.get_ptr(0).name, "self") == 0 ? 1 : 0;
+    bool borrows = true;
+    if (parameters.len() - skip == arity) {
+        TypeProjection* parameter = &parameters.get_ptr(index + skip).declared_type;
+        borrows = parameter.kind == ProjectionTypeKind.Reference;
+        if (borrows) {
+            *matched = true;
+            if (parameter.is_mutable) { *writes = true; }
+        }
+    }
+    parameters.drop();
+    return borrows;
+}
+
+/// True when `argument` goes to a `&T`/`&mut T` parameter, which borrows it
+/// rather than moving it; `*writes` is set when any such candidate takes
+/// `&mut T`. Type checking records no overload choice for a plain call and
+/// this pass knows no receiver types, so every function, or for `.name(...)`
+/// every impl or trait method, of that name and arity must borrow there.
+bool borrow_argument_is_borrowed(SyntaxNode* root, SyntaxNode* argument, bool* writes) {
     i64 index = 0;
     SyntaxNode* callee = borrow_call_for_argument(argument, &index);
-    if (callee == (SyntaxNode*)0 || scoped_is_token(binding_previous_sibling(callee), TokenKind.Dot)) {
-        return false;
-    }
+    if (callee == (SyntaxNode*)0) { return false; }
+    bool method = scoped_is_token(binding_previous_sibling(callee), TokenKind.Dot);
+    // The receiver of `.name(...)` counts as argument 0 there.
+    if (method) { index -= 1; }
     i64 arity = callee.next_sibling.first_child == (SyntaxNode*)0 ? 0 : 1;
     SyntaxNode* part = callee.next_sibling.first_child;
     while (part != (SyntaxNode*)0) {
         if (part.token_kind == TokenKind.Comma) { arity += 1; }
         part = part.next_sibling;
     }
-    return launch_borrowing_callee(root, symbols.selected_callee(callee.span), callee.text,
-                                   arity, index) != (SyntaxNode*)0;
+    bool matched = false;
+    SyntaxNode* item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (!method && launch_callee_candidate(item, (SyntaxNode*)0, callee.text)
+            && !borrow_candidate_borrows(binding_function_parameters(item), arity, index,
+                                         &matched, writes)) {
+            return false;
+        }
+        if (method && (item.kind == NodeKind.Impl || item.kind == NodeKind.Trait)) {
+            Vec<SyntaxNode*> methods = Vec<SyntaxNode*>.new();
+            collect_method_bodies(item, &methods);
+            i64 m = 0;
+            while (m + 1 < methods.len()) {
+                SyntaxNode* name = binding_previous_sibling(methods.get(m));
+                if (scoped_is_token(name, TokenKind.Identifier) && strcmp(name.text, callee.text) == 0
+                    && !borrow_candidate_borrows(methods.get(m), arity, index, &matched, writes)) {
+                    methods.drop();
+                    return false;
+                }
+                m += 2;
+            }
+            methods.drop();
+        }
+        item = item.next_sibling;
+    }
+    return matched;
 }
 
 /// True when a `launch` or a lock block's guard appears under `node`: the

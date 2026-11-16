@@ -875,6 +875,23 @@ class NativeLsp(unittest.TestCase):
                 ("import std.mem.vec;\ni64 inspect(&Vec<i64> data) { return data.len(); }\ni64 main() {\n"
                  " Vec<i64> data = Vec<i64>.new();\n Task<i64> t = launch inspect(&data);\n"
                  " i64 n = inspect(data);\n return wait t + n;\n}\n", []),
+                # A plain call names no overload, so a by-value overload still counts as a move.
+                ("import std.mem.vec;\ni64 consume(Vec<i64> value) { i64 n = value.len(); value.drop(); return n; }\n"
+                 "i64 consume(&Vec<i64> value) { return value.len(); }\ni64 inspect(&Vec<i64> data) { return data.len(); }\n"
+                 "i64 main() {\n Vec<i64> data = Vec<i64>.new();\n Task<i64> t = launch inspect(&data);\n"
+                 " i64 n = consume(data);\n return wait t + n;\n}\n",
+                 [("cannot move 'data' because it is borrowed", 7)]),
+                # A `&mut` parameter borrows a plain argument mutably.
+                ("import std.mem.vec;\ni64 inspect(&Vec<i64> data) { return data.len(); }\n"
+                 "void mutate(&mut Vec<i64> data) { data.push(1); }\ni64 main() {\n Vec<i64> data = Vec<i64>.new();\n"
+                 " Task<i64> t = launch inspect(&data);\n mutate(data);\n return wait t;\n}\n",
+                 [("cannot borrow 'data' as mutable because it is already borrowed as shared", 6)]),
+                # A method's `&T` parameter borrows a plain argument too.
+                ("import std.mem.vec;\nstruct Reader { i64 base; }\nimpl Reader {\n"
+                 " i64 read(&self, &Vec<i64> data) { return self.base + data.len(); }\n}\n"
+                 "i64 inspect(&Vec<i64> data) { return data.len(); }\ni64 main() {\n Reader r;\n r.base = 1;\n"
+                 " Vec<i64> data = Vec<i64>.new();\n Task<i64> t = launch inspect(&data);\n"
+                 " i64 n = r.read(data);\n return wait t + n;\n}\n", []),
                 # A method's lock guard is checked too.
                 ("import std.sync;\nvoid consume(Mutex<i64> _m) { }\nstruct Runner { i64 n; }\nimpl Runner {\n"
                  " void go(&self) {\n  Mutex<i64> state = Mutex<i64>.new(1);\n"
