@@ -982,6 +982,13 @@ class NativeLsp(unittest.TestCase):
                  " lock state as value { match value {\n  Full(text): { { i64 text = 0; }\n"
                  "   let moved = text; },\n  Empty: {} }; }\n return 0;\n}\n",
                  [("cannot move 'text' out of its lock block: the shared value still owns it; clone it instead", 8)]),
+                # A by-value method consumes a locked payload.
+                ("import std.sync;\nimport std.string;\nenum Bin { Full(String); Empty; }\n"
+                 "void eat(String s) { s.drop(); }\nimpl String { void consume(self) { eat(self); } }\ni64 main() {\n"
+                 " String s = String.from_str(\"a\");\n shared Bin state = Bin.Full(move s);\n"
+                 " lock state as value { match value {\n  Full(payload): payload.consume(),\n"
+                 "  Empty: {} }; }\n return 0;\n}\n",
+                 [("cannot move 'payload' out of its lock block: the shared value still owns it; clone it instead", 9)]),
                 # Writing through an index changes a value a task borrows.
                 ("import std.mem.vec;\ni64 inspect(&Vec<i64> data) { return data.len(); }\ni64 main() {\n"
                  " Vec<i64> data = Vec<i64>.new();\n data.push(1);\n Task<i64> t = launch inspect(&data);\n"

@@ -1050,11 +1050,15 @@ impl MoveChecker {
         var_types: &FxHashMap<String, ast::Type>,
     ) -> bool {
         // A lock block's value is `(*__lock_N__name)`, which has no root
-        // local of its own.
-        let ty = match expr_root_and_path(receiver) {
-            Some((root, path)) => self.get_field_type(&root, &path, var_types),
-            None => self.locked_place(receiver, var_types).map(|(_, ty)| ty),
-        };
+        // local of its own, and a payload bound from it has a type only in
+        // `locked_bindings`.
+        let ty = self
+            .locked_place(receiver, var_types)
+            .map(|(_, ty)| ty)
+            .or_else(|| {
+                let (root, path) = expr_root_and_path(receiver)?;
+                self.get_field_type(&root, &path, var_types)
+            });
         let Some(ty) = ty else {
             return false;
         };
@@ -2696,5 +2700,79 @@ fn index_element_type(ty: &ast::Type) -> Option<ast::Type> {
             _ => None,
         },
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        lexer, parser::Parser, semantic::typeck::TypeChecker, symbol_table::CompilerSymbolTable,
+    };
+
+    /// Stand-ins for std.sync's Mutex and Guard, which `shared` and `lock`
+    /// lower to, and an owned payload type.
+    const PRELUDE: &str = "trait Drop { void drop(*self); }\n\
+        struct Text { i64 len; }\n\
+        impl Drop for Text { void drop(*self) {} }\n\
+        impl Text { void consume(self) {} }\n\
+        void eat(Text text) {}\n\
+        Text fresh() { Text text; return text; }\n\
+        struct Mutex<T> { T value; }\n\
+        impl<T> Mutex<T> {\n\
+          Mutex<T> new(T value) { Mutex<T> m; m.value = move value; return m; }\n\
+          Guard<T> lock(&self) { Mutex<T>* owner = self; Guard<T> g; g.owner = owner; return g; }\n\
+        }\n\
+        struct Guard<T> { Mutex<T>* owner; }\n\
+        impl<T> Guard<T> { T* get_ptr(&self) { return &self.owner.value; } }\n\
+        enum Bin { Full(Text); Empty; }\n";
+
+    /// Type and move errors for `arms`, the arms of a match on a locked
+    /// `Bin`. The type checker reports some locked moves itself.
+    fn locked_match_errors(arms: &str) -> Vec<String> {
+        let source = format!(
+            "{PRELUDE}i64 main() {{\n Text text; Bin initial = Bin.Full(move text);\n\
+             shared Bin state = move initial;\n lock state as value {{ match value {{ {arms} }}; }}\n\
+             return 0;\n}}\n"
+        );
+        let tokens = lexer::lex(&source).expect("probe should lex");
+        let (mut program, errors) = Parser::new(tokens).parse_program();
+        assert!(errors.is_empty(), "probe should parse: {errors:?}");
+        TypeChecker::resolve_type_aliases_in_program(&mut program);
+        let mut checker = TypeChecker::new();
+        let (type_errors, _) =
+            checker.check_program_with_table(&program, &mut CompilerSymbolTable::new());
+        let inferred_lets = checker.take_inferred_lets();
+        crate::semantic::typeck::populate_inferred_let_types(&mut program, &inferred_lets);
+        let moves = super::analyze_program_with_imports(&program, &[]).errors;
+        type_errors
+            .into_iter()
+            .map(|error| error.message)
+            .chain(moves.into_iter().map(|error| error.message))
+            .collect()
+    }
+
+    #[test]
+    fn a_locked_payload_cannot_leave_its_lock() {
+        let moved = crate::diagnostics::messages::move_out_of_lock("payload");
+        for arms in [
+            "Full(payload): eat(payload), Empty: {}",
+            "Full(payload): payload.consume(), Empty: {}",
+            "Full(payload): { { i64 payload = 0; } eat(payload); }, Empty: {}",
+            "Full(payload): payload, Empty: fresh()",
+        ] {
+            let errors = locked_match_errors(arms);
+            assert!(errors.contains(&moved), "{arms}: {errors:?}");
+        }
+    }
+
+    #[test]
+    fn a_nested_binding_shadows_a_locked_payload() {
+        for arms in [
+            "Full(payload): { i64 seen = match 0 { payload: payload }; }, Empty: {}",
+            "Full(payload): { i64 payload = 1; i64 seen = payload; }, Empty: {}",
+        ] {
+            let errors = locked_match_errors(arms);
+            assert!(errors.is_empty(), "{arms}: {errors:?}");
+        }
     }
 }
