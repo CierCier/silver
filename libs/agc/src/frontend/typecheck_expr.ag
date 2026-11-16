@@ -59,6 +59,20 @@ impl TypeEnv {
         return move env;
     }
 
+    /// Returns a copy for a nested scope. `insert` replaces a binding in place,
+    /// so a scope's own declarations must not reach the enclosing environment.
+    TypeEnv child(TypeEnv* self) {
+        TypeEnv env = TypeEnv.new();
+        env.expression_depth = self.expression_depth;
+        env.expected_return = self.expected_return;
+        i64 i = 0;
+        while (i < self.locals.len()) {
+            env.locals.push(self.locals.get(i));
+            i += 1;
+        }
+        return move env;
+    }
+
     /// Binds `name_id` to `type_id`, replacing an existing binding.
     void insert(TypeEnv* self, u32 name_id, u32 type_id) {
         i64 i = 0;
@@ -2564,14 +2578,7 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         u32 block_start = expr.inner0;
         u32 block_count = expr.inner1;
         u32 result_expr = expr.aux;
-        TypeEnv block_env = TypeEnv.new();
-        block_env.expression_depth = env.expression_depth;
-        block_env.expected_return = env.expected_return;
-        i64 local_index = 0;
-        while (local_index < env.locals.len()) {
-            block_env.locals.push(env.locals.get(local_index));
-            local_index += 1;
-        }
+        TypeEnv block_env = env.child();
         // Its locals shadow a locked name only inside it, as in a statement block.
         i64 locked_mark = pool.locked_bindings.len();
         i64 stmt_index = 0;
@@ -2682,15 +2689,7 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
         i64 arm_index = 0;
         while (arm_index < (i64)expr.aux) {
             MatchArm* arm = pool.get_arm(expr.inner1 + (u32)arm_index);
-            TypeEnv arm_env = TypeEnv.new();
-            arm_env.expression_depth = env.expression_depth;
-            arm_env.expected_return = env.expected_return;
-            i64 local_index = 0;
-            while (local_index < env.locals.len()) {
-                LocalVar* local = env.locals.get_ptr(local_index);
-                arm_env.insert(local.name_id, local.type_id);
-                local_index += 1;
-            }
+            TypeEnv arm_env = env.child();
             str arm_enum = scrut_enum;
             if (arm.pattern == MatchPatternKind.Variant) {
                 str variant = symbols.names.get(arm.variant_name_id);
@@ -3738,15 +3737,18 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
         if (typecheck_lock_on_unshared(pool, types, symbols, root, env, start, count, diagnostics, ok)) {
             return;
         }
-        // A local declared in the block shadows a locked name only inside it.
+        // A local declared in the block shadows an outer name, locked or not,
+        // only inside it.
+        TypeEnv block_env = env.child();
         i64 locked_mark = pool.locked_bindings.len();
         i64 i = 0;
         while (i < (i64)count) {
             u32 s_id = pool.block_stmts.get((i64)start + i);
-            typecheck_statement(pool, types, symbols, root, env, expected_return, s_id, diagnostics, ok);
+            typecheck_statement(pool, types, symbols, root, &block_env, expected_return, s_id, diagnostics, ok);
             i += 1;
         }
         while (pool.locked_bindings.len() > locked_mark) { pool.locked_bindings.pop(); }
+        block_env.locals.drop();
     }
 }
 
