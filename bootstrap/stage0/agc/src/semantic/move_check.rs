@@ -426,9 +426,10 @@ struct Facts {
     opaque_owners: FxHashSet<String>,
     /// Base type names that implement `Drop`.
     drop_owners: FxHashSet<String>,
-    /// By-value (`InstanceValue`) overloads of each (owner, method): explicit
-    /// parameter count and whether the last parameter is variadic. A borrowing
-    /// overload of another arity must not make its calls consume.
+    /// By-value (`InstanceValue`) overloads of each (owner, method): the
+    /// fewest explicit arguments it takes and whether it takes more, through a
+    /// bare `...` or a typed rest parameter. A borrowing overload of another
+    /// arity must not make its calls consume.
     value_receivers: FxHashMap<(String, String), Vec<(usize, bool)>>,
     /// (function/method name, param index) pairs with a value (non-view) param.
     value_args: FxHashSet<(String, usize)>,
@@ -548,12 +549,14 @@ impl Facts {
                 for member in &imp.items {
                     if let ast::ImplItemKind::Function(func) = member {
                         if func.method_kind == ast::MethodKind::InstanceValue {
-                            let variadic = func.is_variadic
-                                || func.parameters.last().is_some_and(|param| param.is_variadic);
+                            // A typed rest parameter takes zero or more
+                            // arguments; a bare `...` adds no parameter.
+                            let rest = func.parameters.last().is_some_and(|param| param.is_variadic);
+                            let fewest = func.parameters.len().saturating_sub(1 + usize::from(rest));
                             self.value_receivers
                                 .entry((owner.clone(), func.name.name.clone()))
                                 .or_default()
-                                .push((func.parameters.len().saturating_sub(1), variadic));
+                                .push((fewest, rest || func.is_variadic));
                         }
                         let first_arg = usize::from(func.method_kind != ast::MethodKind::Static);
                         for (i, param) in func.parameters.iter().enumerate().skip(first_arg) {
@@ -1078,8 +1081,8 @@ impl MoveChecker {
             .value_receivers
             .get(&(Facts::owner_key(&ty), method.to_string()))
             .is_some_and(|overloads| {
-                overloads.iter().any(|&(count, variadic)| {
-                    argument_count == count || (variadic && argument_count + 1 >= count)
+                overloads.iter().any(|&(fewest, more)| {
+                    argument_count == fewest || (more && argument_count > fewest)
                 })
             })
     }
@@ -2727,8 +2730,8 @@ mod tests {
     };
 
     /// Stand-ins for std.sync's Mutex and Guard, which `shared` and `lock`
-    /// lower to, and an owned payload type with a borrowing `inspect()` and a
-    /// consuming `inspect(tag)`.
+    /// lower to, and an owned payload type with borrowing `inspect()` and
+    /// `peek()` beside consuming overloads that take more arguments.
     const PRELUDE: &str = "trait Drop { void drop(*self); }\n\
         struct Text { i64 len; }\n\
         impl Drop for Text { void drop(*self) {} }\n\
@@ -2736,6 +2739,9 @@ mod tests {
           void consume(self) {}\n\
           i64 inspect(&self) { return self.len; }\n\
           i64 inspect(self, i64 tag) { return tag; }\n\
+          i64 peek(&self) { return self.len; }\n\
+          void peek(self, i64 tag, ...) {}\n\
+          void absorb(self, i64... rest) {}\n\
         }\n\
         void eat(Text text) {}\n\
         Text fresh() { Text text; return text; }\n\
@@ -2816,10 +2822,21 @@ mod tests {
     fn a_borrowing_overload_keeps_its_receiver() {
         let errors = errors_in("Text text; i64 a = text.inspect(); i64 b = text.inspect();");
         assert!(errors.types.is_empty() && errors.moves.is_empty(), "{errors:?}");
-        let errors = errors_in("Text text; i64 a = text.inspect(1); i64 b = text.inspect();");
-        assert!(
-            errors.moves.iter().any(|message| message.contains("moved value 'text'")),
-            "{errors:?}"
-        );
+        // A bare `...` adds no parameter, so `peek()` fits only the borrow.
+        let errors = errors_in("Text text; i64 a = text.peek(); i64 b = text.peek();");
+        assert!(errors.types.is_empty() && errors.moves.is_empty(), "{errors:?}");
+        for consumed in [
+            "text.inspect(1);",
+            "text.peek(1);",
+            "text.peek(1, 2, 3);",
+            "text.absorb();",
+            "text.absorb(1, 2);",
+        ] {
+            let errors = errors_in(&format!("Text text; {consumed} i64 b = text.inspect();"));
+            assert!(
+                errors.moves.iter().any(|message| message.contains("moved value 'text'")),
+                "{consumed}: {errors:?}"
+            );
+        }
     }
 }
