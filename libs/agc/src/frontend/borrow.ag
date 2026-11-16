@@ -2430,11 +2430,15 @@ void borrow_check_task_loan_use(BorrowAnalyzer* analyzer, SyntaxTree* tree,
         && last.next_sibling != (SyntaxNode*)0
         && last.next_sibling.token_kind == TokenKind.Semicolon;
     if (!returned && !borrow_is_whole_call_argument(node, last)) { return; }
-    // A reference parameter borrows the argument for the call instead.
+    // A reference parameter borrows the argument for the call instead. The
+    // scan already checks a shared use against the task's loan.
     bool writes = false;
-    if (!returned && borrow_argument_is_borrowed(tree.root, node, &writes)) {
-        analyzer.report_conflict(path.to_str(), node.span, analyzer.loans.get_ptr(loaned),
-                                 writes ? LoanKind.Mutable : LoanKind.Shared);
+    str receiver_type = borrow_call_receiver_type(tree, symbols, bindings, leaves, node);
+    if (!returned && borrow_argument_is_borrowed(tree.root, symbols, receiver_type, node, &writes)) {
+        if (writes) {
+            analyzer.report_conflict(path.to_str(), node.span, analyzer.loans.get_ptr(loaned),
+                                     LoanKind.Mutable);
+        }
         return;
     }
     Binding* binding = visible_binding(bindings, node.text, node);
@@ -2476,12 +2480,59 @@ bool borrow_candidate_borrows(SyntaxNode* parameter_list, i64 arity, i64 index, 
     return borrows;
 }
 
+/// Folds the methods named `name` of impl or trait `item` into a borrow
+/// verdict, as `borrow_candidate_borrows` does for one candidate.
+bool borrow_methods_borrow(SyntaxNode* item, str name, i64 arity, i64 index, bool* matched,
+                           bool* writes) {
+    Vec<SyntaxNode*> methods = Vec<SyntaxNode*>.new();
+    collect_method_bodies(item, &methods);
+    bool borrows = true;
+    i64 m = 0;
+    while (borrows && m + 1 < methods.len()) {
+        SyntaxNode* method = binding_previous_sibling(methods.get(m));
+        if (scoped_is_token(method, TokenKind.Identifier) && strcmp(method.text, name) == 0) {
+            borrows = borrow_candidate_borrows(methods.get(m), arity, index, matched, writes);
+        }
+        m += 2;
+    }
+    methods.drop();
+    return borrows;
+}
+
+/// The type name of the receiver of the `.name(...)` call that `argument`
+/// is passed to, or "" when it is not a method call or the type is unknown.
+str borrow_call_receiver_type(SyntaxTree* tree, SymbolTable* symbols, Vec<Binding>* bindings,
+                              Vec<SyntaxNode*>* leaves, SyntaxNode* argument) {
+    i64 index = 0;
+    SyntaxNode* callee = borrow_call_for_argument(argument, &index);
+    if (callee == (SyntaxNode*)0 || !scoped_is_token(binding_previous_sibling(callee), TokenKind.Dot)) {
+        return "";
+    }
+    i64 method_index = 0;
+    while (method_index < leaves.len() && leaves.get(method_index) != callee) { method_index += 1; }
+    if (method_index < 2 || method_index >= leaves.len()
+        || leaves.get(method_index - 2).token_kind != TokenKind.Identifier) {
+        return "";
+    }
+    i64 receiver_root = method_index - 2;
+    while (receiver_root >= 2 && leaves.get(receiver_root - 1).token_kind == TokenKind.Dot
+        && leaves.get(receiver_root - 2).token_kind == TokenKind.Identifier) {
+        receiver_root -= 2;
+    }
+    SyntaxNode* receiver = leaves.get(receiver_root);
+    Binding* visible = visible_binding(bindings, receiver.text, receiver);
+    return borrow_local_receiver_type(tree, symbols, bindings, visible, receiver.text, leaves,
+                                      receiver_root, method_index);
+}
+
 /// True when `argument` goes to a `&T`/`&mut T` parameter, which borrows it
-/// rather than moving it; `*writes` is set when any such candidate takes
-/// `&mut T`. Type checking records no overload choice for a plain call and
-/// this pass knows no receiver types, so every function, or for `.name(...)`
-/// every impl or trait method, of that name and arity must borrow there.
-bool borrow_argument_is_borrowed(SyntaxNode* root, SyntaxNode* argument, bool* writes) {
+/// rather than moving it; `*writes` is set when that parameter is `&mut T`.
+/// A plain call is judged by the function type checking calls. Without that
+/// choice, or for a `.name(...)` call, every candidate must borrow there:
+/// the functions of that name and arity, or the methods of the receiver's
+/// type (any impl when the type is unknown), then trait methods.
+bool borrow_argument_is_borrowed(SyntaxNode* root, SymbolTable* symbols, str receiver_type,
+                                 SyntaxNode* argument, bool* writes) {
     i64 index = 0;
     SyntaxNode* callee = borrow_call_for_argument(argument, &index);
     if (callee == (SyntaxNode*)0) { return false; }
@@ -2495,6 +2546,18 @@ bool borrow_argument_is_borrowed(SyntaxNode* root, SyntaxNode* argument, bool* w
         part = part.next_sibling;
     }
     bool matched = false;
+    // Type checking calls the first function of that name and arity unless
+    // the name is overloaded, and records the overload it chose.
+    SyntaxNode* selected = (SyntaxNode*)0;
+    if (!method) {
+        selected = typecheck_has_free_overloads(&symbols.types, root, callee.text)
+            ? symbols.selected_callee(callee.span)
+            : find_function_by_name_and_arity(root, callee.text, arity);
+    }
+    if (selected != (SyntaxNode*)0) {
+        borrow_candidate_borrows(binding_function_parameters(selected), arity, index, &matched, writes);
+        return matched;
+    }
     SyntaxNode* item = root.first_child;
     while (item != (SyntaxNode*)0) {
         if (!method && launch_callee_candidate(item, (SyntaxNode*)0, callee.text)
@@ -2502,20 +2565,21 @@ bool borrow_argument_is_borrowed(SyntaxNode* root, SyntaxNode* argument, bool* w
                                          &matched, writes)) {
             return false;
         }
-        if (method && (item.kind == NodeKind.Impl || item.kind == NodeKind.Trait)) {
-            Vec<SyntaxNode*> methods = Vec<SyntaxNode*>.new();
-            collect_method_bodies(item, &methods);
-            i64 m = 0;
-            while (m + 1 < methods.len()) {
-                SyntaxNode* name = binding_previous_sibling(methods.get(m));
-                if (scoped_is_token(name, TokenKind.Identifier) && strcmp(name.text, callee.text) == 0
-                    && !borrow_candidate_borrows(methods.get(m), arity, index, &matched, writes)) {
-                    methods.drop();
-                    return false;
-                }
-                m += 2;
-            }
-            methods.drop();
+        SyntaxNode* target = item.kind == NodeKind.Impl ? impl_target_identifier(item) : (SyntaxNode*)0;
+        if (method && item.kind == NodeKind.Impl
+            && (strlen(receiver_type) == 0
+                || (target != (SyntaxNode*)0 && strcmp(target.text, receiver_type) == 0))
+            && !borrow_methods_borrow(item, callee.text, arity, index, &matched, writes)) {
+            return false;
+        }
+        item = item.next_sibling;
+    }
+    // A method the receiver's impls lack comes from a trait's default body.
+    item = root.first_child;
+    while (method && !matched && item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Trait
+            && !borrow_methods_borrow(item, callee.text, arity, index, &matched, writes)) {
+            return false;
         }
         item = item.next_sibling;
     }

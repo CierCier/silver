@@ -719,6 +719,18 @@ u32 typecheck_overload_symbol_id(TypeTable* types, Interner* names, str name,
     return symbol_id;
 }
 
+/// True when type checking inferred the type of every argument of `call`.
+bool typecheck_arguments_known(AstPool* pool, AstExpr* call) {
+    i64 i = 0;
+    while (i < (i64)call.aux) {
+        if (pool.get_expr(pool.args.get((i64)call.inner1 + i)).inferred_type == TYPE_UNKNOWN) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
 /// Returns the non-generic overload of `name` whose symbol is `symbol_id`,
 /// or null.
 SyntaxNode* typecheck_overload_by_symbol(TypeTable* types, Interner* names, SyntaxNode* root,
@@ -2414,18 +2426,6 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
     } else if (expr.kind == ExprKind.Launch) {
         u32 result_type = infer_expr(pool, types, symbols, root, env,
                                      expr.inner0, diagnostics, ok);
-        // The borrow and Send passes judge the launch by this overload. They
-        // read the source tree, which has no expanded launches, and an
-        // expansion's spans are offsets into its own text, so they could
-        // collide with a source callee's key.
-        AstExpr* call = pool.get_expr(expr.inner0);
-        AstExpr* callee = pool.get_expr(call.inner0);
-        if (call.kind == ExprKind.Call && call.resolved_callee_id != 0
-            && callee.kind == ExprKind.Var && expr.aux == 0) {
-            SyntaxNode* selected = typecheck_overload_by_symbol(types, &symbols.names, root,
-                symbols.names.get(callee.aux), call.resolved_callee_id - 1);
-            if (selected != (SyntaxNode*)0) { symbols.select_callee(callee.span, selected); }
-        }
         if (result_type != TYPE_UNKNOWN) {
             Vec<u32> task_args = Vec<u32>.new();
             task_args.push(result_type);
@@ -2899,6 +2899,12 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 *ok = false;
             } else if (callee_fn != (SyntaxNode*)0) {
                 if (overloaded) { expr.resolved_callee_id = resolved_symbol_id + 1; }
+                // The borrow and Send passes judge the call by this overload.
+                // Initializer re-checks with partial locals can choose another,
+                // so only a choice made from known argument types counts.
+                if (overloaded && typecheck_arguments_known(pool, expr)) {
+                    symbols.select_callee(callee.span, callee_fn);
+                }
                 u32 ret_type = function_return_type_id(types, callee_fn);
                 inferred = ret_type;
 

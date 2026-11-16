@@ -33,8 +33,10 @@ struct Symbol {
     bool c_variadic;
 }
 
-/// The overload type checking chose for the launched call whose callee name
-/// starts at `start` in `file`, so later passes judge it by its real callee.
+/// The overload type checking chose for the overloaded call whose callee
+/// name starts at `start` in `file`, so later passes judge it by its real
+/// callee. A null `function` means calls at that key chose differently: a
+/// macro expansion's spans are offsets into its own text and can collide.
 struct SelectedCallee {
     i64 file;
     i64 start;
@@ -99,8 +101,17 @@ impl SymbolTable {
     }
 
     /// Records `function` as the overload chosen for the callee name at `span`.
+    /// A different choice already recorded there makes the key unknown.
     void select_callee(SymbolTable* self, Span span, SyntaxNode* function) {
-        if (self.selected_callee(span) != (SyntaxNode*)0) { return; }
+        i64 i = 0;
+        while (i < self.selected_callees.len()) {
+            SelectedCallee* existing = self.selected_callees.get_ptr(i);
+            if (existing.file == span.file && existing.start == span.start) {
+                if (existing.function != function) { existing.function = (SyntaxNode*)0; }
+                return;
+            }
+            i += 1;
+        }
         SelectedCallee selected;
         selected.file = span.file;
         selected.start = span.start;
@@ -109,7 +120,8 @@ impl SymbolTable {
     }
 
     /// Returns the overload chosen for the callee name at `span`, or null
-    /// when type checking chose none (no overloads, or not checked).
+    /// when type checking chose none (no overloads, not checked, or calls
+    /// sharing the key chose differently).
     SyntaxNode* selected_callee(SymbolTable* self, Span span) {
         i64 i = 0;
         while (i < self.selected_callees.len()) {

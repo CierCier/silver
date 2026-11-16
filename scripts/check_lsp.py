@@ -899,6 +899,18 @@ class NativeLsp(unittest.TestCase):
                  "i64 inspect(&Vec<i64> data) { return data.len(); }\ni64 main() {\n Reader r;\n r.base = 1;\n"
                  " Vec<i64> data = Vec<i64>.new();\n Task<i64> t = launch inspect(&data);\n"
                  " i64 n = r.read(data);\n return wait t + n;\n}\n", []),
+                # The call is judged by the function type checking calls, the first `&` one here.
+                ("import std.mem.vec;\ni64 peek(&Vec<i64> data) { return data.len(); }\n"
+                 "i64 inspect(&Vec<i64> _data) { return 1; }\ni64 inspect(&mut Vec<i64> _data) { return 2; }\n"
+                 "i64 main() {\n Vec<i64> data = Vec<i64>.new();\n Task<i64> t = launch peek(&data);\n"
+                 " i64 n = inspect(data);\n return wait t + n;\n}\n", []),
+                # A method is judged by its receiver's type, not another type's method of that name.
+                ("import std.mem.vec;\nstruct Reader { i64 base; }\nstruct Taker { i64 base; }\nimpl Reader {\n"
+                 " i64 read(&self, &Vec<i64> data) { return self.base + data.len(); }\n}\nimpl Taker {\n"
+                 " i64 read(&self, Vec<i64> data) { i64 n = data.len(); data.drop(); return n; }\n}\n"
+                 "i64 inspect(&Vec<i64> data) { return data.len(); }\ni64 main() {\n Reader r;\n r.base = 1;\n"
+                 " Vec<i64> data = Vec<i64>.new();\n Task<i64> t = launch inspect(&data);\n"
+                 " i64 n = r.read(data);\n return wait t + n;\n}\n", []),
                 # A method's lock guard is checked too.
                 ("import std.sync;\nvoid consume(Mutex<i64> _m) { }\nstruct Runner { i64 n; }\nimpl Runner {\n"
                  " void go(&self) {\n  Mutex<i64> state = Mutex<i64>.new(1);\n"
