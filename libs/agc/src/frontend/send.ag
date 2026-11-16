@@ -48,9 +48,10 @@ Binding* send_argument_binding(Vec<Binding>* bindings, LaunchArgument* argument)
 }
 
 /// The type `binding` holds: as declared, or for a `let`, its initializer's
-/// inferred type, whose name `*base` owns. Unknown when neither is known.
+/// inferred type, whose name `*base` owns. With `pointee`, an inferred
+/// reference yields what it points to. Unknown when neither is known.
 TypeProjection send_binding_value_type(SyntaxNode* root, SymbolTable* symbols, Binding* binding,
-                                       String* base) {
+                                       String* base, bool pointee) {
     TypeProjection declared = binding_declared_type(binding.type_start, binding.type_end);
     if (declared.kind != ProjectionTypeKind.Unknown || binding.kind != BindingKind.Let) {
         return declared;
@@ -58,6 +59,8 @@ TypeProjection send_binding_value_type(SyntaxNode* root, SymbolTable* symbols, B
     TypeEnv env = TypeEnv.new();
     u32 type_id = typecheck_initializer_type(symbols, &symbols.types, root, binding.name_node, &env);
     if (type_id == TYPE_UNKNOWN) { return declared; }
+    TypeEntry* entry = symbols.types.get(type_id);
+    if (pointee && entry.kind == TypeKind.Reference) { type_id = entry.inner; }
     return send_project_rendered(symbols.types.type_name(type_id), base);
 }
 
@@ -745,7 +748,7 @@ void check_borrowed_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root, Sy
             pointee = send_reference_pointee(source, &slice);
         } else {
             slice = false;
-            pointee = send_binding_value_type(root, symbols, source, &inferred);
+            pointee = send_binding_value_type(root, symbols, source, &inferred, false);
         }
         if ((*argument).kind == ProjectionExpressionKind.Address
             && (*argument).name_node != (SyntaxNode*)0
@@ -834,7 +837,7 @@ void check_launch_argument(SendAnalyzer* analyzer, SyntaxNode* root, SymbolTable
         bool slice = false;
         path_type = passed.kind == ProjectionTypeKind.Reference
             ? send_reference_pointee(binding, &slice)
-            : send_binding_value_type(root, symbols, binding, &inferred);
+            : send_binding_value_type(root, symbols, binding, &inferred, true);
         // `&self` spells no type here, so its paths are left unjudged.
         if (path_type.kind == ProjectionTypeKind.Unknown) {
             inferred.drop();
