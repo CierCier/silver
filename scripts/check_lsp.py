@@ -874,7 +874,12 @@ class NativeLsp(unittest.TestCase):
                 # Passing a borrowed local to a `&T` parameter reads it; it does not move it.
                 ("import std.mem.vec;\ni64 inspect(&Vec<i64> data) { return data.len(); }\ni64 main() {\n"
                  " Vec<i64> data = Vec<i64>.new();\n Task<i64> t = launch inspect(&data);\n"
-                 " i64 n = inspect(data);\n return wait t + n;\n}\n", [])], 24):
+                 " i64 n = inspect(data);\n return wait t + n;\n}\n", []),
+                # A method's lock guard is checked too.
+                ("import std.sync;\nvoid consume(Mutex<i64> _m) { }\nstruct Runner { i64 n; }\nimpl Runner {\n"
+                 " void go(&self) {\n  Mutex<i64> state = Mutex<i64>.new(1);\n"
+                 "  lock state as value { consume(move state); value = 2; }\n }\n}\n",
+                 [("cannot move 'state' because it is borrowed", 6)])], 24):
             session.send("textDocument/didChange", {"textDocument": {"uri": alias_uri, "version": version},
                 "contentChanges": [{"text": source}]})
             errors = [(item["message"].split("\n")[0].split(" (help:")[0], item["range"]["start"]["line"])

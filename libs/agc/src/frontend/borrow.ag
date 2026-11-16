@@ -2465,12 +2465,17 @@ bool borrow_argument_is_borrowed(SyntaxNode* root, SymbolTable* symbols, SyntaxN
                                    arity, index) != (SyntaxNode*)0;
 }
 
-/// True when a `launch` token appears under `node`.
-bool borrow_contains_launch(SyntaxNode* node) {
-    if (scoped_is_token(node, TokenKind.Launch)) { return true; }
+/// True when a `launch` or a lock block's guard appears under `node`: the
+/// task and lock-guard loans a method body needs checked.
+bool borrow_has_task_or_lock(SyntaxNode* node) {
+    if (scoped_is_token(node, TokenKind.Launch)
+        || (node.kind == NodeKind.Token && node.token_kind == TokenKind.Identifier
+            && sugar_is_lock_guard(node.text))) {
+        return true;
+    }
     SyntaxNode* child = node.first_child;
     while (child != (SyntaxNode*)0) {
-        if (borrow_contains_launch(child)) { return true; }
+        if (borrow_has_task_or_lock(child)) { return true; }
         child = child.next_sibling;
     }
     return false;
@@ -3018,13 +3023,13 @@ bool check_borrows(SyntaxTree* tree, SymbolTable* symbols, DiagnosticBag* diagno
                 ok = false;
             }
         } else if (item.kind == NodeKind.Impl || item.kind == NodeKind.Trait) {
-            // Methods are not borrow-checked yet, except for the task loans
-            // of a method that launches.
+            // Methods are not borrow-checked yet, except for the task and
+            // lock-guard loans of a method that launches or locks.
             Vec<SyntaxNode*> methods = Vec<SyntaxNode*>.new();
             collect_method_bodies(item, &methods);
             i64 m = 0;
             while (m + 1 < methods.len()) {
-                if (borrow_contains_launch(methods.get(m + 1))) {
+                if (borrow_has_task_or_lock(methods.get(m + 1))) {
                     BorrowAnalyzer analyzer = BorrowAnalyzer.new(diagnostics);
                     scan_borrows(&analyzer, tree, symbols, (SyntaxNode*)0, methods.get(m),
                         methods.get(m + 1), cfg, &receiver_table, &return_origins,
