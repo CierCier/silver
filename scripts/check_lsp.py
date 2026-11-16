@@ -965,6 +965,17 @@ class NativeLsp(unittest.TestCase):
                  " lock state as value { match value {\n  Full(text): { i64 _z = @scratch(); consume(text); },\n"
                  "  Empty: consume(String.new()) }; }\n return 0;\n}\n",
                  [("cannot move 'text' out of its lock block: the shared value still owns it; clone it instead", 9)]),
+                # A nested match's own binding is not the locked payload it shadows.
+                ("import std.sync;\nimport std.string;\nenum Bin { Full(String); Empty; }\nvoid consume(String s) { s.drop(); }\n"
+                 "i64 main() {\n String s = String.from_str(\"a\");\n shared Bin state = Bin.Full(move s);\n"
+                 " lock state as value { match value {\n  Full(text): { String c = String.from_str(\"c\");"
+                 " Bin other = Bin.Full(move c);\n   String r = match other { Full(text): text, Empty: String.new() };"
+                 " r.drop(); },\n  Empty: consume(String.new()) }; }\n return 0;\n}\n", []),
+                # An inner integer match's binding shadows the locked payload.
+                ("import std.sync;\nimport std.string;\nenum Bin { Full(String); Empty; }\ni64 main() {\n"
+                 " String s = String.from_str(\"a\");\n shared Bin state = Bin.Full(move s);\n"
+                 " lock state as value { match value {\n  Full(payload): match 0 { payload: payload },\n"
+                 "  Empty: 0 }; }\n return 0;\n}\n", []),
                 # A reference to a shared value borrows it; its initializer is not a value to wrap.
                 ("import std.sync;\ni64 main() {\n shared i64 m = 0;\n &shared i64 r = &m;\n lock r { r += 1; }\n"
                  " return 0;\n}\n", [])], 24):

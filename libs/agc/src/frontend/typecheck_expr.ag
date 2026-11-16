@@ -1286,19 +1286,27 @@ bool typecheck_reject_locked_move(AstPool* pool, TypeTable* types, SymbolTable* 
                                   DiagnosticBag* diagnostics, bool* ok) {
     AstExpr* place = pool.get_expr(place_id);
     if (place.kind == ExprKind.ArrayLit || place.kind == ExprKind.Match) {
-        // Each arm's own locked payloads were checked with the arm.
+        // Each arm's own locked payloads were checked with the arm, so its
+        // bindings only shadow outer locked names here.
         bool reported = false;
         i64 i = 0;
         while (i < (i64)place.aux) {
-            u32 part = place.kind == ExprKind.ArrayLit
-                ? pool.args.get((i64)place.inner1 + 1 + i)
-                : pool.arms.get_ptr((i64)place.inner1 + i).value_id;
+            i64 locked_mark = pool.locked_bindings.len();
+            u32 part = 0;
+            if (place.kind == ExprKind.ArrayLit) {
+                part = pool.args.get((i64)place.inner1 + 1 + i);
+            } else {
+                MatchArm* arm = pool.get_arm(place.inner1 + (u32)i);
+                typecheck_push_arm_bindings(pool, arm, false);
+                part = arm.value_id;
+            }
             // A `move` part is rejected where the move is checked.
             if (part != 0 && pool.get_expr(part).kind != ExprKind.Move
                 && typecheck_reject_locked_move(pool, types, symbols, root, part,
                                                 diagnostics, ok)) {
                 reported = true;
             }
+            while (pool.locked_bindings.len() > locked_mark) { pool.locked_bindings.pop(); }
             i += 1;
         }
         return reported;

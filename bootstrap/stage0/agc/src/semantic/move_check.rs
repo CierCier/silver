@@ -1509,10 +1509,13 @@ impl MoveChecker {
                 }
                 return;
             }
-            // Each arm's own locked payloads were checked with the arm.
+            // Each arm's own locked payloads were checked with the arm, so
+            // its bindings only shadow outer locked names here.
             ast::ExpressionKind::Match { arms, .. } => {
                 for arm in arms {
+                    let saved = self.bind_locked_payloads(&arm.pattern, None);
                     self.reject_locked_move(&arm.body, var_types);
+                    self.locked_bindings = saved;
                 }
                 return;
             }
