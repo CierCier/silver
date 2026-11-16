@@ -411,12 +411,14 @@ fn place_from_expr(expr: &ast::Expression) -> Option<Place> {
 /// Moved-ness lattice per live variable: tracks status, move site and reason.
 type State = FxHashMap<String, VarState>;
 
-/// Scope entry: (name, previous state, previous type) so shadowing restores.
+/// Scope entry: (name, previous state, previous type, previous owner,
+/// previous locked type) so shadowing restores.
 type ScopeEntry = (
     String,
     Option<VarState>,
     Option<ast::Type>,
     Option<super::init_plan::OwnerLocalId>,
+    Option<ast::Type>,
 );
 /// Facts for move classification. TODO(Phase 5): centralize via `type_properties::{is_copy,needs_drop}`.
 #[derive(Clone, Debug, Default)]
@@ -1507,9 +1509,13 @@ impl MoveChecker {
                 }
                 return;
             }
-            ast::ExpressionKind::Match { arms, .. } => {
+            ast::ExpressionKind::Match { expression, arms } => {
+                // An arm's result may hold its own locked payloads.
+                let locked = self.locked_place(expression, var_types).map(|(_, ty)| ty);
                 for arm in arms {
+                    let saved = self.bind_locked_payloads(&arm.pattern, locked.as_ref());
                     self.reject_locked_move(&arm.body, var_types);
+                    self.locked_bindings = saved;
                 }
                 return;
             }
@@ -1576,7 +1582,7 @@ impl MoveChecker {
         var_types: &mut FxHashMap<String, ast::Type>,
     ) {
         let name = &identifier.name;
-        self.locked_bindings.remove(name);
+        let old_locked = self.locked_bindings.remove(name);
         if let Some(ty) = ty {
             let old_owner = self.owner_bindings.remove(name);
             let id = super::init_plan::OwnerLocalId {
@@ -1607,6 +1613,7 @@ impl MoveChecker {
                 old_state,
                 old_type,
                 old_owner,
+                old_locked,
             ));
         }
     }
@@ -1647,8 +1654,12 @@ impl MoveChecker {
         var_types: &mut FxHashMap<String, ast::Type>,
     ) {
         if let Some(scope) = scopes.pop() {
-            for (name, old_state, old_type, old_owner) in scope {
+            for (name, old_state, old_type, old_owner, old_locked) in scope {
                 self.owner_bindings.remove(&name);
+                self.locked_bindings.remove(&name);
+                if let Some(locked) = old_locked {
+                    self.locked_bindings.insert(name.clone(), locked);
+                }
                 if let Some(owner) = old_owner {
                     self.owner_bindings.insert(name.clone(), owner);
                 }
@@ -2510,12 +2521,13 @@ impl MoveChecker {
                             arm.pattern.span,
                         );
                     }
+                    // The guard sees the arm's locked payloads too.
+                    let saved = self.bind_locked_payloads(&arm.pattern, locked.as_ref());
                     if let Some(guard) = &arm.guard {
                         self.check_expr(guard, state, scopes, var_types);
                     }
                     let mut arm_state = state.clone();
                     let mut arm_scopes = scopes.clone();
-                    let saved = self.bind_locked_payloads(&arm.pattern, locked.as_ref());
                     self.check_expr(&arm.body, &mut arm_state, &mut arm_scopes, var_types);
                     self.locked_bindings = saved;
                     if !expression_terminates(&arm.body) {

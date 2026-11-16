@@ -1274,18 +1274,28 @@ bool typecheck_reject_locked_move(AstPool* pool, TypeTable* types, SymbolTable* 
                                   DiagnosticBag* diagnostics, bool* ok) {
     AstExpr* place = pool.get_expr(place_id);
     if (place.kind == ExprKind.ArrayLit || place.kind == ExprKind.Match) {
+        // An arm's result may hold its own locked payloads.
+        bool locked = place.kind == ExprKind.Match && place.inner0 != 0
+            && typecheck_reads_locked_value(pool, symbols, place.inner0);
         bool reported = false;
         i64 i = 0;
         while (i < (i64)place.aux) {
-            u32 part = place.kind == ExprKind.ArrayLit
-                ? pool.args.get((i64)place.inner1 + 1 + i)
-                : pool.arms.get_ptr((i64)place.inner1 + i).value_id;
+            i64 locked_mark = pool.locked_bindings.len();
+            u32 part = 0;
+            if (place.kind == ExprKind.ArrayLit) {
+                part = pool.args.get((i64)place.inner1 + 1 + i);
+            } else {
+                MatchArm* arm = pool.get_arm(place.inner1 + (u32)i);
+                typecheck_push_arm_bindings(pool, arm, locked);
+                part = arm.value_id;
+            }
             // A `move` part is rejected where the move is checked.
             if (part != 0 && pool.get_expr(part).kind != ExprKind.Move
                 && typecheck_reject_locked_move(pool, types, symbols, root, part,
                                                 diagnostics, ok)) {
                 reported = true;
             }
+            while (pool.locked_bindings.len() > locked_mark) { pool.locked_bindings.pop(); }
             i += 1;
         }
         return reported;
@@ -1321,12 +1331,13 @@ bool typecheck_reject_locked_move(AstPool* pool, TypeTable* types, SymbolTable* 
 }
 
 /// True when name `name_id` is a payload binding of a match arm on a lock
-/// block's value.
+/// block's value and no later local shadows it.
 bool typecheck_is_locked_binding(AstPool* pool, u32 name_id) {
-    i64 i = 0;
-    while (i < pool.locked_bindings.len()) {
-        if (pool.locked_bindings.get(i) == name_id) { return true; }
-        i += 1;
+    i64 i = pool.locked_bindings.len() - 1;
+    while (i >= 0) {
+        LockedName* entry = pool.locked_bindings.get_ptr(i);
+        if (entry.name_id == name_id) { return entry.locked; }
+        i -= 1;
     }
     return false;
 }
@@ -1338,9 +1349,24 @@ bool typecheck_reads_locked_value(AstPool* pool, SymbolTable* symbols, u32 id) {
     while ((base.kind == ExprKind.Field || base.kind == ExprKind.Index) && base.inner0 != 0) {
         base = pool.get_expr(base.inner0);
     }
+    if (base.kind == ExprKind.Var) { return typecheck_is_locked_binding(pool, base.aux); }
     if (base.kind != ExprKind.Unary || base.aux != (u32)TokenKind.Star || base.inner0 == 0) { return false; }
     AstExpr* pointer = pool.get_expr(base.inner0);
     return pointer.kind == ExprKind.Var && sugar_locked_name_start(symbols.names.get(pointer.aux)) >= 0;
+}
+
+/// Pushes the names `arm` binds onto `pool.locked_bindings`: locked when
+/// they are payloads of a locked scrutinee, and otherwise shadows of any
+/// outer locked name. The caller truncates them when the arm ends.
+void typecheck_push_arm_bindings(AstPool* pool, MatchArm* arm, bool locked) {
+    i64 bound = 0;
+    while (bound < (i64)arm.bindings_count) {
+        LockedName entry;
+        entry.name_id = pool.arm_bindings.get((i64)arm.bindings_start + bound);
+        entry.locked = locked && arm.pattern == MatchPatternKind.Variant;
+        pool.locked_bindings.push(entry);
+        bound += 1;
+    }
 }
 
 /// The payload binding that match arm `arm` moves out of its scrutinee: a
@@ -2739,13 +2765,8 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                     *ok = false;
                 }
             }
-            // The arm's payload bindings name storage a locked scrutinee owns.
             i64 locked_mark = pool.locked_bindings.len();
-            i64 bound = 0;
-            while (locked && arm.pattern == MatchPatternKind.Variant && bound < (i64)arm.bindings_count) {
-                pool.locked_bindings.push(pool.arm_bindings.get((i64)arm.bindings_start + bound));
-                bound += 1;
-            }
+            typecheck_push_arm_bindings(pool, arm, locked);
             if (arm.guard_id != 0) {
                 u32 guard_type = infer_expr(pool, types, symbols, root, &arm_env, arm.guard_id, diagnostics, ok);
                 if (guard_type != TYPE_UNKNOWN && guard_type != TYPE_BOOL) {
@@ -3614,6 +3635,13 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
         } else {
             env.insert(var_name, declared_type);
         }
+        // A local named like a locked payload owns its own value.
+        if (typecheck_is_locked_binding(pool, var_name)) {
+            LockedName shadow;
+            shadow.name_id = var_name;
+            shadow.locked = false;
+            pool.locked_bindings.push(shadow);
+        }
     } else if (stmt.kind == StmtKind.Assign) {
         u32 target_type = infer_expr(pool, types, symbols, root, env, stmt.inner0, diagnostics, ok);
         u32 val_type = infer_expr(pool, types, symbols, root, env, stmt.inner1, diagnostics, ok);
@@ -3695,12 +3723,15 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
         if (typecheck_lock_on_unshared(pool, types, symbols, root, env, start, count, diagnostics, ok)) {
             return;
         }
+        // A local declared in the block shadows a locked name only inside it.
+        i64 locked_mark = pool.locked_bindings.len();
         i64 i = 0;
         while (i < (i64)count) {
             u32 s_id = pool.block_stmts.get((i64)start + i);
             typecheck_statement(pool, types, symbols, root, env, expected_return, s_id, diagnostics, ok);
             i += 1;
         }
+        while (pool.locked_bindings.len() > locked_mark) { pool.locked_bindings.pop(); }
     }
 }
 

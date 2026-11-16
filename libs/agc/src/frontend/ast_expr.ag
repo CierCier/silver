@@ -191,9 +191,17 @@ struct AstPool {
     Vec<MatchArm> arms;
     Vec<u32> arm_bindings;
     Vec<AstAsm> asms;
-    /// Name ids of the payload bindings of the match arms being checked on a
-    /// lock block's value: the Mutex still owns what they name.
-    Vec<u32> locked_bindings;
+    /// Names in scope in the match arms being checked on a lock block's
+    /// value: their payload bindings, which the Mutex still owns, then any
+    /// local that shadows one. The latest entry for a name decides.
+    Vec<LockedName> locked_bindings;
+}
+
+/// One `AstPool.locked_bindings` entry: `name_id` names locked storage, or
+/// a local that shadows it when `locked` is false.
+struct LockedName {
+    u32 name_id;
+    bool locked;
 }
 
 impl AstPool {
@@ -207,7 +215,7 @@ impl AstPool {
         pool.block_stmts = Vec<u32>.new();
         pool.arms = Vec<MatchArm>.new();
         pool.arm_bindings = Vec<u32>.new();
-        pool.locked_bindings = Vec<u32>.new();
+        pool.locked_bindings = Vec<LockedName>.new();
         pool.asms = Vec<AstAsm>.new();
 
         // 0: Dummy null arm

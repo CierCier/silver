@@ -903,6 +903,32 @@ class NativeLsp(unittest.TestCase):
                  " lock state as value { match value { Full(text): consume(text), Empty: consume(String.new()) }; }\n"
                  " return 0;\n}\n",
                  [("cannot move 'text' out of its lock block: the shared value still owns it; clone it instead", 7)]),
+                # A local named like a locked payload owns its own value.
+                ("import std.sync;\nimport std.string;\nenum Bin { Full(String); Empty; }\nvoid consume(String s) { s.drop(); }\n"
+                 "i64 main() {\n String s = String.from_str(\"a\");\n shared Bin state = Bin.Full(move s);\n"
+                 " lock state as value { match value {\n  Full(text): { String text = String.from_str(\"b\"); consume(move text); },\n"
+                 "  Empty: consume(String.new()) }; }\n return 0;\n}\n", []),
+                # The shadow ends with its block.
+                ("import std.sync;\nimport std.string;\nenum Bin { Full(String); Empty; }\nvoid consume(String s) { s.drop(); }\n"
+                 "i64 main() {\n String s = String.from_str(\"a\");\n shared Bin state = Bin.Full(move s);\n"
+                 " lock state as value { match value {\n"
+                 "  Full(text): { { String text = String.from_str(\"b\"); text.drop(); } consume(text); },\n"
+                 "  Empty: consume(String.new()) }; }\n return 0;\n}\n",
+                 [("cannot move 'text' out of its lock block: the shared value still owns it; clone it instead", 8)]),
+                # A match on a locked payload binds locked payloads too.
+                ("import std.sync;\nimport std.string;\nenum Bin { Full(String); Empty; }\nvoid consume(String s) { s.drop(); }\n"
+                 "enum Outer { Wrap(Bin); Nothing; }\ni64 main() {\n String s = String.from_str(\"a\");\n"
+                 " shared Outer state = Outer.Wrap(Bin.Full(move s));\n lock state as value { match value {\n"
+                 "  Wrap(inner): match inner { Full(text): consume(text), Empty: consume(String.new()) },\n"
+                 "  Nothing: consume(String.new()) }; }\n return 0;\n}\n",
+                 [("cannot move 'text' out of its lock block: the shared value still owns it; clone it instead", 9)]),
+                # A consumed match result holds its arms' payloads.
+                ("import std.sync;\nimport std.string;\nenum Bin { Full(String); Empty; }\nvoid consume(String s) { s.drop(); }\n"
+                 "i64 main() {\n String s = String.from_str(\"a\");\n shared Bin state = Bin.Full(move s);\n"
+                 " lock state as value {\n"
+                 "  [String, i64] r = match value { Full(text): [text, 0], Empty: [String.new(), 1] };\n"
+                 "  r[0].drop();\n }\n return 0;\n}\n",
+                 [("cannot move 'text' out of its lock block: the shared value still owns it; clone it instead", 8)]),
                 # A reference to a shared value borrows it; its initializer is not a value to wrap.
                 ("import std.sync;\ni64 main() {\n shared i64 m = 0;\n &shared i64 r = &m;\n lock r { r += 1; }\n"
                  " return 0;\n}\n", [])], 24):
