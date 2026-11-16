@@ -885,7 +885,10 @@ class NativeLsp(unittest.TestCase):
                  "i64 main() {\n String s = String.from_str(\"a\");\n shared Bin state = Bin.Full(move s);\n"
                  " lock state as value { match value { Full(text): consume(text), Empty: consume(String.new()) }; }\n"
                  " return 0;\n}\n",
-                 [("cannot move 'text' out of its lock block: the shared value still owns it; clone it instead", 7)])], 24):
+                 [("cannot move 'text' out of its lock block: the shared value still owns it; clone it instead", 7)]),
+                # A reference to a shared value borrows it; its initializer is not a value to wrap.
+                ("import std.sync;\ni64 main() {\n shared i64 m = 0;\n &shared i64 r = &m;\n lock r { r += 1; }\n"
+                 " return 0;\n}\n", [])], 24):
             session.send("textDocument/didChange", {"textDocument": {"uri": alias_uri, "version": version},
                 "contentChanges": [{"text": source}]})
             errors = [(item["message"].split("\n")[0].split(" (help:")[0], item["range"]["start"]["line"])

@@ -209,9 +209,12 @@ fn desugar_shared(tokens: &[LexToken]) -> Vec<LexToken> {
         let span = synthesized(current.span, Role::Shared);
         let ty = &tokens[start..end];
         mutex_of(ty, span, &mut out);
+        // `shared T name = init;`: the initializer is a plain T. In
+        // `&shared T name = &m;` it is already a reference to the mutex.
+        let reference = is_reference_type(tokens, i);
         i = end;
-        // `shared T name = init;`: the initializer is a plain T.
-        if let Some(name) = next_significant(tokens, end.saturating_sub(1))
+        if !reference
+            && let Some(name) = next_significant(tokens, end.saturating_sub(1))
             && matches!(tokens[name].kind, Token::Identifier(_))
             && let Some(assign) = next_significant(tokens, name)
             && matches!(tokens[assign].kind, Token::Assign)
@@ -228,6 +231,17 @@ fn desugar_shared(tokens: &[LexToken]) -> Vec<LexToken> {
         }
     }
     out
+}
+
+/// True when the type at `index` follows `&` or `&mut`.
+fn is_reference_type(tokens: &[LexToken], index: usize) -> bool {
+    let mut previous = previous_significant(tokens, index);
+    if let Some(p) = previous
+        && matches!(tokens[p].kind, Token::Mut)
+    {
+        previous = previous_significant(tokens, p);
+    }
+    previous.is_some_and(|p| matches!(tokens[p].kind, Token::BitwiseAnd))
 }
 
 /// True when `index` begins a statement: the previous token ends one.
@@ -495,6 +509,9 @@ mod tests {
         // `shared` binds to the type name, so this is a pointer to a shared
         // i64, initialized with a pointer.
         assert_eq!(rewritten("shared i64* p = &total;"), "Mutex < i64 > * p = & total ;");
+        // A reference to a shared value is initialized with a reference.
+        assert_eq!(rewritten("&shared i64 r = &m;"), "& Mutex < i64 > r = & m ;");
+        assert_eq!(rewritten("&mut shared i64 r = &mut m;"), "& mut Mutex < i64 > r = & mut m ;");
     }
 
     #[test]

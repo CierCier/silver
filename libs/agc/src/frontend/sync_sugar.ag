@@ -203,11 +203,15 @@ void desugar_shared(Vec<Token>* tokens, Vec<Token>* out) {
         }
         Span span = tokens.get_ptr(i).span;
         sugar_mutex_of(tokens, start, end, span, out);
+        i64 before = sugar_previous(tokens, i);
         i = end;
-        // `shared T name = init;`: the initializer is a plain T.
+        // `shared T name = init;`: the initializer is a plain T. In
+        // `&shared T name = &m;` it is already a reference to the mutex.
         i64 name = sugar_next(tokens, end - 1);
         i64 assign = sugar_next(tokens, name);
-        if (sugar_is(tokens, name, TokenKind.Identifier) && sugar_is(tokens, assign, TokenKind.Assign)) {
+        if (sugar_is(tokens, before, TokenKind.Mut)) { before = sugar_previous(tokens, before); }
+        if (!sugar_is(tokens, before, TokenKind.BitwiseAnd)
+            && sugar_is(tokens, name, TokenKind.Identifier) && sugar_is(tokens, assign, TokenKind.Assign)) {
             i64 semicolon = sugar_expression_end(tokens, assign + 1);
             if (semicolon >= 0) {
                 sugar_copy_range(tokens, end, assign + 1, out);
