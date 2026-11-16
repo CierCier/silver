@@ -677,7 +677,7 @@ impl Facts {
                                     method.to_string(),
                                 ))
                                 .or_default()
-                                .push((function.parameters.len() - 1, false));
+                                .push((function.parameters.len() - 1, export.is_variadic));
                         }
                         for (i, param) in function.parameters.iter().enumerate().skip(1) {
                             if !Self::is_view_type(param) {
