@@ -976,6 +976,12 @@ class NativeLsp(unittest.TestCase):
                  " String s = String.from_str(\"a\");\n shared Bin state = Bin.Full(move s);\n"
                  " lock state as value { match value {\n  Full(payload): match 0 { payload: payload },\n"
                  "  Empty: 0 }; }\n return 0;\n}\n", []),
+                # Writing through an index changes a value a task borrows.
+                ("import std.mem.vec;\ni64 inspect(&Vec<i64> data) { return data.len(); }\ni64 main() {\n"
+                 " Vec<i64> data = Vec<i64>.new();\n data.push(1);\n Task<i64> t = launch inspect(&data);\n"
+                 " data[0] = 2;\n data[0] += 1;\n return wait t;\n}\n",
+                 [("cannot assign to 'data' because it is borrowed", 6),
+                  ("cannot assign to 'data' because it is borrowed", 7)]),
                 # A reference to a shared value borrows it; its initializer is not a value to wrap.
                 ("import std.sync;\ni64 main() {\n shared i64 m = 0;\n &shared i64 r = &m;\n lock r { r += 1; }\n"
                  " return 0;\n}\n", [])], 24):

@@ -2380,19 +2380,45 @@ void borrow_add_guard_loan_on(BorrowAnalyzer* analyzer, Vec<SyntaxNode*>* leaves
     loan.lock_guard = true;
 }
 
-/// Returns true when the leaf at `index` is `=` or a compound assignment.
-bool borrow_is_assignment_operator(Vec<SyntaxNode*>* leaves, i64 index) {
-    if (index >= leaves.len()) { return false; }
-    str text = leaves.get(index).text;
+/// Returns true when `text` is `=` or a compound assignment.
+bool borrow_is_assignment_text(str text) {
     return borrow_text_equals(text, "=") || borrow_text_equals(text, "+=")
         || borrow_text_equals(text, "-=") || borrow_text_equals(text, "*=")
         || borrow_text_equals(text, "/=") || borrow_text_equals(text, "%=");
 }
 
+/// Returns true when the leaf at `index` is `=` or a compound assignment.
+bool borrow_is_assignment_operator(Vec<SyntaxNode*>* leaves, i64 index) {
+    if (index >= leaves.len()) { return false; }
+    return borrow_is_assignment_text(leaves.get(index).text);
+}
+
+/// Returns true when `last`, the end of a place, is indexed and the indexed
+/// place is assigned, as in `data[0] = 2` or `data[i].x += 1`. An index is a
+/// bracket group node rather than leaves, so this walks siblings.
+bool borrow_is_index_assignment(SyntaxNode* last) {
+    SyntaxNode* cursor = last.next_sibling;
+    bool indexed = false;
+    while (cursor != (SyntaxNode*)0) {
+        if (cursor.kind == NodeKind.Bracket) {
+            indexed = true;
+            cursor = cursor.next_sibling;
+        } else if (indexed && cursor.token_kind == TokenKind.Dot
+            && cursor.next_sibling != (SyntaxNode*)0
+            && cursor.next_sibling.token_kind == TokenKind.Identifier) {
+            cursor = cursor.next_sibling.next_sibling;
+        } else {
+            break;
+        }
+    }
+    return indexed && cursor != (SyntaxNode*)0 && cursor.kind == NodeKind.Token
+        && borrow_is_assignment_text(cursor.text);
+}
+
 /// Reports a use that would move, drop, or overwrite a place while a launched
 /// task still borrows it or part of it: the place, or a field path into it,
 /// as a by-value call argument, a returned value, the receiver of `.drop()`,
-/// or the target of a field assignment.
+/// or the target of a field or index assignment.
 void borrow_check_task_loan_use(BorrowAnalyzer* analyzer, SyntaxTree* tree,
                                 SymbolTable* symbols, Vec<SyntaxNode*>* leaves,
                                 Vec<Binding>* bindings, Vec<u32>* binding_types, i64 i) {
@@ -2409,7 +2435,13 @@ void borrow_check_task_loan_use(BorrowAnalyzer* analyzer, SyntaxTree* tree,
         path.push_str(leaves.get(k).text);
         k += 1;
     }
-    // Assigning the whole local is checked where the scan sees `name =`.
+    // Assigning the whole local is checked where the scan sees `name =`. A
+    // write through an index, such as `data[0] = 2` or `data[i].x += 1`,
+    // changes the place as well.
+    if (borrow_is_index_assignment(leaves.get(end - 1))) {
+        analyzer.assign_place(&place, path.to_str(), node.span);
+        return;
+    }
     if (end > i + 1 && borrow_is_assignment_operator(leaves, end)) {
         analyzer.assign_place(&place, path.to_str(), node.span);
         return;

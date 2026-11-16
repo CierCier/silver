@@ -2117,6 +2117,22 @@ impl<'a> BorrowChecker<'a> {
         None
     }
 
+    fn is_compound_assignment(operator: &ast::BinaryOperator) -> bool {
+        matches!(
+            operator,
+            ast::BinaryOperator::AddAssign
+                | ast::BinaryOperator::SubtractAssign
+                | ast::BinaryOperator::MultiplyAssign
+                | ast::BinaryOperator::DivideAssign
+                | ast::BinaryOperator::ModuloAssign
+                | ast::BinaryOperator::BitwiseAndAssign
+                | ast::BinaryOperator::BitwiseOrAssign
+                | ast::BinaryOperator::BitwiseXorAssign
+                | ast::BinaryOperator::LeftShiftAssign
+                | ast::BinaryOperator::RightShiftAssign
+        )
+    }
+
     /// Check an assignment target (`x = val` or `p.left = val`).
     fn check_assignment_target(&mut self, target: &ast::Expression) {
         if let Some((root, path, ref_var)) = self.extract_borrow_root_and_path(target) {
@@ -2478,6 +2494,10 @@ impl<'a> BorrowChecker<'a> {
                 } else {
                     self.check_expr(left);
                     self.check_expr(right);
+                    // `x += 1` writes its target like `x = x + 1`.
+                    if Self::is_compound_assignment(operator) {
+                        self.check_assignment_target(left);
+                    }
                 }
             }
             ast::ExpressionKind::Unary { operand, .. } => {
@@ -2747,6 +2767,17 @@ mod tests {
         assert!(borrow.iter().any(|error| {
             error.message == crate::diagnostics::messages::cannot_assign_to_borrowed("slot")
         }), "aggregate-held mutable loan did not block slot reassignment: {borrow:?}");
+    }
+
+    #[test]
+    fn compound_assignment_writes_a_borrowed_place() {
+        let (_, borrow) = integrated_safety_errors(
+            "void main() { i32 n = 1; &i32 view = &n; n += 1; i32 seen = *view; }",
+            44,
+        );
+        assert!(borrow.iter().any(|error| {
+            error.message == crate::diagnostics::messages::cannot_assign_to_borrowed("n")
+        }), "compound assignment did not write the borrowed local: {borrow:?}");
     }
 
     #[test]
