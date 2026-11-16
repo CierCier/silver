@@ -274,6 +274,10 @@ pub fn lock_needs_name() -> &'static str {
     "name the locked value: `lock <place> as <name> { ... }`"
 }
 
+pub fn lock_nesting_too_deep(limit: usize) -> String {
+    format!("lock blocks are nested more than {limit} deep")
+}
+
 pub fn lock_never_closed() -> &'static str {
     "this lock block is never closed"
 }

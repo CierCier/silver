@@ -400,6 +400,12 @@ str lock_needs_name() {
     return "name the locked value: `lock <place> as <name> { ... }`";
 }
 
+/// Diagnostic text: "lock blocks are nested more than {} deep". Returns an
+/// owned string.
+String lock_nesting_too_deep(i64 limit) {
+    return @format("lock blocks are nested more than {} deep", limit);
+}
+
 /// Diagnostic text: "this lock block is never closed".
 str lock_never_closed() {
     return "this lock block is never closed";

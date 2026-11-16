@@ -30,8 +30,12 @@ pub struct SugarError {
 pub fn desugar(tokens: Vec<LexToken>) -> Result<Vec<LexToken>, SugarError> {
     let shared = desugar_shared(&tokens);
     let mut counter = 0;
-    desugar_locks(&shared, &mut counter)
+    desugar_locks(&shared, &mut counter, 0)
 }
+
+/// The deepest lock block nesting rewritten, as stage1's syntax depth
+/// budget: each level copies its body and recurses once.
+const MAX_LOCK_NESTING: usize = 256;
 
 fn token(kind: Token, text: &str, span: Span) -> LexToken {
     LexToken {
@@ -388,7 +392,11 @@ fn declares(tokens: &[LexToken], index: usize) -> bool {
 }
 
 /// Rewrites every `lock` statement in `tokens`, innermost blocks included.
-fn desugar_locks(tokens: &[LexToken], counter: &mut usize) -> Result<Vec<LexToken>, SugarError> {
+fn desugar_locks(
+    tokens: &[LexToken],
+    counter: &mut usize,
+    depth: usize,
+) -> Result<Vec<LexToken>, SugarError> {
     let mut out = Vec::with_capacity(tokens.len());
     let mut i = 0;
     while i < tokens.len() {
@@ -403,6 +411,12 @@ fn desugar_locks(tokens: &[LexToken], counter: &mut usize) -> Result<Vec<LexToke
             continue;
         };
         let lock_span = tokens[i].span;
+        if depth >= MAX_LOCK_NESTING {
+            return Err(SugarError {
+                message: msg::lock_nesting_too_deep(MAX_LOCK_NESTING),
+                span: lock_span,
+            });
+        }
         // The guard and pointer locals must not share a source range: some
         // passes key locals by byte range alone. The guard sits at `lock`,
         // the pointer at the block's `{`, each with its own expansion tag.
@@ -432,7 +446,7 @@ fn desugar_locks(tokens: &[LexToken], counter: &mut usize) -> Result<Vec<LexToke
                 });
             }
         }
-        let body = desugar_locks(body, counter)?;
+        let body = desugar_locks(body, counter, depth + 1)?;
         // Named after the locked value so editor tooling can map it back.
         let value = format!("__lock_{}__{}", *counter, head.name);
         let guard = format!("{value}_guard");

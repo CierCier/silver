@@ -21,6 +21,7 @@
 // output of the two in step.
 import std.mem.vec;
 import std.string;
+import std.recursion;
 import frontend.diagnostics;
 import frontend.lexer;
 import frontend.messages;
@@ -383,7 +384,11 @@ void sugar_check_body(Vec<Token>* body, str name, Vec<Token>* tokens, i64 from, 
 /// Rewrites every `lock` statement in `tokens` into `out`, inner blocks
 /// included. `counter` numbers the generated locals. The value local is
 /// named `__lock_N__<name>` so editor tooling can map it back to `name`.
-void desugar_locks(Vec<Token>* tokens, Vec<Token>* out, i64* counter, DiagnosticBag* diagnostics) {
+/// `depth` counts the enclosing lock blocks; past the syntax depth budget
+/// a block is reported and copied unchanged, since each level copies its
+/// body and recurses.
+void desugar_locks(Vec<Token>* tokens, Vec<Token>* out, i64* counter, DiagnosticBag* diagnostics,
+                   i64 depth) {
     i64 i = 0;
     while (i < tokens.len()) {
         LockHead head;
@@ -398,6 +403,12 @@ void desugar_locks(Vec<Token>* tokens, Vec<Token>* out, i64* counter, Diagnostic
         if (head.place_start < 0 || close < 0) {
             out.push(sugar_copy(tokens.get_ptr(i)));
             i += 1;
+            continue;
+        }
+        if (depth >= DEFAULT_MAX_RECURSION_DEPTH) {
+            diagnostics.error(tokens.get_ptr(i).span, lock_nesting_too_deep(DEFAULT_MAX_RECURSION_DEPTH));
+            sugar_copy_range(tokens, i, close + 1, out);
+            i = close + 1;
             continue;
         }
         Span guard_span = tokens.get_ptr(i).span;
@@ -416,7 +427,7 @@ void desugar_locks(Vec<Token>* tokens, Vec<Token>* out, i64* counter, Diagnostic
         sugar_copy_range(tokens, head.open + 1, close, &raw_body);
         sugar_check_body(&raw_body, name, tokens, head.place_start, head.place_end, diagnostics);
         Vec<Token> body = Vec<Token>.new();
-        desugar_locks(&raw_body, &body, counter, diagnostics);
+        desugar_locks(&raw_body, &body, counter, diagnostics, depth + 1);
         String value = @format("__lock_{}__{}", *counter, name);
         String guard = @format("__lock_{}_guard", *counter);
         *counter += 1;
@@ -522,7 +533,7 @@ void desugar_sync_sugar(TokenStream* stream, DiagnosticBag* diagnostics) {
     desugar_shared(&stream.tokens, &with_shared);
     Vec<Token> rewritten = Vec<Token>.new();
     i64 counter = 0;
-    desugar_locks(&with_shared, &rewritten, &counter, diagnostics);
+    desugar_locks(&with_shared, &rewritten, &counter, diagnostics, 0);
     // A store through a pointer does not drop the old tokens; this local does.
     Vec<Token> _original = move stream.tokens;
     stream.tokens = move rewritten;
