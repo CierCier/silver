@@ -426,8 +426,10 @@ struct Facts {
     opaque_owners: FxHashSet<String>,
     /// Base type names that implement `Drop`.
     drop_owners: FxHashSet<String>,
-    /// (owner, method) pairs whose receiver is by-value (`InstanceValue`).
-    value_receivers: FxHashSet<(String, String)>,
+    /// By-value (`InstanceValue`) overloads of each (owner, method): explicit
+    /// parameter count and whether the last parameter is variadic. A borrowing
+    /// overload of another arity must not make its calls consume.
+    value_receivers: FxHashMap<(String, String), Vec<(usize, bool)>>,
     /// (function/method name, param index) pairs with a value (non-view) param.
     value_args: FxHashSet<(String, usize)>,
     /// (owner, method, explicit argument index) pairs with value parameters.
@@ -546,8 +548,12 @@ impl Facts {
                 for member in &imp.items {
                     if let ast::ImplItemKind::Function(func) = member {
                         if func.method_kind == ast::MethodKind::InstanceValue {
+                            let variadic = func.is_variadic
+                                || func.parameters.last().is_some_and(|param| param.is_variadic);
                             self.value_receivers
-                                .insert((owner.clone(), func.name.name.clone()));
+                                .entry((owner.clone(), func.name.name.clone()))
+                                .or_default()
+                                .push((func.parameters.len().saturating_sub(1), variadic));
                         }
                         let first_arg = usize::from(func.method_kind != ast::MethodKind::Static);
                         for (i, param) in func.parameters.iter().enumerate().skip(first_arg) {
@@ -665,10 +671,13 @@ impl Facts {
                             .first()
                             .is_some_and(|receiver| !Self::is_view_type(receiver))
                         {
-                            self.value_receivers.insert((
-                                owner.split('<').next().unwrap_or(owner).to_string(),
-                                method.to_string(),
-                            ));
+                            self.value_receivers
+                                .entry((
+                                    owner.split('<').next().unwrap_or(owner).to_string(),
+                                    method.to_string(),
+                                ))
+                                .or_default()
+                                .push((function.parameters.len() - 1, false));
                         }
                         for (i, param) in function.parameters.iter().enumerate().skip(1) {
                             if !Self::is_view_type(param) {
@@ -1043,10 +1052,13 @@ impl MoveChecker {
         true
     }
 
+    /// True when calling `method` with `argument_count` arguments selects a
+    /// by-value overload, so the call consumes `receiver`.
     fn consuming_receiver(
         &self,
         receiver: &ast::Expression,
         method: &str,
+        argument_count: usize,
         var_types: &FxHashMap<String, ast::Type>,
     ) -> bool {
         // A lock block's value is `(*__lock_N__name)`, which has no root
@@ -1064,7 +1076,12 @@ impl MoveChecker {
         };
         self.facts
             .value_receivers
-            .contains(&(Facts::owner_key(&ty), method.to_string()))
+            .get(&(Facts::owner_key(&ty), method.to_string()))
+            .is_some_and(|overloads| {
+                overloads.iter().any(|&(count, variadic)| {
+                    argument_count == count || (variadic && argument_count + 1 >= count)
+                })
+            })
     }
 
     fn is_value_call_argument(
@@ -2018,7 +2035,7 @@ impl MoveChecker {
                 arguments,
             } => {
                 let is_consuming = method.name == "drop"
-                    || self.consuming_receiver(receiver, &method.name, var_types);
+                    || self.consuming_receiver(receiver, &method.name, arguments.len(), var_types);
                 if is_consuming {
                     self.move_value_argument(
                         receiver,
@@ -2710,11 +2727,16 @@ mod tests {
     };
 
     /// Stand-ins for std.sync's Mutex and Guard, which `shared` and `lock`
-    /// lower to, and an owned payload type.
+    /// lower to, and an owned payload type with a borrowing `inspect()` and a
+    /// consuming `inspect(tag)`.
     const PRELUDE: &str = "trait Drop { void drop(*self); }\n\
         struct Text { i64 len; }\n\
         impl Drop for Text { void drop(*self) {} }\n\
-        impl Text { void consume(self) {} }\n\
+        impl Text {\n\
+          void consume(self) {}\n\
+          i64 inspect(&self) { return self.len; }\n\
+          i64 inspect(self, i64 tag) { return tag; }\n\
+        }\n\
         void eat(Text text) {}\n\
         Text fresh() { Text text; return text; }\n\
         struct Mutex<T> { T value; }\n\
@@ -2726,29 +2748,39 @@ mod tests {
         impl<T> Guard<T> { T* get_ptr(&self) { return &self.owner.value; } }\n\
         enum Bin { Full(Text); Empty; }\n";
 
-    /// Type and move errors for `arms`, the arms of a match on a locked
-    /// `Bin`. The type checker reports some locked moves itself.
-    fn locked_match_errors(arms: &str) -> Vec<String> {
-        let source = format!(
-            "{PRELUDE}i64 main() {{\n Text text; Bin initial = Bin.Full(move text);\n\
-             shared Bin state = move initial;\n lock state as value {{ match value {{ {arms} }}; }}\n\
-             return 0;\n}}\n"
-        );
+    /// Messages from the type checker and from the move checker, kept apart
+    /// because each reports some moves out of a lock.
+    #[derive(Debug)]
+    struct Errors {
+        types: Vec<String>,
+        moves: Vec<String>,
+    }
+
+    fn errors_in(body: &str) -> Errors {
+        let source = format!("{PRELUDE}i64 main() {{\n{body}\nreturn 0;\n}}\n");
         let tokens = lexer::lex(&source).expect("probe should lex");
         let (mut program, errors) = Parser::new(tokens).parse_program();
         assert!(errors.is_empty(), "probe should parse: {errors:?}");
         TypeChecker::resolve_type_aliases_in_program(&mut program);
         let mut checker = TypeChecker::new();
-        let (type_errors, _) =
+        let (types, _) =
             checker.check_program_with_table(&program, &mut CompilerSymbolTable::new());
         let inferred_lets = checker.take_inferred_lets();
         crate::semantic::typeck::populate_inferred_let_types(&mut program, &inferred_lets);
         let moves = super::analyze_program_with_imports(&program, &[]).errors;
-        type_errors
-            .into_iter()
-            .map(|error| error.message)
-            .chain(moves.into_iter().map(|error| error.message))
-            .collect()
+        Errors {
+            types: types.into_iter().map(|error| error.message).collect(),
+            moves: moves.into_iter().map(|error| error.message).collect(),
+        }
+    }
+
+    /// Errors for `arms`, the arms of a match on a locked `Bin`.
+    fn locked_match_errors(arms: &str) -> Errors {
+        errors_in(&format!(
+            "Text text; Bin initial = Bin.Full(move text);\n\
+             shared Bin state = move initial;\n\
+             lock state as value {{ match value {{ {arms} }}; }}"
+        ))
     }
 
     #[test]
@@ -2757,22 +2789,37 @@ mod tests {
         for arms in [
             "Full(payload): eat(payload), Empty: {}",
             "Full(payload): payload.consume(), Empty: {}",
+            "Full(payload): payload.inspect(1), Empty: 0",
             "Full(payload): { { i64 payload = 0; } eat(payload); }, Empty: {}",
+            // A statement-position match's arm result is consumed.
             "Full(payload): payload, Empty: fresh()",
+            "Full(payload): [payload, 0], Empty: [fresh(), 0]",
         ] {
             let errors = locked_match_errors(arms);
-            assert!(errors.contains(&moved), "{arms}: {errors:?}");
+            assert!(errors.moves.contains(&moved), "{arms}: {errors:?}");
         }
     }
 
     #[test]
-    fn a_nested_binding_shadows_a_locked_payload() {
+    fn a_locked_payload_can_be_borrowed_and_shadowed() {
         for arms in [
+            "Full(payload): payload.inspect(), Empty: 0",
             "Full(payload): { i64 seen = match 0 { payload: payload }; }, Empty: {}",
             "Full(payload): { i64 payload = 1; i64 seen = payload; }, Empty: {}",
         ] {
             let errors = locked_match_errors(arms);
-            assert!(errors.is_empty(), "{arms}: {errors:?}");
+            assert!(errors.types.is_empty() && errors.moves.is_empty(), "{arms}: {errors:?}");
         }
+    }
+
+    #[test]
+    fn a_borrowing_overload_keeps_its_receiver() {
+        let errors = errors_in("Text text; i64 a = text.inspect(); i64 b = text.inspect();");
+        assert!(errors.types.is_empty() && errors.moves.is_empty(), "{errors:?}");
+        let errors = errors_in("Text text; i64 a = text.inspect(1); i64 b = text.inspect();");
+        assert!(
+            errors.moves.iter().any(|message| message.contains("moved value 'text'")),
+            "{errors:?}"
+        );
     }
 }

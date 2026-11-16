@@ -989,6 +989,15 @@ class NativeLsp(unittest.TestCase):
                  " lock state as value { match value {\n  Full(payload): payload.consume(),\n"
                  "  Empty: {} }; }\n return 0;\n}\n",
                  [("cannot move 'payload' out of its lock block: the shared value still owns it; clone it instead", 9)]),
+                # A borrowing overload keeps a locked payload in place; the by-value one moves it.
+                ("import std.sync;\nimport std.string;\nenum Bin { Full(String); Empty; }\nimpl String {\n"
+                 " i64 inspect(&self) { return self.len(); }\n"
+                 " i64 inspect(self, i64 tag) { i64 n = self.len() + tag; self.drop(); return n; }\n}\ni64 main() {\n"
+                 " String s = String.from_str(\"a\");\n shared Bin state = Bin.Full(move s);\n i64 seen = 0;\n"
+                 " lock state as value { match value {\n  Full(payload): { seen = payload.inspect(); },\n"
+                 "  Empty: { seen = 0; } }; }\n lock state as value { match value {\n"
+                 "  Full(payload): { seen = payload.inspect(1); },\n  Empty: { seen = 0; } }; }\n return seen;\n}\n",
+                 [("cannot move 'payload' out of its lock block: the shared value still owns it; clone it instead", 15)]),
                 # Writing through an index changes a value a task borrows.
                 ("import std.mem.vec;\ni64 inspect(&Vec<i64> data) { return data.len(); }\ni64 main() {\n"
                  " Vec<i64> data = Vec<i64>.new();\n data.push(1);\n Task<i64> t = launch inspect(&data);\n"
