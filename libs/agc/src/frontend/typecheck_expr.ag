@@ -1299,20 +1299,36 @@ bool typecheck_reject_locked_move(AstPool* pool, TypeTable* types, SymbolTable* 
         path = move step;
         base = pool.get_expr(base.inner0);
     }
-    if (base.kind != ExprKind.Unary || base.aux != (u32)TokenKind.Star || base.inner0 == 0) { return false; }
-    AstExpr* pointer = pool.get_expr(base.inner0);
-    if (pointer.kind != ExprKind.Var) { return false; }
-    String local = String.from_str(symbols.names.get(pointer.aux));
-    i64 start = sugar_locked_name_start(local.to_str());
-    if (start < 0 || place.inferred_type == TYPE_UNKNOWN
-        || typecheck_type_is_copy(root, types, place.inferred_type)) {
+    String name = String.new();
+    if (base.kind == ExprKind.Var && typecheck_is_locked_binding(pool, base.aux)) {
+        name.push_str(symbols.names.get(base.aux));
+    } else {
+        if (base.kind != ExprKind.Unary || base.aux != (u32)TokenKind.Star || base.inner0 == 0) { return false; }
+        AstExpr* pointer = pool.get_expr(base.inner0);
+        if (pointer.kind != ExprKind.Var) { return false; }
+        String local = String.from_str(symbols.names.get(pointer.aux));
+        i64 start = sugar_locked_name_start(local.to_str());
+        if (start < 0) { return false; }
+        name = local.substr(start, local.len() - start);
+    }
+    if (place.inferred_type == TYPE_UNKNOWN || typecheck_type_is_copy(root, types, place.inferred_type)) {
         return false;
     }
-    String name = local.substr(start, local.len() - start);
     name.push_str(path.to_str());
     diagnostics.error(place.span, move_out_of_lock(name.to_str()));
     *ok = false;
     return true;
+}
+
+/// True when name `name_id` is a payload binding of a match arm on a lock
+/// block's value.
+bool typecheck_is_locked_binding(AstPool* pool, u32 name_id) {
+    i64 i = 0;
+    while (i < pool.locked_bindings.len()) {
+        if (pool.locked_bindings.get(i) == name_id) { return true; }
+        i += 1;
+    }
+    return false;
 }
 
 /// True when `id` reads a lock block's value or a field of it: sync_sugar
@@ -2723,6 +2739,13 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                     *ok = false;
                 }
             }
+            // The arm's payload bindings name storage a locked scrutinee owns.
+            i64 locked_mark = pool.locked_bindings.len();
+            i64 bound = 0;
+            while (locked && arm.pattern == MatchPatternKind.Variant && bound < (i64)arm.bindings_count) {
+                pool.locked_bindings.push(pool.arm_bindings.get((i64)arm.bindings_start + bound));
+                bound += 1;
+            }
             if (arm.guard_id != 0) {
                 u32 guard_type = infer_expr(pool, types, symbols, root, &arm_env, arm.guard_id, diagnostics, ok);
                 if (guard_type != TYPE_UNKNOWN && guard_type != TYPE_BOOL) {
@@ -2741,6 +2764,7 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 arm_type = infer_expr(pool, types, symbols, root, &arm_env,
                                       arm.value_id, diagnostics, ok);
             }
+            while (pool.locked_bindings.len() > locked_mark) { pool.locked_bindings.pop(); }
             u32 moved = locked ? typecheck_arm_moved_binding(pool, types, root, arm) : 0;
             if (moved != 0) {
                 diagnostics.error(arm.span, move_out_of_lock(symbols.names.get(moved)));

@@ -432,6 +432,8 @@ struct Facts {
     value_method_args: FxHashSet<(String, String, usize)>,
     /// Struct field names and types for known struct types.
     struct_fields: FxHashMap<String, StructInfo>,
+    /// Payload types of each tuple variant, by (enum, variant).
+    variant_payloads: FxHashMap<(String, String), Vec<ast::Type>>,
 }
 
 #[derive(Clone, Debug)]
@@ -484,6 +486,14 @@ impl Facts {
             }
             ast::ItemKind::Enum(enumeration) => {
                 self.opaque_owners.insert(enumeration.name.name.clone());
+                for variant in &enumeration.variants {
+                    if let ast::EnumVariantData::Tuple(types) = &variant.data {
+                        self.variant_payloads.insert(
+                            (enumeration.name.name.clone(), variant.name.name.clone()),
+                            types.clone(),
+                        );
+                    }
+                }
                 let fields = enumeration
                     .variants
                     .iter()
@@ -587,6 +597,21 @@ impl Facts {
                 }
                 ExportKind::Enum => {
                     self.opaque_owners.insert(export.name.clone());
+                    for variant in &export.enum_variants {
+                        let payloads: Option<Vec<ast::Type>> = variant
+                            .payload_types
+                            .iter()
+                            .map(|key| {
+                                crate::module_artifact::ast_type_from_canonical_key(key).ok()
+                            })
+                            .collect();
+                        if let Some(payloads) = payloads
+                            && !payloads.is_empty()
+                        {
+                            self.variant_payloads
+                                .insert((export.name.clone(), variant.name.clone()), payloads);
+                        }
+                    }
                     let fields = export
                         .enum_variants
                         .iter()
@@ -788,6 +813,7 @@ pub fn analyze_program_with_imports(
         functions: FxHashMap::default(),
         current_plan: super::init_plan::FunctionInitPlan::default(),
         owner_bindings: FxHashMap::default(),
+        locked_bindings: FxHashMap::default(),
     };
     for item in &program.items {
         match &item.kind {
@@ -834,6 +860,9 @@ struct MoveChecker {
     functions: FxHashMap<super::init_plan::FunctionId, super::init_plan::FunctionInitPlan>,
     current_plan: super::init_plan::FunctionInitPlan,
     owner_bindings: FxHashMap<String, super::init_plan::OwnerLocalId>,
+    /// Owning payload bindings of a match on a lock block's value, with their
+    /// types: the Mutex still owns what they name.
+    locked_bindings: FxHashMap<String, ast::Type>,
 }
 
 /// Layout completion belongs to the semantic ownership boundary. All required
@@ -855,6 +884,7 @@ impl OwnerLayouts {
             functions: FxHashMap::default(),
             current_plan: Default::default(),
             owner_bindings: FxHashMap::default(),
+            locked_bindings: FxHashMap::default(),
         };
         checker.check_function(parameters, return_type, body);
         if let Some(error) = checker.errors.first() {
@@ -1384,8 +1414,9 @@ impl MoveChecker {
         ty
     }
 
-    /// A place inside a `lock` block, `(*__lock_N__name)` with fields and
-    /// indexes: the user's spelling (`name.field[...]`) and its type.
+    /// A place inside a `lock` block, `(*__lock_N__name)` or an owning payload
+    /// binding of a match on it, with fields and indexes: the user's spelling
+    /// (`name.field[...]`) and its type.
     fn locked_place(
         &self,
         expr: &ast::Expression,
@@ -1406,24 +1437,28 @@ impl MoveChecker {
                 _ => break,
             }
         }
-        let ast::ExpressionKind::Unary {
-            operator: ast::UnaryOperator::Dereference,
-            operand,
-        } = place.kind.as_ref()
-        else {
-            return None;
+        let (mut spelling, mut ty) = match place.kind.as_ref() {
+            ast::ExpressionKind::Identifier(binding) => (
+                binding.name.clone(),
+                self.locked_bindings.get(&binding.name)?.clone(),
+            ),
+            ast::ExpressionKind::Unary {
+                operator: ast::UnaryOperator::Dereference,
+                operand,
+            } => {
+                let ast::ExpressionKind::Identifier(pointer) = operand.kind.as_ref() else {
+                    return None;
+                };
+                let name = crate::sync_sugar::locked_name(&pointer.name)?;
+                let Some(ast::TypeKind::Pointer(pointer_type)) =
+                    var_types.get(&pointer.name).map(|ty| ty.kind.as_ref())
+                else {
+                    return None;
+                };
+                (name.to_string(), pointer_type.inner.as_ref().clone())
+            }
+            _ => return None,
         };
-        let ast::ExpressionKind::Identifier(pointer) = operand.kind.as_ref() else {
-            return None;
-        };
-        let name = crate::sync_sugar::locked_name(&pointer.name)?;
-        let Some(ast::TypeKind::Pointer(pointer_type)) =
-            var_types.get(&pointer.name).map(|ty| ty.kind.as_ref())
-        else {
-            return None;
-        };
-        let mut spelling = name.to_string();
-        let mut ty = pointer_type.inner.as_ref().clone();
         for step in steps.into_iter().rev() {
             ty = match step {
                 Some(field) => {
@@ -1541,6 +1576,7 @@ impl MoveChecker {
         var_types: &mut FxHashMap<String, ast::Type>,
     ) {
         let name = &identifier.name;
+        self.locked_bindings.remove(name);
         if let Some(ty) = ty {
             let old_owner = self.owner_bindings.remove(name);
             let id = super::init_plan::OwnerLocalId {
@@ -2463,6 +2499,7 @@ impl MoveChecker {
             }
             ast::ExpressionKind::Match { expression, arms } => {
                 self.check_expr(expression, state, scopes, var_types);
+                let locked = self.locked_place(expression, var_types).map(|(_, ty)| ty);
                 // Each arm is an independent path from the pre-match state;
                 // arms that never fall through do not contribute.
                 let mut merged = state.clone();
@@ -2478,7 +2515,9 @@ impl MoveChecker {
                     }
                     let mut arm_state = state.clone();
                     let mut arm_scopes = scopes.clone();
+                    let saved = self.bind_locked_payloads(&arm.pattern, locked.as_ref());
                     self.check_expr(&arm.body, &mut arm_state, &mut arm_scopes, var_types);
+                    self.locked_bindings = saved;
                     if !expression_terminates(&arm.body) {
                         for (name, var) in merged.iter_mut() {
                             let arm_var = arm_state.get(name).cloned().unwrap_or_default();
@@ -2538,6 +2577,75 @@ impl MoveChecker {
             }
             ast::ExpressionKind::Literal(_) | ast::ExpressionKind::TypeName(_) => {}
         }
+    }
+
+    /// Updates `locked_bindings` for one arm of a match on `locked`, the type
+    /// of a lock block's value or None: its owning payload bindings name
+    /// storage the Mutex owns, and any binding shadows an outer one. Returns
+    /// the previous bindings to restore after the arm.
+    fn bind_locked_payloads(
+        &mut self,
+        pattern: &ast::Pattern,
+        locked: Option<&ast::Type>,
+    ) -> FxHashMap<String, ast::Type> {
+        let saved = self.locked_bindings.clone();
+        let bindings: Vec<Option<&ast::Identifier>> = match &pattern.kind {
+            ast::PatternKind::Identifier(binding) | ast::PatternKind::Move(binding) => {
+                self.locked_bindings.remove(&binding.name);
+                return saved;
+            }
+            ast::PatternKind::Enum {
+                data: Some(data), ..
+            } => match &data.kind {
+                ast::PatternKind::Tuple(items) => items
+                    .iter()
+                    .map(|item| match &item.kind {
+                        ast::PatternKind::Identifier(binding) | ast::PatternKind::Move(binding) => {
+                            Some(binding)
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+                ast::PatternKind::Identifier(binding) | ast::PatternKind::Move(binding) => {
+                    vec![Some(binding)]
+                }
+                _ => return saved,
+            },
+            _ => return saved,
+        };
+        let ast::PatternKind::Enum { variant, .. } = &pattern.kind else {
+            return saved;
+        };
+        let owner = locked.map(Facts::owner_key);
+        let payloads = owner
+            .as_ref()
+            .and_then(|owner| {
+                self.facts
+                    .variant_payloads
+                    .get(&(owner.clone(), variant.name.clone()))
+            })
+            .cloned()
+            .unwrap_or_default();
+        let substitutions = match (
+            locked,
+            owner
+                .as_ref()
+                .and_then(|owner| self.facts.struct_fields.get(owner)),
+        ) {
+            (Some(ty), Some(info)) => Self::generic_substitutions(ty, info),
+            _ => FxHashMap::default(),
+        };
+        for (index, binding) in bindings.into_iter().enumerate() {
+            let Some(binding) = binding else { continue };
+            self.locked_bindings.remove(&binding.name);
+            if let Some(payload) = payloads.get(index) {
+                let ty = Self::substitute_type(payload, &substitutions);
+                if self.is_tracked(&ty) {
+                    self.locked_bindings.insert(binding.name.clone(), ty);
+                }
+            }
+        }
+        saved
     }
 
     fn pattern_has_move(pattern: &ast::Pattern) -> bool {

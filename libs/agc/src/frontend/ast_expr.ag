@@ -191,6 +191,9 @@ struct AstPool {
     Vec<MatchArm> arms;
     Vec<u32> arm_bindings;
     Vec<AstAsm> asms;
+    /// Name ids of the payload bindings of the match arms being checked on a
+    /// lock block's value: the Mutex still owns what they name.
+    Vec<u32> locked_bindings;
 }
 
 impl AstPool {
@@ -204,6 +207,7 @@ impl AstPool {
         pool.block_stmts = Vec<u32>.new();
         pool.arms = Vec<MatchArm>.new();
         pool.arm_bindings = Vec<u32>.new();
+        pool.locked_bindings = Vec<u32>.new();
         pool.asms = Vec<AstAsm>.new();
 
         // 0: Dummy null arm

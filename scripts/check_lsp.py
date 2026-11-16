@@ -879,7 +879,13 @@ class NativeLsp(unittest.TestCase):
                 ("import std.sync;\nvoid consume(Mutex<i64> _m) { }\nstruct Runner { i64 n; }\nimpl Runner {\n"
                  " void go(&self) {\n  Mutex<i64> state = Mutex<i64>.new(1);\n"
                  "  lock state as value { consume(move state); value = 2; }\n }\n}\n",
-                 [("cannot move 'state' because it is borrowed", 6)])], 24):
+                 [("cannot move 'state' because it is borrowed", 6)]),
+                # A locked enum's payload cannot be passed on by value.
+                ("import std.sync;\nimport std.string;\nenum Bin { Full(String); Empty; }\nvoid consume(String s) { s.drop(); }\n"
+                 "i64 main() {\n String s = String.from_str(\"a\");\n shared Bin state = Bin.Full(move s);\n"
+                 " lock state as value { match value { Full(text): consume(text), Empty: consume(String.new()) }; }\n"
+                 " return 0;\n}\n",
+                 [("cannot move 'text' out of its lock block: the shared value still owns it; clone it instead", 7)])], 24):
             session.send("textDocument/didChange", {"textDocument": {"uri": alias_uri, "version": version},
                 "contentChanges": [{"text": source}]})
             errors = [(item["message"].split("\n")[0].split(" (help:")[0], item["range"]["start"]["line"])
