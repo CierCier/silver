@@ -214,6 +214,19 @@ TypeProjection send_project_rendered(str text, String* base) {
             i = 5;
         }
     }
+    if (text[i] == (u8)'[') {
+        // An inferred tuple, `[A, B]`, stays whole; the declaration walk
+        // checks each element.
+        i64 depth = 0;
+        while (text[i] != (u8)0) {
+            u8 c = text[i];
+            base.push(c);
+            i += 1;
+            if (c == (u8)'[' || c == (u8)'<') { depth += 1; }
+            if (c == (u8)']' || c == (u8)'>') { depth -= 1; }
+            if (depth == 0) { break; }
+        }
+    }
     while (text[i] != (u8)0 && text[i] != (u8)'<' && text[i] != (u8)'*') {
         base.push(text[i]);
         i += 1;
@@ -426,6 +439,35 @@ bool send_enum_payloads_are_send(SyntaxNode* root, SyntaxNode* item,
     return true;
 }
 
+/// Returns true when every element of rendered tuple `tuple`, such as
+/// `[Bad, i64]`, is Send.
+bool send_tuple_elements_are_send(SyntaxNode* root, TypeProjection* tuple,
+                                  Vec<String>* visiting, i64 depth, String* reason) {
+    str text = tuple.name;
+    String element = String.new();
+    i64 nesting = 0;
+    i64 i = 1;
+    bool is_send = true;
+    while (is_send && text[i] != (u8)0) {
+        u8 c = text[i];
+        i += 1;
+        if (c == (u8)'[' || c == (u8)'<') { nesting += 1; }
+        if (c == (u8)']' || c == (u8)'>') { nesting -= 1; }
+        if (nesting < 0 || (nesting == 0 && c == (u8)',')) {
+            if (element.len() > 0) {
+                is_send = send_argument_is_send(root, element.to_str(), tuple, visiting, depth, reason);
+            }
+            element.clear();
+            while (text[i] == (u8)' ') { i += 1; }
+            if (nesting < 0) { break; }
+        } else {
+            element.push(c);
+        }
+    }
+    element.drop();
+    return is_send;
+}
+
 /// Returns true when `value` is Send, looking through user struct and enum
 /// declarations (cycles are cut by `visiting`, depth by `depth`).
 bool send_type_is_send_in_declarations(SyntaxNode* root, TypeProjection* value,
@@ -436,6 +478,9 @@ bool send_type_is_send_in_declarations(SyntaxNode* root, TypeProjection* value,
     if (depth >= 64) {
         reason.push_str("recursive type structure exceeds the Send analysis limit");
         return false;
+    }
+    if (value.kind == ProjectionTypeKind.Named && value.name[0] == (u8)'[') {
+        return send_tuple_elements_are_send(root, value, visiting, depth, reason);
     }
     if (value.kind == ProjectionTypeKind.Named) {
         SyntaxNode* item = find_item_by_name(root, NodeKind.Struct, value.name);

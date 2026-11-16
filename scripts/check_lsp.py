@@ -988,6 +988,12 @@ class NativeLsp(unittest.TestCase):
                  " data[0] = 2;\n data[0] += 1;\n return wait t;\n}\n",
                  [("cannot assign to 'data' because it is borrowed", 6),
                   ("cannot assign to 'data' because it is borrowed", 7)]),
+                # An inferred tuple's elements must be Send to borrow it into a task.
+                ("struct Bad { i64* p; }\n[Bad, i64] make_pair() { Bad b; return [b, 1]; }\n"
+                 "[i64, i64] make_plain() { return [1, 2]; }\ni64 peek<T>(&T value) { return 0; }\ni64 main() {\n"
+                 " let pair = make_pair();\n let plain = make_plain();\n Task<i64> t = launch peek(&pair);\n"
+                 " Task<i64> u = launch peek(&plain);\n return wait t + wait u;\n}\n",
+                 [("launch argument of type &[Bad, i64] is not Send: raw pointer types are not Send: move owned values (Box/Vec) or pass a Channel across threads", 7)]),
                 # A reference to a shared value borrows it; its initializer is not a value to wrap.
                 ("import std.sync;\ni64 main() {\n shared i64 m = 0;\n &shared i64 r = &m;\n lock r { r += 1; }\n"
                  " return 0;\n}\n", [])], 24):
