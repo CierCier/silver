@@ -948,6 +948,19 @@ class NativeLsp(unittest.TestCase):
                  "  [String, i64] r = match value { Full(text): [text, 0], Empty: [String.new(), 1] };\n"
                  "  r[0].drop();\n }\n return 0;\n}\n",
                  [("cannot move 'text' out of its lock block: the shared value still owns it; clone it instead", 8)]),
+                # So is a statement match's result, which is dropped.
+                ("import std.sync;\nimport std.string;\nenum Bin { Full(String); Empty; }\nvoid consume(String s) { s.drop(); }\n"
+                 "i64 main() {\n String s = String.from_str(\"a\");\n shared Bin state = Bin.Full(move s);\n"
+                 " lock state as value {\n  match value { Full(text): [text, 0], Empty: [String.new(), 1] };\n }\n"
+                 " return 0;\n}\n",
+                 [("cannot move 'text' out of its lock block: the shared value still owns it; clone it instead", 8)]),
+                # A macro's local shadows a locked name only inside the macro.
+                ("import std.sync;\nimport std.string;\nenum Bin { Full(String); Empty; }\nvoid consume(String s) { s.drop(); }\n"
+                 "macro i64 scratch() { String text = String.new(); text.drop(); return 0; }\ni64 main() {\n"
+                 " String s = String.from_str(\"a\");\n shared Bin state = Bin.Full(move s);\n"
+                 " lock state as value { match value {\n  Full(text): { i64 _z = @scratch(); consume(text); },\n"
+                 "  Empty: consume(String.new()) }; }\n return 0;\n}\n",
+                 [("cannot move 'text' out of its lock block: the shared value still owns it; clone it instead", 9)]),
                 # A reference to a shared value borrows it; its initializer is not a value to wrap.
                 ("import std.sync;\ni64 main() {\n shared i64 m = 0;\n &shared i64 r = &m;\n lock r { r += 1; }\n"
                  " return 0;\n}\n", [])], 24):

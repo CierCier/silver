@@ -1286,28 +1286,19 @@ bool typecheck_reject_locked_move(AstPool* pool, TypeTable* types, SymbolTable* 
                                   DiagnosticBag* diagnostics, bool* ok) {
     AstExpr* place = pool.get_expr(place_id);
     if (place.kind == ExprKind.ArrayLit || place.kind == ExprKind.Match) {
-        // An arm's result may hold its own locked payloads.
-        bool locked = place.kind == ExprKind.Match && place.inner0 != 0
-            && typecheck_reads_locked_value(pool, symbols, place.inner0);
+        // Each arm's own locked payloads were checked with the arm.
         bool reported = false;
         i64 i = 0;
         while (i < (i64)place.aux) {
-            i64 locked_mark = pool.locked_bindings.len();
-            u32 part = 0;
-            if (place.kind == ExprKind.ArrayLit) {
-                part = pool.args.get((i64)place.inner1 + 1 + i);
-            } else {
-                MatchArm* arm = pool.get_arm(place.inner1 + (u32)i);
-                typecheck_push_arm_bindings(pool, arm, locked);
-                part = arm.value_id;
-            }
+            u32 part = place.kind == ExprKind.ArrayLit
+                ? pool.args.get((i64)place.inner1 + 1 + i)
+                : pool.arms.get_ptr((i64)place.inner1 + i).value_id;
             // A `move` part is rejected where the move is checked.
             if (part != 0 && pool.get_expr(part).kind != ExprKind.Move
                 && typecheck_reject_locked_move(pool, types, symbols, root, part,
                                                 diagnostics, ok)) {
                 reported = true;
             }
-            while (pool.locked_bindings.len() > locked_mark) { pool.locked_bindings.pop(); }
             i += 1;
         }
         return reported;
@@ -2573,6 +2564,8 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
             block_env.locals.push(env.locals.get(local_index));
             local_index += 1;
         }
+        // Its locals shadow a locked name only inside it, as in a statement block.
+        i64 locked_mark = pool.locked_bindings.len();
         i64 stmt_index = 0;
         while (stmt_index < (i64)block_count) {
             u32 stmt_id = pool.block_stmts.get((i64)block_start + stmt_index);
@@ -2584,6 +2577,7 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                               result_expr, diagnostics, ok);
         typecheck_reject_partial_drop_move(pool, types, symbols, root, &block_env,
                                            result_expr, diagnostics, ok);
+        while (pool.locked_bindings.len() > locked_mark) { pool.locked_bindings.pop(); }
         block_env.locals.drop();
     } else if (expr.kind == ExprKind.Ternary) {
         u32 cond_type = infer_expr(pool, types, symbols, root, env, expr.inner0, diagnostics, ok);
@@ -2784,6 +2778,13 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
             } else {
                 arm_type = infer_expr(pool, types, symbols, root, &arm_env,
                                       arm.value_id, diagnostics, ok);
+                // The arm's result is consumed even when the match is a
+                // statement, so an aggregate cannot hold its locked payloads.
+                // A bare payload is reported below.
+                if (pool.get_expr(arm.value_id).kind == ExprKind.ArrayLit) {
+                    typecheck_reject_locked_move(pool, types, symbols, root, arm.value_id,
+                                                 diagnostics, ok);
+                }
             }
             while (pool.locked_bindings.len() > locked_mark) { pool.locked_bindings.pop(); }
             u32 moved = locked ? typecheck_arm_moved_binding(pool, types, root, arm) : 0;

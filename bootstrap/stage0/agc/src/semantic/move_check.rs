@@ -1509,13 +1509,10 @@ impl MoveChecker {
                 }
                 return;
             }
-            ast::ExpressionKind::Match { expression, arms } => {
-                // An arm's result may hold its own locked payloads.
-                let locked = self.locked_place(expression, var_types).map(|(_, ty)| ty);
+            // Each arm's own locked payloads were checked with the arm.
+            ast::ExpressionKind::Match { arms, .. } => {
                 for arm in arms {
-                    let saved = self.bind_locked_payloads(&arm.pattern, locked.as_ref());
                     self.reject_locked_move(&arm.body, var_types);
-                    self.locked_bindings = saved;
                 }
                 return;
             }
@@ -1613,6 +1610,16 @@ impl MoveChecker {
                 old_state,
                 old_type,
                 old_owner,
+                old_locked,
+            ));
+        } else if old_locked.is_some() {
+            // An untyped local leaves the state alone but still shadows the
+            // locked name until its scope ends.
+            scopes.last_mut().expect("scope stack is non-empty").push((
+                name.to_string(),
+                state.get(name).cloned(),
+                var_types.get(name).cloned(),
+                self.owner_bindings.get(name).cloned(),
                 old_locked,
             ));
         }
@@ -2529,6 +2536,9 @@ impl MoveChecker {
                     let mut arm_state = state.clone();
                     let mut arm_scopes = scopes.clone();
                     self.check_expr(&arm.body, &mut arm_state, &mut arm_scopes, var_types);
+                    // The arm's result is consumed even when the match is a
+                    // statement, so it cannot hold the arm's locked payloads.
+                    self.reject_locked_move(&arm.body, var_types);
                     self.locked_bindings = saved;
                     if !expression_terminates(&arm.body) {
                         for (name, var) in merged.iter_mut() {
