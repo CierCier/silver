@@ -870,7 +870,11 @@ class NativeLsp(unittest.TestCase):
                 ("void bump(&mut i64 v) { *v += 1; }\ni64 main() {\n i64 x = 0;\n Task<void> t = launch bump(&x);\n"
                  " wait t;\n return x;\n}\n",
                  [("a launch argument for a `&mut` parameter must be `&mut place` or a `&mut` reference "
-                   "variable", 3)])], 24):
+                   "variable", 3)]),
+                # Passing a borrowed local to a `&T` parameter reads it; it does not move it.
+                ("import std.mem.vec;\ni64 inspect(&Vec<i64> data) { return data.len(); }\ni64 main() {\n"
+                 " Vec<i64> data = Vec<i64>.new();\n Task<i64> t = launch inspect(&data);\n"
+                 " i64 n = inspect(data);\n return wait t + n;\n}\n", [])], 24):
             session.send("textDocument/didChange", {"textDocument": {"uri": alias_uri, "version": version},
                 "contentChanges": [{"text": source}]})
             errors = [(item["message"].split("\n")[0].split(" (help:")[0], item["range"]["start"]["line"])

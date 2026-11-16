@@ -2424,7 +2424,10 @@ void borrow_check_task_loan_use(BorrowAnalyzer* analyzer, SyntaxTree* tree,
     bool returned = i > 0 && leaves.get(i - 1).token_kind == TokenKind.Return
         && last.next_sibling != (SyntaxNode*)0
         && last.next_sibling.token_kind == TokenKind.Semicolon;
-    if (!returned && !borrow_is_whole_call_argument(node, last)) { return; }
+    if (!returned && (!borrow_is_whole_call_argument(node, last)
+                      || borrow_argument_is_borrowed(tree.root, symbols, node))) {
+        return;
+    }
     Binding* binding = visible_binding(bindings, node.text, node);
     u32 type_id = borrow_binding_type(symbols, binding);
     if (type_id == TYPE_UNKNOWN) {
@@ -2441,6 +2444,25 @@ void borrow_check_task_loan_use(BorrowAnalyzer* analyzer, SyntaxTree* tree,
     analyzer.diagnostics.error_with_note(node.span, cannot_move_borrowed(path.to_str()),
         borrowed_at, locked ? note_locked_here() : note_task_borrow_here());
     analyzer.failed = true;
+}
+
+/// True when `argument` goes to a `&T`/`&mut T` parameter of the function
+/// its call selects, which borrows it rather than moving it. A method call
+/// is not resolved here and counts as by-value.
+bool borrow_argument_is_borrowed(SyntaxNode* root, SymbolTable* symbols, SyntaxNode* argument) {
+    i64 index = 0;
+    SyntaxNode* callee = borrow_call_for_argument(argument, &index);
+    if (callee == (SyntaxNode*)0 || scoped_is_token(binding_previous_sibling(callee), TokenKind.Dot)) {
+        return false;
+    }
+    i64 arity = callee.next_sibling.first_child == (SyntaxNode*)0 ? 0 : 1;
+    SyntaxNode* part = callee.next_sibling.first_child;
+    while (part != (SyntaxNode*)0) {
+        if (part.token_kind == TokenKind.Comma) { arity += 1; }
+        part = part.next_sibling;
+    }
+    return launch_borrowing_callee(root, symbols.selected_callee(callee.span), callee.text,
+                                   arity, index) != (SyntaxNode*)0;
 }
 
 /// True when a `launch` token appears under `node`.
