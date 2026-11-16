@@ -849,7 +849,23 @@ class NativeLsp(unittest.TestCase):
                 # Explicit type arguments do not hide a launch's borrows.
                 ("void worker<T>(&mut T value, T add) { *value = *value + add; }\ni64 main() {\n i64 value = 1;\n"
                  " Task<void> t = launch worker<i64>(&mut value, 1);\n value = 2;\n wait t;\n return 0;\n}\n",
-                 [("cannot assign to 'value' because it is borrowed", 4)])], 24):
+                 [("cannot assign to 'value' because it is borrowed", 4)]),
+                # An inferred `let` is judged by its initializer's type.
+                ("import std.mem.vec;\ni64 count<T>(&Vec<T> values) { return values.len(); }\ni64 main() {\n"
+                 " let values = Vec<i64>.new();\n Task<i64> t = launch count(&values);\n return wait t;\n}\n", []),
+                ("import std.mem.vec;\nimport std.mem.rc;\ni64 count<T>(&Vec<T> values) { return values.len(); }\n"
+                 "i64 main() {\n let values = Vec<Rc<i64>>.new();\n Task<i64> t = launch count(&values);\n"
+                 " return wait t;\n}\n",
+                 [("launch argument of type &Vec<Rc<i64>> is not Send: Rc<T> carries a shared non-atomic "
+                   "reference count", 5)]),
+                # A method's parameters are checked too.
+                ("import std.mem.rc;\nvoid worker(Rc<i64> _r) { }\nstruct Runner { i64 n; }\nimpl Runner {\n"
+                 " void go(&self, Rc<i64> value) {\n  Task<void> t = launch worker(move value);\n  wait t;\n }\n}\n",
+                 [("launch argument of type Rc<i64> is not Send: Rc<T> carries a shared non-atomic "
+                   "reference count", 5)]),
+                # A field read through a reference passes only that field.
+                ("import std.mem.rc;\nstruct Holder { Rc<i64> r; i64 n; }\ni64 twice(i64 x) { return x * 2; }\n"
+                 "i64 doubled(&Holder h) {\n Task<i64> t = launch twice(h.n);\n return wait t;\n}\n", [])], 24):
             session.send("textDocument/didChange", {"textDocument": {"uri": alias_uri, "version": version},
                 "contentChanges": [{"text": source}]})
             errors = [(item["message"].split("\n")[0].split(" (help:")[0], item["range"]["start"]["line"])
