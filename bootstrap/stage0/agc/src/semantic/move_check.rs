@@ -8,6 +8,7 @@ use crate::parser::ast;
 use crate::semantic::init;
 use crate::semantic::move_path::{InitState, MovePathTree};
 use crate::semantic::place::{Place, Projection};
+use crate::semantic::typeck::MethodCallKey;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 // Phase 4 scaffolding (parallel, not yet hot): `Place`/`MovePathTree`/`InitOp`
@@ -431,6 +432,9 @@ struct Facts {
     /// bare `...` or a typed rest parameter. A borrowing overload of another
     /// arity must not make its calls consume.
     value_receivers: FxHashMap<(String, String), Vec<(usize, bool)>>,
+    /// Whether the overload typeck selected at a method call takes its
+    /// receiver by value; it overrides `value_receivers` for that call.
+    consuming_calls: FxHashMap<MethodCallKey, bool>,
     /// (function/method name, param index) pairs with a value (non-view) param.
     value_args: FxHashSet<(String, usize)>,
     /// (owner, method, explicit argument index) pairs with value parameters.
@@ -799,27 +803,20 @@ fn expression_terminates(expr: &ast::Expression) -> bool {
     }
 }
 
-pub fn check_program(program: &ast::Program) -> Vec<MoveError> {
-    check_program_with_imports(program, &[])
-}
-
-pub fn check_program_with_imports(
-    program: &ast::Program,
-    imported_modules: &[ModuleArtifact],
-) -> Vec<MoveError> {
-    analyze_program_with_imports(program, imported_modules).errors
-}
-
 pub struct MoveReport {
     pub errors: Vec<MoveError>,
     pub init_plan: super::init_plan::ProgramInitPlan,
 }
 
+/// `consuming_calls` is typeck's receiver mode per method call; a call typeck
+/// did not record falls back to the declared methods' arities.
 pub fn analyze_program_with_imports(
     program: &ast::Program,
     imported_modules: &[ModuleArtifact],
+    consuming_calls: &FxHashMap<MethodCallKey, bool>,
 ) -> MoveReport {
-    let facts = Facts::build(program, imported_modules);
+    let mut facts = Facts::build(program, imported_modules);
+    facts.consuming_calls = consuming_calls.clone();
     let mut checker = MoveChecker {
         layouts: OwnerLayouts(facts.clone()),
         facts,
@@ -1055,15 +1052,21 @@ impl MoveChecker {
         true
     }
 
-    /// True when calling `method` with `argument_count` arguments selects a
-    /// by-value overload, so the call consumes `receiver`.
+    /// True when the method call at `call` selects a by-value overload, so it
+    /// consumes `receiver`. Without typeck's choice, any by-value overload
+    /// that accepts `argument_count` arguments counts.
     fn consuming_receiver(
         &self,
+        call: Span,
         receiver: &ast::Expression,
         method: &str,
         argument_count: usize,
         var_types: &FxHashMap<String, ast::Type>,
     ) -> bool {
+        let key = ((call.file, call.start, call.end, call.expansion), method.to_string());
+        if let Some(&consumes) = self.facts.consuming_calls.get(&key) {
+            return consumes;
+        }
         let Some(ty) = self.receiver_type(receiver, var_types) else {
             return false;
         };
@@ -2050,7 +2053,7 @@ impl MoveChecker {
                 arguments,
             } => {
                 let is_consuming = method.name == "drop"
-                    || self.consuming_receiver(receiver, &method.name, arguments.len(), var_types);
+                    || self.consuming_receiver(expr.span, receiver, &method.name, arguments.len(), var_types);
                 if is_consuming {
                     self.move_value_argument(
                         receiver,
@@ -2754,8 +2757,8 @@ mod tests {
     };
 
     /// Stand-ins for std.sync's Mutex and Guard, which `shared` and `lock`
-    /// lower to, and an owned payload type with borrowing `inspect()` and
-    /// `peek()` beside consuming overloads that take more arguments.
+    /// lower to, and an owned payload type with borrowing `inspect` and
+    /// `peek` overloads beside consuming ones.
     const PRELUDE: &str = "trait Drop { void drop(*self); }\n\
         struct Text { i64 len; }\n\
         impl Drop for Text { void drop(*self) {} }\n\
@@ -2763,6 +2766,7 @@ mod tests {
           void consume(self) {}\n\
           i64 inspect(&self) { return self.len; }\n\
           i64 inspect(self, i64 tag) { return tag; }\n\
+          i64 inspect(&self, Sink sink) { return sink.n; }\n\
           i64 peek(&self) { return self.len; }\n\
           void peek(self, i64 tag, ...) {}\n\
           void absorb(self, i64... rest) {}\n\
@@ -2799,7 +2803,9 @@ mod tests {
             checker.check_program_with_table(&program, &mut CompilerSymbolTable::new());
         let inferred_lets = checker.take_inferred_lets();
         crate::semantic::typeck::populate_inferred_let_types(&mut program, &inferred_lets);
-        let moves = super::analyze_program_with_imports(&program, &[]).errors;
+        let moves =
+            super::analyze_program_with_imports(&program, &[], checker.consuming_method_calls())
+                .errors;
         Errors {
             types: types.into_iter().map(|error| error.message).collect(),
             moves: moves.into_iter().map(|error| error.message).collect(),
@@ -2882,14 +2888,14 @@ mod tests {
         // A bare `...` adds no parameter, so `peek()` fits only the borrow.
         let errors = errors_in("Text text; i64 a = text.peek(); i64 b = text.peek();");
         assert!(errors.types.is_empty() && errors.moves.is_empty(), "{errors:?}");
-        for consumed in [
-            "text.inspect(1);",
-            "text.peek(1);",
-            "text.peek(1, 2, 3);",
-            "text.absorb();",
-            "text.absorb(1, 2);",
-        ] {
+        // Typeck's choice decides between overloads of one arity.
+        let errors =
+            errors_in("Text text; Sink k; i64 a = text.inspect(k); i64 b = text.inspect(k);");
+        assert!(errors.types.is_empty() && errors.moves.is_empty(), "{errors:?}");
+        for consumed in ["text.inspect(1);", "text.peek(1);", "text.absorb();", "text.absorb(1, 2);"]
+        {
             let errors = errors_in(&format!("Text text; {consumed} i64 b = text.inspect();"));
+            assert!(errors.types.is_empty(), "{consumed}: {errors:?}");
             assert!(
                 errors.moves.iter().any(|message| message.contains("moved value 'text'")),
                 "{consumed}: {errors:?}"

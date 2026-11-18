@@ -1181,7 +1181,11 @@ impl<'a> ParallelGraphExecutor<'a> {
             .map_err(|e| format!("failed to encode .agm: {e}"))?;
 
         let pid = std::process::id();
-        let ownership = crate::semantic::move_check::analyze_program_with_imports(&ast, &import_lowering.module_artifacts);
+        let ownership = crate::semantic::move_check::analyze_program_with_imports(
+            &ast,
+            &import_lowering.module_artifacts,
+            checker.consuming_method_calls(),
+        );
         if let Some(error) = ownership.errors.first() {
             return Err(error.message.clone());
         }

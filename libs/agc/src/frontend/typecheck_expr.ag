@@ -1837,24 +1837,14 @@ String typecheck_method_symbol(TypeTable* types, str owner_name,
     return move symbol;
 }
 
-/// Returns the symbol of the method a call resolves to.
-String typecheck_method_symbol_for_call(AstPool* pool, SyntaxNode* root,
-                                        TypeTable* types, u32 receiver_type,
-                                        str method_name, u32 args_start,
-                                        bool static_method) {
-    u32 resolved_receiver = types.resolve_subst(receiver_type);
-    TypeEntry* receiver = types.get(resolved_receiver);
-    while (receiver.kind == TypeKind.Pointer || receiver.kind == TypeKind.Reference) {
-        resolved_receiver = receiver.inner;
-        receiver = types.get(resolved_receiver);
-    }
-    if (receiver.kind != TypeKind.Named) {
-        String fallback = String.from_str(types.type_name(resolved_receiver));
-        fallback.push_str("__");
-        fallback.push_str(method_name);
-        return move fallback;
-    }
-    str owner_name = types.names.get(receiver.name_id);
+/// Returns the parameter list of the `owner_name.method_name` overload whose
+/// parameters best fit the call's arguments, the one codegen dispatches to,
+/// with its return-type start and name in `out_ret_start` and `out_name`.
+/// Null when no local declaration accepts the call.
+SyntaxNode* typecheck_select_method(AstPool* pool, SyntaxNode* root, TypeTable* types,
+                                    u32 resolved_receiver, str owner_name,
+                                    str method_name, u32 args_start, bool static_method,
+                                    SyntaxNode** out_ret_start, SyntaxNode** out_name) {
     u32 arg_count = pool.args.get((i64)args_start);
     i64 parameter_offset = static_method ? 0 : 1;
     i64 best_score = -1;
@@ -1946,6 +1936,33 @@ String typecheck_method_symbol_for_call(AstPool* pool, SyntaxNode* root,
         }
         item = item.next_sibling;
     }
+    *out_ret_start = best_ret_start;
+    *out_name = best_name;
+    return best_params;
+}
+
+/// Returns the symbol of the method a call resolves to.
+String typecheck_method_symbol_for_call(AstPool* pool, SyntaxNode* root,
+                                        TypeTable* types, u32 receiver_type,
+                                        str method_name, u32 args_start,
+                                        bool static_method) {
+    u32 resolved_receiver = types.resolve_subst(receiver_type);
+    TypeEntry* receiver = types.get(resolved_receiver);
+    while (receiver.kind == TypeKind.Pointer || receiver.kind == TypeKind.Reference) {
+        resolved_receiver = receiver.inner;
+        receiver = types.get(resolved_receiver);
+    }
+    if (receiver.kind != TypeKind.Named) {
+        String fallback = String.from_str(types.type_name(resolved_receiver));
+        fallback.push_str("__");
+        fallback.push_str(method_name);
+        return move fallback;
+    }
+    str owner_name = types.names.get(receiver.name_id);
+    SyntaxNode* best_ret_start = (SyntaxNode*)0;
+    SyntaxNode* best_name = (SyntaxNode*)0;
+    SyntaxNode* best_params = typecheck_select_method(pool, root, types, resolved_receiver,
+        owner_name, method_name, args_start, static_method, &best_ret_start, &best_name);
     if (best_params == (SyntaxNode*)0) {
         String fallback = String.from_str(owner_name);
         fallback.push_str("__");
@@ -1954,6 +1971,50 @@ String typecheck_method_symbol_for_call(AstPool* pool, SyntaxNode* root,
     }
     return typecheck_method_symbol(types, owner_name, method_name,
                                    best_ret_start, best_name, best_params);
+}
+
+/// Returns true when the overload a call selects takes parameter
+/// `parameter_index` (0 is `self` for an instance call) by value. A method
+/// with no local declaration that fits keeps the arity-based answer.
+bool typecheck_selected_parameter_is_value(AstPool* pool, SyntaxNode* root, TypeTable* types,
+                                           u32 receiver_type, str method_name,
+                                           i64 param_count, u32 args_start,
+                                           bool static_method, i64 parameter_index,
+                                           u32 arg_type) {
+    u32 resolved_receiver = types.resolve_subst(receiver_type);
+    TypeEntry* receiver = types.get(resolved_receiver);
+    while (receiver.kind == TypeKind.Pointer || receiver.kind == TypeKind.Reference) {
+        resolved_receiver = receiver.inner;
+        receiver = types.get(resolved_receiver);
+    }
+    SyntaxNode* params_node = (SyntaxNode*)0;
+    if (receiver.kind == TypeKind.Named && args_start < (u32)pool.args.len()) {
+        SyntaxNode* ret_start = (SyntaxNode*)0;
+        SyntaxNode* name = (SyntaxNode*)0;
+        params_node = typecheck_select_method(pool, root, types, resolved_receiver,
+            types.names.get(receiver.name_id), method_name, args_start, static_method,
+            &ret_start, &name);
+    }
+    if (params_node == (SyntaxNode*)0) {
+        return typecheck_method_parameter_is_value(root, types, receiver_type, method_name,
+                                                   param_count, parameter_index, arg_type);
+    }
+    Vec<Binding> params = Vec<Binding>.new();
+    collect_parameter_bindings(params_node, &params);
+    i64 index = parameter_index;
+    // Trailing arguments fill a typed rest parameter; a bare `...` has none.
+    if (index >= params.len() && params.len() > 0
+        && binding_is_variadic_parameter(params.get_ptr(params.len() - 1))) {
+        index = params.len() - 1;
+    }
+    bool value_parameter = false;
+    if (index >= 0 && index < params.len()) {
+        Binding* parameter = params.get_ptr(index);
+        value_parameter = parameter.declared_type.kind != ProjectionTypeKind.Pointer
+            && parameter.declared_type.kind != ProjectionTypeKind.Reference;
+    }
+    params.drop();
+    return value_parameter;
 }
 
 /// Returns the return type of the method a call resolves to.
@@ -3165,19 +3226,23 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
             base.drop();
         }
         i64 total_param_count = (i64)arg_count + (static_method ? 0 : 1);
+        bool has_arguments = expr.inner1 < (u32)pool.args.len();
+        i64 infer_index = 0;
+        while (has_arguments && infer_index < (i64)arg_count) {
+            u32 arg_id = pool.args.get((i64)expr.inner1 + 1 + infer_index);
+            infer_expr(pool, types, symbols, root, env, arg_id, diagnostics, ok);
+            infer_index += 1;
+        }
+        // The argument types select the overload, and with it whether the
+        // call takes `self` by value.
         if (!static_method && (strcmp(method_name, "drop") == 0
-             || typecheck_method_has_value_receiver(root, types, receiver_type, method_name, total_param_count))
+             || typecheck_selected_parameter_is_value(pool, root, types, receiver_type,
+                    method_name, total_param_count, expr.inner1, false, 0, receiver_type))
             && receiver.kind != ExprKind.Move) {
             typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
                                                expr.inner0, diagnostics, ok);
         }
-        if (expr.inner1 < (u32)pool.args.len()) {
-            i64 infer_index = 0;
-            while (infer_index < (i64)arg_count) {
-                u32 arg_id = pool.args.get((i64)expr.inner1 + 1 + infer_index);
-                infer_expr(pool, types, symbols, root, env, arg_id, diagnostics, ok);
-                infer_index += 1;
-            }
+        if (has_arguments) {
             i64 arg_index = 0;
             while (arg_index < (i64)arg_count) {
                 u32 arg_id = pool.args.get((i64)expr.inner1 + 1 + arg_index);
@@ -3218,9 +3283,9 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                     }
                 }
                 if (variant_constructor
-                    || typecheck_method_parameter_is_value(root, types, receiver_type,
-                                                           method_name, total_param_count,
-                                                           parameter_index, arg_type)) {
+                    || typecheck_selected_parameter_is_value(pool, root, types, receiver_type,
+                           method_name, total_param_count, expr.inner1, static_method,
+                           parameter_index, arg_type)) {
                     if (pool.get_expr(arg_id).kind != ExprKind.Move) {
                         typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
                                                            arg_id, diagnostics, ok);

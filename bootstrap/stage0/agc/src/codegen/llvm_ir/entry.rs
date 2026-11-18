@@ -151,7 +151,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             None
         };
         let mut generator = LlvmIrGenerator {
-            ownership: crate::semantic::move_check::analyze_program_with_imports(program, &[]).init_plan,
+            ownership: crate::semantic::move_check::analyze_program_with_imports(program, &[], &Default::default()).init_plan,
             owner_function: None,
             owner_states: HashMap::default(),
             borrowed_binding_states: HashMap::default(),
@@ -313,7 +313,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             None
         };
         let mut generator = LlvmIrGenerator {
-            ownership: ownership.cloned().unwrap_or_else(|| crate::semantic::move_check::analyze_program_with_imports(program, imported_modules).init_plan),
+            ownership: ownership.cloned().unwrap_or_else(|| crate::semantic::move_check::analyze_program_with_imports(program, imported_modules, &Default::default()).init_plan),
             owner_function: None,
             owner_states: HashMap::default(),
             borrowed_binding_states: HashMap::default(),
@@ -787,7 +787,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             None
         };
         let mut generator = LlvmIrGenerator {
-            ownership: ownership.cloned().unwrap_or_else(|| crate::semantic::move_check::analyze_program_with_imports(program, imported_modules).init_plan),
+            ownership: ownership.cloned().unwrap_or_else(|| crate::semantic::move_check::analyze_program_with_imports(program, imported_modules, &Default::default()).init_plan),
             owner_function: None,
             owner_states: HashMap::default(),
             borrowed_binding_states: HashMap::default(),

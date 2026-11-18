@@ -998,6 +998,14 @@ class NativeLsp(unittest.TestCase):
                  "  Empty: { seen = 0; } }; }\n lock state as value { match value {\n"
                  "  Full(payload): { seen = payload.inspect(1); },\n  Empty: { seen = 0; } }; }\n return seen;\n}\n",
                  [("cannot move 'payload' out of its lock block: the shared value still owns it; clone it instead", 15)]),
+                # Between overloads of one arity, the argument types choose the receiver mode.
+                ("import std.sync;\nimport std.string;\nstruct Tag { i64 t; }\nimpl String {\n"
+                 " i64 inspect(&self, Tag tag) { return tag.t; }\n"
+                 " i64 inspect(self, i64 n) { self.drop(); return n; }\n}\ni64 main() {\n"
+                 " shared String state = String.from_str(\"a\");\n Tag tag = { .t = 0 };\n i64 r = 0;\n"
+                 " lock state as value { r = value.inspect(tag); }\n"
+                 " lock state as value { r = value.inspect(1); }\n return r;\n}\n",
+                 [("cannot move 'value' out of its lock block: the shared value still owns it; clone it instead", 12)]),
                 # A conditional's result can be the locked value.
                 ("import std.sync;\nimport std.string;\ni64 main() {\n shared String state = String.from_str(\"a\");\n"
                  " bool choose = true;\n lock state as value {\n  String out = choose ? value : String.new();\n"

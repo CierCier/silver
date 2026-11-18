@@ -1884,6 +1884,7 @@ pub fn run(cli: Cli) {
                 let move_report = crate::semantic::move_check::analyze_program_with_imports(
                     &ast,
                     &imported_modules,
+                    checker.consuming_method_calls(),
                 );
                 if !move_report.errors.is_empty() {
                     for error in &move_report.errors {

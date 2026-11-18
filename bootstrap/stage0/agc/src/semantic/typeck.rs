@@ -133,6 +133,11 @@ pub struct ResolvedCallable {
     pub mutable_parameters: Vec<usize>,
 }
 
+/// An instance method call's source span and method name. A `for` loop's
+/// implicit `into_iter` call shares its iterable's span, so the span alone
+/// does not name one call.
+pub type MethodCallKey = (CallSiteKey, String);
+
 /// Indices of the reference parameters in `params`, or of only the `&mut`
 /// ones when `mutable_only`.
 fn reference_parameter_indices(params: &[Type], mutable_only: bool) -> Vec<usize> {
@@ -212,6 +217,9 @@ pub struct TypeChecker {
     /// valid while those changes preserve call spans. A rewrite that changes a
     /// call's dispatch must type-check that call again before safety analysis.
     resolved_callables: HashMap<CallSiteKey, ResolvedCallable>,
+    /// Whether the overload selected at each instance method call takes its
+    /// receiver by value.
+    consuming_method_calls: HashMap<MethodCallKey, bool>,
     /// Resolved iterator types for ForIn expressions, populated during typeck.
     /// Maps (expr start, expr end) → AST type of the IntoIter associated type.
     /// Used to populate the ForIn AST node after typeck for codegen.
@@ -518,6 +526,10 @@ impl TypeChecker {
 
     pub fn resolved_callables(&self) -> &HashMap<CallSiteKey, ResolvedCallable> {
         &self.resolved_callables
+    }
+
+    pub fn consuming_method_calls(&self) -> &HashMap<MethodCallKey, bool> {
+        &self.consuming_method_calls
     }
 
     fn ingest_module(&mut self, module: &ModuleArtifact) {
@@ -4808,6 +4820,14 @@ impl TypeChecker {
                 mutable_parameters: reference_parameter_indices(&candidate.params, true),
             },
         );
+        if style == MethodCallStyle::Instance {
+            // A body checked once per instantiation may select a by-value
+            // overload in only some of them; any one makes the call a move.
+            *self
+                .consuming_method_calls
+                .entry(((span.file, span.start, span.end, span.expansion), name.to_string()))
+                .or_default() |= candidate.source_method.method_kind == ast::MethodKind::InstanceValue;
+        }
         self.record_method_monomorph(candidate, mapping, span);
         if !self.lambdas.frames.is_empty() {
             let offset = usize::from(style == MethodCallStyle::Instance);
