@@ -4016,7 +4016,10 @@ impl ExprLowerer {
                             scan = scan.next_sibling;
                         }
                         if (semi1 != (SyntaxNode*)0 && semi2 != (SyntaxNode*)0) {
-                            self.lower_statement(init_start, semi1, stmt_ids);
+                            // The header's declaration belongs to the loop: a
+                            // block around both ends it with the loop.
+                            Vec<u32> loop_stmts = Vec<u32>.new();
+                            self.lower_statement(init_start, semi1, &loop_stmts);
                             u32 cond_id = self.lower_sequence(semi1.next_sibling, semi2);
                             Vec<u32> loop_body_stmts = Vec<u32>.new();
                             self.lower_block(body_node, &loop_body_stmts);
@@ -4034,7 +4037,9 @@ impl ExprLowerer {
                             loop_body_stmts.drop();
                             u32 body_block = self.pool.add_stmt_block(b_start, b_count, body_node.span);
                             u32 while_id = self.pool.add_stmt_while_step(cond_id, body_block, step_block, cursor.span);
-                            stmt_ids.push(while_id);
+                            loop_stmts.push(while_id);
+                            stmt_ids.push(self.lower_stmt_list_block(&loop_stmts, cursor.span));
+                            loop_stmts.drop();
                             cursor = body_node.next_sibling;
                             continue;
                         }

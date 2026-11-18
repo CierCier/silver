@@ -1294,7 +1294,8 @@ u32 typecheck_place_type(AstPool* pool, TypeTable* types, SymbolTable* symbols,
 /// it, out of the block. The value is `(*__lock_N__name)`, a place inside
 /// the Mutex (see sync_sugar.ag), and the Mutex would still own and drop
 /// it. A tuple, a brace initializer, or a match arm consumes each value it
-/// is built from. Returns true when it reported.
+/// is built from, and a conditional either of its results. Returns true when
+/// it reported.
 bool typecheck_reject_locked_move(AstPool* pool, TypeTable* types, SymbolTable* symbols,
                                   SyntaxNode* root, u32 place_id,
                                   DiagnosticBag* diagnostics, bool* ok) {
@@ -1324,6 +1325,13 @@ bool typecheck_reject_locked_move(AstPool* pool, TypeTable* types, SymbolTable* 
             i += 1;
         }
         return reported;
+    }
+    if (place.kind == ExprKind.Ternary) {
+        bool then_reported = place.inner1 != 0
+            && typecheck_reject_locked_move(pool, types, symbols, root, place.inner1, diagnostics, ok);
+        bool else_reported = place.aux != 0
+            && typecheck_reject_locked_move(pool, types, symbols, root, place.aux, diagnostics, ok);
+        return then_reported || else_reported;
     }
     AstExpr* base = place;
     String path = String.new();

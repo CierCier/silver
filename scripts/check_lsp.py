@@ -998,6 +998,18 @@ class NativeLsp(unittest.TestCase):
                  "  Empty: { seen = 0; } }; }\n lock state as value { match value {\n"
                  "  Full(payload): { seen = payload.inspect(1); },\n  Empty: { seen = 0; } }; }\n return seen;\n}\n",
                  [("cannot move 'payload' out of its lock block: the shared value still owns it; clone it instead", 15)]),
+                # A conditional's result can be the locked value.
+                ("import std.sync;\nimport std.string;\ni64 main() {\n shared String state = String.from_str(\"a\");\n"
+                 " bool choose = true;\n lock state as value {\n  String out = choose ? value : String.new();\n"
+                 "  out.drop();\n }\n return 0;\n}\n",
+                 [("cannot move 'value' out of its lock block: the shared value still owns it; clone it instead", 6)]),
+                # A loop header's local shadows the locked payload only inside the loop.
+                ("import std.sync;\nimport std.string;\nenum Bin { Full(String); Empty; }\nvoid eat(String s) { s.drop(); }\n"
+                 "i64 main() {\n String s = String.from_str(\"a\");\n shared Bin state = Bin.Full(move s);\n"
+                 " lock state as value { match value {\n"
+                 "  Full(payload): { for (i64 payload = 0; payload < 1; payload += 1) { } eat(payload); },\n"
+                 "  Empty: {} }; }\n return 0;\n}\n",
+                 [("cannot move 'payload' out of its lock block: the shared value still owns it; clone it instead", 8)]),
                 # Writing through an index changes a value a task borrows.
                 ("import std.mem.vec;\ni64 inspect(&Vec<i64> data) { return data.len(); }\ni64 main() {\n"
                  " Vec<i64> data = Vec<i64>.new();\n data.push(1);\n Task<i64> t = launch inspect(&data);\n"

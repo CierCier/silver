@@ -1064,17 +1064,7 @@ impl MoveChecker {
         argument_count: usize,
         var_types: &FxHashMap<String, ast::Type>,
     ) -> bool {
-        // A lock block's value is `(*__lock_N__name)`, which has no root
-        // local of its own, and a payload bound from it has a type only in
-        // `locked_bindings`.
-        let ty = self
-            .locked_place(receiver, var_types)
-            .map(|(_, ty)| ty)
-            .or_else(|| {
-                let (root, path) = expr_root_and_path(receiver)?;
-                self.get_field_type(&root, &path, var_types)
-            });
-        let Some(ty) = ty else {
+        let Some(ty) = self.receiver_type(receiver, var_types) else {
             return false;
         };
         self.facts
@@ -1119,16 +1109,28 @@ impl MoveChecker {
         index: usize,
         var_types: &FxHashMap<String, ast::Type>,
     ) -> bool {
-        let Some((root, path)) = expr_root_and_path(receiver) else {
-            return false;
-        };
-        self.get_field_type(&root, &path, var_types)
-            .is_some_and(|ty| {
-                self.facts.value_method_args.contains(&(
-                    Facts::owner_key(&ty),
-                    method.to_string(),
-                    index,
-                ))
+        self.receiver_type(receiver, var_types).is_some_and(|ty| {
+            self.facts.value_method_args.contains(&(
+                Facts::owner_key(&ty),
+                method.to_string(),
+                index,
+            ))
+        })
+    }
+
+    fn receiver_type(
+        &self,
+        receiver: &ast::Expression,
+        var_types: &FxHashMap<String, ast::Type>,
+    ) -> Option<ast::Type> {
+        // A lock block's value is `(*__lock_N__name)`, which has no root
+        // local of its own, and a payload bound from it has a type only in
+        // `locked_bindings`.
+        self.locked_place(receiver, var_types)
+            .map(|(_, ty)| ty)
+            .or_else(|| {
+                let (root, path) = expr_root_and_path(receiver)?;
+                self.get_field_type(&root, &path, var_types)
             })
     }
 
@@ -1453,11 +1455,11 @@ impl MoveChecker {
         loop {
             match place.kind.as_ref() {
                 ast::ExpressionKind::FieldAccess { object, field } => {
-                    steps.push(Some(field.name.as_str()));
+                    steps.push(Ok(field.name.as_str()));
                     place = object;
                 }
-                ast::ExpressionKind::Index { object, .. } => {
-                    steps.push(None);
+                ast::ExpressionKind::Index { object, index } => {
+                    steps.push(Err(index.as_ref()));
                     place = object;
                 }
                 _ => break,
@@ -1487,13 +1489,13 @@ impl MoveChecker {
         };
         for step in steps.into_iter().rev() {
             ty = match step {
-                Some(field) => {
+                Ok(field) => {
                     spelling = format!("{spelling}.{field}");
                     self.field_type(ty, field)?
                 }
-                None => {
+                Err(index) => {
                     spelling.push_str("[...]");
-                    index_element_type(&ty)?
+                    index_element_type(&ty, index)?
                 }
             };
         }
@@ -1531,6 +1533,16 @@ impl MoveChecker {
                     | ast::InitializerItem::Index { value, .. }) = item;
                     self.reject_locked_move(value, var_types);
                 }
+                return;
+            }
+            // Either result of a conditional is the value taken.
+            ast::ExpressionKind::Ternary {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                self.reject_locked_move(then_expr, var_types);
+                self.reject_locked_move(else_expr, var_types);
                 return;
             }
             // Each arm's own locked payloads were checked with the arm, so
@@ -2508,7 +2520,11 @@ impl MoveChecker {
                 increment,
                 body,
             } => {
+                // The header declares into the loop's own scope, which ends
+                // with the loop and restores what the header shadowed.
+                scopes.push(Vec::new());
                 if let Some(init_expr) = &init.initializer {
+                    self.reject_locked_move(init_expr, var_types);
                     self.check_expr(init_expr, state, scopes, var_types);
                 }
                 self.declare_pattern(
@@ -2541,6 +2557,7 @@ impl MoveChecker {
                         break;
                     }
                 }
+                self.pop_scope(state, scopes, var_types);
             }
             ast::ExpressionKind::Match { expression, arms } => {
                 self.check_expr(expression, state, scopes, var_types);
@@ -2711,8 +2728,15 @@ impl MoveChecker {
 
 /// The element type of indexing `ty`: an array's or slice's element, or the
 /// one type argument of a container such as `Vec<T>`.
-fn index_element_type(ty: &ast::Type) -> Option<ast::Type> {
+/// The type `ty[index]` yields; a tuple field needs a constant index.
+fn index_element_type(ty: &ast::Type, index: &ast::Expression) -> Option<ast::Type> {
     match ty.kind.as_ref() {
+        ast::TypeKind::Tuple(fields) => match index.kind.as_ref() {
+            ast::ExpressionKind::Literal(ast::Literal::Integer(position)) => {
+                fields.get(usize::try_from(*position).ok()?).cloned()
+            }
+            _ => None,
+        },
         ast::TypeKind::Array(array) => Some(array.element_type.as_ref().clone()),
         ast::TypeKind::Slice(slice) => Some(slice.element_type.as_ref().clone()),
         ast::TypeKind::Named(named) => match named.generics.as_deref() {
@@ -2752,7 +2776,9 @@ mod tests {
         }\n\
         struct Guard<T> { Mutex<T>* owner; }\n\
         impl<T> Guard<T> { T* get_ptr(&self) { return &self.owner.value; } }\n\
-        enum Bin { Full(Text); Empty; }\n";
+        enum Bin { Full(Text); Empty; }\n\
+        struct Sink { i64 n; }\n\
+        impl Sink { void take(&self, Text text) {} }\n";
 
     /// Messages from the type checker and from the move checker, kept apart
     /// because each reports some moves out of a lock.
@@ -2800,10 +2826,41 @@ mod tests {
             // A statement-position match's arm result is consumed.
             "Full(payload): payload, Empty: fresh()",
             "Full(payload): [payload, 0], Empty: [fresh(), 0]",
+            "Full(payload): { Text out = true ? payload : fresh(); }, Empty: {}",
+            "Full(payload): { for (Text item = payload; false; ) {} }, Empty: {}",
+            // The loop header's binding ends with the loop.
+            "Full(payload): { for (i64 payload = 0; payload < 1; payload += 1) {} eat(payload); }, \
+             Empty: {}",
         ] {
             let errors = locked_match_errors(arms);
             assert!(errors.moves.contains(&moved), "{arms}: {errors:?}");
         }
+    }
+
+    #[test]
+    fn a_locked_field_or_element_cannot_leave_its_lock() {
+        let cases = [
+            ("pair[...]", "Text out = pair[0];"),
+            ("payload", "match pair[0] { Full(move payload): {}, Empty: {} };"),
+        ];
+        for (place, body) in cases {
+            let errors = errors_in(&format!(
+                "[Bin, i64] init = [Bin.Full(fresh()), 1];\n\
+                 Mutex<[Bin, i64]> state = Mutex<[Bin, i64]>.new(move init);\n\
+                 lock state as pair {{ {body} }}"
+            ));
+            let moved = crate::diagnostics::messages::move_out_of_lock(place);
+            assert!(
+                errors.types.contains(&moved) || errors.moves.contains(&moved),
+                "{body}: {errors:?}"
+            );
+        }
+        let errors = errors_in(
+            "Sink k; shared Sink sinks = move k; shared Text state = fresh();\n\
+             lock sinks as sink { lock state as text { sink.take(text); } }",
+        );
+        let moved = crate::diagnostics::messages::move_out_of_lock("text");
+        assert!(errors.moves.contains(&moved), "{errors:?}");
     }
 
     #[test]

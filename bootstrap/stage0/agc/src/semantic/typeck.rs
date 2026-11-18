@@ -76,11 +76,13 @@ fn lock_block_place(block: &ast::Block) -> Option<&ast::Expression> {
     (method.name == "lock").then_some(receiver.as_ref())
 }
 
-/// True when `expr` reads a lock block's value or a field of it: sync_sugar
-/// lowers the value to `(*__lock_N__name)`.
+/// True when `expr` reads a lock block's value or a field or element of it:
+/// sync_sugar lowers the value to `(*__lock_N__name)`.
 fn reads_locked_value(expr: &ast::Expression) -> bool {
     let mut place = expr;
-    while let ast::ExpressionKind::FieldAccess { object, .. } = place.kind.as_ref() {
+    while let ast::ExpressionKind::FieldAccess { object, .. }
+    | ast::ExpressionKind::Index { object, .. } = place.kind.as_ref()
+    {
         place = object;
     }
     matches!(place.kind.as_ref(), ast::ExpressionKind::Unary {
