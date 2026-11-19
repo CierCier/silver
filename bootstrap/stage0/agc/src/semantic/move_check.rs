@@ -745,6 +745,26 @@ impl Facts {
             _ => String::new(),
         }
     }
+
+    /// Tracked if Drop-owned (or `Task` handle). TODO(Phase 5): `type_properties::{is_copy,needs_drop}`.
+    fn is_tracked(&self, ty: &ast::Type) -> bool {
+        match ty.kind.as_ref() {
+            ast::TypeKind::Array(arr) => self.is_tracked(&arr.element_type),
+            ast::TypeKind::Tuple(types) => types.iter().any(|t| self.is_tracked(t)),
+            ast::TypeKind::Named(named) => {
+                let owner = Facts::owner_key(ty);
+                (named.path.len() == 1 && named.path[0].name == "Task")
+                    || self.drop_owners.contains(&owner)
+                    || self.struct_fields.get(&owner).is_some_and(|info| {
+                        let substitutions = MoveChecker::generic_substitutions(ty, info);
+                        info.fields.iter().any(|(_, fty)| {
+                            self.is_tracked(&MoveChecker::substitute_type(fty, &substitutions))
+                        })
+                    })
+            }
+            _ => self.drop_owners.contains(&Facts::owner_key(ty)),
+        }
+    }
 }
 
 fn is_noreturn_call(expr: &ast::Expression) -> bool {
@@ -882,6 +902,15 @@ struct MoveChecker {
 pub(crate) struct OwnerLayouts(Facts);
 
 impl OwnerLayouts {
+    /// Whether an array's elements get their own owner nodes. An array whose
+    /// elements own nothing is one initialization unit: its elements can never
+    /// be moved out, and per-element nodes would make every declaration and
+    /// transition linear in the array length. Its elements carry no owner
+    /// state, so only whole-array writes and moves change the array's state.
+    pub(crate) fn tracks_elements(&self, array: &ast::ArrayType) -> bool {
+        self.0.is_tracked(&array.element_type)
+    }
+
     pub(crate) fn analyze_body(
         &self,
         parameters: &[ast::Parameter],
@@ -957,7 +986,7 @@ impl OwnerLayouts {
                             )
                         })
                         .collect(),
-                    ast::TypeKind::Array(array) => {
+                    ast::TypeKind::Array(array) if self.tracks_elements(array) => {
                         if array.size as usize > MAX_NODES {
                             return Err(InitPlanError::TooManyNodes);
                         }
@@ -1247,7 +1276,7 @@ impl MoveChecker {
     }
 
     fn record_owner(&mut self, name: &ast::Identifier, ty: &ast::Type, initialized: bool) {
-        if !self.is_tracked(ty) {
+        if !self.facts.is_tracked(ty) {
             return;
         }
         let id = super::init_plan::OwnerLocalId {
@@ -1294,26 +1323,6 @@ impl MoveChecker {
                     place,
                     state: InitState::Uninitialized,
                 });
-        }
-    }
-
-    /// Tracked if Drop-owned (or `Task` handle). TODO(Phase 5): `type_properties::{is_copy,needs_drop}`.
-    fn is_tracked(&self, ty: &ast::Type) -> bool {
-        match ty.kind.as_ref() {
-            ast::TypeKind::Array(arr) => self.is_tracked(&arr.element_type),
-            ast::TypeKind::Tuple(types) => types.iter().any(|t| self.is_tracked(t)),
-            ast::TypeKind::Named(named) => {
-                let owner = Facts::owner_key(ty);
-                (named.path.len() == 1 && named.path[0].name == "Task")
-                    || self.facts.drop_owners.contains(&owner)
-                    || self.facts.struct_fields.get(&owner).is_some_and(|info| {
-                        let substitutions = Self::generic_substitutions(ty, info);
-                        info.fields.iter().any(|(_, fty)| {
-                            self.is_tracked(&Self::substitute_type(fty, &substitutions))
-                        })
-                    })
-            }
-            _ => self.facts.drop_owners.contains(&Facts::owner_key(ty)),
         }
     }
 
@@ -1561,7 +1570,7 @@ impl MoveChecker {
             _ => {}
         }
         if let Some((place, ty)) = self.locked_place(expr, var_types)
-            && self.is_tracked(&ty)
+            && self.facts.is_tracked(&ty)
         {
             self.error(msg::move_out_of_lock(&place), expr.span);
         }
@@ -1576,7 +1585,7 @@ impl MoveChecker {
         var_types: &FxHashMap<String, ast::Type>,
     ) -> Option<(String, String)> {
         let target = self.get_field_type(root_name, path, var_types)?;
-        if !self.is_tracked(&target) {
+        if !self.facts.is_tracked(&target) {
             return None;
         }
         let mut owner_ty = var_types.get(root_name)?.clone();
@@ -1606,7 +1615,7 @@ impl MoveChecker {
             return true;
         }
         if let Some(ty) = self.get_field_type(root_name, path, var_types) {
-            self.is_tracked(&ty)
+            self.facts.is_tracked(&ty)
         } else {
             false
         }
@@ -1633,7 +1642,7 @@ impl MoveChecker {
             }
             let old_state = state.get(name).cloned();
             let old_type = var_types.get(name).cloned();
-            if self.is_tracked(ty) {
+            if self.facts.is_tracked(ty) {
                 let mut var = VarState::new_live();
                 if let Some(owner) = self
                     .owner_bindings
@@ -2709,7 +2718,7 @@ impl MoveChecker {
             self.locked_bindings.remove(&binding.name);
             if let Some(payload) = payloads.get(index) {
                 let ty = Self::substitute_type(payload, &substitutions);
-                if self.is_tracked(&ty) {
+                if self.facts.is_tracked(&ty) {
                     self.locked_bindings.insert(binding.name.clone(), ty);
                 }
             }

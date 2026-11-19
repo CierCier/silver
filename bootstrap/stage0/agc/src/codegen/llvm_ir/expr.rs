@@ -4135,7 +4135,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 index.span,
                             )
                         })?;
-                        let state = object_state.map(|node| self.project_reference_state(node, index_i64)).transpose()?;
+                        let state = object_state
+                            .filter(|_| self.ownership.layouts.tracks_elements(array))
+                            .map(|node| self.project_reference_state(node, index_i64))
+                            .transpose()?;
                         Ok(ResolvedPlace { ptr: element_ptr, ty: (*array.element_type).clone(), state, raw: object_place.raw })
                     }
                     ast::TypeKind::Tuple(types) => {

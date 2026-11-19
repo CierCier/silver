@@ -212,10 +212,16 @@ impl OwnerLocalPlan {
         }
         for component in path.split('.') {
             let node = &self.nodes[index];
-            if matches!(
-                node.ty.kind.as_ref(),
-                ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_) | ast::TypeKind::Slice(_)
-            ) {
+            let collapsed_array =
+                matches!(node.ty.kind.as_ref(), ast::TypeKind::Array(_)) && node.child_count == 0;
+            if collapsed_array
+                || matches!(
+                    node.ty.kind.as_ref(),
+                    ast::TypeKind::Pointer(_)
+                        | ast::TypeKind::Reference(_)
+                        | ast::TypeKind::Slice(_)
+                )
+            {
                 return Ok(None);
             }
             let element = component.parse::<usize>().ok();
