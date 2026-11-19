@@ -6,7 +6,7 @@ use inkwell::IntPredicate;
 use inkwell::module::Linkage;
 use inkwell::targets::TargetData;
 use inkwell::types::{AnyType, BasicType};
-use inkwell::values::{BasicValueEnum, FunctionValue};
+use inkwell::values::{BasicValueEnum, FunctionValue, PointerValue};
 
 use crate::codegen::SilverGenerator;
 use crate::codegen::llvm_ir::LlvmIrGenerator;
@@ -650,7 +650,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     if let ast::ExpressionKind::Identifier(ident) = iterable.kind.as_ref() {
                         if let Some(orig_ptr) = self.lookup_variable(&ident.name).map(|v| v.ptr) {
                             let zero = iterable_llvm_ty.const_zero();
-                            self.builder.build_store(orig_ptr, zero).map_err(|e| {
+                            self.store_value(orig_ptr, zero).map_err(|e| {
                                 CodegenError::new(format!("failed to zero consumed iterable: {e}"))
                             })?;
                         }
@@ -1245,6 +1245,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .get_insert_block()
             .ok_or_else(|| CodegenError::new("builder is not positioned in a basic block"))?;
 
+        // Enum arms read the scrutinee from one scratch copy, spilled in the
+        // first enum arm's test block, which dominates every later test.
+        let mut scrutinee_place: Option<(inkwell::types::StructType<'ctx>, PointerValue<'ctx>)> = None;
         let mut all_arms_terminated = !arms.is_empty();
         for (arm_index, arm) in arms.iter().enumerate() {
             let arm_bb = self
@@ -1334,25 +1337,29 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     let concrete_name = self.concrete_enum_name(&enum_name, expression);
                     if let Some(struct_ty) = self.enum_payload_layouts.get(&concrete_name).cloned()
                     {
-                        let function = self.current_fn.ok_or_else(|| {
-                            CodegenError::new("no active function for match enum")
-                        })?;
-                        let scrut_ptr = self.create_entry_alloca(
-                            function,
-                            "match.scrut.ptr",
-                            struct_ty.as_basic_type_enum(),
-                        )?;
-                        let zero_struct = struct_ty.const_zero();
-                        self.builder
-                            .build_store(scrut_ptr, zero_struct)
-                            .map_err(|e| {
-                                CodegenError::new(format!("zero init match scrutinee: {e}"))
-                            })?;
-                        self.builder
-                            .build_store(scrut_ptr, scrutinee)
-                            .map_err(|e| {
-                                CodegenError::new(format!("store match scrutinee: {e}"))
-                            })?;
+                        let scrut_ptr = match scrutinee_place {
+                            Some((ty, ptr)) if ty == struct_ty => ptr,
+                            _ => {
+                                let function = self.insertion_function()?;
+                                let ptr = self.create_entry_alloca(
+                                    function,
+                                    "match.scrut.ptr",
+                                    struct_ty.as_basic_type_enum(),
+                                )?;
+                                // A scrutinee of another layout leaves the
+                                // rest of the copy zeroed rather than undefined.
+                                if scrutinee.get_type() != struct_ty.as_basic_type_enum() {
+                                    self.store_value(ptr, struct_ty.const_zero()).map_err(|e| {
+                                        CodegenError::new(format!("zero init match scrutinee: {e}"))
+                                    })?;
+                                }
+                                self.store_value(ptr, scrutinee).map_err(|e| {
+                                    CodegenError::new(format!("store match scrutinee: {e}"))
+                                })?;
+                                scrutinee_place = Some((struct_ty, ptr));
+                                ptr
+                            }
+                        };
                         let tag_ptr = self
                             .builder
                             .build_struct_gep(struct_ty, scrut_ptr, 0, "match.tag.ptr")
@@ -1590,8 +1597,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                                     CodegenError::new(format!("orig slot GEP: {e}"))
                                                 })?
                                             };
-                                            self.builder
-                                                .build_store(slot_ptr, llvm_ty.const_zero())
+                                            self.store_value(slot_ptr, llvm_ty.const_zero())
                                                 .map_err(|e| {
                                                     CodegenError::new(format!(
                                                         "zero orig payload: {e}"

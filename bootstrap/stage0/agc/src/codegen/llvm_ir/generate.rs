@@ -10,7 +10,7 @@ use inkwell::module::{Linkage, Module};
 use inkwell::passes::PassBuilderOptions;
 use inkwell::targets::{TargetData, TargetMachine};
 use inkwell::types::{AnyType, AsTypeRef};
-use inkwell::values::{ArrayValue, AsValueRef};
+use inkwell::values::{ArrayValue, AsValueRef, BasicValue};
 use llvm_sys::prelude::LLVMValueRef;
 use llvm_sys::transforms::pass_builder::LLVMRunPasses;
 
@@ -106,8 +106,8 @@ pub(crate) fn run_module_optimization_passes(
     // A lightweight pipeline: sroa, instcombine, reassociate, gvn, simplifycfg.
     // At higher opt levels also run an extra instcombine cleanup.
     //
-    // sroa, not mem2reg: codegen reaches struct fields through GEPs, which
-    // mem2reg cannot promote to registers.
+    // sroa, not mem2reg: codegen reaches struct fields through GEPs and copies
+    // aggregates with memcpy, which mem2reg cannot promote to registers.
     //
     // instcombine<no-verify-fixpoint> disables instcombine's fixpoint
     // *verification* (a sanity check). LLVM 22 falsely trips it on `nuw` GEPs
@@ -1902,32 +1902,28 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                         }
                         self.clear_field_flags(&ident.name)?;
                     }
-                    if let Some(return_ty) = self.current_return_type.clone() {
+                    let return_type = self.current_return_type.clone();
+                    if let Some(return_ty) = &return_type {
                         value =
-                            self.cast_expr_to_ast_type(value, Some(expr), &return_ty, &expr_span)?;
+                            self.cast_expr_to_ast_type(value, Some(expr), return_ty, &expr_span)?;
                     }
-                    Some((value, expr_span))
+                    let ty = self.lower_result_type(return_type.as_ref())?.ok_or_else(|| {
+                        CodegenError::with_span("value returned from a void function", expr_span)
+                    })?;
+                    // An in-memory result is written now; the defers cannot
+                    // observe the caller's result slot.
+                    self.internal_return_value(ty, Operand::Value(value))
+                        .map_err(|e| CodegenError { span: e.span.or(Some(expr_span)), ..e })?
                 } else {
                     None
                 };
                 // Now run defers (the return value is safely saved)
                 self.emit_defers(self.defers.len())?;
-                // Return the saved value
-                if let Some((value, span)) = saved_value {
-                    let return_type = self.current_return_type.clone();
-                    let ty = self.lower_result_type(return_type.as_ref())?.ok_or_else(|| {
-                        CodegenError::with_span("value returned from a void function", span)
+                self.builder
+                    .build_return(saved_value.as_ref().map(|value| value as &dyn BasicValue))
+                    .map_err(|e| {
+                        CodegenError::with_span(format!("failed to emit return: {e}"), statement.span)
                     })?;
-                    self.build_internal_return(ty, Operand::Value(value))
-                        .map_err(|e| CodegenError { span: e.span.or(Some(span)), ..e })?;
-                } else {
-                    self.builder.build_return(None).map_err(|e| {
-                        CodegenError::with_span(
-                            format!("failed to emit return: {e}"),
-                            statement.span,
-                        )
-                    })?;
-                }
                 Ok(())
             }
             ast::StatementKind::Break(_) => {

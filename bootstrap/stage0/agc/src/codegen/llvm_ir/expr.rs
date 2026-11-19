@@ -1665,16 +1665,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 };
                 // Try payload enum layout first
                 if let Some(struct_ty) = self.enum_payload_layouts.get(enum_name).cloned() {
-                    self.current_fn.as_ref().ok_or_else(|| {
-                        CodegenError::new("no active function for enum variant construction")
-                    })?;
-                    let ptr = self
-                        .builder
-                        .build_alloca(struct_ty, enum_name)
-                        .map_err(|e| CodegenError::new(format!("alloca enum: {e}")))?;
-                    let zero_struct = struct_ty.const_zero();
-                    self.builder
-                        .build_store(ptr, zero_struct)
+                    let function = self.insertion_function()?;
+                    let ptr = self.create_entry_alloca(function, enum_name, struct_ty.into())?;
+                    self.store_value(ptr, struct_ty.const_zero())
                         .map_err(|e| CodegenError::new(format!("zero init enum: {e}")))?;
                     // Store tag (i16)
                     if let Some(tag_value) = self
@@ -1756,10 +1749,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             }
                         }
                     }
-                    Ok(self
-                        .builder
-                        .build_load(struct_ty.as_basic_type_enum(), ptr, enum_name)
-                        .map_err(|e| CodegenError::new(format!("failed to load enum: {e}")))?)
+                    self.load_stable_value(struct_ty.as_basic_type_enum(), ptr, enum_name)
+                        .map_err(|e| CodegenError::new(format!("failed to load enum: {e}")))
                 } else {
                     // Unit variant — fall back to integer constant
                     if let Some(val) = self.enum_member_constant(enum_name, &variant.name) {
@@ -1932,13 +1923,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     ) -> CodegenResult<BasicValueEnum<'ctx>> {
         let enum_name = &enum_ident.name;
         if let Some(struct_ty) = self.enum_payload_layouts.get(enum_name).copied() {
-            let ptr = self
-                .builder
-                .build_alloca(struct_ty, enum_name)
-                .map_err(|e| CodegenError::new(format!("alloca enum: {e}")))?;
-            let zero_struct = struct_ty.const_zero();
-            self.builder
-                .build_store(ptr, zero_struct)
+            let function = self.insertion_function()?;
+            let ptr = self.create_entry_alloca(function, enum_name, struct_ty.into())?;
+            self.store_value(ptr, struct_ty.const_zero())
                 .map_err(|e| CodegenError::new(format!("zero init enum: {e}")))?;
             if let Some(tag_value) = self
                 .enum_variants
@@ -2022,10 +2009,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         .map_err(|e| CodegenError::new(format!("store enum payload: {e}")))?;
                 }
             }
-            Ok(self
-                .builder
-                .build_load(struct_ty.as_basic_type_enum(), ptr, enum_name)
-                .map_err(|e| CodegenError::new(format!("failed to load enum: {e}")))?)
+            self.load_stable_value(struct_ty.as_basic_type_enum(), ptr, enum_name)
+                .map_err(|e| CodegenError::new(format!("failed to load enum: {e}")))
         } else {
             if let Some(val) = self.enum_member_constant(enum_name, &variant.name) {
                 Ok(val)
@@ -2607,8 +2592,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 )?;
 
                 // Zero-initialize the temp, then overwrite specified positions
-                self.builder
-                    .build_store(temp, array_llvm_ty.const_zero())
+                self.store_value(temp, array_llvm_ty.const_zero())
                     .map_err(|e| {
                         CodegenError::with_span(
                             format!("failed to zero-init array initializer: {e}"),
@@ -3075,6 +3059,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .ok_or_else(|| CodegenError::new("builder is not positioned in a basic block"))?;
         let mut incoming: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
             Vec::new();
+        // Enum arms read the scrutinee from one scratch copy, spilled in the
+        // first enum arm's test block, which dominates every later test.
+        let mut scrutinee_place: Option<(inkwell::types::StructType<'ctx>, PointerValue<'ctx>)> = None;
         let mut catch_all = false;
 
         for (arm_index, arm) in arms.iter().enumerate() {
@@ -3177,25 +3164,29 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     let concrete_name = self.concrete_enum_name(&enum_name, expression);
                     if let Some(struct_ty) = self.enum_payload_layouts.get(&concrete_name).cloned()
                     {
-                        let function = self.current_fn.ok_or_else(|| {
-                            CodegenError::new("no active function for match enum")
-                        })?;
-                        let scrut_ptr = self.create_entry_alloca(
-                            function,
-                            "match.scrut.ptr",
-                            struct_ty.as_basic_type_enum(),
-                        )?;
-                        let zero_struct = struct_ty.const_zero();
-                        self.builder
-                            .build_store(scrut_ptr, zero_struct)
-                            .map_err(|e| {
-                                CodegenError::new(format!("zero init match scrutinee: {e}"))
-                            })?;
-                        self.builder
-                            .build_store(scrut_ptr, scrutinee)
-                            .map_err(|e| {
-                                CodegenError::new(format!("store match scrutinee: {e}"))
-                            })?;
+                        let scrut_ptr = match scrutinee_place {
+                            Some((ty, ptr)) if ty == struct_ty => ptr,
+                            _ => {
+                                let function = self.insertion_function()?;
+                                let ptr = self.create_entry_alloca(
+                                    function,
+                                    "match.scrut.ptr",
+                                    struct_ty.as_basic_type_enum(),
+                                )?;
+                                // A scrutinee of another layout leaves the
+                                // rest of the copy zeroed rather than undefined.
+                                if scrutinee.get_type() != struct_ty.as_basic_type_enum() {
+                                    self.store_value(ptr, struct_ty.const_zero()).map_err(|e| {
+                                        CodegenError::new(format!("zero init match scrutinee: {e}"))
+                                    })?;
+                                }
+                                self.store_value(ptr, scrutinee).map_err(|e| {
+                                    CodegenError::new(format!("store match scrutinee: {e}"))
+                                })?;
+                                scrutinee_place = Some((struct_ty, ptr));
+                                ptr
+                            }
+                        };
                         let tag_ptr = self
                             .builder
                             .build_struct_gep(struct_ty, scrut_ptr, 0, "match.tag.ptr")
@@ -3385,7 +3376,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                         // Move-out: null the payload slot in the
                                         // ORIGINAL scrutinee storage so ownership
                                         // leaves the matched enum (no dangling
-                                        // copy). The per-arm scrut_ptr copy is
+                                        // copy). The scrut_ptr copy is
                                         // scratch; the variable itself keeps the
                                         // zeroed slot.
                                         if is_move
@@ -3448,8 +3439,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                                     CodegenError::new(format!("orig slot GEP: {e}"))
                                                 })?
                                             };
-                                            self.builder
-                                                .build_store(slot_ptr, llvm_ty.const_zero())
+                                            self.store_value(slot_ptr, llvm_ty.const_zero())
                                                 .map_err(|e| {
                                                     CodegenError::new(format!(
                                                         "zero orig payload: {e}"

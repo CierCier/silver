@@ -195,6 +195,10 @@ pub struct LlvmIrGenerator<'ctx> {
     /// lexer's source registry holds the file path, and spans carry
     /// precomputed lines).
     pub(crate) fn_source_info: rustc_hash::FxHashMap<String, FnSourceInfo>,
+    /// Aggregate slots written only by the instructions just before their
+    /// one load (call result slots, enum constructions); see
+    /// `load_stable_value`.
+    pub(crate) stable_places: rustc_hash::FxHashSet<PointerValue<'ctx>>,
     pub(crate) abi_handler: Box<dyn AbiHandler>,
     pub(crate) temp_counter: u64,
     /// Monotonic counter for per-launch-site trampoline function names.

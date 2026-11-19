@@ -64,6 +64,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         let declared_param_count = func_type.parameters.len();
 
+        let carried = Self::function_has_reference_abi(&func_type.parameters, Some(&func_type.return_type));
         let mut args = Vec::with_capacity(arguments.len());
         for (index, argument) in arguments.iter().enumerate() {
             let semantic_reference = func_type.parameters.get(index)
@@ -87,13 +88,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     )?;
                 }
             }
-            args.push(value);
+            args.push(if carried { Operand::Value(value) } else { self.internal_argument(value)? });
         }
 
-        if Self::function_has_reference_abi(&func_type.parameters, Some(&func_type.return_type)) {
-            return self.emit_carried_indirect_call(fn_ptr_val, func_type, &args);
+        if carried {
+            let values = args
+                .into_iter()
+                .map(|arg| self.operand_value(arg, "arg").map_err(|e| CodegenError::new(e.to_string())))
+                .collect::<CodegenResult<Vec<_>>>()?;
+            return self.emit_carried_indirect_call(fn_ptr_val, func_type, &values);
         }
-        let args: Vec<Operand<'ctx>> = args.into_iter().map(Operand::Value).collect();
         let (_, value) = self.build_internal_call(
             Callee::Indirect(fn_type, fn_ptr_val.into_pointer_value()),
             &func_type.parameters,
@@ -251,6 +255,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .map(|sig| sig.is_slice_variadic)
             .unwrap_or(false);
 
+        let internal = signature.as_ref().is_some_and(|sig| Self::internal_abi(sig.linkage.as_ref()));
         let mut args = Vec::with_capacity(arguments.len());
         if is_slice_variadic {
             let fixed_count = declared_param_count.saturating_sub(1);
@@ -295,13 +300,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             self.coerce_value_to_abi(value, &signature.params[index], linkage)?;
                     }
                 }
-                args.push(value);
+                args.push(if internal { self.internal_argument(value)? } else { Operand::Value(value) });
             }
             let trailing_args = &arguments[fixed_count..];
             let slice_ty = &signature.as_ref().unwrap().params[fixed_count];
             let slice_val =
                 self.emit_variadic_slice_pack(slice_ty, trailing_args, function_expr.span)?;
-            args.push(slice_val);
+            args.push(Operand::Value(slice_val));
         } else {
             for (index, argument) in arguments.iter().enumerate() {
                 let source_type = self.resolve_argument_type(argument);
@@ -361,13 +366,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         signature.as_ref().and_then(|sig| sig.linkage.as_ref()),
                     )?;
                 }
-                args.push(value);
+                args.push(if internal { self.internal_argument(value)? } else { Operand::Value(value) });
             }
         }
 
         let (call, value) = match &signature {
-            Some(sig) if Self::internal_abi(sig.linkage.as_ref()) => {
-                let args: Vec<Operand<'ctx>> = args.into_iter().map(Operand::Value).collect();
+            Some(sig) if internal => {
                 self.build_internal_call(
                     Callee::Direct(function),
                     &sig.params,
@@ -377,7 +381,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 )?
             }
             _ => {
-                let args: Vec<BasicMetadataValueEnum<'ctx>> = args.into_iter().map(Into::into).collect();
+                let args = args
+                    .into_iter()
+                    .map(|arg| self.operand_value(arg, "arg").map(Into::into).map_err(|e| CodegenError::new(e.to_string())))
+                    .collect::<CodegenResult<Vec<BasicMetadataValueEnum<'ctx>>>>()?;
                 let call = self
                     .builder
                     .build_call(function, &args, "calltmp")
@@ -973,6 +980,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .unwrap_or(inferred_param_count == arguments.len() + 1)
         };
 
+        let internal = signature.as_ref().is_some_and(|sig| Self::internal_abi(sig.linkage.as_ref()));
         let mut args = Vec::with_capacity(arguments.len() + usize::from(inject_receiver));
         if inject_receiver {
             let semantic_reference = signature.as_ref().and_then(|sig| sig.params.first())
@@ -1194,7 +1202,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             } else {
                 receiver_arg
             };
-            args.push(receiver_arg);
+            args.push(if internal { self.internal_argument(receiver_arg)? } else { Operand::Value(receiver_arg) });
         }
 
         if is_slice_variadic {
@@ -1287,13 +1295,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         )?;
                     }
                 }
-                args.push(value);
+                args.push(if internal { self.internal_argument(value)? } else { Operand::Value(value) });
             }
             let trailing_args = &arguments[fixed_count..];
             let slice_param_index = fixed_count + usize::from(inject_receiver);
             let slice_ty = &signature.as_ref().unwrap().params[slice_param_index];
             let slice_val = self.emit_variadic_slice_pack(slice_ty, trailing_args, method.span)?;
-            args.push(slice_val);
+            args.push(Operand::Value(slice_val));
         } else {
             for (index, argument) in arguments.iter().enumerate() {
                 let source_type = self.resolve_argument_type(argument);
@@ -1399,18 +1407,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         signature.as_ref().and_then(|sig| sig.linkage.as_ref()),
                     )?;
                 }
-                args.push(value);
+                args.push(if internal { self.internal_argument(value)? } else { Operand::Value(value) });
             }
         }
 
         let name = format!("call.{call_name}");
         let (call, value) = match &signature {
-            Some(sig) if Self::internal_abi(sig.linkage.as_ref()) => {
-                let args: Vec<Operand<'ctx>> = args.into_iter().map(Operand::Value).collect();
+            Some(sig) if internal => {
                 self.build_internal_call(Callee::Direct(function), &sig.params, sig.return_type.as_ref(), &args, &name)?
             }
             _ => {
-                let args: Vec<BasicMetadataValueEnum<'ctx>> = args.into_iter().map(Into::into).collect();
+                let args = args
+                    .into_iter()
+                    .map(|arg| self.operand_value(arg, "arg").map(Into::into).map_err(|e| CodegenError::new(e.to_string())))
+                    .collect::<CodegenResult<Vec<BasicMetadataValueEnum<'ctx>>>>()?;
                 let call = self
                     .builder
                     .build_call(function, &args, &name)

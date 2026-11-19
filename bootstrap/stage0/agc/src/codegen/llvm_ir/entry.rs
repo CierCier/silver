@@ -202,6 +202,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             debug,
             debug_nested: false,
             fn_source_info: rustc_hash::FxHashMap::default(),
+            stable_places: rustc_hash::FxHashSet::default(),
             abi_handler: abi::get_abi_handler(
                 TargetMachine::get_default_triple()
                     .as_str()
@@ -363,6 +364,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             debug,
             debug_nested: false,
             fn_source_info: rustc_hash::FxHashMap::default(),
+            stable_places: rustc_hash::FxHashSet::default(),
             abi_handler: abi::get_abi_handler(&effective_triple),
             temp_counter: 0,
             task_trampoline_counter: 0,
@@ -890,6 +892,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             debug,
             debug_nested: false,
             fn_source_info: rustc_hash::FxHashMap::default(),
+            stable_places: rustc_hash::FxHashSet::default(),
             abi_handler: abi::get_abi_handler(&effective_triple),
             temp_counter: 0,
             task_trampoline_counter: 0,
@@ -2835,7 +2838,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 })?;
                 let writer_tmp =
                     self.create_entry_alloca(fn_ctx, "sprint.writer", buf_writer_llvm_ty)?;
-                self.builder.build_store(writer_tmp, buf_writer_llvm_ty.const_zero())
+                self.store_value(writer_tmp, buf_writer_llvm_ty.const_zero())
                     .map_err(|e| CodegenError::with_span(e.to_string(), expr.span))?;
 
                 let zero_i64 = self.context.i64_type().const_int(0, false);

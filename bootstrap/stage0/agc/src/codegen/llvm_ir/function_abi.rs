@@ -26,9 +26,10 @@ pub(crate) enum PassMode<'ctx> {
     /// As the fields of a struct of up to `MAX_FIELD_ARGS` scalars, one
     /// argument each. A one-field struct is also returned as its field.
     Fields(StructType<'ctx>),
-    /// Through a pointer. An argument points to a caller-owned copy that the
-    /// callee copies into its own frame slot (debug info and backtraces read
-    /// parameters from the frame); a result points to the caller's slot.
+    /// Through a pointer. An argument points to memory that the caller leaves
+    /// unchanged until the call returns, and the callee copies it into its own
+    /// frame slot on entry (debug info and backtraces read parameters from the
+    /// frame). A result points to the caller's slot.
     Indirect,
 }
 
@@ -175,9 +176,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         value.get_type().print_to_string()
                     )));
                 }
-                (PassMode::Indirect, arg) => {
+                (PassMode::Indirect, Operand::Memory { ptr, .. }) => llvm_args.push(ptr.into()),
+                (PassMode::Indirect, Operand::Value(value)) => {
                     let copy = self.create_entry_alloca(function, "call.arg", ty)?;
-                    self.store_operand(copy, ty, arg).map_err(error)?;
+                    self.store_value(copy, value).map_err(error)?;
                     llvm_args.push(copy.into());
                 }
             }
@@ -189,7 +191,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         .map_err(error)?;
         let value = match (result, result_slot) {
             (None, _) => None,
-            (Some(ty), Some(slot)) => Some(self.load_value(ty, slot, name).map_err(error)?),
+            (Some(ty), Some(slot)) => Some(self.load_stable_value(ty, slot, name).map_err(error)?),
             (Some(ty), None) => {
                 let returned = call
                     .try_as_basic_value()
@@ -206,6 +208,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
         };
         Ok((call, value))
+    }
+
+    /// The operand for internal call argument `value`, evaluated now. An
+    /// aggregate passed by pointer is copied into a fresh slot at once, so
+    /// arguments evaluated later cannot change it.
+    pub(crate) fn internal_argument(&mut self, value: BasicValueEnum<'ctx>) -> CodegenResult<Operand<'ctx>> {
+        let ty = value.get_type();
+        if !matches!(PassMode::of(ty), PassMode::Indirect) {
+            return Ok(Operand::Value(value));
+        }
+        let slot = self.create_entry_alloca(self.insertion_function()?, "call.arg", ty)?;
+        self.store_value(slot, value)
+            .map_err(|e| CodegenError::new(format!("failed to copy call argument: {e}")))?;
+        Ok(Operand::Memory { ptr: slot, ty })
     }
 
     /// Calls `function` with source-level `args`, under the internal ABI when
@@ -231,9 +247,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(call.try_as_basic_value().basic())
     }
 
-    /// Returns `value`, of source-level type `ty`, from the function being
-    /// built under the internal ABI.
-    pub(crate) fn build_internal_return(&mut self, ty: BasicTypeEnum<'ctx>, value: Operand<'ctx>) -> CodegenResult<()> {
+    /// Prepares the return of `value`, of source-level type `ty`, from the
+    /// function being built under the internal ABI. Writes an in-memory
+    /// result through the result slot and gives `None`, or gives the scalar
+    /// to `ret`.
+    pub(crate) fn internal_return_value(
+        &mut self,
+        ty: BasicTypeEnum<'ctx>,
+        value: Operand<'ctx>,
+    ) -> CodegenResult<Option<BasicValueEnum<'ctx>>> {
         let error = |e: inkwell::builder::BuilderError| CodegenError::new(format!("failed to emit return: {e}"));
         let mode = PassMode::of(ty);
         if mode.returns_in_memory() {
@@ -243,17 +265,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .ok_or_else(|| CodegenError::new("missing result slot parameter"))?
                 .into_pointer_value();
             self.store_operand(slot, ty, value).map_err(error)?;
-            self.builder.build_return(None).map_err(error)?;
-            return Ok(());
+            return Ok(None);
         }
         let value = self.operand_value(value, "ret").map_err(error)?;
-        let value = match (mode, value) {
+        Ok(Some(match (mode, value) {
             (PassMode::Fields(_), BasicValueEnum::StructValue(value)) => self.extract_field(value, 0, "ret").map_err(error)?,
             (PassMode::Fields(_), _) => return Err(CodegenError::new("returned value is not the declared struct")),
             (_, value) => value,
-        };
-        self.builder.build_return(Some(&value)).map_err(error)?;
-        Ok(())
+        }))
     }
 
     /// The source-level values of an internal function's parameters, of LLVM

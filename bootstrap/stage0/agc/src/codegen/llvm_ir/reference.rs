@@ -133,7 +133,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 (call.try_as_basic_value().basic(), &signature.return_type, result_type)
             {
                 let value = self.uncoerce_value_from_abi(value, ty, &ast::ExternLinkage::C)?;
-                self.build_internal_return(result_type, Operand::Value(value))?;
+                let value = self.internal_return_value(result_type, Operand::Value(value))?;
+                self.builder.build_return(value.as_ref().map(|value| value as &dyn BasicValue))
+                    .map_err(|e| CodegenError::new(e.to_string()))?;
             } else {
                 self.builder.build_return(None).map_err(|e| CodegenError::new(e.to_string()))?;
             }

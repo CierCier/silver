@@ -1713,8 +1713,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     "cast.arr.dst",
                     target_arr_ty.as_basic_type_enum(),
                 )?;
-                self.builder
-                    .build_store(target_alloca, target_arr_ty.const_zero())
+                self.store_value(target_alloca, target_arr_ty.const_zero())
                     .map_err(|e| CodegenError::with_span(e.to_string(), *span))?;
                 let src_alloca = self.create_entry_alloca(
                     function,
