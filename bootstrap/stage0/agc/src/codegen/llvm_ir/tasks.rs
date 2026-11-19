@@ -634,11 +634,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         );
         // The glue is emitted while another function body is open: park that
         // body's builder state and keep its debug scope off these instructions.
-        let saved_block = self.builder.get_insert_block();
-        let saved_location = self.builder.get_current_debug_location();
+        let parked = self.park_builder();
         let saved_fn = self.current_fn.replace(function);
         let saved_nested = std::mem::replace(&mut self.debug_nested, true);
-        self.builder.unset_current_debug_location();
 
         let entry = self.context.append_basic_block(function, "entry");
         let joined_bb = self.context.append_basic_block(function, "task.drop.joined");
@@ -684,12 +682,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         self.debug_nested = saved_nested;
         self.current_fn = saved_fn;
-        if let Some(block) = saved_block {
-            self.builder.position_at_end(block);
-        }
-        if let Some(location) = saved_location {
-            self.builder.set_current_debug_location(location);
-        }
+        self.restore_builder(parked);
         Ok(name)
     }
 

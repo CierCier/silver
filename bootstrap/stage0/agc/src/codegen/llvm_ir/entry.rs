@@ -889,6 +889,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             generator.emit_backtrace_table();
             crate::profiler::end_phase("emit backtrace table");
 
+            // The inliner rewrites debug locations, so debug metadata must be
+            // final before the opt pipeline runs.
+            crate::profiler::begin_phase("finalize debug info");
+            generator.finalize_debug();
+            crate::profiler::end_phase("finalize debug info");
+
             crate::profiler::begin_phase("LLVM opt passes");
             generate::run_module_optimization_passes(
                 &generator.module,
@@ -896,10 +902,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 generate::wasm_min_opt_level(Some(&effective_triple), opt_level),
             )?;
             crate::profiler::end_phase("LLVM opt passes");
-
-            crate::profiler::begin_phase("finalize debug info");
-            generator.finalize_debug();
-            crate::profiler::end_phase("finalize debug info");
 
             crate::profiler::begin_phase("LLVM machine emit");
             machine
@@ -931,6 +933,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         generator.emit_backtrace_table();
         crate::profiler::end_phase("emit backtrace table");
 
+        crate::profiler::begin_phase("finalize debug info");
+        generator.finalize_debug();
+        crate::profiler::end_phase("finalize debug info");
+
         crate::profiler::begin_phase("LLVM opt passes");
         generate::run_module_optimization_passes(
             &generator.module,
@@ -938,10 +944,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             generate::wasm_min_opt_level(Some(&effective_triple), opt_level),
         )?;
         crate::profiler::end_phase("LLVM opt passes");
-
-        crate::profiler::begin_phase("finalize debug info");
-        generator.finalize_debug();
-        crate::profiler::end_phase("finalize debug info");
 
         crate::profiler::begin_phase("LLVM machine emit (pass 1)");
         machine

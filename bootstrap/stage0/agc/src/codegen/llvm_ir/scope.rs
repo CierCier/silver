@@ -21,7 +21,33 @@ use crate::types::Type;
 use inkwell::IntPredicate;
 use inkwell::targets::TargetData;
 
+/// Builder position and debug location saved while another body is emitted.
+pub(crate) struct ParkedBuilder<'ctx> {
+    block: Option<inkwell::basic_block::BasicBlock<'ctx>>,
+    location: llvm_sys::prelude::LLVMMetadataRef,
+}
+
 impl<'ctx> LlvmIrGenerator<'ctx> {
+    /// Detaches the builder from the current body and clears its debug
+    /// location. The raw location is saved because inkwell's getter reports a
+    /// missing location as an empty `!{}` node, which restores as an invalid
+    /// `!dbg` on every later instruction.
+    pub(crate) fn park_builder(&self) -> ParkedBuilder<'ctx> {
+        let location =
+            unsafe { llvm_sys::core::LLVMGetCurrentDebugLocation2(self.builder.as_mut_ptr()) };
+        self.builder.unset_current_debug_location();
+        ParkedBuilder { block: self.builder.get_insert_block(), location }
+    }
+
+    pub(crate) fn restore_builder(&self, parked: ParkedBuilder<'ctx>) {
+        if let Some(block) = parked.block {
+            self.builder.position_at_end(block);
+        }
+        unsafe {
+            llvm_sys::core::LLVMSetCurrentDebugLocation2(self.builder.as_mut_ptr(), parked.location)
+        };
+    }
+
     pub(crate) fn set_debug_location(&self, span: &Span) {
         // Lazily-emitted generic instances have no subprogram; a DILocation
         // scoped to the compile unit is invalid (LLVM rejects it and crashes
