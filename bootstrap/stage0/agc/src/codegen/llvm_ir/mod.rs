@@ -222,6 +222,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 pub(crate) mod call;
 pub(crate) mod entry;
 pub(crate) mod expr;
+pub(crate) mod aggregate_copies;
 pub(crate) mod generate;
 pub(crate) mod json;
 pub(crate) mod operators;

@@ -885,6 +885,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             generator.eliminate_dead_functions(&machine)?;
             crate::profiler::end_phase("eliminate dead functions");
 
+            crate::profiler::begin_phase("lower aggregate copies");
+            super::aggregate_copies::lower_aggregate_copies(
+                &generator.module,
+                &machine.get_target_data(),
+            );
+            crate::profiler::end_phase("lower aggregate copies");
+
             crate::profiler::begin_phase("emit backtrace table");
             generator.emit_backtrace_table();
             crate::profiler::end_phase("emit backtrace table");
@@ -928,6 +935,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         crate::profiler::begin_phase("eliminate dead functions");
         generator.eliminate_dead_functions(&machine)?;
         crate::profiler::end_phase("eliminate dead functions");
+
+        crate::profiler::begin_phase("lower aggregate copies");
+        super::aggregate_copies::lower_aggregate_copies(
+            &generator.module,
+            &machine.get_target_data(),
+        );
+        crate::profiler::end_phase("lower aggregate copies");
 
         crate::profiler::begin_phase("emit backtrace table");
         generator.emit_backtrace_table();
