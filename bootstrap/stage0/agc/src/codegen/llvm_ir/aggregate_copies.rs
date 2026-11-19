@@ -21,10 +21,11 @@ use inkwell::targets::TargetData;
 /// ones stay SSA values, which SROA and the backend handle well.
 const MIN_LOWERED_BYTES: u64 = 32;
 
-/// Alignment claimed by the intrinsics. Codegen gives aggregate stores their
-/// type's ABI alignment even where the place is less aligned (an enum payload
-/// sits at offset 2), so the original claim cannot be trusted: aligned vector
-/// moves would fault. Unaligned moves cost the same on aligned x86-64 data.
+/// Alignment claimed by the intrinsics. This pass was written while enum
+/// payloads sat at offset 2 under their payload type's alignment claim, where
+/// aligned vector moves faulted. Payloads are now naturally aligned; the pass
+/// keeps align 1 until IR generation stops emitting aggregate stores and the
+/// pass is removed. Unaligned moves cost the same on aligned x86-64 data.
 const COPY_ALIGN: u32 = 1;
 
 enum Copy {

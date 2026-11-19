@@ -2,7 +2,7 @@ use rustc_hash::FxHashMap as HashMap;
 use rustc_hash::FxHashSet;
 
 use inkwell::targets::TargetData;
-use inkwell::types::StructType;
+use inkwell::types::{BasicType, StructType};
 use inkwell::values::{BasicValue, BasicValueEnum};
 
 use crate::codegen::llvm_ir::LlvmIrGenerator;
@@ -118,6 +118,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .or_else(|| self.enum_payload_layouts.get(&base_name))
         {
             return Ok(*layout);
+        }
+        if let Some(layout) = self.ensure_enum_payload_layout(&key)? {
+            return Ok(layout);
         }
         if self.enum_backing_types.contains_key(&base_name)
             || self.enum_variants.contains_key(&base_name)
@@ -1488,35 +1491,144 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .cloned()
             .unwrap_or_default();
         let mut substituted: HashMap<String, Vec<ast::Type>> = HashMap::default();
-        let mut max_payload_size: u64 = 0;
         for (variant, payload) in base_payloads {
             let concrete: Vec<ast::Type> = payload
                 .iter()
                 .map(|pt| Self::substitute_generic_type(pt, mapping))
                 .collect();
-            let mut variant_size: u64 = 0;
-            for pt in &concrete {
-                variant_size += self.ast_type_size(pt);
-            }
-            max_payload_size = max_payload_size.max(variant_size);
             substituted.insert(variant, concrete);
         }
+        let layout = self.enum_payload_layout(substituted.values().map(Vec::as_slice))?;
         self.enum_variant_payload_types
             .insert(mangled_name.to_string(), substituted);
 
-        if max_payload_size > 0 {
-            let i16_ty = self.context.i16_type();
-            let array_ty = self.context.i8_type().array_type(max_payload_size as u32);
-            let struct_ty = self
-                .context
-                .struct_type(&[i16_ty.into(), array_ty.into()], false);
-            struct_ty.set_body(&[i16_ty.into(), array_ty.into()], false);
+        if let Some(struct_ty) = layout {
             self.enum_payload_layouts
                 .insert(mangled_name.to_string(), struct_ty);
             self.struct_types
                 .insert(mangled_name.to_string(), struct_ty);
         }
         Ok(())
+    }
+
+    /// The payload of one variant, laid out as a struct of its field types so
+    /// that every field is naturally aligned within the payload storage.
+    fn enum_variant_payload_struct(
+        &mut self,
+        payload_types: &[ast::Type],
+    ) -> CodegenResult<StructType<'ctx>> {
+        let mut fields = Vec::with_capacity(payload_types.len());
+        for payload_type in payload_types {
+            let field = self.lower_basic_type(payload_type)?;
+            if !field.is_sized() {
+                return Err(CodegenError::with_span(
+                    "enum payload type is not fully defined",
+                    payload_type.span,
+                ));
+            }
+            fields.push(field);
+        }
+        Ok(self.context.struct_type(&fields, false))
+    }
+
+    /// Byte offset of each payload field of one variant, relative to the
+    /// enum's payload storage (field 1 of its layout).
+    pub(crate) fn enum_payload_field_offsets(
+        &mut self,
+        payload_types: &[ast::Type],
+    ) -> CodegenResult<Vec<u64>> {
+        let payload = self.enum_variant_payload_struct(payload_types)?;
+        let target_data = self.target_data();
+        Ok((0..payload_types.len() as u32)
+            .map(|index| target_data.offset_of_element(&payload, index).unwrap_or(0))
+            .collect())
+    }
+
+    /// The `{ i16 tag, [k x iA] }` layout of a payload enum, or `None` when no
+    /// variant carries a payload. The storage element `iA` has the alignment of
+    /// the most-aligned variant payload, so the payload starts at an offset
+    /// aligned for every field it can hold.
+    pub(crate) fn enum_payload_layout<'a>(
+        &mut self,
+        variants: impl IntoIterator<Item = &'a [ast::Type]>,
+    ) -> CodegenResult<Option<StructType<'ctx>>> {
+        let target_data = self.target_data();
+        let mut size = 0;
+        let mut align = 0;
+        for payload_types in variants {
+            if payload_types.is_empty() {
+                continue;
+            }
+            let payload = self.enum_variant_payload_struct(payload_types)?;
+            size = size.max(target_data.get_abi_size(&payload));
+            align = align.max(target_data.get_abi_alignment(&payload));
+        }
+        if align == 0 {
+            return Ok(None);
+        }
+        let element = [
+            self.context.i8_type(),
+            self.context.i16_type(),
+            self.context.i32_type(),
+            self.context.i64_type(),
+            self.context.i128_type(),
+        ]
+        .into_iter()
+        .find(|int| target_data.get_abi_alignment(int) == align)
+        .ok_or_else(|| {
+            CodegenError::new(format!(
+                "no integer type has the {align}-byte alignment of an enum payload"
+            ))
+        })?;
+        let storage = element.array_type(size.div_ceil(u64::from(align)) as u32);
+        Ok(Some(self.context.struct_type(
+            &[self.context.i16_type().into(), storage.into()],
+            false,
+        )))
+    }
+
+    /// The registered name whose payload layout describes `scrutinee`, a value
+    /// of the enum `enum_name`: its monomorphized instance when it has one. A
+    /// generic base layout lowers type parameters to placeholders, so its
+    /// payload offset can differ from the instance's.
+    pub(crate) fn concrete_enum_name(&mut self, enum_name: &str, scrutinee: &ast::Expression) -> String {
+        if let Some(ty) = self.resolve_receiver_type(scrutinee)
+            && let Some(named) = Self::extract_named_type_owned(&ty)
+            && named.path.len() == 1
+            && named.path[0].name == enum_name
+        {
+            let monomorph = Self::monomorph_owner_name_from_named(&named);
+            if self.enum_payload_layouts.contains_key(&monomorph)
+                || self.enum_variant_payload_types.contains_key(&monomorph)
+            {
+                return monomorph;
+            }
+        }
+        enum_name.to_string()
+    }
+
+    /// The payload layout of the registered enum `name`, computed on first
+    /// use; `None` when it has no payload variant.
+    pub(crate) fn ensure_enum_payload_layout(
+        &mut self,
+        name: &str,
+    ) -> CodegenResult<Option<StructType<'ctx>>> {
+        if let Some(layout) = self.enum_payload_layouts.get(name) {
+            return Ok(Some(*layout));
+        }
+        let Some(payloads) = self.enum_variant_payload_types.get(name).cloned() else {
+            return Ok(None);
+        };
+        let layout = self.enum_payload_layout(payloads.values().map(Vec::as_slice))?;
+        if let Some(layout) = layout {
+            self.enum_payload_layouts.insert(name.to_string(), layout);
+            self.struct_types.insert(name.to_string(), layout);
+        }
+        Ok(layout)
+    }
+
+    pub(crate) fn target_data(&self) -> TargetData {
+        TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap())
     }
 
     /// The base name of a type if it is a `Named` with generics, else the type's
@@ -1535,31 +1647,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         match ty.kind.as_ref() {
             ast::TypeKind::Named(named) => Self::monomorph_owner_name_from_named(named),
             _ => Self::named_base_name(ty),
-        }
-    }
-
-    /// Byte size of an AST type for payload-layout sizing.
-    fn ast_type_size(&mut self, ty: &ast::Type) -> u64 {
-        if let Ok(llvm_ty) = self.lower_basic_type(ty) {
-            let target_data =
-                TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
-            return target_data.get_abi_size(&llvm_ty);
-        }
-
-        match ty.kind.as_ref() {
-            ast::TypeKind::Primitive(p) => match p {
-                ast::PrimitiveType::I8 | ast::PrimitiveType::U8 | ast::PrimitiveType::Bool => 1,
-                ast::PrimitiveType::I16 | ast::PrimitiveType::U16 => 2,
-                ast::PrimitiveType::I32
-                | ast::PrimitiveType::U32
-                | ast::PrimitiveType::Char
-                | ast::PrimitiveType::F32 => 4,
-                ast::PrimitiveType::I64 | ast::PrimitiveType::U64 | ast::PrimitiveType::F64 => 8,
-                ast::PrimitiveType::I128 | ast::PrimitiveType::U128 => 16,
-                _ => 8,
-            },
-            ast::TypeKind::Pointer(_) | ast::TypeKind::Reference(_) => 8,
-            _ => 8,
         }
     }
 

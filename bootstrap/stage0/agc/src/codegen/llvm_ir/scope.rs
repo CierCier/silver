@@ -740,7 +740,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok(());
         };
         let enum_name = &named.path[0].name;
-        let Some(struct_ty) = self.enum_payload_layouts.get(enum_name).copied() else {
+        // The instance layout: a generic base layout places the payload by
+        // placeholder types, which can differ from the instance's alignment.
+        let Some(struct_ty) = self
+            .enum_payload_layouts
+            .get(&Self::monomorph_owner_name_from_named(&named))
+            .or_else(|| self.enum_payload_layouts.get(enum_name))
+            .copied()
+        else {
             return Ok(());
         };
         let Some(variants) = self.enum_variants.get(enum_name).cloned() else {
@@ -760,24 +767,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         } else {
             HashMap::default()
         };
-        let target_data =
-            TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
         let mut drop_variants = Vec::new();
         for (variant_name, tag_value) in &variants {
-            let types = payload_types.get(variant_name).cloned().unwrap_or_default();
-            let mut drops: Vec<(u32, ast::Type)> = Vec::new();
-            let mut offset: u32 = 0;
-            for pt in &types {
-                let concrete_pt = if substitutions.is_empty() {
-                    pt.clone()
-                } else {
-                    Self::substitute_generic_type(pt, &substitutions)
-                };
-                let llvm_ty = self.lower_basic_type(&concrete_pt)?;
+            let types: Vec<ast::Type> = payload_types
+                .get(variant_name)
+                .into_iter()
+                .flatten()
+                .map(|pt| Self::substitute_generic_type(pt, &substitutions))
+                .collect();
+            let offsets = self.enum_payload_field_offsets(&types)?;
+            let mut drops: Vec<(u64, ast::Type)> = Vec::new();
+            for (concrete_pt, offset) in types.into_iter().zip(offsets) {
                 if self.type_needs_drop_glue(&concrete_pt, &mut Vec::new())? {
-                    drops.push((offset, concrete_pt.clone()));
+                    drops.push((offset, concrete_pt));
                 }
-                offset += target_data.get_abi_size(&llvm_ty) as u32;
             }
             if !drops.is_empty() {
                 drop_variants.push((*tag_value, drops));
@@ -838,7 +841,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         self.builder.build_gep(
                             self.context.i8_type(),
                             data_ptr,
-                            &[self.context.i32_type().const_int(byte_offset as u64, false)],
+                            &[self.context.i32_type().const_int(byte_offset, false)],
                             "epd.field",
                         )
                     }

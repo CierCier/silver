@@ -908,6 +908,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         )
     }
 
+    /// Records an enum's variants and payload types. Its payload layout is
+    /// computed on first use (`ensure_enum_payload_layout`), so a payload may
+    /// name an enum declared later.
     pub(crate) fn register_enum_metadata(&mut self, item: &ast::EnumItem) -> CodegenResult<()> {
         let enum_name = item.name.name.clone();
         let enum_params: Vec<String> = item
@@ -935,8 +938,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let mut min_value = 0i128;
         let mut max_value = 0i128;
         let mut saw_any = false;
-        let mut has_payload = false;
-        let mut max_payload_size: u64 = 0;
 
         for variant in &item.variants {
             let value = variant.discriminant.unwrap_or(next_value);
@@ -959,33 +960,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 }
             };
             if !payload_types.is_empty() {
-                has_payload = true;
                 self.enum_variant_payload_types
                     .entry(item.name.name.clone())
                     .or_default()
-                    .insert(variant.name.name.clone(), payload_types.clone());
+                    .insert(variant.name.name.clone(), payload_types);
             }
-            let target_data =
-                TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
-            let mut variant_size: u64 = 0;
-            for pt in &payload_types {
-                if let Ok(llvm_ty) = self.lower_basic_type(pt) {
-                    variant_size += target_data.get_abi_size(&llvm_ty);
-                }
-            }
-            max_payload_size = max_payload_size.max(variant_size);
-        }
-
-        if has_payload {
-            let i16_ty = self.context.i16_type();
-            let array_ty = self.context.i8_type().array_type(max_payload_size as u32);
-            let struct_ty = self
-                .context
-                .struct_type(&[i16_ty.into(), array_ty.into()], false);
-            struct_ty.set_body(&[i16_ty.into(), array_ty.into()], false);
-            self.enum_payload_layouts
-                .insert(item.name.name.clone(), struct_ty);
-            self.struct_types.insert(item.name.name.clone(), struct_ty);
         }
 
         self.enum_backing_types.insert(
@@ -1009,7 +988,12 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 self.register_struct_fields(struct_item, &item.attributes);
             }
         }
-        // Pass 0b: lay out struct bodies (field types resolve now).
+        for item in &program.items {
+            if let ast::ItemKind::Enum(enum_item) = &item.kind {
+                self.register_enum_metadata(enum_item)?;
+            }
+        }
+        // Pass 0b: lay out struct and enum bodies (field types resolve now).
         for item in &program.items {
             match &item.kind {
                 ast::ItemKind::Struct(struct_item) => {
@@ -1391,7 +1375,9 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
         _visibility: &ast::Visibility,
         _attributes: &[ast::Attribute],
     ) -> CodegenResult<()> {
-        self.register_enum_metadata(item)
+        self.register_enum_metadata(item)?;
+        self.ensure_enum_payload_layout(&item.name.name)?;
+        Ok(())
     }
 
     fn generate_impl_item(

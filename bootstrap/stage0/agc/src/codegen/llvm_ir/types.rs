@@ -209,7 +209,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             return Ok(struct_ty.as_basic_type_enum());
                         }
                     }
-                    if let Some(struct_ty) = self.enum_payload_layouts.get(&named.path[0].name) {
+                    if let Some(struct_ty) = self.ensure_enum_payload_layout(&named.path[0].name)? {
                         return Ok(struct_ty.as_basic_type_enum());
                     }
                 }

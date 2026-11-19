@@ -4,7 +4,6 @@ use inkwell::AddressSpace;
 use inkwell::FloatPredicate;
 use inkwell::IntPredicate;
 use inkwell::module::Linkage;
-use inkwell::targets::TargetData;
 use inkwell::types::StringRadix;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{
@@ -1722,17 +1721,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             .and_then(|m| m.get(&variant.name))
                             .cloned();
                         if let Some(payload_types) = payload_types_opt {
-                            let target_data = TargetData::create(
-                                self.module.get_data_layout().as_str().to_str().unwrap(),
-                            );
-                            let mut offset: u32 = 0;
+                            let offsets = self.enum_payload_field_offsets(&payload_types)?;
                             for (i, field) in fields.iter().enumerate() {
                                 let payload_type = match payload_types.get(i) {
                                     Some(pt) => pt,
                                     None => break,
                                 };
                                 let target_llvm_ty = self.lower_basic_type(payload_type)?;
-                                let field_size = target_data.get_abi_size(&target_llvm_ty) as u32;
+                                let offset = offsets[i];
                                 let field_ptr = if offset == 0 {
                                     data_ptr
                                 } else {
@@ -1743,7 +1739,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                             &[self
                                                 .context
                                                 .i32_type()
-                                                .const_int(offset as u64, false)],
+                                                .const_int(offset, false)],
                                             "enum.field.gep",
                                         )
                                     }
@@ -1775,7 +1771,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 self.builder.build_store(val_ptr, val).map_err(|e| {
                                     CodegenError::new(format!("store enum payload: {e}"))
                                 })?;
-                                offset += field_size;
                             }
                         }
                     }
@@ -1988,17 +1983,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .and_then(|m| m.get(&variant.name))
                     .cloned();
                 if let Some(payload_types) = payload_types_opt {
-                    let target_data = TargetData::create(
-                        self.module.get_data_layout().as_str().to_str().unwrap(),
-                    );
-                    let mut offset: u32 = 0;
+                    let offsets = self.enum_payload_field_offsets(&payload_types)?;
                     for (i, arg) in arguments.iter().enumerate() {
                         let payload_type = match payload_types.get(i) {
                             Some(pt) => pt,
                             None => break,
                         };
                         let target_llvm_ty = self.lower_basic_type(payload_type)?;
-                        let field_size = target_data.get_abi_size(&target_llvm_ty) as u32;
+                        let offset = offsets[i];
                         let field_ptr = if offset == 0 {
                             data_ptr
                         } else {
@@ -2006,7 +1998,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 self.builder.build_gep(
                                     self.context.i8_type(),
                                     data_ptr,
-                                    &[self.context.i32_type().const_int(offset as u64, false)],
+                                    &[self.context.i32_type().const_int(offset, false)],
                                     "enum.field.gep",
                                 )
                             }
@@ -2033,7 +2025,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         self.builder
                             .build_store(val_ptr, val)
                             .map_err(|e| CodegenError::new(format!("store enum payload: {e}")))?;
-                        offset += field_size;
                     }
                 } else if arguments.len() == 1 {
                     let val = self.emit_expression_value(&arguments[0])?;
@@ -3193,28 +3184,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     // Resolve the enum name: either the explicit `Enum.Variant`
                     // path, or (for bare `Variant` patterns) the scrutinee's
                     // enum type, which typeck already validated.
-                    let (enum_name, concrete_name) = if path.len() == 1 {
-                        (path[0].name.clone(), path[0].name.clone())
+                    let enum_name = if path.len() == 1 {
+                        path[0].name.clone()
                     } else if let Some(ty) = self.resolve_receiver_type(expression)
                         && let Some(named) = Self::extract_named_type_owned(&ty)
                         && named.path.len() == 1
                     {
-                        let base_name = named.path[0].name.clone();
-                        let monomorph = Self::monomorph_owner_name_from_named(&named);
-                        let conc = if self.enum_payload_layouts.contains_key(&monomorph)
-                            || self.enum_variant_payload_types.contains_key(&monomorph)
-                        {
-                            monomorph
-                        } else {
-                            base_name.clone()
-                        };
-                        (base_name, conc)
+                        named.path[0].name.clone()
                     } else {
                         return Err(CodegenError::with_span(
                             "enum type path must be a single name in match".to_string(),
                             arm.pattern.span,
                         ));
                     };
+                    let concrete_name = self.concrete_enum_name(&enum_name, expression);
                     if let Some(struct_ty) = self.enum_payload_layouts.get(&concrete_name).cloned()
                     {
                         let function = self.current_fn.ok_or_else(|| {
@@ -3337,17 +3320,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                     .map_err(|e| {
                                         CodegenError::new(format!("match data GEP: {e}"))
                                     })?;
-                                let target_data = TargetData::create(
-                                    self.module.get_data_layout().as_str().to_str().unwrap(),
-                                );
-                                let mut byte_offset: u32 = 0;
-                                for (i, pt) in payload_types.iter().enumerate() {
-                                    let concrete_pt = if substitutions.is_empty() {
-                                        pt.clone()
-                                    } else {
-                                        Self::substitute_generic_type(pt, &substitutions)
-                                    };
-                                    let llvm_ty = self.lower_basic_type(&concrete_pt)?;
+                                let concrete_payload: Vec<ast::Type> = payload_types
+                                    .iter()
+                                    .map(|pt| Self::substitute_generic_type(pt, &substitutions))
+                                    .collect();
+                                let offsets = self.enum_payload_field_offsets(&concrete_payload)?;
+                                for (i, concrete_pt) in concrete_payload.iter().enumerate() {
+                                    let llvm_ty = self.lower_basic_type(concrete_pt)?;
+                                    let byte_offset = offsets[i];
                                     let binding = bindings.get(i).copied().flatten();
                                     if let Some((binding, is_move)) = binding {
                                         let field_ptr =
@@ -3361,7 +3341,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                                         &[self
                                                             .context
                                                             .i32_type()
-                                                            .const_int(byte_offset as u64, false)],
+                                                            .const_int(byte_offset, false)],
                                                         "match.field.gep",
                                                     )
                                                 }
@@ -3397,7 +3377,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                         })?;
                                         self.emit_debug_variable(
                                             &binding.name,
-                                            &concrete_pt,
+                                            concrete_pt,
                                             &binding.span,
                                             alloca,
                                             None,
@@ -3416,8 +3396,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                             );
                                         }
                                         if is_move {
-                                            if !self.register_owner_state(binding, &concrete_pt, alloca, true)? {
-                                                self.register_drop_flag(&binding.name, &concrete_pt, alloca)?;
+                                            if !self.register_owner_state(binding, concrete_pt, alloca, true)? {
+                                                self.register_drop_flag(&binding.name, concrete_pt, alloca)?;
                                             }
                                         } else {
                                             // The selected tag guarantees an initialized payload;
@@ -3484,7 +3464,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                                         &[self
                                                             .context
                                                             .i32_type()
-                                                            .const_int(byte_offset as u64, false)],
+                                                            .const_int(byte_offset, false)],
                                                         "match.orig.slot",
                                                     )
                                                 }
@@ -3501,7 +3481,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                                 })?;
                                         }
                                     }
-                                    byte_offset += target_data.get_abi_size(&llvm_ty) as u32;
                                 }
                             }
                         }

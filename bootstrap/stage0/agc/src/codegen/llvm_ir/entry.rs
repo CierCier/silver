@@ -1359,12 +1359,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         // variants. Generic enums defer layout to the monomorphized
                         // concrete instantiation (fields may reference T).
                         if export.type_params.is_empty() {
-                            let mut max_payload_size: u64 = 0;
                             let mut variant_payload_types: HashMap<String, Vec<ast::Type>> =
                                 HashMap::default();
-                            let target_data = TargetData::create(
-                                self.module.get_data_layout().as_str().to_str().unwrap(),
-                            );
                             for variant in &export.enum_variants {
                                 if variant.payload_types.is_empty() {
                                     continue;
@@ -1375,22 +1371,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                     .map(|key| ast_type_from_canonical_key(key))
                                     .collect::<Result<Vec<_>, _>>()
                                     .unwrap_or_else(|_| vec![]);
-                                let mut variant_size: u64 = 0;
-                                for pt in &payload_types {
-                                    let llvm_ty = self.lower_basic_type(pt)?;
-                                    variant_size += target_data.get_abi_size(&llvm_ty);
-                                }
-                                max_payload_size = max_payload_size.max(variant_size);
                                 variant_payload_types.insert(variant.name.clone(), payload_types);
                             }
-                            if max_payload_size > 0 {
-                                let i16_ty = self.context.i16_type();
-                                let array_ty =
-                                    self.context.i8_type().array_type(max_payload_size as u32);
-                                let struct_ty = self
-                                    .context
-                                    .struct_type(&[i16_ty.into(), array_ty.into()], false);
-                                struct_ty.set_body(&[i16_ty.into(), array_ty.into()], false);
+                            if let Some(struct_ty) = self.enum_payload_layout(
+                                variant_payload_types.values().map(Vec::as_slice),
+                            )? {
                                 self.enum_payload_layouts
                                     .insert(export.name.clone(), struct_ty);
                                 self.struct_types.insert(export.name.clone(), struct_ty);
@@ -1540,7 +1525,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             {
                                 continue;
                             }
-                            let mut max_payload_size: u64 = 0;
                             let mut variant_payload_types: HashMap<String, Vec<ast::Type>> =
                                 HashMap::default();
                             let mut ready = true;
@@ -1570,34 +1554,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             if !ready {
                                 continue;
                             }
-                            let target_data = inkwell::targets::TargetData::create(
-                                self.module.get_data_layout().as_str().to_str().unwrap(),
-                            );
-                            for payload_types in variant_payload_types.values() {
-                                let mut variant_size: u64 = 0;
-                                for pt in payload_types {
-                                    if let Ok(llvm_ty) = self.lower_basic_type(pt) {
-                                        variant_size +=
-                                            target_data.get_abi_size(&llvm_ty);
-                                    }
-                                }
-                                max_payload_size =
-                                    max_payload_size.max(variant_size);
-                            }
-                            if max_payload_size > 0 {
-                                let i16_ty = self.context.i16_type();
-                                let array_ty = self
-                                    .context
-                                    .i8_type()
-                                    .array_type(max_payload_size as u32);
-                                let struct_ty = self.context.struct_type(
-                                    &[i16_ty.into(), array_ty.into()],
-                                    false,
-                                );
-                                struct_ty.set_body(
-                                    &[i16_ty.into(), array_ty.into()],
-                                    false,
-                                );
+                            if let Some(struct_ty) = self.enum_payload_layout(
+                                variant_payload_types.values().map(Vec::as_slice),
+                            )? {
                                 self.enum_payload_layouts
                                     .insert(export.name.clone(), struct_ty);
                                 self.struct_types.insert(export.name.clone(), struct_ty);
