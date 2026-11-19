@@ -1949,12 +1949,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             let (data_ptr, len_val) = if val.is_struct_value() {
                 let struct_val = val.into_struct_value();
                 let data = self
-                    .builder
-                    .build_extract_value(struct_val, 0, "str_data")
+                    .extract_field(struct_val, 0, "str_data")
                     .map_err(|e| CodegenError::new(format!("extract str data: {e}")))?;
                 let len = self
-                    .builder
-                    .build_extract_value(struct_val, 1, "str_len")
+                    .extract_field(struct_val, 1, "str_len")
                     .map_err(|e| CodegenError::new(format!("extract str len: {e}")))?;
                 (data, len)
             } else if val.is_pointer_value() {

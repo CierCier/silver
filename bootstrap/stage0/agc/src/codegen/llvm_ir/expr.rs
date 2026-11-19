@@ -746,8 +746,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         return self.emit_volatile_load(llvm_ty, ptr, &identifier.name);
                     }
                     return self
-                        .builder
-                        .build_load(llvm_ty, ptr, &identifier.name)
+                        .load_value(llvm_ty, ptr, &identifier.name)
                         .map_err(|e| {
                             CodegenError::with_span(
                                 format!("failed to load variable `{}`: {e}", identifier.name),
@@ -817,8 +816,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                     let llvm_ty = self.lower_basic_type(&reference.inner)?;
                                     let data = self.reference_data(value, object.span)?;
                                     value = self
-                                        .builder
-                                        .build_load(
+                                        .load_value(
                                             llvm_ty,
                                             data,
                                             "str.ref.load",
@@ -943,8 +941,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 if self.lvalue_is_volatile(expr) {
                     return self.emit_volatile_load(llvm_ty, ptr, "lvalue.load");
                 }
-                self.builder
-                    .build_load(llvm_ty, ptr, "lvalue.load")
+                self.load_value(llvm_ty, ptr, "lvalue.load")
                     .map_err(|e| {
                         CodegenError::with_span(format!("failed to load lvalue: {e}"), expr.span)
                     })
@@ -1312,8 +1309,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             return self.emit_volatile_load(llvm_ty, ptr, "lvalue.load");
                         }
                         return self
-                            .builder
-                            .build_load(llvm_ty, ptr, "lvalue.load")
+                            .load_value(llvm_ty, ptr, "lvalue.load")
                             .map_err(|e| {
                                 CodegenError::with_span(
                                     format!("failed to load lvalue: {e}"),
@@ -1338,8 +1334,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             }
                         };
                         return self
-                            .builder
-                            .build_extract_value(struct_val, idx as u32, "tuple.extract")
+                            .extract_field(struct_val, idx as u32, "tuple.extract")
                             .map_err(|e| {
                                 CodegenError::with_span(
                                     format!("failed to extract tuple element: {e}"),
@@ -1366,8 +1361,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         ));
                     };
                     let data = self
-                        .builder
-                        .build_extract_value(slice_value, 0, "slice.data")
+                        .extract_field(slice_value, 0, "slice.data")
                         .map_err(|e| {
                             CodegenError::with_span(
                                 format!("failed to read slice data: {e}"),
@@ -1553,13 +1547,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         let slice_val = self.load_reference_value(slice_val, ty.clone(), object.span)?;
                         let slice_struct = slice_val.into_struct_value();
                         let base_ptr = self
-                            .builder
-                            .build_extract_value(slice_struct, 0, "slice.ptr")
+                            .extract_field(slice_struct, 0, "slice.ptr")
                             .map_err(|e| CodegenError::with_span(e.to_string(), expr.span))?
                             .into_pointer_value();
                         let len_val = self
-                            .builder
-                            .build_extract_value(slice_struct, 1, "slice.len")
+                            .extract_field(slice_struct, 1, "slice.len")
                             .map_err(|e| CodegenError::with_span(e.to_string(), expr.span))?
                             .into_int_value();
                         let elem_ty = self.lower_basic_type(&slice.element_type)?;
@@ -1633,7 +1625,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     let value = if self.lvalue_is_volatile(inner) {
                         self.emit_volatile_load(value_type, place.ptr, "move.value")?
                     } else {
-                        self.builder.build_load(value_type, place.ptr, "move.value")
+                        self.load_value(value_type, place.ptr, "move.value")
                             .map_err(|e| CodegenError::with_span(e.to_string(), inner.span))?
                     };
                     if let Some(state) = place.state {
@@ -1768,7 +1760,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                     .map_err(|e| {
                                         CodegenError::new(format!("pointer cast enum: {e}"))
                                     })?;
-                                self.builder.build_store(val_ptr, val).map_err(|e| {
+                                self.store_value(val_ptr, val).map_err(|e| {
                                     CodegenError::new(format!("store enum payload: {e}"))
                                 })?;
                             }
@@ -2022,8 +2014,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                 "enum.val.cast",
                             )
                             .map_err(|e| CodegenError::new(format!("pointer cast enum: {e}")))?;
-                        self.builder
-                            .build_store(val_ptr, val)
+                        self.store_value(val_ptr, val)
                             .map_err(|e| CodegenError::new(format!("store enum payload: {e}")))?;
                     }
                 } else if arguments.len() == 1 {
@@ -2037,8 +2028,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             "enum.val.cast",
                         )
                         .map_err(|e| CodegenError::new(format!("pointer cast enum: {e}")))?;
-                    self.builder
-                        .build_store(val_ptr, val)
+                    self.store_value(val_ptr, val)
                         .map_err(|e| CodegenError::new(format!("store enum payload: {e}")))?;
                 }
             }
@@ -2290,8 +2280,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         field_init.name.span,
                     )
                 })?;
-            self.builder
-                .build_store(field_ptr, field_value)
+            self.store_value(field_ptr, field_value)
                 .map_err(|e| {
                     CodegenError::with_span(
                         format!("failed to store struct literal field `{field_name}`: {e}"),
@@ -2299,8 +2288,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     )
                 })?;
         }
-        self.builder
-            .build_load(struct_ty.as_basic_type_enum(), temp, "struct.lit.value")
+        self.load_value(struct_ty.as_basic_type_enum(), temp, "struct.lit.value")
             .map_err(|e| {
                 CodegenError::with_span(format!("failed to load struct literal: {e}"), *span)
             })
@@ -2360,7 +2348,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     *span,
                 )
             })?;
-            self.builder.build_store(ptr, *value).map_err(|e| {
+            self.store_value(ptr, *value).map_err(|e| {
                 CodegenError::with_span(
                     format!("failed to store array literal element {index}: {e}"),
                     *span,
@@ -2515,7 +2503,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                     value_expr.span,
                                 )
                             })?;
-                        self.builder.build_store(field_ptr, value).map_err(|e| {
+                        self.store_value(field_ptr, value).map_err(|e| {
                             CodegenError::with_span(
                                 format!(
                                     "failed to store struct initializer field `{field_name}`: {e}"
@@ -2564,7 +2552,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                     expr.span,
                                 )
                             })?;
-                        self.builder.build_store(field_ptr, value).map_err(|e| {
+                        self.store_value(field_ptr, value).map_err(|e| {
                             CodegenError::with_span(
                                 format!("failed to store struct initializer field: {e}"),
                                 expr.span,
@@ -2572,8 +2560,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         })?;
                     }
                 }
-                self.builder
-                    .build_load(struct_ty.as_basic_type_enum(), temp, "init.struct.value")
+                self.load_value(struct_ty.as_basic_type_enum(), temp, "init.struct.value")
                     .map_err(|e| {
                         CodegenError::with_span(
                             format!("failed to load struct initializer: {e}"),
@@ -2688,7 +2675,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                     expr.span,
                                 )
                             })?;
-                            self.builder.build_store(ptr, value).map_err(|e| {
+                            self.store_value(ptr, value).map_err(|e| {
                                 CodegenError::with_span(
                                     format!("store array initializer element {i}: {e}"),
                                     expr.span,
@@ -2731,7 +2718,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                     expr.span,
                                 )
                             })?;
-                            self.builder.build_store(ptr, value).map_err(|e| {
+                            self.store_value(ptr, value).map_err(|e| {
                                 CodegenError::with_span(
                                     format!("store array initializer element {i}: {e}"),
                                     expr.span,
@@ -2787,7 +2774,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                         value.span,
                                     )
                                 })?;
-                                self.builder.build_store(ptr, elem_val).map_err(|e| {
+                                self.store_value(ptr, elem_val).map_err(|e| {
                                     CodegenError::with_span(
                                         format!("store array initializer: {e}"),
                                         value.span,
@@ -3362,8 +3349,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                                 CodegenError::new(format!("pointer cast: {e}"))
                                             })?;
                                         let loaded = self
-                                            .builder
-                                            .build_load(llvm_ty, cast_ptr, &binding.name)
+                                            .load_value(llvm_ty, cast_ptr, &binding.name)
                                             .map_err(|e| {
                                                 CodegenError::new(format!("load data payload: {e}"))
                                             })?;
@@ -3372,7 +3358,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                             &binding.name,
                                             llvm_ty,
                                         )?;
-                                        self.builder.build_store(alloca, loaded).map_err(|e| {
+                                        self.store_value(alloca, loaded).map_err(|e| {
                                             CodegenError::new(format!("store data binding: {e}"))
                                         })?;
                                         self.emit_debug_variable(
@@ -3551,7 +3537,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 })?;
                 let alloca =
                     self.create_entry_alloca(function, &identifier.name, scrutinee.get_type())?;
-                self.builder.build_store(alloca, scrutinee).map_err(|e| {
+                self.store_value(alloca, scrutinee).map_err(|e| {
                     CodegenError::with_span(
                         format!("failed to bind match identifier `{}`: {e}", identifier.name),
                         identifier.span,
@@ -3771,7 +3757,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             "field.rvalue.tmp",
                             value.get_type(),
                         )?;
-                        self.builder.build_store(temp, value).map_err(|e| {
+                        self.store_value(temp, value).map_err(|e| {
                             CodegenError::with_span(
                                 format!("failed to spill rvalue for field access: {e}"),
                                 object.span,
@@ -3793,7 +3779,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     ast::TypeKind::Reference(reference) => {
                         if let ast::TypeKind::Slice(slice) = reference.inner.kind.as_ref() {
                             let ref_llvm_ty = self.lower_basic_type(&object_ty)?;
-                            let loaded = self.builder.build_load(ref_llvm_ty, object_ptr, "field.ref.load").map_err(|e| {
+                            let loaded = self.load_value(ref_llvm_ty, object_ptr, "field.ref.load").map_err(|e| {
                                 CodegenError::with_span(format!("failed to load reference receiver: {e}"), object.span)
                             })?;
                             let struct_ptr = self.reference_data(loaded, object.span)?;
@@ -3849,8 +3835,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         };
                         let ref_llvm_ty = self.lower_basic_type(&object_ty)?;
                         let loaded = self
-                            .builder
-                            .build_load(ref_llvm_ty, object_ptr, "field.ref.load")
+                            .load_value(ref_llvm_ty, object_ptr, "field.ref.load")
                             .map_err(|e| {
                                 CodegenError::with_span(
                                     format!("failed to load reference receiver: {e}"),

@@ -220,7 +220,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .map_err(|e| {
                     CodegenError::with_span(format!("launch: pack arg GEP failed: {e}"), expr.span)
                 })?;
-            self.builder.build_store(slot, casted).map_err(|e| {
+            self.store_value(slot, casted).map_err(|e| {
                 CodegenError::with_span(format!("launch: store arg failed: {e}"), expr.span)
             })?;
             if !matches!(
@@ -442,8 +442,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 })?;
             let loaded_ty = self.lower_basic_type(&result_ty_owned)?;
             let loaded = self
-                .builder
-                .build_load(loaded_ty, slot, "wait.result")
+                .load_value(loaded_ty, slot, "wait.result")
                 .map_err(|e| {
                     CodegenError::with_span(format!("wait: result load failed: {e}"), expr.span)
                 })?;
@@ -516,7 +515,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     )
                 })?;
             let arg_ty = self.lower_basic_type(param_ty)?;
-            let value = self.builder.build_load(arg_ty, slot, "arg").map_err(|e| {
+            let value = self.load_value(arg_ty, slot, "arg").map_err(|e| {
                 CodegenError::with_span(format!("launch: trampoline arg load failed: {e}"), *span)
             })?;
             args.push(BasicMetadataValueEnum::from(value));
@@ -541,7 +540,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         *span,
                     )
                 })?;
-            self.builder.build_store(slot, result).map_err(|e| {
+            self.store_value(slot, result).map_err(|e| {
                 CodegenError::with_span(format!("launch: store result failed: {e}"), *span)
             })?;
         }

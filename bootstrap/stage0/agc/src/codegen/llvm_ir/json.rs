@@ -123,8 +123,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .current_fn
             .ok_or_else(|| CodegenError::with_span("@json requires an active function", *span))?;
         let ptr = self.create_entry_alloca(function, "json.writer", value.get_type())?;
-        self.builder
-            .build_store(ptr, value)
+        self.store_value(ptr, value)
             .map_err(|e| CodegenError::with_span(format!("JsonWriter store failed: {e}"), *span))?;
         self.insert_json_variable("__json_writer", ptr, "JsonWriter", *span)?;
         Ok((
@@ -153,8 +152,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             CodegenError::with_span("@from_json requires an active function", *span)
         })?;
         let ptr = self.create_entry_alloca(function, "json.reader", value.get_type())?;
-        self.builder
-            .build_store(ptr, value)
+        self.store_value(ptr, value)
             .map_err(|e| CodegenError::with_span(format!("JsonReader store failed: {e}"), *span))?;
         self.insert_json_variable("__json_reader", ptr, "JsonReader", *span)?;
         Ok((

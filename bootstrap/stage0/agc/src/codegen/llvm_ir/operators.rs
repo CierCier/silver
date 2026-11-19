@@ -60,8 +60,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let value = self.emit_expression_value(object)?;
                 let ptr =
                     self.create_entry_alloca(function, "compound.object", value.get_type())?;
-                self.builder
-                    .build_store(ptr, value)
+                self.store_value(ptr, value)
                     .map_err(|e| CodegenError::new(e.to_string()))?;
                 (ptr, true)
             };
@@ -104,8 +103,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             let value = self.emit_binary_expression(&target, operator, right, whole_expr)?;
             let value_ptr =
                 self.create_entry_alloca(function, "compound.value", value.get_type())?;
-            self.builder
-                .build_store(value_ptr, value)
+            self.store_value(value_ptr, value)
                 .map_err(|e| CodegenError::new(e.to_string()))?;
             let value_alias =
                 self.compound_alias("$compound.value", value_ptr, value_ty, whole_expr.span);
@@ -249,8 +247,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 if self.lvalue_is_volatile(whole_expr) {
                     return self.emit_volatile_load(inner_llvm_ty, ptr_value, "deref.load");
                 }
-                self.builder
-                    .build_load(inner_llvm_ty, ptr_value, "deref.load")
+                self.load_value(inner_llvm_ty, ptr_value, "deref.load")
                     .map_err(|e| {
                         CodegenError::with_span(
                             format!("failed to load dereference result: {e}"),
@@ -499,7 +496,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 if self.lvalue_is_volatile(left) {
                     self.emit_volatile_store(target_ptr, value)?;
                 } else {
-                    self.builder.build_store(target_ptr, value).map_err(|e| {
+                    self.store_value(target_ptr, value).map_err(|e| {
                         CodegenError::with_span(format!("failed assignment: {e}"), whole_expr.span)
                     })?;
                 }
@@ -1422,9 +1419,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         "comparison requires matching numeric types", whole_expr.span,
                     ));
                 }
-                let lhs_data = self.builder.build_extract_value(*lhs, 0, "reference.cmp.lhs")
+                let lhs_data = self.extract_field(*lhs, 0, "reference.cmp.lhs")
                     .map_err(|e| CodegenError::with_span(e.to_string(), whole_expr.span))?;
-                let rhs_data = self.builder.build_extract_value(*rhs, 0, "reference.cmp.rhs")
+                let rhs_data = self.extract_field(*rhs, 0, "reference.cmp.rhs")
                     .map_err(|e| CodegenError::with_span(e.to_string(), whole_expr.span))?;
                 self.emit_compare_values(&lhs_data, operator, &rhs_data, whole_expr, is_unsigned)
             }
@@ -1640,8 +1637,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         let mut result = target_struct_ty.get_undef();
                         for (i, dst_ty) in dst_fields.iter().enumerate() {
                             let elem = self
-                                .builder
-                                .build_extract_value(struct_val, i as u32, &format!("struct.cast.ext.{i}"))
+                                .extract_field(struct_val, i as u32, &format!("struct.cast.ext.{i}"))
                                 .map_err(|e| CodegenError::with_span(format!("struct cast extract failed: {e}"), *span))?;
                             let casted = self.cast_value_to_basic_type(elem, *dst_ty, span)?;
                             result = self
@@ -1669,8 +1665,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             (BasicValueEnum::StructValue(struct_val), BasicTypeEnum::PointerType(ptr_ty)) => {
                 let data_val = self
-                    .builder
-                    .build_extract_value(struct_val, 0, "slice.to_ptr")
+                    .extract_field(struct_val, 0, "slice.to_ptr")
                     .map_err(|e| CodegenError::with_span(format!("failed to extract slice data: {e}"), *span))?;
                 if data_val.is_pointer_value() {
                     let ptr = data_val.into_pointer_value();
@@ -1814,8 +1809,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 {
                     let inner_llvm_ty = self.lower_basic_type(inner_ty)?;
                     value = self
-                        .builder
-                        .build_load(inner_llvm_ty, value.into_pointer_value(), "slice.borrow.value")
+                        .load_value(inner_llvm_ty, value.into_pointer_value(), "slice.borrow.value")
                         .map_err(|e| CodegenError::with_span(e.to_string(), *span))?;
                 }
 
@@ -1855,12 +1849,10 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     } else if value.is_struct_value() {
                         let struct_val = value.into_struct_value();
                         let data = self
-                            .builder
-                            .build_extract_value(struct_val, 0, "obj.data")
+                            .extract_field(struct_val, 0, "obj.data")
                             .map_err(|e| CodegenError::with_span(e.to_string(), *span))?;
                         let len = self
-                            .builder
-                            .build_extract_value(struct_val, 1, "obj.len")
+                            .extract_field(struct_val, 1, "obj.len")
                             .map_err(|e| CodegenError::with_span(e.to_string(), *span))?;
                         (data, len)
                     } else {
@@ -1935,13 +1927,11 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 && src_fields[1].is_int_type()
             {
                 let elem_ptr = self
-                    .builder
-                    .build_extract_value(struct_val, 0, "slice.cast.ptr")
+                    .extract_field(struct_val, 0, "slice.cast.ptr")
                     .map_err(|e| CodegenError::with_span(e.to_string(), *span))?;
                 let cast_ptr = self.cast_value_to_basic_type(elem_ptr, dst_fields[0], span)?;
                 let len_val = self
-                    .builder
-                    .build_extract_value(struct_val, 1, "slice.cast.len")
+                    .extract_field(struct_val, 1, "slice.cast.len")
                     .map_err(|e| CodegenError::with_span(e.to_string(), *span))?;
                 let cast_len = self.cast_value_to_basic_type(len_val, dst_fields[1], span)?;
                 let mut result = target_struct_ty.get_undef();

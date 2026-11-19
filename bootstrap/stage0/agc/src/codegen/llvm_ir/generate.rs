@@ -102,23 +102,23 @@ pub(crate) fn run_module_optimization_passes(
     if level == "0" {
         return Ok(());
     }
-    // Build a lightweight pipeline matching the plan's original intent:
-    //   mem2reg, instcombine, reassociate, gvn, simplifycfg
+    // A lightweight pipeline: sroa, instcombine, reassociate, gvn, simplifycfg.
     // At higher opt levels also run an extra instcombine cleanup.
+    //
+    // sroa, not mem2reg: codegen reaches struct fields through GEPs, which
+    // mem2reg cannot promote to registers.
     //
     // instcombine<no-verify-fixpoint> disables instcombine's fixpoint
     // *verification* (a sanity check). LLVM 22 falsely trips it on `nuw` GEPs
     // from struct field access, erroring "did not reach a fixpoint"; the pass
     // itself terminates correctly, so the check is safe to disable.
-    // The inliner runs after mem2reg so the many small Silver helpers
-    // (String ops, transport_read, pool lookups) get inlined into hot paths.
     let pipeline = if matches!(level, "3" | "s" | "z" | "fast") {
         CString::new(
-            "always-inline,mem2reg,instcombine<no-verify-fixpoint>,reassociate,gvn,simplifycfg,instcombine<no-verify-fixpoint>",
+            "always-inline,sroa,instcombine<no-verify-fixpoint>,reassociate,gvn,simplifycfg,instcombine<no-verify-fixpoint>",
         )
     } else {
         CString::new(
-            "always-inline,mem2reg,instcombine<no-verify-fixpoint>,reassociate,gvn,simplifycfg",
+            "always-inline,sroa,instcombine<no-verify-fixpoint>,reassociate,gvn,simplifycfg",
         )
     }
     .expect("pipeline CString should not contain null bytes");

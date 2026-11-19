@@ -618,7 +618,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         )
                         .map_err(|e| CodegenError::with_span(e.to_string(), arg.span))?
                 };
-                self.builder.build_store(elem_ptr, arg_val).map_err(|e| {
+                self.store_value(elem_ptr, arg_val).map_err(|e| {
                     CodegenError::with_span(
                         format!("failed to store variadic element: {e}"),
                         arg.span,
@@ -1035,7 +1035,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             "method.recv.tmp",
                             value.get_type(),
                         )?;
-                        self.builder.build_store(temp, value).map_err(|e| {
+                        self.store_value(temp, value).map_err(|e| {
                             CodegenError::with_span(
                                 format!("failed to spill receiver for method call: {e}"),
                                 receiver.span,
@@ -1103,8 +1103,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         ));
                     };
                     if let Some(expected_receiver_ty) = expected_receiver_llvm_ty {
-                        self.builder
-                            .build_load(expected_receiver_ty, receiver_ptr, "method.recv.load")
+                        self.load_value(expected_receiver_ty, receiver_ptr, "method.recv.load")
                             .map(|value| value.as_basic_value_enum())
                             .map_err(|e| {
                                 CodegenError::with_span(
@@ -1218,7 +1217,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         })?;
                         let temp =
                             self.create_entry_alloca(function_ctx, "arg.ref.tmp", val.get_type())?;
-                        self.builder.build_store(temp, val).map_err(|e| {
+                        self.store_value(temp, val).map_err(|e| {
                             CodegenError::with_span(
                                 format!("failed to spill argument for reference param: {e}"),
                                 argument.span,
@@ -1315,7 +1314,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         })?;
                         let temp =
                             self.create_entry_alloca(function_ctx, "arg.ref.tmp", val.get_type())?;
-                        self.builder.build_store(temp, val).map_err(|e| {
+                        self.store_value(temp, val).map_err(|e| {
                             CodegenError::with_span(
                                 format!("failed to spill argument for reference param: {e}"),
                                 argument.span,
@@ -1711,8 +1710,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 // cmpxchg yields `{T old, i1 success}` on this LLVM; the flag
                 // is a real extractvalue (operand access would return the address).
                 let flag = self
-                    .builder
-                    .build_extract_value(pair, 1, "cmpxchg.ok")
+                    .extract_field(pair, 1, "cmpxchg.ok")
                     .map_err(|e| CodegenError::new(format!("cmpxchg flag: {e}")))?;
                 Ok(Some(Some(flag)))
             }

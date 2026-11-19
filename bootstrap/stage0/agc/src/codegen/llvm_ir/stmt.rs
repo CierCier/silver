@@ -113,7 +113,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             };
             let alloca =
                 self.create_entry_alloca(function, &param.name.name, param_value.get_type())?;
-            self.builder.build_store(alloca, param_value).map_err(|e| {
+            self.store_value(alloca, param_value).map_err(|e| {
                 CodegenError::with_span(
                     format!("failed to store parameter `{}`: {e}", param.name.name),
                     param.span,
@@ -583,8 +583,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 );
                 let iterable_ptr =
                     self.create_entry_alloca(function, iterable_name, iterable_llvm_ty)?;
-                self.builder
-                    .build_store(iterable_ptr, iterable_val)
+                self.store_value(iterable_ptr, iterable_val)
                     .map_err(|e| CodegenError::new(format!("failed to store iterable: {e}")))?;
                 if let Some(scope) = self.variables.last_mut() {
                     scope.insert(
@@ -646,8 +645,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .cloned()
                     .unwrap_or_else(|| self.infer_ast_type_from_value(&iterator_val, span));
                 let iter_ptr = self.create_entry_alloca(function, iter_name, iter_llvm_ty)?;
-                self.builder
-                    .build_store(iter_ptr, iterator_val)
+                self.store_value(iter_ptr, iterator_val)
                     .map_err(|e| CodegenError::new(format!("failed to store iterator: {e}")))?;
                 if let Some(scope) = self.variables.last_mut() {
                     scope.insert(
@@ -684,8 +682,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
                 let next_llvm_ty = next_val.get_type();
                 let next_ptr = self.create_entry_alloca(function, next_name, next_llvm_ty)?;
-                self.builder
-                    .build_store(next_ptr, next_val)
+                self.store_value(next_ptr, next_val)
                     .map_err(|e| CodegenError::new(format!("failed to store next result: {e}")))?;
 
                 let cond_bb = self.context.append_basic_block(function, "forin.cond");
@@ -708,8 +705,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     _ => return Err(CodegenError::new("next() must return a struct Optional<T>")),
                 };
                 let is_present = self
-                    .builder
-                    .build_extract_value(opt_sv, 0, "forin.present")
+                    .extract_field(opt_sv, 0, "forin.present")
                     .map_err(|e| CodegenError::new(format!("failed to extract present: {e}")))?;
                 let is_present = self.emit_as_bool(&is_present, span)?;
 
@@ -761,8 +757,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     found.unwrap_or_else(|| self.context.i64_type().as_basic_type_enum())
                 };
                 let thing_loaded = self
-                    .builder
-                    .build_extract_value(opt_sv, 1, &binding.name)
+                    .extract_field(opt_sv, 1, &binding.name)
                     .map_err(|e| CodegenError::new(format!("failed to extract thing: {e}")))?;
 
                 let ast_ty = found_ast_ty
@@ -770,8 +765,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let debug_ty = ast_ty.clone();
                 let var_ptr =
                     self.create_entry_alloca(function, &binding.name, thing_loaded.get_type())?;
-                self.builder
-                    .build_store(var_ptr, thing_loaded)
+                self.store_value(var_ptr, thing_loaded)
                     .map_err(|e| CodegenError::new(format!("failed to store loop var: {e}")))?;
                 if let Some(scope) = self.variables.last_mut() {
                     scope.insert(
@@ -810,8 +804,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let next_val2 = self
                     .emit_method_call_expression(&iter_expr, &next_ident, &[], false, span)?
                     .ok_or_else(|| CodegenError::new("next() must return Optional<T>"))?;
-                self.builder
-                    .build_store(next_ptr, next_val2)
+                self.store_value(next_ptr, next_val2)
                     .map_err(|e| CodegenError::new(format!("failed to store next result: {e}")))?;
                 self.builder
                     .build_unconditional_branch(cond_bb)
@@ -996,7 +989,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         } else if is_volatile {
             self.emit_volatile_store(alloca, init_value)?;
         } else {
-            self.builder.build_store(alloca, init_value).map_err(|e| {
+            self.store_value(alloca, init_value).map_err(|e| {
                 CodegenError::with_span(
                     format!("failed to store local `{}`: {e}", identifier.name),
                     identifier.span,
@@ -1086,8 +1079,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         for (i, sub_pat) in sub_patterns.iter().enumerate() {
             let elem_val = if tuple_val.is_struct_value() {
-                self.builder
-                    .build_extract_value(
+                self.extract_field(
                         tuple_val.into_struct_value(),
                         i as u32,
                         &format!("tuple.ext.{i}"),
@@ -1113,8 +1105,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         )
                     })?;
                 let elem_ty = struct_ty.get_field_type_at_index(i as u32).unwrap();
-                self.builder
-                    .build_load(elem_ty, elem_ptr, &format!("tuple.load.{i}"))
+                self.load_value(elem_ty, elem_ptr, &format!("tuple.load.{i}"))
                     .map_err(|e| {
                         CodegenError::with_span(
                             format!("failed to load tuple element {i}: {e}"),
@@ -1483,8 +1474,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                                 CodegenError::new(format!("pointer cast: {e}"))
                                             })?;
                                         let loaded = self
-                                            .builder
-                                            .build_load(llvm_ty, cast_ptr, &binding.name)
+                                            .load_value(llvm_ty, cast_ptr, &binding.name)
                                             .map_err(|e| {
                                                 CodegenError::new(format!("load data payload: {e}"))
                                             })?;
@@ -1493,7 +1483,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                                             &binding.name,
                                             llvm_ty,
                                         )?;
-                                        self.builder.build_store(alloca, loaded).map_err(|e| {
+                                        self.store_value(alloca, loaded).map_err(|e| {
                                             CodegenError::new(format!("store data binding: {e}"))
                                         })?;
                                         self.emit_debug_variable(
@@ -1662,7 +1652,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 })?;
                 let alloca =
                     self.create_entry_alloca(function, &identifier.name, scrutinee.get_type())?;
-                self.builder.build_store(alloca, scrutinee).map_err(|e| {
+                self.store_value(alloca, scrutinee).map_err(|e| {
                     CodegenError::with_span(
                         format!("failed to bind match identifier `{}`: {e}", identifier.name),
                         identifier.span,

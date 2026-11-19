@@ -68,7 +68,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         while let ast::TypeKind::Reference(reference) = ty.kind.as_ref() {
             let data = self.reference_data(value, span)?;
             let llvm_type = self.lower_basic_type(&reference.inner)?;
-            value = self.builder.build_load(llvm_type, data, "reference.value")
+            value = self.load_value(llvm_type, data, "reference.value")
                 .map_err(|e| CodegenError::with_span(e.to_string(), span))?;
             ty = (*reference.inner).clone();
         }
@@ -81,7 +81,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         span: Span,
     ) -> CodegenResult<ResolvedPlace<'ctx>> {
         while let ast::TypeKind::Reference(reference) = place.ty.kind.as_ref() {
-            let value = self.builder.build_load(self.reference_type(), place.ptr, "reference.place")
+            let value = self.load_value(self.reference_type(), place.ptr, "reference.place")
                 .map_err(|e| CodegenError::with_span(e.to_string(), span))?;
             place = ResolvedPlace {
                 ptr: self.reference_data(value, span)?,
@@ -150,7 +150,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             if volatile {
                 return self.emit_volatile_load(self.reference_type().into(), place.ptr, "reborrow");
             }
-            return self.builder.build_load(self.reference_type(), place.ptr, "reborrow")
+            return self.load_value(self.reference_type(), place.ptr, "reborrow")
                 .map_err(|e| CodegenError::with_span(e.to_string(), span));
         }
         let state = match place.state {
@@ -188,7 +188,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 let value = self.emit_expression_value(argument)?;
                 let function = self.current_fn.ok_or_else(|| CodegenError::new("reference argument outside a function"))?;
                 let temp = self.create_entry_alloca(function, "argument.owner", value.get_type())?;
-                self.builder.build_store(temp, value).map_err(|e| CodegenError::new(e.to_string()))?;
+                self.store_value(temp, value).map_err(|e| CodegenError::new(e.to_string()))?;
                 let name = format!("argument.owner.{}", self.temp_counter);
                 self.temp_counter += 1;
                 self.register_owner_state(&ast::Identifier { name, span: argument.span }, &ty, temp, true)?;
@@ -209,7 +209,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 crate::diagnostics::messages::reference_carrier_expected(), span,
             ));
         };
-        let state = self.builder.build_extract_value(reference, 1, "reference.node")
+        let state = self.extract_field(reference, 1, "reference.node")
             .map_err(|e| CodegenError::with_span(e.to_string(), span))?;
         match state {
             BasicValueEnum::PointerValue(state) => Ok(state),
@@ -271,7 +271,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 crate::diagnostics::messages::reference_carrier_expected(), span,
             ));
         };
-        let data = self.builder.build_extract_value(reference, 0, "reference.address")
+        let data = self.extract_field(reference, 0, "reference.address")
             .map_err(|e| CodegenError::with_span(e.to_string(), span))?;
         match data {
             BasicValueEnum::PointerValue(data) => Ok(data),

@@ -99,7 +99,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
     pub(crate) fn callable_entry(&self, value: BasicValueEnum<'ctx>, foreign: bool)
         -> CodegenResult<PointerValue<'ctx>> {
-        self.builder.build_extract_value(value.into_struct_value(), u32::from(foreign), "callable.entry")
+        self.extract_field(value.into_struct_value(), u32::from(foreign), "callable.entry")
             .map(|v| v.into_pointer_value()).map_err(|e| CodegenError::new(e.to_string()))
     }
 
