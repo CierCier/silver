@@ -157,7 +157,9 @@ pub struct LlvmIrGenerator<'ctx> {
     pub(crate) method_overload_signatures: HashMap<(String, String), Vec<FreeFunctionSig>>,
     pub(crate) string_constants: HashMap<String, PointerValue<'ctx>>,
     pub(crate) struct_generics: HashMap<String, Vec<String>>,
-    pub(crate) generic_impl_templates: Vec<ast::ImplItem>,
+    /// Shared so per-call scans (every drop-glue lookup walks them) copy
+    /// pointers, not impl bodies.
+    pub(crate) generic_impl_templates: Vec<std::rc::Rc<ast::ImplItem>>,
     /// Generic free-function templates (functions with `generics`), keyed by
     /// name. The lazy generic-impl instantiation path emits nested instances
     /// (e.g. `realloc<i64>` inside `Vec<i64>.push`) that the semantic

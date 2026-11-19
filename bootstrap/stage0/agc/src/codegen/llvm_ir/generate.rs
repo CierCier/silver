@@ -1302,7 +1302,7 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 }
                 ast::ItemKind::Impl(impl_item) => {
                     if self.has_generic_placeholder_type(&impl_item.self_type) {
-                        self.generic_impl_templates.push(impl_item.clone());
+                        self.generic_impl_templates.push(std::rc::Rc::new(impl_item.clone()));
                     }
                     self.collect_impl_method_signatures(impl_item, &item.visibility)?;
                     if Self::is_drop_trait_impl(impl_item)

@@ -1587,7 +1587,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let owner = Self::monomorph_owner_name_from_named(&receiver_named);
 
         let templates = self.generic_impl_templates.clone();
-        for template in templates {
+        for template in &templates {
             // Trait filter: skip if required_trait is set and doesn't match
             if let Some(required_trait) = required_trait {
                 let Some(trait_ref) = &template.trait_ref else {
@@ -1635,30 +1635,35 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 ast::ImplItemKind::Function(func)
                     if func.name.name == method_name && func.generics.is_none() =>
                 {
-                    Some((**func).clone())
+                    Some(func)
                 }
                 _ => None,
             }) else {
                 continue;
             };
 
-            let mut func = template_func;
-            for param in &mut func.parameters {
+            let mut parameters = template_func.parameters.clone();
+            for param in &mut parameters {
                 param.param_type = Self::substitute_generic_type(&param.param_type, &mapping);
             }
-            if let Some(return_ty) = &mut func.return_type {
-                *return_ty = Self::substitute_generic_type(return_ty, &mapping);
-            }
+            let return_type = template_func
+                .return_type
+                .as_ref()
+                .map(|return_ty| Self::substitute_generic_type(return_ty, &mapping));
             // The symbol carries a hash of the substituted signature; it must
             // agree with the declaration emitted from the monomorphized impl.
             let mangled_name = self.method_symbol_from_ast(
                 &owner,
                 method_name,
-                &func.parameters,
-                func.return_type.as_ref(),
-                func.is_variadic,
+                &parameters,
+                return_type.as_ref(),
+                template_func.is_variadic,
             );
             if self.module.get_function(&mangled_name).is_none() {
+                // Only a missing instance needs its own copy of the body.
+                let mut func = (**template_func).clone();
+                func.parameters = parameters;
+                func.return_type = return_type;
                 // Rewrite bare references to the enum's own base name inside
                 // the method body (e.g. `Optional.Some(x)` in `impl Optional<T>`
                 // instantiated for `Optional<i32>`) so variant construction
