@@ -896,7 +896,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         ty: &ast::Type,
         value_ptr: PointerValue<'ctx>,
     ) -> CodegenResult<()> {
-        if Self::is_pointer_or_reference(ty) {
+        if !self.type_needs_drop_glue(ty, &mut Vec::new())? {
             return Ok(());
         }
         let drop_fn = self.get_drop_function_name(ty)?;
@@ -966,23 +966,60 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     self.emit_drop_glue_at_pointer(field_ty, field_ptr)?;
                 }
             }
-            ast::TypeKind::Array(array) => {
+            ast::TypeKind::Array(array) if array.size > 0 => {
+                // A loop keeps the glue O(1) in the array length.
                 let array_ty = self.lower_basic_type(ty)?;
-                for index in 0..array.size {
-                    let field_ptr = unsafe {
-                        self.builder.build_in_bounds_gep(
-                            array_ty,
-                            value_ptr,
-                            &[
-                                self.context.i64_type().const_zero(),
-                                self.context.i64_type().const_int(index as u64, false),
-                            ],
-                            "drop.glue.array",
-                        )
-                    }
-                    .map_err(|e| CodegenError::new(format!("drop glue array GEP: {e}")))?;
-                    self.emit_drop_glue_at_pointer(&array.element_type, field_ptr)?;
+                let i64_ty = self.context.i64_type();
+                let function = self
+                    .current_fn
+                    .ok_or_else(|| CodegenError::new("array drop glue outside a function"))?;
+                let entry = self
+                    .builder
+                    .get_insert_block()
+                    .ok_or_else(|| CodegenError::new("array drop glue outside a block"))?;
+                let body = self.context.append_basic_block(function, "drop.glue.array");
+                let done = self.context.append_basic_block(function, "drop.glue.array.done");
+                self.builder
+                    .build_unconditional_branch(body)
+                    .map_err(|e| CodegenError::new(e.to_string()))?;
+                self.builder.position_at_end(body);
+                let index = self
+                    .builder
+                    .build_phi(i64_ty, "drop.glue.index")
+                    .map_err(|e| CodegenError::new(e.to_string()))?;
+                let index_value = index.as_basic_value().into_int_value();
+                let element_ptr = unsafe {
+                    self.builder.build_in_bounds_gep(
+                        array_ty,
+                        value_ptr,
+                        &[i64_ty.const_zero(), index_value],
+                        "drop.glue.element",
+                    )
                 }
+                .map_err(|e| CodegenError::new(format!("drop glue array GEP: {e}")))?;
+                self.emit_drop_glue_at_pointer(&array.element_type, element_ptr)?;
+                let next = self
+                    .builder
+                    .build_int_add(index_value, i64_ty.const_int(1, false), "drop.glue.next")
+                    .map_err(|e| CodegenError::new(e.to_string()))?;
+                let more = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::ULT,
+                        next,
+                        i64_ty.const_int(array.size as u64, false),
+                        "drop.glue.more",
+                    )
+                    .map_err(|e| CodegenError::new(e.to_string()))?;
+                let latch = self
+                    .builder
+                    .get_insert_block()
+                    .ok_or_else(|| CodegenError::new("array drop glue lost its block"))?;
+                self.builder
+                    .build_conditional_branch(more, body, done)
+                    .map_err(|e| CodegenError::new(e.to_string()))?;
+                index.add_incoming(&[(&i64_ty.const_zero(), entry), (&next, latch)]);
+                self.builder.position_at_end(done);
             }
             _ => {}
         }
@@ -1169,6 +1206,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         struct_ptr: PointerValue<'ctx>,
         _parent_flag: PointerValue<'ctx>,
     ) -> CodegenResult<Vec<(String, PointerValue<'ctx>)>> {
+        if !self.type_needs_drop_glue(ty, &mut Vec::new())? {
+            return Ok(Vec::new());
+        }
         if let ast::TypeKind::Tuple(types) = ty.kind.as_ref() {
             let mut field_llvm_types = Vec::with_capacity(types.len());
             for t in types {
