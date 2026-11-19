@@ -2,6 +2,7 @@ use crate::lexer::Span;
 use crate::parser::ast;
 
 pub mod abi;
+pub(crate) mod bt_tables;
 pub mod dwarf_bt;
 pub mod llvm_ir;
 

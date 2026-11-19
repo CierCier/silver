@@ -877,7 +877,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         generator.declare_imported_modules(program, imported_modules)?;
 
         if !debug_info {
-            generator.emit_bt_debug_tables(&[]);
+            generator.emit_bt_debug_tables(&crate::codegen::bt_tables::BtTables::default());
             crate::profiler::begin_phase("codegen IR generation");
             generator.generate_program(program)?;
             table.absorb_from(&generator.symbol_table);
@@ -947,6 +947,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         crate::profiler::begin_phase("emit backtrace table");
         generator.emit_backtrace_table();
+        let elf = !crate::codegen::abi::target_is_windows(Some(&effective_triple))
+            && !crate::codegen::abi::target_is_wasm(Some(&effective_triple))
+            && !effective_triple.contains("apple");
+        if elf && file_type == FileType::Object {
+            generator.reserve_bt_debug_tables();
+        }
         crate::profiler::end_phase("emit backtrace table");
 
         crate::profiler::begin_phase("finalize debug info");
@@ -961,7 +967,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         )?;
         crate::profiler::end_phase("LLVM opt passes");
 
-        crate::profiler::begin_phase("LLVM machine emit (pass 1)");
+        crate::profiler::begin_phase("LLVM machine emit");
         machine
             .write_to_file(&generator.module, file_type, path)
             .map_err(|e| {
@@ -974,14 +980,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     path.display()
                 ))
             })?;
-        crate::profiler::end_phase("LLVM machine emit (pass 1)");
+        crate::profiler::end_phase("LLVM machine emit");
 
-        // Post-pass: the runtime backtrace walker needs exact source lines
-        // and spilled argument offsets, but DWARF sections are not loaded
-        // into the running binary. Parse the object we just emitted and fold
-        // the interesting bits into alloc'd, link-time-resolved tables, then
-        // re-emit.
+        // The runtime backtrace walker needs exact source lines and spilled
+        // argument offsets, but DWARF sections are not loaded into the
+        // running binary. Parse the object just emitted and fold those into
+        // alloc'd, link-time-resolved tables. Unit objects carry no tables.
         if file_type == FileType::Object
+            && generator.emit_bt_tables
             && let Ok(obj) = std::fs::read(path)
         {
             crate::profiler::begin_phase("DWARF backtrace parsing");
@@ -999,22 +1005,36 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     fn_debug[i].params = p;
                 }
             }
+            let tables = generator.resolve_bt_tables(fn_debug);
             crate::profiler::end_phase("DWARF backtrace parsing");
 
-            crate::profiler::begin_phase("emit backtrace tables");
-            generator.emit_bt_debug_tables(&fn_debug);
-            crate::profiler::end_phase("emit backtrace tables");
-
-            crate::profiler::begin_phase("LLVM machine emit (pass 2)");
-            machine
-                .write_to_file(&generator.module, file_type, path)
-                .map_err(|e| {
+            crate::profiler::begin_phase("write backtrace tables");
+            let patched = crate::codegen::bt_tables::write_into_elf(&obj, &tables);
+            crate::profiler::end_phase("write backtrace tables");
+            match patched {
+                Some(patched) => std::fs::write(path, patched).map_err(|e| {
                     CodegenError::new(format!(
-                        "failed to re-emit object with backtrace tables to {}: {e}",
+                        "failed to write backtrace tables to {}: {e}",
                         path.display()
                     ))
-                })?;
-            crate::profiler::end_phase("LLVM machine emit (pass 2)");
+                })?,
+                // Not an ELF object with the reservation intact (COFF, or
+                // reservation skipped): emit the tables as LLVM globals and
+                // re-emit. Functions do not move, so the offsets still hold.
+                None => {
+                    crate::profiler::begin_phase("LLVM machine emit (tables)");
+                    generator.emit_bt_debug_tables(&tables);
+                    machine
+                        .write_to_file(&generator.module, file_type, path)
+                        .map_err(|e| {
+                            CodegenError::new(format!(
+                                "failed to re-emit object with backtrace tables to {}: {e}",
+                                path.display()
+                            ))
+                        })?;
+                    crate::profiler::end_phase("LLVM machine emit (tables)");
+                }
+            }
         }
         Ok(())
     }
