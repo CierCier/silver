@@ -2543,8 +2543,10 @@ const i64 URING_MAX_ENTRIES = 32768;
 /// after the array, and the 16-byte CQEs 64 bytes after that.
 const i64 URING_SQ_ARRAY = 64;
 const i64 URING_CQ_CQES = 64;
-/// An operation that cannot complete yet.
-const i64 URING_PENDING = 1;
+/// An operation that cannot complete yet. CQE results are 32-bit (a count
+/// or -errno), so this value can never be a real result; 1 was a one-byte
+/// read or send.
+const i64 URING_PENDING = 0x4000000000000000;
 /// Most rings alive at once.
 const i64 MAC_URING_MAX = 16;
 

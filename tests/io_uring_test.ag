@@ -198,6 +198,25 @@ void test_io_uring_socket_io() {
     }
 
     assert_true(memcmp((void*)&recv_buf[0], (void*)msg, 27) == 0, "socket message match");
+
+    // A one-byte transfer completes once, with result 1.
+    IoUringSqe* one_send = ring.get_sqe();
+    ring.prep_send(one_send, client.sock.fd, (void*)"z", 1, 0, 0x3333);
+    u8 one_byte[4];
+    memset((void*)&one_byte[0], (u8)0, 4);
+    IoUringSqe* one_recv = ring.get_sqe();
+    ring.prep_recv(one_recv, server.sock.fd, (void*)&one_byte[0], 4, 0, 0x4444);
+    Result<i64, Error> one_sub = ring.submit_and_wait(2);
+    assert_true(one_sub.is_ok(), "submitted one-byte batch");
+    i64 one_results = 0;
+    IoUringCqe one_cqe;
+    while (ring.peek_cqe(&one_cqe)) {
+        assert_true(one_cqe.res == 1, "one-byte transfer completes with 1");
+        ring.cqe_seen(&one_cqe);
+        one_results += 1;
+    }
+    assert_true(one_results == 2, "one-byte send and recv each complete once");
+    assert_true(one_byte[0] == (u8)'z', "one-byte payload arrives");
 }
 
 i32 main() {
