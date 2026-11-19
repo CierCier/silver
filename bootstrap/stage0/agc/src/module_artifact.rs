@@ -503,15 +503,15 @@ impl ModuleArtifact {
     }
 
     pub fn from_path(path: &Path) -> Result<Self, String> {
-        let bytes =
-            std::fs::read(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        let bytes = crate::build_record::read(path)
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
         let mut artifact = Self::from_bytes(&bytes)?;
         artifact.artifact_path = Some(path.to_path_buf());
         Ok(artifact)
     }
 
     pub fn from_source(path: &Path) -> Result<Self, String> {
-        let src = std::fs::read_to_string(path)
+        let src = crate::build_record::read_to_string(path)
             .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
 
         let file_id = lexer::register_source(&path.display().to_string(), &src);
@@ -583,11 +583,11 @@ impl ModuleArtifact {
         }
         let artifact_path = self.artifact_path.as_ref()?;
         let primary = artifact_path.with_extension(self.binary_extension(false));
-        if primary.exists() {
+        if crate::build_record::exists(&primary) {
             return Some(primary);
         }
         let alt = artifact_path.with_extension(self.alternate_binary_extension(false));
-        if alt.exists() {
+        if crate::build_record::exists(&alt) {
             return Some(alt);
         }
         if let Some(parent) = artifact_path.parent()
@@ -596,7 +596,7 @@ impl ModuleArtifact {
         {
             if let Some(file_name) = artifact_path.file_name() {
                 let obj_path = grandparent.join("obj").join(file_name).with_extension("o");
-                if obj_path.exists() {
+                if crate::build_record::exists(&obj_path) {
                     return Some(obj_path);
                 }
             }
@@ -610,11 +610,11 @@ impl ModuleArtifact {
         }
         let artifact_path = self.artifact_path.as_ref()?;
         let primary = artifact_path.with_extension(self.binary_extension(true));
-        if primary.exists() {
+        if crate::build_record::exists(&primary) {
             return Some(primary);
         }
         let alt = artifact_path.with_extension(self.alternate_binary_extension(true));
-        if alt.exists() {
+        if crate::build_record::exists(&alt) {
             return Some(alt);
         }
         Some(primary)

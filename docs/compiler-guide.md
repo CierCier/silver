@@ -279,6 +279,12 @@ flowchart TD
 #### 10. Linker (`main.rs` link driver)
 - Compiles generated LLVM IR into temporary object files.
 - Invokes target toolchains (system `cc` or `ld.lld`) to perform symbol resolution, linking in required library dependencies and producing executables or shared libraries.
+
+#### 11. Build cache (`cache_store.rs`, `build_manifest.rs`, `build_record.rs`)
+- Stage0 caches module and root objects by content. Every key includes the compiler identity: crate version, git SHA, internal ABI revision, and the size and modification time of the `agc` executable. A rebuilt compiler therefore reuses no object from another build.
+- An `exe` or `obj` build with the cache enabled also stores a whole-build manifest. The manifest is keyed by the compiler identity, the build options, the working directory and the import search directories. It lists every file the frontend read (with a SHA-256 digest), every path that import resolution probed (including paths that did not exist), the root object keys, the link inputs and the warnings the build printed. If every recorded fact still holds, the next build prints the same warnings and links the cached objects without running the frontend.
+- `--verbose`, `--show-graph`, `--no-cache` and other emit kinds always run the full build. A build that runs `agsm` for a `.submodule.toml` stores no manifest.
+- Frontend code that reads a source or module file, or makes a decision from whether a path exists, must use `build_record::{read, read_to_string, is_file, exists}`. A successful build prints its diagnostics through `build_record::emit_diagnostic`. A direct `std::fs` call or `eprintln!` there is a dependency or an output that a reused build cannot see.
 ---
 
 ## 5. Coding Style & Conventions

@@ -176,7 +176,7 @@ impl ModuleLoader {
             (source_path, ResolvedSourceImportKind::Module)
         } else {
             let artifact_path = source_path.with_extension("agm");
-            if artifact_path.is_file() {
+            if crate::build_record::is_file(&artifact_path) {
                 (artifact_path, ResolvedSourceImportKind::Module)
             } else {
                 (source_path, ResolvedSourceImportKind::File)
@@ -312,11 +312,11 @@ impl ModuleLoader {
                 candidate.push(segment);
             }
             candidate.set_extension("agm");
-            if candidate.is_file() {
+            if crate::build_record::is_file(&candidate) {
                 return Some(candidate);
             }
             let submodule_config = candidate.with_extension("submodule.toml");
-            if submodule_config.is_file() {
+            if crate::build_record::is_file(&submodule_config) {
                 match ensure_submodule_built(&submodule_config, &candidate) {
                     Ok(compiled) => return Some(compiled),
                     Err(err) => {
@@ -492,6 +492,9 @@ fn find_agsm_binary() -> Option<PathBuf> {
 }
 
 fn ensure_submodule_built(submodule_config: &Path, output_path: &Path) -> Result<PathBuf, String> {
+    // agsm decides staleness from timestamps and may rebuild the module, so
+    // a manifest cannot prove such a build current.
+    crate::build_record::mark_unreplayable();
     let needs_rebuild = if !output_path.is_file() {
         true
     } else {
@@ -549,19 +552,19 @@ fn resolve_source_in_root(
 
     // Prefer source file (.ag)
     let source_path = joined.with_extension("ag");
-    if source_path.is_file() {
+    if crate::build_record::is_file(&source_path) {
         return Some((source_path, ResolvedSourceImportKind::File));
     }
 
     // Fallback to module interface file (.agm)
     let binary_path = joined.with_extension("agm");
-    if binary_path.is_file() {
+    if crate::build_record::is_file(&binary_path) {
         return Some((binary_path, ResolvedSourceImportKind::Module));
     }
 
     // On-demand build from submodule configuration (.submodule.toml)
     let submodule_config = joined.with_extension("submodule.toml");
-    if submodule_config.is_file() {
+    if crate::build_record::is_file(&submodule_config) {
         match ensure_submodule_built(&submodule_config, &binary_path) {
             Ok(compiled) => return Some((compiled, ResolvedSourceImportKind::Module)),
             Err(err) => {

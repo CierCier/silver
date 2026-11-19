@@ -215,9 +215,9 @@ pub fn compiler_cache_version() -> String {
 
 /// Cache identity of the running compiler: `compiler_cache_version()` plus the
 /// size and modification time of the executable. Rebuilding agc at the same
-/// commit changes the binary, so a new build never reuses objects written by
-/// another build of the compiler (D08). `None` when the executable cannot be
-/// inspected.
+/// commit changes the binary, so a new build never reuses objects or build
+/// manifests written by another build of the compiler (D08). `None` when the
+/// executable cannot be inspected.
 pub fn compiler_identity() -> Option<&'static str> {
     static IDENTITY: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     IDENTITY
@@ -275,6 +275,7 @@ impl CacheKeyBuilder {
             total += n as u64;
         }
         let digest = content_hasher.finalize();
+        crate::build_record::record_file_digest(path, digest);
         self.add_str(path.to_str().unwrap_or_default());
         self.hasher.update(&total.to_be_bytes());
         self.hasher.update(&digest);
@@ -667,6 +668,11 @@ impl CacheStore {
         self.root_dir.join("tmp")
     }
 
+    /// Whole-build manifests (see `build_manifest`).
+    pub fn manifest_dir(&self) -> PathBuf {
+        self.root_dir.join("manifest")
+    }
+
     fn lock_dir(&self) -> PathBuf {
         self.root_dir.join("locks")
     }
@@ -675,6 +681,7 @@ impl CacheStore {
         fs::create_dir_all(self.agm_dir())?;
         fs::create_dir_all(self.obj_dir())?;
         fs::create_dir_all(self.tmp_dir())?;
+        fs::create_dir_all(self.manifest_dir())?;
         fs::create_dir_all(self.lock_dir())?;
         Ok(())
     }
@@ -875,6 +882,26 @@ impl CacheStore {
         Ok(final_obj)
     }
 
+    fn manifest_path(&self, key: &CacheKey) -> PathBuf {
+        self.manifest_dir().join(format!("{}.manifest", key.hash_hex))
+    }
+
+    /// Reads a build manifest. The caller decodes and verifies it.
+    pub fn get_manifest(&self, key: &CacheKey) -> Option<Vec<u8>> {
+        let _store_lock = self.lock_store(false).ok()?;
+        let _key_lock = self.lock_key(key).ok()?;
+        fs::read(self.manifest_path(key)).ok()
+    }
+
+    /// Atomically replaces a build manifest.
+    pub fn put_manifest(&self, key: &CacheKey, bytes: &[u8]) -> io::Result<()> {
+        let _store_lock = self.lock_store(false)?;
+        self.ensure_dirs()?;
+        let _key_lock = self.lock_key(key)?;
+        let mut staged = StagedFile::create(self.staging_path(key, "manifest"), bytes)?;
+        staged.publish(&self.manifest_path(key))
+    }
+
     /// Compute summary statistics of the cache store.
     pub fn stats(&self) -> io::Result<CacheStats> {
         let _store_lock = self.lock_store(false)?;
@@ -934,7 +961,7 @@ impl CacheStore {
         let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
         let mut total_bytes: u64 = 0;
 
-        for dir in &[self.agm_dir(), self.obj_dir()] {
+        for dir in &[self.agm_dir(), self.obj_dir(), self.manifest_dir()] {
             if let Ok(entries) = fs::read_dir(dir) {
                 for entry in entries.flatten() {
                     if let Ok(meta) = entry.metadata() {
@@ -979,7 +1006,7 @@ impl CacheStore {
         let mut deleted_count = 0;
         let mut freed_bytes = 0;
 
-        for dir in &[self.agm_dir(), self.obj_dir()] {
+        for dir in &[self.agm_dir(), self.obj_dir(), self.manifest_dir()] {
             if let Ok(entries) = fs::read_dir(dir) {
                 for entry in entries.flatten() {
                     if let Ok(meta) = entry.metadata() {
@@ -1008,7 +1035,12 @@ impl CacheStore {
     pub fn clean_all(&self) -> io::Result<()> {
         let _store_lock = self.lock_store(true)?;
         // Keep lock inodes stable for processes that open them after this call.
-        for directory in [self.agm_dir(), self.obj_dir(), self.tmp_dir()] {
+        for directory in [
+            self.agm_dir(),
+            self.obj_dir(),
+            self.tmp_dir(),
+            self.manifest_dir(),
+        ] {
             match fs::remove_dir_all(&directory) {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}

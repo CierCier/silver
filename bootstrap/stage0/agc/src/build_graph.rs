@@ -251,7 +251,7 @@ impl DependencyGraph {
             return Ok(module_path);
         }
 
-        let src = match std::fs::read_to_string(source_path) {
+        let src = match crate::build_record::read_to_string(source_path) {
             Ok(s) => s,
             Err(_) => return Ok(None),
         };
@@ -989,7 +989,7 @@ impl<'a> ParallelGraphExecutor<'a> {
         }
 
         // Fresh thread-local compilation context
-        let src = std::fs::read_to_string(&node.source_path)
+        let src = crate::build_record::read_to_string(&node.source_path)
             .map_err(|e| format!("failed to read {}: {e}", node.source_path.display()))?;
 
         let file_id = crate::lexer::register_source(&node.source_path.display().to_string(), &src);

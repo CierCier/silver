@@ -587,7 +587,7 @@ fn parse_program_from_file(path: &Path) -> Result<ast::Program, String> {
     if verbose {
         crate::profiler::begin_phase(&format!("read {label}"));
     }
-    let src = std::fs::read_to_string(path)
+    let src = crate::build_record::read_to_string(path)
         .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
     if verbose {
         crate::profiler::end_phase(&format!("read {label}"));
@@ -662,10 +662,10 @@ fn apply_selection_to_artifact(
                 selected.local_name = selected.name.clone();
             }
             None => {
-                eprintln!(
+                crate::build_record::emit_diagnostic(format!(
                     "agc: warning: selective import alias '{}' names no export '{}'; ignored",
                     selected.local_name.name, selected.name.name
-                );
+                ));
             }
         }
     }

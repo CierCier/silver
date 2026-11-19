@@ -39,17 +39,14 @@ pub(crate) fn monomorph_instance_attr() -> ast::Attribute {
 /// instantiations surface as ordinary downstream errors (and the LSP shares
 /// this code path).
 fn report_nonconvergence(what: &str, generation: usize, span: Span) {
-    eprintln!(
-        "{}",
-        diagnostics::render(
-            span,
-            &format!(
-                "monomorphization for {what} did not converge after {generation} \
-                 generations; recursive generic expansion is too deep"
-            ),
-            Severity::Error,
-        )
-    );
+    crate::build_record::emit_diagnostic(diagnostics::render(
+        span,
+        &format!(
+            "monomorphization for {what} did not converge after {generation} \
+             generations; recursive generic expansion is too deep"
+        ),
+        Severity::Error,
+    ));
 }
 
 #[derive(Debug, Clone)]

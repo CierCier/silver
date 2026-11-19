@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::attributes::{collect_program_link_libraries, extend_unique_libs};
+use crate::build_manifest::BuildManifest;
+use crate::cache_store::{CacheKey, CacheKeyBuilder};
 use crate::module_artifact::{
     ModuleArtifact, ModuleCodeArtifacts, hash_source_text, module_name_from_path,
 };
@@ -514,7 +516,7 @@ fn default_output_for(emit: EmitKind, inputs: &[PathBuf], target: Option<&str>) 
 
 /// Read an input source file, hinting when the path looks like a mistyped command.
 fn read_input_source(input: &Path) -> String {
-    match std::fs::read_to_string(input) {
+    match crate::build_record::read_to_string(input) {
         Ok(s) => s,
         Err(e) => {
             eprintln!(
@@ -972,10 +974,10 @@ fn artifact_compatibility_error(module: &ModuleArtifact, plan: &CompilePlan) -> 
     // config-timestamp check in ensure_submodule_built.
     if module.compiler_version != "foreign" {
         for candidate in module.source_candidate_paths() {
-            if !candidate.is_file() {
+            if !crate::build_record::is_file(&candidate) {
                 continue;
             }
-            let Ok(source_text) = std::fs::read_to_string(&candidate) else {
+            let Ok(source_text) = crate::build_record::read_to_string(&candidate) else {
                 continue;
             };
             let current_hash = hash_source_text(&source_text);
@@ -996,6 +998,69 @@ fn artifact_compatibility_error(module: &ModuleArtifact, plan: &CompilePlan) -> 
     }
 
     None
+}
+
+/// Key of the whole-build manifest: everything outside the recorded input
+/// facts that changes what the frontend and codegen produce. `None` when the
+/// build has no cache or the compiler binary has no identity.
+fn build_manifest_key(plan: &CompilePlan, loader: &ModuleLoader) -> Option<CacheKey> {
+    loader.cache_store.as_ref()?;
+    // Exhaustive so that a new plan field must be classified here. Output
+    // paths, UI and cache-management options do not change the objects.
+    let CompilePlan {
+        emit,
+        inputs,
+        output: _,
+        package_root,
+        package_roots,
+        package_imports,
+        package_target_kind,
+        package_target_name,
+        include_dirs,
+        defines,
+        lib_dirs,
+        libs,
+        opt_level,
+        debug_info,
+        target,
+        sysroot,
+        no_std,
+        static_runtime,
+        static_link,
+        shared,
+        verbose: _,
+        dry_run: _,
+        profile: _,
+        leak_check,
+        cfg_flags,
+        cache_dir: _,
+        no_cache: _,
+        clean: _,
+        cache_info: _,
+        cache_prune: _,
+        jobs: _,
+        run_mode: _,
+        run_args: _,
+        show_graph: _,
+        progress: _,
+        auto_output: _,
+        warning_config,
+        test_harness,
+        tree_shake,
+    } = plan;
+    let mut builder = CacheKeyBuilder::new("build-manifest");
+    builder.add_compiler_version(crate::cache_store::compiler_identity()?);
+    builder.add_str(&format!(
+        "{emit:?} {inputs:?} {package_root:?} {package_roots:?} {package_imports:?} \
+         {package_target_kind:?} {package_target_name:?} {include_dirs:?} {defines:?} \
+         {lib_dirs:?} {libs:?} {opt_level:?} {debug_info:?} {target:?} {sysroot:?} \
+         {no_std:?} {static_runtime:?} {static_link:?} {shared:?} {leak_check:?} \
+         {cfg_flags:?} {warning_config:?} {test_harness:?} {tree_shake:?}"
+    ));
+    // Import resolution searches the working directory and the search dirs,
+    // which also reflect SILVER_SYSROOT, XDG_DATA_HOME and HOME.
+    builder.add_str(&format!("{:?} {:?}", loader.cwd, loader.search_dirs));
+    Some(builder.finish())
 }
 
 fn module_artifact_content_hash(module: &ModuleArtifact) -> String {
@@ -1438,18 +1503,51 @@ pub fn run(cli: Cli) {
                 return;
             }
 
+            // Verbose and graph output describe frontend work that a reused
+            // build skips, so those builds always run in full.
+            let manifest_eligible = !plan.no_cache
+                && matches!(plan.emit, EmitKind::Exe | EmitKind::Obj)
+                && !plan.verbose
+                && !plan.show_graph;
+            if manifest_eligible {
+                // Loader construction probes package import paths, so the
+                // recording starts before it.
+                crate::build_record::begin();
+            }
             let loader = build_module_loader(&plan);
             profiler::install(profiler::Profiler::new(
                 plan.profile,
                 plan.profile && plan.verbose,
             ));
+            let manifest_key = if manifest_eligible {
+                build_manifest_key(&plan, &loader)
+            } else {
+                None
+            };
+            let reused = manifest_key
+                .as_ref()
+                .zip(loader.cache_store.as_deref())
+                .and_then(|(key, store)| {
+                    profiler::begin_phase("build manifest");
+                    let reused = BuildManifest::load_current(store, key);
+                    profiler::end_phase("build manifest");
+                    reused
+                });
+            if reused.is_some() || manifest_key.is_none() {
+                let _ = crate::build_record::finish();
+            }
 
             let show_graph = plan.show_graph;
             let progress_enabled = plan.progress;
-            let dep_graph = match crate::build_graph::DependencyGraph::build(&loader, &plan.inputs) {
-                Ok(graph) => graph,
-                Err(_) => {
-                    std::process::exit(2);
+            // A reused build compiles nothing, so it needs no module graph.
+            let dep_graph = if reused.is_some() {
+                crate::build_graph::DependencyGraph::default()
+            } else {
+                match crate::build_graph::DependencyGraph::build(&loader, &plan.inputs) {
+                    Ok(graph) => graph,
+                    Err(_) => {
+                        std::process::exit(2);
+                    }
                 }
             };
             let total_graph_elements = dep_graph.total_codegen_elements();
@@ -1485,27 +1583,29 @@ pub fn run(cli: Cli) {
 
             let mut cached_count = 0;
             let mut compiled_count = 0;
-            if !plan.no_cache && matches!(plan.emit, EmitKind::Exe | EmitKind::Obj) {
-                if let Some(store) = &loader.cache_store {
-                    let executor = crate::build_graph::ParallelGraphExecutor::new(
-                        &dep_graph,
-                        &loader,
-                        store,
-                        plan.jobs,
-                        Some(progress.clone()),
-                        &plan.inputs,
-                    );
-                    match executor.execute() {
-                        Ok(report) => {
-                            cached_count = report.cache_hits;
-                            compiled_count = report.compiled_modules;
+            if !plan.no_cache
+                && reused.is_none()
+                && matches!(plan.emit, EmitKind::Exe | EmitKind::Obj)
+                && let Some(store) = &loader.cache_store
+            {
+                let executor = crate::build_graph::ParallelGraphExecutor::new(
+                    &dep_graph,
+                    &loader,
+                    store,
+                    plan.jobs,
+                    Some(progress.clone()),
+                    &plan.inputs,
+                );
+                match executor.execute() {
+                    Ok(report) => {
+                        cached_count = report.cache_hits;
+                        compiled_count = report.compiled_modules;
+                    }
+                    Err(errors) => {
+                        for error in errors {
+                            eprintln!("agc: {error}");
                         }
-                        Err(errors) => {
-                            for error in errors {
-                                eprintln!("agc: {error}");
-                            }
-                            std::process::exit(2);
-                        }
+                        std::process::exit(2);
                     }
                 }
             }
@@ -1542,8 +1642,10 @@ pub fn run(cli: Cli) {
             let mut dependency_link_artifacts: Vec<PathBuf> = Vec::new();
             let mut dependency_artifact_set: rustc_hash::FxHashSet<PathBuf> =
                 rustc_hash::FxHashSet::default();
+            let mut root_object_keys: Vec<CacheKey> = Vec::new();
 
-            for input in &plan.inputs {
+            let inputs_to_compile: &[PathBuf] = if reused.is_some() { &[] } else { &plan.inputs };
+            for input in inputs_to_compile {
                 profiler::begin_phase("read source");
                 let src = read_input_source(input);
                 profiler::end_phase("read source");
@@ -1932,7 +2034,8 @@ pub fn run(cli: Cli) {
                     } else {
                         diagnostics::Severity::Warning
                     };
-                    eprintln!("{}", diagnostics::render(w.span, &w.message, severity));
+                    let rendered = diagnostics::render(w.span, &w.message, severity);
+                    crate::build_record::emit_diagnostic(rendered);
                 }
                 if had_warning_error {
                     std::process::exit(2);
@@ -2233,6 +2336,7 @@ pub fn run(cli: Cli) {
                                     if let Some(cached_o) = store.get_obj(&key) {
                                         if std::fs::copy(&cached_o, &plan.output).is_ok() {
                                             root_cache_hit = true;
+                                            root_object_keys.push(key.clone());
                                             cached_count += 1;
                                             if let Some(p) = &active_progress {
                                                 p.on_finish(stem, &root_elements, true, std::time::Duration::ZERO);
@@ -2283,8 +2387,10 @@ pub fn run(cli: Cli) {
                             }
                             if !plan.no_cache && ROOT_OBJECT_CACHE_ENABLED {
                                 if let (Some(store), Some(root_key)) = (&loader.cache_store, &root_key_opt) {
-                                    if let Ok(bytes) = std::fs::read(&plan.output) {
-                                        let _ = store.put_obj(root_key, &bytes);
+                                    if let Ok(bytes) = std::fs::read(&plan.output)
+                                        && store.put_obj(root_key, &bytes).is_ok()
+                                    {
+                                        root_object_keys.push(root_key.clone());
                                     }
                                 }
                             }
@@ -2428,6 +2534,7 @@ pub fn run(cli: Cli) {
                                     if let Some(cached_o) = store.get_obj(&key) {
                                         if std::fs::copy(&cached_o, &temp_o).is_ok() {
                                             root_cache_hit = true;
+                                            root_object_keys.push(key.clone());
                                             cached_count += 1;
                                             if let Some(p) = &active_progress {
                                                 p.on_finish(stem, &root_elements, true, std::time::Duration::ZERO);
@@ -2478,8 +2585,10 @@ pub fn run(cli: Cli) {
                             }
                             if !plan.no_cache && ROOT_OBJECT_CACHE_ENABLED {
                                 if let (Some(store), Some(root_key)) = (&loader.cache_store, &root_key_opt) {
-                                    if let Ok(bytes) = std::fs::read(&temp_o) {
-                                        let _ = store.put_obj(root_key, &bytes);
+                                    if let Ok(bytes) = std::fs::read(&temp_o)
+                                        && store.put_obj(root_key, &bytes).is_ok()
+                                    {
+                                        root_object_keys.push(root_key.clone());
                                     }
                                 }
                             }
@@ -2495,6 +2604,47 @@ pub fn run(cli: Cli) {
                         input.display(),
                         symbol_table.summary_line()
                     );
+                }
+            }
+
+            if let Some(reused) = reused {
+                let manifest = reused.manifest;
+                for diagnostic in &manifest.diagnostics {
+                    eprintln!("{diagnostic}");
+                }
+                if plan.emit == EmitKind::Obj {
+                    for object in &reused.root_object_paths {
+                        if let Err(e) = std::fs::copy(object, &plan.output) {
+                            eprintln!(
+                                "agc: {}: failed to write {}: {e}",
+                                "error".red().bold(),
+                                plan.output.display()
+                            );
+                            std::process::exit(2);
+                        }
+                    }
+                }
+                cached_count += reused.root_object_paths.len();
+                exe_object_files = reused.root_object_paths;
+                dependency_link_artifacts = manifest.dependency_artifacts;
+                native_libs = manifest.native_libs;
+                plan.lib_dirs = manifest.lib_dirs;
+            } else if let (Some(key), Some(store)) = (&manifest_key, &loader.cache_store)
+                && let Some(recording) = crate::build_record::finish()
+                && root_object_keys.len() == plan.inputs.len()
+            {
+                let manifest = BuildManifest {
+                    inputs: recording.inputs,
+                    root_objects: root_object_keys.into_iter().map(|key| key.hash_hex).collect(),
+                    dependency_artifacts: dependency_link_artifacts.clone(),
+                    native_libs: native_libs.clone(),
+                    lib_dirs: plan.lib_dirs.clone(),
+                    diagnostics: recording.diagnostics,
+                };
+                // A manifest that cannot be stored only costs the next build
+                // its shortcut.
+                if let Some(bytes) = manifest.encode() {
+                    let _ = store.put_manifest(key, &bytes);
                 }
             }
 
@@ -2557,7 +2707,7 @@ pub fn run(cli: Cli) {
                         total_modules,
                         &total_graph_elements,
                         cached_count,
-                        compiled_count + plan.inputs.len(),
+                        compiled_count + inputs_to_compile.len(),
                     );
                 }
                 // Clean up temp dir

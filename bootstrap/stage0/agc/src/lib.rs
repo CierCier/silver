@@ -2,6 +2,8 @@
 pub mod ast_tree;
 pub mod attributes;
 pub mod build_graph;
+pub mod build_manifest;
+pub mod build_record;
 pub mod builtin_macros;
 pub mod cache_store;
 pub mod cfg;
