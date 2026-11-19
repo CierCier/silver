@@ -196,13 +196,12 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         match ty.kind.as_ref() {
             ast::TypeKind::Array(arr) => {
                 let elem_llvm_ty = self.lower_basic_type(&arr.element_type)?;
-                let array_llvm_ty = elem_llvm_ty.array_type(arr.size as u32);
                 let mut elems = Vec::with_capacity(arr.size as usize);
                 for _ in 0..arr.size {
                     elems.push(self.build_const_array_flat(&arr.element_type, values, span)?);
                 }
                 Ok(unsafe {
-                    inkwell::values::ArrayValue::new_const_array(&array_llvm_ty, &elems)
+                    inkwell::values::ArrayValue::new_const_array(&elem_llvm_ty, &elems)
                         .as_basic_value_enum()
                 })
             }
@@ -289,7 +288,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             ast::TypeKind::Array(array) => {
                 let element_llvm_ty = self.lower_basic_type(&array.element_type)?;
-                let array_llvm_ty = element_llvm_ty.array_type(array.size as u32);
                 let n = array.size as usize;
                 let positional = items
                     .iter()
@@ -348,7 +346,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     // returns BasicValueEnum, so build the constant directly
                     // (safe: all elements were typed against element_llvm_ty).
                     Ok(unsafe {
-                        inkwell::values::ArrayValue::new_const_array(&array_llvm_ty, &values)
+                        inkwell::values::ArrayValue::new_const_array(&element_llvm_ty, &values)
                             .as_basic_value_enum()
                     })
                 } else {
@@ -387,7 +385,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     // returns BasicValueEnum, so build the constant directly
                     // (safe: all elements were typed against element_llvm_ty).
                     Ok(unsafe {
-                        inkwell::values::ArrayValue::new_const_array(&array_llvm_ty, &values)
+                        inkwell::values::ArrayValue::new_const_array(&element_llvm_ty, &values)
                             .as_basic_value_enum()
                     })
                 }
