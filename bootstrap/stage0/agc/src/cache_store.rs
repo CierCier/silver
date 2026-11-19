@@ -539,6 +539,45 @@ fn object_bytes_are_well_formed(bytes: &[u8]) -> bool {
         || wasm_object_is_well_formed(bytes)
 }
 
+/// Header of an object set: the root objects of one executable, which
+/// stage0 may emit as several parallel partitions. Followed by a u32 object
+/// count and, per object, a u64 length and the object bytes (little endian).
+/// One file keeps the set atomic under per-file pruning.
+const OBJECT_SET_MAGIC: &[u8; 8] = b"agcobjs\0";
+
+fn encode_object_set(objects: &[Vec<u8>]) -> Vec<u8> {
+    let mut bytes = OBJECT_SET_MAGIC.to_vec();
+    bytes.extend_from_slice(&(objects.len() as u32).to_le_bytes());
+    for object in objects {
+        bytes.extend_from_slice(&(object.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(object);
+    }
+    bytes
+}
+
+/// The objects of an encoded set, or `None` unless every one is well formed.
+fn decode_object_set(bytes: &[u8]) -> Option<Vec<&[u8]>> {
+    let rest = bytes.strip_prefix(OBJECT_SET_MAGIC)?;
+    let (count, mut rest) = rest.split_first_chunk::<4>()?;
+    let count = u32::from_le_bytes(*count);
+    let mut objects = Vec::new();
+    for _ in 0..count {
+        let (len, tail) = rest.split_first_chunk::<8>()?;
+        let len = usize::try_from(u64::from_le_bytes(*len)).ok()?;
+        let object = tail.get(..len)?;
+        if !object_bytes_are_well_formed(object) {
+            return None;
+        }
+        objects.push(object);
+        rest = &tail[len..];
+    }
+    (rest.is_empty() && !objects.is_empty()).then_some(objects)
+}
+
+fn object_set_is_well_formed(bytes: &[u8]) -> bool {
+    decode_object_set(bytes).is_some()
+}
+
 fn agm_bytes_are_well_formed(bytes: &[u8]) -> bool {
     crate::module_artifact::ModuleArtifact::from_bytes(bytes).is_ok()
 }
@@ -902,6 +941,47 @@ impl CacheStore {
         staged.publish(&self.manifest_path(key))
     }
 
+    pub fn objs_path(&self, key: &CacheKey) -> PathBuf {
+        self.obj_dir().join(format!("{}.objs", key.hash_hex))
+    }
+
+    /// Reads a cached object set (see [`Self::put_objs`]), in link order.
+    pub fn get_objs(&self, key: &CacheKey) -> Option<Vec<Vec<u8>>> {
+        let _store_lock = self.lock_store(false).ok()?;
+        let _key_lock = self.lock_key(key).ok()?;
+        let path = self.objs_path(key);
+        let objects = fs::read(&path).ok().and_then(|bytes| {
+            decode_object_set(&bytes).map(|set| set.into_iter().map(<[u8]>::to_vec).collect())
+        });
+        if objects.is_none() {
+            Self::discard_artifact(&path);
+        }
+        objects
+    }
+
+    /// Atomically stores the objects of one compilation unit as a single
+    /// artifact, so a hit always yields the complete set.
+    pub fn put_objs(&self, key: &CacheKey, objects: &[Vec<u8>]) -> io::Result<PathBuf> {
+        let bytes = encode_object_set(objects);
+        if !object_set_is_well_formed(&bytes) {
+            return Err(invalid_artifact_error("object set"));
+        }
+
+        let _store_lock = self.lock_store(false)?;
+        self.ensure_dirs()?;
+        let _key_lock = self.lock_key(key)?;
+        let final_objs = self.objs_path(key);
+
+        if Self::artifact_is_valid(&final_objs, object_set_is_well_formed) {
+            return Ok(final_objs);
+        }
+
+        let mut staged = StagedFile::create(self.staging_path(key, "objs"), &bytes)?;
+        Self::remove_file_if_exists(&final_objs)?;
+        staged.publish(&final_objs)?;
+        Ok(final_objs)
+    }
+
     /// Compute summary statistics of the cache store.
     pub fn stats(&self) -> io::Result<CacheStats> {
         let _store_lock = self.lock_store(false)?;
@@ -1094,3 +1174,46 @@ pub fn parse_size_to_bytes(s: &str) -> Option<u64> {
 // ===========================================================================
 // Unit Tests
 // ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use inkwell::OptimizationLevel;
+    use inkwell::context::Context;
+    use inkwell::targets::{FileType, InitializationConfig, Target, TargetMachine};
+
+    /// A real, empty object for the host.
+    fn host_object() -> Vec<u8> {
+        Target::initialize_native(&InitializationConfig::default()).unwrap();
+        let triple = TargetMachine::get_default_triple();
+        let machine = crate::codegen::llvm_ir::entry::create_target_machine(
+            triple.as_str().to_str().unwrap(),
+            OptimizationLevel::None,
+        )
+        .unwrap();
+        let context = Context::create();
+        let module = context.create_module("empty");
+        let buffer = machine
+            .write_to_memory_buffer(&module, FileType::Object)
+            .unwrap();
+        crate::codegen::llvm_ir::entry::object_bytes(&buffer)
+    }
+
+    #[test]
+    fn object_set_round_trips_and_a_damaged_set_is_a_miss() {
+        let dir = std::env::temp_dir().join(format!("agc-object-set-{}", std::process::id()));
+        let store = CacheStore::with_dir(dir.clone()).unwrap();
+        let key = CacheKey::new("root", "0123abcd");
+        let objects = vec![host_object(), host_object()];
+
+        store.put_objs(&key, &objects).unwrap();
+        assert_eq!(store.get_objs(&key), Some(objects));
+
+        let path = store.objs_path(&key);
+        let bytes = fs::read(&path).unwrap();
+        fs::write(&path, &bytes[..bytes.len() - 1]).unwrap();
+        assert_eq!(store.get_objs(&key), None);
+        assert!(!path.exists(), "a damaged set is discarded");
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

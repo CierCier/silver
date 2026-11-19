@@ -31,14 +31,21 @@ pub struct BuildManifest {
 /// A manifest whose facts were verified against the filesystem.
 pub struct ReusedBuild {
     pub manifest: BuildManifest,
-    /// Cached root objects, in input order.
-    pub root_object_paths: Vec<PathBuf>,
+    /// Cached root objects in link order: the objects of each input, in
+    /// input order.
+    pub root_objects: Vec<Vec<u8>>,
 }
 
 impl BuildManifest {
     /// Loads the manifest stored under `key` if the build it describes is
-    /// still current: every input fact holds and every root object is cached.
-    pub fn load_current(store: &CacheStore, key: &CacheKey) -> Option<ReusedBuild> {
+    /// still current: every input fact holds and `read_root` finds the
+    /// objects of every root key. The caller supplies `read_root` because the
+    /// emit kind decides how a root's objects are cached.
+    pub fn load_current(
+        store: &CacheStore,
+        key: &CacheKey,
+        read_root: impl Fn(&CacheKey) -> Option<Vec<Vec<u8>>>,
+    ) -> Option<ReusedBuild> {
         let manifest = Self::decode(&store.get_manifest(key)?)?;
         if !manifest
             .inputs
@@ -47,14 +54,13 @@ impl BuildManifest {
         {
             return None;
         }
-        let root_object_paths = manifest
-            .root_objects
-            .iter()
-            .map(|hash| store.get_obj(&CacheKey::new("root", hash.clone())))
-            .collect::<Option<Vec<_>>>()?;
+        let mut root_objects = Vec::new();
+        for hash in &manifest.root_objects {
+            root_objects.extend(read_root(&CacheKey::new("root", hash.clone()))?);
+        }
         Some(ReusedBuild {
             manifest,
-            root_object_paths,
+            root_objects,
         })
     }
 

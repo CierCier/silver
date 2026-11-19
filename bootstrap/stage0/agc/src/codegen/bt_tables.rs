@@ -8,7 +8,9 @@
 //! reserves the table symbols in their own section before the emit, then
 //! rewrites only that section and its relocations: function addresses are
 //! relocations against the object's own function symbols (local ones
-//! included), and everything else is relative to the section symbol.
+//! included) or, for functions a split module emitted into a sibling object,
+//! against their undefined symbols; everything else is relative to the
+//! section symbol.
 
 use rustc_hash::FxHashMap as HashMap;
 
@@ -98,6 +100,7 @@ const SHT_SYMTAB: u32 = 2;
 const SHT_RELA: u32 = 4;
 const STT_FUNC: u8 = 2;
 const STT_SECTION: u8 = 3;
+const SHN_UNDEF: usize = 0;
 const SECTION_HEADER_OFFSET_FIELD: usize = 24;
 const SECTION_HEADER_SIZE_FIELD: usize = 32;
 const SYMBOL_SIZE: usize = 24;
@@ -181,7 +184,9 @@ pub(crate) fn write_into_elf(obj: &[u8], tables: &BtTables) -> Option<Vec<u8>> {
             } else {
                 table_symbols.insert(name, read_u64(obj, entry + 8)?);
             }
-        } else if kind == STT_FUNC && shndx != 0 {
+        } else if (kind == STT_FUNC && shndx != SHN_UNDEF) || (shndx == SHN_UNDEF && index != 0) {
+            // Undefined: a function defined in another object of a split
+            // module, which the linker resolves.
             functions.insert(name, index as u64);
         }
     }

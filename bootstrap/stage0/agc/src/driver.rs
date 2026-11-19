@@ -1000,6 +1000,18 @@ fn artifact_compatibility_error(module: &ModuleArtifact, plan: &CompilePlan) -> 
     None
 }
 
+/// Extension of an executable's object files in the temp dir. The LLVM wasm
+/// backend emits wasm object files; the .wasm extension lets wasm-ld classify
+/// them (it also accepts ELF objects, but the extension keeps the temp dir
+/// readable).
+fn exe_object_extension(target: Option<&str>) -> &'static str {
+    if crate::codegen::abi::target_is_wasm(target) {
+        "o.wasm"
+    } else {
+        "o"
+    }
+}
+
 /// Key of the whole-build manifest: everything outside the recorded input
 /// facts that changes what the frontend and codegen produce. `None` when the
 /// build has no cache or the compiler binary has no identity.
@@ -1529,7 +1541,13 @@ pub fn run(cli: Cli) {
                 .zip(loader.cache_store.as_deref())
                 .and_then(|(key, store)| {
                     profiler::begin_phase("build manifest");
-                    let reused = BuildManifest::load_current(store, key);
+                    let reused = BuildManifest::load_current(store, key, |root| {
+                        if plan.emit == EmitKind::Exe {
+                            store.get_objs(root)
+                        } else {
+                            Some(vec![std::fs::read(store.get_obj(root)?).ok()?])
+                        }
+                    });
                     profiler::end_phase("build manifest");
                     reused
                 });
@@ -2473,17 +2491,13 @@ pub fn run(cli: Cli) {
                             .file_stem()
                             .and_then(|s| s.to_str())
                             .unwrap_or("input");
-                        // The LLVM wasm backend emits wasm object files; give
-                        // them the .wasm extension so wasm-ld classifies them
-                        // correctly (ELF objects are also accepted, but the
-                        // extension keeps the temp dir readable).
-                        let obj_ext = if crate::codegen::abi::target_is_wasm(plan.target.as_deref())
-                        {
-                            "o.wasm"
-                        } else {
-                            "o"
-                        };
-                        let temp_o = temp_dir.join(format!("{stem}.{obj_ext}"));
+                        let temp_o = temp_dir.join(format!(
+                            "{stem}.{}",
+                            exe_object_extension(plan.target.as_deref())
+                        ));
+                        // The root object, or its partitions when stage0 splits
+                        // it; filled from the cache or by the emit.
+                        let mut root_objects = Vec::new();
                         let root_elements = crate::build_graph::CodegenElements::from_program(&ast);
                         let start_time = std::time::Instant::now();
 
@@ -2531,8 +2545,18 @@ pub fn run(cli: Cli) {
                                     }))
                                     .collect();
                                 if let Some(key) = loader.compute_cache_key_with_deps(input, stem, &root_deps) {
-                                    if let Some(cached_o) = store.get_obj(&key) {
-                                        if std::fs::copy(&cached_o, &temp_o).is_ok() {
+                                    if let Some(objects) = store.get_objs(&key) {
+                                        let paths: Vec<PathBuf> = (0..objects.len())
+                                            .map(|part| {
+                                                codegen::llvm_ir::entry::part_object_path(
+                                                    &temp_o, part,
+                                                )
+                                            })
+                                            .collect();
+                                        if paths.iter().zip(&objects).all(|(path, object)| {
+                                            std::fs::write(path, object).is_ok()
+                                        }) {
+                                            root_objects = paths;
                                             root_cache_hit = true;
                                             root_object_keys.push(key.clone());
                                             cached_count += 1;
@@ -2550,7 +2574,7 @@ pub fn run(cli: Cli) {
                             if let Some(p) = &active_progress {
                                 p.on_start(stem, &root_elements);
                             }
-                            let result = codegen::llvm_ir::LlvmIrGenerator::emit_object_file_with_imports_and_table_and_source_with_leak_check(
+                            let result = codegen::llvm_ir::LlvmIrGenerator::emit_split_object_files(
                                     &ast,
                                     &imported_modules,
                                     &temp_o,
@@ -2568,25 +2592,30 @@ pub fn run(cli: Cli) {
                                     p.on_finish(stem, &root_elements, false, start_time.elapsed());
                                 }
                             }
-                            if let Err(error) = result {
-                                if let Some(span) = error.span {
-                                    eprintln!(
-                                        "{}",
-                                        diagnostics::render(
-                                            span,
-                                            &error.message,
-                                            diagnostics::Severity::Error,
-                                        )
-                                    );
-                                } else {
-                                    eprintln!("agc: {}: {}", "error".red().bold(), error.message);
+                            match result {
+                                Ok(paths) => root_objects = paths,
+                                Err(error) => {
+                                    if let Some(span) = error.span {
+                                        eprintln!(
+                                            "{}",
+                                            diagnostics::render(
+                                                span,
+                                                &error.message,
+                                                diagnostics::Severity::Error,
+                                            )
+                                        );
+                                    } else {
+                                        eprintln!("agc: {}: {}", "error".red().bold(), error.message);
+                                    }
+                                    std::process::exit(2);
                                 }
-                                std::process::exit(2);
                             }
                             if !plan.no_cache && ROOT_OBJECT_CACHE_ENABLED {
                                 if let (Some(store), Some(root_key)) = (&loader.cache_store, &root_key_opt) {
-                                    if let Ok(bytes) = std::fs::read(&temp_o)
-                                        && store.put_obj(root_key, &bytes).is_ok()
+                                    let objects: Result<Vec<_>, _> =
+                                        root_objects.iter().map(std::fs::read).collect();
+                                    if let Ok(objects) = objects
+                                        && store.put_objs(root_key, &objects).is_ok()
                                     {
                                         root_object_keys.push(root_key.clone());
                                     }
@@ -2595,7 +2624,7 @@ pub fn run(cli: Cli) {
                             compiled_count += 1;
                         }
                         profiler::end_phase("codegen");
-                        exe_object_files.push(temp_o);
+                        exe_object_files.extend(root_objects);
                     }
                 }
                 if plan.verbose {
@@ -2612,20 +2641,28 @@ pub fn run(cli: Cli) {
                 for diagnostic in &manifest.diagnostics {
                     eprintln!("{diagnostic}");
                 }
-                if plan.emit == EmitKind::Obj {
-                    for object in &reused.root_object_paths {
-                        if let Err(e) = std::fs::copy(object, &plan.output) {
-                            eprintln!(
-                                "agc: {}: failed to write {}: {e}",
-                                "error".red().bold(),
-                                plan.output.display()
-                            );
-                            std::process::exit(2);
-                        }
+                let destinations: Vec<PathBuf> = match &exe_temp_dir {
+                    Some(dir) => {
+                        let ext = exe_object_extension(plan.target.as_deref());
+                        (0..reused.root_objects.len())
+                            .map(|index| dir.join(format!("root{index}.{ext}")))
+                            .collect()
+                    }
+                    // An obj build has a single root object.
+                    None => vec![plan.output.clone(); reused.root_objects.len()],
+                };
+                for (path, object) in destinations.iter().zip(&reused.root_objects) {
+                    if let Err(e) = std::fs::write(path, object) {
+                        eprintln!(
+                            "agc: {}: failed to write {}: {e}",
+                            "error".red().bold(),
+                            path.display()
+                        );
+                        std::process::exit(2);
                     }
                 }
-                cached_count += reused.root_object_paths.len();
-                exe_object_files = reused.root_object_paths;
+                cached_count += manifest.root_objects.len();
+                exe_object_files = destinations;
                 dependency_link_artifacts = manifest.dependency_artifacts;
                 native_libs = manifest.native_libs;
                 plan.lib_dirs = manifest.lib_dirs;

@@ -1,13 +1,15 @@
 use rustc_hash::FxHashSet as HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rustc_hash::FxHashMap as HashMap;
 
 use inkwell::AddressSpace;
 use inkwell::context::Context;
 use inkwell::module::Linkage;
+use inkwell::OptimizationLevel;
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetData, TargetMachine,
+    TargetTriple,
 };
 use inkwell::types::{AsTypeRef, BasicType, BasicTypeEnum};
 use inkwell::values::AsValueRef;
@@ -458,7 +460,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             true,
             None,
             None,
+            false,
         )
+        .map(drop)
     }
 
     #[expect(
@@ -520,6 +524,47 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             leak_check,
             true,
             ownership,
+        )
+    }
+
+    /// Emits an executable's root object like
+    /// [`Self::emit_object_file_with_imports_and_table_and_source_with_leak_check`],
+    /// but a large module may be split across several objects emitted in
+    /// parallel: `path` and its [`part_object_path`] siblings. Returns every
+    /// object written, in link order.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "codegen context threading; a config struct would hide more than it clarifies"
+    )]
+    pub fn emit_split_object_files(
+        program: &ast::Program,
+        imported_modules: &[ModuleArtifact],
+        path: &Path,
+        target_triple: Option<&str>,
+        opt_level: Option<&str>,
+        table: &mut CompilerSymbolTable,
+        source_path: Option<&Path>,
+        source_text: Option<&str>,
+        debug_info: bool,
+        leak_check: bool,
+        ownership: Option<&crate::semantic::init_plan::ProgramInitPlan>,
+    ) -> CodegenResult<Vec<PathBuf>> {
+        Self::emit_target_file_with_imports(
+            program,
+            imported_modules,
+            path,
+            target_triple,
+            opt_level,
+            FileType::Object,
+            table,
+            source_path,
+            source_text,
+            debug_info,
+            leak_check,
+            true,
+            None,
+            ownership,
+            true,
         )
     }
 
@@ -588,7 +633,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             emit_bt_tables,
             inline_global_owner,
             ownership,
+            false,
         )
+        .map(drop)
     }
 
     pub fn emit_assembly_file(
@@ -644,7 +691,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             true,
             None,
             None,
+            false,
         )
+        .map(drop)
     }
 
     #[expect(
@@ -708,7 +757,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             true,
             None,
             ownership,
+            false,
         )
+        .map(drop)
     }
 
     #[expect(
@@ -741,7 +792,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             true,
             None,
             None,
+            false,
         )
+        .map(drop)
     }
 
     #[expect(
@@ -763,7 +816,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         emit_bt_tables: bool,
         inline_global_owner: Option<&Path>,
         ownership: Option<&crate::semantic::init_plan::ProgramInitPlan>,
-    ) -> CodegenResult<()> {
+        split: bool,
+    ) -> CodegenResult<Vec<PathBuf>> {
         let context = Context::create();
         let module = context.create_module("silver");
         let builder = context.create_builder();
@@ -852,29 +906,17 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Target::initialize_all(&InitializationConfig::default());
         let triple = inkwell::targets::TargetTriple::create(&effective_triple);
         generator.module.set_triple(&triple);
-
-        let target = Target::from_triple(&triple).map_err(|e| {
-            CodegenError::new(format!("failed to resolve LLVM target `{}`: {e}", triple))
-        })?;
-        let machine = target
-            .create_target_machine(
-                &triple,
-                "generic",
-                "",
-                generate::map_opt_level(opt_level),
-                RelocMode::Default,
-                CodeModel::Default,
-            )
-            .ok_or_else(|| {
-                CodegenError::new(format!(
-                    "failed to create LLVM target machine for `{}`",
-                    triple
-                ))
-            })?;
+        let machine = create_target_machine(&effective_triple, generate::map_opt_level(opt_level))?;
         generator
             .module
             .set_data_layout(&machine.get_target_data().get_data_layout());
         generator.declare_imported_modules(program, imported_modules)?;
+        let elf = !crate::codegen::abi::target_is_windows(Some(&effective_triple))
+            && !crate::codegen::abi::target_is_wasm(Some(&effective_triple))
+            && !effective_triple.contains("apple");
+        // Split objects rely on ELF symbol semantics and on bt_tables'
+        // ELF writer for debug builds.
+        let split = split && elf && file_type == FileType::Object;
 
         if !debug_info {
             generator.emit_bt_debug_tables(&crate::codegen::bt_tables::BtTables::default());
@@ -912,21 +954,15 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             )?;
             crate::profiler::end_phase("LLVM opt passes");
 
-            crate::profiler::begin_phase("LLVM machine emit");
-            machine
-                .write_to_file(&generator.module, file_type, path)
-                .map_err(|e| {
-                    CodegenError::new(format!(
-                        "failed to emit {} via LLVM target machine to {}: {e}",
-                        match file_type {
-                            FileType::Object => "object file",
-                            FileType::Assembly => "assembly file",
-                        },
-                        path.display()
-                    ))
-                })?;
-            crate::profiler::end_phase("LLVM machine emit");
-            return Ok(());
+            return generator.emit_machine_code(
+                &machine,
+                &effective_triple,
+                opt_level,
+                file_type,
+                path,
+                split,
+                false,
+            );
         }
 
         crate::profiler::begin_phase("codegen IR generation");
@@ -947,9 +983,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         crate::profiler::begin_phase("emit backtrace table");
         generator.emit_backtrace_table();
-        let elf = !crate::codegen::abi::target_is_windows(Some(&effective_triple))
-            && !crate::codegen::abi::target_is_wasm(Some(&effective_triple))
-            && !effective_triple.contains("apple");
         if elf && file_type == FileType::Object {
             generator.reserve_bt_debug_tables();
         }
@@ -967,73 +1000,140 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         )?;
         crate::profiler::end_phase("LLVM opt passes");
 
+        generator.emit_machine_code(
+            &machine,
+            &effective_triple,
+            opt_level,
+            file_type,
+            path,
+            split,
+            true,
+        )
+    }
+
+    /// Emits the finished module to `path`. With `split`, a large module
+    /// becomes several objects emitted in parallel, written to
+    /// [`part_object_path`]s (see partition.rs). `bt_tables` fills the
+    /// backtrace tables from the objects' DWARF. Returns every file written,
+    /// in link order.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "codegen context threading; a config struct would hide more than it clarifies"
+    )]
+    fn emit_machine_code(
+        &mut self,
+        machine: &TargetMachine,
+        triple: &str,
+        opt_level: Option<&str>,
+        file_type: FileType,
+        path: &Path,
+        split: bool,
+        bt_tables: bool,
+    ) -> CodegenResult<Vec<PathBuf>> {
+        if file_type == FileType::Assembly {
+            crate::profiler::begin_phase("LLVM machine emit");
+            machine
+                .write_to_file(&self.module, file_type, path)
+                .map_err(|e| {
+                    CodegenError::new(format!(
+                        "failed to emit assembly file via LLVM target machine to {}: {e}",
+                        path.display()
+                    ))
+                })?;
+            crate::profiler::end_phase("LLVM machine emit");
+            return Ok(vec![path.to_path_buf()]);
+        }
+
+        let level = generate::map_opt_level(opt_level);
+        crate::profiler::begin_phase("partition module");
+        let plan = split
+            .then(|| super::partition::SplitPlan::prepare(&self.module, level))
+            .flatten();
+        crate::profiler::end_phase("partition module");
+
         crate::profiler::begin_phase("LLVM machine emit");
-        machine
-            .write_to_file(&generator.module, file_type, path)
-            .map_err(|e| {
-                CodegenError::new(format!(
-                    "failed to emit {} via LLVM target machine to {}: {e}",
-                    match file_type {
-                        FileType::Object => "object file",
-                        FileType::Assembly => "assembly file",
-                    },
-                    path.display()
-                ))
-            })?;
+        let mut objects = match &plan {
+            Some(plan) => plan.emit(&self.module, triple, level)?,
+            None => vec![emit_object(machine, &self.module)?],
+        };
         crate::profiler::end_phase("LLVM machine emit");
 
-        // The runtime backtrace walker needs exact source lines and spilled
-        // argument offsets, but DWARF sections are not loaded into the
-        // running binary. Parse the object just emitted and fold those into
-        // alloc'd, link-time-resolved tables. Unit objects carry no tables.
-        if file_type == FileType::Object
-            && generator.emit_bt_tables
-            && let Ok(obj) = std::fs::read(path)
-        {
-            crate::profiler::begin_phase("DWARF backtrace parsing");
-            let mut fn_debug = crate::codegen::dwarf_bt::parse_object_debug_lines(&obj);
-            let targets: rustc_hash::FxHashSet<String> =
-                fn_debug.iter().map(|f| f.name.clone()).collect();
-            let params = crate::codegen::dwarf_bt::parse_object_params(&obj, &targets);
-            let by_name: rustc_hash::FxHashMap<String, usize> = fn_debug
+        if bt_tables && self.emit_bt_tables {
+            self.fill_bt_tables(machine, &mut objects)?;
+        }
+
+        objects
+            .iter()
+            .enumerate()
+            .map(|(part, object)| {
+                let part_path = part_object_path(path, part);
+                std::fs::write(&part_path, object).map_err(|e| {
+                    CodegenError::new(format!(
+                        "failed to write object file {}: {e}",
+                        part_path.display()
+                    ))
+                })?;
+                Ok(part_path)
+            })
+            .collect()
+    }
+
+    /// The runtime backtrace walker needs exact source lines and spilled
+    /// argument offsets, but DWARF sections are not loaded into the running
+    /// binary. Parse the emitted objects and fold those into alloc'd,
+    /// link-time-resolved tables in the first object, which holds the
+    /// reserved table symbols and references every function.
+    fn fill_bt_tables(
+        &mut self,
+        machine: &TargetMachine,
+        objects: &mut [Vec<u8>],
+    ) -> CodegenResult<()> {
+        crate::profiler::begin_phase("DWARF backtrace parsing");
+        let mut fn_debug = Vec::new();
+        for object in objects.iter() {
+            let mut debug = crate::codegen::dwarf_bt::parse_object_debug_lines(object);
+            // Lines come keyed by symbol, parameters by DWARF linkage name,
+            // which keeps a promoted local's original name.
+            let linkage_name = |f: &crate::codegen::dwarf_bt::BtFnDebug| {
+                super::partition::source_name(&f.name).to_string()
+            };
+            let targets: rustc_hash::FxHashSet<String> = debug.iter().map(linkage_name).collect();
+            let params = crate::codegen::dwarf_bt::parse_object_params(object, &targets);
+            let by_name: rustc_hash::FxHashMap<String, usize> = debug
                 .iter()
                 .enumerate()
-                .map(|(i, f)| (f.name.clone(), i))
+                .map(|(i, f)| (linkage_name(f), i))
                 .collect();
             for (name, p) in params {
                 if let Some(&i) = by_name.get(&name) {
-                    fn_debug[i].params = p;
+                    debug[i].params = p;
                 }
             }
-            let tables = generator.resolve_bt_tables(fn_debug);
-            crate::profiler::end_phase("DWARF backtrace parsing");
+            fn_debug.append(&mut debug);
+        }
+        let tables = self.resolve_bt_tables(fn_debug);
+        crate::profiler::end_phase("DWARF backtrace parsing");
 
-            crate::profiler::begin_phase("write backtrace tables");
-            let patched = crate::codegen::bt_tables::write_into_elf(&obj, &tables);
-            crate::profiler::end_phase("write backtrace tables");
-            match patched {
-                Some(patched) => std::fs::write(path, patched).map_err(|e| {
-                    CodegenError::new(format!(
-                        "failed to write backtrace tables to {}: {e}",
-                        path.display()
-                    ))
-                })?,
-                // Not an ELF object with the reservation intact (COFF, or
-                // reservation skipped): emit the tables as LLVM globals and
-                // re-emit. Functions do not move, so the offsets still hold.
-                None => {
-                    crate::profiler::begin_phase("LLVM machine emit (tables)");
-                    generator.emit_bt_debug_tables(&tables);
-                    machine
-                        .write_to_file(&generator.module, file_type, path)
-                        .map_err(|e| {
-                            CodegenError::new(format!(
-                                "failed to re-emit object with backtrace tables to {}: {e}",
-                                path.display()
-                            ))
-                        })?;
-                    crate::profiler::end_phase("LLVM machine emit (tables)");
-                }
+        crate::profiler::begin_phase("write backtrace tables");
+        let patched = crate::codegen::bt_tables::write_into_elf(&objects[0], &tables);
+        crate::profiler::end_phase("write backtrace tables");
+        match (patched, objects) {
+            (Some(patched), [first, ..]) => *first = patched,
+            // Not an ELF object with the reservation intact (COFF, or
+            // reservation skipped): emit the tables as LLVM globals and
+            // re-emit. Functions do not move, so the offsets still hold.
+            (None, [only]) => {
+                crate::profiler::begin_phase("LLVM machine emit (tables)");
+                self.emit_bt_debug_tables(&tables);
+                *only = emit_object(machine, &self.module)?;
+                crate::profiler::end_phase("LLVM machine emit (tables)");
+            }
+            // Split objects are ELF only and the first one references every
+            // function, so the writer cannot miss a precondition here.
+            _ => {
+                return Err(CodegenError::new(
+                    "internal error: backtrace tables do not fit the split objects",
+                ));
             }
         }
         Ok(())
@@ -3213,5 +3313,58 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             // All non-sprint variants return void
             Ok(self.context.i8_type().const_zero().into())
         }
+    }
+}
+
+/// The one LLVM target machine configuration, shared by the main emit and
+/// every split-object worker so all objects get identical code generation.
+pub(crate) fn create_target_machine(
+    triple: &str,
+    level: OptimizationLevel,
+) -> CodegenResult<TargetMachine> {
+    let triple = TargetTriple::create(triple);
+    let target = Target::from_triple(&triple)
+        .map_err(|e| CodegenError::new(format!("failed to resolve LLVM target `{triple}`: {e}")))?;
+    target
+        .create_target_machine(
+            &triple,
+            "generic",
+            "",
+            level,
+            RelocMode::Default,
+            CodeModel::Default,
+        )
+        .ok_or_else(|| {
+            CodegenError::new(format!(
+                "failed to create LLVM target machine for `{triple}`"
+            ))
+        })
+}
+
+fn emit_object(
+    machine: &TargetMachine,
+    module: &inkwell::module::Module<'_>,
+) -> CodegenResult<Vec<u8>> {
+    let buffer = machine
+        .write_to_memory_buffer(module, FileType::Object)
+        .map_err(|e| CodegenError::new(format!("failed to emit object file via LLVM: {e}")))?;
+    Ok(object_bytes(&buffer))
+}
+
+/// An object's bytes without the NUL LLVM guarantees one past a buffer's end.
+pub(crate) fn object_bytes(buffer: &inkwell::memory_buffer::MemoryBuffer<'_>) -> Vec<u8> {
+    let bytes = buffer.as_slice();
+    bytes[..bytes.len() - 1].to_vec()
+}
+
+/// Where split object `part` of `path` goes: part 0 is `path` itself, part
+/// `k` is `name.k.ext` beside it.
+pub(crate) fn part_object_path(path: &Path, part: usize) -> PathBuf {
+    if part == 0 {
+        return path.to_path_buf();
+    }
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) => path.with_extension(format!("{part}.{ext}")),
+        None => path.with_extension(part.to_string()),
     }
 }
