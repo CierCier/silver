@@ -234,6 +234,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
         }
         generator.generate_program(program)?;
+        generator.collect_doc_comments(program);
         generator.emit_backtrace_table();
         table.absorb_from(&generator.symbol_table);
         Ok(generator.finish())
@@ -398,6 +399,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .set_data_layout(&machine.get_target_data().get_data_layout());
         generator.declare_imported_modules(program, imported_modules)?;
         generator.generate_program(program)?;
+        generator.collect_doc_comments(program);
         generator.emit_backtrace_table();
         table.absorb_from(&generator.symbol_table);
         Ok(generator.finish())

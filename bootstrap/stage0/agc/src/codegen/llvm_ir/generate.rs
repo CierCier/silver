@@ -165,6 +165,24 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         name_global
     }
 
+    /// Collects function doc comments so finish() can print them as `;`
+    /// comments in textual IR (non-generic functions only — monomorphized
+    /// instances would repeat the comment per instance). Only textual IR
+    /// output calls this: the lookup scans every comment and item per item.
+    pub(crate) fn collect_doc_comments(&mut self, program: &ast::Program) {
+        for item in &program.items {
+            if let ast::ItemKind::Function(func) = &item.kind
+                && func.generics.is_none()
+                && let Some(doc) = program.doc_comment_for(item)
+            {
+                let name = function_link_name(&item.attributes)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| func.name.name.clone());
+                self.doc_comments.push((name, doc));
+            }
+        }
+    }
+
     /// Emits the runtime's exact-line + argument tables parsed from the
     /// emitted object's DWARF. `__silver_bt_lines` maps (function start,
     /// offset-within-function) to (line, file); `__silver_bt_args` carries
@@ -1308,18 +1326,6 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
 
         // Pass 2: emit item bodies/remaining lowering.
         for item in &program.items {
-            // Collect doc comments for functions so finish() can emit them as
-            // `;` comments in the printed IR (non-generic functions only —
-            // monomorphized instances would repeat the comment per instance).
-            if let ast::ItemKind::Function(func) = &item.kind
-                && func.generics.is_none()
-                && let Some(doc) = program.doc_comment_for(item)
-            {
-                let name = function_link_name(&item.attributes)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| func.name.name.clone());
-                self.doc_comments.push((name, doc));
-            }
             self.generate_item(item)?;
         }
         Ok(())
