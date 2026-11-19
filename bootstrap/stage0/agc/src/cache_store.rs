@@ -207,7 +207,7 @@ pub struct CacheKeyBuilder {
 /// objects built from a dirty tree at the same commit before an ABI migration.
 pub fn compiler_cache_version() -> String {
     format!(
-        "{}+{}+aligned-enum-payload-abi3",
+        "{}+{}+internal-call-abi5",
         env!("CARGO_PKG_VERSION"),
         option_env!("GIT_SHA").unwrap_or("unknown")
     )

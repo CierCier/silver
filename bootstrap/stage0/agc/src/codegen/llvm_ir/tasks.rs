@@ -35,6 +35,8 @@ use inkwell::targets::TargetData;
 use inkwell::types::{BasicTypeEnum, StructType};
 use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue};
 
+use crate::codegen::llvm_ir::aggregate::Operand;
+use crate::codegen::llvm_ir::function_abi::Callee;
 use crate::codegen::llvm_ir::{FunctionSig, LlvmIrGenerator};
 use crate::codegen::{CodegenError, CodegenResult};
 use crate::lexer::Span;
@@ -515,20 +517,35 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     )
                 })?;
             let arg_ty = self.lower_basic_type(param_ty)?;
-            let value = self.load_value(arg_ty, slot, "arg").map_err(|e| {
-                CodegenError::with_span(format!("launch: trampoline arg load failed: {e}"), *span)
-            })?;
-            args.push(BasicMetadataValueEnum::from(value));
+            args.push(Operand::Memory { ptr: slot, ty: arg_ty });
         }
 
-        let call = self
-            .builder
-            .build_call(callee, &args, "task.call")
-            .map_err(|e| {
-                CodegenError::with_span(format!("launch: trampoline call failed: {e}"), *span)
-            })?;
+        let result = if Self::internal_abi(signature.linkage.as_ref()) {
+            self.build_internal_call(
+                Callee::Direct(callee),
+                &signature.params,
+                signature.return_type.as_ref(),
+                &args,
+                "task.call",
+            )?
+            .1
+        } else {
+            let mut values = Vec::with_capacity(args.len());
+            for arg in args {
+                values.push(BasicMetadataValueEnum::from(self.operand_value(arg, "arg").map_err(|e| {
+                    CodegenError::with_span(format!("launch: trampoline arg load failed: {e}"), *span)
+                })?));
+            }
+            self.builder
+                .build_call(callee, &values, "task.call")
+                .map_err(|e| {
+                    CodegenError::with_span(format!("launch: trampoline call failed: {e}"), *span)
+                })?
+                .try_as_basic_value()
+                .basic()
+        };
         if !ret_is_void {
-            let result = call.try_as_basic_value().basic().ok_or_else(|| {
+            let result = result.ok_or_else(|| {
                 CodegenError::with_span("launch: callee unexpectedly returned void", *span)
             })?;
             let slot = self

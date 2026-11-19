@@ -9,6 +9,8 @@ use inkwell::{AtomicOrdering, AtomicRMWBinOp};
 
 use crate::codegen::SilverGenerator;
 use crate::codegen::llvm_ir::LlvmIrGenerator;
+use crate::codegen::llvm_ir::aggregate::Operand;
+use crate::codegen::llvm_ir::function_abi::Callee;
 use crate::codegen::llvm_ir::{DeferAction, DeferredEntry, FunctionSig};
 use crate::codegen::{CodegenError, CodegenResult};
 use crate::lexer::Span;
@@ -91,14 +93,16 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         if Self::function_has_reference_abi(&func_type.parameters, Some(&func_type.return_type)) {
             return self.emit_carried_indirect_call(fn_ptr_val, func_type, &args);
         }
-        let args: Vec<BasicMetadataValueEnum<'ctx>> = args.into_iter().map(Into::into).collect();
+        let args: Vec<Operand<'ctx>> = args.into_iter().map(Operand::Value).collect();
+        let (_, value) = self.build_internal_call(
+            Callee::Indirect(fn_type, fn_ptr_val.into_pointer_value()),
+            &func_type.parameters,
+            Some(&func_type.return_type),
+            &args,
+            "calltmp",
+        )?;
 
-        let call = self
-            .builder
-            .build_indirect_call(fn_type, fn_ptr_val.into_pointer_value(), &args, "calltmp")
-            .map_err(|e| CodegenError::new(format!("failed to emit indirect call: {e}")))?;
-
-        if let Some(value) = call.try_as_basic_value().basic() {
+        if let Some(value) = value {
             Ok(Some(value))
         } else if allow_void {
             Ok(None)
@@ -291,13 +295,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                             self.coerce_value_to_abi(value, &signature.params[index], linkage)?;
                     }
                 }
-                args.push(BasicMetadataValueEnum::from(value));
+                args.push(value);
             }
             let trailing_args = &arguments[fixed_count..];
             let slice_ty = &signature.as_ref().unwrap().params[fixed_count];
             let slice_val =
                 self.emit_variadic_slice_pack(slice_ty, trailing_args, function_expr.span)?;
-            args.push(BasicMetadataValueEnum::from(slice_val));
+            args.push(slice_val);
         } else {
             for (index, argument) in arguments.iter().enumerate() {
                 let source_type = self.resolve_argument_type(argument);
@@ -357,14 +361,30 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         signature.as_ref().and_then(|sig| sig.linkage.as_ref()),
                     )?;
                 }
-                args.push(BasicMetadataValueEnum::from(value));
+                args.push(value);
             }
         }
 
-        let call = self
-            .builder
-            .build_call(function, &args, "calltmp")
-            .map_err(|e| CodegenError::new(format!("failed to emit call: {e}")))?;
+        let (call, value) = match &signature {
+            Some(sig) if Self::internal_abi(sig.linkage.as_ref()) => {
+                let args: Vec<Operand<'ctx>> = args.into_iter().map(Operand::Value).collect();
+                self.build_internal_call(
+                    Callee::Direct(function),
+                    &sig.params,
+                    sig.return_type.as_ref(),
+                    &args,
+                    "calltmp",
+                )?
+            }
+            _ => {
+                let args: Vec<BasicMetadataValueEnum<'ctx>> = args.into_iter().map(Into::into).collect();
+                let call = self
+                    .builder
+                    .build_call(function, &args, "calltmp")
+                    .map_err(|e| CodegenError::new(format!("failed to emit call: {e}")))?;
+                (call, call.try_as_basic_value().basic())
+            }
+        };
 
         // Add byval attributes to call site for large struct arguments
         if let Some(sig) = &signature
@@ -406,7 +426,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .build_unreachable()
                 .map_err(|e| CodegenError::new(format!("failed to emit unreachable: {e}")))?;
         }
-        if let Some(value) = call.try_as_basic_value().basic() {
+        if let Some(value) = value {
             if let Some(signature) = &signature
                 && let (Some(ret_ty), Some(linkage)) = (&signature.return_type, &signature.linkage)
             {
@@ -1174,7 +1194,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             } else {
                 receiver_arg
             };
-            args.push(BasicMetadataValueEnum::from(receiver_arg));
+            args.push(receiver_arg);
         }
 
         if is_slice_variadic {
@@ -1267,13 +1287,13 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         )?;
                     }
                 }
-                args.push(BasicMetadataValueEnum::from(value));
+                args.push(value);
             }
             let trailing_args = &arguments[fixed_count..];
             let slice_param_index = fixed_count + usize::from(inject_receiver);
             let slice_ty = &signature.as_ref().unwrap().params[slice_param_index];
             let slice_val = self.emit_variadic_slice_pack(slice_ty, trailing_args, method.span)?;
-            args.push(BasicMetadataValueEnum::from(slice_val));
+            args.push(slice_val);
         } else {
             for (index, argument) in arguments.iter().enumerate() {
                 let source_type = self.resolve_argument_type(argument);
@@ -1379,14 +1399,25 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         signature.as_ref().and_then(|sig| sig.linkage.as_ref()),
                     )?;
                 }
-                args.push(BasicMetadataValueEnum::from(value));
+                args.push(value);
             }
         }
 
-        let call = self
-            .builder
-            .build_call(function, &args, &format!("call.{call_name}"))
-            .map_err(|e| CodegenError::new(format!("failed to emit method call: {e}")))?;
+        let name = format!("call.{call_name}");
+        let (call, value) = match &signature {
+            Some(sig) if Self::internal_abi(sig.linkage.as_ref()) => {
+                let args: Vec<Operand<'ctx>> = args.into_iter().map(Operand::Value).collect();
+                self.build_internal_call(Callee::Direct(function), &sig.params, sig.return_type.as_ref(), &args, &name)?
+            }
+            _ => {
+                let args: Vec<BasicMetadataValueEnum<'ctx>> = args.into_iter().map(Into::into).collect();
+                let call = self
+                    .builder
+                    .build_call(function, &args, &name)
+                    .map_err(|e| CodegenError::new(format!("failed to emit method call: {e}")))?;
+                (call, call.try_as_basic_value().basic())
+            }
+        };
         // If this is an explicit drop() call, clear the drop flag so
         // the implicit destructor at scope exit doesn't double-free.
         if method.name == "drop" {
@@ -1422,7 +1453,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
         }
 
-        if let Some(value) = call.try_as_basic_value().basic() {
+        if let Some(value) = value {
             if let Some(signature) = &signature
                 && let (Some(ret_ty), Some(linkage)) = (&signature.return_type, &signature.linkage)
             {

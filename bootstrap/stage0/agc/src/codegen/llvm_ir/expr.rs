@@ -1060,17 +1060,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 });
 
                 if let Some(cast_fn) = found {
-                    let args = vec![BasicMetadataValueEnum::from(source)];
-                    let call = self
-                        .builder
-                        .build_call(cast_fn, &args, "cast.result")
-                        .map_err(|e| {
-                            CodegenError::with_span(
-                                format!("failed to call user-defined cast: {e}"),
-                                expr.span,
-                            )
-                        })?;
-                    call.try_as_basic_value().basic().ok_or_else(|| {
+                    self.call_function(cast_fn, &[source], "cast.result")?.ok_or_else(|| {
                         CodegenError::with_span(
                             "user-defined cast returned void".to_string(),
                             expr.span,

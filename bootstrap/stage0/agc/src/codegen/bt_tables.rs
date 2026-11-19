@@ -48,7 +48,7 @@ pub(crate) struct BtTables {
 }
 
 impl BtTables {
-    /// Keeps the functions `param_sizes` knows (it returns each LLVM
+    /// Keeps the functions `param_sizes` knows (it returns each source-level
     /// parameter's ABI size) and the arguments that live in the frame.
     pub(crate) fn resolve(
         fn_debug: Vec<BtFnDebug>,

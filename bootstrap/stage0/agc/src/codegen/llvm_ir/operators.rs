@@ -2016,17 +2016,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
 
         for candidate in candidates {
             if let Some(from_str_fn) = self.module.get_function(&candidate) {
-                let args = vec![inkwell::values::BasicMetadataValueEnum::from(value)];
-                let call = self
-                    .builder
-                    .build_call(from_str_fn, &args, "lit2str")
-                    .map_err(|e| {
-                        CodegenError::with_span(
-                            format!("failed to call String.from_str: {e}"),
-                            *span,
-                        )
-                    })?;
-                let result = call.try_as_basic_value().basic().ok_or_else(|| {
+                let result = self.call_function(from_str_fn, &[value], "lit2str")?.ok_or_else(|| {
                     CodegenError::with_span("String.from_str returned void".to_string(), *span)
                 })?;
                 return Ok(Some(result));
@@ -2100,14 +2090,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }) else {
             return Ok(None);
         };
-        let args = vec![BasicMetadataValueEnum::from(value)];
-        let call = self
-            .builder
-            .build_call(cast_fn, &args, "cast.arg")
-            .map_err(|e| {
-                CodegenError::with_span(format!("failed to call user-defined cast: {e}"), *span)
-            })?;
-        let result = call.try_as_basic_value().basic().ok_or_else(|| {
+        let result = self.call_function(cast_fn, &[value], "cast.arg")?.ok_or_else(|| {
             CodegenError::with_span("user-defined cast returned void".to_string(), *span)
         })?;
         Ok(Some(result))

@@ -20,6 +20,7 @@ use crate::codegen::bt_tables::{
 };
 use crate::codegen::dwarf_bt::BtFnDebug;
 use crate::codegen::llvm_ir::LlvmIrGenerator;
+use crate::codegen::llvm_ir::aggregate::Operand;
 use crate::codegen::{CodegenError, CodegenResult, SilverGenerator};
 use crate::parser::ast;
 use crate::symbol_table::{CompilerPhase, SymbolKind};
@@ -188,11 +189,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     }
 
     /// Resolves parsed DWARF against this module: functions it defines and
-    /// the ABI size of each LLVM parameter.
+    /// the ABI size of each source-level parameter.
     pub(crate) fn resolve_bt_tables(&self, fn_debug: Vec<BtFnDebug>) -> BtTables {
         let target_data =
             TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
         BtTables::resolve(fn_debug, |name| {
+            if let Some(info) = self.fn_source_info.get(name) {
+                return Some(info.param_sizes.clone());
+            }
             let function = self.module.get_function(name)?;
             Some(
                 function
@@ -511,8 +515,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             let (file, line) = self
                 .fn_source_info
                 .get(&name)
-                .cloned()
-                .unwrap_or_else(|| ("unknown.ag".to_string(), 0));
+                .map_or_else(|| ("unknown.ag".to_string(), 0), |info| (info.file.clone(), info.line));
             let name_global = self.emit_bt_string(i, &name);
             let file_global = self.emit_bt_string(i + functions.len(), &file);
             // ptrtoint (ptr @F to i64) — resolved to the function's
@@ -1911,9 +1914,12 @@ impl<'ctx> SilverGenerator for LlvmIrGenerator<'ctx> {
                 self.emit_defers(self.defers.len())?;
                 // Return the saved value
                 if let Some((value, span)) = saved_value {
-                    self.builder.build_return(Some(&value)).map_err(|e| {
-                        CodegenError::with_span(format!("failed to emit return value: {e}"), span)
+                    let return_type = self.current_return_type.clone();
+                    let ty = self.lower_result_type(return_type.as_ref())?.ok_or_else(|| {
+                        CodegenError::with_span("value returned from a void function", span)
                     })?;
+                    self.build_internal_return(ty, Operand::Value(value))
+                        .map_err(|e| CodegenError { span: e.span.or(Some(span)), ..e })?;
                 } else {
                     self.builder.build_return(None).map_err(|e| {
                         CodegenError::with_span(

@@ -57,6 +57,17 @@ impl PartialEq for FunctionSig {
     }
 }
 
+/// What the runtime backtrace table records about a function it defines.
+pub(crate) struct FnSourceInfo {
+    /// Source file basename.
+    pub(crate) file: String,
+    /// Declaration line.
+    pub(crate) line: u32,
+    /// ABI size of each source-level parameter; the internal ABI may pass one
+    /// parameter as several LLVM arguments or as a pointer.
+    pub(crate) param_sizes: Vec<u64>,
+}
+
 #[derive(Clone)]
 pub(crate) struct VarInfo<'ctx> {
     pub(crate) ptr: PointerValue<'ctx>,
@@ -180,10 +191,10 @@ pub struct LlvmIrGenerator<'ctx> {
     /// another function's body). Nested emissions get no debug info: their
     /// scopes would dangle under LLVM 22's DbgRecord DIE construction.
     pub(crate) debug_nested: bool,
-    /// llvm symbol name -> (source file basename, declaration line) for the
-    /// runtime backtrace table (works without -g: the lexer's source
-    /// registry holds the file path, and spans carry precomputed lines).
-    pub(crate) fn_source_info: rustc_hash::FxHashMap<String, (String, u32)>,
+    /// llvm symbol name -> backtrace table facts (works without -g: the
+    /// lexer's source registry holds the file path, and spans carry
+    /// precomputed lines).
+    pub(crate) fn_source_info: rustc_hash::FxHashMap<String, FnSourceInfo>,
     pub(crate) abi_handler: Box<dyn AbiHandler>,
     pub(crate) temp_counter: u64,
     /// Monotonic counter for per-launch-site trampoline function names.

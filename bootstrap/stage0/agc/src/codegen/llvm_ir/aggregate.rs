@@ -21,16 +21,33 @@ use llvm_sys::prelude::LLVMValueRef;
 
 use super::LlvmIrGenerator;
 
+/// A value handed to a call or a copy: a first-class value, or an aggregate
+/// that already lives in memory and is read before anything writes there.
+#[derive(Clone, Copy)]
+pub(crate) enum Operand<'ctx> {
+    Value(BasicValueEnum<'ctx>),
+    Memory {
+        ptr: PointerValue<'ctx>,
+        ty: BasicTypeEnum<'ctx>,
+    },
+}
+
 /// A struct that travels as SSA scalars: one or two int, float or pointer
 /// fields. Packed structs keep whole-value accesses, whose alignment claim of 1
 /// covers every field.
 pub(crate) fn scalar_struct(ty: BasicTypeEnum<'_>) -> Option<StructType<'_>> {
+    scalar_fields(ty, 2)
+}
+
+/// A struct that is not packed and has one to `max_fields` int, float or
+/// pointer fields.
+pub(crate) fn scalar_fields(ty: BasicTypeEnum<'_>, max_fields: usize) -> Option<StructType<'_>> {
     let BasicTypeEnum::StructType(struct_ty) = ty else {
         return None;
     };
     let fields = struct_ty.get_field_types();
     let scalar = !struct_ty.is_packed()
-        && (1..=2).contains(&fields.len())
+        && (1..=max_fields).contains(&fields.len())
         && fields.iter().all(|field| {
             matches!(
                 field,
@@ -122,5 +139,38 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             last = Some(self.builder.build_store(field_ptr, field)?);
         }
         Ok(last.expect("scalar structs have at least one field"))
+    }
+
+    /// The operand as a first-class value, loading it from memory if needed.
+    pub(crate) fn operand_value(
+        &self,
+        operand: Operand<'ctx>,
+        name: &str,
+    ) -> Result<BasicValueEnum<'ctx>, BuilderError> {
+        match operand {
+            Operand::Value(value) => Ok(value),
+            Operand::Memory { ptr, ty } => self.load_value(ty, ptr, name),
+        }
+    }
+
+    /// Writes `operand`, a value of type `ty`, to `dest`. An operand in
+    /// memory is copied with `memcpy`: both places hold a `ty`, so both are
+    /// aligned for it, and they never partially overlap.
+    pub(crate) fn store_operand(
+        &self,
+        dest: PointerValue<'ctx>,
+        ty: BasicTypeEnum<'ctx>,
+        operand: Operand<'ctx>,
+    ) -> Result<(), BuilderError> {
+        match operand {
+            Operand::Value(value) => self.store_value(dest, value).map(|_| ()),
+            Operand::Memory { ptr, .. } if ptr == dest => Ok(()),
+            Operand::Memory { ptr, .. } => {
+                let target_data = self.target_data();
+                let align = target_data.get_abi_alignment(&ty);
+                let size = self.context.i64_type().const_int(target_data.get_abi_size(&ty), false);
+                self.builder.build_memcpy(dest, align, ptr, align, size).map(|_| ())
+            }
+        }
     }
 }

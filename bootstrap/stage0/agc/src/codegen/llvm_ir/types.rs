@@ -727,6 +727,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         is_variadic: bool,
         linkage: Option<ast::ExternLinkage>,
     ) -> CodegenResult<FunctionType<'ctx>> {
+        if Self::internal_abi(linkage.as_ref()) {
+            return self.lower_internal_function_type(params, return_type, is_variadic);
+        }
         let target_data =
             TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
 

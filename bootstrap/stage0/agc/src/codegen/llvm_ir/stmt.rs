@@ -10,7 +10,8 @@ use inkwell::values::{BasicValueEnum, FunctionValue};
 
 use crate::codegen::SilverGenerator;
 use crate::codegen::llvm_ir::LlvmIrGenerator;
-use crate::codegen::llvm_ir::VarInfo;
+use crate::codegen::llvm_ir::{FnSourceInfo, VarInfo};
+use crate::codegen::llvm_ir::function_abi::PassMode;
 use crate::codegen::{CodegenError, CodegenResult};
 use crate::lexer::Span;
 use crate::parser::ast;
@@ -52,8 +53,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .to_string()
             })
             .unwrap_or_else(|| "unknown.ag".to_string());
-        self.fn_source_info
-            .insert(fn_name.to_string(), (src_file, src_line));
 
         let nested_emission = self.debug_nested;
         let ret_di = if nested_emission {
@@ -97,23 +96,43 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         self.current_return_type = return_type.cloned();
         self.push_scope();
 
-        for (index, param) in parameters.iter().enumerate() {
-            let Some(param_value) = function.get_nth_param(index as u32) else {
-                continue;
-            };
-            let param_ast_ty = if param.is_variadic {
-                ast::Type {
-                    kind: Box::new(ast::TypeKind::Slice(Box::new(ast::SliceType {
-                        element_type: Box::new(param.param_type.clone()),
-                    }))),
-                    span: param.param_type.span,
+        let param_ast_types: Vec<ast::Type> = parameters
+            .iter()
+            .map(|param| {
+                if param.is_variadic {
+                    ast::Type {
+                        kind: Box::new(ast::TypeKind::Slice(Box::new(ast::SliceType {
+                            element_type: Box::new(param.param_type.clone()),
+                        }))),
+                        span: param.param_type.span,
+                    }
+                } else {
+                    param.param_type.clone()
                 }
-            } else {
-                param.param_type.clone()
-            };
-            let alloca =
-                self.create_entry_alloca(function, &param.name.name, param_value.get_type())?;
-            self.store_value(alloca, param_value).map_err(|e| {
+            })
+            .collect();
+        let param_types = param_ast_types
+            .iter()
+            .map(|ty| self.lower_basic_type(ty))
+            .collect::<CodegenResult<Vec<_>>>()?;
+        let target_data = self.target_data();
+        let param_sizes = param_types.iter().map(|ty| target_data.get_abi_size(ty)).collect();
+        self.fn_source_info.insert(
+            fn_name.to_string(),
+            FnSourceInfo { file: src_file, line: src_line, param_sizes },
+        );
+        let returns_in_memory = self
+            .lower_result_type(return_type)?
+            .is_some_and(|ty| PassMode::of(ty).returns_in_memory());
+        let param_values = self.internal_params(function, &param_types, returns_in_memory)?;
+        for (index, ((param, param_ast_ty), (&param_type, param_value))) in parameters
+            .iter()
+            .zip(&param_ast_types)
+            .zip(param_types.iter().zip(param_values))
+            .enumerate()
+        {
+            let alloca = self.create_entry_alloca(function, &param.name.name, param_type)?;
+            self.store_operand(alloca, param_type, param_value).map_err(|e| {
                 CodegenError::with_span(
                     format!("failed to store parameter `{}`: {e}", param.name.name),
                     param.span,
@@ -134,7 +153,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             }
             self.emit_debug_variable(
                 &param.name.name,
-                &param_ast_ty,
+                param_ast_ty,
                 &param.name.span,
                 alloca,
                 Some(index as u32 + 1),

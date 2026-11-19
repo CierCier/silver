@@ -3,6 +3,8 @@ use inkwell::types::StructType;
 use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue};
 
 use super::LlvmIrGenerator;
+use super::aggregate::Operand;
+use super::function_abi::PassMode;
 use crate::codegen::{CodegenError, CodegenResult};
 use crate::lexer::Span;
 use crate::parser::ast;
@@ -113,22 +115,25 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let block = self.context.append_basic_block(adapter, "entry");
         self.builder.position_at_end(block);
         let result = (|| {
+            let param_types = signature.params.iter().map(|ty| self.lower_basic_type(ty))
+                .collect::<CodegenResult<Vec<_>>>()?;
+            let result_type = self.lower_result_type(signature.return_type.as_ref())?;
+            let returns_in_memory = result_type.is_some_and(|ty| PassMode::of(ty).returns_in_memory());
+            let params = self.internal_params(adapter, &param_types, returns_in_memory)?;
             let mut arguments = Vec::with_capacity(signature.params.len());
-            for (index, parameter) in signature.params.iter().enumerate() {
-                let value = adapter.get_nth_param(index as u32)
-                    .ok_or_else(|| CodegenError::new("missing reference adapter parameter"))?;
+            for (param, parameter) in params.into_iter().zip(&signature.params) {
+                let value = self.operand_value(param, "arg").map_err(|e| CodegenError::new(e.to_string()))?;
                 arguments.push(BasicMetadataValueEnum::from(
                     self.coerce_value_to_abi(value, parameter, &ast::ExternLinkage::C)?,
                 ));
             }
             let call = self.builder.build_call(function, &arguments, "")
                 .map_err(|e| CodegenError::new(e.to_string()))?;
-            if let Some(value) = call.try_as_basic_value().basic() {
-                let value = if let Some(ty) = &signature.return_type {
-                    self.uncoerce_value_from_abi(value, ty, &ast::ExternLinkage::C)?
-                } else { value };
-                self.builder.build_return(Some(&value))
-                    .map_err(|e| CodegenError::new(e.to_string()))?;
+            if let (Some(value), Some(ty), Some(result_type)) =
+                (call.try_as_basic_value().basic(), &signature.return_type, result_type)
+            {
+                let value = self.uncoerce_value_from_abi(value, ty, &ast::ExternLinkage::C)?;
+                self.build_internal_return(result_type, Operand::Value(value))?;
             } else {
                 self.builder.build_return(None).map_err(|e| CodegenError::new(e.to_string()))?;
             }
