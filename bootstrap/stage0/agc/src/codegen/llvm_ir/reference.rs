@@ -219,51 +219,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
-    pub(crate) fn project_reference_state(
-        &self,
-        state: PointerValue<'ctx>,
-        index: IntValue<'ctx>,
-    ) -> CodegenResult<PointerValue<'ctx>> {
-        if state == self.initialized_reference_state() { return Ok(state); }
-        let initialized = self.builder.build_int_compare(
-            inkwell::IntPredicate::EQ, state, self.initialized_reference_state(), "reference.initialized",
-        ).map_err(|e| CodegenError::new(e.to_string()))?;
-        let before = self.builder.get_insert_block()
-            .ok_or_else(|| CodegenError::new("reference projection outside a block"))?;
-        let function = before.get_parent()
-            .ok_or_else(|| CodegenError::new("reference projection outside a function"))?;
-        let tracked = self.context.append_basic_block(function, "reference.project");
-        let done = self.context.append_basic_block(function, "reference.projected");
-        self.builder.build_conditional_branch(initialized, done, tracked)
-            .map_err(|e| CodegenError::new(e.to_string()))?;
-        self.builder.position_at_end(tracked);
-        let child = self.tracked_reference_child(state, index)?;
-        self.builder.build_unconditional_branch(done)
-            .map_err(|e| CodegenError::new(e.to_string()))?;
-        self.builder.position_at_end(done);
-        let pointer_type = self.context.ptr_type(AddressSpace::default());
-        let result = self.builder.build_phi(pointer_type, "reference.projected.node")
-            .map_err(|e| CodegenError::new(e.to_string()))?;
-        result.add_incoming(&[(&state, before), (&child, tracked)]);
-        Ok(result.as_basic_value().into_pointer_value())
-    }
-
-    pub(crate) fn tracked_reference_child(
-        &self,
-        state: PointerValue<'ctx>,
-        index: IntValue<'ctx>,
-    ) -> CodegenResult<PointerValue<'ctx>> {
-        let children_ptr = self.builder.build_struct_gep(
-            self.owner_node_type(), state, 1, "reference.children.ptr",
-        ).map_err(|e| CodegenError::new(e.to_string()))?;
-        let pointer_type = self.context.ptr_type(AddressSpace::default());
-        let children = self.builder.build_load(pointer_type, children_ptr, "reference.children")
-            .map_err(|e| CodegenError::new(e.to_string()))?.into_pointer_value();
-        unsafe {
-            self.builder.build_in_bounds_gep(self.owner_node_type(), children, &[index], "reference.child")
-        }.map_err(|e| CodegenError::new(e.to_string()))
-    }
-
     pub(crate) fn reference_range_node(
         &self,
         state: PointerValue<'ctx>,
