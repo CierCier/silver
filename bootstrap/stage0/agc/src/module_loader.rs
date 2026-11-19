@@ -124,7 +124,9 @@ impl ModuleLoader {
         if builder.add_file(&canonical).is_err() {
             return None;
         }
-        builder.add_compiler_version(&crate::cache_store::compiler_cache_version());
+        // Without a binary identity, objects from another compiler build at the
+        // same commit would look current, so such a compiler does not cache.
+        builder.add_compiler_version(crate::cache_store::compiler_identity()?);
         builder.add_target(&self.effective_target());
         builder.add_opt_level(self.opt_level.as_deref());
         builder.add_flags(&self.cfg_flags);

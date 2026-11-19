@@ -213,6 +213,31 @@ pub fn compiler_cache_version() -> String {
     )
 }
 
+/// Cache identity of the running compiler: `compiler_cache_version()` plus the
+/// size and modification time of the executable. Rebuilding agc at the same
+/// commit changes the binary, so a new build never reuses objects written by
+/// another build of the compiler (D08). `None` when the executable cannot be
+/// inspected.
+pub fn compiler_identity() -> Option<&'static str> {
+    static IDENTITY: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    IDENTITY
+        .get_or_init(|| {
+            let meta = fs::metadata(std::env::current_exe().ok()?).ok()?;
+            let modified = meta
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_nanos();
+            Some(format!(
+                "{}+exe:{}:{modified}",
+                compiler_cache_version(),
+                meta.len()
+            ))
+        })
+        .as_deref()
+}
+
 impl CacheKeyBuilder {
     pub fn new(module_name: impl Into<String>) -> Self {
         let mut builder = Self {

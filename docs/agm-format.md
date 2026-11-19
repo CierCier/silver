@@ -22,7 +22,8 @@ Bound checking uses these templates rather than inferring an implementation from
 the optional trait name on a method export.
 
 Versions through v11 are rejected, including their historical trailer variants.
-Stage0 cache keys include `borrow-state-abi1`; native object cache keys use
+Stage0 cache keys include `borrow-state-abi2` and the identity of the `agc`
+executable; native object cache keys use
 `silver-stage1-native-object-v4-borrow-state-abi1`. Neither compiler may reuse an
 object compiled with the earlier internal reference ABI.
 
