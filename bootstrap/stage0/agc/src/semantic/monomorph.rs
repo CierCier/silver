@@ -1549,6 +1549,7 @@ fn instantiate_requests(
         })
         .collect::<HashMap<_, _>>();
     let mut items = Vec::new();
+    let mut function_rewrites = FunctionCallRewrites::default();
     for request in ordered_requests {
         match request {
             MonomorphRequest::Function {
@@ -1581,14 +1582,15 @@ fn instantiate_requests(
                 // Always rewrite call sites, even if the function was already
                 // monomorphized from a different call site. The dedup below
                 // prevents generating duplicate function definitions.
-                rewrite_function_calls(
-                    program,
-                    &source.name.name,
-                    &args,
-                    &mangled,
-                    call_span,
-                    source.parameters.len(),
-                );
+                function_rewrites
+                    .entry(source.name.name.clone())
+                    .or_default()
+                    .push(FunctionCallRewrite {
+                        args: args.clone(),
+                        mangled: mangled.clone(),
+                        span: *call_span,
+                        param_count: source.parameters.len(),
+                    });
 
                 if !generated.insert(key) {
                     continue;
@@ -1746,6 +1748,9 @@ fn instantiate_requests(
             }
         }
     }
+    // One walk applies every function rewrite. Method rewrites above only
+    // touch method calls, so running these after them is equivalent.
+    rewrite_function_calls(program, &function_rewrites);
     items
 }
 
@@ -1963,41 +1968,45 @@ fn substitute_ast_type(ty: &ast::Type, mapping: &HashMap<String, Type>) -> ast::
     type_to_ast(&concrete, ty.span)
 }
 
+/// One generic function instance's call-site rewrite.
+struct FunctionCallRewrite {
+    args: Vec<Type>,
+    mangled: String,
+    /// An identifier call matches only at the requesting call site.
+    span: Span,
+    /// A `Name<T...>(...)` call matches by arity, which keeps one overload
+    /// from rewriting another.
+    param_count: usize,
+}
+
+/// Rewrites for every function request, keyed by the template's name. A call
+/// takes the first matching rule in request order, as when each request
+/// rewrote the whole program in turn.
+type FunctionCallRewrites = HashMap<String, Vec<FunctionCallRewrite>>;
+
 fn rewrite_function_calls(
     program: &mut ast::Program,
-    name: &str,
-    args: &[Type],
-    mangled: &str,
-    span: &Span,
-    param_count: usize,
+    rewrites: &FunctionCallRewrites,
 ) {
     for item in &mut program.items {
-        rewrite_item_function_calls(item, name, args, mangled, span, param_count);
+        rewrite_item_function_calls(item, rewrites);
     }
 }
 
 fn rewrite_item_function_calls(
     item: &mut ast::Item,
-    name: &str,
-    args: &[Type],
-    mangled: &str,
-    span: &Span,
-    param_count: usize,
+    rewrites: &FunctionCallRewrites,
 ) {
     match &mut item.kind {
         ast::ItemKind::Function(func) => {
-            rewrite_block_function_calls(&mut func.body, name, args, mangled, span, param_count)
+            rewrite_block_function_calls(&mut func.body, rewrites)
         }
         ast::ItemKind::Impl(impl_item) => {
             for impl_item in &mut impl_item.items {
                 if let ast::ImplItemKind::Function(func) = impl_item {
                     rewrite_block_function_calls(
                         &mut func.body,
-                        name,
-                        args,
-                        mangled,
-                        span,
-                        param_count,
+                        rewrites,
                     )
                 }
             }
@@ -2008,54 +2017,42 @@ fn rewrite_item_function_calls(
 
 fn rewrite_block_function_calls(
     block: &mut ast::Block,
-    name: &str,
-    args: &[Type],
-    mangled: &str,
-    span: &Span,
-    param_count: usize,
+    rewrites: &FunctionCallRewrites,
 ) {
     for stmt in &mut block.statements {
-        rewrite_statement_function_calls(stmt, name, args, mangled, span, param_count);
+        rewrite_statement_function_calls(stmt, rewrites);
     }
 }
 
 fn rewrite_statement_function_calls(
     stmt: &mut ast::Statement,
-    name: &str,
-    args: &[Type],
-    mangled: &str,
-    span: &Span,
-    param_count: usize,
+    rewrites: &FunctionCallRewrites,
 ) {
     match &mut stmt.kind {
         ast::StatementKind::Block(block) => {
-            rewrite_block_function_calls(block, name, args, mangled, span, param_count)
+            rewrite_block_function_calls(block, rewrites)
         }
         ast::StatementKind::Let(let_stmt) => {
             if let Some(init) = &mut let_stmt.initializer {
-                rewrite_expression_function_calls(init, name, args, mangled, span, param_count);
+                rewrite_expression_function_calls(init, rewrites);
             }
         }
         ast::StatementKind::Expression(expr)
         | ast::StatementKind::Return(Some(expr))
         | ast::StatementKind::Break(Some(expr)) => {
-            rewrite_expression_function_calls(expr, name, args, mangled, span, param_count)
+            rewrite_expression_function_calls(expr, rewrites)
         }
         ast::StatementKind::Return(None) | ast::StatementKind::Break(None) => {}
         ast::StatementKind::Continue => {}
         ast::StatementKind::Defer(inner) => {
-            rewrite_statement_function_calls(inner, name, args, mangled, span, param_count)
+            rewrite_statement_function_calls(inner, rewrites)
         }
     }
 }
 
 fn rewrite_expression_function_calls(
     expr: &mut ast::Expression,
-    name: &str,
-    args: &[Type],
-    mangled: &str,
-    span: &Span,
-    param_count: usize,
+    rewrites: &FunctionCallRewrites,
 ) {
     match expr.kind.as_mut() {
         ast::ExpressionKind::Ternary {
@@ -2063,13 +2060,13 @@ fn rewrite_expression_function_calls(
             then_expr,
             else_expr,
         } => {
-            rewrite_expression_function_calls(condition, name, args, mangled, span, param_count);
-            rewrite_expression_function_calls(then_expr, name, args, mangled, span, param_count);
-            rewrite_expression_function_calls(else_expr, name, args, mangled, span, param_count);
+            rewrite_expression_function_calls(condition, rewrites);
+            rewrite_expression_function_calls(then_expr, rewrites);
+            rewrite_expression_function_calls(else_expr, rewrites);
         }
         ast::ExpressionKind::UnwrapOr { value, fallback } => {
-            rewrite_expression_function_calls(value, name, args, mangled, span, param_count);
-            rewrite_expression_function_calls(fallback, name, args, mangled, span, param_count);
+            rewrite_expression_function_calls(value, rewrites);
+            rewrite_expression_function_calls(fallback, rewrites);
         }
         ast::ExpressionKind::Call {
             function,
@@ -2079,39 +2076,40 @@ fn rewrite_expression_function_calls(
             // AND value parameter count. This handles nested generic calls inside
             // monomorphized bodies where the span differs from the original request's
             // call_span, and prevents one overload from rewriting another.
-            let should_rewrite = match function.kind.as_mut() {
-                ast::ExpressionKind::Identifier(ident) => ident.name == name && expr.span == *span,
-                ast::ExpressionKind::TypeName(ty) => {
-                    if let ast::TypeKind::Named(named) = ty.kind.as_mut() {
-                        let name_ok = named.path.len() == 1 && named.path[0].name == name;
-                        let param_ok = arguments.len() == param_count;
-                        let generics_ok = match &named.generics {
-                            Some(generics) => {
-                                let actual_args: Vec<Type> =
-                                    generics.iter().map(Type::from_ast).collect();
-
-                                actual_args == args
-                            }
-                            None => args.is_empty(),
-                        };
-                        name_ok && param_ok && generics_ok
-                    } else {
-                        false
+            let mangled = match function.kind.as_ref() {
+                ast::ExpressionKind::Identifier(ident) => rewrites
+                    .get(&ident.name)
+                    .and_then(|rules| rules.iter().find(|rule| rule.span == expr.span)),
+                ast::ExpressionKind::TypeName(ty) => match ty.kind.as_ref() {
+                    ast::TypeKind::Named(named) if named.path.len() == 1 => {
+                        rewrites.get(&named.path[0].name).and_then(|rules| {
+                            let actual_args: Vec<Type> = named
+                                .generics
+                                .iter()
+                                .flatten()
+                                .map(Type::from_ast)
+                                .collect();
+                            rules.iter().find(|rule| {
+                                arguments.len() == rule.param_count && actual_args == rule.args
+                            })
+                        })
                     }
-                }
-                _ => false,
-            };
-            if should_rewrite {
+                    _ => None,
+                },
+                _ => None,
+            }
+            .map(|rule| rule.mangled.clone());
+            if let Some(mangled) = mangled {
                 **function = ast::Expression {
                     kind: Box::new(ast::ExpressionKind::Identifier(ast::Identifier {
-                        name: mangled.to_string(),
+                        name: mangled,
                         span: function.span,
                     })),
                     span: function.span,
                 };
             }
             for arg in arguments {
-                rewrite_expression_function_calls(arg, name, args, mangled, span, param_count);
+                rewrite_expression_function_calls(arg, rewrites);
             }
         }
         ast::ExpressionKind::MethodCall {
@@ -2119,41 +2117,41 @@ fn rewrite_expression_function_calls(
             arguments,
             ..
         } => {
-            rewrite_expression_function_calls(receiver, name, args, mangled, span, param_count);
+            rewrite_expression_function_calls(receiver, rewrites);
             for arg in arguments {
-                rewrite_expression_function_calls(arg, name, args, mangled, span, param_count);
+                rewrite_expression_function_calls(arg, rewrites);
             }
         }
         ast::ExpressionKind::FieldAccess { object, .. }
         | ast::ExpressionKind::Index { object, .. }
         | ast::ExpressionKind::Slice { object, .. } => {
-            rewrite_expression_function_calls(object, name, args, mangled, span, param_count);
+            rewrite_expression_function_calls(object, rewrites);
         }
         ast::ExpressionKind::Cast { expression, .. } => {
-            rewrite_expression_function_calls(expression, name, args, mangled, span, param_count);
+            rewrite_expression_function_calls(expression, rewrites);
         }
         ast::ExpressionKind::Binary { left, right, .. } => {
-            rewrite_expression_function_calls(left, name, args, mangled, span, param_count);
-            rewrite_expression_function_calls(right, name, args, mangled, span, param_count);
+            rewrite_expression_function_calls(left, rewrites);
+            rewrite_expression_function_calls(right, rewrites);
         }
         ast::ExpressionKind::Unary { operand, .. }
         | ast::ExpressionKind::Postfix { operand, .. } => {
-            rewrite_expression_function_calls(operand, name, args, mangled, span, param_count)
+            rewrite_expression_function_calls(operand, rewrites)
         }
         ast::ExpressionKind::If {
             condition,
             then_branch,
             else_branch,
         } => {
-            rewrite_expression_function_calls(condition, name, args, mangled, span, param_count);
-            rewrite_block_function_calls(then_branch, name, args, mangled, span, param_count);
+            rewrite_expression_function_calls(condition, rewrites);
+            rewrite_block_function_calls(then_branch, rewrites);
             if let Some(branch) = else_branch {
-                rewrite_block_function_calls(branch, name, args, mangled, span, param_count);
+                rewrite_block_function_calls(branch, rewrites);
             }
         }
         ast::ExpressionKind::While { condition, body } => {
-            rewrite_expression_function_calls(condition, name, args, mangled, span, param_count);
-            rewrite_block_function_calls(body, name, args, mangled, span, param_count);
+            rewrite_expression_function_calls(condition, rewrites);
+            rewrite_block_function_calls(body, rewrites);
         }
         ast::ExpressionKind::For {
             init,
@@ -2164,42 +2162,30 @@ fn rewrite_expression_function_calls(
             if let Some(init_expr) = &mut init.initializer {
                 rewrite_expression_function_calls(
                     init_expr,
-                    name,
-                    args,
-                    mangled,
-                    span,
-                    param_count,
+                    rewrites,
                 );
             }
-            rewrite_expression_function_calls(condition, name, args, mangled, span, param_count);
-            rewrite_expression_function_calls(increment, name, args, mangled, span, param_count);
-            rewrite_block_function_calls(body, name, args, mangled, span, param_count);
+            rewrite_expression_function_calls(condition, rewrites);
+            rewrite_expression_function_calls(increment, rewrites);
+            rewrite_block_function_calls(body, rewrites);
         }
         ast::ExpressionKind::Match { expression, arms } => {
-            rewrite_expression_function_calls(expression, name, args, mangled, span, param_count);
+            rewrite_expression_function_calls(expression, rewrites);
             for arm in arms {
                 if let Some(guard) = &mut arm.guard {
                     rewrite_expression_function_calls(
                         guard,
-                        name,
-                        args,
-                        mangled,
-                        span,
-                        param_count,
+                        rewrites,
                     );
                 }
                 rewrite_expression_function_calls(
                     &mut arm.body,
-                    name,
-                    args,
-                    mangled,
-                    span,
-                    param_count,
+                    rewrites,
                 );
             }
         }
         ast::ExpressionKind::Block(block) | ast::ExpressionKind::Lambda { body: block, .. } => {
-            rewrite_block_function_calls(block, name, args, mangled, span, param_count)
+            rewrite_block_function_calls(block, rewrites)
         }
         ast::ExpressionKind::Initializer { items } => {
             for item in items {
@@ -2208,29 +2194,17 @@ fn rewrite_expression_function_calls(
                     | ast::InitializerItem::Field { value: expr, .. } => {
                         rewrite_expression_function_calls(
                             expr,
-                            name,
-                            args,
-                            mangled,
-                            span,
-                            param_count,
+                            rewrites,
                         )
                     }
                     ast::InitializerItem::Index { index, value } => {
                         rewrite_expression_function_calls(
                             index,
-                            name,
-                            args,
-                            mangled,
-                            span,
-                            param_count,
+                            rewrites,
                         );
                         rewrite_expression_function_calls(
                             value,
-                            name,
-                            args,
-                            mangled,
-                            span,
-                            param_count,
+                            rewrites,
                         );
                     }
                 }
@@ -2238,18 +2212,14 @@ fn rewrite_expression_function_calls(
         }
         ast::ExpressionKind::Array(items) | ast::ExpressionKind::Tuple(items) => {
             for item in items {
-                rewrite_expression_function_calls(item, name, args, mangled, span, param_count);
+                rewrite_expression_function_calls(item, rewrites);
             }
         }
         ast::ExpressionKind::StructLiteral { fields, .. } => {
             for field in fields {
                 rewrite_expression_function_calls(
                     &mut field.value,
-                    name,
-                    args,
-                    mangled,
-                    span,
-                    param_count,
+                    rewrites,
                 );
             }
         }
@@ -2259,19 +2229,19 @@ fn rewrite_expression_function_calls(
         | ast::ExpressionKind::Wait(inner)
         | ast::ExpressionKind::Reference {
             expression: inner, ..
-        } => rewrite_expression_function_calls(inner, name, args, mangled, span, param_count),
+        } => rewrite_expression_function_calls(inner, rewrites),
         ast::ExpressionKind::MacroCall {
             args: macro_args, ..
         } => {
             for arg in macro_args {
                 if let ast::MacroArg::Expression(expr) = arg {
-                    rewrite_expression_function_calls(expr, name, args, mangled, span, param_count);
+                    rewrite_expression_function_calls(expr, rewrites);
                 }
             }
         }
         ast::ExpressionKind::ForIn { iterable, body, .. } => {
-            rewrite_expression_function_calls(iterable, name, args, mangled, span, param_count);
-            rewrite_block_function_calls(body, name, args, mangled, span, param_count);
+            rewrite_expression_function_calls(iterable, rewrites);
+            rewrite_block_function_calls(body, rewrites);
         }
         ast::ExpressionKind::TypeName(_)
         | ast::ExpressionKind::Literal(_)
@@ -2279,7 +2249,7 @@ fn rewrite_expression_function_calls(
         | ast::ExpressionKind::EnumVariant { .. } => {}
         ast::ExpressionKind::Asm { inputs, .. } => {
             for input in inputs {
-                rewrite_expression_function_calls(input, name, args, mangled, span, param_count);
+                rewrite_expression_function_calls(input, rewrites);
             }
         }
     }
