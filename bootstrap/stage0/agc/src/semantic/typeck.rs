@@ -5372,7 +5372,7 @@ impl TypeChecker {
             return;
         }
         self.monomorph_requests.push(MonomorphRequest::Function {
-            source: Box::new((*candidate.source).clone()),
+            source: candidate.source.clone(),
             type_params: candidate.type_params.clone(),
             mapping: mapping.clone(),
             call_span: span,
@@ -5393,8 +5393,8 @@ impl TypeChecker {
             return;
         }
         self.monomorph_requests.push(MonomorphRequest::ImplMethod {
-            impl_item: Box::new((*candidate.source_impl).clone()),
-            method: Box::new((*candidate.source_method).clone()),
+            impl_item: candidate.source_impl.clone(),
+            method: candidate.source_method.clone(),
             type_params: candidate.type_params.clone(),
             mapping: mapping.clone(),
             call_span: span,

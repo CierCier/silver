@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::diagnostics::{self, Severity};
@@ -53,7 +55,9 @@ fn report_nonconvergence(what: &str, generation: usize, span: Span) {
 #[derive(Debug, Clone)]
 pub enum MonomorphRequest {
     Function {
-        source: Box<ast::FunctionItem>,
+        /// Shared with the typeck signature: one request per call site, so a
+        /// copy here would clone the whole body per call.
+        source: Arc<ast::FunctionItem>,
         type_params: Vec<String>,
         mapping: HashMap<String, Type>,
         call_span: Span,
@@ -63,8 +67,8 @@ pub enum MonomorphRequest {
         is_imported: bool,
     },
     ImplMethod {
-        impl_item: Box<ast::ImplItem>,
-        method: Box<ast::ImplFunction>,
+        impl_item: Arc<ast::ImplItem>,
+        method: Arc<ast::ImplFunction>,
         type_params: Vec<String>,
         mapping: HashMap<String, Type>,
         call_span: Span,
@@ -82,49 +86,84 @@ impl MonomorphRequest {
 }
 
 pub fn refresh_monomorph_bodies(monomorphs: &mut [MonomorphRequest], program: &ast::Program) {
+    let mut functions = HashMap::default();
+    let mut impls = HashMap::default();
+    let mut methods = HashMap::default();
     for request in monomorphs {
         match request {
             MonomorphRequest::Function { source, .. } => {
-                for item in &program.items {
-                    if let ast::ItemKind::Function(f) = &item.kind
-                        && f.name.name == source.name.name
-                        && f.generics == source.generics
-                        && f.parameters == source.parameters
-                        && f.return_type == source.return_type
-                    {
-                        source.body = f.body.clone();
-                        break;
+                update_shared(&mut functions, Arc::as_ptr(source), source, |source| {
+                    for item in &program.items {
+                        if let ast::ItemKind::Function(f) = &item.kind
+                            && f.name.name == source.name.name
+                            && f.generics == source.generics
+                            && f.parameters == source.parameters
+                            && f.return_type == source.return_type
+                        {
+                            source.body = f.body.clone();
+                            break;
+                        }
                     }
-                }
+                });
             }
             MonomorphRequest::ImplMethod {
                 impl_item, method, ..
             } => {
-                for item in &program.items {
-                    if let ast::ItemKind::Impl(impl_item_ast) = &item.kind
-                        && impl_item_ast.self_type == impl_item.self_type
+                // Each impl block contributes its first same-named method;
+                // the last such block wins.
+                let Some(body) = program.items.iter().rev().find_map(|item| match &item.kind {
+                    ast::ItemKind::Impl(impl_item_ast)
+                        if impl_item_ast.self_type == impl_item.self_type =>
                     {
-                        for member in &impl_item_ast.items {
-                            if let ast::ImplItemKind::Function(func) = member
-                                && func.name.name == method.name.name
+                        impl_item_ast.items.iter().find_map(|member| match member {
+                            ast::ImplItemKind::Function(func)
+                                if func.name.name == method.name.name =>
                             {
-                                for source_member in &mut impl_item.items {
-                                    if let ast::ImplItemKind::Function(source_func) = source_member
-                                        && source_func.name.name == method.name.name
-                                    {
-                                        source_func.body = func.body.clone();
-                                        break;
-                                    }
-                                }
-                                method.body = func.body.clone();
-                                break;
+                                Some(&func.body)
                             }
+                            _ => None,
+                        })
+                    }
+                    _ => None,
+                }) else {
+                    continue;
+                };
+                let name = &method.name.name;
+                let impl_key = (Arc::as_ptr(impl_item), name.clone());
+                update_shared(&mut impls, impl_key, impl_item, |impl_item| {
+                    for source_member in &mut impl_item.items {
+                        if let ast::ImplItemKind::Function(source_func) = source_member
+                            && source_func.name.name == *name
+                        {
+                            source_func.body = body.clone();
+                            break;
                         }
                     }
-                }
+                });
+                update_shared(&mut methods, Arc::as_ptr(method), method, |method| {
+                    method.body = body.clone();
+                });
             }
         }
     }
+}
+
+/// Replaces `value` with `update` applied to a copy, computing the copy
+/// once per `key`. Requests from different call sites share one template;
+/// updating each request's copy would clone the template per call site.
+/// The cache keeps the original alive, so its address stays a valid key.
+fn update_shared<K: Eq + std::hash::Hash, T: Clone>(
+    cache: &mut HashMap<K, (Arc<T>, Arc<T>)>,
+    key: K,
+    value: &mut Arc<T>,
+    update: impl FnOnce(&mut T),
+) {
+    let (_, updated) = cache.entry(key).or_insert_with(|| {
+        let mut copy = T::clone(value);
+        update(&mut copy);
+        (Arc::clone(value), Arc::new(copy))
+    });
+    *value = Arc::clone(updated);
 }
 
 pub fn append_monomorphs(
@@ -366,28 +405,37 @@ fn normalize_requests_defaults(
     requests: &mut [MonomorphRequest],
     defaults: &[(String, Vec<Option<ast::Type>>)],
 ) {
+    let mut functions = HashMap::default();
+    let mut impls = HashMap::default();
+    let mut methods = HashMap::default();
     for request in requests {
         match request {
             MonomorphRequest::Function { source, .. } => {
-                for parameter in &mut source.parameters {
-                    normalize_type(&mut parameter.param_type, defaults);
-                }
-                if let Some(return_type) = &mut source.return_type {
-                    normalize_type(return_type, defaults);
-                }
-                normalize_block(&mut source.body, defaults);
+                update_shared(&mut functions, Arc::as_ptr(source), source, |source| {
+                    for parameter in &mut source.parameters {
+                        normalize_type(&mut parameter.param_type, defaults);
+                    }
+                    if let Some(return_type) = &mut source.return_type {
+                        normalize_type(return_type, defaults);
+                    }
+                    normalize_block(&mut source.body, defaults);
+                });
             }
             MonomorphRequest::ImplMethod {
                 impl_item, method, ..
             } => {
-                normalize_type(&mut impl_item.self_type, defaults);
-                for parameter in &mut method.parameters {
-                    normalize_type(&mut parameter.param_type, defaults);
-                }
-                if let Some(return_type) = &mut method.return_type {
-                    normalize_type(return_type, defaults);
-                }
-                normalize_block(&mut method.body, defaults);
+                update_shared(&mut impls, Arc::as_ptr(impl_item), impl_item, |impl_item| {
+                    normalize_type(&mut impl_item.self_type, defaults);
+                });
+                update_shared(&mut methods, Arc::as_ptr(method), method, |method| {
+                    for parameter in &mut method.parameters {
+                        normalize_type(&mut parameter.param_type, defaults);
+                    }
+                    if let Some(return_type) = &mut method.return_type {
+                        normalize_type(return_type, defaults);
+                    }
+                    normalize_block(&mut method.body, defaults);
+                });
             }
         }
     }
@@ -3287,7 +3335,7 @@ fn collect_remaining_function_requests(
                         .unwrap_or(0)
             {
                 requests.push(MonomorphRequest::Function {
-                    source: Box::new(source.clone()),
+                    source: Arc::new(source.clone()),
                     type_params,
                     mapping,
                     call_span,
@@ -3798,7 +3846,7 @@ impl<'a> BareCallDiscoverer<'a> {
             return;
         }
         self.requests.push(MonomorphRequest::Function {
-            source: Box::new(source),
+            source: Arc::new(source),
             type_params,
             mapping,
             call_span: span,
