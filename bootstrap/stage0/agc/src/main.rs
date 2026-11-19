@@ -9,6 +9,11 @@ use std::{env, ffi::OsString};
 use agc::driver::{Cli, run};
 use clap::Parser;
 
+// The frontend clones and drops AST nodes at a high rate; glibc malloc spent
+// about a third of an -O0 build in malloc/free/consolidate.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn normalize_argv_for_clap(argv: Vec<OsString>) -> Vec<OsString> {
     if argv.len() < 2 {
         return argv;
