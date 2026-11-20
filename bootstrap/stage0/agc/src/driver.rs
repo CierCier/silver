@@ -1594,6 +1594,8 @@ pub fn run(cli: Cli) {
                 }
                 + if has_link_step { 1 } else { 0 };
             let progress = std::sync::Arc::new(crate::build_graph::BuildProgress::new(
+                &dep_graph,
+                &plan.inputs,
                 total_steps,
                 progress_enabled,
                 plan.verbose,
