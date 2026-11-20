@@ -12,6 +12,7 @@ import std.sys.raw.fs;
 import std.sys.raw.socket;
 import std.sys.result;
 import std.test;
+import std.time;
 
 // io_uring is kernel-dependent (5.1+). gVisor and older kernels return
 // ENOSYS from io_uring_setup; probe once so the kernel-dependent cases
@@ -219,10 +220,60 @@ void test_io_uring_socket_io() {
     assert_true(one_byte[0] == (u8)'z', "one-byte payload arrives");
 }
 
+/// Sleeps briefly, then writes one byte to `fd`, so the byte arrives while
+/// the ring is already waiting.
+void late_write(i64 fd) {
+    sleep_ms(50);
+    sys_write(fd, (i64)"w", 1);
+}
+
+void test_io_uring_many_pending() {
+    test_start("io_uring wait wakes on any of many pending reads");
+
+    if (!io_uring_available()) {
+        @println("  [SKIP] io_uring_setup unavailable on this kernel (ENOSYS)");
+        return;
+    }
+
+    // More pending reads than one fixed-size wait batch holds; data arrives
+    // only on the last one, after the wait has begun.
+    i64 count = 65;
+    i32 fds[130];
+    for (i64 i = 0; i < count; i = i + 1) {
+        @assert(sys_pipe2((i64)&fds[i * 2], 0) == 0);
+    }
+    Result<IoUring, Error> ring_res = IoUring.new(128);
+    @assert(ring_res.is_ok());
+    IoUring ring = ring_res.unwrap();
+    u8 bufs[65];
+    for (i64 i = 0; i < count; i = i + 1) {
+        IoUringSqe* sqe = ring.get_sqe();
+        assert_true(sqe != (IoUringSqe*)0, "got pending read sqe");
+        ring.prep_read(sqe, fds[i * 2], (void*)&bufs[i], 1, (u64)0, (u64)i);
+    }
+    Result<i64, Error> queued = ring.submit();
+    assert_true(queued.is_ok(), "queued every read");
+
+    Task<void> writer = launch late_write((i64)fds[(count - 1) * 2 + 1]);
+    Result<i64, Error> waited = ring.submit_and_wait(1);
+    wait writer;
+    assert_true(waited.is_ok(), "wait returned");
+
+    IoUringCqe cqe;
+    assert_true(ring.peek_cqe(&cqe), "the late read completed");
+    assert_true(cqe.user_data == (u64)(count - 1) && cqe.res == 1, "completion is the last read");
+    ring.cqe_seen(&cqe);
+    ring.close();
+    for (i64 i = 0; i < count * 2; i = i + 1) {
+        sys_close((i64)fds[i]);
+    }
+}
+
 i32 main() {
     test_io_uring_structures();
     test_io_uring_nop();
     test_io_uring_file_io();
     test_io_uring_socket_io();
+    test_io_uring_many_pending();
     return done();
 }

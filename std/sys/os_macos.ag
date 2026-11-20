@@ -2559,6 +2559,7 @@ struct MacUring {
     i64 sqes_size;
     u8* pending;        // copies of SQEs waiting for readiness
     i64 pending_count;
+    u8* pollfds;        // one pollfd per pending operation, for waits
     i64 sq_entries;
     i64 cq_entries;
     i64 cq_off;         // byte offset of the CQ header in `ring`
@@ -2633,14 +2634,17 @@ i64 sys_io_uring_setup(i64 entries, i64 params) {
     i64 ring_size = mac_page_round(cq_off + URING_CQ_CQES + cq * 16);
     i64 sqes_size = mac_page_round(sq * 64);
     i64 pending_size = mac_page_round(cq * 64);
+    i64 pollfds_size = mac_page_round(cq * 8);
     i64 ring = sys_mmap(0, ring_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     i64 sqes = sys_mmap(0, sqes_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     i64 pending = sys_mmap(0, pending_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    i64 pollfds = sys_mmap(0, pollfds_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     i64 fd = mac_ret((i64)mac_kqueue());
-    if (ring < 0 || sqes < 0 || pending < 0 || fd < 0) {
+    if (ring < 0 || sqes < 0 || pending < 0 || pollfds < 0 || fd < 0) {
         if (ring > 0) { sys_munmap(ring, ring_size); }
         if (sqes > 0) { sys_munmap(sqes, sqes_size); }
         if (pending > 0) { sys_munmap(pending, pending_size); }
+        if (pollfds > 0) { sys_munmap(pollfds, pollfds_size); }
         if (fd >= 0) { mac_close((i32)fd); }
         return -12; // ENOMEM
     }
@@ -2661,6 +2665,7 @@ i64 sys_io_uring_setup(i64 entries, i64 params) {
             u.sqes_size = sqes_size;
             u.pending = (u8*)pending;
             u.pending_count = 0;
+            u.pollfds = (u8*)pollfds;
             u.sq_entries = sq;
             u.cq_entries = cq;
             u.cq_off = cq_off;
@@ -2676,6 +2681,7 @@ i64 sys_io_uring_setup(i64 entries, i64 params) {
         sys_munmap(ring, ring_size);
         sys_munmap(sqes, sqes_size);
         sys_munmap(pending, pending_size);
+        sys_munmap(pollfds, pollfds_size);
         mac_close((i32)fd);
         return -24; // EMFILE
     }
@@ -2735,6 +2741,7 @@ void mac_uring_release(MacUring* u) {
         sys_munmap((i64)u.sqes, u.sqes_size);
     }
     sys_munmap((i64)u.pending, mac_page_round(u.cq_entries * 64));
+    sys_munmap((i64)u.pollfds, mac_page_round(u.cq_entries * 8));
     __atomic_store_i64(&u.fd, 0, ATOMIC_RELEASE);
     __atomic_fetch_sub_i64(&g_mac_uring_live, 1, ATOMIC_ACQ_REL);
 }
@@ -2864,17 +2871,17 @@ i64 mac_uring_service(MacUring* u, i64 timeout_ms) {
         return 0;
     }
     if (timeout_ms != 0) {
-        // Wait until any pending descriptor is ready.
-        i32 pfds[128];
-        i64 n = u.pending_count < 64 ? u.pending_count : (i64)64;
+        // Wait until any pending descriptor is ready; every pending operation
+        // is watched, so readiness on any of them ends the wait.
+        i32* pfds = (i32*)u.pollfds;
         i64 i = 0;
-        while (i < n) {
+        while (i < u.pending_count) {
             u8* sqe = u.pending + i * 64;
             pfds[i * 2] = *(i32*)(sqe + 4);
             pfds[i * 2 + 1] = (i32)(mac_uring_wait_events(sqe) | 0x38);
             i += 1;
         }
-        sys_poll((i64)&pfds[0], n, timeout_ms);
+        sys_poll((i64)pfds, u.pending_count, timeout_ms);
     }
     i64 done = 0;
     i64 i = 0;
