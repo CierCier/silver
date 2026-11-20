@@ -25,6 +25,9 @@ mkdir -p "$stage_dir/bin" "$stage_dir/include/silver/std" "$stage_dir/lib"
 cp "$target_dir/release/agc" "$stage_dir/bin/agc"
 cp "$target_dir/release/aglsp" "$stage_dir/bin/aglsp"
 cp "$target_dir/release/agsm" "$stage_dir/bin/agsm"
+# The build-shell RUNPATH names Nix store glibc and gcc paths that do not exist on
+# other machines. Drop it from the staged copies; target/ keeps its own.
+patchelf --remove-rpath "$stage_dir/bin/agc" "$stage_dir/bin/agsm"
 cp -R "$root_dir/std/"* "$stage_dir/include/silver/std/"
 cp "$root_dir/README.md" "$stage_dir/README.md"
 cp "$root_dir/LICENSE" "$stage_dir/LICENSE"

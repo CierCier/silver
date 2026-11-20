@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 clap =  { version = "4.5.56", features = ["derive"] }
 inkwell = { version = "0.9.0", features = ["llvm22-1"] }
-llvm-sys = { version = "221.0.1", features = ["prefer-dynamic"] }
+llvm-sys = { version = "221.0.1", features = ["force-static"] }
 mimalloc = { version = "0.1", default-features = false }
 owo-colors = "4.1.0"
 parking_lot = "0.12"

@@ -12,11 +12,13 @@ pkgs.mkShell {
     nodejs
     go
     llvmPackages_22.lld
+    patchelf
   ];
 
   LLVM_SYS_221_PREFIX = "${pkgs.llvmPackages_22.llvm.dev}";
   LIBCLANG_PATH = "${pkgs.llvmPackages_22.libclang.lib}/lib";
   OPENSSL_LIB_DIR = "${pkgs.lib.getLib pkgs.openssl}/lib";
   OPENSSL_DIR = "${pkgs.openssl.dev}";
+  RUSTFLAGS = silver.passthru.rustflags;
   SILVER_SYSROOT = builtins.toString ../.;
 }

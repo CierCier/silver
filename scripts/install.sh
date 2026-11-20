@@ -97,6 +97,10 @@ for bin_name in agc aglsp agsm; do
   echo "  Installing binary: $dest_bin"
   cp --remove-destination "$src_bin" "$dest_bin"
   chmod +x "$dest_bin"
+  # Same RUNPATH issue as the release bundle; aglsp is static and has no dynamic section.
+  if [[ "$bin_name" != "aglsp" ]]; then
+    patchelf --remove-rpath "$dest_bin"
+  fi
 done
 
 # 2. Install includes (std and vendor)
