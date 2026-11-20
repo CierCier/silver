@@ -17,5 +17,8 @@ elise-core = { git = "https://github.com/CierCier/elise.git" }
 elise-lex = { git = "https://github.com/CierCier/elise.git" }
 elise-parse = { git = "https://github.com/CierCier/elise.git" }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [build-dependencies]
 cc = "1"

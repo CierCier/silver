@@ -563,6 +563,20 @@ impl DependencyGraph {
 // Build Progress Visualizer
 // ===========================================================================
 
+#[derive(Clone, Copy)]
+enum ModuleStatus {
+    Waiting,
+    Building,
+    Done {
+        cached: bool,
+        duration: std::time::Duration,
+    },
+    Failed,
+}
+
+/// Live build tree in the style of nix-output-monitor: each module's
+/// dependencies are listed above it, and a footer totals the statuses.
+/// Non-terminal and verbose output keep one line per module instead.
 pub struct BuildProgress {
     total_steps: usize,
     completed: std::sync::atomic::AtomicUsize,
@@ -570,21 +584,131 @@ pub struct BuildProgress {
     enabled: bool,
     verbose: bool,
     start_time: std::time::Instant,
-    active: std::sync::Mutex<HashSet<String>>,
+    state: Mutex<TreeState>,
+}
+
+struct TreeState {
+    roots: Vec<String>,
+    /// The driver reports a root by its file stem. This maps that name to the
+    /// graph key; the two differ when the stem is not valid UTF-8.
+    root_alias: HashMap<String, String>,
+    deps: HashMap<String, Vec<String>>,
+    status: HashMap<String, ModuleStatus>,
+    linking: Option<String>,
+    summary: Option<String>,
+    drawn_lines: usize,
+}
+
+impl TreeState {
+    fn key(&self, name: &str) -> String {
+        match self.root_alias.get(name) {
+            Some(module) if !self.deps.contains_key(name) => module.clone(),
+            _ => name.to_string(),
+        }
+    }
+}
+
+/// One drawn tree row. Failed rows are kept when the tree is clipped.
+struct TreeLine {
+    text: String,
+    failed: bool,
 }
 
 impl BuildProgress {
-    pub fn new(total_steps: usize, enabled: bool, verbose: bool) -> Self {
+    /// `root_inputs` name the build targets; they are the tree's top nodes.
+    /// `with_dependencies` is false when the parallel executor will not run, so
+    /// dependencies never report progress and are left out of the tree.
+    pub fn new(
+        graph: &DependencyGraph,
+        root_inputs: &[PathBuf],
+        total_steps: usize,
+        enabled: bool,
+        verbose: bool,
+        with_dependencies: bool,
+    ) -> Self {
         use std::io::IsTerminal;
-        let is_terminal = std::io::stderr().is_terminal();
+        let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let inputs: Vec<PathBuf> = root_inputs.iter().map(|p| canonical(p)).collect();
+        let mut roots: Vec<String> = graph
+            .nodes
+            .values()
+            .filter(|node| inputs.contains(&canonical(&node.source_path)))
+            .map(|node| node.module_path.clone())
+            .collect();
+        roots.sort();
+        let mut root_alias = HashMap::default();
+        for input in root_inputs {
+            let stem = input
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("input");
+            let wanted = canonical(input);
+            if let Some(node) = graph
+                .nodes
+                .values()
+                .find(|node| canonical(&node.source_path) == wanted)
+            {
+                root_alias.insert(stem.to_string(), node.module_path.clone());
+            }
+        }
+        let deps = graph
+            .nodes
+            .values()
+            .filter(|node| with_dependencies || roots.contains(&node.module_path))
+            .map(|node| {
+                let dependencies = if with_dependencies {
+                    node.dependencies.clone()
+                } else {
+                    Vec::new()
+                };
+                (node.module_path.clone(), dependencies)
+            })
+            .collect();
         Self {
             total_steps,
             completed: std::sync::atomic::AtomicUsize::new(0),
-            is_terminal,
+            is_terminal: std::io::stderr().is_terminal(),
             enabled,
             verbose,
             start_time: std::time::Instant::now(),
-            active: std::sync::Mutex::new(HashSet::default()),
+            state: Mutex::new(TreeState {
+                roots,
+                root_alias,
+                deps,
+                status: HashMap::default(),
+                linking: None,
+                summary: None,
+                drawn_lines: 0,
+            }),
+        }
+    }
+
+    /// The tree needs a terminal with room for a header, a footer, one tree row,
+    /// and the cursor's row. A shorter terminal falls back to line output.
+    fn tree_mode(&self) -> bool {
+        const MIN_ROWS: usize = 6;
+        self.is_terminal
+            && !self.verbose
+            && terminal_size().is_none_or(|(rows, _)| rows >= MIN_ROWS)
+    }
+
+    /// True when progress is on and drawn as a tree.
+    fn drawing(&self) -> bool {
+        self.enabled && self.tree_mode()
+    }
+
+    /// Records a module's status in every mode, and redraws when drawing the tree.
+    /// Line output abandons the frame, so a terminal that grows back to a tree
+    /// draws a new frame below the lines instead of erasing them, and still
+    /// shows the right states.
+    fn record(&self, module_name: &str, status: ModuleStatus) {
+        let mut state = self.state.lock().unwrap();
+        let key = state.key(module_name);
+        state.status.insert(key, status);
+        if self.tree_mode() {
+            self.redraw(&mut state);
+        } else {
+            state.drawn_lines = 0;
         }
     }
 
@@ -592,47 +716,16 @@ impl BuildProgress {
         if !self.enabled && !self.verbose {
             return;
         }
-        let mut active = self.active.lock().unwrap();
-        active.insert(module_name.to_string());
-        let current = (self.completed.load(Ordering::Relaxed) + 1).min(self.total_steps);
-        let total = self.total_steps;
-        let percent = if total > 0 {
-            (current * 100) / total
-        } else {
-            100
-        };
-
-        use owo_colors::OwoColorize;
-        let step_prefix = format!("[{:>2}/{:<2}] {:>3}%", current, total, percent.min(100));
-        let active_list = if active.len() > 1 {
-            let names: Vec<_> = active.iter().cloned().collect();
-            format!(" [active: {}]", names.join(", "))
-        } else {
-            String::new()
-        };
-        let summary_text = if self.verbose {
-            format!(" ({})", elements.summary())
-        } else {
-            format!(" ({})", elements.brief_summary())
-        };
-
-        if self.is_terminal && !self.verbose {
-            eprint!(
-                "\r\x1b[2K{} {} {}{}{}",
-                step_prefix.dimmed(),
-                "compiling".bold().cyan(),
-                module_name.bold(),
-                summary_text.dimmed(),
-                active_list.dimmed()
-            );
-            let _ = std::io::Write::flush(&mut std::io::stderr());
-        } else if self.verbose {
+        self.record(module_name, ModuleStatus::Building);
+        if self.verbose {
+            use owo_colors::OwoColorize;
+            let current = (self.completed.load(Ordering::Relaxed) + 1).min(self.total_steps);
             eprintln!(
-                "{} {} {}{}",
-                step_prefix.dimmed(),
+                "{} {} {} ({})",
+                self.step_prefix(current).dimmed(),
                 "compiling".bold().cyan(),
                 module_name.bold(),
-                summary_text.dimmed()
+                elements.summary().dimmed()
             );
         }
     }
@@ -644,114 +737,83 @@ impl BuildProgress {
         is_cached: bool,
         duration: std::time::Duration,
     ) {
-        let mut active = self.active.lock().unwrap();
-        active.remove(module_name);
         let current = self.completed.fetch_add(1, Ordering::Relaxed) + 1;
-        let total = self.total_steps;
-        let percent = if total > 0 {
-            (current * 100) / total
-        } else {
-            100
-        };
-
         if !self.enabled && !self.verbose {
             return;
         }
-
-        use owo_colors::OwoColorize;
-        let step_prefix = format!(
-            "[{:>2}/{:<2}] {:>3}%",
-            current.min(total),
-            total,
-            percent.min(100)
+        self.record(
+            module_name,
+            ModuleStatus::Done {
+                cached: is_cached,
+                duration,
+            },
         );
-        let status = if is_cached {
+        if self.tree_mode() {
+            return;
+        }
+        use owo_colors::OwoColorize;
+        let label = if is_cached {
             "[cached]".bold().green().to_string()
         } else {
             format!("{} in {:.1?}", "compiled".bold().green(), duration)
         };
-        let summary_text = if self.verbose {
-            format!(" ({})", elements.summary())
+        let summary = if self.verbose {
+            elements.summary()
         } else {
-            format!(" ({})", elements.brief_summary())
+            elements.brief_summary()
         };
+        eprintln!(
+            "{} {} {} ({})",
+            self.step_prefix(current).dimmed(),
+            label,
+            module_name.bold(),
+            summary.dimmed()
+        );
+    }
 
-        if self.is_terminal && !self.verbose {
-            eprintln!(
-                "\r\x1b[2K{} {} {}{}",
-                step_prefix.dimmed(),
-                status,
-                module_name.bold(),
-                summary_text.dimmed()
-            );
-            if let Some(next_active) = active.iter().next() {
-                let next_step = (current + 1).min(total);
-                let next_percent = if total > 0 {
-                    (next_step * 100) / total
-                } else {
-                    100
-                };
-                let next_prefix =
-                    format!("[{:>2}/{:<2}] {:>3}%", next_step, total, next_percent.min(100));
-                let active_list = if active.len() > 1 {
-                    let names: Vec<_> = active.iter().cloned().collect();
-                    format!(" [active: {}]", names.join(", "))
-                } else {
-                    String::new()
-                };
-                eprint!(
-                    "\r\x1b[2K{} {} {}{}",
-                    next_prefix.dimmed(),
-                    "compiling".bold().cyan(),
-                    next_active.bold(),
-                    active_list.dimmed()
-                );
-                let _ = std::io::Write::flush(&mut std::io::stderr());
-            }
-        } else {
-            eprintln!(
-                "{} {} {}{}",
-                step_prefix.dimmed(),
-                status,
-                module_name.bold(),
-                summary_text.dimmed()
-            );
+    /// Marks a module whose compile failed, so the tree shows the failure.
+    pub fn on_fail(&self, module_name: &str) {
+        if self.enabled {
+            self.record(module_name, ModuleStatus::Failed);
         }
     }
 
+    /// Prints diagnostic text that a tree redraw must not erase. With a live tree,
+    /// the frame is cleared, the text is written, and the next frame is drawn
+    /// below it, all under the lock every redraw takes. Workers compiling in
+    /// parallel can therefore not move the cursor into the middle of the text.
+    pub fn print_diagnostic(&self, text: &str) {
+        if !self.drawing() {
+            eprintln!("{text}");
+            return;
+        }
+        let mut state = self.state.lock().unwrap();
+        if state.drawn_lines > 0 {
+            eprint!("\x1b[{}F\x1b[J", state.drawn_lines);
+        }
+        eprintln!("{text}");
+        state.drawn_lines = 0;
+        self.redraw(&mut state);
+    }
+
     pub fn on_link(&self, target_path: &Path) {
+        let current = self.completed.fetch_add(1, Ordering::Relaxed) + 1;
         if !self.enabled && !self.verbose {
             return;
         }
-        let current = self.completed.fetch_add(1, Ordering::Relaxed) + 1;
-        let total = self.total_steps;
-        let percent = if total > 0 {
-            (current * 100) / total
-        } else {
-            100
-        };
-        use owo_colors::OwoColorize;
-        let step_prefix = format!(
-            "[{:>2}/{:<2}] {:>3}%",
-            current.min(total),
-            total,
-            percent.min(100)
-        );
-        if self.is_terminal && !self.verbose {
-            eprintln!(
-                "\r\x1b[2K{} {} {}",
-                step_prefix.dimmed(),
-                "linking".bold().magenta(),
-                target_path.display().to_string().bold()
-            );
-        } else {
-            eprintln!(
-                "{} {} {}",
-                step_prefix.dimmed(),
-                "linking".bold().magenta(),
-                target_path.display().to_string().bold()
-            );
+        if self.tree_mode() {
+            let mut state = self.state.lock().unwrap();
+            state.linking = Some(target_path.display().to_string());
+            self.redraw(&mut state);
+            return;
         }
+        use owo_colors::OwoColorize;
+        eprintln!(
+            "{} {} {}",
+            self.step_prefix(current).dimmed(),
+            "linking".bold().magenta(),
+            target_path.display().to_string().bold()
+        );
     }
 
     pub fn on_complete(
@@ -764,23 +826,327 @@ impl BuildProgress {
         if !self.enabled && !self.verbose {
             return;
         }
-        use owo_colors::OwoColorize;
         let elapsed = self.start_time.elapsed();
-        let summary_text = if self.verbose {
+        let summary = if self.verbose {
             total_elements.summary()
         } else {
             total_elements.brief_summary()
         };
-        eprintln!(
-            "{} in {:.2?} ({} modules, {}, {} cached, {} compiled)",
-            "Build finished".bold().green(),
-            elapsed,
-            total_modules.to_string().bold(),
-            summary_text.bold(),
-            cached_count.to_string().green(),
-            compiled_count.to_string().cyan()
+        let text = format!(
+            "Finished in {elapsed:.2?} ({total_modules} modules, {summary}, {cached_count} cached, {compiled_count} compiled)"
         );
+        if self.tree_mode() {
+            let mut state = self.state.lock().unwrap();
+            state.linking = None;
+            state.summary = Some(text);
+            self.redraw(&mut state);
+            return;
+        }
+        use owo_colors::OwoColorize;
+        eprintln!("{}", text.bold().green());
     }
+
+    /// The spinner frame for the current time. The tree redraws on build events,
+    /// so the frame advances as modules start and finish.
+    fn spinner_frame(&self) -> &'static str {
+        let tick = (self.start_time.elapsed().as_millis() / 80) as usize;
+        SPINNER_FRAMES[tick % SPINNER_FRAMES.len()]
+    }
+
+    fn step_prefix(&self, current: usize) -> String {
+        let total = self.total_steps;
+        let percent = (current * 100).checked_div(total).unwrap_or(100);
+        format!(
+            "[{:>2}/{:<2}] {:>3}%",
+            current.min(total),
+            total,
+            percent.min(100)
+        )
+    }
+
+    /// Rewrites the tree in place. Called under the state lock so that events
+    /// from parallel compile workers cannot interleave.
+    fn redraw(&self, state: &mut TreeState) {
+        // A frame taller than the terminal cannot be erased, and a line wider than
+        // it wraps and miscounts rows; either leaves copies in scrollback. Leave
+        // room for the header, the footer, and the cursor's row.
+        let size = terminal_size();
+        let max_tree_lines = size.map_or(20, |(rows, _)| rows.saturating_sub(3).max(3));
+        let mut lines = self.render(state, max_tree_lines);
+        if let Some((_, columns)) = size {
+            lines = lines.iter().map(|line| clip_line(line, columns)).collect();
+        }
+        let mut out = String::new();
+        if state.drawn_lines > 0 {
+            out.push_str(&format!("\x1b[{}F\x1b[J", state.drawn_lines));
+        }
+        for line in &lines {
+            out.push_str(line);
+            out.push('\n');
+        }
+        state.drawn_lines = lines.len();
+        eprint!("{out}");
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+    }
+
+    fn render(&self, state: &TreeState, max_tree_lines: usize) -> Vec<String> {
+        use owo_colors::OwoColorize;
+        let mut lines = vec![format!("{}", "┏━ Dependency Graph".bold())];
+        let mut emitted = HashSet::default();
+        let mut tree: Vec<TreeLine> = Vec::new();
+        // Roots first so their dependencies sit above them. Units no root reaches
+        // are listed after them, but only while unfinished; the footer counts the rest.
+        let mut unreached: Vec<&String> = state
+            .deps
+            .keys()
+            .filter(|name| !state.roots.contains(name))
+            .collect();
+        unreached.sort();
+        for name in state.roots.iter().chain(unreached) {
+            if !state.roots.contains(name) && self.closure_finished(state, name) {
+                continue;
+            }
+            self.push_subtree(state, name, "", "", "", &mut emitted, &mut tree);
+        }
+
+        if tree.len() > max_tree_lines {
+            // Hide the oldest rows first, but never a failed one: the footer counts
+            // failures, and the tree must still say which module failed.
+            let room = max_tree_lines.saturating_sub(1);
+            let failed = tree.iter().filter(|line| line.failed).count();
+            let mut spare = room.saturating_sub(failed);
+            let mut keep = vec![false; tree.len()];
+            for (index, line) in tree.iter().enumerate().rev() {
+                if line.failed {
+                    keep[index] = true;
+                } else if spare > 0 {
+                    keep[index] = true;
+                    spare -= 1;
+                }
+            }
+            let hidden = keep.iter().filter(|kept| !**kept).count();
+            lines.push(format!("┃ … {hidden} more"));
+            lines.extend(
+                tree.into_iter()
+                    .zip(keep)
+                    .filter(|(_, kept)| *kept)
+                    .map(|(line, _)| line.text),
+            );
+        } else {
+            lines.extend(tree.into_iter().map(|line| line.text));
+        }
+
+        let (mut building, mut done, mut failed) = (0, 0, 0);
+        for status in state.status.values() {
+            match status {
+                ModuleStatus::Building => building += 1,
+                ModuleStatus::Done { .. } => done += 1,
+                ModuleStatus::Failed => failed += 1,
+                ModuleStatus::Waiting => {}
+            }
+        }
+        let waiting = state.deps.len().saturating_sub(building + done + failed);
+        let footer = if let Some(summary) = &state.summary {
+            format!("┗━ {}", summary.bold().green())
+        } else if let Some(target) = &state.linking {
+            format!("┗━ {} {}", "linking".bold().magenta(), target.bold())
+        } else {
+            format!(
+                "┗━ building {building}  done {done}  waiting {waiting}  failed {failed}  elapsed {:.1?}",
+                self.start_time.elapsed()
+            )
+        };
+        lines.push(footer);
+        lines
+    }
+
+    /// Appends a module's dependencies, then the module itself. A module whose
+    /// whole dependency closure is finished is drawn as one collapsed line.
+    #[allow(clippy::too_many_arguments)]
+    fn push_subtree(
+        &self,
+        state: &TreeState,
+        name: &str,
+        prefix: &str,
+        connector: &str,
+        child_prefix: &str,
+        emitted: &mut HashSet<String>,
+        out: &mut Vec<TreeLine>,
+    ) {
+        if !emitted.insert(name.to_string()) {
+            return;
+        }
+        let is_root = connector.is_empty();
+        let collapsed = !is_root && self.closure_finished(state, name);
+        // Only units are drawn; a direct import that is not a unit has no status.
+        let deps: Vec<String> = if collapsed {
+            Vec::new()
+        } else {
+            state
+                .deps
+                .get(name)
+                .into_iter()
+                .flatten()
+                .filter(|dep| state.deps.contains_key(*dep))
+                .cloned()
+                .collect()
+        };
+        let last = deps.len().saturating_sub(1);
+        for (index, dep) in deps.iter().enumerate() {
+            let (dep_connector, dep_child_prefix) = if index == last {
+                ("└─ ", "   ")
+            } else {
+                ("├─ ", "│  ")
+            };
+            let next_prefix = format!("{child_prefix}{dep_child_prefix}");
+            self.push_subtree(
+                state,
+                dep,
+                child_prefix,
+                dep_connector,
+                &next_prefix,
+                emitted,
+                out,
+            );
+        }
+        let extra = if collapsed {
+            let count = self.closure_size(state, name);
+            (count > 0).then(|| format!(" (+{count} done)"))
+        } else {
+            None
+        };
+        let status = state.status.get(name).copied();
+        out.push(TreeLine {
+            text: format!(
+                "┃ {prefix}{connector}{}",
+                node_text(status, name, self.spinner_frame(), extra.as_deref())
+            ),
+            failed: matches!(status, Some(ModuleStatus::Failed)),
+        });
+    }
+
+    /// True when the module and everything it depends on are done. The walk keeps
+    /// a visited set, so a dependency cycle ends instead of overflowing the stack,
+    /// and a cycle whose modules are all done counts as finished.
+    fn closure_finished(&self, state: &TreeState, name: &str) -> bool {
+        let mut seen: HashSet<&str> = HashSet::default();
+        let mut stack = vec![name];
+        while let Some(current) = stack.pop() {
+            if !seen.insert(current) {
+                continue;
+            }
+            if !matches!(state.status.get(current), Some(ModuleStatus::Done { .. })) {
+                return false;
+            }
+            for dep in state.deps.get(current).into_iter().flatten() {
+                if state.deps.contains_key(dep) {
+                    stack.push(dep);
+                }
+            }
+        }
+        true
+    }
+
+    fn closure_size(&self, state: &TreeState, name: &str) -> usize {
+        let mut seen = HashSet::default();
+        let mut stack = vec![name.to_string()];
+        while let Some(current) = stack.pop() {
+            for dep in state.deps.get(&current).into_iter().flatten() {
+                if state.deps.contains_key(dep) && seen.insert(dep.clone()) {
+                    stack.push(dep.clone());
+                }
+            }
+        }
+        seen.len()
+    }
+}
+
+/// Braille frames for a module that is compiling.
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// One tree line's module text: a status mark, the name, and the duration or cache state.
+fn node_text(
+    status: Option<ModuleStatus>,
+    name: &str,
+    spinner: &str,
+    extra: Option<&str>,
+) -> String {
+    use owo_colors::OwoColorize;
+    let extra = extra
+        .map(|text| text.dimmed().to_string())
+        .unwrap_or_default();
+    match status.unwrap_or(ModuleStatus::Waiting) {
+        ModuleStatus::Waiting => format!("{} {}{extra}", "[ ]".dimmed(), name.dimmed()),
+        ModuleStatus::Building => format!("{} {}{extra}", spinner.yellow().bold(), name.bold()),
+        ModuleStatus::Done { cached: true, .. } => {
+            format!("{} {} {}{extra}", "[x]".green(), name, "cached".dimmed())
+        }
+        ModuleStatus::Done { duration, .. } => format!(
+            "{} {} {}{extra}",
+            "[x]".green(),
+            name,
+            format!("{duration:.1?}").dimmed()
+        ),
+        ModuleStatus::Failed => format!("{} {}{extra}", "[!]".red().bold(), name.bold()),
+    }
+}
+
+/// Rows and columns of the terminal on stderr, when it can be queried.
+#[cfg(unix)]
+fn terminal_size() -> Option<(usize, usize)> {
+    // SAFETY: TIOCGWINSZ only writes a `winsize` into the struct passed to it.
+    let size = unsafe {
+        let mut size: libc::winsize = std::mem::zeroed();
+        if libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ, &mut size) != 0 {
+            return None;
+        }
+        size
+    };
+    (size.ws_row > 0 && size.ws_col > 0).then_some((size.ws_row as usize, size.ws_col as usize))
+}
+
+#[cfg(not(unix))]
+fn terminal_size() -> Option<(usize, usize)> {
+    None
+}
+
+/// Cuts `line` to `width` visible characters and marks the cut with `…`. Color
+/// sequences are kept whole and do not count toward the width.
+fn clip_line(line: &str, width: usize) -> String {
+    let mut tokens: Vec<(bool, String)> = Vec::new();
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            let mut sequence = String::from(c);
+            for next in chars.by_ref() {
+                sequence.push(next);
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            tokens.push((true, sequence));
+        } else {
+            tokens.push((false, c.to_string()));
+        }
+    }
+    let visible = tokens.iter().filter(|(escape, _)| !escape).count();
+    if visible <= width {
+        return line.to_string();
+    }
+    let keep = width.saturating_sub(1);
+    let mut shown = 0;
+    let mut out = String::new();
+    for (escape, text) in tokens {
+        if escape {
+            out.push_str(&text);
+        } else if shown < keep {
+            out.push_str(&text);
+            shown += 1;
+        }
+    }
+    out.push('…');
+    out.push_str("\x1b[0m");
+    out
 }
 
 // ===========================================================================
@@ -972,11 +1338,20 @@ impl<'a> ParallelGraphExecutor<'a> {
         let res = self.compile_single_module_inner(node, key);
         let elapsed = start.elapsed();
         if let Some(p) = &self.progress {
-            if res.is_ok() {
-                p.on_finish(&node.module_path, &node.codegen_elements, false, elapsed);
+            match res {
+                Ok(_) => p.on_finish(&node.module_path, &node.codegen_elements, false, elapsed),
+                Err(_) => p.on_fail(&node.module_path),
             }
         }
         res
+    }
+
+    /// Prints a module's diagnostic so the progress tree cannot erase it.
+    fn report(&self, text: &str) {
+        match &self.progress {
+            Some(progress) => progress.print_diagnostic(text),
+            None => eprintln!("{text}"),
+        }
     }
 
     fn compile_single_module_inner(
@@ -1000,16 +1375,12 @@ impl<'a> ParallelGraphExecutor<'a> {
             crate::parser::Parser::new_with_source(tokens, node.source_path.display().to_string());
         let (mut ast, errors) = parser.parse_program();
         if !errors.is_empty() {
-            eprint!("\r\x1b[2K");
             for error in &errors {
-                eprintln!(
-                    "{}",
-                    crate::diagnostics::render(
-                        *error.span(),
-                        &error.to_string(),
-                        crate::diagnostics::Severity::Error,
-                    )
-                );
+                self.report(&crate::diagnostics::render(
+                    *error.span(),
+                    &error.to_string(),
+                    crate::diagnostics::Severity::Error,
+                ));
             }
             return Err(format!("syntax error in {}", node.source_path.display()));
         }
@@ -1035,13 +1406,17 @@ impl<'a> ParallelGraphExecutor<'a> {
         crate::semantic::serialize::synthesize_serialization_for_program(&mut ast);
         let macro_errors = crate::semantic::macro_expand::expand_macros_in_program(&mut ast);
         if !macro_errors.is_empty() {
-            eprint!("\r\x1b[2K");
             for error in &macro_errors {
-                eprintln!("{}", crate::diagnostics::render(
-                    error.span, &error.message, crate::diagnostics::Severity::Error,
+                self.report(&crate::diagnostics::render(
+                    error.span,
+                    &error.message,
+                    crate::diagnostics::Severity::Error,
                 ));
             }
-            return Err(format!("macro expansion failed in {}", node.source_path.display()));
+            return Err(format!(
+                "macro expansion failed in {}",
+                node.source_path.display()
+            ));
         }
 
         let mut symbol_table = crate::symbol_table::CompilerSymbolTable::new();
@@ -1061,16 +1436,12 @@ impl<'a> ParallelGraphExecutor<'a> {
         let (type_errors, monomorphs) = checker.check_program_with_table(&ast, &mut symbol_table);
         checker.lower_lambdas(&mut ast);
         if !type_errors.is_empty() {
-            eprint!("\r\x1b[2K");
             for error in &type_errors {
-                eprintln!(
-                    "{}",
-                    crate::diagnostics::render(
-                        error.span,
-                        &error.message,
-                        crate::diagnostics::Severity::Error,
-                    )
-                );
+                self.report(&crate::diagnostics::render(
+                    error.span,
+                    &error.message,
+                    crate::diagnostics::Severity::Error,
+                ));
             }
             return Err(format!("type errors in {}", node.source_path.display()));
         }
@@ -1106,14 +1477,11 @@ impl<'a> ParallelGraphExecutor<'a> {
         let escape_errors = crate::semantic::escape_check::check_program(&ast);
         if !escape_errors.is_empty() {
             for error in &escape_errors {
-                eprintln!(
-                    "{}",
-                    crate::diagnostics::render(
-                        error.span,
-                        &error.message,
-                        crate::diagnostics::Severity::Error,
-                    )
-                );
+                self.report(&crate::diagnostics::render(
+                    error.span,
+                    &error.message,
+                    crate::diagnostics::Severity::Error,
+                ));
             }
             return Err(format!("escape errors in {}", node.source_path.display()));
         }
@@ -1206,18 +1574,14 @@ impl<'a> ParallelGraphExecutor<'a> {
             Some(&ownership.init_plan),
         )
         .map_err(|e| {
-            eprint!("\r\x1b[2K");
             if let Some(span) = e.span {
-                eprintln!(
-                    "{}",
-                    crate::diagnostics::render(
-                        span,
-                        &e.message,
-                        crate::diagnostics::Severity::Error,
-                    )
-                );
+                self.report(&crate::diagnostics::render(
+                    span,
+                    &e.message,
+                    crate::diagnostics::Severity::Error,
+                ));
             } else {
-                eprintln!("error: {}", e.message);
+                self.report(&format!("error: {}", e.message));
             }
             format!(
                 "LLVM codegen error in {}: {}",
