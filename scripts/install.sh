@@ -97,8 +97,10 @@ for bin_name in agc aglsp agsm; do
   echo "  Installing binary: $dest_bin"
   cp --remove-destination "$src_bin" "$dest_bin"
   chmod +x "$dest_bin"
-  # Same RUNPATH issue as the release bundle; aglsp is static and has no dynamic section.
-  if [[ "$bin_name" != "aglsp" ]]; then
+  # A build inside the Nix dev shell embeds /nix/store paths in its RUNPATH. Strip
+  # them when patchelf is available (it is in the dev shell; other builds have no
+  # such RUNPATH). aglsp is static and has no dynamic section.
+  if [[ "$bin_name" != "aglsp" ]] && command -v patchelf >/dev/null 2>&1; then
     patchelf --remove-rpath "$dest_bin"
   fi
 done
