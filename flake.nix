@@ -36,8 +36,29 @@
         system:
         let
           silver = self.packages.${system}.silver;
+          pkgs = import nixpkgs {
+            inherit system;
+            config = { };
+            overlays = [ ];
+          };
+          # Runs scripts/check.sh from the working tree inside the dev shell, so
+          # the tests see local edits and the same toolchain as `nix develop`.
+          check = pkgs.writeShellScriptBin "silver-check" ''
+            set -euo pipefail
+            root="$(${pkgs.git}/bin/git rev-parse --show-toplevel 2>/dev/null)" || {
+              echo "silver-check: run this from inside the Silver checkout" >&2
+              exit 1
+            }
+            cd "$root"
+            exec nix develop . --command bash scripts/check.sh "$@"
+          '';
         in
         {
+          check = {
+            type = "app";
+            program = "${check}/bin/silver-check";
+            meta.description = "Run every Silver test suite (Rust, stdlib stage0 and stage1, language server)";
+          };
           default = {
             type = "app";
             program = "${silver}/bin/agc";

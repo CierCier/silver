@@ -81,6 +81,7 @@ package dependencies.
 | Stdlib suite | `python3 tests/run_tests.py --no-tui --jobs 4` |
 | Focused stdlib tests | `python3 tests/run_tests.py --no-tui string vec collection_drop_glue` |
 | Stdlib suite with native stage1 | `python3 tests/run_tests.py --no-tui --jobs 4 --compiler /tmp/agc-stage1` |
+| Every suite (Rust tests, stdlib with stage0 and stage1, language server) | `nix run .#check` |
 
 - Test observable behavior, failure paths, output, and resource cleanup.
   Source-presence checks and a successful compile alone do not prove behavior.

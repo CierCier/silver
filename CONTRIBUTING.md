@@ -96,6 +96,11 @@ target/debug/agc build silver.toml --bin aglsp --no-cache -o /tmp/aglsp-stage1
 python3 tests/run_tests.py --compiler /tmp/agc-stage1 --no-tui --jobs 4
 ```
 
+To run all of the above in one step, including the Rust tests and the language
+server suite, use `nix run .#check`. It builds in the working tree, runs every
+suite even after a failure, and exits non-zero if any step failed. Set
+`CHECK_JOBS` to change the stdlib suite's parallelism (default 4).
+
 Rebuild stage0 after Rust changes before building stage1. Keep the suite focused
 on stdlib APIs and capped at 124 runnable programs; extend the relevant module
 test instead of adding compiler-only fixtures. Compiler builds and stdlib use
