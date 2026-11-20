@@ -2,7 +2,7 @@ import std.string;
 import params;
 
 /// Keep in step with the workspace version in silver.toml.
-const str AGLSP_VERSION = "0.2.6";
+const str AGLSP_VERSION = "0.3.0";
 /// File watcher filters for Silver sources and manifests.
 const str INDEXED_FILE_FILTERS = "{\"filters\":[{\"scheme\":\"file\",\"pattern\":{\"glob\":\"**/*.ag\"}},{\"scheme\":\"file\",\"pattern\":{\"glob\":\"**/silver.toml\"}}]}";
 

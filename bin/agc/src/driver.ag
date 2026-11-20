@@ -966,7 +966,7 @@ i32 run_frontend() {
         return result;
     }
     if (cli.has("version")) {
-        STDOUT.write_str("agc 0.2.6\n");
+        STDOUT.write_str("agc 0.3.0\n");
         arguments.drop();
         return 0;
     }

@@ -15,7 +15,7 @@
 # only to bootstrap stage1 and is never launched by the stage1 executable.
 
 name = "silver"
-version = "0.2.6"
+version = "0.3.0"
 # NOTE (MIG-006): `default_target = "agc"` below matches two same-named targets
 # ([bin."agc"] and [lib."agc"]). This is kind-namespaced, not a conflict: every
 # caller passes `--bin agc` or `--lib agc`, and a bare `agc build` resolves to

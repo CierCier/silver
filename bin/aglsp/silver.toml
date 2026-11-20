@@ -1,5 +1,5 @@
 name = "aglsp"
-version = "0.2.6"
+version = "0.3.0"
 
 [bin."aglsp"]
 entry = "src/main.ag"

@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agc"
-version = "0.2.6"
+version = "0.3.0"
 dependencies = [
  "cc",
  "clap",
@@ -23,7 +23,7 @@ dependencies = [
 
 [[package]]
 name = "agsm"
-version = "0.2.6"
+version = "0.3.0"
 dependencies = [
  "agc",
  "clang",

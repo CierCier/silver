@@ -4500,7 +4500,7 @@ class NativeLsp(unittest.TestCase):
 
     def test_server_help_and_version_flags(self):
         for flag, needle in (("--help", "Usage: aglsp"), ("-h", "Usage: aglsp"),
-                             ("--version", "aglsp 0.2.6"), ("-V", "aglsp 0.2.6")):
+                             ("--version", "aglsp 0.3.0"), ("-V", "aglsp 0.3.0")):
             with self.subTest(flag=flag):
                 out = subprocess.run([str(self.binary), flag], capture_output=True, text=True, timeout=10)
                 self.assertEqual(out.returncode, 0, (flag, out.stderr))

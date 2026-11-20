@@ -17,7 +17,7 @@ let
 in
 rustPlatform.buildRustPackage {
   pname = "silver";
-  version = "0.2.6";
+  version = "0.3.0";
 
   src = fs.toSource {
     root = ../.;
@@ -76,7 +76,7 @@ rustPlatform.buildRustPackage {
   OPENSSL_DIR = "${openssl.dev}";
 
   # Ensure reproducible build without git repository in sandbox
-  GIT_DESCRIBE = "0.2.6";
+  GIT_DESCRIBE = "0.3.0";
   GIT_SHA = "nix";
   GIT_DIRTY = "0";
 
