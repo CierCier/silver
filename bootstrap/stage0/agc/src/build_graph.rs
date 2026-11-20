@@ -697,16 +697,27 @@ impl BuildProgress {
         self.enabled && self.tree_mode()
     }
 
+    /// Records a module's status in every mode, and redraws when drawing the tree.
+    /// Line output abandons the frame, so a terminal that grows back to a tree
+    /// draws a new frame below the lines instead of erasing them, and still
+    /// shows the right states.
+    fn record(&self, module_name: &str, status: ModuleStatus) {
+        let mut state = self.state.lock().unwrap();
+        let key = state.key(module_name);
+        state.status.insert(key, status);
+        if self.tree_mode() {
+            self.redraw(&mut state);
+        } else {
+            state.drawn_lines = 0;
+        }
+    }
+
     pub fn on_start(&self, module_name: &str, elements: &CodegenElements) {
         if !self.enabled && !self.verbose {
             return;
         }
-        if self.tree_mode() {
-            let mut state = self.state.lock().unwrap();
-            let key = state.key(module_name);
-            state.status.insert(key, ModuleStatus::Building);
-            self.redraw(&mut state);
-        } else if self.verbose {
+        self.record(module_name, ModuleStatus::Building);
+        if self.verbose {
             use owo_colors::OwoColorize;
             let current = (self.completed.load(Ordering::Relaxed) + 1).min(self.total_steps);
             eprintln!(
@@ -730,15 +741,14 @@ impl BuildProgress {
         if !self.enabled && !self.verbose {
             return;
         }
-        let status = ModuleStatus::Done {
-            cached: is_cached,
-            duration,
-        };
+        self.record(
+            module_name,
+            ModuleStatus::Done {
+                cached: is_cached,
+                duration,
+            },
+        );
         if self.tree_mode() {
-            let mut state = self.state.lock().unwrap();
-            let key = state.key(module_name);
-            state.status.insert(key, status);
-            self.redraw(&mut state);
             return;
         }
         use owo_colors::OwoColorize;
@@ -763,13 +773,9 @@ impl BuildProgress {
 
     /// Marks a module whose compile failed, so the tree shows the failure.
     pub fn on_fail(&self, module_name: &str) {
-        if !self.drawing() {
-            return;
+        if self.enabled {
+            self.record(module_name, ModuleStatus::Failed);
         }
-        let mut state = self.state.lock().unwrap();
-        let key = state.key(module_name);
-        state.status.insert(key, ModuleStatus::Failed);
-        self.redraw(&mut state);
     }
 
     /// Prints diagnostic text that a tree redraw must not erase. With a live tree,
