@@ -683,8 +683,18 @@ impl BuildProgress {
         }
     }
 
+    /// The tree needs a terminal with room for a header, a footer, one tree row,
+    /// and the cursor's row. A shorter terminal falls back to line output.
     fn tree_mode(&self) -> bool {
-        self.is_terminal && !self.verbose
+        const MIN_ROWS: usize = 6;
+        self.is_terminal
+            && !self.verbose
+            && terminal_size().is_none_or(|(rows, _)| rows >= MIN_ROWS)
+    }
+
+    /// True when progress is on and drawn as a tree.
+    fn drawing(&self) -> bool {
+        self.enabled && self.tree_mode()
     }
 
     pub fn on_start(&self, module_name: &str, elements: &CodegenElements) {
@@ -753,15 +763,29 @@ impl BuildProgress {
 
     /// Marks a module whose compile failed, so the tree shows the failure.
     pub fn on_fail(&self, module_name: &str) {
-        if !self.enabled || !self.tree_mode() {
+        if !self.drawing() {
             return;
         }
         let mut state = self.state.lock().unwrap();
         let key = state.key(module_name);
         state.status.insert(key, ModuleStatus::Failed);
-        // The failed compile has already printed its diagnostics below the old
-        // frame. Leave that frame where it is and draw the next one under the
-        // diagnostics, so the redraw cannot erase them.
+        self.redraw(&mut state);
+    }
+
+    /// Prints diagnostic text that a tree redraw must not erase. With a live tree,
+    /// the frame is cleared, the text is written, and the next frame is drawn
+    /// below it, all under the lock every redraw takes. Workers compiling in
+    /// parallel can therefore not move the cursor into the middle of the text.
+    pub fn print_diagnostic(&self, text: &str) {
+        if !self.drawing() {
+            eprintln!("{text}");
+            return;
+        }
+        let mut state = self.state.lock().unwrap();
+        if state.drawn_lines > 0 {
+            eprint!("\x1b[{}F\x1b[J", state.drawn_lines);
+        }
+        eprintln!("{text}");
         state.drawn_lines = 0;
         self.redraw(&mut state);
     }
@@ -1316,6 +1340,14 @@ impl<'a> ParallelGraphExecutor<'a> {
         res
     }
 
+    /// Prints a module's diagnostic so the progress tree cannot erase it.
+    fn report(&self, text: &str) {
+        match &self.progress {
+            Some(progress) => progress.print_diagnostic(text),
+            None => eprintln!("{text}"),
+        }
+    }
+
     fn compile_single_module_inner(
         &self,
         node: &ModuleNode,
@@ -1337,16 +1369,12 @@ impl<'a> ParallelGraphExecutor<'a> {
             crate::parser::Parser::new_with_source(tokens, node.source_path.display().to_string());
         let (mut ast, errors) = parser.parse_program();
         if !errors.is_empty() {
-            eprint!("\r\x1b[2K");
             for error in &errors {
-                eprintln!(
-                    "{}",
-                    crate::diagnostics::render(
-                        *error.span(),
-                        &error.to_string(),
-                        crate::diagnostics::Severity::Error,
-                    )
-                );
+                self.report(&crate::diagnostics::render(
+                    *error.span(),
+                    &error.to_string(),
+                    crate::diagnostics::Severity::Error,
+                ));
             }
             return Err(format!("syntax error in {}", node.source_path.display()));
         }
@@ -1372,13 +1400,17 @@ impl<'a> ParallelGraphExecutor<'a> {
         crate::semantic::serialize::synthesize_serialization_for_program(&mut ast);
         let macro_errors = crate::semantic::macro_expand::expand_macros_in_program(&mut ast);
         if !macro_errors.is_empty() {
-            eprint!("\r\x1b[2K");
             for error in &macro_errors {
-                eprintln!("{}", crate::diagnostics::render(
-                    error.span, &error.message, crate::diagnostics::Severity::Error,
+                self.report(&crate::diagnostics::render(
+                    error.span,
+                    &error.message,
+                    crate::diagnostics::Severity::Error,
                 ));
             }
-            return Err(format!("macro expansion failed in {}", node.source_path.display()));
+            return Err(format!(
+                "macro expansion failed in {}",
+                node.source_path.display()
+            ));
         }
 
         let mut symbol_table = crate::symbol_table::CompilerSymbolTable::new();
@@ -1398,16 +1430,12 @@ impl<'a> ParallelGraphExecutor<'a> {
         let (type_errors, monomorphs) = checker.check_program_with_table(&ast, &mut symbol_table);
         checker.lower_lambdas(&mut ast);
         if !type_errors.is_empty() {
-            eprint!("\r\x1b[2K");
             for error in &type_errors {
-                eprintln!(
-                    "{}",
-                    crate::diagnostics::render(
-                        error.span,
-                        &error.message,
-                        crate::diagnostics::Severity::Error,
-                    )
-                );
+                self.report(&crate::diagnostics::render(
+                    error.span,
+                    &error.message,
+                    crate::diagnostics::Severity::Error,
+                ));
             }
             return Err(format!("type errors in {}", node.source_path.display()));
         }
@@ -1443,14 +1471,11 @@ impl<'a> ParallelGraphExecutor<'a> {
         let escape_errors = crate::semantic::escape_check::check_program(&ast);
         if !escape_errors.is_empty() {
             for error in &escape_errors {
-                eprintln!(
-                    "{}",
-                    crate::diagnostics::render(
-                        error.span,
-                        &error.message,
-                        crate::diagnostics::Severity::Error,
-                    )
-                );
+                self.report(&crate::diagnostics::render(
+                    error.span,
+                    &error.message,
+                    crate::diagnostics::Severity::Error,
+                ));
             }
             return Err(format!("escape errors in {}", node.source_path.display()));
         }
@@ -1543,18 +1568,14 @@ impl<'a> ParallelGraphExecutor<'a> {
             Some(&ownership.init_plan),
         )
         .map_err(|e| {
-            eprint!("\r\x1b[2K");
             if let Some(span) = e.span {
-                eprintln!(
-                    "{}",
-                    crate::diagnostics::render(
-                        span,
-                        &e.message,
-                        crate::diagnostics::Severity::Error,
-                    )
-                );
+                self.report(&crate::diagnostics::render(
+                    span,
+                    &e.message,
+                    crate::diagnostics::Severity::Error,
+                ));
             } else {
-                eprintln!("error: {}", e.message);
+                self.report(&format!("error: {}", e.message));
             }
             format!(
                 "LLVM codegen error in {}: {}",
