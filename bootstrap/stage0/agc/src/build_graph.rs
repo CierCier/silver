@@ -589,6 +589,9 @@ pub struct BuildProgress {
 
 struct TreeState {
     roots: Vec<String>,
+    /// The driver reports a root by its file stem. This maps that name to the
+    /// graph key; the two differ when the stem is not valid UTF-8.
+    root_alias: HashMap<String, String>,
     deps: HashMap<String, Vec<String>>,
     status: HashMap<String, ModuleStatus>,
     linking: Option<String>,
@@ -596,14 +599,32 @@ struct TreeState {
     drawn_lines: usize,
 }
 
+impl TreeState {
+    fn key(&self, name: &str) -> String {
+        match self.root_alias.get(name) {
+            Some(module) if !self.deps.contains_key(name) => module.clone(),
+            _ => name.to_string(),
+        }
+    }
+}
+
+/// One drawn tree row. Failed rows are kept when the tree is clipped.
+struct TreeLine {
+    text: String,
+    failed: bool,
+}
+
 impl BuildProgress {
     /// `root_inputs` name the build targets; they are the tree's top nodes.
+    /// `with_dependencies` is false when the parallel executor will not run, so
+    /// dependencies never report progress and are left out of the tree.
     pub fn new(
         graph: &DependencyGraph,
         root_inputs: &[PathBuf],
         total_steps: usize,
         enabled: bool,
         verbose: bool,
+        with_dependencies: bool,
     ) -> Self {
         use std::io::IsTerminal;
         let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
@@ -615,10 +636,33 @@ impl BuildProgress {
             .map(|node| node.module_path.clone())
             .collect();
         roots.sort();
+        let mut root_alias = HashMap::default();
+        for input in root_inputs {
+            let stem = input
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("input");
+            let wanted = canonical(input);
+            if let Some(node) = graph
+                .nodes
+                .values()
+                .find(|node| canonical(&node.source_path) == wanted)
+            {
+                root_alias.insert(stem.to_string(), node.module_path.clone());
+            }
+        }
         let deps = graph
             .nodes
             .values()
-            .map(|node| (node.module_path.clone(), node.dependencies.clone()))
+            .filter(|node| with_dependencies || roots.contains(&node.module_path))
+            .map(|node| {
+                let dependencies = if with_dependencies {
+                    node.dependencies.clone()
+                } else {
+                    Vec::new()
+                };
+                (node.module_path.clone(), dependencies)
+            })
             .collect();
         Self {
             total_steps,
@@ -629,6 +673,7 @@ impl BuildProgress {
             start_time: std::time::Instant::now(),
             state: Mutex::new(TreeState {
                 roots,
+                root_alias,
                 deps,
                 status: HashMap::default(),
                 linking: None,
@@ -648,9 +693,8 @@ impl BuildProgress {
         }
         if self.tree_mode() {
             let mut state = self.state.lock().unwrap();
-            state
-                .status
-                .insert(module_name.to_string(), ModuleStatus::Building);
+            let key = state.key(module_name);
+            state.status.insert(key, ModuleStatus::Building);
             self.redraw(&mut state);
         } else if self.verbose {
             use owo_colors::OwoColorize;
@@ -682,7 +726,8 @@ impl BuildProgress {
         };
         if self.tree_mode() {
             let mut state = self.state.lock().unwrap();
-            state.status.insert(module_name.to_string(), status);
+            let key = state.key(module_name);
+            state.status.insert(key, status);
             self.redraw(&mut state);
             return;
         }
@@ -708,13 +753,17 @@ impl BuildProgress {
 
     /// Marks a module whose compile failed, so the tree shows the failure.
     pub fn on_fail(&self, module_name: &str) {
-        if self.tree_mode() {
-            let mut state = self.state.lock().unwrap();
-            state
-                .status
-                .insert(module_name.to_string(), ModuleStatus::Failed);
-            self.redraw(&mut state);
+        if !self.enabled || !self.tree_mode() {
+            return;
         }
+        let mut state = self.state.lock().unwrap();
+        let key = state.key(module_name);
+        state.status.insert(key, ModuleStatus::Failed);
+        // The failed compile has already printed its diagnostics below the old
+        // frame. Leave that frame where it is and draw the next one under the
+        // diagnostics, so the redraw cannot erase them.
+        state.drawn_lines = 0;
+        self.redraw(&mut state);
     }
 
     pub fn on_link(&self, target_path: &Path) {
@@ -788,7 +837,15 @@ impl BuildProgress {
     /// Rewrites the tree in place. Called under the state lock so that events
     /// from parallel compile workers cannot interleave.
     fn redraw(&self, state: &mut TreeState) {
-        let lines = self.render(state);
+        // A frame taller than the terminal cannot be erased, and a line wider than
+        // it wraps and miscounts rows; either leaves copies in scrollback. Leave
+        // room for the header, the footer, and the cursor's row.
+        let size = terminal_size();
+        let max_tree_lines = size.map_or(20, |(rows, _)| rows.saturating_sub(3).max(3));
+        let mut lines = self.render(state, max_tree_lines);
+        if let Some((_, columns)) = size {
+            lines = lines.iter().map(|line| clip_line(line, columns)).collect();
+        }
         let mut out = String::new();
         if state.drawn_lines > 0 {
             out.push_str(&format!("\x1b[{}F\x1b[J", state.drawn_lines));
@@ -802,12 +859,11 @@ impl BuildProgress {
         let _ = std::io::Write::flush(&mut std::io::stderr());
     }
 
-    fn render(&self, state: &TreeState) -> Vec<String> {
+    fn render(&self, state: &TreeState, max_tree_lines: usize) -> Vec<String> {
         use owo_colors::OwoColorize;
         let mut lines = vec![format!("{}", "┏━ Dependency Graph".bold())];
         let mut emitted = HashSet::default();
-        let mut finished = HashMap::default();
-        let mut tree = Vec::new();
+        let mut tree: Vec<TreeLine> = Vec::new();
         // Roots first so their dependencies sit above them. Units no root reaches
         // are listed after them, but only while unfinished; the footer counts the rest.
         let mut unreached: Vec<&String> = state
@@ -817,30 +873,38 @@ impl BuildProgress {
             .collect();
         unreached.sort();
         for name in state.roots.iter().chain(unreached) {
-            if !state.roots.contains(name) && self.closure_finished(state, name, &mut finished) {
+            if !state.roots.contains(name) && self.closure_finished(state, name) {
                 continue;
             }
-            self.push_subtree(
-                state,
-                name,
-                "",
-                "",
-                "",
-                &mut emitted,
-                &mut finished,
-                &mut tree,
-            );
+            self.push_subtree(state, name, "", "", "", &mut emitted, &mut tree);
         }
 
-        // A frame taller than the terminal cannot be erased, and each redraw would
-        // leave a copy in scrollback. Keep the most recent lines and say what is hidden.
-        const MAX_TREE_LINES: usize = 20;
-        if tree.len() > MAX_TREE_LINES {
-            let hidden = tree.len() - (MAX_TREE_LINES - 1);
-            tree.drain(..hidden);
+        if tree.len() > max_tree_lines {
+            // Hide the oldest rows first, but never a failed one: the footer counts
+            // failures, and the tree must still say which module failed.
+            let room = max_tree_lines.saturating_sub(1);
+            let failed = tree.iter().filter(|line| line.failed).count();
+            let mut spare = room.saturating_sub(failed);
+            let mut keep = vec![false; tree.len()];
+            for (index, line) in tree.iter().enumerate().rev() {
+                if line.failed {
+                    keep[index] = true;
+                } else if spare > 0 {
+                    keep[index] = true;
+                    spare -= 1;
+                }
+            }
+            let hidden = keep.iter().filter(|kept| !**kept).count();
             lines.push(format!("┃ … {hidden} more"));
+            lines.extend(
+                tree.into_iter()
+                    .zip(keep)
+                    .filter(|(_, kept)| *kept)
+                    .map(|(line, _)| line.text),
+            );
+        } else {
+            lines.extend(tree.into_iter().map(|line| line.text));
         }
-        lines.extend(tree);
 
         let (mut building, mut done, mut failed) = (0, 0, 0);
         for status in state.status.values() {
@@ -877,14 +941,13 @@ impl BuildProgress {
         connector: &str,
         child_prefix: &str,
         emitted: &mut HashSet<String>,
-        finished: &mut HashMap<String, bool>,
-        out: &mut Vec<String>,
+        out: &mut Vec<TreeLine>,
     ) {
         if !emitted.insert(name.to_string()) {
             return;
         }
         let is_root = connector.is_empty();
-        let collapsed = !is_root && self.closure_finished(state, name, finished);
+        let collapsed = !is_root && self.closure_finished(state, name);
         // Only units are drawn; a direct import that is not a unit has no status.
         let deps: Vec<String> = if collapsed {
             Vec::new()
@@ -913,7 +976,6 @@ impl BuildProgress {
                 dep_connector,
                 &next_prefix,
                 emitted,
-                finished,
                 out,
             );
         }
@@ -923,40 +985,36 @@ impl BuildProgress {
         } else {
             None
         };
-        out.push(format!(
-            "┃ {prefix}{connector}{}",
-            node_text(
-                state.status.get(name).copied(),
-                name,
-                self.spinner_frame(),
-                extra.as_deref()
-            )
-        ));
+        let status = state.status.get(name).copied();
+        out.push(TreeLine {
+            text: format!(
+                "┃ {prefix}{connector}{}",
+                node_text(status, name, self.spinner_frame(), extra.as_deref())
+            ),
+            failed: matches!(status, Some(ModuleStatus::Failed)),
+        });
     }
 
-    fn closure_finished(
-        &self,
-        state: &TreeState,
-        name: &str,
-        memo: &mut HashMap<String, bool>,
-    ) -> bool {
-        if let Some(&known) = memo.get(name) {
-            return known;
+    /// True when the module and everything it depends on are done. The walk keeps
+    /// a visited set, so a dependency cycle ends instead of overflowing the stack,
+    /// and a cycle whose modules are all done counts as finished.
+    fn closure_finished(&self, state: &TreeState, name: &str) -> bool {
+        let mut seen: HashSet<&str> = HashSet::default();
+        let mut stack = vec![name];
+        while let Some(current) = stack.pop() {
+            if !seen.insert(current) {
+                continue;
+            }
+            if !matches!(state.status.get(current), Some(ModuleStatus::Done { .. })) {
+                return false;
+            }
+            for dep in state.deps.get(current).into_iter().flatten() {
+                if state.deps.contains_key(dep) {
+                    stack.push(dep);
+                }
+            }
         }
-        // Module graphs can contain cycles. Mark the module unfinished before
-        // recursing so a cycle returns instead of overflowing the stack.
-        memo.insert(name.to_string(), false);
-        let own_done = matches!(state.status.get(name), Some(ModuleStatus::Done { .. }));
-        let result = own_done
-            && state
-                .deps
-                .get(name)
-                .into_iter()
-                .flatten()
-                .filter(|dep| state.deps.contains_key(*dep))
-                .all(|dep| self.closure_finished(state, dep, memo));
-        memo.insert(name.to_string(), result);
-        result
+        true
     }
 
     fn closure_size(&self, state: &TreeState, name: &str) -> usize {
@@ -1001,6 +1059,64 @@ fn node_text(
         ),
         ModuleStatus::Failed => format!("{} {}{extra}", "[!]".red().bold(), name.bold()),
     }
+}
+
+/// Rows and columns of the terminal on stderr, when it can be queried.
+#[cfg(unix)]
+fn terminal_size() -> Option<(usize, usize)> {
+    // SAFETY: TIOCGWINSZ only writes a `winsize` into the struct passed to it.
+    let size = unsafe {
+        let mut size: libc::winsize = std::mem::zeroed();
+        if libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ, &mut size) != 0 {
+            return None;
+        }
+        size
+    };
+    (size.ws_row > 0 && size.ws_col > 0).then_some((size.ws_row as usize, size.ws_col as usize))
+}
+
+#[cfg(not(unix))]
+fn terminal_size() -> Option<(usize, usize)> {
+    None
+}
+
+/// Cuts `line` to `width` visible characters and marks the cut with `…`. Color
+/// sequences are kept whole and do not count toward the width.
+fn clip_line(line: &str, width: usize) -> String {
+    let mut tokens: Vec<(bool, String)> = Vec::new();
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            let mut sequence = String::from(c);
+            for next in chars.by_ref() {
+                sequence.push(next);
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            tokens.push((true, sequence));
+        } else {
+            tokens.push((false, c.to_string()));
+        }
+    }
+    let visible = tokens.iter().filter(|(escape, _)| !escape).count();
+    if visible <= width {
+        return line.to_string();
+    }
+    let keep = width.saturating_sub(1);
+    let mut shown = 0;
+    let mut out = String::new();
+    for (escape, text) in tokens {
+        if escape {
+            out.push_str(&text);
+        } else if shown < keep {
+            out.push_str(&text);
+            shown += 1;
+        }
+    }
+    out.push('…');
+    out.push_str("\x1b[0m");
+    out
 }
 
 // ===========================================================================

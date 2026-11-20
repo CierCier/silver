@@ -1593,21 +1593,28 @@ pub fn run(cli: Cli) {
                     0
                 }
                 + if has_link_step { 1 } else { 0 };
+            // Only the parallel executor reports dependency progress; without it the
+            // progress tree would show every dependency as waiting for the whole build.
+            let executor_store = if !plan.no_cache
+                && reused.is_none()
+                && matches!(plan.emit, EmitKind::Exe | EmitKind::Obj)
+            {
+                loader.cache_store.as_ref()
+            } else {
+                None
+            };
             let progress = std::sync::Arc::new(crate::build_graph::BuildProgress::new(
                 &dep_graph,
                 &plan.inputs,
                 total_steps,
                 progress_enabled,
                 plan.verbose,
+                executor_store.is_some(),
             ));
 
             let mut cached_count = 0;
             let mut compiled_count = 0;
-            if !plan.no_cache
-                && reused.is_none()
-                && matches!(plan.emit, EmitKind::Exe | EmitKind::Obj)
-                && let Some(store) = &loader.cache_store
-            {
+            if let Some(store) = executor_store {
                 let executor = crate::build_graph::ParallelGraphExecutor::new(
                     &dep_graph,
                     &loader,
@@ -2391,6 +2398,9 @@ pub fn run(cli: Cli) {
                                 }
                             }
                             if let Err(error) = result {
+                                if let Some(p) = &active_progress {
+                                    p.on_fail(stem);
+                                }
                                 if let Some(span) = error.span {
                                     eprintln!(
                                         "{}",
@@ -2597,6 +2607,9 @@ pub fn run(cli: Cli) {
                             match result {
                                 Ok(paths) => root_objects = paths,
                                 Err(error) => {
+                                    if let Some(p) = &active_progress {
+                                        p.on_fail(stem);
+                                    }
                                     if let Some(span) = error.span {
                                         eprintln!(
                                             "{}",

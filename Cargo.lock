@@ -12,6 +12,7 @@ dependencies = [
  "elise-lex",
  "elise-parse",
  "inkwell",
+ "libc",
  "llvm-sys",
  "mimalloc",
  "owo-colors",
