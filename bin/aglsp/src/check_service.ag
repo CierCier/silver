@@ -1,0 +1,171 @@
+import tooling.diagnostics;
+import tooling.index;
+import transport;
+import std.channel;
+import std.env;
+import std.mem.alloc;
+import std.thread;
+
+// Semantic checks run on persistent worker threads that own everything they
+// read. A job carries copies of the file texts, and each worker parses its own
+// trees, so a worker never touches memory the dispatcher can free or change.
+
+/// Parsed-tree bytes (source size) each worker keeps between checks. Imports
+/// such as `std` rarely change, so most of a check's parsing is a cache hit.
+const i64 TREE_CACHE_BYTES = 4194304;
+
+/// One file of a check job.
+struct CheckSource { String path; String text; i64 text_hash; }
+
+/// One file check. `files[0]` is the checked file; the rest are its imports in
+/// the depth-first order the checker expects.
+struct CheckJob {
+    i64 doc_id;
+    // Persisted-cache key when queued; the result is stored under it.
+    String key;
+    // Import-closure fingerprint when queued; a result is stale once it differs.
+    i64 fingerprint;
+    Vec<CheckSource> files;
+    Vec<String> include_dirs;
+}
+
+/// A finished check, identified by the job's document and fingerprint.
+struct CheckResult { i64 doc_id; String key; i64 fingerprint; DiagnosticBag diagnostics; }
+
+/// Channels between the dispatcher and the workers. Workers block on `jobs`
+/// while idle; closing it ends them.
+/// Shared with the workers: both channels are thread-safe, `stopping` is
+/// atomic, and `transport` is used only for `wake`, which is atomic and
+/// channel based.
+#[safe]
+struct CheckService {
+    Channel<CheckJob> jobs;
+    Channel<CheckResult> results;
+    Transport* transport;
+    i32 stopping;
+}
+
+impl CheckService {
+    /// Creates a service that wakes `transport`'s dispatcher after each result.
+    CheckService new(Transport* transport) {
+        CheckService service; service.jobs = Channel<CheckJob>.new(); service.results = Channel<CheckResult>.new();
+        service.transport = transport; __atomic_store_i32(&service.stopping, 0, ATOMIC_RELEASE);
+        return move service;
+    }
+
+    /// Ends the workers: queued jobs are skipped and idle workers return.
+    /// A job already running finishes first.
+    void stop(CheckService* self) {
+        __atomic_store_i32(&self.stopping, 1, ATOMIC_RELEASE);
+        self.jobs.close(); self.results.close();
+    }
+}
+
+impl Drop for CheckService {
+    void drop(*self) { self.jobs.destroy(); self.results.destroy(); }
+}
+
+/// One parsed file kept between checks.
+struct CachedTree { String path; i64 text_hash; i64 bytes; IdeIndex index; }
+
+/// A worker's private parsed-tree cache, oldest entries first. Entries are
+/// heap allocated so tree pointers survive later lookups; `trim` is the only
+/// call that frees one.
+struct TreeCache { Vec<CachedTree*> entries; i64 bytes; i64 limit; }
+
+impl TreeCache {
+    /// Creates an empty cache holding up to `limit` source bytes.
+    TreeCache new(i64 limit) {
+        TreeCache cache; cache.entries = Vec<CachedTree*>.new(); cache.bytes = 0; cache.limit = limit;
+        return move cache;
+    }
+
+    /// Returns the tree of `file`, parsing it on a miss, and marks it newest.
+    /// Parsing is the dispatcher's own (`IdeIndex.new`), so trees match.
+    CachedTree* get(TreeCache* self, CheckSource* file) {
+        i64 i = self.entries.len() - 1;
+        while (i >= 0) {
+            CachedTree* entry = self.entries.get(i);
+            if (entry.text_hash == file.text_hash && entry.path.equals(file.path.to_str())) {
+                self.entries.take(i); self.entries.push(entry);
+                return entry;
+            }
+            i -= 1;
+        }
+        CachedTree* entry = alloc<CachedTree>(1);
+        entry.path = file.path.clone(); entry.text_hash = file.text_hash; entry.bytes = file.text.len();
+        entry.index = IdeIndex.new(file.text.to_str());
+        self.entries.push(entry); self.bytes += entry.bytes;
+        return entry;
+    }
+
+    /// Evicts the oldest entries until the cache fits its limit. Call between
+    /// jobs: it invalidates tree pointers from earlier lookups.
+    void trim(TreeCache* self) {
+        while (self.bytes > self.limit && self.entries.len() > 0) {
+            CachedTree* oldest = self.entries.take(0);
+            self.bytes -= oldest.bytes;
+            // `@drop_in_place` would skip the index's destructor; moving the
+            // fields into locals drops them at the end of this iteration.
+            IdeIndex _index = move oldest.index; String _path = move oldest.path;
+            free(oldest);
+        }
+    }
+}
+
+impl Drop for TreeCache {
+    void drop(*self) {
+        self.limit = 0; self.trim();
+    }
+}
+
+/// Checks the job's file against its imports. The result owns its messages.
+CheckResult run_check(TreeCache* cache, CfgSet* cfg, CheckJob* job) {
+    CachedTree* source = cache.get(job.files.get_ptr(0));
+    Vec<SyntaxTree*> dependencies = Vec<SyntaxTree*>.new();
+    i64 i = 1;
+    while (i < job.files.len()) {
+        CachedTree* dependency = cache.get(job.files.get_ptr(i));
+        dependencies.push(&dependency.index.tree); i += 1;
+    }
+    CheckResult result; result.doc_id = job.doc_id; result.key = job.key.clone(); result.fingerprint = job.fingerprint;
+    result.diagnostics = check_snapshot_diagnostics(&source.index.tree, &dependencies, cfg,
+                                                    job.files.get_ptr(0).path.to_str(), &job.include_dirs);
+    return move result;
+}
+
+/// Worker body: runs queued jobs until the service stops. Launched with a
+/// borrow of the service. Reads only the job it owns and its private cache.
+void check_worker(&CheckService shared) {
+    CheckService* service = shared;
+    CfgSet cfg = linux_defaults();
+    TreeCache cache = TreeCache.new(TREE_CACHE_BYTES);
+    while (true) {
+        Optional<CheckJob> next = service.jobs.recv();
+        if (!next.is_some()) { return; }
+        CheckJob job = next.unwrap();
+        if (__atomic_load_i32(&service.stopping, ATOMIC_ACQUIRE) != 0) { return; }
+        CheckResult result = run_check(&cache, &cfg, &job);
+        cache.trim();
+        service.results.send(move result);
+        service.transport.wake();
+    }
+}
+
+/// `AGLSP_JOBS` when set; otherwise half the CPUs this process may use, so the
+/// editor keeps cores while a cold workspace check runs. At most 32, within
+/// the runtime's thread registry.
+i64 check_worker_count() {
+    i64 count = thread_available_parallelism() / 2;
+    Optional<String> configured = var("AGLSP_JOBS");
+    if (configured.is_some()) {
+        String text = configured.unwrap(); i64 value = 0; i64 i = 0;
+        while (i < text.len() && text.data[i] >= (u8)'0' && text.data[i] <= (u8)'9') {
+            value = value * 10 + (i64)(text.data[i] - (u8)'0'); i += 1;
+        }
+        if (i == text.len() && value > 0) { count = value; }
+    }
+    if (count > 32) { count = 32; }
+    if (count < 1) { count = 1; }
+    return count;
+}

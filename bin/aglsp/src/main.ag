@@ -4,6 +4,8 @@ import std.env;
 import std.path;
 import document;
 import diagnostics;
+import check_service;
+import check_scheduler;
 import symbols;
 import format;
 import completion;
@@ -31,9 +33,7 @@ struct ServerState {
     bool shutdown;
     i64 trace;
     bool index_progress;
-    // A workspace diagnostic pull yielded to other messages; ask the client to
-    // pull again once the queue and background index are idle.
-    bool diagnostics_yielded;
+    CheckScheduler checks;
     Transport* transport_ptr;
 }
 
@@ -43,11 +43,9 @@ void begin_index_session(ServerState* state) {
     __atomic_store_i32(&state.transport_ptr.index_cancelled, 0, ATOMIC_RELEASE);
 }
 
-/// Tells the client analysis changed: pushes diagnostics, or asks pull
-/// clients to refresh.
+/// Asks the client to refresh what analysis changed. Diagnostics are not
+/// part of it: background checks deliver those when they finish.
 void notify_analysis_change(ServerState* state) {
-    if (!state.client.pull_diagnostics) { publish_open_diagnostics(&state.store, &state.client); }
-    else if (state.client.diagnostic_refresh) { state.requests.refresh(ClientRequestKind.DiagnosticRefresh); }
     if (state.client.semantic_refresh) { state.requests.refresh(ClientRequestKind.SemanticRefresh); }
     if (state.client.inlay_refresh) { state.requests.refresh(ClientRequestKind.InlayHintRefresh); }
     if (state.client.code_lens_refresh) { state.requests.refresh(ClientRequestKind.CodeLensRefresh); }
@@ -112,7 +110,7 @@ void handle_document_request(DocumentStore* store, WorkspaceIndex* index, Client
         || (client.semantic.range && strcmp(method, "textDocument/semanticTokens/range") == 0)
         || strcmp(method, "textDocument/foldingRange") == 0 || strcmp(method, "textDocument/selectionRange") == 0
         || strcmp(method, "textDocument/inlayHint") == 0 || strcmp(method, "textDocument/codeLens") == 0;
-    supported = supported || strcmp(method, "textDocument/diagnostic") == 0 || strcmp(method, "textDocument/documentLink") == 0;
+    supported = supported || strcmp(method, "textDocument/documentLink") == 0;
     supported = supported || (client.code_action_literals && strcmp(method, "textDocument/codeAction") == 0);
     if (!supported) { complete_error(pending, message.id_raw.to_str(), -32601, "Method not found"); return; }
     bool valid = positioned ? parse_position_params(params, &uri, &line, &column) : parse_document_uri_param(params, &uri);
@@ -175,13 +173,6 @@ void handle_document_request(DocumentStore* store, WorkspaceIndex* index, Client
     else if (strcmp(method, "textDocument/documentLink") == 0) { result = compute_document_links(store, doc, client.document_link_tooltips); }
     else if (strcmp(method, "textDocument/codeAction") == 0) {
         result = compute_code_actions(store, doc, action_range, actions_allowed, refactors_allowed, client, pending);
-    }
-    else if (strcmp(method, "textDocument/diagnostic") == 0) {
-        String previous = String.new();
-        if (!diagnostic_identifier(params) || !previous_diagnostic_result(params, &previous)) {
-            complete_error(pending, message.id_raw.to_str(), -32602, "Invalid diagnostic report parameters"); return;
-        }
-        result = compute_document_diagnostics(doc, store, client, previous.to_str());
     }
     else if (strcmp(method, "textDocument/formatting") == 0 || strcmp(method, "textDocument/rangeFormatting") == 0
         || strcmp(method, "textDocument/rangesFormatting") == 0 || strcmp(method, "textDocument/onTypeFormatting") == 0) {
@@ -294,6 +285,30 @@ void handle_open_document_command(ServerState* state, PendingMessage* pending, J
     state.requests.show_document_request(uri.to_str(), range_raw.to_str(), id);
 }
 
+/// textDocument/diagnostic: answers a clean document at once. A dirty one
+/// parks the request until its background check lands; the dispatcher keeps
+/// serving other messages, and a newer edit or a cancel answers it sooner.
+void handle_document_diagnostic(ServerState* state, PendingMessage* pending, JsonRpcMessage* message) {
+    str params = message.params_json.to_str(); str id = message.id_raw.to_str();
+    DocumentStore* store = &state.store;
+    String uri = String.new();
+    if (!parse_document_uri_param(params, &uri)) { complete_error(pending, id, -32602, "Invalid document parameters"); return; }
+    Document* doc = store.get(uri.to_str());
+    if (doc == (Document*)0) {
+        String path = document_path(uri.to_str());
+        if (path.len() > 0) { doc = store.load(path.to_str()); store.refresh_imports(); }
+    }
+    if (doc == (Document*)0) { complete_error(pending, id, -32602, "Document not found"); return; }
+    String previous = String.new();
+    if (!diagnostic_identifier(params) || !previous_diagnostic_result(params, &previous)) {
+        complete_error(pending, id, -32602, "Invalid diagnostic report parameters"); return;
+    }
+    String key = String.new();
+    if (!state.checks.reconcile(doc, &key, false)) { state.checks.park_document_pull(pending, id, doc, previous.to_str()); return; }
+    String out = String.new(); append_diagnostic_report(&out, doc, previous.to_str(), false);
+    complete_response(pending, id, out.to_str());
+}
+
 /// Returns -1 to continue, or the exit status after an exit notification.
 i32 dispatch_message(ServerState* state, PendingMessage* pending) {
         DocumentStore* store = &state.store; WorkspaceIndex* index = &state.index;
@@ -331,7 +346,7 @@ i32 dispatch_message(ServerState* state, PendingMessage* pending) {
             if (message.has_id) { complete_error(pending, message.id_raw.to_str(), -32002, "Server not initialized"); }
         } else if (strcmp(method, "shutdown") == 0 && message.has_id) {
             if (client.telemetry) { send_telemetry("{\"event\":\"shutdown\",\"server\":\"aglsp\"}"); }
-            *shutdown = true; seal_message(pending, false); send_response(message.id_raw.to_str(), "null");
+            *shutdown = true; state.checks.cancel_all(); seal_message(pending, false); send_response(message.id_raw.to_str(), "null");
         } else if (message.has_id && request_cancelled(pending)) { complete_error(pending, message.id_raw.to_str(), -32800, "Request cancelled"); }
         else if (strcmp(method, "initialized") == 0) {
             begin_index_session(state);
@@ -366,11 +381,15 @@ i32 dispatch_message(ServerState* state, PendingMessage* pending) {
             String uri = String.new();
             if (apply_document_changes(store, params, &uri)) {
                 store.refresh_imports(); notify_analysis_change(state);
+                Document* changed = store.get(uri.to_str());
+                if (changed != (Document*)0) { state.checks.answer_stale(changed); }
             }
         } else if (strcmp(method, "textDocument/didClose") == 0) {
             String uri = String.new();
             if (parse_document_uri_param(params, &uri)) {
+                Document* closed = store.get(uri.to_str());
                 store.close(uri.to_str()); store.refresh_imports();
+                if (closed != (Document*)0) { state.checks.answer_stale(closed); }
                 if (store.discover_open_projects && index.manifests.len() > 0) { begin_index_session(state); *index = workspace_index(store); }
                 if (!client.pull_diagnostics) { publish_empty_diagnostics(uri.to_str()); }
                 notify_analysis_change(state);
@@ -384,10 +403,12 @@ i32 dispatch_message(ServerState* state, PendingMessage* pending) {
                     if (client.save_include_text && json_string(params, "text", &saved) && !saved.equals(doc.text.to_str())) {
                         doc = store.set(uri.to_str(), saved.to_str(), doc.version + 1, true);
                         store.refresh_imports(); notify_analysis_change(state);
+                        if (doc != (Document*)0) { state.checks.answer_stale(doc); }
                     }
                     if (doc != (Document*)0) {
-                        if (!client.pull_diagnostics) { publish_file_diagnostics(doc, store, client); }
-                        else if (client.diagnostic_refresh) { state.requests.refresh(ClientRequestKind.DiagnosticRefresh); }
+                        // Push clients get a current report now, or when its check lands.
+                        if (!client.pull_diagnostics) { if (!doc.diagnostics_dirty) { publish_diagnostics(doc, client); } }
+                        else { state.checks.refresh_due = true; }
                     }
                 }
             }
@@ -470,13 +491,8 @@ i32 dispatch_message(ServerState* state, PendingMessage* pending) {
             if (!diagnostic_identifier(params) || !parse_previous_diagnostics(params, &previous)) {
                 complete_error(pending, message.id_raw.to_str(), -32602, "Invalid workspace diagnostic parameters");
             } else {
-                pending.yields = true;
-                if (index_request_workspace(store, index, pending)) {
-                    String result = compute_workspace_diagnostics(store, client, &previous, pending);
-                    complete_response(pending, message.id_raw.to_str(), result.to_str());
-                } else { complete_response(pending, message.id_raw.to_str(), "null"); }
-                if (pending.completion == RequestCompletion.Interrupted) { state.diagnostics_yielded = true; }
-                state.transport_ptr.status.pull_pending = pending.completion == RequestCompletion.Interrupted;
+                // Answered once indexing and background checks are quiescent.
+                state.checks.park_workspace_pull(pending, message.id_raw.to_str(), move previous);
             }
         }
         else if (strcmp(method, "workspace/symbol") == 0 && message.has_id) {
@@ -568,6 +584,7 @@ i32 dispatch_message(ServerState* state, PendingMessage* pending) {
                     complete_response(pending, message.id_raw.to_str(), result.to_str());
                 }
             }
+            else if (strcmp(method, "textDocument/diagnostic") == 0) { handle_document_diagnostic(state, pending, &message); }
             else { handle_document_request(store, index, client, &message, pending); }
         }
         return -1;
@@ -606,19 +623,40 @@ i32 main() {
     }
     ServerState state; state.store = DocumentStore.new(); state.index.paths = Vec<IndexPath>.new();
     state.client = client_options("{}"); state.initialized = false; state.shutdown = false;
-    state.trace = 0; state.index_progress = false; state.diagnostics_yielded = false;
+    state.trace = 0; state.index_progress = false;
     state.requests = ClientRequests.new();
     Transport transport = Transport.new();
     state.transport_ptr = &transport;
+    CheckService checks = CheckService.new(&transport);
+    i64 workers = check_worker_count();
+    state.checks = CheckScheduler.new(&state.store, &state.client, &state.index, &checks, &transport, workers);
     Task<void> reader = launch read_transport(&transport);
     if (!reader.started()) { return 1; }
+    // Persistent check workers block on the job channel while idle. The first
+    // must start, or no pull could ever be answered.
+    Task<void> first = launch check_worker(&checks);
+    if (!first.started()) { return 1; }
+    Vec<Task<void>> more = Vec<Task<void>>.new();
+    for (i64 w = 1; w < workers; w += 1) { more.push(launch check_worker(&checks)); }
     i32 status = 1;
     while (true) {
+        // Results first: a wake-up marker can be lost on a full queue, and a
+        // blocked dispatcher is only safe if nothing is left to drain.
+        state.checks.drain();
+        state.checks.settle();
         Optional<PendingMessage*> next = transport.messages.try_recv();
         if (!next.is_some() && transport.messages.is_closed()) {
             // The reader can enqueue and close between the first receive and this check.
             next = transport.messages.try_recv();
             if (!next.is_some()) { status = state.shutdown ? 0 : 1; break; }
+        }
+        if (!next.is_some()) {
+            state.checks.schedule();
+            state.checks.settle();
+            if (state.checks.refresh_due && !state.shutdown) {
+                state.checks.refresh_due = false;
+                if (state.client.diagnostic_refresh) { state.requests.refresh(ClientRequestKind.DiagnosticRefresh); }
+            }
         }
         if (!next.is_some() && !state.shutdown
             && (state.index.paths.len() > 0 || state.index_progress)) {
@@ -652,27 +690,23 @@ i32 main() {
             }
             continue;
         }
-        if (!next.is_some() && state.diagnostics_yielded) {
-            state.diagnostics_yielded = false;
-            if (state.client.diagnostic_refresh && !state.shutdown) { state.requests.refresh(ClientRequestKind.DiagnosticRefresh); }
-            // `status` is dispatcher-only; write it through the dispatcher's
-            // pointer while the reader borrows the transport.
-            else { state.transport_ptr.status.pull_pending = false; }
-            continue;
-        }
-        // Idle: no queued message, no index work, no unfinished project check.
-        if (!next.is_some() && transport.status.busy && !transport.status.pull_pending) {
+        // Idle: no queued message, no index work, no unfinished check.
+        if (!next.is_some() && state.checks.outstanding == 0 && transport.status.busy) {
             report_ready(&state.store, &transport.status);
         }
         if (!next.is_some()) { next = transport.messages.recv(); }
         if (!next.is_some()) { status = state.shutdown ? 0 : 1; break; }
         PendingMessage* pending = next.unwrap();
+        if (transport.is_wake(pending)) { transport.take_wake(); continue; }
         i32 result = dispatch_message(&state, pending);
-        finish_progress(pending);
-        release_message(&transport, pending);
+        // A parked diagnostic pull stays pending until its report is ready.
+        if (!state.checks.holds(pending)) {
+            finish_progress(pending);
+            release_message(&transport, pending);
+        }
         state.store.compact_closed();
         if (result >= 0) { status = result; break; }
     }
-    transport.stop(); wait reader;
+    transport.stop(); checks.stop(); wait reader;
     return status;
 }

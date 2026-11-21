@@ -26,9 +26,6 @@ struct PendingMessage {
     // Analysis flags belong to the dispatcher; sealing excludes reader cancels.
     bool preemptible;
     bool pressure_interrupted;
-    // Background work (workspace diagnostics) stops for any queued message so
-    // hovers and edits are not stuck behind a whole-workspace scan.
-    bool yields;
     bool sealed;
     RequestCompletion completion;
     // Completion generation this request was queued in; a newer generation
@@ -43,8 +40,6 @@ struct ServerStatus {
     bool enabled;
     bool busy;
     String last;
-    // A workspace diagnostic pull yielded and its retry has not finished.
-    bool pull_pending;
     // Latest finished workspace diagnostic pull, for the idle summary (-1: none).
     i64 checked;
     i64 failing;
@@ -54,7 +49,7 @@ impl ServerStatus {
     /// Creates a disabled status reporter.
     ServerStatus new() {
         ServerStatus status; status.enabled = false; status.busy = false; status.last = String.new();
-        status.pull_pending = false; status.checked = -1; status.failing = 0; return move status;
+        status.checked = -1; status.failing = 0; return move status;
     }
 
     /// Sends `experimental/serverStatus` when enabled and the message changed.
@@ -84,6 +79,10 @@ struct Transport {
     // workDoneProgress/cancel for it stops background indexing.
     String index_identity;
     i32 index_cancelled;
+    // Queued in `messages` to wake a dispatcher blocked in `recv`; never
+    // released, never in `pending`. `wake_queued` keeps at most one in the queue.
+    PendingMessage* wake_marker;
+    i32 wake_queued;
     // Dispatcher-only, like stdout.
     ServerStatus status;
 }
@@ -110,8 +109,7 @@ bool request_cancelled(PendingMessage* message) {
 }
 
 /// Returns true when a preemptible request should stop: cancelled, a newer
-/// completion request arrived, the reader is blocked on a full queue, or
-/// (for yielding work) any message is waiting.
+/// completion request arrived, or the reader is blocked on a full queue.
 bool request_interrupted(PendingMessage* message) {
     if (request_cancelled(message)) { return true; }
     if (!message.preemptible) { return false; }
@@ -124,7 +122,6 @@ bool request_interrupted(PendingMessage* message) {
         message.pressure_interrupted = true;
     }
     if (__atomic_load_i32(&transport.reader_waiting, ATOMIC_ACQUIRE) != 0) { message.pressure_interrupted = true; }
-    if (message.yields && transport.messages.len() > 0) { message.pressure_interrupted = true; }
     return message.pressure_interrupted;
 }
 
@@ -208,14 +205,17 @@ void read_transport(&Transport shared) {
         bool progress_cancel = parsed.method.equals("window/workDoneProgress/cancel");
         if (valid && !parsed.has_id && (request_cancel || progress_cancel)) {
             String raw = json_field(parsed.params_json.to_str(), request_cancel ? "id" : "token"); String id = request_identity(raw.to_str());
-            transport.mutex.lock(); i64 i = 0;
+            transport.mutex.lock(); i64 i = 0; bool marked = false;
             while (id.len() > 0 && i < transport.pending.len()) {
                 PendingMessage* pending = transport.pending.get(i);
                 String* key = request_cancel ? &pending.id : &pending.progress_id;
-                if (!pending.sealed && key.equals(id.to_str())) { __atomic_store_i32(&pending.cancelled, 1, ATOMIC_RELEASE); }
+                if (!pending.sealed && key.equals(id.to_str())) { __atomic_store_i32(&pending.cancelled, 1, ATOMIC_RELEASE); marked = true; }
                 i += 1;
             }
             transport.mutex.unlock();
+            // A parked diagnostic pull is answered by the dispatcher; wake it
+            // so the cancel does not wait for the next client message.
+            if (marked) { transport.wake(); }
             if (!request_cancel && id.len() > 0 && id.equals(transport.index_identity.to_str())) {
                 __atomic_store_i32(&transport.index_cancelled, 1, ATOMIC_RELEASE);
             }
@@ -257,11 +257,29 @@ impl Transport {
         transport.stopping = 0;
         transport.completion_epoch = 0;
         transport.index_identity = request_identity("\"silver/index\"");
+        transport.wake_marker = alloc<PendingMessage>(1); transport.wake_queued = 0;
         transport.status = ServerStatus.new();
         __atomic_store_i32(&transport.index_cancelled, 0, ATOMIC_RELEASE);
         __atomic_store_i32(&transport.reader_waiting, 0, ATOMIC_RELEASE);
         return move transport;
     }
+
+    /// Wakes a dispatcher blocked on the queue by queueing the wake marker,
+    /// unless one is already queued. Callable from any thread. A failed send
+    /// (queue full or closed) is harmless: the dispatcher drains worker results
+    /// on every loop iteration before it blocks, and a full queue means it
+    /// has messages to take first.
+    void wake(Transport* self) {
+        if (__atomic_exchange_i32(&self.wake_queued, 1, ATOMIC_ACQ_REL) != 0) { return; }
+        if (!self.messages.try_send(self.wake_marker)) { __atomic_store_i32(&self.wake_queued, 0, ATOMIC_RELEASE); }
+    }
+
+    /// Returns true for the wake marker, which carries no client input.
+    bool is_wake(Transport* self, PendingMessage* message) { return message == self.wake_marker; }
+
+    /// Consumes a dequeued wake marker. Call before draining worker results, so
+    /// a result pushed after the drain queues a new marker.
+    void take_wake(Transport* self) { __atomic_store_i32(&self.wake_queued, 0, ATOMIC_RELEASE); }
 
     /// Asks the reader to stop and closes the queue.
     void stop(Transport* self) {
@@ -274,5 +292,6 @@ impl Drop for Transport {
     void drop(*self) {
         while (self.pending.len() > 0) { release_message(self, self.pending.get(self.pending.len() - 1)); }
         self.index_identity.drop();
+        free(self.wake_marker);
     }
 }

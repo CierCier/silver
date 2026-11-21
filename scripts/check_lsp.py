@@ -105,6 +105,15 @@ class Session:
         self.process.stdin.write(f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
         self.process.stdin.flush()
 
+    def send_batch(self, messages):
+        """Write several messages in one go, so the server reads them back to back."""
+        frames = []
+        for message in messages:
+            body = json.dumps({"jsonrpc": "2.0", **message}, ensure_ascii=False).encode()
+            frames.append(f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+        self.process.stdin.write(b"".join(frames))
+        self.process.stdin.flush()
+
     def respond(self, request_id, result=None, error=None):
         message = {"jsonrpc": "2.0", "id": request_id}
         message["error" if error is not None else "result"] = error if error is not None else result
@@ -151,6 +160,40 @@ class Session:
             self.notifications.append(message)
             if message.get("method") == "textDocument/publishDiagnostics":
                 self.diagnostics[message["params"]["uri"]] = message["params"]
+
+    def pump(self):
+        """Read one server message into `notifications` (and `diagnostics`) and return it."""
+        try:
+            message = self.messages.get(timeout=30)
+        except queue.Empty as error:
+            raise AssertionError("timeout waiting for a server message") from error
+        if isinstance(message, Exception):
+            self.stderr.seek(0)
+            raise AssertionError(f"{message}\n{self.stderr.read().decode(errors='replace')}")
+        self.notifications.append(message)
+        if message.get("method") == "textDocument/publishDiagnostics":
+            self.diagnostics[message["params"]["uri"]] = message["params"]
+        return message
+
+    def published(self, uri, version=None, accept=lambda params: True):
+        """The latest push diagnostics of `uri` once they are for `version` or newer
+        and `accept` approves them. The server checks in the background, so a report
+        follows the edit that caused it."""
+        while True:
+            params = self.diagnostics.get(uri)
+            if (params is not None and (version is None or params.get("version", 0) >= version)
+                    and accept(params)):
+                return params
+            self.pump()
+
+    def wait_refreshes(self, count):
+        """Wait until `count` refresh requests are in `notifications`; returns them."""
+        def refreshes():
+            return [message for message in self.notifications
+                    if message.get("method", "").endswith("/refresh")]
+        while len(refreshes()) < count:
+            self.pump()
+        return refreshes()
 
     def close(self):
         try:
@@ -313,7 +356,7 @@ class NativeLsp(unittest.TestCase):
         session.send("textDocument/didClose", {"textDocument": {"uri": outside_uri}})
         self.assertEqual(session.result("workspace/symbol", {"query": "loose"}), [])
 
-    def test_parallel_workspace_checks_match_sequential_and_yield_to_requests(self):
+    def test_parallel_workspace_checks_match_sequential_and_do_not_block_requests(self):
         (self.root / "src").mkdir()
         modules = [f"part{index}" for index in range(8)]
         main_text = "".join(f"import {name};\n" for name in modules) + "i32 main() { return 0; }\n"
@@ -338,7 +381,8 @@ class NativeLsp(unittest.TestCase):
         parallel = session(3)
         self.assertEqual(normalized(parallel.result("workspace/diagnostic", {"previousResultIds": []})["items"]), expected)
         parallel.close()
-        # A request queued behind a cold pull is answered first; the retried pull completes.
+        # A cold pull parks while workers check; requests behind it are answered
+        # meanwhile and the pull completes with the full report, never an error.
         busy = session(3)
         uri = (self.root / "src/main.ag").as_uri()
         busy.send("textDocument/didOpen", {"textDocument": {"uri": uri, "languageId": "silver", "version": 1, "text": main_text}})
@@ -347,14 +391,105 @@ class NativeLsp(unittest.TestCase):
         hover = busy.request("textDocument/hover", {"textDocument": {"uri": uri}, "position": position(main_text, main_text.index("part0"))})
         self.assertNotIn("error", hover)
         # The pull may answer while the hover is awaited; the session files it with notifications.
-        first = next((message for message in busy.notifications
-                      if message.get("id") == pull and "method" not in message), None) or busy.wait_response(pull)
-        if "error" in first:
-            self.assertEqual(first["error"]["code"], -32802)
-            self.assertEqual(first["error"]["data"], {"retriggerRequest": True})
-        retried = busy.result("workspace/diagnostic", {"previousResultIds": []})
-        self.assertEqual(normalized(retried["items"]), expected)
+        answered = next((message for message in busy.notifications
+                         if message.get("id") == pull and "method" not in message), None) or busy.wait_response(pull)
+        self.assertNotIn("error", answered)
+        self.assertEqual(normalized(answered["result"]["items"]), expected)
         busy.close()
+
+    def pull_client(self):
+        """A session that, like Zed, pulls diagnostics and accepts refresh requests."""
+        env = dict(self.clean_env(), AGLSP_JOBS="1")
+        session = Session(self.binary, self.root, env=env)
+        self.addCleanup(session.close)
+        session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {
+            "textDocument": {"diagnostic": {"relatedDocumentSupport": True}},
+            "workspace": {"diagnostics": {"refreshSupport": True}}}})
+        session.send("initialized", {})
+        return session
+
+    @staticmethod
+    def heavy_text(error):
+        """A document whose check takes long enough to overlap later messages."""
+        body = "".join(f"i32 f{index}(i32 value) {{ return value + {index}; }}\n" for index in range(3000))
+        return body + (f"i32 broken() {{ return {error}; }}\n" if error else "")
+
+    @staticmethod
+    def did_open(uri, text, version=1):
+        return {"method": "textDocument/didOpen", "params": {"textDocument": {
+            "uri": uri, "languageId": "silver", "version": version, "text": text}}}
+
+    @staticmethod
+    def did_change(uri, text, version):
+        return {"method": "textDocument/didChange", "params": {
+            "textDocument": {"uri": uri, "version": version}, "contentChanges": [{"text": text}]}}
+
+    def test_background_pull_waits_for_the_check_and_other_requests_do_not_wait_for_it(self):
+        session = self.pull_client()
+        uri = (self.root / "heavy.ag").as_uri()
+        text = self.heavy_text("missing_symbol")
+        document = {"textDocument": {"uri": uri}}
+        session.send_batch([self.did_open(uri, text),
+                            {"id": 100, "method": "textDocument/diagnostic", "params": document},
+                            {"id": 101, "method": "textDocument/hover", "params": {**document,
+                             "position": position(text, text.index("f7("))}}])
+        hover = session.wait_response(101)
+        self.assertNotIn("error", hover)
+        report = session.wait_response(100)
+        self.assertEqual(report["result"]["kind"], "full")
+        self.assertTrue(any("missing_symbol" in item["message"] for item in report["result"]["items"]))
+        # Clean again: answered at once, with `unchanged` for a client that has the report.
+        again = session.result("textDocument/diagnostic", {**document, "previousResultId": report["result"]["resultId"]})
+        self.assertEqual(again["kind"], "unchanged")
+
+    def test_cancelled_parked_pull_is_answered_cancelled_and_the_server_keeps_working(self):
+        session = self.pull_client()
+        uri = (self.root / "heavy.ag").as_uri()
+        document = {"textDocument": {"uri": uri}}
+        session.send_batch([self.did_open(uri, self.heavy_text("missing_symbol")),
+                            {"id": "parked", "method": "textDocument/diagnostic", "params": document},
+                            {"method": "$/cancelRequest", "params": {"id": "parked"}}])
+        self.assertEqual(session.wait_response("parked")["error"]["code"], -32800)
+        # The check still finishes and a fresh pull gets the report; nothing was leaked or stuck.
+        report = session.result("textDocument/diagnostic", document)
+        self.assertTrue(any("missing_symbol" in item["message"] for item in report["items"]))
+
+    def test_parked_pull_is_answered_when_a_newer_edit_makes_its_report_stale(self):
+        session = self.pull_client()
+        uri = (self.root / "heavy.ag").as_uri()
+        document = {"textDocument": {"uri": uri}}
+        session.send_batch([self.did_open(uri, self.heavy_text("missing_old")),
+                            {"id": 100, "method": "textDocument/diagnostic", "params": document},
+                            self.did_change(uri, self.heavy_text("missing_new"), 2)])
+        self.assertNotIn("error", session.wait_response(100))
+        # Only the report for the newer text is ever reported afterwards.
+        report = session.result("textDocument/diagnostic", document)
+        messages = [item["message"] for item in report["items"]]
+        self.assertTrue(any("missing_new" in message for message in messages), messages)
+        self.assertFalse(any("missing_old" in message for message in messages), messages)
+
+    def test_workspace_pull_completes_with_current_reports_after_edits(self):
+        session = self.pull_client()
+        uri = (self.root / "heavy.ag").as_uri()
+        session.send_batch([self.did_open(uri, self.heavy_text("missing_old")),
+                            {"id": 100, "method": "workspace/diagnostic", "params": {"previousResultIds": []}}])
+        # An edit while the pull is parked does not complete it with the old text's report.
+        session.send_batch([self.did_change(uri, self.heavy_text("missing_new"), 2)])
+        answered = session.wait_response(100)
+        self.assertNotIn("error", answered)
+        reports = {item["uri"]: item for item in answered["result"]["items"]}
+        messages = [item["message"] for item in reports[uri]["items"]]
+        self.assertTrue(any("missing_new" in message for message in messages), messages)
+        self.assertFalse(any("missing_old" in message for message in messages), messages)
+
+    def test_background_result_that_changes_a_report_no_pull_waits_on_requests_a_refresh(self):
+        session = self.pull_client()
+        uri = (self.root / "heavy.ag").as_uri()
+        session.send_batch([self.did_open(uri, self.heavy_text("missing_symbol"))])
+        refresh = session.wait_notification("workspace/diagnostic/refresh")
+        session.respond(refresh["id"])
+        report = session.result("textDocument/diagnostic", {"textDocument": {"uri": uri}})
+        self.assertTrue(any("missing_symbol" in item["message"] for item in report["items"]))
 
     def test_restarts_reuse_cached_diagnostics_until_the_import_closure_changes(self):
         (self.root / "src").mkdir()
@@ -1071,7 +1206,7 @@ class NativeLsp(unittest.TestCase):
                                                ("argument", text.index("=> argument", text.index("identity =")), text.index("identity ="))]:
                     self.assertEqual(self.session.result("textDocument/definition", self.at(uri, text, word, use)),
                                      {"uri": uri, "range": location(text, word, declaration)})
-                published = self.session.diagnostics[uri]
+                published = self.session.published(uri, version)
                 self.assertEqual(published["version"], version)
                 errors = [item for item in published["diagnostics"] if item["severity"] == 1]
                 expected = [] if message is None else [{"range": location(text, token), "severity": 1,
@@ -1170,7 +1305,7 @@ class NativeLsp(unittest.TestCase):
         ]})
         original = self.at(uri, text, "count", text.index("return"))
         self.assertEqual(self.session.result("textDocument/definition", original)["range"], location(text, "count"))
-        self.assertEqual(self.session.diagnostics[uri]["version"], 1)
+        self.assertEqual(self.session.published(uri, 1)["version"], 1)
         changes = [{"range": location(text, "😀"), "text": "λ"}]
         updated = text.replace("😀", "λ")
         changes.append({"range": location(updated, "1"), "text": "22"})
@@ -1178,14 +1313,14 @@ class NativeLsp(unittest.TestCase):
         self.session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2}, "contentChanges": changes})
         params = self.at(uri, updated, "count", updated.index("return"))
         self.assertEqual(self.session.result("textDocument/definition", params)["range"], location(updated, "count"))
-        self.assertEqual(self.session.diagnostics[uri]["version"], 2)
+        self.assertEqual(self.session.published(uri, 2)["version"], 2)
         self.session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 1}, "contentChanges": [{"text": ""}]})
         self.assertIsNotNone(self.session.result("textDocument/hover", params))
         self.session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 3}, "contentChanges": [
             {"text": "i32 broken;"}, {"range": {"start": {"line": 9, "character": 0}, "end": {"line": 0, "character": 0}}, "text": ""},
         ]})
         self.assertIsNotNone(self.session.result("textDocument/hover", params))
-        self.assertEqual(self.session.diagnostics[uri]["version"], 2)
+        self.assertEqual(self.session.published(uri, 2)["version"], 2)
         self.session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 3}, "contentChanges": [{"text": ""}]})
         self.assertEqual(self.session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}}), [])
 
@@ -1358,7 +1493,7 @@ class NativeLsp(unittest.TestCase):
                 "struct Pair<T, U> { T first; U second; }\n"
                 "i32 inspect(Pair<Marker, i32>* pair, i32 unused_named) { return pair.second; }\n")
         uri = self.open(text, "generic-parameter-lint.ag")
-        diagnostics = self.session.diagnostics[uri]["diagnostics"]
+        diagnostics = self.session.published(uri, 1)["diagnostics"]
         self.assertFalse(any(item["message"].startswith("unused parameter 'Marker'") for item in diagnostics), diagnostics)
         unused = [item for item in diagnostics if item["message"] ==
                   "unused parameter 'unused_named' (help: prefix with _ to ignore: '_unused_named')"]
@@ -1706,7 +1841,7 @@ class NativeLsp(unittest.TestCase):
                 self.session.send("textDocument/didOpen", {"textDocument": {
                     "uri": uri, "languageId": "silver", "version": 3, "text": updated}})
                 self.session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
-                self.assertEqual(self.session.diagnostics[uri]["diagnostics"], [])
+                self.assertEqual(self.session.published(uri, 3)["diagnostics"], [])
                 definition = self.session.result("textDocument/definition", self.at(uri, updated, "answer", updated.index("return")))
                 self.assertEqual(definition["uri"], (self.root / "provider.ag").as_uri())
                 again = self.session.result("textDocument/completion", {"textDocument": {"uri": uri},
@@ -2076,7 +2211,7 @@ class NativeLsp(unittest.TestCase):
         session = Session(self.binary, self.root, env=env)
         self.addCleanup(session.close)
         session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(),
-            "capabilities": {}})
+            "capabilities": {"textDocument": {"publishDiagnostics": {"versionSupport": True}}}})
         session.send("initialized", {})
 
         text = "i32 main() { return uniq(); }\n"
@@ -2095,7 +2230,7 @@ class NativeLsp(unittest.TestCase):
         session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
             "contentChanges": [{"text": updated}]})
         session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
-        self.assertEqual(session.diagnostics[uri]["diagnostics"], [])
+        self.assertEqual(session.published(uri, 2)["diagnostics"], [])
         definition = session.result("textDocument/definition", {
             "textDocument": {"uri": uri},
             "position": position(updated, updated.index("unique_std_value", updated.index("return")))})
@@ -2149,7 +2284,8 @@ class NativeLsp(unittest.TestCase):
         env = dict(os.environ, SILVER_SYSROOT=str(stdlib.parent))
         session = Session(self.binary, self.root, env=env)
         self.addCleanup(session.close)
-        session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {}})
+        session.result("initialize", {"processId": None, "rootUri": self.root.as_uri(),
+            "capabilities": {"textDocument": {"publishDiagnostics": {"versionSupport": True}}}})
         session.send("initialized", {})
         session.result("workspace/symbol", {"query": "String"})
         for index, header in enumerate(("", "import std.mem.vec;\n")):
@@ -2167,7 +2303,7 @@ class NativeLsp(unittest.TestCase):
             session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
                 "contentChanges": [{"text": updated}]})
             session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
-            self.assertFalse(any(d.get("severity") == 1 for d in session.diagnostics[uri]["diagnostics"]))
+            self.assertFalse(any(d.get("severity") == 1 for d in session.published(uri, 2)["diagnostics"]))
             definition = session.result("textDocument/definition", {
                 "textDocument": {"uri": uri}, "position": position(updated, updated.index("String value"))})
             self.assertEqual(definition["uri"], (stdlib / "string.ag").as_uri())
@@ -2227,7 +2363,7 @@ class NativeLsp(unittest.TestCase):
         updated = apply_edits(text, [local["textEdit"]])
         self.session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2}, "contentChanges": [{"text": updated}]})
         self.session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
-        self.assertEqual(self.session.diagnostics[uri]["diagnostics"], [])
+        self.assertEqual(self.session.published(uri, 2)["diagnostics"], [])
         workspace = self.session.result("workspace/symbol", {"query": "gd"})
         self.assertEqual({item["name"] for item in workspace}, {"gd", "get_data", "GatherDetails"})
         self.assertEqual(workspace[0]["name"], "gd")
@@ -2288,7 +2424,7 @@ class NativeLsp(unittest.TestCase):
         self.assertEqual(updated, 'import helper;\r\n' + text)
         self.session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2}, "contentChanges": [{"text": updated}]})
         self.session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
-        self.assertEqual(self.session.diagnostics[uri]["diagnostics"], [])
+        self.assertEqual(self.session.published(uri, 2)["diagnostics"], [])
         self.assertEqual(self.session.result("textDocument/definition", self.at(uri, updated, "answer")),
                          {"uri": (self.root / "helper.ag").as_uri(), "range": {"start": {"line": 1, "character": 4}, "end": {"line": 1, "character": 10}}})
         params["range"] = location(updated, "answer")
@@ -2355,7 +2491,7 @@ class NativeLsp(unittest.TestCase):
         self.assertEqual(self.session.result("textDocument/definition", {
             "textDocument": {"uri": uri}, "position": position(updated, updated.index("wanted()"))})["uri"],
             provider.as_uri())
-        self.assertFalse(any(d.get("severity") == 1 for d in self.session.diagnostics[uri]["diagnostics"]))
+        self.assertFalse(any(d.get("severity") == 1 for d in self.session.published(uri, 2)["diagnostics"]))
 
         text = "import callables.raw;\ni64 existing() { return sys_openat(1); }\ni32 main() { return wanted(); }\n"
         uri = self.open(text, "callable-overlap-quickfix.ag")
@@ -2369,7 +2505,7 @@ class NativeLsp(unittest.TestCase):
         self.assertEqual(self.session.result("textDocument/definition", {
             "textDocument": {"uri": uri}, "position": position(updated, updated.index("wanted()"))})["uri"],
             provider.as_uri())
-        self.assertFalse(any(d.get("severity") == 1 for d in self.session.diagnostics[uri]["diagnostics"]))
+        self.assertFalse(any(d.get("severity") == 1 for d in self.session.published(uri, 2)["diagnostics"]))
 
         text = ("import callables.raw;\n"
                 "i32 main() { sys_openat(1); return want() + missing(); }\n")
@@ -2389,7 +2525,7 @@ class NativeLsp(unittest.TestCase):
             "textDocument": {"uri": uri}, "position": position(updated, updated.index("wanted()"))})["uri"],
             provider.as_uri())
         self.assertTrue(any("missing" in d.get("message", "")
-                            for d in self.session.diagnostics[uri]["diagnostics"]))
+                            for d in self.session.published(uri, 2)["diagnostics"]))
 
         quickfix_text = ("import callables.raw;\n"
                          "i32 main() { sys_openat(1); return wanted() + missing(); }\n")
@@ -2418,7 +2554,7 @@ class NativeLsp(unittest.TestCase):
         self.assertEqual(self.session.result("textDocument/definition", {
             "textDocument": {"uri": uri}, "position": position(updated, updated.index("String value"))})["uri"],
             provider.as_uri())
-        self.assertFalse(any(d.get("severity") == 1 for d in self.session.diagnostics[uri]["diagnostics"]))
+        self.assertFalse(any(d.get("severity") == 1 for d in self.session.published(uri, 2)["diagnostics"]))
 
     def test_import_suggestions_reject_callable_overloads_that_make_existing_calls_ambiguous(self):
         callables = self.root / "integer_overloads"
@@ -2449,7 +2585,7 @@ class NativeLsp(unittest.TestCase):
         control = ("import integer_overloads.raw;\nimport integer_overloads.provider;\n"
                    "u32 main() { open_at(1); return wanted(); }\n")
         control_uri = self.open(control, "manual-callable-import-control.ag", version=1)
-        report = self.session.diagnostics[control_uri]
+        report = self.session.published(control_uri, 1)
         self.assertEqual(report["version"], 1)
         errors = [item for item in report["diagnostics"] if item["severity"] == 1]
         self.assertTrue(any("open_at" in item["message"] and "ambiguous" in item["message"]
@@ -2458,7 +2594,7 @@ class NativeLsp(unittest.TestCase):
         unresolved = ("import integer_overloads.raw;\nimport integer_overloads.provider;\n"
                       "u32 main() { open_at(1); return wanted() + missing(); }\n")
         unresolved_uri = self.open(unresolved, "unresolved-callable-import-control.ag")
-        unresolved_errors = [item for item in self.session.diagnostics[unresolved_uri]["diagnostics"]
+        unresolved_errors = [item for item in self.session.published(unresolved_uri, 1)["diagnostics"]
                              if item["severity"] == 1]
         self.assertTrue(any("missing" in item["message"] for item in unresolved_errors), unresolved_errors)
 
@@ -2480,7 +2616,7 @@ class NativeLsp(unittest.TestCase):
         updated = apply_edits(text, actions[0]["edit"]["changes"][uri])
         self.session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 3}, "contentChanges": [{"text": updated}]})
         self.session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
-        self.assertEqual(self.session.diagnostics[uri]["diagnostics"], [])
+        self.assertEqual(self.session.published(uri, 3)["diagnostics"], [])
 
     def test_import_quickfix_uses_versions_and_excludes_legacy_clients(self):
         session = Session(self.binary, self.root, env=self.clean_env())
@@ -2527,9 +2663,10 @@ class NativeLsp(unittest.TestCase):
 
     def test_diagnostics_stay_owned_by_document_and_close_clears(self):
         first = self.open("i32 main() { return missing_value; }", "first.ag")
-        diagnostics = self.session.diagnostics[first]["diagnostics"]
+        diagnostics = self.session.published(first, 1)["diagnostics"]
         self.assertTrue(diagnostics)
-        self.open("i32 second() { return 0; }", "second.ag")
+        second = self.open("i32 second() { return 0; }", "second.ag")
+        self.session.published(second, 1)
         self.assertEqual(self.session.diagnostics[first]["diagnostics"], diagnostics)
         self.session.send("textDocument/didClose", {"textDocument": {"uri": first}})
         self.assertEqual(self.session.result("textDocument/documentSymbol", {"textDocument": {"uri": first}}), [])
@@ -2988,6 +3125,8 @@ class NativeLsp(unittest.TestCase):
         self.assertEqual(self.session.request("initialize", {"processId": None, "rootUri": self.root.as_uri(), "capabilities": {}})["error"]["code"], -32600)
         text = "i32 main() { return 0; }\n"
         uri = self.open(text)
+        # The background check's publish would otherwise interleave with the raw reads below.
+        self.session.published(uri, 1)
         self.session.send("textDocument/hover", self.at(uri, text, "main"), "request-string-id")
         response = self.session.messages.get(timeout=10)
         self.assertEqual(response["id"], "request-string-id")
@@ -3266,21 +3405,22 @@ class NativeLsp(unittest.TestCase):
                 self.assertNotIn("error", responses[0], responses)
                 self.assertEqual(responses[1], {"jsonrpc": "2.0", "id": 2, "result": None})
 
-    def test_diagnostics_invalidate_dependents_without_republishing_unrelated_files(self):
+    def test_diagnostics_invalidate_dependents_after_background_checks(self):
         main = "import helper;\ni32 main() { return answer(1); }\n"
         main_uri = self.open(main)
         unrelated = self.open("i32 separate() { return 2; }\n", "separate.ag")
         helper_text = "i32 answer(i32 value) { return value; }\n"
         helper_uri = self.open(helper_text, "helper.ag")
-        self.session.notifications.clear()
+        for opened in (main_uri, unrelated, helper_uri):
+            self.session.published(opened, 1)
         self.session.send("textDocument/didChange", {"textDocument": {"uri": helper_uri, "version": 2},
                           "contentChanges": [{"text": helper_text.replace("answer", "renamed")} ]})
-        self.session.result("textDocument/documentSymbol", {"textDocument": {"uri": helper_uri}})
-        published = {message["params"]["uri"] for message in self.session.notifications
-                     if message.get("method") == "textDocument/publishDiagnostics"}
-        self.assertEqual(published, {helper_uri, main_uri})
-        self.assertNotIn(unrelated, published)
-        self.assertTrue(self.session.diagnostics[main_uri]["diagnostics"])
+        # Checks run in the background: the edited file and its dependent are
+        # published again, and the dependent now reports the missing function.
+        self.assertEqual(self.session.published(helper_uri, 2)["diagnostics"], [])
+        report = self.session.published(main_uri, accept=lambda report: bool(report["diagnostics"]))
+        self.assertTrue(any("answer" in item["message"] for item in report["diagnostics"]))
+        self.assertEqual(self.session.diagnostics[unrelated]["diagnostics"], [])
 
     def test_type_declaration_and_implementation_navigation(self):
         model = ("trait Measure { i32 size(&self); }\n"
@@ -3334,16 +3474,17 @@ class NativeLsp(unittest.TestCase):
     def test_new_unsaved_module_participates_in_import_resolution(self):
         text = "import unsaved;\ni32 main() { return fresh(1); }\n"
         uri = self.open(text)
-        self.assertTrue(self.session.diagnostics[uri]["diagnostics"])
+        self.assertTrue(self.session.published(uri, 1)["diagnostics"])
         module = "i32 fresh(i32 value) { return value; }\n"
         imported = self.open(module, "unsaved.ag")
         params = self.at(uri, text, "fresh")
         self.assertEqual(self.session.result("textDocument/definition", params),
                          {"uri": imported, "range": location(module, "fresh")})
-        self.assertEqual(self.session.diagnostics[uri]["diagnostics"], [])
+        # The new module changes the import closure, so the importer is checked again.
+        self.assertEqual(self.session.published(uri, accept=lambda report: not report["diagnostics"])["diagnostics"], [])
         self.session.send("textDocument/didClose", {"textDocument": {"uri": imported}})
         self.assertIsNone(self.session.result("textDocument/definition", params))
-        self.assertTrue(self.session.diagnostics[uri]["diagnostics"])
+        self.assertTrue(self.session.published(uri, accept=lambda report: bool(report["diagnostics"]))["diagnostics"])
 
     def test_nearer_unsaved_import_rebinds_cached_direct_transitive_and_unused_origins(self):
         sub = self.root / "sub"
@@ -3767,7 +3908,7 @@ class NativeLsp(unittest.TestCase):
         self.session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
                           "contentChanges": [{"text": updated}]})
         self.session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
-        self.assertEqual(self.session.diagnostics[uri]["diagnostics"], [])
+        self.assertEqual(self.session.published(uri, 2)["diagnostics"], [])
         declared = self.session.result("textDocument/declaration", self.at(uri, updated, "fetch", updated.index("return first")))
         self.assertEqual(declared, {"uri": uri, "range": location(updated, "fetch")})
         conflict = text.replace("return 1; } }", "return 1; } i32 fetch(&self) { return 3; } }")
@@ -3792,7 +3933,7 @@ class NativeLsp(unittest.TestCase):
             self.assertEqual(hover["contents"]["kind"], "plaintext")
             self.assertNotIn("```", hover["contents"]["value"])
             self.assertIn("The answer.", hover["contents"]["value"])
-            self.assertNotIn("version", session.diagnostics[uri])
+            self.assertNotIn("version", session.published(uri))
             flat = session.result("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
             member = next(symbol for symbol in flat if symbol["name"] == "member")
             self.assertEqual(member["containerName"], "Box")
@@ -3868,6 +4009,7 @@ class NativeLsp(unittest.TestCase):
         session.send("textDocument/didOpen", {"textDocument": {
             "uri": uri, "languageId": "silver", "version": 1, "text": text}})
         session.result("textDocument/documentSymbol", document)
+        session.published(uri)
         session.notifications.clear()
         token = "saturated-index"
         request_id = "active-index"
@@ -3958,7 +4100,8 @@ class NativeLsp(unittest.TestCase):
             repeated = session.result("workspace/diagnostic", {"previousResultIds": previous})
             self.assertTrue(all(report["kind"] == "unchanged" for report in repeated["items"]))
             refresh = [message for message in session.notifications if message.get("method", "").endswith("/refresh")]
-            self.assertEqual({message["method"] for message in refresh}, {"workspace/diagnostic/refresh", "workspace/semanticTokens/refresh"})
+            # The parked pull delivered the report, so only the semantic refresh was due.
+            self.assertEqual({message["method"] for message in refresh}, {"workspace/semanticTokens/refresh"})
             for request in refresh:
                 session.respond(request["id"])
             session.result("textDocument/diagnostic", document)
@@ -3970,7 +4113,8 @@ class NativeLsp(unittest.TestCase):
             self.assertEqual(changed["kind"], "full")
             self.assertNotEqual(changed["resultId"], initial["resultId"])
             self.assertTrue(any("answer" in item["message"] for item in changed["items"]))
-            self.assertTrue(any(message.get("method") == "workspace/diagnostic/refresh" for message in session.notifications))
+            # The pull carried the changed report, and the opened file's own report is unchanged: no refresh.
+            self.assertFalse(any(message.get("method") == "workspace/diagnostic/refresh" for message in session.notifications))
             self.assertFalse(any(message.get("method") == "textDocument/publishDiagnostics" for message in session.notifications))
             session.send("textDocument/didClose", {"textDocument": {"uri": helper}})
             restored = session.result("textDocument/diagnostic", document)
@@ -4024,11 +4168,11 @@ class NativeLsp(unittest.TestCase):
                 self.assertEqual(session.result("textDocument/inlayHint", {"textDocument": {"uri": uri}, "range": {
                     "start": position(text, 0), "end": position(text, len(text))}}), [{
                         "position": position(text, text.index("7")), "kind": 2, "paddingRight": True, "label": "value:"}])
+                session.published(uri)
                 self.assert_refreshes(session, ["workspace/inlayHint/refresh"] if support is True else [])
-                self.assertEqual(session.notifications[0]["method"], "textDocument/publishDiagnostics")
-                if support is True:
-                    self.assertEqual([message["method"] for message in session.notifications],
-                                     ["textDocument/publishDiagnostics", "workspace/inlayHint/refresh"])
+                self.assertEqual(sorted(message["method"] for message in session.notifications),
+                                 sorted(["textDocument/publishDiagnostics"]
+                                        + (["workspace/inlayHint/refresh"] if support is True else [])))
 
     def test_inlay_refresh_coalesces_changes_and_ignores_invalid_or_duplicate_acknowledgements(self):
         session, _ = self.inlay_session(True)
@@ -4066,7 +4210,11 @@ class NativeLsp(unittest.TestCase):
         self.assert_refreshes(session, [method, method, method])
 
     def test_inlay_refresh_shares_ordered_ids_and_errors_disable_only_the_failed_kind(self):
-        methods = ["workspace/diagnostic/refresh", "workspace/semanticTokens/refresh", "workspace/inlayHint/refresh"]
+        # Semantic and inlay refreshes follow the edit; the diagnostic refresh
+        # follows the background check that changed the report, so it comes
+        # last the first time and only when a report changes.
+        methods = ["workspace/semanticTokens/refresh", "workspace/inlayHint/refresh", "workspace/diagnostic/refresh"]
+        edited = [method for method in methods if method != "workspace/diagnostic/refresh"]
         text = "import helper;\ni32 main() { return answer(7); }\n"
         uri = (self.root / "inlay.ag").as_uri()
         document = {"textDocument": {"uri": uri}}
@@ -4076,8 +4224,10 @@ class NativeLsp(unittest.TestCase):
                 session.send("textDocument/didOpen", {"textDocument": {
                     "uri": uri, "languageId": "silver", "version": 1, "text": text}})
                 session.result("textDocument/documentSymbol", document)
+                session.wait_refreshes(len(methods))
                 initial = self.assert_refreshes(session, methods)
                 self.assertEqual(session.notifications, initial)
+                # The same diagnostics: no further diagnostic refresh is due.
                 session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
                     "contentChanges": [{"text": text + "\n"}]})
                 session.result("textDocument/documentSymbol", document)
@@ -4086,7 +4236,7 @@ class NativeLsp(unittest.TestCase):
                     session.respond(request["id"], error={"code": -32601, "message": "Unsupported"}
                                     if request["method"] == failed else None)
                 session.result("textDocument/documentSymbol", document)
-                surviving = [method for method in methods if method != failed]
+                surviving = [method for method in edited if method != failed]
                 repeated = self.assert_refreshes(session, methods + surviving)[3:]
                 for request in repeated:
                     session.respond(request["id"])
@@ -4164,21 +4314,28 @@ class NativeLsp(unittest.TestCase):
                 session.send("textDocument/didOpen", {"textDocument": {
                     "uri": uri, "languageId": "silver", "version": 1, "text": text}})
                 session.result("textDocument/documentSymbol", document)
-                methods = (["workspace/diagnostic/refresh"] if pull else []) + [
-                    "workspace/semanticTokens/refresh", "workspace/inlayHint/refresh"]
+                methods = ["workspace/semanticTokens/refresh", "workspace/inlayHint/refresh"] + (
+                    ["workspace/diagnostic/refresh"] if pull else [])
+                # The background check of the opened file lands before the save.
+                if pull:
+                    session.wait_refreshes(len(methods))
+                else:
+                    session.published(uri)
                 for request in self.assert_refreshes(session, methods):
                     session.respond(request["id"])
                 session.result("textDocument/documentSymbol", document)
                 session.notifications.clear()
                 session.send("textDocument/didSave", document)
                 session.result("textDocument/documentSymbol", document)
+                if pull:
+                    session.wait_refreshes(1)
                 self.assertEqual([message["method"] for message in session.notifications],
                                  ["workspace/diagnostic/refresh" if pull else "textDocument/publishDiagnostics"])
 
     def test_save_republishes_overlay_diagnostics_or_requests_pull_refresh(self):
         text = 'i32 main() { return missing(); }\n'
         uri = self.open(text, version=7)
-        original = self.session.diagnostics[uri]
+        original = self.session.published(uri, 7)
         self.assertTrue(any("missing" in item["message"] for item in original["diagnostics"]))
         (self.root / "main.ag").write_text('i32 disk_only() { return 0; }\n')
         self.session.notifications.clear()
@@ -4196,14 +4353,15 @@ class NativeLsp(unittest.TestCase):
         session.send("textDocument/didOpen", {"textDocument": {"uri": uri, "languageId": "silver", "version": 7, "text": text}})
         params = {"textDocument": {"uri": uri}}
         initial = session.result("textDocument/diagnostic", params)
-        refreshes = [message for message in session.notifications if message.get("method") == "workspace/diagnostic/refresh"]
-        self.assertEqual(len(refreshes), 1)
-        session.respond(refreshes[0]["id"])
+        # The parked pull carried the report to the client, so no refresh follows it.
         session.result("textDocument/documentSymbol", params)
+        self.assertEqual([message for message in session.notifications if message.get("method", "").endswith("/refresh")], [])
         session.notifications.clear()
         session.send("textDocument/didSave", params)
         unchanged = session.result("textDocument/diagnostic", {**params, "previousResultId": initial["resultId"]})
         self.assertEqual(unchanged, {"kind": "unchanged", "resultId": initial["resultId"]})
+        # A save asks the client to pull again; the request follows the response once the queue is idle.
+        session.wait_refreshes(1)
         self.assertEqual([message["method"] for message in session.notifications], ["workspace/diagnostic/refresh"])
 
     def test_transport_rejects_invalid_utf8_nul_suffixes_and_noninteger_request_ids(self):

@@ -52,6 +52,8 @@ struct Document {
     LspLineIndex lines;
     i64 version;
     i64 revision;
+    // `DocumentStore.edit_clock` when last set or closed; orders check priority.
+    i64 edit_tick;
     bool open;
     bool imports_dirty;
     bool diagnostics_dirty;
@@ -89,6 +91,7 @@ struct DocumentStore {
     Vec<String> project_entries;
     Vec<String> overlay_paths;
     bool discover_open_projects;
+    i64 edit_clock;
 }
 
 /// Returns true when `path` is inside one of `roots`.
@@ -227,6 +230,7 @@ impl DocumentStore {
         store.project_entries = Vec<String>.new();
         store.overlay_paths = Vec<String>.new();
         store.discover_open_projects = true;
+        store.edit_clock = 0;
         // Same sysroot fallback cascade as the compiler: SILVER_SYSROOT,
         // executable-relative prefix, user data dir, and system share dirs.
         Vec<String> sysroot_dirs = module_sysroot_include_dirs();
@@ -278,6 +282,7 @@ impl DocumentStore {
         doc.replace_text(text);
         doc.version = version;
         doc.revision += 1;
+        self.edit_clock += 1; doc.edit_tick = self.edit_clock;
         doc.open = open;
         doc.imports_dirty = true;
         doc.diagnostics_dirty = true;
@@ -356,6 +361,7 @@ impl DocumentStore {
         self.invalidate_dependents(doc);
         doc.open = false;
         doc.revision += 1;
+        self.edit_clock += 1; doc.edit_tick = self.edit_clock;
         doc.imports_dirty = true;
         doc.diagnostics_dirty = true;
         doc.semantic_dirty = true;
