@@ -244,11 +244,14 @@ so a restart re-checks only what changed.
 Files that miss the cache are checked on persistent worker threads: half the
 CPUs the process may use by default, or `AGLSP_JOBS` when set. The dispatcher
 hands a worker an owned copy of the file, its imports, and the include
-directories; the worker parses them itself (keeping recently used trees up to
-4 MiB of source per worker) and returns the diagnostics. The dispatcher starts
-jobs only while no client message waits, checks open files before workspace
-files, newest edit first, and drops a result whose import closure changed
-while it ran. While jobs run, `experimental/serverStatus` reports
+directories; the worker parses them itself and returns the diagnostics. The
+checked file is parsed fresh for each job. For imports the worker keeps only
+their signatures (cfg-filtered items with bodies stripped, text owned by the
+signature tree), up to 12 MiB per worker, which holds `aglsp`'s whole import
+closure; the full parse of an import is dropped once its signatures are built.
+The dispatcher starts jobs only while no client message waits, checks open
+files before workspace files, newest edit first, and drops a result whose
+import closure changed while it ran. While jobs run, `experimental/serverStatus` reports
 `Checking files: done/total`.
 
 A `textDocument/diagnostic` pull for a clean document answers immediately. For

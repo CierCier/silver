@@ -1,5 +1,7 @@
 import tooling.diagnostics;
 import tooling.index;
+import frontend.ast;
+import frontend.cfg;
 import transport;
 import std.channel;
 import std.env;
@@ -10,9 +12,9 @@ import std.thread;
 // read. A job carries copies of the file texts, and each worker parses its own
 // trees, so a worker never touches memory the dispatcher can free or change.
 
-/// Parsed-tree bytes (source size) each worker keeps between checks. Imports
-/// such as `std` rarely change, so most of a check's parsing is a cache hit.
-const i64 TREE_CACHE_BYTES = 4194304;
+/// Retained bytes of dependency signatures each worker keeps between checks.
+/// Imports such as `std` rarely change, so most of a check's parsing is a cache hit.
+const i64 SIGNATURE_CACHE_BYTES = 12582912;
 
 /// One file of a check job.
 struct CheckSource { String path; String text; i64 text_hash; }
@@ -65,71 +67,99 @@ impl Drop for CheckService {
     void drop(*self) { self.jobs.destroy(); self.results.destroy(); }
 }
 
-/// One parsed file kept between checks.
-struct CachedTree { String path; i64 text_hash; i64 bytes; IdeIndex index; }
+/// One dependency kept between checks: only the signatures a check reads,
+/// not the parse of the whole file. `pool` owns every node and every byte of
+/// token text, so the tokens and the full syntax tree are gone once it is built.
+struct CachedSignatures { String path; i64 text_hash; i64 bytes; NodePool pool; SyntaxTree tree; }
 
-/// A worker's private parsed-tree cache, oldest entries first. Entries are
-/// heap allocated so tree pointers survive later lookups; `trim` is the only
-/// call that frees one.
-struct TreeCache { Vec<CachedTree*> entries; i64 bytes; i64 limit; }
+/// Estimated heap bytes of one `SyntaxNode` (112 bytes plus the allocator header).
+const i64 NODE_BYTES = 128;
+/// Estimated bytes an interned string costs beyond twice its length: the
+/// interner keeps the text twice, with a hash entry and two `String` headers.
+const i64 INTERNED_OVERHEAD = 130;
 
-impl TreeCache {
-    /// Creates an empty cache holding up to `limit` source bytes.
-    TreeCache new(i64 limit) {
-        TreeCache cache; cache.entries = Vec<CachedTree*>.new(); cache.bytes = 0; cache.limit = limit;
+/// Returns the heap bytes `pool` retains, estimated from its node and text counts.
+i64 pool_retained_bytes(NodePool* pool) {
+    i64 bytes = 0;
+    SyntaxNode* node = pool.head;
+    while (node != (SyntaxNode*)0) { bytes += NODE_BYTES; node = node.pool_next; }
+    i64 i = 0;
+    while (i < pool.generated_text.len()) {
+        bytes += 2 * strlen(pool.generated_text.get((u32)i)) + INTERNED_OVERHEAD; i += 1;
+    }
+    return bytes;
+}
+
+/// A worker's private cache of dependency signatures, oldest entries first,
+/// limited by the bytes the entries retain. Entries are heap allocated so tree
+/// pointers survive later lookups; `trim` is the only call that frees one.
+struct SignatureCache { Vec<CachedSignatures*> entries; i64 bytes; i64 limit; }
+
+impl SignatureCache {
+    /// Creates an empty cache holding up to `limit` retained bytes.
+    SignatureCache new(i64 limit) {
+        SignatureCache cache; cache.entries = Vec<CachedSignatures*>.new(); cache.bytes = 0; cache.limit = limit;
         return move cache;
     }
 
-    /// Returns the tree of `file`, parsing it on a miss, and marks it newest.
-    /// Parsing is the dispatcher's own (`IdeIndex.new`), so trees match.
-    CachedTree* get(TreeCache* self, CheckSource* file) {
+    /// Returns the signature tree of `file`, building it on a miss, and marks
+    /// it newest. A miss parses the file like the dispatcher does
+    /// (`IdeIndex.new`) and keeps only the cfg-filtered, body-stripped items,
+    /// exactly what `check_snapshot_diagnostics` copies out of a dependency.
+    CachedSignatures* get(SignatureCache* self, CheckSource* file, CfgSet* cfg) {
         i64 i = self.entries.len() - 1;
         while (i >= 0) {
-            CachedTree* entry = self.entries.get(i);
+            CachedSignatures* entry = self.entries.get(i);
             if (entry.text_hash == file.text_hash && entry.path.equals(file.path.to_str())) {
                 self.entries.take(i); self.entries.push(entry);
                 return entry;
             }
             i -= 1;
         }
-        CachedTree* entry = alloc<CachedTree>(1);
-        entry.path = file.path.clone(); entry.text_hash = file.text_hash; entry.bytes = file.text.len();
-        entry.index = IdeIndex.new(file.text.to_str());
+        CachedSignatures* entry = alloc<CachedSignatures>(1);
+        entry.path = file.path.clone(); entry.text_hash = file.text_hash;
+        entry.pool = NodePool.new();
+        IdeIndex parsed = IdeIndex.new(file.text.to_str());
+        entry.tree.root = diagnostic_signature_root(&entry.pool, &parsed.tree, 0, cfg, true);
+        entry.bytes = pool_retained_bytes(&entry.pool);
         self.entries.push(entry); self.bytes += entry.bytes;
         return entry;
     }
 
     /// Evicts the oldest entries until the cache fits its limit. Call between
     /// jobs: it invalidates tree pointers from earlier lookups.
-    void trim(TreeCache* self) {
+    void trim(SignatureCache* self) {
         while (self.bytes > self.limit && self.entries.len() > 0) {
-            CachedTree* oldest = self.entries.take(0);
+            CachedSignatures* oldest = self.entries.take(0);
             self.bytes -= oldest.bytes;
-            // `@drop_in_place` would skip the index's destructor; moving the
-            // fields into locals drops them at the end of this iteration.
-            IdeIndex _index = move oldest.index; String _path = move oldest.path;
+            // `@drop_in_place` would skip field destructors; moving the fields
+            // into locals drops them at the end of this iteration.
+            NodePool _pool = move oldest.pool; String _path = move oldest.path;
+            _pool.destroy();
             free(oldest);
         }
     }
 }
 
-impl Drop for TreeCache {
+impl Drop for SignatureCache {
     void drop(*self) {
         self.limit = 0; self.trim();
     }
 }
 
 /// Checks the job's file against its imports. The result owns its messages.
-CheckResult run_check(TreeCache* cache, CfgSet* cfg, CheckJob* job) {
-    CachedTree* source = cache.get(job.files.get_ptr(0));
+/// The checked file is parsed fresh and dropped with the job: it changes on
+/// every keystroke, so caching it would only evict dependencies.
+CheckResult run_check(SignatureCache* cache, CfgSet* cfg, CheckJob* job) {
+    IdeIndex source = IdeIndex.new(job.files.get_ptr(0).text.to_str());
     Vec<SyntaxTree*> dependencies = Vec<SyntaxTree*>.new();
     i64 i = 1;
     while (i < job.files.len()) {
-        CachedTree* dependency = cache.get(job.files.get_ptr(i));
-        dependencies.push(&dependency.index.tree); i += 1;
+        CachedSignatures* dependency = cache.get(job.files.get_ptr(i), cfg);
+        dependencies.push(&dependency.tree); i += 1;
     }
     CheckResult result; result.doc_id = job.doc_id; result.key = job.key.clone(); result.fingerprint = job.fingerprint;
-    result.diagnostics = check_snapshot_diagnostics(&source.index.tree, &dependencies, cfg,
+    result.diagnostics = check_snapshot_diagnostics(&source.tree, &dependencies, cfg,
                                                     job.files.get_ptr(0).path.to_str(), &job.include_dirs);
     return move result;
 }
@@ -139,7 +169,7 @@ CheckResult run_check(TreeCache* cache, CfgSet* cfg, CheckJob* job) {
 void check_worker(&CheckService shared) {
     CheckService* service = shared;
     CfgSet cfg = linux_defaults();
-    TreeCache cache = TreeCache.new(TREE_CACHE_BYTES);
+    SignatureCache cache = SignatureCache.new(SIGNATURE_CACHE_BYTES);
     while (true) {
         Optional<CheckJob> next = service.jobs.recv();
         if (!next.is_some()) { return; }
