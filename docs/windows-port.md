@@ -141,11 +141,10 @@ Implement `Win64Abi` alongside `Amd64Abi` and dispatch on the triple's **OS** co
 - 32-byte shadow space at every call site; stack always 16-byte aligned before `call`.
 - Varargs: caller-cleanup; float args passed in *both* `xmmN` and the integer slot.
 
-Known follow-up (shared with SysV, not Win64-specific): **call-site sret materialization**.
-`lower_function_type` shapes extern-C declarations with a hidden return pointer, but
-`call.rs` does not yet allocate the destination temporary and pass it — a call to an
-extern-C function returning a large struct fails loudly (LLVM argument-count mismatch)
-rather than miscompiling. Needed before P3 relies on C interop with large struct returns.
+Call-site sret materialization (shared with SysV and AAPCS64) is in place:
+`build_foreign_call` (`codegen/llvm_ir/function_abi.rs`) allocates the destination,
+passes it as the hidden first argument with the declaration's `sret` attribute, and
+loads the result.
 
 Data layout differences (i128 align 8 vs 16, etc.) flow from the triple automatically via
 `create_target_machine` (`codegen/llvm_ir/entry.rs:643-669`); no manual work beyond not

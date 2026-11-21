@@ -1,7 +1,6 @@
 use crate::codegen::llvm_ir::HashMap;
 use inkwell::attributes::{Attribute, AttributeLoc};
-use inkwell::targets::TargetData;
-use inkwell::types::{AnyType, BasicType, BasicTypeEnum};
+use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::values::{
     BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue,
 };
@@ -385,42 +384,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .into_iter()
                     .map(|arg| self.operand_value(arg, "arg").map(Into::into).map_err(|e| CodegenError::new(e.to_string())))
                     .collect::<CodegenResult<Vec<BasicMetadataValueEnum<'ctx>>>>()?;
-                let call = self
-                    .builder
-                    .build_call(function, &args, "calltmp")
-                    .map_err(|e| CodegenError::new(format!("failed to emit call: {e}")))?;
-                (call, call.try_as_basic_value().basic())
+                self.build_foreign_call(function, signature.as_ref(), args, "calltmp")?
             }
         };
-
-        // Add byval attributes to call site for large struct arguments
-        if let Some(sig) = &signature
-            && let Some(linkage) = &sig.linkage
-            && matches!(linkage, ast::ExternLinkage::C)
-        {
-            let target_data =
-                TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
-            for (index, param_ty) in sig.params.iter().enumerate() {
-                let lowered = self.lower_basic_type(param_ty)?;
-                if let BasicTypeEnum::StructType(struct_ty) = lowered {
-                    if self
-                        .abi_handler
-                        .struct_needs_byval(self.context, &target_data, struct_ty)
-                    {
-                        let byval_kind = Attribute::get_named_enum_kind_id("byval");
-                        let attr = self
-                            .context
-                            .create_type_attribute(byval_kind, struct_ty.as_any_type_enum());
-                        call.add_attribute(AttributeLoc::Param(index as u32), attr);
-
-                        let align = self.abi_handler.byval_alignment(struct_ty, &target_data);
-                        let align_kind = Attribute::get_named_enum_kind_id("align");
-                        let align_attr = self.context.create_enum_attribute(align_kind, align);
-                        call.add_attribute(AttributeLoc::Param(index as u32), align_attr);
-                    }
-                }
-            }
-        }
         let is_noreturn = self.noreturn_functions.contains(&fn_name)
             || self
                 .noreturn_functions
@@ -434,11 +400,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 .map_err(|e| CodegenError::new(format!("failed to emit unreachable: {e}")))?;
         }
         if let Some(value) = value {
-            if let Some(signature) = &signature
-                && let (Some(ret_ty), Some(linkage)) = (&signature.return_type, &signature.linkage)
-            {
-                return Ok(Some(self.uncoerce_value_from_abi(value, ret_ty, linkage)?));
-            }
             Ok(Some(value))
         } else if allow_void {
             Ok(None)
@@ -1412,7 +1373,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
 
         let name = format!("call.{call_name}");
-        let (call, value) = match &signature {
+        let (_, value) = match &signature {
             Some(sig) if internal => {
                 self.build_internal_call(Callee::Direct(function), &sig.params, sig.return_type.as_ref(), &args, &name)?
             }
@@ -1421,11 +1382,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     .into_iter()
                     .map(|arg| self.operand_value(arg, "arg").map(Into::into).map_err(|e| CodegenError::new(e.to_string())))
                     .collect::<CodegenResult<Vec<BasicMetadataValueEnum<'ctx>>>>()?;
-                let call = self
-                    .builder
-                    .build_call(function, &args, &name)
-                    .map_err(|e| CodegenError::new(format!("failed to emit method call: {e}")))?;
-                (call, call.try_as_basic_value().basic())
+                self.build_foreign_call(function, signature.as_ref(), args, &name)?
             }
         };
         // If this is an explicit drop() call, clear the drop flag so
@@ -1434,41 +1391,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             self.clear_drop_flag_of(receiver)?;
         }
 
-        // Add byval attributes to call site for large struct arguments
-        if let Some(sig) = &signature
-            && let Some(linkage) = &sig.linkage
-            && matches!(linkage, ast::ExternLinkage::C)
-        {
-            let target_data =
-                TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
-            for (index, param_ty) in sig.params.iter().enumerate() {
-                let lowered = self.lower_basic_type(param_ty)?;
-                if let BasicTypeEnum::StructType(struct_ty) = lowered {
-                    if self
-                        .abi_handler
-                        .struct_needs_byval(self.context, &target_data, struct_ty)
-                    {
-                        let byval_kind = Attribute::get_named_enum_kind_id("byval");
-                        let attr = self
-                            .context
-                            .create_type_attribute(byval_kind, struct_ty.as_any_type_enum());
-                        call.add_attribute(AttributeLoc::Param(index as u32), attr);
-
-                        let align = self.abi_handler.byval_alignment(struct_ty, &target_data);
-                        let align_kind = Attribute::get_named_enum_kind_id("align");
-                        let align_attr = self.context.create_enum_attribute(align_kind, align);
-                        call.add_attribute(AttributeLoc::Param(index as u32), align_attr);
-                    }
-                }
-            }
-        }
-
         if let Some(value) = value {
-            if let Some(signature) = &signature
-                && let (Some(ret_ty), Some(linkage)) = (&signature.return_type, &signature.linkage)
-            {
-                return Ok(Some(self.uncoerce_value_from_abi(value, ret_ty, linkage)?));
-            }
             Ok(Some(value))
         } else if allow_void {
             Ok(None)

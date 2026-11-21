@@ -1,4 +1,5 @@
 use inkwell::AddressSpace;
+use inkwell::attributes::AttributeLoc;
 use inkwell::module::Linkage;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, StructType};
 use inkwell::values::{
@@ -206,6 +207,43 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     _ => returned,
                 })
             }
+        };
+        Ok((call, value))
+    }
+
+    /// Emits a call of `function` with `args` already in their foreign ABI
+    /// form. Under C linkage a struct result that returns in memory goes
+    /// through a hidden `sret` slot, and the call site carries the
+    /// declaration's `sret`, `byval` and `alignstack` attributes. Returns the
+    /// call site and the source-level result.
+    pub(crate) fn build_foreign_call(
+        &mut self,
+        function: FunctionValue<'ctx>,
+        signature: Option<&FunctionSig>,
+        mut args: Vec<BasicMetadataValueEnum<'ctx>>,
+        name: &str,
+    ) -> CodegenResult<(CallSiteValue<'ctx>, Option<BasicValueEnum<'ctx>>)> {
+        let error = |e: inkwell::builder::BuilderError| CodegenError::new(format!("failed to emit call: {e}"));
+        let Some(sig) = signature.filter(|sig| matches!(sig.linkage, Some(ast::ExternLinkage::C))) else {
+            let call = self.builder.build_call(function, &args, name).map_err(error)?;
+            return Ok((call, call.try_as_basic_value().basic()));
+        };
+        let result_slot = match self.c_sret_struct(sig.linkage.as_ref(), sig.return_type.as_ref())? {
+            Some(struct_ty) => {
+                let slot = self.create_entry_alloca(self.insertion_function()?, "call.sret", struct_ty.into())?;
+                args.insert(0, slot.into());
+                Some((struct_ty, slot))
+            }
+            None => None,
+        };
+        let call = self.builder.build_call(function, &args, name).map_err(error)?;
+        for (index, attribute) in self.c_abi_attributes(&sig.params, sig.return_type.as_ref())? {
+            call.add_attribute(AttributeLoc::Param(index), attribute);
+        }
+        let value = match (result_slot, call.try_as_basic_value().basic(), &sig.return_type) {
+            (Some((struct_ty, slot)), _, _) => Some(self.builder.build_load(struct_ty, slot, name).map_err(error)?),
+            (None, Some(value), Some(ret)) => Some(self.uncoerce_value_from_abi(value, ret, &ast::ExternLinkage::C)?),
+            (None, value, _) => value,
         };
         Ok((call, value))
     }

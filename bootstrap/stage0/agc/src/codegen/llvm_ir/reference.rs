@@ -127,12 +127,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                     self.coerce_value_to_abi(value, parameter, &ast::ExternLinkage::C)?,
                 ));
             }
-            let call = self.builder.build_call(function, &arguments, "")
-                .map_err(|e| CodegenError::new(e.to_string()))?;
-            if let (Some(value), Some(ty), Some(result_type)) =
-                (call.try_as_basic_value().basic(), &signature.return_type, result_type)
-            {
-                let value = self.uncoerce_value_from_abi(value, ty, &ast::ExternLinkage::C)?;
+            let (_, value) = self.build_foreign_call(function, Some(signature), arguments, "")?;
+            if let (Some(value), Some(result_type)) = (value, result_type) {
                 let value = self.internal_return_value(result_type, Operand::Value(value))?;
                 self.builder.build_return(value.as_ref().map(|value| value as &dyn BasicValue))
                     .map_err(|e| CodegenError::new(e.to_string()))?;

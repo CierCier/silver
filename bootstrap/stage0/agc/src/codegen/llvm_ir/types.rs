@@ -2,10 +2,11 @@ use std::collections::HashMap;
 
 use inkwell::AddressSpace;
 use inkwell::attributes::{Attribute, AttributeLoc};
-use inkwell::targets::TargetData;
-use inkwell::types::{AnyType, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType};
+use inkwell::types::{AnyType, BasicType, BasicTypeEnum, FunctionType, StructType};
 use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, PointerValue};
 
+pub(crate) use crate::codegen::abi::AbiSlot;
+use crate::codegen::abi::StructPass;
 use crate::codegen::llvm_ir::{FunctionSig, LlvmIrGenerator};
 use crate::codegen::{CodegenError, CodegenResult};
 use crate::parser::ast;
@@ -322,10 +323,112 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         }
     }
 
+    /// How the C struct `ty` crosses a call at `slot`, or `None` when `ty`
+    /// is not passed as a C struct. Errors on a target without a struct ABI.
+    pub(crate) fn c_struct_pass(
+        &mut self,
+        ty: &ast::Type,
+        slot: AbiSlot,
+    ) -> CodegenResult<Option<(StructType<'ctx>, StructPass<'ctx>)>> {
+        if Self::is_void_primitive(ty)
+            || matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_) | ast::TypeKind::Function(_))
+        {
+            return Ok(None);
+        }
+        let BasicTypeEnum::StructType(struct_ty) = self.lower_basic_type(ty)? else {
+            return Ok(None);
+        };
+        let target_data = self.target_data();
+        let context = self.context;
+        let handler = self.abi_handler.as_deref().ok_or_else(|| {
+            CodegenError::with_span(
+                crate::diagnostics::messages::c_struct_abi_unsupported(
+                    &self.module.get_triple().as_str().to_string_lossy(),
+                ),
+                ty.span,
+            )
+        })?;
+        let pass = match slot {
+            AbiSlot::Argument => handler.argument(context, &target_data, struct_ty),
+            AbiSlot::Result => handler.result(context, &target_data, struct_ty),
+        };
+        Ok(Some((struct_ty, pass)))
+    }
+
+    /// The `sret`, `byval` and `alignstack` attributes of a C signature, by
+    /// LLVM parameter index. A function and every call of it carry the same
+    /// set: LLVM reads them from the call site for indirect calls.
+    pub(crate) fn c_abi_attributes(
+        &mut self,
+        params: &[ast::Type],
+        return_type: Option<&ast::Type>,
+    ) -> CodegenResult<Vec<(u32, Attribute)>> {
+        let target_data = self.target_data();
+        let type_attribute = |context: &'ctx inkwell::context::Context, name: &str, ty: StructType<'ctx>| {
+            context.create_type_attribute(Attribute::get_named_enum_kind_id(name), ty.as_any_type_enum())
+        };
+        let enum_attribute = |context: &'ctx inkwell::context::Context, name: &str, value: u64| {
+            context.create_enum_attribute(Attribute::get_named_enum_kind_id(name), value)
+        };
+        let mut attributes = Vec::new();
+        let mut offset = 0;
+        if let Some(ret) = return_type
+            && let Some((struct_ty, StructPass::Indirect)) = self.c_struct_pass(ret, AbiSlot::Result)?
+        {
+            attributes.push((0, type_attribute(self.context, "sret", struct_ty)));
+            attributes.push((0, enum_attribute(self.context, "align", target_data.get_abi_alignment(&struct_ty).into())));
+            offset = 1;
+        }
+        for (index, param) in params.iter().enumerate() {
+            let index = index as u32 + offset;
+            match self.c_struct_pass(param, AbiSlot::Argument)? {
+                Some((struct_ty, StructPass::ByVal)) => {
+                    attributes.push((index, type_attribute(self.context, "byval", struct_ty)));
+                    let align = target_data.get_abi_alignment(&struct_ty).into();
+                    attributes.push((index, enum_attribute(self.context, "align", align)));
+                }
+                Some((_, StructPass::Direct { stack_align: Some(align), .. })) => {
+                    attributes.push((index, enum_attribute(self.context, "alignstack", align)));
+                }
+                _ => {}
+            }
+        }
+        Ok(attributes)
+    }
+
+    /// Reinterprets the bytes of `value` as `to` through a stack slot large
+    /// and aligned enough for both types. A C struct and the type that
+    /// carries it in registers may differ in size (a 3-byte struct passes as
+    /// `i64` on AArch64), so neither side may read past the other.
+    fn reinterpret_through_memory(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        to: BasicTypeEnum<'ctx>,
+    ) -> CodegenResult<BasicValueEnum<'ctx>> {
+        let function = self
+            .current_fn
+            .ok_or_else(|| CodegenError::new("no active function for C ABI conversion"))?;
+        let from = value.get_type();
+        let target_data = self.target_data();
+        let slot_ty = if target_data.get_abi_size(&to) > target_data.get_abi_size(&from) { to } else { from };
+        let slot = self.create_entry_alloca(function, "abi.slot", slot_ty)?;
+        let align = target_data.get_abi_alignment(&from).max(target_data.get_abi_alignment(&to));
+        slot.as_instruction()
+            .expect("alloca instruction")
+            .set_alignment(align)
+            .map_err(|e| CodegenError::new(format!("failed to align C ABI slot: {e}")))?;
+        let error = |e: inkwell::builder::BuilderError| CodegenError::new(format!("failed to convert C ABI value: {e}"));
+        self.builder.build_store(slot, value).map_err(error)?;
+        self.builder.build_load(to, slot, "abi.value").map_err(error)
+    }
+
+    /// The LLVM type that carries a value of `ty` across a call of `linkage`
+    /// at `slot`.
     pub(crate) fn lower_abi_type(
         &mut self,
         ty: &ast::Type,
         linkage: &ast::ExternLinkage,
+        slot: AbiSlot,
     ) -> CodegenResult<BasicTypeEnum<'ctx>> {
         // Handle void return types specially - they map to LLVM void type
         // Note: void is not a BasicType, so we return an error here.
@@ -355,19 +458,14 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok(self.context.i32_type().as_basic_type_enum());
         }
 
-        if let BasicTypeEnum::StructType(struct_ty) = lowered {
-            let target_data =
-                TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
-            // Full delegation to the target ABI handler: SysV eightbyte
-            // classification vs Win64 by-reference rules live in abi.rs.
-            Ok(self
-                .abi_handler
-                .classify_argument(self.context, &target_data, struct_ty))
-        } else {
-            Ok(lowered)
+        match self.c_struct_pass(ty, slot)? {
+            Some((_, pass)) => Ok(pass.llvm_type(self.context)),
+            None => Ok(lowered),
         }
     }
 
+    /// Converts argument `value` of source type `ty` to its C-ABI form. A
+    /// struct passed by reference becomes a pointer to a fresh copy.
     pub(crate) fn coerce_value_to_abi(
         &mut self,
         value: BasicValueEnum<'ctx>,
@@ -388,7 +486,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return self.callable_entry(value, true).map(|v| v.as_basic_value_enum());
         }
 
-        let abi_ty = self.lower_abi_type(ty, linkage)?;
+        let abi_ty = self.lower_abi_type(ty, linkage, AbiSlot::Argument)?;
         if abi_ty == value.get_type() {
             return Ok(value);
         }
@@ -407,48 +505,22 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok(promoted.as_basic_value_enum());
         }
 
-        let function = self
-            .current_fn
-            .ok_or_else(|| CodegenError::new("no active function for ABI coercion"))?;
-
-        let alloca = self.create_entry_alloca(function, "abi_coercion_tmp", value.get_type())?;
-        self.builder
-            .build_store(alloca, value)
-            .map_err(|e| CodegenError::new(format!("failed to store for ABI coercion: {e}")))?;
-
         if abi_ty.is_pointer_type() && !value.get_type().is_pointer_type() {
-            // Large struct being passed by pointer (byval)
-            Ok(alloca.as_basic_value_enum())
-        } else if abi_ty.is_struct_type() && value.get_type().is_struct_type() {
-            // Struct-to-struct conversion: use memcpy
-            let target_data =
-                TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
-            let struct_ty = value.get_type().into_struct_type();
-            let size = target_data.get_store_size(&struct_ty);
-
-            let abi_alloca = self.create_entry_alloca(function, "abi_coercion_tmp2", abi_ty)?;
-
-            self.build_memcpy(abi_alloca, 1, alloca, 1, size)?;
-
-            let coerced = self
-                .builder
-                .build_load(abi_ty, abi_alloca, "abi_coerced")
-                .map_err(|e| {
-                    CodegenError::new(format!("failed to load coerced struct value: {e}"))
-                })?;
-
-            Ok(coerced)
-        } else {
-            // Scalar conversion: load as new type
-            let coerced = self
-                .builder
-                .build_load(abi_ty, alloca, "abi_coerced")
-                .map_err(|e| CodegenError::new(format!("failed to load coerced value: {e}")))?;
-
-            Ok(coerced)
+            let function = self
+                .current_fn
+                .ok_or_else(|| CodegenError::new("no active function for C ABI conversion"))?;
+            let copy = self.create_entry_alloca(function, "abi.copy", value.get_type())?;
+            self.builder
+                .build_store(copy, value)
+                .map_err(|e| CodegenError::new(format!("failed to copy C ABI argument: {e}")))?;
+            return Ok(copy.as_basic_value_enum());
         }
+        self.reinterpret_through_memory(value, abi_ty)
     }
 
+    /// Converts a value received from C, either a call result or a callback
+    /// argument, back to source type `ty`. A struct result returned through
+    /// `sret` never reaches here; `build_foreign_call` loads it from the slot.
     pub(crate) fn uncoerce_value_from_abi(
         &mut self,
         value: BasicValueEnum<'ctx>,
@@ -487,59 +559,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             return Ok(narrowed.as_basic_value_enum());
         }
 
-        let function = self
-            .current_fn
-            .ok_or_else(|| CodegenError::new("no active function for ABI uncoercion"))?;
-
-        if value.get_type().is_pointer_type() && !native_ty.is_pointer_type() {
-            // Large struct returned by pointer (unlikely for many C functions but possible)
-            let uncoerced = self
-                .builder
-                .build_load(native_ty, value.into_pointer_value(), "abi_uncoerced")
-                .map_err(|e| CodegenError::new(format!("failed to load uncoerced value: {e}")))?;
-            return Ok(uncoerced);
-        }
-
-        if native_ty.is_struct_type() && value.get_type().is_struct_type() {
-            // Struct-to-struct conversion: use memcpy
-            let target_data =
-                TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
-            let abi_struct_ty = value.get_type().into_struct_type();
-            let size = target_data.get_store_size(&abi_struct_ty);
-
-            let native_alloca =
-                self.create_entry_alloca(function, "abi_uncoercion_tmp", native_ty)?;
-
-            let abi_alloca =
-                self.create_entry_alloca(function, "abi_uncoercion_tmp2", value.get_type())?;
-
-            self.builder.build_store(abi_alloca, value).map_err(|e| {
-                CodegenError::new(format!("failed to store for ABI struct uncoercion: {e}"))
-            })?;
-
-            self.build_memcpy(native_alloca, 1, abi_alloca, 1, size)?;
-
-            let uncoerced = self
-                .builder
-                .build_load(native_ty, native_alloca, "abi_uncoerced")
-                .map_err(|e| {
-                    CodegenError::new(format!("failed to load uncoerced struct value: {e}"))
-                })?;
-
-            return Ok(uncoerced);
-        }
-
-        let alloca = self.create_entry_alloca(function, "abi_uncoercion_tmp", value.get_type())?;
-        self.builder
-            .build_store(alloca, value)
-            .map_err(|e| CodegenError::new(format!("failed to store for ABI uncoercion: {e}")))?;
-
-        let uncoerced = self
-            .builder
-            .build_load(native_ty, alloca, "abi_uncoerced")
-            .map_err(|e| CodegenError::new(format!("failed to load uncoerced value: {e}")))?;
-
-        Ok(uncoerced)
+        self.reinterpret_through_memory(value, native_ty)
     }
 
     fn c_narrow_unit_enum_is_signed(&self, ty: &ast::Type) -> Option<bool> {
@@ -651,73 +671,35 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok(())
     }
 
+    /// Adds the C-ABI parameter attributes of `sig` to its declaration.
     pub(crate) fn apply_abi_attributes(
         &mut self,
         function: FunctionValue<'ctx>,
         sig: &FunctionSig,
     ) -> CodegenResult<()> {
-        let Some(linkage) = &sig.linkage else {
-            return Ok(());
-        };
-
-        if !matches!(linkage, ast::ExternLinkage::C) {
+        if !matches!(sig.linkage, Some(ast::ExternLinkage::C)) {
             return Ok(());
         }
-
-        let target_data =
-            TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
-
-        // Check if return type needs sret to calculate parameter offset
-        let mut sret_offset: u32 = 0;
-        if let Some(ret_ty) = &sig.return_type
-            && !Self::is_void_primitive(ret_ty)
-        {
-            let lowered_ret = self.lower_basic_type(ret_ty)?;
-            if let BasicTypeEnum::StructType(struct_ty) = lowered_ret {
-                if self
-                    .abi_handler
-                    .struct_needs_sret(self.context, &target_data, struct_ty)
-                {
-                    sret_offset = 1;
-                    // Add sret attribute to the first parameter (implicit return pointer)
-                    let sret_kind = Attribute::get_named_enum_kind_id("sret");
-                    let attr = self
-                        .context
-                        .create_type_attribute(sret_kind, struct_ty.as_any_type_enum());
-                    function.add_attribute(AttributeLoc::Param(0), attr);
-
-                    let align = self.abi_handler.byval_alignment(struct_ty, &target_data);
-                    let align_kind = Attribute::get_named_enum_kind_id("align");
-                    let align_attr = self.context.create_enum_attribute(align_kind, align);
-                    function.add_attribute(AttributeLoc::Param(0), align_attr);
-                }
-            }
+        for (index, attribute) in self.c_abi_attributes(&sig.params, sig.return_type.as_ref())? {
+            function.add_attribute(AttributeLoc::Param(index), attribute);
         }
-
-        // Add byval attributes to user parameters (shifted by sret_offset)
-        for (i, param_ty) in sig.params.iter().enumerate() {
-            let lowered = self.lower_basic_type(param_ty)?;
-            if let BasicTypeEnum::StructType(struct_ty) = lowered {
-                if self
-                    .abi_handler
-                    .struct_needs_byval(self.context, &target_data, struct_ty)
-                {
-                    let param_idx = (i as u32) + sret_offset;
-                    let byval_kind = Attribute::get_named_enum_kind_id("byval");
-                    let attr = self
-                        .context
-                        .create_type_attribute(byval_kind, struct_ty.as_any_type_enum());
-                    function.add_attribute(AttributeLoc::Param(param_idx), attr);
-
-                    let align = self.abi_handler.byval_alignment(struct_ty, &target_data);
-                    let align_kind = Attribute::get_named_enum_kind_id("align");
-                    let align_attr = self.context.create_enum_attribute(align_kind, align);
-                    function.add_attribute(AttributeLoc::Param(param_idx), align_attr);
-                }
-            }
-        }
-
         Ok(())
+    }
+
+    /// The struct that a function of `linkage` returns through a hidden
+    /// leading `sret` pointer instead of as a value.
+    pub(crate) fn c_sret_struct(
+        &mut self,
+        linkage: Option<&ast::ExternLinkage>,
+        return_type: Option<&ast::Type>,
+    ) -> CodegenResult<Option<StructType<'ctx>>> {
+        let (Some(ast::ExternLinkage::C), Some(ret)) = (linkage, return_type) else {
+            return Ok(None);
+        };
+        Ok(match self.c_struct_pass(ret, AbiSlot::Result)? {
+            Some((struct_ty, StructPass::Indirect)) => Some(struct_ty),
+            _ => None,
+        })
     }
 
     pub(crate) fn lower_function_type(
@@ -727,65 +709,22 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         is_variadic: bool,
         linkage: Option<ast::ExternLinkage>,
     ) -> CodegenResult<FunctionType<'ctx>> {
-        if Self::internal_abi(linkage.as_ref()) {
+        let Some(linkage) = linkage.filter(|linkage| !Self::internal_abi(Some(linkage))) else {
             return self.lower_internal_function_type(params, return_type, is_variadic);
+        };
+        let sret = self.c_sret_struct(Some(&linkage), return_type)?.is_some();
+        let mut llvm_params = Vec::with_capacity(params.len() + usize::from(sret));
+        if sret {
+            llvm_params.push(self.context.ptr_type(AddressSpace::default()).into());
         }
-        let target_data =
-            TargetData::create(self.module.get_data_layout().as_str().to_str().unwrap());
-
-        // Check if return type needs sret (hidden pointer parameter)
-        let mut needs_sret = false;
-        if let Some(ret) = return_type
-            && !Self::is_void_primitive(ret)
-            && let Some(link) = &linkage
-            && matches!(link, ast::ExternLinkage::C)
-            && !matches!(ret.kind.as_ref(), ast::TypeKind::Reference(_) | ast::TypeKind::Function(_))
-        {
-            let lowered_ret = self.lower_basic_type(ret)?;
-            if let BasicTypeEnum::StructType(struct_ty) = lowered_ret {
-                if self
-                    .abi_handler
-                    .struct_needs_sret(self.context, &target_data, struct_ty)
-                {
-                    needs_sret = true;
-                }
-            }
-        }
-
-        let mut llvm_params = Vec::with_capacity(params.len() + if needs_sret { 1 } else { 0 });
-
-        // If sret is needed, add implicit return pointer as first parameter
-        if needs_sret {
-            let ptr = self.context.ptr_type(AddressSpace::default());
-            llvm_params.push(BasicMetadataTypeEnum::from(ptr));
-        }
-
         for param in params {
-            let lowered = if let Some(linkage) = &linkage {
-                self.lower_abi_type(param, linkage)?
-            } else {
-                self.lower_basic_type(param)?
-            };
-            let basic_meta = BasicMetadataTypeEnum::from(lowered);
-            llvm_params.push(basic_meta);
+            llvm_params.push(self.lower_abi_type(param, &linkage, AbiSlot::Argument)?.into());
         }
-
-        if let Some(ret) = return_type {
-            if Self::is_void_primitive(ret) {
-                return Ok(self.context.void_type().fn_type(&llvm_params, is_variadic));
+        match return_type {
+            Some(ret) if !sret && !Self::is_void_primitive(ret) => {
+                Ok(self.lower_abi_type(ret, &linkage, AbiSlot::Result)?.fn_type(&llvm_params, is_variadic))
             }
-            if needs_sret {
-                // Return type becomes void when using sret
-                return Ok(self.context.void_type().fn_type(&llvm_params, is_variadic));
-            }
-            let basic_ret = if let Some(linkage) = &linkage {
-                self.lower_abi_type(ret, linkage)?
-            } else {
-                self.lower_basic_type(ret)?
-            };
-            Ok(basic_ret.fn_type(&llvm_params, is_variadic))
-        } else {
-            Ok(self.context.void_type().fn_type(&llvm_params, is_variadic))
+            _ => Ok(self.context.void_type().fn_type(&llvm_params, is_variadic)),
         }
     }
 

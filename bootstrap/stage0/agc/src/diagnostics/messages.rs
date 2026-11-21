@@ -9,6 +9,10 @@ pub fn reference_carrier_expected() -> &'static str {
     "internal reference requires a data pointer and initialization-state capability"
 }
 
+pub fn c_struct_abi_unsupported(target: &str) -> String {
+    format!("passing a struct by value across a C boundary is not supported for target `{target}`")
+}
+
 pub fn reference_state_unavailable() -> &'static str {
     "cannot borrow owned storage without its initialization-state capability"
 }
