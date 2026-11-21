@@ -441,29 +441,27 @@ u32 common_numeric_type(u32 left, u32 right) {
 /// (any arity when -1), or null.
 SyntaxNode* find_function_by_name_and_arity(SyntaxNode* root, str name, i64 arity) {
     if (root == (SyntaxNode*)0) { return (SyntaxNode*)0; }
-    SyntaxNode* child = root.first_child;
+    RootIndex* index = root_index(root);
     SyntaxNode* fallback = (SyntaxNode*)0;
-    while (child != (SyntaxNode*)0) {
-        if (child.kind == NodeKind.Function) {
-            SyntaxNode* id_node = function_identifier(child);
-            if (id_node != (SyntaxNode*)0 && strcmp(id_node.text, name) == 0) {
-                if (arity < 0) {
-                    return child;
-                }
-                Vec<Binding> params = Vec<Binding>.new();
-                collect_parameter_bindings(binding_function_parameters(child), &params);
-                i64 p_len = params.len();
-                bool accepts_arity = binding_parameters_accept_arity(&params, arity);
-                params.drop();
-                if (p_len == arity || accepts_arity) {
-                    return child;
-                }
-                if (fallback == (SyntaxNode*)0) {
-                    fallback = child;
-                }
-            }
+    i64 entry = index.find(name);
+    while (entry >= 0) {
+        SyntaxNode* child = index.item(entry);
+        entry = index.after(entry);
+        if (child.kind != NodeKind.Function) { continue; }
+        if (arity < 0) {
+            return child;
         }
-        child = child.next_sibling;
+        Vec<Binding> params = Vec<Binding>.new();
+        collect_parameter_bindings(binding_function_parameters(child), &params);
+        i64 p_len = params.len();
+        bool accepts_arity = binding_parameters_accept_arity(&params, arity);
+        params.drop();
+        if (p_len == arity || accepts_arity) {
+            return child;
+        }
+        if (fallback == (SyntaxNode*)0) {
+            fallback = child;
+        }
     }
     return fallback;
 }
@@ -668,18 +666,15 @@ bool typecheck_same_free_signature(TypeTable* types, SyntaxNode* left, SyntaxNod
 /// Returns true when `name` has more than one distinct free overload.
 bool typecheck_has_free_overloads(TypeTable* types, SyntaxNode* root, str name) {
     SyntaxNode* first = (SyntaxNode*)0;
-    SyntaxNode* item = root.first_child;
-    while (item != (SyntaxNode*)0) {
-        if (item.kind == NodeKind.Function) {
-            SyntaxNode* id = function_identifier(item);
-            // Test the name before generics: most items are not named `name`.
-            if (id != (SyntaxNode*)0 && strcmp(id.text, name) == 0
-                && !typecheck_is_generic_function(item)) {
-                if (first == (SyntaxNode*)0) { first = item; }
-                else if (!typecheck_same_free_signature(types, first, item)) { return true; }
-            }
+    RootIndex* index = root_index(root);
+    i64 entry = index.find(name);
+    while (entry >= 0) {
+        SyntaxNode* item = index.item(entry);
+        entry = index.after(entry);
+        if (item.kind == NodeKind.Function && !typecheck_is_generic_function(item)) {
+            if (first == (SyntaxNode*)0) { first = item; }
+            else if (!typecheck_same_free_signature(types, first, item)) { return true; }
         }
-        item = item.next_sibling;
     }
     return false;
 }
@@ -751,15 +746,15 @@ bool typecheck_arguments_known(AstPool* pool, AstExpr* call) {
 /// or null.
 SyntaxNode* typecheck_overload_by_symbol(TypeTable* types, Interner* names, SyntaxNode* root,
                                          str name, u32 symbol_id) {
-    SyntaxNode* item = root.first_child;
-    while (item != (SyntaxNode*)0) {
-        SyntaxNode* id = item.kind == NodeKind.Function ? function_identifier(item) : (SyntaxNode*)0;
-        if (id != (SyntaxNode*)0 && strcmp(id.text, name) == 0
-            && !typecheck_is_generic_function(item)
+    RootIndex* index = root_index(root);
+    i64 entry = index.find(name);
+    while (entry >= 0) {
+        SyntaxNode* item = index.item(entry);
+        entry = index.after(entry);
+        if (item.kind == NodeKind.Function && !typecheck_is_generic_function(item)
             && typecheck_overload_symbol_id(types, names, name, item) == symbol_id) {
             return item;
         }
-        item = item.next_sibling;
     }
     return (SyntaxNode*)0;
 }
@@ -794,16 +789,12 @@ SyntaxNode* typecheck_resolve_free_function(AstPool* pool, TypeTable* types,
     u32 selected_symbol_id = 0;
     i64 selected_score = 0;
     bool saw_arity = false;
-    SyntaxNode* item = root.first_child;
-    while (item != (SyntaxNode*)0) {
-        if (item.kind != NodeKind.Function) {
-            item = item.next_sibling;
-            continue;
-        }
-        SyntaxNode* id = function_identifier(item);
-        if (id == (SyntaxNode*)0 || strcmp(id.text, name) != 0
-            || typecheck_is_generic_function(item)) {
-            item = item.next_sibling;
+    RootIndex* index = root_index(root);
+    i64 entry = index.find(name);
+    while (entry >= 0) {
+        SyntaxNode* item = index.item(entry);
+        entry = index.after(entry);
+        if (item.kind != NodeKind.Function || typecheck_is_generic_function(item)) {
             continue;
         }
         Vec<Binding> params = Vec<Binding>.new();
@@ -845,7 +836,6 @@ SyntaxNode* typecheck_resolve_free_function(AstPool* pool, TypeTable* types,
             }
         }
         params.drop();
-        item = item.next_sibling;
     }
     actual_types.drop();
 

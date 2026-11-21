@@ -1,7 +1,10 @@
 // Syntactic queries over top-level items shared by lowering and codegen.
 // These walk the lossless CST directly so enum and method shapes resolve the
 // same way in every pass without a separate registry.
+import std.map;
+import std.mem.alloc;
 import std.mem.vec;
+import std.optional;
 import std.string;
 import frontend.ast;
 import frontend.ast_expr;
@@ -9,20 +12,95 @@ import frontend.lexer;
 import frontend.symbols;
 import frontend.types;
 
+impl RootIndex {
+    /// Returns the first named item spelled `name` (an entry for `item` and
+    /// `after`), or -1.
+    i64 find(RootIndex* self, str name) {
+        Optional<u32> id = map_get_opt_str_u32(&self.names.ids, name);
+        return id.is_some() ? self.head.get((i64)id.unwrap()) : -1;
+    }
+
+    /// Returns the next named item with the same name as `entry`, or -1.
+    i64 after(RootIndex* self, i64 entry) {
+        return self.next.get(entry);
+    }
+
+    /// Returns the item of a named entry.
+    SyntaxNode* item(RootIndex* self, i64 entry) {
+        return self.items.get(entry);
+    }
+
+    /// Records a named item at the end of its name's chain.
+    void add_named(RootIndex* self, SyntaxNode* item, str name) {
+        i64 id = (i64)self.names.intern(name);
+        i64 entry = self.items.len();
+        self.items.push(item);
+        self.next.push(-1);
+        while (self.head.len() <= id) {
+            self.head.push(-1);
+            self.tail.push(-1);
+        }
+        if (self.head.get(id) < 0) {
+            self.head.set(id, entry);
+        } else {
+            self.next.set(self.tail.get(id), entry);
+        }
+        self.tail.set(id, entry);
+    }
+}
+
+/// Returns the lookup index of `root`'s items, building it on first use and
+/// again when the root's first or last child has changed since.
+RootIndex* root_index(SyntaxNode* root) {
+    RootIndex* index = root.index;
+    if (index != (RootIndex*)0 && index.first == root.first_child && index.last == root.last_child) {
+        return index;
+    }
+    if (index == (RootIndex*)0) {
+        index = (RootIndex*)alloc<RootIndex>();
+        root.index = index;
+    } else {
+        @drop_in_place(index, 1);
+    }
+    index.first = root.first_child;
+    index.last = root.last_child;
+    index.names = Interner.new();
+    index.items = Vec<SyntaxNode*>.new();
+    index.next = Vec<i64>.new();
+    index.head = Vec<i64>.new();
+    index.tail = Vec<i64>.new();
+    index.impls = Vec<SyntaxNode*>.new();
+    index.c_externs = Vec<SyntaxNode*>.new();
+    SyntaxNode* item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        if (item.kind == NodeKind.Impl) {
+            index.impls.push(item);
+        } else if (item_extern_uses_c_abi(item)) {
+            index.c_externs.push(item);
+        } else {
+            SyntaxNode* id = item_identifier(item);
+            if (id != (SyntaxNode*)0) {
+                index.add_named(item, id.text);
+            }
+        }
+        item = item.next_sibling;
+    }
+    return index;
+}
+
 /// Returns the first top-level item of `kind` named `name`, or null.
 SyntaxNode* find_item_by_name(SyntaxNode* root, NodeKind kind, str name) {
     if (root == (SyntaxNode*)0) {
         return (SyntaxNode*)0;
     }
-    SyntaxNode* child = root.first_child;
-    while (child != (SyntaxNode*)0) {
-        if (child.kind == kind) {
-            SyntaxNode* id = item_identifier(child);
-            if (id != (SyntaxNode*)0 && strcmp(id.text, name) == 0) {
-                return child;
-            }
+    RootIndex* index = root_index(root);
+    i64 entry = index.find(name);
+    while (entry >= 0) {
+        SyntaxNode* item = index.item(entry);
+        if (item.kind == kind) {
+            return item;
         }
-        child = child.next_sibling;
+        entry = index.after(entry);
     }
     return (SyntaxNode*)0;
 }
@@ -268,57 +346,57 @@ ExternFunctionSignature item_find_c_extern_function(SyntaxNode* root,
     result.signature_start = (SyntaxNode*)0;
     result.function_name = (SyntaxNode*)0;
     result.parameter_list = (SyntaxNode*)0;
-    SyntaxNode* item = root == (SyntaxNode*)0 ? (SyntaxNode*)0 : root.first_child;
-    while (item != (SyntaxNode*)0) {
-        if (item_extern_uses_c_abi(item)) {
-            SyntaxNode* block = item.first_child;
-            while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
-                block = block.next_sibling;
+    RootIndex* index = root == (SyntaxNode*)0 ? (RootIndex*)0 : root_index(root);
+    i64 item_position = 0;
+    while (index != (RootIndex*)0 && item_position < index.c_externs.len()) {
+        SyntaxNode* item = index.c_externs.get(item_position);
+        item_position += 1;
+        SyntaxNode* block = item.first_child;
+        while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+            block = block.next_sibling;
+        }
+        SyntaxNode* cursor = block != (SyntaxNode*)0
+            ? block.first_child : item_extern_single_signature_start(item);
+        while (cursor != (SyntaxNode*)0) {
+            if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
+                cursor = cursor.next_sibling;
+                continue;
             }
-            SyntaxNode* cursor = block != (SyntaxNode*)0
-                ? block.first_child : item_extern_single_signature_start(item);
-            while (cursor != (SyntaxNode*)0) {
-                if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
-                    cursor = cursor.next_sibling;
+            SyntaxNode* signature_start = item_skip_extern_attribute(cursor);
+            SyntaxNode* name = (SyntaxNode*)0;
+            SyntaxNode* callable_name = (SyntaxNode*)0;
+            SyntaxNode* parameters = (SyntaxNode*)0;
+            SyntaxNode* scan = signature_start;
+            while (scan != (SyntaxNode*)0
+                && !(scan.kind == NodeKind.Token
+                    && scan.token_kind == TokenKind.Semicolon)) {
+                SyntaxNode* next = item_skip_extern_attribute(scan);
+                if (next != scan) {
+                    scan = next;
                     continue;
                 }
-                SyntaxNode* signature_start = item_skip_extern_attribute(cursor);
-                SyntaxNode* name = (SyntaxNode*)0;
-                SyntaxNode* callable_name = (SyntaxNode*)0;
-                SyntaxNode* parameters = (SyntaxNode*)0;
-                SyntaxNode* scan = signature_start;
-                while (scan != (SyntaxNode*)0
-                    && !(scan.kind == NodeKind.Token
-                        && scan.token_kind == TokenKind.Semicolon)) {
-                    SyntaxNode* next = item_skip_extern_attribute(scan);
-                    if (next != scan) {
-                        scan = next;
-                        continue;
-                    }
-                    if (scan.kind == NodeKind.Token
-                        && scan.token_kind == TokenKind.Identifier) {
-                        name = scan;
-                    }
-                    if (scan.kind == NodeKind.Parenthesized && name != (SyntaxNode*)0
-                        && name.next_sibling == scan) {
-                        callable_name = name;
-                        parameters = scan;
-                    }
-                    scan = scan.next_sibling;
+                if (scan.kind == NodeKind.Token
+                    && scan.token_kind == TokenKind.Identifier) {
+                    name = scan;
                 }
-                if (name != (SyntaxNode*)0 && callable_name == name
-                    && parameters != (SyntaxNode*)0
-                    && strcmp(name.text, function_name) == 0) {
-                    result.signature_start = signature_start;
-                    result.function_name = name;
-                    result.parameter_list = parameters;
-                    return result;
+                if (scan.kind == NodeKind.Parenthesized && name != (SyntaxNode*)0
+                    && name.next_sibling == scan) {
+                    callable_name = name;
+                    parameters = scan;
                 }
-                cursor = scan == (SyntaxNode*)0 ? cursor.next_sibling
-                                                : scan.next_sibling;
+                scan = scan.next_sibling;
             }
+            if (name != (SyntaxNode*)0 && callable_name == name
+                && parameters != (SyntaxNode*)0
+                && strcmp(name.text, function_name) == 0) {
+                result.signature_start = signature_start;
+                result.function_name = name;
+                result.parameter_list = parameters;
+                return result;
+            }
+            cursor = scan == (SyntaxNode*)0 ? cursor.next_sibling
+                                            : scan.next_sibling;
         }
-        item = item.next_sibling;
     }
     return result;
 }
