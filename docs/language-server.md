@@ -472,6 +472,38 @@ The benchmark options operate as follows:
 - Do not compare partial or truncated candidate sets against complete responses, nor equate untruncated candidate lists (such as earlier ~490-item responses) with top-100 capped responses, or compare differing provider payloads (such as single-character `S` returning 38 versus 42 providers). Differing payloads and candidate counts do not represent equal work; state no current verified equal-work speedup. While top-100 truncation and single-character prefix behavior are supported in source, overall clangd parity remains open.
 - All numbers in the performance tables above remain historical baseline evidence from earlier completed and verified runs.
 
+### Edit latency
+
+`scripts/benchmark_lsp_edits.py` measures what a user sees right after an
+edit. It replays Zed's order in one warmed session: `didChange`, a diagnostic
+pull, then the format, rename, or references request the user sent. A slow
+diagnostic pull therefore shows up as format and rename latency. With
+`--workspace-poll`, the client also keeps one `workspace/diagnostic` request
+open and re-sends it after each answer, as Zed does.
+
+```sh
+python3 scripts/benchmark_lsp_edits.py --server /tmp/aglsp-native --workspace . --runs 10
+python3 scripts/benchmark_lsp_edits.py --server /tmp/aglsp-native --workspace . --runs 10 --workspace-poll
+```
+
+The script edits `bin/aglsp/src/main.ag` and renames `dispatch_message` by
+default (`--document`, `--rename`). `format_after_burst` sends ten keystrokes
+30 ms apart, each followed by a pull. `fresh_diagnostics_after_edit` adds an
+undefined name and measures until a pull reports it.
+
+A comparison on 2026-11-21 used `-O2` builds on this repository, ten runs each,
+with `--workspace-poll`, load average about 3:
+
+| Metric | Before median | After median | After p95 |
+| --- | ---: | ---: | ---: |
+| Format after an edit | 1812 ms | 42 ms | 64 ms |
+| Format after ten keystrokes | 17927 ms | 24 ms | 41 ms |
+| Rename, idle | 3932 ms | 9 ms | 13 ms |
+| Rename after an edit | 5752 ms | 29 ms | 37 ms |
+| References, idle | 4679 ms | 12 ms | 21 ms |
+| New error reported after an edit | 1074 ms | 97 ms | 102 ms |
+| Peak resident memory | 450 MiB | 377 MiB | |
+
 ## Clangd 22 default parity comparison
 
 The reference implementation is pinned to upstream
