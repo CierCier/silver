@@ -231,6 +231,17 @@ bool mono_push_owner_type_arguments(SyntaxNode* root, TypeTable* types, u32 type
     return true;
 }
 
+/// Returns true when `target` names `base`: its text up to any `<` equals it.
+/// Compares in place so scanning every impl allocates nothing.
+bool mono_target_base_is(str target, str base) {
+    i64 i = 0;
+    while (target[i] != (u8)0 && target[i] != (u8)'<') {
+        if (base[i] != target[i]) { return false; }
+        i += 1;
+    }
+    return base[i] == (u8)0;
+}
+
 /// Find an impl block for `base` defining `method`, matching type arguments `arg_ids`.
 /// Collects the impl-level type parameter names (deduped, in order) for substitution.
 /// For specialized concrete impls, param_ids will be empty (no substitution needed).
@@ -254,14 +265,7 @@ bool mono_find_method_template(SyntaxNode* root, TypeTable* types, str base, str
         if (item.kind == NodeKind.Impl) {
             SyntaxNode* target = impl_target_identifier(item);
             if (target != (SyntaxNode*)0) {
-                String target_base = String.new();
-                i64 bi = 0;
-                while (target.text[bi] != (u8)0 && target.text[bi] != (u8)60) {
-                    target_base.push(target.text[bi]);
-                    bi += 1;
-                }
-                bool is_base = strcmp(target_base.to_str(), base) == 0;
-                target_base.drop();
+                bool is_base = mono_target_base_is(target.text, base);
                 if (is_base && impl_target_pointer_depth(item) == receiver_depth) {
                     SyntaxNode* block = item.first_child;
                     while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {

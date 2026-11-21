@@ -670,9 +670,11 @@ bool typecheck_has_free_overloads(TypeTable* types, SyntaxNode* root, str name) 
     SyntaxNode* first = (SyntaxNode*)0;
     SyntaxNode* item = root.first_child;
     while (item != (SyntaxNode*)0) {
-        if (item.kind == NodeKind.Function && !typecheck_is_generic_function(item)) {
+        if (item.kind == NodeKind.Function) {
             SyntaxNode* id = function_identifier(item);
-            if (id != (SyntaxNode*)0 && strcmp(id.text, name) == 0) {
+            // Test the name before generics: most items are not named `name`.
+            if (id != (SyntaxNode*)0 && strcmp(id.text, name) == 0
+                && !typecheck_is_generic_function(item)) {
                 if (first == (SyntaxNode*)0) { first = item; }
                 else if (!typecheck_same_free_signature(types, first, item)) { return true; }
             }
@@ -751,9 +753,9 @@ SyntaxNode* typecheck_overload_by_symbol(TypeTable* types, Interner* names, Synt
                                          str name, u32 symbol_id) {
     SyntaxNode* item = root.first_child;
     while (item != (SyntaxNode*)0) {
-        SyntaxNode* id = item.kind == NodeKind.Function && !typecheck_is_generic_function(item)
-            ? function_identifier(item) : (SyntaxNode*)0;
+        SyntaxNode* id = item.kind == NodeKind.Function ? function_identifier(item) : (SyntaxNode*)0;
         if (id != (SyntaxNode*)0 && strcmp(id.text, name) == 0
+            && !typecheck_is_generic_function(item)
             && typecheck_overload_symbol_id(types, names, name, item) == symbol_id) {
             return item;
         }
@@ -794,12 +796,13 @@ SyntaxNode* typecheck_resolve_free_function(AstPool* pool, TypeTable* types,
     bool saw_arity = false;
     SyntaxNode* item = root.first_child;
     while (item != (SyntaxNode*)0) {
-        if (item.kind != NodeKind.Function || typecheck_is_generic_function(item)) {
+        if (item.kind != NodeKind.Function) {
             item = item.next_sibling;
             continue;
         }
         SyntaxNode* id = function_identifier(item);
-        if (id == (SyntaxNode*)0 || strcmp(id.text, name) != 0) {
+        if (id == (SyntaxNode*)0 || strcmp(id.text, name) != 0
+            || typecheck_is_generic_function(item)) {
             item = item.next_sibling;
             continue;
         }
