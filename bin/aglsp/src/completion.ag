@@ -330,9 +330,8 @@ void append_import_context_completions(DocumentStore* store, Document* doc,
                 j += 1;
             }
             if (!symbol.local && !symbol.is_private && symbol.owner.len() == 0 && score >= 0 && !selected) {
-                Vec<Document*> visited = Vec<Document*>.new(); SymbolTarget unique;
-                unique.document = source; unique.symbol = -1;
-                find_imported_symbol(source, symbol.name.to_str(), "", &visited, &unique);
+                SymbolTarget unique; unique.document = source; unique.symbol = -1;
+                find_symbol(source, symbol.name.to_str(), "", &unique);
                 if (unique.symbol == i && unique.document == source) {
                     SymbolTarget target; target.document = doc; target.symbol = -1;
                     offer_completion(candidates, symbol.name.to_str(), "", "", completion_kind(symbol.kind),
