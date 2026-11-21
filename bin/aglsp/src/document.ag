@@ -92,6 +92,8 @@ struct DocumentStore {
     Vec<String> overlay_paths;
     bool discover_open_projects;
     i64 edit_clock;
+    // Set when a closed document's report goes stale; the scheduler consumes it.
+    bool closed_dirtied;
 }
 
 /// Returns true when `path` is inside one of `roots`.
@@ -153,22 +155,54 @@ impl Document {
         self.analysis.symbols = move retained;
     }
 
-    /// True when `name` appears in the text as a whole identifier. Reads only
-    /// the text, so it works on compacted documents and lets name-driven
-    /// scans skip files whose parse tree they would otherwise rebuild.
-    bool mentions(Document* self, str name) {
+    /// Byte offset of the first whole-identifier `name` at or after `from`, or
+    /// -1. Reads only the text, so it works on compacted documents and lets
+    /// name-driven scans skip files whose parse tree they would otherwise rebuild.
+    i64 find_name(Document* self, str name, i64 from) {
         i64 width = strlen(name); i64 length = self.text.len();
-        if (width == 0) { return false; }
-        u8* data = self.text.data; u8 first = (u8)name[0]; i64 i = 0;
+        if (width == 0) { return -1; }
+        u8* data = self.text.data; u8 first = (u8)name[0]; i64 i = from;
         while (i + width <= length) {
             if (data[i] == first && (i == 0 || !typecheck_name_continue(data[i - 1]))) {
                 i64 k = 1;
                 while (k < width && data[i + k] == (u8)name[k]) { k += 1; }
-                if (k == width && (i + width == length || !typecheck_name_continue(data[i + width]))) { return true; }
+                if (k == width && (i + width == length || !typecheck_name_continue(data[i + width]))) { return i; }
             }
             i += 1;
         }
+        return -1;
+    }
+
+    /// True when `name` appears in the text as a whole identifier.
+    bool mentions(Document* self, str name) { return self.find_name(name, 0) >= 0; }
+
+    /// True when any of `names` appears in the text as a whole identifier.
+    bool mentions_any(Document* self, Vec<String>* names) {
+        i64 i = 0;
+        while (i < names.len()) { if (self.mentions(names.get_ptr(i).to_str())) { return true; } i += 1; }
         return false;
+    }
+
+    /// Adds to `names` each new alias the text gives `name` (`name as alias`).
+    void collect_aliases(Document* self, str name, Vec<String>* names) {
+        i64 width = strlen(name); i64 length = self.text.len(); u8* data = self.text.data;
+        i64 at = self.find_name(name, 0);
+        while (at >= 0) {
+            i64 i = at + width;
+            while (i < length && (data[i] == (u8)' ' || data[i] == (u8)'\t' || data[i] == (u8)'\n' || data[i] == (u8)'\r')) { i += 1; }
+            if (i + 2 < length && data[i] == (u8)'a' && data[i + 1] == (u8)'s' && !typecheck_name_continue(data[i + 2])) {
+                i += 2;
+                while (i < length && (data[i] == (u8)' ' || data[i] == (u8)'\t' || data[i] == (u8)'\n' || data[i] == (u8)'\r')) { i += 1; }
+                i64 begin = i;
+                while (i < length && typecheck_name_continue(data[i])) { i += 1; }
+                if (i > begin) {
+                    String alias = self.text.substr(begin, i - begin); i64 known = 0;
+                    while (known < names.len() && !names.get_ptr(known).equals(alias.to_str())) { known += 1; }
+                    if (known == names.len()) { names.push(move alias); }
+                }
+            }
+            at = self.find_name(name, at + width);
+        }
     }
 
     /// Replaces the text, rebuilding the line index and editor analysis.
@@ -230,7 +264,7 @@ impl DocumentStore {
         store.project_entries = Vec<String>.new();
         store.overlay_paths = Vec<String>.new();
         store.discover_open_projects = true;
-        store.edit_clock = 0;
+        store.edit_clock = 0; store.closed_dirtied = false;
         // Same sysroot fallback cascade as the compiler: SILVER_SYSROOT,
         // executable-relative prefix, user data dir, and system share dirs.
         Vec<String> sysroot_dirs = module_sysroot_include_dirs();
@@ -336,6 +370,7 @@ impl DocumentStore {
             doc.imports_dirty = false;
             doc.diagnostics_dirty = true;
             doc.semantic_dirty = true;
+            if (!doc.open) { self.closed_dirtied = true; }
             Vec<Document*> next = Vec<Document*>.new();
             if (doc.path.len() > 0) {
                 i64 j = 0;
@@ -746,6 +781,20 @@ SymbolTarget follow_import_alias(SymbolTarget target) {
     target.symbol = -1;
     find_imported_symbol(target.document, symbol.type_name.to_str(), "", &target);
     return target;
+}
+
+/// The names a symbol called `name` is spelled by in `documents`: itself and
+/// every `name as alias` import alias, followed through alias chains. A scan
+/// that skips files by name must keep the files spelling any of these.
+Vec<String> spelled_names(Vec<Document*>* documents, str name) {
+    Vec<String> names = Vec<String>.new(); names.push(String.from_str(name));
+    i64 scanned = 0;
+    while (scanned < names.len()) {
+        // `names` grows while scanning, so work from a copy of the current name.
+        String known = names.get_ptr(scanned).clone(); scanned += 1; i64 i = 0;
+        while (i < documents.len()) { documents.get(i).collect_aliases(known.to_str(), &names); i += 1; }
+    }
+    return move names;
 }
 
 /// Resolves value name `name` visible at `offset` in `doc` or its imports.

@@ -247,8 +247,10 @@ hands a worker an owned copy of the file, its imports, and the include
 directories; the worker parses them itself and returns the diagnostics. The
 checked file is parsed fresh for each job. For imports the worker keeps only
 their signatures (cfg-filtered items with bodies stripped, text owned by the
-signature tree), up to 12 MiB per worker, which holds `aglsp`'s whole import
-closure; the full parse of an import is dropped once its signatures are built.
+signature tree). Between checks each worker trims that cache to an estimated
+12 MiB, which holds `aglsp`'s whole import closure; one check can briefly hold
+more, because it keeps every signature it reads until it ends. The full parse
+of an import is dropped once its signatures are built.
 The dispatcher starts jobs only while no client message waits, checks open
 files before workspace files, newest edit first, and drops a result whose
 import closure changed while it ran. While jobs run, `experimental/serverStatus` reports
@@ -487,7 +489,8 @@ python3 scripts/benchmark_lsp_edits.py --server /tmp/aglsp-native --workspace . 
 ```
 
 The script edits `bin/aglsp/src/main.ag` and renames `dispatch_message` by
-default (`--document`, `--rename`). `format_after_burst` sends ten keystrokes
+default (`--document`, `--rename`). Each run starts its server with an empty
+`SILVER_CACHE_DIR`, so no stored report stands in for a check. `format_after_burst` sends ten keystrokes
 30 ms apart, each followed by a pull. `fresh_diagnostics_after_edit` adds an
 undefined name and measures until a pull reports it.
 

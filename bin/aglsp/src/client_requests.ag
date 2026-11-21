@@ -281,13 +281,15 @@ impl ClientRequests {
                 ClientRequest completed = self.pending.take(i);
                 if (error.len() > 0) {
                     match completed.kind {
-                        ClientRequestKind.DiagnosticRefresh : { sink.client.diagnostic_refresh = false; },
-                        ClientRequestKind.SemanticRefresh : { sink.client.semantic_refresh = false; },
-                        ClientRequestKind.InlayHintRefresh : { sink.client.inlay_refresh = false; },
-                        ClientRequestKind.CodeLensRefresh : { sink.client.code_lens_refresh = false; },
-                        ClientRequestKind.FoldingRefresh : { sink.client.folding_refresh = false; },
+                        // A rejected kind is off, so a refresh wanted for it must not be sent.
+                        ClientRequestKind.DiagnosticRefresh : { sink.client.diagnostic_refresh = false; self.diagnostic_wanted = false; },
+                        ClientRequestKind.SemanticRefresh : { sink.client.semantic_refresh = false; self.semantic_wanted = false; },
+                        ClientRequestKind.InlayHintRefresh : { sink.client.inlay_refresh = false; self.inlay_wanted = false; },
+                        ClientRequestKind.CodeLensRefresh : { sink.client.code_lens_refresh = false; self.code_lens_wanted = false; },
+                        ClientRequestKind.FoldingRefresh : { sink.client.folding_refresh = false; self.folding_wanted = false; },
                     }
-                } else if (completed.repeat) { self.refresh(completed.kind); }
+                // Replay through `want`: edits since the idle pass share one request.
+                } else if (completed.repeat) { self.want(completed.kind); }
                 break;
             }
             i += 1;

@@ -150,7 +150,7 @@ impl Drop for SignatureCache {
 /// Checks the job's file against its imports. The result owns its messages.
 /// The checked file is parsed fresh and dropped with the job: it changes on
 /// every keystroke, so caching it would only evict dependencies.
-CheckResult run_check(SignatureCache* cache, CfgSet* cfg, CheckJob* job) {
+CheckResult run_check(&mut SignatureCache cache, &CfgSet cfg, &CheckJob job) {
     IdeIndex source = IdeIndex.new(job.files.get_ptr(0).text.to_str());
     Vec<SyntaxTree*> dependencies = Vec<SyntaxTree*>.new();
     i64 i = 1;
@@ -175,7 +175,7 @@ void check_worker(&CheckService shared) {
         if (!next.is_some()) { return; }
         CheckJob job = next.unwrap();
         if (__atomic_load_i32(&service.stopping, ATOMIC_ACQUIRE) != 0) { return; }
-        CheckResult result = run_check(&cache, &cfg, &job);
+        CheckResult result = run_check(&mut cache, &cfg, &job);
         cache.trim();
         service.results.send(move result);
         service.transport.wake();
@@ -191,7 +191,9 @@ i64 check_worker_count() {
     if (configured.is_some()) {
         String text = configured.unwrap(); i64 value = 0; i64 i = 0;
         while (i < text.len() && text.data[i] >= (u8)'0' && text.data[i] <= (u8)'9') {
-            value = value * 10 + (i64)(text.data[i] - (u8)'0'); i += 1;
+            // Stop growing past the cap so a long digit string cannot wrap the value.
+            if (value <= 32) { value = value * 10 + (i64)(text.data[i] - (u8)'0'); }
+            i += 1;
         }
         if (i == text.len() && value > 0) { count = value; }
     }

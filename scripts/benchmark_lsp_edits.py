@@ -8,11 +8,13 @@ slow pull shows up as format and rename latency, which is what the user sees.
 
 import argparse
 import json
+import os
 from pathlib import Path
 import statistics
+import tempfile
 import time
 
-from check_lsp import Session, semantic_capability
+from check_lsp import Session, position, semantic_capability
 
 # The capabilities that change server behavior for Zed: pull diagnostics with
 # refresh, semantic and inlay refresh, and versioned workspace edits.
@@ -31,7 +33,11 @@ ZED_CAPABILITIES = {
     },
 }
 FORMAT_OPTIONS = {"tabSize": 4, "insertSpaces": True}
-BROKEN_FUNCTION = "\ni32 aglsp_benchmark_broken() { return aglsp_benchmark_missing; }\n"
+
+
+def missing_name(sample):
+    """A name no file defines, different for each sample so a stale report cannot pass."""
+    return f"aglsp_benchmark_missing_{sample}"
 
 
 def summarize(samples):
@@ -45,7 +51,9 @@ class Client:
     """One warmed session that answers server requests the way Zed does."""
 
     def __init__(self, binary, root, document):
-        self.session = Session(binary, root)
+        # A private, empty diagnostic cache: a stored report would skip the check being timed.
+        self.cache = tempfile.TemporaryDirectory()
+        self.session = Session(binary, root, env={**os.environ, "SILVER_CACHE_DIR": self.cache.name})
         self.text = document.read_text()
         self.uri = document.as_uri()
         self.version = 1
@@ -112,26 +120,21 @@ class Client:
     def close(self):
         self.edit(self.text)
         self.session.close()
+        self.cache.cleanup()
 
 
-def position_of(text, word):
-    offset = text.index(word)
-    line = text.count("\n", 0, offset)
-    return {"line": line, "character": offset - (text.rfind("\n", 0, offset) + 1)}
-
-
-def reports_error(report):
-    return any(item.get("severity") == 1 and "aglsp_benchmark" in item.get("message", "")
+def reports_error(report, sample):
+    return any(item.get("severity") == 1 and missing_name(sample) in item.get("message", "")
                for item in (report or {}).get("items", []))
 
 
 def fresh_diagnostics_ms(client, sample):
     """Time from an edit that adds an error until a pull reports it."""
     start = time.perf_counter()
-    client.edit(client.text + BROKEN_FUNCTION + f"// {sample}\n")
+    client.edit(client.text + f"\ni32 aglsp_benchmark_broken_{sample}() {{ return {missing_name(sample)}; }}\n")
     deadline = start + 30
     while time.perf_counter() < deadline:
-        if reports_error(client.wait(client.pull())):
+        if reports_error(client.wait(client.pull()), sample):
             return (time.perf_counter() - start) * 1000
         # A server that checks in the background asks for a re-pull when done.
         refresh = client.session.wait_notification("workspace/diagnostic/refresh")
@@ -145,7 +148,7 @@ def benchmark(binary, root, document, rename_word, runs, workspace_poll):
         client.start_workspace_poll()
     samples = {name: [] for name in ("format_idle", "format_after_edit", "rename_idle",
                                      "rename_after_edit", "references_idle", "format_after_burst")}
-    rename_position = {**client.document(), "position": position_of(client.text, rename_word)}
+    rename_position = {**client.document(), "position": position(client.text, client.text.index(rename_word))}
     try:
         for sample in range(runs):
             start = time.perf_counter()

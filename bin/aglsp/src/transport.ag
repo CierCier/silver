@@ -266,12 +266,19 @@ impl Transport {
 
     /// Wakes a dispatcher blocked on the queue by queueing the wake marker,
     /// unless one is already queued. Callable from any thread. A failed send
-    /// (queue full or closed) is harmless: the dispatcher drains worker results
-    /// on every loop iteration before it blocks, and a full queue means it
-    /// has messages to take first.
+    /// (queue full or closed) clears the flag and tries once more: another
+    /// producer may have skipped its wake-up because it saw the flag, and
+    /// only a retry sent after the clear covers it. A second failure is
+    /// harmless: the queue was full after that producer's result was sent, so
+    /// the dispatcher takes a message and drains results again before it blocks.
     void wake(Transport* self) {
-        if (__atomic_exchange_i32(&self.wake_queued, 1, ATOMIC_ACQ_REL) != 0) { return; }
-        if (!self.messages.try_send(self.wake_marker)) { __atomic_store_i32(&self.wake_queued, 0, ATOMIC_RELEASE); }
+        i64 attempt = 0;
+        while (attempt < 2) {
+            if (__atomic_exchange_i32(&self.wake_queued, 1, ATOMIC_ACQ_REL) != 0) { return; }
+            if (self.messages.try_send(self.wake_marker)) { return; }
+            __atomic_store_i32(&self.wake_queued, 0, ATOMIC_RELEASE);
+            attempt += 1;
+        }
     }
 
     /// Returns true for the wake marker, which carries no client input.

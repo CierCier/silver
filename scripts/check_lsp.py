@@ -125,6 +125,10 @@ class Session:
         return self.wait_response(self.next_id, method)
 
     def wait_response(self, request_id, method="request"):
+        # A response may have arrived while an earlier wait was looking for another.
+        for index, stored in enumerate(self.notifications):
+            if stored.get("id") == request_id and "method" not in stored:
+                return self.notifications.pop(index)
         while True:
             try:
                 message = self.messages.get(timeout=30)
@@ -501,6 +505,30 @@ class NativeLsp(unittest.TestCase):
         session.respond(refresh["id"])
         report = session.result("textDocument/diagnostic", {"textDocument": {"uri": uri}})
         self.assertTrue(any("missing_symbol" in item["message"] for item in report["items"]))
+
+    def test_edit_that_stales_a_closed_importer_requests_a_refresh_after_a_workspace_pull(self):
+        # The project entry is closed and imports the open library, so a workspace pull reports it.
+        (self.root / "src").mkdir()
+        (self.root / "silver.toml").write_text('name = "app"\nversion = "1"\n[bin."app"]\nentry = "src/main.ag"\n')
+        library = "i32 base_value() { return 1; }\n"
+        (self.root / "src/used.ag").write_text(library)
+        (self.root / "src/main.ag").write_text("import used;\ni32 main() { return base_value(); }\n")
+        session = self.pull_client()
+        uri = (self.root / "src/used.ag").as_uri()
+        session.send_batch([self.did_open(uri, library),
+                            {"id": 100, "method": "workspace/diagnostic", "params": {"previousResultIds": []}}])
+        self.assertNotIn("error", session.wait_response(100))
+        for message in [m for m in session.notifications if m.get("method") == "workspace/diagnostic/refresh"]:
+            session.respond(message["id"]); session.notifications.remove(message)
+        # The open library stays clean, but the closed entry now calls a missing function and
+        # no workspace pull is parked: only a refresh tells the client to pull again.
+        session.send_batch([self.did_change(uri, "i32 renamed_value() { return 1; }\n", 2)])
+        refresh = session.wait_notification("workspace/diagnostic/refresh")
+        session.respond(refresh["id"])
+        report = session.result("workspace/diagnostic", {"previousResultIds": []})
+        reports = {item["uri"]: item for item in report["items"]}
+        entry = reports[(self.root / "src/main.ag").as_uri()]
+        self.assertTrue(any("base_value" in item["message"] for item in entry["items"]), entry)
 
     def test_restarts_reuse_cached_diagnostics_until_the_import_closure_changes(self):
         (self.root / "src").mkdir()
@@ -3664,6 +3692,17 @@ class NativeLsp(unittest.TestCase):
         self.session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
                           "contentChanges": [{"text": "// shifted\n" + text}]})
         self.assertEqual(self.session.request("callHierarchy/outgoingCalls", {"item": item})["error"]["code"], -32801)
+
+    def test_incoming_calls_include_callers_that_spell_only_an_import_alias(self):
+        # The caller never writes `answer`: it reaches the function through an
+        # alias declared in a file it imports, so the name filter must follow aliases.
+        self.open("import helper { answer as calculate };\n", "alias_middle.ag")
+        self.open("import alias_middle;\ni32 caller() { return calculate(5); }\n", "alias_caller.ag")
+        helper = (self.root / "helper.ag").read_text()
+        uri = self.open(helper, "helper.ag")
+        item = self.session.result("textDocument/prepareCallHierarchy", self.at(uri, helper, "answer", helper.index("i32 answer")))[0]
+        incoming = self.session.result("callHierarchy/incomingCalls", {"item": item})
+        self.assertEqual({call["from"]["name"] for call in incoming}, {"caller", "other"})
 
     def test_type_hierarchy_follows_trait_implementations(self):
         text = ("trait Measure { i32 size(&self); }\nstruct Shape {}\nstruct Other {}\n"

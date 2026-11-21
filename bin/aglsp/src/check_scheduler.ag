@@ -42,6 +42,9 @@ struct CheckScheduler {
     // Documents whose report changed with no pull to carry it to the client.
     Vec<Document*> changed;
     bool refresh_due;
+    // True once the client has sent a workspace pull; only then can an
+    // unchecked closed file leave it with an old report.
+    bool workspace_pulled;
 }
 
 /// Identifies the files a result was computed from: any text change or import
@@ -63,6 +66,7 @@ impl CheckScheduler {
         scheduler.service = service; scheduler.transport = transport; scheduler.workers = workers;
         scheduler.in_flight = Vec<i64>.new(); scheduler.done = 0; scheduler.outstanding = 0;
         scheduler.parked = Vec<ParkedPull>.new(); scheduler.changed = Vec<Document*>.new(); scheduler.refresh_due = false;
+        scheduler.workspace_pulled = false;
         return move scheduler;
     }
 
@@ -84,6 +88,29 @@ impl CheckScheduler {
     bool has_workspace_pull(CheckScheduler* self) {
         i64 i = 0;
         while (i < self.parked.len()) { if (self.parked.get_ptr(i).doc == (Document*)0) { return true; } i += 1; }
+        return false;
+    }
+
+    /// Returns true when a closed document a workspace pull reports has an
+    /// out-of-date report.
+    bool reported_stale(CheckScheduler* self) {
+        Vec<Document*> reported = workspace_report_documents(self.store); i64 i = 0;
+        while (i < reported.len()) {
+            Document* doc = reported.get(i); i += 1;
+            if (!doc.open && doc.diagnostics_dirty) { return true; }
+        }
+        return false;
+    }
+
+    /// Returns true when a parked pull that is not cancelled will carry `doc`'s
+    /// report to the client: its own pull, or a workspace pull.
+    bool carries(CheckScheduler* self, Document* doc) {
+        i64 i = 0;
+        while (i < self.parked.len()) {
+            ParkedPull* pull = self.parked.get_ptr(i);
+            if ((pull.doc == doc || pull.doc == (Document*)0) && !request_cancelled(pull.pending)) { return true; }
+            i += 1;
+        }
         return false;
     }
 
@@ -223,10 +250,17 @@ impl CheckScheduler {
     void settle(CheckScheduler* self) {
         bool undelivered = false; i64 i = 0;
         while (i < self.changed.len()) {
-            if (!self.has_workspace_pull() && !self.targeted(self.changed.get(i))) { undelivered = true; }
+            // A pull cancelled before it answers delivers nothing.
+            if (!self.carries(self.changed.get(i))) { undelivered = true; }
             i += 1;
         }
         self.changed.clear();
+        // Closed files are checked only for a parked workspace pull, so a reported
+        // one that went stale while none waited needs the client to pull again.
+        if (self.store.closed_dirtied) {
+            self.store.closed_dirtied = false;
+            if (self.workspace_pulled && !self.has_workspace_pull() && self.reported_stale()) { undelivered = true; }
+        }
         bool quiet = self.has_workspace_pull() && self.index.paths.len() == 0 && self.wanted().len() == 0;
         i = 0;
         while (i < self.parked.len()) {
@@ -261,6 +295,7 @@ impl CheckScheduler {
 
     /// Parks a `workspace/diagnostic` request until checking is quiescent.
     void park_workspace_pull(CheckScheduler* self, PendingMessage* pending, str id, Vec<PreviousDiagnostic> previous) {
+        self.workspace_pulled = true;
         ParkedPull pull; pull.pending = pending; pull.id = String.from_str(id); pull.doc = (Document*)0;
         pull.previous = String.new(); pull.previous_results = move previous;
         self.parked.push(move pull);

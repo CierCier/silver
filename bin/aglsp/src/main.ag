@@ -637,14 +637,16 @@ i32 main() {
     // Persistent check workers block on the job channel while idle. The first
     // must start, or no pull could ever be answered.
     Task<void> first = launch check_worker(&checks);
-    if (!first.started()) { return 1; }
+    // Stop the reader first: leaving scope joins it, and it blocks while stdin stays open.
+    if (!first.started()) { transport.stop(); return 1; }
     Vec<Task<void>> more = Vec<Task<void>>.new();
     for (i64 w = 1; w < workers; w += 1) { more.push(launch check_worker(&checks)); }
     i32 status = 1;
     while (true) {
         // Results first: a wake-up marker can be lost on a full queue, and a
         // blocked dispatcher is only safe if nothing is left to drain.
-        state.checks.drain();
+        // After `shutdown` nothing is published and no check starts.
+        if (!state.shutdown) { state.checks.drain(); }
         state.checks.settle();
         Optional<PendingMessage*> next = transport.messages.try_recv();
         if (!next.is_some() && transport.messages.is_closed()) {
@@ -653,7 +655,7 @@ i32 main() {
             if (!next.is_some()) { status = state.shutdown ? 0 : 1; break; }
         }
         if (!next.is_some()) {
-            state.checks.schedule();
+            if (!state.shutdown) { state.checks.schedule(); }
             state.checks.settle();
             if (state.checks.refresh_due) {
                 state.checks.refresh_due = false;
