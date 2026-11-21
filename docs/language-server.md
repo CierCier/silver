@@ -332,8 +332,10 @@ Progress ends before the response, including cancellation and invalid-parameter
 errors. `window/workDoneProgress/cancel` cancels the associated operation.
 Refresh requests for diagnostics, semantic tokens, and inlay hints use the
 client's advertised refresh support. Semantic refresh also requires an enabled
-token provider. Outstanding requests coalesce; a change arriving before an
-acknowledgement schedules another refresh. A rejected refresh disables further
+token provider. Changes only mark a refresh as wanted; the server sends one
+request per kind once no client message is waiting, so a typing burst costs one
+refresh rather than one per keystroke. Outstanding requests coalesce; a change
+arriving before an acknowledgement schedules another refresh. A rejected refresh disables further
 requests of that kind for the session.
 
 Inlay refresh follows analysis changes, including imported signature changes,

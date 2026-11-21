@@ -43,13 +43,15 @@ void begin_index_session(ServerState* state) {
     __atomic_store_i32(&state.transport_ptr.index_cancelled, 0, ATOMIC_RELEASE);
 }
 
-/// Asks the client to refresh what analysis changed. Diagnostics are not
-/// part of it: background checks deliver those when they finish.
+/// Marks what analysis changed for the client to refresh. Nothing is sent
+/// here: the loop flushes the flags once no message waits, so an edit burst
+/// costs one request per kind. Diagnostics are not part of it: background
+/// checks deliver those when they finish.
 void notify_analysis_change(ServerState* state) {
-    if (state.client.semantic_refresh) { state.requests.refresh(ClientRequestKind.SemanticRefresh); }
-    if (state.client.inlay_refresh) { state.requests.refresh(ClientRequestKind.InlayHintRefresh); }
-    if (state.client.code_lens_refresh) { state.requests.refresh(ClientRequestKind.CodeLensRefresh); }
-    if (state.client.folding_refresh) { state.requests.refresh(ClientRequestKind.FoldingRefresh); }
+    if (state.client.semantic_refresh) { state.requests.want(ClientRequestKind.SemanticRefresh); }
+    if (state.client.inlay_refresh) { state.requests.want(ClientRequestKind.InlayHintRefresh); }
+    if (state.client.code_lens_refresh) { state.requests.want(ClientRequestKind.CodeLensRefresh); }
+    if (state.client.folding_refresh) { state.requests.want(ClientRequestKind.FoldingRefresh); }
 }
 
 /// Returns true for requests whose params carry a text position.
@@ -653,10 +655,11 @@ i32 main() {
         if (!next.is_some()) {
             state.checks.schedule();
             state.checks.settle();
-            if (state.checks.refresh_due && !state.shutdown) {
+            if (state.checks.refresh_due) {
                 state.checks.refresh_due = false;
-                if (state.client.diagnostic_refresh) { state.requests.refresh(ClientRequestKind.DiagnosticRefresh); }
+                if (state.client.diagnostic_refresh) { state.requests.want(ClientRequestKind.DiagnosticRefresh); }
             }
+            if (!state.shutdown) { state.requests.flush_refreshes(); }
         }
         if (!next.is_some() && !state.shutdown
             && (state.index.paths.len() > 0 || state.index_progress)) {

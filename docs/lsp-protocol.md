@@ -88,7 +88,7 @@ marked open are not advertised; their providers return eager results instead.
 
 | Method | Direction | Status | Scope, limits, and evidence |
 | --- | --- | --- | --- |
-| `workspace/diagnostic/refresh` | S → C | Conditional | Pull-diagnostic sessions with `workspace.diagnostics.refreshSupport`. Coalesces requests; changes during an outstanding request schedule another. Client errors disable further requests of this kind. [Source][client-requests], [checks][checks]. |
+| `workspace/diagnostic/refresh` | S → C | Conditional | Pull-diagnostic sessions with `workspace.diagnostics.refreshSupport`. Sent when a background check changes a report that no pending pull delivered, once no client message is waiting. Coalesces requests; changes during an outstanding request schedule another. Client errors disable further requests of this kind. [Source][client-requests], [checks][checks]. |
 | `workspace/semanticTokens/refresh` | S → C | Conditional | Requires an enabled semantic-token provider and `workspace.semanticTokens.refreshSupport`; dependency invalidation, coalescing and acknowledgement/error handling. [Source][client-requests], [checks][checks]. |
 | `workspace/foldingRange/refresh` | S → C | Conditional | Requires `workspace.foldingRange.refreshSupport`; coalesced like other refresh kinds and disabled alone on client error. [Source][client-requests], [checks][checks]. |
 | `workspace/inlayHint/refresh` | S → C | Conditional | Requires `workspace.inlayHint.refreshSupport`. Analysis changes ask editors to recompute hints from current snapshots, including imported signatures. Coalesces requests, repeats after acknowledgement when needed, and disables only this kind on client error. [Source][client-requests], [checks][checks]. |

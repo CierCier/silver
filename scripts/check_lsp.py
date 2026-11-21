@@ -161,11 +161,14 @@ class Session:
             if message.get("method") == "textDocument/publishDiagnostics":
                 self.diagnostics[message["params"]["uri"]] = message["params"]
 
-    def pump(self):
-        """Read one server message into `notifications` (and `diagnostics`) and return it."""
+    def pump(self, timeout=30):
+        """Read one server message into `notifications` (and `diagnostics`) and
+        return it, or None when `timeout` passes first and is short."""
         try:
-            message = self.messages.get(timeout=30)
+            message = self.messages.get(timeout=timeout)
         except queue.Empty as error:
+            if timeout < 30:
+                return None
             raise AssertionError("timeout waiting for a server message") from error
         if isinstance(message, Exception):
             self.stderr.seek(0)
@@ -185,6 +188,13 @@ class Session:
                     and accept(params)):
                 return params
             self.pump()
+
+    def settle(self):
+        """Round-trip, then read until the server is quiet for a moment, so the
+        refresh requests it holds back while a message waits have arrived."""
+        self.request("silver/settle")
+        while self.pump(timeout=0.15) is not None:
+            pass
 
     def wait_refreshes(self, count):
         """Wait until `count` refresh requests are in `notifications`; returns them."""
@@ -297,6 +307,7 @@ class NativeLsp(unittest.TestCase):
         return session, capabilities
 
     def assert_refreshes(self, session, methods):
+        session.settle()
         self.assertTrue(all("method" in message for message in session.notifications), session.notifications)
         requests = [message for message in session.notifications if message["method"].endswith("/refresh")]
         self.assertEqual([message["method"] for message in requests], methods)
@@ -4138,7 +4149,9 @@ class NativeLsp(unittest.TestCase):
             session.send("textDocument/didOpen", {"textDocument": {"uri": uri, "languageId": "silver", "version": 1, "text": text}})
             document = {"textDocument": {"uri": uri}}
             session.result("textDocument/documentSymbol", document)
-            refresh = lambda: [message for message in session.notifications if message.get("method") == "workspace/semanticTokens/refresh"]
+            def refresh():
+                session.settle()
+                return [message for message in session.notifications if message.get("method") == "workspace/semanticTokens/refresh"]
             self.assertEqual(len(refresh()), 1)
             first = refresh()[0]["id"]
             session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2}, "contentChanges": [{"text": text.replace("1", "2")}]})
@@ -4884,6 +4897,7 @@ class NativeLsp(unittest.TestCase):
         session, _ = self.capable_session(workspace={
             "codeLens": {"refreshSupport": True}, "foldingRange": {"refreshSupport": True}})
         self.open_in(session, "i32 main() { return 1; }\n")
+        session.settle()
         methods = [m["method"] for m in session.notifications if str(m.get("method", "")).endswith("/refresh")]
         self.assertIn("workspace/codeLens/refresh", methods)
         self.assertIn("workspace/foldingRange/refresh", methods)
