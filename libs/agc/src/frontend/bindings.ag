@@ -296,22 +296,41 @@ void collect_bracket_bindings(SyntaxNode* bracket, Vec<Binding>* bindings) {
     leaves.drop();
 }
 
-/// Returns true when a block is the arm block of a `match`.
+/// Returns true when a `match` token precedes `node` among its siblings with
+/// no block or `;` in between. One forward scan, because nodes carry no
+/// previous-sibling link.
+bool binding_follows_match(SyntaxNode* node) {
+    if (node == (SyntaxNode*)0 || node.parent == (SyntaxNode*)0) {
+        return false;
+    }
+    bool follows = false;
+    SyntaxNode* child = node.parent.first_child;
+    while (child != (SyntaxNode*)0 && child != node) {
+        if (child.kind == NodeKind.Token && child.token_kind == TokenKind.Match) {
+            follows = true;
+        } else if (child.kind == NodeKind.Block
+            || (child.kind == NodeKind.Token && child.token_kind == TokenKind.Semicolon)) {
+            follows = false;
+        }
+        child = child.next_sibling;
+    }
+    return follows;
+}
+
+/// Returns true when a block is the arm block of a `match`, directly or
+/// through the blocks that contain it.
 bool binding_is_match_block(SyntaxNode* node) {
-    SyntaxNode* previous = binding_previous_sibling(node);
-    while (previous != (SyntaxNode*)0) {
-        if (previous.kind == NodeKind.Token && previous.token_kind == TokenKind.Match) {
+    while (node != (SyntaxNode*)0) {
+        if (binding_follows_match(node)) {
             return true;
         }
-        if (previous.kind == NodeKind.Block
-            || (previous.kind == NodeKind.Token && previous.token_kind == TokenKind.Semicolon)) {
-            break;
+        SyntaxNode* parent = node.parent;
+        if (parent == (SyntaxNode*)0 || parent.kind != NodeKind.Block) {
+            return false;
         }
-        previous = binding_previous_sibling(previous);
+        node = parent;
     }
-    SyntaxNode* parent = node.parent;
-    return parent != (SyntaxNode*)0 && parent.kind == NodeKind.Block
-        && binding_is_match_block(parent);
+    return false;
 }
 
 /// Adds the bindings introduced by each `match` arm pattern in `block`.
@@ -334,11 +353,13 @@ void collect_match_arm_bindings(SyntaxNode* block, Vec<Binding>* bindings) {
     }
 }
 
-/// Returns true when `node` is inside a `match` arm block.
+/// Returns true when `node` is inside a `match` arm block. A block inside a
+/// match block is itself one, so it is enough that some ancestor block
+/// directly follows a `match`.
 bool binding_has_match_ancestor(SyntaxNode* node) {
     SyntaxNode* parent = node.parent;
     while (parent != (SyntaxNode*)0) {
-        if (parent.kind == NodeKind.Block && binding_is_match_block(parent)) {
+        if (parent.kind == NodeKind.Block && binding_follows_match(parent)) {
             return true;
         }
         parent = parent.parent;
@@ -346,39 +367,66 @@ bool binding_has_match_ancestor(SyntaxNode* node) {
     return false;
 }
 
-/// Adds bindings from every pattern under `node`.
-void collect_pattern_bindings_in_tree(SyntaxNode* node, Vec<Binding>* bindings) {
-    if (node == (SyntaxNode*)0) {
-        return;
-    }
-    if (node.kind == NodeKind.Block && binding_is_match_block(node)) {
+/// Adds the bindings of every pattern in the subtree at `node`. The caller
+/// supplies the context that sits above `node`: its previous sibling, whether
+/// it is a match block, and whether a match block encloses it. Children are
+/// visited in order, carrying their own context down, so no node rescans its
+/// siblings.
+void collect_pattern_bindings_walk(SyntaxNode* node, SyntaxNode* previous,
+                                   bool match_block, bool in_match, Vec<Binding>* bindings) {
+    bool arm_block = node.kind == NodeKind.Block && match_block;
+    if (arm_block) {
         collect_match_arm_bindings(node, bindings);
     }
-    if (node.kind == NodeKind.Parenthesized) {
-        SyntaxNode* previous = binding_previous_sibling(node);
-        if (binding_has_match_ancestor(node)
-            && previous != (SyntaxNode*)0 && previous.kind == NodeKind.Token
-            && strlen(previous.text) > 0
-            && previous.text[0] >= (u8)'A'
-            && previous.text[0] <= (u8)'Z') {
-            Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
-            binding_collect_leaves(node, &leaves);
-            i64 i = 0;
-            while (i < leaves.len()) {
-                SyntaxNode* leaf = leaves.get(i);
-                if (binding_is_value_name(leaf)) {
-                    add_binding(bindings, leaf, BindingKind.MatchBinding);
-                }
-                i += 1;
+    if (node.kind == NodeKind.Parenthesized && in_match
+        && previous != (SyntaxNode*)0 && previous.kind == NodeKind.Token
+        && strlen(previous.text) > 0
+        && previous.text[0] >= (u8)'A'
+        && previous.text[0] <= (u8)'Z') {
+        Vec<SyntaxNode*> leaves = Vec<SyntaxNode*>.new();
+        binding_collect_leaves(node, &leaves);
+        i64 i = 0;
+        while (i < leaves.len()) {
+            SyntaxNode* leaf = leaves.get(i);
+            if (binding_is_value_name(leaf)) {
+                add_binding(bindings, leaf, BindingKind.MatchBinding);
             }
-            leaves.drop();
+            i += 1;
         }
+        leaves.drop();
     }
+    bool child_in_match = in_match || arm_block;
+    bool follows_match = false;
+    SyntaxNode* before = (SyntaxNode*)0;
     SyntaxNode* child = node.first_child;
     while (child != (SyntaxNode*)0) {
-        collect_pattern_bindings_in_tree(child, bindings);
+        if (child.kind != NodeKind.Token) {
+            collect_pattern_bindings_walk(child, before,
+                child.kind == NodeKind.Block && (follows_match || arm_block),
+                child_in_match, bindings);
+        } else if (child.token_kind == TokenKind.Match) {
+            follows_match = true;
+        } else if (child.token_kind == TokenKind.Semicolon) {
+            follows_match = false;
+        }
+        if (child.kind == NodeKind.Block) {
+            follows_match = false;
+        }
+        before = child;
         child = child.next_sibling;
     }
+}
+
+/// Adds bindings from every pattern under `node`.
+void collect_pattern_bindings_in_tree(SyntaxNode* node, Vec<Binding>* bindings) {
+    if (node == (SyntaxNode*)0 || node.kind == NodeKind.Token) {
+        return;
+    }
+    SyntaxNode* previous = node.kind == NodeKind.Parenthesized
+        ? binding_previous_sibling(node) : (SyntaxNode*)0;
+    collect_pattern_bindings_walk(node, previous,
+        node.kind == NodeKind.Block && binding_is_match_block(node),
+        binding_has_match_ancestor(node), bindings);
 }
 
 /// Adds a binding for each parameter in a parameter list.
