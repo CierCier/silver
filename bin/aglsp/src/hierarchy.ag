@@ -80,9 +80,14 @@ struct CallGroup { SymbolTarget target; Vec<Span> ranges; }
 String compute_call_hierarchy(DocumentStore* store, SymbolTarget selected, bool incoming, PendingMessage* pending) {
     Vec<CallGroup> groups = Vec<CallGroup>.new(); i64 i = 0;
     Vec<Document*> documents = store.query_documents(selected.document);
+    str selected_name = selected.document.analysis.symbols.get_ptr(selected.symbol).name.to_str();
+    // A caller spells the callee's name or one of its import aliases.
+    Vec<String> names = Vec<String>.new();
+    if (incoming) { names = spelled_names(&documents, selected_name); }
     while (i < documents.len() && !request_interrupted(pending)) {
         Document* doc = documents.get(i); i64 token = 0;
-        if (!incoming && doc != selected.document) { i += 1; continue; }
+        // Outgoing calls come from the selected file.
+        if (incoming ? !doc.mentions_any(&names) : doc != selected.document) { i += 1; continue; }
         doc.ensure_syntax();
         while (token < doc.analysis.tokens.len() && !request_interrupted(pending)) {
             if (doc.analysis.tokens.get(token).kind == TokenKind.LeftParen) {
@@ -127,8 +132,13 @@ String compute_call_hierarchy(DocumentStore* store, SymbolTarget selected, bool 
 String compute_type_hierarchy(DocumentStore* store, SymbolTarget selected, bool supers, PendingMessage* pending) {
     Vec<SymbolTarget> targets = Vec<SymbolTarget>.new(); i64 i = 0;
     Vec<Document*> documents = store.query_documents(selected.document);
+    str selected_name = selected.document.analysis.symbols.get_ptr(selected.symbol).name.to_str();
+    Vec<String> names = spelled_names(&documents, selected_name);
     while (i < documents.len() && !request_interrupted(pending)) {
-        Document* doc = documents.get(i); doc.ensure_syntax(); i64 j = 0;
+        Document* doc = documents.get(i);
+        // The matched impl spells the selected type or trait, or an import alias of it.
+        if (!doc.mentions_any(&names)) { i += 1; continue; }
+        doc.ensure_syntax(); i64 j = 0;
         while (j < doc.analysis.implementations.len() && !request_interrupted(pending)) {
             IdeImplementation* implementation = doc.analysis.implementations.get_ptr(j);
             if (implementation.trait_name != (SyntaxNode*)0) {

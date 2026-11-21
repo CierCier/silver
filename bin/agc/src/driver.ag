@@ -387,6 +387,7 @@ i32 emit_check(str path, CfgSet* cfg, Vec<String>* include_dirs, LintConfig* lin
             }
             SyntaxNode* local_first = tree.root.first_child;
             if (imported.root.last_child != (SyntaxNode*)0) {
+                drop_root_index(tree.root);
                 imported.root.last_child.next_sibling = local_first;
                 tree.root.first_child = imported.root.first_child;
             }
@@ -422,6 +423,7 @@ i32 emit_check(str path, CfgSet* cfg, Vec<String>* include_dirs, LintConfig* lin
                 }
                 profiler_end_phase("type check");
             }
+            drop_root_index(tree.root);
             tree.root.first_child = local_first;
             if (imported.root.last_child != (SyntaxNode*)0) {
                 imported.root.last_child.next_sibling = (SyntaxNode*)0;

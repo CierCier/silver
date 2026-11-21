@@ -302,6 +302,29 @@ bool redundant_parameter_argument(Document* doc, i64 begin, i64 end, str name) {
     return false;
 }
 
+/// The token that ends the argument list opened at `open`: its `)`, or the
+/// Eof or mismatched closer where argument scanning stops. Nesting and generic
+/// calls follow the same rules as the argument loop in `compute_inlay_hints`.
+i64 call_end_token(Document* doc, i64 open, Vec<i64>* opens) {
+    opens.clear(); i64 j = open + 1;
+    while (j < doc.analysis.tokens.len()) {
+        Token* token = doc.analysis.tokens.get(j);
+        if (token.kind == TokenKind.Less) {
+            i64 close = generic_call_close_token(doc, j);
+            if (close >= 0) { j = close + 1; continue; }
+        }
+        if (token.kind == TokenKind.Eof || (opens.len() == 0 && token.kind == TokenKind.RightParen)) { return j; }
+        if (token.kind != TokenKind.Comment && token.kind != TokenKind.Comma) {
+            if (is_close(token)) {
+                if (opens.len() == 0 || !matching_open(doc.analysis.tokens.get(opens.get(opens.len() - 1)), token)) { return j; }
+                opens.pop();
+            } else if (is_open(token)) { opens.push(j); }
+        }
+        j += 1;
+    }
+    return doc.analysis.tokens.len() - 1;
+}
+
 /// Computes inlay hints (inferred types, parameter names) for
 /// `[start, end)`.
 String compute_inlay_hints(Document* doc, i64 start, i64 end) {
@@ -316,10 +339,15 @@ String compute_inlay_hints(Document* doc, i64 start, i64 end) {
         }
         i += 1;
     }
-    i = 0;
+    i = 0; Vec<i64> scan = Vec<i64>.new();
     while (i < doc.analysis.tokens.len()) {
         Token* open = doc.analysis.tokens.get(i);
-        if (open.kind == TokenKind.LeftParen && i > 0) {
+        // Hints sit on arguments after the `(`, so a later call has none in range.
+        if (open.kind == TokenKind.LeftParen && open.span.start >= end) { break; }
+        // A call that closes at or before `start` has no argument in range.
+        bool ended = open.kind == TokenKind.LeftParen && open.span.start < start
+            && doc.analysis.tokens.get(call_end_token(doc, i, &scan)).span.start <= start;
+        if (open.kind == TokenKind.LeftParen && i > 0 && !ended) {
             i64 occurrence = call_occurrence(doc, i);
             SymbolTarget target = follow_import_alias(resolve_occurrence(doc, occurrence));
             if (target.symbol >= 0 && occurrence >= 0 && !doc.analysis.occurrences.get_ptr(occurrence).definition) {

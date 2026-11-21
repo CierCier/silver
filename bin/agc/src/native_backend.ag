@@ -1408,6 +1408,7 @@ void native_strip_import_nodes(SyntaxNode* parent) {
     while (child != (SyntaxNode*)0) {
         SyntaxNode* next = child.next_sibling;
         if (child.kind == NodeKind.Import) {
+            drop_root_index(parent);
             if (previous == (SyntaxNode*)0) { parent.first_child = next; }
             else { previous.next_sibling = next; }
             if (parent.last_child == child) { parent.last_child = previous; }
@@ -1719,6 +1720,7 @@ SyntaxNode* native_append_expanded_cfg(SyntaxNode* root, SyntaxNode* first_token
 /// Expands nested cfg blocks inside a block's items.
 void native_expand_block_items(SyntaxNode* root, SyntaxNode* block, CfgSet* cfg, NodePool* pool) {
     if (block == (SyntaxNode*)0) { return; }
+    drop_root_index(block);
     SyntaxNode* child = block.first_child;
     while (child != (SyntaxNode*)0) {
         if (child.kind != NodeKind.Token) {
@@ -1811,6 +1813,7 @@ void native_append_expanded_item(SyntaxNode* root, SyntaxNode* item, CfgSet* cfg
 /// Replaces every top-level `if (@cfg)` block with its active branch.
 void native_expand_cfg_blocks(SyntaxNode* root, CfgSet* cfg, NodePool* pool) {
     if (root == (SyntaxNode*)0) { return; }
+    drop_root_index(root);
     SyntaxNode* old_first = root.first_child;
     root.first_child = (SyntaxNode*)0;
     root.last_child = (SyntaxNode*)0;
@@ -1881,6 +1884,7 @@ bool native_fold_cfg_exprs(SyntaxNode* node, CfgSet* cfg) {
                 child.token_kind = value == 1 ? TokenKind.True : TokenKind.False;
                 child.text = value == 1 ? "true" : "false";
             }
+            drop_root_index(node);
             child.next_sibling = args.next_sibling;
             if (node.last_child == args) {
                 node.last_child = child;

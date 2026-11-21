@@ -957,27 +957,26 @@ bool borrow_call_returns_argument(Vec<BorrowReturnOrigin>* origins,
                                   Vec<BorrowReturnStatus>* statuses,
                                   Vec<Binding>* caller_bindings) {
     if (call == (SyntaxNode*)0) { return false; }
-    SyntaxNode* function = root.first_child;
-    while (function != (SyntaxNode*)0) {
+    RootIndex* index = root_index(root);
+    i64 entry = index.find(call.text);
+    while (entry >= 0) {
+        SyntaxNode* function = index.item(entry);
+        entry = index.after(entry);
         if (function.kind == NodeKind.Function) {
-            SyntaxNode* name = function_identifier(function);
-            if (name != (SyntaxNode*)0 && borrow_text_equals(name.text, call.text)) {
-                Vec<Binding> parameters = Vec<Binding>.new();
-                collect_parameter_bindings(borrow_function_parameters(function), &parameters);
-                bool matches = parameters.len() == argument_count
-                    && argument_index >= 0 && argument_index < parameters.len()
-                    && parameters.get_ptr(argument_index).declared_type.kind
-                        == ProjectionTypeKind.Reference
-                    && borrow_call_argument_matches(caller_bindings, call,
-                        argument_index, parameters.get_ptr(argument_index))
-                    && (borrow_has_return_origin(origins, function, argument_index)
-                        || (borrow_return_status(statuses, function) != (BorrowReturnStatus*)0
-                            && borrow_return_status(statuses, function).unknown_internal));
-                parameters.drop();
-                if (matches) { return true; }
-            }
+            Vec<Binding> parameters = Vec<Binding>.new();
+            collect_parameter_bindings(borrow_function_parameters(function), &parameters);
+            bool matches = parameters.len() == argument_count
+                && argument_index >= 0 && argument_index < parameters.len()
+                && parameters.get_ptr(argument_index).declared_type.kind
+                    == ProjectionTypeKind.Reference
+                && borrow_call_argument_matches(caller_bindings, call,
+                    argument_index, parameters.get_ptr(argument_index))
+                && (borrow_has_return_origin(origins, function, argument_index)
+                    || (borrow_return_status(statuses, function) != (BorrowReturnStatus*)0
+                        && borrow_return_status(statuses, function).unknown_internal));
+            parameters.drop();
+            if (matches) { return true; }
         }
-        function = function.next_sibling;
     }
     return item_is_c_extern_function(root, call.text);
 }

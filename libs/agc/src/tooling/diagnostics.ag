@@ -42,10 +42,14 @@ impl Drop for DiagnosticTree {
 
 /// Copies an item for the scratch tree under file id `file`, dropping
 /// function bodies when `strip_bodies` (dependencies need signatures only).
+/// With `retain_text`, token text is interned in `pool`, so the copy no longer
+/// borrows the snapshot's tokens.
 SyntaxNode* diagnostic_clone_signature(NodePool* pool, SyntaxNode* node,
-                                       i64 file, bool strip_bodies) {
+                                       i64 file, bool strip_bodies, bool retain_text) {
     Span span = node.span; span.file = file;
-    SyntaxNode* copy = pool.create(node.kind, span, node.text);
+    SyntaxNode* copy = retain_text && node.kind == NodeKind.Token
+        ? pool.create_token(node.token_kind, span, node.text)
+        : pool.create(node.kind, span, node.text);
     copy.token_kind = node.token_kind;
     // Method lookup requires a Block even when the executable body is absent.
     if (node.kind == NodeKind.Block && strip_bodies) { return copy; }
@@ -65,7 +69,7 @@ SyntaxNode* diagnostic_clone_signature(NodePool* pool, SyntaxNode* node,
             child = attribute.next_sibling;
             continue;
         }
-        append_child(copy, diagnostic_clone_signature(pool, child, file, nested_bodies));
+        append_child(copy, diagnostic_clone_signature(pool, child, file, nested_bodies, retain_text));
         child = child.next_sibling;
     }
     return copy;
@@ -88,15 +92,16 @@ void diagnostic_register_types(SymbolTable* symbols, SyntaxTree* tree, CfgSet* c
     }
 }
 
-/// Adds a dependency snapshot's signatures to the scratch tree as file
-/// `file`, reporting its own errors to `report`.
-void diagnostic_add_snapshot(DiagnosticTree* scratch, SyntaxTree* dependency,
-                             i64 file, SymbolTable* symbols, CfgSet* cfg,
-                             DiagnosticBag* report) {
+/// Returns a `Program` node in `pool` holding the signatures of the
+/// cfg-active items of `dependency`, as file `file`. With `retain_text`, the
+/// result owns all its text and outlives `dependency`; a cached result can be
+/// passed to `diagnostic_add_snapshot` again, because the cfg filter and the
+/// body stripping are idempotent and the file id is assigned per call.
+SyntaxNode* diagnostic_signature_root(NodePool* pool, SyntaxTree* dependency, i64 file,
+                                      CfgSet* cfg, bool retain_text) {
     Vec<SyntaxNode*> items = Vec<SyntaxNode*>.new();
     cfg_collect_items(dependency.root, cfg, (DiagnosticBag*)0, &items);
-    SyntaxTree signatures;
-    signatures.root = scratch.pool.create(NodeKind.Program, Span.synthetic(), "");
+    SyntaxNode* root = pool.create(NodeKind.Program, Span.synthetic(), "");
     i64 i = 0;
     while (i < items.len()) {
         SyntaxNode* item = items.get(i);
@@ -105,11 +110,21 @@ void diagnostic_add_snapshot(DiagnosticTree* scratch, SyntaxTree* dependency,
             || item.kind == NodeKind.Trait || item.kind == NodeKind.Impl
             || item.kind == NodeKind.TypeAlias || item.kind == NodeKind.Extern
             || item.kind == NodeKind.Import) {
-            append_child(signatures.root, diagnostic_clone_signature(&scratch.pool, item,
-                file, item.kind == NodeKind.Function));
+            append_child(root, diagnostic_clone_signature(pool, item,
+                file, item.kind == NodeKind.Function, retain_text));
         }
         i += 1;
     }
+    return root;
+}
+
+/// Adds a dependency snapshot's signatures to the scratch tree as file
+/// `file`, reporting its own errors to `report`.
+void diagnostic_add_snapshot(DiagnosticTree* scratch, SyntaxTree* dependency,
+                             i64 file, SymbolTable* symbols, CfgSet* cfg,
+                             DiagnosticBag* report) {
+    SyntaxTree signatures;
+    signatures.root = diagnostic_signature_root(&scratch.pool, dependency, file, cfg, false);
     collect_symbols(symbols, report, &signatures, cfg);
     SyntaxNode* item = signatures.root.first_child;
     while (item != (SyntaxNode*)0) {
@@ -117,6 +132,7 @@ void diagnostic_add_snapshot(DiagnosticTree* scratch, SyntaxTree* dependency,
         if (item.kind != NodeKind.Import) { append_child(scratch.tree.root, item); }
         item = next;
     }
+    drop_root_index(signatures.root);
     signatures.root.first_child = (SyntaxNode*)0;
     signatures.root.last_child = (SyntaxNode*)0;
 }

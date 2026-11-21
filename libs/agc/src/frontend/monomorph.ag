@@ -231,6 +231,17 @@ bool mono_push_owner_type_arguments(SyntaxNode* root, TypeTable* types, u32 type
     return true;
 }
 
+/// Returns true when `target` names `base`: its text up to any `<` equals it.
+/// Compares in place so scanning every impl allocates nothing.
+bool mono_target_base_is(str target, str base) {
+    i64 i = 0;
+    while (target[i] != (u8)0 && target[i] != (u8)'<') {
+        if (base[i] != target[i]) { return false; }
+        i += 1;
+    }
+    return base[i] == (u8)0;
+}
+
 /// Find an impl block for `base` defining `method`, matching type arguments `arg_ids`.
 /// Collects the impl-level type parameter names (deduped, in order) for substitution.
 /// For specialized concrete impls, param_ids will be empty (no substitution needed).
@@ -249,158 +260,151 @@ bool mono_find_method_template(SyntaxNode* root, TypeTable* types, str base, str
     MonoMethodTemplate generic_template;
     Vec<u32> generic_params = Vec<u32>.new();
 
-    SyntaxNode* item = root.first_child;
-    while (item != (SyntaxNode*)0) {
-        if (item.kind == NodeKind.Impl) {
-            SyntaxNode* target = impl_target_identifier(item);
-            if (target != (SyntaxNode*)0) {
-                String target_base = String.new();
-                i64 bi = 0;
-                while (target.text[bi] != (u8)0 && target.text[bi] != (u8)60) {
-                    target_base.push(target.text[bi]);
-                    bi += 1;
+    RootIndex* index = root_index(root);
+    i64 impl_position = 0;
+    while (impl_position < index.impls.len()) {
+        SyntaxNode* item = index.impls.get(impl_position);
+        impl_position += 1;
+        SyntaxNode* target = impl_target_identifier(item);
+        if (target != (SyntaxNode*)0) {
+            bool is_base = mono_target_base_is(target.text, base);
+            if (is_base && impl_target_pointer_depth(item) == receiver_depth) {
+                SyntaxNode* block = item.first_child;
+                while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+                    block = block.next_sibling;
                 }
-                bool is_base = strcmp(target_base.to_str(), base) == 0;
-                target_base.drop();
-                if (is_base && impl_target_pointer_depth(item) == receiver_depth) {
-                    SyntaxNode* block = item.first_child;
-                    while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
-                        block = block.next_sibling;
-                    }
-                    if (block != (SyntaxNode*)0) {
-                        SyntaxNode* cursor = block.first_child;
-                        while (cursor != (SyntaxNode*)0) {
-                            if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
-                                cursor = cursor.next_sibling;
-                                continue;
+                if (block != (SyntaxNode*)0) {
+                    SyntaxNode* cursor = block.first_child;
+                    while (cursor != (SyntaxNode*)0) {
+                        if (cursor.kind == NodeKind.Token && cursor.token_kind == TokenKind.Semicolon) {
+                            cursor = cursor.next_sibling;
+                            continue;
+                        }
+                        SyntaxNode* current_ret = cursor;
+                        SyntaxNode* current_name = (SyntaxNode*)0;
+                        SyntaxNode* current_params = (SyntaxNode*)0;
+                        SyntaxNode* current_body = (SyntaxNode*)0;
+                        SyntaxNode* scan = cursor;
+                        bool hit_semi = false;
+                        SyntaxNode* semi_node = (SyntaxNode*)0;
+                        while (scan != (SyntaxNode*)0) {
+                            if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Semicolon) {
+                                hit_semi = true;
+                                semi_node = scan;
+                                break;
                             }
-                            SyntaxNode* current_ret = cursor;
-                            SyntaxNode* current_name = (SyntaxNode*)0;
-                            SyntaxNode* current_params = (SyntaxNode*)0;
-                            SyntaxNode* current_body = (SyntaxNode*)0;
-                            SyntaxNode* scan = cursor;
-                            bool hit_semi = false;
-                            SyntaxNode* semi_node = (SyntaxNode*)0;
-                            while (scan != (SyntaxNode*)0) {
-                                if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Semicolon) {
-                                    hit_semi = true;
-                                    semi_node = scan;
+                            if (scan.kind == NodeKind.Block) {
+                                current_body = scan;
+                                break;
+                            }
+                            if (scan.kind == NodeKind.Parenthesized) {
+                                current_params = scan;
+                                if (scan.next_sibling != (SyntaxNode*)0 && scan.next_sibling.kind == NodeKind.Block) {
+                                    current_body = scan.next_sibling;
                                     break;
                                 }
-                                if (scan.kind == NodeKind.Block) {
-                                    current_body = scan;
-                                    break;
+                            }
+                            if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Identifier) {
+                                current_name = scan;
+                            }
+                            scan = scan.next_sibling;
+                        }
+                        if (hit_semi) {
+                            cursor = semi_node.next_sibling;
+                            continue;
+                        }
+                        current_name = item_method_name(current_ret, current_params);
+                        if (current_body != (SyntaxNode*)0 && current_body.kind == NodeKind.Block) {
+                            if (current_name != (SyntaxNode*)0 && strcmp(current_name.text, method) == 0
+                                && current_params != (SyntaxNode*)0) {
+                                if (value_arg_count >= 0) {
+                                    Vec<Binding> params = Vec<Binding>.new();
+                                    collect_parameter_bindings(current_params, &params);
+                                    bool matches_call = params.len() == value_arg_count + (static_method ? 0 : 1)
+                                        && item_first_parameter_is_self(current_params) != static_method;
+                                    params.drop();
+                                    if (!matches_call) {
+                                        cursor = current_body.next_sibling;
+                                        continue;
+                                    }
                                 }
-                                if (scan.kind == NodeKind.Parenthesized) {
-                                    current_params = scan;
-                                    if (scan.next_sibling != (SyntaxNode*)0 && scan.next_sibling.kind == NodeKind.Block) {
-                                        current_body = scan.next_sibling;
+                                Vec<u32> declared_params = Vec<u32>.new();
+                                SyntaxNode* impl_head = item.first_child;
+                                while (impl_head != (SyntaxNode*)0 && impl_head.kind != NodeKind.Block) {
+                                    if (impl_head.kind == NodeKind.Token && impl_head.token_kind == TokenKind.Impl) {
+                                        SyntaxNode* generic_open = impl_head.next_sibling;
+                                        if (generic_open != (SyntaxNode*)0 && generic_open.kind == NodeKind.Token
+                                            && generic_open.token_kind == TokenKind.Less) {
+                                            mono_collect_generic_parameters(generic_open, types, &declared_params);
+                                        }
                                         break;
                                     }
+                                    impl_head = impl_head.next_sibling;
                                 }
-                                if (scan.kind == NodeKind.Token && scan.token_kind == TokenKind.Identifier) {
-                                    current_name = scan;
+                                if (declared_params.len() == 0) {
+                                    mono_collect_struct_parameters(root, base, types, &declared_params);
                                 }
-                                scan = scan.next_sibling;
-                            }
-                            if (hit_semi) {
-                                cursor = semi_node.next_sibling;
-                                continue;
-                            }
-                            current_name = item_method_name(current_ret, current_params);
-                            if (current_body != (SyntaxNode*)0 && current_body.kind == NodeKind.Block) {
-                                if (current_name != (SyntaxNode*)0 && strcmp(current_name.text, method) == 0
-                                    && current_params != (SyntaxNode*)0) {
-                                    if (value_arg_count >= 0) {
-                                        Vec<Binding> params = Vec<Binding>.new();
-                                        collect_parameter_bindings(current_params, &params);
-                                        bool matches_call = params.len() == value_arg_count + (static_method ? 0 : 1)
-                                            && item_first_parameter_is_self(current_params) != static_method;
-                                        params.drop();
-                                        if (!matches_call) {
-                                            cursor = current_body.next_sibling;
-                                            continue;
+                                Vec<u32> candidate_params = Vec<u32>.new();
+                                bool matched = mono_match_target_args(target, types, &declared_params, arg_ids, &candidate_params);
+                                declared_params.drop();
+                                if (matched && (required_name == (SyntaxNode*)0 || current_name == required_name)) {
+                                    MonoMethodTemplate candidate;
+                                    candidate.ret_start = current_ret;
+                                    candidate.name_node = current_name;
+                                    candidate.params_node = current_params;
+                                    candidate.body_node = current_body;
+                                    candidate.receiver_depth = receiver_depth;
+                                    bool generic_method = item_method_is_generic(current_name);
+                                    i64 specificity = 0;
+                                    if (call_pool != (AstPool*)0) {
+                                        Vec<u32> names = Vec<u32>.new();
+                                        Vec<u32> args = Vec<u32>.new();
+                                        i64 copy_index = 0;
+                                        while (copy_index < candidate_params.len()) {
+                                            names.push(candidate_params.get(copy_index));
+                                            args.push(arg_ids.get(copy_index));
+                                            copy_index += 1;
+                                        }
+                                        String failure = String.new();
+                                        u32 receiver_type = arg_ids.len() == 0
+                                            ? types.parse_type_name(base) : types.get_named_args(base, arg_ids);
+                                        specificity = mono_match_method_call(call_pool, root, types,
+                                            receiver_type, call_args, static_method, &candidate,
+                                            &names, &args, &failure);
+                                        names.drop();
+                                        args.drop();
+                                        failure.drop();
+                                    }
+                                    bool concrete_owner = receiver_binding_count(&candidate_params, candidate_params.len()) == 0;
+                                    bool preferred = !found_any || specificity > best_specificity
+                                        || (specificity == best_specificity
+                                            && ((concrete_owner && !best_concrete_owner)
+                                                || (concrete_owner == best_concrete_owner
+                                                    && !generic_method && best_generic_method)));
+                                    if ((specificity >= 0 || generic_method) && preferred) {
+                                        best_specificity = specificity;
+                                        best_concrete_owner = concrete_owner;
+                                        best_generic_method = generic_method;
+                                        found_any = true;
+                                        generic_template = candidate;
+                                        generic_params.clear();
+                                        i64 cp = 0;
+                                        while (cp < candidate_params.len()) {
+                                            generic_params.push(candidate_params.get(cp));
+                                            cp += 1;
                                         }
                                     }
-                                    Vec<u32> declared_params = Vec<u32>.new();
-                                    SyntaxNode* impl_head = item.first_child;
-                                    while (impl_head != (SyntaxNode*)0 && impl_head.kind != NodeKind.Block) {
-                                        if (impl_head.kind == NodeKind.Token && impl_head.token_kind == TokenKind.Impl) {
-                                            SyntaxNode* generic_open = impl_head.next_sibling;
-                                            if (generic_open != (SyntaxNode*)0 && generic_open.kind == NodeKind.Token
-                                                && generic_open.token_kind == TokenKind.Less) {
-                                                mono_collect_generic_parameters(generic_open, types, &declared_params);
-                                            }
-                                            break;
-                                        }
-                                        impl_head = impl_head.next_sibling;
-                                    }
-                                    if (declared_params.len() == 0) {
-                                        mono_collect_struct_parameters(root, base, types, &declared_params);
-                                    }
-                                    Vec<u32> candidate_params = Vec<u32>.new();
-                                    bool matched = mono_match_target_args(target, types, &declared_params, arg_ids, &candidate_params);
-                                    declared_params.drop();
-                                    if (matched && (required_name == (SyntaxNode*)0 || current_name == required_name)) {
-                                        MonoMethodTemplate candidate;
-                                        candidate.ret_start = current_ret;
-                                        candidate.name_node = current_name;
-                                        candidate.params_node = current_params;
-                                        candidate.body_node = current_body;
-                                        candidate.receiver_depth = receiver_depth;
-                                        bool generic_method = item_method_is_generic(current_name);
-                                        i64 specificity = 0;
-                                        if (call_pool != (AstPool*)0) {
-                                            Vec<u32> names = Vec<u32>.new();
-                                            Vec<u32> args = Vec<u32>.new();
-                                            i64 copy_index = 0;
-                                            while (copy_index < candidate_params.len()) {
-                                                names.push(candidate_params.get(copy_index));
-                                                args.push(arg_ids.get(copy_index));
-                                                copy_index += 1;
-                                            }
-                                            String failure = String.new();
-                                            u32 receiver_type = arg_ids.len() == 0
-                                                ? types.parse_type_name(base) : types.get_named_args(base, arg_ids);
-                                            specificity = mono_match_method_call(call_pool, root, types,
-                                                receiver_type, call_args, static_method, &candidate,
-                                                &names, &args, &failure);
-                                            names.drop();
-                                            args.drop();
-                                            failure.drop();
-                                        }
-                                        bool concrete_owner = receiver_binding_count(&candidate_params, candidate_params.len()) == 0;
-                                        bool preferred = !found_any || specificity > best_specificity
-                                            || (specificity == best_specificity
-                                                && ((concrete_owner && !best_concrete_owner)
-                                                    || (concrete_owner == best_concrete_owner
-                                                        && !generic_method && best_generic_method)));
-                                        if ((specificity >= 0 || generic_method) && preferred) {
-                                            best_specificity = specificity;
-                                            best_concrete_owner = concrete_owner;
-                                            best_generic_method = generic_method;
-                                            found_any = true;
-                                            generic_template = candidate;
-                                            generic_params.clear();
-                                            i64 cp = 0;
-                                            while (cp < candidate_params.len()) {
-                                                generic_params.push(candidate_params.get(cp));
-                                                cp += 1;
-                                            }
-                                        }
-                                    }
-                                    candidate_params.drop();
                                 }
-                                cursor = current_body.next_sibling;
-                                continue;
+                                candidate_params.drop();
                             }
-                            cursor = cursor.next_sibling;
+                            cursor = current_body.next_sibling;
+                            continue;
                         }
+                        cursor = cursor.next_sibling;
                     }
                 }
             }
         }
-        item = item.next_sibling;
     }
     if (found_any) {
         out.ret_start = generic_template.ret_start;

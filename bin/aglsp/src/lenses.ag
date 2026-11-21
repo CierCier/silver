@@ -35,9 +35,12 @@ String compute_code_lenses(Document* doc) {
 i64 collect_references(DocumentStore* store, SymbolTarget target, PendingMessage* pending,
                        String* locations) {
     Vec<Document*> documents = store.query_documents(target.document);
+    IdeSymbol* declared = target.document.analysis.symbols.get_ptr(target.symbol);
     i64 count = 0; i64 i = 0; bool first = true;
     while (i < documents.len() && !request_interrupted(pending)) {
         Document* candidate = documents.get(i);
+        // A local is only visible in its declaring file; any other symbol needs its name in the text.
+        if (declared.local ? candidate != target.document : !candidate.mentions(declared.name.to_str())) { i += 1; continue; }
         candidate.ensure_syntax();
         i64 j = 0;
         while (j < candidate.analysis.occurrences.len()) {

@@ -3,6 +3,7 @@
 // without making the parser rewrite source text.
 import std.mem.alloc;
 import std.mem.memory;
+import std.mem.vec;
 import std.recursion;
 import std.intern;
 import frontend.diagnostics;
@@ -62,6 +63,29 @@ struct SyntaxNode {
     SyntaxNode* last_child;
     SyntaxNode* next_sibling;
     SyntaxNode* pool_next;
+    // Lookup index over this node's children: see `RootIndex`. Built on demand
+    // for a `Program` root. Owned; every code path that rewires `first_child`
+    // or `next_sibling` links must call `drop_root_index` on the node.
+    RootIndex* index;
+}
+
+/// Name and kind lookups over the direct children of one `Program` root, so
+/// the frontend's item queries need no scan of every top-level item. Built on
+/// first use by `root_index` (items.ag) and kept until `drop_root_index`
+/// discards it, so whatever changes the root's children must discard it.
+/// Entries keep root order.
+struct RootIndex {
+    // Named items (functions, structs, enums, traits, aliases, globals):
+    // entry `i` is `items[i]`; `next[i]` is the next entry with the same name
+    // or -1; `head[id]` is the first entry for interned name `id`.
+    Interner names;
+    Vec<SyntaxNode*> items;
+    Vec<i64> next;
+    Vec<i64> head;
+    Vec<i64> tail;
+    // `impl` items, and `extern` items with C linkage, in root order.
+    Vec<SyntaxNode*> impls;
+    Vec<SyntaxNode*> c_externs;
 }
 
 /// Owns every `SyntaxNode` allocated for one tree, plus interned text for
@@ -121,6 +145,7 @@ impl NodePool {
         node.first_child = (SyntaxNode*)0;
         node.last_child = (SyntaxNode*)0;
         node.next_sibling = (SyntaxNode*)0;
+        node.index = (RootIndex*)0;
         node.pool_next = self.head;
         self.head = node;
         return node;
@@ -131,10 +156,22 @@ impl NodePool {
         SyntaxNode* node = self.head;
         while (node != (SyntaxNode*)0) {
             SyntaxNode* next = node.pool_next;
+            drop_root_index(node);
             free(node);
             node = next;
         }
         self.head = (SyntaxNode*)0;
+    }
+}
+
+/// Discards the lookup index of `node`'s children, if it has one. Call it
+/// before or after any edit to `node`'s child links; the next `root_index`
+/// query rebuilds it.
+void drop_root_index(SyntaxNode* node) {
+    if (node != (SyntaxNode*)0 && node.index != (RootIndex*)0) {
+        @drop_in_place(node.index, 1);
+        free(node.index);
+        node.index = (RootIndex*)0;
     }
 }
 
@@ -144,6 +181,7 @@ void append_child(SyntaxNode* parent, SyntaxNode* child) {
     if (parent == (SyntaxNode*)0 || child == (SyntaxNode*)0) {
         return;
     }
+    drop_root_index(parent);
     child.parent = parent;
     child.next_sibling = (SyntaxNode*)0;
     if (parent.first_child == (SyntaxNode*)0) {
@@ -594,6 +632,7 @@ void parse_cfg_block_items(Parser* self, SyntaxNode* item, i64 start, i64 end) {
             if (open >= token_cursor) {
                 i64 close = matching_index(self, open);
                 if (close > open && close < end) {
+                    drop_root_index(child);
                     child.first_child = (SyntaxNode*)0;
                     child.last_child = (SyntaxNode*)0;
                     i64 saved_cursor = self.cursor;

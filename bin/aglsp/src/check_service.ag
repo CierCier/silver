@@ -1,0 +1,203 @@
+import tooling.diagnostics;
+import tooling.index;
+import frontend.ast;
+import frontend.cfg;
+import transport;
+import std.channel;
+import std.env;
+import std.mem.alloc;
+import std.thread;
+
+// Semantic checks run on persistent worker threads that own everything they
+// read. A job carries copies of the file texts, and each worker parses its own
+// trees, so a worker never touches memory the dispatcher can free or change.
+
+/// Retained bytes of dependency signatures each worker keeps between checks.
+/// Imports such as `std` rarely change, so most of a check's parsing is a cache hit.
+const i64 SIGNATURE_CACHE_BYTES = 12582912;
+
+/// One file of a check job.
+struct CheckSource { String path; String text; i64 text_hash; }
+
+/// One file check. `files[0]` is the checked file; the rest are its imports in
+/// the depth-first order the checker expects.
+struct CheckJob {
+    i64 doc_id;
+    // Persisted-cache key when queued; the result is stored under it.
+    String key;
+    // Import-closure fingerprint when queued; a result is stale once it differs.
+    i64 fingerprint;
+    Vec<CheckSource> files;
+    Vec<String> include_dirs;
+}
+
+/// A finished check, identified by the job's document and fingerprint.
+struct CheckResult { i64 doc_id; String key; i64 fingerprint; DiagnosticBag diagnostics; }
+
+/// Channels between the dispatcher and the workers. Workers block on `jobs`
+/// while idle; closing it ends them.
+/// Shared with the workers: both channels are thread-safe, `stopping` is
+/// atomic, and `transport` is used only for `wake`, which is atomic and
+/// channel based.
+#[safe]
+struct CheckService {
+    Channel<CheckJob> jobs;
+    Channel<CheckResult> results;
+    Transport* transport;
+    i32 stopping;
+}
+
+impl CheckService {
+    /// Creates a service that wakes `transport`'s dispatcher after each result.
+    CheckService new(Transport* transport) {
+        CheckService service; service.jobs = Channel<CheckJob>.new(); service.results = Channel<CheckResult>.new();
+        service.transport = transport; __atomic_store_i32(&service.stopping, 0, ATOMIC_RELEASE);
+        return move service;
+    }
+
+    /// Ends the workers: queued jobs are skipped and idle workers return.
+    /// A job already running finishes first.
+    void stop(CheckService* self) {
+        __atomic_store_i32(&self.stopping, 1, ATOMIC_RELEASE);
+        self.jobs.close(); self.results.close();
+    }
+}
+
+impl Drop for CheckService {
+    void drop(*self) { self.jobs.destroy(); self.results.destroy(); }
+}
+
+/// One dependency kept between checks: only the signatures a check reads,
+/// not the parse of the whole file. `pool` owns every node and every byte of
+/// token text, so the tokens and the full syntax tree are gone once it is built.
+struct CachedSignatures { String path; i64 text_hash; i64 bytes; NodePool pool; SyntaxTree tree; }
+
+/// Estimated heap bytes of one `SyntaxNode` (112 bytes plus the allocator header).
+const i64 NODE_BYTES = 128;
+/// Estimated bytes an interned string costs beyond twice its length: the
+/// interner keeps the text twice, with a hash entry and two `String` headers.
+const i64 INTERNED_OVERHEAD = 130;
+
+/// Returns the heap bytes `pool` retains, estimated from its node and text counts.
+i64 pool_retained_bytes(NodePool* pool) {
+    i64 bytes = 0;
+    SyntaxNode* node = pool.head;
+    while (node != (SyntaxNode*)0) { bytes += NODE_BYTES; node = node.pool_next; }
+    i64 i = 0;
+    while (i < pool.generated_text.len()) {
+        bytes += 2 * strlen(pool.generated_text.get((u32)i)) + INTERNED_OVERHEAD; i += 1;
+    }
+    return bytes;
+}
+
+/// A worker's private cache of dependency signatures, oldest entries first,
+/// limited by the bytes the entries retain. Entries are heap allocated so tree
+/// pointers survive later lookups; `trim` is the only call that frees one.
+struct SignatureCache { Vec<CachedSignatures*> entries; i64 bytes; i64 limit; }
+
+impl SignatureCache {
+    /// Creates an empty cache holding up to `limit` retained bytes.
+    SignatureCache new(i64 limit) {
+        SignatureCache cache; cache.entries = Vec<CachedSignatures*>.new(); cache.bytes = 0; cache.limit = limit;
+        return move cache;
+    }
+
+    /// Returns the signature tree of `file`, building it on a miss, and marks
+    /// it newest. A miss parses the file like the dispatcher does
+    /// (`IdeIndex.new`) and keeps only the cfg-filtered, body-stripped items,
+    /// exactly what `check_snapshot_diagnostics` copies out of a dependency.
+    CachedSignatures* get(SignatureCache* self, CheckSource* file, CfgSet* cfg) {
+        i64 i = self.entries.len() - 1;
+        while (i >= 0) {
+            CachedSignatures* entry = self.entries.get(i);
+            if (entry.text_hash == file.text_hash && entry.path.equals(file.path.to_str())) {
+                self.entries.take(i); self.entries.push(entry);
+                return entry;
+            }
+            i -= 1;
+        }
+        CachedSignatures* entry = alloc<CachedSignatures>(1);
+        entry.path = file.path.clone(); entry.text_hash = file.text_hash;
+        entry.pool = NodePool.new();
+        IdeIndex parsed = IdeIndex.new(file.text.to_str());
+        entry.tree.root = diagnostic_signature_root(&entry.pool, &parsed.tree, 0, cfg, true);
+        entry.bytes = pool_retained_bytes(&entry.pool);
+        self.entries.push(entry); self.bytes += entry.bytes;
+        return entry;
+    }
+
+    /// Evicts the oldest entries until the cache fits its limit. Call between
+    /// jobs: it invalidates tree pointers from earlier lookups.
+    void trim(SignatureCache* self) {
+        while (self.bytes > self.limit && self.entries.len() > 0) {
+            CachedSignatures* oldest = self.entries.take(0);
+            self.bytes -= oldest.bytes;
+            // `@drop_in_place` would skip field destructors; moving the fields
+            // into locals drops them at the end of this iteration.
+            NodePool _pool = move oldest.pool; String _path = move oldest.path;
+            _pool.destroy();
+            free(oldest);
+        }
+    }
+}
+
+impl Drop for SignatureCache {
+    void drop(*self) {
+        self.limit = 0; self.trim();
+    }
+}
+
+/// Checks the job's file against its imports. The result owns its messages.
+/// The checked file is parsed fresh and dropped with the job: it changes on
+/// every keystroke, so caching it would only evict dependencies.
+CheckResult run_check(&mut SignatureCache cache, &CfgSet cfg, &CheckJob job) {
+    IdeIndex source = IdeIndex.new(job.files.get_ptr(0).text.to_str());
+    Vec<SyntaxTree*> dependencies = Vec<SyntaxTree*>.new();
+    i64 i = 1;
+    while (i < job.files.len()) {
+        CachedSignatures* dependency = cache.get(job.files.get_ptr(i), cfg);
+        dependencies.push(&dependency.tree); i += 1;
+    }
+    CheckResult result; result.doc_id = job.doc_id; result.key = job.key.clone(); result.fingerprint = job.fingerprint;
+    result.diagnostics = check_snapshot_diagnostics(&source.tree, &dependencies, cfg,
+                                                    job.files.get_ptr(0).path.to_str(), &job.include_dirs);
+    return move result;
+}
+
+/// Worker body: runs queued jobs until the service stops. Launched with a
+/// borrow of the service. Reads only the job it owns and its private cache.
+void check_worker(&CheckService shared) {
+    CheckService* service = shared;
+    CfgSet cfg = linux_defaults();
+    SignatureCache cache = SignatureCache.new(SIGNATURE_CACHE_BYTES);
+    while (true) {
+        Optional<CheckJob> next = service.jobs.recv();
+        if (!next.is_some()) { return; }
+        CheckJob job = next.unwrap();
+        if (__atomic_load_i32(&service.stopping, ATOMIC_ACQUIRE) != 0) { return; }
+        CheckResult result = run_check(&mut cache, &cfg, &job);
+        cache.trim();
+        service.results.send(move result);
+        service.transport.wake();
+    }
+}
+
+/// `AGLSP_JOBS` when set; otherwise half the CPUs this process may use, so the
+/// editor keeps cores while a cold workspace check runs. At most 32, within
+/// the runtime's thread registry.
+i64 check_worker_count() {
+    i64 count = thread_available_parallelism() / 2;
+    Optional<String> configured = var("AGLSP_JOBS");
+    if (configured.is_some()) {
+        String text = configured.unwrap(); i64 value = 0; i64 i = 0;
+        while (i < text.len() && text.data[i] >= (u8)'0' && text.data[i] <= (u8)'9') {
+            // Stop growing past the cap so a long digit string cannot wrap the value.
+            if (value <= 32) { value = value * 10 + (i64)(text.data[i] - (u8)'0'); }
+            i += 1;
+        }
+        if (i == text.len() && value > 0) { count = value; }
+    }
+    if (count > 32) { count = 32; }
+    if (count < 1) { count = 1; }
+    return count;
+}

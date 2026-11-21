@@ -1,0 +1,312 @@
+import capabilities;
+import check_service;
+import diagnostics;
+import document;
+import json_rpc;
+import transport;
+import workspace;
+
+// The dispatcher's half of background checking. It decides which dirty
+// document to check next, applies results the workers send back, and answers
+// diagnostic pulls once the report they wait on is current. Everything here
+// runs on the dispatcher thread; workers see only the owned job copies.
+
+/// A diagnostic pull waiting for background checks. Its message stays in
+/// `transport.pending`, so `$/cancelRequest` still marks it; the scheduler
+/// answers and releases it.
+struct ParkedPull {
+    PendingMessage* pending;
+    String id;
+    // The pulled document; null for a workspace pull.
+    Document* doc;
+    String previous;
+    Vec<PreviousDiagnostic> previous_results;
+}
+
+/// Job queue, in-flight jobs, parked pulls, and refresh bookkeeping. The
+/// pointers refer to dispatcher state that outlives it.
+struct CheckScheduler {
+    DocumentStore* store;
+    ClientOptions* client;
+    WorkspaceIndex* index;
+    CheckService* service;
+    Transport* transport;
+    i64 workers;
+    // Documents with a job running, by `Document.store_id`.
+    Vec<i64> in_flight;
+    // Results applied since no check was outstanding; feeds the status line.
+    i64 done;
+    // Dirty documents still to check at the last scheduling pass.
+    i64 outstanding;
+    Vec<ParkedPull> parked;
+    // Documents whose report changed with no pull to carry it to the client.
+    Vec<Document*> changed;
+    bool refresh_due;
+    // True once the client has sent a workspace pull; only then can an
+    // unchecked closed file leave it with an old report.
+    bool workspace_pulled;
+}
+
+/// Identifies the files a result was computed from: any text change or import
+/// change in the closure changes it, so a stale result is recognizable.
+i64 closure_fingerprint(Vec<Document*>* closure) {
+    i64 fingerprint = 0; i64 i = 0;
+    while (i < closure.len()) {
+        Document* doc = closure.get(i);
+        fingerprint = fingerprint * 1000003 + doc.text_hash * 31 + doc.store_id; i += 1;
+    }
+    return fingerprint;
+}
+
+impl CheckScheduler {
+    /// Creates a scheduler for `workers` running worker threads.
+    CheckScheduler new(DocumentStore* store, ClientOptions* client, WorkspaceIndex* index,
+                       CheckService* service, Transport* transport, i64 workers) {
+        CheckScheduler scheduler; scheduler.store = store; scheduler.client = client; scheduler.index = index;
+        scheduler.service = service; scheduler.transport = transport; scheduler.workers = workers;
+        scheduler.in_flight = Vec<i64>.new(); scheduler.done = 0; scheduler.outstanding = 0;
+        scheduler.parked = Vec<ParkedPull>.new(); scheduler.changed = Vec<Document*>.new(); scheduler.refresh_due = false;
+        scheduler.workspace_pulled = false;
+        return move scheduler;
+    }
+
+    /// Returns true when a job for the document is running.
+    bool is_in_flight(CheckScheduler* self, i64 doc_id) {
+        i64 i = 0;
+        while (i < self.in_flight.len()) { if (self.in_flight.get(i) == doc_id) { return true; } i += 1; }
+        return false;
+    }
+
+    /// Returns true when a parked document pull waits on `doc`.
+    bool targeted(CheckScheduler* self, Document* doc) {
+        i64 i = 0;
+        while (i < self.parked.len()) { if (self.parked.get_ptr(i).doc == doc) { return true; } i += 1; }
+        return false;
+    }
+
+    /// Returns true when a workspace pull is parked.
+    bool has_workspace_pull(CheckScheduler* self) {
+        i64 i = 0;
+        while (i < self.parked.len()) { if (self.parked.get_ptr(i).doc == (Document*)0) { return true; } i += 1; }
+        return false;
+    }
+
+    /// Returns true when a closed document a workspace pull reports has an
+    /// out-of-date report.
+    bool reported_stale(CheckScheduler* self) {
+        Vec<Document*> reported = workspace_report_documents(self.store); i64 i = 0;
+        while (i < reported.len()) {
+            Document* doc = reported.get(i); i += 1;
+            if (!doc.open && doc.diagnostics_dirty) { return true; }
+        }
+        return false;
+    }
+
+    /// Returns true when a parked pull that is not cancelled will carry `doc`'s
+    /// report to the client: its own pull, or a workspace pull.
+    bool carries(CheckScheduler* self, Document* doc) {
+        i64 i = 0;
+        while (i < self.parked.len()) {
+            ParkedPull* pull = self.parked.get_ptr(i);
+            if ((pull.doc == doc || pull.doc == (Document*)0) && !request_cancelled(pull.pending)) { return true; }
+            i += 1;
+        }
+        return false;
+    }
+
+    /// Returns true when `pending` is a parked pull, which the dispatcher must
+    /// not release yet.
+    bool holds(CheckScheduler* self, PendingMessage* pending) {
+        i64 i = 0;
+        while (i < self.parked.len()) { if (self.parked.get_ptr(i).pending == pending) { return true; } i += 1; }
+        return false;
+    }
+
+    /// Dirty documents to check, most urgent first: open documents and pull
+    /// targets with the newest edit first, then, once indexing is done, the
+    /// documents of a parked workspace pull.
+    Vec<Document*> wanted(CheckScheduler* self) {
+        Vec<Document*> out = Vec<Document*>.new(); i64 i = 0;
+        while (i < self.store.docs.len()) {
+            Document* doc = self.store.docs.get(i); i += 1;
+            if (!doc.diagnostics_dirty || !(doc.open || self.targeted(doc))) { continue; }
+            out.push(doc); i64 k = out.len() - 1;
+            while (k > 0 && out.get(k - 1).edit_tick < doc.edit_tick) { out.swap(k - 1, k); k -= 1; }
+        }
+        if (self.has_workspace_pull() && self.index.paths.len() == 0) {
+            Vec<Document*> reported = workspace_report_documents(self.store);
+            i = 0;
+            while (i < reported.len()) {
+                Document* doc = reported.get(i); i += 1;
+                if (doc.diagnostics_dirty && !contains_document(&out, doc)) { out.push(doc); }
+            }
+        }
+        return move out;
+    }
+
+    /// Returns true when the document's report is current: it is clean, or
+    /// just became so without a check (persisted cache hit, or parse errors
+    /// that are the whole report). `key` receives the cache key. `record`
+    /// reports a change to clients that were not waiting on it.
+    bool reconcile(CheckScheduler* self, Document* doc, String* key, bool record) {
+        if (!doc.diagnostics_dirty) { return true; }
+        *key = diagnostic_cache_key(doc, self.client.related_diagnostics);
+        bool changed = false;
+        if (!reuse_file_diagnostics(doc, key.to_str(), &changed)) {
+            // Parse diagnostics were computed with the text; no worker needed.
+            if (doc.analysis.diagnostics.is_empty()) { return false; }
+            changed = finish_file_diagnostics(doc, self.store, self.client, (DiagnosticBag*)0, key.to_str());
+        }
+        if (record) { self.record_clean(doc, changed); }
+        return true;
+    }
+
+    /// Delivers a document's new report: pushed to push clients, otherwise
+    /// remembered for `settle` to match against parked pulls.
+    void record_clean(CheckScheduler* self, Document* doc, bool changed) {
+        if (!self.client.pull_diagnostics) { if (doc.open) { publish_diagnostics(doc, self.client); } }
+        else if (changed) { self.changed.push(doc); }
+    }
+
+    /// Hands a job with copies of the document and its imports to the workers.
+    void queue(CheckScheduler* self, Document* doc, str key) {
+        Vec<Document*> closure = Vec<Document*>.new(); collect_import_closure(doc, &closure);
+        CheckJob job; job.doc_id = doc.store_id; job.key = String.from_str(key);
+        job.fingerprint = closure_fingerprint(&closure);
+        job.files = Vec<CheckSource>.new(); job.include_dirs = Vec<String>.new();
+        i64 i = 0;
+        while (i < closure.len()) {
+            Document* file = closure.get(i);
+            CheckSource source; source.path = file.path.clone(); source.text = file.text.clone(); source.text_hash = file.text_hash;
+            job.files.push(move source); i += 1;
+        }
+        i = 0;
+        while (i < self.store.include_dirs.len()) { job.include_dirs.push(self.store.include_dirs.get_ptr(i).clone()); i += 1; }
+        self.in_flight.push(doc.store_id);
+        self.service.jobs.send(move job);
+    }
+
+    /// Applies every finished check. A result whose import closure changed
+    /// while it ran is dropped; its document stays dirty and is queued again.
+    /// The dispatcher calls this on every loop iteration before it blocks, so
+    /// a lost wake-up marker cannot strand a result.
+    void drain(CheckScheduler* self) {
+        while (true) {
+            Optional<CheckResult> next = self.service.results.try_recv();
+            if (!next.is_some()) { return; }
+            CheckResult result = next.unwrap();
+            i64 i = 0;
+            while (i < self.in_flight.len() && self.in_flight.get(i) != result.doc_id) { i += 1; }
+            if (i < self.in_flight.len()) { self.in_flight.swap_remove(i); }
+            Document* doc = self.store.docs.get(result.doc_id);
+            if (!doc.diagnostics_dirty) { continue; }
+            Vec<Document*> closure = Vec<Document*>.new(); collect_import_closure(doc, &closure);
+            if (closure_fingerprint(&closure) != result.fingerprint) { continue; }
+            bool changed = finish_file_diagnostics(doc, self.store, self.client, &result.diagnostics, result.key.to_str());
+            self.done += 1; self.record_clean(doc, changed);
+        }
+    }
+
+    /// Starts checks for dirty documents while a worker is free and no client
+    /// message waits, so a typing burst starts no check per keystroke. One job
+    /// per document at a time; a stale result is discarded when it lands.
+    void schedule(CheckScheduler* self) {
+        Vec<Document*> wanted = self.wanted();
+        self.outstanding = wanted.len();
+        i64 i = 0;
+        while (i < wanted.len() && self.in_flight.len() < self.workers && self.transport.messages.len() == 0) {
+            Document* doc = wanted.get(i); i += 1;
+            if (self.is_in_flight(doc.store_id)) { continue; }
+            String key = String.new();
+            if (self.reconcile(doc, &key, true)) { self.outstanding -= 1; continue; }
+            self.queue(doc, key.to_str());
+        }
+        if (self.outstanding == 0) { self.done = 0; return; }
+        String message = String.from_str("Checking files: "); message.push_display(&self.done);
+        i64 total = self.done + self.outstanding;
+        message.push('/'); message.push_display(&total);
+        self.transport.status.report(false, message.to_str());
+    }
+
+    /// Answers `pull` with the current report, or -32800 when cancelled, and
+    /// releases its message.
+    void complete(CheckScheduler* self, ParkedPull* pull) {
+        str id = pull.id.to_str();
+        if (request_cancelled(pull.pending)) { complete_error(pull.pending, id, -32800, "Request cancelled"); }
+        else {
+            String out = String.new();
+            if (pull.doc == (Document*)0) {
+                out = compute_workspace_diagnostics(self.store, &pull.previous_results, &self.transport.status);
+            } else { append_diagnostic_report(&out, pull.doc, pull.previous.to_str(), false); }
+            complete_response(pull.pending, id, out.to_str());
+        }
+        release_message(self.transport, pull.pending);
+    }
+
+    /// Answers parked pulls that are ready: cancelled, their document clean,
+    /// or (workspace pulls) no check queued or running for any reported
+    /// document. During continuous typing a workspace pull therefore answers
+    /// between bursts. Also decides whether a changed report reached a client.
+    void settle(CheckScheduler* self) {
+        bool undelivered = false; i64 i = 0;
+        while (i < self.changed.len()) {
+            // A pull cancelled before it answers delivers nothing.
+            if (!self.carries(self.changed.get(i))) { undelivered = true; }
+            i += 1;
+        }
+        self.changed.clear();
+        // Closed files are checked only for a parked workspace pull, so a reported
+        // one that went stale while none waited needs the client to pull again.
+        if (self.store.closed_dirtied) {
+            self.store.closed_dirtied = false;
+            if (self.workspace_pulled && !self.has_workspace_pull() && self.reported_stale()) { undelivered = true; }
+        }
+        bool quiet = self.has_workspace_pull() && self.index.paths.len() == 0 && self.wanted().len() == 0;
+        i = 0;
+        while (i < self.parked.len()) {
+            ParkedPull* pull = self.parked.get_ptr(i);
+            bool ready = request_cancelled(pull.pending)
+                || (pull.doc == (Document*)0 ? quiet : !pull.doc.diagnostics_dirty);
+            if (!ready) { i += 1; continue; }
+            ParkedPull finished = self.parked.take(i);
+            self.complete(&finished);
+        }
+        if (undelivered && self.client.pull_diagnostics && self.client.diagnostic_refresh) { self.refresh_due = true; }
+    }
+
+    /// A newer edit or close makes `doc`'s pending report stale: answer its
+    /// parked pulls now with what the client can already show. The client
+    /// pulls again, and `unchanged` keeps its anchored diagnostics in place.
+    void answer_stale(CheckScheduler* self, Document* doc) {
+        i64 i = 0;
+        while (i < self.parked.len()) {
+            if (self.parked.get_ptr(i).doc != doc) { i += 1; continue; }
+            ParkedPull finished = self.parked.take(i);
+            self.complete(&finished);
+        }
+    }
+
+    /// Parks a `textDocument/diagnostic` request until `doc` is clean.
+    void park_document_pull(CheckScheduler* self, PendingMessage* pending, str id, Document* doc, str previous) {
+        ParkedPull pull; pull.pending = pending; pull.id = String.from_str(id); pull.doc = doc;
+        pull.previous = String.from_str(previous); pull.previous_results = Vec<PreviousDiagnostic>.new();
+        self.parked.push(move pull);
+    }
+
+    /// Parks a `workspace/diagnostic` request until checking is quiescent.
+    void park_workspace_pull(CheckScheduler* self, PendingMessage* pending, str id, Vec<PreviousDiagnostic> previous) {
+        self.workspace_pulled = true;
+        ParkedPull pull; pull.pending = pending; pull.id = String.from_str(id); pull.doc = (Document*)0;
+        pull.previous = String.new(); pull.previous_results = move previous;
+        self.parked.push(move pull);
+    }
+
+    /// Cancels every parked pull; used at shutdown.
+    void cancel_all(CheckScheduler* self) {
+        while (self.parked.len() > 0) {
+            ParkedPull pull = self.parked.take(0);
+            complete_error(pull.pending, pull.id.to_str(), -32800, "Request cancelled");
+            release_message(self.transport, pull.pending);
+        }
+    }
+}

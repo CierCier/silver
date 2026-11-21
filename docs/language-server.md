@@ -211,9 +211,11 @@ literal/comment contents. `tabSize` and `insertSpaces` are required;
 
 Positions use UTF-16 code units. Incremental changes apply sequentially to a
 temporary buffer. Invalid change batches leave the document unchanged. Older or
-repeated document versions are ignored. Opening or changing a file republishes
-diagnostics for that file and its open dependents. Closing a file clears its diagnostics and restores
-its disk contents for navigation from other files.
+repeated document versions are ignored. Opening or changing a file
+queues a background check of that file; push clients receive the diagnostics
+when the check finishes, and pull clients get them from their next pull.
+Closing a file clears its diagnostics and restores its disk contents for
+navigation from other files.
 
 The server indexes `.ag` files under `rootUri` and `workspaceFolders`, including
 unopened files. It follows symlinked source files and skips hidden entries,
@@ -239,11 +241,29 @@ Results persist in `$SILVER_CACHE_DIR/aglsp-diagnostics-v1` (default
 file, every file in its import closure, and the `aglsp` executable are unchanged,
 so a restart re-checks only what changed.
 
-Files that miss the cache are checked on worker threads: half the CPUs the
-process may use by default, or `AGLSP_JOBS` when set. Parsing, import
-resolution, and rendering stay on the dispatcher thread. A client message that
-arrives during the check stops the workers after the files in hand; finished
-results are kept, and the pull is retried with `retriggerRequest`.
+Files that miss the cache are checked on persistent worker threads: half the
+CPUs the process may use by default, or `AGLSP_JOBS` when set. The dispatcher
+hands a worker an owned copy of the file, its imports, and the include
+directories; the worker parses them itself and returns the diagnostics. The
+checked file is parsed fresh for each job. For imports the worker keeps only
+their signatures (cfg-filtered items with bodies stripped, text owned by the
+signature tree). Between checks each worker trims that cache to an estimated
+12 MiB, which holds `aglsp`'s whole import closure; one check can briefly hold
+more, because it keeps every signature it reads until it ends. The full parse
+of an import is dropped once its signatures are built.
+The dispatcher starts jobs only while no client message waits, checks open
+files before workspace files, newest edit first, and drops a result whose
+import closure changed while it ran. While jobs run, `experimental/serverStatus` reports
+`Checking files: done/total`.
+
+A `textDocument/diagnostic` pull for a clean document answers immediately. For
+a dirty one the request stays pending until its check finishes, and other
+requests run meanwhile; `$/cancelRequest` answers it with `RequestCancelled`,
+and a newer edit or close answers it with the report the client already has.
+A `workspace/diagnostic` pull completes once no check is queued or running for
+a reported file. When a check changes a report that no pending pull delivered,
+the server sends `workspace/diagnostic/refresh`, so a long-polling client pulls
+again.
 
 Closed files retain source text and symbol metadata. Their parse trees, tokens,
 and occurrence tables are released after use. Cross-file navigation restores
@@ -317,8 +337,10 @@ Progress ends before the response, including cancellation and invalid-parameter
 errors. `window/workDoneProgress/cancel` cancels the associated operation.
 Refresh requests for diagnostics, semantic tokens, and inlay hints use the
 client's advertised refresh support. Semantic refresh also requires an enabled
-token provider. Outstanding requests coalesce; a change arriving before an
-acknowledgement schedules another refresh. A rejected refresh disables further
+token provider. Changes only mark a refresh as wanted; the server sends one
+request per kind once no client message is waiting, so a typing burst costs one
+refresh rather than one per keystroke. Outstanding requests coalesce; a change
+arriving before an acknowledgement schedules another refresh. A rejected refresh disables further
 requests of that kind for the session.
 
 Inlay refresh follows analysis changes, including imported signature changes,
@@ -341,8 +363,8 @@ returning. Cancellation checks stop that traversal between files and return
 `RequestCancelled`; individual frontend passes currently run to completion.
 If the reader is waiting for queue space, interruptible analysis stops at its next
 checkpoint and returns `ServerCancelled` (`-32802`) with a retry message and
-`data: {"retriggerRequest": true}`, so clients re-send the request (including
-diagnostic pulls) instead of reporting a failure. Pending document
+`data: {"retriggerRequest": true}`, so clients re-send the request instead of
+reporting a failure. Diagnostic pulls never use it: they stay pending. Pending document
 changes remain ordered. Queue pressure does not count as client cancellation;
 a cancellation behind the backlog may arrive after the overload response.
 Cancelled and completed request identities are removed, allowing ID reuse.
@@ -452,6 +474,39 @@ The benchmark options operate as follows:
 - Do not compare partial or truncated candidate sets against complete responses, nor equate untruncated candidate lists (such as earlier ~490-item responses) with top-100 capped responses, or compare differing provider payloads (such as single-character `S` returning 38 versus 42 providers). Differing payloads and candidate counts do not represent equal work; state no current verified equal-work speedup. While top-100 truncation and single-character prefix behavior are supported in source, overall clangd parity remains open.
 - All numbers in the performance tables above remain historical baseline evidence from earlier completed and verified runs.
 
+### Edit latency
+
+`scripts/benchmark_lsp_edits.py` measures what a user sees right after an
+edit. It replays Zed's order in one warmed session: `didChange`, a diagnostic
+pull, then the format, rename, or references request the user sent. A slow
+diagnostic pull therefore shows up as format and rename latency. With
+`--workspace-poll`, the client also keeps one `workspace/diagnostic` request
+open and re-sends it after each answer, as Zed does.
+
+```sh
+python3 scripts/benchmark_lsp_edits.py --server /tmp/aglsp-native --workspace . --runs 10
+python3 scripts/benchmark_lsp_edits.py --server /tmp/aglsp-native --workspace . --runs 10 --workspace-poll
+```
+
+The script edits `bin/aglsp/src/main.ag` and renames `dispatch_message` by
+default (`--document`, `--rename`). Each run starts its server with an empty
+`SILVER_CACHE_DIR`, so no stored report stands in for a check. `format_after_burst` sends ten keystrokes
+30 ms apart, each followed by a pull. `fresh_diagnostics_after_edit` adds an
+undefined name and measures until a pull reports it.
+
+A comparison on 2026-11-21 used `-O2` builds on this repository, ten runs each,
+with `--workspace-poll`, load average about 3:
+
+| Metric | Before median | After median | After p95 |
+| --- | ---: | ---: | ---: |
+| Format after an edit | 1812 ms | 42 ms | 64 ms |
+| Format after ten keystrokes | 17927 ms | 24 ms | 41 ms |
+| Rename, idle | 3932 ms | 9 ms | 13 ms |
+| Rename after an edit | 5752 ms | 29 ms | 37 ms |
+| References, idle | 4679 ms | 12 ms | 21 ms |
+| New error reported after an edit | 1074 ms | 97 ms | 102 ms |
+| Peak resident memory | 450 MiB | 377 MiB | |
+
 ## Clangd 22 default parity comparison
 
 The reference implementation is pinned to upstream
@@ -465,7 +520,7 @@ Default configuration options derive from `ClangdMain.cpp` and `ClangdLSPServer.
 | **2. All-scopes completion** | `--all-scopes-completion=true`. Searches across global and all namespace scopes; inserts qualified names or includes. | Searches workspace and stdlib modules for reachable unimported declarations (`append_auto_imports`), offering auto-import items. | Supported for source files (`test_single_character_prefix_includes_auto_imports_after_indexing`, `test_auto_import_completion_applies_primary_and_import_edits_and_resolves`); binary `.agm` exports open. | Silver uses module paths (`import std.io;`) rather than C++ nested lexical namespaces (`a::b::c`). No lexical namespace qualifiers. |
 | **3. Argument placeholders** | `--function-arg-placeholders=true`. Emits `${1:arg}` placeholders when snippets supported. | Inserts call argument placeholders `${1:param}` when client advertises snippets; omits implicit receiver `self`; suppresses if cursor precedes `(`. | Conditional. Requires client `snippetSupport`. Verified in protocol checks (`test_completion_snippets_and_deferred_details_preserve_edits_and_reject_stale_items`); generic substitution in method signatures open. | Maps function and method signatures to snippet syntax. |
 | **4. Header insertion / Auto-import** | `--header-insertion=iwyu`. Inserts missing `#include <header>` via `additionalTextEdits`. | Inserts `import path;` via `additionalTextEdits`; merges with primary edit if cursor is at offset 0; offers import quick-fixes. | Supported for source `.ag` files (`test_auto_import_at_file_start_combines_edits_without_overlap`, `test_import_quickfix_applies_to_current_source_and_resolves_diagnostics`). Binary `.agm` exports open. | Silver uses module imports instead of C textual preprocessor `#include`. No angle vs quote syntax or IWYU pragmas. |
-| **5. Background index** | `--background-index=true`. Multithreaded background crawler indexes workspace files in worker threads. | Single-threaded cooperative indexing yields between files during event loop. Responds with available data and `isIncomplete: true`. | Partial. Analysis passes themselves are synchronous on the main dispatch thread; no worker thread pool (`test_completion_responds_with_available_data_while_indexing_continues`). | Prevents complete server stall on startup, but long single-file frontend passes remain non-preemptible. |
+| **5. Background index** | `--background-index=true`. Multithreaded background crawler indexes workspace files in worker threads. | Single-threaded cooperative indexing yields between files during event loop. Responds with available data and `isIncomplete: true`. | Partial. Diagnostic checks run on persistent worker threads; other analysis passes are synchronous on the main dispatch thread (`test_completion_responds_with_available_data_while_indexing_continues`). | Prevents complete server stall on startup, but long single-file frontend passes remain non-preemptible. |
 | **6. Persistence** | Writes disk index files to `.cache/clangd/index/*.idx` for fast cross-session restarts. | Zero disk persistence. In-memory only. Re-indexes on every LSP startup. Releases ASTs of closed files to conserve memory (~67 MiB idle RSS). | Open / Missing. No on-disk index format or cache directory. Closed-file compaction reduces memory but requires re-parsing on demand. | Clangd stores standalone `.idx` files. Silver currently rebuilds index in RAM every run. |
 | **7. Diagnostics** | Clang compiler frontend diagnostics (parse, template, type, lint, fix-its, notes/related information). | Push diagnostics and LSP 3.17 pull diagnostics (`textDocument/diagnostic`, `workspace/diagnostic`). Emits frontend errors/warnings. | Supported with limits. Lambda analysis uses owned CST. Related locations are strictly document-local; cross-document related locations remain open. | Silver has no C++ templates or SFINAE errors; diagnoses borrow/ownership and nominal generics instead. |
 | **8. Semantic features** | Semantic tokens (modifiers, types), hover, definition, declaration, typeDefinition, implementation, references, rename, hierarchies, inlay hints. | Implemented: tokens (full/delta/range), hover, definition/typeDefinition/implementation, references, rename (trait methods, scope-aware), hierarchies, parameter/type hints. | Partial. General expression-based receiver inference, free-function overloads, macro expansion hover, and code lenses remain open. | Silver method syntax and trait impls map to hierarchies; lack of general receiver inference limits dot-completion on complex expressions. |

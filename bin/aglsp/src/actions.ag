@@ -174,8 +174,8 @@ String compute_import_actions(DocumentStore* store, Document* active, Span selec
             while (doc < documents.len() && !request_interrupted(pending)) {
                 Document* candidate = documents.get(doc);
                 if (candidate != active && candidate.path.len() > 0 && candidate.analysis.diagnostics.is_empty()) {
-                    Vec<Document*> visited = Vec<Document*>.new(); SymbolTarget target; target.document = candidate; target.symbol = -1;
-                    find_imported_symbol(candidate, selected.node.text, "", &visited, &target);
+                    SymbolTarget target; target.document = candidate; target.symbol = -1;
+                    find_symbol(candidate, selected.node.text, "", &target);
                     if (target.symbol >= 0 && target.document == candidate
                         && candidate.analysis.symbols.get_ptr(target.symbol).kind != IdeSymbolKind.ImportAlias) {
                         String module_name = import_module_name(store, active, candidate);

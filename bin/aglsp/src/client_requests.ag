@@ -33,6 +33,12 @@ struct ClientRequests {
     i64 next_id;
     bool progress_requested;
     bool progress_created;
+    // Refresh kinds asked for and not yet sent; see `want` and `flush_refreshes`.
+    bool diagnostic_wanted;
+    bool semantic_wanted;
+    bool inlay_wanted;
+    bool code_lens_wanted;
+    bool folding_wanted;
 }
 
 /// Maps an LSP trace setting (`off`, `messages`, `verbose`) to 0, 1, or 2.
@@ -52,6 +58,8 @@ impl ClientRequests {
         requests.next_id = 0;
         requests.progress_requested = false;
         requests.progress_created = false;
+        requests.diagnostic_wanted = false; requests.semantic_wanted = false; requests.inlay_wanted = false;
+        requests.code_lens_wanted = false; requests.folding_wanted = false;
         return move requests;
     }
 
@@ -74,6 +82,26 @@ impl ClientRequests {
         send_raw_payload(out.to_str());
         out.drop();
         return move id;
+    }
+
+    /// Records that `kind` needs a refresh. A burst of edits sets the same flag
+    /// repeatedly, and `flush_refreshes` sends one request for all of them.
+    void want(ClientRequests* self, ClientRequestKind kind) {
+        if (kind == ClientRequestKind.DiagnosticRefresh) { self.diagnostic_wanted = true; }
+        else if (kind == ClientRequestKind.SemanticRefresh) { self.semantic_wanted = true; }
+        else if (kind == ClientRequestKind.InlayHintRefresh) { self.inlay_wanted = true; }
+        else if (kind == ClientRequestKind.CodeLensRefresh) { self.code_lens_wanted = true; }
+        else { self.folding_wanted = true; }
+    }
+
+    /// Sends the wanted refreshes. The dispatcher calls it only when no client
+    /// message waits, so the editor's own requests are answered first.
+    void flush_refreshes(ClientRequests* self) {
+        if (self.semantic_wanted) { self.semantic_wanted = false; self.refresh(ClientRequestKind.SemanticRefresh); }
+        if (self.inlay_wanted) { self.inlay_wanted = false; self.refresh(ClientRequestKind.InlayHintRefresh); }
+        if (self.code_lens_wanted) { self.code_lens_wanted = false; self.refresh(ClientRequestKind.CodeLensRefresh); }
+        if (self.folding_wanted) { self.folding_wanted = false; self.refresh(ClientRequestKind.FoldingRefresh); }
+        if (self.diagnostic_wanted) { self.diagnostic_wanted = false; self.refresh(ClientRequestKind.DiagnosticRefresh); }
     }
 
     /// Asks the client to refresh `kind`, coalescing repeated requests.
@@ -253,13 +281,15 @@ impl ClientRequests {
                 ClientRequest completed = self.pending.take(i);
                 if (error.len() > 0) {
                     match completed.kind {
-                        ClientRequestKind.DiagnosticRefresh : { sink.client.diagnostic_refresh = false; },
-                        ClientRequestKind.SemanticRefresh : { sink.client.semantic_refresh = false; },
-                        ClientRequestKind.InlayHintRefresh : { sink.client.inlay_refresh = false; },
-                        ClientRequestKind.CodeLensRefresh : { sink.client.code_lens_refresh = false; },
-                        ClientRequestKind.FoldingRefresh : { sink.client.folding_refresh = false; },
+                        // A rejected kind is off, so a refresh wanted for it must not be sent.
+                        ClientRequestKind.DiagnosticRefresh : { sink.client.diagnostic_refresh = false; self.diagnostic_wanted = false; },
+                        ClientRequestKind.SemanticRefresh : { sink.client.semantic_refresh = false; self.semantic_wanted = false; },
+                        ClientRequestKind.InlayHintRefresh : { sink.client.inlay_refresh = false; self.inlay_wanted = false; },
+                        ClientRequestKind.CodeLensRefresh : { sink.client.code_lens_refresh = false; self.code_lens_wanted = false; },
+                        ClientRequestKind.FoldingRefresh : { sink.client.folding_refresh = false; self.folding_wanted = false; },
                     }
-                } else if (completed.repeat) { self.refresh(completed.kind); }
+                // Replay through `want`: edits since the idle pass share one request.
+                } else if (completed.repeat) { self.want(completed.kind); }
                 break;
             }
             i += 1;

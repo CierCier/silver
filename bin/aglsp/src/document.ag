@@ -52,6 +52,8 @@ struct Document {
     LspLineIndex lines;
     i64 version;
     i64 revision;
+    // `DocumentStore.edit_clock` when last set or closed; orders check priority.
+    i64 edit_tick;
     bool open;
     bool imports_dirty;
     bool diagnostics_dirty;
@@ -64,7 +66,17 @@ struct Document {
     Vec<i64> previous_semantic_data;
     IdeIndex analysis;
     Vec<Document*> dependencies;
+    // Cached `import_closure`; current while `closure_epoch == g_import_epoch`.
+    Vec<Document*> closure;
+    i64 closure_epoch;
+    // Stamp of the closure walk that last reached this document.
+    i64 closure_mark;
 }
+
+// Bumped whenever any document's `dependencies` change, which expires every
+// cached `Document.closure`. One store per server, so the counter is global.
+private i64 g_import_epoch = 0;
+private i64 g_closure_walk = 0;
 
 /// Every known document plus the workspace roots, include directories, and
 /// project manifests used to resolve imports. Not thread-safe; owns the
@@ -79,6 +91,9 @@ struct DocumentStore {
     Vec<String> project_entries;
     Vec<String> overlay_paths;
     bool discover_open_projects;
+    i64 edit_clock;
+    // Set when a closed document's report goes stale; the scheduler consumes it.
+    bool closed_dirtied;
 }
 
 /// Returns true when `path` is inside one of `roots`.
@@ -140,6 +155,56 @@ impl Document {
         self.analysis.symbols = move retained;
     }
 
+    /// Byte offset of the first whole-identifier `name` at or after `from`, or
+    /// -1. Reads only the text, so it works on compacted documents and lets
+    /// name-driven scans skip files whose parse tree they would otherwise rebuild.
+    i64 find_name(Document* self, str name, i64 from) {
+        i64 width = strlen(name); i64 length = self.text.len();
+        if (width == 0) { return -1; }
+        u8* data = self.text.data; u8 first = (u8)name[0]; i64 i = from;
+        while (i + width <= length) {
+            if (data[i] == first && (i == 0 || !typecheck_name_continue(data[i - 1]))) {
+                i64 k = 1;
+                while (k < width && data[i + k] == (u8)name[k]) { k += 1; }
+                if (k == width && (i + width == length || !typecheck_name_continue(data[i + width]))) { return i; }
+            }
+            i += 1;
+        }
+        return -1;
+    }
+
+    /// True when `name` appears in the text as a whole identifier.
+    bool mentions(Document* self, str name) { return self.find_name(name, 0) >= 0; }
+
+    /// True when any of `names` appears in the text as a whole identifier.
+    bool mentions_any(Document* self, Vec<String>* names) {
+        i64 i = 0;
+        while (i < names.len()) { if (self.mentions(names.get_ptr(i).to_str())) { return true; } i += 1; }
+        return false;
+    }
+
+    /// Adds to `names` each new alias the text gives `name` (`name as alias`).
+    void collect_aliases(Document* self, str name, Vec<String>* names) {
+        i64 width = strlen(name); i64 length = self.text.len(); u8* data = self.text.data;
+        i64 at = self.find_name(name, 0);
+        while (at >= 0) {
+            i64 i = at + width;
+            while (i < length && (data[i] == (u8)' ' || data[i] == (u8)'\t' || data[i] == (u8)'\n' || data[i] == (u8)'\r')) { i += 1; }
+            if (i + 2 < length && data[i] == (u8)'a' && data[i + 1] == (u8)'s' && !typecheck_name_continue(data[i + 2])) {
+                i += 2;
+                while (i < length && (data[i] == (u8)' ' || data[i] == (u8)'\t' || data[i] == (u8)'\n' || data[i] == (u8)'\r')) { i += 1; }
+                i64 begin = i;
+                while (i < length && typecheck_name_continue(data[i])) { i += 1; }
+                if (i > begin) {
+                    String alias = self.text.substr(begin, i - begin); i64 known = 0;
+                    while (known < names.len() && !names.get_ptr(known).equals(alias.to_str())) { known += 1; }
+                    if (known == names.len()) { names.push(move alias); }
+                }
+            }
+            at = self.find_name(name, at + width);
+        }
+    }
+
     /// Replaces the text, rebuilding the line index and editor analysis.
     void replace_text(Document* self, str text) {
         String _previous_text = move self.text;
@@ -199,6 +264,7 @@ impl DocumentStore {
         store.project_entries = Vec<String>.new();
         store.overlay_paths = Vec<String>.new();
         store.discover_open_projects = true;
+        store.edit_clock = 0; store.closed_dirtied = false;
         // Same sysroot fallback cascade as the compiler: SILVER_SYSROOT,
         // executable-relative prefix, user data dir, and system share dirs.
         Vec<String> sysroot_dirs = module_sysroot_include_dirs();
@@ -240,6 +306,8 @@ impl DocumentStore {
             doc.uri = String.from_str(uri);
             doc.path = document_path(uri);
             doc.dependencies = Vec<Document*>.new();
+            doc.closure = Vec<Document*>.new();
+            doc.closure_epoch = -1;
             self.docs.push(doc);
         } else if (doc.open && version <= doc.version) {
             return (Document*)0;
@@ -248,6 +316,7 @@ impl DocumentStore {
         doc.replace_text(text);
         doc.version = version;
         doc.revision += 1;
+        self.edit_clock += 1; doc.edit_tick = self.edit_clock;
         doc.open = open;
         doc.imports_dirty = true;
         doc.diagnostics_dirty = true;
@@ -301,18 +370,20 @@ impl DocumentStore {
             doc.imports_dirty = false;
             doc.diagnostics_dirty = true;
             doc.semantic_dirty = true;
-            doc.dependencies.clear();
+            if (!doc.open) { self.closed_dirtied = true; }
+            Vec<Document*> next = Vec<Document*>.new();
             if (doc.path.len() > 0) {
                 i64 j = 0;
                 while (j < doc.analysis.imports.len()) {
                     String path = resolve_document_import(self, doc, doc.analysis.imports.get_ptr(j).to_str());
                     if (path.len() > 0 && !path.ends_with(".agm")) {
                         Document* imported = self.load(path.to_str());
-                        if (imported != (Document*)0 && imported != doc) { doc.dependencies.push(imported); }
+                        if (imported != (Document*)0 && imported != doc) { next.push(imported); }
                     }
                     j += 1;
                 }
             }
+            set_dependencies(doc, &next);
             i += 1;
         }
     }
@@ -325,6 +396,7 @@ impl DocumentStore {
         self.invalidate_dependents(doc);
         doc.open = false;
         doc.revision += 1;
+        self.edit_clock += 1; doc.edit_tick = self.edit_clock;
         doc.imports_dirty = true;
         doc.diagnostics_dirty = true;
         doc.semantic_dirty = true;
@@ -340,7 +412,7 @@ impl DocumentStore {
             }
         }
         doc.replace_text("");
-        doc.dependencies.clear();
+        if (doc.dependencies.len() > 0) { doc.dependencies.clear(); g_import_epoch += 1; }
         doc.compact();
     }
 
@@ -374,6 +446,18 @@ impl DocumentStore {
     }
 }
 
+/// Stores `next` as the dependencies of `doc`; expires the cached import
+/// closures only when the list differs, so an edit that keeps its imports
+/// keeps every closure.
+void set_dependencies(Document* doc, Vec<Document*>* next) {
+    bool same = doc.dependencies.len() == next.len(); i64 i = 0;
+    while (same && i < next.len()) { same = doc.dependencies.get(i) == next.get(i); i += 1; }
+    if (same) { return; }
+    doc.dependencies.clear(); i = 0;
+    while (i < next.len()) { doc.dependencies.push(next.get(i)); i += 1; }
+    g_import_epoch += 1;
+}
+
 /// Resolves import `name` from `doc` to a file path ("" when unresolved),
 /// using open documents as source overlays.
 String resolve_document_import(DocumentStore* store, Document* doc, str name) {
@@ -397,13 +481,38 @@ impl Drop for DocumentStore {
 /// A symbol in a specific document; `symbol` is -1 when unresolved.
 struct SymbolTarget { Document* document; i64 symbol; }
 
-/// Searches `doc` and its imports (skipping `visited`) for a top-level
-/// symbol `name` (a member of `owner` when set), writing it to `*target`.
-void find_imported_symbol(Document* doc, str name, str owner, Vec<Document*>* visited, SymbolTarget* target) {
+/// Appends the documents `doc` reaches through imports to `out`, depth first.
+/// `closure_mark == walk` marks a document as reached, so cycles end and the
+/// walk's root stays out.
+void append_import_closure(Document* doc, i64 walk, Vec<Document*>* out) {
     i64 i = 0;
-    while (i < visited.len()) { if (visited.get(i) == doc) { return; } i += 1; }
-    visited.push(doc);
-    i = ide_name_head(&doc.analysis, name);
+    while (i < doc.dependencies.len()) {
+        Document* imported = doc.dependencies.get(i);
+        if (imported.closure_mark != walk) {
+            imported.closure_mark = walk; out.push(imported); append_import_closure(imported, walk, out);
+        }
+        i += 1;
+    }
+}
+
+/// The documents `doc` imports directly or transitively, each once, `doc`
+/// excluded, in depth-first order. Cached until any import list changes. The
+/// store never frees or moves a Document while it lives (`compact` only drops
+/// parse trees), so the cached pointers stay valid.
+Vec<Document*>* import_closure(Document* doc) {
+    if (doc.closure_epoch != g_import_epoch) {
+        g_closure_walk += 1;
+        doc.closure.clear(); doc.closure_mark = g_closure_walk;
+        append_import_closure(doc, g_closure_walk, &doc.closure);
+        doc.closure_epoch = g_import_epoch;
+    }
+    return &doc.closure;
+}
+
+/// Matches top-level symbols `name` of `doc` alone (members of `owner` when
+/// set); a second match across calls marks `*target` ambiguous (-2).
+void match_symbol(Document* doc, str name, str owner, SymbolTarget* target) {
+    i64 i = ide_name_head(&doc.analysis, name);
     while (i >= 0) {
         IdeSymbol* symbol = doc.analysis.symbols.get_ptr(i);
         if (!symbol.local && !symbol.is_private && symbol.kind != IdeSymbolKind.Macro
@@ -413,29 +522,35 @@ void find_imported_symbol(Document* doc, str name, str owner, Vec<Document*>* vi
         }
         i = doc.analysis.next_name.get(i);
     }
-    i = 0;
-    while (i < doc.dependencies.len()) {
-        find_imported_symbol(doc.dependencies.get(i), name, owner, visited, target);
-        i += 1;
-    }
 }
 
-/// Collects members named `name` of `owner` across `doc` and its imports.
-void collect_member_symbols(Document* doc, str name, str owner, Vec<Document*>* visited, Vec<SymbolTarget>* found) {
-    i64 i = 0;
-    while (i < visited.len()) { if (visited.get(i) == doc) { return; } i += 1; }
-    visited.push(doc);
-    i = ide_name_head(&doc.analysis, name);
-    while (i >= 0) {
-        IdeSymbol* symbol = doc.analysis.symbols.get_ptr(i);
-        if (!symbol.local && !symbol.is_private && symbol.name.equals(name) && symbol.owner.equals(owner)) {
-            SymbolTarget member; member.document = doc; member.symbol = i; found.push(member);
+/// Searches the imports of `doc`, not `doc` itself, for a top-level symbol
+/// `name` (a member of `owner` when set), writing it to `*target`.
+void find_imported_symbol(Document* doc, str name, str owner, SymbolTarget* target) {
+    Vec<Document*>* closure = import_closure(doc); i64 i = 0;
+    while (i < closure.len()) { match_symbol(closure.get(i), name, owner, target); i += 1; }
+}
+
+/// Like `find_imported_symbol`, but `doc` is searched first.
+void find_symbol(Document* doc, str name, str owner, SymbolTarget* target) {
+    match_symbol(doc, name, owner, target);
+    find_imported_symbol(doc, name, owner, target);
+}
+
+/// Collects members named `name` of `owner` across the imports of `doc`.
+void collect_member_symbols(Document* doc, str name, str owner, Vec<SymbolTarget>* found) {
+    Vec<Document*>* closure = import_closure(doc); i64 d = 0;
+    while (d < closure.len()) {
+        Document* imported = closure.get(d);
+        i64 i = ide_name_head(&imported.analysis, name);
+        while (i >= 0) {
+            IdeSymbol* symbol = imported.analysis.symbols.get_ptr(i);
+            if (!symbol.local && !symbol.is_private && symbol.name.equals(name) && symbol.owner.equals(owner)) {
+                SymbolTarget member; member.document = imported; member.symbol = i; found.push(member);
+            }
+            i = imported.analysis.next_name.get(i);
         }
-        i = doc.analysis.next_name.get(i);
-    }
-    i = 0;
-    while (i < doc.dependencies.len()) {
-        collect_member_symbols(doc.dependencies.get(i), name, owner, visited, found); i += 1;
+        d += 1;
     }
 }
 
@@ -649,23 +764,12 @@ SymbolTarget resolve_occurrence(Document* doc, i64 occurrence) {
             local = doc.analysis.next_name.get(local);
         }
         // Members declared in this file shadow imported ones of the same owner.
-        Vec<Document*> visited = Vec<Document*>.new(); visited.push(doc); i64 i = 0;
-        bool shadowed = found.len() > 0;
-        while (!shadowed && i < doc.dependencies.len()) {
-            collect_member_symbols(doc.dependencies.get(i), selected.node.text, owner.to_str(), &visited, &found);
-            i += 1;
-        }
+        if (found.len() == 0) { collect_member_symbols(doc, selected.node.text, owner.to_str(), &found); }
         SymbolTarget chosen = choose_member(&found, ide_member_call(selected.node));
         if (chosen.symbol != -1) { return chosen; }
         return target;
     }
-    Vec<Document*> visited = Vec<Document*>.new();
-    visited.push(doc);
-    i64 i = 0;
-    while (i < doc.dependencies.len()) {
-        find_imported_symbol(doc.dependencies.get(i), selected.node.text, owner.to_str(), &visited, &target);
-        i += 1;
-    }
+    find_imported_symbol(doc, selected.node.text, owner.to_str(), &target);
     return target;
 }
 
@@ -674,15 +778,23 @@ SymbolTarget follow_import_alias(SymbolTarget target) {
     if (target.symbol < 0) { return target; }
     IdeSymbol* symbol = target.document.analysis.symbols.get_ptr(target.symbol);
     if (symbol.kind != IdeSymbolKind.ImportAlias) { return target; }
-    Document* doc = target.document;
-    Vec<Document*> visited = Vec<Document*>.new(); visited.push(doc);
     target.symbol = -1;
-    i64 i = 0;
-    while (i < doc.dependencies.len()) {
-        find_imported_symbol(doc.dependencies.get(i), symbol.type_name.to_str(), "", &visited, &target);
-        i += 1;
-    }
+    find_imported_symbol(target.document, symbol.type_name.to_str(), "", &target);
     return target;
+}
+
+/// The names a symbol called `name` is spelled by in `documents`: itself and
+/// every `name as alias` import alias, followed through alias chains. A scan
+/// that skips files by name must keep the files spelling any of these.
+Vec<String> spelled_names(Vec<Document*>* documents, str name) {
+    Vec<String> names = Vec<String>.new(); names.push(String.from_str(name));
+    i64 scanned = 0;
+    while (scanned < names.len()) {
+        // `names` grows while scanning, so work from a copy of the current name.
+        String known = names.get_ptr(scanned).clone(); scanned += 1; i64 i = 0;
+        while (i < documents.len()) { documents.get(i).collect_aliases(known.to_str(), &names); i += 1; }
+    }
+    return move names;
 }
 
 /// Resolves value name `name` visible at `offset` in `doc` or its imports.
@@ -690,10 +802,7 @@ SymbolTarget visible_name(Document* doc, str name, i64 offset) {
     SymbolTarget target; target.document = doc;
     target.symbol = ide_resolve_local(&doc.analysis, name, offset);
     if (target.symbol != -1) { return follow_import_alias(target); }
-    Vec<Document*> visited = Vec<Document*>.new(); visited.push(doc); i64 i = 0;
-    while (i < doc.dependencies.len()) {
-        find_imported_symbol(doc.dependencies.get(i), name, "", &visited, &target); i += 1;
-    }
+    find_imported_symbol(doc, name, "", &target);
     return follow_import_alias(target);
 }
 
@@ -701,12 +810,7 @@ SymbolTarget visible_name(Document* doc, str name, i64 offset) {
 SymbolTarget visible_type_name(Document* doc, str name, i64 offset) {
     SymbolTarget target; target.document = doc;
     target.symbol = ide_resolve_type(&doc.analysis, name, offset);
-    if (target.symbol == -1) {
-        Vec<Document*> visited = Vec<Document*>.new(); visited.push(doc); i64 i = 0;
-        while (i < doc.dependencies.len()) {
-            find_imported_symbol(doc.dependencies.get(i), name, "", &visited, &target); i += 1;
-        }
-    }
+    if (target.symbol == -1) { find_imported_symbol(doc, name, "", &target); }
     target = follow_import_alias(target);
     if (target.symbol >= 0 && !ide_type_symbol(target.document.analysis.symbols.get_ptr(target.symbol).kind)) { target.symbol = -1; }
     return target;
