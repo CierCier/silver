@@ -4082,6 +4082,7 @@ bool typecheck_expressions(AstPool* pool, SymbolTable* symbols, SyntaxTree* tree
                            CfgSet* cfg, DiagnosticBag* diagnostics, SyntaxNode* imported_root) {
     SyntaxNode* local_last = tree.root.last_child;
     if (local_last != (SyntaxNode*)0 && imported_root.first_child != (SyntaxNode*)0) {
+        drop_root_index(tree.root);
         local_last.next_sibling = imported_root.first_child;
         tree.root.last_child = imported_root.last_child;
     }
@@ -4098,6 +4099,7 @@ bool typecheck_expressions(AstPool* pool, SymbolTable* symbols, SyntaxTree* tree
     }
     imported_items.drop();
     if (!typecheck_expressions_scoped(pool, symbols, tree, cfg, diagnostics, 0)) { ok = false; }
+    drop_root_index(tree.root);
     if (local_last != (SyntaxNode*)0) { local_last.next_sibling = (SyntaxNode*)0; }
     tree.root.last_child = local_last;
     return ok;

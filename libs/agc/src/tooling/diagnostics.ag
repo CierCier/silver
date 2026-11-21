@@ -117,6 +117,7 @@ void diagnostic_add_snapshot(DiagnosticTree* scratch, SyntaxTree* dependency,
         if (item.kind != NodeKind.Import) { append_child(scratch.tree.root, item); }
         item = next;
     }
+    drop_root_index(signatures.root);
     signatures.root.first_child = (SyntaxNode*)0;
     signatures.root.last_child = (SyntaxNode*)0;
 }

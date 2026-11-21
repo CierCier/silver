@@ -49,21 +49,15 @@ impl RootIndex {
     }
 }
 
-/// Returns the lookup index of `root`'s items, building it on first use and
-/// again when the root's first or last child has changed since.
+/// Returns the lookup index of `root`'s items, building it on first use. It
+/// stays valid until `drop_root_index(root)`, which every edit to the root's
+/// children calls.
 RootIndex* root_index(SyntaxNode* root) {
-    RootIndex* index = root.index;
-    if (index != (RootIndex*)0 && index.first == root.first_child && index.last == root.last_child) {
-        return index;
+    if (root.index != (RootIndex*)0) {
+        return root.index;
     }
-    if (index == (RootIndex*)0) {
-        index = (RootIndex*)alloc<RootIndex>();
-        root.index = index;
-    } else {
-        @drop_in_place(index, 1);
-    }
-    index.first = root.first_child;
-    index.last = root.last_child;
+    RootIndex* index = (RootIndex*)alloc<RootIndex>();
+    root.index = index;
     index.names = Interner.new();
     index.items = Vec<SyntaxNode*>.new();
     index.next = Vec<i64>.new();
