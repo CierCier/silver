@@ -129,15 +129,20 @@ String compute_implementations(DocumentStore* store, Document* context, SymbolTa
     bool method = symbol.kind == IdeSymbolKind.Method;
     if (method) { trait_target = visible_name(selected.document, symbol.owner.to_str(), symbol.selection.start); }
     Vec<Document*> documents = store.query_documents(context);
+    SymbolTarget wanted = method ? trait_target : selected;
+    str wanted_name = wanted.symbol < 0 ? "" : wanted.document.analysis.symbols.get_ptr(wanted.symbol).name.to_str();
     i64 i = 0;
     while (i < documents.len()) {
-        Document* candidate = documents.get(i); candidate.ensure_syntax(); i64 j = 0;
+        Document* candidate = documents.get(i);
+        // An implementation spells the trait or type it implements; an unresolved target matches nothing.
+        if (!candidate.mentions(wanted_name)) { i += 1; continue; }
+        candidate.ensure_syntax(); i64 j = 0;
         while (j < candidate.analysis.implementations.len()) {
             IdeImplementation* implementation = candidate.analysis.implementations.get_ptr(j);
             SyntaxNode* match_node = symbol.kind == IdeSymbolKind.Trait || method ? implementation.trait_name : implementation.target;
             if (match_node != (SyntaxNode*)0) {
                 SymbolTarget resolved = resolve_occurrence(candidate, candidate.analysis.occurrence_at(match_node.span.start));
-                if (same_target(resolved, method ? trait_target : selected)) {
+                if (same_target(resolved, wanted)) {
                     Span location = implementation.target.span; bool found = true;
                     if (method) {
                         SymbolTarget implemented = method_in_extent(candidate, symbol.name.to_str(), implementation.node.span);

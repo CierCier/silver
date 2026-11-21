@@ -140,6 +140,24 @@ impl Document {
         self.analysis.symbols = move retained;
     }
 
+    /// True when `name` appears in the text as a whole identifier. Reads only
+    /// the text, so it works on compacted documents and lets name-driven
+    /// scans skip files whose parse tree they would otherwise rebuild.
+    bool mentions(Document* self, str name) {
+        i64 width = strlen(name); i64 length = self.text.len();
+        if (width == 0) { return false; }
+        u8* data = self.text.data; u8 first = (u8)name[0]; i64 i = 0;
+        while (i + width <= length) {
+            if (data[i] == first && (i == 0 || !typecheck_name_continue(data[i - 1]))) {
+                i64 k = 1;
+                while (k < width && data[i + k] == (u8)name[k]) { k += 1; }
+                if (k == width && (i + width == length || !typecheck_name_continue(data[i + width]))) { return true; }
+            }
+            i += 1;
+        }
+        return false;
+    }
+
     /// Replaces the text, rebuilding the line index and editor analysis.
     void replace_text(Document* self, str text) {
         String _previous_text = move self.text;
