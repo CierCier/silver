@@ -11,6 +11,7 @@ import std.sys.io_uring;
 import std.sys.raw.fs;
 import std.sys.raw.socket;
 import std.sys.result;
+import std.sys.socket;
 import std.test;
 import std.time;
 
@@ -269,11 +270,51 @@ void test_io_uring_many_pending() {
     }
 }
 
+void test_io_uring_connect() {
+    test_start("io_uring connect completes once connected");
+
+    if (!io_uring_available()) {
+        @println("  [SKIP] io_uring_setup unavailable on this kernel (ENOSYS)");
+        return;
+    }
+
+    SocketAddr addr = SocketAddr.v4("127.0.0.1", (u16)0).unwrap();
+    TcpListener listener = TcpListener.bind(&addr, 4);
+    SockAddrIn sa;
+    u32 slen = 16;
+    try_getsockname(listener.raw_fd(), (void*)&sa, &slen);
+    Result<IoUring, Error> ring_res = IoUring.new(4);
+    @assert(ring_res.is_ok());
+    IoUring ring = ring_res.unwrap();
+
+    // A blocking socket, then a non-blocking one: both complete with the
+    // connect's final result, not with EINPROGRESS.
+    for (i64 nonblocking = 0; nonblocking < 2; nonblocking = nonblocking + 1) {
+        i64 flags = nonblocking == 1 ? SOCK_NONBLOCK : (i64)0;
+        i64 fd = sys_socket((i64)AddressFamily.INET, (i64)SocketType.STREAM | flags, 0);
+        assert_true(fd >= 0, "created connect socket");
+        IoUringSqe* sqe = ring.get_sqe();
+        ring.prep_connect(sqe, (i32)fd, (void*)&sa, 16, (u64)(0x5550 + nonblocking));
+        Result<i64, Error> sub = ring.submit_and_wait(1);
+        assert_true(sub.is_ok(), "submitted connect");
+        IoUringCqe cqe;
+        assert_true(ring.peek_cqe(&cqe), "connect completed");
+        assert_true(cqe.user_data == (u64)(0x5550 + nonblocking) && cqe.res == 0, "connect result is 0");
+        ring.cqe_seen(&cqe);
+        Result<i64, Error> accepted = listener.accept();
+        assert_true(accepted.is_ok(), "listener sees the connection");
+        sys_close(accepted.value());
+        sys_close(fd);
+    }
+    ring.close();
+}
+
 i32 main() {
     test_io_uring_structures();
     test_io_uring_nop();
     test_io_uring_file_io();
     test_io_uring_socket_io();
     test_io_uring_many_pending();
+    test_io_uring_connect();
     return done();
 }

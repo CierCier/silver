@@ -2547,6 +2547,12 @@ const i64 URING_CQ_CQES = 64;
 /// or -errno), so this value can never be a real result; 1 was a one-byte
 /// read or send.
 const i64 URING_PENDING = 0x4000000000000000;
+/// A connect that started and is still in progress (also outside the result
+/// range). Its pending copy is marked at URING_SQE_CONNECTING.
+const i64 URING_CONNECTING = 0x4000000000000001;
+/// Byte of a pending SQE copy (in the SQE's padding) set while its connect
+/// is in progress.
+const i64 URING_SQE_CONNECTING = 56;
 /// Most rings alive at once.
 const i64 MAC_URING_MAX = 16;
 
@@ -2783,7 +2789,37 @@ i64 mac_uring_wait_events(u8* sqe) {
     if (op == URING_POLL_ADD) {
         return (i64)(*(u32*)(sqe + 28) & (u32)0xFFFF);
     }
+    if (op == URING_CONNECT && sqe[URING_SQE_CONNECTING] != (u8)0) {
+        return 4; // POLLOUT: the connection finished or failed
+    }
     return 0;
+}
+
+/// Runs an io_uring connect without blocking the caller. The first attempt
+/// is non-blocking (a blocking socket is switched for the call only, so
+/// another thread using the socket meanwhile sees O_NONBLOCK); a connect
+/// still in progress returns URING_CONNECTING and completes, once the
+/// socket is writable, with its SO_ERROR, as the kernel reports it.
+i64 mac_uring_connect(u8* sqe, i64 fd, i64 addr, i64 addr_len) {
+    if (sqe[URING_SQE_CONNECTING] != (u8)0) {
+        i32 err = 0;
+        u32 err_len = (u32)4;
+        i64 r = sys_getsockopt(fd, 1, 4, (i64)&err, (i64)&err_len); // SOL_SOCKET, SO_ERROR
+        return r < 0 ? r : -(i64)err;
+    }
+    i64 status = sys_fcntl(fd, F_GETFL, 0);
+    if (status < 0) {
+        return status;
+    }
+    bool blocking = (status & O_NONBLOCK) == 0;
+    if (blocking) {
+        sys_fcntl(fd, F_SETFL, status | O_NONBLOCK);
+    }
+    i64 r = sys_connect(fd, addr, addr_len);
+    if (blocking) {
+        sys_fcntl(fd, F_SETFL, status);
+    }
+    return r == -115 ? URING_CONNECTING : r; // EINPROGRESS
 }
 
 /// Polls `fd` for `events` without waiting. Returns the revents.
@@ -2824,8 +2860,9 @@ i64 mac_uring_rwv(i64 fd, i64 iov, i64 count, i64 off, bool write) {
 }
 
 /// Runs one SQE (Linux layout: opcode @0, fd @4, off @8, addr @16, len @24,
-/// op flags @28, user_data @32). Returns the CQE result, or URING_PENDING
-/// when `may_wait` is false and the descriptor is not ready yet.
+/// op flags @28, user_data @32). Returns the CQE result, URING_PENDING when
+/// `may_wait` is false and the descriptor is not ready yet, or
+/// URING_CONNECTING for a connect in progress.
 i64 mac_uring_run(u8* sqe, bool may_wait) {
     i64 op = (i64)sqe[0];
     i64 fd = (i64)*(i32*)(sqe + 4);
@@ -2855,7 +2892,7 @@ i64 mac_uring_run(u8* sqe, bool may_wait) {
     if (op == URING_RECV) { return sys_recvfrom(fd, addr, len, opflags, 0, 0); }
     if (op == URING_SEND) { return sys_sendto(fd, addr, len, opflags, 0, 0); }
     if (op == URING_ACCEPT) { return sys_accept4(fd, addr, off, opflags); }
-    if (op == URING_CONNECT) { return sys_connect(fd, addr, off); }
+    if (op == URING_CONNECT) { return mac_uring_connect(sqe, fd, addr, off); }
     if (op == URING_FSYNC) { return sys_fsync(fd); }
     if (op == URING_OPENAT) { return sys_openat(fd, addr, opflags, len); }
     if (op == URING_CLOSE) { return sys_close(fd); }
@@ -2888,7 +2925,7 @@ i64 mac_uring_service(MacUring* u, i64 timeout_ms) {
     while (i < u.pending_count) {
         u8* sqe = u.pending + i * 64;
         i64 res = mac_uring_run(sqe, false);
-        if (res == URING_PENDING) {
+        if (res == URING_PENDING || res == URING_CONNECTING) {
             i += 1;
             continue;
         }
@@ -2928,8 +2965,10 @@ i64 sys_io_uring_enter6(i64 fd, i64 to_submit, i64 min_complete, i64 flags, i64 
         } else {
             u8* sqe = u.sqes + (i64)index * 64;
             i64 res = mac_uring_run(sqe, false);
-            if (res == URING_PENDING) {
-                @memcpy(u.pending + u.pending_count * 64, sqe, 64);
+            if (res == URING_PENDING || res == URING_CONNECTING) {
+                u8* copy = u.pending + u.pending_count * 64;
+                @memcpy(copy, sqe, 64);
+                copy[URING_SQE_CONNECTING] = res == URING_CONNECTING ? (u8)1 : (u8)0;
                 u.pending_count += 1;
             } else {
                 mac_uring_post(u, *(u64*)(sqe + 32), res);
