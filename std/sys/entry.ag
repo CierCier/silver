@@ -239,6 +239,12 @@ if (@cfg(os.linux)) {
         /// Win32 `LocalFree`: frees memory from LocalAlloc.
         #[link_name("LocalFree")]
         u8* win_LocalFree(u8* mem);
+        /// Win32 `GetEnvironmentStringsW`: the process environment block.
+        #[link_name("GetEnvironmentStringsW")]
+        u16* win_GetEnvironmentStringsW();
+        /// Win32 `FreeEnvironmentStringsW`: releases that block.
+        #[link_name("FreeEnvironmentStringsW")]
+        i32 win_FreeEnvironmentStringsW(u16* block);
     }
 
     /// Program entry point (Windows): initializes the platform layer and argv,
@@ -247,6 +253,7 @@ if (@cfg(os.linux)) {
     void _start() {
         sys_platform_init();
         __silver_win_arg_setup();
+        __silver_win_env_setup();
         __silver_cpu_init();
         // Signature-agnostic call: the user program may define i32/i64/void main.
         // The 32-byte reservation is the Win64 shadow space; RSP is 16-aligned
@@ -332,6 +339,57 @@ if (@cfg(os.linux)) {
         __silver_argc = argcw;
         __silver_argv = argv;
         win_LocalFree((u8*)argvw);
+    }
+
+    /// Internal: builds a UTF-8 `KEY=value` envp array (NULL-terminated, like
+    /// the Linux initial stack provides) from the UTF-16 environment block.
+    /// Entries starting with '=' (per-drive working directories) are hidden,
+    /// as the CRT does. Runs once in `_start`; the strings live for the process.
+    void __silver_win_env_setup() {
+        u16* block = win_GetEnvironmentStringsW();
+        if (block == (u16*)0) {
+            return;
+        }
+        i64 count = 0;
+        i64 payload = 0;
+        i64 pos = 0;
+        while (block[pos] != 0) {
+            i64 len = 0;
+            while (block[pos + len] != 0) { len += 1; }
+            if (block[pos] != (u16)61) {
+                count += 1;
+                // Worst case 3 UTF-8 bytes per UTF-16 unit + terminator + the
+                // converter's 4-byte stop margin.
+                payload += len * 3 + 5;
+            }
+            pos += len + 1;
+        }
+        i64 ptr_bytes = (count + 1) * 8;
+        u8* mem = mem_sys_alloc(ptr_bytes + payload);
+        if (mem == (u8*)0) {
+            win_FreeEnvironmentStringsW(block);
+            return;
+        }
+        i8** envp = (i8**)mem;
+        i64 off = ptr_bytes;
+        i64 cap = payload;
+        i64 n = 0;
+        pos = 0;
+        while (block[pos] != 0) {
+            i64 len = 0;
+            while (block[pos + len] != 0) { len += 1; }
+            if (block[pos] != (u16)61) {
+                envp[n] = (i8*)(mem + off);
+                i64 used = win_utf16_to_utf8(&block[pos], mem + off, cap);
+                off += used + 1;
+                cap -= used + 1;
+                n += 1;
+            }
+            pos += len + 1;
+        }
+        envp[n] = (i8*)0;
+        __silver_envp = envp;
+        win_FreeEnvironmentStringsW(block);
     }
 }
 }

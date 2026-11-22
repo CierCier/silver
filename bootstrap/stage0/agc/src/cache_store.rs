@@ -448,21 +448,57 @@ fn elf_object_is_well_formed(bytes: &[u8]) -> bool {
     true
 }
 
+/// Regular COFF objects cap sections at 65279 (larger values are reserved
+/// indices). The 96-section cap applies to PE images, not objects: one
+/// COMDAT section per generic instance routinely exceeds it.
+const COFF_MAX_SECTIONS: usize = 0xFEFF;
+
+/// `ANON_OBJECT_HEADER_BIGOBJ` class id: what LLVM writes for objects past
+/// the regular section limit (`/bigobj`).
+const COFF_BIGOBJ_CLASS_ID: [u8; 16] = [
+    0xc7, 0xa1, 0xba, 0xd1, 0xee, 0xba, 0xa9, 0x4b, 0xaf, 0x20, 0xfa, 0xf6, 0x6a, 0xa4, 0xdc, 0xb8,
+];
+
 fn coff_object_is_well_formed(bytes: &[u8]) -> bool {
     if bytes.len() < 20 {
         return false;
     }
-    let machine = read_u16_at(bytes, 0, true).unwrap_or(0);
-    let section_count = read_u16_at(bytes, 2, true).unwrap_or(0) as usize;
-    let symbol_offset = read_u32_at(bytes, 8, true).unwrap_or(u32::MAX) as usize;
-    let symbol_count = read_u32_at(bytes, 12, true).unwrap_or(u32::MAX) as usize;
-    let optional_len = read_u16_at(bytes, 16, true).unwrap_or(u16::MAX) as usize;
-    let section_table = 20usize.saturating_add(optional_len);
+    let sig1 = read_u16_at(bytes, 0, true).unwrap_or(0);
+    let sig2 = read_u16_at(bytes, 2, true).unwrap_or(0);
+    let is_bigobj = sig1 == 0
+        && sig2 == 0xFFFF
+        && bytes.get(12..28) == Some(&COFF_BIGOBJ_CLASS_ID[..]);
+    // (machine, section count, section table offset, symbol table, symbol size)
+    let (machine, section_count, section_table, symbol_offset, symbol_count, symbol_size) =
+        if is_bigobj {
+            if bytes.len() < 56 {
+                return false;
+            }
+            (
+                read_u16_at(bytes, 6, true).unwrap_or(0),
+                read_u32_at(bytes, 44, true).unwrap_or(0) as usize,
+                56usize,
+                read_u32_at(bytes, 48, true).unwrap_or(u32::MAX) as usize,
+                read_u32_at(bytes, 52, true).unwrap_or(u32::MAX) as usize,
+                20usize,
+            )
+        } else {
+            let optional_len = read_u16_at(bytes, 16, true).unwrap_or(u16::MAX) as usize;
+            (
+                sig1,
+                sig2 as usize,
+                20usize.saturating_add(optional_len),
+                read_u32_at(bytes, 8, true).unwrap_or(u32::MAX) as usize,
+                read_u32_at(bytes, 12, true).unwrap_or(u32::MAX) as usize,
+                18usize,
+            )
+        };
     if machine == 0
         || section_count == 0
-        || section_count > 96
+        || (!is_bigobj && section_count > COFF_MAX_SECTIONS)
         || !range_fits(bytes, section_table, section_count.saturating_mul(40))
-        || (symbol_count > 0 && !range_fits(bytes, symbol_offset, symbol_count.saturating_mul(18)))
+        || (symbol_count > 0
+            && !range_fits(bytes, symbol_offset, symbol_count.saturating_mul(symbol_size)))
     {
         return false;
     }
@@ -1215,5 +1251,58 @@ mod tests {
         assert_eq!(store.get_objs(&key), None);
         assert!(!path.exists(), "a damaged set is discarded");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A COFF object with one COMDAT section per function, as codegen emits
+    /// for generic instances.
+    fn coff_object_with_comdats(functions: usize) -> Vec<u8> {
+        Target::initialize_x86(&InitializationConfig::default());
+        let machine = crate::codegen::llvm_ir::entry::create_target_machine(
+            "x86_64-pc-windows-msvc",
+            OptimizationLevel::None,
+        )
+        .unwrap();
+        let context = Context::create();
+        let module = context.create_module("comdats");
+        let fn_type = context.void_type().fn_type(&[], false);
+        for index in 0..functions {
+            let name = format!("instance_{index}");
+            let function = module.add_function(&name, fn_type, None);
+            let block = context.append_basic_block(function, "entry");
+            let builder = context.create_builder();
+            builder.position_at_end(block);
+            builder.build_return(None).unwrap();
+            let comdat = module.get_or_insert_comdat(&name);
+            comdat.set_selection_kind(inkwell::comdat::ComdatSelectionKind::Any);
+            function.as_global_value().set_comdat(comdat);
+        }
+        let buffer = machine
+            .write_to_memory_buffer(&module, FileType::Object)
+            .unwrap();
+        crate::codegen::llvm_ir::entry::object_bytes(&buffer)
+    }
+
+    #[test]
+    fn coff_objects_past_the_image_section_limit_are_well_formed() {
+        let object = coff_object_with_comdats(200);
+        let section_count = read_u16_at(&object, 2, true).unwrap();
+        assert!(section_count > 96, "fixture must exceed 96 sections");
+        assert!(object_bytes_are_well_formed(&object));
+        assert!(!object_bytes_are_well_formed(&object[..object.len() / 2]));
+    }
+
+    #[test]
+    fn coff_bigobj_headers_are_well_formed() {
+        // Bigobj header (56 bytes) + one 40-byte empty section header.
+        let mut object = vec![0u8; 56 + 40];
+        object[2..4].copy_from_slice(&0xFFFFu16.to_le_bytes());
+        object[4..6].copy_from_slice(&2u16.to_le_bytes());
+        object[6..8].copy_from_slice(&0x8664u16.to_le_bytes());
+        object[12..28].copy_from_slice(&COFF_BIGOBJ_CLASS_ID);
+        object[44..48].copy_from_slice(&1u32.to_le_bytes());
+        assert!(object_bytes_are_well_formed(&object));
+
+        object[44..48].copy_from_slice(&2u32.to_le_bytes());
+        assert!(!object_bytes_are_well_formed(&object), "section table overruns");
     }
 }

@@ -17,6 +17,10 @@ pub fn c_abi_conversion_failed(error: impl Display) -> String {
     format!("failed to convert a value to or from its C ABI form: {error}")
 }
 
+pub fn memory_intrinsic_pointer_expected(intrinsic: &str) -> String {
+    format!("@{intrinsic} expects pointer or reference operands")
+}
+
 pub fn reference_state_unavailable() -> &'static str {
     "cannot borrow owned storage without its initialization-state capability"
 }
