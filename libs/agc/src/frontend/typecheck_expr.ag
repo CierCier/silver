@@ -300,12 +300,11 @@ bool typecheck_is_unit_enum(SyntaxNode* root, TypeTable* types, u32 type_id) {
     return unit;
 }
 
-/// True when `actual_type` converts to `expected_type` without a written
-/// cast: through a user `cast` block, between numeric, `char`, and `bool`
-/// primitives, or between a unit enum and an integer, `char`, `bool`, or
-/// another unit enum, as in stage0.
-bool typecheck_implicit_cast(SyntaxNode* root, TypeTable* types, u32 actual_type,
-                             u32 expected_type) {
+/// True when `actual_type` converts to `expected_type` between numeric,
+/// `char`, and `bool` primitives, or between a unit enum and an integer,
+/// `char`, `bool`, or another unit enum, as in stage0.
+bool typecheck_scalar_conversion(SyntaxNode* root, TypeTable* types, u32 actual_type,
+                                 u32 expected_type) {
     if (root == (SyntaxNode*)0 || actual_type == TYPE_UNKNOWN || expected_type == TYPE_UNKNOWN) {
         return false;
     }
@@ -323,6 +322,19 @@ bool typecheck_implicit_cast(SyntaxNode* root, TypeTable* types, u32 actual_type
         && (expected_enum || type_is_integer(expected_type) || expected_type == TYPE_CHAR
             || expected_type == TYPE_BOOL)) {
         return true;
+    }
+    return false;
+}
+
+/// True when `actual_type` converts to `expected_type` without a written
+/// cast: by a scalar conversion or through a user `cast` block.
+bool typecheck_implicit_cast(SyntaxNode* root, TypeTable* types, u32 actual_type,
+                             u32 expected_type) {
+    if (typecheck_scalar_conversion(root, types, actual_type, expected_type)) {
+        return true;
+    }
+    if (root == (SyntaxNode*)0 || actual_type == TYPE_UNKNOWN || expected_type == TYPE_UNKNOWN) {
+        return false;
     }
     TypeEntry* act_entry = types.get(actual_type);
     while (act_entry.kind == TypeKind.Pointer || act_entry.kind == TypeKind.Reference) {
@@ -540,13 +552,13 @@ bool expr_is_literal(AstPool* pool, u32 expr_id) {
     return pool.get_expr(expr_id).kind == ExprKind.Literal;
 }
 
-/// True when aggregate element `element_id` fills a slot of type `expected`,
-/// with the conversions a scalar declaration allows.
+/// True when aggregate element `element_id` fills a slot of type `expected`
+/// with a scalar conversion. Element stores do not run user `cast` blocks.
 bool typecheck_element_fits(AstPool* pool, SyntaxNode* root, TypeTable* types, u32 expected,
                             u32 element_id) {
     u32 actual = pool.get_expr(element_id).inferred_type;
     return types_match_value(types, expected, actual, expr_is_literal(pool, element_id))
-        || typecheck_implicit_cast(root, types, actual, expected);
+        || typecheck_scalar_conversion(root, types, actual, expected);
 }
 
 /// True when `expr_id` is a `[a, b]` literal whose elements fill the tuple
@@ -2248,45 +2260,83 @@ SyntaxNode* typecheck_select_method(AstPool* pool, SyntaxNode* root, TypeTable* 
     return best_params;
 }
 
-/// Counts the declarations of `method_name` in impls of `owner_name`, or in
-/// traits and blanket impls when `owner_name` is null. `*generic` counts
-/// those with their own type parameters.
+/// Counts the declarations of `method_name` directly in the block of `item`
+/// (an impl or trait). `*generic` counts those with their own type parameters.
+void typecheck_count_block_methods(SyntaxNode* item, str method_name, i64* count,
+                                   i64* generic) {
+    SyntaxNode* block = item == (SyntaxNode*)0 ? (SyntaxNode*)0 : item.first_child;
+    while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+        block = block.next_sibling;
+    }
+    // Bodies are nested blocks, so a direct `name(` or `name<` is a
+    // method declaration.
+    SyntaxNode* member = block == (SyntaxNode*)0 ? (SyntaxNode*)0 : block.first_child;
+    while (member != (SyntaxNode*)0) {
+        SyntaxNode* next = member.next_sibling;
+        if (member.kind == NodeKind.Token && member.token_kind == TokenKind.Identifier
+            && strcmp(member.text, method_name) == 0 && next != (SyntaxNode*)0) {
+            if (next.kind == NodeKind.Parenthesized) {
+                *count = *count + 1;
+            } else if (next.kind == NodeKind.Token && next.token_kind == TokenKind.Less) {
+                *count = *count + 1;
+                *generic = *generic + 1;
+            }
+        }
+        member = next;
+    }
+}
+
+/// Returns the trait an impl implements (`Show` in `impl Show for A`), or
+/// null for an inherent impl.
+SyntaxNode* typecheck_impl_trait(SyntaxNode* impl_item) {
+    SyntaxNode* trait_name = (SyntaxNode*)0;
+    i64 angle_depth = 0;
+    SyntaxNode* child = impl_item.first_child;
+    while (child != (SyntaxNode*)0 && child.kind != NodeKind.Block) {
+        if (child.kind == NodeKind.Token) {
+            if (child.token_kind == TokenKind.Less) {
+                angle_depth += 1;
+            } else if (child.token_kind == TokenKind.Greater && angle_depth > 0) {
+                angle_depth -= 1;
+            } else if (child.token_kind == TokenKind.For || strcmp(child.text, "for") == 0) {
+                return trait_name;
+            } else if (angle_depth == 0 && trait_name == (SyntaxNode*)0
+                       && node_is_identifier(child)) {
+                trait_name = child;
+            }
+        }
+        child = child.next_sibling;
+    }
+    return (SyntaxNode*)0;
+}
+
+/// Counts the declarations of `method_name` in impls of `owner_name`.
+/// With `reachable`, counts instead what the owner reaches without
+/// declaring it: members of traits an impl applies to it (`impl Show for
+/// A`, or a blanket `impl<T> Show for T`) and methods of blanket impls.
+/// `*generic` counts those with their own type parameters.
 void typecheck_count_methods(SyntaxNode* root, str owner_name, str method_name,
-                             i64* count, i64* generic) {
+                             bool reachable, i64* count, i64* generic) {
     *count = 0;
     *generic = 0;
     SyntaxNode* item = root.first_child;
     while (item != (SyntaxNode*)0) {
         SyntaxNode* target = item.kind == NodeKind.Impl
             ? impl_target_identifier(item) : (SyntaxNode*)0;
-        // Without an owner, count what a declared type can reach without
-        // its own impl: trait members and impls of non-declared (blanket)
-        // targets, never another declared type's impl.
-        bool owned = owner_name == (str)0
-            ? item.kind == NodeKind.Trait
-                || (target != (SyntaxNode*)0
-                    && find_item_by_name(root, NodeKind.Struct, target.text) == (SyntaxNode*)0
-                    && find_enum_item(root, target.text) == (SyntaxNode*)0)
-            : target != (SyntaxNode*)0 && strcmp(target.text, owner_name) == 0;
-        SyntaxNode* block = owned ? item.first_child : (SyntaxNode*)0;
-        while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
-            block = block.next_sibling;
-        }
-        // Bodies are nested blocks, so a direct `name(` or `name<` is a
-        // method declaration.
-        SyntaxNode* member = block == (SyntaxNode*)0 ? (SyntaxNode*)0 : block.first_child;
-        while (member != (SyntaxNode*)0) {
-            SyntaxNode* next = member.next_sibling;
-            if (member.kind == NodeKind.Token && member.token_kind == TokenKind.Identifier
-                && strcmp(member.text, method_name) == 0 && next != (SyntaxNode*)0) {
-                if (next.kind == NodeKind.Parenthesized) {
-                    *count = *count + 1;
-                } else if (next.kind == NodeKind.Token && next.token_kind == TokenKind.Less) {
-                    *count = *count + 1;
-                    *generic = *generic + 1;
-                }
+        bool own = target != (SyntaxNode*)0 && strcmp(target.text, owner_name) == 0;
+        if (!reachable) {
+            if (own) { typecheck_count_block_methods(item, method_name, count, generic); }
+        } else if (target != (SyntaxNode*)0) {
+            bool blanket = !own
+                && find_item_by_name(root, NodeKind.Struct, target.text) == (SyntaxNode*)0
+                && find_enum_item(root, target.text) == (SyntaxNode*)0;
+            SyntaxNode* trait_name = typecheck_impl_trait(item);
+            if ((own || blanket) && trait_name != (SyntaxNode*)0) {
+                typecheck_count_block_methods(
+                    find_item_by_name(root, NodeKind.Trait, trait_name.text),
+                    method_name, count, generic);
             }
-            member = next;
+            if (blanket) { typecheck_count_block_methods(item, method_name, count, generic); }
         }
         item = item.next_sibling;
     }
@@ -2317,9 +2367,9 @@ void typecheck_method_call_target(AstPool* pool, TypeTable* types, SyntaxNode* r
     }
     i64 declared = 0;
     i64 generic = 0;
-    typecheck_count_methods(root, owner_name, method_name, &declared, &generic);
+    typecheck_count_methods(root, owner_name, method_name, false, &declared, &generic);
     if (declared == 0) {
-        typecheck_count_methods(root, (str)0, method_name, &declared, &generic);
+        typecheck_count_methods(root, owner_name, method_name, true, &declared, &generic);
         if (declared == 0) {
             diagnostics.error(span, unknown_method(method_name, types.type_name(owner_type)));
             *ok = false;

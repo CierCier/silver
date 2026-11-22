@@ -426,7 +426,7 @@ The checker rejects these invalid core forms with a source diagnostic:
 | --- | --- |
 | Literals | A literal of the wrong kind for its declared type, such as `str s = 42;`. |
 | Calls | Unknown functions, wrong argument counts, and argument types that do not convert. |
-| Methods | On a declared struct or enum, a name that neither its impls, a trait, nor a blanket impl declares, and arguments that fit no non-generic overload. |
+| Methods | On a declared struct or enum, a name that neither its impls, a trait it implements, nor a blanket impl declares, and arguments that fit no non-generic overload. |
 | Generic calls | Arguments and results that conflict with explicit type arguments or with type arguments inferred from non-literal arguments. |
 | Aggregates | Unknown fields in struct literals and field access, and field or array element values that do not convert. |
 | Assignments | Values that do not convert to the target, and undeclared targets. |
@@ -434,8 +434,9 @@ The checker rejects these invalid core forms with a source diagnostic:
 
 Implicit conversions follow stage0. Numeric, `char`, and `bool` primitives
 convert to each other. Unit enums (enums without payloads) convert to and from
-integers, `char`, `bool`, and other unit enums. Aggregate elements convert the
-same way. A user `cast` block also converts
+integers, `char`, `bool`, and other unit enums. Array and tuple elements take
+these conversions but not a user `cast` block, because element stores do not
+run one. A user `cast` block also converts
 implicitly, and `&r` of a reference `r` reborrows through it. Overload selection
 does not count `bool` as a number, so `f(1)` still picks `f(i64)` over `f(bool)`.
 
