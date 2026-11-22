@@ -1066,10 +1066,15 @@ class NativeLsp(unittest.TestCase):
                  "i64 main() {\n Vec<i64> data = Vec<i64>.new();\n Task<i64> t = launch inspect(&data);\n"
                  " i64 n = consume(data);\n return wait t + n;\n}\n",
                  [("cannot move 'data' because it is borrowed", 7)]),
-                # A `&mut` parameter borrows a plain argument mutably.
+                # A `&mut` parameter needs `&mut place`; a plain argument is
+                # rejected before it could write through a task's loan.
                 ("import std.mem.vec;\ni64 inspect(&Vec<i64> data) { return data.len(); }\n"
                  "void mutate(&mut Vec<i64> data) { data.push(1); }\ni64 main() {\n Vec<i64> data = Vec<i64>.new();\n"
                  " Task<i64> t = launch inspect(&data);\n mutate(data);\n return wait t;\n}\n",
+                 [("type mismatch: expected &mut Vec<i64>, found Vec<i64>", 6)]),
+                ("import std.mem.vec;\ni64 inspect(&Vec<i64> data) { return data.len(); }\n"
+                 "void mutate(&mut Vec<i64> data) { data.push(1); }\ni64 main() {\n Vec<i64> data = Vec<i64>.new();\n"
+                 " Task<i64> t = launch inspect(&data);\n mutate(&mut data);\n return wait t;\n}\n",
                  [("cannot borrow 'data' as mutable because it is already borrowed as shared", 6)]),
                 # A method's `&T` parameter borrows a plain argument too.
                 ("import std.mem.vec;\nstruct Reader { i64 base; }\nimpl Reader {\n"
@@ -1252,6 +1257,32 @@ class NativeLsp(unittest.TestCase):
                                                        "source": "silver", "message": message}]
                 self.assertEqual(errors, expected)
 
+    def test_push_diagnostics_report_core_type_errors_and_clear_after_fixes(self):
+        # The editor shares `agc check`'s expression checker, so a core type
+        # error it once filtered out now reaches the document.
+        valid = ('struct Counter { i32 n; }\n'
+                 'impl Counter { void bump(Counter* self, i32 by) { self.n = self.n + by; } }\n'
+                 'i32 total(Counter* c) { c.bump(1); return c.n; }\n')
+        uri = (self.root / "push-core-types.ag").as_uri()
+        cases = [(valid, []),
+                 (valid.replace("c.bump(1)", 'c.bump("one")'),
+                  ["no overload of method 'bump' on type Counter matches these arguments"]),
+                 (valid.replace("c.bump(1)", "c.reset()"), ["unknown method 'reset' on type Counter"]),
+                 (valid.replace("return c.n;", "return;"),
+                  ["return type mismatch: expected i32, found void"]),
+                 (valid, [])]
+        for version, (text, messages) in enumerate(cases, 1):
+            if version == 1:
+                self.session.send("textDocument/didOpen", {"textDocument": {
+                    "uri": uri, "languageId": "silver", "version": version, "text": text}})
+            else:
+                self.session.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": version},
+                    "contentChanges": [{"text": text}]})
+            with self.subTest(version=version):
+                published = self.session.published(uri, version)
+                errors = [item["message"] for item in published["diagnostics"] if item["severity"] == 1]
+                self.assertEqual(errors, messages)
+
     def test_lambda_diagnostics_use_unsaved_imported_methods_and_invalidate_dependencies(self):
         disk = 'struct Gauge { i32 value; }\nimpl Gauge { i32 read(&self) { return self.value; } }\n'
         helper_path = self.root / "gauge.ag"
@@ -1306,8 +1337,11 @@ class NativeLsp(unittest.TestCase):
                 self.assertCountEqual([item for item in imported["items"] if item["severity"] == 1], [{
                     "range": location(helper, token), "severity": 1, "source": "silver",
                     "message": f"unknown identifier '{token}'"} for token in tokens])
-                expected = [] if version != 3 else [{"range": location(text, "(&Gauge item)"), "severity": 1,
-                    "source": "silver", "message": "cannot infer lambda return type"}]
+                expected = [] if version != 3 else [
+                    {"range": location(text, "()", text.index("read();")), "severity": 1,
+                     "source": "silver", "message": "unknown method 'read' on type Gauge"},
+                    {"range": location(text, "(&Gauge item)"), "severity": 1,
+                     "source": "silver", "message": "cannot infer lambda return type"}]
                 self.assertEqual([item for item in report["items"] if item["severity"] == 1], expected)
             previous = report["resultId"]
 

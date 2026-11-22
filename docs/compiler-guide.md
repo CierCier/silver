@@ -140,7 +140,7 @@ implements. An accepted spelling alone does not establish behavior.
 | --- | --- |
 | `--help`, `-h`, `--version`, `-V` | Print the stage1 help/version and exit. |
 | `build`/`b`, `run`/`r`, direct source paths | Build native code; `run` executes the result. Use the command form rather than hidden `--run`. |
-| `check`/`c`, `lex`, `parse`, `ast` | Local frontend commands. `check` has partial typed checking; syntax acceptance is not a complete semantic guarantee. |
+| `check`/`c`, `lex`, `parse`, `ast` | Local frontend commands. `check` runs the same expression checker as `build` and the language server; see [native expression checking](#native-expression-checking) for what it judges and its limits. |
 | `--manifest PATH`, `--bin NAME`, `--lib NAME` | Select supported package/workspace targets. Git dependencies remain unsupported. See the [workspace implementation](../bin/agc/src/workspace.ag). |
 | `-o FILE`, `--output FILE`, `--output=FILE` | Select the output path. |
 | `--emit=exe` or no emit option | Produce an executable. |
@@ -409,6 +409,70 @@ drop-glue fixture checks owned Vec captures and transfers, and the HTTP server
 fixture exercises the local routing predicates in `std.net.http`. Generic
 lambda scopes and capturing callbacks through generic callable APIs remain
 unsupported.
+
+### Native expression checking
+
+Stage1 `check`, `build`, and the language server run one expression checker
+([`typecheck_expressions_scoped`](../libs/agc/src/frontend/typecheck_expr.ag))
+over every cfg-active non-generic function and every cfg-active non-generic
+method of a non-generic `impl`. Every error it reports fails the command, so
+`check` and `build` agree on semantic acceptance. Link and environment failures
+remain build-only.
+
+The checker rejects these invalid core forms with a source diagnostic:
+
+| Family | Rejected |
+| --- | --- |
+| Literals | A literal of the wrong kind for its declared type, such as `str s = 42;`. |
+| Calls | Unknown functions, wrong argument counts, and argument types that do not convert. |
+| Methods | On a declared struct or enum, a name that no impl or trait declares, and arguments that fit no non-generic overload. |
+| Generic calls | Arguments and results that conflict with explicit type arguments or with type arguments inferred from non-literal arguments. |
+| Aggregates | Unknown fields in struct literals and field access, and field or array element values that do not convert. |
+| Assignments | Values that do not convert to the target, and undeclared targets. |
+| Returns | Values that do not convert to the return type, and `return;` in a function with a resolved non-void return type. |
+
+Implicit conversions follow stage0. Numeric, `char`, and `bool` primitives
+convert to each other. Unit enums (enums without payloads) convert to and from
+those primitives and to other unit enums. A user `cast` block also converts
+implicitly, and `&r` of a reference `r` reborrows through it. Overload selection
+does not count `bool` as a number, so `f(1)` still picks `f(i64)` over `f(bool)`.
+
+A value passed to an immutable `&T` parameter is borrowed implicitly. Overload
+selection prefers a by-value overload. A `&mut T` parameter needs `&mut place`.
+In `launch f(x)`, the scoped-launch pass reports a bare value for a reference
+parameter with its own diagnostic. A `[a, b]` literal fills a tuple type in a
+declaration, a `return`, or an argument, so `[i64, i64] p = [1, 2];` is
+accepted.
+
+The checker does not judge a type it cannot resolve. It accepts an unknown type
+or an unbound type parameter wherever a type is expected. A generic callee takes
+its explicit type arguments. Otherwise, each non-literal argument binds the
+parameters that appear in its declared type. Parameters left unbound stay
+unknown.
+
+A function body that the checker cannot lower fails with `cannot check the body
+of '<name>'` and does not pass silently. Designated array initializers
+(`i32 a[4] = { [1]=7 };`) fail with a specific diagnostic. Native codegen does
+not implement them, and it previously wrote the wrong elements.
+
+Stage1 is stricter than stage0 in two cases. It rejects a non-exhaustive `match`
+on an enum and an unknown field in a struct literal. Stage0 accepts both, and
+the generated code fails at run time.
+
+Remaining limits:
+
+- The checker does not check generic function bodies directly. The token-based
+  pre-check in [`hir.ag`](../libs/agc/src/frontend/hir.ag) catches string and
+  non-string conflicts there. Ownership probes of concrete generic calls report
+  only ownership errors.
+- Overloads of methods with their own type parameters are not judged.
+- The checker does not judge method calls on receivers it cannot resolve, or on
+  types that are not declared structs or enums.
+- Methods of a generic `impl` (`impl<T> ...` or `impl Box<T>`) and methods with
+  their own type parameters are not checked.
+- Two codegen divergences pass checking: stage1 passes a `[a, b]` tuple literal
+  argument incorrectly, and it converts `bool b = 1.5;` to `true` where stage0
+  produces `false`.
 
 ## 7. Diagnostics
 

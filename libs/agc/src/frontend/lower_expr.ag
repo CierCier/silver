@@ -132,8 +132,9 @@ SyntaxNode* lower_find_generic_call_close(SyntaxNode* less) {
 }
 
 /// Lowering state: the output pool, the type table and name interner, the
-/// program root for item lookups, and macro expansion diagnostics.
-/// `unsupported` is set when a construct cannot be lowered.
+/// program root for item lookups, and lowering diagnostics.
+/// `unsupported` is set when a construct cannot be lowered; `error` then
+/// explains it at `error_span` when the construct has a source diagnostic.
 struct ExprLowerer {
     AstPool* pool;
     TypeTable* types;
@@ -143,8 +144,8 @@ struct ExprLowerer {
     bool debug_mode;
     u32 macro_depth;
     u32 expected_type_id;
-    String macro_error;
-    Span macro_error_span;
+    String error;
+    Span error_span;
 }
 
 /// One macro call argument as a range of sibling nodes.
@@ -984,8 +985,8 @@ impl ExprLowerer {
         lowerer.debug_mode = true;
         lowerer.macro_depth = 0;
         lowerer.expected_type_id = TYPE_UNKNOWN;
-        lowerer.macro_error = String.new();
-        lowerer.macro_error_span = Span.synthetic();
+        lowerer.error = String.new();
+        lowerer.error_span = Span.synthetic();
         return move lowerer;
     }
 
@@ -1173,8 +1174,8 @@ impl ExprLowerer {
         Vec<LowerMacroArgument> arguments = Vec<LowerMacroArgument>.new();
         Vec<LowerMacroBinding> bindings = Vec<LowerMacroBinding>.new();
         bool supported = lower_collect_macro_bindings(definition, call_args,
-            &bindings, &arguments, name_node.text, &self.macro_error);
-        if (!supported) { self.macro_error_span = name_node.span; }
+            &bindings, &arguments, name_node.text, &self.error);
+        if (!supported) { self.error_span = name_node.span; }
         if (supported) {
             supported = lower_bind_macro_type_arguments(self, definition,
                 generic_less, generic_greater, &bindings, &arguments);
@@ -1292,8 +1293,8 @@ impl ExprLowerer {
         Vec<LowerMacroArgument> arguments = Vec<LowerMacroArgument>.new();
         Vec<LowerMacroBinding> bindings = Vec<LowerMacroBinding>.new();
         if (!lower_collect_macro_bindings(definition, call_args,
-                &bindings, &arguments, name_node.text, &self.macro_error)) {
-            self.macro_error_span = name_node.span;
+                &bindings, &arguments, name_node.text, &self.error)) {
+            self.error_span = name_node.span;
             bindings.drop();
             arguments.drop();
             self.unsupported = true;
@@ -2316,6 +2317,20 @@ impl ExprLowerer {
             }
             SyntaxNode* next_element = (SyntaxNode*)0;
             u32 element_id = 0;
+            // Stage1 codegen has no index designators; lowering `[i]=v` as a
+            // value would silently initialize the wrong elements.
+            SyntaxNode* designator_end = element.next_sibling;
+            if (element.kind == NodeKind.Bracket && designator_end != (SyntaxNode*)0
+                && designator_end.kind == NodeKind.Token
+                && designator_end.token_kind == TokenKind.Assign) {
+                elements.drop();
+                self.unsupported = true;
+                if (self.error.len() == 0) {
+                    self.error = designated_array_initializer_unsupported();
+                    self.error_span = element.span;
+                }
+                return 0;
+            }
             if (element.kind == NodeKind.Block) {
                 element_id = self.lower_array_initializer(element);
                 next_element = element.next_sibling;

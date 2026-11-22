@@ -42,11 +42,13 @@ struct LocalVar {
 }
 
 /// The locals in scope during expression checking, innermost last, plus
-/// the current nesting depth.
+/// the current nesting depth. `launched_call` is the call a `launch` wraps;
+/// the launch pass judges how its reference parameters are borrowed.
 struct TypeEnv {
     Vec<LocalVar> locals;
     u32 expression_depth;
     u32 expected_return;
+    u32 launched_call;
 }
 
 impl TypeEnv {
@@ -56,6 +58,7 @@ impl TypeEnv {
         env.locals = Vec<LocalVar>.new();
         env.expression_depth = 0;
         env.expected_return = TYPE_UNKNOWN;
+        env.launched_call = 0;
         return move env;
     }
 
@@ -128,14 +131,42 @@ i64 typecheck_literal_index(str text) {
     return i > 0 && text[i] == 0 ? value : -1;
 }
 
-/// Returns true when `actual` is acceptable where `expected` is required.
-/// Unknown types always match, as do pointers or references where either
-/// side points to `void` or an unknown type.
-bool types_match(TypeTable* types, u32 expected, u32 actual) {
-    if (expected == TYPE_UNKNOWN || actual == TYPE_UNKNOWN) {
+/// True when `type_id` mentions an unknown type or a type parameter. The
+/// checker has no substitution for it, so it cannot judge the type.
+bool typecheck_type_is_unresolved(TypeTable* types, u32 type_id, i64 depth) {
+    if (depth > 16) { return true; }
+    type_id = types.resolve_subst(type_id);
+    TypeEntry* entry = types.get(type_id);
+    if (entry.kind == TypeKind.Unknown || entry.kind == TypeKind.TypeParam) {
         return true;
     }
+    if (entry.kind == TypeKind.Pointer || entry.kind == TypeKind.Reference
+        || entry.kind == TypeKind.Array) {
+        return typecheck_type_is_unresolved(types, entry.inner, depth + 1);
+    }
+    if (entry.kind == TypeKind.Named) {
+        i64 i = 0;
+        while (i < entry.count) {
+            if (typecheck_type_is_unresolved(types, types.type_args.get(entry.inner + (u32)i),
+                                             depth + 1)) {
+                return true;
+            }
+            i += 1;
+        }
+    }
+    return false;
+}
+
+/// Returns true when `actual` is acceptable where `expected` is required.
+/// Unresolved types always match, as do pointers or references where either
+/// side points to `void`. Numeric, `char`, and `bool` primitives convert
+/// implicitly, as in stage0.
+bool types_match(TypeTable* types, u32 expected, u32 actual) {
     if (expected == actual) {
+        return true;
+    }
+    if (typecheck_type_is_unresolved(types, expected, 0)
+        || typecheck_type_is_unresolved(types, actual, 0)) {
         return true;
     }
     TypeEntry* exp_entry = types.get(expected);
@@ -155,6 +186,10 @@ bool types_match(TypeTable* types, u32 expected, u32 actual) {
         TypeEntry* act_inner_entry = types.get(act_entry.inner);
         if (act_entry.kind == TypeKind.Reference && act_inner_entry.kind == TypeKind.Pointer) {
             return exp_entry.inner == act_inner_entry.inner || exp_entry.inner == TYPE_VOID;
+        }
+        // `&r` of a reference `r` reborrows through it, as in stage0.
+        if (exp_entry.kind == TypeKind.Reference && act_inner_entry.kind == TypeKind.Reference) {
+            return exp_entry.inner == act_inner_entry.inner;
         }
     }
     if ((exp_entry.kind == TypeKind.Pointer || exp_entry.kind == TypeKind.Reference)
@@ -190,14 +225,61 @@ bool types_match(TypeTable* types, u32 expected, u32 actual) {
     if (type_is_numeric_or_char(expected) && type_is_numeric_or_char(actual)) {
         return true;
     }
+    // Tuple elements convert like scalars: `[text, 0]` from a match arm
+    // types its literal as i32 but fills an `[String, i64]`.
+    if (exp_entry.kind == TypeKind.Tuple && act_entry.kind == TypeKind.Tuple
+        && exp_entry.count == act_entry.count) {
+        i64 count = exp_entry.count;
+        u32 exp_start = exp_entry.inner;
+        u32 act_start = act_entry.inner;
+        i64 element = 0;
+        while (element < count) {
+            if (!types_match(types, types.type_args.get(exp_start + (u32)element),
+                             types.type_args.get(act_start + (u32)element))) {
+                return false;
+            }
+            element += 1;
+        }
+        return true;
+    }
     return false;
 }
 
-/// Returns true when a user `cast` block converts `actual_type` to
-/// `expected_type`.
-bool has_user_cast(SyntaxNode* root, TypeTable* types, u32 actual_type, u32 expected_type) {
+/// True when `type_id` names an enum whose variants carry no payload.
+bool typecheck_is_unit_enum(SyntaxNode* root, TypeTable* types, u32 type_id) {
+    TypeEntry* entry = types.get(type_id);
+    if (entry.kind != TypeKind.Named || entry.count != 0) { return false; }
+    SyntaxNode* item = find_enum_item(root, types.names.get(entry.name_id));
+    if (item == (SyntaxNode*)0) { return false; }
+    Vec<SyntaxNode*> names = Vec<SyntaxNode*>.new();
+    Vec<i64> tags = Vec<i64>.new();
+    Vec<i64> arities = Vec<i64>.new();
+    bool unit = enum_each_variant(item, &names, &tags, &arities);
+    i64 i = 0;
+    while (unit && i < names.len()) {
+        SyntaxNode* payload = names.get(i).next_sibling;
+        if (arities.get(i) > 0 || (payload != (SyntaxNode*)0 && payload.kind == NodeKind.Block)) {
+            unit = false;
+        }
+        i += 1;
+    }
+    return unit;
+}
+
+/// True when `actual_type` converts to `expected_type` without a written
+/// cast: through a user `cast` block, or between a unit enum and a numeric,
+/// `char`, or `bool` primitive or another unit enum, as in stage0.
+bool typecheck_implicit_cast(SyntaxNode* root, TypeTable* types, u32 actual_type,
+                             u32 expected_type) {
     if (root == (SyntaxNode*)0 || actual_type == TYPE_UNKNOWN || expected_type == TYPE_UNKNOWN) {
         return false;
+    }
+    bool actual_scalar = type_is_numeric_or_char(actual_type) || actual_type == TYPE_BOOL
+        || typecheck_is_unit_enum(root, types, actual_type);
+    bool expected_scalar = type_is_numeric_or_char(expected_type) || expected_type == TYPE_BOOL
+        || typecheck_is_unit_enum(root, types, expected_type);
+    if (actual_scalar && expected_scalar) {
+        return true;
     }
     TypeEntry* act_entry = types.get(actual_type);
     while (act_entry.kind == TypeKind.Pointer || act_entry.kind == TypeKind.Reference) {
@@ -374,6 +456,16 @@ bool typecheck_call_argument_matches(TypeTable* types, u32 expected, u32 actual,
         || typecheck_slice_argument_coercion(types, expected, actual);
 }
 
+/// True when a value of type `actual` passed to an immutable `&T` parameter
+/// is borrowed implicitly, as in stage0. `&mut T` still needs `&mut place`,
+/// and overload selection prefers a by-value match over this borrow.
+bool typecheck_implicit_borrow(TypeTable* types, u32 expected, u32 actual,
+                               bool actual_is_literal) {
+    TypeEntry* parameter = types.get(types.resolve_subst(expected));
+    return parameter.kind == TypeKind.Reference && !parameter.is_mut
+        && types_match_value(types, parameter.inner, actual, actual_is_literal);
+}
+
 /// Reports passing a byte pointer where a `char*` is expected (or the
 /// reverse); the element widths differ.
 void typecheck_char_pointer_argument(TypeTable* types, u32 expected, u32 actual,
@@ -403,6 +495,32 @@ bool expr_is_literal(AstPool* pool, u32 expr_id) {
         return false;
     }
     return pool.get_expr(expr_id).kind == ExprKind.Literal;
+}
+
+/// True when `expr_id` is a `[a, b]` literal whose elements fill the tuple
+/// type `expected`. Equal element types infer an array, so `[1, 2]` reaches
+/// an `[i64, i64]` only through this check.
+bool typecheck_tuple_literal_fits(AstPool* pool, TypeTable* types, u32 expected, u32 expr_id) {
+    AstExpr* literal = pool.get_expr(expr_id);
+    TypeEntry* tuple = types.get(types.resolve_subst(expected));
+    if (literal.kind != ExprKind.ArrayLit || tuple.kind != TypeKind.Tuple
+        || tuple.count != (i64)literal.aux) {
+        return false;
+    }
+    i64 count = tuple.count;
+    u32 tuple_start = tuple.inner;
+    u32 elements_start = literal.inner1 + 1;
+    i64 i = 0;
+    while (i < count) {
+        u32 element_id = pool.args.get((i64)elements_start + i);
+        if (!types_match_value(types, types.resolve_subst(types.type_args.get(tuple_start + (u32)i)),
+                               pool.get_expr(element_id).inferred_type,
+                               expr_is_literal(pool, element_id))) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
 }
 
 /// Returns the promotion rank of a numeric type (0 for non-numeric).
@@ -517,6 +635,100 @@ bool typecheck_is_generic_function(SyntaxNode* function) {
         node = node.next_sibling;
     }
     return false;
+}
+
+/// Type arguments of one generic call: `params[i]` is a callee type
+/// parameter name and `bound[i]` its type, or unknown when not inferred.
+struct CalleeTypeArgs {
+    Vec<u32> params;
+    Vec<u32> bound;
+}
+
+impl CalleeTypeArgs {
+    /// Returns `type_id` with the callee's type parameters substituted.
+    u32 resolve(CalleeTypeArgs* self, TypeTable* types, u32 type_id) {
+        i64 i = 0;
+        while (i < self.params.len()) {
+            types.push_subst(self.params.get(i), self.bound.get(i));
+            i += 1;
+        }
+        u32 resolved = types.resolve_subst(type_id);
+        types.pop_subst(self.params.len());
+        return resolved;
+    }
+}
+
+/// Binds unbound callee type parameters in `declared` to the matching parts
+/// of `actual`: `T` binds directly, views and arrays compare their element,
+/// a view parameter also accepts an implicit borrow, and generic named types
+/// compare their type arguments.
+void typecheck_infer_type_args(TypeTable* types, CalleeTypeArgs* args, u32 declared,
+                               u32 actual, i64 depth) {
+    if (depth > 16) { return; }
+    actual = types.resolve_subst(actual);
+    if (typecheck_type_is_unresolved(types, actual, 0)) { return; }
+    TypeEntry* declared_entry = types.get(declared);
+    TypeEntry* actual_entry = types.get(actual);
+    bool actual_is_view = actual_entry.kind == TypeKind.Pointer
+        || actual_entry.kind == TypeKind.Reference;
+    if (declared_entry.kind == TypeKind.Named && declared_entry.count == 0) {
+        i64 p = 0;
+        while (p < args.params.len()) {
+            if (args.params.get(p) == declared_entry.name_id
+                && args.bound.get(p) == TYPE_UNKNOWN) {
+                *args.bound.get_ptr(p) = actual;
+            }
+            p += 1;
+        }
+    } else if (declared_entry.kind == TypeKind.Pointer
+               || declared_entry.kind == TypeKind.Reference) {
+        typecheck_infer_type_args(types, args, declared_entry.inner,
+            actual_is_view ? actual_entry.inner : actual, depth + 1);
+    } else if (declared_entry.kind == TypeKind.Array && actual_entry.kind == TypeKind.Array) {
+        typecheck_infer_type_args(types, args, declared_entry.inner, actual_entry.inner,
+                                  depth + 1);
+    } else if (declared_entry.kind == TypeKind.Named && actual_entry.kind == TypeKind.Named
+               && declared_entry.name_id == actual_entry.name_id
+               && declared_entry.count == actual_entry.count) {
+        i64 i = 0;
+        while (i < declared_entry.count) {
+            typecheck_infer_type_args(types, args,
+                types.type_args.get(declared_entry.inner + (u32)i),
+                types.type_args.get(actual_entry.inner + (u32)i), depth + 1);
+            i += 1;
+        }
+    }
+}
+
+/// Binds generic `callee`'s type parameters for `call`. Explicit type
+/// arguments win; otherwise non-literal arguments bind them structurally,
+/// since a literal adapts to its parameter. Unbound parameters stay
+/// unknown so the checker never compares a bare `T`.
+CalleeTypeArgs typecheck_callee_type_args(AstPool* pool, TypeTable* types, SyntaxNode* callee,
+                                          AstExpr* call, Vec<Binding>* parameters,
+                                          Vec<u32>* argument_types) {
+    CalleeTypeArgs args = { .params = Vec<u32>.new(), .bound = Vec<u32>.new() };
+    SyntaxNode* id = function_identifier(callee);
+    if (id == (SyntaxNode*)0) { return move args; }
+    mono_collect_generic_parameters(id.next_sibling, types, &args.params);
+    bool explicit_args = (i64)call.generic_args_count == args.params.len();
+    i64 i = 0;
+    while (i < args.params.len()) {
+        args.bound.push(explicit_args
+            ? pool.generic_type_args.get((i64)call.generic_args_start + i)
+            : TYPE_UNKNOWN);
+        i += 1;
+    }
+    i = 0;
+    while (!explicit_args && i < argument_types.len() && i < parameters.len()) {
+        if (!expr_is_literal(pool, pool.args.get((i64)call.inner1 + i))) {
+            typecheck_infer_type_args(types, &args,
+                typecheck_parameter_type_id(types, parameters.get_ptr(i)),
+                argument_types.get(i), 0);
+        }
+        i += 1;
+    }
+    return move args;
 }
 
 /// Returns a stable canonical spelling of type `type_id` for signature keys.
@@ -815,12 +1027,13 @@ SyntaxNode* typecheck_resolve_free_function(AstPool* pool, TypeTable* types,
                     : typecheck_parameter_type_id(types, parameter);
                 u32 actual = actual_types.get(p);
                 u32 arg_id = pool.args.get((i64)call.inner1 + p);
-                if (!typecheck_call_argument_matches(
-                        types, expected, actual, expr_is_literal(pool, arg_id))) {
+                bool literal = expr_is_literal(pool, arg_id);
+                bool direct = typecheck_call_argument_matches(types, expected, actual, literal);
+                if (!direct && !typecheck_implicit_borrow(types, expected, actual, literal)) {
                     matches = false;
                     break;
                 }
-                if (expected != actual) { score += 1; }
+                if (!direct) { score += 2; } else if (expected != actual) { score += 1; }
                 p += 1;
             }
             if (matches) {
@@ -1670,7 +1883,8 @@ bool typecheck_method_argument_score(AstPool* pool, TypeTable* types,
         *score = *score + 1;
         return true;
     }
-    if (types_match_value(types, expected, actual, expr_is_literal(pool, arg_id))) {
+    if (types_match_value(types, expected, actual, expr_is_literal(pool, arg_id))
+        || typecheck_implicit_cast(root, types, actual, expected)) {
         *score = *score + 1;
         return true;
     }
@@ -1932,6 +2146,99 @@ SyntaxNode* typecheck_select_method(AstPool* pool, SyntaxNode* root, TypeTable* 
     *out_ret_start = best_ret_start;
     *out_name = best_name;
     return best_params;
+}
+
+/// Counts the declarations of `method_name` in impls of `owner_name`, or in
+/// every impl and trait when `owner_name` is null. `*generic` counts those
+/// with their own type parameters.
+void typecheck_count_methods(SyntaxNode* root, str owner_name, str method_name,
+                             i64* count, i64* generic) {
+    *count = 0;
+    *generic = 0;
+    SyntaxNode* item = root.first_child;
+    while (item != (SyntaxNode*)0) {
+        SyntaxNode* target = item.kind == NodeKind.Impl
+            ? impl_target_identifier(item) : (SyntaxNode*)0;
+        bool owned = owner_name == (str)0
+            ? item.kind == NodeKind.Impl || item.kind == NodeKind.Trait
+            : target != (SyntaxNode*)0 && strcmp(target.text, owner_name) == 0;
+        SyntaxNode* block = owned ? item.first_child : (SyntaxNode*)0;
+        while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+            block = block.next_sibling;
+        }
+        // Bodies are nested blocks, so a direct `name(` or `name<` is a
+        // method declaration.
+        SyntaxNode* member = block == (SyntaxNode*)0 ? (SyntaxNode*)0 : block.first_child;
+        while (member != (SyntaxNode*)0) {
+            SyntaxNode* next = member.next_sibling;
+            if (member.kind == NodeKind.Token && member.token_kind == TokenKind.Identifier
+                && strcmp(member.text, method_name) == 0 && next != (SyntaxNode*)0) {
+                if (next.kind == NodeKind.Parenthesized) {
+                    *count = *count + 1;
+                } else if (next.kind == NodeKind.Token && next.token_kind == TokenKind.Less) {
+                    *count = *count + 1;
+                    *generic = *generic + 1;
+                }
+            }
+            member = next;
+        }
+        item = item.next_sibling;
+    }
+}
+
+/// Reports a call to a method that a declared struct or enum receiver
+/// cannot have: no impl or trait declares the name, or the owner declares
+/// it but no overload accepts the arguments. Unresolved receivers and
+/// argument types are not judged.
+void typecheck_method_call_target(AstPool* pool, TypeTable* types, SyntaxNode* root,
+                                  u32 receiver_type, str method_name, u32 args_start,
+                                  bool static_method, Span span,
+                                  DiagnosticBag* diagnostics, bool* ok) {
+    u32 owner_type = types.resolve_subst(receiver_type);
+    TypeEntry* owner = types.get(owner_type);
+    while (owner.kind == TypeKind.Pointer || owner.kind == TypeKind.Reference) {
+        owner_type = types.resolve_subst(owner.inner);
+        owner = types.get(owner_type);
+    }
+    if (owner.kind != TypeKind.Named || typecheck_type_is_unresolved(types, owner_type, 0)
+        || strcmp(method_name, "drop") == 0) {
+        return;
+    }
+    str owner_name = types.names.get(owner.name_id);
+    if (find_item_by_name(root, NodeKind.Struct, owner_name) == (SyntaxNode*)0
+        && find_enum_item(root, owner_name) == (SyntaxNode*)0) {
+        return;
+    }
+    i64 declared = 0;
+    i64 generic = 0;
+    typecheck_count_methods(root, owner_name, method_name, &declared, &generic);
+    if (declared == 0) {
+        typecheck_count_methods(root, (str)0, method_name, &declared, &generic);
+        if (declared == 0) {
+            diagnostics.error(span, unknown_method(method_name, types.type_name(owner_type)));
+            *ok = false;
+        }
+        return;
+    }
+    // Overload selection does not infer a method's own type parameters.
+    if (generic > 0) { return; }
+    if (args_start >= (u32)pool.args.len()) { return; }
+    SyntaxNode* ret_start = (SyntaxNode*)0;
+    SyntaxNode* name = (SyntaxNode*)0;
+    // An instance call may also pass its receiver explicitly: `r.get(&r)`.
+    types.push_subst(types.names.intern("Self"), owner_type);
+    bool selected = typecheck_select_method(pool, root, types, owner_type, owner_name,
+            method_name, args_start, static_method, &ret_start, &name) != (SyntaxNode*)0
+        || (!static_method
+            && typecheck_select_method(pool, root, types, owner_type, owner_name, method_name,
+                                       args_start, true, &ret_start, &name)
+                != (SyntaxNode*)0);
+    types.pop_subst(1);
+    if (!selected) {
+        diagnostics.error(span, method_overload_mismatch(method_name,
+                                                         types.type_name(owner_type)));
+        *ok = false;
+    }
 }
 
 /// Returns the symbol of the method a call resolves to.
@@ -2499,8 +2806,11 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
             inferred = env.lookup(expr.aux);
         }
     } else if (expr.kind == ExprKind.Launch) {
+        u32 enclosing_launch = env.launched_call;
+        env.launched_call = expr.inner0;
         u32 result_type = infer_expr(pool, types, symbols, root, env,
                                      expr.inner0, diagnostics, ok);
+        env.launched_call = enclosing_launch;
         if (result_type != TYPE_UNKNOWN) {
             Vec<u32> task_args = Vec<u32>.new();
             task_args.push(result_type);
@@ -2975,6 +3285,7 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 if (overloaded && typecheck_arguments_known(pool, expr)) {
                     symbols.select_callee(callee.span, callee_fn);
                 }
+                bool generic_callee = typecheck_is_generic_function(callee_fn);
                 u32 ret_type = function_return_type_id(types, callee_fn);
                 inferred = ret_type;
 
@@ -2982,6 +3293,18 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                 Vec<Binding> params = Vec<Binding>.new();
                 collect_parameter_bindings(binding_function_parameters(callee_fn), &params);
                 u32 args_count = expr.aux;
+                // Arguments are inferred before the callee's type parameters
+                // are bound, so a caller's own `T` is never shadowed.
+                Vec<u32> arg_types = Vec<u32>.new();
+                i64 arg_index = 0;
+                while (arg_index < (i64)args_count) {
+                    arg_types.push(infer_expr(pool, types, symbols, root, env,
+                        pool.args.get((i64)expr.inner1 + arg_index), diagnostics, ok));
+                    arg_index += 1;
+                }
+                CalleeTypeArgs type_args = typecheck_callee_type_args(
+                    pool, types, callee_fn, expr, &params, &arg_types);
+                if (generic_callee) { inferred = type_args.resolve(types, ret_type); }
                 bool variadic = params.len() > 0
                     && binding_is_variadic_parameter(params.get_ptr(params.len() - 1));
                 i64 fixed_count = params.len() - (variadic ? 1 : 0);
@@ -3002,24 +3325,36 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                     while (i < (i64)args_count) {
                         i64 parameter_index = i < fixed_count ? i : params.len() - 1;
                         Binding* param = params.get_ptr(parameter_index);
-                        u32 expected_arg_type = variadic && i >= fixed_count
-                            ? typecheck_parameter_base_type_id(types, param)
-                            : typecheck_parameter_type_id(types, param);
+                        u32 expected_arg_type = type_args.resolve(types,
+                            variadic && i >= fixed_count
+                                ? typecheck_parameter_base_type_id(types, param)
+                                : typecheck_parameter_type_id(types, param));
                         u32 arg_expr_id = pool.args.get((i64)expr.inner1 + i);
-                        u32 actual_arg_type = infer_expr(pool, types, symbols, root, env, arg_expr_id, diagnostics, ok);
+                        u32 actual_arg_type = arg_types.get(i);
                         typecheck_char_pointer_argument(types, expected_arg_type, actual_arg_type,
                             pool.get_expr(arg_expr_id).span, diagnostics, ok);
                         TypeEntry* expected_entry = types.get(expected_arg_type);
+                        TypeEntry* actual_entry = types.get(types.resolve_subst(actual_arg_type));
                         if (expected_entry.kind != TypeKind.Pointer
                             && expected_entry.kind != TypeKind.Reference
                             && pool.get_expr(arg_expr_id).kind != ExprKind.Move) {
                             typecheck_reject_partial_drop_move(pool, types, symbols, root, env,
                                                                arg_expr_id, diagnostics, ok);
                         }
-                        if (!typecheck_is_generic_function(callee_fn)
+                        // The launch pass reports a bare value for a reference
+                        // parameter of a launched call with the scoped-launch rules.
+                        bool launch_borrow = env.launched_call == expr_id
+                            && expected_entry.kind == TypeKind.Reference
+                            && actual_entry.kind != TypeKind.Pointer
+                            && actual_entry.kind != TypeKind.Reference;
+                        if (launch_borrow) {
+                            i += 1;
+                            continue;
+                        }
+                        if (!generic_callee
                             && typecheck_reference_argument_mismatch(
                                 types, expected_arg_type, actual_arg_type)
-                            && !has_user_cast(root, types, actual_arg_type, expected_arg_type)) {
+                            && !typecheck_implicit_cast(root, types, actual_arg_type, expected_arg_type)) {
                             diagnostics.error(pool.get_expr(arg_expr_id).span,
                                 reference_argument_mismatch(types.type_name(expected_arg_type),
                                     types.type_name(actual_arg_type)));
@@ -3027,7 +3362,10 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                         } else if (!typecheck_call_argument_matches(
                                 types, expected_arg_type, actual_arg_type,
                                 expr_is_literal(pool, arg_expr_id))
-                            && !has_user_cast(root, types, actual_arg_type, expected_arg_type)) {
+                            && !typecheck_implicit_borrow(types, expected_arg_type, actual_arg_type,
+                                expr_is_literal(pool, arg_expr_id))
+                            && !typecheck_tuple_literal_fits(pool, types, expected_arg_type, arg_expr_id)
+                            && !typecheck_implicit_cast(root, types, actual_arg_type, expected_arg_type)) {
                             String message = String.from_str("type mismatch: expected ");
                             message.push_str(types.type_name(expected_arg_type));
                             message.push_str(", found ");
@@ -3039,7 +3377,7 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
                     }
                 }
                 params.drop();
-                if (valid_arity && !variadic && typecheck_is_generic_function(callee_fn)) {
+                if (valid_arity && !variadic && generic_callee) {
                     typecheck_generic_call_drop_ownership(
                         pool, types, symbols, root, env, callee_fn,
                         expr_id, diagnostics, ok);
@@ -3225,6 +3563,10 @@ u32 infer_expr(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode
             u32 arg_id = pool.args.get((i64)expr.inner1 + 1 + infer_index);
             infer_expr(pool, types, symbols, root, env, arg_id, diagnostics, ok);
             infer_index += 1;
+        }
+        if (!variant_constructor) {
+            typecheck_method_call_target(pool, types, root, receiver_type, method_name,
+                expr.inner1, static_method, expr.span, diagnostics, ok);
         }
         // The argument types select the overload, and with it whether the
         // call takes `self` by value.
@@ -3699,7 +4041,8 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
             }
             if (!array_initializer && declared_type != TYPE_UNKNOWN && actual_type != TYPE_UNKNOWN
                 && !types_match_value(types, declared_type, actual_type, expr_is_literal(pool, init_id))
-                && !has_user_cast(root, types, actual_type, declared_type)) {
+                && !typecheck_tuple_literal_fits(pool, types, declared_type, init_id)
+                && !typecheck_implicit_cast(root, types, actual_type, declared_type)) {
                 String message = String.from_str("type mismatch: expected ");
                 message.push_str(types.type_name(declared_type));
                 message.push_str(", found ");
@@ -3745,7 +4088,7 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
             *ok = false;
         } else if (target_type != TYPE_UNKNOWN && val_type != TYPE_UNKNOWN
             && !types_match_value(types, target_type, val_type, expr_is_literal(pool, stmt.inner1))
-            && !has_user_cast(root, types, val_type, target_type)) {
+            && !typecheck_implicit_cast(root, types, val_type, target_type)) {
             String message = String.from_str("type mismatch: expected ");
             message.push_str(types.type_name(target_type));
             message.push_str(", found ");
@@ -3765,7 +4108,8 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
             }
             if (expected_return != TYPE_UNKNOWN && actual_type != TYPE_UNKNOWN
                 && !types_match_value(types, expected_return, actual_type, expr_is_literal(pool, expr_id))
-                && !has_user_cast(root, types, actual_type, expected_return)) {
+                && !typecheck_tuple_literal_fits(pool, types, expected_return, expr_id)
+                && !typecheck_implicit_cast(root, types, actual_type, expected_return)) {
                 String message = String.from_str("type mismatch: expected ");
                 message.push_str(types.type_name(expected_return));
                 message.push_str(", found ");
@@ -3773,6 +4117,11 @@ void typecheck_statement(AstPool* pool, TypeTable* types, SymbolTable* symbols,
                 diagnostics.error(pool.get_expr(expr_id).span, move message);
                 *ok = false;
             }
+        } else if (expected_return != TYPE_VOID && expected_return != TYPE_UNKNOWN) {
+            // An unparsed return type reads as void, so only a resolved
+            // non-void type rejects a bare `return;`.
+            diagnostics.error(stmt.span, return_type_mismatch(types.type_name(expected_return), "void"));
+            *ok = false;
         }
     } else if (stmt.kind == StmtKind.Expr) {
         infer_expr(pool, types, symbols, root, env, stmt.inner0, diagnostics, ok);
@@ -3926,8 +4275,8 @@ void typecheck_generic_call_drop_ownership(
     Vec<u32> stmt_ids = Vec<u32>.new();
     lowerer.lower_block(body, &stmt_ids);
     if (lowerer.unsupported) {
-        if (lowerer.macro_error.len() > 0) {
-            diagnostics.error(lowerer.macro_error_span, move lowerer.macro_error);
+        if (lowerer.error.len() > 0) {
+            diagnostics.error(lowerer.error_span, move lowerer.error);
             *ok = false;
         }
         stmt_ids.drop();
@@ -3960,33 +4309,45 @@ void typecheck_generic_call_drop_ownership(
     }
 }
 
-/// Type-checks every statement of a function body.
-void typecheck_function_statements(AstPool* pool, TypeTable* types, SymbolTable* symbols,
-                                  SyntaxNode* root, SyntaxNode* function,
-                                  DiagnosticBag* diagnostics, bool* ok) {
-    typecheck_function_statements_scoped(pool, types, symbols, root, function, diagnostics, ok, (bool*)0);
-}
-
-/// Type-checks a function body with an outer environment.
+/// Type-checks every statement of a function body. Sets `*unsupported_out`
+/// (when non-null) if the body cannot be lowered.
 void typecheck_function_statements_scoped(AstPool* pool, TypeTable* types, SymbolTable* symbols,
                                           SyntaxNode* root, SyntaxNode* function,
                                           DiagnosticBag* diagnostics, bool* ok, bool* unsupported_out) {
     SyntaxNode* body = find_function_body(function);
     if (body == (SyntaxNode*)0) { return; }
+    typecheck_body(pool, types, symbols, root, binding_function_parameters(function), body,
+                   function_return_type_id(types, function), TYPE_UNKNOWN, diagnostics, ok,
+                   unsupported_out);
+}
 
-    u32 expected_return = function_return_type_id(types, function);
+/// Type-checks the statements of `body` with `parameters` in scope. A
+/// receiver written without a type (`*self`, `&self`, `self`) has
+/// `self_type`. Sets `*unsupported_out` (when non-null) if the body cannot
+/// be lowered.
+void typecheck_body(AstPool* pool, TypeTable* types, SymbolTable* symbols, SyntaxNode* root,
+                    SyntaxNode* parameters, SyntaxNode* body, u32 expected_return,
+                    u32 self_type, DiagnosticBag* diagnostics, bool* ok,
+                    bool* unsupported_out) {
     TypeEnv env = TypeEnv.new();
     env.expected_return = expected_return;
-
-    // Populate parameters
     Vec<Binding> params = Vec<Binding>.new();
-    collect_parameter_bindings(binding_function_parameters(function), &params);
+    collect_parameter_bindings(parameters, &params);
     i64 p = 0;
     while (p < params.len()) {
         Binding* param = params.get_ptr(p);
-        u32 name_id = symbols.names.intern(param.name);
         u32 type_id = typecheck_parameter_type_id(types, param);
-        env.insert(name_id, type_id);
+        String declared = binding_parameter_type_text(param);
+        if (self_type != TYPE_UNKNOWN && strcmp(param.name, "self") == 0
+            && declared.len() == 0) {
+            type_id = param.declared_type.kind == ProjectionTypeKind.Pointer
+                ? types.get_pointer(self_type, true)
+                : param.declared_type.kind == ProjectionTypeKind.Reference
+                    ? types.get_reference(self_type, param.declared_type.is_mutable)
+                    : self_type;
+        }
+        declared.drop();
+        env.insert(symbols.names.intern(param.name), types.resolve_subst(type_id));
         p += 1;
     }
     params.drop();
@@ -3999,21 +4360,104 @@ void typecheck_function_statements_scoped(AstPool* pool, TypeTable* types, Symbo
         if (unsupported_out != (bool*)0) {
             *unsupported_out = true;
         }
-        if (lowerer.macro_error.len() > 0) {
-            diagnostics.error(lowerer.macro_error_span, move lowerer.macro_error);
+        if (lowerer.error.len() > 0) {
+            diagnostics.error(lowerer.error_span, move lowerer.error);
             *ok = false;
         }
         stmt_ids.drop();
         return;
     }
-
     i64 s = 0;
     while (s < stmt_ids.len()) {
-        typecheck_statement(pool, types, symbols, root, &env, expected_return, stmt_ids.get(s), diagnostics, ok);
+        typecheck_statement(pool, types, symbols, root, &env, expected_return, stmt_ids.get(s),
+                            diagnostics, ok);
         s += 1;
     }
-
     stmt_ids.drop();
+}
+
+/// True when `node` is a `<` token.
+bool typecheck_is_less(SyntaxNode* node) {
+    return node != (SyntaxNode*)0 && node.kind == NodeKind.Token
+        && node.token_kind == TokenKind.Less;
+}
+
+/// Type-checks the cfg-active, non-generic method bodies of an impl whose
+/// target takes no type arguments, with `Self` bound to the target. Generic
+/// and specialized impls (`impl<T> Box<T>`, `impl Set<K>`,
+/// `impl Result<i64, Error>`) and cast blocks are not checked.
+void typecheck_impl_methods(AstPool* pool, SymbolTable* symbols, SyntaxNode* root,
+                            SyntaxNode* item, CfgSet* cfg, DiagnosticBag* diagnostics,
+                            bool* ok) {
+    SyntaxNode* target = impl_target_identifier(item);
+    if (target == (SyntaxNode*)0 || typecheck_is_less(mono_impl_generics(item))
+        || typecheck_is_less(target.next_sibling)) {
+        return;
+    }
+    SyntaxNode* block = item.first_child;
+    while (block != (SyntaxNode*)0 && block.kind != NodeKind.Block) {
+        block = block.next_sibling;
+    }
+    if (block == (SyntaxNode*)0) { return; }
+    TypeTable* types = &symbols.types;
+    u32 owner = types.parse_type_name(target.text);
+    types.push_subst(types.names.intern("Self"), owner);
+    SyntaxNode* start = block.first_child;
+    SyntaxNode* cursor = start;
+    while (cursor != (SyntaxNode*)0) {
+        SyntaxNode* next = cursor.next_sibling;
+        bool member_end = cursor.kind == NodeKind.Token
+            && cursor.token_kind == TokenKind.Semicolon;
+        if (cursor.kind == NodeKind.Parenthesized && next != (SyntaxNode*)0
+            && next.kind == NodeKind.Block) {
+            SyntaxNode* name = item_method_name(start, cursor);
+            bool is_cast = start.kind == NodeKind.Token
+                && (start.token_kind == TokenKind.Cast || strcmp(start.text, "cast") == 0);
+            bool active = name != (SyntaxNode*)0 && !is_cast && !item_method_is_generic(name);
+            String return_text = String.new();
+            SyntaxNode* scan = start;
+            while (active && scan != name) {
+                bool attribute = scan.kind == NodeKind.Token && strcmp(scan.text, "#") == 0;
+                if (attribute && scan.next_sibling != name
+                    && scan.next_sibling.kind == NodeKind.Bracket) {
+                    scan = scan.next_sibling;
+                    SyntaxNode* key = scan.first_child;
+                    if (key != (SyntaxNode*)0 && key.kind == NodeKind.Token
+                        && strcmp(key.text, "cfg") == 0 && key.next_sibling != (SyntaxNode*)0
+                        && key.next_sibling.kind == NodeKind.Parenthesized) {
+                        bool malformed = false;
+                        cfg_eval_args(key.next_sibling, cfg, &active, &malformed);
+                    }
+                } else if (!attribute && !(scan.kind == NodeKind.Token
+                    && (scan.token_kind == TokenKind.Private || strcmp(scan.text, "pub") == 0
+                        || strcmp(scan.text, "static") == 0))) {
+                    append_node_tokens(scan, &return_text);
+                }
+                scan = scan.next_sibling;
+            }
+            if (active) {
+                u32 expected_return = types.resolve_subst(
+                    type_id_from_text(types, return_text.to_str()));
+                if (expected_return == TYPE_UNKNOWN || expected_return == 0) {
+                    expected_return = TYPE_VOID;
+                }
+                bool function_ok = true;
+                bool unsupported = false;
+                typecheck_body(pool, types, symbols, root, cursor, next, expected_return,
+                               owner, diagnostics, &function_ok, &unsupported);
+                if (unsupported && function_ok) {
+                    diagnostics.error(name.span, unchecked_function_body(name.text));
+                    function_ok = false;
+                }
+                if (!function_ok) { *ok = false; }
+            }
+            member_end = true;
+            next = next.next_sibling;
+        }
+        if (member_end) { start = next; }
+        cursor = next;
+    }
+    types.pop_subst(1);
 }
 
 /// Type-checks cfg-active non-generic functions, only those from file
@@ -4029,44 +4473,23 @@ bool typecheck_expressions_scoped(AstPool* pool, SymbolTable* symbols, SyntaxTre
         if (file_id_filter == 0 || item.span.file == (i64)file_id_filter) {
             if (symbol_item_is_function(item)) {
                 if (!typecheck_is_generic_function(item)) {
-                    DiagnosticBag function_diagnostics = DiagnosticBag.new();
                     bool function_ok = true;
-                    typecheck_function_statements(pool, &symbols.types, symbols, tree.root, item,
-                                                  &function_diagnostics, &function_ok);
-                    i64 diagnostic_index = 0;
-                    while (diagnostic_index < function_diagnostics.len()) {
-                        Diagnostic* diagnostic = function_diagnostics.get(diagnostic_index);
-                        // Expression inference is still incomplete. Also report
-                        // ownership violations when the projected source and
-                        // destructor ancestor are both resolved.
-                        str diagnostic_text = diagnostic.message.to_str();
-                        if (typecheck_str_starts_with(diagnostic_text,
-                                                     "call to overloaded function '")
-                            || typecheck_str_starts_with(diagnostic_text,
-                                "cannot use this C function as a value:")
-                            || typecheck_str_starts_with(diagnostic_text, "macro '@")
-                            || typecheck_str_starts_with(diagnostic_text, "pointer argument type mismatch:")
-                            || typecheck_str_starts_with(diagnostic_text, "reference argument type mismatch:")
-                            || typecheck_str_starts_with(diagnostic_text, "unwrap-or ")
-                            || typecheck_str_starts_with(diagnostic_text, "generic method ")
-                            || typecheck_str_starts_with(diagnostic_text, "Task has no method '")
-                            || diagnostic.message.contains(" is shared between threads: read or change it inside `lock ")
-                            || diagnostic.message.contains(", not shared: declare it `shared ")
-                            || typecheck_str_starts_with(diagnostic_text, "cannot move '")
-                            || typecheck_str_starts_with(diagnostic_text,
-                                "return statement is not allowed inside a defer block")
-                            || typecheck_str_starts_with(diagnostic_text,
-                                "break statement is not allowed inside a defer block")
-                            || typecheck_str_starts_with(diagnostic_text,
-                                "continue statement is not allowed inside a defer block")
-                            || strcmp(diagnostic_text, "cannot index into zero-size array") == 0
-                            || strcmp(diagnostic_text, "expected expression") == 0) {
-                            diagnostics.error(diagnostic.span, diagnostic.message.clone());
-                            ok = false;
-                        }
-                        diagnostic_index += 1;
+                    bool unsupported = false;
+                    typecheck_function_statements_scoped(pool, &symbols.types, symbols, tree.root,
+                                                         item, diagnostics, &function_ok,
+                                                         &unsupported);
+                    // A body the checker cannot lower is a limitation, not an
+                    // accepted body. A macro error already explains it.
+                    if (unsupported && function_ok) {
+                        SyntaxNode* name = function_identifier(item);
+                        diagnostics.error(name == (SyntaxNode*)0 ? item.span : name.span,
+                            unchecked_function_body(name == (SyntaxNode*)0 ? "" : name.text));
+                        function_ok = false;
                     }
+                    if (!function_ok) { ok = false; }
                 }
+            } else if (item.kind == NodeKind.Impl) {
+                typecheck_impl_methods(pool, symbols, tree.root, item, cfg, diagnostics, &ok);
             }
         }
         index += 1;

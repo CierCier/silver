@@ -255,6 +255,18 @@ String return_type_mismatch(str expected, str found) {
     return move s;
 }
 
+/// Diagnostic text: "cannot check the body of '{}': it uses a construct the
+/// stage1 checker does not support yet". Returns an owned string.
+String unchecked_function_body(str name) {
+    return @format("cannot check the body of '{}': it uses a construct the stage1 checker does not support yet", name);
+}
+
+/// Diagnostic text: "designated array initializers (`[index] = value`) are
+/// not supported by stage1 yet". Returns an owned string.
+String designated_array_initializer_unsupported() {
+    return String.from_str("designated array initializers (`[index] = value`) are not supported by stage1 yet");
+}
+
 /// Diagnostic text: "void function cannot return a value". Returns static
 /// text.
 str void_func_cannot_return_value() {
@@ -551,6 +563,18 @@ str send_reason_reference_value() {
 /// started()". Returns an owned string.
 String unknown_task_method(str method) {
     return @format("Task has no method '{}'; its only method is started()", method);
+}
+
+/// Diagnostic text: "unknown method '{}' on type {}". Returns an owned
+/// string.
+String unknown_method(str method, str type_name) {
+    return @format("unknown method '{}' on type {}", method, type_name);
+}
+
+/// Diagnostic text: "no overload of method '{}' on type {} matches these
+/// arguments". Returns an owned string.
+String method_overload_mismatch(str method, str type_name) {
+    return @format("no overload of method '{}' on type {} matches these arguments", method, type_name);
 }
 
 /// Diagnostic text: "task handle consumed by wait". Returns static text.
