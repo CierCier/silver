@@ -231,7 +231,9 @@ impl Arm64Abi {
         fn visit<'ctx>(ty: BasicTypeEnum<'ctx>, base: &mut Option<FloatType<'ctx>>, count: &mut u32) -> bool {
             match ty {
                 BasicTypeEnum::FloatType(float) => {
-                    *count += 1;
+                    // Saturating: a huge array can already have pushed the
+                    // count past the four-member limit.
+                    *count = count.saturating_add(1);
                     *base.get_or_insert(float) == float
                 }
                 BasicTypeEnum::StructType(inner) => inner.get_field_types_iter().all(|f| visit(f, base, count)),
