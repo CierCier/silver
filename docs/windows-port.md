@@ -243,9 +243,9 @@ driver's SDK/MSVC lib paths (§3.3) make these resolvable.
 | Module | Reason | Windows answer |
 |---|---|---|
 | `std/sys/epoll.ag`, `std/sys/io_uring.ag`, `std/sys/eventfd.ag` | Linux-only kernel interfaces (io_uring mmaps its SQ/CQ rings — no analogue) | IOCP wrapper later (`CreateIoCompletionPort`); near-term: cfg-gate behind `os.linux`, tests skip |
-| `std/sys/raw/socket.ag` / `std/net/*` | raw socket syscalls, AF_UNIX (`tcp.ag:26, 283, 327`) | WinSock2 layer (`WSAStartup`, `SOCKET` ≠ fd, `closesocket`); AF_UNIX exists Win10 1803+ with caveats — phase 2 |
+| `std/sys/raw/socket.ag` / `std/net/*` | raw socket syscalls, AF_UNIX | **Done**: `os_windows.ag` emulates the Linux socket syscalls over WinSock2 (see "Landed (2026-11-22)"); pathname AF_UNIX works, the abstract namespace is Linux-only |
 | `std/net/tls.ag` (OpenSSL) | `SSL_set_fd(ssl, i32 fd)` takes a Unix fd (`tls.ag:44`) | Windows OpenSSL builds exist (`libssl.lib`/`libcrypto.lib`); declare `SSL_set_fd` taking a `SOCKET` (u64) under a cfg; or Schannel later |
-| `std/sys/io_vec.ag` | `readv/writev/sendfile` | loops or `WSASend/WSARecv` with `WSABUF` |
+| `std/sys/io_vec.ag` | `readv/writev/sendfile` | **Done**: one `WSASend/WSARecv` per call for sockets, one `WriteFile`/`ReadFile` through a bounce buffer otherwise; `sendfile` is a 16 KiB copy loop |
 
 ### 4.4 I/O shape
 
@@ -424,6 +424,75 @@ multi-unit link + execution under Wine); after pulling, run
 The current suite covers stdlib behavior only. Compiler builds and stdlib
 container cleanup tests exercise ownership and code generation; see
 [testing expectations](compiler-guide.md#8-testing-expectations).
+
+### Landed (2026-11-22): native Windows parity pass
+
+Verified on a Windows 11 host (stage0, `x86_64-pc-windows-msvc`): the stdlib
+suite is 106 passed, 0 failed, 12 skipped (from 81 / 11 / 26).
+
+**Compiler and driver**
+- Cache: COFF objects with more than 96 sections (one COMDAT per generic
+  instance) and `/bigobj` headers are valid cache artifacts. 96 is the PE
+  *image* section limit; objects allow 65279.
+- Win64 C ABI: references and reference-carrying callbacks lower to plain
+  pointers at the C boundary, so they no longer take `byval` (their 16-byte
+  Silver carrier looked like a by-reference aggregate). `qsort` with a Silver
+  comparator crashed before.
+- `@memcpy`/`@memmove`/`@memset` accept borrow references (`&buf[i]`);
+  they panicked the compiler before.
+- Link: the default set adds `ws2_32`, `iphlpapi`, `userenv`, and `dbghelp`
+  (the last two complete what Rust staticlibs declare). `-lc` maps to
+  `legacy_stdio_definitions` and `-lm/-lpthread/-ldl/-lrt` to nothing (the
+  UCRT provides them). Like `ld` preferring `.so` over `.a`, a dynamic link
+  prefers `<name>.dll.lib` over `<name>.lib` in `-L` dirs.
+- `agc.exe` reserves an 8 MiB main-thread stack (the Linux default); the PE
+  default of 1 MiB overflowed while compiling `std.net.http`.
+
+**Runtime seam (`std/sys/os_windows.ag`)**
+- Win32 and Winsock errors map to Linux errno values (`win_errno`), replacing
+  the fixed ENOENT/EIO approximations.
+- `sys_stat` opens directories (`FILE_FLAG_BACKUP_SEMANTICS`) and fills the
+  Linux `struct stat` dev/ino/nlink/mode/size/blocks/atime/mtime/ctime fields
+  (ctime is the NTFS change time); read-only files clear the write bits.
+  Files open with `FILE_SHARE_DELETE`, and `sys_unlink` uses POSIX delete
+  semantics where supported, so an open file can be unlinked and its name
+  reused at once.
+- `sys_getcwd`/`sys_chdir`; the entry fills `envp` from the UTF-16
+  environment block, and `std.env` and `std.process` match names with the
+  OS's case-insensitive ordinal rules (`CompareStringOrdinal`).
+- Sockets: `sys_socket`, `bind`, `listen`, `accept4`, `connect`, `shutdown`,
+  `setsockopt`/`getsockopt`, `getsockname`/`getpeername`, `sendto`/
+  `recvfrom`, `poll` (WSAPoll), `writev`/`readv`, and `sendfile` take Linux
+  values and translate: AF_INET6 10↔23, Linux SO_* numbers, timeval
+  timeouts → DWORD ms, SO_ERROR → errno, Linux `pollfd` ↔ `WSAPOLLFD`.
+  Socket fds are the SOCKET handle with bit 0 set (Win32 handles are
+  multiples of 4), so `read`/`write`/`close`/`fcntl(O_NONBLOCK)` route to
+  winsock as on Linux. Linux behaviors kept: timeouts report EAGAIN,
+  unconnected UDP ignores ICMP port-unreachable, accepted sockets are
+  blocking unless `SOCK_NONBLOCK`, and loopback connects to a closed port
+  fail at once (Windows otherwise retries the SYN for ~2 s).
+  Sockets are overlapped-capable because winsock ignores SO_RCVTIMEO
+  otherwise. SO_REUSEADDR is a no-op (winsock already rebinds TIME_WAIT
+  ports, and its own option allows duplicate live binds); SO_REUSEPORT,
+  TCP_CORK, and TCP_QUICKACK report ENOPROTOOPT. `F_GETFL` cannot report
+  O_NONBLOCK (winsock has no FIONBIO query); `F_SETFL` applies it.
+  `writev`/`readv` move a whole vector in one call, so a datagram stays one
+  datagram; `sendfile` leaves a null-offset input at the first unsent byte,
+  and an explicit-offset call must not share `in_fd` with another thread.
+- `std.net.dns` uses the system's DNS servers (`GetNetworkParams`) instead of
+  the systemd-resolved stub and `/etc/resolv.conf`.
+- `std.process`: `Command.spawn` (CreateProcessW, MSVC argument quoting,
+  inherited standard handles, env = `std.env` + overrides, sorted), `wait_status`,
+  `kill` (exit code 137), and `getppid`; dropping an unwaited `Child` closes
+  its handle. A program that cannot start is
+  `Err(-errno)` at spawn rather than exit status 127.
+
+**Still Linux-only** (skipped in `WINDOWS_SKIP`): raw syscall and `clone(2)`
+tests, epoll/eventfd/io_uring, DMA-BUF, termios and `/dev/ptmx` ptys (a
+ConPTY backend for `std.term.pty` is the next gap), OpenSSL TLS over
+winsock, and the native stage1 driver, which calls raw Linux syscalls in
+`bin/agc/src/native_backend.ag` and `libs/agc/src/frontend/module_loader.ag`
+and links ELF.
 
 ## 8. Risks
 

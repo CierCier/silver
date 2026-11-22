@@ -3,8 +3,10 @@
 // Tests: TCP echo (bind, connect, accept, send, recv) and connection refused.
 
 import std.error;
+import std.fs;
 import std.net.tcp;
 import std.net.inet;
+import std.sys.io_vec;
 import std.sys.result;
 import std.mem;
 import std.test;
@@ -43,6 +45,50 @@ i32 main() {
     assert_eq_str("hello", (str)msg, "echo message matches");
     free(msg);
 
+    // Vectored I/O and sendfile on the connected pair.
+    test_start("tcp writev, readv, and sendfile");
+    IoVec out_parts[2] = { IoVec.new((void*)"ab", 2), IoVec.new((void*)"cde", 3) };
+    assert_eq_i64(5, client.writev(&out_parts[0], 2).value(), "writev sends both buffers");
+    u8 first[2];
+    u8 rest[4];
+    IoVec in_parts[2] = { IoVec.new((void*)&first[0], 2), IoVec.new((void*)&rest[0], 3) };
+    Result<i64, Error> rv = server.readv(&in_parts[0], 2);
+    assert_true(rv.is_ok() && rv.value() > 0, "readv receives data");
+    // TCP may deliver less than was written; read the remainder in place.
+    i64 have = rv.value();
+    while (rv.is_ok() && rv.value() > 0 && have < 5) {
+        if (have < 2) {
+            rv = server.read(&first[have], 2 - have);
+        } else {
+            rv = server.read(&rest[have - 2], 5 - have);
+        }
+        have += rv.value();
+    }
+    assert_eq_i64(5, have, "readv and the remainder deliver all five bytes");
+    rest[3] = (u8)0;
+    assert_true(first[0] == (u8)'a' && first[1] == (u8)'b', "readv fills the first buffer");
+    assert_eq_str("cde", (str)&rest[0], "readv fills the second buffer");
+
+    str payload_path = "silver_net_sendfile.bin";
+    Result<i64, Error> pf = try_open(payload_path, O_RDWR | O_CREAT | O_TRUNC, 420);
+    assert_true(pf.is_ok(), "opened sendfile payload");
+    i32 payload_fd = (i32)pf.value();
+    try_write(payload_fd, (u8*)"payload", 7);
+    i64 payload_off = 0;
+    assert_eq_i64(7, client.sendfile(payload_fd, &payload_off, 7).value(), "sendfile to a socket");
+    assert_eq_i64(7, payload_off, "sendfile advances the offset");
+    u8 got[8];
+    i64 got_len = 0;
+    while (got_len < 7) {
+        Result<i64, Error> gr = server.read(&got[got_len], 7 - got_len);
+        if (gr.is_err() || gr.value() == 0) { break; }
+        got_len += gr.value();
+    }
+    got[got_len] = (u8)0;
+    assert_eq_str("payload", (str)&got[0], "socket received the file bytes");
+    try_close(payload_fd);
+    assert_true(remove_file(payload_path), "removed sendfile payload");
+
     // Test B: connection refused
     test_start("tcp connect refused");
     Result<SocketAddr, AddrError> refused_result =
@@ -52,9 +98,15 @@ i32 main() {
     Result<TcpStream, Error> refused = TcpStream.connect(&refused_addr);
     assert_true(refused.failed(), "connect refused returns error");
     Error refused_err = refused.get_error();
-    // Test C: Unix domain socket TCP stream/listener (abstract namespace)
+    // Test C: Unix domain socket TCP stream/listener. The abstract namespace
+    // is Linux-only; Windows AF_UNIX binds filesystem paths.
     test_start("unix domain socket echo");
-    Result<SocketAddr, AddrError> u_bind_r = SocketAddr.unix("@test_silver_tcp_sock");
+    str u_path = "@test_silver_tcp_sock";
+    if (@cfg(os.windows)) {
+        u_path = "test_silver_tcp.sock";
+        remove_file(u_path);
+    }
+    Result<SocketAddr, AddrError> u_bind_r = SocketAddr.unix(u_path);
     assert_true(u_bind_r.success(), "unix bind address valid");
     SocketAddr u_bind_addr = u_bind_r.unwrap();
     TcpListener u_listener = TcpListener.bind(&u_bind_addr, 1);
@@ -76,6 +128,9 @@ i32 main() {
     u_msg[ur.value()] = (u8)0;
     assert_eq_str("ping", (str)u_msg, "unix echo message matches");
     free(u_msg);
+    if (@cfg(os.windows)) {
+        assert_true(remove_file(u_path), "unix socket path removed");
+    }
 
     return done();
 }

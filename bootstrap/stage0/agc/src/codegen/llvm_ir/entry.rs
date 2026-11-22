@@ -2033,6 +2033,35 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .ok_or_else(|| CodegenError::new("hash_bytes returned void"))
     }
 
+    /// Address operand of a raw-memory intrinsic. A borrow reference such as
+    /// `&buf[0]` is a {data, state} carrier and lowers to its data pointer, as
+    /// at a C call boundary.
+    /// Any other aggregate is rejected rather than read through its first
+    /// field.
+    fn memory_intrinsic_pointer(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        operand: &ast::Expression,
+        intrinsic: &str,
+    ) -> CodegenResult<PointerValue<'ctx>> {
+        // Expressions the resolver does not type (a conditional choosing
+        // between references, a call through a function-typed local) are
+        // accepted when the value is exactly the reference carrier; user
+        // structs are named LLVM types and never match it.
+        let is_reference = match self.resolve_argument_type(operand) {
+            Some(ty) => matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_)),
+            None => value.get_type() == self.reference_type().as_basic_type_enum(),
+        };
+        match value {
+            BasicValueEnum::PointerValue(pointer) => Ok(pointer),
+            BasicValueEnum::StructValue(_) if is_reference => self.reference_data(value, operand.span),
+            _ => Err(CodegenError::with_span(
+                crate::diagnostics::messages::memory_intrinsic_pointer_expected(intrinsic),
+                operand.span,
+            )),
+        }
+    }
+
     pub(crate) fn memcpy_codegen(
         &mut self,
         expr: &ast::Expression,
@@ -2059,8 +2088,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let dst_val = self.emit_expression_value(dst_expr)?;
         let src_val = self.emit_expression_value(src_expr)?;
         let len_val = self.emit_expression_value(len_expr)?;
-        let dst_ptr = dst_val.into_pointer_value();
-        let src_ptr = src_val.into_pointer_value();
+        let dst_ptr = self.memory_intrinsic_pointer(dst_val, dst_expr, "memcpy")?;
+        let src_ptr = self.memory_intrinsic_pointer(src_val, src_expr, "memcpy")?;
         let len_i64 = len_val.into_int_value();
         // Get or declare llvm.memcpy.p0.p0.i64 intrinsic
         let memcpy_fn = self
@@ -2089,7 +2118,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 "memcpy",
             )
             .map_err(|e| CodegenError::with_span(format!("@memcpy call failed: {e}"), expr.span))?;
-        Ok(dst_val)
+        Ok(dst_ptr.into())
     }
 
     pub(crate) fn memset_codegen(
@@ -2118,7 +2147,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let dst_val = self.emit_expression_value(dst_expr)?;
         let val_val = self.emit_expression_value(val_expr)?;
         let len_val = self.emit_expression_value(len_expr)?;
-        let dst_ptr = dst_val.into_pointer_value();
+        let dst_ptr = self.memory_intrinsic_pointer(dst_val, dst_expr, "memset")?;
         let val_i8 = val_val.into_int_value();
         let len_i64 = len_val.into_int_value();
         // Get or declare llvm.memset.p0.i64 intrinsic
@@ -2149,7 +2178,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 "memset",
             )
             .map_err(|e| CodegenError::with_span(format!("@memset call failed: {e}"), expr.span))?;
-        Ok(dst_val)
+        Ok(dst_ptr.into())
     }
 
     pub(crate) fn memmove_codegen(
@@ -2178,8 +2207,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         let dst_val = self.emit_expression_value(dst_expr)?;
         let src_val = self.emit_expression_value(src_expr)?;
         let len_val = self.emit_expression_value(len_expr)?;
-        let dst_ptr = dst_val.into_pointer_value();
-        let src_ptr = src_val.into_pointer_value();
+        let dst_ptr = self.memory_intrinsic_pointer(dst_val, dst_expr, "memmove")?;
+        let src_ptr = self.memory_intrinsic_pointer(src_val, src_expr, "memmove")?;
         let len_i64 = len_val.into_int_value();
         // Get or declare llvm.memmove.p0.p0.i64 intrinsic
         let memmove_fn = self
@@ -2210,7 +2239,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .map_err(|e| {
                 CodegenError::with_span(format!("@memmove call failed: {e}"), expr.span)
             })?;
-        Ok(dst_val)
+        Ok(dst_ptr.into())
     }
 
     pub(crate) fn emit_value_drop_at_ptr(

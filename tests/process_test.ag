@@ -1,8 +1,35 @@
 import std.test;
+import std.env;
+import std.optional;
 import std.process;
+import std.string;
 import std.sys.raw.process;
 import std.mem.vec;
 import std.slice;
+
+/// Arguments the self-spawn check passes through the platform's argv
+/// encoding: spaces, quotes, trailing and embedded backslashes, empty.
+str g_tricky_args[5] = { "two words", "quote\"inside", "trail\\", "back\\\\\"q", "" };
+
+/// Child mode (`--child-args`): exits 0 when argv carries `g_tricky_args`
+/// unchanged and the spawning Command's env override is visible.
+i32 child_check_args(Vec<String>* argv) {
+    if (argv.len() != 7) { return 3; }
+    for (i64 i = 0; i < 5; i = i + 1) {
+        if (!argv.get_ptr(i + 2).equals(g_tricky_args[i])) { return 4 + (i32)i; }
+    }
+    Optional<String> marker = var("SILVER_PROCESS_TEST");
+    if (marker.is_none() || !marker.unwrap().equals("on")) { return 9; }
+    return 0;
+}
+
+/// A Command re-running this test binary in child mode `mode`.
+Command self_command(str mode) {
+    Vec<String> argv = args();
+    Command cmd = Command.new(argv.get_ptr(0).to_str());
+    cmd.arg(mode);
+    return cmd;
+}
 
 void bounds_child(i32 container, i32 operation, i64 index, bool empty) {
     i32 array[3] = {10, 20, 30};
@@ -57,6 +84,14 @@ i32 compound_forbidden_rhs() {
 }
 
 i32 main() {
+    Vec<String> argv = args();
+    if (argv.len() >= 2 && argv.get_ptr(1).equals("--child-args")) {
+        return child_check_args(&argv);
+    }
+    if (argv.len() >= 3 && argv.get_ptr(1).equals("--child-exit")) {
+        exit((i32)argv.get_ptr(2).parse_i64().unwrap());
+    }
+
     test_start("native process management");
 
     // 1. Process identity
@@ -65,6 +100,44 @@ i32 main() {
     i64 ppid = getppid();
     assert_true(ppid > 0, "getppid returns positive ppid");
 
+    // Portable spawn coverage: re-run this binary as the child.
+    test_start("self spawn: argv round trip, env, exit codes");
+    Command cmd_args = self_command("--child-args");
+    for (i64 i = 0; i < 5; i = i + 1) { cmd_args.arg(g_tricky_args[i]); }
+    cmd_args.env("SILVER_PROCESS_TEST", "on");
+    Result<Child, i64> ra = cmd_args.spawn();
+    assert_true(ra.is_ok(), "self spawn succeeds");
+    if (ra.is_ok()) {
+        Child ca = ra.unwrap();
+        assert_true(ca.id() > 0, "self child pid is positive");
+        ExitStatus sa = ca.wait_status();
+        assert_true(sa.exited, "self child exited normally");
+        assert_eq_i32(0, sa.exit_code(), "child saw the arguments and env unchanged");
+    }
+    Command cmd_exit = self_command("--child-exit");
+    cmd_exit.arg("42");
+    Result<ExitStatus, i64> re = cmd_exit.status();
+    assert_true(re.is_ok(), "status() of self child succeeds");
+    assert_eq_i32(42, re.unwrap().exit_code(), "self child exit code is 42");
+    assert_true(!re.unwrap().success(), "exit 42 is not success");
+
+    if (@cfg(os.windows)) {
+        // A program that cannot start fails at spawn (no fork/exec split).
+        Command cmd_missing = Command.new("C:\\nonexistent_dir_xyz\\nonexistent_command_xyz_12345.exe");
+        Result<Child, i64> rm = cmd_missing.spawn();
+        assert_true(rm.is_err(), "spawn of a missing program fails");
+        assert_eq_i64(-2, rm.unwrap_err(), "missing program reports -ENOENT");
+    }
+
+    if (@cfg(os.linux)) {
+        if (linux_process_checks() != 0) { return 1; }
+    }
+    return done();
+}
+
+/// Linux-only coverage: /usr/bin/env children and fork-based abort checks.
+#[cfg(os.linux)]
+i32 linux_process_checks() {
     // 2. Command spawn and wait: success case
     Command cmd_true = Command.new("/usr/bin/env");
     cmd_true.arg("sh");
@@ -163,5 +236,5 @@ i32 main() {
         assert_eq_i32(6, status.termsig(), "wide and negative array access aborts");
         if (status.termsig() != 6) { return 1; }
     }
-    return done();
+    return 0;
 }

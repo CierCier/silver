@@ -1,4 +1,4 @@
-// std/net/tcp.ag — TCP stream and listener wrappers (Linux x86_64).
+// std/net/tcp.ag — TCP stream and listener wrappers.
 //
 // TcpStream and TcpListener own a Socket and accept borrowed SocketAddr
 // values at the syscall boundary. Constructors retain the existing invalid
@@ -154,7 +154,7 @@ impl TcpStream {
         i64 done = 0;
         while (done < len) {
             Result<i64, Error> r =
-                try_sendto(self.sock.fd, (void*)((i64)buf + done), len - done, 0x4000, (void*)0, 0);
+                try_sendto(self.sock.fd, (void*)((i64)buf + done), len - done, MSG_NOSIGNAL, (void*)0, 0);
             if (r.is_err()) {
                 if (r.err_is(EINTR)) { continue; }
                 if (done > 0) { return Ok(done); }
