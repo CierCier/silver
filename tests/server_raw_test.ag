@@ -201,11 +201,27 @@ void test_zero_copy_sendfile() {
     sys_unlink((i64)path);
 }
 
+/// An eventfd that lands on descriptor 0 (stdin closed) still behaves as an
+/// eventfd. Runs last: it leaves stdin closed.
+void test_eventfd_on_descriptor_zero() {
+    try_close(0);
+    Result<EventFd, Error> efd_res = EventFd.new(0, true);
+    @assert(efd_res.is_ok());
+    EventFd efd = efd_res.unwrap();
+    @assert(efd.fd == 0);
+    @assert(efd.notify(3));
+    Result<u64, Error> r = efd.read_val();
+    @assert(r.is_ok());
+    @assert(r.unwrap() == 3);
+    efd.close();
+}
+
 i32 main() {
     test_packed_epoll_event();
     test_epoll_and_eventfd();
     test_vectorized_io();
     test_socket_tuning_and_reuseport();
     test_zero_copy_sendfile();
+    test_eventfd_on_descriptor_zero();
     return 0;
 }

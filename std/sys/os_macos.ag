@@ -1824,7 +1824,7 @@ void mac_termios_from_linux(u8* lin, u8* mac) {
 
 /// Most pty masters with a held slave at once.
 const i64 MAC_PTY_MAX = 64;
-/// Master fd per slot (0 = free) and the slave fd held for it.
+/// Master fd + 1 per slot (0 = free; the bias lets descriptor 0 be a master).
 i64 g_mac_pty_masters[64];
 /// Slave fd held for the master in the same slot.
 i64 g_mac_pty_slaves[64];
@@ -1856,7 +1856,7 @@ i64 mac_pty_hold(i64 fd) {
     }
     i64 i = 0;
     while (i < MAC_PTY_MAX) {
-        if (__atomic_cmpxchg_i64(&g_mac_pty_masters[i], 0, fd, ATOMIC_SEQ_CST, ATOMIC_ACQUIRE)) {
+        if (__atomic_cmpxchg_i64(&g_mac_pty_masters[i], 0, fd + 1, ATOMIC_SEQ_CST, ATOMIC_ACQUIRE)) {
             g_mac_pty_slaves[i] = slave;
             __atomic_fetch_add_i64(&g_mac_pty_live, 1, ATOMIC_ACQ_REL);
             return 0;
@@ -1869,12 +1869,12 @@ i64 mac_pty_hold(i64 fd) {
 
 /// The slot holding master `fd`'s slave, or -1.
 i64 mac_pty_slot(i64 fd) {
-    if (__atomic_load_i64(&g_mac_pty_live, ATOMIC_ACQUIRE) == 0 || fd <= 0) {
+    if (__atomic_load_i64(&g_mac_pty_live, ATOMIC_ACQUIRE) == 0 || fd < 0) {
         return -1;
     }
     i64 i = 0;
     while (i < MAC_PTY_MAX) {
-        if (__atomic_load_i64(&g_mac_pty_masters[i], ATOMIC_ACQUIRE) == fd) {
+        if (__atomic_load_i64(&g_mac_pty_masters[i], ATOMIC_ACQUIRE) == fd + 1) {
             return i;
         }
         i += 1;
@@ -2286,9 +2286,11 @@ const i64 LINUX_EFD_SEMAPHORE = 1;
 /// Most eventfds alive at once.
 const i64 MAC_EVENTFD_MAX = 64;
 
-/// One emulated eventfd: the read end the caller holds (0 when the slot is
-/// free), the pipe's write end, the 64-bit counter, and the Linux flags.
+/// One emulated eventfd: its slot key (the read end + 1; 0 = free, -1 =
+/// being filled, so descriptor 0 can be an eventfd), the read end the caller
+/// holds, the pipe's write end, the 64-bit counter, and the Linux flags.
 struct MacEventFd {
+    i64 key;
     i64 fd;
     i64 write_fd;
     u64 counter;
@@ -2302,12 +2304,12 @@ i64 g_mac_eventfd_live;
 
 /// The table entry for `fd`, or null when `fd` is not an eventfd.
 MacEventFd* mac_eventfd_find(i64 fd) {
-    if (__atomic_load_i64(&g_mac_eventfd_live, ATOMIC_ACQUIRE) == 0 || fd <= 0) {
+    if (__atomic_load_i64(&g_mac_eventfd_live, ATOMIC_ACQUIRE) == 0 || fd < 0) {
         return (MacEventFd*)0;
     }
     i64 i = 0;
     while (i < MAC_EVENTFD_MAX) {
-        if (__atomic_load_i64(&g_mac_eventfds[i].fd, ATOMIC_ACQUIRE) == fd) {
+        if (__atomic_load_i64(&g_mac_eventfds[i].key, ATOMIC_ACQUIRE) == fd + 1) {
             return &g_mac_eventfds[i];
         }
         i += 1;
@@ -2331,8 +2333,9 @@ i64 sys_eventfd2(i64 initval, i64 flags) {
     }
     i64 i = 0;
     while (i < MAC_EVENTFD_MAX) {
-        if (__atomic_cmpxchg_i64(&g_mac_eventfds[i].fd, 0, -1, ATOMIC_SEQ_CST, ATOMIC_ACQUIRE)) {
+        if (__atomic_cmpxchg_i64(&g_mac_eventfds[i].key, 0, -1, ATOMIC_SEQ_CST, ATOMIC_ACQUIRE)) {
             MacEventFd* e = &g_mac_eventfds[i];
+            e.fd = (i64)fds[0];
             e.write_fd = (i64)fds[1];
             e.counter = (u64)initval;
             e.flags = flags;
@@ -2341,7 +2344,7 @@ i64 sys_eventfd2(i64 initval, i64 flags) {
                 mac_write(fds[1], (i64)&one, 1);
             }
             __atomic_fetch_add_i64(&g_mac_eventfd_live, 1, ATOMIC_ACQ_REL);
-            __atomic_store_i64(&e.fd, (i64)fds[0], ATOMIC_RELEASE);
+            __atomic_store_i64(&e.key, (i64)fds[0] + 1, ATOMIC_RELEASE);
             return (i64)fds[0];
         }
         i += 1;
@@ -2411,7 +2414,7 @@ i64 mac_eventfd_write(MacEventFd* e, i64 buf, i64 len) {
 i64 mac_eventfd_close(MacEventFd* e) {
     i64 fd = e.fd;
     mac_close((i32)e.write_fd);
-    __atomic_store_i64(&e.fd, 0, ATOMIC_RELEASE);
+    __atomic_store_i64(&e.key, 0, ATOMIC_RELEASE);
     __atomic_fetch_sub_i64(&g_mac_eventfd_live, 1, ATOMIC_ACQ_REL);
     return mac_ret((i64)mac_close((i32)fd));
 }
@@ -2558,7 +2561,8 @@ const i64 MAC_URING_MAX = 16;
 
 /// One emulated ring.
 struct MacUring {
-    i64 fd;             // ring fd; 0 = free slot
+    i64 key;            // ring fd + 1; 0 = free slot, -1 = being filled
+    i64 fd;             // ring fd
     u8* ring;           // SQ and CQ rings (one region)
     i64 ring_size;
     u8* sqes;           // submission entries
@@ -2580,12 +2584,12 @@ i64 g_mac_uring_live;
 
 /// The ring whose fd is `fd`, or null.
 MacUring* mac_uring_find(i64 fd) {
-    if (__atomic_load_i64(&g_mac_uring_live, ATOMIC_ACQUIRE) == 0 || fd <= 0) {
+    if (__atomic_load_i64(&g_mac_uring_live, ATOMIC_ACQUIRE) == 0 || fd < 0) {
         return (MacUring*)0;
     }
     i64 i = 0;
     while (i < MAC_URING_MAX) {
-        if (__atomic_load_i64(&g_mac_urings[i].fd, ATOMIC_ACQUIRE) == fd) {
+        if (__atomic_load_i64(&g_mac_urings[i].key, ATOMIC_ACQUIRE) == fd + 1) {
             return &g_mac_urings[i];
         }
         i += 1;
@@ -2663,8 +2667,9 @@ i64 sys_io_uring_setup(i64 entries, i64 params) {
 
     i64 i = 0;
     while (i < MAC_URING_MAX) {
-        if (__atomic_cmpxchg_i64(&g_mac_urings[i].fd, 0, -1, ATOMIC_SEQ_CST, ATOMIC_ACQUIRE)) {
+        if (__atomic_cmpxchg_i64(&g_mac_urings[i].key, 0, -1, ATOMIC_SEQ_CST, ATOMIC_ACQUIRE)) {
             MacUring* u = &g_mac_urings[i];
+            u.fd = fd;
             u.ring = (u8*)ring;
             u.ring_size = ring_size;
             u.sqes = (u8*)sqes;
@@ -2678,7 +2683,7 @@ i64 sys_io_uring_setup(i64 entries, i64 params) {
             u.ring_mapped = false;
             u.sqes_mapped = false;
             __atomic_fetch_add_i64(&g_mac_uring_live, 1, ATOMIC_ACQ_REL);
-            __atomic_store_i64(&u.fd, fd, ATOMIC_RELEASE);
+            __atomic_store_i64(&u.key, fd + 1, ATOMIC_RELEASE);
             break;
         }
         i += 1;
@@ -2748,7 +2753,7 @@ void mac_uring_release(MacUring* u) {
     }
     sys_munmap((i64)u.pending, mac_page_round(u.cq_entries * 64));
     sys_munmap((i64)u.pollfds, mac_page_round(u.cq_entries * 8));
-    __atomic_store_i64(&u.fd, 0, ATOMIC_RELEASE);
+    __atomic_store_i64(&u.key, 0, ATOMIC_RELEASE);
     __atomic_fetch_sub_i64(&g_mac_uring_live, 1, ATOMIC_ACQ_REL);
 }
 
