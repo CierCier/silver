@@ -10,8 +10,10 @@
 //! - `.symtab`: function symbols (name, .text offset, size).
 //! - `.debug_line` (DWARF v4 and v5): (address, line, file) pairs.
 //! - `.debug_info`/`.debug_abbrev`/`.debug_str`: per-subprogram formal
-//!   parameter names and `DW_OP_fbreg` frame offsets (for reading spilled
-//!   arguments off the frame at abort time).
+//!   parameter names and frame offsets (for reading spilled arguments off the
+//!   frame at abort time). AArch64 describes some slots relative to SP, which
+//!   the walker cannot see; each function's prologue gives the SP-to-x29
+//!   distance that turns them into frame-pointer offsets.
 //!
 //! Addresses in the object are `.text`-relative; absolute relocations
 //! (`R_X86_64_64`/`_32`, `R_AARCH64_ABS64`/`ABS32`) against the debug
@@ -34,9 +36,12 @@ pub struct BtLineEntry {
 /// Where a formal parameter lives in the frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BtParamLoc {
-    /// `DW_OP_fbreg N`: read `N + CFA` bytes; CFA = rbp + 16 with
-    /// `"frame-pointer"="all"`.
+    /// `DW_OP_fbreg N`: `N` bytes from the frame pointer (`rbp` or `x29`),
+    /// which `"frame-pointer"="all"` makes the frame base.
     Fbreg(i64),
+    /// `DW_OP_breg31 N` on AArch64: `N` bytes above SP once the prologue has
+    /// run. LLVM uses it for slots nearer SP than the frame pointer.
+    SpOffset(i64),
     /// `DW_OP_regN`: register-resident, cannot be read from the frame.
     Reg(u32),
     /// Anything else (loclists, complex expressions).
@@ -50,6 +55,9 @@ pub struct BtFnDebug {
     /// Sorted by offset; one entry per line transition.
     pub lines: Vec<BtLineEntry>,
     pub params: Vec<(String, BtParamLoc)>,
+    /// AArch64: how far the frame pointer sits above SP after the prologue;
+    /// `None` on other targets or when the prologue is not recognised.
+    pub fp_above_sp: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -172,6 +180,8 @@ struct ElfSym {
 
 struct ObjectFile<'a> {
     data: &'a [u8],
+    /// ELF `e_machine`; COFF objects are x86-64.
+    machine: u16,
     sections: Vec<ElfSection>,
     symbols: Vec<ElfSym>,
     /// debug-section-relative offset -> value to add (symbol value + addend)
@@ -306,6 +316,7 @@ fn elf_parse(data: &[u8]) -> Option<ObjectFile<'_>> {
     }
     Some(ObjectFile {
         data,
+        machine: e_machine,
         sections,
         symbols,
         relocations,
@@ -545,6 +556,7 @@ fn coff_parse(data: &[u8]) -> Option<ObjectFile<'_>> {
 
     Some(ObjectFile {
         data,
+        machine: EM_X86_64,
         sections: secs
             .into_iter()
             .map(|s| ElfSection {
@@ -623,6 +635,20 @@ pub fn parse_object_debug_lines(obj: &[u8]) -> Vec<BtFnDebug> {
     if funcs.is_empty() {
         return Vec::new();
     }
+    let fp_above_sp: HashMap<String, i64> = if elf.machine == EM_AARCH64 {
+        elf.symbols
+            .iter()
+            .filter(|s| s.is_func && s.defined && s.size > 0)
+            .filter_map(|s| {
+                let section = elf.sections.get(usize::from(s.section as u16))?;
+                let start = section.offset.checked_add(usize::try_from(s.value).ok()?)?;
+                let code = elf.data.get(start..start.checked_add(usize::try_from(s.size).ok()?)?)?;
+                Some((s.name.clone(), aarch64_fp_above_sp(code)?))
+            })
+            .collect()
+    } else {
+        HashMap::default()
+    };
     let mut per_fn: HashMap<String, Vec<(u64, u64, String)>> = HashMap::default();
 
     let mut pos = 0usize;
@@ -796,6 +822,7 @@ pub fn parse_object_debug_lines(obj: &[u8]) -> Vec<BtFnDebug> {
             collapsed.push(entry);
         }
         out.push(BtFnDebug {
+            fp_above_sp: fp_above_sp.get(&name).copied(),
             name,
             lines: collapsed
                 .into_iter()
@@ -805,6 +832,45 @@ pub fn parse_object_debug_lines(obj: &[u8]) -> Vec<BtFnDebug> {
         });
     }
     out
+}
+
+/// How far x29 sits above SP once the AArch64 prologue at the start of
+/// `code` has run. LLVM saves the callee-saved registers, sets x29 with
+/// `add x29, sp, #K` (`mov x29, sp` is K = 0), then may lower SP further with
+/// `sub sp, sp, #N`. Any other SP write after x29 is set (stack realignment,
+/// a register-sized frame) makes SP-relative slots unreadable from x29, so
+/// the result is `None` rather than a wrong offset.
+fn aarch64_fp_above_sp(code: &[u8]) -> Option<i64> {
+    // Prologue instructions before x29 is set: PAC/BTI hints, one SP bump,
+    // and every callee-saved register pair (x19-x28, d8-d15).
+    const MAX_BEFORE_FP: usize = 16;
+    // Body instructions checked for a late SP write such as `and sp, x9, #m`.
+    const BODY_WINDOW: usize = 4;
+    let words: Vec<u32> = code
+        .chunks_exact(4)
+        .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+        .collect();
+    let add_imm = |word: u32| i64::from((word >> 10) & 0xfff) << if word & (1 << 22) != 0 { 12 } else { 0 };
+    let fp_setup = words
+        .iter()
+        .take(MAX_BEFORE_FP)
+        .position(|&w| w & 0xff80_03ff == 0x9100_03fd)?; // add x29, sp, #imm
+    let mut above = add_imm(words[fp_setup]);
+    let mut rest = words[fp_setup + 1..].iter().copied().peekable();
+    while let Some(word) = rest.next_if(|&w| w & 0xff80_03ff == 0xd100_03ff) {
+        above += add_imm(word); // sub sp, sp, #imm
+    }
+    // Rd = 31 names SP only in the forms that do not set flags.
+    let writes_sp = |w: u32| {
+        let add_sub_imm = w & 0x3f80_0000 == 0x1100_0000;
+        let add_sub_extended = w & 0x3fe0_0000 == 0x0b20_0000;
+        let logical_imm = w & 0x1f80_0000 == 0x1200_0000 && w & 0x6000_0000 != 0x6000_0000;
+        w & 0x1f == 0x1f && (add_sub_imm || add_sub_extended || logical_imm)
+    };
+    if rest.take(BODY_WINDOW).any(writes_sp) {
+        return None;
+    }
+    Some(above)
 }
 
 fn push_entry(
@@ -846,6 +912,7 @@ const DW_TAG_SUBPROGRAM: u64 = 0x2e;
 const DW_TAG_FORMAL_PARAMETER: u64 = 0x05;
 
 const DW_OP_FBREG: u8 = 0x91;
+const DW_OP_BREG31: u8 = 0x8f;
 const DW_OP_REG0: u8 = 0x50;
 const DW_OP_REGX: u8 = 0x90;
 
@@ -1066,7 +1133,8 @@ fn read_flag(r: &mut Reader, form: u64) -> Option<bool> {
     }
 }
 
-/// DW_AT_location: exprloc with DW_OP_fbreg N / DW_OP_regN / DW_OP_regx.
+/// DW_AT_location: exprloc with DW_OP_fbreg N / DW_OP_breg31 N / DW_OP_regN /
+/// DW_OP_regx.
 fn read_location(r: &mut Reader, form: u64) -> Option<BtParamLoc> {
     let bytes = match form {
         DW_FORM_EXPRLOC | DW_FORM_BLOCK => {
@@ -1090,6 +1158,7 @@ fn read_location(r: &mut Reader, form: u64) -> Option<BtParamLoc> {
     let mut br = Reader::new(bytes);
     match br.u8()? {
         DW_OP_FBREG => Some(BtParamLoc::Fbreg(br.sleb()?)),
+        DW_OP_BREG31 => Some(BtParamLoc::SpOffset(br.sleb()?)),
         op if (DW_OP_REG0..=DW_OP_REG0 + 31).contains(&op) => {
             Some(BtParamLoc::Reg(u32::from(op - DW_OP_REG0)))
         }
@@ -1137,5 +1206,29 @@ fn skip_form(r: &mut Reader, form: u64) {
         _ => {
             r.skip(8);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::aarch64_fp_above_sp;
+
+    fn code(words: &[u32]) -> Vec<u8> {
+        words.iter().flat_map(|w| w.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn aarch64_prologue_distance() {
+        // sub sp, sp, #0x20; stp x29, x30, [sp, #0x10]; add x29, sp, #0x10; str x0, [sp]
+        let combined = code(&[0xd100_83ff, 0xa901_7bfd, 0x9100_43fd, 0xf900_03e0]);
+        assert_eq!(aarch64_fp_above_sp(&combined), Some(0x10));
+        // stp x29, x30, [sp, #-0x10]!; mov x29, sp; sub sp, sp, #0x1, lsl #12; sub sp, sp, #0x30
+        let separate = code(&[0xa9bf_7bfd, 0x9100_03fd, 0xd140_07ff, 0xd100_c3ff, 0xf900_03e0]);
+        assert_eq!(aarch64_fp_above_sp(&separate), Some(0x1030));
+        // stp x29, x30, [sp, #-0x10]!; mov x29, sp; sub x9, sp, #0x40; and sp, x9, #~0x1f
+        let realigned = code(&[0xa9bf_7bfd, 0x9100_03fd, 0xd101_03e9, 0x927b_e93f]);
+        assert_eq!(aarch64_fp_above_sp(&realigned), None);
+        // No frame pointer setup.
+        assert_eq!(aarch64_fp_above_sp(&code(&[0xd100_83ff, 0xd65f_03c0])), None);
     }
 }
