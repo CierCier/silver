@@ -35,6 +35,7 @@ use inkwell::targets::TargetData;
 use inkwell::types::{BasicTypeEnum, StructType};
 use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue};
 
+use crate::codegen::abi::AbiSlot;
 use crate::codegen::llvm_ir::aggregate::Operand;
 use crate::codegen::llvm_ir::function_abi::Callee;
 use crate::codegen::llvm_ir::{FunctionSig, LlvmIrGenerator};
@@ -490,6 +491,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             CodegenError::with_span("launch: no active insert block for trampoline", *span)
         })?;
         self.builder.position_at_end(entry);
+        // C ABI conversion inserts blocks into `current_fn`; point it at the
+        // trampoline while emitting its body.
+        let saved_fn = self.current_fn.replace(tramp);
 
         let pack_arg = tramp.get_nth_param(0).ok_or_else(|| {
             CodegenError::with_span("launch: trampoline missing pack parameter", *span)
@@ -520,7 +524,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             args.push(Operand::Memory { ptr: slot, ty: arg_ty });
         }
 
-        let result = if Self::internal_abi(signature.linkage.as_ref()) {
+        let result = if let Some(linkage) = signature.linkage.as_ref().filter(|l| !Self::internal_abi(Some(l))) {
+            // A foreign callee gets C-ABI arguments and, for a large struct
+            // result, the hidden `sret` slot that `build_foreign_call` adds.
+            let mut values = Vec::with_capacity(args.len());
+            for (arg, param_ty) in args.into_iter().zip(&signature.params) {
+                let value = self.operand_value(arg, "arg").map_err(|e| {
+                    CodegenError::with_span(format!("launch: trampoline arg load failed: {e}"), *span)
+                })?;
+                values.push(BasicMetadataValueEnum::from(
+                    self.coerce_value_to_abi(value, param_ty, linkage, AbiSlot::Argument)?,
+                ));
+            }
+            self.build_foreign_call(callee, Some(signature), values, "task.call")?.1
+        } else {
             self.build_internal_call(
                 Callee::Direct(callee),
                 &signature.params,
@@ -529,20 +546,6 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 "task.call",
             )?
             .1
-        } else {
-            let mut values = Vec::with_capacity(args.len());
-            for arg in args {
-                values.push(BasicMetadataValueEnum::from(self.operand_value(arg, "arg").map_err(|e| {
-                    CodegenError::with_span(format!("launch: trampoline arg load failed: {e}"), *span)
-                })?));
-            }
-            self.builder
-                .build_call(callee, &values, "task.call")
-                .map_err(|e| {
-                    CodegenError::with_span(format!("launch: trampoline call failed: {e}"), *span)
-                })?
-                .try_as_basic_value()
-                .basic()
         };
         if !ret_is_void {
             let result = result.ok_or_else(|| {
@@ -565,7 +568,8 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             CodegenError::with_span(format!("launch: trampoline return failed: {e}"), *span)
         })?;
 
-        // Restore the parent function's builder position.
+        // Restore the parent function and its builder position.
+        self.current_fn = saved_fn;
         self.builder.position_at_end(saved_block);
         Ok(tramp.as_global_value().as_pointer_value().into())
     }

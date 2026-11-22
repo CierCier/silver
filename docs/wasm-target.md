@@ -42,10 +42,9 @@ loudly instead of miscompiling silently:
 - **ABI** (`codegen/abi.rs`): new `WasmAbi` implementing the tool-conventions
   Basic C ABI — single-member aggregates pass by value as the member's own
   type (`{i64}`→`i64`), all other aggregates pass by pointer (`byval`),
-  returns mirror with `sret`. The trait gained type-aware
-  `struct_needs_byval`/`struct_needs_sret` because size alone cannot express
-  the rule (`{i64}` vs `{i32,i32}` are both 8 bytes). The old silent
-  AMD64-fallback for unknown triples never fires on wasm.
+  returns mirror with `sret`. Classification takes the struct type, not its
+  size, because size alone cannot express the rule (`{i64}` vs `{i32,i32}`
+  are both 8 bytes).
 - **Inline asm** (`codegen/llvm_ir/expr.rs`): any `asm()` is a hard compile
   error on wasm triples — the x86 register model cannot be expressed.
 - **`launch`** (`tasks.rs`): hard compile error — WASI preview1 is

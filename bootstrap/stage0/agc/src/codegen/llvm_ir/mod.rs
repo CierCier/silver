@@ -199,7 +199,8 @@ pub struct LlvmIrGenerator<'ctx> {
     /// one load (call result slots, enum constructions); see
     /// `load_stable_value`.
     pub(crate) stable_places: rustc_hash::FxHashSet<PointerValue<'ctx>>,
-    pub(crate) abi_handler: Box<dyn AbiHandler>,
+    /// By-value C struct classification; `None` on a target without one.
+    pub(crate) abi_handler: Option<Box<dyn AbiHandler>>,
     pub(crate) temp_counter: u64,
     /// Monotonic counter for per-launch-site trampoline function names.
     pub(crate) task_trampoline_counter: u64,

@@ -1,4 +1,5 @@
 use inkwell::AddressSpace;
+use inkwell::attributes::AttributeLoc;
 use inkwell::module::Linkage;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, StructType};
 use inkwell::values::{
@@ -7,6 +8,7 @@ use inkwell::values::{
 
 use super::aggregate::{Operand, scalar_fields};
 use super::{FunctionSig, LlvmIrGenerator};
+use crate::codegen::abi::AbiSlot;
 use crate::codegen::{CodegenError, CodegenResult};
 use crate::parser::ast;
 
@@ -210,6 +212,43 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         Ok((call, value))
     }
 
+    /// Emits a call of `function` with `args` already in their foreign ABI
+    /// form. Under C linkage a struct result that returns in memory goes
+    /// through a hidden `sret` slot, and the call site carries the
+    /// declaration's `sret`, `byval` and `alignstack` attributes. Returns the
+    /// call site and the source-level result.
+    pub(crate) fn build_foreign_call(
+        &mut self,
+        function: FunctionValue<'ctx>,
+        signature: Option<&FunctionSig>,
+        mut args: Vec<BasicMetadataValueEnum<'ctx>>,
+        name: &str,
+    ) -> CodegenResult<(CallSiteValue<'ctx>, Option<BasicValueEnum<'ctx>>)> {
+        let error = |e: inkwell::builder::BuilderError| CodegenError::new(format!("failed to emit call: {e}"));
+        let Some(sig) = signature.filter(|sig| matches!(sig.linkage, Some(ast::ExternLinkage::C))) else {
+            let call = self.builder.build_call(function, &args, name).map_err(error)?;
+            return Ok((call, call.try_as_basic_value().basic()));
+        };
+        let result_slot = match self.c_sret_struct(sig.linkage.as_ref(), sig.return_type.as_ref())? {
+            Some(struct_ty) => {
+                let slot = self.create_entry_alloca(self.insertion_function()?, "call.sret", struct_ty.into())?;
+                args.insert(0, slot.into());
+                Some((struct_ty, slot))
+            }
+            None => None,
+        };
+        let call = self.builder.build_call(function, &args, name).map_err(error)?;
+        for (index, attribute) in self.c_abi_attributes(&sig.params, sig.return_type.as_ref())? {
+            call.add_attribute(AttributeLoc::Param(index), attribute);
+        }
+        let value = match (result_slot, call.try_as_basic_value().basic(), &sig.return_type) {
+            (Some((struct_ty, slot)), _, _) => Some(self.builder.build_load(struct_ty, slot, name).map_err(error)?),
+            (None, Some(value), Some(ret)) => Some(self.uncoerce_value_from_abi(value, ret, &ast::ExternLinkage::C, AbiSlot::Result)?),
+            (None, value, _) => value,
+        };
+        Ok((call, value))
+    }
+
     /// The operand for internal call argument `value`, evaluated now. An
     /// aggregate passed by pointer is copied into a fresh slot at once, so
     /// arguments evaluated later cannot change it.
@@ -343,17 +382,23 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
         } else { None };
         for (argument, ty) in args.iter().zip(&signature.parameters) {
             foreign_args.push(BasicMetadataValueEnum::from(self.coerce_value_to_abi(
-                *argument, ty, &ast::ExternLinkage::C)?));
+                *argument, ty, &ast::ExternLinkage::C, AbiSlot::Argument)?));
         }
-        let foreign_result = self.builder.build_indirect_call(foreign_type, foreign, &foreign_args, "")
-            .map_err(|e| CodegenError::new(e.to_string()))?.try_as_basic_value().basic();
+        let foreign_call = self.builder.build_indirect_call(foreign_type, foreign, &foreign_args, "")
+            .map_err(|e| CodegenError::new(e.to_string()))?;
+        // An indirect call has no declaration, so `sret` and `byval` must sit
+        // on the call site for LLVM to pass them as C expects.
+        for (index, attribute) in self.c_abi_attributes(&signature.parameters, Some(&signature.return_type))? {
+            foreign_call.add_attribute(AttributeLoc::Param(index), attribute);
+        }
+        let foreign_result = foreign_call.try_as_basic_value().basic();
         let foreign_result = if let Some(slot) = return_slot {
             let ty = self.lower_basic_type(&signature.return_type)?;
             Some(self.builder.build_load(ty, slot, "callback.sret.result")
                 .map_err(|e| CodegenError::new(e.to_string()))?)
         } else {
             foreign_result.map(|value| self.uncoerce_value_from_abi(
-                value, &signature.return_type, &ast::ExternLinkage::C)).transpose()?
+                value, &signature.return_type, &ast::ExternLinkage::C, AbiSlot::Result)).transpose()?
         };
         self.builder.build_unconditional_branch(after).map_err(|e| CodegenError::new(e.to_string()))?;
         let foreign_end = self.builder.get_insert_block().expect("foreign call block");
@@ -417,6 +462,9 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             let ty = self.lower_function_type(&signature.params, signature.return_type.as_ref(), false,
                 Some(ast::ExternLinkage::C))?;
             let adapter = self.module.add_function(&adapter_name, ty, Some(Linkage::Internal));
+            for (index, attribute) in self.c_abi_attributes(&signature.params, signature.return_type.as_ref())? {
+                adapter.add_attribute(AttributeLoc::Param(index), attribute);
+            }
             let saved_block = self.builder.get_insert_block();
             let saved_function = self.current_fn.replace(adapter);
             self.builder.position_at_end(self.context.append_basic_block(adapter, "entry"));
@@ -427,7 +475,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 for (index, parameter) in signature.params.iter().enumerate() {
                     let value = adapter.get_nth_param(index as u32 + u32::from(sret))
                         .ok_or_else(|| CodegenError::new("missing callback parameter"))?;
-                    args.push(Operand::Value(self.uncoerce_value_from_abi(value, parameter, &ast::ExternLinkage::C)?));
+                    args.push(Operand::Value(self.uncoerce_value_from_abi(value, parameter, &ast::ExternLinkage::C, AbiSlot::Argument)?));
                 }
                 let (_, result) = self.build_internal_call(Callee::Direct(function), &signature.params,
                     signature.return_type.as_ref(), &args, "")?;
@@ -440,7 +488,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                         return Ok(());
                     }
                     let value = if let Some(ty) = &signature.return_type {
-                        self.coerce_value_to_abi(value, ty, &ast::ExternLinkage::C)?
+                        self.coerce_value_to_abi(value, ty, &ast::ExternLinkage::C, AbiSlot::Result)?
                     } else { value };
                     self.builder.build_return(Some(&value)).map_err(|e| CodegenError::new(e.to_string()))?;
                 } else {
