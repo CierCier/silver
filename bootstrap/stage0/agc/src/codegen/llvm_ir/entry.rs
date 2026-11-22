@@ -2113,7 +2113,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 "memcpy",
             )
             .map_err(|e| CodegenError::with_span(format!("@memcpy call failed: {e}"), expr.span))?;
-        Ok(dst_val)
+        Ok(dst_ptr.into())
     }
 
     pub(crate) fn memset_codegen(
@@ -2173,7 +2173,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
                 "memset",
             )
             .map_err(|e| CodegenError::with_span(format!("@memset call failed: {e}"), expr.span))?;
-        Ok(dst_val)
+        Ok(dst_ptr.into())
     }
 
     pub(crate) fn memmove_codegen(
@@ -2234,7 +2234,7 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
             .map_err(|e| {
                 CodegenError::with_span(format!("@memmove call failed: {e}"), expr.span)
             })?;
-        Ok(dst_val)
+        Ok(dst_ptr.into())
     }
 
     pub(crate) fn emit_value_drop_at_ptr(
