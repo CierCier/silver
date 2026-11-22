@@ -81,7 +81,7 @@ i32 main() {
     @memmove(&ref_dst[1], &ref_dst[0], 3);
     @assert(ref_dst[0] == (u8)1 && ref_dst[1] == (u8)1 && ref_dst[2] == (u8)2 && ref_dst[3] == (u8)3,
         "@memmove overlapping references");
-    @memset(&ref_src[1], 9, 2);
+    @memset(&ref_src[1], (u8)9, 2);
     @assert(ref_src[0] == (u8)1 && ref_src[1] == (u8)9 && ref_src[2] == (u8)9 && ref_src[3] == (u8)4,
         "@memset through a reference");
 

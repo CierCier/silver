@@ -251,19 +251,26 @@ fn msvc_default_libs(static_crt: bool) -> &'static [&'static str] {
     }
 }
 
-/// User and dependency library dirs searched for `<name>.dll.lib` import
-/// libraries; SDK dirs hold only system libraries and are skipped.
-fn native_search_dirs_win(plan: &CompilePlan, dependency_paths: &[PathBuf]) -> Vec<PathBuf> {
-    let mut dirs = plan.lib_dirs.clone();
+/// Every directory the COFF link searches (`-L`, dependency, `LIB`, and
+/// the discovered MSVC/SDK dirs), in its order, for probing which library
+/// file a bare `#[link]` name resolves to.
+fn native_search_dirs_win(
+    plan: &CompilePlan,
+    dependency_paths: &[PathBuf],
+    msvc_dirs: &[PathBuf],
+) -> Vec<PathBuf> {
+    let mut dirs = msvc_dirs.to_vec();
     dirs.extend(dependency_library_dirs(dependency_paths));
+    dirs.extend(plan.lib_dirs.iter().cloned());
     dirs
 }
 
-/// MSVC stand-ins for POSIX libc component libraries, so `-lc`/`-lm` stay
-/// portable instead of failing on a missing `c.lib`. The default UCRT set
-/// already provides libm/pthread/dl/rt equivalents; `printf`-family entry
-/// points are header inlines in the UCRT, and `legacy_stdio_definitions`
-/// exports them as real symbols for C-ABI callers.
+/// MSVC stand-ins for POSIX libc component libraries, used when no library
+/// of that name is installed, so `-lc`/`-lm` stay portable instead of
+/// failing on a missing `c.lib`. The default UCRT set already provides
+/// libm/dl/rt equivalents; `printf`-family entry points are header inlines in
+/// the UCRT, and `legacy_stdio_definitions` exports them as real symbols for
+/// C-ABI callers. An installed `pthread.lib` (pthreads-win32) still wins.
 fn posix_library_win(library: &str) -> Option<&'static [&'static str]> {
     match library {
         "c" => Some(&["legacy_stdio_definitions.lib"]),
@@ -276,17 +283,14 @@ fn posix_library_win(library: &str) -> Option<&'static [&'static str]> {
 /// resolve as `<name>.lib` on the MSVC side. Like `ld` preferring `lib<name>.so`
 /// over `lib<name>.a`, a dynamic link prefers the `<name>.dll.lib` import
 /// library (Rust's and CMake's naming, distinct from a same-named static
-/// library) when one exists in `search_dirs`.
+/// library) when one exists in `search_dirs`. POSIX libc names fall back to
+/// their MSVC stand-ins only when no such library is installed.
 fn add_native_library_win(
     command: &mut Command,
     library: &str,
     search_dirs: &[PathBuf],
     static_link: bool,
 ) {
-    if let Some(replacements) = posix_library_win(library) {
-        command.args(replacements);
-        return;
-    }
     let path = Path::new(library);
     if path.is_absolute() {
         command.arg(library);
@@ -296,11 +300,17 @@ fn add_native_library_win(
     {
         command.arg(library);
     } else {
+        let installed = |file: &str| search_dirs.iter().any(|dir| dir.join(file).is_file());
         let import_lib = format!("{library}.dll.lib");
-        if !static_link && search_dirs.iter().any(|dir| dir.join(&import_lib).is_file()) {
+        let lib = format!("{library}.lib");
+        if !static_link && installed(&import_lib) {
             command.arg(import_lib);
+        } else if installed(&lib) {
+            command.arg(lib);
+        } else if let Some(replacements) = posix_library_win(library) {
+            command.args(replacements);
         } else {
-            command.arg(format!("{library}.lib"));
+            command.arg(lib);
         }
     }
 }
@@ -556,7 +566,8 @@ pub(crate) fn link_exe_with_lld_link(
         link.arg(dep);
     }
 
-    for dir in msvc_library_dirs() {
+    let msvc_dirs = msvc_library_dirs();
+    for dir in &msvc_dirs {
         link.arg(format!("/LIBPATH:{}", dir.display()));
     }
     for dir in dependency_library_dirs(dependency_paths) {
@@ -570,7 +581,7 @@ pub(crate) fn link_exe_with_lld_link(
         link.arg(lib);
     }
     // `#[link(name = "foo")]` native deps resolve against the SDK/libpath as foo.lib.
-    let search_dirs = native_search_dirs_win(plan, dependency_paths);
+    let search_dirs = native_search_dirs_win(plan, dependency_paths, &msvc_dirs);
     for lib in native_libs {
         add_native_library_win(&mut link, lib, &search_dirs, plan.static_link);
     }
@@ -802,7 +813,8 @@ pub(crate) fn link_shared_module(
             }
             link.arg(dep);
         }
-        for dir in msvc_library_dirs() {
+        let msvc_dirs = msvc_library_dirs();
+        for dir in &msvc_dirs {
             link.arg(format!("/LIBPATH:{}", dir.display()));
         }
         for dir in dependency_library_dirs(dependency_paths) {
@@ -814,7 +826,7 @@ pub(crate) fn link_shared_module(
         for lib in msvc_default_libs(plan.static_link) {
             link.arg(lib);
         }
-        let search_dirs = native_search_dirs_win(plan, dependency_paths);
+        let search_dirs = native_search_dirs_win(plan, dependency_paths, &msvc_dirs);
         for lib in native_libs {
             add_native_library_win(&mut link, lib, &search_dirs, plan.static_link);
         }

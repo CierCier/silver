@@ -2036,15 +2036,20 @@ impl<'ctx> LlvmIrGenerator<'ctx> {
     /// Address operand of a raw-memory intrinsic. A borrow reference such as
     /// `&buf[0]` is a {data, state} carrier and lowers to its data pointer, as
     /// at a C call boundary.
+    /// Any other aggregate is rejected rather than read through its first
+    /// field.
     fn memory_intrinsic_pointer(
-        &self,
+        &mut self,
         value: BasicValueEnum<'ctx>,
         operand: &ast::Expression,
         intrinsic: &str,
     ) -> CodegenResult<PointerValue<'ctx>> {
+        let is_reference = self
+            .resolve_argument_type(operand)
+            .is_some_and(|ty| matches!(ty.kind.as_ref(), ast::TypeKind::Reference(_)));
         match value {
             BasicValueEnum::PointerValue(pointer) => Ok(pointer),
-            BasicValueEnum::StructValue(_) => self.reference_data(value, operand.span),
+            BasicValueEnum::StructValue(_) if is_reference => self.reference_data(value, operand.span),
             _ => Err(CodegenError::with_span(
                 crate::diagnostics::messages::memory_intrinsic_pointer_expected(intrinsic),
                 operand.span,
