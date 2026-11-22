@@ -58,6 +58,25 @@ i32 main() {
         assert_true(replaced.is_some() && replaced.unwrap().equals("replaced"),
             "set_var replaces a differently-cased name on windows");
     }
+    // Long names (past any fixed conversion buffer) stay addressable.
+    String long_name = String.from_str("__SILVER_LONG_");
+    for (i64 i = 0; i < 600; i = i + 1) { long_name.push((u8)'N'); }
+    set_var(long_name.to_str(), "first");
+    set_var(long_name.to_str(), "second");
+    Optional<String> long_val = var(long_name.to_str());
+    assert_true(long_val.is_some() && long_val.unwrap().equals("second"),
+        "a 600-byte name is replaced in place, not duplicated");
+    remove_var(long_name.to_str());
+    assert_true(var(long_name.to_str()).is_none(), "a 600-byte name can be removed");
+    if (@cfg(os.windows)) {
+        // Case folding covers non-ASCII letters (the OS uppercase table).
+        set_var("__SILVER_\u{C4}_VAR", "umlaut");
+        Optional<String> folded_umlaut = var("__silver_\u{E4}_var");
+        assert_true(folded_umlaut.is_some() && folded_umlaut.unwrap().equals("umlaut"),
+            "non-ASCII names fold case on windows");
+        remove_var("__silver_\u{E4}_var");
+        assert_true(var("__SILVER_\u{C4}_VAR").is_none(), "removal folds non-ASCII case");
+    }
     remove_var("__SILVER_DYNAMIC_TEST_VAR__");
     Optional<String> rem_val = var("__SILVER_DYNAMIC_TEST_VAR__");
     assert_true(rem_val.is_none(), "dynamic var is none after remove_var");

@@ -384,7 +384,7 @@ void win_append_quoted_arg(String* line, str arg) {
 /// case-insensitively as Windows expects. Free functions in this block rather
 /// than `Command` methods, so no compiler sees them off Windows. The caller
 /// frees the block.
-u16* win_env_block(Command* cmd) {
+u16* win_env_block(&Command cmd) {
     Vec<String> entries = Vec<String>.new();
     i8** env = silver_envp();
     if (!cmd.clear_env && env != (i8**)0) {
@@ -438,7 +438,7 @@ i32 win_env_name_compare(str a, str b) {
 
 /// True when one of `cmd`'s `env` entries names the variable of `entry`
 /// ("KEY=value"), compared with Windows' case-insensitive name rules.
-bool win_env_overrides(Command* cmd, str entry) {
+bool win_env_overrides(&Command cmd, str entry) {
     for (i64 i = 0; i < cmd.env_vars.len(); i = i + 1) {
         if (win_env_name_compare(cmd.env_vars.get_ptr(i).to_str(), entry) == 0) {
             return true;

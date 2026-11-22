@@ -35,10 +35,12 @@ void check_vectored_file_io() {
     assert_true(head[0] == (u8)'h' && head[5] == (u8)' ', "readv fills the first buffer");
     assert_eq_str("world", (str)&tail[0], "readv scatters the rest into the second");
 
+    // Start away from where the read ends, so a missing restore shows.
+    try_lseek(src, 2, SEEK_SET);
     i64 offset = 6;
     assert_eq_i64(5, try_sendfile(dst, src, &offset, 5).value(), "sendfile at an offset");
     assert_eq_i64(11, offset, "sendfile advances the offset");
-    assert_eq_i64(11, try_lseek(src, 0, SEEK_CUR).value(), "explicit offset leaves the position");
+    assert_eq_i64(2, try_lseek(src, 0, SEEK_CUR).value(), "explicit offset leaves the position");
 
     try_lseek(src, 0, SEEK_SET);
     assert_eq_i64(11, try_sendfile(dst, src, (i64*)0, 64).value(), "sendfile stops at EOF");

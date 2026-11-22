@@ -52,7 +52,19 @@ i32 main() {
     u8 first[2];
     u8 rest[4];
     IoVec in_parts[2] = { IoVec.new((void*)&first[0], 2), IoVec.new((void*)&rest[0], 3) };
-    assert_eq_i64(5, server.readv(&in_parts[0], 2).value(), "readv receives both buffers");
+    Result<i64, Error> rv = server.readv(&in_parts[0], 2);
+    assert_true(rv.is_ok() && rv.value() > 0, "readv receives data");
+    // TCP may deliver less than was written; read the remainder in place.
+    i64 have = rv.value();
+    while (rv.is_ok() && rv.value() > 0 && have < 5) {
+        if (have < 2) {
+            rv = server.read(&first[have], 2 - have);
+        } else {
+            rv = server.read(&rest[have - 2], 5 - have);
+        }
+        have += rv.value();
+    }
+    assert_eq_i64(5, have, "readv and the remainder deliver all five bytes");
     rest[3] = (u8)0;
     assert_true(first[0] == (u8)'a' && first[1] == (u8)'b', "readv fills the first buffer");
     assert_eq_str("cde", (str)&rest[0], "readv fills the second buffer");

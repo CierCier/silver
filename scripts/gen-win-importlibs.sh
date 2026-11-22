@@ -51,6 +51,7 @@ EXPORTS
   GetFileAttributesW
   GetFileInformationByHandle
   GetFileInformationByHandleEx
+  GetFileType
   GetLastError
   GetStdHandle
   GetSystemTimePreciseAsFileTime
